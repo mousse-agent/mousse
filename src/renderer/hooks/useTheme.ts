@@ -13,10 +13,12 @@ import { setReplyPacing } from '../lib/replyPacingSetting'
 import { applyFontSettings } from '../lib/appFonts'
 import { setThreadProjectColors } from '../lib/threadProjectColorsSetting'
 import { setThreadPathInTitleBar } from '../lib/threadPathSetting'
+import { setReplyPreviews } from '../lib/replyPreviewSetting'
 import { setContextRingInComposer } from '../lib/contextRingSetting'
 import { setAnimationSpeed } from '../lib/motion'
 import { applyFrostedComposer } from '../lib/frostedComposer'
-import { applyThemeCss } from '../lib/themeCss'
+import { applyThemeCss, setUserThemeActive } from '../lib/themeCss'
+import { showWallpaper } from '../lib/wallpaper'
 import { activeUserTheme, type UserTheme } from '../../shared/themes/userThemes'
 
 const FIXED_SURFACE_VARS = [
@@ -192,14 +194,17 @@ function applyLayoutTokens(theme: ThemeId): void {
 }
 
 /**
- * A user theme over its base: its color tokens and CSS as one adopted sheet after the app's (`applyThemeCss`, which
- * also pauses it while a decision is on screen), and `data-user-theme` on the root. No theme takes it off.
+ * A user theme over its base: its color tokens and CSS as one adopted sheet after the app's (`applyThemeCss`), its
+ * wallpaper behind the chat (`showWallpaper`), and `data-user-theme` on the root. While a decision is on screen all of
+ * it pauses (`setUserThemeActive`). No theme takes it off.
  */
 function applyUserTheme(theme: UserTheme | undefined): void {
   const root = document.documentElement
   if (theme) root.setAttribute('data-user-theme', theme.id)
   else root.removeAttribute('data-user-theme')
+  setUserThemeActive(Boolean(theme))
   applyThemeCss(theme?.css ?? '', { tokens: theme?.colors ?? {} })
+  showWallpaper(useAppStore.getState().profileId, theme?.wallpaper)
 }
 
 function applyAppearance(appearance: AppearanceSettings): void {
@@ -220,13 +225,14 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyUserTheme(userTheme)
 }
 
-/** Display settings that live under appearance: math, reply pacing, the changed-files summary, the title-bar path and the context ring. */
+/** Display settings that live under appearance: math, reply pacing, the changed-files summary, the title-bar path, reply previews and the context ring. */
 function applyChatDisplay(appearance: AppearanceSettings): void {
   const normalized = normalizeAppearance(appearance)
   setRenderMath(normalized.renderMath)
   setReplyPacing(normalized.replyPacing)
   setTurnChangedFiles(normalized.turnChangedFiles)
   setThreadPathInTitleBar(normalized.threadPathInTitleBar)
+  setReplyPreviews(normalized.replyPreviews)
   setContextRingInComposer(normalized.contextRingInComposer)
 }
 

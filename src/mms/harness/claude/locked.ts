@@ -17,12 +17,14 @@ import type { ToolLedger } from '../../run/mcp/appTools/types'
 import { CLAUDE_LOCKED_TOOLS_ITEMS, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
 import { CLAUDE_TURN_EXTRA_ARGS } from '../vendors/claude/turnFrames'
 import { trackChildProcess } from '../../diagnostics/liveCounts'
+import { LINUX_RUN_KEPT_OPEN, LINUX_SYSTEM_FOLDERS } from '../linuxFolders'
 
 /**
  * How a bot's turn runs on Claude Code (PR 6 §3), on either kind of entry:
  * - the owner's own entry (the one their chats use, with their sign-in): the turn runs in that
- *   locked environment plus its sign-in, as one query that is never kept warm, and its process is the turn's own:
- *   the deadline ends it through the turn's signal, never the bot supervisor (`ownerEntry`);
+ *   locked environment plus its sign-in, and its process is the turn's own: the deadline ends it through the turn's
+ *   signal, never the bot supervisor (`ownerEntry`). A chat turn without Bash runs on the chat's warm process, kept
+ *   between turns while its launch stays the same; every other turn is one query;
  * - a `locked` entry (`config.profile: 'locked'`), which runs in a home of its own and only bot
  *   turns, in the locked environment, with its process group under the bot supervisor.
  * Every interactive turn keeps the user's own setup, untouched.
@@ -39,8 +41,8 @@ import { trackChildProcess } from '../../diagnostics/liveCounts'
 export const CLAUDE_LOCKED_PROFILE = 'locked'
 
 /**
- * One `query` is one dispatch: a backstop on its model turns, not a policy claim. A bot's budget is its work time
- * (and its turn budget, when its grant has one); a dispatch that reaches this cap ends with `provider_turn_cap` and
+ * One `query` is one dispatch: a backstop on its model turns, not a policy claim. A bot's only budget is what its
+ * grant sets (turns, tool calls, tokens or spend), when it sets one; a dispatch that reaches this cap ends with `provider_turn_cap` and
  * the bot carries the work on in its next dispatch, so the cap only bounds one query, never the work.
  */
 export const CLAUDE_LOCKED_MAX_TURNS = 300
@@ -278,30 +280,6 @@ export function claudeLockedTools(turn: Pick<ClaudeLockedTurn, 'authority' | 'sh
   const tools = [...offered].sort()
   return { tools, disallowedTools: CLAUDE_BUILTIN_TOOLS.filter((name) => !offered.has(name)) }
 }
-
-/**
- * The top folders of a Linux system that hold its own programs, libraries, settings and kernel views, which commands
- * need to run. Every other top folder (`/home`, `/mnt`, `/media`, `/opt`, `/srv`, `/var`, `/root`, `/run`, …) is
- * unreadable to a bot's commands, as Codex's `:minimal` profile keeps them. `/run` holds removable
- * drives (`/run/media/<user>`) and each signed-in user's runtime folder (`/run/user/<uid>`: network mounts, sign-in
- * sockets); commands need nothing there but NixOS's programs (`LINUX_RUN_KEPT_OPEN`).
- *
- * `/tmp` stays readable, not writable (it is denied with the other temporary folders): Claude Code's sandbox keeps its
- * own sockets there. Mousse still keeps some folders of its own there, each private to this user (mode 700), which a
- * bot's command can read since it runs as the same user: the ChatGPT token broker's socket folder (its socket can't be
- * used: the sandbox refuses every connect to a Unix socket), and for the seconds a task runs, `mousse-pr-*` (the title
- * and text of a pull request the owner opens), `mousse-pathspec-*` (the paths of files the owner stages or discards),
- * `mousse-trace-*` (Git's trace of the hooks of the owner's commit or push) and `mousse-acp-*` (the working folder of an
- * ACP agent's check). docs/bots.md lists them under what remains.
- */
-export const LINUX_SYSTEM_FOLDERS: readonly string[] = ['/bin', '/sbin', '/lib', '/lib32', '/lib64', '/libx32', '/usr', '/etc', '/proc', '/dev', '/sys', '/tmp', '/nix']
-
-/**
- * What stays readable under the closed `/run` when it exists: on NixOS the system's programs are on the PATH through
- * `/run/current-system/sw/bin`, and the setuid wrappers (`sudo`, `ping`, …) through `/run/wrappers`, both leading into
- * `/nix`, which is open. Without them no command finds its programs there. Nothing else under `/run` is opened.
- */
-export const LINUX_RUN_KEPT_OPEN: readonly string[] = ['/run/current-system/sw/bin', '/run/wrappers']
 
 /** `LINUX_RUN_KEPT_OPEN` that exist here, on Linux. */
 function keptOpenUnderRun(platform: NodeJS.Platform, exists: (path: string) => boolean): string[] {
@@ -620,8 +598,17 @@ export class ClaudeLockedGate {
   constructor(
     private readonly turn: ClaudeLockedTurn,
     /** The Mousse MCP server is attached to the turn. */
-    private readonly mcp: boolean
+    private readonly mcp: boolean,
+    /**
+     * Told before a shell call is let through, in the hook and again in `canUseTool`: a command may outlive the call
+     * that started it, so the process that ran one is not kept for another turn.
+     */
+    private readonly onCommand?: () => void
   ) {}
+
+  private noteCommand(classified: Classified | undefined): void {
+    if (classified?.kind === 'builtin' && classified.neutral.includes('shell')) this.onCommand?.()
+  }
 
   private classify(toolName: string): Classified {
     if (this.mcp && toolName.startsWith(CLAUDE_MOUSSE_TOOL_PREFIX)) return { kind: 'app', tool: toolName.slice(CLAUDE_MOUSSE_TOOL_PREFIX.length) }
@@ -699,6 +686,7 @@ export class ClaudeLockedGate {
     try {
       const decided = this.decide(toolName, args)
       if (!decided.ok) return decided
+      this.noteCommand(decided.classified)
       if (decided.classified?.kind === 'builtin') this.turn.authority.counters.charge('tool')
       return { ok: true }
     } catch (error) {
@@ -728,6 +716,7 @@ export class ClaudeLockedGate {
     const decided = this.decide(toolName, args)
     if (!decided.ok) return decided
     const classified = decided.classified!
+    this.noteCommand(classified)
     if (classified.kind === 'app' || classified.kind === 'mcp') return { ok: true }
     const idempotent = classified.kind === 'tool_search' || (classified.kind === 'builtin' && classified.neutral.every(neutralToolIdempotent))
     const row = this.turn.ledger?.start({ type: 'toolCall', id: toolUseId, name: toolName, arguments: args } as ToolCall, { idempotent })

@@ -161,7 +161,7 @@ function ownerService(probe: Probe, result: Record<string, unknown> = { subtype:
   }
   const service = new ClaudeSubscriptionProviderService(home, new UserQuestionService(), {
     query,
-    // A live process would be kept warm: a bot turn never takes one.
+    // Live processes are on: a bot turn without the chat's key (`BotAuthority.warm`) still never takes one.
     live: true,
     runAuth: async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }),
     launchConfig: () => ({ binaryPath: binary, env: { USER_VARIABLE: 'from-settings' } })
@@ -182,6 +182,8 @@ describe('a bot on the owner\'s own Claude Code entry', () => {
     const env = captured.find((options) => options.hooks)!.env!
     for (const name of secrets) expect(env, name).not.toHaveProperty(name)
     expect(env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB).toBe('1')
+    // A bot turn always loads Mousse's tools on demand (its tool catalogue): the list it starts with is names only.
+    expect(env.ENABLE_TOOL_SEARCH).toBe('true')
     if (entry === 'owner' && process.platform !== 'win32') expect(env.TMPDIR).toBe(join(scratch, 'tmp'))
     if (entry === 'owner') {
       expect(env.ANTHROPIC_AUTH_TOKEN).toBe('signin-token')

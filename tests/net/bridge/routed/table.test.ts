@@ -294,11 +294,12 @@ describe('the routed method table', () => {
     ])
     for (const method of marked) {
       const row = ROUTED_METHODS[method]
-      // The key arrived with the row's newest version: an owner at the version before has not got it, so a caller
-      // refuses to send it there (`RoutedClient.unsupportedKey`) instead of delivering an agent's call as a person's.
-      expect(row.since?.[ROUTED_AGENT_KEY], method).toBe(row.version)
-      expect(ROUTED_AGENT_METHODS[method], method).toBe(row.version)
-      expect(routedKeysAt(row, row.version - 1), method).not.toContain(ROUTED_AGENT_KEY)
+      // The key arrived with a version of its own: an owner at the version before has not got it, so a caller refuses
+      // to send it there (`RoutedClient.unsupportedKey`) instead of delivering an agent's call as a person's.
+      const since = row.since?.[ROUTED_AGENT_KEY]
+      expect(since, method).toBeGreaterThan(1)
+      expect(ROUTED_AGENT_METHODS[method], method).toBe(since)
+      expect(routedKeysAt(row, since! - 1), method).not.toContain(ROUTED_AGENT_KEY)
       expect(ROUTED_DROPPABLE_KEYS[method] ?? [], method).not.toContain(ROUTED_AGENT_KEY)
     }
   })

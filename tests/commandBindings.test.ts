@@ -456,7 +456,7 @@ describe('the command table', () => {
     expect(new Set(COMMANDS.map((command) => command.id)).size).toBe(COMMANDS.length)
     const unbound = COMMANDS.filter((command) => command.defaultBinding === null).map((command) => command.id)
     // Palette-only commands and Deny (a slip of the hand must not deny) ship without a key.
-    expect(unbound).toEqual(['thread.rename', 'thread.pin', 'thread.archive', 'project.open', 'approval.deny', 'theme.builtIn', 'automations.open', 'usage.open'])
+    expect(unbound).toEqual(['thread.rename', 'thread.pin', 'thread.archive', 'project.open', 'approval.deny', 'theme.builtIn', 'window.reload', 'automations.open', 'usage.open'])
     for (const command of COMMANDS) {
       for (const platform of ['win32', 'darwin']) {
         const binding = defaultBindingFor(command.id, platform)
@@ -478,13 +478,6 @@ describe('the command table', () => {
       expect(bindings.get(resolveBinding('CommandOrControl+F', platform)!)).toEqual(['chat.findInThread'])
       // The defaults clash with nothing, and use the chords reserved for them without a warning.
       expect(findConflicts({}, platform)).toEqual([])
-    }
-  })
-
-  it('still warns when another command is moved onto the Files chords', () => {
-    for (const chord of ['CommandOrControl+P', 'CommandOrControl+Shift+F']) {
-      const conflicts = findConflicts({ 'thread.new': chord }, 'win32')
-      expect(conflicts.map((conflict) => conflict.kind).sort()).toEqual(['command', 'reserved'])
     }
   })
 

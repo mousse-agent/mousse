@@ -160,16 +160,39 @@ function unverifiedClaim(store: ResourceLifecycleStore, current: ResourceLifecyc
  * data folders inside project folders are read without blocking (see `OwnershipFacts`); `facts` may be shared.
  */
 export async function getExternalResourceClaims(current: ResourceLifecycleStore, ownedIds: Set<string>, facts = new OwnershipFacts()): Promise<ExternalClaims> {
+  // First what needs no Git: the profiles, their records and the old data folders in project folders. A thread there that
+  // no record owns refuses at once, before a single checkout is read (one Git check per worktree of the installation).
+  for (let round = 0; round < 8; round++) {
+    const needs: OwnershipNeed[] = []
+    try {
+      ownerStores(current, collectingReads(facts, needs))
+    } catch (error) {
+      // As below: a refusal made on a stand-in for something not yet read is checked again once it is read.
+      if (!needs.length) throw error
+    }
+    if (!needs.length) break
+    await readOwnershipFacts(needs, facts)
+  }
+  // An old data folder found clean above is scanned again after the checkouts are read, which can take long: a thread
+  // that appeared in one meanwhile still refuses, and a purge's last check (`getExternalResourceClaimsFromFacts`) rests
+  // on scans no older than its Git checks.
+  let early = [...facts.legacy].filter(([, scan]) => !scan.error).map(([root]) => root)
   for (let round = 0; ; round++) {
     const needs: OwnershipNeed[] = []
     try {
       const claims = claimsFrom(current, ownedIds, collectingReads(facts, needs))
-      if (!needs.length) return claims
+      if (!needs.length && (!early.length || !facts.worktrees.size)) return claims
     } catch (error) {
       // A first pass may stop on a real refusal before naming every checkout; that refusal stands once nothing is missing.
       if (!needs.length) throw error
     }
     if (round >= 8) return claimsFrom(current, ownedIds, finalReads(facts))
+    if (!needs.length) {
+      // Everything is read and Git was among it: forget the early scans, so the next round reads them again.
+      for (const root of early) facts.legacy.delete(root)
+      early = []
+      continue
+    }
     await readOwnershipFacts(needs, facts)
   }
 }
@@ -183,6 +206,24 @@ export function getExternalResourceClaimsFromFacts(current: ResourceLifecycleSto
 }
 
 function claimsFrom(current: ResourceLifecycleStore, ownedIds: Set<string>, reads: OwnershipReads): ExternalClaims {
+  return ownerStores(current, reads).flatMap(({ store, records }) =>
+    records.filter((record) => record.state !== 'purged' && !(resolve(store.profileHome) === resolve(current.profileHome) && ownedIds.has(record.taskId))).flatMap((record) => {
+      const inventory = inventoryFrom(store, record, {}, reads)
+      // Paths are compared by their real paths, so an alias (a link, `/tmp` for `/private/tmp`) names the same folder.
+      const claims: ExternalClaims = inventory.resources.map((resource) => ({ ...resource, peerProfileId: store.profileId, ...(isAbsolute(resource.identity) ? { canonicalIdentity: reads.canonical(resource.identity) } : {}) }))
+      if (!inventory.blockers.length) return claims
+      // Records read in full, with only a checkout that can't be verified: what the thread may own is known, so only that is held.
+      if (inventory.blockers.every((blocker) => blocker.startsWith(UNVERIFIED_WORKTREE))) return [...claims, unverifiedClaim(store, current, record, inventory, reads)]
+      throw new Error(`Shared ownership cannot be proven for profile ${store.profileId}, task ${record.taskId}: ${inventory.blockers.join('; ')}`)
+    }))
+}
+
+/**
+ * Every profile's lifecycle store with its records, once nothing but those records owns a thread there: the registered
+ * profiles, their thread folders, the old data folders inside project folders and the thread indexes. None of this reads
+ * Git, so a refusal here comes before any checkout is read.
+ */
+function ownerStores(current: ResourceLifecycleStore, reads: OwnershipReads): Array<{ store: ResourceLifecycleStore; records: TaskLifecycleRecord[] }> {
   const nested = basename(dirname(current.profileHome)) === 'profiles'
   const installation = nested ? dirname(dirname(current.profileHome)) : current.profileHome
   const profilesRoot = join(installation, 'profiles')
@@ -210,7 +251,7 @@ function claimsFrom(current: ResourceLifecycleStore, ownedIds: Set<string>, read
     } else if (nested && existsSync(join(installation, 'threads-index.json')) && JSON.parse(readFileSync(join(installation, 'threads-index.json'), 'utf8')).length) throw new Error('Unmigrated legacy thread ownership prevents cleanup.')
   } else if (nested || existsSync(profilesRoot) && readdirSync(profilesRoot).length) throw new Error('Profile storage has no validated installation registry; cleanup is blocked.')
 
-  return stores.flatMap((store) => {
+  return stores.map((store) => {
     const records = store.list()
     let visited = 0
     const scanOwners = (root: string, path: string, depth = 0): void => {
@@ -255,14 +296,6 @@ function claimsFrom(current: ResourceLifecycleStore, ownedIds: Set<string>, read
       const entries = JSON.parse(readFileSync(index, 'utf8')) as Array<{ id?: string }>
       if (!Array.isArray(entries) || entries.some((entry) => !entry.id || !records.some((record) => record.taskId === entry.id))) throw new Error(`Unregistered thread ownership in profile ${store.profileId} prevents cleanup.`)
     }
-    return records.filter((record) => record.state !== 'purged' && !(resolve(store.profileHome) === resolve(current.profileHome) && ownedIds.has(record.taskId))).flatMap((record) => {
-      const inventory = inventoryFrom(store, record, {}, reads)
-      // Paths are compared by their real paths, so an alias (a link, `/tmp` for `/private/tmp`) names the same folder.
-      const claims: ExternalClaims = inventory.resources.map((resource) => ({ ...resource, peerProfileId: store.profileId, ...(isAbsolute(resource.identity) ? { canonicalIdentity: reads.canonical(resource.identity) } : {}) }))
-      if (!inventory.blockers.length) return claims
-      // Records read in full, with only a checkout that can't be verified: what the thread may own is known, so only that is held.
-      if (inventory.blockers.every((blocker) => blocker.startsWith(UNVERIFIED_WORKTREE))) return [...claims, unverifiedClaim(store, current, record, inventory, reads)]
-      throw new Error(`Shared ownership cannot be proven for profile ${store.profileId}, task ${record.taskId}: ${inventory.blockers.join('; ')}`)
-    })
+    return { store, records }
   })
 }

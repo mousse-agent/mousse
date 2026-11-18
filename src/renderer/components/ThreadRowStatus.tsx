@@ -103,18 +103,18 @@ const noClock = (): (() => void) => () => {}
 
 /**
  * Renders again each minute of the shared clock while `enabled`: for what shows a time (an age, when a limit resets,
- * when a thread deletes itself). Rows that show none do not subscribe, so the clock renders nothing for them.
+ * when a thread archives itself). Rows that show none do not subscribe, so the clock renders nothing for them.
  */
 export function useAgeClock(enabled: boolean): void {
   useSyncExternalStore(enabled ? subscribeClock : noClock, readClock, readClock)
 }
 
-/** A row's "Deletes itself" mark; its tooltip says how long until then, kept current by the shared clock. */
+/** A row's "Archives itself" mark; its tooltip says how long until then, kept current by the shared clock. */
 export const ThreadExpiryIcon = memo(function ThreadExpiryIcon({ expiresAt, size }: { expiresAt: string; size: number }) {
   useAgeClock(true)
   return (
-    <span className="thread-expiry-icon" title={`Deletes ${expiresInLabel(expiresAt)}`}>
-      <Clock size={size} strokeWidth={2} aria-label="Deletes itself" />
+    <span className="thread-expiry-icon" title={`Archives ${expiresInLabel(expiresAt)}`}>
+      <Clock size={size} strokeWidth={2} aria-label="Archives itself" />
     </span>
   )
 })

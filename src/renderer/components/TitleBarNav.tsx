@@ -7,6 +7,7 @@ import { showProjectInSidebar } from '../lib/sidebarReveal'
 import { selectThread } from '../lib/threadActions'
 import {
   canOpenFromHistory,
+  chatsPlaceTitle,
   goToHistoryIndex,
   HISTORY_PAGE_TITLES,
   historyList,
@@ -193,7 +194,7 @@ export function HistoryButtons() {
 
   const rows: NavMenuRow[] = menu === null ? [] : historyList(history, menu, canOpenFromHistory).map(({ index, threadId }) => ({
     key: `${index}`,
-    label: pageTitle(threadId) ?? (threads.find((thread) => thread.id === threadId)?.name.trim() || 'New thread'),
+    label: pageTitle(threadId) ?? chatsPlaceTitle(threadId) ?? (threads.find((thread) => thread.id === threadId)?.name.trim() || 'New thread'),
     meta: projectOf(threadId),
     onSelect: () => void goToHistoryIndex(index).catch(logFailure('Opening a thread from the history'))
   }))

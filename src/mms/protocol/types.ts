@@ -1,3 +1,6 @@
+import { APP_PRESENCE_CAPABILITY } from '../notifications/OwnerQuietHours'
+import { KEEP_AWAKE_CAPABILITY } from '../../shared/keepAwake'
+import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
 /**
  * Versioned MMS local protocol envelopes (transport-independent).
  * No Electron imports.
@@ -22,6 +25,14 @@ export const MMS_PROTOCOL_LOGIN_TIMEOUT_MS = 15 * 60_000
 export const MMS_PROTOCOL_ORCHESTRATOR_SEND_TIMEOUT_MS = 30 * 60_000
 /** Git mutations can wait on hooks, credential helpers or a slow remote; Git itself decides when they are stuck. */
 export const MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS = 30 * 60_000
+/** How long `/compact` waits for a runtime's own compaction; after it the compaction stops and the full history stays. */
+export const CONTEXT_COMPACTION_TIME_LIMIT_MS = 5 * 60_000
+/**
+ * `threads.compact` answers once the compaction ended, which the service limits to `CONTEXT_COMPACTION_TIME_LIMIT_MS`
+ * plus Mousse's own cut when the runtime's failed. The caller waits that long and a little more, so it never gives up
+ * on a compaction that is still running.
+ */
+export const MMS_PROTOCOL_COMPACT_TIMEOUT_MS = CONTEXT_COMPACTION_TIME_LIMIT_MS + 2 * 60_000
 export const MMS_PROTOCOL_REPLAY_RING_SIZE = 512
 /**
  * The most a profile's replay ring holds, by its size estimate. Past it the oldest events leave, and a client that
@@ -231,6 +242,7 @@ export type ProtocolEnvelope =
  */
 export const PROTOCOL_METHODS = [
   'applets.get', 'applets.state.get', 'applets.state.save', 'applets.export',
+  'app.presence',
   'health',
   'capabilities',
   'projects.list',
@@ -244,6 +256,10 @@ export const PROTOCOL_METHODS = [
   'projects.trustGitSettings',
   'projects.icon',
   'projects.setIcon',
+  'appearance.wallpaperImport',
+  'appearance.wallpaperImportBytes',
+  'appearance.wallpaperRead',
+  'appearance.wallpaperSaveCopy',
   'threads.list',
   'threads.get',
   'threads.create',
@@ -281,6 +297,7 @@ export const PROTOCOL_METHODS = [
   'runs.list',
   'runs.get',
   'runs.events',
+  'runs.wait',
   'runs.effects',
   'runs.credentials',
   'runs.transfers',
@@ -509,6 +526,9 @@ export const PROTOCOL_METHODS = [
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number]
 
 export const PROTOCOL_CAPABILITIES = [
+  APP_PRESENCE_CAPABILITY,
+  KEEP_AWAKE_CAPABILITY,
+  BOT_TELLING_CAPABILITY,
   MMS_PROTOCOL_CHUNK_CAPABILITY,
   'errors.v1',
   'health',

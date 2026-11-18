@@ -17,7 +17,7 @@
  * - Forget: the default's line goes from the work's prompt and from the chat turn it queued
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BotEngine, noteSteerText } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_JOURNAL_ERROR, BotEngine, noteSteerText } from '../../src/mms/bots/activation/BotEngine'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { capturedRows } from '../../src/mms/bots/memory/capture'
 import type { ChatMessage } from '../../src/shared/types'
@@ -131,6 +131,7 @@ describe('a nudge', () => {
     const [first] = nudgesOf(questionId)
     expect(first).toMatchObject({ author: 'bot', text: `${NUDGE_TEXT}\n\nFlat A · Flat B · Something else`, plainFrom: NUDGE_TEXT.length, replyTo: { id: bubble.id }, question: { questionId, status: 'open', nudge: true, choices: [{ label: 'Flat A' }, { label: 'Flat B' }] } })
     expect(first!.question?.nudged).toBeUndefined()
+    expect(f.store.message(first!.id)?.tell).toBe('soon')
     expect(botNotificationKind(first!, Date.parse(first!.at))).toBe('question')
     expect(f.resolved.length).toBe(models)
     expect(f.store.listActivations(botId)).toHaveLength(activations)
@@ -194,12 +195,12 @@ describe('a default', () => {
     expect(mainDispatches(workId).at(-1)!.prompt.text).toBe(`[Mousse] ${defaultWorkLine(FLATS.question, 'Flat A', 30 * MIN)} Carry on where you left off.`)
     const resumed = await start(f, workId, mainDispatches(workId).at(-1)!.n)
     expect(resumed.prepared.policy.tools?.allow).toEqual(work.prepared.policy.tools?.allow)
-    expect(resumed.prepared.authority.threadsReadOnly).toBe('work')
+    expect(resumed.prepared.authority.threadsReadOnly).toBe(work.prepared.authority.threadsReadOnly)
     await finish(f, resumed.payload, 'completed', { text: 'No answer, so I went with Flat A and booked Saturday.' })
     expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'run_report', text: 'No answer, so I went with Flat A and booked Saturday.' })
   })
 
-  it('queues a chat turn of its own for a chat question, not the owner’s: their threads stay read-only and it has none of their words', async () => {
+  it('queues a chat turn of its own for a chat question, not the owner’s: it may act on their threads (#1359) but has none of their words', async () => {
     const { bubble, questionId } = await chatAsks(DEFAULT_A)
     await reach(Date.parse(bubble.at) + 30 * MIN)
     expect(f.store.question(questionId)?.status).toBe('defaulted')
@@ -207,7 +208,8 @@ describe('a default', () => {
     expect(turn).toMatchObject({ lane: 'chat', trigger: { kind: 'manual', input: defaultChatInput(FLATS.question, 'Flat A', 30 * MIN) } })
     expect(turn.trigger).not.toHaveProperty('owner')
     const running = await start(f, turn.id)
-    expect(running.prepared.authority.threadsReadOnly).toBe('not_owner')
+    // It carries on the owner's work, so it may act on their threads like a wake or a thread's notice.
+    expect(running.prepared.authority).not.toHaveProperty('threadsReadOnly')
     expect(f.bots.ownerWords(botId, turn.id)).toBe('')
     await finish(f, running.payload, 'completed', { text: 'No answer, so I went with Flat A.' })
     expect(chatOf(f, botId).at(-1)).toMatchObject({ author: 'bot', text: 'No answer, so I went with Flat A.' })
@@ -276,12 +278,8 @@ describe('a question that never follows up', () => {
       memory.forget(botId, { refs: [journaled(memory, q.bubble, 'notice')], by: 'owner_ui' })
     }],
     ['open again, with no follow-up, when its answer is forgotten before the work read it', 'open', async (q: Awaited<ReturnType<typeof workAsks>>) => {
-      // Every run slot busy: the answer waits, unread, for one.
-      for (const key of ['f1', 'f2', 'f3']) {
-        const turn = await chat(`Please do: ${key}`, `m-${key}`)
-        await f.bots.tools.work.start(botId, turn.activation.id, { title: key, brief: `${key}.`, key })
-        await finish(f, turn.payload, 'completed', { text: 'On it.' })
-      }
+      // Nothing starts while the bot's journal cannot be written: the answer waits, unread.
+      f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
       const { message } = await tap(q.questionId, 'Flat B')
       const memory = memoryStore()
       memory.forget(botId, { refs: [journaled(memory, message, 'owner_msg')], by: 'owner_ui' })
@@ -332,16 +330,13 @@ describe('a late answer, after the bot went with its default', () => {
 
   it('becomes the answer while the work has not gone on with its default yet', async () => {
     const { workId, bubble, questionId } = await workAsks(DEFAULT_A)
-    for (const key of ['f1', 'f2', 'f3']) {
-      const turn = await chat(`Please do: ${key}`, `m-${key}`)
-      await f.bots.tools.work.start(botId, turn.activation.id, { title: key, brief: `${key}.`, key })
-      await finish(f, turn.payload, 'completed', { text: 'On it.' })
-    }
+    // Nothing starts while the bot's journal cannot be written, so the work does not go on with its default yet.
+    f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
     await reach(Date.parse(bubble.at) + 30 * MIN)
     expect(f.store.activation(workId)).toMatchObject({ status: 'blocked', endReason: 'question_answered' })
     await tap(questionId, 'Flat B')
     expect(f.store.question(questionId)).toMatchObject({ status: 'answered', answer: { choice: 'Flat B', by: 'owner' } })
-    await finish(f, payloadOf(f, f.store.laneActivations(botId, 'run', ['running']).find((row) => row.id !== workId)!.id), 'completed', { text: 'Done.' })
+    f.store.setError(botId, null)
     await f.bots.maintain()
     expect(mainDispatches(workId).at(-1)!.prompt.text).toContain(`"${FLATS.question}": Flat B.`)
   })
@@ -458,4 +453,149 @@ describe('Forget', () => {
     expect(botNotificationKind(after, Date.parse(after.at))).toBeNull()
     expect(botNotificationContent('Pip', after).body).not.toMatch(/which flat|flat a/i)
   })
+})
+
+
+describe('owner attention in the shared summary', () => {
+  const summary = () => f.bots.service.get(botId).summary
+
+  it('counts a posted chat question, then clears on an answer', async () => {
+    const { questionId } = await chatAsks(FLATS)
+    expect(summary()).toMatchObject({ state: 'needs_you', stateText: `Asked: ${FLATS.question}`, needsOwner: true })
+    await tap(questionId, 'Flat A')
+    expect(summary().needsOwner).toBeUndefined()
+    expect(summary().state).not.toBe('needs_you')
+  })
+
+  it.each(['running', 'queued'] as const)('keeps %s work visible while a chat question still counts for the badge', async (status) => {
+    await chatAsks(DEFAULT_A)
+    const activation = await f.bots.activate({ botId, input: 'Check flights', clientRequestId: 'flights' })
+    if (status === 'queued') f.store.moveActivation(activation.id, ['running'], 'queued')
+    expect(summary()).toMatchObject({ state: 'working', needsOwner: true })
+    expect(summary().stateText).not.toContain('Asked:')
+    f.store.moveActivation(activation.id, [status], 'done')
+    expect(summary()).toMatchObject({ state: 'needs_you', stateText: `Asked: ${FLATS.question}`, needsOwner: true })
+  })
+
+  it('keeps a managed thread visible while a chat question still counts for the badge', async () => {
+    await chatAsks(FLATS)
+    f.launched = () => [{ threadId: 'flights', title: 'Check flights', status: 'running', startedAt: new Date(f.clock.now).toISOString(), updatedAt: new Date(f.clock.now).toISOString() }]
+    expect(summary()).toMatchObject({ state: 'working', needsOwner: true })
+    expect(summary().stateText).not.toContain('Asked:')
+    f.launched = () => []
+    expect(summary()).toMatchObject({ state: 'needs_you', stateText: `Asked: ${FLATS.question}`, needsOwner: true })
+  })
+
+  it('clears when the owner answers the only question from work', async () => {
+    const { questionId } = await workAsks(FLATS)
+    expect(summary().needsOwner).toBe(true)
+    await tap(questionId, 'Flat A')
+    expect(summary().needsOwner).toBeUndefined()
+    expect(summary().state).not.toBe('needs_you')
+  })
+
+  it('counts work waiting on its question, once even with three questions', async () => {
+    const one = await workAsks(FLATS)
+    await workAsks({ question: 'Which movers?', choices: ['A', 'B'] }, 'Movers', 'w2')
+    await chatAsks({ question: 'Which day?', choices: ['Monday', 'Tuesday'] })
+    expect(summary()).toMatchObject({ state: 'needs_you', needsOwner: true })
+    await tap(one.questionId, 'Flat A')
+    expect(summary().needsOwner).toBe(true)
+  })
+
+  it.each(['moved_on', 'defaulted', 'withdrawn'] as const)('does not count a %s chat question', async (status) => {
+    const { questionId } = await chatAsks(DEFAULT_A)
+    expect(summary().needsOwner).toBe(true)
+    if (status === 'moved_on') await chat('Something else now.', 'move-on')
+    else if (status === 'defaulted') await reach(Date.parse(f.store.question(questionId)!.nextAt!))
+    else f.store.withdrawQuestions(botId)
+    expect(f.store.question(questionId)?.status).toBe(status)
+    expect(summary().needsOwner).toBeUndefined()
+    expect(summary().state).not.toBe('needs_you')
+  })
+
+  it('counts an open question even when an error takes priority in the state', async () => {
+    f.store.setError(botId, { code: 'test', error: { text: 'Sign in', action: { kind: 'sign_in', label: 'Sign in', instanceId: 'test' } } })
+    expect(summary().needsOwner).toBeUndefined()
+    await chatAsks(FLATS)
+    f.store.setError(botId, { code: 'test', error: { text: 'Sign in', action: { kind: 'sign_in', label: 'Sign in', instanceId: 'test' } } })
+    expect(summary()).toMatchObject({ state: 'stuck', needsOwner: true })
+  })
+
+  it('does not count a paused bot with an open question', async () => {
+    await chatAsks(FLATS)
+    await f.bots.service.pause(botId)
+    expect(summary()).toMatchObject({ state: 'paused' })
+    expect(summary().needsOwner).toBeUndefined()
+  })
+})
+
+it.each(['nudge', 'default'])('moves a %s due at 03:00 to the quiet-hours end and never applies it overnight', async kind => {
+  const { OwnerQuietHours } = await import('../../src/mms/notifications/OwnerQuietHours')
+  const q = new OwnerQuietHours(() => ({ from: '22:00', to: '08:00' }), () => f.clock.now, () => 'UTC')
+  Object.assign(f.host, { quietHoursFor: (botId: string, at: number) => q.quietHoursFor(botId, at) })
+  f.clock.now = Date.parse('2026-11-08T02:30:00Z')
+  const { questionId } = await chatAsks(kind === 'default' ? DEFAULT_A : { ...FLATS, ifNoAnswer: 'nudge', after: 30 })
+  expect(f.store.question(questionId)?.nextAt).toBe('2026-11-08T08:00:00.000Z')
+  await reach(Date.parse('2026-11-08T04:00:00Z'))
+  expect(f.store.question(questionId)).toMatchObject({ status: 'open', nudges: 0 })
+  await reach(Date.parse('2026-11-08T08:00:00Z'))
+  expect(f.store.question(questionId)).toMatchObject(kind === 'default' ? { status: 'defaulted' } : { nudges: 1 })
+})
+
+it('updates the shown default time when a new quiet-hours wish moves it', async () => {
+  f.clock.now = Date.parse('2026-11-07T21:45:00Z')
+  const { questionId } = await chatAsks(DEFAULT_A)
+  const messages: BotChatMessage[] = []
+  f.bots.events.on('message', e => messages.push(e.message))
+  const { OwnerQuietHours } = await import('../../src/mms/notifications/OwnerQuietHours')
+  const q = new OwnerQuietHours(() => ({ from: '22:00', to: '08:00' }), () => f.clock.now, () => 'UTC')
+  Object.assign(f.host, { quietHoursFor: (id: string, at: number) => q.quietHoursFor(id, at) })
+  f.bots.quietHoursChanged()
+  expect(messages.find(m => m.question?.questionId === questionId)?.question?.defaultAt).toBe('2026-11-08T08:00:00.000Z')
+})
+
+// First follow-up: nudge/default, shortened/cleared hours, before/after its original due time.
+it.each([
+  ['nudge', 'shorten', false], ['default', 'shorten', false],
+  ['nudge', 'off', false], ['default', 'off', false],
+  ['nudge', 'shorten', true], ['default', 'shorten', true],
+  ['nudge', 'off', true], ['default', 'off', true]
+] as const)('pulls a held %s back on %s (original time elapsed=%s)', async (kind, change, elapsed) => {
+  const { OwnerQuietHours } = await import('../../src/mms/notifications/OwnerQuietHours')
+  let hours: { from: string; to: string } | undefined = { from: '22:00', to: '08:00' }
+  const q = new OwnerQuietHours(() => hours, () => f.clock.now, () => 'UTC')
+  Object.assign(f.host, { quietHoursFor: (id: string, at: number) => q.quietHoursFor(id, at) })
+  f.clock.now = Date.parse('2026-11-08T02:30:00Z')
+  const { questionId } = await chatAsks(kind === 'default' ? DEFAULT_A : { ...FLATS, ifNoAnswer: 'nudge', after: 30 })
+  expect(f.store.question(questionId)?.nextAt).toBe('2026-11-08T08:00:00.000Z')
+  const messages: BotChatMessage[] = []
+  f.bots.events.on('message', e => messages.push(e.message))
+  f.clock.now = Date.parse(elapsed ? '2026-11-08T04:00:00Z' : '2026-11-08T02:45:00Z')
+  hours = change === 'off' ? undefined : { from: '22:00', to: '05:00' }
+  f.bots.quietHoursChanged()
+  const expected = change === 'shorten' ? '2026-11-08T05:00:00.000Z' : elapsed ? f.store.now() : '2026-11-08T03:00:00.000Z'
+  expect(f.store.question(questionId)?.nextAt).toBe(expected)
+  if (kind === 'default') expect(messages.find(m => m.question?.questionId === questionId)?.question?.defaultAt).toBe(expected)
+  await reach(Date.parse(expected))
+  expect(f.store.question(questionId)).toMatchObject(kind === 'default' ? { status: 'defaulted' } : { nudges: 1 })
+})
+
+it('keeps the second nudge a day after the first when quiet hours are cleared', async () => {
+  const { OwnerQuietHours } = await import('../../src/mms/notifications/OwnerQuietHours')
+  let hours: { from: string; to: string } | undefined
+  const q = new OwnerQuietHours(() => hours, () => f.clock.now, () => 'UTC')
+  Object.assign(f.host, { quietHoursFor: (id: string, at: number) => q.quietHoursFor(id, at) })
+  f.clock.now = Date.parse('2026-11-07T02:30:00Z')
+  const { questionId } = await chatAsks({ ...FLATS, ifNoAnswer: 'nudge', after: 30 })
+  await reach(Date.parse('2026-11-07T03:00:00Z'))
+  hours = { from: '22:00', to: '08:00' }
+  f.bots.quietHoursChanged()
+  expect(f.store.question(questionId)?.nextAt).toBe('2026-11-08T08:00:00.000Z')
+  f.clock.now += HOUR
+  hours = undefined
+  f.bots.quietHoursChanged()
+  expect(f.store.question(questionId)?.nextAt).toBe('2026-11-08T03:00:00.000Z')
+  await f.bots.deliverDueReminders()
+  expect(f.store.question(questionId)?.nudges).toBe(1)
 })

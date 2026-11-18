@@ -4,6 +4,8 @@ import type { BotMemoryAdmin } from '../seams'
 import { memoryRef, parseMemoryRef } from '../../../shared/bots/personal/memory'
 import { entryOf, type BotMemoryStore } from './BotMemoryStore'
 import { renderMemoryBlocks } from './render'
+import { shortChipText } from '../../../shared/bots/personal/chips'
+import { guardPackText, MEMORY_SECRET_MARKER } from './guard'
 
 /**
  * The owner's side of bot memory (bot-context.md §8, §10): what `bots.memory.*` and the engine's
@@ -13,6 +15,7 @@ import { renderMemoryBlocks } from './render'
 
 export interface BotMemoryAdminOptions {
   store: BotMemoryStore
+  name?: (botId: string) => string | undefined
   /** The bot's definition, written as `definition.json` in an export. */
   definition?: (botId: string) => unknown
   timeZone?: () => string | undefined
@@ -35,11 +38,24 @@ async function exportFolder(dir: string, botId: string, date: string): Promise<s
 export function createBotMemoryAdmin(options: BotMemoryAdminOptions): BotMemoryAdmin {
   const { store } = options
   const zone = () => options.timeZone?.() ?? store.zone()
+  const name = (botId: string) => {
+    try { return options.name?.(botId)?.trim() || 'your bot' } catch { return 'your bot' }
+  }
   return {
+    tidyDuplicates: (botId, canTidy) => store.tidyDuplicates(botId, canTidy),
     list: (botId, history) => store.list(botId, history),
     forget: (botId, id) => {
       const result = store.forget(botId, { id, by: 'owner_ui' })
-      if ('error' in result) throw Object.assign(new Error(result.error), { code: 'not_found' })
+      if ('error' in result) {
+        const labels = result.holders?.map((entry) => {
+          const screened = guardPackText(entry.text ?? '', 'owner', MEMORY_SECRET_MARKER)
+          return `“${shortChipText(screened.ok ? screened.text : 'Saved memory (text held back)')}”`
+        })
+        const message = labels?.length
+          ? `These memories still hold those words: ${labels.join('; ')}. Ask ${name(botId)} to forget these together, then save again what should stay.`
+          : result.error
+        throw Object.assign(new Error(message), { code: labels?.length ? 'invalid_params' : 'not_found' })
+      }
       return result
     },
     edit: (botId, ref, words) => {
@@ -61,7 +77,7 @@ export function createBotMemoryAdmin(options: BotMemoryAdminOptions): BotMemoryA
       if ('error' in result) {
         const message = result.error === 'refused' ? result.reason
           : result.error === 'stale' ? 'This memory changed since you opened it.'
-            : 'Memory of this kind is full. Forget something first.'
+            : `Memory of this kind is full. Ask ${name(botId)} to combine some, or forget one.`
         throw Object.assign(new Error(message), { code: 'invalid_params' })
       }
       return entryOf(store.versions(botId, result.id).at(-1)!)
@@ -82,6 +98,8 @@ export function createBotMemoryAdmin(options: BotMemoryAdminOptions): BotMemoryA
       // The questions it asked, with their answers (issue #1123), when it asked any.
       const questions = store.questions(botId)
       if (questions.length) files.push(['questions.jsonl', `${questions.map((row) => JSON.stringify(row)).join('\n')}\n`])
+      const actions = store.actions(botId)
+      if (actions.length) files.push(['actions.jsonl', `${actions.map((row) => JSON.stringify(row)).join('\n')}\n`])
       const definition = options.definition?.(botId)
       if (definition !== undefined) files.push(['definition.json', `${JSON.stringify(definition, null, 2)}\n`])
       const written: string[] = []
@@ -101,14 +119,11 @@ export function createBotMemoryAdmin(options: BotMemoryAdminOptions): BotMemoryA
     // Each entry goes through the owner's Forget, in one transaction: its words leave the journal, the chat and the
     // packs as they do for one, and its hash is kept so it is not learned again.
     forgetAll: (botId) => store.write(() => {
-      const forgotten = new Set<string>()
-      for (const entry of store.list(botId).entries) {
-        if (forgotten.has(entry.id) || store.versions(botId, entry.id).at(-1)?.status === 'forgotten') continue
-        const result = store.forget(botId, { id: entry.id, by: 'owner_ui' })
-        if ('error' in result) continue
-        for (const id of result.forgotten?.split(', ') ?? []) forgotten.add(id)
-      }
-      return forgotten.size
+      const entries = store.list(botId).entries
+      if (!entries.length) return 0
+      const result = store.forget(botId, { refs: entries.map((entry) => entry.ref), by: 'owner_ui' })
+      if ('error' in result) throw new Error(result.error)
+      return result.forgotten?.split(', ').length ?? 0
     }),
     wipeHistory: (botId) => store.wipe(botId, true),
     reset: (botId) => {

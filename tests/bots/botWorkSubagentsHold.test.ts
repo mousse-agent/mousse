@@ -6,9 +6,9 @@
  * - entries: the work's own; another on the same runtime; one whose runtime holds commands less tightly; one that
  *   searches the web whatever the bot holds;
  * - what the work's turn holds: commands, the web; an Allow given while the turn runs;
- * - endings: the report with a subagent mid-command, mid-file-change or idle; the owner's Stop; the deadline; the bot
+ * - endings: the report with a subagent mid-command, mid-file-change or idle; the owner's Stop; the end of its window; the bot
  *   deleted; Run commands switched off (a cut-off call under the subagent's own entry's names);
- * - counts: the work's time with subagents running, and the bot's day;
+ * - counts: the bot's day;
  * - a follow-up (`subagent_send`) after the model's entry reached its usage limit, or the work moved model.
  */
 import { join } from 'node:path'
@@ -17,7 +17,7 @@ import { botInstructions } from '../../src/mms/bots/instructions'
 import { toolArgsDigest } from '../../src/mms/run/tools/argsDigest'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
-import { MAX_BOT_SUBAGENTS_PER_DAY } from '../../src/shared/bots/personal/manifest'
+import { BOT_TURN_WINDOW_MS } from '../../src/shared/bots/personal/definition'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import type { BotRuntimeHold } from '../../src/shared/bots/personal/subagentHold'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
@@ -185,63 +185,31 @@ describe('a subagent on another entry is never held less tightly than its work',
     expect(f.store.activation(job.id)).toMatchObject({ status: 'paused', endReason: 'unknown_calls' })
   })
 
-  it.each(['the owner\'s Stop', 'the deadline', 'the bot deleted'] as const)('%s with a subagent running ends it with the work', async (how) => {
+  it.each(['the owner\'s Stop', 'the end of its window', 'the bot deleted'] as const)('%s with a subagent running ends it with the work', async (how) => {
     f.host.quiesceTimeoutMs = 200
     const job = await work('w1')
     await job.prepared.authority.subagents!.start({ title: 'Slow', brief: 'Take your time.' })
     const slow = await start(f, job.id, subagentNs(job.id)[0])
     let removing: Promise<unknown> | undefined
     if (how === 'the owner\'s Stop') await f.bots.stop(job.id)
-    else if (how === 'the deadline') f.timers.at(-1)!.fn()
+    else if (how === 'the end of its window') {
+      f.timers.filter((timer) => timer.ms === BOT_TURN_WINDOW_MS).at(-1)!.fn()
+      await flush()
+    }
     else {
       removing = f.bots.remove(botId).catch((error: unknown) => error)
       await flush()
     }
     // It shares the work's stop: its turn ends at once, and the work's settle stops its run.
     expect(slow.prepared.authority.time.signal.aborted).toBe(true)
-    await finish(f, job.payload, 'interrupted', { outcome: { interruptedBy: how === 'the deadline' ? 'bot_wall' : 'user' } })
+    await finish(f, job.payload, 'interrupted', { outcome: { interruptedBy: how === 'the end of its window' ? 'bot_wall' : 'user' } })
     expect(f.stopped).toContain(slow.payload.threadId)
     await finish(f, slow.payload, 'interrupted', { outcome: { interruptedBy: 'user' } })
     await removing
     expect(f.store.dispatch(job.id, subagentNs(job.id)[0]!)!.endedAt).not.toBeNull()
-    expect(f.store.activation(job.id)!.status).not.toBe('running')
-  })
-
-  it('its running time counts against the work\'s: the deadline comes closer while it runs, and its time is charged', async () => {
-    const job = await work('w1')
-    const allowance = f.store.dispatch(job.id, 1)!.deadlineMs!
-    const before = f.store.counters(job.id).activeMs
-    await job.prepared.authority.subagents!.start({ title: 'Half', brief: 'Do half.' })
-    const half = await start(f, job.id, subagentNs(job.id)[0])
-    // Two running now: what is left goes twice as fast, so the work's deadline is half its allowance away.
-    expect(f.timers.at(-1)!.ms).toBe(Math.floor(allowance / 2))
-    f.clock.now += 10 * 60_000
-    await finish(f, half.payload, 'completed', { text: 'Half done.' })
-    // Its ten minutes are charged; the work alone again, its deadline is what is left after both.
-    expect(f.store.counters(job.id).activeMs).toBe(before + 10 * 60_000)
-    expect(f.timers.at(-1)!.ms).toBe(allowance - 20 * 60_000)
-    f.clock.now += 60_000
-    await finish(f, job.payload, 'completed', { text: 'Done.' })
-    expect(f.store.counters(job.id).activeMs - (before - allowance)).toBe(21 * 60_000)
-  })
-
-  it(`counts the bot's subagents per day: ${MAX_BOT_SUBAGENTS_PER_DAY} across its work, then none until a day has passed`, async () => {
-    let started = 0
-    for (let w = 0; started < MAX_BOT_SUBAGENTS_PER_DAY; w += 1) {
-      const job = await work(`w${w}`)
-      for (let k = 0; k < 10 && started < MAX_BOT_SUBAGENTS_PER_DAY; k += 1) {
-        expect(await job.prepared.authority.subagents!.start({ title: `Part ${k}`, brief: 'Do it.' }), `${started}`).toHaveProperty('started')
-        await finish(f, (await start(f, job.id, subagentNs(job.id).at(-1)!)).payload, 'completed', { text: 'Done.' })
-        started += 1
-      }
-      await finish(f, job.payload, 'completed', { text: 'Done.' })
-    }
-    const next = await work('over')
-    expect(await next.prepared.authority.subagents!.start({ title: 'One more', brief: 'Do it.' })).toMatchObject({ refused: expect.stringMatching(new RegExp(`started ${MAX_BOT_SUBAGENTS_PER_DAY} subagents in the last day`)) })
-    await finish(f, next.payload, 'completed', { text: 'Done.' })
-    f.clock.now += 24 * 60 * 60_000 + 1
-    const tomorrow = await work('tomorrow')
-    expect(await tomorrow.prepared.authority.subagents!.start({ title: 'One more', brief: 'Do it.' })).toHaveProperty('started')
+    // The work itself ends, except at the end of its window: then it goes on in a fresh turn, without the subagent.
+    if (how === 'the end of its window') expect(f.store.lastMainDispatch(job.id)!.prompt.text).toMatch(/ran as long as one turn may/)
+    else expect(f.store.activation(job.id)!.status).not.toBe('running')
   })
 
   it('subagent_send checks its model again: a named model now at its usage limit is refused, and one on the work\'s model runs on the model the work runs on now', async () => {

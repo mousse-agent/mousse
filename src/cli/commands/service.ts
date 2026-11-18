@@ -15,6 +15,7 @@ import { resolveCliPathForInstall } from '../cliLaunch'
 import { HEADLESS_DISPLAY_SWITCHES } from '../../shared/headlessSwitches'
 import {
   canonicalizeHome,
+  DAEMON_OWNER_TOKEN_ENV,
   pollUntilRuntimeReady,
   publishOwnRuntimeRecord,
   readStopRequest,
@@ -26,6 +27,7 @@ import {
   SERVICE_STOP_TIMEOUT_MS
 } from '../mmsRuntime'
 import {
+  createOwnerToken,
   formatOwnerBusyMessage,
   MmsOwnerBusyError,
   resolveOwnerStatus
@@ -82,6 +84,11 @@ export interface DaemonForegroundOptions {
   skipSignals?: boolean
   /** Test inject: aborting it stops the daemon like a signal would. */
   stopSignal?: AbortSignal
+  /**
+   * The owner token to take the home with, chosen by whoever started the daemon so it can send a
+   * stop before the lease exists. A new one when unset.
+   */
+  ownerToken?: string
   onLog?: (msg: string) => void
 }
 
@@ -104,11 +111,13 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     homeDir,
     mms: null,
     protocolServer: null,
-    ownerToken: null,
+    // Known from the start, so a stop request is read before the owner lease exists.
+    ownerToken: opts.ownerToken ?? createOwnerToken(),
     runtimeWritten: false,
     pollStop: null,
     shuttingDown: false
   }
+  const ownerToken = state.ownerToken!
 
   let memoryMonitor: ReturnType<typeof prepareMemoryMonitor> = null
   const shutdown = async (reason: string, exitCode = 0): Promise<void> => {
@@ -145,13 +154,25 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     })
   }
 
+  // A stop request for this daemon starts the shutdown. Read from the start, so a stop
+  // sent while startup still runs is not left waiting for readiness.
+  const checkStopRequest = (): void => {
+    if (state.shuttingDown) return
+    if (!readStopRequest(homeDir, ownerToken)) return
+    void shutdown('stop-request')
+  }
+
   // A stop that arrives while startup is still running: stop what startup has
   // made so far and go no further.
   const stoppedDuringStartup = async (): Promise<boolean> => {
+    checkStopRequest()
     if (!state.shuttingDown) return false
     await shutdownDaemonLifecycle(state)
     return true
   }
+
+  // Teardown clears it.
+  state.pollStop = setInterval(checkStopRequest, SERVICE_POLL_INTERVAL_MS)
 
   try {
     // Before owner creation, so an Electron quit during startup is held too.
@@ -161,8 +182,9 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
           `Electron daemon shutdown failed: ${error instanceof Error ? error.message : String(error)}`
         )
       })
-      if (await stoppedDuringStartup()) return state
     }
+    // A stop sent before this daemon took the home: it never takes it.
+    if (await stoppedDuringStartup()) return state
 
     // Sole production owner construction path (kind: daemon).
     const opened = await createDaemonOwner(
@@ -170,12 +192,17 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
         homeDir,
         mode: 'text'
       },
-      { start: true }
+      { start: false, ownerToken }
     )
-    state.mms = opened.mms
+    // A stop that came while the owner was being created skips the start. One that comes
+    // during the start waits for it: teardown stops the owner only once it is on `state`.
+    try {
+      if (!(await stoppedDuringStartup())) await opened.mms.start()
+    } finally {
+      state.mms = opened.mms
+    }
     if (await stoppedDuringStartup()) return state
-    state.ownerToken = opened.mms.getOwnerLease()?.owner.token ?? null
-    if (!state.ownerToken) {
+    if (opened.mms.getOwnerLease()?.owner.token !== ownerToken) {
       throw new Error('Daemon started without owner lease')
     }
 
@@ -183,7 +210,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     const protocolServer = new MmsProtocolServer({
       mms: opened.mms,
       commandRouter: opened.mms.browserCommandRouter,
-      ownerToken: state.ownerToken,
+      ownerToken,
       version: tryReadPackageVersion()
     })
     state.protocolServer = protocolServer
@@ -214,7 +241,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
         throw new RuntimeOwnershipError('Injected runtime-publish failure')
       }
       publishOwnRuntimeRecord(homeDir, {
-        ownerToken: state.ownerToken,
+        ownerToken,
         startedAt,
         version: tryReadPackageVersion(),
         ownerKind: 'daemon'
@@ -234,14 +261,6 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     )
 
     memoryMonitor?.start()
-
-    state.pollStop = setInterval(() => {
-      if (state.shuttingDown) return
-      const req = readStopRequest(homeDir)
-      if (!req) return
-      if (req.token !== state.ownerToken) return
-      void shutdown('stop-request')
-    }, SERVICE_POLL_INTERVAL_MS)
 
     await lifetime
     return state
@@ -268,8 +287,13 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
 async function runForeground(homeFlag?: string): Promise<void> {
   // Before anything starts a program: the app that started the service may quit and take its mount with it.
   dropForeignAppImageMounts()
+  // The window client that started this daemon chose its owner token (`DAEMON_OWNER_TOKEN_ENV`).
+  // Dropped here so nothing the daemon starts inherits it.
+  const chosen = process.env[DAEMON_OWNER_TOKEN_ENV]
+  delete process.env[DAEMON_OWNER_TOKEN_ENV]
   await runDaemonForeground({
-    homeDir: resolveMousseHome(homeFlag)
+    homeDir: resolveMousseHome(homeFlag),
+    ...(chosen && /^[0-9a-f]{64}$/.test(chosen) ? { ownerToken: chosen } : {})
   })
 }
 
@@ -353,7 +377,7 @@ async function stopDaemon(
       exitWithError('MMS is not running.', mode)
       return
     case 'unreadable':
-      exitWithError('MMS runtime is present but unreadable; cannot send owner-checked stop request.', mode)
+      exitWithError('MMS home is held but its owner cannot be read; cannot send owner-checked stop request.', mode)
       return
     case 'stopped':
       writeOutput(mode, { stopped: true, pid: result.pid, running: false })

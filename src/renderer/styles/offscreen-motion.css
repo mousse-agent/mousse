@@ -1,0 +1,6 @@
+/* A looping indicator no one can see (scrolled out of view, or the window hidden) holds still where it is
+   (lib/offscreenMotion.ts). It keeps its frame and its layout and carries on when it comes back. `!important`, because
+   each indicator's own `animation` shorthand sets the play state back to running. */
+[data-offscreen] {
+  animation-play-state: paused !important;
+}

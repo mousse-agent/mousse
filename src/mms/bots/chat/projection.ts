@@ -1,9 +1,13 @@
+import { readableActionTitle, type ActionRow } from '../actions/BotActions'
+import type { BotActionCard } from '../../../shared/bots/personal/chat'
+import { workWaitLine, parkedNeedsOwner } from '../activation/workWaiting'
+import { replyPreviewText } from '../../../shared/threadPreview'
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
 import { launchedActive, withAppletNames, type BotAskCard, type BotAskStatus, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotLaunchedThread, type BotWatcherItem, type BotWorkItem, type BotChip, type BotDetail, type BotError, type BotMessageKind, type BotPermissionItem, type BotReminderItem, type BotRunItem, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
-import { askFingerprint, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
+import { askFingerprint, BOT_BUDGET_WALL_KEYS, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
 import { BOT_THREADS_PERMISSION, botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
 import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
@@ -19,7 +23,13 @@ import { replyApplets } from './replyApplets'
 import { takeToolImages } from './toolImages'
 import { takeReplyCards } from './replyCards'
 import { WAKE_LINE_PREFIX, wakeEventLabel } from '../../../shared/bots/personal/wakes'
+import { BOT_FOLD_LINE_PREFIX, BOT_FOLD_LINE_TITLE } from '../../../shared/bots/personal/memory'
+
+function isServiceLine(id: string): boolean {
+  return ['bm_permission_', 'bm_schedule_ended_', 'bm_schedule_done_', WAKE_LINE_PREFIX, BOT_FOLD_LINE_PREFIX].some(prefix => id.startsWith(prefix))
+}
 import type { AppletReference } from '../../../shared/applets'
+import { BOT_USAGE_WINDOW_MS, turnUsageSummary } from '../activation/turnUsage'
 
 /**
  * The Bot UI's view of `bots.db` (Bot Phase 1 §5.1.1, §5.7): the chat rows (`bot_messages`), each
@@ -30,8 +40,7 @@ import type { AppletReference } from '../../../shared/applets'
 
 /**
  * The starter grant (§5.3.1, `botStarterManifest`): files in the bot's own files folder, the web,
- * its own tools (`BOT_DEFAULT_APP_TOOLS`) and an hour of work per activation, and nothing
- * outside. Pressing Create bot approves it.
+ * its own tools (`BOT_DEFAULT_APP_TOOLS`), no limits, and nothing outside. Pressing Create bot approves it.
  */
 export function starterManifest(): BotManifest {
   return canonicalManifest(botStarterManifest())
@@ -114,6 +123,8 @@ export interface PostInput {
    * pack, search or read gives the bot, so it never learns a model's or an entry's name from its own chat.
    */
   hidden?: true
+  /** Trusted job facts from the scheduler, used only by the post-time telling classifier. */
+  scheduleLine?: { say: string; ownerAsked?: boolean }
 }
 
 /**
@@ -200,10 +211,15 @@ export class BotChatProjection {
 
   constructor(private readonly options: {
     store: BotStore
+    asksFirst?(): boolean
     journal?: BotJournal
     /** `bots.message`, after the row's transaction committed. */
     emit(event: { botId: string; message: BotChatMessage }): void
     /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
+    tellAt?(botId: string, tell: 'now' | 'soon' | 'later', at: string, messageId: string): string
+    classify?(message: BotChatMessage, input: PostInput): 'now' | 'soon' | 'later' | null
+    tellingSettings?(botId: string): import('../../../shared/bots/personal/tellingSettings').BotTellingPreferences
+    telling?(botId: string): string | undefined
     schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean }>
     /**
      * Where a granted MCP server stands now (`BotMcp.where`), for About → Can use; undefined while the servers were not
@@ -296,7 +312,7 @@ export class BotChatProjection {
         ...(input.activationId ? { activationId: input.activationId } : {}),
         ...(input.threadId ? { threadId: input.threadId } : {}),
         sourceKey: `bm:${id}`,
-        who: input.external ? 'tool' : input.author === 'owner' ? 'owner' : input.kind === 'error' ? 'mousse' : 'bot',
+        who: input.external ? 'tool' : input.author === 'owner' ? 'owner' : input.kind === 'error' || isServiceLine(id) ? 'mousse' : 'bot',
         ...(input.external ? { external: true } : {}),
         text: shown.journal || (input.error?.text ?? ''),
         json: {
@@ -310,6 +326,8 @@ export class BotChatProjection {
           ...(input.questionId ? { questionId: input.questionId } : {})
         }
       })
+      const tell = this.options.classify?.(this.toMessage(this.store.message(id)!), input) ?? null
+      this.store.run('UPDATE bot_messages SET tell = ?, tell_at = ? WHERE id = ?', tell, tell ? this.options.tellAt?.(input.botId, tell, at, id) ?? at : null, id)
       return { row: this.store.message(id)!, inserted: true }
     })
     const message = this.toMessage(row)
@@ -335,7 +353,19 @@ export class BotChatProjection {
     }
   }
 
+  /** A lightweight row-kind check for telling priority; no card or message reads. */
+  isActionMessage(row: Pick<BotMessageRow, 'id'>): boolean {
+    return row.id.startsWith('bm_action_')
+  }
+
   toMessage(row: BotMessageRow): BotChatMessage {
+    const reminder = row.id.startsWith('bm_rem_') ? this.store.reminderForMessage(row.botId, row.id) : undefined
+    const expiresAt = reminder?.deliveredAt ? new Date(Date.parse(reminder.deliveredAt) + 24 * 60 * 60_000).toISOString() : undefined
+    const snoozed = reminder && this.store.snoozedCopy(row.botId, reminder.id)
+    const action = this.isActionMessage(row) ? this.actionForMessage(row.id) : undefined
+    const sentAction = row.id.startsWith('bm_action_') ? this.store.get("SELECT ran_at FROM bot_actions WHERE message_id = ? AND status = 'done'", row.id) : undefined
+    const expiredAction = row.id.startsWith('bm_action_') ? this.store.get("SELECT activation_id FROM bot_actions WHERE message_id = ? AND status = 'expired'", row.id) : undefined
+    const expiredRun = expiredAction ? this.store.activation(String(expiredAction.activation_id)) : undefined
     const escalation = row.askId ? this.store.escalation(row.askId) : undefined
     const question = row.questionId ? this.store.question(row.questionId) : undefined
     // A question's bubble, or a nudge of it (any other bot row that carries it): its words, then its answers as plain text
@@ -345,6 +375,10 @@ export class BotChatProjection {
     const cards = row.author === 'bot' ? chatCards(row.cards) : []
     const plain = [plainCards(cards), asks && asks.spec.choices.length ? plainChoices(asks.spec) : ''].filter(Boolean).join('\n\n')
     return {
+      ...(reminder && expiresAt && expiresAt > this.store.now() && !reminder.work && !reminder.wake && !this.store.messageForgotten(row.botId, row.id) ? { reminder: { expiresAt, ...(snoozed ? { snoozedUntil: snoozed.dueAt } : {}) } } : {}),
+      ...(typeof sentAction?.ran_at === 'string' ? { actionSentAt: sentAction.ran_at } : {}),
+      ...(action ? { action } : {}),
+      ...(expiredRun?.trigger.kind === 'schedule' ? { expiredActionSchedule: expiredRun.trigger.scheduleId } : {}),
       seq: row.seq,
       id: row.id,
       at: row.at,
@@ -352,7 +386,9 @@ export class BotChatProjection {
       kind: row.kind,
       // Reserved ids keep permission switch lines quiet after a restart without a message schema change.
       // A wake's line too: it says why the bot speaks unasked.
-      ...(row.kind === 'notice' && (row.id.startsWith('bm_permission_') || row.id.startsWith(WAKE_LINE_PREFIX)) ? { systemLine: true as const } : {}),
+      ...(row.kind === 'notice' && isServiceLine(row.id) ? { systemLine: true as const } : {}),
+      // A fold's line says what happened on hover (docs/plans/bot-context.md §14).
+      ...(row.kind === 'notice' && row.id.startsWith(BOT_FOLD_LINE_PREFIX) ? { systemTitle: BOT_FOLD_LINE_TITLE } : {}),
       text: plain ? (row.text ? `${row.text}\n\n${plain}` : plain) : row.text,
       ...(plain ? { plainFrom: row.text.length } : {}),
       ...(cards.length ? { cards } : {}),
@@ -371,6 +407,56 @@ export class BotChatProjection {
       ...(row.replyTo ? { replyTo: this.quoteOf(row.replyTo) } : {}),
       ...(row.author === 'owner' && row.clientRequestId ? { clientRequestId: row.clientRequestId } : {}),
       ...(row.author === 'bot' && row.ownerReaction ? { reaction: row.ownerReaction.emoji } : {})
+    }
+  }
+
+  private actionForMessage(messageId: string): BotActionCard | undefined {
+    // Only the two known nudge ids refer back to an existing review; they never create actions.
+    messageId = messageId.replace(/_n[12]$/, '')
+    const row = this.store.get('SELECT id, bot_id, activation_id, args_digest, args_json, card_json, status, created_at, ran_at, answered_at, target_json, result_json FROM bot_actions WHERE message_id = ?', messageId) as unknown as (ActionRow & { created_at: string }) | undefined
+    if (!row) return undefined
+    const storedMetadata = JSON.parse(row.card_json ?? '{}')
+    const metadata = storedMetadata && typeof storedMetadata === 'object' && !Array.isArray(storedMetadata) ? storedMetadata : {}
+    const forgotten = row.args_digest === '[forgotten]' && row.args_json === '"[forgotten]"'
+    const args: unknown = forgotten ? null : JSON.parse(row.args_json)
+    const hiddenPaths: string[][] = []
+    const visit = (value: unknown, path: string[]): void => {
+      if (!value || typeof value !== 'object') return
+      const object = value as Record<string, unknown>
+      if (object.$mousse === 'hidden') { hiddenPaths.push(path); return }
+      if (object.$mousse === 'literal') {
+        // The wrapper escapes this object's namespace only. Its children may still contain real markers.
+        if (object.value && typeof object.value === 'object')
+          for (const [key, item] of Object.entries(object.value)) visit(item, [...path, key])
+        return
+      }
+      for (const [key, item] of Object.entries(value)) visit(item, [...path, key])
+    }
+    visit(args, [])
+    const result = forgotten
+      ? (metadata.toolReportedError === true || metadata.toolReportedError === 1 ? { text: '', toolReportedError: true } : undefined)
+      : row.result_json ? JSON.parse(row.result_json) : undefined
+    const previous = row.status === 'open' && !forgotten ? this.store.all(`SELECT status, ran_at, answered_at, created_at, target_json, result_json FROM bot_actions WHERE bot_id = ? AND args_digest = ?
+      AND rowid < (SELECT rowid FROM bot_actions WHERE id = ?) AND status IN ('done', 'uncertain', 'failed') ORDER BY rowid DESC`, row.bot_id, row.args_digest, row.id)
+      .find(candidate => {
+        const target = JSON.parse(String(candidate.target_json))
+        const current = JSON.parse(row.target_json)
+        return target.server === current.server && target.tool === current.tool &&
+          (candidate.status !== 'failed' || JSON.parse(String(candidate.result_json ?? '{}')).toolReportedError === true)
+      }) : undefined
+    const previousAt = previous?.ran_at ?? previous?.answered_at ?? previous?.created_at
+    const validAt = (value: unknown): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value))
+    const at = [metadata.settledAt, row.ran_at, row.answered_at].find(validAt)
+    return {
+      actionId: row.id, digest: row.args_digest, askedAt: row.created_at,
+      title: typeof metadata.title === 'string' ? metadata.title : readableActionTitle(JSON.parse(row.target_json).tool),
+      serverName: typeof metadata.serverName === 'string' ? metadata.serverName : 'Your service', args,
+      hasHiddenValues: !forgotten && metadata.hasHiddenValues === true, hiddenPaths,
+      ...(forgotten ? { forgotten: true as const } : {}),
+      status: row.status as BotActionCard['status'],
+      ...(previous && typeof previousAt === 'string' ? { previous: { status: previous.status as 'done' | 'uncertain' | 'failed', at: previousAt } } : {}),
+      ...(at ? { at } : {}),
+      ...(result ? { result: { text: result.text, ...(result.toolReportedError ? { toolReportedError: true } : {}), ...(result.notSentInTime === true ? { notSentInTime: true } : {}) } } : {})
     }
   }
 
@@ -496,33 +582,45 @@ export class BotChatProjection {
       .map((row) => ({
         id: row.id,
         title: row.trigger.kind === 'work' ? row.trigger.title : oneLine(row.trigger.input, 60),
-        status: row.status === 'queued' || row.endReason === 'room_allowed' || row.endReason === 'question_answered' ? 'queued' as const : row.status === 'paused' || row.status === 'blocked' ? 'paused' as const : row.offline ? 'waiting_for_internet' as const : 'running' as const,
-        // Held for the owner's answer to the question it asked them: an older app shows "held", a new one "waiting on you".
-        ...(row.status === 'blocked' && row.endReason === 'question' ? { waitsFor: 'answer' as const } : {}),
+        ...workWaitLine(row, { store: () => this.store }),
         startedAt: row.createdAt,
         ...(row.trigger.kind === 'schedule' ? { scheduled: true as const } : {}),
         // A model the owner asked for this work alone, not the bot's usual one: named on its line.
         ...(row.trigger.kind === 'work' && row.trigger.model?.name ? { model: { name: row.trigger.model.name, detail: workModelDetail(row.trigger.model) } } : {}),
         ...this.runningSubagents(row.id)
       }))
-    // Questions the bot's work waits on need the owner too ("Asked: Which flat…?"); a permission ask's words come first.
+    // Posted chat questions and questions the bot's work waits on need the owner too ("Asked: Which flat…?"); a permission ask's words come first.
+    const approval = this.store.get(`SELECT m.text, a.card_json, a.target_json FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id
+      LEFT JOIN bot_messages m ON m.id = a.message_id
+      WHERE a.bot_id = ? AND a.status = 'open' AND w.status = 'blocked' AND w.end_reason = 'approval'
+      ORDER BY a.rowid LIMIT 1`, definition.id)
+    // The legacy message begins with a raw tool id. Reuse the review's stored display names for the sidebar.
+    const approvalMetadata = approval && this.options.asksFirst?.() === true ? JSON.parse(String(approval.card_json ?? '{}')) ?? {} : undefined
+    const approvalLabel = approvalMetadata
+      ? `${typeof approvalMetadata.title === 'string' ? approvalMetadata.title : readableActionTitle(JSON.parse(String(approval!.target_json)).tool)} · ${typeof approvalMetadata.serverName === 'string' ? approvalMetadata.serverName : 'Your service'}`
+      : String(approval?.text ?? 'Send this action?').split('\n')[0]
     const waitingOn = this.store.waitingQuestions(definition.id)
+    const chatQuestions = this.store.openChatQuestions(definition.id)
+    const needsOwner = !paused && (asks.length + waitingOn.length + chatQuestions.length > 0
+      || parkedNeedsOwner(this.store.activationsIn(definition.id, ['blocked']), { store: () => this.store }))
     // Threads it started that still work keep it busy: it manages them. Those that ended are listed, never counted.
     const threads = this.launchedOf(definition.id)
     const watchers = this.options.watchers?.(definition.id) ?? []
     const managing = threads.filter(launchedActive)
-    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length, liveActivations: live + managing.length })
+    const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length + Number(Boolean(approval)) + (live + managing.length === 0 ? chatQuestions.length : 0), liveActivations: live + managing.length })
     // Working, but every running activation waits for the internet.
     const running = liveRows.filter((row) => row.status === 'running')
     const offline = state === 'working' && running.length > 0 && running.every((row) => row.offline)
     const last = this.store.lastMessage(definition.id)
     const ended = this.store.lastEndedActivation(definition.id)
+    const replied = last?.author === 'bot' && last.text ? last : this.store.lastBotReply(definition.id)
+    const lastReply = replied?.text ? replyPreviewText(replied.text) : undefined
     const stateText = state === 'paused'
       ? pausedHere
         ? registry?.pausedReason === 'usage_limit' && registry.pausedUntil ? `Paused until ${clockTime(registry.pausedUntil)}` : 'Paused'
         : `Paused until ${clockTime(limitedUntil!)}`
       : state === 'stuck' ? `Needs you: ${error!.text}`
-        : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : `Asked: ${oneLine(waitingOn[0]!.spec.question, 80)}`)
+        : state === 'needs_you' ? (asks[0] ? `Wants to ${this.card(asks[0]).title}` : approval ? `${this.options.asksFirst?.() === true ? 'Waiting for you' : 'Wants to send'}: ${oneLine(approvalLabel, 80)}` : `Asked: ${oneLine((waitingOn[0] ?? chatQuestions[0])?.spec.question ?? 'Your answer is needed', 80)}`)
           : state === 'working' ? (offline ? 'Waiting for internet' : chatTurn ? 'Working…' : work.length ? workingOn(work) : managing.length ? managingLine(managing) : 'Working…')
             : last ? oneLine(last.text || last.error?.text || plainCards(last.cards)) : ''
     return {
@@ -532,11 +630,13 @@ export class BotChatProjection {
       ...(definition.promptDefault ? { promptEdited: true as const } : {}),
       look: normalizeBotLook(definition.look),
       state,
+      ...(needsOwner ? { needsOwner: true as const } : {}),
       stateText,
       ...(offline ? { waiting: 'internet' as const } : {}),
       ...(error ? { error } : {}),
       // A message of cards alone reads as its first card's plain text.
       ...(last ? { last: { text: oneLine(last.text || last.error?.text || plainCards(last.cards) || last.attachments?.map((file) => file.name).join(', ') || '', 200), at: last.at, author: last.author } } : {}),
+      ...(lastReply ? { lastReply } : {}),
       ...(ended ? { lastOutcome: ended.status === 'done' ? 'ok' as const : ended.status === 'failed' ? 'failed' as const : 'stopped' as const } : {}),
       unread: this.store.unread(definition.id, registry?.readSeq ?? 0),
       createdAt: registry?.createdAt ?? new Date(now).toISOString(),
@@ -578,17 +678,20 @@ export class BotChatProjection {
     const runs: BotRunItem[] = (this.options.schedules?.(definition.id) ?? []).map((schedule) => (
       { id: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), kind: 'schedule' as const, ...(schedule.jobId ? { jobId: schedule.jobId } : {}), ...(schedule.paused ? { paused: true as const } : {}) }
     ))
-    const reminders: BotReminderItem[] = this.store.waitingReminders(definition.id).map((reminder) => (
-      { id: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ...(reminder.work ? { work: true as const } : {}), ...(reminder.wake ? { wake: reminder.event ? wakeEventLabel(reminder.event) : '' } : {}) }
+    const reminders: BotReminderItem[] = this.store.waitingReminders(definition.id).filter((reminder) => !reminder.workId).map((reminder) => (
+      { id: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ownerSet: reminder.ownerSet, ...(reminder.work ? { work: true as const } : {}), ...(reminder.wake ? { wake: reminder.event ? wakeEventLabel(reminder.event) : '' } : {}) }
     ))
     return {
       summary: this.summary(definition, now),
+      ...(this.options.tellingSettings ? { tellingSettings: this.options.tellingSettings(definition.id) } : {}),
+      ...(this.options.telling?.(definition.id) ? { telling: this.options.telling(definition.id) } : {}),
       permissions: grant ? [
         ...this.permissionItems(definition.id, grant.manifest, grant.approvedAt).filter((item) => !this.store.disabledPermissions(definition.id).some((off) => off.id === item.id)).map((item) => ({ ...item, enabled: true })),
         ...this.store.disabledPermissions(definition.id).flatMap((off) => this.permissionItems(definition.id, off.manifest, grant.approvedAt).filter((item) => item.id === off.id).map((item) => ({ ...item, enabled: false, note: `Switched off for this bot. ${item.note}` })))
       ] : [],
       runs,
-      reminders
+      reminders,
+      ...((usage) => (usage ? { usage } : {}))(turnUsageSummary(this.store.turnUsageSince(definition.id, 'chat', now - BOT_USAGE_WINDOW_MS)))
     }
   }
 
@@ -613,6 +716,8 @@ export class BotChatProjection {
         if (where?.state === 'off') return { id, title, note: `${name} is switched off in Settings → Skills & MCP, so this gives nothing while it is. Switch it on there to use it again, or remove it.`, grantedAt, mark: 'Switched off' }
         if (where?.state === 'mcp_off') return { id, title, note: `MCP is turned off in Settings → Skills & MCP, so this gives nothing while it is. Turn it on there to use it again, or remove it.`, grantedAt, mark: 'MCP is off' }
         if (where?.state === 'changed') return { id, title, note: `${name} was changed since you allowed it (it runs from another address or command now), so this gives nothing until ${name} is allowed again. The bot asks when it needs it; you can also remove it.`, grantedAt, mark: 'Changed' }
+        if (this.options.asksFirst?.() && manifest.mcp.some(tool => tool.serverId === permission.mcp.serverId && tool.level === 'asks_first'))
+          return { id, title, note: 'Asks you first before actions that can send or change things.', grantedAt, mark: 'Asks first', asksFirst: true }
         const shown = tools.slice(0, 6).join(', ')
         const unusable = live?.unusable.length ? ` (${live.unusable.length} more of its tools can't be used by a bot)` : ''
         return { id, title, note: `${tools.length} tool${tools.length === 1 ? '' : 's'}: ${shown}${tools.length > 6 ? ', …' : ''}${unusable}`, grantedAt }
@@ -649,7 +754,7 @@ export function grantedPermissions(manifest: BotManifest): BotPermissionRequest[
   const servers = new Map<string, string[]>()
   for (const pair of manifest.mcp) servers.set(pair.serverId, [...(servers.get(pair.serverId) ?? []), pair.tool])
   for (const [serverId, tools] of servers) items.push({ mcp: { serverId, tools: [...tools].sort() } })
-  for (const key of ['maxActiveMs', 'maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'] as const) {
+  for (const key of BOT_BUDGET_WALL_KEYS) {
     const held = manifest.budget[key]
     const base = starter.budget[key]
     if (held !== undefined && (base === undefined || held > base)) items.push({ budget: { key, ...(base !== undefined ? { amount: held - base } : {}) } })

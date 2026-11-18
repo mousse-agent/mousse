@@ -231,6 +231,18 @@ describe('composer model picker', () => {
     expect(onModelSelect).toHaveBeenCalledWith('claude-subscription', 'fast-model:high', undefined)
   })
 
+  it('keeps the footer while another listed model has speeds, so hovering one without never resizes the picker', async () => {
+    render({ models: [opus, standardSpeed, fastSpeed], modelId: 'opus:high' })
+    // Opus has one speed: the bar is there, empty.
+    expect(footer()).not.toBeNull()
+    expect(speeds()).toHaveLength(0)
+    await hover('Fast 1')
+    expect(speeds()).toHaveLength(2)
+    await hover('Opus 5.5')
+    expect(footer()).not.toBeNull()
+    expect(speeds()).toHaveLength(0)
+  })
+
   it('adds a faster tier to the Speed toggle only when the model lists it', () => {
     const standard: LlmModelOption = { id: 'gpt', label: 'GPT 9', efforts: ['low', 'high'], thinkingOff: false }
     const fast: LlmModelOption = { id: 'gpt-fast', label: 'GPT 9 (fast)', efforts: ['low', 'high'], speed: 'fast', thinkingOff: false }

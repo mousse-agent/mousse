@@ -109,16 +109,11 @@ html[data-theme='light'] {
   font-family: inherit;
   font-size: 12px;
 }
-/* Dim tool chrome (thought rows, tool groups, tool cards) so the
-   assistant's text keeps the contrast. Hover and focus stay at the same
-   level — brightening them matches the reply text. A running shimmer and
-   a card waiting for approval still come up to full opacity. Nested chrome
-   inherits the group's level instead of dimming twice, and drops the
-   outer margin so rows inside a group sit close together. */
+/* Tool chrome (thought rows, tool groups, tool cards) is not faded: its rows step back from the reply by size
+   (14px, regular weight) and the muted text colour, so their words stay sharp. Nested chrome drops the outer
+   margin so rows inside a group sit close together. */
 .an-message-list .an-tool-chrome {
-  opacity: 0.55;
   margin-block: 2px;
-  transition: opacity 0.15s ease-out;
 }
 /* The spacing scale (see settings.css) for the turn's meta lines: "Worked
    for …" above the reply and the changed-files line after it. */
@@ -136,9 +131,9 @@ html[data-theme='light'] {
   margin-top: 6px;
 }
 .an-message-list .turn-work-label {
-  color: color-mix(in srgb, var(--text-secondary) 70%, transparent);
-  font-size: 12.5px;
-  font-weight: 450;
+  color: color-mix(in srgb, var(--text-secondary) 85%, transparent);
+  font-size: 14px;
+  font-weight: 400;
   letter-spacing: -0.011em;
   line-height: 1.3;
 }
@@ -165,11 +160,28 @@ html[data-theme='light'] {
   background: color-mix(in srgb, var(--text-primary) 8%, transparent);
   border-radius: 4px;
 }
-.an-message-list .turn-work-chevron {
-  width: 14px;
-  height: 14px;
+/* " · (message icon) 3": how many replies the fold hides, in the line's own colour. */
+.an-message-list .turn-work-replies {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+}
+.an-message-list .turn-work-replies-icon {
+  width: 13px;
+  height: 13px;
   flex-shrink: 0;
+}
+/* Light like the chat's other disclosure chevrons (.an-row-chevron, tool-icon.css); it brightens with its line. */
+.an-message-list .turn-work-chevron {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: color-mix(in srgb, var(--text-secondary) 70%, transparent);
   transition: transform 150ms ease-out;
+}
+.an-message-list .turn-work-toggle:is(:hover, :focus-visible) .turn-work-chevron {
+  color: inherit;
 }
 .an-message-list .turn-work-chevron[data-open] {
   transform: rotate(90deg);
@@ -196,27 +208,31 @@ html[data-theme='light'] {
 .an-message-list .turn-work + .turn-answer {
   margin-top: var(--space-16);
 }
+/* A turn's folded work (a Collapse in its column, message-list.tsx) takes the column's gap (12px) inside its clip,
+   so the gap closes with the rows instead of snapping shut when the fold unmounts. */
+.an-message-list .turn-answer > .ui-collapse:not(:first-child) {
+  margin-top: -12px;
+}
+.an-message-list .turn-answer > .ui-collapse:not(:first-child) > .ui-collapse-clip > * {
+  padding-top: 12px;
+}
+.an-message-list .turn-answer > .ui-collapse:first-child:not(:last-child) {
+  margin-bottom: -12px;
+}
+.an-message-list .turn-answer > .ui-collapse:first-child:not(:last-child) > .ui-collapse-clip > * {
+  padding-bottom: 12px;
+}
+/* The line of a part of a steered turn ("Continued for 8s ›") sits under the steered message, in the column. */
+.an-message-list .turn-answer > .turn-work {
+  margin-top: 0;
+}
 /* A reply's text with no block shown yet (reply pacing) renders nothing and takes no gap, nor does a
    reply that holds only such text: the live line under it stays put until the first block shows. */
 .an-message-list .group\/assistant-text:empty,
 .an-message-list .turn-answer > .group\/assistant-turn:has(> .group\/assistant-text:empty):not(:has(> :not(.group\/assistant-text:empty))) {
   display: none;
 }
-.an-message-list .an-tool-chrome:has(.an-text-shimmer--active) {
-  opacity: 1;
-}
-/* A thought being written reads at the label's colour, not dimmed: its words are what the person follows. */
-.an-message-list .an-tool-chrome:has(.thinking-icon.is-thinking) {
-  opacity: 1;
-}
-/* Cards awaiting the user's decision (quick-action approval) stay at full
-   opacity — dimming a call to action to 0.55 buries exactly the card that
-   needs attention. Cleared when the card decides (attribute removed). */
-.an-message-list .an-tool-chrome[data-awaiting-approval="true"] {
-  opacity: 1;
-}
 .an-message-list .an-tool-chrome .an-tool-chrome {
-  opacity: inherit;
   margin-block: 0;
 }
 /* A tool's output shown as a code block (an MCP call's result) sits in the same plain block as a command's output:
@@ -280,6 +296,11 @@ html[data-theme='light'] {
 .an-message-list[data-following-end] {
   overflow-anchor: none;
 }
+/* While a finished turn's work folds, virtual/fold-hold.ts keeps the reader's row in place itself: the native anchor
+   may be the row that folds. */
+.an-message-list[data-fold-hold] {
+  overflow-anchor: none;
+}
 /* A block that appears in a reply while it streams fades in, and so does a new item in a list.
    Opacity only, so nothing around it moves and the compositor runs it; only the live reply has
    data-streaming, so opening a finished thread replays nothing. */
@@ -291,6 +312,20 @@ html[data-theme='light'] {
   .an-markdown[data-streaming] > div > *,
   .an-markdown[data-streaming] li {
     opacity: 0;
+  }
+}
+/* A bot's live reply (reply-flow.ts): each word that shows fades in from a slight blur. Only new
+   words are new elements, so words already shown never fade again. Animation speed scales it, and
+   Off or reduced motion makes it instant. */
+.an-markdown[data-reveal-words] .an-word {
+  transition:
+    opacity calc(380ms * var(--ui-motion-scale, 1)) ease-out,
+    filter calc(380ms * var(--ui-motion-scale, 1)) ease-out;
+}
+@starting-style {
+  .an-markdown[data-reveal-words] .an-word {
+    opacity: 0;
+    filter: blur(2px);
   }
 }
 
@@ -404,6 +439,14 @@ body,
   height: 100%;
   overflow: hidden;
   background: var(--app-window-bg);
+}
+
+/* The shell never scrolls: Chromium lets scrollIntoView and focus scroll an overflow: hidden box, and once moved the
+   whole app up and left. clip can't be scrolled at all. (On html it would mean hidden anyway: the page itself is put
+   back by keepShellUnscrolled.) */
+body,
+#root {
+  overflow: clip;
 }
 
 #root {
@@ -527,7 +570,8 @@ html.platform-darwin .overlay-titlebar {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
-  overflow: hidden;
+  /* A frame pane: clip, so scrollIntoView and focus can't scroll it (see body and #root above). */
+  overflow: clip;
 }
 
 .keep-mounted-pane[hidden] {
@@ -758,7 +802,7 @@ html.platform-darwin .overlay-titlebar {
 .chat-user-bubble.is-agent .chat-user-text.is-folded {
   max-height: 110px;
 }
-/* "Agent · <sending thread>": the robot, the word, then the thread's title, which opens it. */
+/* "Agent · <sending thread>": the robot, the word, then the thread's title, which opens it. A bot's: "<face> <name> · open". */
 .chat-agent-sender {
   display: flex;
   align-items: center;
@@ -784,8 +828,17 @@ html.platform-darwin .overlay-titlebar {
   white-space: nowrap;
 }
 .chat-agent-sender-link {
+  padding: 0;
+  border: 0;
+  background: none;
   color: inherit;
+  font: inherit;
   text-decoration: none;
+  cursor: pointer;
+}
+/* A bot's message: its face, drawn still, in place of the robot. */
+.chat-bot-sender .chat-bot-sender-face {
+  flex: none;
 }
 .chat-agent-sender-link:hover {
   color: var(--text-primary);

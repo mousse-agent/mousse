@@ -100,7 +100,8 @@ export class MousseMainService extends MmsProfileServices {
     const owner = options?.requireOwnership === false ? null : acquireMmsOwnerLease(home, {
       kind: options?.ownerKind ?? (options?.headless ? 'cli' : 'gui'),
       version: options?.version ?? process.env.npm_package_version,
-      build: options?.build
+      build: options?.build,
+      token: options?.ownerToken
     })
     let providers: ProviderAuthService | undefined
     let service: MousseMainService | undefined
@@ -255,7 +256,8 @@ export class MousseMainService extends MmsProfileServices {
           if (!engine.botIds().includes(botId)) throw new BotDefinitionError('bot_not_found', 'This bot is gone.')
         },
         store: services.botDeviceAccess,
-        devices: async () => services.botReach?.devices()
+        devices: async () => services.botReach?.devices(),
+        changed: (botId) => engine.reachChanged(botId)
       }
     })
     // Each bot's own browser, as its owner sees it (`bots.browser.*`).
@@ -359,7 +361,7 @@ export class MousseMainService extends MmsProfileServices {
     const runtime: BrowserRuntimePort = {
       capabilities: (context) => {
         if (context.profileId !== services.profileId) return undefined
-        const target = context.source === 'gui' ? services.platform.browser.selectedTarget(context.threadId) : { backend: 'managed-chromium' as const }
+        const target = context.source === 'gui' ? services.platform.browser.targetFor(context) : { backend: 'managed-chromium' as const }
         return services.platform.browser.sessions.listThreadSessions({ profileId: context.profileId, threadId: context.threadId })
           .find((session) => session.backend === target?.backend && session.runId === context.runId && session.lifecycle !== 'closed' && session.lifecycle !== 'disconnected')?.capabilities
       },
@@ -375,7 +377,7 @@ export class MousseMainService extends MmsProfileServices {
       resolveTarget: (context) => {
         if (context.profileId !== services.profileId) throw new BrowserAutomationError({ code: 'profile_mismatch', message: 'Browser context belongs to another profile' })
         if (context.source !== 'gui') return { backend: 'managed-chromium' }
-        const selected = services.platform.browser.selectedTarget(context.threadId)
+        const selected = services.platform.browser.targetFor(context)
         if (!selected) throw new BrowserAutomationError({ code: 'setup_required', message: 'No available in-app browser tab is connected. Open a browser tab and retry.' })
         return selected
       },

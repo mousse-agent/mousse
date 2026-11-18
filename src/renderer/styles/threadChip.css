@@ -61,8 +61,3 @@
 .thread-chip[data-state='missing'] .thread-chip-title {
   text-decoration: line-through;
 }
-
-/* The note on the thread whose agent started another: "Started", the link, then what was chosen for it. */
-.launched-thread-note .thread-chip {
-  font-size: 12px;
-}

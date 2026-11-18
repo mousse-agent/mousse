@@ -154,3 +154,51 @@ describe('McpManager for the MCP relay', () => {
     expect(listener).toHaveBeenCalledTimes(2)
   })
 })
+
+it('refuses a pinned schema that changed before dispatch', async () => {
+  const callTool = vi.fn(async () => ({ content: [] }))
+  const { factory } = clientFactory({ callTool })
+  const mcp = manager(factory)
+  const tool = (await mcp.getEnabledTools())[0]!
+  await expect(mcp.callTool(tool.providerName, {}, undefined, undefined, undefined, {
+    installationId: tool.installationId!, configRevision: tool.configRevision!, toolName: tool.toolName,
+    schemaDigest: 'a-different-schema'
+  })).rejects.toMatchObject({ code: 'stale_revision' })
+  expect(callTool).not.toHaveBeenCalled()
+  await mcp.shutdown()
+})
+
+it('checks the bot binding synchronously after the last asynchronous authorization read', async () => {
+  const callTool = vi.fn(async () => ({ content: [] }))
+  const { factory } = clientFactory({ callTool })
+  const mcp = manager(factory)
+  const tool = (await mcp.getEnabledTools())[0]!
+  let stillGranted = true
+  const original = mcp.isToolCallAllowed.bind(mcp)
+  let reads = 0
+  vi.spyOn(mcp, 'isToolCallAllowed').mockImplementation(async (...args) => {
+    const allowed = await original(...args)
+    if (++reads === 2) stillGranted = false
+    return allowed
+  })
+  await expect(mcp.callTool(tool.providerName, {}, undefined, undefined, undefined, {
+    installationId: tool.installationId!, configRevision: tool.configRevision!, toolName: tool.toolName,
+    assertDispatchActive: () => { if (!stillGranted) throw new Error('grant changed') }
+  })).rejects.toThrow('grant changed')
+  expect(callTool).not.toHaveBeenCalled()
+  await mcp.shutdown()
+})
+
+it.each([false, true])('tracks certainty at the actual transport boundary, dispatched=%s', async dispatched => {
+  const callTool = vi.fn(async () => { throw new Error('connection dropped') })
+  const { factory } = clientFactory({ callTool })
+  const mcp = manager(factory)
+  const tool = (await mcp.getEnabledTools())[0]!
+  const error = await mcp.callTool(tool.providerName, {}, undefined, undefined, undefined, {
+    installationId: tool.installationId!, configRevision: tool.configRevision!, toolName: tool.toolName,
+    assertDispatchActive: () => { if (!dispatched) throw new Error('binding changed') }
+  }, { trackDispatch: true }).catch(error => error as { mcpNotDispatched?: boolean })
+  expect(error.mcpNotDispatched).toBe(dispatched ? undefined : true)
+  expect(callTool).toHaveBeenCalledTimes(dispatched ? 1 : 0)
+  await mcp.shutdown()
+})

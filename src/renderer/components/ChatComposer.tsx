@@ -38,7 +38,8 @@ import { ATTACHMENT_LINES_ROOM, isLongPaste, longPasteFile, pastedTextBlock, pas
 import { PastedTextPreview } from './PastedTextPreview'
 import { formatAttachedFilesMarker } from '../../shared/attachedFilesMarker'
 import type { ChatReference } from '../../shared/chatReferences'
-import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseReferenceDragData } from '../../shared/chatReferences'
+import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseChatReference, parseReferenceDragData } from '../../shared/chatReferences'
+import { ownFileDrop, startDragOut } from '../lib/fileDragOut'
 import { ChatReferencePill } from './ReferencePill'
 import { insertTranscript } from '../dictation/insertTranscript'
 import { useDictation } from '../dictation/useDictation'
@@ -163,8 +164,8 @@ export interface ChatComposerProps {
   /** Buttons of the caller's own in the footer, left of Attach (see `ComposerFooter`). */
   extraActions?: ReactNode
   /**
-   * The thread whose send mode (Queue or Steer, `lib/sendMode.ts`) Enter follows while a reply runs; the mode
-   * button left of send shows and switches it. Absent (a bot's chat, which never steers): Enter queues and there is
+   * The thread whose composer Enter follows the profile's send mode in (Queue or Steer, `lib/sendMode.ts`) while a
+   * reply runs; the mode button left of send shows and switches it for every thread. Absent (a bot's chat, which never steers): Enter queues and there is
    * no button.
    */
   sendModeThreadId?: string
@@ -894,23 +895,35 @@ export function ChatComposer({
     }
   }
 
+  const takeReference = (reference: ChatReference) => {
+    if (!onAddReference) return
+    setPendingReferences((count) => count + 1)
+    void Promise.resolve().then(() => onAddReference(reference)).catch((error) => {
+      onReferenceError(error instanceof Error ? error.message : String(error))
+    }).finally(() => setPendingReferences((count) => count - 1))
+  }
+
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     if (disabled) return
     const reference = onAddReference ? parseReferenceDragData(event.dataTransfer) : null
     if (reference && onAddReference) {
       event.preventDefault()
       event.stopPropagation()
-      setPendingReferences((count) => count + 1)
-      void Promise.resolve().then(() => onAddReference(reference)).catch((error) => {
-        onReferenceError(error instanceof Error ? error.message : String(error))
-      }).finally(() => setPendingReferences((count) => count - 1))
+      takeReference(reference)
       return
     }
     const files = Array.from(event.dataTransfer.files)
-    if (files.length) {
-      event.preventDefault()
-      addFiles(files)
+    if (!files.length) return
+    event.preventDefault()
+    // A file this window drags out (a file tree row, a chip) means here what the window's own drag meant.
+    const own = ownFileDrop(files)
+    if (own?.kind === 'ignore') return
+    if (own?.kind === 'reference') {
+      const parsed = parseChatReference({ ...own.reference, id: own.reference.id ?? `${own.reference.kind}:${crypto.randomUUID()}` })
+      if (parsed) takeReference(parsed)
+      return
     }
+    addFiles(files)
   }
 
   return (
@@ -944,6 +957,14 @@ export function ChatComposer({
                     onInsertText={pastedText ? () => void insertPastedText(id) : undefined}
                     className={pastedText ? 'max-w-[280px]' : undefined}
                     onRemove={() => removeFile(id)}
+                    onDragStart={(event) => startDragOut(event, {
+                      name: file.name,
+                      threadId: mentionScope?.threadId,
+                      projectId: mentionScope?.projectId,
+                      ...(path ? { item: { kind: 'attachment' as const, path, name: file.name } } : { composerFile: file }),
+                      // Dropped back on the composer, it is already attached.
+                      inApp: { kind: 'ignore' }
+                    })}
                   />
                 )
               })}

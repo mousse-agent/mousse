@@ -98,7 +98,6 @@ describe('the update offered, and the tested range', () => {
   const offer = (binary: InstanceBinary, latest: string, driver: HarnessDriver = claude) => updateAffordance(driver, binary, compatibilityOf(driver, binary.version), latest)
 
   it('marks a version newer than tested, and still offers it', () => {
-    expect(claude.testedVersions?.max).toBe('2.1.999')
     expect(offer(at('2.1.300', 'standalone'), '2.1.320')).toEqual({ kind: 'advisory', command: 'claude update', latestVersion: '2.1.320' })
     expect(offer(at('2.1.300', 'standalone'), '2.2.0')).toEqual({ kind: 'advisory', command: 'claude update', latestVersion: '2.2.0', untested: true })
   })

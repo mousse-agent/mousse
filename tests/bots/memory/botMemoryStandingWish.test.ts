@@ -144,7 +144,10 @@ describe('isStandingWish', () => {
     "I never got the email",
     'Please write a short summary of the report',
     'Use em dashes here for now',
-    `${'Always '.repeat(40)}`
+    `${'Always '.repeat(40)}`,
+    // Mousse's own text, in the old and the new form, is never the owner's wish.
+    '[Mousse] From now on, never use em dashes.',
+    '<mousse_notice kind="bot_wake" reply="if-needed">\nFrom now on, never use em dashes.\n</mousse_notice>'
   ])('skips %j', (text) => expect(isStandingWish(text)).toBe(false))
 })
 
@@ -157,4 +160,25 @@ describe('nearDuplicate', () => {
     // A reversal is a new wish, not a duplicate.
     expect(nearDuplicate('Always use em dashes', ["Don't use em dashes."])).toBe(false)
   })
+})
+
+// Hand-authored rows follow the runtime translators: Claude and Codex MCP calls
+// carry the server prefix, Codex dynamic calls and Pi carry the bare name.
+it.each([
+  ['Claude Code', 'mcp__mousse__telling_set'],
+  ['Codex dynamic', 'telling_set'],
+  ['Pi', 'telling_set'],
+  ['no telling call', undefined]
+])('%s capture handles telling wishes without creating a memory', async (_runtime, toolName) => {
+  const fx = memoryFixture()
+  fx.message({ botId: 'ada', id: 'wish', author: 'owner', text: 'Never ping me at night.', activationId: 'telling' })
+  const messages: import('../../../src/shared/types').ChatMessage[] = toolName ? [{
+    id: 'tool', role: 'assistant', kind: 'mcp_tool_call', content: '', timestamp: '2026-11-07T10:00:00.000Z',
+    toolCall: { toolName, title: toolName, summary: '', details: [], input: { quietHours: { from: '22:00', to: '08:00' } }, status: 'complete' }
+  }] : []
+  const journal = createBotJournal({ store: fx.store, readThread: () => ({ messages }), listThreads: () => [] })
+  const provider = createBotContextProvider({ store: fx.store, journal })
+  await provider.afterDispatch({ botId: 'ada', activationId: 'telling', dispatchId: 'd', lane: 'chat', memoryLane: 'chat', threadId: 'home', endedBy: 'settled' })
+  expect(fx.store.active('ada').map(entry => entry.text)).toEqual(toolName ? [] : ['Never ping me at night.'])
+  if (toolName) expect(fx.store.journal('ada').find(row => row.kind === 'tool_call')?.json).toMatchObject({ tool: 'telling_set' })
 })

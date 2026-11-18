@@ -550,6 +550,8 @@ export interface Listener {
 export interface InboundInfo {
   remoteAddress?: string
   transport: TransportId
+  /** Accepted on the automatic LAN listener: `remoteAddress` is the peer's address on the local network. */
+  lan?: boolean
 }
 
 /** Who a dial is for. Only transports that must check local permission for a peer read it. */
@@ -706,6 +708,11 @@ export interface PeerRef {
   user: UserId
   routes: Route[]
   transportKey: Base64Url
+  /**
+   * Addresses among `routes` that only this computer remembers, with no signature behind them: another device may hold
+   * one now, so a different key there fails that route alone and the race goes on (the pin is still checked).
+   */
+  remembered?: readonly string[]
 }
 
 export type RouteHealth = {

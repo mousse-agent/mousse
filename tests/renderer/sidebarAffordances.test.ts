@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
- * Starting work from the sidebar: Add project and each project's "New thread" are always there, the tabs never
- * change width, both tabs end with the same "Archived" footer, the open thread's row is always
- * shown, and the Projects tab is a tree the keyboard can walk.
+ * Starting work from the sidebar: each project's "New thread" is always there, the tabs never change width, both
+ * tabs end with the same "Archived" footer, the open thread's row is always shown, unsent drafts are marked, and the
+ * Projects tab is a tree the keyboard can walk.
  */
 import { readFileSync } from 'node:fs'
 import { act, createElement } from 'react'
@@ -16,7 +16,8 @@ import type { Project, Thread } from '../../src/shared/types'
 const actions = vi.hoisted(() => ({
   selectThread: vi.fn(async () => undefined),
   createAndSelectThread: vi.fn(async () => undefined),
-  createAndSelectProjectThread: vi.fn(async () => undefined)
+  createAndSelectProjectThread: vi.fn(async () => undefined),
+  addProjectAndStartThread: vi.fn(async () => undefined)
 }))
 vi.mock('../../src/renderer/lib/threadActions', () => actions)
 // Neighbours that read the daemon. The pull request dialog leaves a mark to find.
@@ -32,6 +33,8 @@ const { ToastHost, dismissToast } = await import('../../src/renderer/components/
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { worktreeMark } = await import('../../src/renderer/lib/worktreeMark')
 const { hasMoreBelow, revealDelta } = await import('../../src/renderer/lib/sidebarScroll')
+const { startRenderCounts, stopRenderCounts } = await import('../../src/renderer/chat/components/agent-elements/render-counts')
+const { ARCHIVED_FIRST_ROWS } = await import('../../src/renderer/components/sidebar/ArchivedList')
 
 const at = '2026-11-05T10:00:00.000Z'
 const project = (id: string, name: string): Project => ({ id, name, path: `/p/${name}`, createdAt: at, order: 0 })
@@ -57,7 +60,7 @@ function preload(): unknown {
   })
 }
 
-const appKeys = ['projects', 'threads', 'threadActivity', 'activeThreadId', 'threadsSidebarView', 'sidebarMode'] as const
+const appKeys = ['projects', 'threads', 'threadActivity', 'activeThreadId', 'threadsSidebarView', 'sidebarMode', 'composerDrafts'] as const
 const appInitial = useAppStore.getInitialState()
 const appOriginal = Object.fromEntries(appKeys.map((key) => [key, appInitial[key]]))
 
@@ -111,37 +114,12 @@ const rule = (css: string, selector: string) => {
 const many = (count: number) => Array.from({ length: count }, (_, index) => thread(`t${index + 1}`, `Thread ${index + 1}`))
 
 describe('starting work', () => {
-  it('shows Add project at the end of the tab row and no button under the list', () => {
-    show([thread('a', 'Fix tests')])
-    const add = byLabel('Add project')!
-    expect(add.closest('.threads-sidebar-tabs-row')).not.toBeNull()
-    expect(host.textContent).not.toContain('Open project')
-    click(add)
-    expect(projectsApi.open).toHaveBeenCalledTimes(1)
-  })
-
-  it('shows Add project only on the Projects tab; elsewhere the tabs take the whole row', () => {
-    show([thread('a', 'Fix tests')])
-    const tab = (name: string) => [...host.querySelectorAll<HTMLElement>('[role="tab"]')].find((item) => item.getAttribute('aria-label') === name)!
-    const rowChildren = () => [...host.querySelector('.threads-sidebar-tabs-row')!.children].map((child) => child.className)
-    expect(rowChildren()).toEqual(['threads-sidebar-tabs', 'threads-sidebar-toolbar-button threads-sidebar-add-project'])
-    for (const name of ['Threads', 'Chats']) {
-      click(tab(name))
-      expect(byLabel('Add project')).toBeNull()
-      expect(rowChildren()).toEqual(['threads-sidebar-tabs'])
-    }
-    click(tab('Projects'))
-    expect(byLabel('Add project')).not.toBeNull()
-    // The tab list grows into the row when Add project is gone.
-    expect(rule(sidebarCss, '.threads-sidebar-tabs')).toMatch(/flex:\s*1;/)
-  })
-
   it('says "No projects" with an inline Add project when there are none', () => {
     show([], { projects: [] })
     const empty = host.querySelector<HTMLElement>('.threads-sidebar-empty-projects')!
     expect(empty.textContent).toBe('No projects' + 'Add project')
     click(empty.querySelector('button')!)
-    expect(projectsApi.open).toHaveBeenCalledTimes(1)
+    expect(actions.addProjectAndStartThread).toHaveBeenCalledTimes(1)
     expect(host.querySelector('[role="tree"]')).toBeNull()
   })
 
@@ -190,7 +168,7 @@ describe('tabs', () => {
   it('make a bot from the + next to Bots in the Agents tab, which no longer opens Automations', async () => {
     const { ChatsSidebar } = await vi.importActual<typeof import('../../src/renderer/components/chats/ChatsSidebar')>('../../src/renderer/components/chats/ChatsSidebar')
     const html = renderToStaticMarkup(createElement(ChatsSidebar))
-    expect(html).toContain('<h2>Bots</h2>')
+    expect(html).toMatch(/<h2>(?:(?!<\/h2>).)*>Bots<(?:(?!<\/h2>).)*<\/h2>/)
     expect(html).toContain('aria-label="New bot"')
     expect(html).not.toContain('aria-label="Open Automations"')
     expect(html).not.toContain('Roster')
@@ -247,6 +225,30 @@ describe('the footer', () => {
     show([thread('a', 'Fix tests'), thread('c', 'Old', { settledAt: at })])
     click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
     expect(host.querySelector<HTMLElement>('.threads-sidebar-footer')!.style.getPropertyValue('--threads-sidebar-settled-head')).toMatch(/px$/)
+  })
+
+  // Scrolling, kept focus and the last row's menu need layout: archived-list-electron.test.ts.
+  it('builds no archived card while Archived is closed, and opens hundreds with only the first cards drawn', async () => {
+    const archived = Array.from({ length: 300 }, (_, index) => thread(`old-${index}`, `Old ${index}`, { settledAt: at }))
+    const counts = startRenderCounts()
+    try {
+      show([thread('a', 'Fix tests'), ...archived])
+      // Another sidebar update while closed builds none either.
+      act(() => useAppStore.setState({ threadActivity: {} }))
+      expect(Object.keys(counts).filter((name) => name.startsWith('SidebarRow:old-'))).toEqual([])
+      expect(host.querySelector('.threads-sidebar-settled-count')?.textContent).toBe('300')
+      click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
+      const drawn = host.querySelectorAll('.threads-sidebar-settled-list [data-thread-id]')
+      expect(drawn.length).toBeGreaterThan(0)
+      expect(drawn.length).toBeLessThanOrEqual(ARCHIVED_FIRST_ROWS)
+      // The menu of a drawn row still acts on the whole list.
+      click(byLabel('More actions for Old 0')!)
+      click(menuItem('Delete all archived…'))
+      await flush()
+      expect(document.querySelector('[role="dialog"], [role="alertdialog"]')?.textContent).toContain('Delete 300 archived threads?')
+    } finally {
+      stopRenderCounts()
+    }
   })
 })
 
@@ -376,6 +378,57 @@ describe('row marks', () => {
     expect(title().hasAttribute('title')).toBe(false)
     width.mockRestore()
     visible.mockRestore()
+  })
+})
+
+describe('unsent drafts', () => {
+  const draft = (drafts: Record<string, string>) => act(() => useAppStore.setState({ composerDrafts: drafts }))
+  const rowOf = (id: string) => host.querySelector<HTMLButtonElement>(`[role="tree"] button[data-thread-id="${id}"]`)
+  const draftMark = (id: string) => rowOf(id)?.querySelector('[role="img"][aria-label="Unsent draft"]') ?? null
+  const chat = thread('n', 'New thread', { startedAt: undefined })
+
+  it('marks a thread whose composer holds text, until the text is sent or cleared; whitespace is not a draft', () => {
+    show([thread('a', 'Fix tests'), thread('b', 'Release notes')], { active: 'a' })
+    expect(draftMark('a')).toBeNull()
+    draft({ a: 'half a thought', b: '  \n ' })
+    expect(draftMark('a')?.getAttribute('title')).toBe('Unsent draft')
+    expect(draftMark('b')).toBeNull()
+    draft({})
+    expect(draftMark('a')).toBeNull()
+  })
+
+  it('lists a new chat in its project once it has a draft, titled by the draft, below pinned threads; a click opens it', () => {
+    show([thread('a', 'Fix tests', { pinnedAt: at }), thread('b', 'Release notes'), chat], { active: 'b' })
+    expect(rowOf('n')).toBeNull()
+    draft({ n: 'Why does the\nrefund   fail?' })
+    const rows = [...host.querySelectorAll<HTMLElement>('[role="tree"] button[data-thread-id]')]
+    expect(rows.map((item) => item.dataset.threadId)).toEqual(['a', 'n', 'b'])
+    expect(rowOf('n')!.querySelector('.threads-sidebar-thread-name')?.textContent).toBe('Why does the refund fail?')
+    expect(draftMark('n')).not.toBeNull()
+    click(rowOf('n')!)
+    expect(actions.selectThread).toHaveBeenCalledWith('n')
+    draft({ n: ' ' })
+    expect(rowOf('n')).toBeNull()
+  })
+
+  it('gives a new chat nothing to rename, pin, archive, drag or open a menu on', () => {
+    show([thread('a', 'Fix tests'), chat], { active: 'a' })
+    draft({ n: 'a question' })
+    const item = rowOf('n')!
+    expect(item.closest('.threads-sidebar-thread-container')!.querySelector('.threads-sidebar-thread-actions')).toBeNull()
+    expect(item.draggable).toBe(false)
+    key(item, { key: 'F2' })
+    act(() => { item.querySelector('.threads-sidebar-thread-name')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    expect(host.querySelector('input')).toBeNull()
+    act(() => { item.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })) })
+    expect(document.querySelector('[role="menuitem"]')).toBeNull()
+  })
+
+  it('keeps new chats out of the Threads tab', () => {
+    show([thread('a', 'Fix tests'), chat], { view: 'threads' })
+    draft({ n: 'a question' })
+    expect(host.querySelector('[data-thread-id="n"]')).toBeNull()
+    expect(host.querySelector('[data-thread-id="a"]')).not.toBeNull()
   })
 })
 

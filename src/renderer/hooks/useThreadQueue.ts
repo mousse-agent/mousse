@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChatImageAttachment, QueuedMessage } from '../../shared/types'
 import { readableError } from '../lib/errorText'
 import { canEditQueued, isOptimisticQueueItem, queuedWords, splitQueuedContent, type QueueEditDraft } from '../lib/queuedContent'
+import { steerLanded, steerOnTheWay, type SteerOnTheWay } from '../lib/steersOnTheWay'
 import { useAppStore } from '../stores/appStore'
 
 export { isOptimisticQueueItem }
@@ -89,7 +90,15 @@ export interface ThreadQueue {
   /** While a compaction runs, the queue waits for it; Send now then skips the compaction. */
   hold: QueueHold | null
   /** Sends the item into the running reply now; while a compaction holds the queue, stops it and sends the item first. */
-  steer: (itemId: string) => Promise<void>
+  steer: (itemId: string, known?: QueuedMessage) => Promise<void>
+  /**
+   * A steer typed in the composer is on its way; returns its key. `endComposerSteer` when its send answers: `taken`
+   * when the service took it for the reply, so it stays painted there until its copy shows (or comes back after a while).
+   */
+  beginComposerSteer: (content: string, images?: ChatImageAttachment[]) => string | null
+  endComposerSteer: (key: string, taken: boolean) => void
+  /** Steers sent here that the transcript does not show yet: the conversation paints them in the reply at once. */
+  steersOnTheWay: SteerOnTheWay[]
   remove: (itemId: string) => Promise<void>
   /** Saves a new order; shown at once, put back when the save fails. */
   reorder: (orderedIds: string[]) => Promise<void>
@@ -151,7 +160,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   lastPromptIdRef.current = lastPromptId
   // Removed here: it leaves the list at once.
   const removing = useRef(new Set<string>())
-  const sentNowRef = useRef<Readonly<Record<string, true>>>({})
+  const sentNowRef = useRef<Readonly<Record<string, SteerOnTheWay>>>({})
   // The thread `items` were read for; null until the shown thread's list arrives.
   const [itemsThread, setItemsThread] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -378,9 +387,9 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   // Send now requests in flight, by item: a second click before the first answers (and before the button shows
   // busy) sends nothing more.
   const steering = useRef(new Set<string>())
-  // Messages sent now leave the list at the click: the transcript shows them as sent. One that is refused comes
-  // back; one the daemon still lists as waiting (its turn is still being set up) comes back after a while.
-  const [sentNow, setSentNow] = useState<Readonly<Record<string, true>>>({})
+  // Messages sent now leave the list at the click, and the reply shows them at once (`steersOnTheWay`). One that is
+  // refused comes back; one the daemon still lists as waiting (its turn is still being set up) comes back after a while.
+  const [sentNow, setSentNow] = useState<Readonly<Record<string, SteerOnTheWay>>>({})
   sentNowRef.current = sentNow
   const sentNowTimers = useRef(new Map<string, number>())
   const unsend = useCallback((itemId: string) => {
@@ -411,7 +420,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
       }
     }
   }, [items, sentNow, unsend])
-  const steer = useCallback(async (itemId: string) => {
+  const steer = useCallback(async (itemId: string, known?: QueuedMessage) => {
     if (!threadId) return
     const key = `${threadId}\n${itemId}`
     if (steering.current.has(key)) return
@@ -419,7 +428,9 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     const live = changeScope(threadId)
     const refused = 'Could not send it now; the reply may have ended. The message is still queued.'
     markBusy(itemId, true)
-    setSentNow((current) => (current[itemId] ? current : { ...current, [itemId]: true }))
+    const item = itemsRef.current.find((entry) => entry.id === itemId) ?? (known?.id === itemId ? known : undefined)
+    const painted = steerOnTheWay(`item:${itemId}`, threadId, item?.content ?? '', useAppStore.getState().messages, { itemId, images: item?.images })
+    setSentNow((current) => (current[itemId] ? current : { ...current, [itemId]: painted }))
     setError(null)
     setNotice(null)
     try {
@@ -445,6 +456,54 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
       if (live()) markBusy(itemId, false)
     }
   }, [threadId, loadQueue, markBusy, changeScope, unsend])
+
+  // Steers typed in the composer, painted in the reply from the click. One the service took stays painted until its
+  // copy shows; if it never does (its turn is still being set up), the queue shows it again after a while.
+  const [composerSteers, setComposerSteers] = useState<readonly SteerOnTheWay[]>([])
+  const composerSteerTimers = useRef(new Map<string, number>())
+  const dropComposerSteer = useCallback((key: string) => {
+    const timer = composerSteerTimers.current.get(key)
+    if (timer !== undefined) window.clearTimeout(timer)
+    composerSteerTimers.current.delete(key)
+    setComposerSteers((current) => (current.some((steer) => steer.key === key) ? current.filter((steer) => steer.key !== key) : current))
+  }, [])
+  useEffect(() => () => {
+    for (const timer of composerSteerTimers.current.values()) window.clearTimeout(timer)
+    composerSteerTimers.current.clear()
+  }, [])
+  const beginComposerSteer = useCallback((content: string, images?: ChatImageAttachment[]): string | null => {
+    if (!threadId || (!content.trim() && !images?.length)) return null
+    const key = `composer:${crypto.randomUUID()}`
+    const painted = steerOnTheWay(key, threadId, content, useAppStore.getState().messages, { images })
+    setComposerSteers((current) => [...current, painted])
+    return key
+  }, [threadId])
+  const endComposerSteer = useCallback((key: string, taken: boolean) => {
+    if (!taken) { dropComposerSteer(key); return }
+    const previous = composerSteerTimers.current.get(key)
+    if (previous !== undefined) window.clearTimeout(previous)
+    composerSteerTimers.current.set(key, window.setTimeout(() => dropComposerSteer(key), SENT_NOW_HIDE_MS))
+  }, [dropComposerSteer])
+  // Its copy showed: nothing left to paint, and the queue no longer looks for it.
+  const transcript = useAppStore((state) => state.messages)
+  useEffect(() => {
+    for (const steer of composerSteers) if (steer.threadId === threadId && steerLanded(steer, transcript)) dropComposerSteer(steer.key)
+  }, [composerSteers, transcript, threadId, dropComposerSteer])
+  const steersOnTheWay = useMemo(
+    () => (threadId ? [...composerSteers, ...Object.values(sentNow)].filter((steer) => steer.threadId === threadId) : []),
+    [threadId, composerSteers, sentNow]
+  )
+  // A composer steer the turn takes once it runs waits in the queue meanwhile (the daemon lists it there, newest with
+  // its words): it is shown in the reply, not also here.
+  const composerSteerItemIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const steer of composerSteers) {
+      if (steer.threadId !== threadId) continue
+      const waiting = items.filter((item) => item.state === 'pending' && !ids.has(item.id) && item.content.trim() === steer.text)
+      if (waiting.length) ids.add(waiting[waiting.length - 1]!.id)
+    }
+    return ids
+  }, [composerSteers, items, threadId])
 
   // The editor stays open until the edit answers, so the item keeps its text until then. Its open edit learns the
   // outcome even when another thread is shown by then: saved closes it, anything else keeps the draft.
@@ -524,14 +583,14 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     ...(startingShown ? [startingShown] : []),
     ...items,
     ...optimisticItems.filter((optimistic) => optimistic.threadId === threadId && !items.some((item) => sameQueuedSend(item, optimistic)))
-  ].filter((item) => !item.internal && item.state !== 'steering' && !sentNow[item.id] && item.id !== lastPromptQueueItemId &&
-    !(item.clientRequestId && hiddenRequestIds?.has(item.clientRequestId))),
-  [startingShown, items, optimisticItems, threadId, sentNow, lastPromptQueueItemId, hiddenRequestIds])
+  ].filter((item) => !item.internal && item.state !== 'steering' && !sentNow[item.id] && !composerSteerItemIds.has(item.id) &&
+    item.id !== lastPromptQueueItemId && !(item.clientRequestId && hiddenRequestIds?.has(item.clientRequestId))),
+  [startingShown, items, optimisticItems, threadId, sentNow, composerSteerItemIds, lastPromptQueueItemId, hiddenRequestIds])
   // The message on its way into its turn takes no change.
   const busy = useMemo(() => (startingShown ? { ...busyIds, [startingShown.id]: true } : busyIds), [busyIds, startingShown])
 
   return useMemo(
-    () => ({ threadId, items: shown, busyIds: busy, error, clearError, notice, clearNotice, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, remove, reorder, edit }),
-    [threadId, shown, busy, error, clearError, notice, clearNotice, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, remove, reorder, edit]
+    () => ({ threadId, items: shown, busyIds: busy, error, clearError, notice, clearNotice, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, beginComposerSteer, endComposerSteer, steersOnTheWay, remove, reorder, edit }),
+    [threadId, shown, busy, error, clearError, notice, clearNotice, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, beginComposerSteer, endComposerSteer, steersOnTheWay, remove, reorder, edit]
   )
 }

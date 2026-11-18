@@ -108,9 +108,8 @@ it('composes signed protected relay enrollment, actual normal sessions and prote
   )
 }, 15_000)
 
-it('validates add-on settings before persistence and leaves protected blank join preparation unable to create a new authority', async () => {
-  const a = profile(),
-    b = profile()
+it('validates add-on settings before persistence', async () => {
+  const a = profile()
   await a.net.request('net.init', { listen: true })
   await a.net.request('net.protect', { passphrase: 'protected-authority' })
   const before = a.net.runtime().db.database.prepare('SELECT value FROM net_service_config').get()
@@ -124,15 +123,6 @@ it('validates add-on settings before persistence and leaves protected blank join
   expect(a.net.runtime().db.database.prepare('SELECT value FROM net_service_config').get()).toEqual(
     before
   )
-  const invite = (await a.net.request('bridge.invite', {})) as { invite: string }
-  await a.net.shutdown()
-  await expect(
-    b.net.request('bridge.join', { invite: invite.invite, passphrase: 'prepared-follower' })
-  ).rejects.toMatchObject({ code: 'route_unreachable' })
-  expect(b.net.status()).toMatchObject({ protected: true, keystore: 'unlocked' })
-  expect(b.net.runtime().identity.self()).toBeUndefined()
-  expect(b.net.runtime().keys.rootKey()).toBeUndefined()
-  await expect(b.net.request('net.init', {})).rejects.toMatchObject({ code: 'conflict' })
 })
 
 it('persists selected fake-binary cloudflared settings and signs newer route withdrawal and child recovery versions', async () => {

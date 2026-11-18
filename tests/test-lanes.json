@@ -94,6 +94,7 @@
     "tests/run/providerBranchRatchet.test.ts",
     "tests/run/restoreSafety.test.ts",
     "tests/run/threadFork.test.ts",
+    "tests/running/runningRegistry.test.ts",
     "tests/supportDaemon.test.ts",
     "tests/teamWorkflowScripts.test.ts",
     "tests/threadWorkspace.test.ts",
@@ -112,7 +113,8 @@
     "tests/net/chats/framed.test.ts",
     "tests/net/chats/joined.test.ts",
     "tests/net/chats/publication.test.ts",
-    "tests/net/chats/tasks.test.ts"
+    "tests/net/chats/tasks.test.ts",
+    "tests/net/transports/lan-offline.test.ts"
   ],
   "daemon": [
     "tests/net/bots/daemon/reader.test.ts",

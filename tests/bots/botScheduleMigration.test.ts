@@ -3,7 +3,7 @@
  * store. It keeps ids and next runs, marks the rows instead of deleting them, is idempotent, finishes a move cut short,
  * and can be undone.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -197,8 +197,115 @@ describe('going back to an older build and coming back', () => {
     expect(jobs.getJob('bot-a--news')?.bot).toEqual({ botId: 'bot-a', scheduleId: 'news', createdBy: 'owner' })
   })
 
+  it('restores a fixed line when an older build kept the bot link but lost its new keys', () => {
+    move()
+    const job = jobs.getJob('bot-a--news')!
+    jobs.updateJob(job.id, { prompt: 'Say exactly: Take your pills', bot: { ...job.bot!, say: 'Take your pills' } })
+    const inside = jobs as unknown as { config: MousseConfigStore }
+    inside.config.updateScheduledSection({ jobs: jobs.listJobs().map((row) => {
+      const definition = jobToDefinition(row)
+      if (row.id === job.id) delete (definition.bot as { say?: string }).say
+      return definition
+    }) })
+    expect(jobs.restoreDroppedFields()).toContain(job.id)
+    expect(jobs.getJob(job.id)!.bot).toMatchObject({ say: 'Take your pills' })
+  })
+
+  it.each([true, false])('keeps canWakeMe %s through an older save of the bot link', canWakeMe => {
+    move()
+    const job = jobs.getJob('bot-a--news')!
+    jobs.updateJob(job.id, { bot: { ...job.bot!, canWakeMe } })
+    const inside = jobs as unknown as { config: MousseConfigStore }
+    inside.config.updateScheduledSection({ jobs: jobs.listJobs().map(row => {
+      const definition = jobToDefinition(row)
+      if (row.id === job.id) delete definition.bot!.canWakeMe
+      return definition
+    }) })
+    jobs.restoreDroppedFields()
+    expect(jobs.getJob(job.id)!.bot?.canWakeMe).toBe(canWakeMe)
+  })
+
+  it('restoring dropped bot keys does not restore an intentionally removed model', () => {
+    move()
+    const job = jobs.getJob('bot-a--news')!
+    jobs.updateJob(job.id, { prompt: 'Say exactly: Hello', bot: { ...job.bot!, model: 'old-model', say: 'Hello' } })
+    const inside = jobs as unknown as { config: MousseConfigStore }
+    inside.config.updateScheduledSection({ jobs: jobs.listJobs().map((row) => {
+      const definition = jobToDefinition(row)
+      if (row.id === job.id) { delete definition.bot!.model; delete definition.bot!.say }
+      return definition
+    }) })
+    jobs.restoreDroppedFields()
+    expect(jobs.getJob(job.id)!.bot?.say).toBe('Hello')
+    expect(jobs.getJob(job.id)!.bot?.model).toBeUndefined()
+  })
+
+  it.each([true, false])('an older build edit wins over kept say (bot link survives: %s)', (survives) => {
+    move()
+    const job = jobs.getJob('bot-a--news')!
+    jobs.updateJob(job.id, { prompt: 'Say exactly: Take your pills', bot: { ...job.bot!, say: 'Take your pills' } })
+    const inside = jobs as unknown as { config: MousseConfigStore }
+    inside.config.updateScheduledSection({ jobs: jobs.listJobs().map((row) => {
+      const definition = jobToDefinition(row)
+      if (row.id === job.id) {
+        definition.prompt = 'Check my inbox and tell me what matters.'
+        if (survives) delete definition.bot!.say
+        else delete definition.bot
+      }
+      return definition
+    }) })
+    jobs.restoreDroppedFields()
+    expect(jobs.getJob(job.id)!.prompt).toBe('Check my inbox and tell me what matters.')
+    expect(jobs.getJob(job.id)!.bot?.say).toBeUndefined()
+    jobs.restoreDroppedFields()
+    expect(jobs.getJob(job.id)!.bot?.say).toBeUndefined()
+  })
+
+  it.each(['explicit false', 'another bot'] as const)('kept ownerAsked cannot promote %s', (kind) => {
+    move()
+    const job = jobs.getJob('bot-a--news')!
+    const keptPath = join(base, 'home', 'scheduled', 'jobs-kept.json')
+    const kept = JSON.parse(readFileSync(keptPath, 'utf8'))
+    kept.jobs[job.id].bot.ownerAsked = true
+    writeFileSync(keptPath, JSON.stringify(kept))
+    const inside = jobs as unknown as { config: MousseConfigStore }
+    inside.config.updateScheduledSection({ jobs: jobs.listJobs().map((row) => {
+      const definition = jobToDefinition(row)
+      if (row.id === job.id) {
+        if (kind === 'explicit false') Object.assign(definition.bot!, { ownerAsked: false })
+        else definition.bot!.botId = 'another-bot'
+      }
+      return definition
+    }) })
+    jobs.restoreDroppedFields()
+    expect((jobs.getJob(job.id)!.bot as { ownerAsked?: boolean }).ownerAsked).not.toBe(true)
+  })
+
+  it.each([[false, false], [false, true], [true, false], [true, true]])('restores both fixed words and ownership without undoing Do (changed: %s, dropped bot: %s)', (changed, whole) => {
+    move()
+    const job = jobs.getJob('bot-a--news')!
+    jobs.updateJob(job.id, { prompt: 'Say exactly: Take your pills', bot: { ...job.bot!, say: 'Take your pills', ownerAsked: true } })
+    const inside = jobs as unknown as { config: MousseConfigStore }
+    inside.config.updateScheduledSection({ jobs: jobs.listJobs().map(row => {
+      const definition = jobToDefinition(row)
+      if (row.id === job.id) {
+        if (changed) definition.prompt = 'Check my inbox and tell me what matters.'
+        if (whole) delete definition.bot
+        else { delete definition.bot!.say; delete definition.bot!.ownerAsked }
+      }
+      return definition
+    }) })
+    jobs.restoreDroppedFields()
+    const restored = jobs.getJob(job.id)!
+    expect(restored.bot?.ownerAsked).toBe(true)
+    expect(restored.bot?.say).toBe(changed ? undefined : 'Take your pills')
+    expect(restored.prompt).toBe(changed ? 'Check my inbox and tell me what matters.' : 'Say exactly: Take your pills')
+    expect(jobs.restoreDroppedFields()).toEqual([])
+  })
+
   it('puts back every field an older build’s save dropped: a bot’s link, a draft, keys, Tell me and a CLI name', () => {
     move()
+    jobs.updateJob('bot-a--news', { bot: { ...jobs.getJob('bot-a--news')!.bot!, ownerAsked: true } })
     const draft = jobs.createJob({ name: 'Draft', prompt: 'x', schedule: { kind: 'interval', minutes: 30 }, draft: { draft: true, draftId: 'd1' } })
     const keyed = jobs.createJob({ name: 'Keyed', prompt: 'x', schedule: { kind: 'manual' }, keys: ['GITHUB_TOKEN'], tellMe: 'every', cliName: 'keyed' })
     // The older build saves: it pauses a bot's job on its guard thread, gives another bot's job a thread of its own,
@@ -215,7 +322,7 @@ describe('going back to an older build and coming back', () => {
     expect(jobs.restoreDroppedFields().sort()).toEqual(['bot-a--news', 'bot-a--tidy', 'bot-b--daily', draft.id, keyed.id].sort())
     // The draft is a draft again, never on, and never due.
     expect(jobs.getJob(draft.id)).toMatchObject({ draft: { draft: true, draftId: 'd1' }, enabled: false, state: 'paused', nextRunAt: null })
-    expect(jobs.getJob('bot-a--news')).toMatchObject({ bot: { botId: 'bot-a', scheduleId: 'news' }, threadId: botJobThreadGuard('bot-a') })
+    expect(jobs.getJob('bot-a--news')).toMatchObject({ bot: { botId: 'bot-a', scheduleId: 'news', ownerAsked: true }, threadId: botJobThreadGuard('bot-a') })
     expect(jobs.getJob(keyed.id)).toMatchObject({ keys: ['GITHUB_TOKEN'], tellMe: 'every', cliName: 'keyed' })
     expect(jobs.getJob('bot-b--daily')).toMatchObject({ bot: { botId: 'bot-b', scheduleId: 'daily' }, enabled: true, state: 'scheduled' })
     // The scheduler never starts a draft.

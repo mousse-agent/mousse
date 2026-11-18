@@ -159,13 +159,24 @@ describe('rename', () => {
     expect(document.activeElement).toBe(row('a'))
   })
 
-  it('starts with a double-click on the title of a thread or a project', () => {
+  it('starts with a double-click on a thread title', () => {
     show([thread('a', 'Fix tests')])
     openProject()
     act(() => { host.querySelector('.threads-sidebar-thread-name')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
     expect(host.querySelector<HTMLInputElement>('.threads-sidebar-rename-input')?.value).toBe('Fix tests')
-    key(host.querySelector('.threads-sidebar-rename-input')!, { key: 'Escape' })
+  })
+
+  it('leaves a project as it is on a double-click, which opens and closes it, and starts from its menu', () => {
+    show([thread('a', 'Fix tests')])
+    // A double-click is two clicks and a dblclick: the project opens and closes, and no rename starts.
+    click(projectToggle())
+    click(projectToggle())
     act(() => { host.querySelector('.threads-sidebar-project-name')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+    expect(host.querySelector('.threads-sidebar-project-rename')).toBeNull()
+    expect(projectToggle().getAttribute('aria-expanded')).toBe('false')
+
+    act(() => { projectToggle().dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 })) })
+    click(menuItem('Rename'))
     expect(host.querySelector<HTMLInputElement>('.threads-sidebar-project-rename')?.value).toBe('Mousse')
   })
 })
@@ -196,7 +207,7 @@ describe('the row menu', () => {
     click(more)
     expect(menuLabels()).toEqual(fromRightClick)
     // A thread in use is archived first: no Delete.
-    expect(menuLabels()).toEqual(['Pin', 'Archive', 'Regenerate title', 'Rename', 'Delete after'])
+    expect(menuLabels()).toEqual(['Pin', 'Archive', 'Regenerate title', 'Rename', 'Archive after'])
     expect(more.getAttribute('aria-expanded')).toBe('true')
     expect(document.activeElement).toBe(menuItem('Pin'))
   })
@@ -211,7 +222,7 @@ describe('the row menu', () => {
     key(document.activeElement!, { key: 'ArrowDown' })
     expect(document.activeElement).toBe(menuItem('Regenerate title'))
     key(document.activeElement!, { key: 'End' })
-    expect(document.activeElement).toBe(menuItem('Delete after'))
+    expect(document.activeElement).toBe(menuItem('Archive after'))
     key(document.activeElement!, { key: 'Home' })
     expect(document.activeElement).toBe(menuItem('Pin'))
     key(document.activeElement!, { key: 'Escape' })

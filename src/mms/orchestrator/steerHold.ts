@@ -149,9 +149,13 @@ export class SteerHold {
 
   foregroundTools(): ForegroundTool[] {
     const tools = this.options.foreground(this.waitingOnPerson)
+    return this.compactionHolds() ? [{ callId: 'compaction', toolName: 'compaction' }, ...tools] : tools
+  }
+
+  /** A compaction runs now (and, on a bot's turn, has not run past its limit). */
+  private compactionHolds(): boolean {
     const limit = this.options.compactionLimitMs
-    const compacting = this.compactingNow && (limit === undefined || this.now() - (this.compactingSince ?? 0) < limit)
-    return compacting ? [{ callId: 'compaction', toolName: 'compaction' }, ...tools] : tools
+    return this.compactingNow && (limit === undefined || this.now() - (this.compactingSince ?? 0) < limit)
   }
 
   /** The window after the last foreground tool's result is still open (`start` providers only). */
@@ -244,9 +248,14 @@ export class SteerHold {
       strict: this.options.strict,
       held: this.heldKeys !== undefined && !asking,
       atBoundary: this.atBoundary,
-      forced
+      forced,
+      compacting: this.adopted && this.compactionHolds()
     }, { person: pending.person })
-    return { delivery, forced: forced && delivery === 'cut', tools, ...(delivery === 'hold' || forced ? { holdGeneration: this.generation } : {}) }
+    // A person's steer that cuts in is sent now, as Send now does: the adapter stops the tool the turn runs, so the turn
+    // goes on with the steer at once rather than after the command (an immediate message waits for a running command on
+    // Claude Code). The check at dispatch lets it through.
+    const sentNow = this.adopted && pending.person && delivery === 'cut'
+    return { delivery, forced: sentNow || (forced && delivery === 'cut'), tools, ...(delivery === 'hold' || forced ? { holdGeneration: this.generation } : {}) }
   }
 
   /**

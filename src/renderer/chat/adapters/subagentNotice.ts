@@ -2,7 +2,7 @@ import type { UIMessage } from 'ai'
 import type { SubagentNoticeItem } from '../../../shared/subagents'
 
 /**
- * Subagent results a message delivers, read from the structured payload the daemon attached to it
+ * What a message delivers about subagents (results, a question, a stop), read from the structured payload the daemon attached to it
  * (`ChatMessage.subagentNotice`, carried on the UI message's metadata). The message text is what the
  * model reads and is never parsed here.
  */
@@ -19,10 +19,12 @@ function isNoticeItem(value: unknown): value is SubagentNoticeItem {
   return typeof item.delegationId === 'string' && typeof item.childThreadId === 'string' && typeof item.runStatus === 'string'
 }
 
-export type SubagentNoticeTone = 'done' | 'failed' | 'stopped'
+export type SubagentNoticeTone = 'done' | 'failed' | 'stopped' | 'asking'
 
-/** How a notice item reads: its run status as a verb and a tone for the row. */
-export function noticeOutcome(item: Pick<SubagentNoticeItem, 'runStatus'>): { verb: string; tone: SubagentNoticeTone } {
+/** How a notice item reads: what it reports as a verb and a tone for the row. */
+export function noticeOutcome(item: Pick<SubagentNoticeItem, 'runStatus' | 'event'>): { verb: string; tone: SubagentNoticeTone } {
+  if (item.event === 'question') return { verb: 'asked a question', tone: 'asking' }
+  if (item.event === 'stopped') return { verb: 'was stopped', tone: 'stopped' }
   switch (item.runStatus) {
     case 'completed':
       return { verb: 'finished', tone: 'done' }

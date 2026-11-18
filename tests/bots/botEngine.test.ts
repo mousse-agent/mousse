@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { BOT_OFFLINE_WATCH_MS, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_JOURNAL_ERROR, BOT_OFFLINE_WATCH_MS, BOT_PERMISSION_REMOVED_TEXT, BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
 import { botFilesFolder, botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { BotStore } from '../../src/mms/bots/store/BotStore'
@@ -20,10 +20,11 @@ import { RunStore } from '../../src/mms/run/RunStore'
 import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import { isBotTurnPayload, type BotTurnPayload } from '../../src/mms/run/types'
 import type { BotDefinition, BotManifest } from '../../src/shared/bots/personal/definition'
+import { BOT_TURN_WINDOW_MS } from '../../src/shared/bots/personal/definition'
 import type { Enforceability, RunPolicy } from '../../src/shared/harness/types'
 import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
-import { BOT_SUBAGENT_TOOLS } from '../../src/shared/bots/personal/manifest'
+import { BOT_SUBAGENT_TOOLS, BOT_TASK_TOOLS } from '../../src/shared/bots/personal/manifest'
 
 let base: string
 let profile: string
@@ -48,7 +49,7 @@ const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   mcp: [],
   skills: [],
   workspace: null,
-  budget: { maxActiveMs: 10 * 60_000, maxTurns: 30 },
+  budget: { maxTurns: 30 },
   audience: 'owner',
   ...patch
 })
@@ -148,7 +149,6 @@ describe('approval', () => {
     expect(bots.approval('site-editor').added.map((line) => line.text)).toEqual([
       'Read files in its files folder',
       'Search files in its files folder',
-      'Up to 10 minutes of work per run',
       'Up to 30 model requests (retries included) per run'
     ])
     expect(approve()).toMatchObject({ digest: botManifestDigest(manifest()) })
@@ -170,7 +170,7 @@ describe('approval', () => {
   it('a narrower revision runs without asking; a wider one waits for the owner', async () => {
     publish()
     approve()
-    publish({ tools: ['read'], budget: { maxActiveMs: 5 * 60_000, maxTurns: 10 } })
+    publish({ tools: ['read'], budget: { maxTurns: 10 } })
     await expect(bots.activate({ botId: 'site-editor', input: 'a', clientRequestId: 'narrow' })).resolves.toMatchObject({ status: 'running' })
     publish({ tools: ['read', 'search', 'edit'] })
     await expect(bots.activate({ botId: 'site-editor', input: 'b', clientRequestId: 'wide' })).rejects.toMatchObject({
@@ -232,7 +232,7 @@ describe('activation and dispatch', () => {
     expect(runs.listRuns(activation.threadId!)).toHaveLength(1)
   })
 
-  it('prepare compiles the grant, binds as a bot and prepays the remaining active time', async () => {
+  it('prepare compiles the grant, binds as a bot and prepays its window of active time', async () => {
     const activation = await bots.activate({ botId: 'site-editor', input: '/deploy now', clientRequestId: 'c1' })
     const payload = turnStart(store.dispatch(activation.id, 1)!.runId!)
     const prepared = bots.prepare(payload)
@@ -240,10 +240,10 @@ describe('activation and dispatch', () => {
     // A run's request ends with what its last message is for (bot-context.md §5.2).
     expect(prepared.prompt).toBe(` /deploy now\n\n${BOT_RUN_REPORT_LINE}`)
     expect(prepared.instructions).toBe('You keep the site tidy.\n\nAnswer briefly.')
-    expect(prepared.policy).toMatchObject({ approvals: 'grants', approve: 'host', tools: { allow: ['escalate', 'find', 'grep', ...BOT_MEMORY_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'show_card', ...BOT_SUBAGENT_TOOLS, 'work_models'].sort() }, budget: { maxTurns: 30, maxWallMs: 10 * 60_000 }, authority: { kind: 'bot' } })
+    expect(prepared.policy).toMatchObject({ approvals: 'grants', approve: 'host', tools: { allow: ['escalate', 'find', 'grep', ...BOT_MEMORY_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'work_models'].sort() }, budget: { maxTurns: 30, maxWallMs: BOT_TURN_WINDOW_MS }, authority: { kind: 'bot' } })
     expect(prepared.authority.spend).toBeNull()
     expect(existsSync(join(prepared.scratch, 'tmp'))).toBe(true)
-    expect(store.counters(activation.id).activeMs).toBe(10 * 60_000)
+    expect(store.counters(activation.id).activeMs).toBe(BOT_TURN_WINDOW_MS)
     expect(checked.at(-1)).toMatchObject({ origin: 'bot', mode: 'default' })
     // A second claim of the same turn.start is refused: the dispatch already started.
     expect(bots.prepare(payload)).toMatchObject({ code: 'bot_dispatch_started' })
@@ -312,16 +312,32 @@ describe('activation and dispatch', () => {
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'cancelled', endReason: 'grant_replaced' })
   })
 
-  it('a narrower published revision is what runs: tools, limits and work time', async () => {
-    publish({ tools: ['read'], budget: { maxActiveMs: 2 * 60_000, maxTurns: 5 } })
+  it('Remove while a turn runs refuses only what it took away: a lower limit refuses nothing', async () => {
+    const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
+    const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
+    if ('refused' in prepared) throw new Error(prepared.refused)
+    const read = { kind: 'builtin' as const, tool: 'read' as const, nativeName: 'read', args: { path: join(root, 'a.md') } }
+    const search = { kind: 'builtin' as const, tool: 'search' as const, nativeName: 'grep', args: { path: root } }
+    bots.narrowGrant('site-editor', (held) => ({ ...held, budget: { ...held.budget, maxTurns: 20 } }))
+    expect(prepared.authority.check(read)).toEqual({ ok: true })
+    expect(prepared.authority.check(search)).toEqual({ ok: true })
+    bots.narrowGrant('site-editor', (held) => ({ ...held, tools: held.tools.filter((tool) => tool !== 'search') }))
+    expect(prepared.authority.check(read)).toEqual({ ok: true })
+    expect(prepared.authority.check(search)).toEqual({ ok: false, refused: { text: BOT_PERMISSION_REMOVED_TEXT, askId: '' } })
+    expect(bots.getActivation(activation.id).status).toBe('running')
+    expect(store.openAsks('site-editor')).toEqual([])
+  })
+
+  it('a narrower published revision is what runs: tools and limits', async () => {
+    publish({ tools: ['read'], budget: { maxTurns: 5 } })
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'narrow' })
     expect(store.counters(activation.id).limits).toEqual({ maxTurns: 5 })
     const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
     if ('refused' in prepared) throw new Error(prepared.refused)
     // The memory tools and the listing of the owner's MCP servers are every bot's, beside its grant (Bot Phase 1 §5.10);
-    // a run also splits its job among subagents, on models from work_models.
-    expect(prepared.policy).toMatchObject({ tools: { allow: ['escalate', ...BOT_MEMORY_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'show_card', ...BOT_SUBAGENT_TOOLS, 'work_models'].sort() }, budget: { maxTurns: 5, maxWallMs: 2 * 60_000 } })
-    expect(store.counters(activation.id).activeMs).toBe(2 * 60_000)
+    // a run also splits its job among subagents, on models from work_models, and reads the rest of its tools from its catalogue.
+    expect(prepared.policy).toMatchObject({ tools: { allow: ['escalate', ...BOT_MEMORY_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'work_models'].sort() }, budget: { maxTurns: 5, maxWallMs: BOT_TURN_WINDOW_MS } })
+    expect(store.counters(activation.id).activeMs).toBe(BOT_TURN_WINDOW_MS)
     // An ungranted tool in a run is refused and asked for once (Bot Phase 1 §5.4); the run goes on.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'search', nativeName: 'grep', args: { path: root } })).toMatchObject({ ok: false, refused: { askId: expect.stringMatching(/^esc_/) } })
     // The tool the revision keeps still works in its files folder.
@@ -329,18 +345,19 @@ describe('activation and dispatch', () => {
     expect(bots.getActivation(activation.id).status).toBe('running')
   })
 
-  it('the deadline ends a run failed, with one ask for more time on later runs; later calls are refused (Bot Phase 1 §5.7)', async () => {
+  it('the end of its window ends the turn with no ask and no failure; later calls are refused', async () => {
     const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
     const prepared = bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))
     if ('refused' in prepared) throw new Error(prepared.refused)
-    // Its deadline, and the look every live dispatch gets (`BOT_OFFLINE_WATCH_MS`).
-    expect(timers.map((timer) => timer.ms)).toEqual([10 * 60_000, BOT_OFFLINE_WATCH_MS])
+    // Its window, and the look every live dispatch gets (`BOT_OFFLINE_WATCH_MS`).
+    expect(timers.map((timer) => timer.ms)).toEqual([BOT_TURN_WINDOW_MS, BOT_OFFLINE_WATCH_MS])
+    expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: true })
     timers[0].fn()
     await new Promise((resolve) => setImmediate(resolve))
     expect(prepared.authority.time.signal.aborted).toBe(true)
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'failed', endReason: 'budget_exhausted' })
-    expect(store.openAsks('site-editor')).toMatchObject([{ mode: 'ask', kind: 'budget', permission: { budget: { key: 'maxActiveMs', amount: 10 * 60_000 } }, title: 'work for up to 20 minutes per run' }])
-    expect(store.registry('site-editor')?.failureStreak).toBe(1)
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'running' })
+    expect(store.openAsks('site-editor')).toEqual([])
+    expect(store.registry('site-editor')?.failureStreak ?? 0).toBe(0)
     expect(prepared.authority.check({ kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: join(root, 'a.md') } })).toEqual({ ok: false, wall: { kind: 'ended' } })
   })
 
@@ -365,7 +382,7 @@ describe('activation and dispatch', () => {
     clock += 5_000
     finish(payload.runId)
     new BotEngine(engineHost).settleRun(payload.runId)
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'done', counters: { activeMs: 10 * 60_000 } })
+    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'done', counters: { activeMs: BOT_TURN_WINDOW_MS } })
   })
 
   it('refuses a dispatch the runtime cannot hold now, before any time is charged', async () => {
@@ -375,27 +392,17 @@ describe('activation and dispatch', () => {
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'failed', counters: { activeMs: 0 } })
   })
 
-  it('with less than one 15-second slice of work time left, nothing is dispatched', async () => {
-    const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
-    store.run('UPDATE bot_counters SET active_ms = ? WHERE activation_id = ?', 10 * 60_000 - 14_000, activation.id)
-    expect(bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))).toMatchObject({ code: 'active_time_exhausted' })
-    // A run's budget wall ends it; the owner is asked for more time on later runs.
-    expect(bots.getActivation(activation.id)).toMatchObject({ status: 'failed', endReason: 'budget_exhausted' })
-    expect(store.openAsks('site-editor')).toMatchObject([{ mode: 'ask', kind: 'budget', permission: { budget: { key: 'maxActiveMs' } } }])
-  })
-
-  it('three runs of a bot run at a time; the next starts when one ends', async () => {
+  it('runs of a bot run at once, with no count; one ending leaves the others running', async () => {
     const first = await bots.activate({ botId: 'site-editor', input: 'one', clientRequestId: 'c1' })
-    for (const id of ['c2', 'c3']) expect(await bots.activate({ botId: 'site-editor', input: id, clientRequestId: id })).toMatchObject({ status: 'running' })
-    const fourth = await bots.activate({ botId: 'site-editor', input: 'four', clientRequestId: 'c4' })
-    expect(fourth).toMatchObject({ status: 'queued', threadId: null })
+    const others = []
+    for (const id of ['c2', 'c3', 'c4', 'c5']) others.push(await bots.activate({ botId: 'site-editor', input: id, clientRequestId: id }))
+    for (const other of others) expect(other).toMatchObject({ status: 'running', threadId: expect.any(String) })
     const payload = turnStart(store.dispatch(first.id, 1)!.runId!)
     bots.prepare(payload)
     finish(payload.runId, 'failed')
     bots.settle(payload, {})
     expect(bots.getActivation(first.id)).toMatchObject({ status: 'failed', endReason: 'failed' })
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(bots.getActivation(fourth.id).status).toBe('running')
+    for (const other of others) expect(bots.getActivation(other.id).status).toBe('running')
   })
 
   it('a tool call cut off without an outcome pauses the activation until the owner checks it', async () => {
@@ -419,7 +426,8 @@ describe('activation and dispatch', () => {
 
   it('stopping a queued activation ends it; stopping a running one stops its thread', async () => {
     const first = await bots.activate({ botId: 'site-editor', input: 'one', clientRequestId: 'c1' })
-    for (const id of ['c2', 'c3']) await bots.activate({ botId: 'site-editor', input: id, clientRequestId: id })
+    // Nothing starts while the bot's journal cannot be written, so the second waits.
+    store.setError('site-editor', { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
     const second = await bots.activate({ botId: 'site-editor', input: 'two', clientRequestId: 'c4' })
     expect(second.status).toBe('queued')
     await expect(bots.stop(second.id)).resolves.toMatchObject({ status: 'cancelled', endReason: 'stopped' })
@@ -442,17 +450,19 @@ describe('activation and dispatch', () => {
     store = new BotStore({ profileHome: profile, clock: () => clock })
   })
 
-  it('keeps at most 20 runs, running ones counted; the oldest waiting one is dropped', async () => {
-    await bots.activate({ botId: 'site-editor', input: 'running', clientRequestId: 'run' })
+  it('keeps at most 20 waiting runs, running ones not counted; the oldest waiting one is dropped', async () => {
+    const running = await bots.activate({ botId: 'site-editor', input: 'running', clientRequestId: 'run' })
+    // Nothing starts while the bot's journal cannot be written, so the rest wait.
+    store.setError('site-editor', { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
     const waiting = []
     for (let index = 0; index < 21; index += 1) {
       clock += 1
       waiting.push(await bots.activate({ botId: 'site-editor', input: `q${index}`, clientRequestId: `q${index}` }))
     }
-    // Three run (the first, q0 and q1); of the 19 that waited, the two oldest are dropped.
-    expect(bots.listActivations('site-editor').filter((row) => row.status === 'running')).toHaveLength(3)
-    for (const index of [2, 3]) expect(bots.getActivation(waiting[index].id)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
-    expect(bots.listActivations('site-editor').filter((row) => row.status === 'queued')).toHaveLength(17)
+    // Of the 21 that waited, the oldest is dropped; the running one is kept and not counted.
+    expect(bots.getActivation(running.id).status).toBe('running')
+    expect(bots.getActivation(waiting[0].id)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+    expect(bots.listActivations('site-editor').filter((row) => row.status === 'queued')).toHaveLength(20)
   })
 
   it('deleting the bot cancels its activations, revokes its grant and archives its threads (Bot Phase 1 §5.3.3)', async () => {

@@ -11,12 +11,13 @@ import { claudeLockedTools, type ClaudeLockedTurn } from '../../src/mms/harness/
 import { ClaudeSubscriptionAdapter } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import { botAppToolRefusal } from '../../src/shared/bots/personal/walls'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
+import { refused } from '../../src/mms/run/mcp/appTools/refusal'
 import { delegationFixture } from '../run/delegationFixture'
 import { compileBotThread, botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import { ToolRegistry } from '../../src/mms/run/mcp/appTools/registry'
 import type { MousseTool } from '../../src/mms/run/mcp/appTools/types'
-import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_TOOLS, BOT_PROFILER_TOOLS, BOT_THREAD_TOOLS, BOT_WORK_TOOLS, botMayBeOffered, botStarterManifest } from '../../src/shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_TOOLS, BOT_GROUP_PERMISSIONS, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SECRET_TOOLS, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THREAD_TOOLS, BOT_WORK_TOOLS, botGrantTool, botMayBeOffered, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { withPermission } from '../../src/shared/bots/personal/escalation'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
 import { botFixture, createBot, finish, start, type BotFixture } from './botFixture'
@@ -152,7 +153,7 @@ describe('the stated permissions match the tools a run is given', () => {
     })
 
   it('the text says yes or no for each permission, in plain words', () => {
-    const text = botAllowedText({ shell: true, browser: true, threads: false, profiler: false, web: true, skills: [], automation: [] }, 'run', true)
+    const text = botAllowedText({ shell: true, browser: true, threads: false, profiler: false, themes: false, web: true, skills: [], automation: [] }, 'run', true)
     expect(text.split('\n')).toEqual([
       'What your owner allows now (current; it replaces anything said earlier in this chat)',
       '- Search the web and read pages: yes',
@@ -160,6 +161,10 @@ describe('the stated permissions match the tools a run is given', () => {
       "- Use the browser (your own): yes, but it can't open on this run",
       "- Use your owner's threads: no",
       "- Read Mousse's profiler: no",
+      '- Change how Mousse looks: no',
+      "- Schedule work in your owner's threads: no",
+      '- Use secrets your owner gives you: no',
+      '- Add quick actions: no',
       '- Skills: none',
       '- Automation tools: none',
       "- Your owner's MCP servers: none yet (mcp_servers lists the ones you can ask for)",
@@ -234,18 +239,20 @@ describe("a bot's thread lists only tools a bot can hold", () => {
       const { registry, turns, request } = appToolRegistry(fx.engine, fakeAppToolHost().host)
       turns.register(appTurn({ threadId: 'bot-home', runId: run.runId, bot: authority(['escalate']) }))
       // Not "Browser tools are not bound for this turn": the bot is told it is not allowed, and to escalate.
-      expect(await registry.call('browser_open', { url: 'https://example.com' }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual({ text: NOT_ALLOWED, isError: true })
+      expect(await registry.call('browser_open', { url: 'https://example.com' }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual(refused('not_granted', NOT_ALLOWED))
       // Any other tool outside the grant keeps its wall.
-      expect(await registry.call('ask_user', { questions: [] }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual({ text: 'This bot is not allowed to use ask_user.', isError: true })
+      expect(await registry.call('ask_user', { questions: [] }, request({ threadId: 'bot-home', runId: run.runId }))).toEqual(refused('not_granted', 'This bot is not allowed to use ask_user.'))
     } finally {
       fx.dispose()
     }
   })
 
-  it('a bot can hold every grantable tool, the browser, thread and profiler tools and the work tools', () => {
-    for (const name of [...BOT_APP_TOOLS].filter((name) => name !== 'browser' && name !== 'threads' && name !== 'profiler')) expect(botMayBeOffered(name), name).toBe(true)
-    for (const name of [...BOT_BROWSER_TOOLS, ...BOT_THREAD_TOOLS, ...BOT_PROFILER_TOOLS, ...BOT_WORK_TOOLS, 'consult', 'list_skills', 'load_skill']) expect(botMayBeOffered(name), name).toBe(true)
-    // A permission's name is no tool, and nothing a bot could steer, queue or answer with is offered, nor the heap summary, which pauses the service.
-    for (const name of ['delegate_task', 'thread_steer', 'approval_respond', 'queue_enqueue', 'thread_fork', 'browser_request_human', 'browser', 'threads', 'profiler', 'profiler_heap_summary']) expect(botMayBeOffered(name), name).toBe(false)
+  it('a bot can hold every grantable tool, every tool of each permission, the task list and the work tools', () => {
+    for (const name of [...BOT_APP_TOOLS].filter((name) => !BOT_GROUP_PERMISSIONS.has(name))) expect(botMayBeOffered(name), name).toBe(true)
+    for (const name of [...BOT_BROWSER_TOOLS, ...BOT_THREAD_TOOLS, ...BOT_PROFILER_TOOLS, ...BOT_THEME_TOOLS, ...BOT_SCHEDULE_READ_TOOLS, ...BOT_SCHEDULE_ACT_TOOLS, ...BOT_SECRET_TOOLS, ...BOT_QUICK_ACTION_TOOLS, ...BOT_TASK_TOOLS, ...BOT_WORK_TOOLS, 'consult', 'list_skills', 'load_skill']) expect(botMayBeOffered(name), name).toBe(true)
+    // What a thread's agent steers, queues, forks and answers with is a bot's too, under "use your threads".
+    for (const name of ['thread_steer', 'approval_respond', 'queue_enqueue', 'thread_fork', 'thread_merge_back', 'git_status', 'list_computers']) expect(botGrantTool(name), name).toBe('threads')
+    // A permission's name is no tool; delegation is the work's own subagents; the heap summary pauses the service; a bot has no goal.
+    for (const name of ['delegate_task', 'continue_subagent', 'browser_request_human', ...BOT_GROUP_PERMISSIONS, 'profiler_heap_summary', 'goal_status']) expect(botMayBeOffered(name), name).toBe(false)
   })
 })

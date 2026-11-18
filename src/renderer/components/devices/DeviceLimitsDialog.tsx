@@ -35,10 +35,12 @@ export function DeviceLimitsDialog({ node, name, policy, onClose, onDone }: {
   const [terminal, setTerminal] = useState(policy.terminal)
   const [editor, setEditor] = useState(policy.editor)
   const [reach, setReach] = useState<AgentReach | undefined>(policy.agentReach)
-  const changed = mode !== policy.maxPermissionMode || terminal !== policy.terminal || editor !== policy.editor || reach !== policy.agentReach
+  const [work, setWork] = useState<boolean | undefined>(policy.work)
+  const changed = mode !== policy.maxPermissionMode || terminal !== policy.terminal || editor !== policy.editor || reach !== policy.agentReach || work !== policy.work
   const save = async () => {
     const answer = await call('bridge.policy', {
       node,
+      ...(work !== policy.work ? { work } : {}),
       ...(mode !== policy.maxPermissionMode ? { maxPermissionMode: mode } : {}),
       ...(terminal !== policy.terminal ? { terminal } : {}),
       ...(editor !== policy.editor ? { editor } : {}),
@@ -55,6 +57,10 @@ export function DeviceLimitsDialog({ node, name, policy, onClose, onDone }: {
     >
       <div className="devices-dialog" data-mousse-decision="">
         <p className="settings-muted">These apply here only. {name} keeps its own limits for what this computer may do there.</p>
+        {work !== undefined && <div className="devices-field">
+          <span title={`Off, ${name} reads threads and chats with bots here, and can't start, send to, change or stop threads, see files or Git, or make or change bots.`}>Work on threads from this device</span>
+          <Switch checked={work} label={`Work on threads from ${name}`} disabled={busy} onChange={setWork} />
+        </div>}
         <label className="devices-field">
           <span>Highest permission mode</span>
           <select className="settings-input" value={mode} disabled={busy} onChange={(event) => setMode(event.target.value as PermissionMode)}>

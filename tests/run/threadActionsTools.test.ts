@@ -5,12 +5,12 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Thread } from '../../src/shared/types'
-import { McpToolError, type AgentRunCommandResult, type AgentSendResult, type McpCallRequest } from '../../src/mms/run/mcp/appTools'
+import type { AgentRunCommandResult, AgentSendResult, McpCallRequest } from '../../src/mms/run/mcp/appTools'
 import { AGENT_MESSAGE_END, agentMessage, agentMessageText } from '../../src/mms/run/mcp/appTools/agentMessage'
 import { agentMessageWords } from '../../src/shared/agentMessageWords'
-import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, THREAD_RESULT_MAX_CHARS, THREAD_SEND_MAX_PER_RUN } from '../../src/mms/run/mcp/appTools/thread'
+import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, THREAD_RESULT_MAX_CHARS } from '../../src/mms/run/mcp/appTools/thread'
 import type { RunPause } from '../../src/mms/run/types'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, denied as refusalIn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const NOW = '2026-10-12T00:00:00.000Z'
@@ -77,7 +77,7 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       request({ threadId: 'caller', runId: runs.caller, ...extra })
     const call = (name: string, args: Record<string, unknown> = {}, extra: Partial<Parameters<typeof request>[0]> = {}) =>
       registry.call(name, args, as(extra))
-    const denied = (promise: Promise<unknown>) => promise.then(() => undefined, (error: McpToolError) => error)
+    const denied = refusalIn
     const result = async (promise: Promise<{ text: string }>) => JSON.parse((await promise).text)
     return { fx, registry, turns, request, threads, sent, answers, runs, call, denied, result, callerRun, targetRun, ...fake }
   }
@@ -155,13 +155,27 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(host.sendToThread).not.toHaveBeenCalled()
     })
 
-    it('refuses a subagent, whose parent reaches it with continue_subagent', async () => {
-      const { call, denied, fx, callerRun, threads, host } = await world()
+    it('to the caller\'s own subagent it is the follow-up continue_subagent starts, under the same call id; another thread\'s subagent is refused', async () => {
+      const { call, denied, fx, callerRun, targetRun, threads, host } = await world()
       const child = await fx.delegate(callerRun.runId, 'call-1')
       threads.set(child.childThreadId, thread(child.childThreadId))
-      const error = await denied(call('thread_send', { threadId: child.childThreadId, content: 'x' }))
+      const delegation = (host.delegation as unknown as () => { continueSubagent: ReturnType<typeof vi.fn> })()
+      delegation.continueSubagent.mockResolvedValueOnce({ delegationId: 'd2', childThreadId: child.childThreadId, childRunId: 'run:child:2', title: 'Helper', status: 'queued', note: 'busy' })
+      const sent = JSON.parse((await call('thread_send', { threadId: child.childThreadId, content: 'next step', mode: 'plan' }, { toolCallId: 'mcp:follow-1' })).text)
+      expect(delegation.continueSubagent).toHaveBeenCalledWith({ subagent: child.childThreadId, prompt: 'next step', mode: 'plan' }, { toolCallId: 'mcp:follow-1' })
+      expect(sent).toMatchObject({ threadId: child.childThreadId, runId: 'run:child:2', delivery: 'queued', queued: true, delegationId: 'd2', subagent: true })
+      // A refusal (the subagent waits for an answer) comes back as continue_subagent gives it.
+      delegation.continueSubagent.mockResolvedValueOnce({ started: false, code: 'needs_answer', message: 'answer it first' })
+      expect(JSON.parse((await call('thread_send', { threadId: child.childThreadId, content: 'more' })).text)).toMatchObject({ started: false, code: 'needs_answer' })
+      // Nothing went the untracked way.
+      expect(host.sendToThread).not.toHaveBeenCalled()
+
+      const theirs = await fx.delegate(targetRun.runId, 'call-2')
+      threads.set(theirs.childThreadId, thread(theirs.childThreadId))
+      const error = await denied(call('thread_send', { threadId: theirs.childThreadId, content: 'x' }))
       expect(error!.code).toBe('mousse_scope_denied')
-      expect(error!.message).toContain('continue_subagent')
+      expect(error!.message).toContain('only its parent')
+      expect(delegation.continueSubagent).toHaveBeenCalledTimes(2)
       expect(host.sendToThread).not.toHaveBeenCalled()
     })
 
@@ -224,30 +238,11 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(sent[0].options.clientRequestId).not.toBe('thread_send:target:retry-1')
     })
 
-    it(`is capped at ${THREAD_SEND_MAX_PER_RUN} messages per caller run: a loop of sends is cut off, retries and failures do not count, another run starts fresh`, async () => {
-      const { call, denied, answers, host, sent, fx, turns, runs, callerRun } = await world()
-      for (let index = 0; index < THREAD_SEND_MAX_PER_RUN; index += 1)
+    it('has no count of sends per run: one run sends 50 messages and none is refused', async () => {
+      const { call, host } = await world()
+      for (let index = 0; index < 50; index += 1)
         expect((await call('thread_send', { threadId: 'target', content: `m${index}` })).isError, `send ${index}`).toBeUndefined()
-      const over = await denied(call('thread_send', { threadId: 'target', content: 'one too many' }))
-      expect(over).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'sends_per_run_exceeded', limit: THREAD_SEND_MAX_PER_RUN } })
-      expect(over!.message).toContain(`limited to ${THREAD_SEND_MAX_PER_RUN}`)
-      expect(host.sendToThread).toHaveBeenCalledTimes(THREAD_SEND_MAX_PER_RUN)
-      expect(sent).toHaveLength(THREAD_SEND_MAX_PER_RUN)
-
-      // A new run of the same thread has its own count (a new turn, not the loop of the old one).
-      fx.finish(callerRun.runId, 'done')
-      const next = await fx.runningRun('caller')
-      turns.register(appTurn({ threadId: 'caller', runId: next.runId }))
-      runs.caller = next.runId
-      // Replays and refused sends are not sends: they leave the budget alone.
-      answers.send = async () => ({ runId: 'run:first', sequence: 10, queued: false, replayed: true })
-      for (let index = 0; index < THREAD_SEND_MAX_PER_RUN + 5; index += 1) await call('thread_send', { threadId: 'target', content: 'retry' })
-      answers.send = async () => { throw refusal('questions_pending') }
-      for (let index = 0; index < THREAD_SEND_MAX_PER_RUN + 5; index += 1) await call('thread_send', { threadId: 'target', content: 'busy' }).catch(() => undefined)
-      answers.send = async () => ({ runId: 'run:fresh', sequence: 10, queued: false, replayed: false })
-      for (let index = 0; index < THREAD_SEND_MAX_PER_RUN; index += 1)
-        expect((await call('thread_send', { threadId: 'target', content: `n${index}` })).isError, `fresh ${index}`).toBeUndefined()
-      expect(await denied(call('thread_send', { threadId: 'target', content: 'over again' }))).toMatchObject({ details: { conflict: 'sends_per_run_exceeded' } })
+      expect(host.sendToThread).toHaveBeenCalledTimes(50)
     })
 
     it('validates its input before it reaches the host', async () => {
@@ -306,6 +301,19 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       expect(host.showAgentAction).toHaveBeenCalledTimes(1)
     })
 
+    it('a steer that came after the run finished its answer says it runs as the next turn, to the caller and in the thread', async () => {
+      const { call, result, answers, host, targetRun } = await world()
+      answers.steer = async () => ({ status: 'accepted', runId: targetRun.runId, sequence: 12, replayed: false, followUp: true })
+      expect(await result(call('thread_steer', { threadId: 'target', runId: targetRun.runId, text: 'x' }))).toMatchObject({ runId: targetRun.runId, followUp: true, delivery: 'queued' })
+      expect(host.showAgentAction).toHaveBeenLastCalledWith({ threadId: 'target' }, expect.anything(), expect.stringMatching(/runs after run .* had just finished/))
+      // A steer the turn takes says neither.
+      answers.steer = async () => ({ status: 'accepted', runId: targetRun.runId, sequence: 13, replayed: false })
+      const joined = await result(call('thread_steer', { threadId: 'target', runId: targetRun.runId, text: 'y' }))
+      expect(joined).not.toHaveProperty('followUp')
+      expect(joined).not.toHaveProperty('delivery')
+      expect(host.showAgentAction).toHaveBeenLastCalledWith({ threadId: 'target' }, expect.anything(), `steered run ${targetRun.runId}`)
+    })
+
     it('requires the run and the text', async () => {
       const { call, host } = await world()
       for (const [name, args] of [['thread_interrupt', { threadId: 'target' }], ['thread_steer', { threadId: 'target', runId: 'r' }], ['thread_steer', { threadId: 'target', runId: 'r', text: ' ' }]] as const)
@@ -324,21 +332,8 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
   })
 
   describe('limits and boundaries (review of PR 3)', () => {
-    it('a retry of an earlier send is answered with its first result after the run has used its budget; a new send is still refused', async () => {
-      const { call, denied, host, answers } = await world()
-      for (let index = 0; index < THREAD_SEND_MAX_PER_RUN; index += 1) await call('thread_send', { threadId: 'target', content: `m${index}`, clientRequestId: `req-${index}` })
-      // The host knows what `req-19` sent; it knows nothing of `brand-new`.
-      host.earlierSend = vi.fn((_threadId: string, key: string) => key === 'thread_send:caller:req-19' ? { runId: 'run:first', sequence: 3, queued: true, replayed: true } : undefined)
-      const retry = await call('thread_send', { threadId: 'target', content: 'm19', clientRequestId: 'req-19' })
-      expect(JSON.parse(retry.text)).toEqual({ threadId: 'target', runId: 'run:first', sequence: 3, queued: true, delivery: 'queued', replayed: true })
-      const fresh = await denied(call('thread_send', { threadId: 'target', content: 'one more', clientRequestId: 'brand-new' }))
-      expect(fresh).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'sends_per_run_exceeded' } })
-      expect(host.sendToThread).toHaveBeenCalledTimes(THREAD_SEND_MAX_PER_RUN)
-      expect(answers).toBeDefined()
-    })
-
     // Each limit the owner enforces has its own code and says which limit it is and what to do (one "limit reached" sends
-    // agents looking for the wrong cause). The send-per-run count is the tool's own, tested above.
+    // agents looking for the wrong cause).
     it.each([
       ['agent_hops_exceeded', /agent messages in a row/],
       ['agent_queue_full_per_sender', new RegExp(`${AGENT_QUEUE_MAX_PER_SENDER} messages from your thread .*the most one thread may have`)],
@@ -520,6 +515,62 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       // The delegation path reads the stored result, not the tool's: the parent's notice row has every character.
       const row = fx.engine.inbox.listForChildThread(child.childThreadId, 'child_result')[0]
       expect((row.payload as { result: { text: string } }).result.text).toBe(long)
+    })
+
+    it('the result of your own subagent read here is acknowledged, as task_status does, so its notice is not handed over again', async () => {
+      const { call, result, fx, callerRun, threads } = await world()
+      const child = await fx.delegate(callerRun.runId, 'call-ack')
+      threads.set(child.childThreadId, { id: child.childThreadId, name: 'Child', createdAt: '', updatedAt: '' } as never)
+      fx.finish(child.childRunId, 'the child answer')
+      expect(fx.engine.inbox.listPending('caller')).toHaveLength(1)
+      expect(await result(call('thread_wait', { threadId: child.childThreadId, runId: child.childRunId }))).toMatchObject({ status: 'finished', resultText: 'the child answer' })
+      expect(fx.engine.delegations.get(child.delegationId)!.status).toBe('acknowledged')
+      expect(fx.engine.inbox.listForDelegation(child.delegationId).map((row) => row.status)).toEqual(['acknowledged'])
+      expect(fx.engine.inbox.listPending('caller')).toEqual([])
+    })
+
+    it('a call a native helper made reads the result but never acknowledges it: the thread\'s own turn still gets the notice (§2.7)', async () => {
+      const { registry, request, result, fx, callerRun, runs, threads, delegation } = await world()
+      const child = await fx.delegate(callerRun.runId, 'call-helper')
+      threads.set(child.childThreadId, { id: child.childThreadId, name: 'Child', createdAt: '', updatedAt: '' } as never)
+      fx.finish(child.childRunId, 'the child answer')
+      const byHelper = (): McpCallRequest => ({ ...request({ threadId: 'caller', runId: runs.caller }), helper: { kind: 'unattributed' } })
+      expect(await result(registry.call('thread_wait', { threadId: child.childThreadId, runId: child.childRunId }, byHelper()))).toMatchObject({ status: 'finished', resultText: 'the child answer' })
+      expect(fx.engine.delegations.get(child.delegationId)!.status).toBe('result_available')
+      expect(fx.engine.inbox.listPending('caller')).toHaveLength(1)
+      // task_status from a helper asks the thread owner not to acknowledge; the thread's own call still does.
+      await registry.call('task_status', { subagent: child.childThreadId }, byHelper())
+      expect(delegation.taskStatus).toHaveBeenLastCalledWith({ subagent: child.childThreadId }, { acknowledge: false })
+      await registry.call('task_status', { subagent: child.childThreadId }, request({ threadId: 'caller', runId: runs.caller }))
+      expect(delegation.taskStatus).toHaveBeenLastCalledWith({ subagent: child.childThreadId })
+    })
+
+    it('a question answered before the wait could report it does not end the wait: it goes on to the run\'s result, never a false timeout', async () => {
+      let open = false
+      const listeners = new Set<(threadId: string) => void>()
+      const { call, result, fx, targetRun } = await world({
+        pendingRequests: (threadId) => (threadId === 'target' && open ? [{ requestId: 'q-1', questions: [] }] : []),
+        onRequestPending: (listener) => {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        }
+      })
+      const waiting = result(call('thread_wait', { threadId: 'target', runId: targetRun.runId, timeoutMs: 20_000 }))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      // The question opens and is answered before the waiter reads it.
+      open = true
+      for (const listener of listeners) listener('target')
+      open = false
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      fx.finish(targetRun.runId, 'answered and done')
+      expect(await waiting).toMatchObject({ status: 'finished', resultText: 'answered and done' })
+    })
+
+    it('a question still open when the wait reports it ends the wait with needs_input', async () => {
+      const { call, result, targetRun } = await world({
+        pendingRequests: (threadId) => (threadId === 'target' ? [{ requestId: 'q-1', questions: [] }] : [])
+      })
+      expect(await result(call('thread_wait', { threadId: 'target', runId: targetRun.runId, timeoutMs: 20_000 }))).toMatchObject({ status: 'needs_input', needsInput: true, requests: 1 })
     })
 
     it('a run that left no text is finished without resultText', async () => {

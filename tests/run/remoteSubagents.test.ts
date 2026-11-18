@@ -33,6 +33,8 @@ class FakeComputer implements RemoteComputersPort {
   marks = false
   /** How often it was asked. */
   asked = 0
+  /** The routed versions it reports; undefined is a computer that reports none. */
+  routedVersions: Record<string, number> | undefined
   private threads = 0
   private runs = 0
 
@@ -52,6 +54,11 @@ class FakeComputer implements RemoteComputersPort {
     return this.marks
   }
 
+  async versions(node: string): Promise<Record<string, number> | undefined> {
+    expect(node).toBe(MAC)
+    return this.routedVersions
+  }
+
   async call(node: string, method: string, params: Record<string, unknown>, options?: { idem?: string }): Promise<unknown> {
     expect(node).toBe(MAC)
     this.calls.push({ method, params, ...(options?.idem ? { idem: options.idem } : {}) })
@@ -65,9 +72,11 @@ class FakeComputer implements RemoteComputersPort {
       case 'threads.setPermissionMode':
       case 'threads.setModel':
       case 'threads.settle':
+      case 'threads.setExpiry':
         return {}
       case 'orchestrator.send':
-        return { runId: `far-run-${++this.runs}`, accepted: true }
+        // A computer that takes a running-time limit says so in its answer.
+        return { runId: `far-run-${++this.runs}`, accepted: true, ...(params.deadlineMinutes !== undefined ? { deadlineMinutes: params.deadlineMinutes } : {}) }
       case 'runs.get':
         return { run: { runId: params.runId, ...this.farRun } }
       case 'orchestrator.pendingQuestions':
@@ -259,6 +268,134 @@ describe('remote subagents (issue #469)', () => {
     expect(d.engine.inbox.listPending(parent.id).length + d.engine.inbox.listByStatus(parent.id, 'delivered').length + d.engine.inbox.listByStatus(parent.id, 'acknowledged').length).toBeGreaterThan(0)
   })
 
+  it('has no default time limit and no longest one: without maxMinutes it runs on after days, and a limit past a day is kept as given', async () => {
+    const { d, steps, out, say, mac, service, startOnMac } = remoteWorld()
+    steps['go'] = async (tools) => {
+      out.started = await startOnMac(tools, 'Mac tester')
+      out.long = await startOnMac(tools, 'Mac soak', { maxMinutes: 3000 })
+    }
+    await say('go')
+    const clock = (service as unknown as { deps: { now: () => number } }).deps
+    clock.now = () => Date.now() + 2 * 24 * 60 * 60_000
+    await service.pass()
+    expect(d.engine.delegations.get(out.started.delegationId)!.result).toBeFalsy()
+    expect(d.engine.delegations.get(out.long.delegationId)!.result).toBeFalsy()
+    expect(mac.methods()).not.toContain('orchestrator.abort')
+    clock.now = () => Date.now() + 3001 * 60_000
+    await service.pass()
+    expect(d.engine.delegations.get(out.long.delegationId)!.result!.error).toContain('3000-minute limit on Studio Mac')
+    expect(d.engine.delegations.get(out.started.delegationId)!.result).toBeFalsy()
+  })
+
+  // Issue #685: the time limit is running time, counted by the computer that runs the task, where that computer can.
+  it('a computer that takes a limit on a send gets it as running time, and this one no longer stops the task by the clock', async () => {
+    const { d, steps, out, say, mac, service, startOnMac } = remoteWorld()
+    mac.marks = true
+    mac.routedVersions = { 'orchestrator.send': 8 }
+    steps['go'] = async (tools) => { out.started = await startOnMac(tools, 'Mac tester', { maxMinutes: 5 }) }
+    await say('go')
+    expect(mac.calls.find((call) => call.method === 'orchestrator.send')!.params).toMatchObject({ deadlineMinutes: 5 })
+    expect(d.engine.remoteSubagents.get(out.started.delegationId)).toMatchObject({ limitMinutes: 5, deadlineAt: null })
+    ;(service as unknown as { deps: { now: () => number } }).deps.now = () => Date.now() + 60 * 60_000
+    await service.pass()
+    expect(d.engine.delegations.get(out.started.delegationId)!.result).toBeFalsy()
+    expect(mac.methods()).not.toContain('orchestrator.abort')
+  })
+
+  it('an older computer gets no limit on the send, and the task keeps its deadline here', async () => {
+    const { d, steps, out, say, mac, startOnMac } = remoteWorld()
+    mac.marks = true
+    mac.routedVersions = { 'orchestrator.send': 7 }
+    steps['go'] = async (tools) => {
+      out.started = await startOnMac(tools, 'Mac tester', { maxMinutes: 5 })
+      out.free = await startOnMac(tools, 'Mac soak')
+    }
+    await say('go')
+    for (const send of mac.calls.filter((call) => call.method === 'orchestrator.send')) expect(send.params).not.toHaveProperty('deadlineMinutes')
+    expect(d.engine.remoteSubagents.get(out.started.delegationId)!.deadlineAt).not.toBeNull()
+    expect(d.engine.remoteSubagents.get(out.free.delegationId)).toMatchObject({ limitMinutes: null, deadlineAt: null })
+  })
+
+  // Issue #685: a subagent on another computer expires with the thread that started it.
+  it('its thread there gets the parent\'s expiry, then every change and the removal, also once that computer is back', async () => {
+    const { d, parent, steps, out, say, mac, service, startOnMac } = remoteWorld()
+    const inTwoHours = new Date(Date.now() + 2 * 60 * 60_000).toISOString()
+    d.store.updateThreadMeta(parent.id, { expiresAt: inTwoHours, expiryStopsRun: true }, { touch: false })
+    steps['go'] = async (tools) => { out.started = await startOnMac(tools, 'Mac tester') }
+    await say('go')
+    const expiries = () => mac.calls.filter((call) => call.method === 'threads.setExpiry')
+    expect(expiries()).toHaveLength(1)
+    expect(expiries()[0]).toMatchObject({ params: { threadId: 'far-thread-1', expiresAt: inTwoHours, stopsRun: true }, idem: expect.stringContaining('remote-expiry:') })
+
+    // Changed while that computer is offline: sent once it answers.
+    const inThreeHours = new Date(Date.now() + 3 * 60 * 60_000).toISOString()
+    mac.online = false
+    d.store.updateThreadMeta(parent.id, { expiresAt: inThreeHours, expiryStopsRun: undefined }, { touch: false })
+    d.orch.threadExpiryChanged(parent.id)
+    await service.pass()
+    expect(d.engine.remoteExpiry.get(out.started.childThreadId)).toMatchObject({ state: 'pending', expiresAt: inThreeHours })
+    mac.online = true
+    await service.pass()
+    expect(expiries().at(-1)!.params).toEqual({ threadId: 'far-thread-1', expiresAt: inThreeHours })
+    expect(d.engine.remoteExpiry.get(out.started.childThreadId)).toMatchObject({ state: 'sent', lastError: null })
+    const sentSoFar = expiries().length
+    // Nothing changed: nothing is sent again.
+    d.orch.threadExpiryChanged(parent.id)
+    await service.pass()
+    expect(expiries()).toHaveLength(sentSoFar)
+
+    // Kept after all: the thread there is kept too.
+    d.store.updateThreadMeta(parent.id, { expiresAt: undefined, expiryStopsRun: undefined }, { touch: false })
+    d.orch.threadExpiryChanged(parent.id)
+    await service.pass()
+    expect(expiries().at(-1)!.params).toEqual({ threadId: 'far-thread-1', expiresAt: null })
+  })
+
+  it('an expiry that passed while that computer was offline is sent as soon as it takes, so its thread still goes', async () => {
+    const { d, parent, steps, out, say, mac, service, startOnMac } = remoteWorld()
+    steps['go'] = async (tools) => { out.started = await startOnMac(tools, 'Mac tester') }
+    await say('go')
+    mac.online = false
+    d.store.updateThreadMeta(parent.id, { expiresAt: new Date(Date.now() - 60_000).toISOString() }, { touch: false })
+    d.orch.threadExpiryChanged(parent.id)
+    await service.pass()
+    mac.online = true
+    await service.pass()
+    const sent = mac.calls.filter((call) => call.method === 'threads.setExpiry').at(-1)!
+    // That computer refuses an expiry less than a minute away; a minute and a half is the soonest sent.
+    expect(Date.parse(String(sent.params.expiresAt))).toBeGreaterThanOrEqual(Date.now() + 60_000)
+    expect(Date.parse(String(sent.params.expiresAt))).toBeLessThanOrEqual(Date.now() + 2 * 60_000)
+  })
+
+  it('an expiry that computer refuses for good is not asked again; one it cannot be reached for is', async () => {
+    const { d, parent, steps, out, say, mac, service, startOnMac } = remoteWorld()
+    d.store.updateThreadMeta(parent.id, { expiresAt: new Date(Date.now() + 2 * 60 * 60_000).toISOString() }, { touch: false })
+    mac.refuse['threads.setExpiry'] = 'computer_forbidden'
+    steps['go'] = async (tools) => { out.started = await startOnMac(tools, 'Mac tester') }
+    await say('go')
+    await service.pass()
+    expect(mac.methods().filter((method) => method === 'threads.setExpiry')).toHaveLength(1)
+    expect(d.engine.remoteExpiry.get(out.started.childThreadId)).toMatchObject({ state: 'sent', lastError: expect.stringContaining('refused threads.setExpiry') })
+  })
+
+  it('a Stop that cannot reach that computer yet shows as Stop requested until it is delivered', async () => {
+    const { d, parent, steps, out, say, mac, service, startOnMac } = remoteWorld()
+    steps['go'] = async (tools) => { out.started = await startOnMac(tools, 'Mac tester') }
+    steps['cancel'] = async (tools) => { out.cancelled = await tools.taskCancel({ subagent: 'Mac tester' }) as Json }
+    await say('go')
+    mac.online = false
+    await say('cancel')
+    await service.pass()
+    await service.pass()
+    expect(d.engine.remoteSubagents.get(out.started.delegationId)!.state).toBe('stopping')
+    expect((d.orch as any).subagentView(parent.id)[0].computer).toMatchObject({ online: false, stopRequested: true, lastError: 'Studio Mac is offline.' })
+    mac.online = true
+    await service.pass()
+    expect(mac.methods()).toContain('orchestrator.abort')
+    expect(d.engine.remoteSubagents.get(out.started.delegationId)!.state).toBe('done')
+    expect((d.orch as any).subagentView(parent.id)[0].computer).not.toHaveProperty('stopRequested')
+  })
+
   it('continues on the same thread there once the last task finished, and never merges here', async () => {
     const { d, steps, out, say, mac, service, startOnMac } = remoteWorld()
     steps['go'] = async (tools) => { out.started = await startOnMac(tools, 'Mac tester') }
@@ -323,24 +460,27 @@ describe('remote subagents (issue #469)', () => {
 
   // Issue #1160: the mode there is the narrowest of the parent thread's mode, its run and the limit that computer set
   // for this one, with no fixed cap. A read-only task is still sent in Plan mode.
-  const MODE_ROWS: Array<{ name: string; parent: PermissionMode; limit: PermissionMode; workspace?: 'shared'; mode: PermissionMode; chatMode: 'agent' | 'plan' }> = [
+  const MODE_ROWS: Array<{ name: string; parent: PermissionMode; limit: PermissionMode; workspace?: 'shared'; readOnly?: boolean; mode: PermissionMode; chatMode: 'agent' | 'plan' }> = [
     { name: 'Full access when both sides allow it', parent: 'full', limit: 'full', mode: 'full', chatMode: 'agent' },
     { name: 'the default device limit narrows a Full access parent', parent: 'full', limit: 'accept_edits', mode: 'accept_edits', chatMode: 'agent' },
     { name: 'a lower device limit narrows it', parent: 'full', limit: 'ask', mode: 'ask', chatMode: 'agent' },
     { name: 'a stricter parent narrows a Full access limit', parent: 'accept_edits', limit: 'full', mode: 'accept_edits', chatMode: 'agent' },
-    { name: 'a read-only task is still Plan', parent: 'full', limit: 'full', workspace: 'shared', mode: 'full', chatMode: 'plan' }
+    { name: 'a read-only task is still Plan', parent: 'full', limit: 'full', workspace: 'shared', readOnly: true, mode: 'full', chatMode: 'plan' },
+    { name: 'a shared task not asked read-only is Agent', parent: 'full', limit: 'full', workspace: 'shared', mode: 'full', chatMode: 'agent' }
   ]
-  it.each(MODE_ROWS)('the mode there: $name', async ({ parent: parentMode, limit, workspace, mode, chatMode }) => {
+  it.each(MODE_ROWS)('the mode there: $name', async ({ parent: parentMode, limit, workspace, readOnly, mode, chatMode }) => {
     const { d, parent, steps, out, say, mac, startOnMac } = remoteWorld()
     d.orch.setThreadPermissionMode(parent.id, parentMode)
     mac.limit = limit
     steps['go'] = async (tools) => {
-      out.started = await startOnMac(tools, 'Mac tester', workspace ? { workspace, role: 'research' } : {})
+      out.started = await startOnMac(tools, 'Mac tester', workspace ? { workspace, role: 'research', ...(readOnly ? { readOnly } : {}) } : {})
     }
     await say('go')
     expect(out.started).toMatchObject({ title: 'Mac tester', computer: 'Studio Mac' })
     expect(mac.calls.find((call) => call.method === 'threads.setPermissionMode')!.params.mode).toBe(mode)
     expect(mac.calls.find((call) => call.method === 'orchestrator.send')!.params.mode).toBe(chatMode)
+    // Only a read-only task reads that computer's project folder itself; one that may edit gets a worktree there.
+    expect(mac.calls[0]!.params.worktreeEnabled).toBe(!readOnly)
   })
 
   it('a follow-up runs no looser than the run that sends it', async () => {

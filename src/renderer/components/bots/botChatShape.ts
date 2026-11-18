@@ -1,4 +1,6 @@
-import { compareLaunched, launchedActive, type BotAskCard, type BotChatMessage, type BotChip, type BotLaunchedThread, type BotSummary, type BotWorkItem } from '../../../shared/bots/personal/chat'
+import { compareLaunched, launchedActive, launchedGoing, type BotAskCard, type BotChatMessage, type BotChip, type BotLaunchedThread, type BotSummary, type BotWorkItem } from '../../../shared/bots/personal/chat'
+import { guardTextCharacters } from '../../../shared/bots/personal/modelSlots'
+import { botGroupTime } from './messageGroups'
 import { askNoticeText } from '../../../shared/bots/personal/askText'
 
 /**
@@ -47,13 +49,16 @@ export function workSignalsOf(message: BotChatMessage): { titles: string[]; queu
  */
 export type BotChatRow =
   | { kind: 'message'; message: BotChatMessage }
-  | { kind: 'system'; id: string; at: string; text: string; title?: string; of?: string; note?: 'info' | 'error' }
+  | { kind: 'system'; id: string; at: string; text: string; title?: string; of?: string; note?: 'info' | 'error'; cut?: true; expiredReviews?: BotChatMessage[]; actionHistory?: BotChatMessage[] }
+
+/** A row of this window only: a `/` command's line, or (`cut`) the words of a reply its turn stopped before finishing. */
+export interface BotWindowLine { id: string; at: string; text: string; error?: true; cut?: true; expiredReviews?: BotChatMessage[]; actionHistory?: BotChatMessage[] }
 
 /**
- * `rows` with the owner's own lines from `/` commands (`notes`) among them by time: each before the first row that
- * came after it, the newest at the end.
+ * `rows` with this window's own lines (`notes`, oldest first: the owner's `/` commands, replies cut off) among them by
+ * time: each before the first row that came after it, the newest at the end.
  */
-export function withNotes(rows: readonly BotChatRow[], notes: ReadonlyArray<{ id: string; at: string; text: string; error?: true }>): BotChatRow[] {
+export function withNotes(rows: readonly BotChatRow[], notes: readonly BotWindowLine[]): BotChatRow[] {
   if (!notes.length) return rows as BotChatRow[]
   const merged: BotChatRow[] = []
   let next = 0
@@ -66,7 +71,9 @@ export function withNotes(rows: readonly BotChatRow[], notes: ReadonlyArray<{ id
   return merged
 }
 
-const noteRow = (note: { id: string; at: string; text: string; error?: true }): BotChatRow => ({ kind: 'system', id: note.id, at: note.at, text: note.text, note: note.error ? 'error' : 'info' })
+const noteRow = (note: BotWindowLine): BotChatRow => (note.cut
+  ? { kind: 'system', id: note.id, at: note.at, text: note.text, cut: true }
+  : { kind: 'system', id: note.id, at: note.at, text: note.text, note: note.error ? 'error' : 'info' })
 
 /** The quiet line an answer the owner tapped leaves in place of their bubble: "You answered “Flat B”". */
 export function tappedAnswerLine(label: string): string {
@@ -114,7 +121,47 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
   const rows: BotChatRow[] = []
   const marks = new Map<string, OwnerMarks>()
   let lastOwner: string | undefined
+  let expired: { schedule: string; count: number; row: Extract<BotChatRow, { kind: 'system' }> } | undefined
+  const latestAction = new Map<string, BotChatMessage>()
+  for (const message of messages) if (message.action) {
+    const first = latestAction.get(message.action.actionId)
+    latestAction.set(message.action.actionId, { ...message, action: { ...message.action, askedAt: message.action.askedAt ?? first?.action?.askedAt ?? first?.at ?? message.at } })
+  }
+  const foldedActions = new Set(messages.filter(message => message.expiredActionSchedule && message.action).map(message => message.action!.actionId))
+  const nudgeOf = (message: BotChatMessage) => Boolean(message.action && /^bm_action_.*_n[12]$/.test(message.id))
+  const earlierLine = (message: BotChatMessage): Extract<BotChatRow, { kind: 'system' }> => ({
+    kind: 'system', id: message.id, at: message.at, of: message.id,
+    text: `${guardTextCharacters(message.action!.title).replace(/\s+/g, ' ')} · ${nudgeOf(message) ? 'Reminded' : 'Asked'} ${botGroupTime(message.at)}`
+  })
   for (const message of messages) {
+    const nudge = nudgeOf(message)
+    if (nudge && message.action && foldedActions.has(message.action.actionId)) {
+      // The newest review is represented inside its schedule fold. Earlier nudge copies stay quiet here.
+      // All history for this call belongs inside its expired review.
+      continue
+    }
+    if (!nudge && message.expiredActionSchedule) {
+      if (expired?.schedule === message.expiredActionSchedule) expired.count++
+      else {
+        const line: Extract<BotChatRow, { kind: 'system' }> = { kind: 'system', id: message.id, at: message.at, text: 'Expired · not sent', of: message.id }
+        expired = { schedule: message.expiredActionSchedule, count: 1, row: line }
+        rows.push(line)
+      }
+      if (message.action) {
+        const newest = latestAction.get(message.action.actionId) ?? message
+        ;(expired.row.expiredReviews ??= []).push({ ...newest, action: { ...message.action, askedAt: message.action.askedAt ?? message.at } })
+      }
+      const reviews = expired.row.expiredReviews
+      const names = reviews?.map(review => guardTextCharacters(review.action!.title).replace(/\s+/g, ' '))
+      const name = names?.length === expired.count && names.every(title => title === names[0]) ? `: ${names[0]}` : ''
+      expired.row.text = `${expired.count === 1 ? 'Expired' : `${expired.count} expired`} · not sent${name}`
+      continue
+    }
+    if (!nudge) expired = undefined
+    if (message.action && latestAction.get(message.action.actionId)?.id !== message.id) {
+      rows.push(earlierLine(message))
+      continue
+    }
     if (message.author === 'owner') lastOwner = message.id
     // A tapped answer is the bot's own label, so it reads as a quiet line, as an answered ask does.
     if (message.author === 'owner' && message.answers?.tapped) {
@@ -123,7 +170,7 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
       continue
     }
     if (message.systemLine) {
-      rows.push({ kind: 'system', id: message.id, at: message.at, text: message.text, of: message.id })
+      rows.push({ kind: 'system', id: message.id, at: message.at, text: message.text, of: message.id, ...(message.systemTitle ? { title: message.systemTitle } : {}) })
       continue
     }
     const signals = workSignalsOf(message)
@@ -153,7 +200,7 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
         continue
       }
     }
-    rows.push({ kind: 'message', message })
+    rows.push({ kind: 'message', message: message.action ? latestAction.get(message.action.actionId)! : message })
     const answered = message.ask ? askAnsweredLine(botName, message.ask) : undefined
     if (answered) {
       const tip = answerTip?.(message)
@@ -161,6 +208,38 @@ export function chatRows(messages: readonly BotChatMessage[], botName: string, a
     }
   }
   return { rows, marks }
+}
+
+/**
+ * One step as a line of plain words: "Searched the web · vacuum prices", "Started thread: Fix the login page". Mousse
+ * writes these from the calls it allowed (shared/bots/personal/chips.ts), never from model text.
+ */
+export function stepText(chip: BotChip): string {
+  const text = chip.text.charAt(0).toUpperCase() + chip.text.slice(1)
+  return chip.highlight ? `${text}${chip.thread ? ': ' : ' · '}${chip.highlight}` : text
+}
+
+/** Beside the typing dots while the bot has only the owner's message before it: nothing of its turn has shown yet. */
+export const BOT_READING_TEXT = 'Reading your message'
+/** Beside the typing dots while the bot writes words that are not shown yet. */
+export const BOT_WRITING_TEXT = 'Writing a reply'
+/** Beside the typing dots when nothing says what the bot does. */
+export const BOT_WORKING_TEXT = 'Working'
+
+/**
+ * The line beside a bot's typing dots: what its chat turn is doing now, from what the turn has sent so far.
+ * - `own`: the bot's own words (its latest line before a step). They win over everything Mousse would say.
+ * - Otherwise Mousse's words: "Writing a reply" while its words stream and none are shown yet, else its live step as a
+ *   settled step reads ("Searching the web · vacuum prices", from shared/bots/personal/chips.ts, the one place a call
+ *   gets its words; a call with none reads "Working", never its tool's name).
+ * - `idle`: nothing says what it does now: "Reading your message" while the owner's message is the newest row
+ *   (`unanswered`), else "Working".
+ */
+export function botDoingLine(now: { status?: string; writing: boolean; chip?: BotChip; unanswered: boolean }): { text: string; own?: true; idle?: true } {
+  if (now.status) return { text: now.status, own: true }
+  if (now.writing) return { text: BOT_WRITING_TEXT }
+  if (now.chip) return { text: stepText(now.chip) }
+  return { text: now.unanswered ? BOT_READING_TEXT : BOT_WORKING_TEXT, idle: true }
 }
 
 /** What the header says under the bot's name, and how it reads. `lead`: the work the line names, whose activity the sticker shows. */
@@ -177,8 +256,8 @@ export function leadWork(work: readonly BotWorkItem[]): BotWorkItem | undefined 
  * The bot's presence under its name: "typing…" while its chat turn writes, "System check +1" while work runs or waits
  * (the work running longest, and how many more, threads it manages included; never "+0"), "Managing Dictation mock-ups"
  * or "Managing 2 threads" while only threads it started still work, "paused", "waiting for internet", and "free"
- * otherwise. Threads that ended or sit idle are listed but never make it busy. Typing wins over work; the line still
- * opens the list.
+ * otherwise. Threads that ended, sit idle or are on hold for the owner are listed but never make it busy. Typing wins
+ * over work; the line still opens the list.
  */
 export function presenceOf(bot: Pick<BotSummary, 'state' | 'work' | 'threads' | 'watchers'>, chat: { typing: boolean; offline: boolean }): BotPresence {
   if (bot.state === 'paused') return { kind: 'paused', text: 'paused' }
@@ -201,12 +280,38 @@ export function presenceOf(bot: Pick<BotSummary, 'state' | 'work' | 'threads' | 
   return { kind: 'free', text: 'free' }
 }
 
+/** How a bot's line in the sidebar reads: `working` in purple, `needs` (it waits on its owner) in amber, `idle` in grey. */
+export type BotRowTone = 'working' | 'needs' | 'idle'
+
+/**
+ * The line under a bot's name in the sidebar's Bots list, in words coloured by `tone`: what waits on the owner ("Wants to
+ * use files on this computer"), what it works on (the header's line: "System check +1", "Typing…"), or "Paused",
+ * "Waiting for internet", "Waiting on …", and "Idle" when there is nothing at all. `resting` (only for "Idle"): its face
+ * sleeps.
+ */
+export function botRowLine(bot: Pick<BotSummary, 'state' | 'stateText' | 'needsOwner' | 'waiting' | 'chat' | 'work' | 'threads' | 'watchers'>): { tone: BotRowTone; text: string; resting: boolean } {
+  const line = (tone: BotRowTone, text: string, resting = false) => ({ tone, text, resting })
+  if (bot.state === 'paused') return line('idle', 'Paused')
+  if (bot.needsOwner || bot.state === 'needs_you' || bot.state === 'stuck') return line('needs', bot.stateText || 'Needs you')
+  const offline = Boolean(bot.chat?.offline) || bot.waiting === 'internet'
+  const presence = presenceOf(bot, { typing: Boolean(bot.chat) && !offline, offline })
+  if (presence.kind === 'offline') return line('idle', 'Waiting for internet')
+  if (presence.kind === 'typing') return line('working', 'Typing…')
+  if (presence.kind === 'busy') return line('working', presence.text)
+  if (bot.state === 'working') return line('working', bot.stateText || 'Working…')
+  if (presence.text !== 'free') return line('idle', presence.text)
+  return line('idle', 'Idle', true)
+}
+
 /** How a thread the bot started looks in its list: the tint of its row (`working` blue, `waiting` amber, `done` green, `failed` red), and its label. */
 export type LaunchedTone = 'working' | 'waiting' | 'idle' | 'done' | 'failed'
 
-/** The tone and the words for where a thread the bot started stands: "working", "waiting on subagents", "waiting on you", "done", "stopped". */
+/**
+ * The tone and the words for where a thread the bot started stands: "working", "waiting on subagents", "waiting on you"
+ * (a question, or on hold until the owner continues it), "done", "stopped".
+ */
 export function launchedLook(status: BotLaunchedThread['status']): { tone: LaunchedTone; label: string } {
-  if (status === 'needs_input') return { tone: 'waiting', label: 'waiting on you' }
+  if (status === 'needs_input' || status === 'on_hold') return { tone: 'waiting', label: 'waiting on you' }
   if (status === 'queued') return { tone: 'working', label: 'queued' }
   if (status === 'paused') return { tone: 'working', label: 'held' }
   if (status === 'subagents') return { tone: 'working', label: 'waiting on subagents' }
@@ -218,12 +323,12 @@ export function launchedLook(status: BotLaunchedThread['status']): { tone: Launc
 }
 
 /**
- * The threads the bot started, split for its list: those still going (working first, then waiting on the owner), and
- * the rest under "Done" (idle, then ended, the most recently updated first), in the summary's order (`compareLaunched`).
+ * The threads the bot started, split for its list: those still going (working first, then waiting on the owner, on hold
+ * too), and the rest under "Done" (idle, then ended, the most recently updated first), in the summary's order (`compareLaunched`).
  */
 export function launchedGroups(threads: readonly BotLaunchedThread[]): { going: BotLaunchedThread[]; ended: BotLaunchedThread[] } {
   const ordered = [...threads].sort(compareLaunched)
-  return { going: ordered.filter(launchedActive), ended: ordered.filter((thread) => !launchedActive(thread)) }
+  return { going: ordered.filter(launchedGoing), ended: ordered.filter((thread) => !launchedGoing(thread)) }
 }
 
 /** What the sticker on the header's face shows. */

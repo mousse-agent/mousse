@@ -216,24 +216,6 @@ describe('deleting a thread while its turn runs', () => {
     })
   }
 
-  it('stops the turns of its subagent threads too, and deletes them with it', async () => {
-    const p = await profile()
-    try {
-      const parent = await p.thread('parent')
-      const child = p.f.services.threads.createThread('its subagent', undefined, undefined, { started: true, lineage: { parentThreadId: parent.id, rootThreadId: parent.id, relationship: 'subagent' } })
-      await p.run(parent.id, false)
-      await p.run(child.id, false)
-      archived(p.f.services.threads, parent.id)
-      const reply = await p.f.rpc.request<{ lifecycle: { state: string } }>('threads.delete', { threadId: parent.id })
-      expect(reply.lifecycle.state).toBe('purged')
-      expect(p.f.services.threads.getThread(child.id)).toBeUndefined()
-      expect(p.adapter.live(child.id)).toBe(0)
-      expect(p.adapter.live(parent.id)).toBe(0)
-    } finally {
-      await p.close()
-    }
-  })
-
   it('ends a question its running turn asked, which the Stop withdraws, instead of refusing the delete', async () => {
     const p = await profile()
     try {

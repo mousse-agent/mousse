@@ -82,8 +82,7 @@ describe('a tombstone across a downgrade', () => {
     // This build starts on A again.
     const next = start(homeA, credentials)
     const startTurn = vi.spyOn(PiStubAdapter.prototype, 'startTurn')
-    // (The agents are seeded on a profile's first start; no driver serves them in this test.)
-    expect(Object.keys(next.instances.list())).toEqual(['antigravity', 'claude', 'codex'])
+    expect(Object.keys(next.instances.list())).not.toContain('pi:openrouter')
     expect(next.instances.get('pi:openrouter')).toBeUndefined()
     expect((await next.harness.instances.snapshots(device)).map((snapshot) => snapshot.instanceId)).toEqual([])
     expect((await next.harness.llmProviders(device)).map((option) => option.instanceId)).toEqual([])

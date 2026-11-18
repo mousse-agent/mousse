@@ -82,12 +82,6 @@ export interface RunOutcome {
    */
   sentByAgent?: true
   agentHops?: number
-  /**
-   * A person's steer that missed its turn and runs as a `steer-followup` turn of its own. The source is shared
-   * with agents' leftover steers and carried subagent results, so this marks the person's: its `turn.start`
-   * takes a free turn slot ahead of background turns, as a message from the window does.
-   */
-  sentByPerson?: true
   /** SPEC §16.4: the interrupted run this send continues ("Continue" after a restart). */
   continuationOf?: string
   /** Set while the run is `paused`, and kept after the pause ended. */
@@ -242,10 +236,10 @@ export interface EffectKindSpec {
 export const DEFAULT_EFFECT_MAX_ATTEMPTS = 5
 
 /**
- * Which worker fibres may claim an effect kind (SPEC §12.3): `turn` fibres run `turn.start` (one
- * per live turn, so their count caps a profile's concurrent turns), `control` fibres run the
- * interrupts, steers and answers that must reach a live turn, and `replaySafe` fibres run the
- * replay-safe kinds. A long turn can therefore never starve a Stop.
+ * Which part of the worker may claim an effect kind (SPEC §12.3): the turn claimer runs `turn.start`
+ * (every due turn at once, no limit), `control` fibres run the interrupts, steers and answers that
+ * must reach a live turn, and `replaySafe` fibres run the replay-safe kinds. A turn can therefore
+ * never hold up a Stop.
  */
 export type EffectLaneClass = 'turn' | 'control' | 'replaySafe'
 
@@ -478,8 +472,52 @@ export interface ChildQuestionPayload {
   delegationId?: string
 }
 
+/**
+ * Payload of a `reconcile_notice` row that tells a thread a subagent below it was refused a capability it lacks
+ * (docs/plans/tool-api.md §2.4): its parent when the parent holds it (`to: 'parent'`), else the root of its tree, which
+ * is told what would give it (`fix`). Written once per capability of the subagent's work.
+ */
+export interface ChildLacksPayload {
+  kind: 'child_lacks'
+  childThreadId: string
+  childRunId: string
+  tool: string
+  lacks: string
+  fix?: string
+  to: 'parent' | 'root'
+  delegationId?: string
+}
+
 export function isChildQuestionRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
   return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'child_question'
+}
+
+/**
+ * Payload of a `reconcile_notice` row that carries another agent's note (docs/plans/tool-api.md §2.2): information that
+ * grants nothing, labelled with who sent it and what it may do. It is delivered as any notice is: steered into a native
+ * run, handed over with a Mousse tool's result on a runtime that restarts its reply, or with the thread's next turn.
+ */
+export interface AgentNotePayload {
+  kind: 'agent_note'
+  senderThreadId: string
+  senderRunId: string
+  senderTitle: string | null
+  /** What the sender may do, for the label: a read-only subagent, a Plan ceiling, or an agent that may change files. */
+  senderAccess: 'read_only' | 'plan' | 'agent'
+  /** Who the sender is to the receiver; `bot` is the owner's personal bot that started the receiving thread. */
+  from: 'parent' | 'ancestor' | 'subagent' | 'sibling' | 'bot'
+  text: string
+  /** `needed` starts a notice turn on an idle thread; `none` waits for the thread's next turn. */
+  attention: 'needed' | 'none'
+}
+
+export function isAgentNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'agent_note'
+}
+
+/** A note sent with `attention: none`: it never starts a turn of its own. */
+export function isQuietNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return isAgentNoteRow(row) && (row.payload as AgentNotePayload).attention === 'none'
 }
 
 /** Payload of a `turn.start` effect that wakes a thread for its pending inbox rows (rule 4). */

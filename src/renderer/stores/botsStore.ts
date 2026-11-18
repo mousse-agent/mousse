@@ -1,9 +1,11 @@
+import { botActionRefusal } from '../../shared/bots/personal/actionRefusal'
 import { useEffect } from 'react'
 import { create } from 'zustand'
 import type { BotChatMessage, BotChatQuote, BotChip, BotDetail, BotSummary } from '../../shared/bots/personal/chat'
 import type { BotLook } from '../../shared/bots/personal/look'
 import type { BotMemoryEntry } from '../../shared/bots/personal/memory'
 import type { BotModelPick, BotModelSlots } from '../../shared/bots/personal/definition'
+import type { NewBotAccess } from '../../shared/bots/personal/deviceAccess'
 import { attachmentTooLargeText } from '../../shared/bots/personal/attachments'
 import { MAX_BOT_CHAT_ATTACHMENT_BYTES, MAX_BOT_CHAT_ATTACHMENTS, type BotChatAttachment, type BotShownRows, type BotsPersonalV2Result } from '../../shared/bots/personal/methods'
 import type { BotFaceState } from '../components/bots/face/BotFace'
@@ -11,6 +13,7 @@ import type { AttachedFile } from '../components/ChatComposer'
 import { attachmentPath, createPersonalBotsClient, errorText, personalBotsEvents, type PersonalBotsClient } from '../services/personalBotsClient'
 import { keepEqualById } from '../lib/keepEqual'
 import { expandComposerQuotes, insertQuoteToken, registerQuote } from '../lib/composerQuotes'
+import { clearBotLiveReplies, noteBots, noteBotStopAsked, noteThreadMessage, setBotLiveReplySources } from './botLiveReplies'
 
 /**
  * The owner's bots in the Chats tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
@@ -28,6 +31,8 @@ function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T
   delete next[key]
   return next
 }
+
+export interface BotActionRefusal { reason: string; text: string }
 
 export const BOT_CHAT_PAGE = 50
 /** How long the face plays "done" after a working bot goes idle with a good outcome. */
@@ -68,6 +73,8 @@ export interface NewBotDraft {
   slots: BotShownRows | null
   /** The Images row (#1088): a model to make pictures with, or null (none, the default). */
   image: BotModelPick | null
+  /** The Devices row: every device (the default) or this computer alone; sent only to a service that takes it. */
+  access: NewBotAccess['mode']
   /** The step New bot shows, so closing and reopening returns to it. */
   step: NewBotStep
   /** The owner typed or picked something: a click beside the dialog no longer closes it. */
@@ -75,7 +82,7 @@ export interface NewBotDraft {
 }
 /** New bot's steps: the look, what it does (name and sentence), and where it runs. */
 export type NewBotStep = 'look' | 'about' | 'runsOn'
-const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, image: null, step: 'look', touched: false }
+const EMPTY_NEW_BOT: NewBotDraft = { look: null, name: '', description: '', model: null, slots: null, image: null, access: 'all', step: 'look', touched: false }
 
 /**
  * The step that can fix a refused create: a model no longer offered is Runs on's, a name or sentence the service
@@ -113,6 +120,7 @@ interface BotsState {
   replyingTo: Record<string, BotChatQuote>
   /** The service has no `bots.chat.react` (an older one): messages show no reaction bar. */
   reactionsMissing: boolean
+  snoozeMissing: boolean
   /** The service has no `bots.questions.answer`: questions show no buttons, and the owner answers with Reply. */
   questionsMissing: boolean
   error: string | null
@@ -155,10 +163,12 @@ interface BotsState {
   /** Stops one piece of work (the line above the composer); the chat goes on. */
   stopWork(botId: string, workId: string): Promise<void>
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<void>
+  snoozeReminder(botId: string, messageId: string, choice: import('../../shared/bots/personal/chat').BotSnoozeChoice): Promise<boolean>
   /**
    * The owner taps one of a question's answers: it is their reply to the question, which the bot answers. False when it
    * was not sent (the error says why, or the service has no buttons for questions).
    */
+  answerAction(botId: string, actionId: string, digest: string, answer: 'send' | 'not_now'): Promise<BotActionRefusal | null>
   answerQuestion(botId: string, questionId: string, choice: string): Promise<boolean>
   /**
    * The owner's reaction on one of the bot's messages: shown at once, and put back as it was when the service refuses
@@ -178,7 +188,7 @@ interface BotsState {
   /** Moves New bot to a step; moving alone is not putting anything in. */
   setNewBotStep(step: NewBotStep): void
   /** One create at a time: a second call while one is on its way gets the same answer. */
-  create(input: { look: BotLook; name?: string; description: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }): Promise<BotSummary | null>
+  create(input: { look: BotLook; name?: string; description: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }): Promise<BotSummary | null>
   update(botId: string, change: { name?: string; look?: BotLook }): Promise<boolean>
   /**
    * The owner edits the bot's prompt in About (its description; null: back to the default). Its next turn works under
@@ -187,6 +197,8 @@ interface BotsState {
   setPrompt(botId: string, description: string | null): Promise<string | null>
   pause(botId: string): Promise<void>
   resume(botId: string): Promise<void>
+  /** Make private: only this computer reaches the bot from now on (About's Devices, in one click). */
+  makePrivate(botId: string): Promise<void>
   remove(botId: string): Promise<boolean>
   loadDetail(botId: string): Promise<void>
   setPermission(botId: string, permissionId: string, enabled: boolean): Promise<void>
@@ -322,7 +334,11 @@ export const useBotsStore = create<BotsState>((set, get) => {
   const subscribe = () => {
     for (const stop of unsubscribe) stop()
     const events = personalBotsEvents()
+    // The bot's home thread streams its chat turn's reply: shown as it is written (botLiveReplies.ts).
+    const orchestrator = (window.mousse as Partial<typeof window.mousse> | undefined)?.orchestrator
     unsubscribe = [
+      orchestrator?.onThreadMessage?.(({ threadId, message }) => noteThreadMessage(threadId, message, true)),
+      orchestrator?.onThreadMessageUpdated?.(({ threadId, message }) => noteThreadMessage(threadId, message, false)),
       events.onChanged?.((event) => {
         void get().refresh()
         // About, and a chat card that shows one of the bot's automations (`watchBotDetail`), read its runs again.
@@ -346,7 +362,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
   return {
     profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
-    reactionsMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
+    reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {},
 
     activate(profileId) {
@@ -362,10 +378,12 @@ export const useBotsStore = create<BotsState>((set, get) => {
       readSeq.clear()
       removed.clear()
       reactions.clear()
+      clearBotLiveReplies()
       set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
-        reactionsMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
+        reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {} })
       subscribe()
+      void get().refresh()
     },
 
     async refresh() {
@@ -561,6 +579,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
     async stop(botId) {
       const owner = epoch
+      noteBotStopAsked(botId)
       try { await bots().stop(botId); if (owner === epoch) void get().refresh() } catch (cause) { fail(owner, cause, botId) }
     },
 
@@ -580,6 +599,40 @@ export const useBotsStore = create<BotsState>((set, get) => {
       } catch (cause) { fail(owner, cause, botId) }
     },
 
+    async snoozeReminder(botId, messageId, choice) {
+      const owner = epoch
+      set({ error: null })
+      try {
+        const message = await bots().snoozeReminder(botId, messageId, choice)
+        if (owner !== epoch) return false
+        putMessages(botId, [message])
+        void get().refresh()
+        return true
+      } catch (cause) {
+        if (owner !== epoch) return false
+        if (missingMethod(cause)) set({ snoozeMissing: true })
+        else fail(owner, cause, botId)
+        void get().loadChat(botId)
+        return false
+      }
+    },
+    async answerAction(botId, actionId, digest, answer) {
+      const card = get().chats[botId]?.messages.find(message => message.action?.actionId === actionId)?.action
+      const names = { botName: get().bots.find(bot => bot.id === botId)?.name, serverName: card?.serverName }
+      const owner = epoch
+      try {
+        await bots().answerAction(actionId, digest, answer)
+        if (owner === epoch) { await get().loadChat(botId); void get().refresh() }
+        return null
+      } catch (cause) {
+        if (owner !== epoch) throw cause
+        await get().loadChat(botId)
+        const refusal = botActionRefusal(cause, names)
+        // A gone row unmounts its card, so its refusal belongs in the chat's existing notice.
+        if (owner === epoch && !get().chats[botId]?.messages.some(message => message.action?.actionId === actionId)) fail(owner, refusal ? { message: refusal.text } : cause, botId)
+        return refusal ?? { reason: String((cause as { code?: unknown } | null)?.code ?? 'request_failed'), text: errorText(cause) }
+      }
+    },
     async answerQuestion(botId, questionId, choice) {
       const owner = epoch
       set({ error: null })
@@ -786,6 +839,16 @@ export const useBotsStore = create<BotsState>((set, get) => {
       try { const bot = await bots().resume(botId); if (owner === epoch) putBot(bot) } catch (cause) { fail(owner, cause, botId) }
     },
 
+    async makePrivate(botId) {
+      const owner = epoch
+      try {
+        await bots().setDevices(botId, { mode: 'this_computer' })
+        if (owner !== epoch) return
+        // The list's lock shows at once; the service's `bots.changed` reads it again too.
+        set((state) => ({ bots: state.bots.map((bot) => (bot.id === botId ? { ...bot, reach: 'this_computer' } : bot)) }))
+      } catch (cause) { fail(owner, cause, botId) }
+    },
+
     async remove(botId) {
       const owner = epoch
       set({ busy: true, error: null })
@@ -845,6 +908,10 @@ export const useBotsStore = create<BotsState>((set, get) => {
     }
   }
 })
+
+// A live reply follows its bot's chat turn and its chat's messages: it goes once its message is posted.
+setBotLiveReplySources({ bots: () => useBotsStore.getState().bots, messages: (botId) => useBotsStore.getState().chats[botId]?.messages ?? [] })
+useBotsStore.subscribe((state, previous) => { if (state.bots !== previous.bots || state.chats !== previous.chats) noteBots() })
 
 /** Failures whose words come from the service and are meant for the owner as they are. */
 const PLAIN_CREATE_FAILURES = new Set(['invalid_params', 'bot_invalid', 'bots_unavailable', 'model_unavailable'])

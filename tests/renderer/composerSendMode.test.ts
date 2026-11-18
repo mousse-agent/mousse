@@ -5,7 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChatComposer, type ChatComposerProps } from '../../src/renderer/components/ChatComposer'
 import { attachCommandShortcuts } from '../../src/renderer/commands/useCommandShortcuts'
-import { forgetSendModes, setThreadSendMode, threadSendMode } from '../../src/renderer/lib/sendMode'
+import { forgetSendModes, profileSendMode, setProfileSendMode } from '../../src/renderer/lib/sendMode'
 import { forgetSteerKey, steerKeyRecently, steersOnEnter, type SendMode } from '../../src/renderer/lib/steerKey'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { getCommand, resolveBinding } from '../../src/shared/commands'
@@ -122,7 +122,7 @@ describe('send mode keys', () => {
     expect(enter({ ctrlKey: true, shiftKey: true }, 'queue')).toBe(false)
   })
 
-  it('queues on Enter and steers on Ctrl+Enter in a thread set to Queue', () => {
+  it('queues on Enter and steers on Ctrl+Enter in Queue mode', () => {
     const { onSend } = render()
     press()
     expect(onSend.mock.lastCall).toEqual(queue)
@@ -131,8 +131,8 @@ describe('send mode keys', () => {
     expect(onSend).toHaveBeenCalledTimes(2)
   })
 
-  it('steers on Enter and queues on Ctrl+Enter (Cmd+Enter on a Mac) in a thread set to Steer', () => {
-    setThreadSendMode(PROFILE, 'thread-a', 'steer')
+  it('steers on Enter and queues on Ctrl+Enter (Cmd+Enter on a Mac) in Steer mode', () => {
+    setProfileSendMode(PROFILE, 'steer')
     let { onSend } = render()
     expect(box().placeholder).toBe('Steer the reply · Ctrl+Enter queues')
     press()
@@ -150,7 +150,7 @@ describe('send mode keys', () => {
   })
 
   it('the send button does what Enter does', () => {
-    setThreadSendMode(PROFILE, 'thread-a', 'steer')
+    setProfileSendMode(PROFILE, 'steer')
     const { onSend } = render()
     expect(sendButton().getAttribute('aria-label')).toBe('Steer message')
     expect(sendButton().title).toBe('Steer · Enter — Queue · Ctrl+Enter')
@@ -159,7 +159,7 @@ describe('send mode keys', () => {
   })
 
   it('keeps the approval guard after the chord queues in Steer mode, and after Enter steers', () => {
-    setThreadSendMode(PROFILE, 'thread-a', 'steer')
+    setProfileSendMode(PROFILE, 'steer')
     render()
     press({ ctrlKey: true })
     expect(steerKeyRecently()).toBe(true)
@@ -174,7 +174,7 @@ describe('send mode keys', () => {
     press({ ctrlKey: true })
     expect(onSteerQueued).toHaveBeenCalledTimes(1)
     expect(steerKeyRecently()).toBe(true)
-    setThreadSendMode(PROFILE, 'thread-a', 'steer')
+    setProfileSendMode(PROFILE, 'steer')
     rerender({ input: '', onSteerQueued })
     press({ ctrlKey: true })
     expect(onSteerQueued).toHaveBeenCalledTimes(2)
@@ -203,7 +203,7 @@ describe('send mode keys', () => {
   })
 
   it('sends every Enter as a plain send with no run going, whatever the mode', () => {
-    setThreadSendMode(PROFILE, 'thread-a', 'steer')
+    setProfileSendMode(PROFILE, 'steer')
     const { onSend } = render({ loading: false })
     press()
     press({ ctrlKey: true })
@@ -245,7 +245,7 @@ describe('send mode button and shortcut', () => {
     const event = press({ ctrlKey: true, shiftKey: true })
     expect(event.defaultPrevented).toBe(true)
     expect(modeButton()!.getAttribute('aria-label')).toBe('Send mode: Steer')
-    expect(threadSendMode(PROFILE, 'thread-a')).toBe('steer')
+    expect(profileSendMode(PROFILE)).toBe('steer')
     press({ ctrlKey: true, shiftKey: true })
     expect(modeButton()!.getAttribute('aria-label')).toBe('Send mode: Queue')
     expect(onSend).not.toHaveBeenCalled()
@@ -255,11 +255,11 @@ describe('send mode button and shortcut', () => {
   it('leaves Ctrl+Shift+Enter alone with no run going', () => {
     render({ loading: false })
     expect(press({ ctrlKey: true, shiftKey: true }).defaultPrevented).toBe(false)
-    expect(threadSendMode(PROFILE, 'thread-a')).toBe('queue')
+    expect(profileSendMode(PROFILE)).toBe('queue')
   })
 
   it('has no button when idle, in a bot chat, or while a card takes the message', () => {
-    setThreadSendMode(PROFILE, 'thread-a', 'steer')
+    setProfileSendMode(PROFILE, 'steer')
     render({ loading: false })
     expect(modeButton()).toBeNull()
     expect(box().placeholder).toBe('Ask anything · @ files · / commands')
@@ -279,29 +279,31 @@ describe('send mode button and shortcut', () => {
 })
 
 describe('send mode storage', () => {
-  it('belongs to each thread: new threads queue, and the mode outlives a restart', () => {
+  it('the last choice holds in every thread of the profile and outlives a restart', () => {
     render()
-    act(() => modeButton()!.click())
-    expect(threadSendMode(PROFILE, 'thread-a')).toBe('steer')
-    rerender({ thread: 'thread-b' })
     expect(modeButton()!.getAttribute('aria-label')).toBe('Send mode: Queue')
-    // A restart reads the mode back from storage.
-    forgetSendModes()
-    rerender({ thread: 'thread-a' })
-    expect(modeButton()!.getAttribute('aria-label')).toBe('Send mode: Steer')
-    expect(threadSendMode(PROFILE, 'thread-b')).toBe('queue')
-    // Another profile on this computer has its own.
-    expect(threadSendMode('profile-2', 'thread-a')).toBe('queue')
     act(() => modeButton()!.click())
+    // Switching threads keeps the choice, including a thread never opened before.
+    rerender({ thread: 'thread-b' })
+    expect(modeButton()!.getAttribute('aria-label')).toBe('Send mode: Steer')
+    // The last choice wins, wherever it was made.
+    act(() => modeButton()!.click())
+    rerender({ thread: 'thread-a' })
+    expect(modeButton()!.getAttribute('aria-label')).toBe('Send mode: Queue')
+    act(() => modeButton()!.click())
+    // A restart reads it back from storage.
     forgetSendModes()
-    expect(threadSendMode(PROFILE, 'thread-a')).toBe('queue')
+    rerender({ thread: 'thread-c' })
+    expect(modeButton()!.getAttribute('aria-label')).toBe('Send mode: Steer')
+    // Another profile on this computer has its own.
+    expect(profileSendMode('profile-2')).toBe('queue')
   })
 
-  it('reads unreadable storage as Queue', () => {
-    localStorage.setItem(`mousse-profile-${PROFILE}-steerThreads.v1`, '{not json')
+  it('reads anything but Steer in storage as Queue', () => {
+    localStorage.setItem(`mousse-profile-${PROFILE}-sendMode.v1`, '{not json')
     forgetSendModes()
-    expect(threadSendMode(PROFILE, 'thread-a')).toBe('queue')
-    setThreadSendMode(PROFILE, 'thread-a', 'steer')
-    expect(JSON.parse(localStorage.getItem(`mousse-profile-${PROFILE}-steerThreads.v1`)!)).toEqual(['thread-a'])
+    expect(profileSendMode(PROFILE)).toBe('queue')
+    setProfileSendMode(PROFILE, 'steer')
+    expect(localStorage.getItem(`mousse-profile-${PROFILE}-sendMode.v1`)).toBe('steer')
   })
 })

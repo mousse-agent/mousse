@@ -21,7 +21,8 @@ const OWNERS: Record<string, string[]> = {
   composer: ['src/renderer/components/ChatComposer.tsx'],
   'project-icon': ['src/renderer/components/ProjectIcon.tsx'],
   'side-card': ['src/renderer/components/sideCard/ThreadSideCard.tsx'],
-  settings: ['src/renderer/components/SettingsPage.tsx']
+  settings: ['src/renderer/components/SettingsPage.tsx'],
+  wallpaper: ['src/renderer/components/ChatWallpaper.tsx']
 }
 
 const partOf = (selector: string): string => /^\[data-mousse="([a-z-]+)"\]$/.exec(selector)?.[1] ?? selector
@@ -94,6 +95,7 @@ const PERMISSION_MODE_REVIEWED: Record<string, string> = {
   'src/renderer/components/ComposerEffortPicker.tsx': 'hosts the menu; the choices are ComposerPermissionPicker',
   'src/renderer/components/OrchestratorChat.tsx': 'the handler, no control',
   'src/renderer/components/settings/GeneralSettings.tsx': 'Settings → General, paused with the page',
+  'src/renderer/components/NetDevicesSection.tsx': 'Settings → Devices, paused with the page; names a device’s highest mode, no control',
   'src/renderer/components/automations/AutomationDetail.tsx': 'only on the Automations page, paused with it',
   'src/renderer/components/automations/inbox/EditDetailsPane.tsx': 'only on the Automations page, paused with it'
 }
@@ -107,7 +109,8 @@ describe('decisions pause the theme', () => {
   })
 
   it('every file that uses permission modes is marked or reviewed', () => {
-    const unreviewed = sourceFiles('src/renderer').filter((file) => file.endsWith('.tsx')).filter((file) => {
+    // Forward slashes on every system, as the reviewed list is written.
+    const unreviewed = sourceFiles('src/renderer').map((file) => file.split('\\').join('/')).filter((file) => file.endsWith('.tsx')).filter((file) => {
       const text = readFileSync(file, 'utf8')
       return /shared\/permissionMode'/.test(text) && !text.includes('data-mousse-decision') && !(file in PERMISSION_MODE_REVIEWED)
     })

@@ -8,10 +8,11 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_NOT_NOW_TEXT, BOT_ASK_NOT_YET_TEXT, BOT_ASK_REFUSED_TEXT, BOT_ASK_UNKNOWN_TEXT, BOT_MCP_UNAVAILABLE_TEXT, BOT_OFFLINE_WATCH_MS, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
+import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_NOT_NOW_TEXT, BOT_ASK_NOT_YET_TEXT, BOT_ASK_REFUSED_TEXT, BOT_ASK_UNKNOWN_TEXT, BOT_MCP_UNAVAILABLE_TEXT, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
+import { askAnsweredLine } from '../../src/renderer/components/bots/botChatShape'
 
 let f: BotFixture
 let botId: string
@@ -23,8 +24,12 @@ const command = (text: string): NormalisedCall => ({ kind: 'builtin', tool: 'she
 /** A call of a thread tool: a gate refusal asks for "use your threads", which the chat uses itself. */
 const app = (tool: string): NormalisedCall => ({ kind: 'app', tool, args: {} })
 const shellFingerprint = askFingerprintOf({ tool: 'shell' })
-/** The newest dispatch's deadline fires (the newest timer that is not the watch every live dispatch has). */
-const deadline = () => f.timers.filter((timer) => timer.ms !== BOT_OFFLINE_WATCH_MS).at(-1)!.fn()
+/** The bot may make `maxTurns` model requests per activation. */
+const limitTurns = (maxTurns: number) => f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, budget: { ...manifest.budget, maxTurns } }))
+/** A turn uses up its 3 model requests: the 4th is over the limit. */
+const exhaust = (prepared: { authority: { counters: { charge: (kind: 'request') => unknown } } }) => {
+  for (let i = 0; i < 4; i += 1) prepared.authority.counters.charge('request')
+}
 
 beforeEach(async () => {
   f = botFixture()
@@ -64,7 +69,7 @@ describe('asks in a run', () => {
     const cards = chatOf(f, botId).filter((message) => message.ask)
     expect(cards).toMatchObject([{ author: 'bot', kind: 'notice', text: 'Penny wants to run commands.', ask: { askId: asks[0]!.id, status: 'open', kind: 'permission' } }])
     expect(chatOf(f, botId).filter((message) => message.kind === 'run_report')).toHaveLength(3)
-    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'needs_you', stateText: 'Wants to run commands' })
+    expect(f.bots.service.get(botId).summary).toMatchObject({ state: 'needs_you', stateText: 'Wants to run commands', needsOwner: true })
   })
 
   it('the bot\'s own escalate in a run asks once and carries on', async () => {
@@ -86,8 +91,10 @@ describe('asks in a run', () => {
     first.prepared.authority.check(command('ls'))
     await finish(f, first.payload, 'completed', { text: 'Skipped.' })
     const askId = f.store.openAsks(botId)[0]!.id
+    expect(f.bots.service.get(botId).summary.needsOwner).toBe(true)
     const { message } = await f.bots.service.answer(botId, askId, 'not_now')
     expect(message.ask).toMatchObject({ askId, status: 'not_now' })
+    expect(f.bots.service.get(botId).summary.needsOwner).toBeUndefined()
     f.clock.now += DAY - 60_000
     const second = await run('r2')
     // No card: the bot is told the owner said not now, never that it asked.
@@ -231,14 +238,15 @@ describe('asks across lanes and timing (review)', () => {
   })
 
   it('a limit has one open ask whichever way it was raised', async () => {
-    const { payload } = await run('limit-run')
-    // A run that reached its time: it ends, with one ask for more.
-    deadline()
+    limitTurns(3)
+    const { payload, prepared } = await run('limit-run')
+    // A run that used up its steps: it ends, with one ask for more.
+    exhaust(prepared)
     await finish(f, payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
     expect(f.store.openAsks(botId).filter((ask) => ask.kind === 'budget')).toHaveLength(1)
     // The chat asking for the same limit takes that ask over rather than adding a second one.
-    const turn = await chat('work longer please', 'm-limit')
-    turn.prepared.authority.escalate!({ permission: { budget: { key: 'maxActiveMs', amount: 15 * 60_000 } }, reason: 'More time.' })
+    const turn = await chat('take more steps please', 'm-limit')
+    turn.prepared.authority.escalate!({ permission: { budget: { key: 'maxTurns', amount: 3 } }, reason: 'More steps.' })
     expect(f.store.openAsks(botId).filter((ask) => 'budget' in ask.permission)).toHaveLength(1)
   })
 
@@ -259,8 +267,9 @@ describe('asks across lanes and timing (review)', () => {
   })
 
   it('a message sent while the chat waits at a limit starts a chat of its own', async () => {
+    limitTurns(3)
     const turn = await chat('a long job', 'm-long')
-    deadline()
+    exhaust(turn.prepared)
     await finish(f, turn.payload, 'interrupted', { outcome: { interruptedBy: 'bot_wall' } })
     expect(f.store.activation(turn.activation.id)!.status).toBe('waiting_grant')
     await f.bots.service.chatSend({ botId, text: 'never mind, just say hi', clientRequestId: 'm-hi' })
@@ -315,17 +324,16 @@ describe('asks: caps, limits and grant moves (review round 2)', () => {
   })
 
   it('a limit ask shows its new total and at most doubles the limit', async () => {
-    const held = f.store.activeGrant(botId)!.manifest.budget.maxActiveMs
-    const { payload, prepared } = await chat('take all the time you need', 'm-huge')
-    prepared.authority.escalate!({ permission: { budget: { key: 'maxActiveMs', amount: 1_000 * held } }, reason: 'Lots of time.' })
+    const held = 20
+    limitTurns(held)
+    const { payload, prepared } = await chat('take all the steps you need', 'm-huge')
+    prepared.authority.escalate!({ permission: { budget: { key: 'maxTurns', amount: 1_000 * held } }, reason: 'Lots of steps.' })
     await finish(f, payload, 'completed', { text: 'May I?' })
     const ask = f.store.openAsks(botId)[0]!
-    expect(ask.permission).toEqual({ budget: { key: 'maxActiveMs', amount: held } })
-    // The starter hour, doubled.
-    expect(held).toBe(60 * 60_000)
-    expect(ask.title).toBe('work for up to 2 hours per run')
+    expect(ask.permission).toEqual({ budget: { key: 'maxTurns', amount: held } })
+    expect(ask.title).toBe('take up to 40 steps per run')
     await f.bots.service.answer(botId, ask.id, 'allow')
-    expect(f.store.activeGrant(botId)!.manifest.budget.maxActiveMs).toBe(2 * held)
+    expect(f.store.activeGrant(botId)!.manifest.budget.maxTurns).toBe(2 * held)
   })
 
   it('Allow during another activation\'s start moves its unstarted dispatch to the wider grant', async () => {
@@ -458,5 +466,22 @@ describe('a message sent while the chat waits on an ask', () => {
     const next = f.store.laneActivations(botId, 'chat', ['queued', 'running'])
     expect(next).toHaveLength(1)
     expect(next[0]!.trigger.input).toBe('skip that, just list what you can')
+  })
+})
+
+describe('a card for one of the bot\'s own tools', () => {
+  // A bot made before telling_set existed has none of it in its grant, so the owner's "notify me when it's all done"
+  // asks for it. The card and the line its answer leaves say what it does, never "use the telling set tool".
+  it('reads in plain words, says what the call would set, and Not now keeps them', async () => {
+    f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, appTools: manifest.appTools.filter((tool) => tool !== 'telling_set') }))
+    const { payload, prepared } = await chat('Notify me when all done.', 'm-tell')
+    const call: NormalisedCall = { kind: 'app', tool: 'telling_set', args: { tellMe: 'look', quietHours: { from: '22:00', to: '07:00' } } }
+    expect(prepared.authority.check(call)).toMatchObject({ ok: false, wall: { kind: 'escalated', permission: 'change when it tells you' } })
+    await finish(f, payload, 'interrupted', { text: 'I need your OK first.', outcome: { interruptedBy: 'bot_wall' } })
+    const reply = chatOf(f, botId).at(-1)!
+    expect(reply.ask).toMatchObject({ status: 'open', title: 'change when it tells you', note: 'It would set: tell you when something is worth a look, quiet hours 22:00 to 07:00.' })
+    expect(JSON.stringify(reply.ask)).not.toMatch(/telling/)
+    const { message } = await f.bots.service.answer(botId, reply.ask!.askId, 'not_now')
+    expect(askAnsweredLine('Penny', message.ask!)).toBe('You said not now to Penny: change when it tells you')
   })
 })

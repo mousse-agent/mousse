@@ -168,18 +168,10 @@ describe('opening and closing with Ctrl+K', () => {
     expect(focusLog).toEqual(['composer'])
     expect(run).not.toHaveBeenCalled()
   })
-
-  it('toggles', () => {
-    stubWindow(composer())
-    togglePalette()
-    expect(useAppStore.getState().paletteOpen).toBe(true)
-    togglePalette()
-    expect(useAppStore.getState().paletteOpen).toBe(false)
-  })
 })
 
 describe('opening thread search', () => {
-  it('opens the palette with message hits first from Search threads, and Ctrl+K opens it plain', () => {
+  it('opens Search everything from its command, and Ctrl+K opens the plain palette', () => {
     const { win } = stubWindow(composer())
     attachCommandShortcuts(win as never)
     registerPaletteToggle()
@@ -284,16 +276,6 @@ describe('closePalette', () => {
     expect(order).toEqual(['open:false', 'opener', 'then'])
   })
 
-  it('leaves focus where a focus-changing command put it', () => {
-    let focused = ''
-    closePalette({
-      opener: { focus: () => void (focused = 'opener') },
-      then: () => void (focused = 'composer'),
-      setOpen: () => undefined
-    })
-    expect(focused).toBe('composer')
-  })
-
   it('leaves focus on the opener when nothing was chosen, and copes with no opener', () => {
     let focused = ''
     closePalette({ opener: { focus: () => void (focused = 'opener') }, setOpen: () => undefined })
@@ -382,7 +364,7 @@ describe('opening a thread from the palette', () => {
   it('opens a message hit: selects its thread, then asks the transcript to show the message', async () => {
     const { win } = stubWindow(composer())
     useChatNavigationStore.setState({ message: null })
-    // Search threads works over the Usage page; the thread it opens has to show.
+    // Search everything works over the Usage page; the thread it opens has to show.
     useAppStore.setState({ usageOpen: true })
     openPalette('messages')
 

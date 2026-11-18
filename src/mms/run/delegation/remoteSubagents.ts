@@ -25,7 +25,7 @@ export interface RemoteSubagentRecord {
    * to the limit it set for this one (`RemoteSubagents.advanceStart`), so Full access is used only when both allow it.
    */
   permissionMode: PermissionMode
-  /** `plan` for a read-only task (`workspace: 'shared'`, or a plan ceiling): it plans and reads, never edits. */
+  /** `plan` for a read-only task (`readOnly`, or a plan ceiling): it plans and reads, never edits. */
   chatMode: 'agent' | 'plan'
   /** The far thread works in a worktree of its own (`workspace: 'isolated'`). */
   worktree: boolean
@@ -37,8 +37,13 @@ export interface RemoteSubagentRecord {
   remoteThreadId: string | null
   /** The far run's id; null until that computer accepted the send. */
   remoteRunId: string | null
-  /** When the task is stopped if the far run has not ended (`maxMinutes`); null for no limit. */
+  /**
+   * When this computer stops the task if the far run has not ended (`maxMinutes` of wall time); null for no limit, and
+   * cleared once that computer took the limit as running time (`limitMinutes`) and stops the run itself.
+   */
   deadlineAt: string | null
+  /** The minutes of running time the task may use (`maxMinutes`); null for no limit. */
+  limitMinutes: number | null
   state: RemoteSubagentState
   /** The far thread is waiting for an answer to a question or an approval. */
   waitingInput: boolean
@@ -64,6 +69,8 @@ export interface RemoteSubagentOverlay {
   ref?: string
   /** What the far run of the latest open task is doing, as a subagent's activity; undefined until read. */
   activity?: 'starting' | 'working' | 'paused' | 'needs_input'
+  /** A Stop of the subagent has not reached that computer yet; it is sent when that computer answers. */
+  stopRequested?: true
   /** Why the latest call there failed. */
   lastError?: string
 }
@@ -88,6 +95,7 @@ function fromRow(row: Row): RemoteSubagentRecord {
     remoteThreadId: str(row.remote_thread_id),
     remoteRunId: str(row.remote_run_id),
     deadlineAt: str(row.deadline_at),
+    limitMinutes: row.limit_minutes === null || row.limit_minutes === undefined ? null : int(row.limit_minutes),
     state: (STATES.has(state) ? state : 'done') as RemoteSubagentState,
     waitingInput: int(row.waiting_input) === 1,
     lastError: str(row.last_error),
@@ -100,12 +108,13 @@ function fromRow(row: Row): RemoteSubagentRecord {
 
 /** What a caller may change on a row; `undefined` keeps a field, `null` clears a nullable one. */
 export type RemoteSubagentPatch = Partial<
-  Pick<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'marked'>
+  Pick<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'deadlineAt' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'marked'>
 >
 
 const COLUMNS: Record<keyof RemoteSubagentPatch, string> = {
   remoteThreadId: 'remote_thread_id',
   remoteRunId: 'remote_run_id',
+  deadlineAt: 'deadline_at',
   state: 'state',
   waitingInput: 'waiting_input',
   lastError: 'last_error',
@@ -117,7 +126,8 @@ const COLUMNS: Record<keyof RemoteSubagentPatch, string> = {
 export class RemoteSubagentRecords {
   constructor(private readonly store: RunStore) {}
 
-  create(input: Omit<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'marked' | 'createdAt' | 'updatedAt'> & {
+  create(input: Omit<RemoteSubagentRecord, 'remoteThreadId' | 'remoteRunId' | 'limitMinutes' | 'state' | 'waitingInput' | 'lastError' | 'lastSeenAt' | 'marked' | 'createdAt' | 'updatedAt'> & {
+    limitMinutes?: number | null
     /** A follow-up on a subagent whose far thread already exists. */
     remoteThreadId?: string | null
   }): RemoteSubagentRecord {
@@ -125,8 +135,8 @@ export class RemoteSubagentRecords {
     this.store.db
       .statement(
         `INSERT INTO remote_subagents(delegation_id, child_thread_id, child_run_id, node, prompt, permission_mode,
-           chat_mode, worktree, project_id, instance_id, model, remote_thread_id, deadline_at, state, created_at, updated_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?)`
+           chat_mode, worktree, project_id, instance_id, model, remote_thread_id, deadline_at, limit_minutes, state, created_at, updated_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?)`
       )
       .run(
         input.delegationId,
@@ -142,6 +152,7 @@ export class RemoteSubagentRecords {
         input.model,
         input.remoteThreadId ?? null,
         input.deadlineAt,
+        input.limitMinutes ?? null,
         now,
         now
       )

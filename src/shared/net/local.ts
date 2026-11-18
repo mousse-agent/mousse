@@ -57,12 +57,23 @@ export const NET_LOCAL_METHODS = [
   'net.unlock',
   'bridge.invite',
   'bridge.join',
+  'net.join.retry',
+  'net.join.abandon',
+  'net.startOver.check',
+  'net.startOver',
+  'net.link.make',
+  'net.link.check',
+  'net.link.paste',
   'bridge.nodes',
   'bridge.revoke',
   'bridge.rename',
   'bridge.setCaps',
   'bridge.setKind',
   'bridge.policy',
+  'bridge.connect',
+  'bridge.disconnect',
+  'bridge.allow',
+  'bridge.access.there',
   'bridge.workOnThreads',
   'bridge.shareBots',
   'bridge.editorServer',
@@ -111,6 +122,57 @@ export interface BridgeInviteInput {
   caps?: NodeCapability[]
 }
 /**
+ * Whether another device of this user's list is connected here (`connection` on each `bridge.nodes` row, set with
+ * `bridge.connect` and `bridge.disconnect`). `none`: never connected here; `disconnected`: someone disconnected it;
+ * `held`: it came in by a connect link (made here, or pasted here to join it) and waits for `bridge.allow`. Until
+ * connected this computer serves it nothing but the keeper's control traffic, and two members not connected on both
+ * ends open no session.
+ */
+export type BridgeNodeConnection = 'connected' | 'disconnected' | 'held' | 'none'
+/** `net.link.make`: a connect link made on this computer. */
+export interface NetLinkMade {
+  /** The copyable text, `ml1_…`. */
+  link: string
+  /** It adds a computer (this computer keeps the list); otherwise it only connects devices already in the list. */
+  add: boolean
+  /** This computer had no network identity: making the link created it, and it now keeps the others connected. */
+  created: boolean
+  expiresAt: number
+  /** Some address in the link is not this computer's loopback; without one, only another copy here can use it. */
+  reachable: boolean
+  /** For a link that only connects: the name of the computer that adds computers. */
+  keeper?: string
+}
+/**
+ * `net.link.check`: what pasting a link here would do, read from the link alone with no network call. `join`: this
+ * computer joins the maker's list. `connect`: both are in one list; nothing is enrolled. `start_over`: this computer
+ * must start over first (it is alone), offered once a route answers. `refused`: `reason` says why.
+ */
+export interface NetLinkCheck {
+  row: 'join' | 'connect' | 'start_over' | 'refused'
+  add: boolean
+  reason?:
+    | 'connect_only'
+    | 'own_link'
+    | 'other_list'
+    | 'join_unfinished'
+    | 'space_host'
+    | 'mousse_id'
+    | 'live_devices'
+  /** For `start_over`, and for a refusal that comes from it. */
+  startOver?: NetStartOverCheck
+}
+/** `net.link.paste`: what the link did. The device reached is held here until Allow when this computer joined. */
+export interface NetLinkPasted {
+  row: 'join' | 'connect'
+  /** The computer that made the link. */
+  node: NodeId
+  name?: string
+  connection: BridgeNodeConnection
+  /** For a join: whether the first session opened in time. */
+  connected?: boolean
+}
+/**
  * What this computer lets another device do here (`bridge.policy`, and `policy` on each
  * `bridge.nodes` row). It is kept on this computer only, so every computer sets its own.
  */
@@ -136,7 +198,45 @@ export interface BridgeNodePolicy {
    * started here (the default), or all. Absent from a service from before the setting.
    */
   agentReach?: AgentReach
+  /**
+   * The device may work on threads here ("Work on threads from this device"): start, send, steer, stop, change
+   * settings, files and Git, and make or change bots. Off, it reads threads and chats with bots only. On until the
+   * owner turns it off. Absent from a service from before the switch.
+   */
+  work?: boolean
 }
+
+/**
+ * `bridge.access.mine`, a call one computer makes on another of its user's: what the computer that answers lets the
+ * caller do there now. Each field is the result of the same checks a real call from the caller meets there (connected
+ * there, the block, the grant, "Let my other computers work here", the per-device switches, Share bots). A caller that
+ * is not connected there is refused (`forbidden`, reason `not_connected`).
+ */
+export interface BridgeAccessMine {
+  v: 1
+  /** Every Bridge call from the caller is refused there. */
+  blocked: boolean
+  /** Reads threads there. */
+  threads: boolean
+  /** Starts and works on threads there, up to `maxPermissionMode`. */
+  work: boolean
+  terminal: boolean
+  editor: boolean
+  /** Reaches that computer's bots (each bot's own Devices choice still applies). */
+  bots: boolean
+  maxPermissionMode: PermissionMode
+  agentReach: AgentReach
+}
+/**
+ * `bridge.access.there { node }`: `bridge.access.mine` asked of `node`. `not_connected`: that computer has not connected
+ * this one. `unknown`: it could not answer now (`offline`), or runs a build without the call (`older`).
+ */
+export type BridgeAccessThere =
+  | { state: 'known'; access: BridgeAccessMine }
+  | { state: 'not_connected' }
+  /** It answered, and refused this computer the question: its grant there covers nothing. */
+  | { state: 'refused' }
+  | { state: 'unknown'; reason: 'offline' | 'older' }
 
 /** What a device's agents may change on this computer (`net_node_policy.agent_reach`). */
 export type AgentReach = 'none' | 'launched' | 'all'
@@ -169,6 +269,8 @@ export interface NetStatus {
     detail?: string
   }>
   protected?: boolean
+  /** The keys are protected by a passphrase; `net.protect` without one moves them to the system keychain. */
+  passphraseProtected?: boolean
   /**
    * The system keychain refused to protect network keys (it is missing, or access was denied). Until
    * Mousse restarts, only a passphrase can protect them.
@@ -180,6 +282,11 @@ export interface NetStatus {
    */
   self?: { node: NodeId; user: UserId; isAuthority: boolean; removed?: true }
   rosterState?: RosterState
+  /**
+   * A join sent to another computer whose answer never came back (no identity yet). `name` is that
+   * computer's; `net.join.retry` asks again with the same keys, `net.join.abandon` gives up.
+   */
+  unfinishedJoin?: { name?: string; expiresAt?: number }
   routes: Route[]
   peers: Array<{ node: NodeId; state: 'connecting' | 'open' | 'closed'; error?: NetErrorCode }>
   error?: NetErrorCode
@@ -193,6 +300,23 @@ export interface PlusConfiguration {
   gatewayId: string
 }
 /** `net.plus.status`. Not configured (and never connected) when the Mousse ID module is absent. */
+/**
+ * Whether this computer may start over with a new identity, as `net.startOver.check` answers.
+ */
+export interface NetStartOverCheck {
+  /** It was removed, no other device holds a pass in its list, or its own pass lapsed past renewal. */
+  allowed?: 'removed' | 'alone' | 'lapsed'
+  /** It hosts a Space, is signed in to Mousse ID, or other devices still hold a pass in its list. */
+  refused?: 'space_host' | 'mousse_id' | 'live_devices'
+  /** It keeps the list; its key stays in the set-aside folder. */
+  keeper: boolean
+  /** The Spaces it hosts, when that is why it is refused. */
+  hosted?: string[]
+  /** The other devices that still hold a pass in its list. */
+  live?: string[]
+  /** The Spaces it belongs to, to join again afterwards. */
+  spaces: string[]
+}
 export interface PlusStatus {
   configured: boolean
   connected: boolean

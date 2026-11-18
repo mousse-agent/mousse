@@ -91,6 +91,26 @@ function render(px: number) {
       } : {})
     }
   },
+  /** Opens a reply's reaction row ("Add reaction"), or widens it to every emoji ("More reactions"). */
+  openReactions: (id: string) => article(id).querySelector<HTMLButtonElement>('button[aria-label="Add reaction"]')!.click(),
+  moreReactions: (id: string) => article(id).querySelector<HTMLButtonElement>('button[aria-label="More reactions"]')!.click(),
+  /** What the pointer finds at the centre of each choice in a reply's open reaction menu: its own button, or something
+   *  else drawn over it. `overLater` counts the centres that lie over a later message, which shows there is something to cover. */
+  hitReactions: (id: string) => {
+    const buttons = Array.from(article(id).querySelectorAll<HTMLButtonElement>('.bot-react-grid[role="menu"] button'))
+    const later = Array.from(document.querySelectorAll<HTMLElement>('[data-message-id]')).filter((element) => article(id).compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING)
+    const misses: string[] = []
+    let overLater = 0
+    for (const button of buttons) {
+      const box = button.getBoundingClientRect()
+      const x = box.left + box.width / 2
+      const y = box.top + box.height / 2
+      if (later.some((element) => { const r = element.getBoundingClientRect(); return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom })) overLater++
+      const hit = document.elementFromPoint(x, y)
+      if (!hit || !button.contains(hit)) misses.push(hit ? `${hit.tagName}.${hit.className}` : 'nothing')
+    }
+    return { total: buttons.length, overLater, misses }
+  },
   /** The reply's width, its applet's, and the widest bubble's (the table reply). */
   addApplet: async () => { shown = [...MESSAGES, WITH_APPLET]; await useBotsStore.getState().loadChat(bot.id) },
   applet: () => ({

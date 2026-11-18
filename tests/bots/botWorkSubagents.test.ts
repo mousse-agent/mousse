@@ -16,7 +16,7 @@ import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import { botTools } from '../../src/mms/run/mcp/appTools/bots'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import type { BotManifest } from '../../src/shared/bots/personal/definition'
-import { BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_OWN_APP_TOOLS, BOT_SUBAGENT_TOOLS, BOT_THREAD_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_TOOLS, MAX_BOT_SUBAGENTS_AT_ONCE, MAX_BOT_SUBAGENTS_PER_WORK, botStarterManifest } from '../../src/shared/bots/personal/manifest'
+import { BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_OWN_APP_TOOLS, BOT_SUBAGENT_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_TOOLS, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
@@ -27,7 +27,7 @@ const command: NormalisedCall = { kind: 'builtin', tool: 'shell', nativeName: 'b
 const app = (tool: string): NormalisedCall => ({ kind: 'app', tool, args: {} })
 
 /** What only the bot and its work may have: a subagent never holds one of these, whatever the grant says. */
-const NEVER_A_SUBAGENTS = [...BOT_OWN_APP_TOOLS, ...BOT_WORK_TOOLS, ...BOT_THREAD_TOOLS, ...BOT_MEMORY_TOOLS, ...BOT_SUBAGENT_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, BOT_IMAGE_TOOL, 'consult', 'escalate', 'mcp_servers', 'delegate_task', 'ask_owner', 'question_answer', 'show_card']
+const NEVER_A_SUBAGENTS = [...BOT_OWN_APP_TOOLS, ...BOT_WORK_TOOLS, ...BOT_MEMORY_TOOLS, ...BOT_SUBAGENT_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, BOT_IMAGE_TOOL, 'consult', 'escalate', 'mcp_servers', 'delegate_task', 'ask_owner', 'question_answer', 'show_card']
 
 describe('a subagent is compiled from its work\'s grant, and holds no more', () => {
   let base: string
@@ -67,7 +67,7 @@ describe('a subagent is compiled from its work\'s grant, and holds no more', () 
   it.each([
     ['the starter grant', starter],
     ['every permission', everything]
-  ] as const)('%s: what the work holds of the built-ins, files, MCP tools and skills; of the app tools only the web and the browser', (_name, grant) => {
+  ] as const)('%s: what the work holds of the built-ins, files, MCP tools and skills; of the app tools what a thread\'s subagent may use, the owner\'s threads as the work holds them', (_name, grant) => {
     for (const runtime of Object.keys(runtimes)) {
       const parent = compile(grant, 'pi', work).permissions
       // Each compile snapshots temporary entries independently. A new one must be closed to the child without changing its grant.
@@ -93,7 +93,8 @@ describe('a subagent is compiled from its work\'s grant, and holds no more', () 
       // Never more than the work: every app tool it holds, the work holds too.
       for (const tool of child.permissions.appTools) expect(parent.appTools, `${runtime}: ${tool}`).toContain(tool)
       for (const tool of NEVER_A_SUBAGENTS) expect(child.permissions.appTools, `${runtime}: ${tool}`).not.toContain(tool)
-      expect(child.permissions.threads).toBeUndefined()
+      // The owner's threads as the work holds them (a thread's subagent may use them), never more.
+      expect(child.permissions.threads).toEqual(parent.threads)
       // Its policy names its own runtime's built-ins.
       expect(child.policy.tools!.allow).toEqual(expect.arrayContaining(runtimes[runtime]!(child.permissions.tools)))
     }
@@ -208,23 +209,22 @@ describe('a bot\'s work and its subagents', () => {
     expect(child.prepared.authority.role).toBe('subagent')
   })
 
-  it(`counts in the service: ${MAX_BOT_SUBAGENTS_AT_ONCE} at once, ${MAX_BOT_SUBAGENTS_PER_WORK} in all across the work's turns, and a title once`, async () => {
+  it('no count at once or in all: past the old caps of three at once and ten in a work; a title once', async () => {
     const job = await work('w1')
     const subagents = job.prepared.authority.subagents!
-    for (let n = 1; n <= MAX_BOT_SUBAGENTS_AT_ONCE; n += 1) expect(await subagents.start({ title: `Part ${n}`, brief: 'Do it.' })).toHaveProperty('started')
-    expect(await subagents.start({ title: 'One more', brief: 'Do it.' })).toMatchObject({ refused: expect.stringMatching(/most at once/) })
+    for (let n = 1; n <= 5; n += 1) expect(await subagents.start({ title: `Part ${n}`, brief: 'Do it.' })).toHaveProperty('started')
     expect(await subagents.start({ title: 'part 1', brief: 'Again.' })).toMatchObject({ refused: expect.stringMatching(/already have a subagent called/) })
     // A repeat of one tool call starts nothing new.
     for (const n of subagentNs(job.id)) await finish(f, (await start(f, job.id, n)).payload, 'completed', { text: 'Done.' })
     const repeated = await subagents.start({ title: 'Part X', brief: 'Do it.', toolCallId: 'call-7' })
     expect(await subagents.start({ title: 'Part X', brief: 'Do it.', toolCallId: 'call-7' })).toEqual(repeated)
-    for (let n = subagentNs(job.id).length + 1; n <= MAX_BOT_SUBAGENTS_PER_WORK; n += 1) {
+    await finish(f, (await start(f, job.id, subagentNs(job.id).at(-1)!)).payload, 'completed', { text: 'Done.' })
+    for (let n = subagentNs(job.id).length + 1; n <= 12; n += 1) {
       expect(await subagents.start({ title: `Part ${n}`, brief: 'Do it.' })).toHaveProperty('started')
       const last = subagentNs(job.id).at(-1)!
       await finish(f, (await start(f, job.id, last)).payload, 'completed', { text: 'Done.' })
     }
-    expect(subagentNs(job.id)).toHaveLength(MAX_BOT_SUBAGENTS_PER_WORK)
-    expect(await subagents.start({ title: 'Eleventh', brief: 'Do it.' })).toMatchObject({ refused: expect.stringMatching(/most one piece of work may/) })
+    expect(subagentNs(job.id)).toHaveLength(12)
     // A follow-up is no new subagent: it carries on in its own thread.
     expect(await subagents.send({ subagent: 'Part 1', message: 'And the warranty?' })).toMatchObject({ sent: { subagent: 'Part 1', state: 'running' } })
     const followUp = await start(f, job.id, subagentNs(job.id).at(-1)!)

@@ -8,7 +8,12 @@ import type {
   UserId,
   WireMessage
 } from '../../../shared/net'
-import { NetError, type NetErrorCode } from '../../../shared/net/errors'
+import {
+  NetError,
+  forbiddenReason,
+  type ForbiddenReason,
+  type NetErrorCode
+} from '../../../shared/net/errors'
 import { SESSION_MAX_SUBSCRIPTIONS } from '../../../shared/net/limits'
 import type {
   Clock,
@@ -20,7 +25,7 @@ import type {
 } from '../contracts'
 import { systemClock } from '../clock'
 
-/** How often a peer refused for a lapsed delegation is tried again. */
+/** How often a peer refused for a lapsed delegation, or for not having connected this device, is tried again. */
 const LAPSED_RETRY_MS = 10 * 60_000
 
 /** Reconnects authenticated sessions and reattaches reads from their durable cursors.
@@ -40,6 +45,7 @@ export class SyncSupervisor implements SyncSession {
   private rosterListener?: () => void
   private failures = 0
   private failure?: NetErrorCode
+  private failureReason?: ForbiddenReason
   private openedAt = 0
   private subscriptions = new Map<
     StreamId,
@@ -85,6 +91,10 @@ export class SyncSupervisor implements SyncSession {
   /** Why the last attempt failed; cleared once a session opens. For the device list only. */
   lastError(): NetErrorCode | undefined {
     return this.failure
+  }
+  /** The reason the peer gave with a `forbidden` last attempt (such as `not_connected`). */
+  lastReason(): ForbiddenReason | undefined {
+    return this.failureReason
   }
   state(): SessionState {
     return this.stopped || this.blocked
@@ -239,6 +249,7 @@ export class SyncSupervisor implements SyncSession {
       }
       this.active = session
       this.failure = undefined
+      this.failureReason = undefined
       this.lastPeer = session.peer
       this.openedAt = this.clock.monotonic()
       this.closeConnection = session.onClosed((error) => {
@@ -275,13 +286,21 @@ export class SyncSupervisor implements SyncSession {
   }
   private scheduleRetry(error: unknown): void {
     this.failure = error instanceof NetError ? error.code : undefined
+    const reason =
+      error instanceof NetError && error.code === 'forbidden' ? forbiddenReason(error.details) : undefined
+    this.failureReason = reason
     const retryable =
       error instanceof NetError &&
       ['route_unreachable', 'peer_offline', 'deadline_exceeded'].includes(error.code)
     // A lapsed delegation (this computer's or the peer's) clears once either side gets a renewed
     // roster, which can arrive from another device or Mousse ID. A roster change retries at once;
     // this slow retry covers a renewal this computer cannot see coming.
-    if (error instanceof NetError && error.code === 'bad_delegation') {
+    // A device that has not connected this one yet may connect it at any time, and says nothing when it does: the
+    // same slow retry, never a final refusal. Connecting here wakes the attempt at once.
+    if (
+      error instanceof NetError &&
+      (error.code === 'bad_delegation' || reason === 'not_connected')
+    ) {
       this.retry = this.clock.setTimeout(() => {
         void this.connect()
       }, LAPSED_RETRY_MS)

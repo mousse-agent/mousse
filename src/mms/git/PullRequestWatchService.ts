@@ -124,6 +124,8 @@ export interface PullRequestWatchDeps {
   notify(threadId: string, text: string, messageId: string): Promise<'delivered' | 'already'>
   /** Calls `listener` when a run of any thread ends; returns the unsubscribe function. */
   onRunEnd?(listener: (threadId: string) => void): () => void
+  /** Keeps what a read said about the pull request (its state, title, draft) on the threads linked to it. */
+  noteStates?(details: readonly PullRequestDetail[]): void
   clock?: () => number
   minIntervalMs?: number
   maxIntervalMs?: number
@@ -385,6 +387,13 @@ export class PullRequestWatchService extends EventEmitter {
         }
       } catch (error) {
         failure = error
+      }
+      if (detail && failure === null) {
+        try {
+          this.deps.noteStates?.([detail])
+        } catch {
+          // The sidebar's state is a display; a failed write waits for the next read.
+        }
       }
       for (const member of members) {
         // A rate limit met by one thread of the group (or by the read itself) holds back the rest of it.

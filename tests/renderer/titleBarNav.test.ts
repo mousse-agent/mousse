@@ -31,7 +31,11 @@ import { selectThread } from '../../src/renderer/lib/threadActions'
 import { ThreadPathView, TitleBarNav } from '../../src/renderer/components/TitleBarNav'
 import { SubagentParentBar } from '../../src/renderer/components/SubagentParentBar'
 import { useAppStore } from '../../src/renderer/stores/appStore'
-import { COMMANDS, commandAllowedInContext, defaultBindingFor, findConflicts, getCommand, resolveCommand, type CommandContext } from '../../src/shared/commands'
+import { useBotsStore } from '../../src/renderer/stores/botsStore'
+import { useChatsStore } from '../../src/renderer/stores/chatsStore'
+import { openLinkedThread } from '../../src/renderer/utils/chatLinks'
+import type { BotSummary } from '../../src/shared/bots/personal/chat'
+import { commandAllowedInContext, defaultBindingFor, getCommand, resolveCommand, type CommandContext } from '../../src/shared/commands'
 import { getDefaultSettings, normalizeAppearance } from '../../src/shared/settings'
 import { searchSettings } from '../../src/renderer/lib/settingsSearch'
 import type { Project, Thread } from '../../src/shared/types'
@@ -185,6 +189,46 @@ describe('the thread history', () => {
     }
   })
 
+  it('counts a bot\'s chat as a place: back from a thread its link opened returns to the chat, forward to the thread', async () => {
+    const chatsInitial = useChatsStore.getState()
+    const botsInitial = useBotsStore.getState()
+    // Opening a bot's chat shows Chats and the bot; its messages are not this test's concern.
+    const openBot = vi.fn(async (botId: string) => {
+      useAppStore.getState().setThreadsSidebarView('chats')
+      useChatsStore.setState({ activeBotId: botId, activeChatId: null })
+    })
+    useChatsStore.setState({ openBot, activeBotId: null, activeChatId: null })
+    useBotsStore.setState({ bots: [{ id: 'alpha', name: 'alpha' } as BotSummary] })
+    const stop = trackThreadHistory()
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
+    try {
+      useAppStore.setState({ activeThreadId: 't1' })
+      await useChatsStore.getState().openBot('alpha')
+      openLinkedThread('t2')
+      await flush()
+      expect(useAppStore.getState()).toMatchObject({ activeThreadId: 't2', sidebarMode: 'projects', threadsSidebarView: 'projects' })
+      expect(useThreadHistoryStore.getState()).toEqual(expect.objectContaining({ entries: ['t1', 'bot:alpha', 't2'], index: 2 }))
+      await stepHistory(-1)
+      expect(useAppStore.getState().sidebarMode).toBe('chats')
+      expect(useChatsStore.getState().activeBotId).toBe('alpha')
+      expect(useThreadHistoryStore.getState().index).toBe(1)
+      await stepHistory(1)
+      await flush()
+      expect(useAppStore.getState()).toMatchObject({ activeThreadId: 't2', sidebarMode: 'projects' })
+      expect(useThreadHistoryStore.getState()).toEqual(expect.objectContaining({ entries: ['t1', 'bot:alpha', 't2'], index: 2 }))
+      // Leaving Chats by its tab, with no thread being opened, is a visit to the thread the workspace shows.
+      await stepHistory(-1)
+      useAppStore.getState().setThreadsSidebarView('projects')
+      await flush()
+      expect(useThreadHistoryStore.getState().entries).toEqual(['t1', 'bot:alpha', 't2'])
+      expect(useThreadHistoryStore.getState().index).toBe(2)
+    } finally {
+      stop()
+      useChatsStore.setState({ openBot: chatsInitial.openBot, activeBotId: null, activeChatId: null })
+      useBotsStore.setState({ bots: botsInitial.bots })
+    }
+  })
+
   it('stays put when the switch is refused to keep unsaved changes', async () => {
     const stop = trackThreadHistory()
     try {
@@ -258,14 +302,6 @@ describe('the back and forward shortcuts', () => {
     expect(resolveCommand(key('[', { meta: true }), {}, context({ inTerminal: true }), registered)).toBeNull()
     expect(getCommand('thread.back').guest).toBe('deny')
     expect(commandAllowedInContext(getCommand('thread.forward'), context())).toBe(true)
-  })
-
-  it('clash with no other default', () => {
-    for (const platform of ['darwin', 'win32', 'linux']) {
-      const clashes = findConflicts({}, platform).filter((conflict) => conflict.kind === 'command' && conflict.commands.some((id) => id === 'thread.back' || id === 'thread.forward'))
-      expect(clashes).toEqual([])
-    }
-    expect(COMMANDS.filter((command) => command.id === 'thread.back' || command.id === 'thread.forward')).toHaveLength(2)
   })
 })
 

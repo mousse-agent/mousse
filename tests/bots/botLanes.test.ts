@@ -3,6 +3,7 @@
  * owner's messages in order on the home thread; the run lane runs manual and scheduled runs on
  * threads of their own, each with the run pack of its schedule, and posts a run report.
  */
+import { BotEngine, UNANSWERED_REPLY } from '../../src/mms/bots/activation/BotEngine'
 import { existsSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
@@ -66,8 +67,9 @@ describe('messages sent one after another', () => {
     expect(lane('chat', ['queued'])).toEqual([])
     expect(ownerRows().at(-1)).toMatchObject({ text: 'mousse', activationId: turn!.id })
     const taken = prepared.steer!.take()!
-    expect(taken.text).toContain('The owner wrote again while you were answering')
-    expect(taken.text).toContain('mousse')
+    // The owner's own words, in one block that asks for an answer, then what to do with them.
+    expect(taken.text.startsWith('<mousse_message from="owner" reply="required">\nmousse\n</mousse_message>\n\n')).toBe(true)
+    expect(taken.text).toContain('answer both in the one reply you are writing')
     prepared.steer!.accepted(taken.token)
     await finish(f, payload, 'completed', { text: 'You were right: I told the acrylic thread in mousse to retake the screenshots.' })
     expect(f.store.activation(turn!.id)).toMatchObject({ status: 'done' })
@@ -76,23 +78,206 @@ describe('messages sent one after another', () => {
     expect(lane('chat', ['queued', 'running'])).toEqual([])
   })
 
-  it('a follow-up the turn never read is answered next in the same thread, after the reply to the first', async () => {
-    const first = await f.bots.service.chatSend({ botId, text: "wdym you can't reach the thread?", clientRequestId: 'm1' })
-    const [turn] = lane('chat', ['running'])
-    const { payload } = await start(f, turn!.id)
-    const second = await f.bots.service.chatSend({ botId, text: 'mousse', clientRequestId: 'm2' })
-    await finish(f, payload, 'completed', { text: 'The thread is there; I can only message it from this chat.' })
-    // The reply so far answers the first message only, and the same turn goes on with the follow-up.
-    expect(chatOf(f, botId).at(-1)).toMatchObject({ text: 'The thread is there; I can only message it from this chat.', replyTo: { id: first.message.id } })
-    expect(f.store.activation(turn!.id)?.status).toBe('running')
-    expect(lane('chat', ['queued'])).toEqual([])
-    const { payload: next, prepared } = await start(f, turn!.id, 2)
+  /**
+   * The follow-up cuts the reply, and Claude Code resumes the session with its own "No response requested." line, which
+   * the turn then ends on (the runtime's result, or a model that copied it from its history). Inputs: the placeholder
+   * alone / after a partial reply / again on the retry / in an owner's turn vs a wake-up.
+   */
+  describe('a reply that ends on the runtime\'s "No response requested."', () => {
+    /** The owner's turn reads their second message as a steer while it answers; `tool`: a call it made before. */
+    async function cutTurn(tool?: string): Promise<{ turn: string; payload: Awaited<ReturnType<typeof start>>['payload']; follow: string }> {
+      await send('what changed in the release?', 'm1')
+      const [turn] = lane('chat', ['running'])
+      const { payload, prepared } = await start(f, turn!.id)
+      if (tool) expect(prepared.authority.check({ kind: 'app', tool, args: {} })).toMatchObject({ ok: true })
+      prepared.steer!.attached()
+      const follow = (await f.bots.service.chatSend({ botId, text: 'and is it merged?', clientRequestId: 'm2' })).message.id
+      const taken = prepared.steer!.take()!
+      prepared.steer!.accepted(taken.token)
+      return { turn: turn!.id, payload, follow }
+    }
+    const placeholderRows = () => chatOf(f, botId).filter((message) => message.author === 'bot' && /No response requested/i.test(message.text))
+    const botRows = (turn: string) => chatOf(f, botId).filter((message) => message.activationId === turn && message.author === 'bot')
+
+    // Seen the runtime's way (`TurnResult.steerUnanswered`, carried to `settle` as `unanswered`) or by its placeholder
+    // anywhere in the reply; after a call that changed something too, the cut reply is held back, never posted.
+    it.each([
+      ['the runtime says the steer went unanswered', { text: 'Two fixes landed.', unanswered: true }, 'Two fixes landed.', undefined],
+      ['the runtime says so after a memory_save', { text: 'Saved it.', unanswered: true }, 'Saved it.', 'memory_save'],
+      ['the placeholder alone', { text: 'No response requested.' }, undefined, undefined],
+      ['the placeholder after a partial reply', { text: 'Two fixes landed.\n\nNo response requested.' }, 'Two fixes landed.', undefined],
+      ['the placeholder before more words', { text: 'No response requested.\n\nTwo fixes landed.' }, 'Two fixes landed.', undefined],
+      ['the placeholder without its full stop', { text: 'Two fixes landed.\n\nno response requested' }, 'Two fixes landed.', undefined]
+    ] as const)('%s: nothing is posted, and the turn goes on once to answer the owner', async (_name, end, draft, tool) => {
+      const { turn, payload, follow } = await cutTurn(tool)
+      await finish(f, payload, 'completed', end)
+      expect(botRows(turn)).toEqual([])
+      expect(f.store.activation(turn)?.status).toBe('running')
+      const { payload: next, prepared } = await start(f, turn, 2)
+      expect(prepared.prompt).toContain('Your reply never reached your owner')
+      expect(prepared.prompt).toContain('what changed in the release?')
+      expect(prepared.prompt).toContain('and is it merged?')
+      if (draft) expect(prepared.prompt).toContain(`«${draft}»`)
+      await finish(f, next, 'completed', { text: 'Two fixes landed, and yes, it merged.' })
+      expect(chatOf(f, botId).filter((message) => message.activationId === turn && message.author === 'bot')).toMatchObject([
+        { kind: 'text', text: 'Two fixes landed, and yes, it merged.', replyTo: { id: follow } }
+      ])
+      expect(f.store.activation(turn)?.status).toBe('done')
+    })
+
+    it('cut off again: it says so once, with what it had, and goes on no further', async () => {
+      const { turn, payload } = await cutTurn()
+      await finish(f, payload, 'completed', { text: 'Two fixes landed.\n\nNo response requested.' })
+      const { payload: next } = await start(f, turn, 2)
+      await finish(f, next, 'completed', { text: 'No response requested.' })
+      expect(placeholderRows()).toEqual([])
+      expect(f.store.dispatch(turn, 3)).toBeUndefined()
+      expect(f.store.activation(turn)?.status).toBe('done')
+      expect(chatOf(f, botId).filter((message) => message.activationId === turn && message.author === 'bot').map((message) => message.text))
+        .toEqual([`Two fixes landed.\n\n${UNANSWERED_REPLY}`])
+    })
+
+    it('cut off again with a few words: what it held back and those words go out with the line asking to send it again', async () => {
+      const { turn, payload } = await cutTurn()
+      await finish(f, payload, 'completed', { text: 'Two fixes landed.', unanswered: true })
+      const { payload: next, prepared } = await start(f, turn, 2)
+      // The owner writes a third time, and that cuts the answer too.
+      prepared.steer!.attached()
+      await f.bots.service.chatSend({ botId, text: 'and the notes?', clientRequestId: 'm3' })
+      prepared.steer!.accepted(prepared.steer!.take()!.token)
+      await finish(f, next, 'completed', { text: 'And it merged', unanswered: true })
+      expect(f.store.dispatch(turn, 3)).toBeUndefined()
+      expect(botRows(turn).map((message) => message.text)).toEqual([`Two fixes landed.\n\nAnd it merged\n\n${UNANSWERED_REPLY}`])
+    })
+
+    it('the run ends before its words arrive: nothing is posted until they do, and then the cut is seen', async () => {
+      const { turn, payload } = await cutTurn()
+      f.runs.markTerminal(payload.runId, 'completed')
+      f.bots.settle(payload, {})
+      await flush()
+      expect(botRows(turn)).toEqual([])
+      f.bots.settle(payload, { text: 'Two fixes landed.', unanswered: true })
+      await flush()
+      expect(botRows(turn)).toEqual([])
+      expect(f.store.activation(turn)?.status).toBe('running')
+      const { prepared } = await start(f, turn, 2)
+      expect(prepared.prompt).toContain('Your reply never reached your owner')
+      expect(prepared.prompt).toContain('«Two fixes landed.»')
+    })
+
+    it('a steer that carried no message of the owner\'s (the pack again after a compaction) is no cut: the reply is posted', async () => {
+      await send('what changed in the release?', 'm1')
+      const [turn] = lane('chat', ['running'])
+      const { payload } = await start(f, turn!.id)
+      await finish(f, payload, 'completed', { text: 'Two fixes landed.', unanswered: true })
+      expect(botRows(turn!.id).map((message) => message.text)).toEqual(['Two fixes landed.'])
+      expect(f.store.activation(turn!.id)?.status).toBe('done')
+    })
+
+    it('a turn that read the follow-up and answered it posts its reply as written', async () => {
+      const { turn, payload } = await cutTurn()
+      await finish(f, payload, 'completed', { text: 'Two fixes landed.\n\nAnd yes, it merged.' })
+      expect(botRows(turn).map((message) => message.text)).toEqual(['Two fixes landed.\n\nAnd yes, it merged.'])
+      expect(f.store.activation(turn)?.status).toBe('done')
+    })
+  })
+
+  // Inputs: no calls / reads / mutations; success / Stop / failure / restart; third message.
+  it.each(['none', 'read', 'memory_list', 'work_start', 'memory_save', 'set_profile'])('unread follow-up after %s keeps the right replies and quotes', async (tool) => {
+    const first = await f.bots.service.chatSend({ botId, text: 'hi', clientRequestId: 'm1' })
+    const turn = first.message.activationId!
+    const { payload, prepared: firstPrepared } = await start(f, turn)
+    if (tool !== 'none') expect(firstPrepared.authority.check(tool === 'read'
+      ? { kind: 'builtin', tool: 'read', nativeName: 'read', args: { path: `${firstPrepared.authority.workspace!.scratch}/note.txt` } }
+      : { kind: 'app', tool, args: {} })).toMatchObject({ ok: true })
+    if (tool === 'read') f.chips.set(`${turn}:d1`, [{ icon: 'read', text: 'read your threads' }])
+    const second = await f.bots.service.chatSend({ botId, text: 'check the flat', clientRequestId: 'm2' })
+    f.bots.service.markRead(botId, second.message.seq)
+    await finish(f, payload, 'completed', { text: 'Hi! What can I do?' })
+    const held = ['none', 'read', 'memory_list'].includes(tool)
+    const replies = () => chatOf(f, botId).filter((m) => m.activationId === turn && m.author === 'bot' && m.kind === 'text')
+    expect(replies()).toHaveLength(held ? 0 : 1)
+    expect(f.bots.service.get(botId).summary.unread).toBe(held ? 0 : 1)
+    expect(f.store.activation(turn)?.status).toBe('running')
+    const { payload: next, prepared } = await start(f, turn, 2)
     expect(prepared.history).toBe('thread')
-    expect(prepared.prompt).toContain('The owner wrote again while you were answering; your reply so far was already sent to them.')
-    expect(prepared.prompt).toContain('mousse')
-    await finish(f, next, 'completed', { text: 'Done: I told the mousse thread.' })
-    expect(chatOf(f, botId).at(-1)).toMatchObject({ text: 'Done: I told the mousse thread.', replyTo: { id: second.message.id } })
-    expect(f.store.activation(turn!.id)?.status).toBe('done')
+    expect(prepared.prompt).toContain(held ? 'Your draft, not sent: «Hi! What can I do?»' : 'your reply so far was already sent')
+    expect(prepared.prompt).toContain('check the flat')
+    await finish(f, next, 'completed', { text: 'Hi — checking the flat.' })
+    expect(replies()).toHaveLength(held ? 1 : 2)
+    if (tool === 'read') expect(replies().at(-1)?.chips).toContainEqual({ icon: 'read', text: 'read your threads' })
+    expect(replies().at(-1)).toMatchObject({ text: 'Hi — checking the flat.', replyTo: { id: second.message.id } })
+    if (!held) expect(replies()[0]).toMatchObject({ replyTo: { id: first.message.id } })
+    expect(replies().at(-1)!.seq).toBeGreaterThan(second.message.seq)
+    expect(f.bots.service.get(botId).summary.unread).toBe(held ? 1 : 2)
+  })
+
+  it.each(['stop', 'fail', 'restart-cancelled', 'restart-failed', 'restart-running', 'restart-done', 'third'] as const)('a held reply survives %s, once', async (end) => {
+    const first = await f.bots.service.chatSend({ botId, text: 'hi', clientRequestId: 'm1' })
+    const turn = first.message.activationId!
+    const { payload } = await start(f, turn)
+    await send('check the flat', 'm2')
+    await finish(f, payload, 'completed', { text: 'Hi! What can I do?' })
+    const replies = () => chatOf(f, botId).filter((m) => m.activationId === turn && m.kind === 'text' && m.author === 'bot')
+    expect(replies()).toHaveLength(0)
+    if (end.startsWith('restart')) {
+      f.bots.close()
+      if (end === 'restart-done') {
+        f.store.run('UPDATE bot_dispatches SET ended_at = ? WHERE activation_id = ? AND n = 2', new Date(f.clock.now).toISOString(), turn)
+        f.store.moveActivation(turn, ['running'], 'done', { result: 'Hi — checking the flat.' })
+      } else if (end !== 'restart-running') f.store.moveActivation(turn, ['running'], end === 'restart-failed' ? 'failed' : 'cancelled', { endReason: 'stopped' })
+      f.bots = new BotEngine(f.host)
+      await f.bots.reconcileOnStartup()
+      await flush()
+      if (f.store.activation(turn)?.status === 'running') {
+        const dispatch = f.store.lastMainDispatch(turn)!
+        await finish(f, (await start(f, turn, dispatch.n)).payload, 'completed', { text: 'Hi — checking the flat.' })
+      }
+      await f.bots.reconcileOnStartup()
+      expect(replies()).toHaveLength(1)
+      if (end === 'restart-done') expect(replies()[0]?.text).toBe('Hi — checking the flat.')
+    } else {
+      const { payload: next } = await start(f, turn, 2)
+      if (end === 'third') {
+        const third = await f.bots.service.chatSend({ botId, text: 'and the roof', clientRequestId: 'm3' })
+        await finish(f, next, 'completed', { text: 'Checking the flat.' })
+        expect(replies()).toHaveLength(1)
+        expect(replies()[0]).toMatchObject({ replyTo: { text: 'check the flat' } })
+        const last = await start(f, turn, 3)
+        expect(last.prepared.prompt).toContain('already sent')
+        await finish(f, last.payload, 'completed', { text: 'The roof too.' })
+        expect(replies().at(-1)).toMatchObject({ replyTo: { id: third.message.id } })
+      } else {
+        if (end === 'stop') await f.bots.service.chatStop(botId)
+        await finish(f, next, end === 'stop' ? 'interrupted' : 'failed', { outcome: { error: 'boom' } })
+        expect(replies()).toHaveLength(1)
+        expect(replies()[0]).toMatchObject({ text: 'Hi! What can I do?', replyTo: { id: first.message.id } })
+      }
+    }
+    expect(f.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, `draft:${turn}`)).toBeUndefined()
+  })
+
+  it.each([true, false])('late final words are held; combined reply arrives=%s', async (arrives) => {
+    const first = await f.bots.service.chatSend({ botId, text: 'hi', clientRequestId: 'm1' })
+    const turn = first.message.activationId!
+    const one = await start(f, turn)
+    await send('check the flat', 'm2')
+    f.runs.markTerminal(one.payload.runId, 'completed')
+    f.bots.settle(one.payload, {})
+    await flush()
+    f.bots.settle(one.payload, { text: 'Hi! What can I do?' })
+    await flush()
+    const two = await start(f, turn, 2)
+    expect(two.prepared.prompt).toContain('Your draft, not sent: «Hi! What can I do?»')
+    f.runs.markTerminal(two.payload.runId, 'completed')
+    f.bots.settle(two.payload, {})
+    await flush()
+    const replies = () => chatOf(f, botId).filter((m) => m.activationId === turn && m.author === 'bot' && m.kind === 'text')
+    expect(replies()).toHaveLength(0)
+    if (arrives) f.bots.settle(two.payload, { text: 'Hi — checking the flat.' })
+    else f.timers.filter((timer) => timer.ms === 5000).at(-1)!.fn()
+    await flush()
+    expect(replies().map((m) => m.text)).toEqual([arrives ? 'Hi — checking the flat.' : 'Hi! What can I do?'])
   })
 
   it('a follow-up the turn never read before it failed gets a turn of its own that holds it', async () => {

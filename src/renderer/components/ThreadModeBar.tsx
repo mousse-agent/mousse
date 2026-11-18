@@ -11,7 +11,7 @@ import '../styles/private-threads.css'
 interface ThreadModeBarViewProps {
   /** A started private thread; an empty one says so on its logo (EmptyThreadHeading). */
   localOnly: boolean
-  /** When the thread deletes itself (its own expiry, or its root thread's for a subagent). */
+  /** When the thread archives itself (its own expiry, or its root thread's for a subagent). */
   expiresAt?: string
   expiryStopsRun?: boolean
   /** The expiry can be changed here: a thread of this computer that is not a subagent. */
@@ -21,7 +21,7 @@ interface ThreadModeBarViewProps {
 }
 
 /**
- * Top of a private thread (`Thread.localOnly`) or one that deletes itself (`Thread.expiresAt`): a small pair
+ * Top of a private thread (`Thread.localOnly`) or one that archives itself (`Thread.expiresAt`): a small pair
  * of sunglasses for a private thread, and when it is deleted, with a menu to extend or keep it.
  */
 export function ThreadModeBarView({ localOnly, expiresAt, expiryStopsRun, editable, now, onExpiryChange }: ThreadModeBarViewProps) {
@@ -38,13 +38,13 @@ export function ThreadModeBarView({ localOnly, expiresAt, expiryStopsRun, editab
         <span className="thread-mode-bar-part thread-mode-bar-expiry" data-expired={expired || undefined}>
           <Clock size={12} strokeWidth={2} aria-hidden="true" />
           <span className="thread-mode-bar-text" title={new Date(expiresAt).toLocaleString()}>
-            {expired ? 'Expired · being deleted' : `Deletes ${expiresInLabel(expiresAt, now)}`}
+            {expired ? 'Expired · being archived' : `Archives ${expiresInLabel(expiresAt, now)}`}
             {!expired && expiryStopsRun && <span className="thread-mode-bar-detail"> · stops a running turn</span>}
           </span>
           {editable && !expired && (
             <ExpiryMenu
               triggerClassName="thread-mode-bar-button"
-              triggerTitle="Change when this thread is deleted"
+              triggerTitle="Change when this thread is archived"
               trigger="Change"
               hasExpiry
               stopsRun={expiryStopsRun === true}
@@ -57,7 +57,7 @@ export function ThreadModeBarView({ localOnly, expiresAt, expiryStopsRun, editab
   )
 }
 
-/** Shown above the selected thread when it is private or deletes itself. */
+/** Shown above the selected thread when it is private or archives itself. */
 export function ThreadModeBar() {
   const thread = useAppStore((state) => state.threads.find((entry) => entry.id === state.activeThreadId))
   const threads = useAppStore((state) => state.threads)

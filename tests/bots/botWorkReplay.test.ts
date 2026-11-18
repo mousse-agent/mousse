@@ -1,7 +1,7 @@
+import { MAX_QUEUED_ACTIVATIONS } from '../../src/shared/bots/personal/definition'
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
-import { MAX_QUEUED_ACTIVATIONS } from '../../src/shared/bots/personal/definition'
 import { rollUpChips } from '../../src/shared/bots/personal/chips'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
@@ -57,8 +57,9 @@ describe('work_start through the production registry', () => {
 
   it('a repeated queued request says it is already queued', async () => {
     const call = caller(await chat())
-    for (const title of ['First', 'Second', 'Third']) await call({ ...request, title })
     const queued = await call()
+    // The run lane has no count (#1452), so work starts at once; the stored status stands in for a wait.
+    f.store.run('UPDATE bot_activations SET status = ? WHERE id = ?', 'queued', queued.workId)
     const repeated = await call()
     expect(repeated).toMatchObject({ workId: queued.workId, status: 'queued', replayed: true, note: expect.stringMatching(/already queued/i) })
     expect(rollUpChips([{ tool: 'work_start', input: request, result: repeated }])).toMatchObject([{ text: 'already queued' }])
@@ -130,16 +131,23 @@ describe('work_start through the production registry', () => {
 
   it('retries work dropped from the full queue', async () => {
     const call = caller(await chat())
-    for (const title of ['First', 'Second', 'Third']) await call({ ...request, title })
-    const first = await call()
-    for (let n = 0; n < MAX_QUEUED_ACTIVATIONS - 3; n += 1) {
-      f.clock.now += 1
-      await call({ ...request, title: `Other job ${n}` })
+    const park = async (workId: string) => {
+      await flush()
+      const turn = await start(f, workId)
+      await f.bots.tools.wakes!.wait!(botId, workId, { brief: 'Check later', dueAt: new Date(f.clock.now + 3600_000).toISOString() })
+      await finish(f, turn.payload)
+      expect(f.store.activation(workId)?.endReason).toBe('waiting')
     }
-    expect(f.store.activation(first.workId)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
+    const first = await call()
+    await park(first.workId)
+    for (let n = 0; n < MAX_QUEUED_ACTIVATIONS; n += 1) {
+      f.clock.now += 1
+      await park((await call({ ...request, title: `Other job ${n}` })).workId)
+    }
+    expect(f.store.activation(first.workId)).toMatchObject({ status: 'failed', endReason: 'queue_full' })
     const retry = await call()
     expect(retry.workId).not.toBe(first.workId)
-    expect(retry.status).toBe('queued')
+    expect(retry.status).toBe('started')
     expect((await call()).workId).toBe(retry.workId)
   })
 

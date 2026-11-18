@@ -6,6 +6,7 @@ import {
   ROUTED_AGENT_KEY,
   ROUTED_AGENT_METHODS,
   ROUTED_AGENT_TITLE_MAX,
+  ROUTED_DEADLINE_KEY,
   type RoutedAgentMark
 } from '../../../shared/bridge/routed'
 import type { Thread } from '../../../shared/types'
@@ -68,7 +69,7 @@ const MARKED_KEYS: Readonly<Record<string, readonly string[]>> = {
   'threads.create': ['name', 'projectId', 'worktreeEnabled', 'startedFromProjectId'],
   'threads.setModel': ['threadId', 'model', 'ifRevision'],
   'threads.setPermissionMode': ['threadId', 'mode', 'ifRevision'],
-  'orchestrator.send': ['threadId', 'content', 'mode', 'clientRequestId', 'requestId', 'refuseWhilePaused', 'forceQueue'],
+  'orchestrator.send': ['threadId', 'content', 'mode', 'clientRequestId', 'requestId', 'refuseWhilePaused', 'forceQueue', ROUTED_DEADLINE_KEY],
   'queue.enqueue': ['threadId', 'content', 'mode', 'requestId'],
   'orchestrator.steer': ['threadId', 'text', 'runId', 'clientRequestId'],
   'orchestrator.abort': ['threadId', 'runId', 'clientRequestId']
@@ -130,6 +131,9 @@ export class RemoteAgentCalls {
       case 'queue.enqueue': {
         const content = String(params.content)
         this.assertBody(content)
+        const deadline = params[ROUTED_DEADLINE_KEY]
+        if (deadline !== undefined && (method !== 'orchestrator.send' || !Number.isSafeInteger(deadline) || (deadline as number) < 1))
+          throw new DomainRpcError('invalid_params', `${ROUTED_DEADLINE_KEY} must be a whole number of minutes, at least 1.`)
         const key = this.requestKey(call, params, method === 'queue.enqueue' ? 'requestId' : 'clientRequestId')
         const actor = this.actor(call, mode, this.hops(threadId, call, launchedBySender))
         if (!this.replay(key)) this.assertLimits(call, threadId, true)
@@ -137,7 +141,9 @@ export class RemoteAgentCalls {
           clientRequestId: key,
           actor,
           ...(method === 'queue.enqueue' || params.forceQueue === true ? { forceQueue: true } : {}),
-          ...(params.refuseWhilePaused === true ? { refuseWhilePaused: true } : {})
+          ...(params.refuseWhilePaused === true ? { refuseWhilePaused: true } : {}),
+          // The running time the run may use here: this computer counts it and stops the run (`RunTimeLimits`).
+          ...(deadline !== undefined ? { runningMinutes: deadline as number } : {})
         })
         return sent
       }

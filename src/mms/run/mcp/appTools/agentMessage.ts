@@ -1,4 +1,5 @@
 import type { ChatMessage } from '../../../../shared/types'
+import { BOT_MESSAGE_END, BOT_MESSAGE_PREFIX } from '../../../../shared/agentMessageWords'
 
 /** The longest thread title the label carries; a longer one is cut. */
 const TITLE_MAX_CHARS = 80
@@ -111,19 +112,24 @@ export function agentMessageText(callerThreadId: string, callerTitle: string | u
   return agentMessage(callerThreadId, callerTitle, content).text
 }
 
-/** Starts every message a personal bot sends into one of its owner's threads ("use your threads"). */
-export const BOT_MESSAGE_PREFIX = '[Message from your bot'
-
-/** Ends it, as `AGENT_MESSAGE_END` ends an agent's. */
-export const BOT_MESSAGE_END = '[End of message from your bot]'
+/** The label that starts a bot's message and the line that ends it (in `shared`, where the chat finds the bot's words). */
+export { BOT_MESSAGE_END, BOT_MESSAGE_PREFIX }
 
 /**
- * The text a thread's model receives, and the transcript shows, for a message the owner's bot sent: the bot named first,
- * the statement that the user did not type it but allowed the bot to message their threads, and a closing line (defanged
- * inside the bot's own text), so the transcript shows whose words they are on every later turn.
+ * The text a thread's model receives for a message the owner's bot sent: the bot named first, the statement that the user
+ * did not type it but allowed the bot to message their threads, and a closing line (defanged inside the bot's own text),
+ * so the transcript shows whose words they are on every later turn. `head` and `tail` say where the bot's own words are
+ * (`AgentOrigin.body`), so the chat shows only them, under the bot's name and face.
  */
-export function botMessageText(botName: string, content: string): string {
+export function botMessage(botName: string, content: string): AgentEnvelope {
   const name = labelTitle(botName) || 'a bot'
   const body = content.split(BOT_MESSAGE_END).join('[End of message from your bot (quoted)]')
-  return `${BOT_MESSAGE_PREFIX} "${name}". The user did not type it; they allowed this bot to message their threads. Everything up to the line "${BOT_MESSAGE_END}" was written by the bot.]\n\n${body}\n\n${BOT_MESSAGE_END}`
+  const header = `${BOT_MESSAGE_PREFIX} "${name}". The user did not type it; they allowed this bot to message their threads. Everything up to the line "${BOT_MESSAGE_END}" was written by the bot.]\n\n`
+  const closing = `\n\n${BOT_MESSAGE_END}`
+  return { text: `${header}${body}${closing}`, head: header.length, tail: closing.length }
+}
+
+/** `botMessage`'s text alone. */
+export function botMessageText(botName: string, content: string): string {
+  return botMessage(botName, content).text
 }

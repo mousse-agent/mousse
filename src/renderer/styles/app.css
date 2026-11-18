@@ -73,7 +73,8 @@
   inset: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  /* clip, not hidden: nothing, not even scrollIntoView or focus, can scroll the app's frame. */
+  overflow: clip;
   background: var(--app-window-bg);
 }
 
@@ -81,7 +82,7 @@
   display: flex;
   flex: 1 1 0;
   min-height: 0;
-  overflow: hidden;
+  overflow: clip;
 }
 
 .titlebar {
@@ -402,7 +403,7 @@ html.platform-darwin .titlebar-left {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow: clip;
   background: transparent;
   container-type: inline-size;
   container-name: main-area;
@@ -618,12 +619,12 @@ html.platform-darwin .titlebar-left {
 }
 
 .main-view-tab:hover {
-  background: rgba(var(--accent-rgb), 0.1);
+  background: var(--ui-hover, rgba(127, 127, 127, 0.1));
   color: var(--text-primary);
 }
 
 .main-view-tab.active {
-  background: rgba(var(--accent-rgb), 0.18);
+  background: var(--main-tab-selected, rgba(127, 127, 127, 0.16));
   color: var(--text-primary);
 }
 
@@ -634,7 +635,6 @@ html.platform-darwin .titlebar-left {
 
 .main-view-tab.active .main-view-tab-icon {
   opacity: 1;
-  color: var(--accent);
 }
 
 /* The empty app panel: one muted line and the list, in a compact column centred in the pane, a little

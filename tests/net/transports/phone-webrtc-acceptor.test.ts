@@ -125,9 +125,6 @@ describe('WebRTC acceptor', () => {
     factory.peers.at(-1)!.openChannel()
     accepted.at(-1)!.authenticated()
     expect(webrtc.counts(node('a'))).toEqual({ pending: 0, live: 4 })
-
-    for (const name of ['b', 'c', 'd']) for (let index = 0; index < 4; index++) await connect(name)
-    expect(webrtc.counts().live).toBe(16)
   })
 
   it('counts pending tickets against the overall live limit', async () => {

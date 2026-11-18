@@ -8,8 +8,7 @@ import { imageTypeOf } from '../images/pictures'
 /**
  * Cards a bot's turn made with `show_card` (issue #1123), kept for the activation's next message as the pictures a tool
  * hands a turn are (`toolImages.ts`): its reply, or its work's report. In memory only: after a restart the turn that made
- * them has ended, and its message was posted without them. At most `MAX_CARDS_PER_MESSAGE` and `MAX_CARDS_JSON_BYTES`
- * per message (`cardsProblem`).
+ * them has ended, and its message was posted without them. At most `MAX_CARDS_JSON_BYTES` per message (`cardsProblem`).
  */
 
 /** Activations whose cards wait for a message; the oldest are let go first. */

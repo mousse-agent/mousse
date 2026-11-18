@@ -1,6 +1,7 @@
 import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 import { boundedResetIso, usageLimitError } from '../../../orchestrator/providerErrors'
 import type { AppError } from '../../../../shared/errors'
+import type { PlanWindowUse } from '../../adapter'
 
 /** How long a turn may sit after a rejected window with no frame and no result before Mousse ends it. */
 export const USAGE_LIMIT_HOLD_MS = 30_000
@@ -18,6 +19,8 @@ interface RejectedWindow {
  */
 export class RejectedWindows {
   private readonly windows = new Map<string, RejectedWindow>()
+  /** Every plan window a rate-limit event reported how much of it is used, the latest per window; never cleared. */
+  private readonly used = new Map<string, PlanWindowUse>()
   /** An assistant message reported `rate_limit`, with or without a window. */
   private assistantError = false
   /** When the last frame arrived after a rejection; the hold watchdog measures from here. */
@@ -27,6 +30,17 @@ export class RejectedWindows {
 
   get recorded(): boolean {
     return this.windows.size > 0 || this.assistantError
+  }
+
+  /** A rate-limit event's report of how much of its window is used (`utilization`), whatever its status. */
+  noteUse(info: unknown): void {
+    const use = planWindowUse(info)
+    if (use) this.used.set(use.kind, use)
+  }
+
+  /** The plan windows' use the frames reported (`ProviderMetrics.quota`). */
+  planUse(): PlanWindowUse[] {
+    return [...this.used.values()]
   }
 
   record(window: RejectedWindow, nowMs: number): void {
@@ -69,8 +83,21 @@ interface RateLimitInfo {
   status?: unknown
   resetsAt?: unknown
   rateLimitType?: unknown
+  utilization?: unknown
   overageStatus?: unknown
   isUsingOverage?: unknown
+}
+
+/** How much of a window an event says is used: `utilization` is a fraction (0-1), or a percentage above 1. */
+function planWindowUse(info: unknown): PlanWindowUse | undefined {
+  if (!info || typeof info !== 'object') return undefined
+  const { utilization, rateLimitType, resetsAt } = info as RateLimitInfo
+  if (typeof utilization !== 'number' || !Number.isFinite(utilization) || utilization < 0) return undefined
+  return {
+    kind: typeof rateLimitType === 'string' ? rateLimitType : 'unknown',
+    usedPercent: Math.min(100, Math.round((utilization <= 1 ? utilization * 100 : utilization) * 10) / 10),
+    ...(typeof resetsAt === 'number' && Number.isFinite(resetsAt) ? { resetsAt } : {})
+  }
 }
 
 /** A rejected window that no overage can cover. */
@@ -91,6 +118,7 @@ function rejectedWindow(info: unknown): RejectedWindow | undefined {
  */
 export function observeRateLimit(message: SDKMessage, seen: RejectedWindows, nowMs = Date.now()): void {
   if (message.type === 'rate_limit_event') {
+    seen.noteUse(message.rate_limit_info)
     const window = rejectedWindow(message.rate_limit_info)
     if (window) seen.record(window, nowMs)
     return

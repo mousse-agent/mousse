@@ -1,9 +1,11 @@
+import type { BotTelling } from './telling'
 import type { BotCustomSlot, BotModelPick, BotModelSlotKey, BotModelSlots, BotPickCredential, BotSchedule } from './definition'
 import type { BotChatMessage, BotChip, BotDetail, BotSummary } from './chat'
 import type { BotLook } from './look'
 import type { BotPickReason } from './modelSlots'
 import type { BotMemoryEntry, BotMemoryForgetResult, BotMemoryListing } from './memory'
 import type { LlmProviderOption } from '../../settings'
+import type { NewBotAccess } from './deviceAccess'
 
 /** A computer on a bot's About and create row: this one (`this_computer`), or another of the person's computers by node. */
 export interface BotComputerChoice {
@@ -66,6 +68,11 @@ export interface BotRunsOnChoices {
   imageProviders?: LlmProviderOption[]
   /** What the owner can add for the Images row to offer a model, while it offers none (its tooltip). */
   imagesMissing?: string
+  /**
+   * New bot's Devices row: the service takes `access` on `bots.create`, saved before the bot is listed anywhere. Absent
+   * from an older service, which refuses the key, so the app shows no such row there.
+   */
+  reachOnCreate?: true
 }
 
 /** The pictures a bot made today against its caps (#1088), for the Images row's tooltip. */
@@ -142,8 +149,8 @@ export const BOTS_PERSONAL_V2_METHODS = [
  * Methods added after the required Bot UI set (docs/plans/bot-always-free.md, #673): the app calls them when they are
  * there, and an older service that lacks them is still compatible (`guiDaemonCompatibility` lists only the set above).
  */
-export const BOTS_WORK_METHODS = ['bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices', 'bots.model.setSlots', 'bots.model.setImage', 'bots.chat.react', 'bots.questions.answer', 'bots.memory.edit',
-  'bots.chat.clear', 'bots.memory.wipe', 'bots.reset', 'bots.model.setCustom'] as const
+export const BOTS_WORK_METHODS = ['bots.reminders.snooze', 'bots.work.stop', 'bots.reminders.cancel', 'bots.model.choices', 'bots.model.setSlots', 'bots.model.setImage', 'bots.chat.react', 'bots.questions.answer', 'bots.memory.edit',
+  'bots.actions.answer', 'bots.chat.clear', 'bots.memory.wipe', 'bots.reset', 'bots.model.setCustom'] as const
 export type BotsPersonalV2Method = (typeof BOTS_PERSONAL_V2_METHODS)[number] | (typeof BOTS_WORK_METHODS)[number]
 export const BOTS_PERSONAL_V2_CAPABILITY = 'bots.personal.v2'
 
@@ -175,9 +182,11 @@ export interface BotsPersonalV2Api {
    * from before rows): one model by name on every row; neither, by usage (an app from before picks). Older services
    * refuse these keys, so the app sends `model` only to a service that has `bots.model.choices`, and `slots` only to one
    * whose choices carry `providers`. `image`: the Images row (#1088), one of `imageProviders`' models; sent only to a
-   * service whose choices carry `imageProviders`.
+   * service whose choices carry `imageProviders`. `access`: which devices reach the new bot (New bot's Devices row),
+   * saved before the bot is listed anywhere; sent only to a service whose choices carry `reachOnCreate`. Absent, every
+   * device, as before.
    */
-  'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }; result: { bot: BotSummary } }
+  'bots.create': { params: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: NewBotAccess }; result: { bot: BotSummary } }
   'bots.get': { params: { botId: string }; result: BotDetail }
   /**
    * Renames the bot, changes its look, or (`description`) edits its prompt in About: the description it works under from
@@ -197,6 +206,7 @@ export interface BotsPersonalV2Api {
   'bots.chat.stop': { params: { botId: string }; result: Record<string, never> }
   /** Stops one piece of work (or a scheduled run) of the bot; the chat goes on. `stopped` is false when it had ended. */
   'bots.work.stop': { params: { botId: string; workId: string }; result: { stopped: boolean } }
+  'bots.reminders.snooze': { params: { botId: string; messageId: string; choice: import('./chat').BotSnoozeChoice }; result: BotChatMessage }
   /** Cancels one waiting reminder; it is never said or started. One already said leaves the detail as it is. */
   'bots.reminders.cancel': { params: { botId: string; reminderId: string }; result: BotDetail }
   'bots.chat.markRead': { params: { botId: string; seq: number }; result: Record<string, never> }
@@ -209,6 +219,7 @@ export interface BotsPersonalV2Api {
    * answered (`question_answered`) or no longer open (`question_closed`) is refused before anything is written. An older
    * service lacks it: the owner answers with Reply.
    */
+  'bots.actions.answer': { params: { actionId: string; digest: string; answer: 'send' | 'not_now' }; result: { status: string } }
   'bots.questions.answer': { params: { botId: string; questionId: string; choice: string; clientRequestId: string }; result: { message: BotChatMessage; question?: BotChatMessage } }
   /** `permissionId` is a `BotDetail.permissions` item's id (its fingerprint). */
   'bots.permissions.set': { params: { botId: string; permissionId: string; enabled: boolean }; result: BotDetail }
@@ -281,7 +292,7 @@ export interface BotsPersonalV2Api {
    * an older one is refused), with the guard and caps a save has. A run note the owner edits becomes a note.
    */
   'bots.memory.edit': { params: { botId: string; id: string; text: string }; result: { entry: BotMemoryEntry } }
-  /** Writes `memory.md`, `memory.jsonl`, `journal.jsonl`, `questions.jsonl` (when it asked any) and the definition into `dir`. */
+  /** Writes `memory.md`, `memory.jsonl`, `journal.jsonl`, `questions.jsonl` (when it asked any), `actions.jsonl` (when it has any calls) and the definition into `dir`. */
   'bots.memory.export': { params: { botId: string; dir: string }; result: { files: string[] } }
 }
 
@@ -292,10 +303,12 @@ export type BotsPersonalV2Result<M extends BotsPersonalV2Method> = BotsPersonalV
  * Events of the v2 methods. `bots.message` with an `ask` replaces `bots.escalation`, which is no
  * longer bridged to clients.
  */
-export const BOTS_PERSONAL_V2_EVENTS = ['bots.changed', 'bots.message', 'bots.activity'] as const
+export const BOTS_PERSONAL_V2_EVENTS = ['bots.changed', 'bots.message', 'bots.activity', 'bots.tell'] as const
 export type BotsPersonalV2Event = (typeof BOTS_PERSONAL_V2_EVENTS)[number]
 
 export interface BotsPersonalV2EventData {
+  /** A service-decided banner or withdrawal, only for windows that negotiated telling. */
+  'bots.tell': BotTelling
   /** The list and the bot's state need refreshing. */
   'bots.changed': { botId: string }
   /** A new or changed chat row: chat push and notifications (titled with `botName`, absent on older daemons). */

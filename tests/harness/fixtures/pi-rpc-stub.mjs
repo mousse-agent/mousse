@@ -90,7 +90,7 @@ process.stdin.on('data', (chunk) => {
 })
 
 function handle(command) {
-  if (scripted && ['prompt', 'steer', 'clear_queue', 'abort'].includes(command.type)) log({ command: command.type, ...(command.message !== undefined ? { message: command.message } : {}) })
+  if (scripted && ['prompt', 'steer', 'clear_queue', 'abort'].includes(command.type)) log({ command: command.type, ...(command.message !== undefined ? { message: command.message } : {}), ...(command.images !== undefined ? { images: command.images } : {}) })
   switch (command.type) {
     case 'get_available_models': return respond(command, { models: [] })
     case 'get_state': return respond(command, { sessionId: `stub-${process.pid}` })
@@ -212,7 +212,8 @@ function handle(command) {
 // - `{ text: 'a b c', deltaMs }`: the reply streams word by word and ends (`forever: true` streams until `abort`);
 // - `tools: [{ name, args, runMs, gate }]`: the reply ends with those calls. Pi starts them one after another, each
 //   through Mousse's gate when `gate` is set (the engine's real `/pi/gate`, as the extension's `beforeToolCall`), then
-//   runs the allowed ones together. After an abort it starts none of the rest;
+//   runs the allowed ones together. After an abort it starts none of the rest. `endMs`: the step's `turn_end` comes
+//   that long after the calls' results (by default at once);
 // - `fail: true, delayMs`: the request fails and Pi retries after `delayMs` (an `agent_end` per failed attempt);
 // - `prepareMs`: Pi prepares this step that long after the previous step's end (by default at once), with the steer
 //   it took out of its queue not shown yet; `compactMs`: then it compacts for that long (an abort stops it);
@@ -458,6 +459,8 @@ async function execute(run) {
       const finished = runnable.length ? await wait(run, Math.max(...runnable.map((tool) => tool.runMs ?? 20))) : !run.aborted
       for (const tool of runnable) end(tool, !finished, finished ? 'done' : 'Operation aborted')
       afterTools = true
+      // `endMs`: the step ends that long after its calls' results.
+      if (step.endMs) await wait(run, step.endMs, false)
     }
     write({ type: 'turn_end' })
     // Pi takes one steer from its queue right after `turn_end`: a steer sent in reply to it is too late for this step.

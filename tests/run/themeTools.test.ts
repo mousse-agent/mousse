@@ -4,16 +4,21 @@
  * changes settings, so a read-only turn, a read-only child and a Plan ceiling are refused, and under Ask the person
  * is asked first.
  */
-import { mkdtempSync, rmSync } from 'fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
+import { WallpaperStore } from '../../src/mms/appearance/WallpaperStore'
+import { ThemeRestoreStore } from '../../src/mms/appearance/ThemeRestoreStore'
+import { WALLPAPER_REFUSED } from '../../src/shared/themes/wallpaperImage'
+import { shownPath } from '../../src/mms/run/mcp/appTools/appearance'
+import { pngHeader } from '../fixtures/wallpaperBytes'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import type { AppearanceToolHost } from '../../src/mms/run/mcp/appTools'
 import type { MousseSettingsUpdate } from '../../src/shared/settings'
 import { canAnswerApproval } from '../../src/mms/run/approvalRights'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, denied, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 describe('theme_read and theme_set', () => {
@@ -26,15 +31,23 @@ describe('theme_read and theme_set', () => {
     home = undefined
   })
 
-  const setup = async (options: { mode?: 'ask' | 'accept_edits' | 'full'; answer?: 'allow' | 'reject'; readOnlyTurn?: boolean; readOnlyChild?: boolean; ceiling?: 'plan' | 'default'; subagent?: boolean; unattended?: boolean } = {}) => {
+  const setup = async (options: { mode?: 'ask' | 'accept_edits' | 'full'; answer?: 'allow' | 'reject'; readOnlyTurn?: boolean; readOnlyChild?: boolean; ceiling?: 'plan' | 'default'; subagent?: boolean; unattended?: boolean; importWallpaper?: AppearanceToolHost['importWallpaper'] } = {}) => {
     home = mkdtempSync(join(tmpdir(), 'mousse-theme-tools-'))
     const settings = new SettingsStore(MousseConfigStore.load(home))
     const saves: unknown[] = []
+    // The profile's real wallpaper store, wired as the daemon wires it: an agent's path is never a network share.
+    const wallpapers = new WallpaperStore(join(home, 'profile'))
     const appearance: AppearanceToolHost = {
       get: () => settings.get().appearance,
       set: (patch) => {
         saves.push(patch)
         return settings.set({ appearance: patch } as MousseSettingsUpdate).appearance
+      },
+      importWallpaper: options.importWallpaper ?? ((path) => wallpapers.importFile(path, { network: false })),
+      // A new store at every call, so the restore point is read back from disk as after a restart.
+      restorePoint: {
+        get: () => new ThemeRestoreStore(join(home!, 'profile')).get(),
+        set: (point) => new ThemeRestoreStore(join(home!, 'profile')).set(point)
       }
     }
     fx = delegationFixture()
@@ -63,7 +76,14 @@ describe('theme_read and theme_set', () => {
       if (outcome.isError) throw new Error(outcome.text)
       return JSON.parse(outcome.text) as Record<string, unknown>
     }
-    return { call, parsed, settings, saves, asked, registry }
+    return { call, parsed, settings, saves, asked, registry, home: home! }
+  }
+
+  /** A PNG on disk an agent can name. */
+  const picture = (folder: string, width = 5120, height = 2880): string => {
+    const path = join(folder, `wall-${width}x${height}.png`)
+    writeFileSync(path, pngHeader(width, height, 16))
+    return path
   }
 
   it('"switch me to dark mode": theme_set switches to a built-in theme and turns a user theme off', async () => {
@@ -148,7 +168,7 @@ describe('theme_read and theme_set', () => {
 
   it('a read-only child and a Plan ceiling are refused before anything runs, and are not offered the tool', async () => {
     const child = await setup({ readOnlyChild: true })
-    await expect(child.call('theme_set', { theme: 'light' })).rejects.toMatchObject({ code: 'mousse_read_only' })
+    expect(await denied(child.call('theme_set', { theme: 'light' }))).toMatchObject({ code: 'mousse_read_only' })
     expect(child.registry.listForThread('parent').map((tool) => tool.name)).toContain('theme_read')
     expect(child.registry.listForThread('parent').map((tool) => tool.name)).not.toContain('theme_set')
     expect(child.saves).toEqual([])
@@ -156,7 +176,7 @@ describe('theme_read and theme_set', () => {
     fx = undefined
 
     const plan = await setup({ ceiling: 'plan' })
-    await expect(plan.call('theme_set', { theme: 'light' })).rejects.toMatchObject({ code: 'mousse_ceiling_exceeded' })
+    expect(await denied(plan.call('theme_set', { theme: 'light' }))).toMatchObject({ code: 'mousse_ceiling_exceeded' })
     expect(plan.registry.listFor({ readOnly: false, modeCeiling: 'plan' }).map((tool) => tool.name)).not.toContain('theme_set')
     expect(plan.saves).toEqual([])
   })
@@ -222,10 +242,151 @@ describe('theme_read and theme_set', () => {
     expect(settings.get().appearance.userThemes).toEqual([{ id: 'user-night', name: 'Night Owl', base: 'dark', accent: '#7fdbca', colors: { '--surface-base': '#011627' }, css: 'a { color: red }' }])
   })
 
-  it.each(['accept_edits', 'full'] as const)('runs without asking under %s', async (mode) => {
-    const { call, asked, settings } = await setup({ mode })
-    await expect(call('theme_set', { theme: 'light' })).resolves.not.toMatchObject({ isError: true })
+  it('an update changes only the colors it names; null removes one', async () => {
+    const { parsed, settings } = await setup()
+    await parsed('theme_set', { userTheme: { name: 'Night', base: 'dark', colors: { '--surface-base': '#011627', '--text-primary': '#d6deeb' } } })
+    await parsed('theme_set', { userTheme: { id: 'user-night', colors: { '--surface-base': '#000000', '--text-primary': null, '--accent': '#7fdbca' } } })
+    expect(settings.get().appearance.userThemes[0]!.colors).toEqual({ '--surface-base': '#000000', '--accent': '#7fdbca' })
+  })
+
+  describe('restore', () => {
+    // The person's own theme, with CSS and a stored wallpaper, in use before any agent change.
+    const mine = {
+      id: 'user-mine', name: 'Mine', base: 'light', accent: '#112233', colors: { '--surface-base': '#fafafa' }, css: 'a { color: blue }',
+      wallpaper: { id: 'a'.repeat(64), type: 'image/webp', width: 1920, height: 1080, fit: 'contain', position: 'top', dim: 40 }
+    }
+
+    it("puts back the theme from before the agents' changes, however many: the person's theme as it was, wallpaper included, and removes the themes agents made", async () => {
+      const { call, parsed, settings, asked } = await setup()
+      settings.set({ appearance: { userThemes: [mine], userTheme: 'user-mine' } } as MousseSettingsUpdate)
+      const original = settings.get().appearance
+
+      const switched = await parsed('theme_set', { theme: 'dark' })
+      expect(switched.before).toEqual({ theme: 'light', userTheme: 'user-mine' })
+      await parsed('theme_set', { userTheme: { id: 'user-mine', colors: { '--surface-base': '#000000' }, wallpaper: null } })
+      await parsed('theme_set', { userTheme: { name: 'Agent Try', base: 'dark', colors: { '--surface-base': '#101418' } } })
+      await parsed('theme_set', { userTheme: { id: 'user-agent-try', accent: '#ff0000' } })
+      expect(await parsed('theme_read')).toMatchObject({
+        restorePoint: { theme: 'light', userTheme: 'user-mine', changedThemes: ['user-mine', 'user-agent-try'] }
+      })
+
+      const restored = await parsed('theme_set', { restore: true })
+      expect(restored).toMatchObject({ restored: true, removed: ['user-agent-try'], userTheme: { id: 'user-mine' } })
+      expect(settings.get().appearance).toEqual(original)
+      // Putting back the person's own CSS asks nobody, under Accept edits.
+      expect(asked).toEqual([])
+      expect(await parsed('theme_read')).toMatchObject({ restorePoint: null })
+      await expect(call('theme_set', { restore: true })).resolves.toMatchObject({ isError: true, text: expect.stringContaining('Nothing to restore') })
+    })
+
+    it('a theme the person picks in Settings after an agent change stays; the next agent change starts from it', async () => {
+      const { call, parsed, settings } = await setup()
+      await parsed('theme_set', { theme: 'dark' })
+      settings.set({ appearance: { theme: 'light' } } as MousseSettingsUpdate)
+      expect(await parsed('theme_read')).toMatchObject({ restorePoint: null })
+      await expect(call('theme_set', { restore: true })).resolves.toMatchObject({ isError: true, text: expect.stringContaining('changed in Settings') })
+      expect(settings.get().appearance.theme).toBe('light')
+
+      await parsed('theme_set', { theme: 'dark' })
+      await parsed('theme_set', { restore: true })
+      expect(settings.get().appearance).toMatchObject({ theme: 'light', userTheme: '' })
+    })
+
+    it('is refused with theme or userTheme beside it, and where settings may not change', async () => {
+      const both = await setup()
+      await both.parsed('theme_set', { theme: 'dark' })
+      await expect(both.call('theme_set', { restore: true, theme: 'light' })).resolves.toMatchObject({ isError: true, text: expect.stringContaining('restore alone') })
+      expect(both.settings.get().appearance.theme).toBe('dark')
+      const plan = await setup({ readOnlyTurn: true })
+      await expect(plan.call('theme_set', { restore: true })).resolves.toMatchObject({ isError: true })
+    })
+  })
+
+  it('"use this image as my wallpaper": theme_set stores the image, saves the theme with it and theme_read shows it', async () => {
+    const { parsed, settings, home } = await setup({ mode: 'full' })
+    const path = picture(home)
+    const saved = await parsed('theme_set', { userTheme: { name: 'Goku', base: 'dark', wallpaper: { path, dim: 55 } } })
+    const wallpaper = settings.get().appearance.userThemes[0]!.wallpaper!
+    expect(wallpaper).toMatchObject({ type: 'image/png', width: 5120, height: 2880, fit: 'cover', position: 'center', dim: 55 })
+    expect(wallpaper.id).toMatch(/^[0-9a-f]{64}$/)
+    expect(saved).toMatchObject({ saved: 'user-goku' })
+    // Mousse keeps its own copy: the source can go.
+    rmSync(path)
+    expect(existsSync(join(home, 'profile', 'wallpapers', `${wallpaper.id}.png`))).toBe(true)
+    const read = await parsed('theme_read')
+    expect((read.userThemes as Array<{ wallpaper?: unknown }>)[0]!.wallpaper).toMatchObject({ id: wallpaper.id, dim: 55 })
+    expect(read.guide).toContain('userTheme.wallpaper')
+
+    // Fit, position and dim change without a path; null removes the wallpaper.
+    await parsed('theme_set', { userTheme: { id: 'user-goku', wallpaper: { fit: 'contain', position: 'top' } } })
+    expect(settings.get().appearance.userThemes[0]!.wallpaper).toMatchObject({ id: wallpaper.id, fit: 'contain', position: 'top', dim: 55 })
+    await parsed('theme_set', { userTheme: { id: 'user-goku', wallpaper: null } })
+    expect(settings.get().appearance.userThemes[0]!.wallpaper).toBeUndefined()
+  })
+
+  it.each([
+    ['a file that is not an image', (folder: string) => { writeFileSync(join(folder, 'notes.txt'), 'secret'); return join(folder, 'notes.txt') }],
+    ['a missing file', (folder: string) => join(folder, 'missing.png')],
+    ['a network share', () => '\\\\attacker\\share\\x.png'],
+    ['a relative path', () => 'x.png']
+  ])('refuses %s with one sentence that does not say which, and saves nothing', async (_name, path) => {
+    const { call, saves, home } = await setup({ mode: 'full' })
+    const outcome = await call('theme_set', { userTheme: { name: 'Bad', base: 'dark', wallpaper: { path: path(home) } } })
+    expect(refusalOf(outcome)).toMatchObject({ message: WALLPAPER_REFUSED })
+    expect(saves).toEqual([])
+  })
+
+  it('refuses display fields for a theme with no image yet, and bad fields, before reading anything', async () => {
+    let imports = 0
+    const { call, saves } = await setup({ mode: 'full', importWallpaper: async () => { imports++; throw new Error('never') } })
+    await expect(call('theme_set', { userTheme: { name: 'A', base: 'dark', wallpaper: { dim: 30 } } })).resolves.toMatchObject({ isError: true, text: expect.stringContaining('no wallpaper yet') })
+    await expect(call('theme_set', { userTheme: { name: 'A', base: 'dark', wallpaper: { path: 'C:\\x.png', fit: 'stretch' } } })).resolves.toMatchObject({ isError: true, text: expect.stringContaining('wallpaper.fit') })
+    await expect(call('theme_set', { userTheme: { name: 'A', base: 'dark', wallpaper: { path: 'C:\\x.png', dim: 95 } } })).resolves.toMatchObject({ isError: true, text: expect.stringContaining('wallpaper.dim') })
+    expect(imports).toBe(0)
+    expect(saves).toEqual([])
+  })
+
+  it('a new image asks unless the run is in Full access, naming the file, and nothing is read before the answer', async () => {
+    const full = await setup({ mode: 'full' })
+    await expect(full.call('theme_set', { userTheme: { name: 'Wall', base: 'dark', wallpaper: { path: picture(full.home) } } })).resolves.not.toMatchObject({ isError: true })
+    expect(full.asked).toEqual([])
+    fx?.dispose()
+    fx = undefined
+
+    const edits = await setup({ mode: 'accept_edits', answer: 'reject' })
+    const other = picture(edits.home, 800, 600)
+    await expect(edits.call('theme_set', { userTheme: { name: 'Wall', base: 'dark', wallpaper: { path: other } } })).resolves.toMatchObject({ isError: true, text: expect.stringContaining('did not approve') })
+    expect(edits.asked).toEqual([{ prompt: `Allow this agent to use ${other} as the wallpaper and change how Mousse looks?`, approval: expect.objectContaining({ permissionKey: 'mousse:appearance' }) }])
+    expect(existsSync(join(edits.home, 'profile', 'wallpapers'))).toBe(false)
+    expect(edits.saves).toEqual([])
+  })
+
+  it('the approval shows the path on one line, without characters that could make it read as another path', () => {
+    expect(shownPath('C:\\pics\\a\u202egnp.exe\nC:\\safe.png')).toBe('C:\\pics\\agnp.exeC:\\safe.png')
+    expect(shownPath(`C:\\${'d\\'.repeat(150)}goku.png`)).toMatch(/^….*goku\.png$/)
+    expect(shownPath(`C:\\${'d\\'.repeat(150)}goku.png`)).toHaveLength(200)
+  })
+
+  it('fit, position and dim of a stored image run under Accept edits without asking', async () => {
+    const { call, parsed, asked, settings, home } = await setup({ mode: 'accept_edits', answer: 'allow' })
+    await parsed('theme_set', { userTheme: { name: 'Wall', base: 'dark', wallpaper: { path: picture(home) } } })
+    asked.length = 0
+    await expect(call('theme_set', { userTheme: { id: 'user-wall', wallpaper: { dim: 70 } } })).resolves.not.toMatchObject({ isError: true })
     expect(asked).toEqual([])
-    expect(settings.get().appearance.theme).toBe('light')
+    expect(settings.get().appearance.userThemes[0]!.wallpaper?.dim).toBe(70)
+  })
+
+  it('a change made while the image is being stored is kept: the themes are read after the import', async () => {
+    let finish!: (value: { id: string; type: 'image/png'; width: number; height: number }) => void
+    const pending = new Promise<{ id: string; type: 'image/png'; width: number; height: number }>((resolve) => { finish = resolve })
+    const { call, settings } = await setup({ mode: 'full', importWallpaper: () => pending })
+    const setting = call('theme_set', { userTheme: { name: 'Wall', base: 'dark', wallpaper: { path: 'C:\\x.png' } } })
+    // Meanwhile another window adds a theme.
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    settings.set({ appearance: { userThemes: [{ id: 'user-other', name: 'Other', base: 'light', accent: '', colors: {}, css: '' }] } } as MousseSettingsUpdate)
+    finish({ id: 'a'.repeat(64), type: 'image/png', width: 100, height: 100 })
+    await expect(setting).resolves.not.toMatchObject({ isError: true })
+    expect(settings.get().appearance.userThemes.map((theme) => theme.id)).toEqual(['user-other', 'user-wall'])
+    expect(settings.get().appearance.userThemes[1]!.wallpaper?.id).toBe('a'.repeat(64))
   })
 })

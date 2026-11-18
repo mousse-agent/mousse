@@ -89,6 +89,9 @@ Recovery passphrases use hidden/piped stdin and never argv or flags.
 `
 
 export const BRIDGE_HELP = `Usage:
+  mousse-cli bridge link [--name <name>] [--protect]
+  mousse-cli bridge paste [ml1_<payload>] [--name <name>] [--start-over] [--protect] [--link-file <path>]
+  mousse-cli bridge allow <node-id>
   mousse-cli bridge invite [--ttl 10m] [--name <name>] [--caps read,chat,write]
   mousse-cli bridge join [mj1_<payload>] [--name <name>] [--protect] [--invite-file <path>]
     [--via ws://127.0.0.1:<port>/mousse-net]
@@ -97,13 +100,28 @@ export const BRIDGE_HELP = `Usage:
   mousse-cli bridge rename <node-id> <name>
   mousse-cli bridge block <node-id>
   mousse-cli bridge unblock <node-id>
+  mousse-cli bridge connect <node-id>
+  mousse-cli bridge disconnect <node-id>
   mousse-cli bridge limits <node-id> [--max-mode ask|accept_edits|auto|full] [--terminal on|off]
-    [--editor on|off] [--bots on|off] [--agent-reach none|launched|all]
+    [--editor on|off] [--bots on|off] [--agent-reach none|launched|all] [--work on|off]
   mousse-cli bridge caps <node-id> --caps read,chat,write,settings
   mousse-cli bridge kind <node-id> computer|phone
   mousse-cli bridge threads [on|off]
   mousse-cli bridge bots [on|off]
   mousse-cli bridge editor-server [system|mousse]
+
+link makes a connect link: one line of text to paste on the other computer. On the computer
+that keeps the list it adds a computer; on any other it only connects a device already in the
+list. On a computer with no network identity it creates one, named after this computer, and this
+computer then keeps the others connected: pick the one that is usually on. --name sets that name.
+--protect reads a passphrase (hidden or piped) for when the system keychain refuses. A new link
+stops any earlier one that was not used; a link lasts 30 minutes. The link is a secret.
+paste uses a link made on another computer. Without an argument it reads the link at a no-echo
+prompt, or from --link-file (a private regular file). Joining through a link holds the computer
+that made it until allow; a computer that is set up alone must start over first, which
+--start-over does only after the other computer answers. A device that came in by a link made
+here waits for allow; allow connects it with the "Work on threads" access. Other computers
+signed in to Mousse ID connect the new device on their own.
 
 editor-server chooses which SSH server answers editor connections from your other computers:
 mousse (the default) is Mousse's own, which needs no SSH server on this computer; system is this
@@ -117,7 +135,12 @@ default and only changes this computer.
 Only the current authority can invite, revoke or rename nodes, change capabilities or set a
 device's kind. block, unblock and limits act on this computer only, on any computer: a blocked
 device is refused every Bridge call and stream here until unblocked. limits --bots off keeps
-one device from every personal bot on this computer.
+one device from every personal bot on this computer. limits --work off lets one device view
+threads and chat with bots only: it can't start, send to, change or stop threads, or make or
+change bots, here.
+connect and disconnect also act on this computer only: a device of your list that is not
+connected here gets nothing from it, and two computers open no session until each connected the
+other. Disconnect ends the device's streams and editor connections here; what it started runs on.
 caps settings is "works on threads"; it is refused for a device not known to be a computer.
 revoke and rename require the nod_ identifier shown by bridge nodes.
 An invite without --caps is for another computer: read, chat, write and settings
@@ -169,6 +192,11 @@ type NetMethod =
   | 'bridge.setCaps'
   | 'bridge.setKind'
   | 'bridge.policy'
+  | 'bridge.connect'
+  | 'bridge.disconnect'
+  | 'bridge.allow'
+  | 'net.link.make'
+  | 'net.link.paste'
   | 'bridge.workOnThreads'
   | 'bridge.shareBots'
   | 'bridge.editorServer'
@@ -181,18 +209,22 @@ const BRIDGE_ALIASES: Record<string, NetMethod> = {
   unblock: 'bridge.policy',
   limits: 'bridge.policy',
   caps: 'bridge.setCaps',
-  kind: 'bridge.setKind'
+  kind: 'bridge.setKind',
+  link: 'net.link.make',
+  paste: 'net.link.paste'
 }
 export interface NetCliRequest {
   method: NetMethod
   params: Record<string, unknown>
   promptInvite?: boolean
+  promptLink?: boolean
   promptPassphrase?: boolean
   recoveryOutput?: string
 }
 export interface NetCliIO {
   emit(value: unknown, text: string): void
   readInvite?: () => Promise<string>
+  readLink?: () => Promise<string>
   readPassphrase?: () => Promise<string>
 }
 export type NetCliClient = Pick<DaemonClient, 'request'>
@@ -233,6 +265,11 @@ export function parseInviteTtl(value = '10m'): number {
 function invite(value: string): string {
   if (!/^mj1_[A-Za-z0-9_-]+$/.test(value) || value.length > 64 * 1024)
     invalid('Expected a valid mj1_ invite string.')
+  return value
+}
+function connectLink(value: string): string {
+  if (!/^ml1_[A-Za-z0-9_-]+$/.test(value) || value.length > 4096)
+    invalid('Expected a valid ml1_ connect link.')
   return value
 }
 function passphrase(value: string): string {
@@ -355,7 +392,12 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
     'bridge.rename': [],
     'bridge.setCaps': ['caps'],
     'bridge.setKind': [],
-    'bridge.policy': args.subcommand === 'limits' ? ['max-mode', 'terminal', 'editor', 'bots', 'agent-reach'] : [],
+    'bridge.policy': args.subcommand === 'limits' ? ['max-mode', 'terminal', 'editor', 'bots', 'agent-reach', 'work'] : [],
+    'bridge.connect': [],
+    'bridge.disconnect': [],
+    'bridge.allow': [],
+    'net.link.make': ['name', 'protect'],
+    'net.link.paste': ['name', 'start-over', 'protect', 'link-file'],
     'bridge.workOnThreads': [],
     'bridge.shareBots': [],
     'bridge.editorServer': []
@@ -373,7 +415,8 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
         'unlock',
         'become-authority',
         'revoke',
-        'bind-root'
+        'bind-root',
+        'start-over'
       ].includes(key)
     ) {
       if (args.flags.get(key) !== true) invalid('This option is a switch; do not supply a value.')
@@ -395,10 +438,14 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
           : method === 'bridge.rename' || method === 'bridge.setKind'
             ? 2
             : method === 'bridge.revoke' ||
+                method === 'bridge.connect' ||
+                method === 'bridge.disconnect' ||
+                method === 'bridge.allow' ||
                 method === 'bridge.setCaps' ||
                 method === 'bridge.policy'
               ? 1
               : method === 'bridge.join' ||
+                  method === 'net.link.paste' ||
                   method === 'bridge.workOnThreads' ||
                   method === 'bridge.shareBots' ||
                   method === 'bridge.editorServer'
@@ -573,10 +620,34 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
       ...(promptPassphrase ? { promptPassphrase: true } : {})
     }
   }
-  if (method === 'bridge.revoke' || method === 'bridge.rename') {
+  if (method === 'net.link.make')
+    return { method, params, ...(args.flags.has('protect') ? { promptPassphrase: true } : {}) }
+  if (method === 'net.link.paste') {
+    if (args.positional.length > 1) invalid('bridge paste accepts at most one link argument.')
+    const file = stringFlag(args, 'link-file')
+    if (file && args.positional.length) invalid('Choose one link input.')
+    if (file) params.link = connectLink(readBoundedFile(file, 4096, true).trim())
+    else if (args.positional.length) params.link = connectLink(args.positional[0])
+    if (args.flags.has('start-over')) params.startOver = true
+    return {
+      method,
+      params,
+      ...(params.link === undefined ? { promptLink: true } : {}),
+      ...(args.flags.has('protect') ? { promptPassphrase: true } : {})
+    }
+  }
+  if (
+    method === 'bridge.revoke' ||
+    method === 'bridge.rename' ||
+    method === 'bridge.connect' ||
+    method === 'bridge.disconnect' ||
+    method === 'bridge.allow'
+  ) {
     const node = args.positional[0]
     if (!isId('node', node))
-      invalid('bridge revoke and rename require a valid nod_ node identifier from bridge nodes.')
+      invalid(
+        `bridge ${args.subcommand} requires a valid nod_ node identifier from bridge nodes.`
+      )
     params.node = node
     if (method === 'bridge.rename') params.name = name(args.positional[1])
   }
@@ -627,16 +698,18 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
         terminal = stringFlag(args, 'terminal'),
         editor = stringFlag(args, 'editor'),
         bots = stringFlag(args, 'bots'),
-        reach = stringFlag(args, 'agent-reach')
+        reach = stringFlag(args, 'agent-reach'),
+        work = stringFlag(args, 'work')
       if (
         mode === undefined &&
         terminal === undefined &&
         editor === undefined &&
         bots === undefined &&
-        reach === undefined
+        reach === undefined &&
+        work === undefined
       )
         invalid(
-          'bridge limits requires --max-mode ask|accept_edits|auto|full, --terminal on|off, --editor on|off, --bots on|off and/or --agent-reach none|launched|all.'
+          'bridge limits requires --max-mode ask|accept_edits|auto|full, --terminal on|off, --editor on|off, --bots on|off, --agent-reach none|launched|all and/or --work on|off.'
         )
       if (mode !== undefined) {
         if (!isPermissionMode(mode)) invalid('--max-mode requires ask, accept_edits, auto or full.')
@@ -658,6 +731,10 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
         if (!isAgentReach(reach)) invalid('--agent-reach requires none, launched or all.')
         params.agentReach = reach
       }
+      if (work !== undefined) {
+        if (work !== 'on' && work !== 'off') invalid('--work requires on or off.')
+        params.work = work === 'on'
+      }
     }
   }
   return {
@@ -671,7 +748,7 @@ export function prepareNetCommand(args: ParsedArgs): NetCliRequest {
 export function publicNetOutput(value: unknown): unknown {
   if (typeof value === 'string')
     return value
-      .replace(/\b(?:mj1|sj1)_[A-Za-z0-9_-]+/g, '[redacted]')
+      .replace(/\b(?:mj1|sj1|ml1)_[A-Za-z0-9_-]+/g, '[redacted]')
       .replace(/(https?:\/\/)[^/\s@]+@/g, '$1[redacted]@')
   if (Array.isArray(value)) return value.map(publicNetOutput)
   if (value && typeof value === 'object')
@@ -697,6 +774,10 @@ export async function executeNetCommand(
   if (request.promptInvite) {
     if (!io.readInvite) invalid('A no-echo invite input is required.')
     params.invite = invite((await io.readInvite()).trim())
+  }
+  if (request.promptLink) {
+    if (!io.readLink) invalid('A no-echo link input is required.')
+    params.link = connectLink((await io.readLink()).trim())
   }
   if (request.promptPassphrase) {
     if (!io.readPassphrase) invalid('A no-echo passphrase input is required.')
@@ -761,6 +842,46 @@ export async function executeNetCommand(
       output,
       `mousse-cli bridge join ${output.invite}\nExpires: ${new Date(output.expiresAt).toISOString()}`
     )
+  } else if (request.method === 'net.link.make') {
+    const response = result as {
+      link?: unknown
+      add?: unknown
+      created?: unknown
+      expiresAt?: unknown
+      reachable?: unknown
+      keeper?: unknown
+    }
+    if (
+      !response ||
+      typeof response.link !== 'string' ||
+      typeof response.add !== 'boolean' ||
+      typeof response.expiresAt !== 'number'
+    )
+      throw new Error('Invalid link response')
+    const output = {
+      link: connectLink(response.link),
+      add: response.add,
+      created: response.created === true,
+      expiresAt: response.expiresAt,
+      reachable: response.reachable !== false,
+      ...(typeof response.keeper === 'string' ? { keeper: response.keeper } : {})
+    }
+    io.emit(
+      output,
+      [
+        ...(output.created
+          ? ['This computer will keep the others connected. Pick the one that is usually on.']
+          : []),
+        output.add
+          ? 'Paste on the computer to add:'
+          : `Connects a device already in the list. To add a computer, make the link on ${output.keeper ?? 'the computer that keeps the list'}.`,
+        `mousse-cli bridge paste ${output.link}`,
+        `Expires: ${new Date(output.expiresAt).toISOString()}`,
+        ...(output.reachable
+          ? []
+          : ['Only this computer can reach this link. Allow Mousse through the firewall, or turn on Tailscale or SSH.'])
+      ].join('\n')
+    )
   } else {
     const output = publicNetOutput(result)
     io.emit(output, JSON.stringify(output, null, 2))
@@ -768,7 +889,30 @@ export async function executeNetCommand(
   return 0
 }
 
-export function netCliFailure(error: unknown): {
+/** Why a connect link could not be made or used, in the words the Devices page uses. */
+const LINK_REASONS: Record<string, string> = {
+  start_over:
+    'This computer is set up alone. Run bridge paste again with --start-over, or make the link here instead.',
+  connect_only:
+    'This link only connects devices already in the list. Make the link on the computer that keeps the list.',
+  own_link: 'This link was made on this computer. Paste it on the other one.',
+  other_list:
+    'This computer is in another list. Two lists can’t be merged; start over on one of them first.',
+  live_devices:
+    'This computer keeps other devices connected. Make the link here and paste it on the other computer.',
+  mousse_id: 'This computer is signed in to Mousse ID. Sign out to start over.',
+  space_host: 'This computer hosts a Space, so it can’t start over.',
+  stale: 'This link was used or replaced. Make a new link.',
+  link_unreachable:
+    'The computer that made the link didn’t answer. Allow Mousse through its firewall, or connect both computers with Tailscale or SSH.',
+  no_listener:
+    'No other computer can reach this one. Allow Mousse through the firewall, or turn on Tailscale or SSH.',
+  passphrase: 'The system keychain refused. Run again with --protect to choose a passphrase.'
+}
+export function netCliFailure(
+  error: unknown,
+  method?: NetMethod
+): {
   code: NetErrorCode
   error: string
   exitCode: number
@@ -802,9 +946,18 @@ export function netCliFailure(error: unknown): {
     : typeof code === 'string' && Object.hasOwn(localCodes, code)
       ? localCodes[code]
       : 'internal'
+  const reason =
+    error && typeof error === 'object'
+      ? (error as { details?: { reason?: unknown } }).details?.reason
+      : undefined
   return {
     code: safeCode,
-    error: NET_ERRORS[safeCode].message,
+    error:
+      (method === 'net.link.make' || method === 'net.link.paste') &&
+      typeof reason === 'string' &&
+      Object.hasOwn(LINK_REASONS, reason)
+        ? LINK_REASONS[reason]
+        : NET_ERRORS[safeCode].message,
     exitCode: safeCode === 'cancelled' ? 130 : safeCode === 'bad_request' ? 2 : 1
   }
 }
@@ -924,6 +1077,12 @@ export function readInviteSecret(
     output
   )
 }
+export function readLinkSecret(
+  input: InviteInput = process.stdin,
+  output: Pick<NodeJS.WritableStream, 'write'> = process.stderr
+): Promise<string> {
+  return readSecret({ prompt: 'Link (input hidden): ', maxBytes: 4096, trim: true }, input, output)
+}
 export function readPassphraseSecret(
   input: InviteInput = process.stdin,
   output: Pick<NodeJS.WritableStream, 'write'> = process.stderr
@@ -936,17 +1095,27 @@ export async function runNet(args: ParsedArgs): Promise<void> {
     process.stdout.write(args.command === 'bridge' ? BRIDGE_HELP : NET_HELP)
     return
   }
-  let client: DaemonClient | undefined
+  let client: DaemonClient | undefined,
+    method: NetMethod | undefined
   try {
     const request = prepareNetCommand(args)
-    if (request.promptInvite && request.promptPassphrase && !process.stdin.isTTY)
+    method = request.method
+    if (
+      (request.promptInvite || request.promptLink) &&
+      request.promptPassphrase &&
+      !process.stdin.isTTY
+    )
       invalid(
-        'Piped --protect input requires --invite-file or an invite argument; stdin carries only the passphrase.'
+        'Piped --protect input requires a file or an argument for the invite or link; stdin carries only the passphrase.'
       )
     // Read the bearer before daemon auto-start, so invalid input has no side effects.
     if (request.promptInvite) {
       request.params.invite = invite(await readInviteSecret())
       request.promptInvite = false
+    }
+    if (request.promptLink) {
+      request.params.link = connectLink(await readLinkSecret())
+      request.promptLink = false
     }
     if (request.promptPassphrase) {
       request.params.passphrase = passphrase(await readPassphraseSecret())
@@ -968,7 +1137,7 @@ export async function runNet(args: ParsedArgs): Promise<void> {
       emit: (value, text) => writeOutput(args.globals.mode, value, () => text)
     })
   } catch (error) {
-    const failure = netCliFailure(error)
+    const failure = netCliFailure(error, method)
     process.stderr.write(
       args.globals.mode === 'json'
         ? `${JSON.stringify({ code: failure.code, error: failure.error })}\n`

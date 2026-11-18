@@ -29,6 +29,7 @@ export type CommandId =
   | 'mainArea.toggle'
   | 'terminal.open'
   | 'theme.builtIn'
+  | 'window.reload'
   | 'settings.open'
   | 'automations.open'
   | 'usage.open'
@@ -233,9 +234,9 @@ export const COMMANDS: readonly CommandDefinition[] = [
   },
   {
     id: 'threads.search',
-    title: 'Search threads',
+    title: 'Search everything',
     category: 'Threads',
-    searchTerms: ['find', 'chat', 'messages'],
+    searchTerms: ['find', 'threads', 'chats', 'bots', 'archived', 'messages'],
     defaultBinding: `${MOD}+Shift+O`,
     scope: 'global',
     textInput: 'allow',
@@ -290,18 +291,19 @@ export const COMMANDS: readonly CommandDefinition[] = [
     guest: 'allow'
   },
   {
-    // The transcript's own find bar. A text field may be focused (the composer); a terminal or the
-    // browser surface keeps the key, and the handler also leaves Monaco its own find widget.
+    // The transcript's own find bar, in a thread or (under the Chats tab) a bot's chat. A text field may be
+    // focused (the composer); a terminal or the browser surface keeps the key, and the handler also leaves
+    // Monaco its own find widget.
     id: 'chat.findInThread',
     title: 'Find in thread',
     category: 'Threads',
-    searchTerms: ['search', 'text', 'messages', 'transcript'],
+    searchTerms: ['search', 'text', 'messages', 'transcript', 'chat'],
     defaultBinding: `${MOD}+F`,
     scope: 'global',
     textInput: 'allow',
     terminal: 'deny',
     guest: 'deny',
-    when: threadIsOpen
+    when: (ctx) => ctx.threadOpen || !ctx.projectsMode
   },
   {
     id: 'run.stop',
@@ -394,6 +396,19 @@ export const COMMANDS: readonly CommandDefinition[] = [
     title: 'Turn off custom theme',
     category: 'View',
     searchTerms: ['theme', 'appearance', 'css', 'reset', 'default'],
+    defaultBinding: null,
+    scope: 'global',
+    textInput: 'allow',
+    terminal: 'allow',
+    guest: 'allow'
+  },
+  {
+    // Recovers a broken layout without quitting. Saves autosaved edits first and refuses while unsaved edits remain.
+    // No key: a slip of the hand must not reload the window.
+    id: 'window.reload',
+    title: 'Reload window',
+    category: 'View',
+    searchTerms: ['refresh', 'restart', 'layout', 'developer'],
     defaultBinding: null,
     scope: 'global',
     textInput: 'allow',

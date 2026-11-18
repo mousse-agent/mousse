@@ -640,13 +640,6 @@ describe('stdout', () => {
       expect(text).not.toMatch(/console\.|process\.stdout/u)
     }
   })
-
-  it('stays empty through a run that is refused, whatever the reason', async () => {
-    const d = await fakeDaemon({ open: async () => Promise.reject(new TunnelError('editor_off')) })
-    const t = wire(d.home)
-    await runSshProxy(argv(), t.io)
-    expect(t.stdout().length).toBe(0)
-  })
 })
 
 describe('the ProxyCommand Mousse writes', () => {

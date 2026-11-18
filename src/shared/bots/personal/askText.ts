@@ -1,6 +1,7 @@
 import type { BotBudget } from './definition'
 import { isSpecialAsk, type BotAskRequest } from './escalation'
 import { botGrantTool } from './manifest'
+import { tellingChangeText } from './tellingSettings'
 
 /**
  * An ask in plain words for its card and for About → Can use (Bot Phase 1 §5.4): the card reads
@@ -23,7 +24,7 @@ export interface AskText {
 export const THREADS_TEXT: AskText = {
   title: 'use your threads',
   note: 'Threads it starts run with full access on this computer.',
-  tip: 'It can read your threads, start new ones, message or stop them, and archive or unarchive them, only when you ask it in its chat. A thread it starts runs commands and changes files without asking; a message it sends runs in that thread\'s own mode. It never answers an approval or a question.'
+  tip: 'It can read your threads, their queues and their Git status and diffs, here and on your other computers that let agents work there. When you ask it in its chat, or in work you gave it, it can start new threads, message, steer or stop them, change what waits in their queues, fork one and hand a fork\'s work back, and archive or unarchive them. A thread it starts runs commands and changes files without asking; a message it sends runs in that thread\'s own mode. It answers an approval only while you let agents answer approvals on other threads, and never a question.'
 }
 
 /** Tools by name, as a card says them after "wants to". */
@@ -42,7 +43,58 @@ const TOOL_TEXT: Record<string, AskText> = {
     title: 'use the profiler',
     note: "Mousse's memory and CPU numbers, while Labs lets agents read the profiler.",
     tip: "It can read Mousse's profiler: memory and CPU of each process, the service's counts and caches, windows and the GPU, and take samples. Numbers only, never your chats or files; threads it can't see count only in totals. Never a heap snapshot. Settings → Labs → Profiler can still turn it off."
-  }
+  },
+  themes: {
+    title: 'change how Mousse looks',
+    note: 'Themes, colors, CSS and a wallpaper picture from this computer, without asking each time.',
+    tip: "It can read your themes, switch between them, and save a theme with colors, an accent, CSS and a wallpaper, as a thread's agent can in Full access. Theme CSS can restyle or cover anything in Mousse's window; CSS that loads anything from outside Mousse is dropped. A wallpaper is a PNG, JPEG or WebP it names on this computer, never on a network share; Mousse keeps its own copy. Settings → Appearance switches the theme back."
+  },
+  schedules: {
+    title: 'schedule work in your threads',
+    note: 'Scheduled jobs that run in your threads with full access, without asking each time.',
+    tip: "It can make scheduled jobs, as a thread's agent can: a turn in one of your threads, or a new thread in a project, later or on a cadence. It sees, changes, pauses, runs and removes only the jobs it made. Its jobs run in Full access (or no wider than the device you wrote from). The profile's limits on agent jobs hold, and Automations shows each job; only you resume or extend one."
+  },
+  secrets: {
+    title: 'use secrets you give it',
+    note: 'You type each one into a private card in its chat; it gets only the name.',
+    tip: 'It can ask you for a secret (an API key, a token) with a private card in its chat, where you type it or pick a saved one. It never sees the value: it uses the secret by name in commands its work runs from its files folder (with "run commands"), each command\'s output masked. Those commands run as its other commands do, with only the secrets they name and none of your other settings or credentials; on Linux with bubblewrap, in a sandbox with only its folders and no network. Settings → Secrets lists and removes them.'
+  },
+  quick_actions: {
+    title: 'add quick actions',
+    note: 'Buttons in your Actions list, without asking for each.',
+    tip: 'It can add a quick action: a button in your Actions list that sends a message or runs a shell command when you press it. Nothing runs until you press it.'
+  },
+  // The bot's own tools: a bot made before one of them existed has none of it in its grant, so its first use asks.
+  telling_set: { title: 'change when it tells you', note: 'How often it tells you, its quiet hours, and whether it can wake you.' },
+  bot_schedule_add: { title: 'run on a schedule', note: '' },
+  bot_schedule_remove: { title: 'remove its schedules', note: '' },
+  bot_schedule_list: { title: 'see its schedules', note: '' },
+  set_profile: { title: 'change its name or description', note: '' },
+  set_depth: { title: 'change how long it thinks', note: '' },
+  use_model: { title: 'switch its model', note: '' },
+  escalate: { title: 'ask you for permissions', note: '' },
+  run_report: { title: 'report on its automation runs', note: '' },
+  memory_search: { title: 'search its memory', note: '' },
+  memory_read: { title: 'read its memory', note: '' },
+  memory_list: { title: 'list its memory', note: '' },
+  memory_save: { title: 'save to its memory', note: '' },
+  memory_forget: { title: 'forget things in its memory', note: '' },
+  automation_draft_save: { title: 'draft automations', note: 'You turn each one on yourself.' },
+  automation_ask: { title: 'ask you about its automation drafts', note: '' },
+  automation_list: { title: 'see your automations', note: '' },
+  automation_update: { title: 'change your automations', note: '' },
+  automation_pause: { title: 'pause your automations', note: '' }
+}
+
+/** Any other tool: the card never shows a tool's name ("use the telling set tool"); the tooltip does. */
+const otherToolText = (tool: string): AskText => ({ title: 'use another of Mousse\'s tools', note: '', tip: `Mousse's tool ${tool}.` })
+
+/**
+ * What one refused call would have done, for its ask's note: "It would set: tell you when something is worth a look." Only
+ * for tools whose arguments say it plainly; undefined for every other call, whose card keeps its usual note.
+ */
+export function askCallNote(tool: string, args: unknown): string | undefined {
+  return tool === 'telling_set' ? tellingChangeText(args) : undefined
 }
 
 /**
@@ -61,13 +113,7 @@ export function mcpChangesNote(name: string, changes: 'none' | 'some' | 'unknown
  */
 export const OLD_FILES_TEXT: AskText = { title: 'use files on this computer', note: 'No longer available: a bot uses only its own files folder.' }
 
-const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000))
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`
-/** "45 minutes", "2 hours", "90 minutes": whole hours read as hours. */
-const duration = (ms: number) => {
-  const count = minutes(ms)
-  return count >= 60 && count % 60 === 0 ? plural(count / 60, 'hour') : plural(count, 'minute')
-}
 /** "400,000 tokens". */
 const tokens = (count: number) => `${Math.round(count).toLocaleString('en-US')} tokens`
 
@@ -75,8 +121,9 @@ function budgetText(key: string, amount: number | undefined, budget: BotBudget |
   const held = budget?.[key as keyof BotBudget]
   const total = amount !== undefined && held !== undefined ? held + amount : undefined
   switch (key) {
+    // An older build's ask for work time, which has no limit now: only its answered card is still shown.
     case 'maxActiveMs':
-      return total !== undefined ? { title: `work for up to ${duration(total)} per run`, note: '' } : { title: 'work longer on each run', note: '' }
+      return { title: 'keep working', note: '' }
     case 'maxTurns':
       return total !== undefined ? { title: `take up to ${plural(Math.round(total), 'step')} per run`, note: '' } : { title: 'take more steps on each run', note: '' }
     case 'maxToolCalls':
@@ -112,7 +159,7 @@ export function askText(request: BotAskRequest, options: { budget?: BotBudget } 
   if ('tool' in request) {
     // Every browser tool is one permission: "use the browser", never "the browser act tool".
     const tool = botGrantTool(request.tool)
-    return TOOL_TEXT[tool] ?? { title: `use the ${tool.replace(/_/g, ' ')} tool`, note: '' }
+    return TOOL_TEXT[tool] ?? otherToolText(tool)
   }
   return budgetText(request.budget.key, request.budget.amount, options.budget)
 }

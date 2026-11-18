@@ -4,6 +4,7 @@ import { modelPickProblem, modelRowsProblem } from '../../shared/bots/personal/m
 import { MAX_CHOICE_LABEL_CHARS } from '../../shared/bots/personal/questions'
 import { isAbsolutePath } from '../../shared/bots/personal/manifest'
 import type { BotLook } from '../../shared/bots/personal/look'
+import { isNewBotAccess, type NewBotAccess } from '../../shared/bots/personal/deviceAccess'
 import { DomainHandlerRegistry, DomainRpcError, domainObject } from '../protocol/domainRegistry'
 import { BotEngineError } from './activation/BotEngine'
 import type { BotChatService } from './chat/BotChatService'
@@ -20,7 +21,7 @@ type Params = Record<string, unknown>
 
 const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.personal.list': [],
-  'bots.create': ['look', 'name', 'description', 'clientRequestId', 'model', 'slots', 'image'],
+  'bots.create': ['look', 'name', 'description', 'clientRequestId', 'model', 'slots', 'image', 'access'],
   'bots.get': ['botId'],
   'bots.update': ['botId', 'name', 'look', 'description'],
   'bots.personal.pause': ['botId'],
@@ -30,10 +31,12 @@ const KEYS: Record<BotsPersonalV2Method, readonly string[]> = {
   'bots.chat.send': ['botId', 'text', 'attachments', 'clientRequestId', 'replyTo'],
   'bots.chat.stop': ['botId'],
   'bots.work.stop': ['botId', 'workId'],
+  'bots.reminders.snooze': ['botId', 'messageId', 'choice'],
   'bots.reminders.cancel': ['botId', 'reminderId'],
   'bots.chat.markRead': ['botId', 'seq'],
   'bots.chat.react': ['botId', 'messageId', 'emoji'],
   'bots.asks.answer': ['botId', 'askId', 'answer'],
+  'bots.actions.answer': ['actionId', 'digest', 'answer'],
   'bots.questions.answer': ['botId', 'questionId', 'choice', 'clientRequestId'],
   'bots.permissions.set': ['botId', 'permissionId', 'enabled'],
   'bots.permissions.revoke': ['botId', 'permissionId'],
@@ -125,6 +128,8 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
       if (p.slots !== undefined) slots(p.slots, { all: true })
       if (p.slots !== undefined && p.model !== undefined) throw new DomainRpcError('invalid_params', 'Give the models as slots or as one model, not both')
       if (p.image !== undefined) imagePick(p.image)
+      // New bot offers every device or this computer alone; picking devices one by one is About's.
+      if (p.access !== undefined && !isNewBotAccess(p.access)) throw new DomainRpcError('invalid_params', 'A new bot reaches every device or only this computer')
       break
     case 'bots.model.setImage':
       if (p.pick === undefined) throw new DomainRpcError('invalid_params', 'Give the pick, or null')
@@ -157,6 +162,9 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
     case 'bots.work.stop':
       if (typeof p.workId !== 'string' || !/^act_[0-9a-f-]{36}$/.test(p.workId)) throw new DomainRpcError('invalid_params', 'A work id is required')
       break
+    case 'bots.reminders.snooze':
+      if (!text(p.messageId, 200) || !['10m', '1h', 'tomorrow'].includes(p.choice as string)) throw new DomainRpcError('invalid_params', 'Choose a reminder and snooze time.')
+      break
     case 'bots.reminders.cancel':
       if (typeof p.reminderId !== 'string' || !/^rem_[0-9a-f-]{36}$/.test(p.reminderId)) throw new DomainRpcError('invalid_params', 'A reminder id is required')
       break
@@ -171,6 +179,9 @@ function validate(method: BotsPersonalV2Method, value: unknown): Params {
     case 'bots.asks.answer':
       if (typeof p.askId !== 'string' || !ASK_ID.test(p.askId)) throw new DomainRpcError('invalid_params', 'An ask id is required')
       if (p.answer !== 'allow' && p.answer !== 'not_now') throw new DomainRpcError('invalid_params', 'The answer must be allow or not_now')
+      break
+    case 'bots.actions.answer':
+      if (!text(p.actionId, 100) || !text(p.digest, 64) || (p.answer !== 'send' && p.answer !== 'not_now')) throw new DomainRpcError('invalid_params', 'Name the held action, its digest and Send or Not now.')
       break
     case 'bots.questions.answer':
       if (typeof p.questionId !== 'string' || !QUESTION_ID.test(p.questionId)) throw new DomainRpcError('invalid_params', 'A question id is required')
@@ -235,7 +246,7 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
   const botId = p.botId as string
   switch (method) {
     case 'bots.personal.list': return bots.list()
-    case 'bots.create': return bots.create({ look: p.look as BotLook, ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}), description: p.description as string, clientRequestId: p.clientRequestId as string, ...(typeof p.model === 'string' ? { model: p.model.trim() } : {}), ...(p.slots !== undefined ? { slots: p.slots as BotModelSlots } : {}), ...(p.image !== undefined ? { image: p.image as BotModelPick } : {}) })
+    case 'bots.create': return bots.create({ look: p.look as BotLook, ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}), description: p.description as string, clientRequestId: p.clientRequestId as string, ...(typeof p.model === 'string' ? { model: p.model.trim() } : {}), ...(p.slots !== undefined ? { slots: p.slots as BotModelSlots } : {}), ...(p.image !== undefined ? { image: p.image as BotModelPick } : {}), ...(p.access !== undefined ? { access: p.access as NewBotAccess } : {}) })
     case 'bots.get': return bots.get(botId)
     case 'bots.update': return bots.update(botId, { ...(p.name !== undefined ? { name: p.name as string } : {}), ...(p.look !== undefined ? { look: p.look as BotLook } : {}), ...(p.description !== undefined ? { description: p.description as string | null } : {}) })
     case 'bots.personal.pause': return bots.pause(botId)
@@ -245,10 +256,12 @@ async function handle(method: BotsPersonalV2Method, p: Params, bots: BotChatServ
     case 'bots.chat.send': return bots.chatSend({ botId, text: p.text as string, ...(p.attachments ? { attachments: p.attachments as BotChatAttachment[] } : {}), clientRequestId: p.clientRequestId as string, ...(typeof p.replyTo === 'string' ? { replyTo: p.replyTo } : {}) })
     case 'bots.chat.stop': return bots.chatStop(botId)
     case 'bots.work.stop': return bots.workStop(botId, p.workId as string)
+    case 'bots.reminders.snooze': return bots.reminderSnooze(botId, p.messageId as string, p.choice as import('../../shared/bots/personal/chat').BotSnoozeChoice)
     case 'bots.reminders.cancel': return bots.reminderCancel(botId, p.reminderId as string)
     case 'bots.chat.markRead': return bots.markRead(botId, p.seq as number)
     case 'bots.chat.react': return bots.react(botId, p.messageId as string, p.emoji as string | null)
     case 'bots.asks.answer': return bots.answer(botId, p.askId as string, p.answer as 'allow' | 'not_now')
+    case 'bots.actions.answer': return bots.answerAction({ actionId: p.actionId as string, digest: p.digest as string, answer: p.answer as 'send' | 'not_now' })
     case 'bots.questions.answer': return bots.answerQuestion({ botId, questionId: p.questionId as string, choice: p.choice as string, clientRequestId: p.clientRequestId as string })
     case 'bots.permissions.set': return bots.setPermission(botId, p.permissionId as string, p.enabled as boolean)
     case 'bots.permissions.revoke': return bots.revokePermission(botId, p.permissionId as string)

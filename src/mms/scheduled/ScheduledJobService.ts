@@ -42,9 +42,12 @@ export interface ScheduledJobRunner {
  * ready yet (the occurrence stays due).
  */
 export interface ScheduledBotRunner {
+  /** Save a schedule edit and retire stale approval rows before edit observers run. */
+  editSchedule?(botId: string, save: () => ScheduledJob | null): ScheduledJob | null
   /** The run already inserted for this claim, before a crash interrupted the hand-over. */
-  findOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | undefined
-  runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now: Date; model?: string; pick?: NonNullable<ScheduledJob['bot']>['pick'] }):
+  findOccurrence(input: { botId: string; scheduleId: string; occurrenceKey: string }): { activationId: string; occurrenceAt: string } | { messageId: string; occurrenceAt: string } | { kind: 'skipped'; reason: string } | undefined
+  runOccurrence(input: { jobId: string; botId: string; scheduleId: string; prompt: string; say?: string; ownerAsked?: boolean; occurrenceAt: string; occurrenceKey?: string; missed?: ScheduledMissedRuns; now: Date; model?: string; pick?: NonNullable<ScheduledJob['bot']>['pick'] }):
+    | { kind: 'said'; messageId: string }
     | { kind: 'started'; activationId: string }
     | { kind: 'skipped'; reason: string }
     | { kind: 'not_ready' }
@@ -120,7 +123,8 @@ export interface ScheduledOccurrenceSettled {
 /** Why a bot's schedule is paused when every occurrence would be skipped the same way: no bots here, or its bot is deleted. */
 const LASTING_BOT_SKIPS: Record<string, string | undefined> = {
   bots_unavailable: 'Bots could not be opened in this profile. Resume it once they are back.',
-  bot_deleted: 'Its bot was deleted.'
+  bot_deleted: 'Its bot was deleted.',
+  say_owner_required: 'This fixed line is marked as not owner-set. Set its words again in Automations, then Resume, or use a prompt.'
 }
 
 export class ScheduledJobService extends EventEmitter {
@@ -177,7 +181,7 @@ export class ScheduledJobService extends EventEmitter {
     this.store.setJobRemovedHandler((job) => {
       if (job.trigger?.webhook) this.webhookSecrets?.delete(job.trigger.webhook.secretRef)
       try {
-        this.emit('jobRemoved', job.id)
+        this.emit('jobRemoved', job.id, job)
       } catch {
         /* a listener never breaks a delete */
       }
@@ -483,11 +487,26 @@ export class ScheduledJobService extends EventEmitter {
     return job
   }
 
+  private editBotSchedule(id: string, save: () => ScheduledJob | null): ScheduledJob | null {
+    const job = this.store.getJob(id)
+    if (!job?.bot || !this.botRunner?.editSchedule) return save()
+    let saved: ScheduledJob | null = null
+    try {
+      return this.botRunner.editSchedule(job.bot.botId, () => { saved = save(); return saved })
+    } catch (error) {
+      if (!saved) throw error
+      // The shared job file committed before the bot database step failed. Keep that successful edit
+      // and its normal updated event; revision checks still fence Send, and reconciliation retries cleanup.
+      console.warn('A schedule edit was saved but its approval cleanup failed', { jobId: id, error: error instanceof Error ? error.message : String(error) })
+      return saved
+    }
+  }
+
   updateJob(id: string, patch: Partial<ScheduledJob>, options?: Parameters<ScheduledJobStore['updateJob']>[2]): ScheduledJob | null {
     this.lifecycle.assertAccepting()
     // The live status is derived when listed; a patch that carries it back never stores it.
     const { liveStatus: _status, liveThreadId: _thread, ...stored } = patch
-    const job = this.store.updateJob(id, stored, options)
+    const job = this.editBotSchedule(id, () => this.store.updateJob(id, stored, options))
     if (job) this.emitUpdated()
     return job
   }
@@ -501,14 +520,14 @@ export class ScheduledJobService extends EventEmitter {
 
   pauseJob(id: string, reason?: string, resumeAt?: string): ScheduledJob | null {
     this.lifecycle.assertAccepting()
-    const job = this.store.pauseJob(id, reason, resumeAt)
+    const job = this.editBotSchedule(id, () => this.store.pauseJob(id, reason, resumeAt))
     if (job) this.emitUpdated()
     return job
   }
 
   resumeJob(id: string): ScheduledJob | null {
     this.lifecycle.assertAccepting()
-    const job = this.store.resumeJob(id)
+    const job = this.editBotSchedule(id, () => this.store.resumeJob(id))
     if (job) this.emitUpdated()
     return job
   }
@@ -867,9 +886,11 @@ export class ScheduledJobService extends EventEmitter {
     let outcome: ReturnType<ScheduledBotRunner['runOccurrence']>
     try {
       const existing = this.botRunner?.findOccurrence({ botId: job.bot.botId, scheduleId: job.bot.scheduleId, occurrenceKey: claim.occurrenceKey })
-      if (existing) {
+      if (existing && 'kind' in existing) {
+        outcome = existing
+      } else if (existing) {
         occurrenceAt = existing.occurrenceAt
-        outcome = { kind: 'started', activationId: existing.activationId }
+        outcome = 'messageId' in existing ? { kind: 'said', messageId: existing.messageId } : { kind: 'started', activationId: existing.activationId }
       } else {
         // Only detected downtime expires an occurrence. A busy tick may be arbitrarily late.
         let next = claim.missed ? computeNextRun(job.schedule, occurrenceAt, now) : null
@@ -906,7 +927,7 @@ export class ScheduledJobService extends EventEmitter {
         const expired = next && now.getTime() - Date.parse(occurrenceAt) >= Date.parse(next) - now.getTime()
         const missedReason = `Missed ${new Date(occurrenceAt).toLocaleDateString('en-US', { weekday: 'short' })} ${clockTime(occurrenceAt)} (computer off)`
         outcome = expired ? { kind: 'skipped', reason: missedReason } : this.botRunner
-          ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, occurrenceAt, occurrenceKey: claim.occurrenceKey, ...(claim.missed ? { missed: claim.missed } : {}), now, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick?.model === job.bot.model ? { pick: job.bot.pick } : {}) })
+          ? this.botRunner.runOccurrence({ jobId: job.id, botId: job.bot.botId, scheduleId: job.bot.scheduleId, prompt: job.prompt, ...(job.bot.say !== undefined ? { say: job.bot.say, ownerAsked: job.bot.ownerAsked } : {}), occurrenceAt, occurrenceKey: claim.occurrenceKey, ...(claim.missed ? { missed: claim.missed } : {}), now, ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick?.model === job.bot.model ? { pick: job.bot.pick } : {}) })
           : { kind: 'skipped', reason: 'bots_unavailable' }
       }
     } catch (error) {

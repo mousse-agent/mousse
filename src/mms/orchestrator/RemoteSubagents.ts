@@ -1,4 +1,4 @@
-import { ROUTED_AGENT_KEY, type RoutedAgentMark } from '../../shared/bridge/routed'
+import { ROUTED_AGENT_KEY, ROUTED_DEADLINE_KEY, ROUTED_DEADLINE_SINCE, type RoutedAgentMark } from '../../shared/bridge/routed'
 import { qualifyId } from '../../shared/threadRef'
 import type { ThreadRunsOn } from '../../shared/types'
 import { DomainRpcError } from '../protocol/domainRegistry'
@@ -20,7 +20,16 @@ import { REMOTE_START_TRANSIENT, runRemoteThreadStart, sendRefusal, sentRunId } 
  *   `runRemoteThreadStart` shares with `thread_create` on another computer);
  * - `running`: read the run there until it ends, then end the stand-in with its status and final message,
  *   so the task publishes and the parent hears exactly as for a local subagent;
- * - `stopping`: the task ended here first (a Stop, a cancel, the time limit): tell the run there to stop.
+ * - `stopping`: the task ended here first (a Stop, a cancel, the time limit): tell the run there to stop. The row stays
+ *   until that computer took the Stop, also across restarts; the subagent's row shows the Stop as requested meanwhile.
+ *
+ * Besides the tasks, it keeps each subagent's thread there expiring with its root thread here (`remote_expiry`, issue
+ * #685): the expiry is set there right after the thread is made, and every later change or removal is sent until that
+ * computer took it. That computer deletes the thread at expiry itself, also when it was offline then.
+ *
+ * A task with `maxMinutes` (`limitMinutes`) gives that computer the limit as running time where it takes one
+ * (`ROUTED_DEADLINE_KEY`): it counts only the time the run works, not the time it waits on a person, and stops the run
+ * itself. An older computer is stopped from here instead, after that many minutes of wall time (`deadlineAt`).
  *
  * Every call is a routed call, so the other computer applies its own limits to it: its switch for working on its
  * threads, and the permission limit it set for this computer. Where that computer knows the agent mark
@@ -43,6 +52,8 @@ export interface RemoteSubagentsDeps {
   recordMessage: (threadId: string, role: 'user' | 'assistant', text: string) => void
   /** Something a subagent row shows changed (the computer went offline, a question waits there). */
   changed: (childThreadId: string) => void
+  /** Whether the subagent's stand-in thread still exists here; a gone one's expiry row goes once it was sent. */
+  threadExists?: (childThreadId: string) => boolean
   /** How often open tasks are read (default 4 s). */
   pollMs?: number
   now?: () => number
@@ -58,6 +69,8 @@ export type RemoteLaunch =
 
 /** A pass waits for one call at most this long, so one slow computer does not hold the others. */
 const CALL_TIMEOUT_MS = 20_000
+/** The soonest expiry sent to another computer: it takes none less than a minute away (`expiryRefusal`). */
+const EXPIRY_SOONEST_MS = 90_000
 
 function codeOf(error: unknown): string {
   return error instanceof DomainRpcError ? error.code : 'remote_error'
@@ -154,13 +167,15 @@ export class RemoteSubagents {
     const computer = this.computers().find((entry) => entry.node === latest.node)
     const remoteThreadId = tasks.find((task) => task.remoteThreadId)?.remoteThreadId
     const activity = open ? (open.waitingInput ? 'needs_input' : this.seen.get(open.delegationId) ?? (open.remoteRunId ? undefined : 'starting')) : undefined
-    const lastError = (open ?? latest).lastError
+    const stopping = tasks.find((task) => task.state === 'stopping')
+    const lastError = (open ?? stopping ?? latest).lastError
     return {
       node: latest.node,
       computerName: computer?.name ?? 'the other computer',
       online: Boolean(computer?.online) && !this.offline.has(latest.node),
       ...(remoteThreadId ? { ref: qualifyId(latest.node, remoteThreadId) } : {}),
       ...(activity ? { activity } : {}),
+      ...(stopping ? { stopRequested: true as const } : {}),
       ...(lastError ? { lastError } : {})
     }
   }
@@ -203,13 +218,17 @@ export class RemoteSubagents {
         this.passing = undefined
         const next = this.again ? 0 : this.deps.pollMs ?? 4_000
         this.again = false
-        if (this.records.hasOpen()) this.schedule(next)
+        if (this.records.hasOpen() || this.expiry.hasPending()) this.schedule(next)
       })
     }, ms)
     this.timer.unref?.()
   }
 
-  /** One pass over every open task. Never throws. */
+  private get expiry() {
+    return this.deps.engine.remoteExpiry
+  }
+
+  /** One pass over every open task, then every expiry still to send. Never throws. */
   async pass(): Promise<void> {
     for (const listed of this.records.listOpen()) {
       if (this.closed) return
@@ -226,6 +245,41 @@ export class RemoteSubagents {
         this.inFlight.delete(record.delegationId)
       }
     }
+    for (const row of this.expiry.listPending()) {
+      if (this.closed) return
+      await this.sendExpiry(row.childThreadId)
+    }
+  }
+
+  /**
+   * Sets the expiry the subagent's thread there must have (`remote_expiry`). Kept pending while that computer cannot be
+   * reached. An expiry less than a minute away (or past: the root here expired while that computer was offline) is
+   * sent as a minute and a half from now, the soonest that computer takes, so its thread still goes. Never throws.
+   */
+  private async sendExpiry(childThreadId: string): Promise<void> {
+    const row = this.expiry.get(childThreadId)
+    if (!row || row.state !== 'pending' || !row.remoteThreadId) return
+    let expiresAt = row.expiresAt
+    if (expiresAt !== null) {
+      const soonest = this.now() + EXPIRY_SOONEST_MS
+      if (!(Date.parse(expiresAt) >= soonest)) expiresAt = new Date(soonest).toISOString()
+    }
+    try {
+      await this.call({ node: row.node, childThreadId }, 'threads.setExpiry', {
+        threadId: row.remoteThreadId,
+        expiresAt,
+        ...(expiresAt !== null && row.stopsRun ? { stopsRun: true } : {})
+      }, `remote-expiry:${childThreadId}:${row.generation}:${expiresAt ?? 'none'}`)
+      this.expiry.markSent(childThreadId, row.generation)
+    } catch (error) {
+      const code = codeOf(error)
+      // Not reached, or no answer that says what happened: tried again on a later pass.
+      if (!(error instanceof DomainRpcError) || REMOTE_START_TRANSIENT.has(code)) return this.expiry.noteError(childThreadId, row.generation, messageOf(error))
+      // Gone there, or already expired and being archived there: nothing is left to set. Any other refusal is that
+      // computer's answer for good (it does not let this one change its threads): kept as the reason, not asked again.
+      this.expiry.markSent(childThreadId, row.generation, code === 'thread_not_found' || code === 'thread_expired' ? undefined : messageOf(error))
+    }
+    if (this.deps.threadExists && !this.deps.threadExists(childThreadId)) this.expiry.remove(childThreadId)
   }
 
   private async step(record: RemoteSubagentRecord): Promise<void> {
@@ -238,7 +292,7 @@ export class RemoteSubagents {
     }
     if (record.state === 'stopping') return this.stopThere(record)
     if (record.deadlineAt && this.now() >= Date.parse(record.deadlineAt)) {
-      const minutes = Math.round((Date.parse(record.deadlineAt) - Date.parse(record.createdAt)) / 60_000)
+      const minutes = record.limitMinutes ?? Math.round((Date.parse(record.deadlineAt) - Date.parse(record.createdAt)) / 60_000)
       const where = this.computerName(record.node)
       await this.deps.engine.settleRemoteRun(record.childRunId, 'interrupted', {
         error: record.waitingInput
@@ -295,7 +349,7 @@ export class RemoteSubagents {
   }
 
   /** A call to the task's computer, bounded; it notes whether the computer answered. */
-  private async call(record: RemoteSubagentRecord, method: string, params: Record<string, unknown>, idem?: string): Promise<unknown> {
+  private async call(record: Pick<RemoteSubagentRecord, 'node' | 'childThreadId'>, method: string, params: Record<string, unknown>, idem?: string): Promise<unknown> {
     const port = this.deps.port()
     if (!port) throw new DomainRpcError('bridge_off', 'Connecting to your other computers is turned off on this computer.')
     try {
@@ -324,6 +378,7 @@ export class RemoteSubagents {
     let remoteThreadId = record.remoteThreadId
     try {
       await this.markedForm(record)
+      const deadlineMinutes = await this.runningLimitThere(record)
       const started = await runRemoteThreadStart({
         key: `remote-subagent:${record.delegationId}`,
         name: this.deps.titleOf(record.childThreadId) ?? 'Subagent',
@@ -340,7 +395,8 @@ export class RemoteSubagents {
           clientRequestId: `remote-subagent:${record.delegationId}`,
           // A follow-up on a thread that may be paused by a usage limit refuses, as a follow-up on one computer does.
           // A thread made for this task has never run, so the first task sends nothing extra to an older computer.
-          ...(record.remoteThreadId ? { refuseWhilePaused: true } : {})
+          ...(record.remoteThreadId ? { refuseWhilePaused: true } : {}),
+          ...(deadlineMinutes ? { deadlineMinutes } : {})
         }
       }, {
         computerName: name,
@@ -348,6 +404,7 @@ export class RemoteSubagents {
         created: (id) => {
           remoteThreadId = id
           this.records.update(record.delegationId, { remoteThreadId: id })
+          this.expiry.setRemoteThread(record.childThreadId, id)
           this.deps.setRunsOn(record.childThreadId, { node: record.node, computerName: name, ref: qualifyId(record.node, id) })
         }
       })
@@ -356,9 +413,13 @@ export class RemoteSubagents {
         const refused = sendRefusal(started.sent, name)
         throw new DomainRpcError(refused.code, refused.message)
       }
-      this.records.update(record.delegationId, { remoteRunId: runId, state: 'running', lastError: null, lastSeenAt: new Date(this.now()).toISOString() })
+      // That computer took the limit and stops the run itself, by its running time: this one no longer stops it by the clock.
+      const limitTaken = deadlineMinutes !== undefined && isRecord(started.sent) && started.sent[ROUTED_DEADLINE_KEY] === deadlineMinutes
+      this.records.update(record.delegationId, { remoteRunId: runId, state: 'running', lastError: null, lastSeenAt: new Date(this.now()).toISOString(), ...(limitTaken ? { deadlineAt: null } : {}) })
       this.seen.set(record.delegationId, 'starting')
       this.deps.changed(record.childThreadId)
+      // A new thread there gets its expiry now; one that cannot be set yet is sent on a later pass.
+      await this.sendExpiry(record.childThreadId)
       return { ok: true, remoteThreadId: started.remoteThreadId, remoteRunId: runId }
     } catch (error) {
       const code = codeOf(error)
@@ -373,6 +434,18 @@ export class RemoteSubagents {
       if (onRefusal === 'settle') await this.deps.engine.settleRemoteRun(record.childRunId, 'failed', { error: `${name} refused the task: ${message}` })
       return { ok: false, code, message }
     }
+  }
+
+  /**
+   * The minutes of running time to send with the task: its limit, when its calls are marked and that computer takes a
+   * limit on a send (`ROUTED_DEADLINE_KEY`). Undefined for no limit, or an older computer (stopped from here instead).
+   */
+  private async runningLimitThere(record: RemoteSubagentRecord): Promise<number | undefined> {
+    if (!record.limitMinutes || record.marked !== true) return undefined
+    const port = this.deps.port()
+    if (!port?.versions) return undefined
+    const versions = await port.versions(record.node, AbortSignal.timeout(CALL_TIMEOUT_MS))
+    return (versions?.['orchestrator.send'] ?? 0) >= ROUTED_DEADLINE_SINCE ? record.limitMinutes : undefined
   }
 
   /** Reads the far run; once it ended, ends the stand-in with its status and final message. */

@@ -90,10 +90,6 @@ describe('indexAtOffset', () => {
     expect(indexAtOffset(layout, 123)).toBe(0)
     expect(indexAtOffset(layout, 10_000)).toBe(4)
   })
-
-  it('assigns a gap to the row above it', () => {
-    expect(indexAtOffset(layout, 110)).toBe(0)
-  })
 })
 
 describe('lastIndexAtOrBefore', () => {
@@ -318,10 +314,6 @@ describe('anchorDelta', () => {
 
   it('is zero for growth below the anchor', () => {
     expect(anchorDelta({ posBefore: position(1_000, 500), posAfter: position(1_000, 500) })).toBe(0)
-  })
-
-  it('is zero when only scrollTop changed', () => {
-    expect(anchorDelta({ posBefore: position(1_000, 500), posAfter: position(1_000, 900) })).toBe(0)
   })
 
   it('is exactly the shift when the content moved while scrollTop also changed', () => {

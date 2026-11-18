@@ -45,6 +45,8 @@ export interface AgentModelOption {
   group?: string
 }
 
+export type ThreadProjectColorStyle = 'off' | 'outline' | 'fill' | 'gradient'
+
 export interface AppearanceSettings {
   /** The built-in theme in use: the active user theme's base while one is on. */
   theme: ThemeId
@@ -65,8 +67,10 @@ export interface AppearanceSettings {
   interfaceFont: FontChoice
   /** Font for monospace text: code, diffs, the file editor and terminals. */
   codeFont: FontChoice
-  /** Tint each thread in the Threads tab with its project's color. */
-  threadProjectColors: boolean
+  /** How cards in the Threads tab show their project's color. */
+  threadProjectColors: ThreadProjectColorStyle
+  /** Thread rows and the Bots list show the latest reply under each title, on one muted line. */
+  replyPreviews: boolean
   /** The title bar shows back and forward and the open thread's path (project / thread / subagent). */
   threadPathInTitleBar: boolean
   /** How fast UI motion plays. 'off' stops it; the OS reduced-motion setting also stops it. */
@@ -136,7 +140,17 @@ export interface NotificationChannels {
   sound: boolean
 }
 
+export interface QuietHours { from: string; to: string }
+export function isQuietHours(value: unknown): value is QuietHours {
+  if (!value || typeof value !== 'object') return false
+  const { from, to } = value as QuietHours
+  const time = /^(?:[01]\d|2[0-3]):[0-5]\d$/
+  return typeof from === 'string' && typeof to === 'string' && time.test(from) && time.test(to) && from !== to
+}
+
 export interface NotificationSettings {
+  /** Absent means off. Times use the owner's last device zone. */
+  quietHours?: QuietHours
   /**
    * The sound for every event, from before sounds were chosen per event. Still read for an event
    * whose `sound` has not been chosen.
@@ -147,6 +161,11 @@ export interface NotificationSettings {
    * sent in, or that was opened here in the last seven days, notifies.
    */
   allRemoteThreads: boolean
+  /**
+   * Notify for threads a personal bot keeps out of the sidebar (`Thread.hidden`), and their subagents, like any
+   * thread. Absent means off: such a thread raises no banner, sound, toast or Needs me count until it is shown.
+   */
+  botThreads?: boolean
   /** The channels chosen for each event. A channel not chosen yet is on. */
   events?: Partial<Record<ThreadNotificationEvent, Partial<NotificationChannels>>>
   /**
@@ -369,10 +388,15 @@ export interface RunSettings {
   resumeAfterUsageLimit: boolean
   usageLimitPauseCap: number
   newThreadWorktree: boolean
-  /** When a new private thread deletes itself (`Thread.expiresAt`); `never` keeps it. Each new chat can change it. */
+  /** When a new private thread archives itself (`Thread.expiresAt`); `never`: it does not. Each new chat can change it. */
   privateThreadExpiry: ExpiryPreset | 'never'
   /** How many turns Mousse starts for a thread's goal (`/goal`) before it stops; Continue allows as many again. */
   goalTurnLimit: number
+  /**
+   * Keep this computer from sleeping while a run of a thread, a subagent or a bot is working, and for a short grace
+   * after the last one ends. The screen may still turn off. Absent counts as on.
+   */
+  keepAwake: boolean
   /**
    * How a held steer is released, per provider instance (docs/design/steer-and-interruptions.md §2.3.2). `strict`: on
    * a provider that reports a tool only when it starts, a steer held for a tool waits for the provider's own turn to
@@ -400,7 +424,8 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
         : DEFAULT_USAGE_LIMIT_PAUSE_CAP,
     newThreadWorktree: raw?.newThreadWorktree !== false,
     privateThreadExpiry: isExpiryPreset(raw?.privateThreadExpiry) ? raw.privateThreadExpiry : 'never',
-    goalTurnLimit: normalizeGoalTurnLimit(raw?.goalTurnLimit)
+    goalTurnLimit: normalizeGoalTurnLimit(raw?.goalTurnLimit),
+    keepAwake: raw?.keepAwake !== false
   }
 }
 
@@ -412,13 +437,14 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
  * always has (`workspace` isolated or shared). Either way a subagent's work is reported, never merged.
  */
 export interface ExperimentalSettings {
+  botAsksFirst: boolean
   subagentWorktrees: boolean
   /** The profiler (Settings → Labs). */
   profiler: ProfilerSettings
 }
 
 export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings> | null): ExperimentalSettings {
-  return { subagentWorktrees: raw?.subagentWorktrees === true, profiler: normalizeProfilerSettings(raw?.profiler) }
+  return { botAsksFirst: raw?.botAsksFirst === true, subagentWorktrees: raw?.subagentWorktrees === true, profiler: normalizeProfilerSettings(raw?.profiler) }
 }
 
 /** A worktree folder the person chose, and the id written in its marker (`.mousse-worktrees.json`) when it was chosen. */
@@ -523,7 +549,9 @@ export type DeepPartial<T> = {
       : T[K]
 }
 
-export type MousseSettingsUpdate = DeepPartial<MousseSettings>
+export type MousseSettingsUpdate = Omit<DeepPartial<MousseSettings>, 'notifications'> & {
+  notifications?: Omit<DeepPartial<NotificationSettings>, 'quietHours'> & { quietHours?: QuietHours | null }
+}
 
 export interface ThemeOption {
   id: ThemeId
@@ -866,7 +894,8 @@ export function getDefaultSettings(): MousseSettings {
       replyPacing: true,
       interfaceFont: { ...DEFAULT_FONT_CHOICE },
       codeFont: { ...DEFAULT_FONT_CHOICE },
-      threadProjectColors: true,
+      threadProjectColors: 'fill',
+      replyPreviews: false,
       threadPathInTitleBar: true,
       animationSpeed: 'normal',
       turnChangedFiles: 'summary',
@@ -952,7 +981,7 @@ export function getDefaultSettings(): MousseSettings {
  * Migrates legacy theme ids (`*-acrylic`) into theme + acrylic boolean.
  */
 export function normalizeAppearance(
-  raw: Partial<AppearanceSettings> & { theme?: string } | null | undefined
+  raw: (Omit<Partial<AppearanceSettings>, 'threadProjectColors'> & { threadProjectColors?: ThreadProjectColorStyle | boolean; theme?: string }) | null | undefined
 ): AppearanceSettings {
   const defaults = getDefaultSettings().appearance
   if (!raw || typeof raw !== 'object') {
@@ -1007,7 +1036,11 @@ export function normalizeAppearance(
     interfaceFont: normalizeFontChoice(raw.interfaceFont),
     codeFont: normalizeFontChoice(raw.codeFont),
     threadProjectColors:
-      typeof raw.threadProjectColors === 'boolean' ? raw.threadProjectColors : defaults.threadProjectColors,
+      raw.threadProjectColors === false ? 'off'
+        : raw.threadProjectColors === true ? 'fill'
+          : raw.threadProjectColors === 'off' || raw.threadProjectColors === 'outline' || raw.threadProjectColors === 'fill' || raw.threadProjectColors === 'gradient'
+            ? raw.threadProjectColors : defaults.threadProjectColors,
+    replyPreviews: typeof raw.replyPreviews === 'boolean' ? raw.replyPreviews : defaults.replyPreviews,
     threadPathInTitleBar:
       typeof raw.threadPathInTitleBar === 'boolean' ? raw.threadPathInTitleBar : defaults.threadPathInTitleBar,
     animationSpeed: isAnimationSpeed(raw.animationSpeed) ? raw.animationSpeed : defaults.animationSpeed,

@@ -7,6 +7,7 @@ import { FileAttachment } from "./input/file-attachment";
 import { ImageLightbox } from "./image-lightbox";
 import { useImageGallery } from "./image-gallery";
 import { userMessageImages, userMessageImageTiles } from "./image-sources";
+import { imageDragItem, startDragOut } from "../../../lib/fileDragOut";
 import { ChatReferencePill } from "../../../components/ReferencePill";
 import { parseChatReference, type ChatReference } from "../../../../shared/chatReferences";
 import { openFileInPanel, openLinkedThread, routeLink } from "../../../utils/chatLinks";
@@ -17,7 +18,10 @@ import { WithSentQuotes } from "../../../components/QuotePill";
 import { Bot } from "../../../lib/icons";
 import { useAppStore } from "../../../stores/appStore";
 import { useBotsStore } from "../../../stores/botsStore";
+import { useChatsStore } from "../../../stores/chatsStore";
+import { BotFace } from "../../../components/bots/face/BotFace";
 import type { AgentOrigin } from "../../../../shared/types";
+import type { BotSummary } from "../../../../shared/bots/personal/chat";
 
 export type UserMessageProps = {
   message: UIMessage;
@@ -83,31 +87,21 @@ export const PROMPT_FOLD_HEIGHT = 176;
 /** An agent's message folds sooner: it is read less closely than a prompt the person wrote. */
 export const AGENT_FOLD_HEIGHT = 110;
 
-/** The agent that sent this message, from the origin stored with it (never from its text); undefined for anyone else. */
+/**
+ * The agent or bot that sent this message, from the origin stored with it (never from its text); undefined for anyone
+ * else. Its bubble names the sender and offers Copy of its words, never Edit.
+ */
 export function agentOriginOfMessage(message: UIMessage): AgentOrigin | undefined {
   const origin = (message.metadata as { origin?: AgentOrigin } | undefined)?.origin;
   return origin?.kind === "agent" && typeof origin.threadId === "string" ? origin : undefined;
 }
 
 /**
- * Whether the message shows as an agent's: an agent's origin that is not a bot's. A bot's message stores its home thread as
- * the sender and no words or title of its own; it keeps the look it has until it stores a sender of its own.
+ * The owner's bot behind a message: the one the origin names (`AgentOrigin.bot`), else, for a message stored before it
+ * named one, the bot whose chat thread sent it.
  */
-export function useAgentSender(message: UIMessage): AgentOrigin | undefined {
-  const origin = agentOriginOfMessage(message);
-  const fromBot = useBotsStore((state) => Boolean(origin && isBotOrigin(origin, state.bots)));
-  return origin && !fromBot ? origin : undefined;
-}
-
-/** A bot's message: its home thread as the sender, with no words kept (`useAgentSender`). */
-export function isBotOrigin(origin: AgentOrigin, bots: ReadonlyArray<{ homeThreadId?: string }>): boolean {
-  return !origin.body && bots.some((bot) => bot.homeThreadId === origin.threadId);
-}
-
-/** `useAgentSender` outside a hook: read once, for a choice that need not follow the bot list. */
-export function agentSenderOf(message: UIMessage): AgentOrigin | undefined {
-  const origin = agentOriginOfMessage(message);
-  return origin && !isBotOrigin(origin, useBotsStore.getState().bots) ? origin : undefined;
+function botOfOrigin<T extends { id: string; homeThreadId?: string }>(origin: AgentOrigin, bots: readonly T[]): T | undefined {
+  return origin.bot ? bots.find((bot) => bot.id === origin.bot!.id) : bots.find((bot) => bot.homeThreadId === origin.threadId);
 }
 
 /**
@@ -142,6 +136,47 @@ function AgentSenderHeader({ origin }: { origin: AgentOrigin }) {
       ))}
     </div>
   );
+}
+
+/**
+ * The header inside a bot's bubble: its face, drawn still, its name, and "open", which opens its chat. A bot this window
+ * does not list (deleted, or on another computer) shows the name it had when it sent, with nothing to open.
+ */
+function BotSenderHeader({ origin, bot }: { origin: AgentOrigin; bot: BotSummary | undefined }) {
+  const name = bot?.name ?? origin.bot?.name ?? "Bot";
+  return (
+    <div className="chat-agent-sender chat-bot-sender" data-find-ignore>
+      {bot ? (
+        <BotFace look={bot.look} state="idle" size={18} view="head" still className="chat-bot-sender-face" />
+      ) : (
+        <Bot size={13} strokeWidth={2} aria-hidden="true" />
+      )}
+      <span className="chat-agent-sender-kind">{name}</span>
+      {bot && <span aria-hidden="true">·</span>}
+      {bot && (
+        <button
+          type="button"
+          className="chat-agent-sender-link"
+          title={`Open ${name}'s chat`}
+          aria-label={`Open ${name}'s chat`}
+          onClick={() => void useChatsStore.getState().openBot(bot.id)}
+        >
+          open
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** The sender's header: a bot's name and face (`BotSenderHeader`), or "Agent · <sending thread>" (`AgentSenderHeader`). */
+function SenderHeader({ origin }: { origin: AgentOrigin }) {
+  const bot = useBotsStore((state) => botOfOrigin(origin, state.bots));
+  const loaded = useBotsStore((state) => state.loaded);
+  // In a window that has not read the bots yet, they are read (once): a bot's message shows its face and opens its chat.
+  useEffect(() => {
+    if (!bot && !loaded) void useBotsStore.getState().refresh();
+  }, [bot, loaded]);
+  return bot || origin.bot ? <BotSenderHeader origin={origin} bot={bot} /> : <AgentSenderHeader origin={origin} />;
 }
 
 /**
@@ -210,7 +245,7 @@ export const UserMessage = memo(function UserMessage({
   const textRef = useRef<HTMLParagraphElement>(null);
   const textParts = message.parts?.filter(isTextPart) ?? [];
   const text = textParts.map((p) => p.text).join("");
-  const agent = useAgentSender(message);
+  const agent = agentOriginOfMessage(message);
   const foldable = useTallEnoughToFold(textRef, text, agent ? AGENT_FOLD_HEIGHT : PROMPT_FOLD_HEIGHT);
   const folded = foldable && !expanded;
   // Find landing on a match in the folded part opens the prompt, so the match is not hidden under the fold.
@@ -253,7 +288,7 @@ export const UserMessage = memo(function UserMessage({
           agent ? "is-agent" : "bg-an-user-message-bg text-an-user-message-text",
         )}
       >
-      {agent && <AgentSenderHeader origin={agent} />}
+      {agent && <SenderHeader origin={agent} />}
       {images.length > 0 && <div className="chat-user-image-carousel" role="region" aria-label="Attached images" tabIndex={0}>
         {images.map(({ url, name }, i) => {
           const label = name ?? `Image ${i + 1}`;
@@ -263,9 +298,12 @@ export const UserMessage = memo(function UserMessage({
               alt={label}
               loading="lazy"
               decoding="async"
+              draggable={false}
               className="block h-[120px] w-[184px] object-cover rounded-an-message-inner"
             />
           );
+          // Dragged out of the window, the tile drops the image as a file under its name.
+          const dragImage = (event: React.DragEvent) => startDragOut(event, { name: name ?? label, item: () => imageDragItem(url, name) });
           const tileClass = "chat-user-image h-[132px] w-[196px] shrink-0 p-1.5 bg-an-foreground/4 rounded-an-message";
           return enableImagePreview ? (
             <button
@@ -275,11 +313,13 @@ export const UserMessage = memo(function UserMessage({
               aria-label={name ? `Open ${name}` : `Open image ${i + 1}`}
               title={name}
               onClick={() => openImage(i)}
+              draggable
+              onDragStart={dragImage}
             >
               {image}
             </button>
           ) : (
-            <div key={i} className={tileClass}>
+            <div key={i} className={tileClass} draggable onDragStart={dragImage}>
               {image}
             </div>
           );
@@ -309,6 +349,15 @@ export const UserMessage = memo(function UserMessage({
               isImage={file.isImage}
               title={file.path}
               onOpen={file.path ? () => openFileInPanel({ path: file.path! }) : undefined}
+              onDragStart={file.path ? (event) => {
+                const started = startDragOut(event, {
+                  name: file.filename,
+                  threadId: useAppStore.getState().activeThreadId,
+                  item: { kind: "attachment", path: file.path!, name: file.filename },
+                });
+                // A thread on another computer: the chip has nothing to drag.
+                if (!started) event.preventDefault();
+              } : undefined}
             />
           ))}
         </div>

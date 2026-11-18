@@ -1,3 +1,5 @@
+import { appPresence } from '../mms/appPresence'
+import type { BotTelling } from '../../shared/bots/personal/telling'
 import { registerAppletIpc } from '../applets/registerAppletIpc'
 import { registerMemoryDiagnosticsIpc } from '../diagnostics/memoryIpc'
 import { AppError, type AppErrorShape, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
@@ -25,7 +27,7 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
  * Does not take a MousseMainService / owner lease.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, powerMonitor, screen, session, shell } from 'electron'
 import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { readAssetInPieces } from './assetPieces'
 import { browsedRootParams, browseSupport } from './browsedRoot'
@@ -49,7 +51,8 @@ import {
 } from '../mms/protocolEventBridge'
 import { SettingsStore } from '../../mms/settings/SettingsStore'
 import { listEditors, openInEditor, openRemoteInEditor } from '../editors'
-import { copyImageFile, openLocalPath, saveFileCopy, showFileInFolder } from '../localFiles'
+import { openLocalPath, saveFileCopy, showFileInFolder } from '../localFiles'
+import { startFileDrag } from './fileDragIpc'
 import { nodeOfThread, remoteRoute } from '../remoteEditorFlow'
 import { EDITOR_PROXY_READY, type RemoteAskResult, type RemoteOpenResult, type RemoteRoute } from '../../shared/remoteEditor'
 import { askForEditorAccess } from '../remoteEditorAsk'
@@ -88,7 +91,7 @@ import {
 } from '../../shared/settings'
 import { surfaceToWindowBackground } from '../../shared/accentPalette'
 import { appearanceSurfaceBase } from '../../shared/themeSurfaces'
-import { showCopyMenu } from '../contextMenu'
+import { showCopyMenu, writePngToClipboard } from '../contextMenu'
 import { pickExecutable } from './pickExecutable'
 import { stageBotAttachment, stageThreadAttachment } from './botAttachments'
 import { chooseBrowserViewFiles, type BrowserViewFilesDeps } from './browserViewFiles'
@@ -293,6 +296,8 @@ export function getWindowShortcuts(senderId: number): ShortcutOverrides | undefi
  * possibly out of date. Set once handlers are registered: reads the thread in view again.
  */
 let refreshAfterUncertain: ((node: string) => void) | undefined
+/** Display changes are watched once per process, however often the handlers are registered. */
+let displaysWatched = false
 
 function noteUncertainOutcome(error: unknown): void {
   if (!error || typeof error !== 'object') return
@@ -334,6 +339,11 @@ function registerHandler(
  * `params` with the thread a call is about, when the window named one. The daemon routes a call
  * about a thread on another computer by it and ignores it for a thread of this one.
  */
+/** An activity event the service marked as a turn a person stopped (theirs, or the one that launched it). */
+function stoppedByPerson(data: unknown): boolean {
+  return (data as { stoppedByPerson?: unknown } | null)?.stoppedByPerson === true
+}
+
 function withThreadId<T extends object>(params: T, threadId: unknown): T & { threadId?: string } {
   return typeof threadId === 'string' && threadId.length > 0 ? { ...params, threadId } : params
 }
@@ -565,8 +575,9 @@ export function registerGuiIpc(
     profileSettings = settings.get(),
     profileId = currentProfileKey()
   ): void => {
-    // Subagents are quiet; one that asks a question is announced under its parent's name.
-    const about = notificationThreads.resolve(profileId, threadId, kind)
+    // Subagents are quiet; one that asks a question is announced under its parent's name. A thread a bot keeps out of
+    // the sidebar is quiet too, unless the person chose to hear about bot threads.
+    const about = notificationThreads.resolve(profileId, threadId, kind, profileSettings.notifications?.botThreads === true)
     if (!about) return
     const content = getThreadNotificationPresentation(kind, profileSettings)
     const win = targetWindow
@@ -621,11 +632,24 @@ export function registerGuiIpc(
    * An automation's run ended (`scheduled.runEnded`). It notifies only when its Tell me lets it (the daemon decides),
    * through the person's choices for a finished thread, or for a question when the run failed. A click opens its thread.
    */
+  const reportPresence = appPresence({
+    windows: () => BrowserWindow.getAllWindows(),
+    idleSeconds: () => powerMonitor.getSystemIdleTime(),
+    audience: id => guiMms.presenceAudience?.(id),
+    send: (id, presence) => guiMms.sendPresence(id, presence)
+  })
+  const presenceTimer = setInterval(reportPresence, 10_000)
+  presenceTimer.unref()
+  app.on('browser-window-focus', reportPresence)
+  app.on('will-quit', () => { clearInterval(presenceTimer); app.removeListener('browser-window-focus', reportPresence) })
+
   const notifyAutomationRun = (data: unknown, win: BrowserWindow, activeThreadId: string | null, profileSettings: MousseSettings): void => {
     const run = (data ?? {}) as Partial<ScheduledRunEnded>
     if (run.notify !== true || typeof run.jobName !== 'string' || typeof run.outcome !== 'string') return
     const kind: ThreadNotificationKind = run.outcome === 'failed' || run.outcome === 'incomplete' ? 'idle' : 'completed'
-    const plan = planThreadNotification({ ...threadNotificationChannels(profileSettings.notifications, kind), toast: false }, {
+    const channels = threadNotificationChannels(profileSettings.notifications, kind)
+    if (run.quietHours === true) channels.sound = false
+    const plan = planThreadNotification({ ...channels, toast: false }, {
       windowFocused: win.isFocused(),
       viewingThread: Boolean(run.threadId && activeThreadId === run.threadId),
       systemSupported: Notification.isSupported()
@@ -634,7 +658,7 @@ export function registerGuiIpc(
       if (plan.playSound) playThreadCompletionSound()
       return
     }
-    const content = getThreadNotificationPresentation(kind, profileSettings)
+    const content = { ...getThreadNotificationPresentation(kind, profileSettings), ...(run.quietHours === true ? { silent: true } : {}) }
     const useWindowsCompletionSound = process.platform === 'win32' && !content.silent
     const notification = new Notification({
       ...content,
@@ -655,6 +679,37 @@ export function registerGuiIpc(
 
   // The bot whose chat each window shows, so that bot's rows only sound while it is on screen.
   const viewedBots = new Map<number, string | null>()
+  const tellingBanners = new Map<string, Notification>()
+  const tellingDeliveries = new Map<string, number>()
+  const notifyTelling = (telling: BotTelling, win: BrowserWindow, profileSettings: MousseSettings, profileId: string, sequence: number, instance?: string): void => {
+    const audience = `${instance ?? ''}:${profileId}`
+    const key = `${audience}:${telling.id}`
+    // One protocol event reaches each window; only the first shows this revision.
+    if ((tellingDeliveries.get(audience) ?? -1) >= sequence) return
+    tellingDeliveries.set(audience, sequence)
+    tellingBanners.get(key)?.close()
+    tellingBanners.delete(key)
+    if (!telling.rows.length) return
+    const botId = telling.rows[0]!.botId
+    const channels = { ...threadNotificationChannels(profileSettings.notifications, telling.kind), toast: false }
+    channels.sound &&= telling.sound
+    const viewing = BrowserWindow.getAllWindows().some(w => !w.isDestroyed() && w.isFocused() &&
+      guiMms.getWindowBindingForSender(w.webContents.id)?.profileId === profileId && viewedBots.get(w.webContents.id) === botId)
+    const plan = planThreadNotification(channels, { windowFocused: viewing, viewingThread: viewing, systemSupported: Notification.isSupported() })
+    if (!plan.system) { if (plan.playSound) playThreadCompletionSound(); return }
+    const audible = channels.sound
+    const notification = new Notification({ title: telling.title, body: telling.body,
+      silent: !audible || process.platform === 'win32', ...(audible && process.platform === 'darwin' ? { sound: 'Ping' } : {}) })
+    notification.on('click', () => {
+      if (win.isDestroyed()) return
+      if (win.isMinimized()) win.restore()
+      win.show(); win.focus(); win.webContents.send('notifications:openBot', botId)
+    })
+    tellingBanners.set(key, notification)
+    notification.on('close', () => { if (tellingBanners.get(key) === notification) tellingBanners.delete(key) })
+    notification.show()
+    if (audible && process.platform === 'win32') playThreadCompletionSound()
+  }
   registerHandler('notifications:viewBot', async (event, botId: unknown) => {
     viewedBots.set(event.sender.id, typeof botId === 'string' && botId ? botId : null)
   })
@@ -954,8 +1009,8 @@ export function registerGuiIpc(
             notifyThread(event.threadId, 'completed', currentPresentation().getActiveThreadId())
           } else if (state === 'awaiting_input') {
             notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
-          } else if (state === 'idle' || state === 'paused') {
-            // A run that hit a usage limit stopped and waits for the person (or the reset).
+          } else if ((state === 'idle' && !stoppedByPerson(event.data)) || state === 'paused') {
+            // A run that hit a usage limit stopped and waits for the person (or the reset). A turn a person stopped is not news.
             notifyThread(event.threadId, 'idle', currentPresentation().getActiveThreadId())
           }
         }
@@ -966,7 +1021,8 @@ export function registerGuiIpc(
       // event. If the thread is still tracked as working, flip it and ding;
       // if the activity event already landed, that path already notified.
       if (isThreadActivityActive(activityTrackerFor().getState(event.threadId))) {
-        setThreadActivity(event.threadId, 'awaiting_input')
+        // A question asked without waiting leaves the thread working: the person is told, and the agent carries on.
+        if ((event.data as { wait?: unknown } | null)?.wait !== false) setThreadActivity(event.threadId, 'awaiting_input')
         notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
       }
     }
@@ -1153,7 +1209,8 @@ export function registerGuiIpc(
       // Working → Waiting is still the same work cycle; only its end notifies. A scheduled occurrence's end is the
       // automation's to announce (`scheduled.runEnded`, as its Tell me says), unless it stopped to ask.
       const scheduledTurn = (event.data as { scheduled?: unknown } | null)?.scheduled === true
-      if (!replay && isThreadActivityActive(previousActivity) && state && !isThreadActivityActive(state) && !(scheduledTurn && state !== 'awaiting_input')) {
+      // A turn a person stopped (theirs, or the thread that launched it) is not announced to them as stopped.
+      if (!replay && isThreadActivityActive(previousActivity) && state && !isThreadActivityActive(state) && !(scheduledTurn && state !== 'awaiting_input') && !(state === 'idle' && stoppedByPerson(event.data))) {
         const kind: ThreadNotificationKind = state === 'completed'
           ? 'completed'
           : state === 'awaiting_input'
@@ -1169,11 +1226,15 @@ export function registerGuiIpc(
         )
       }
     }
-    if (event.type === 'bots.message' && !replay) notifyBot(event.data, win, windowSettings.get(senderId) ?? settings.get(), binding.profileId)
+    if (event.type === 'bots.tell' && !replay) notifyTelling(event.data as BotTelling, win, windowSettings.get(senderId) ?? settings.get(), binding.profileId, event.sequence, instance)
+    if (event.type === 'bots.message' && !replay && !guiMms.tellsForSender?.(senderId)) notifyBot(event.data, win, windowSettings.get(senderId) ?? settings.get(), binding.profileId)
     if (event.type === 'scheduled.runEnded' && !replay) notifyAutomationRun(event.data, win, presentationForSender(senderId).getActiveThreadId(), windowSettings.get(senderId) ?? settings.get())
     if (event.type === 'questions.pending' && event.threadId && isThreadActivityActive(tracker.getState(event.threadId))) {
-      tracker.setState(event.threadId, 'awaiting_input')
-      target('threads:activity', tracker.getSnapshot())
+      // A question asked without waiting leaves the thread working: the person is told, and the agent carries on.
+      if ((event.data as { wait?: unknown } | null)?.wait !== false) {
+        tracker.setState(event.threadId, 'awaiting_input')
+        target('threads:activity', tracker.getSnapshot())
+      }
       if (!replay) notifyThread(
         event.threadId,
         'question',
@@ -1220,7 +1281,7 @@ export function registerGuiIpc(
     const full = snap as {
       agents?: unknown[]
       tasks?: unknown[]
-      pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown }>
+      pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown; wait?: false }>
       turnSnapshot?: TurnStateSnapshot
     }
     const profileId = out.profileId ?? currentProfileKey()
@@ -1256,7 +1317,8 @@ export function registerGuiIpc(
         questions: q.questions,
         // The window shows the question only while it shows this thread.
         threadId,
-        ...(q.approval ? { approval: q.approval } : {})
+        ...(q.approval ? { approval: q.approval } : {}),
+        ...(q.wait === false ? { wait: false } : {})
       })
     }
     out.send('orchestrator:turn-state', turn)
@@ -1659,7 +1721,7 @@ export function registerGuiIpc(
       const full = snap as {
         agents?: unknown[]
         tasks?: unknown[]
-        pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown }>
+        pendingQuestions?: Array<{ requestId: string; questions: unknown; approval?: unknown; wait?: false }>
       }
       syncDaemonTurnSnapshot(snap)
       broadcastThreadSnapshot(
@@ -1682,7 +1744,8 @@ export function registerGuiIpc(
           requestId: q.requestId,
           questions: q.questions,
           threadId: activeId,
-          ...(q.approval ? { approval: q.approval } : {})
+          ...(q.approval ? { approval: q.approval } : {}),
+          ...(q.wait === false ? { wait: false } : {})
         })
       }
       const projects = await guiMms.request<{ projects: unknown[] }>('projects.list')
@@ -2107,6 +2170,58 @@ export function registerGuiIpc(
     const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
+  // Theme wallpapers. The file dialog and the import are one step here, so the page never names a file; the daemon keeps
+  // its own copy (`WallpaperStore`). Each call carries the profile it was made for, and the daemon refuses it once the
+  // window shows another one.
+  registerHandler('appearance:chooseWallpaper', async (_e, profileId: unknown) => {
+    const expectedProfileId = typeof profileId === 'string' ? profileId : guiMms.getWindowBinding()?.profileId
+    const win = getWindow()
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose a wallpaper',
+      properties: ['openFile'],
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return null
+    const res = await guiMms.request<{ wallpaper: unknown }>('appearance.wallpaperImport', { path: result.filePaths[0], expectedProfileId })
+    return res.wallpaper
+  })
+  registerHandler('appearance:importWallpaperBytes', async (_e, profileId: unknown, dataBase64: unknown) => {
+    const res = await guiMms.request<{ wallpaper: unknown }>('appearance.wallpaperImportBytes', {
+      dataBase64,
+      expectedProfileId: typeof profileId === 'string' ? profileId : undefined
+    })
+    return res.wallpaper
+  })
+  registerHandler('appearance:readWallpaper', async (_e, profileId: unknown, id: unknown, bucket: unknown, offset: unknown) =>
+    guiMms.request('appearance.wallpaperRead', {
+      id,
+      ...(bucket == null ? {} : { bucket }),
+      offset,
+      expectedProfileId: typeof profileId === 'string' ? profileId : undefined
+    })
+  )
+  registerHandler('appearance:saveWallpaperCopy', async (_e, profileId: unknown, id: unknown, bucket: unknown, dataBase64: unknown, replace: unknown) => {
+    const res = await guiMms.request<{ saved: boolean }>('appearance.wallpaperSaveCopy', {
+      id,
+      bucket,
+      dataBase64,
+      replace: replace === true,
+      expectedProfileId: typeof profileId === 'string' ? profileId : undefined
+    })
+    return res.saved
+  })
+  /** The longest edge of the largest display, in physical pixels: the size of the wallpaper copy windows show. */
+  registerHandler('appearance:displayLongEdge', () =>
+    Math.max(0, ...screen.getAllDisplays().map((display) => Math.round(Math.max(display.size.width, display.size.height) * display.scaleFactor)))
+  )
+  if (!displaysWatched) {
+    displaysWatched = true
+    const changed = (): void => broadcast('appearance:displaysChanged', null)
+    screen.on('display-added', changed)
+    screen.on('display-removed', changed)
+    screen.on('display-metrics-changed', changed)
+  }
   registerHandler('projects:reorder', async (_e, projectIds: string[]) => {
     const res = await guiMms.request<{ projects: unknown[] }>('projects.reorder', {
       projectIds
@@ -2554,8 +2669,9 @@ export function registerGuiIpc(
     return res.ok
   })
   registerHandler('subagents:list', async (_e, threadId: string) => {
-    const res = await guiMms.request<{ subagents: SubagentSummary[] }>('subagents.list', { threadId })
-    return res.subagents
+    const res = await guiMms.request<{ subagents: SubagentSummary[]; removed?: SubagentSummary[] }>('subagents.list', { threadId })
+    // Subagents whose thread is gone follow the live ones, each marked `removed` (an older daemon sends none).
+    return [...res.subagents, ...(res.removed ?? []).map((row) => ({ ...row, removed: true as const }))]
   })
   registerHandler('tasks:list', async () => {
     const threadId = currentPresentation().getActiveThreadId()
@@ -2635,6 +2751,7 @@ export function registerGuiIpc(
         command?: string
         env?: Record<string, string>
         shellArgs?: string[]
+        label?: string
       }
     ) => {
       // The terminal belongs to the thread its tab names, not to whichever thread the window shows when it starts.
@@ -2657,7 +2774,8 @@ export function registerGuiIpc(
               cwd: request.cwd,
               command: request.command,
               env: request.env,
-              shellArgs: request.shellArgs
+              shellArgs: request.shellArgs,
+              ...(typeof request.label === 'string' && request.label.trim() ? { label: request.label.trim().slice(0, 60) } : {})
             }
       )
       return { ptyId: res.ptyId }
@@ -3226,7 +3344,16 @@ export function registerGuiIpc(
   registerHandler('localFiles:showInFolder', async (_e, path: unknown) => { await showFileInFolder(path) })
   registerHandler('localFiles:saveCopy', async (event, path: unknown) =>
     saveFileCopy(path, BrowserWindow.fromWebContents(event.sender) ?? getWindow(), app.getPath('downloads')))
-  registerHandler('localFiles:copyImage', async (_e, path: unknown) => { await copyImageFile(path) })
+  // A file dragged out of the window into Finder, Explorer or another app (fileDrag.ts): the window names it, this
+  // process checks that it belongs to the thread and starts the system's drag.
+  registerHandler('files:startDrag', async (event, request: unknown) => startFileDrag(event.sender, request, {
+    temp: app.getPath('temp'),
+    filesRoot: async (scope) => (await guiMms.request<{ root?: string }>('files.root', scope)).root,
+    messageTexts: async (threadId) => {
+      const snapshot = await guiMms.request<{ messages?: Array<{ content?: unknown }> }>('thread.snapshot', { threadId, newest: 200 })
+      return (snapshot.messages ?? []).flatMap((message) => (typeof message.content === 'string' ? [message.content] : []))
+    }
+  }))
   // A thread of another computer: its folder opens in an editor of this one over SSH. The window names the
   // thread only; the folder is the one the owner answers, and the SSH address is read here from this
   // computer's own records.
@@ -3703,6 +3830,7 @@ export function registerGuiIpc(
   registerHandler('clipboard:showCopyMenu', (_e, x: number, y: number, text: string) => {
     showCopyMenu(getWindow, x, y, text)
   })
+  registerHandler('clipboard:writeImage', (_e, png: unknown) => { writePngToClipboard(png) })
 
   return { syncDaemonTurnSnapshot }
 }

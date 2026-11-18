@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { onRetiredBareRoute, type ExecutionBinding } from '../../shared/harness/types'
+import { onRetiredBareRoute, type ExecutionBinding, type TurnOrigin } from '../../shared/harness/types'
 import { isStricter, type PermissionMode } from '../../shared/permissionMode'
 import { narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { DaemonEpoch } from './DaemonEpoch'
@@ -10,6 +10,8 @@ import { isFencedSource, isFollowUpSource, isPauseHeldSource, isResumeSource } f
 import { cancelAcknowledgedWakes, recoverWakesOnBoot } from './delegation/wake'
 import { RemoteLaunchRecords } from './delegation/remoteLaunches'
 import { RemoteSubagentRecords } from './delegation/remoteSubagents'
+import { RemoteExpiryRecords } from './delegation/remoteExpiry'
+import { RunTimeLimitRecords } from './runTimeLimits'
 import { Delegations } from './Delegations'
 import { EffectOutbox } from './EffectOutbox'
 import { HandoffService } from './handoff/HandoffService'
@@ -23,6 +25,7 @@ import type { RunStore } from './RunStore'
 import { bumpStopGenerations, currentStopGeneration, isRunAdmissionStale } from './stopGeneration'
 import { strandedQueuedRuns } from './strandedRuns'
 import { writeTerminalRun, type RunTerminalStatus, type TerminalNotice } from './terminal'
+import { OpenQuestions } from './OpenQuestions'
 import { ThreadApprovals, type BootRecovery } from './ThreadApprovals'
 import { ThreadMutex } from './ThreadMutex'
 import { ToolInvocations } from './ToolInvocations'
@@ -94,8 +97,6 @@ export type RunCommand =
        * writes no event and does not refuse a paused thread (the queue holds such an item while a pause lasts).
        */
       agentOrigin?: { hops: number }
-      /** A person's leftover steer queued as a turn of its own (`RunOutcome.sentByPerson`). */
-      sentByPerson?: true
       /**
        * The run delivers settle notices (SPEC §15.1): it carries the count of agent messages in a row of the runs the
        * notices are about and adds none of its own. It is not an agent's message.
@@ -177,6 +178,8 @@ export type CommandResult =
       endedPause?: { runId: string; resumeItemId?: string }
       /** A send with `queueBehindPause` that found the thread paused: the paused run, whose pause it left in place. */
       heldByPause?: { runId: string }
+      /** A steer that reached the run after its provider's turn was over: it runs as the next turn instead (set by the orchestrator). */
+      followUp?: true
     }
   | { status: 'rejected'; reason: string; sequence: number; replayed?: boolean }
   | {
@@ -274,6 +277,11 @@ export interface DelegationRequest {
   model?: string
   role?: string
   workspace: 'isolated' | 'shared'
+  /**
+   * A read-only child (`delegate_task` `readOnly`): it works in the parent's folder (`workspace: 'shared'`) with the
+   * read-only tools only. Absent: the child has every tool its parent has, in either workspace.
+   */
+  readOnly?: boolean
   wake: DelegationWake
   title?: string
   /** The most the child may do (SPEC §15.1); the caller has already checked it against its own. */
@@ -299,6 +307,8 @@ export interface RemoteDelegationTarget {
   instanceId: string | null
   model: string | null
   deadlineAt: string | null
+  /** The minutes of running time the task may use (`maxMinutes`); null for no limit. */
+  limitMinutes?: number | null
   /** The far thread, for a follow-up on a subagent that already has one. */
   remoteThreadId?: string | null
 }
@@ -436,6 +446,8 @@ export const RESTART_TRANSCRIPTS_THREAD_ID = '__restart_transcripts__'
 const RESTART_TRANSCRIPT_PENDING = 'restart.transcript_pending'
 /** The thread's transcript says the restart cut the run off. */
 const RESTART_TRANSCRIPT_WRITTEN = 'restart.transcript_written'
+/** Turn origins whose runs a thread turn does not continue after a restart: their own runner owns them. */
+const NOT_CONTINUABLE_ORIGINS: ReadonlySet<TurnOrigin> = new Set(['bot', 'workflow', 'definition'])
 
 /** The outcome of a run whose binding names the retired bare pi route (PR 4). */
 const RETIRED_ROUTE_OUTCOME = Object.freeze({
@@ -473,10 +485,16 @@ export class RunEngine extends EventEmitter {
   readonly delegations: Delegations
   /** Remote subagents' tasks and the runs on other computers that do them (issue #469). */
   readonly remoteSubagents: RemoteSubagentRecords
+  /** The expiry each remote subagent's thread there must have (emote_expiry). */
+  readonly remoteExpiry: RemoteExpiryRecords
+  /** Running-time limits of runs on this computer (un_time_limits). */
+  readonly runTimeLimits: RunTimeLimitRecords
   /** Threads agents here launched on other computers (`thread_create` with `computer`, issue #1160). */
   readonly remoteLaunches: RemoteLaunchRecords
   /** Saved approval requests (SPEC §17). */
   readonly approvals: ThreadApprovals
+  /** Questions agents asked without waiting (`ask_user` with `wait: false`). */
+  readonly openQuestions: OpenQuestions
   /** Context handoffs (SPEC §16.1). */
   readonly handoffs: HandoffService
   /** Fork and merge-back transfers (SPEC §16.2). */
@@ -510,8 +528,11 @@ export class RunEngine extends EventEmitter {
     this.inbox = new Inbox(opts.store)
     this.delegations = new Delegations(opts.store, this.inbox)
     this.remoteSubagents = new RemoteSubagentRecords(opts.store)
+    this.remoteExpiry = new RemoteExpiryRecords(opts.store)
+    this.runTimeLimits = new RunTimeLimitRecords(opts.store)
     this.remoteLaunches = new RemoteLaunchRecords(opts.store)
     this.approvals = new ThreadApprovals(opts.store, { outbox: this.outbox, lineage: (threadId) => this.delegations.getLineage(threadId) })
+    this.openQuestions = new OpenQuestions(opts.store)
     this.handoffs = new HandoffService(opts.store)
     this.transfers = new ContextTransfers(opts.store)
     this.pid = opts.pid ?? process.pid
@@ -955,7 +976,9 @@ export class RunEngine extends EventEmitter {
         strandedQueued.push(run.runId)
       }
       // SPEC §17.6: what waited for a provider in the dead process can only continue the thread now.
-      const approvals = this.approvals.recoverOnBoot(uncertainTools, (runId) => (this.bindingForRun(runId)?.policy.origin ?? 'interactive') !== 'interactive')
+      // A bot's, a workflow's and an agent definition's runs belong to their own runner, which a thread turn does not
+      // continue; every other run's request parks for the person.
+      const approvals = this.approvals.recoverOnBoot(uncertainTools, (runId) => NOT_CONTINUABLE_ORIGINS.has(this.bindingForRun(runId)?.policy.origin ?? 'interactive'))
       for (const requestId of approvals.continued) {
         const record = this.approvals.get(requestId)
         if (!record) continue
@@ -2009,8 +2032,7 @@ export class RunEngine extends EventEmitter {
         ...(continuationOf ? { continuationOf, ...(resuming ? { resumedFromPause: command.source === 'resume' ? 'auto' as const : 'user' as const } : {}) } : {}),
         // Remembered with the run, so a message an agent sent is still known as one when it starts later.
         ...(command.actor ? { sentByAgent: true as const, agentHops: command.actor.hops ?? 1 } : command.agentOrigin ? { sentByAgent: true as const, agentHops: command.agentOrigin.hops } : {}),
-        ...(carriedHops !== undefined ? { agentHops: carriedHops } : {}),
-        ...(command.sentByPerson && !command.actor && !command.agentOrigin ? { sentByPerson: true as const } : {})
+        ...(carriedHops !== undefined ? { agentHops: carriedHops } : {})
       }
       const run = store.createRun({
         threadId: command.threadId,

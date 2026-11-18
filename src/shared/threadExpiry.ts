@@ -1,9 +1,9 @@
 import type { Thread } from './types'
 
 /**
- * Thread expiry (issue #672): a thread can be given a time after which it, its subagents, its worktree,
- * checkpoints and attachments are deleted for good. The time is absolute (`Thread.expiresAt`), so a
- * computer that was asleep or closed deletes it on its next start.
+ * Thread expiry (issue #672): a thread can be given a time after which it is archived, as Archive does.
+ * The time is absolute (`Thread.expiresAt`), so a computer that was asleep or closed archives it on its
+ * next start.
  */
 
 /** The choices the composer, the thread's menu and Settings offer. */

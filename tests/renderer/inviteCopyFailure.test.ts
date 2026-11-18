@@ -37,7 +37,6 @@ describe('Invitation copy', () => {
       busy: false,
       now: 0,
       onCreate: () => undefined,
-      onBack: () => undefined,
       onClose: () => undefined
     })))
   }

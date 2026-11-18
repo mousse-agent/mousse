@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { BotChatMessage, BotChip, BotLaunchedThread, BotWorkItem } from '../../src/shared/bots/personal/chat'
-import { chatRows, launchedGroups, launchedLook, presenceOf, stickerOf, workSignalsOf } from '../../src/renderer/components/bots/botChatShape'
+import { botDoingLine, botRowLine, chatRows, launchedGroups, launchedLook, presenceOf, stickerOf, workSignalsOf } from '../../src/renderer/components/bots/botChatShape'
 
 const started = (title: string, text = 'started'): BotChip => ({ icon: 'think', text, highlight: title })
 const noted: BotChip = { icon: 'think', text: 'passed on your note' }
@@ -93,7 +93,9 @@ describe('presence and sticker', () => {
       ['work leads, threads add to +N', one, threads, 'System check +2', 'working'],
       ['none left: free', [], [], 'free', undefined],
       ['threads that ended or sit idle: free', [], [thread('t3', 'A', 'done'), thread('t4', 'B', 'failed'), thread('t5', 'C', 'stopped'), thread('t6', 'D', 'idle')], 'free', undefined],
-      ['waiting on the owner still counts', [], [thread('t2', 'Typing dots shimmer', 'needs_input'), thread('t3', 'A', 'done')], 'Managing Typing dots shimmer', 'working']
+      ['waiting on the owner still counts', [], [thread('t2', 'Typing dots shimmer', 'needs_input'), thread('t3', 'A', 'done')], 'Managing Typing dots shimmer', 'working'],
+      ['on hold for the owner (a pause only Resume now ends): free', [], [thread('t7', 'Fix login', 'on_hold'), thread('t3', 'A', 'done')], 'free', undefined],
+      ['on hold beside one that works: only the working one is managed', [], [thread('t7', 'Fix login', 'on_hold'), thread('t1', 'Dictation mock-ups')], 'Managing Dictation mock-ups', 'working']
     ]
     for (const [what, work, launched, text, sticker] of rows) {
       const presence = presenceOf({ state: text === 'free' ? 'idle' : 'working', work, threads: launched }, { typing: false, offline: false })
@@ -122,12 +124,12 @@ describe('presence and sticker', () => {
     const statuses: Array<[BotLaunchedThread['status'], string, string]> = [
       ['done', 'done', 'done'], ['needs_input', 'waiting', 'waiting on you'], ['running', 'working', 'working'], ['failed', 'failed', 'failed'],
       ['queued', 'working', 'queued'], ['idle', 'idle', 'idle'], ['stopped', 'failed', 'stopped'], ['paused', 'working', 'held'],
-      ['subagents', 'working', 'waiting on subagents']
+      ['subagents', 'working', 'waiting on subagents'], ['on_hold', 'waiting', 'waiting on you']
     ]
     for (const [status, tone, label] of statuses) expect([status, launchedLook(status)]).toEqual([status, { tone, label }])
     const { going, ended } = launchedGroups(statuses.map(([status]) => thread(status, status)))
     // Started at the same time here, so ties go by id.
-    expect(going.map((item) => item.status)).toEqual(['paused', 'queued', 'running', 'subagents', 'needs_input'])
+    expect(going.map((item) => item.status)).toEqual(['paused', 'queued', 'running', 'subagents', 'needs_input', 'on_hold'])
     expect(ended.map((item) => item.status)).toEqual(['idle', 'done', 'failed', 'stopped'])
   })
 
@@ -145,5 +147,45 @@ describe('presence and sticker', () => {
     for (const [shown, kind] of kinds) expect(shown).toBe(kind)
     // A task that waits shows no activity of its own.
     expect(stickerOf(presenceOf({ state: 'working', work: [item('q', 'Later', 'queued', '2026-11-13T21:55:00.000Z')] }, { typing: false, offline: false }), { icon: 'search', text: 'searching the web' })).toBe('working')
+  })
+})
+
+describe('the line beside the typing dots', () => {
+  type Now = Parameters<typeof botDoingLine>[0]
+  const search: BotChip = { icon: 'search', text: 'searching the web', highlight: 'ssd prices', live: true }
+  // What the turn has sent so far: the bot's own words, words being written, its live step, and whether the owner's message is the newest row.
+  const rows: Array<[string, Now, ReturnType<typeof botDoingLine>]> = [
+    ['nothing yet, after the owner wrote', { writing: false, unanswered: true }, { text: 'Reading your message', idle: true }],
+    ['nothing yet, in a turn the owner did not start', { writing: false, unanswered: false }, { text: 'Working', idle: true }],
+    ['a step with what it is about', { writing: false, chip: search, unanswered: true }, { text: 'Searching the web · ssd prices' }],
+    ['a step without one', { writing: false, chip: { icon: 'memory', text: 'looking back', live: true }, unanswered: true }, { text: 'Looking back' }],
+    ['a thread it just started', { writing: false, chip: { icon: 'think', text: 'started thread', highlight: 'Fix the login page', thread: 't1' }, unanswered: true }, { text: 'Started thread: Fix the login page' }],
+    ['words being written, over the step before them', { writing: true, chip: search, unanswered: true }, { text: 'Writing a reply' }],
+    ['its own words, over a step', { status: 'Comparing the two drives now', writing: false, chip: search, unanswered: true }, { text: 'Comparing the two drives now', own: true }],
+    ['its own words, over words being written', { status: 'Comparing the two drives now', writing: true, unanswered: false }, { text: 'Comparing the two drives now', own: true }]
+  ]
+  it.each(rows)('%s', (_name, now, line) => {
+    expect(botDoingLine(now)).toEqual(line)
+  })
+})
+
+describe('the line under a bot in the sidebar', () => {
+  const work = (title: string, startedAt = '2026-11-13T21:50:00.000Z'): BotWorkItem => ({ id: title, title, status: 'running', startedAt })
+  type Bot = Parameters<typeof botRowLine>[0]
+  // [what, the bot, tone, words, whether its face sleeps]
+  const rows: Array<[string, Bot, ReturnType<typeof botRowLine>['tone'], string, boolean]> = [
+    ['nothing at all: idle, asleep', { state: 'idle', stateText: '' }, 'idle', 'Idle', true],
+    ['paused, even with work', { state: 'paused', stateText: 'Paused', work: [work('System check')] }, 'idle', 'Paused', false],
+    ['an ask waits on the owner', { state: 'needs_you', stateText: 'Wants to use files on this computer' }, 'needs', 'Wants to use files on this computer', false],
+    ['stuck waits on the owner', { state: 'stuck', stateText: 'Needs you: Set up a provider so I can work.' }, 'needs', 'Needs you: Set up a provider so I can work.', false],
+    ['an open question beats work', { state: 'working', stateText: 'Working…', needsOwner: true, work: [work('System check')] }, 'needs', 'Working…', false],
+    ['its work, the longest-running first', { state: 'working', stateText: 'Working…', work: [work('Review PR', '2026-11-13T21:52:00.000Z'), work('System check')] }, 'working', 'System check +1', false],
+    ['its chat turn writes', { state: 'working', stateText: 'Working…', chat: { activationId: 'a1' } }, 'working', 'Typing…', false],
+    ['waiting for the internet', { state: 'working', stateText: 'Waiting for internet', chat: { activationId: 'a1', offline: true } }, 'idle', 'Waiting for internet', false],
+    ['working with nothing listed', { state: 'working', stateText: 'Working…' }, 'working', 'Working…', false],
+    ['only a background command: awake, waiting', { state: 'idle', stateText: '', watchers: [{ id: 'w', title: 'the build', command: 'npm run build', startedAt: '2026-11-13T21:50:00.000Z', until: '2026-11-13T22:50:00.000Z' }] }, 'idle', 'Waiting on the build', false]
+  ]
+  it.each(rows)('%s', (_what, bot, tone, text, resting) => {
+    expect(botRowLine(bot)).toEqual({ tone, text, resting })
   })
 })

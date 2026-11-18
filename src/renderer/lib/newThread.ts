@@ -19,7 +19,7 @@ export interface ComposerWorkspace {
   localProjectId?: string
   /** A private thread (`Thread.localOnly`): it runs on this computer only, so `node` is never set with it. */
   localOnly?: boolean
-  /** The new chat deletes itself this long after it is created (`Thread.expiresAt`); absent: never. */
+  /** The new chat archives itself this long after it is created (`Thread.expiresAt`); absent: never. */
   expiryMs?: number
   /** With `expiryMs`: a run still going at expiry is stopped (`Thread.expiryStopsRun`). */
   expiryStopsRun?: boolean
@@ -149,7 +149,7 @@ export function workspaceWithPrivate(
   workspace: ComposerWorkspace,
   localOnly: boolean,
   localProjects: readonly Pick<Project, 'id'>[],
-  /** Settings → Runs: when a new private chat deletes itself. Applied only when no expiry was picked. */
+  /** Settings → Runs: when a new private chat archives itself. Applied only when no expiry was picked. */
   privateDefaultMs?: number
 ): ComposerWorkspace {
   if (!localOnly) {

@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto'
-import type { Tool } from '@earendil-works/pi-ai'
 import type { MousseIntegrationsSettings, SkillDescriptor, SkillsRegistrySnapshot } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import { sha256Hex } from '../../../../shared/agents/hashes'
@@ -12,10 +11,8 @@ import { withoutWebhookData } from '../../../scheduled/promptPlaceholders'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
 import type { ModeRegistry } from '../../../modes/ModeRegistry'
 import { mousseOrchestrationInstructions } from '../instructions'
-import type { AppToolFamily } from './index'
-import type { ToolRegistry } from './registry'
 import { normalizeSkillName } from './skills'
-import { truncateForModel, type AppToolTurn, type ModeFacts } from './types'
+import { truncateForModel, type ModeFacts } from './types'
 
 /**
  * Turn assembly shared by every runtime (PR 2 §2 "Assembly" and "Instructions"): skills, what a
@@ -145,29 +142,23 @@ async function loadExplicitSkills(
   return loaded
 }
 
-/** The pi-ai definitions an in-process loop sends this turn, per tool family. */
-export function offeredDefinitions(registry: ToolRegistry, families: Record<AppToolFamily, string[]>, turn: AppToolTurn): Record<AppToolFamily, Tool[]> {
-  const offered = new Set(registry.offeredFor(turn).map((tool) => tool.name))
-  const out = {} as Record<AppToolFamily, Tool[]>
-  for (const [family, names] of Object.entries(families) as Array<[AppToolFamily, string[]]>) {
-    out[family] = names.filter((name) => offered.has(name)).map((name) => {
-      const tool = registry.get(name)!
-      return tool.definition?.(turn) ?? { name: tool.name, description: tool.description, parameters: tool.inputSchema as unknown as Tool['parameters'] }
-    })
-  }
-  return out
-}
-
 /** The session sentence of a turn that attaches the MCP relay. */
 export const RELAY_SESSION_INSTRUCTION = 'The user\'s MCP servers set up in Mousse are also available through the "mousse-relay" server as <server>__<tool>.'
 
 /**
- * Stable session text for a runtime with its own loop, delivered where the runtime applies session
- * text: Mousse's tool guidance when its MCP server is attached (with one sentence for the MCP relay
- * when that is attached too), and the applet guidance when applets are on. Empty when there is neither.
+ * The session sentence every thread agent gets, with or without Mousse's tools. A finished turn shows only its last
+ * reply; the earlier ones fold behind its "Worked for" line, so an answer given before more work is easily missed.
+ */
+export const LAST_REPLY_SESSION_INSTRUCTION = 'Your last reply of a turn is the only one the person sees. Put every answer they asked for in it, including ones you gave earlier in the turn.'
+
+/**
+ * Stable session text for a thread agent's runtime with its own loop, delivered where the runtime applies session
+ * text: the last-reply sentence, Mousse's tool guidance when its MCP server is attached (with one sentence for the
+ * MCP relay when that is attached too), and the applet guidance when applets are on.
  */
 export function sessionInstructions(input: { mcp: boolean; relay?: boolean; appletGuidance?: string }): string {
   return [
+    LAST_REPLY_SESSION_INSTRUCTION,
     ...(input.mcp ? [mousseOrchestrationInstructions()] : []),
     ...(input.mcp && input.relay ? [RELAY_SESSION_INSTRUCTION] : []),
     ...(input.appletGuidance?.trim() ? [input.appletGuidance.trim()] : [])
@@ -187,19 +178,23 @@ export const PLAN_TURN_NOTE = 'Plan mode: this turn is read-only. Inspect what y
 /**
  * What a runtime with its own loop is told at the start of each prompt (PR 2 §2 "Instructions"):
  * skills loaded for the turn (an explicit `/skill` included), the mode's own instructions, the
- * conversation's applet catalogue, and which Mousse tools are usable now. Empty when there is none.
+ * conversation's applet catalogue, what already runs for the turn's folder, and which Mousse tools are usable now.
+ * Empty when there is none.
  */
 export function turnPreamble(input: {
   loadedSkills: Array<{ name: string; content: string }>
   modePrompt?: string
   appletCatalogue?: string
   usableTools?: string[]
+  /** What already runs for the turn's folder (`runningNote`); empty or absent: nothing runs, and no section. */
+  running?: string
 }): string {
   const sections: string[] = []
   if (input.loadedSkills.length)
     sections.push(`## Loaded Skill Instructions\n${input.loadedSkills.map((skill) => `### ${skill.name}\n${skill.content}`).join('\n\n')}`)
   if (input.modePrompt?.trim()) sections.push(`## Mode\n${input.modePrompt.trim()}`)
   if (input.appletCatalogue?.trim()) sections.push(`## Applets${input.appletCatalogue}`)
+  if (input.running?.trim()) sections.push(`## Running now\n${input.running.trim()}`)
   if (input.usableTools) sections.push(`## Mousse tools this turn\n${input.usableTools.length ? `Usable now: ${input.usableTools.join(', ')}.` : 'None of Mousse\'s tools are usable this turn.'}`)
   return sections.join('\n\n')
 }

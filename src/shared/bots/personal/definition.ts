@@ -1,4 +1,4 @@
-import type { ScheduledMissedRuns } from '../../types'
+import type { ScheduledMissedRuns, TellMe } from '../../types'
 import type { NeutralTool } from '../../harness/tools'
 import type { ProviderSelection } from '../../harness/types'
 import type { BotMessageSender } from './botMessages'
@@ -18,7 +18,7 @@ export interface BotManifest {
   /** Mousse app tools, by their app-tool name. */
   appTools: string[]
   /** The user's MCP tools, server-qualified. */
-  mcp: Array<{ serverId: string; tool: string }>
+  mcp: Array<{ serverId: string; tool: string; level?: 'asks_first' }>
   /** Skill ids. */
   skills: string[]
   /**
@@ -67,8 +67,11 @@ export function foldersOf(workspace: BotWorkspace | null): Array<[string, 'read'
 }
 
 export interface BotBudget {
-  /** Active work time per activation (required; enforced on every runtime). */
-  maxActiveMs: number
+  /**
+   * Work time per activation, no longer used: work time has no limit. A grant approved before keeps it only so its
+   * digest, and the activations made under it, still hold; nothing reads it.
+   */
+  maxActiveMs?: number
   /** Model requests per run, retries included (only on runtimes with hard budgets). */
   maxTurns?: number
   maxToolCalls?: number
@@ -326,7 +329,7 @@ export type BotActivationTrigger =
    * sent it and which turn in a row without the owner it is.
    */
   | { kind: 'manual'; input: string; owner?: BotOwnerTurn; fromBot?: BotMessageSender }
-  | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string; missed?: ScheduledMissedRuns }
+  | { kind: 'schedule'; input: string; scheduleId: string; occurrenceAt: string; missed?: ScheduledMissedRuns; removedTelling?: { tellMe: TellMe; canWakeMe?: boolean }; completed?: { why: string; name: string; tellMe?: TellMe; canWakeMe?: boolean; removed?: true } }
   /**
    * Work the chat handed off (`work_start`) or a reminder started (docs/plans/bot-always-free.md): a run beside the
    * chat, whose report answers `replyTo`, the owner's message that asked for it. `from`: the chat activation or
@@ -345,15 +348,18 @@ export interface BotWorkModelName {
   effort?: string
 }
 
-/** The default active time of one activation: an hour. */
-export const DEFAULT_BOT_ACTIVE_MS = 60 * 60_000
-/** The default active time before it became an hour: grants that still hold it are upgraded (`BotEngine.upgradeWorkTime`). */
-export const OLD_DEFAULT_BOT_ACTIVE_MS = 15 * 60_000
+/**
+ * The longest one turn of a bot's work runs before it goes on in a fresh turn of the same thread, as at its runtime's
+ * step cap (`BotEngine.continueAfterTurnCap`, not counted with those). Not a limit on the work: it keeps each turn's
+ * timer, supervisor and runtime wall time finite, and stays under the run engine's cut of one turn
+ * (`EFFECT_KIND_SPEC['turn.start'].timeoutMs`, six hours), so a long turn goes on instead of failing there.
+ */
+export const BOT_TURN_WINDOW_MS = 5 * 60 * 60_000
 /** Most context threads one bot may have. */
 export const MAX_BOT_CONTEXT_THREADS = 8
 /** Most activations one bot keeps queued; the oldest is dropped beyond this. */
 export const MAX_QUEUED_ACTIVATIONS = 20
-/** The smallest active-time slice a dispatch starts with; less than this left is a budget wall. */
+/** A slice of a turn's window: a steer or a subagent needs at least two of them left in the turn to start. */
 export const ACTIVE_TIME_CHUNK_MS = 15_000
 
 export type BotActivationStatus = 'queued' | 'running' | 'waiting_grant' | 'paused' | 'blocked' | 'done' | 'failed' | 'cancelled'

@@ -13,6 +13,8 @@ Tests build small, tidy threads. Real ones have hundreds of tool calls, big outp
 - The Net database: `~/.mousse/profiles/<profile>/net/net.db`. It holds the request ledger (`net_executions`), display streams (`bridge_thread_streams`, `net_records`) and everything else Net keeps. It is the one database that grows with every device and thread.
 - A user's thread you are asked about can also be read there (see `docs/thread-storage.md`).
 
+Read `docs/thread-storage.md` for the behavioural contracts the change touches (what a thread database holds, images and large outputs, paging, measuring), not the whole file by habit.
+
 Never write to `~/.mousse`. Read copies: [`real-threads.ts`](real-threads.ts) copies each `thread.db` (with its write-ahead log) to a temporary folder and yields its messages.
 
 ## 1. Same result, every thread
@@ -28,13 +30,13 @@ for (const thread of realThreads()) { /* run both on thread.messages, compare, c
 console.log({ changed, failedBefore, failedNow })
 ```
 
-Report the counts: threads checked, ones that failed before, ones that fail now, and ones whose result changed. A change that is meant to keep the result must show zero changes. One that is meant to fix a failure shows how many threads it fixes.
+Check every thread; correctness never samples. Print only aggregates: threads checked, ones that failed before, ones that fail now, ones whose result changed, plus a bounded size summary (`summarizeSizes` in `real-threads.ts`: count, min, median, p90, max and the few largest). Never print thread ids, folders, titles or per-thread lines; when a thread needs a closer look inside the script, label it anonymously ("largest #2"). A change that is meant to keep the result must show zero changes. One that is meant to fix a failure shows how many threads it fixes.
 
 ## 2. Time and memory
 
-- Time the old and new code on the largest real threads. Report the median of several runs, warm and cold. For a cold read, copy the database to a new file and drop it from the page cache first (`dd if=<copy> iflag=nocache count=0`).
+- Time the old and new code on the 3 to 5 largest real threads plus representative shapes: the median thread, the smallest, one with images or blobs, and one written by an older version (`pickForTiming` picks the first three kinds). Report the median of several runs, warm and cold, as one line per label. For a cold read, copy the database to a new file and drop it from the page cache first (`dd if=<copy> iflag=nocache count=0`).
 - Note the process's peak memory (`/usr/bin/time -v`) when the change builds whole threads or snapshots in memory.
-- A migration that adds an index or rewrites rows runs at startup on every user's database: time it on the largest real copy you have, and say how long the first start takes.
+- A migration that adds an index or rewrites rows runs at startup on every user's database: time it on the largest real copy you have and on copies in each older shape the migration handles, and say how long the first start takes.
 
 ## 3. Query plans
 
@@ -42,5 +44,5 @@ A new index can make SQLite pick a worse plan for a query that already existed. 
 
 ## What not to do
 
-- Do not commit real data, thread ids, transcripts or check scripts. Report numbers only.
+- Do not commit real data, thread ids, transcripts or check scripts. Report numbers only: aggregates and anonymous labels, no identifiers, folders or per-thread lines.
 - Do not use this in place of tests. Turn each failure it finds into a small test with made-up data that has the same shape.

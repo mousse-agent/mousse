@@ -7,6 +7,7 @@ import { themeCssTooLong } from '../../../shared/themes/cssSafety'
 import { Download, Trash2 } from '../../lib/icons'
 import { Select } from '../ui/Select'
 import { SettingsRow } from './SettingsRow'
+import { WallpaperRows } from './WallpaperRows'
 
 /** The colors the editor offers as swatches: the theme's accent and the tokens most themes change. */
 const SWATCHES: ReadonlyArray<{ key: 'accent' | string; label: string }> = [
@@ -134,6 +135,7 @@ export function UserThemeEditor({ theme, appearance, onSave, onDelete, onExport 
           </div>
         }
       />
+      <WallpaperRows wallpaper={draft.wallpaper} onChange={(wallpaper) => setDraft((current) => ({ ...current, wallpaper }))} />
       <SettingsRow
         title="Custom CSS"
         anchor="appearance-custom-css"

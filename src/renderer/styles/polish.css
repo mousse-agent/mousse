@@ -51,6 +51,8 @@
   --ui-menu-drop: 0 16px 44px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.2);
 
   --ui-hover: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  /* The selected main-area tab: a quiet neutral fill. */
+  --main-tab-selected: color-mix(in srgb, var(--text-primary) 9%, transparent);
   --ui-pressed: color-mix(in srgb, var(--text-primary) 10%, transparent);
   --ui-selected: rgba(var(--accent-rgb), 0.15);
   /* Opaque selection fill (selected settings page, selected theme): the
@@ -517,34 +519,6 @@ html .chat-avatar.group[class*='chat-color-'] {
   color: var(--chat-hue);
 }
 
-.app .chat-roster {
-  gap: 2px;
-  padding: 2px 0;
-  scrollbar-width: none;
-}
-
-.app .chat-roster::-webkit-scrollbar {
-  display: none;
-}
-
-.app .chat-roster button {
-  gap: 5px;
-  min-width: 48px;
-  padding: 6px 4px 5px;
-  border-radius: 9px;
-  font-size: 11px;
-  transition: background 0.15s, color 0.15s;
-}
-
-.app .chat-roster button:hover:not(:disabled) {
-  background: var(--ui-hover);
-  color: var(--text-primary);
-}
-
-.app .chat-roster button:disabled {
-  opacity: 0.4;
-}
-
 .app .chats-sidebar-content .chat-avatar {
   width: 30px;
   height: 30px;
@@ -626,13 +600,14 @@ html .chat-avatar.group[class*='chat-color-'] {
   background: var(--ui-hover);
 }
 
+/* Main-area tabs are plain: the selected one gets a quiet neutral fill, with no tint, rim light or glint. */
 .app .main-view-tab.active {
-  background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised));
-  box-shadow: var(--ui-specular);
+  background: var(--main-tab-selected);
+  box-shadow: none;
 }
 
 .app .main-view-tab.active .main-view-tab-icon {
-  color: var(--accent);
+  color: inherit;
 }
 
 /* ---------- Home and composer ---------- */
@@ -935,7 +910,6 @@ html .settings-nav-item.active {
 /* Composer fields draw focus on their card, not on the bare field. */
 .composer textarea:focus,
 .agent-chat-composer textarea:focus,
-.chat-search input:focus,
 .chat-resource-url input:focus {
   box-shadow: none;
 }
@@ -992,7 +966,6 @@ html .composer-workspace-menu {
 .app .threads-sidebar-thread.active,
 .app .chat-list-row.active,
 .app .navigation-rail-button.active,
-.app .main-view-tab.active,
 .app .threads-sidebar-tab.active,
 .app .header-toggle-active,
 .app .header-actions .icon-btn-ghost.header-toggle-active,
@@ -1004,7 +977,6 @@ html .composer-command-suggestion.selected {
 .app .threads-sidebar-thread.active::before,
 .app .chat-list-row.active::before,
 .app .navigation-rail-button.active::before,
-.app .main-view-tab.active::before,
 .app .threads-sidebar-tab.active::before,
 .app .header-toggle-active::before,
 .app .header-actions .icon-btn-ghost.header-toggle-active::before,
@@ -1206,9 +1178,9 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
  * the top and the bottom of the transcript, under the composer, the prompt rail and the jump pill. A mask on the
  * scroller would look the same but makes the GPU keep a transcript-sized copy of it, its mask and their tiles:
  * about 75 MB at 1400x870 on a 2x screen. Only a see-through window (acrylic) or the frosted composer, where no
- * colour can stand in for what lies behind, keeps the mask.
+ * colour can stand in for what lies behind, keeps the mask; so does a theme's wallpaper (wallpaper.css).
  */
-:is(html[data-acrylic='true'], html[data-frosted-composer='true']) .chat:not(.chat--empty) .an-message-list {
+:is(html[data-acrylic='true'], html[data-frosted-composer='true'], html[data-wallpaper]) .chat:not(.chat--empty) .an-message-list {
   --transcript-mask: linear-gradient(
     to bottom,
     transparent 0,
@@ -1222,12 +1194,12 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
 }
 
 /* The transcript is one stacking context, so nothing in it can rise above the bands. */
-html:not([data-acrylic='true']):not([data-frosted-composer='true']) .chat:not(.chat--empty) .an-message-list {
+html:not([data-acrylic='true']):not([data-frosted-composer='true']):not([data-wallpaper]) .chat:not(.chat--empty) .an-message-list {
   isolation: isolate;
 }
 
-html:not([data-acrylic='true']):not([data-frosted-composer='true']) .chat:not(.chat--empty) .an-message-list-wrap::before,
-html:not([data-acrylic='true']):not([data-frosted-composer='true']) .chat:not(.chat--empty) .an-message-list-wrap::after {
+html:not([data-acrylic='true']):not([data-frosted-composer='true']):not([data-wallpaper]) .chat:not(.chat--empty) .an-message-list-wrap::before,
+html:not([data-acrylic='true']):not([data-frosted-composer='true']):not([data-wallpaper]) .chat:not(.chat--empty) .an-message-list-wrap::after {
   content: '';
   position: absolute;
   left: 0;
@@ -1236,14 +1208,14 @@ html:not([data-acrylic='true']):not([data-frosted-composer='true']) .chat:not(.c
   pointer-events: none;
 }
 
-html:not([data-acrylic='true']):not([data-frosted-composer='true']) .chat:not(.chat--empty) .an-message-list-wrap::before {
+html:not([data-acrylic='true']):not([data-frosted-composer='true']):not([data-wallpaper]) .chat:not(.chat--empty) .an-message-list-wrap::before {
   top: 0;
   height: 28px;
   background: linear-gradient(to bottom, var(--pane-backdrop), transparent);
 }
 
 /* From 12px above the composer's top edge to the bottom of the pane: the fade, then the pane's colour. */
-html:not([data-acrylic='true']):not([data-frosted-composer='true']) .chat:not(.chat--empty) .an-message-list-wrap::after {
+html:not([data-acrylic='true']):not([data-frosted-composer='true']):not([data-wallpaper]) .chat:not(.chat--empty) .an-message-list-wrap::after {
   --chat-composer-stack: inherit;
   bottom: 0;
   height: min(calc(var(--chat-composer-stack, 160px) + 12px), calc(100% - 28px));

@@ -58,6 +58,11 @@ export const SESSION_CAPABILITIES = [
    * answer a new subscription of the stream after it) instead of closing the connection. Every node with
    * `streams.v1` offers it.
    */
-  'snapshot.stale.v1'
+  'snapshot.stale.v1',
+  /**
+   * Each side tells the other the port of its automatic LAN listener (`lan.port`), unsigned, so the side that accepted
+   * a session can dial the other back on the local network. A peer without it is told nothing.
+   */
+  'lan.port.v1'
 ] as const
 export type SessionCapability = (typeof SESSION_CAPABILITIES)[number]

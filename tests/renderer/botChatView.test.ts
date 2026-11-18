@@ -9,6 +9,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { rollUpChips } from '../../src/shared/bots/personal/chips'
 import { AT, fakeBots, installPreload, message, summary, type FakeBots } from './fakeBotsClient'
 import { setAnimationSpeed } from '../../src/renderer/lib/motion'
 import type { BotLaunchedThread } from '../../src/shared/bots/personal/chat'
@@ -48,8 +49,9 @@ const { useChatsStore, OPEN_BOT_HOLD_MS } = await import('../../src/renderer/sto
 const { ChatsSidebar } = await import('../../src/renderer/components/chats/ChatsSidebar')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
-const { SelectionReplyButton } = await import('../../src/renderer/components/SelectionReplyButton')
-const { botMessageScroller } = await import('../../src/renderer/components/bots/BotChatView')
+const { botMessageScroller, DOING_HOLD_MS } = await import('../../src/renderer/components/bots/BotChatView')
+const { SETTLE_MS, clearBotLiveReplies } = await import('../../src/renderer/stores/botLiveReplies')
+const { FLOW_CATCH_UP_MS } = await import('../../src/renderer/chat/components/agent-elements/reply-flow')
 
 let root: Root
 let host: HTMLElement
@@ -95,6 +97,8 @@ it('shows a permission switch notice as one quiet line', async () => {
 })
 
 beforeEach(() => {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
   fake = fakeBots()
   setViewedBot = vi.fn(async () => undefined)
   installPreload(fake, { app: { setViewedBot } })
@@ -110,13 +114,31 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount())
   host.remove()
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   setBotsClient(null)
+  clearBotLiveReplies()
   useChatsStore.setState(chatsInitial)
   useBotsStore.setState(botsInitial)
   useAppStore.setState({ settingsOpen: appInitial.settingsOpen })
 })
 
 describe('the transcript', () => {
+  it('shows put-away memory entries in the reply steps and keeps the saved-entry link focused', async () => {
+    const chips = rollUpChips([{
+      tool: 'memory_save', input: { text: 'Combined notes.' },
+      result: { id: 'm3', absorbed: [{ ref: 'm1', text: 'First note.' }, { ref: 'm2', text: 'Second note.' }] }
+    }])
+    fake.chats.inbox = [message(1, { id: 'combined', text: 'Saved.', chips })]
+    await open()
+    await click(transcript().querySelector<HTMLButtonElement>('.bot-worked')!)
+    const step = transcript().querySelector('.bot-steps li')!
+    expect(step.textContent).toBe('Remembered · Combined notes. · put away 2')
+    expect(step.getAttribute('title')).toBe('Put away:\nFirst note.\nSecond note.')
+    await click(transcript().querySelector<HTMLButtonElement>('.bot-memory-tag')!)
+    expect(useBotsStore.getState().memoryOpen?.focus).toBe('Combined notes.')
+  })
+
   it('shows the owner’s messages and the bot’s as bubbles, with no face or name on the bot’s; its work folds behind Worked for', async () => {
     const at = (seconds: number) => new Date(Date.UTC(2026, 10, 13, 9, 0, seconds)).toISOString()
     fake.chats.inbox = [
@@ -288,10 +310,35 @@ describe('the transcript', () => {
     let localFiles: Record<string, ReturnType<typeof vi.fn>>
     /** Every picture file reads as a PNG, each with its own preview address. */
     const install = () => {
-      localFiles = { showInFolder: vi.fn(async () => undefined), saveCopy: vi.fn(async () => '/home/me/Downloads/a.png'), copyImage: vi.fn(async () => undefined) }
+      localFiles = { showInFolder: vi.fn(async () => undefined), saveCopy: vi.fn(async () => '/home/me/Downloads/a.png') }
+      writeImage = vi.fn(async () => undefined)
       let made = 0
       URL.createObjectURL = vi.fn(() => `blob:picture-${++made}`)
-      installPreload(fake, { app: { setViewedBot }, fs: { readAsset: vi.fn(async () => ({ mimeType: 'image/png', data: [137, 80, 78, 71] })) }, localFiles })
+      installPreload(fake, { app: { setViewedBot }, fs: { readAsset: vi.fn(async () => ({ mimeType: 'image/png', data: [137, 80, 78, 71] })) }, localFiles, clipboard: { writeImage } })
+    }
+    let writeImage: ReturnType<typeof vi.fn>
+    /**
+     * jsdom draws nothing: a picture "loads" at 3 by 2 unless its address is `blob:broken`, and the canvas encodes
+     * PNG bytes that name the picture drawn on it, so a test can tell which picture reached the clipboard.
+     */
+    const drawing = () => {
+      const PNG = [137, 80, 78, 71, 13, 10, 26, 10]
+      class LoadingImage {
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+        naturalWidth = 3
+        naturalHeight = 2
+        width = 3
+        height = 2
+        private address = ''
+        get src() { return this.address }
+        set src(value: string) { this.address = value; queueMicrotask(() => (value === 'blob:broken' ? this.onerror?.() : this.onload?.())) }
+      }
+      vi.stubGlobal('Image', LoadingImage)
+      let drawn = ''
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ({ drawImage: (image: LoadingImage) => { drawn = image.src } }) as never)
+      vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((done: BlobCallback) => done(new Blob([new Uint8Array([...PNG, ...new TextEncoder().encode(drawn)])], { type: 'image/png' })))
+      return (bytes: Uint8Array) => ({ png: [...bytes.slice(0, 8)].join() === PNG.join(), picture: new TextDecoder().decode(bytes.slice(8)) })
     }
     const article = (id: string) => transcript().querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
     const contextMenu = async (target: Element) => {
@@ -411,21 +458,29 @@ describe('the transcript', () => {
 
     it('a right-click offers Open, Save as…, Show in folder and Copy image, each on that picture', async () => {
       install()
+      const copied = drawing()
       fake.chats.inbox = [message(1, { id: 'b1', text: `![a](${picture('a.png')}) ![b](${picture('b.png')})` })]
       await open()
       await settle()
       const second = button('Open picture: b', article('b1'))!
       const menuItems = () => [...document.querySelectorAll<HTMLButtonElement>('.bot-picture-menu [role="menuitem"]')]
-      for (const [label, action] of [['Save as…', 'saveCopy'], ['Show in folder', 'showInFolder'], ['Copy image', 'copyImage']] as const) {
+      for (const label of ['Save as…', 'Show in folder', 'Copy image']) {
         await contextMenu(second)
         expect(menuItems().map((item) => item.textContent)).toEqual(['Open', 'Save as…', 'Show in folder', 'Copy image'])
         // The tools beside the bubble (reactions, Read aloud, Copy, Reply) step aside while the menu is open.
         expect(article('b1').classList.contains('is-menu-open')).toBe(true)
         await click(menuItems().find((item) => item.textContent === label))
-        expect(localFiles[action]).toHaveBeenCalledWith(picture('b.png'))
+        await settle()
         expect(document.querySelector('.bot-picture-menu')).toBeNull()
         expect(article('b1').classList.contains('is-menu-open')).toBe(false)
       }
+      expect(localFiles.saveCopy).toHaveBeenCalledWith(picture('b.png'))
+      expect(localFiles.showInFolder).toHaveBeenCalledWith(picture('b.png'))
+      // Copy image puts the picture itself on the clipboard, as PNG bytes: the second picture, not its path.
+      expect(writeImage).toHaveBeenCalledTimes(1)
+      const shown = second.querySelector('img')!.getAttribute('src')!
+      expect(copied(writeImage.mock.calls[0][0] as Uint8Array)).toEqual({ png: true, picture: shown })
+      expect(composerError()).toBeNull()
       await contextMenu(second)
       await click(menuItems()[0])
       expect(document.querySelector('[role="dialog"]')?.getAttribute('aria-label')).toBe('b')
@@ -434,6 +489,50 @@ describe('the transcript', () => {
       await contextMenu(second)
       await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
       expect(document.querySelector('.bot-picture-menu')).toBeNull()
+    })
+
+    // A picture with no file (a `data:` image, a GIF or WebP drawn by the window) is copied as the window shows it.
+    it('a picture with no file offers Open and Copy image, and Copy image puts that picture on the clipboard', async () => {
+      install()
+      const copied = drawing()
+      const gif = 'data:image/gif;base64,R0lGODlhAQABAAAAACw='
+      fake.chats.inbox = [message(1, { id: 'b1', text: `![dance](${gif})` })]
+      await open()
+      await settle()
+      await contextMenu(button('Open picture: dance', article('b1'))!)
+      const items = [...document.querySelectorAll<HTMLButtonElement>('.bot-picture-menu [role="menuitem"]')]
+      expect(items.map((item) => item.textContent)).toEqual(['Open', 'Copy image'])
+      await click(items[1])
+      await settle()
+      expect(copied(writeImage.mock.calls[0][0] as Uint8Array)).toEqual({ png: true, picture: gif })
+      expect(localFiles.saveCopy).not.toHaveBeenCalled()
+    })
+
+    it("a picture that can't be drawn is said above the composer, and the clipboard is left alone", async () => {
+      install()
+      drawing()
+      fake.chats.inbox = [message(1, { id: 'b1', text: `![x](${picture('unreadable.png')})` })]
+      URL.createObjectURL = vi.fn(() => 'blob:broken')
+      await open()
+      await settle()
+      await contextMenu(button('Open picture: x', article('b1'))!)
+      await click([...document.querySelectorAll<HTMLButtonElement>('.bot-picture-menu [role="menuitem"]')].find((item) => item.textContent === 'Copy image'))
+      await settle()
+      expect(writeImage).not.toHaveBeenCalled()
+      expect(composerError()?.textContent).toBe("This picture can't be copied.")
+    })
+
+    it('a clipboard that refuses the picture is said in its own words above the composer', async () => {
+      install()
+      drawing()
+      writeImage.mockRejectedValue(new Error("Error invoking remote method 'clipboard:writeImage': Error: This picture can't be copied."))
+      fake.chats.inbox = [message(1, { id: 'b1', text: '![y](data:image/png;base64,iVBORw0KGgo=)' })]
+      await open()
+      await settle()
+      await contextMenu(button('Open picture: y', article('b1'))!)
+      await click([...document.querySelectorAll<HTMLButtonElement>('.bot-picture-menu [role="menuitem"]')].find((item) => item.textContent === 'Copy image'))
+      await settle()
+      expect(composerError()?.textContent).toBe("This picture can't be copied.")
     })
   })
 
@@ -567,7 +666,7 @@ describe('the transcript', () => {
     expect(transcript().querySelector('dl')).toBeNull()
   })
 
-  it('groups one sender’s messages within ten minutes, with a time on every message and a day line per day', async () => {
+  it('groups one sender’s messages within ten minutes, with one time per run in a minute and a day line per day', async () => {
     const today = new Date()
     today.setHours(11, 27, 0, 0)
     const at = (minutes: number, days = 0) => new Date(today.getTime() + minutes * 60_000 - days * 86_400_000).toISOString()
@@ -587,9 +686,10 @@ describe('the transcript', () => {
     // Owner o1+o2, bot b1+b2 (a quote does not break a group), then o3 twenty minutes later.
     expect(['y1', 'o1', 'o2', 'b1', 'b2', 'o3'].map((id) => article(id).classList.contains('is-group-start'))).toEqual([true, true, false, true, false, true])
     expect(article('b2').querySelector('.bot-reply-quote')?.textContent).toBe('tool calls')
-    // Every message has its own time in its bubble, grouped or not, and no time on hover.
+    // One sender's messages in a row in one minute show one time, on the last: o1 and o2 share 11:27, so only o2
+    // shows it; b1 (11:27) and b2 (11:28) are in other minutes, so each shows its own. No time on hover.
     const time = (id: string) => article(id).querySelector('time.bot-bubble-time')
-    expect(['y1', 'o1', 'o2', 'b1', 'b2', 'o3'].map((id) => time(id)?.getAttribute('dateTime'))).toEqual([at(0, 1), at(0), at(0), at(0), at(1), at(20)])
+    expect(['y1', 'o1', 'o2', 'b1', 'b2', 'o3'].map((id) => time(id)?.getAttribute('dateTime') ?? null)).toEqual([at(0, 1), null, at(0), at(0), at(1), at(20)])
     expect(time('b2')?.closest('.bot-bubble')).not.toBeNull()
     expect(time('o2')?.closest('.bot-you-bubble')).not.toBeNull()
     expect(log.querySelector('[title*="2026"], article[title]')).toBeNull()
@@ -604,6 +704,26 @@ describe('the transcript', () => {
     const sending = transcript().querySelector<HTMLElement>('.bot-you.is-pending')!
     expect(sending.classList.contains('is-group-start')).toBe(false)
     expect(sending.querySelector('.bot-bubble-time')?.textContent).toBe('Sending…')
+    // The message above has no other time to lean on until this one is sent: it keeps its own.
+    expect(transcript().querySelector('[data-message-id="o1"] time.bot-bubble-time')).not.toBeNull()
+  })
+
+  it('a quiet line between two of the bot’s messages in one minute keeps both times', async () => {
+    const minute = new Date()
+    minute.setHours(11, 27, 0, 0)
+    const at = (seconds: number) => new Date(minute.getTime() + seconds * 1000).toISOString()
+    fake.chats.inbox = [
+      message(1, { id: 'b1', at: at(10), text: 'Starting.' }),
+      message(2, { id: 'b2', at: at(30), text: 'Done.' }),
+      message(3, { id: 'b3', at: at(40), text: 'Anything else?' })
+    ]
+    await open()
+    await act(async () => useBotsStore.setState({ notes: { inbox: [{ id: 'n1', text: 'Checked mail', at: at(20) }] } }))
+    const log = transcript()
+    expect(log.textContent).toContain('Checked mail')
+    const hasTime = (id: string) => log.querySelector(`[data-message-id="${id}"] time.bot-bubble-time`) !== null
+    // b1, then the quiet line, then b2 and b3 in the same minute: b1 keeps its time, b2 gives its time to b3.
+    expect(['b1', 'b2', 'b3'].map(hasTime)).toEqual([true, false, true])
   })
 
   it('Sign in opens Settings, Providers on the entry to sign in to (the bot runner\'s card)', async () => {
@@ -633,16 +753,6 @@ describe('the transcript', () => {
     act(() => root.unmount())
     expect(setViewedBot).toHaveBeenLastCalledWith(null)
     root = createRoot(host)
-  })
-
-  it('pages back with beforeSeq when scrolled to the top', async () => {
-    fake.chats.inbox = Array.from({ length: 70 }, (_, index) => message(index + 1))
-    await open()
-    expect(transcript().querySelectorAll('article')).toHaveLength(50)
-    await act(async () => { transcript().dispatchEvent(new Event('scroll')) })
-    await act(async () => {})
-    expect(fake.calls).toContainEqual(['messages', 'inbox', { beforeSeq: 21, limit: 50 }])
-    expect(transcript().querySelectorAll('article')).toHaveLength(70)
   })
 
   it('a quote of a message not loaded yet loads older pages until it is there, then scrolls to it and lights it', async () => {
@@ -718,6 +828,7 @@ describe('a long chat', () => {
         await scrollTo(0)
         expect(drawn()).toHaveLength(rows)
       }
+      expect(fake.calls).toContainEqual(['messages', 'inbox', { beforeSeq: 151, limit: 50 }])
       expect(drawn()[0]).toBe('m1')
 
       // Away to the Threads tab and back: the chat is still loaded, and only its newest rows are drawn.
@@ -778,13 +889,14 @@ describe('while it works', () => {
   const presence = () => host.querySelector('.chat-conversation-header .bot-presence')
   const sticker = () => host.querySelector('.bot-header-about .bot-sticker')
 
-  it('types as a messenger does: dots in a bubble with "Working…" until it says more, "typing…" and a pen in the header, no spinner or chip; Stop and the mic stay', async () => {
+  it('types as a messenger does: dots in a bubble with what it is doing now in words, "typing…" and a pen in the header, no spinner or chip; Stop and the mic stay', async () => {
     fake.chats.inbox = [message(1, { id: 'o1', author: 'owner', text: 'again' })]
     fake.live.inbox = { activationId: 'act1', chip: { icon: 'search', text: 'searching the web' } }
     await open({ ...inbox, state: 'working', stateText: 'Working…' })
     const typing = transcript().querySelector('.bot-typing')!
-    expect(typing.getAttribute('aria-label')).toBe('Inbox helper: Working…')
-    expect(typing.querySelector('.bot-typing-status')?.firstChild?.textContent).toBe('Working…')
+    // A chat opened mid-turn says the step the turn is on, from the page it loaded.
+    expect(typing.getAttribute('aria-label')).toBe('Inbox helper: Searching the web')
+    expect(typing.querySelector('.bot-typing-status')?.firstChild?.textContent).toBe('Searching the web')
     expect(typing.querySelectorAll('.bot-typing-bubble i')).toHaveLength(3)
     expect(transcript().querySelector('.chat-spin, .bot-chip, .chat-run-status')).toBeNull()
     expect(transcript().textContent).not.toContain('is working')
@@ -818,7 +930,7 @@ describe('while it works', () => {
       const shimmer = () => running().filter((record) => words().contains(record.element))
       expect(onDots().map((record) => [dots.indexOf(record.element), record.options.delay, record.options.iterations]))
         .toEqual([[0, 0, Infinity], [1, 150, Infinity], [2, 300, Infinity]])
-      // "Working…" shimmers on the dots' cycle, its band reaching the words one dot step after the last dot peaks
+      // The words shimmer on the dots' cycle, the band reaching them one dot step after the last dot peaks
       // (300 + 360 + 150 ms).
       expect(shimmer().map((record) => [record.options.duration, record.options.iterations, (record.options.delay as number) + 0.25 * 1200]))
         .toEqual([[1200, Infinity, 300 + 360 + 150], [1200, Infinity, 300 + 360 + 150]])
@@ -839,6 +951,41 @@ describe('while it works', () => {
     } finally {
       delete (HTMLElement.prototype as { animate?: unknown }).animate
       setAnimationSpeed('normal')
+    }
+  })
+
+  it('pauses the typing dots and the shimmer together while the window is hidden, and plays them when it shows', async () => {
+    // jsdom has no Web Animations: animate and getAnimations are recorded here. Out of view counts the same as a hidden
+    // window (lib/offscreenMotion.ts, tested in offscreenMotion.test.ts).
+    const started: Array<{ element: Element; calls: string[] }> = []
+    const prototype = HTMLElement.prototype as { animate?: unknown; getAnimations?: unknown }
+    prototype.animate = function (this: Element) {
+      const record = { element: this, calls: [] as string[] }
+      started.push(record)
+      return { cancel: () => record.calls.push('cancel'), pause: () => record.calls.push('pause'), play: () => record.calls.push('play') }
+    }
+    prototype.getAnimations = function (this: Element) {
+      return started.filter((record) => this.contains(record.element) && !record.calls.includes('cancel'))
+        .map((record) => ({ pause: () => record.calls.push('pause'), play: () => record.calls.push('play') }))
+    }
+    let visibility: DocumentVisibilityState = 'visible'
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility })
+    const windowShown = (shown: boolean) => act(() => {
+      visibility = shown ? 'visible' : 'hidden'
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    try {
+      await open({ ...inbox, state: 'working', stateText: 'Working…' })
+      expect(started).toHaveLength(5)
+      const last = () => started.map((record) => record.calls.at(-1))
+      windowShown(false)
+      expect(last()).toEqual(['pause', 'pause', 'pause', 'pause', 'pause'])
+      windowShown(true)
+      expect(last()).toEqual(['play', 'play', 'play', 'play', 'play'])
+    } finally {
+      delete prototype.animate
+      delete prototype.getAnimations
+      delete (document as { visibilityState?: unknown }).visibilityState
     }
   })
 
@@ -864,6 +1011,260 @@ describe('while it works', () => {
   })
 })
 
+describe('a reply as it is written', () => {
+  // The bot's chat turns run in its home thread, whose messages reach the window as a thread's do.
+  const thread = { added: [] as Array<(event: { threadId: string; message: unknown }) => void>, updated: [] as Array<(event: { threadId: string; message: unknown }) => void> }
+  const writer = summary('inbox', { name: 'Inbox helper', state: 'working', stateText: 'Working…', homeThreadId: 'home1', chat: { activationId: 'act_c1' } })
+  const frame = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 40)) })
+  const add = async (message: object, threadId = 'home1') => { await act(async () => { for (const cb of thread.added) cb({ threadId, message }) }); await frame() }
+  const write = async (content: string, over: object = {}) => {
+    await act(async () => { for (const cb of thread.updated) cb({ threadId: 'home1', message: { id: 'r1', role: 'assistant', content, timestamp: AT, streaming: true, ...over } }) })
+    await frame()
+  }
+  const live = () => transcript().querySelector('.bot-live-reply')
+  const stopped = () => transcript().querySelector('.bot-cut-reply')
+  // With Animation speed Off (as with reduced motion) the reply's whole words show as they come, with no flow: the tests
+  // about what shows and when it goes read it at once. The flow itself has its own test, at normal speed.
+  beforeEach(() => { act(() => setAnimationSpeed('off')) })
+  afterEach(() => { act(() => setAnimationSpeed('normal')) })
+  async function openWriting(bot = writer) {
+    thread.added.length = 0
+    thread.updated.length = 0
+    installPreload(fake, { app: { setViewedBot }, orchestrator: { onThreadMessage: (cb: never) => { thread.added.push(cb); return () => {} }, onThreadMessageUpdated: (cb: never) => { thread.updated.push(cb); return () => {} } } })
+    fake.chats.inbox = [message(1, { id: 'o1', author: 'owner', text: 'Compare the two drives.' })]
+    await open(bot)
+    await add({ id: 'u1', role: 'user', content: 'Compare the two drives.', timestamp: AT })
+  }
+
+  it('keeps a stored action card single while another chat reply streams and the card settles', async () => {
+    await openWriting()
+    await write('The comparison is ready.\n\n')
+    const cardMessage = message(2, { id: 'held-stream', activationId: 'act_work', text: 'Mail · send_email fallback', action: action() })
+    await act(async () => fake.emit.message('inbox', cardMessage))
+    await frame()
+    expect(live()?.textContent).toBe('The comparison is ready.')
+    expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+    expect(transcript().textContent).not.toContain('send_email fallback')
+    // A reread/push of the same row updates it; it must not append a second review or end the chat's live reply.
+    await act(async () => fake.emit.message('inbox', { ...cardMessage, action: { ...cardMessage.action!, status: 'done', at: AT } }))
+    await frame()
+    expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+    expect(live()?.textContent).toBe('The comparison is ready.')
+    expect(transcript().querySelector('[aria-label="Action to review"] [role="status"]')?.textContent).toContain('Sent')
+    await act(async () => fake.emit.message('inbox', message(3, { text: 'The comparison is ready.', activationId: 'act_c1' })))
+    expect(live()).toBeNull()
+    expect(transcript().textContent?.match(/The comparison is ready\./g)).toHaveLength(1)
+    expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+    expect(stopped()).toBeNull()
+  })
+
+  it('keeps the card and both posted replies single across warm turns on the same home thread', async () => {
+    await openWriting()
+    await write('First warm reply.\n\n')
+    await act(async () => fake.emit.message('inbox', message(2, { id: 'first-posted', text: 'First warm reply.', activationId: 'act_c1' })))
+    fake.bots = [{ ...writer, chat: { activationId: 'act_c2' } }]
+    await act(async () => { await useBotsStore.getState().refresh() })
+    await add({ id: 'u2', role: 'user', content: 'What about the email?', timestamp: AT })
+    await write('Second warm reply.\n\n', { id: 'r2' })
+    const cardMessage = message(3, { id: 'warm-card', activationId: 'act_work', text: 'Mail · send_email fallback', action: action() })
+    await act(async () => fake.emit.message('inbox', cardMessage))
+    await act(async () => fake.emit.message('inbox', message(2, { id: 'first-posted', text: 'First warm reply.', activationId: 'act_c1' })))
+    await frame()
+    expect(live()?.textContent).toBe('Second warm reply.')
+    expect(transcript().textContent?.match(/First warm reply\./g)).toHaveLength(1)
+    expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+    await act(async () => fake.emit.message('inbox', message(4, { id: 'second-posted', text: 'Second warm reply.', activationId: 'act_c2' })))
+    expect(live()).toBeNull()
+    expect(transcript().textContent?.match(/Second warm reply\./g)).toHaveLength(1)
+    expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+    expect(stopped()).toBeNull()
+  })
+
+  it('shows the turn whole words at a time before it ends, each word drawn once, then only its posted message', async () => {
+    act(() => setAnimationSpeed('normal'))
+    await openWriting()
+    expect(transcript().querySelector('.bot-typing')).not.toBeNull()
+    // A word still being written is not shown: the dots stay until one is whole.
+    await write('The')
+    expect(live()).toBeNull()
+    expect(transcript().querySelector('.bot-typing')).not.toBeNull()
+    await write('The first drive')
+    // Its first whole word at once, the rest a step at a time.
+    expect(live()?.textContent).toBe('The')
+    expect(transcript().querySelector('.bot-typing')).toBeNull()
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, FLOW_CATCH_UP_MS)) })
+    expect(live()?.textContent).toBe('The first')
+    const first = live()!.querySelector('.an-word')
+    expect(first?.textContent).toBe('The')
+    await write('The first drive is faster.\n\nThe second one is')
+    // What has come shows within the flow's catch-up time.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, FLOW_CATCH_UP_MS + 200)) })
+    expect(live()?.textContent).toBe('The first drive is faster.The second one')
+    // Words already shown keep their element, so only the new ones fade in.
+    expect(live()!.querySelector('.an-word')).toBe(first)
+    // Another chat's thread is not this bot's.
+    await act(async () => { for (const cb of thread.updated) cb({ threadId: 'other', message: { id: 'x', role: 'assistant', content: 'Not mine.\n\n', timestamp: AT, streaming: true } }) })
+    await frame()
+    expect(transcript().textContent).not.toContain('Not mine.')
+    // Its message posted: the live bubble goes, and the words show once, as the message.
+    await act(async () => fake.emit.message('inbox', message(2, { text: 'The first drive is faster.\n\nThe second one is cheaper.', activationId: 'act_c1' })))
+    expect(live()).toBeNull()
+    expect(transcript().querySelectorAll('.bot-message:not(.bot-typing)')).toHaveLength(1)
+    expect(stopped()).toBeNull()
+  })
+
+  it('a reply whose message is posted before its first frame never shows beside it', async () => {
+    await openWriting()
+    // Its words and its posted message arrive within one frame.
+    await act(async () => { for (const cb of thread.updated) cb({ threadId: 'home1', message: { id: 'r1', role: 'assistant', content: 'The first drive is faster.\n\n', timestamp: AT, streaming: true } }) })
+    await act(async () => fake.emit.message('inbox', message(2, { text: 'The first drive is faster.', activationId: 'act_c1' })))
+    await frame()
+    expect(live()).toBeNull()
+    expect(transcript().textContent?.match(/The first drive is faster\./g)).toHaveLength(1)
+  })
+
+  it('a late update of a reply already posted never brings its bubble back; the next reply still streams', async () => {
+    await openWriting()
+    await write('The first drive is faster.\n\n')
+    await act(async () => fake.emit.message('inbox', message(2, { text: 'The first drive is faster.', activationId: 'act_c1' })))
+    expect(live()).toBeNull()
+    await write('The first drive is faster.\n\n', { streaming: false })
+    expect(live()).toBeNull()
+    expect(transcript().textContent?.match(/The first drive is faster\./g)).toHaveLength(1)
+    // Another reply of the home thread is a new one.
+    await write('One more thing.\n\n', { id: 'r2' })
+    expect(live()?.textContent).toBe('One more thing.')
+  })
+
+  it('says beside the dots what the turn is doing from its start; calls quicker than the hold never show; the bot’s own words win', async () => {
+    await openWriting()
+    const words = () => transcript().querySelector('.bot-typing .bot-typing-status')?.firstChild?.textContent
+    const step = (chip: Parameters<typeof fake.emit.activity>[1], status?: string) => act(async () => fake.emit.activity('inbox', chip, 'act_c1', status))
+    const pass = (ms: number) => act(async () => { vi.advanceTimersByTime(ms) })
+    // Nothing of the turn yet, and the owner's message is the newest row.
+    expect(words()).toBe('Reading your message')
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'requestAnimationFrame', 'cancelAnimationFrame'] })
+    try {
+      await step({ icon: 'memory', text: 'looking back', live: true })
+      await pass(DOING_HOLD_MS)
+      expect(words()).toBe('Looking back')
+      // Two calls inside the hold: the line stays, then takes the newest. The one between is never shown.
+      await step({ icon: 'web', text: 'reading a page', highlight: 'example.com', live: true })
+      await pass(DOING_HOLD_MS / 2)
+      await step({ icon: 'search', text: 'searching the web', highlight: 'ssd prices', live: true })
+      expect(words()).toBe('Looking back')
+      await pass(DOING_HOLD_MS / 2)
+      expect(words()).toBe('Searching the web · ssd prices')
+      // Its step ended and nothing new came: the words stay.
+      await step(null)
+      await pass(DOING_HOLD_MS)
+      expect(words()).toBe('Searching the web · ssd prices')
+      // Its words stream, none of them whole yet, so none shown.
+      await act(async () => { for (const cb of thread.updated) cb({ threadId: 'home1', message: { id: 'r1', role: 'assistant', content: 'The', timestamp: AT, streaming: true } }) })
+      await pass(DOING_HOLD_MS)
+      expect(live()).toBeNull()
+      expect(words()).toBe('Writing a reply')
+      // A step follows those words, which makes them the bot's own line: it shows at once, over the call that came with
+      // it and the ones after.
+      await act(async () => { for (const cb of thread.added) cb({ threadId: 'home1', message: { id: 't1', role: 'assistant', kind: 'tool_call', content: '', timestamp: AT } }) })
+      await step({ icon: 'web', text: 'reading a page', live: true }, 'Comparing the two drives now')
+      expect(words()).toBe('Comparing the two drives now')
+      await step({ icon: 'search', text: 'searching the web', live: true }, 'Comparing the two drives now')
+      await pass(DOING_HOLD_MS)
+      expect(words()).toBe('Comparing the two drives now')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a step after its words makes them the status beside the dots: the bubble goes until the reply after it', async () => {
+    await openWriting()
+    await write('Let me check the prices.\n\n')
+    expect(live()?.textContent).toBe('Let me check the prices.')
+    await add({ id: 't1', role: 'assistant', kind: 'tool_call', content: '', timestamp: AT })
+    expect(live()).toBeNull()
+    expect(transcript().querySelector('.bot-typing')).not.toBeNull()
+  })
+
+  it('never shows an applet’s source or the runtime’s placeholder, and draws nothing for words that finish no block', async () => {
+    await openWriting()
+    await write('Here it is.\n\n```mousse-applet\n{"schemaVersion":1,\n')
+    expect(live()?.textContent).toBe('Here it is.')
+    markdown.renders = 0
+    await write('Here it is.\n\n```mousse-applet\n{"schemaVersion":1,"title":"Budget",\n')
+    expect(markdown.renders).toBe(0)
+    await act(async () => { for (const cb of thread.updated) cb({ threadId: 'home1', message: { id: 'r2', role: 'assistant', content: 'No response requested.\n\n', timestamp: AT, streaming: true } }) })
+    await frame()
+    expect(transcript().textContent).not.toContain('No response requested')
+  })
+
+  /** The chat's turn ends (the service's summary no longer names it), and its settle wait passes. */
+  async function endTurn(before: () => void = () => {}) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      await act(async () => before())
+      fake.bots = [{ ...writer, state: 'idle', stateText: '', chat: undefined }]
+      await act(async () => { await useBotsStore.getState().refresh() })
+      expect(stopped()).toBeNull()
+      await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_MS + 50) })
+    } finally {
+      vi.useRealTimers()
+    }
+  }
+
+  it('a quiet turn’s silent marker never shows, and a turn that ends with no message leaves nothing behind', async () => {
+    await openWriting()
+    await write('[SIL')
+    await write('[SILENT]')
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1000)) })
+    expect(live()).toBeNull()
+    expect(transcript().textContent).not.toContain('SIL')
+    // Words it showed, then a turn that ends with nothing posted and no Stop or failure: no "Stopped" reply.
+    await write('Checked the build.\n\n')
+    expect(live()?.textContent).toBe('Checked the build.')
+    await endTurn()
+    expect(live()).toBeNull()
+    expect(stopped()).toBeNull()
+  })
+
+  it('a turn that fails before its message keeps its words marked Stopped beside the error', async () => {
+    await openWriting()
+    await write('The first drive is faster.\n\n')
+    await endTurn(() => fake.emit.message('inbox', message(2, { kind: 'error', text: '', error: { text: 'Claude stopped answering.' }, activationId: 'act_c1' })))
+    expect(live()).toBeNull()
+    expect(stopped()?.querySelector('.bot-markdown')?.textContent).toBe('The first drive is faster.')
+    expect(stopped()?.querySelector('.bot-cut-mark')?.textContent).toBe('Stopped')
+    expect(transcript().textContent).toContain('Claude stopped answering.')
+  })
+
+  it('a turn the owner stops before its message leaves its words muted and marked Stopped, never as a sent message', async () => {
+    await openWriting()
+    await write('The first drive is faster.\n\nThe second')
+    await act(async () => { await useBotsStore.getState().stop('inbox') })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      fake.bots = [{ ...writer, state: 'idle', stateText: '', chat: undefined }]
+      await act(async () => { await useBotsStore.getState().refresh() })
+      // It waits a moment for its message first.
+      expect(live()).not.toBeNull()
+      expect(stopped()).toBeNull()
+      await act(async () => { await vi.advanceTimersByTimeAsync(SETTLE_MS + 50) })
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(live()).toBeNull()
+    // All it had written, the sentence it was in the middle of too, as a thread keeps a stopped reply.
+    expect(stopped()?.querySelector('.bot-markdown')?.textContent).toBe('The first drive is faster.The second')
+    expect(stopped()?.querySelector('.bot-cut-mark')?.textContent).toBe('Stopped')
+    // Not a message: nothing to reply to, react to or quote.
+    expect(stopped()?.querySelector('button')).toBeNull()
+    expect(stopped()?.hasAttribute('data-message-id')).toBe(false)
+    // A message of that turn that still comes takes its place.
+    await act(async () => fake.emit.message('inbox', message(2, { at: new Date(Date.now() + 1000).toISOString(), text: 'Late reply.', activationId: 'act_c1' })))
+    expect(stopped()).toBeNull()
+  })
+})
+
 describe('what renders again', () => {
   it('leaves the messages alone for a poll that changed nothing, a live chip, the bot starting work and the chats list', async () => {
     fake.chats.inbox = [message(1, { author: 'owner', text: 'Find me a PSU.' }), message(2, { text: 'Here are three.' }), message(3, { text: 'And a fourth.' })]
@@ -876,7 +1277,7 @@ describe('what renders again', () => {
     await act(async () => useChatsStore.setState({ snapshot: { ...useChatsStore.getState().snapshot } }))
     expect(markdown.renders).toBe(0)
     expect(transcript().querySelector('.bot-typing')).not.toBeNull()
-    // A new message renders itself only.
+    // A new message renders itself only (the one above may lose its time to it, but not draw its words again).
     await act(async () => fake.emit.message('inbox', message(4, { text: 'Done.' })))
     expect(markdown.renders).toBe(1)
   })
@@ -1065,49 +1466,6 @@ describe('the composer', () => {
     expect(box().value).toBe('Do this every weekday at 9.')
   })
 
-  it('Reply on text selected in a bot message puts a pill in the box at the caret; the bot gets it in quotes in its own paragraph', async () => {
-    fake.chats.inbox = [message(1, { id: 'b1', text: 'Your flight leaves at 9:40 from gate 12.' })]
-    await act(async () => { createRoot(document.body.appendChild(document.createElement('div'))).render(createElement(SelectionReplyButton)) })
-    await open()
-    // jsdom has no layout: the selection is given a place on screen.
-    Range.prototype.getClientRects = () => [{ top: 10, bottom: 30, left: 10, right: 80 }] as unknown as DOMRectList
-    transcript().getBoundingClientRect = () => ({ top: 0, bottom: 500, left: 0, right: 500 }) as DOMRect
-    await type(box(), 'Which gate? ')
-    // Selects "gate 12" in the bot's message, as a drag would, and lets the button find it.
-    const frame = () => act(async () => { await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined))) })
-    const select = async () => {
-      // The box takes the focus a frame after an edit, which would end a selection made before it.
-      await frame()
-      const walker = document.createTreeWalker(transcript().querySelector('.bot-bubble')!, NodeFilter.SHOW_TEXT)
-      let textNode = walker.nextNode()
-      while (textNode && !textNode.textContent!.includes('gate 12')) textNode = walker.nextNode()
-      const at = textNode!.textContent!.indexOf('gate 12')
-      const range = document.createRange()
-      range.setStart(textNode!, at)
-      range.setEnd(textNode!, at + 'gate 12'.length)
-      window.getSelection()!.removeAllRanges()
-      window.getSelection()!.addRange(range)
-      document.dispatchEvent(new Event('selectionchange'))
-      await frame()
-    }
-    await select()
-    await click(document.querySelector('.selection-reply-button'))
-    expect(box().value).toMatch(/^Which gate\? \u2068\u2003\u00a0“gate\u00a012”\u2069 $/)
-    // The pill goes like one character.
-    box().setSelectionRange(box().value.length - 1, box().value.length - 1)
-    await press('Backspace')
-    expect(box().value).toBe('Which gate?  ')
-    await select()
-    await click(document.querySelector('.selection-reply-button'))
-    await press('Enter')
-    expect(vi.mocked(fake.client.send).mock.calls.at(-1)?.[1]).toBe('Which gate?\n\n"gate 12"')
-    // The bubble shows the quote as a pill, not the quote marks and blank lines the bot got.
-    await settle()
-    const bubble = [...transcript().querySelectorAll('.bot-you-bubble')].at(-1)!
-    expect(bubble.querySelector('.sent-quote-pill')?.textContent).toBe('Replying to: gate 12')
-    expect(bubble.textContent).not.toContain('"gate 12"')
-  })
-
   it('two identical messages on their way are two bubbles, and each confirmation clears only its own', async () => {
     await open()
     const releases: Array<() => void> = []
@@ -1231,10 +1589,10 @@ describe('the composer', () => {
 })
 
 describe('the menu', () => {
-  it('offers About, Rename, Change look, Pause and Delete bot', async () => {
+  it('offers About, Find in chat, Rename, Change look, Pause and Delete bot', async () => {
     await open()
     await click(button('Bot menu'))
-    expect([...host.querySelectorAll('[role="menuitem"]')].map((element) => element.textContent)).toEqual(['About this bot', 'Rename', 'Change look', 'Pause', 'Delete bot'])
+    expect([...host.querySelectorAll('[role="menuitem"]')].map((element) => element.textContent)).toEqual(['About this bot', 'Find in chat', 'Rename', 'Change look', 'Pause', 'Delete bot'])
     await click(button('About this bot'))
     expect(host.querySelector('.bot-about')).not.toBeNull()
     expect(host.querySelector('[role="menu"]')).toBeNull()
@@ -1442,10 +1800,10 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     const long = 'Reading the three store pages you sent and checking which of them still have the 2 TB drive in stock, with delivery to Pune before Friday'
     await act(async () => fake.emit.activity('inbox', { icon: 'web', text: 'reading a page' }, 'act_c1', long))
     expect(words()?.textContent).toBe(long)
-    // An event without one: "Working…" again, never the dots alone.
+    // An event without one (its step ended): the line keeps its words, never the dots alone or a step back to "Working".
     await act(async () => fake.emit.activity('inbox', null, 'act_c1'))
-    expect(words()?.textContent).toBe('Working…')
-    expect(typing().getAttribute('aria-label')).toBe('Inbox helper: Working…')
+    expect(words()?.textContent).toBe(long)
+    expect(typing().getAttribute('aria-label')).toBe(`Inbox helper: ${long}`)
   })
 
   it("the chat's own turn types and has Stop; the header still opens the work", async () => {
@@ -1475,6 +1833,15 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       expect([fold.textContent, fold.getAttribute('aria-expanded')]).toEqual(['Done4', 'false'])
       await click(fold)
       expect(rows().slice(2)).toEqual([['Never ran', 'idle', 'idle'], ['Broken', 'failed', 'failed'], ['Halted', 'stopped', 'failed'], ['Old run', 'done', 'done']])
+    })
+
+    it('a thread on hold for the owner is listed as waiting on you while the bot reads free, and the rest fold under Done', async () => {
+      await open({ ...inbox, state: 'idle', stateText: 'Done.', threads: [thread('t8', 'Fix login', 'on_hold', 20), thread('t3', 'Old run', 'done', 90)] })
+      expect(presence().textContent).toBe('free')
+      await click(presence())
+      expect(rows()).toEqual([['Fix login', 'waiting on you', 'waiting']])
+      const fold = host.querySelector<HTMLButtonElement>('.bot-thread-fold')!
+      expect([fold.textContent, fold.getAttribute('aria-expanded')]).toEqual(['Done1', 'false'])
     })
 
     it('opens a thread from its row, moves along the list with the arrow keys, and closes on Escape or a click away', async () => {
@@ -1715,7 +2082,7 @@ describe('loading and labels', () => {
   it('opens a bot with its messages: the click marks its face, and the pane changes once they are here', async () => {
     const release = await withSlowFirstPage()
     await click(button('Message Inbox helper'))
-    expect(button('Message Inbox helper')!.className).toContain('bot-roster-active')
+    expect(button('Message Inbox helper')!.getAttribute('aria-current')).toBe('true')
     // Nothing of the bot shows without its messages: no empty chat, no Loading line.
     expect(host.querySelector('.chat-transcript')).toBeNull()
     expect(loadState()).toBeNull()
@@ -1867,6 +2234,11 @@ describe('memory', () => {
     expect(fake.calls.some(([name]) => name === 'send')).toBe(false)
     await press('Enter')
     expect(vi.mocked(fake.client.send).mock.calls.at(-1)?.[1]).toBe('Why?\n\n"The owner reads mail at 8."')
+    // The bubble shows the quote as a pill, not the quote marks and blank lines the bot got.
+    await settle()
+    const bubble = [...transcript().querySelectorAll('.bot-you-bubble')].at(-1)!
+    expect(bubble.querySelector('.sent-quote-pill')?.textContent).toBe('Replying to: The owner reads mail at 8.')
+    expect(bubble.textContent).not.toContain('"The owner reads mail at 8."')
   })
 
   it('a reply whose turn saved a memory has a "Saved to memory" tag that opens Memory at that entry', async () => {
@@ -1882,4 +2254,830 @@ describe('memory', () => {
     await settle()
     expect(dialog()?.querySelector('.is-focused .bot-memory-text')?.textContent).toBe('The owner reads mail at 8.')
   })
+})
+
+it.each(['unfocused', 'hidden'] as const)('keeps a mounted %s chat unread until visible and focused', async state => {
+  const markRead = vi.mocked(fake.client.markRead).getMockImplementation()!
+  vi.mocked(fake.client.markRead).mockImplementation((id, seq) => {
+    fake.bots = fake.bots.map(bot => bot.id === id ? { ...bot, unread: 0 } : bot)
+    return markRead(id, seq)
+  })
+  let focused = state !== 'unfocused'
+  let visible = state !== 'hidden'
+  vi.mocked(document.hasFocus).mockImplementation(() => focused)
+  vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visible ? 'visible' : 'hidden')
+  fake.chats.inbox = [message(1)]
+  await open({ ...inbox, unread: 1 })
+  await act(async () => fake.emit.message('inbox', message(2)))
+  expect(fake.calls.filter(call => call[0] === 'markRead')).toEqual([])
+  expect(useBotsStore.getState().bots[0]?.unread).toBeGreaterThan(0)
+  focused = true; visible = true
+  await act(async () => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')) })
+  expect(fake.calls).toContainEqual(['markRead', 'inbox', 2])
+  expect(useBotsStore.getState().bots[0]?.unread).toBe(0)
+})
+
+it('a reminder offers snooze replies and a tap leaves a quiet confirmation', async () => {
+  fake.chats.inbox = [message(1, { text: 'Tea', reminder: {} })]
+  fake.client.snoozeReminder = vi.fn(async () => ({ ...fake.chats.inbox![0]!, reminder: { snoozedUntil: '2026-11-07T09:10:00.000Z' } }))
+  await open()
+  expect(button('In 10 min')).toBeDefined()
+  expect(button('In 1 hour')).toBeDefined()
+  expect([...host.querySelectorAll('button')].some(b => b.textContent?.startsWith('Tomorrow '))).toBe(true)
+  await click(button('In 10 min'))
+  expect(fake.client.snoozeReminder).toHaveBeenCalledWith('inbox', 'm1', '10m')
+  expect(button('In 10 min')).toBeUndefined()
+  expect(host.textContent).toContain('Snoozed until')
+})
+
+it('a service without snooze support offers no snooze replies', async () => {
+  fake.chats.inbox = [message(1, { text: 'Tea' })]
+  await open()
+  expect(button('In 10 min')).toBeUndefined()
+})
+
+it('removes snooze replies in an open chat when their day expires', async () => {
+  vi.useFakeTimers()
+  fake.chats.inbox = [message(1, { text: 'Tea', reminder: { expiresAt: new Date(Date.now() + 60_000).toISOString() } })]
+  await open()
+  expect(button('In 10 min')).toBeDefined()
+  try {
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_001) })
+    expect(button('In 10 min')).toBeUndefined()
+  } finally { vi.useRealTimers() }
+})
+
+
+it.each([
+  ['en-US', '4:05 AM', '9:00 AM'],
+  ['en-GB', '4:05', '9:00']
+])('snooze replies use the bubble clock format in %s', async (locale, dueTime, morning) => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date(2026, 10, 16, 3, 55))
+  const nativeTime = Date.prototype.toLocaleTimeString
+  const format = vi.spyOn(Date.prototype, 'toLocaleTimeString').mockImplementation(function (locales, options) {
+    return nativeTime.call(this, locale, options)
+  })
+  try {
+    const due = new Date(2026, 10, 16, 4, 5).toISOString()
+    fake.chats.inbox = [message(1, { at: due, text: 'Tea', reminder: {} })]
+    fake.client.snoozeReminder = vi.fn(async () => ({ ...fake.chats.inbox![0]!, reminder: { snoozedUntil: due } }))
+    await open()
+    expect(button(`Tomorrow ${morning}`)).toBeDefined()
+    expect(host.querySelector('.bot-bubble-time')?.textContent).toBe(dueTime)
+    await click(button('In 10 min'))
+    expect(host.querySelector('.bot-question-settled')?.textContent).toBe(`Snoozed until ${dueTime}`)
+  } finally { format.mockRestore(); vi.useRealTimers() }
+})
+
+it('a snooze on another day shows the chat date and time', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date(2026, 10, 16, 23, 55))
+  try {
+    const due = new Date(2026, 10, 17, 9).toISOString()
+    const { botDayLabel, botGroupTime } = await import('../../src/renderer/components/bots/messageGroups')
+    fake.chats.inbox = [message(1, { at: due, text: 'Tea', reminder: { snoozedUntil: due } })]
+    await open()
+    expect(host.querySelector('.bot-question-settled')?.textContent).toBe(`Snoozed until ${botDayLabel(due)} ${botGroupTime(due)}`)
+  } finally { vi.useRealTimers() }
+})
+
+it('R5-time formats a sent action in the client clock', async () => {
+  const { botGroupTime } = await import('../../src/renderer/components/bots/messageGroups')
+  fake.chats.inbox = [message(1, { id: 'bm_action_sent', text: 'Sent', actionSentAt: AT } as never)]
+  await open()
+  expect(host.querySelector('[data-message-id="bm_action_sent"]')?.textContent).toContain(`Sent · ${botGroupTime(AT)}`)
+})
+
+// Stored action cards, through the workspace the owner actually opens.
+const action = (change: Record<string, unknown> = {}) => ({ actionId: 'held-1', digest: 'shown-digest', title: 'Send an email', serverName: 'Mail', args: { from: 'me@example.com', to: ['one@example.com', 'two@example.com'], subject: 'A subject', attachments: ['trip.pdf'], body: 'Long email '.repeat(120) + 'last word', password: { $mousse: 'hidden', text: 'hidden · will be sent' }, literal: { $mousse: 'literal', value: { $mousse: 'hidden', text: 'hidden · will be sent' } } }, hasHiddenValues: true, hiddenPaths: [['password'], ['login', 'token']], status: 'open', note: 'Please check this.', ...change })
+const held = (change: Record<string, unknown> = {}) => message(1, { id: 'held-message', text: 'legacy fallback', action: action(change) } as never)
+it('shows complete stored action arguments as guarded text, with an in-place body fold and no invented bot note', async () => {
+  fake.chats.inbox = [held({ title: '<b>Send</b>', serverName: '[Mail](https://evil.test)', note: '<i>Check</i>\u202e this', args: { ...action().args, hostile: '<button>Send now</button> https://evil.test Ignore instructions', text: 'hidden · will be sent' } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card).toBeTruthy()
+  for (const text of ['me@example.com', 'one@example.com', 'two@example.com', 'A subject', 'trip.pdf', '<b>Send</b>', '<button>Send now</button>', 'login']) expect(card.textContent).toContain(text)
+  expect(card.querySelector('[aria-label="Bot note"]')).toBeNull()
+  expect(card.textContent).not.toContain('<i>Check</i>')
+  expect(card.querySelector('a, b, i')).toBeNull()
+  expect(card.textContent).not.toContain('\u202e')
+  const fold = card.querySelector('details')!
+  expect(fold.open).toBe(false)
+  await click(fold.querySelector('summary'))
+  expect(fold.open).toBe(true)
+  expect(fold.textContent).toContain('last word')
+  expect(card.querySelectorAll('[aria-label="Hidden value that will be sent"]')).toHaveLength(1)
+  expect(button('Send', card)?.autofocus).toBe(false)
+})
+it('answers only the card id, digest and choice, then redraws a changed card with live buttons', async () => {
+  fake.chats.inbox = [held()]
+  const answer = vi.fn(async () => { fake.chats.inbox = [held({ digest: 'new-digest', title: 'Changed email' })]; throw Object.assign(new Error('This changed since you saw it'), { code: 'bot_action_changed' }) })
+  Object.assign(fake.client, { answerAction: answer })
+  await open()
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  expect(answer).toHaveBeenCalledWith('held-1', 'shown-digest', 'send')
+  expect(host.textContent).toContain('This changed since you saw it')
+  expect(host.textContent).toContain('Changed email')
+  expect(button('Send', host.querySelector('[aria-label="Action to review"]')!)?.disabled).toBe(false)
+  await click(button('Not now'))
+  expect(answer).toHaveBeenLastCalledWith('held-1', 'new-digest', 'not_now')
+})
+it.each([
+  ['open', 'Send'], ['approved', 'Waiting for Mail…'], ['running', 'Sending'], ['done', 'Sent ·'],
+  ['failed', 'Not sent'], ['uncertain', "Couldn't tell if it went through"], ['declined', 'Not sent'],
+  ['expired', 'Expired · not sent'], ['withdrawn', 'Not sent']
+])('keeps the complete card readable in %s', async (status, label) => {
+  fake.chats.inbox = [held({ status, at: AT })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.textContent).toContain(label)
+  expect(card.textContent).toContain('trip.pdf')
+  expect(button('Send', card)?.disabled ?? true).toBe(status !== 'open')
+})
+it.each(['done', 'failed', 'uncertain'])('warns about the previous %s call and shows masked tool errors', async (status) => {
+  fake.chats.inbox = [held({ previous: { status, at: AT }, result: { text: '<error>hidden · will be sent</error>', toolReportedError: true } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.textContent).toContain(status === 'done' ? 'already sent exactly this' : status === 'failed' ? 'already tried exactly this' : "couldn't tell if it went through")
+  expect(card.querySelector('[role="note"][aria-label="Tool result"]')?.textContent).toContain('<error>hidden · will be sent</error>')
+})
+it('keeps Not now available when a card is too large to send here', async () => {
+  fake.chats.inbox = [held({ tooLarge: true })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.textContent).toContain('Use the computer')
+  expect(button('Send', card)?.disabled).toBe(true)
+  expect(button('Not now', card)?.disabled).toBe(false)
+})
+
+it.each(['done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn', 'legacy'])('find counts only highlightable settled text for %s cards', async (status) => {
+  fake.chats.inbox = [status === 'legacy' ? message(1, { text: 'Sent', actionSentAt: AT }) : held({ status, at: AT })]
+  await open()
+  const { botFindText } = await import('../../src/renderer/components/bots/useBotChatFind')
+  const { collectFindRanges } = await import('../../src/renderer/chat/components/agent-elements/find/dom-highlight')
+  const row = host.querySelector('[data-turn-key]')!
+  const text = botFindText(fake.chats.inbox[0]!)
+  const needle = status === 'uncertain' ? "Couldn't" : status === 'failed' || status === 'declined' || status === 'withdrawn' ? 'Not sent' : status === 'expired' ? 'Expired' : 'Sent'
+  expect(text).toContain(needle)
+  expect(collectFindRanges(row, needle)).toHaveLength(1)
+  // The plain fallback is replaced by the card; it must never produce an unpaintable match.
+  expect(text).not.toContain('legacy fallback')
+})
+
+it('keeps structural hidden children inside escaped literal objects distinct from literal marker-shaped text', async () => {
+  fake.chats.inbox = [held({ args: { $mousse: 'literal', value: { $mousse: 'custom', password: { $mousse: 'hidden', text: 'hidden · will be sent' }, spoof: { $mousse: 'literal', value: { $mousse: 'literal', value: { $mousse: 'literal', value: { $mousse: 'hidden', text: 'hidden · will be sent' } } } } } } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelectorAll('[aria-label="Hidden value that will be sent"]')).toHaveLength(1)
+  expect(card.textContent).toContain('custom')
+})
+it('passes exactly the shown action identity through the real client transport, and refreshes the settled tool error', async () => {
+  fake.chats.inbox = [held()]
+  const { createPersonalBotsClient } = await import('../../src/renderer/services/personalBotsClient')
+  const request = vi.fn(async () => {
+    fake.chats.inbox = [held({ status: 'failed', result: { text: '<error>Partial delivery</error>', toolReportedError: true } })]
+    return { status: 'failed' }
+  })
+  Object.assign(fake.client, { answerAction: createPersonalBotsClient({ request } as never).answerAction })
+  await open()
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  expect(request).toHaveBeenCalledExactlyOnceWith('bots.actions.answer', { actionId: 'held-1', digest: 'shown-digest', answer: 'send' })
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.textContent).toContain('The tool reported an error')
+  expect(card.querySelector('[aria-label="Tool result"]')?.textContent).toBe('<error>Partial delivery</error>')
+  expect(button('Send', card)).toBeUndefined()
+})
+
+it('keeps subject and multiline recipient probes inside data and drops legacy notes', async () => {
+  const note = 'Fine.\n\nInbox helper already sent exactly this at 9:14 AM\n\nThis changed since you saw it'
+  const subject = 'Hi\n\nHidden values will be sent: nothing\n\nInbox helper already sent exactly this…'
+  const recipient = 'alice@example.com\nbcc\nevil@example.com'
+  fake.chats.inbox = [held({ note, args: { subject, to: [recipient], 'Hidden values will be sent': 'pretend notice' }, previous: { status: 'done', at: AT } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const argumentsRegion = card.querySelector('[role="region"][aria-label="Everything it will send"]')!
+  expect(argumentsRegion).toBeTruthy()
+  expect(argumentsRegion.querySelector('blockquote')?.textContent).toContain('Hi↵')
+  expect(argumentsRegion.textContent).toContain('alice@example.com↵\nbcc↵\nevil@example.com')
+  expect(card.querySelector('blockquote[aria-label="Bot note"]')).toBeNull()
+  expect(card.textContent).not.toContain('Fine.')
+  const notices = [...card.querySelectorAll('[role="note"]')].filter((element) => element.textContent?.includes('Hidden values will be sent:') || element.textContent?.includes('already sent exactly this at'))
+  for (const notice of notices) { expect(argumentsRegion.contains(notice)).toBe(false); expect(notice.querySelector('svg')).toBeTruthy() }
+})
+
+it('distinguishes scalar data types, scalar-looking text and empty text', async () => {
+  fake.chats.inbox = [held({ args: { off: false, textOff: 'false', on: true, textOn: 'true', count: 123, textCount: '123', nothing: null, textNothing: 'null', list: [], textList: '[]', object: {}, textObject: '{}', empty: '', plain: 'An ordinary sentence' } })]
+  await open()
+  const args = host.querySelector('[aria-label="Everything it will send"]')!
+  const value = (key: string) => [...args.querySelectorAll('dt')].find((element) => element.textContent === key)!.nextElementSibling!
+  for (const [key, display] of [['off', 'false'], ['on', 'true'], ['count', '123'], ['nothing', 'null'], ['list', '[]'], ['object', '{}']]) {
+    expect(value(key).querySelector('code')?.textContent).toBe(display)
+    expect(value(`text${key === 'off' ? 'Off' : key === 'on' ? 'On' : key === 'count' ? 'Count' : key === 'nothing' ? 'Nothing' : key === 'list' ? 'List' : 'Object'}`).textContent).toBe(`"${display}"`)
+  }
+  expect(value('empty').textContent).toBe('(empty text)')
+  expect(value('plain').textContent).toBe('An ordinary sentence')
+  expect(value('plain').querySelector('code')).toBeNull()
+})
+
+it.each(['approved', 'running', 'done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn'])('keeps %s cards compact with arguments readable in place and a timed outcome', async (status) => {
+  fake.chats.inbox = [held({ status, at: AT, result: status === 'failed' ? { text: 'Partly delivered', toolReportedError: true } : undefined })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelector('[aria-label="Action summary"]')?.textContent).toBe('Send an email · Mail')
+  const fold = card.querySelector<HTMLDetailsElement>('details')!
+  expect(fold?.open).toBe(false)
+  expect(fold.querySelector('[aria-label="Everything it will send"]')).toBeTruthy()
+  expect(card.querySelector('[role="status"]')?.textContent).toContain(' · ')
+  if (status === 'failed') expect(card.querySelector('[aria-label="Tool result"]')?.textContent).toBe('Partly delivered')
+  await click(fold.querySelector('summary'))
+  expect(fold.open).toBe(true)
+  expect(fold.textContent).toContain('trip.pdf')
+})
+
+it('folds long list values and names when more arguments remain below', async () => {
+  fake.chats.inbox = [held({ args: { subject: 'S'.repeat(300), to: ['alice@example.com\n'.repeat(40)], final: 'Last field' } })]
+  await open()
+  const args = host.querySelector<HTMLElement>('[aria-label="Everything it will send"]')!
+  const subject = [...args.querySelectorAll('dt')].find((item) => item.textContent === 'subject')!.nextElementSibling!
+  expect(subject.querySelector('details')?.open).toBe(false)
+  expect(args.querySelector('li details')?.textContent).toContain('alice@example.com')
+  expect(args.textContent).toContain('Last field')
+  Object.defineProperties(args, { scrollHeight: { configurable: true, value: 900 }, clientHeight: { configurable: true, value: 360 }, scrollTop: { configurable: true, writable: true, value: 0 } })
+  await act(async () => args.dispatchEvent(new Event('scroll', { bubbles: true })))
+  expect(host.textContent).toContain('More below')
+  args.scrollTop = 540
+  await act(async () => args.dispatchEvent(new Event('scroll', { bubbles: true })))
+  expect(host.textContent).not.toContain('More below')
+})
+
+it('shows a too-large device stub without null arguments or an empty hidden-field list', async () => {
+  fake.chats.inbox = [held({ tooLarge: true, args: null, hiddenPaths: [] })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelector('[aria-label="Everything it will send"]')).toBeNull()
+  expect(card.textContent).toContain('too large to review on this device')
+  expect(card.textContent).toContain('Hidden values will be sent')
+  expect(card.textContent).not.toContain('Hidden values will be sent:')
+  expect(card.textContent).not.toContain('null')
+  expect(button('Send', card)?.disabled).toBe(true)
+  expect(button('Not now', card)?.disabled).toBe(false)
+})
+
+it('quotes actual hidden path segments without interpreting dots or arrows and folds long segments', async () => {
+  const long = 'harmless preview (not sent)_token'.repeat(20)
+  fake.chats.inbox = [held({ hiddenPaths: [['a.b', 'c → d'], ['meta', long]] })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const warning = [...card.querySelectorAll('[role="note"]')].find((item) => item.textContent?.includes('Hidden values will be sent'))!
+  const path = warning.querySelector('[aria-label="Hidden field path"]')!
+  expect([...path.querySelectorAll('[aria-label="Field name"]')].map((item) => item.textContent)).toEqual(['a.b', 'c → d'])
+  const fold = warning.querySelector('details')!
+  expect(fold.open).toBe(false)
+  await click(fold.querySelector('summary'))
+  expect(fold.open).toBe(true)
+  expect(fold.textContent).toContain(long)
+})
+
+it('guards hidden characters consistently while preserving ordinary script and emoji joiners', async () => {
+  const hidden = '\u2028\u2029\u034f\u115f\u1160\u3164\uffa0\u200b\u202e\u2067\ufeff'
+  fake.chats.inbox = [held({ args: { subject: `before${hidden}after`, to: ['bob@exa\u200dmple.com', 'https://exa\u200cmple.com', 'bоb@example.com'], 'tо': 'lookalike name', ordinary: 'می‌روم 👩‍💻 Ελληνικά Русский' } })]
+  await open()
+  const args = host.querySelector('[aria-label="Everything it will send"]')!
+  expect(args.textContent).not.toContain(hidden)
+  expect(args.textContent).toContain(`before${'�'.repeat([...hidden].length)}after`)
+  expect(args.textContent).toContain('bob@exa�mple.com')
+  expect(args.textContent).toContain('https://exa�mple.com')
+  expect(args.textContent).toContain('می‌روم 👩‍💻 Ελληνικά Русский')
+  expect(args.querySelectorAll('[aria-label="Non-ASCII letters or digits"]')).toHaveLength(1)
+  const { plainLabel } = await import('../../src/shared/bots/personal/modelSlots')
+  expect(plainLabel('one\u200ctwo\u2029three')).toBe('one two three')
+})
+
+it('gives an earlier repeated action its calendar day as well as its time', async () => {
+  fake.chats.inbox = [held({ previous: { status: 'done', at: '2020-02-03T09:14:00.000Z' } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const warning = [...card.querySelectorAll('[role="note"]')].find((item) => item.textContent?.includes('already sent exactly this'))!
+  expect(warning.textContent).toContain('2020')
+  expect(warning.textContent).toContain('Feb')
+})
+
+it.each([
+  ['bot_action_changed', 'The service changed. Ask your bot to prepare this again.', 'open', 'This changed since you saw it. Check it again before sending.'],
+  ['bot_action_paused', 'Resume this bot before sending.', 'open', 'Resume Inbox helper to send this.'],
+  ['bot_action_expired', 'This action has expired and was not sent.', 'expired', 'This expired, so nothing was sent.'],
+  ['bot_action_closed', 'This action can no longer be sent.', 'withdrawn', 'This action can no longer be sent.']
+])('shows the locally mapped refusal for %s and refreshes the actual row', async (code, text, status, expected) => {
+  fake.chats.inbox = [held()]
+  Object.assign(fake.client, { answerAction: vi.fn(async () => {
+    fake.chats.inbox = [held({ status })]
+    const refusal = code === 'bot_action_closed' ? { code } : { code: 'conflict', details: { reason: code } }
+    throw Object.assign(new Error(text), refusal)
+  }) })
+  await open()
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.textContent).toContain(status === 'expired' ? 'Expired · not sent' : expected)
+  expect(button('Send', card) !== undefined).toBe(status === 'open')
+  expect(button('Not now', card) !== undefined).toBe(status === 'open')
+  const { botsClient } = await import('../../src/renderer/stores/botsStore')
+  const result = await useBotsStore.getState().answerAction('inbox', 'held-1', 'shown-digest', 'send')
+  expect(result).toEqual({ reason: code, text: expected })
+  expect(botsClient().messages).toHaveBeenCalled()
+})
+
+it.each(['open', 'done'])('finds literal title and visible status with matching paintable parts for %s', async (status) => {
+  fake.chats.inbox = [held({ title: '*Sent* <b>[Mail](https://x.test) &copy;', status, at: AT })]
+  await open()
+  const { botFindTurns } = await import('../../src/renderer/components/bots/useBotChatFind')
+  const { buildFindIndex } = await import('../../src/renderer/chat/components/agent-elements/find/find-index')
+  const { collectFindRanges } = await import('../../src/renderer/chat/components/agent-elements/find/dom-highlight')
+  const turns = botFindTurns([{ kind: 'message', message: fake.chats.inbox[0]! }] as never)
+  const row = host.querySelector('[data-turn-key]')!
+  for (const query of ['*Sent*', '[Mail]', '&copy;', 'Sent']) {
+    const indexed = buildFindIndex(turns, query)
+    const painted = collectFindRanges(row, query)
+    expect(indexed.length).toBeGreaterThan(0)
+    expect(painted.map(({ partIndex, ordinal }) => ({ partIndex, ordinal }))).toEqual(indexed.map(({ partIndex, ordinal }) => ({ partIndex, ordinal })))
+  }
+  expect(buildFindIndex(turns, 'trip.pdf')).toHaveLength(0)
+})
+
+it('updates the more-arguments cue when a nested fold opens without scrolling', async () => {
+  fake.chats.inbox = [held()]
+  await open()
+  const region = host.querySelector<HTMLElement>('[aria-label="Everything it will send"]')!
+  Object.defineProperties(region, { scrollHeight: { configurable: true, value: 900 }, clientHeight: { configurable: true, value: 360 }, scrollTop: { configurable: true, value: 0 } })
+  const fold = region.querySelector('details')!
+  await act(async () => { fold.open = true; fold.dispatchEvent(new Event('toggle')) })
+  expect(host.textContent).toContain('More below')
+})
+
+it.each([
+  ['done', false, 'What it sent'], ['failed', true, 'What it sent'],
+  ['uncertain', false, 'What it tried to send'], ['approved', false, 'What it will send'],
+  ['running', false, 'What it is sending'], ['declined', false, 'What it would have sent'],
+  ['expired', false, 'What it would have sent'], ['withdrawn', false, 'What it would have sent'],
+  ['failed', false, 'What it would have sent']
+])('names the %s review by what happened, tool error=%s', async (status, toolReportedError, label) => {
+  fake.chats.inbox = [held({ status, at: AT, result: toolReportedError ? { text: 'Service error', toolReportedError } : undefined })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelector('details > summary')?.textContent).toBe(label)
+  expect(card.querySelector('[role="region"]')?.getAttribute('aria-label')).toBe('Everything it will send')
+  expect(card.textContent).not.toContain('arguments')
+})
+
+it('puts the identifying data under the title, then the outcome before the tool answer and review', async () => {
+  fake.chats.inbox = [held({ status: 'failed', at: AT, result: { text: 'Partly delivered', toolReportedError: true } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const status = card.querySelector('[role="status"]')!
+  const identity = card.querySelector('[aria-label="Request identification"]')!
+  expect(card.querySelector('[aria-label="Action summary"]')?.nextElementSibling).toBe(identity)
+  expect(identity.nextElementSibling).toBe(status)
+  expect(status.nextElementSibling).toBe(card.querySelector('[aria-label="Tool result"]'))
+  expect(status.nextElementSibling?.nextElementSibling).toBe(card.querySelector('details'))
+})
+
+it('distinguishes quoted text, backslashes and the literal empty-text label', async () => {
+  const values = ['false', '"false"', '"a\\b"', '(empty text)', '']
+  fake.chats.inbox = [held({ args: Object.fromEntries(values.map((value, index) => [String(index), value])) })]
+  await open()
+  const blocks = [...host.querySelectorAll('[aria-label="Everything it will send"] > dl > div > dd')].map(block => block.textContent)
+  expect(blocks).toEqual(['"false"', JSON.stringify('"false"'), JSON.stringify('"a\\b"'), '"(empty text)"', '(empty text)'])
+  expect(new Set(blocks).size).toBe(values.length)
+})
+
+it('notes non-ASCII address and phone letters or digits without warning on ordinary prose', async () => {
+  const values = ['bob@ｅxample.com', 'bob@exօmple.com', 'раураӏ.рф', '+1 ８００ 555 0100', 'Мария Иванова']
+  fake.chats.inbox = [held({ args: Object.fromEntries(values.map((value, index) => [String(index), value])) })]
+  await open()
+  const blocks = [...host.querySelectorAll('[aria-label="Everything it will send"] > dl > div > dd')]
+  for (const block of blocks.slice(0, 4)) expect(block.textContent).toContain('Contains letters or digits outside A–Z and 0–9')
+  expect(blocks[4].textContent).toBe('Мария Иванова')
+})
+
+it('shows field-name line breaks as marks and gives an empty field a name', async () => {
+  fake.chats.inbox = [held({ args: { 'to\nalice@example.com': 'evil@example.com', '': 'value' } })]
+  await open()
+  const names = [...host.querySelectorAll('[aria-label="Everything it will send"] dt')].map(item => item.textContent)
+  expect(names).toEqual([JSON.stringify('to\nalice@example.com'), '(no name)'])
+})
+
+it('keeps a curly-quoted arrow name in one unquoted hidden-path segment', async () => {
+  fake.chats.inbox = [held({ hiddenPaths: [['a” → “b', 'token']] })]
+  await open()
+  const path = host.querySelector('[aria-label="Hidden field path"]')!
+  expect(path.querySelector('q')).toBeNull()
+  expect([...path.querySelectorAll('[aria-label="Field name"]')].map(item => item.textContent)).toEqual(['a” → “b', 'token'])
+})
+
+it.each(['approved', 'running', 'unreachable'])('C4 integration waiting distinguishes %s from an actual send', async (state) => {
+  const sentence = "Stored Mail couldn't be reached. Nothing was sent. Try again when it is available."
+  fake.chats.inbox = [held({ status: state === 'unreachable' ? 'failed' : state, serverName: 'Stored Mail', at: AT, result: state === 'unreachable' ? { text: sentence, notSentInTime: true } : undefined })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const status = card.querySelector('[role="status"]')!
+  expect(status.textContent).toContain(state === 'approved' ? 'Waiting for Stored Mail…' : state === 'running' ? 'Sending…' : sentence.slice(0, -1))
+  expect(status.textContent).toContain(' · ')
+  expect(button('Send', card)).toBeUndefined()
+  expect(button('Not now', card)).toBeUndefined()
+  if (state === 'unreachable') {
+    expect(card.querySelector('summary')?.textContent).toBe('What it would have sent')
+    expect(card.querySelector('[aria-label="Tool result"]')).toBeNull()
+    expect(card.textContent).not.toContain('The tool reported an error')
+  }
+})
+
+it.each(['done', 'failed', 'uncertain', 'withdrawn'])('C4 integration forgotten %s cards hide all content but retain the outcome', async (status) => {
+  fake.chats.inbox = [held({ forgotten: true, digest: '[forgotten]', title: 'Send email', serverName: 'Your service', args: '[forgotten]', note: '[forgotten]', status, at: AT, result: { text: '[forgotten]', toolReportedError: status === 'failed' } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.textContent).toContain('Forgotten')
+  expect(card.querySelector('[aria-label="Action summary"]')?.textContent).toBe('Send email')
+  expect(card.querySelector('[role="status"]')?.textContent).toContain(status === 'failed' ? 'The tool reported an error' : status === 'done' ? 'Sent' : status === 'uncertain' ? "Couldn't tell" : 'Not sent')
+  expect(card.querySelector('[role="status"]')?.textContent).toContain(' · ')
+  expect(card.querySelector('details, [role="region"], [aria-label="Bot note"], [aria-label="Tool result"]')).toBeNull()
+  expect(card.textContent).not.toContain('[forgotten]')
+  expect(card.textContent).not.toContain('Your service')
+  expect(button('Send', card)).toBeUndefined()
+})
+
+it.each([
+  ['changed', 'This changed since you saw it. Check it again before sending.', 'open'],
+  ['paused', 'Resume Inbox helper to send this.', 'open'],
+  ['expired', 'This expired, so nothing was sent.', 'expired'],
+  ['withdrawn', 'No longer needed, so nothing was sent.', 'withdrawn'],
+  ['work_ended', 'This work ended. Nothing was sent.', 'withdrawn'],
+  ['owner_paused', 'This bot was paused, so nothing was sent.', 'withdrawn'],
+  ['permission_changed', 'This tool or its permission changed, so nothing was sent.', 'withdrawn'],
+  ['disabled', 'Withdrawn when asks first was turned off. Nothing was sent.', 'withdrawn'],
+  ['owner_removed', 'You removed this request, so nothing was sent.', 'withdrawn'],
+  ['binding_changed', 'This changed since you saw it. Nothing was sent.', 'withdrawn'],
+  ['settled', 'This was already answered.', 'done'],
+  ['gone', "This can't be sent any more.", 'gone'],
+  ['unreachable', "Mail couldn't be reached. Nothing was sent. Try again when it is available.", 'open']
+])('C4 integration renderer preserves the exact %s service refusal through the real client', async (reason, text, status) => {
+  fake.chats.inbox = [held()]
+  const { createPersonalBotsClient } = await import('../../src/renderer/services/personalBotsClient')
+  const request = vi.fn(async () => {
+    fake.chats.inbox = [status === 'gone' ? message(1, { id: 'held-message', text: 'Earlier request' }) : held({ status })]
+    throw Object.assign(new Error(text), { code: `bot_action_${reason}` })
+  })
+  Object.assign(fake.client, { answerAction: createPersonalBotsClient({ request } as never).answerAction })
+  await open()
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  expect(request).toHaveBeenCalledExactlyOnceWith('bots.actions.answer', { actionId: 'held-1', digest: 'shown-digest', answer: 'send' })
+  expect(host.textContent).toContain(reason === 'expired' ? 'Expired · not sent' : text)
+  const card = host.querySelector('[aria-label="Action to review"]')
+  if (reason === 'gone') expect(card).toBeNull()
+  else {
+    expect(button('Send', card!) !== undefined).toBe(status === 'open')
+    expect(button('Not now', card!) !== undefined).toBe(status === 'open')
+  }
+})
+
+it('C4 integration bridge timeout stub has its outcome and computer explanation without an empty review fold', async () => {
+  const text = "Mail couldn't be reached. Nothing was sent. Try again when it is available."
+  fake.chats.inbox = [held({ status: 'failed', at: AT, tooLarge: true, args: null, hiddenPaths: [], result: { text, notSentInTime: true } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelector('[role="status"]')?.textContent).toContain(text.slice(0, -1))
+  expect(card.querySelector('details, [role="region"]')).toBeNull()
+  expect(card.textContent).toContain('Use the computer')
+  expect(button('Send', card)).toBeUndefined()
+})
+
+it('C4 integration approved review names what it will send while waiting for the service', async () => {
+  fake.chats.inbox = [held({ status: 'approved', at: AT })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelector('summary')?.textContent).toBe('What it will send')
+  expect(card.querySelector('[role="status"]')?.textContent).toContain('Waiting for Mail…')
+  expect(card.textContent).not.toContain('What it is sending')
+})
+
+it.each(['Send', 'Not now'])('keeps the stored review intact when the device Work gate refuses %s', async label => {
+  fake.chats.inbox = [held()]
+  const text = 'Home lets this computer view threads and chat with bots only.'
+  Object.assign(fake.client, { answerAction: vi.fn(async () => { throw Object.assign(new Error(text), { code: 'forbidden', details: { reason: 'work_off' } }) }) })
+  await open()
+  await click(button(label, host.querySelector('[aria-label="Action to review"]')!))
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.textContent).toContain(text)
+  expect(card.textContent).toContain('trip.pdf')
+  expect(button('Send', card)?.disabled).toBe(false)
+  expect(button('Not now', card)?.disabled).toBe(false)
+  expect(card.querySelector('[aria-label="Tool result"]')).toBeNull()
+  expect(fake.client.answerAction).toHaveBeenCalledExactlyOnceWith('held-1', 'shown-digest', label === 'Send' ? 'send' : 'not_now')
+})
+
+it('six adjacent expired schedule cards fold to one quiet line, keeping the waiting row', async () => {
+  fake.chats[inbox.id] = [
+    ...Array.from({ length: 6 }, (_, n) => message(n + 1, { id: 'expired-' + n, kind: 'notice', text: 'Expired · not sent', expiredActionSchedule: 'mail' })),
+    message(7, { id: 'waiting', text: 'Waiting for your answer' })
+  ]
+  await open()
+  expect(transcript().textContent).toContain('6 expired · not sent')
+  expect(transcript().textContent).toContain('Waiting for your answer')
+  expect([...host.querySelectorAll('[role="note"]')].filter(el => el.textContent?.includes('expired · not sent'))).toHaveLength(1)
+})
+
+it('a chat digest line separates expired-card folds and leaves the waiting row visible', async () => {
+  fake.chats[inbox.id] = [
+    message(1, { text: 'Expired · not sent', expiredActionSchedule: 'mail' }),
+    message(2, { text: 'Older chat summarised', systemLine: true }),
+    message(3, { text: 'Expired · not sent', expiredActionSchedule: 'mail' }),
+    message(4, { text: 'Expired · not sent', expiredActionSchedule: 'mail' }),
+    message(5, { text: 'Waiting for your answer' })
+  ]
+  await open()
+  expect(transcript().textContent).toContain('Older chat summarised')
+  expect(transcript().textContent).toContain('2 expired · not sent')
+  expect(transcript().textContent).not.toContain('3 expired · not sent')
+  expect(transcript().textContent).toContain('Waiting for your answer')
+})
+
+it('keeps only the newest review after two nudges, with earlier copies reduced to named asked-time lines', async () => {
+  const copies = ['bm_action_one', 'bm_action_one_n1', 'bm_action_one_n2'].map((id, n) => message(n + 1, { id, at: new Date(Date.parse(AT) + n * 3600_000).toISOString(), text: 'Legacy review', action: action(), ...(n ? { replyTo: { id: 'bm_action_one', author: 'bot' as const, text: 'Original review' } } : {}) }))
+  fake.chats.inbox = copies
+  await open()
+  expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+  const latest = transcript().querySelector('[data-message-id="bm_action_one_n2"]')!
+  expect(latest.querySelector('[aria-label="Everything it will send"]')).toBeTruthy()
+  expect(button('Send', latest)).toBeTruthy()
+  const earlier = [...transcript().querySelectorAll('[role="note"]')].filter(item => item.textContent?.includes('Asked'))
+  expect(earlier).toHaveLength(1)
+  expect(transcript().textContent).toContain('Reminded')
+  expect(latest.querySelector('time')?.getAttribute('datetime')).toBe(copies[0]!.at)
+  for (const line of earlier) { expect(line.textContent).toContain('Send an email'); expect(line.querySelector('button, details, dl')).toBeNull() }
+  await act(async () => fake.emit.message('inbox', { ...copies[2]!, action: { ...copies[2]!.action!, status: 'done', at: AT } }))
+  expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+  expect(button('Send', transcript())).toBeUndefined()
+})
+
+it('keeps empty and unusual field names injective and reserves the non-ASCII note for address-shaped values', async () => {
+  fake.chats.inbox = [held({ args: { '': 'empty key', '(no name)': 'literal label', '\n\n': 'newlines', '↵↵': 'literal arrows', '   ': 'spaces', 'имя': 'Анна', '名前': '太郎', 'tо': 'mixed key', to: 'аlice@example.test', wide: '＂false＂', french: '«false»', german: '„false„', blank: '   ' } })]
+  await open()
+  const region = host.querySelector('[aria-label="Everything it will send"]')!
+  const label = (value: string) => [...region.querySelectorAll('dd')].find(item => item.textContent === value)!.previousElementSibling!
+  expect(label('empty key').querySelector('[aria-label="Empty field name"]')).toBeTruthy()
+  expect(label('literal label').textContent).toBe('"(no name)"')
+  expect(label('newlines').textContent).toBe('"\\n\\n"')
+  expect(label('literal arrows').textContent).toBe('"↵↵"')
+  expect(label('spaces').textContent).toBe('"   "')
+  for (const key of ['имя', '名前', 'tо']) {
+    const name = [...region.querySelectorAll('dt')].find(item => item.textContent === key)!
+    expect(name).toBeTruthy()
+    expect(name.querySelector('[aria-label="Non-ASCII letters or digits"]')).toBeNull()
+  }
+  expect(region.querySelectorAll('[aria-label="Non-ASCII letters or digits"]')).toHaveLength(1)
+  for (const text of ['＂false＂', '«false»', '„false„', '   ']) expect([...region.querySelectorAll('dd')].some(item => item.textContent === JSON.stringify(text))).toBe(true)
+})
+
+it('shows a settled card time once, trims timeout punctuation and avoids repeating an expired refusal', async () => {
+  const sentence = "Mail couldn't be reached. Nothing was sent. Try again when it is available."
+  fake.chats.inbox = [held({ status: 'failed', at: '2026-11-07T10:24:00.000Z', result: { text: sentence, notSentInTime: true } })]
+  await open()
+  const row = host.querySelector('[data-message-id="held-message"]')!
+  expect(row.querySelectorAll('time')).toHaveLength(1)
+  expect(row.querySelector('time')?.getAttribute('datetime')).toBe('2026-11-07T10:24:00.000Z')
+  expect(row.querySelector('[role="status"]')?.textContent).not.toContain('. ·')
+  // Redraw to an open row, then let the service expire it during Send.
+  await act(async () => fake.emit.message('inbox', held()))
+  Object.assign(fake.client, { answerAction: vi.fn(async () => { fake.chats.inbox = [held({ status: 'expired', at: AT })]; throw Object.assign(new Error('This expired, so nothing was sent.'), { code: 'bot_action_expired' }) }) })
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelectorAll('[role="status"]')).toHaveLength(1)
+  expect(card.textContent).toContain('Expired · not sent')
+  expect(card.textContent).not.toContain('This expired, so nothing was sent.')
+})
+
+it('expands adjacent expired schedule reviews inline without counting nudges or crossing a digest', async () => {
+  const expired = (seq: number, id: string) => message(seq, { id: `bm_${id}`, text: 'Expired · not sent', expiredActionSchedule: 'mail', action: action({ actionId: id, title: 'Send an email', status: 'expired', at: AT }) })
+  const first = expired(1, 'action_exp1')
+  const nudge = (seq: number, suffix: number) => ({ ...first, seq, id: `${first.id}_n${suffix}`, expiredActionSchedule: undefined, replyTo: { id: first.id, author: 'bot' as const, text: 'Send an email' } })
+  fake.chats.inbox = [first, nudge(2, 1), expired(3, 'action_exp2'), nudge(4, 2), expired(5, 'action_exp3'), message(6, { text: 'Older chat summarised', systemLine: true }), expired(7, 'action_exp4'), message(8, { id: 'waiting', text: 'Please review', action: action({ actionId: 'action_waiting' }) })]
+  await open()
+  const folds = [...transcript().querySelectorAll<HTMLDetailsElement>('details[aria-label="Expired action reviews"]')]
+  expect(folds).toHaveLength(2)
+  expect(folds[0]!.querySelector('summary')?.textContent).toBe('3 expired · not sent: Send an email')
+  expect(folds[1]!.querySelector('summary')?.textContent).toBe('Expired · not sent: Send an email')
+  expect(folds[0]!.open).toBe(false)
+  expect(folds[0]!.querySelectorAll('[role=note]')).toHaveLength(1)
+  await click(folds[0]!.querySelector('summary'))
+  expect(folds[0]!.open).toBe(true)
+  const cards = [...folds[0]!.querySelectorAll('[aria-label="Action to review"]')]
+  expect(cards).toHaveLength(3)
+  for (const card of cards) expect(card.querySelector('[aria-label="Asked time"] time')).toBeTruthy()
+  expect(folds[0]!.querySelectorAll('.bot-system-line')).toHaveLength(0)
+  for (const card of cards) { expect(card.querySelector('summary')?.textContent).toBe('What it would have sent'); expect(card.querySelector('[role="status"]')?.textContent).toContain('Expired · not sent'); expect(button('Send', card)).toBeUndefined() }
+  expect(folds[0]!.querySelectorAll('[data-message-id="bm_action_exp1_n2"] [aria-label="Action to review"]')).toHaveLength(1)
+  expect(transcript().querySelectorAll('[aria-label="Action to review"]')).toHaveLength(5)
+  expect(transcript().textContent).not.toContain('4 expired · not sent')
+  expect(button('Send', transcript().querySelector('[data-message-id="waiting"]')!)).toBeTruthy()
+})
+
+it('keeps a tool-error outcome readable when a device receives its category without answer text', async () => {
+  fake.chats.inbox = [held({ status: 'failed', at: AT, tooLarge: true, args: null, hiddenPaths: [], result: { toolReportedError: true } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelector('[role="status"]')?.textContent).toContain('The tool reported an error')
+  expect(card.querySelector('[aria-label="Tool result"]')).toBeNull()
+  expect(card.querySelectorAll('time')).toHaveLength(1)
+})
+
+it('omits a common action name when the expired schedule reviews describe different actions', async () => {
+  fake.chats.inbox = ['Send an email', 'Delete a draft'].map((title, index) => message(index + 1, { expiredActionSchedule: 'mail', action: action({ actionId: `different-${index}`, title, status: 'expired', at: AT }) }))
+  await open()
+  const fold = host.querySelector<HTMLDetailsElement>('details[aria-label="Expired action reviews"]')!
+  expect(fold.querySelector('summary')?.textContent).toBe('2 expired · not sent')
+  await click(fold.querySelector('summary'))
+  expect([...fold.querySelectorAll('[aria-label="Action summary"]')].map(item => item.textContent)).toEqual(['Send an email · Mail', 'Delete a draft · Mail'])
+})
+
+it('keeps an expiry fold closed to Send while a newer nudge still has its pre-expiry snapshot', async () => {
+  const original = message(1, { id: 'bm_action_race', expiredActionSchedule: 'mail', action: action({ actionId: 'action_race', status: 'expired', at: AT }) })
+  fake.chats.inbox = [original, message(2, { id: 'bm_action_race_n1', action: action({ actionId: 'action_race', status: 'open' }), replyTo: { id: original.id, author: 'bot', text: 'Review' } })]
+  await open()
+  const fold = host.querySelector<HTMLDetailsElement>('details[aria-label="Expired action reviews"]')!
+  await click(fold.querySelector('summary'))
+  const card = fold.querySelector('[aria-label="Action to review"]')!
+  expect(card.querySelector('[role="status"]')?.textContent).toContain('Expired · not sent')
+  expect(button('Send', card)).toBeUndefined()
+  expect(card.querySelector('summary')?.textContent).toBe('What it would have sent')
+  expect(fold.querySelectorAll('[aria-label="Action to review"]')).toHaveLength(1)
+})
+
+it('keeps one labelled asked time on an open review and replaces it with the settled outcome time', async () => {
+  fake.chats.inbox = [held()]
+  await open()
+  const times = () => [...host.querySelectorAll('[data-message-id="held-message"] time')]
+  expect(times()).toHaveLength(1)
+  expect(times()[0]?.textContent).toContain('Asked')
+  await act(async () => fake.emit.message('inbox', { ...held(), action: action({ status: 'done', at: AT }) } as never))
+  expect(times()).toHaveLength(1)
+  expect(times()[0]?.textContent).not.toContain('Asked')
+  expect(host.querySelector('[data-message-id="held-message"] [role="status"]')?.textContent).toContain('Sent')
+})
+
+it.each([
+  ['bot_action_paused', 'Resume Inbox helper to send this.'],
+  [undefined, 'This could not be sent from here. Open it on the computer to see what happened.']
+])('maps a device conflict %s locally instead of displaying its wire words', async (reason, expected) => {
+  fake.chats.inbox = [held()]
+  Object.assign(fake.client, { answerAction: vi.fn(async () => {
+    throw Object.assign(new Error('WIRE WORDS MUST NOT APPEAR'), { code: 'conflict', ...(reason ? { details: { reason } } : {}) })
+  }) })
+  await open()
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  expect(transcript().textContent).toContain(expected)
+  expect(host.textContent).not.toContain('WIRE WORDS MUST NOT APPEAR')
+  expect(button('Send', transcript())).toBeTruthy()
+})
+
+it('keeps the cached service name for a device refusal after its card disappears on reload', async () => {
+  fake.chats.inbox = [held()]
+  Object.assign(fake.client, { answerAction: vi.fn(async () => {
+    fake.chats.inbox = [message(1, { id: 'held-message', text: 'Removed review', action: undefined } as never)]
+    throw Object.assign(new Error('WIRE SERVICE MUST NOT APPEAR'), { code: 'conflict', details: { reason: 'bot_action_unreachable' } })
+  }) })
+  await open()
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  expect(host.textContent).toContain("Mail couldn't be reached. Nothing was sent. Try again when it is available.")
+  expect(host.textContent).not.toContain('WIRE SERVICE MUST NOT APPEAR')
+  expect(host.querySelector('[aria-label="Action to review"]')).toBeNull()
+})
+
+it.each(['local', 'device'])('keeps the changed-schedule sentence and closes buttons on %s', async route => {
+  fake.chats.inbox = [held()]
+  Object.assign(fake.client, { answerAction: vi.fn(async () => {
+    fake.chats.inbox = [held({ status: 'withdrawn' })]
+    throw Object.assign(new Error('wire prose must not appear'), route === 'local' ? { code: 'bot_action_schedule_changed' } : { code: 'conflict', details: { reason: 'bot_action_schedule_changed' } })
+  }) })
+  await open()
+  await click(button('Send', host.querySelector('[aria-label="Action to review"]')!))
+  expect(host.textContent).toContain('This changed since you saw it. Nothing was sent.')
+  expect(button('Send', transcript())).toBeUndefined()
+})
+
+describe('a message from another of the owner\'s bots', () => {
+  const alpha = summary('bot-alpha', { name: 'Alpha', look: { colour: 'green', accessory: 'beret' } })
+  const text = '**Message from your bot Alpha**\n\n> The Mac nightly passed.\n>\n> The DMG is in `nightly/`.'
+  async function openWith(row: { id: string; text: string }, sender = alpha) {
+    fake.bots = [inbox, sender]
+    fake.chats[inbox.id] = [
+      message(1, { author: 'owner', text: 'Ask Alpha about the nightly.' }),
+      message(2, { id: row.id, kind: 'notice', text: row.text }),
+      message(3, { text: 'Alpha says the nightly passed.' })
+    ]
+    await act(async () => useChatsStore.getState().activate('p1'))
+    await act(async () => root.render(createElement(ChatWorkspace)))
+    await act(async () => useChatsStore.getState().openBot(inbox.id))
+  }
+  const sent = (id: string) => host.querySelector<HTMLElement>(`[data-message-id="${id}"]`)!
+
+  it('reads as that bot\'s own message: its name on top and its words, with no header or quote, and Copy takes the words alone', async () => {
+    const id = 'bm_botmsg_bot-alpha_6f1c2a3b-0d4e-4f5a-9b6c-7d8e9f0a1b2c'
+    await openWith({ id, text })
+    expect(sent(id).textContent).toContain('Alpha')
+    expect(sent(id).textContent).toContain('The Mac nightly passed.')
+    expect(sent(id).textContent).not.toContain('Message from your bot')
+    expect(sent(id).querySelector('blockquote')).toBeNull()
+    const writeText = vi.fn(async () => undefined)
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+    await click(button('Copy', sent(id)))
+    expect(writeText).toHaveBeenCalledWith('The Mac nightly passed.\n\nThe DMG is in `nightly/`.')
+  })
+
+  it('names the sender as it is called now', async () => {
+    const id = 'bm_botmsg_bot-alpha_6f1c2a3b-0d4e-4f5a-9b6c-7d8e9f0a1b2c'
+    await openWith({ id, text }, { ...alpha, name: 'Alpha Two' })
+    expect(sent(id).textContent).toContain('Alpha Two')
+  })
+
+  it('draws a message kept before the sender\'s id was, by the name it holds', async () => {
+    const id = 'bm_botmsg_6f1c2a3b-0d4e-4f5a-9b6c-7d8e9f0a1b2c'
+    await openWith({ id, text })
+    expect(sent(id).textContent).toContain('Alpha')
+    expect(sent(id).textContent).toContain('The DMG is in')
+    expect(sent(id).textContent).not.toContain('Message from your bot')
+  })
+})
+
+// Settled identifiers use the first visible recipient/subject field, never hidden content.
+it.each([
+  [{ to: 'alex@example.test', subject: 'Later subject' }, 'alex@example.test'],
+  [{ recipient: ['a@example.test', 'b@example.test'] }, 'a@example.test, b@example.test'],
+  [{ email: 'a@example.test' }, 'a@example.test'],
+  [{ channel: '#team' }, '#team'],
+  [{ subject: 'One\nline' }, 'One line'],
+  [{ title: 'A title' }, 'A title'],
+  [{ to: { $mousse: 'hidden', text: 'hidden · will be sent' }, subject: 'Visible subject' }, 'Visible subject'],
+  [{ nested: { subject: '<b>Plain</b>' } }, '<b>Plain</b>'],
+  [{ body: 'No identifying field' }, undefined]
+])('C10 settled cards identify their stored call: %j', async (args, expected) => {
+  fake.chats.inbox = [held({ status: 'done', args })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const identity = card.querySelector('[aria-label="Request identification"]')
+  if (expected === undefined) expect(identity).toBeNull()
+  else {
+    expect(identity?.textContent).toBe(expected)
+    expect(identity?.closest('details')).toBeNull()
+    expect(identity?.querySelector('b, a')).toBeNull()
+  }
+})
+it.each(['open', 'approved', 'running', 'forgotten'])('C10 no compact identifier for %s cards', async state => {
+  fake.chats.inbox = [held(state === 'forgotten' ? { status: 'done', forgotten: true, args: null } : { status: state })]
+  await open()
+  expect(host.querySelector('[aria-label="Request identification"]')).toBeNull()
+})
+
+// Short body-like fields and any other short strings stay in place; either length bound folds.
+it.each([
+  ['body', 'See you at noon.', false], ['text', 'Short text', false],
+  ['content', 'Short content', false], ['message', 'Short message', false],
+  ['body', 'x'.repeat(280), false], ['body', 'x'.repeat(281), true],
+  ['body', 'a\nb\nc\nd', false], ['body', 'a\nb\nc\nd\ne', true],
+  ['subject', 'x'.repeat(281), true]
+])('C10 folds %s only when its value is long (%s)', async (name, value, folds) => {
+  fake.chats.inbox = [held({ args: { [name]: value } })]
+  await open()
+  const region = host.querySelector('[aria-label="Everything it will send"]')!
+  expect(region.querySelector('details') !== null).toBe(folds)
+  expect(region.textContent).toContain(value.replaceAll('\n', '↵\n'))
+})
+
+it('C10 review cold Send gives a local retry sentence and leaves both buttons live', async () => {
+  fake.chats.inbox = [held()]
+  Object.assign(fake.client, { answerAction: async () => { throw Object.assign(new Error('not owner-facing'), { code: 'bot_action_unreachable' }) } })
+  await open()
+  await click(button('Send'))
+  expect(host.textContent).toContain("Mail couldn't be reached. Nothing was sent. Try again when it is available.")
+  expect(button('Send')?.disabled).toBe(false)
+  expect(button('Not now')?.disabled).toBe(false)
+})
+it('C10 review compact recipient carries the full review look-alike warning', async () => {
+  fake.chats.inbox = [held({ status: 'done', args: { to: 'аlex@example.test' } })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const warning = [...card.querySelectorAll('[aria-label="Non-ASCII letters or digits"]')].find(el => !el.closest('details'))
+  expect(warning?.textContent).toContain('Contains letters or digits outside A–Z and 0–9')
+})
+
+it('R2 a timed-out Send is terminal while the card retains its stored timeout outcome', async () => {
+  fake.chats.inbox = [held()]
+  Object.assign(fake.client, { answerAction: async () => {
+    fake.chats.inbox = [held({ status: 'failed', at: AT, result: { text: "Mail couldn't be reached, so nothing was sent.", notSentInTime: true } })]
+    throw Object.assign(new Error('not owner-facing'), { code: 'bot_action_gone' })
+  } })
+  await open(); await click(button('Send'))
+  expect(host.textContent).toContain("This can't be sent any more.")
+  expect(host.textContent).not.toContain('Try again when it is available.')
+  expect(button('Send')).toBeUndefined()
+  expect(button('Not now')).toBeUndefined()
+  expect(host.textContent).toContain("Mail couldn't be reached, so nothing was sent")
 })

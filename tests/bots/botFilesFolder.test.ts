@@ -71,11 +71,7 @@ describe('the files folder', () => {
     expect(botFilesFolder('/home/me/.mousse/profiles/p1', 'b1')).toBe(join('/home/me/.mousse/profiles/p1', 'bots', 'files', 'b1'))
   })
 
-  it('compiles as a writable folder beside the grant, never as one of its roots', () => {
-    const compiled = compile()
-    if (!compiled.ok) throw new Error(compiled.error.message)
-    expect(compiled.permissions.workspace).toEqual({ roots: [], access: 'read', writeRoots: [], scratch: realpathSync(scratch), files: realpathSync(files) })
-    // The starter grant names no folder at all: About lists nothing for it.
+  it('the starter grant names no folder at all: About lists nothing for it', () => {
     expect(describeManifest(botStarterManifest()).filter((line) => line.kind === 'workspace')).toEqual([])
   })
 
@@ -97,12 +93,6 @@ describe('the files folder', () => {
     expect(compile({ filesFolder: notes })).toMatchObject({ ok: false, error: { code: 'policy_unenforceable' } })
     expect(compile({ filesFolder: join(profile, 'bots', 'files') })).toMatchObject({ ok: false })
   })
-
-  it('without one, a bot has no folder at all, as before', () => {
-    const compiled = compile({ filesFolder: undefined })
-    if (!compiled.ok) throw new Error(compiled.error.message)
-    expect(compiled.permissions.workspace).toBeNull()
-  })
 })
 
 describe('memory tools on every bot thread', () => {
@@ -116,6 +106,6 @@ describe('memory tools on every bot thread', () => {
     }
     const without = compile({ grant: old, botTools: { escalate: true, consult: false } })
     if (!without.ok) throw new Error(without.error.message)
-    expect(without.permissions.appTools).toEqual(['escalate', 'web_search'])
+    expect(without.permissions.appTools).toEqual(['escalate', 'running_list', 'web_search'])
   })
 })

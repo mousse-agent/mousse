@@ -32,14 +32,16 @@ export function accessFor(mode: BotDeviceAccessMode, current: BotDeviceAccess): 
  * own switch for bots is off (Settings, Devices) reaches no bot here whatever is ticked, and says so. An older service has
  * no such choice, and the row is not shown.
  */
-export function BotDevicesRow({ botId, name }: { botId: string; name: string }) {
+export function BotDevicesRow({ botId, name, reach }: { botId: string; name: string; reach?: BotDeviceAccessMode | undefined }) {
   const [view, setView] = useState<BotDevicesView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [missing, setMissing] = useState(false)
   const client = botsClient()
+  // Another bot: nothing of the last one's choice shows while its own is read.
+  useEffect(() => { setView(null) }, [botId])
+  // Read again when the list says the choice changed elsewhere (Make private in the bot's menu).
   useEffect(() => {
     let live = true
-    setView(null)
     client.devices(botId).then(
       (next) => { if (live) setView(next) },
       (cause) => {
@@ -50,7 +52,7 @@ export function BotDevicesRow({ botId, name }: { botId: string; name: string }) 
     )
     return () => { live = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [botId])
+  }, [botId, reach])
   if (missing) return null
   if (!view) return error ? <p className="bot-about-empty" role="alert">{error}</p> : null
   const save = async (access: BotDeviceAccess) => {

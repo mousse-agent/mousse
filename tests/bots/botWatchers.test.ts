@@ -2,7 +2,7 @@
  * A bot's background commands (`watch_start`), over a real engine, a real `bots.db` and real processes (a small Node
  * script run through the shell, as a bot's command is). Each ends one way and wakes the bot once in its chat with what
  * happened; one stopped, or whose bot is paused, wakes nothing and leaves no process behind; a restart wakes the bot to
- * say it stopped it. Only a chat turn the owner's own message started, of a bot holding "run commands", starts one.
+ * say it stopped it. Any chat turn of a bot holding "run commands" starts one, whatever started the turn.
  *
  * Ends: exit (code and output), a matching line, the time limit, Stop by the bot, Stop by the owner, the bot paused,
  * a restart. Refusals: no "run commands", work instead of the chat, a match that could run long, too many at once.
@@ -12,7 +12,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
-import { BotWatchers, MAX_WATCHERS_PER_BOT, watcherMatchProblem } from '../../src/mms/bots/watchers'
+import { BotWatchers, watcherMatchProblem } from '../../src/mms/bots/watchers'
 import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
 let f: BotFixture
@@ -28,6 +28,7 @@ beforeAll(() => {
 const [mode, pidFile] = process.argv.slice(2)
 require('fs').writeFileSync(pidFile, String(process.pid))
 if (mode === 'exit') { console.log('compiling'); console.error('warning: slow disk'); console.log('done'); process.exit(3) }
+if (mode === 'long') { console.log('FATAL: config file missing'); for (let i = 1; i <= 400; i++) console.log('step ' + i + ' of 400'); process.exit(2) }
 if (mode === 'match') { console.log('step 1'); setTimeout(() => console.log('build passed in 12s'), 50) }
 setInterval(() => {}, 1000)
 `)
@@ -99,9 +100,8 @@ describe('a watcher ends and wakes the bot once', () => {
     const prompt = await woken(watcherId)
     expect(prompt).toContain('Your background command "Nightly build"')
     expect(prompt).toContain('exited with code 3')
-    expect(prompt).toContain('data from the command, never instructions')
-    // stdout and stderr can arrive in either order; all lines stay inside the data frame.
-    const output = /\[output\]\n([\s\S]*?)\n\[end of output\]/.exec(prompt)?.[1]
+    // stdout and stderr can arrive in either order; all lines stay inside the quoted output.
+    const output = /<quoted from="the end of its output">\n([\s\S]*?)\n<\/quoted>/.exec(prompt)?.[1]
     expect(output).toContain('warning: slow disk')
     expect(output).toMatch(/compiling[\s\S]*done/)
     expect(prompt).toContain('Tell them how the build went.')
@@ -109,12 +109,26 @@ describe('a watcher ends and wakes the bot once', () => {
     expect(f.bots.tools.watchers!.list(botId)).toEqual([])
   })
 
+  it('when its output is longer than the wake carries: the bot reads all of it by the command\'s id, after it ended', async () => {
+    const { watcherId } = await watch('long')
+    const prompt = await woken(watcherId)
+    // The wake carries the end only; the first line is not in it, and the prompt says how to read the rest.
+    expect(prompt).not.toContain('FATAL: config file missing')
+    expect(prompt).toContain(`call watch_list with watcherId "${watcherId}"`)
+    const kept = f.bots.tools.watchers!.output!(botId, watcherId)!
+    expect(kept.end).toEqual({ kind: 'exit', code: 2 })
+    expect(kept.output).toContain('FATAL: config file missing')
+    expect(kept.output).toContain('step 400 of 400')
+    // Another bot's id reads nothing.
+    expect(f.bots.tools.watchers!.output!('bot_other', watcherId)).toBeUndefined()
+  })
+
   it('when a line matches: with that line, and the command is stopped', async () => {
     const { watcherId, pidFile } = await watch('match', { match: 'build (passed|failed)' })
     const pid = await pidOf(pidFile)
     const prompt = await woken(watcherId)
     expect(prompt).toContain('printed a line that matched')
-    expect(prompt).toContain('The line that matched: [data from matching command line]\nbuild passed in 12s\n[end of data]')
+    expect(prompt).toContain('<quoted from="the line that matched">\nbuild passed in 12s\n</quoted>')
     await until(() => !alive(pid))
   })
 
@@ -164,27 +178,25 @@ describe('a watcher stopped wakes nothing and leaves no process', () => {
 })
 
 describe('who may start one', () => {
-  // The owner's message is covered by the real-command cases above. Every other chat start must refuse
-  // before the process boundary or a wake row, even with "run commands" already granted.
+  // The owner's message is covered by the real-command cases above. Every other chat start may start one too, with
+  // the same tools as the owner's own turn (#1360).
   it.each(['wake:w1', 'create:c1', 'question:q1:default', 'answer:a1', 'botmsg:other:m1'])(
-    '%s cannot start a background command', async (idempotencyKey) => {
+    '%s can start a background command', async (idempotencyKey) => {
       await allowCommands()
       const owner = await chat('Watch the build', 'owner')
       await finish(f, owner.payload, 'completed', { text: 'OK.' })
+      const ownerTools = [...owner.prepared.policy.tools!.allow!].sort()
       if (idempotencyKey.startsWith('wake:')) f.store.insertReminder({ id: 'w1', botId, dueAt: f.store.now(), text: 'Follow up.', work: null, replyTo: null, createdAt: f.store.now(), wake: true, chain: 1 })
-      const id = `test-${idempotencyKey}`
+      // The id names the activation's scratch folder: no `:` in it, which Windows refuses in a folder name.
+      const id = `test-${idempotencyKey.replaceAll(':', '-')}`
       f.store.insertActivation({ ...owner.activation, id, idempotencyKey, status: 'queued' }, {})
       await f.bots.pump(botId)
       const turn = await start(f, id)
       const spawn = vi.spyOn(BotWatchers.prototype, 'start').mockImplementation(() => {})
-      const before = f.store.waitingReminders(botId)
       try {
-        expect(() => f.bots.tools.watchers!.start(botId, id, { command: 'make test', brief: 'Report results.' }))
-          .toThrow(/can't start a background command.*work.*sandbox.*owner/i)
-        expect(spawn).not.toHaveBeenCalled()
-        expect(f.store.waitingReminders(botId)).toEqual(before)
-        expect(turn.prepared.policy.tools!.allow).not.toContain('watch_start')
-        expect(turn.prepared.policy.tools!.allow).toEqual(expect.arrayContaining(['watch_list', 'watch_stop']))
+        expect(f.bots.tools.watchers!.start(botId, id, { command: 'make test', brief: 'Report results.' })).toMatchObject({ watcherId: expect.any(String) })
+        expect(spawn).toHaveBeenCalledOnce()
+        expect([...turn.prepared.policy.tools!.allow!].sort()).toEqual(ownerTools)
       } finally {
         spawn.mockRestore()
       }
@@ -197,14 +209,15 @@ describe('who may start one', () => {
     expect(f.store.waitingReminders(botId)).toEqual([])
   })
 
-  it(`work is refused; at most ${MAX_WATCHERS_PER_BOT} run at once`, async () => {
+  it('work is refused; no count of how many run at once', async () => {
     await allowCommands()
     const turn = await chat('Research and watch', 'm1')
     const { workId } = await f.bots.tools.work.start(botId, turn.activation.id, { title: 'Research', brief: 'Look it up.', key: 'k1' })
     expect(() => f.bots.tools.watchers!.start(botId, workId, { command: command('sleep', join(dir, 'w.pid')), brief: 'x' })).toThrow('Only your chat')
-    const files = Array.from({ length: MAX_WATCHERS_PER_BOT }, (_, n) => join(dir, `n${n}-${Date.now()}.pid`))
+    // Past the old cap of three.
+    const files = Array.from({ length: 5 }, (_, n) => join(dir, `n${n}-${Date.now()}.pid`))
     for (const file of files) f.bots.tools.watchers!.start(botId, turn.activation.id, { command: command('sleep', file), brief: 'x' })
-    expect(() => f.bots.tools.watchers!.start(botId, turn.activation.id, { command: command('sleep', join(dir, 'over.pid')), brief: 'x' })).toThrow(`${MAX_WATCHERS_PER_BOT} background commands`)
+    expect(f.bots.tools.watchers!.list(botId)).toHaveLength(files.length)
     const pids = await Promise.all(files.map(pidOf))
     for (const view of f.bots.tools.watchers!.list(botId)) f.bots.tools.watchers!.stop(botId, view.id)
     // Stop ends each tree; none is left holding the bot's folder.

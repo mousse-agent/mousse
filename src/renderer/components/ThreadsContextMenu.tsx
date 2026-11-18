@@ -9,6 +9,7 @@ import {
   Copy,
   DeleteRegular,
   EditRegular,
+  EyeOff,
   Folder,
   FolderSearch,
   GitBranch,
@@ -38,7 +39,7 @@ export interface ThreadsContextMenuTarget {
   alsoOn?: readonly string[]
   /** A project's folder, on the computer that holds it. */
   path?: string
-  /** Threads only: when it deletes itself (`Thread.expiresAt`). */
+  /** Threads only: when it archives itself (`Thread.expiresAt`). */
   expiresAt?: string
   /** Threads only: its expiry can be set here (a thread of this computer that is not a subagent). */
   canExpire?: boolean
@@ -85,12 +86,14 @@ interface ThreadsContextMenuProps {
   onResetIcon?: () => void
   /** Set when the project shows an image icon: show the folder glyph instead. */
   onUseFolderIcon?: () => void
+  /** Projects with bot threads in the sidebar: hide them all (`Thread.hidden`). */
+  onHideBotThreads?: () => void
 }
 
 const Separator = () => <div className="threads-context-menu-separator" role="separator" />
 
 /**
- * "Git ›", "Delete after ›" (threads not archived): rarely needed actions, one level down. Opens on hover, click, Enter, Space or the right
+ * "Git ›", "Archive after ›" (threads not archived): rarely needed actions, one level down. Opens on hover, click, Enter, Space or the right
  * arrow (focusing its first item); the left arrow or Escape closes it and returns to its item.
  */
 function Submenu({ icon, label, children }: { icon: ReactNode; label: string; children: ReactNode }) {
@@ -186,8 +189,187 @@ export function ThreadsContextMenu({
   onDeleteAllArchived,
   onChangeIcon,
   onResetIcon,
-  onUseFolderIcon
+  onUseFolderIcon,
+  onHideBotThreads
 }: ThreadsContextMenuProps) {
+  return (
+    <MenuFrame x={x} y={y} label={target.type === 'project' ? `Project ${target.name}` : `Thread ${target.name}`} onClose={onClose}>
+      {target.type === 'project' && target.computerName && (
+        <div className="threads-context-menu-label" role="presentation">On {target.computerName}</div>
+      )}
+      {target.type === 'project' && (onNewThread || onNewThreadFromPullRequest) && (
+        <>
+          {onNewThread && (
+            <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onNewThread}>
+              <MessageSquarePlus />
+              <span>New thread</span>
+            </button>
+          )}
+          {onNewThreadFromPullRequest && (
+            <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onNewThreadFromPullRequest}>
+              <GitPullRequest />
+              <span>New thread from a pull request</span>
+            </button>
+          )}
+          <Separator />
+        </>
+      )}
+      {target.type === 'project' && (openInEditor || reveal || onCopyPath) && (
+        <>
+          {openInEditor && (
+            <button type="button" className="threads-context-menu-item" role="menuitem" onClick={openInEditor.onSelect}>
+              <Code2 />
+              <span>{openInEditor.label}</span>
+            </button>
+          )}
+          {reveal && (
+            <button type="button" className="threads-context-menu-item" role="menuitem" onClick={reveal.onSelect}>
+              <FolderSearch />
+              <span>{reveal.label}</span>
+            </button>
+          )}
+          {onCopyPath && (
+            <button type="button" className="threads-context-menu-item" role="menuitem" title={target.path} onClick={onCopyPath}>
+              <Copy />
+              <span>Copy path</span>
+            </button>
+          )}
+          <Separator />
+        </>
+      )}
+      {!target.settled && (
+        <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onPin}>
+          {target.pinned ? <PinOffRegular /> : <PinRegular />}
+          <span>{target.pinned ? 'Unpin' : 'Pin'}</span>
+        </button>
+      )}
+      {target.type === 'thread' && (
+        <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onArchive}>
+          {target.settled ? <ArchiveArrowBackRegular /> : <ArchiveRegular />}
+          <span>{target.settled ? 'Unarchive' : 'Archive'}</span>
+        </button>
+      )}
+      {target.type === 'thread' && (
+        <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onRegenerateTitle}>
+          <ArrowSyncRegular />
+          <span>Regenerate title</span>
+        </button>
+      )}
+      <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onRename}>
+        <EditRegular />
+        <span>Rename</span>
+      </button>
+      {target.type === 'project' && onChangeIcon && (
+        <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onChangeIcon}>
+          <Image />
+          <span>Change icon…</span>
+        </button>
+      )}
+      {target.type === 'project' && onResetIcon && (
+        <button type="button" className="threads-context-menu-item" role="menuitem" title="Use the icon found in the project folder" onClick={onResetIcon}>
+          <RotateCcw />
+          <span>Reset icon</span>
+        </button>
+      )}
+      {target.type === 'project' && onUseFolderIcon && (
+        <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onUseFolderIcon}>
+          <Folder />
+          <span>Use folder icon</span>
+        </button>
+      )}
+      {target.type === 'project' && onHideBotThreads && (
+        <button type="button" className="threads-context-menu-item" role="menuitem" title={BOT_THREADS_HIDE_HINT} onClick={onHideBotThreads}>
+          <EyeOff />
+          <span>Hide bot threads</span>
+        </button>
+      )}
+      {target.type === 'thread' && !target.settled && target.canExpire && onSetExpiry && (
+        <Submenu icon={<Clock />} label="Archive after">
+          {EXPIRY_PRESETS.map((preset) => (
+            <button key={preset.id} type="button" className="threads-context-menu-item" role="menuitem" onClick={() => onSetExpiry(preset.ms)}>
+              <span>After {preset.label}</span>
+            </button>
+          ))}
+          {target.expiresAt && (
+            <button type="button" className="threads-context-menu-item" role="menuitem" onClick={() => onSetExpiry(null)}>
+              <span>Never</span>
+            </button>
+          )}
+        </Submenu>
+      )}
+      {target.type === 'project' && onTrustGitSettings && !target.node && (
+        <Submenu icon={<GitBranch />} label="Git">
+          <button
+            type="button"
+            className="threads-context-menu-item"
+            role="menuitem"
+            title="Mousse runs this repository's own Git filters (git-crypt, a local Git LFS) only as they were when you added it. Use this after you changed one yourself."
+            data-mousse-decision=""
+            onClick={onTrustGitSettings}
+          >
+            <ShieldCheck />
+            <span>Trust this repository's Git settings</span>
+          </button>
+        </Submenu>
+      )}
+      {target.type === 'project' && <Separator />}
+      {target.type === 'project' && (
+        <button
+          type="button"
+          className="threads-context-menu-item threads-context-menu-item-danger"
+          role="menuitem"
+          title={
+            target.alsoOn?.length
+              ? `Removes the project from this computer only. ${target.alsoOn.join(' and ')} keep${target.alsoOn.length === 1 ? 's' : ''} theirs.`
+              : undefined
+          }
+          onClick={onRemove}
+        >
+          <DeleteRegular />
+          <span>Remove project…</span>
+        </button>
+      )}
+      {/* A thread is archived before it can be deleted; deleting is permanent and stays on the thread's computer. */}
+      {target.type === 'thread' && target.settled && (
+        <button
+          type="button"
+          className="threads-context-menu-item threads-context-menu-item-danger"
+          role="menuitem"
+          disabled={Boolean(target.node)}
+          title={target.node ? `Delete on ${target.computerName ?? 'its computer'}` : undefined}
+          onClick={onRemove}
+        >
+          <DeleteRegular />
+          <span>Delete…</span>
+        </button>
+      )}
+      {target.type === 'thread' && target.settled && onDeleteAllArchived && (
+        <button type="button" className="threads-context-menu-item threads-context-menu-item-danger" role="menuitem" onClick={onDeleteAllArchived}>
+          <DeleteRegular />
+          <span>Delete all archived…</span>
+        </button>
+      )}
+    </MenuFrame>
+  )
+}
+
+/** Hiding is undone from the bot's chat, where each one stays listed with Show in sidebar. */
+const BOT_THREADS_HIDE_HINT = 'Your bots’ chats still list them'
+
+/** The Threads tab's menu: hide every bot thread listed in the sidebar. */
+export function ThreadsTabMenu({ x, y, onClose, onHideAllBotThreads }: { x: number; y: number; onClose: () => void; onHideAllBotThreads: () => void }) {
+  return (
+    <MenuFrame x={x} y={y} label="Threads" onClose={onClose}>
+      <button type="button" className="threads-context-menu-item" role="menuitem" title={BOT_THREADS_HIDE_HINT} onClick={onHideAllBotThreads}>
+        <EyeOff />
+        <span>Hide all bot threads</span>
+      </button>
+    </MenuFrame>
+  )
+}
+
+/** A sidebar menu at a point: focus starts on its first item; a click or right-click outside, or Escape, closes it. */
+function MenuFrame({ x, y, label, onClose, children }: { x: number; y: number; label: string; onClose: () => void; children: ReactNode }) {
   const menuRef = useRef<HTMLDivElement>(null)
   const onMenuKeyDown = useMenuKeyboard(menuRef, onClose)
 
@@ -246,158 +428,10 @@ export function ThreadsContextMenu({
         className="threads-context-menu"
         style={{ left: x, top: y, zIndex: FLOATING_LAYER_Z_INDEX }}
         role="menu"
-        aria-label={target.type === 'project' ? `Project ${target.name}` : `Thread ${target.name}`}
+        aria-label={label}
         onKeyDown={onMenuKeyDown}
       >
-        {target.type === 'project' && target.computerName && (
-          <div className="threads-context-menu-label" role="presentation">On {target.computerName}</div>
-        )}
-        {target.type === 'project' && (onNewThread || onNewThreadFromPullRequest) && (
-          <>
-            {onNewThread && (
-              <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onNewThread}>
-                <MessageSquarePlus />
-                <span>New thread</span>
-              </button>
-            )}
-            {onNewThreadFromPullRequest && (
-              <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onNewThreadFromPullRequest}>
-                <GitPullRequest />
-                <span>New thread from a pull request</span>
-              </button>
-            )}
-            <Separator />
-          </>
-        )}
-        {target.type === 'project' && (openInEditor || reveal || onCopyPath) && (
-          <>
-            {openInEditor && (
-              <button type="button" className="threads-context-menu-item" role="menuitem" onClick={openInEditor.onSelect}>
-                <Code2 />
-                <span>{openInEditor.label}</span>
-              </button>
-            )}
-            {reveal && (
-              <button type="button" className="threads-context-menu-item" role="menuitem" onClick={reveal.onSelect}>
-                <FolderSearch />
-                <span>{reveal.label}</span>
-              </button>
-            )}
-            {onCopyPath && (
-              <button type="button" className="threads-context-menu-item" role="menuitem" title={target.path} onClick={onCopyPath}>
-                <Copy />
-                <span>Copy path</span>
-              </button>
-            )}
-            <Separator />
-          </>
-        )}
-        {!target.settled && (
-          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onPin}>
-            {target.pinned ? <PinOffRegular /> : <PinRegular />}
-            <span>{target.pinned ? 'Unpin' : 'Pin'}</span>
-          </button>
-        )}
-        {target.type === 'thread' && (
-          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onArchive}>
-            {target.settled ? <ArchiveArrowBackRegular /> : <ArchiveRegular />}
-            <span>{target.settled ? 'Unarchive' : 'Archive'}</span>
-          </button>
-        )}
-        {target.type === 'thread' && (
-          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onRegenerateTitle}>
-            <ArrowSyncRegular />
-            <span>Regenerate title</span>
-          </button>
-        )}
-        <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onRename}>
-          <EditRegular />
-          <span>Rename</span>
-        </button>
-        {target.type === 'project' && onChangeIcon && (
-          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onChangeIcon}>
-            <Image />
-            <span>Change icon…</span>
-          </button>
-        )}
-        {target.type === 'project' && onResetIcon && (
-          <button type="button" className="threads-context-menu-item" role="menuitem" title="Use the icon found in the project folder" onClick={onResetIcon}>
-            <RotateCcw />
-            <span>Reset icon</span>
-          </button>
-        )}
-        {target.type === 'project' && onUseFolderIcon && (
-          <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onUseFolderIcon}>
-            <Folder />
-            <span>Use folder icon</span>
-          </button>
-        )}
-        {target.type === 'thread' && !target.settled && target.canExpire && onSetExpiry && (
-          <Submenu icon={<Clock />} label="Delete after">
-            {EXPIRY_PRESETS.map((preset) => (
-              <button key={preset.id} type="button" className="threads-context-menu-item" role="menuitem" onClick={() => onSetExpiry(preset.ms)}>
-                <span>After {preset.label}</span>
-              </button>
-            ))}
-            {target.expiresAt && (
-              <button type="button" className="threads-context-menu-item" role="menuitem" onClick={() => onSetExpiry(null)}>
-                <span>Keep it</span>
-              </button>
-            )}
-          </Submenu>
-        )}
-        {target.type === 'project' && onTrustGitSettings && !target.node && (
-          <Submenu icon={<GitBranch />} label="Git">
-            <button
-              type="button"
-              className="threads-context-menu-item"
-              role="menuitem"
-              title="Mousse runs this repository's own Git filters (git-crypt, a local Git LFS) only as they were when you added it. Use this after you changed one yourself."
-              data-mousse-decision=""
-              onClick={onTrustGitSettings}
-            >
-              <ShieldCheck />
-              <span>Trust this repository's Git settings</span>
-            </button>
-          </Submenu>
-        )}
-        {target.type === 'project' && <Separator />}
-        {target.type === 'project' && (
-          <button
-            type="button"
-            className="threads-context-menu-item threads-context-menu-item-danger"
-            role="menuitem"
-            title={
-              target.alsoOn?.length
-                ? `Removes the project from this computer only. ${target.alsoOn.join(' and ')} keep${target.alsoOn.length === 1 ? 's' : ''} theirs.`
-                : undefined
-            }
-            onClick={onRemove}
-          >
-            <DeleteRegular />
-            <span>Remove project…</span>
-          </button>
-        )}
-        {/* A thread is archived before it can be deleted; deleting is permanent and stays on the thread's computer. */}
-        {target.type === 'thread' && target.settled && (
-          <button
-            type="button"
-            className="threads-context-menu-item threads-context-menu-item-danger"
-            role="menuitem"
-            disabled={Boolean(target.node)}
-            title={target.node ? `Delete on ${target.computerName ?? 'its computer'}` : undefined}
-            onClick={onRemove}
-          >
-            <DeleteRegular />
-            <span>Delete…</span>
-          </button>
-        )}
-        {target.type === 'thread' && target.settled && onDeleteAllArchived && (
-          <button type="button" className="threads-context-menu-item threads-context-menu-item-danger" role="menuitem" onClick={onDeleteAllArchived}>
-            <DeleteRegular />
-            <span>Delete all archived…</span>
-          </button>
-        )}
+        {children}
       </div>
     </FloatingPortal>
   )

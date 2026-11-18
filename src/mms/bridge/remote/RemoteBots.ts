@@ -1,4 +1,5 @@
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
+import { botActionRefusalText, isBotActionRefusalCode } from '../../../shared/bots/personal/actionRefusal'
 import { NetError, type NodeCapability, type NodeId } from '../../../shared/net'
 import type { BotChatCard, BotChatMessage, BotDetail, BotError, BotSummary } from '../../../shared/bots/personal/chat'
 import { MAX_BOT_DESCRIPTION_CHARS, MAX_BOT_NAME_CHARS } from '../../../shared/bots/personal/definition'
@@ -11,6 +12,7 @@ import type { PermissionMode } from '../../../shared/permissionMode'
 import { canonicalJson } from '../../net/sync/codec'
 import { isBotId } from '../../bots/definitions/BotDefinitionStore'
 import type { BotReachPort } from '../../protocol/botReachPort'
+import { REMOTE_BOT_REACH, type BotDeviceAccess } from '../../../shared/bots/personal/deviceAccess'
 
 /**
  * The personal-bot methods of the user's other devices (phones and other computers): a bot's chat and its images, its
@@ -33,11 +35,13 @@ export const REMOTE_BOT_METHODS = {
   'bots.work.stop': { capability: 'chat', mutating: true },
   'bots.chat.markRead': { capability: 'chat', mutating: true },
   'bots.asks.answer': { capability: 'chat', mutating: true },
+  'bots.actions.answer': { capability: 'chat', mutating: true },
   'bots.questions.answer': { capability: 'chat', mutating: true },
   'bots.personal.pause': { capability: 'write', mutating: true },
   'bots.personal.resume': { capability: 'write', mutating: true },
   'bots.create': { capability: 'write', mutating: true },
   'bots.update': { capability: 'write', mutating: true },
+  'bots.reminders.snooze': { capability: 'chat', mutating: true },
   'bots.reminders.cancel': { capability: 'write', mutating: true },
   'bots.schedules.remove': { capability: 'write', mutating: true },
   'bots.permissions.set': { capability: 'write', mutating: true },
@@ -46,6 +50,17 @@ export const REMOTE_BOT_METHODS = {
   'bots.memory.edit': { capability: 'write', mutating: true }
 } as const satisfies Record<string, { capability: NodeCapability; mutating: boolean }>
 export type RemoteBotMethod = keyof typeof REMOTE_BOT_METHODS
+
+/**
+ * The version of each method above that this computer accepts, as `net.info` reports it (`bots`), so a device sends only
+ * keys this computer knows: an older one refuses any other key. 2 for `bots.create`: `reach` (`RemoteBotReach`). An
+ * older computer reports none, and a device offers no choice of reach for a bot it makes there.
+ */
+export function remoteBotVersions(): Record<RemoteBotMethod, number> {
+  const out = {} as Record<RemoteBotMethod, number>
+  for (const name of Object.keys(REMOTE_BOT_METHODS) as RemoteBotMethod[]) out[name] = name === 'bots.create' ? 2 : 1
+  return out
+}
 
 /** What the remote methods use of the profile's bots (`BotChatService`). */
 export interface RemoteBotsPort {
@@ -58,12 +73,16 @@ export interface RemoteBotsPort {
   markRead(botId: string, seq: number): Record<string, never>
   askKind(botId: string, askId: string): 'permission' | 'export_memory' | 'threads'
   answer(botId: string, askId: string, answer: 'allow' | 'not_now'): Promise<{ message: BotChatMessage }>
+  actionMessage(botId: string, actionId: string): BotChatMessage
+  answerAction(input: { botId: string; actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }>
+  actionCheck(input: { botId: string; actionId: string; digest: string; answer: 'send' | 'not_now' }): void
   questionCheck(botId: string, questionId: string): void
   answerQuestion(input: { botId: string; questionId: string; choice: string; clientRequestId: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage; question?: BotChatMessage }>
   pause(botId: string): { bot: BotSummary }
   resume(botId: string): Promise<{ bot: BotSummary }>
-  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string }): Promise<{ bot: BotSummary }>
+  create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; access?: BotDeviceAccess }): Promise<{ bot: BotSummary }>
   update(botId: string, change: { name?: string; look?: BotLook }): { bot: BotSummary }
+  reminderSnooze(botId: string, messageId: string, choice: import('../../../shared/bots/personal/chat').BotSnoozeChoice): BotChatMessage
   reminderCancel(botId: string, reminderId: string): BotDetail
   removeSchedule(botId: string, scheduleId: string): BotDetail
   setPermission(botId: string, id: string, enabled: boolean): BotDetail
@@ -85,11 +104,13 @@ const KEYS: Record<RemoteBotMethod, { required: readonly string[]; optional?: re
   'bots.work.stop': { required: ['botId', 'workId'] },
   'bots.chat.markRead': { required: ['botId', 'seq'] },
   'bots.asks.answer': { required: ['botId', 'askId', 'answer'] },
+  'bots.actions.answer': { required: ['botId', 'actionId', 'digest', 'answer'] },
   'bots.questions.answer': { required: ['botId', 'questionId', 'choice', 'clientRequestId'] },
   'bots.personal.pause': { required: ['botId'] },
   'bots.personal.resume': { required: ['botId'] },
-  'bots.create': { required: ['look', 'description', 'clientRequestId'], optional: ['name'] },
+  'bots.create': { required: ['look', 'description', 'clientRequestId'], optional: ['name', 'reach'] },
   'bots.update': { required: ['botId'], optional: ['name', 'look'] },
+  'bots.reminders.snooze': { required: ['botId', 'messageId', 'choice'] },
   'bots.reminders.cancel': { required: ['botId', 'reminderId'] },
   'bots.schedules.remove': { required: ['botId', 'scheduleId'] },
   'bots.permissions.set': { required: ['botId', 'permissionId', 'enabled'] },
@@ -224,6 +245,9 @@ export function validateRemoteBotParams(method: RemoteBotMethod, value: unknown)
       ok(typeof p.askId === 'string' && ASK_ID.test(p.askId))
       ok(p.answer === 'allow' || p.answer === 'not_now')
       break
+    case 'bots.actions.answer':
+      ok(text(p.actionId, 100) && text(p.digest, 64) && (p.answer === 'send' || p.answer === 'not_now'))
+      break
     case 'bots.questions.answer':
       ok(typeof p.questionId === 'string' && QUESTION_ID.test(p.questionId))
       ok(text(p.choice, MAX_CHOICE_LABEL_CHARS))
@@ -232,11 +256,15 @@ export function validateRemoteBotParams(method: RemoteBotMethod, value: unknown)
       ok(lookOf(p.look))
       ok(text(p.description, MAX_BOT_DESCRIPTION_CHARS))
       if (p.name !== undefined) ok(typeof p.name === 'string' && p.name.length <= MAX_BOT_NAME_CHARS)
+      if (p.reach !== undefined) ok((REMOTE_BOT_REACH as readonly unknown[]).includes(p.reach))
       break
     case 'bots.update':
       ok(p.name !== undefined || p.look !== undefined)
       if (p.name !== undefined) ok(text(p.name, MAX_BOT_NAME_CHARS))
       if (p.look !== undefined) ok(lookOf(p.look))
+      break
+    case 'bots.reminders.snooze':
+      ok(text(p.messageId, 200) && ['10m', '1h', 'tomorrow'].includes(p.choice as string))
       break
     case 'bots.reminders.cancel':
       ok(typeof p.reminderId === 'string' && REMINDER_ID.test(p.reminderId))
@@ -271,7 +299,8 @@ export function remoteBotError(error: BotError): BotError {
 
 /** A bot as another device sees it. */
 export function remoteBotSummary(bot: BotSummary): BotSummary {
-  const { error, ...rest } = bot
+  // Which devices reach the bot is set and shown on its own computer only.
+  const { error, reach: _reach, ...rest } = bot
   return { ...rest, ...(error ? { error: remoteBotError(error) } : {}) }
 }
 
@@ -327,6 +356,18 @@ const bytes = (value: unknown): number => Buffer.byteLength(canonicalJson(value)
 /** One message within a reply: a very long text is cut, with a note that the rest is on the computer. */
 function fitted(message: RemoteBotMessage, budget = RESULT_BYTES): RemoteBotMessage {
   if (bytes(message) <= budget) return message
+  if (message.action) {
+    // Never send a partially reviewable card with a live Send button. Not now still names this row.
+    const action = message.action
+    message = { ...message, text: 'This action is too large to send from here. Open it on the computer.', action: {
+      actionId: action.actionId, digest: action.digest, ...(action.askedAt ? { askedAt: action.askedAt } : {}), title: action.title, serverName: action.serverName,
+      args: null, hasHiddenValues: action.hasHiddenValues, hiddenPaths: [], status: action.status,
+      ...(action.previous ? { previous: action.previous } : {}), ...(action.at ? { at: action.at } : {}),
+      ...(action.result?.notSentInTime ? { result: { text: action.result.text, notSentInTime: true } }
+        : action.result?.toolReportedError ? { result: { toolReportedError: true } } : {}), tooLarge: true
+    } }
+    if (bytes(message) <= budget) return message
+  }
   const over = bytes(message) - budget
   const keep = Math.max(0, Buffer.byteLength(message.text) - over - 256)
   let cut = Buffer.from(message.text).subarray(0, keep).toString()
@@ -387,6 +428,8 @@ function refusal(error: unknown): never {
   // Only the engine's own refusals (which carry a code and plain words) are passed on.
   if (typeof code !== 'string') throw error
   const message = error instanceof Error ? error.message : undefined
+  if (isBotActionRefusalCode(code))
+    throw new NetError('conflict', undefined, { details: { reason: code } })
   if (code === 'bot_not_found') throw new NetError('stream_unknown', 'This bot is gone.')
   if (code.endsWith('_not_found') || code === 'not_found') throw new NetError('stream_unknown', message)
   throw new NetError(code === 'invalid_params' ? 'bad_request' : 'conflict', message)
@@ -430,7 +473,8 @@ export function remoteBotMethods(options: {
   reach?: Pick<BotReachPort, 'canReach' | 'deviceOn'> & Partial<Pick<BotReachPort, 'hiddenFor'>>
   /**
    * A bot a device just made: it is kept within reach of that device (its choice gains the device), so the device is not
-   * locked out of what it made. No other bot changes.
+   * locked out of what it made. A bot with a choice of its own saved (asked for at creation, or set since) is left as it
+   * is (`keepMakerInReach`). No other bot changes.
    */
   madeBy?(botId: string, node: string): void
 }): RpcMethod[] {
@@ -539,6 +583,15 @@ export function remoteBotMethods(options: {
     throw new NetError('stream_unknown', `${what} is gone.`)
   }
   const botId = (p: Record<string, unknown>): string => p.botId as string
+  const actionSize = (p: Record<string, unknown>, port: RemoteBotsPort): void => {
+      if (p.answer === 'send') {
+        const message = port.actionMessage(botId(p), p.actionId as string)
+        // Include the page envelope too: fittedPage may cut its only message to leave room for it.
+        const page = port.chatList(botId(p), { limit: 1, beforeSeq: message.seq + 1 })
+        if (bytes({ ...page, messages: [remoteBotMessage(message)] }) + 1 > RESULT_BYTES)
+          throw new NetError('conflict', botActionRefusalText('bot_action_too_large'), { details: { reason: 'bot_action_too_large' } })
+      }
+  }
   return [
     method('bots.get', async (p, port) => remoteBotDetail(port.get(botId(p)))),
     method('bots.chat.list', async (p, port) =>
@@ -609,15 +662,28 @@ export function remoteBotMethods(options: {
       },
       first((p, port) => port.questionCheck(botId(p), p.questionId as string))
     ),
+    method('bots.actions.answer', async (p, port) => {
+      actionSize(p, port)
+      return port.answerAction({ botId: botId(p), actionId: p.actionId as string, digest: p.digest as string, answer: p.answer as 'send' | 'not_now' })
+    }, first((p, port) => {
+      port.actionCheck({ botId: botId(p), actionId: p.actionId as string, digest: p.digest as string, answer: p.answer as 'send' | 'not_now' })
+      actionSize(p, port)
+    })),
+    method('bots.reminders.snooze', async (p, port) => fitted(remoteBotMessage(port.reminderSnooze(botId(p), p.messageId as string, p.choice as import('../../../shared/bots/personal/chat').BotSnoozeChoice)))),
     method('bots.personal.pause', async (p, port) => ({ bot: remoteBotSummary(port.pause(botId(p)).bot) })),
     method('bots.personal.resume', async (p, port) => ({ bot: remoteBotSummary((await port.resume(botId(p))).bot) })),
     method('bots.create', async (p, port, context) => {
       const before = new Set(port.list().bots.map((bot) => bot.id))
+      // What the device asked for is saved before the bot is published (`BotChatService.create`): "home and maker" is
+      // this computer and the calling device alone, so no other device lists the bot even for a moment.
+      const access: BotDeviceAccess | undefined =
+        p.reach === 'home_and_maker' ? { mode: 'chosen', nodes: [context.caller.node] } : p.reach === 'all' ? { mode: 'all' } : undefined
       const { bot } = await port.create({
         look: p.look as BotLook,
         ...(typeof p.name === 'string' && p.name.trim() ? { name: p.name } : {}),
         description: p.description as string,
-        clientRequestId: p.clientRequestId as string
+        clientRequestId: p.clientRequestId as string,
+        ...(access ? { access } : {})
       })
       remember(context.execution, bot.id)
       // The device that made it keeps it within reach; a request id that names a bot made before is answered only if the

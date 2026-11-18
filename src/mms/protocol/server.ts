@@ -1,3 +1,8 @@
+import { APP_PRESENCE_CAPABILITY } from '../notifications/OwnerQuietHours'
+import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
+import { ACTIVE_RUNS_EVENT, KEEP_AWAKE_CAPABILITY, type SleepBlocker } from '../../shared/keepAwake'
+import { KeepAwakeService, serviceSleepBlocker } from '../power/KeepAwakeService'
+import { onSettingsSaved } from '../settings/SettingsStore'
 import { AgentDefinitionError } from '../../shared/agents/errors'
 import { ERROR_INFO_CAPABILITY, errorDiagnostic, knownAppError, normalizeAppError, serializeAppError } from '../../shared/errors'
 /**
@@ -76,6 +81,11 @@ export interface ProtocolServerOptions {
    * neither advertised nor granted.
    */
   commandRouter?: ConnectionCommandRouter
+  /**
+   * What the service holds the computer awake with while runs work and no app is attached. Absent: Electron's power
+   * save blocker when the service runs in Electron, none under plain Node. Null: none.
+   */
+  sleepBlocker?: SleepBlocker | null
 }
 
 /** Constant-time comparison so hello auth cannot be probed via timing. */
@@ -151,6 +161,9 @@ export class MmsProtocolServer {
   /** Each profile's `threads.updated` sender: changes in one turn of the event loop go out as one event. */
   private readonly threadListPushers = new Map<string, (threadId?: string) => void>()
   private profileLifecycleUnsubscribe: (() => void) | null = null
+  /** Counts working runs for the app's sleep blocker, and holds one itself while no app is attached. */
+  private keepAwake: KeepAwakeService | null = null
+  private keepAwakeSettingsUnsubscribe: (() => void) | null = null
   private accepting = false
   private endpointPath: string | null = null
   private stopping = false
@@ -222,6 +235,11 @@ export class MmsProtocolServer {
     }
     if (this.stopping) throw new Error('Protocol server stopped while starting')
 
+    this.keepAwake ??= new KeepAwakeService({
+      emit: (active) => this.emitInstallationEvent(ACTIVE_RUNS_EVENT, { active }),
+      blocker: this.opts.sleepBlocker !== undefined ? this.opts.sleepBlocker : serviceSleepBlocker()
+    })
+    this.keepAwakeSettingsUnsubscribe ??= onSettingsSaved(() => this.keepAwake?.settingsChanged())
     this.wireOrchestratorEvents(this.opts.mms)
     const host = this.opts.mms.getInstallationHost()
     if (host) {
@@ -311,6 +329,10 @@ export class MmsProtocolServer {
     this.clients.clear()
 
     this.disposeOrchestratorEvents()
+    this.keepAwakeSettingsUnsubscribe?.()
+    this.keepAwakeSettingsUnsubscribe = null
+    this.keepAwake?.dispose()
+    this.keepAwake = null
 
     if (this.server) {
       const server = this.server
@@ -411,6 +433,11 @@ export class MmsProtocolServer {
     disposers.push(() => services.events.off('protocol:event', requested as (data: unknown) => void))
     services.protocolSequence = () => this.ringFor(services.profileId).currentSequence
     disposers.push(() => { services.protocolSequence = () => 0 })
+    // Every run of the profile (threads, subagents, bots) counts toward keeping the computer awake.
+    const runStore = services.runEngine?.store
+    if (runStore && this.keepAwake) {
+      disposers.push(this.keepAwake.attach(services.profileId, runStore, () => services.settings.get().runs.keepAwake))
+    }
     const orch = services.orchestrator
     const onOrch = (event: string, handler: (...args: any[]) => void): void => {
       orch.on(event, handler)
@@ -728,9 +755,12 @@ export class MmsProtocolServer {
       questions,
       'cleared',
       (payload: { requestId: string; threadId: string }) => {
-        services.threadRuntimes
-          .getOrHydrate(payload.threadId)
-          .pendingQuestionIds.delete(payload.requestId)
+        const runtime = services.threadRuntimes.getOrHydrate(payload.threadId)
+        runtime.pendingQuestionIds.delete(payload.requestId)
+        // The last open question answered: a turn that still runs reads as working again (and a steer steers).
+        if (!runtime.pendingQuestionIds.size && !questions.listPendingForThread(payload.threadId).length && !services.secretRequests?.waiting(payload.threadId)) {
+          services.orchestrator.inputAnswered(payload.threadId)
+        }
         emitToSubscribers(
           this.ring.push('questions.cleared', payload, payload.threadId)
         )
@@ -802,7 +832,10 @@ export class MmsProtocolServer {
         // A scheduled occurrence's turn: its end is announced by `scheduled.runEnded` as the job's Tell me says, so
         // clients do not also announce the thread finishing.
         const scheduled = services.orchestrator.isScheduledTurn(payload.threadId)
-        if (!bots.has(payload.threadId)) emitToSubscribers(this.ring.push('activity', scheduled ? { ...payload, scheduled: true } : payload, payload.threadId))
+        // A turn a person stopped: they did it, so clients do not announce it as stopped.
+        const stoppedByPerson = payload.state === 'idle' && services.orchestrator.stoppedByPerson(payload.threadId)
+        const marks = { ...(scheduled ? { scheduled: true } : {}), ...(stoppedByPerson ? { stoppedByPerson: true } : {}) }
+        if (!bots.has(payload.threadId)) emitToSubscribers(this.ring.push('activity', scheduled || stoppedByPerson ? { ...payload, ...marks } : payload, payload.threadId))
         if (payload.activity) {
           const activity = bots.size ? Object.fromEntries(Object.entries(payload.activity).filter(([threadId]) => !bots.has(threadId))) : payload.activity
           emitToSubscribers(
@@ -870,7 +903,9 @@ export class MmsProtocolServer {
     })
     // How an automation's run ended and whether its Tell me lets it notify; the GUI shows the notification.
     onEmitter(services.scheduled, 'runEnded', (event: { threadId?: string }) => {
-      emitToSubscribers(this.ring.push('scheduled.runEnded', event, event.threadId))
+      const quiet = services.ownerQuietHours
+      const data = quiet?.quietHoursFor() && !quiet.active() ? { ...event, quietHours: true } : event
+      emitToSubscribers(this.ring.push('scheduled.runEnded', data, event.threadId))
     })
     // A watched pull request changed (checks finished, a review arrived, the watch ended): clients refresh that thread's detail.
     onEmitter(services.pullRequestWatch, 'updated', (payload: { threadId: string }) => {
@@ -882,6 +917,9 @@ export class MmsProtocolServer {
     // A new or changed chat row (run reports, asks and errors notify), and a working bot's live chip.
     if (services.personalBots) onEmitter(services.personalBots.events, 'message', (event: unknown) => {
       emitToSubscribers(this.ring.push('bots.message', event, undefined))
+    })
+    if (services.personalBots) onEmitter(services.personalBots.events, 'tell', (event: unknown) => {
+      emitToSubscribers(this.ring.push('bots.tell', event, undefined))
     })
     if (services.personalBots) onEmitter(services.personalBots.events, 'activity', (event: unknown) => {
       emitToSubscribers(this.ring.push('bots.activity', event, undefined))
@@ -997,10 +1035,17 @@ export class MmsProtocolServer {
             capability !== MMS_PROTOCOL_CHUNK_CAPABILITY &&
             capability !== PROFILES_V1_CAPABILITY &&
             capability !== ERROR_INFO_CAPABILITY &&
+            capability !== APP_PRESENCE_CAPABILITY &&
+            capability !== BOT_TELLING_CAPABILITY &&
+            capability !== KEEP_AWAKE_CAPABILITY &&
             capability !== BROWSER_ATTACHED_V1_CAPABILITY
         )
       )
       if (requested.has(MMS_PROTOCOL_CHUNK_CAPABILITY) && advertised.includes(MMS_PROTOCOL_CHUNK_CAPABILITY)) session.capabilities.add(MMS_PROTOCOL_CHUNK_CAPABILITY)
+      if (v.hello.clientType === 'gui' && requested.has(APP_PRESENCE_CAPABILITY)) session.capabilities.add(APP_PRESENCE_CAPABILITY)
+      if (v.hello.clientType === 'gui' && requested.has(BOT_TELLING_CAPABILITY)) session.capabilities.add(BOT_TELLING_CAPABILITY)
+      // The app holds the sleep blocker while it is attached (`refreshKeepAwakeHolders`).
+      if (v.hello.clientType === 'gui' && requested.has(KEEP_AWAKE_CAPABILITY)) session.capabilities.add(KEEP_AWAKE_CAPABILITY)
       if (requested.has(ERROR_INFO_CAPABILITY)) session.capabilities.add(ERROR_INFO_CAPABILITY)
       // A window says it binds a chat's first message; nothing else may claim it.
       if (v.hello.clientType === 'gui' && requested.has(FIRST_SEND_BINDING_CAPABILITY)) session.capabilities.add(FIRST_SEND_BINDING_CAPABILITY)
@@ -1230,6 +1275,7 @@ export class MmsProtocolServer {
           // A profile switch changes the event cursor namespace. Pause delivery
           // until the client establishes a fresh replay boundary for that profile.
           session.subscribeState = 'none'
+          this.refreshTellingWindows()
           session.eventBuffer = []
           session.lastSeq = 0
         }
@@ -1246,6 +1292,10 @@ export class MmsProtocolServer {
         method,
         params
       )
+      if ((session.clientType === 'gui' || session.clientType === 'bridge') && ['orchestrator.send', 'orchestrator.steer', 'orchestrator.steerNow', 'orchestrator.answerQuestions'].includes(method)) {
+        resolved.services.ownerQuietHours?.report()
+        resolved.services.personalBots?.quietHoursChanged()
+      }
       // Profile creation/restore starts a new service while dispatch is in
       // flight. Attach its producers before acknowledging the lifecycle call.
       if (isInstallationMethod(method)) this.wireLiveProfileEvents()
@@ -1333,6 +1383,7 @@ export class MmsProtocolServer {
     for (const stored of replay.events) {
       if (session.clientType !== 'gui' && isQualifiedId(stored.threadId)) continue
       // Project for this client first, so the budget counts what is actually sent.
+      if (stored.type === 'bots.tell') continue // A telling is shown live once; durable rows supply catch-up.
       const event = projectEventFor(session.clientType, stored, this.remoteListsFor(session))
       replayBytes += Buffer.byteLength(JSON.stringify(event), 'utf8') + (result.replay.length ? 1 : 0)
       if (replayBytes > replayBudget) {
@@ -1346,6 +1397,7 @@ export class MmsProtocolServer {
 
     session.subscribeState = 'active'
     session.lastSeq = currentSeq
+    this.refreshTellingWindows()
 
     // Flush events that landed during buffering with sequence after the boundary.
     const buffered = session.eventBuffer
@@ -1355,6 +1407,11 @@ export class MmsProtocolServer {
       if (ev.sequence <= currentSeq) continue
       this.deliverEventToClient(session, ev)
     }
+
+    this.refreshKeepAwakeHolders()
+    // The app that just attached learns how many runs work now, after the events it was owed, so the numbering stays in
+    // order; it holds the blocker from here on.
+    if (session.capabilities.has(KEEP_AWAKE_CAPABILITY) && !session.closed) this.keepAwake?.announce()
 
     return res
   }
@@ -1453,7 +1510,12 @@ export class MmsProtocolServer {
   }
 
   private deliverEventToClient(session: ClientSession, event: ProtocolEvent): void {
+    if (event.type === 'bots.tell' && !session.capabilities.has(BOT_TELLING_CAPABILITY)) return
     if (!this.sendRaw(session, event)) return
+    if (event.type === 'bots.message' && session.clientType === 'gui' && !session.capabilities.has(BOT_TELLING_CAPABILITY)) {
+      const services = this.servicesByProfile.get(session.binding?.profileId ?? this.opts.mms.profileId)
+      try { services?.personalBots?.noteLegacyTelling(event.data) } catch { /* A best-effort receipt cannot undo a sent frame. */ }
+    }
     session.lastSeq = event.sequence
   }
 
@@ -1590,6 +1652,21 @@ export class MmsProtocolServer {
     })
   }
 
+  /** How many attached app connections hold the sleep blocker; while none does, the service holds its own. */
+  private refreshKeepAwakeHolders(): void {
+    const count = [...this.clients.values()].filter(c => !c.closed && c.authenticated && c.clientType === 'gui' &&
+      c.subscribeState === 'active' && c.capabilities.has(KEEP_AWAKE_CAPABILITY)).length
+    this.keepAwake?.setAppHolders(count)
+  }
+
+  private refreshTellingWindows(): void {
+    for (const [profileId, services] of this.servicesByProfile) {
+      const count = [...this.clients.values()].filter(c => !c.closed && c.authenticated && c.clientType === 'gui' &&
+        c.subscribeState === 'active' && c.capabilities.has(BOT_TELLING_CAPABILITY) && (c.binding?.profileId ?? this.opts.mms.profileId) === profileId).length
+      services.personalBots?.setTellingWindows(count)
+    }
+  }
+
   private closeClient(session: ClientSession): void {
     if (session.closed) return
     session.closed = true
@@ -1603,6 +1680,8 @@ export class MmsProtocolServer {
     session.completedResponseBytes = 0
     session.completedIds.clear()
     this.clients.delete(session.id)
+    this.refreshTellingWindows()
+    this.refreshKeepAwakeHolders()
     this.opts.commandRouter?.revoke(session.id, 'close')
     this.opts.mms.domains?.notifyConnectionClosed(session.id)
     try {

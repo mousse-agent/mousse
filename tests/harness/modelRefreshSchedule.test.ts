@@ -126,6 +126,26 @@ describe('model refresh schedule', () => {
     return { home, binary, harness, spec, advance }
   }
 
+  it('refreshes stale models on desktop open while leaving fresh and signed-out entries alone', async () => {
+    const world = newWorld(['claude:stale', 'claude:fresh', 'claude:disabled', 'claude:failed'])
+    const { harness, advance } = fixture(world, ['claude:stale', 'claude:fresh', 'claude:signed-out', 'claude:disabled', 'claude:failed'], { enabled: { 'claude:disabled': false } })
+    world.stamps.set('claude:stale', new Date(Date.now() - HOUR).toISOString())
+    world.stamps.set('claude:fresh', new Date().toISOString())
+    world.failing.add('claude:failed')
+
+    harness.instances.refreshStaleModelsOnDesktopOpen()
+    await advance(50)
+    expect(world.started.sort()).toEqual(['claude:failed', 'claude:stale'])
+    const snapshots = await harness.instances.snapshots({ kind: 'device' })
+    expect(snapshots.find((snapshot) => snapshot.instanceId === 'claude:stale')?.models.source).toBe('live')
+
+    // A second window does not immediately retry a failed provider.
+    world.started.length = 0
+    harness.instances.refreshStaleModelsOnDesktopOpen()
+    await advance(50)
+    expect(world.started).toEqual([])
+  })
+
   it('refreshes after the start-up delay, and not before', async () => {
     const world = newWorld(['claude:a'])
     const { harness, advance } = fixture(world, ['claude:a'])

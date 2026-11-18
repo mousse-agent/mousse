@@ -150,6 +150,8 @@ export interface HarnessGateway {
    * `ONE_SHOT_INACTIVITY_MS` without a provider event, and is never retried: the caller falls back.
    */
   oneShot(request: OneShotRequest): Promise<{ text: string }>
+  /** The driver's runtime masks secret values in its tool results before keeping them (`HarnessDriver.masksToolResults`). */
+  masksToolResults(driver: HarnessDriverKind | undefined): boolean
   /**
    * The models an entry can make pictures with in Mousse's own process (#1088, a bot's Images row); none for an entry
    * that is unknown, turned off, or whose runtime makes none.
@@ -271,8 +273,15 @@ export interface HarnessGateway {
    * whichever instance holds it: the thread may have switched instances since. 'stopped' when one did.
    */
   stopThread(threadId: string): Promise<'stopped' | 'not_active'>
+  /**
+   * Stops one native helper of `hostThreadId`'s run on the instance that runs it (`ProviderAdapter.stopNativeHelper`).
+   * `unsupported`: that instance's runtime cannot stop a single helper.
+   */
+  stopNativeHelper?(instanceId: string, hostThreadId: string, agentId: string): Promise<'stopped' | 'not_active' | 'unsupported'>
   /** Whether any instance keeps a process for the thread between turns now (`ProviderAdapter.hasLiveProcess`). */
   hasLiveProcess?(threadId: string): boolean
+  /** Closes the process a bot's chat keeps warm on the thread, on whichever instance holds it (`ProviderAdapter.releaseBotProcess`). */
+  releaseBotProcess?(threadId: string): boolean
   /**
    * `/compact` on the instance a thread runs on: its own compaction of the thread's native session.
    * False when it has none or compacted nothing (`DriverRuntime.compactConversation`).
@@ -399,6 +408,7 @@ export interface ResolvedSelection {
  */
 export interface HarnessInstances {
   snapshots(scope: ProviderScope): Promise<InstanceSnapshot[]>
+  refreshStaleModelsOnDesktopOpen(): void
   /**
    * The plan usage of every enabled, signed-in instance whose runtime reports any (`DriverRuntime.usage`),
    * for the usage page: keyed by the instance and named like it. An instance that cannot be read
@@ -557,6 +567,11 @@ export interface TurnAppContext {
   modeCeiling: ModeCeiling
   /** The agent access level granted to the run (SPEC §15.1); absent is `lineage`. */
   accessLevel?: AgentAccessLevel
+  /**
+   * The thread's capability revision (`ToolRegistry.capabilityRevision`): when it differs from the last turn's, the
+   * turn gets a new credential epoch, so the runtime takes the list the thread holds now.
+   */
+  capabilityRevision?: string
   /** The turn may attach the Mousse MCP server (a run engine run). */
   mcpEligible: boolean
   /**
@@ -622,6 +637,8 @@ export const MODEL_REFRESH_INTERVAL_MS = 3 * 60 * 60_000
 export const MODEL_REFRESH_STARTUP_DELAY_MS = 2 * 60_000
 /** Model refreshes running at once (Claude Code and Codex start a CLI each). */
 const MODEL_REFRESH_CONCURRENCY = 2
+/** Coalesce nearby desktop opens, including retries of an unsuccessful refresh. */
+const DESKTOP_MODEL_REFRESH_INTERVAL_MS = 5 * 60_000
 /** Test-only: replaces `MODEL_REFRESH_INTERVAL_MS`, in milliseconds. */
 const MODEL_REFRESH_INTERVAL_ENV = 'MOUSSE_MODEL_REFRESH_INTERVAL_MS'
 /** A one-shot request ends with `timeout` after this long without a provider event. */
@@ -928,6 +945,7 @@ export class Harness implements HarnessGateway {
    * schedule, a probe that saw a new program, a click) joins it instead of starting another.
    */
   private readonly modelRefreshes = new Map<string, Promise<void>>()
+  private lastDesktopModelRefresh = -Infinity
   private modelSlots = 0
   private readonly modelWaiting: Array<() => void> = []
   private modelSchedule?: { interval: ReturnType<typeof setInterval>; startup: ReturnType<typeof setTimeout>; latest: ReturnType<typeof setInterval>; intervalMs: number }
@@ -959,6 +977,7 @@ export class Harness implements HarnessGateway {
       .catch(() => {})
     this.instances = {
       snapshots: (scope) => this.snapshots(scope),
+      refreshStaleModelsOnDesktopOpen: () => this.refreshStaleModelsOnDesktopOpen(),
       usage: (scope, options) => this.usage(scope, options),
       usageSlots: (scope) => this.usageIds(scope, true).map(({ instanceId, signedOut }) => ({ id: instanceId, label: this.displayName(this.record(instanceId, { allowDisabled: true })), ...(signedOut ? { signedOut: true as const } : {}) })),
       useLimitReset: async (scope, instanceId, creditId) => {
@@ -1486,7 +1505,7 @@ export class Harness implements HarnessGateway {
       // runtime passes admission with them. The record is taken before admission, so a first attempt
       // that is refused still leaves one.
       // A caller-given count scope (a bot activation's) records every request and tool call even
-      // with no count limit, so a bot limited only by work time still shows what it did.
+      // with no count limit, so a bot with no limits still shows what it did.
       const limits = budgetLimitsOf(spec.binding.policy) ?? (spec.counters ? {} : undefined)
       const counted = limits ? this.runCounters.acquire(spec.input.runId, limits, spec.counters, { laterAttempt: (spec.attemptOrdinal ?? 1) > 1, ...(spec.spend ? { spend: spec.spend } : {}) }) : undefined
       let signal = spec.input.signal
@@ -1580,6 +1599,11 @@ export class Harness implements HarnessGateway {
       providerRef: () => ref,
       interrupt: async () => (ended || !ref ? 'not_active' : this.interruptOn(record, ref, spec.input.threadId))
     }
+  }
+
+  /** Whether a driver's runtime masks secrets in tool results before keeping them (`HarnessDriver.masksToolResults`). */
+  masksToolResults(driver: HarnessDriverKind | undefined): boolean {
+    return Boolean(driver && this.drivers.get(driver)?.masksToolResults)
   }
 
   /** Whether the instance's driver runs one-shots (`HarnessDriver.oneShot`); read for picker listings. */
@@ -1962,12 +1986,30 @@ export class Harness implements HarnessGateway {
     return false
   }
 
+  releaseBotProcess(threadId: string): boolean {
+    let released = false
+    for (const record of this.records.values()) {
+      try {
+        if (record.runtime.adapter.releaseBotProcess?.(threadId)) released = true
+      } catch (error) {
+        console.warn("a bot's warm process could not be closed", { threadId, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return released
+  }
+
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
     const results = await Promise.allSettled([...this.records.values()].map((record) => record.runtime.adapter.stopThread?.(threadId)))
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (results.some((result) => result.status === 'fulfilled' && result.value === 'stopped')) return 'stopped'
     if (failed) throw failed.reason
     return 'not_active'
+  }
+
+  async stopNativeHelper(instanceId: string, hostThreadId: string, agentId: string): Promise<'stopped' | 'not_active' | 'unsupported'> {
+    const adapter = this.recordOrUndefined(instanceId)?.runtime.adapter
+    if (!adapter?.stopNativeHelper) return 'unsupported'
+    return adapter.stopNativeHelper(hostThreadId, agentId)
   }
 
   async compactConversation(request: NativeCompactRequest): Promise<boolean> {
@@ -2008,6 +2050,13 @@ export class Harness implements HarnessGateway {
     const relayGrant = record.driver.relay && (botRelay || (app.relay && app.relay.runtimes[record.driver.kind as McpRelayRuntime] === true && !app.bot && !app.definition && binding.policy.authority?.kind !== 'bot'))
       ? { approvals: record.driver.relay.approvals }
       : undefined
+    // What the server's tool list depends on, apart from the bearer: the caller's policy, a level other than the default,
+    // and the thread's capability revision.
+    const listParts = [
+      ...(binding.policyDigest ? [binding.policyDigest] : []),
+      ...(app.accessLevel && app.accessLevel !== 'lineage' ? [`access:${app.accessLevel}`] : []),
+      ...(app.capabilityRevision ? [`caps:${app.capabilityRevision}`] : [])
+    ]
     let attachment: { url: string; token: string; tokenHash: string; relayUrl: string } | null = null
     if (app.mcpEligible && this.mcp && mcpAttachable(caps)) {
       try {
@@ -2022,8 +2071,9 @@ export class Harness implements HarnessGateway {
           // A new runtime, a new epoch: driver, home, signed-in account and settings, and a caller's
           // policy (a narrower grant must not keep the tool list of the last one). So is a different agent
           // access level (SPEC §15.1): a runtime caches its tool list, so it takes the new level with a new
-          // bearer. The default level adds nothing, so a profile that never sets one is unchanged.
-          generation: [binding.driver, binding.homeId, binding.accountGeneration, binding.configRevision, ...(binding.policyDigest ? [binding.policyDigest] : []), ...(app.accessLevel && app.accessLevel !== 'lineage' ? [`access:${app.accessLevel}`] : [])].join('|')
+          // bearer. The default level adds nothing, so a profile that never sets one is unchanged. So is a new
+          // capability revision: the list the thread holds changed, and no runtime is told so mid-epoch.
+          generation: [binding.driver, binding.homeId, binding.accountGeneration, binding.configRevision, ...listParts].join('|')
         })
       } catch (error) {
         console.warn('Mousse MCP credential could not be minted; the turn runs without Mousse tools', {
@@ -2038,9 +2088,9 @@ export class Harness implements HarnessGateway {
       ? { url: attachment.relayUrl, revision: botRelay ? botRelayRevision(app.bot!) : app.relay!.revision }
       : undefined
     const texts = app.instructions(attachment !== null, relay !== undefined)
-    // What the server's tool list depends on, apart from the bearer: a runtime that keeps its process for a bearer
-    // renewed in place starts a new one when this changes, since it would keep offering a tool the list dropped.
-    const tools = [...(binding.policyDigest ? [binding.policyDigest] : []), ...(app.accessLevel && app.accessLevel !== 'lineage' ? [`access:${app.accessLevel}`] : [])].join('|')
+    // A runtime that keeps its process for a bearer renewed in place starts a new one when this changes, since it would
+    // keep offering a tool the list dropped.
+    const tools = listParts.join('|')
     return {
       bridge: {
         mcp: attachment ? { url: attachment.url, token: attachment.token, ...(tools ? { tools } : {}), ...(relay ? { relay } : {}) } : null,
@@ -3725,7 +3775,7 @@ export class Harness implements HarnessGateway {
    * at once). A refresh that fails is recorded on the instance, never thrown. When `when` is set,
    * the instance is checked again once its turn comes and is left alone if it no longer qualifies.
    */
-  private refreshModelsOf(instanceId: string, when?: { minAgeMs: number; reason: 'schedule' | 'upgrade' }): Promise<void> {
+  private refreshModelsOf(instanceId: string, when?: { minAgeMs: number; reason: 'schedule' | 'upgrade' | 'desktop' }): Promise<void> {
     const running = this.modelRefreshes.get(instanceId)
     if (running) return running
     const job = this.withModelSlot(async () => {
@@ -3795,23 +3845,33 @@ export class Harness implements HarnessGateway {
     if (this.stopped || this.modelSchedule) return
     const override = Number(process.env[MODEL_REFRESH_INTERVAL_ENV])
     const intervalMs = Number.isFinite(override) && override > 0 ? override : MODEL_REFRESH_INTERVAL_MS
-    const pass = (minAgeMs: number) => {
-      if (this.stopped) return
-      for (const [instanceId, entry] of Object.entries(this.instanceMap.list())) {
-        if (!entry.enabled || entry.driver === 'pi') continue
-        // The first pass leaves a list younger than the interval alone; later ones also take lists
-        // the previous pass refreshed just under an interval ago.
-        void this.refreshModelsOf(instanceId, { minAgeMs, reason: 'schedule' }).catch((error) => console.warn('[harness] scheduled model refresh failed', { instanceId, error: errorText(error) }))
-      }
-    }
-    const interval = setInterval(() => pass(intervalMs / 2), intervalMs)
-    const startup = setTimeout(() => pass(intervalMs), Math.min(MODEL_REFRESH_STARTUP_DELAY_MS, intervalMs))
+    // The first pass leaves lists younger than the interval alone. Later passes also pick up
+    // lists the previous pass refreshed just under an interval ago.
+    const interval = setInterval(() => this.refreshModelPass(intervalMs / 2, 'schedule'), intervalMs)
+    const startup = setTimeout(() => this.refreshModelPass(intervalMs, 'schedule'), Math.min(MODEL_REFRESH_STARTUP_DELAY_MS, intervalMs))
     // Newest published versions, for the update button: the cache decides when a lookup is due.
     const latest = setInterval(() => this.refreshLatest(Object.keys(this.instanceMap.list())), LATEST_CHECK_INTERVAL_MS)
     interval.unref?.()
     startup.unref?.()
     latest.unref?.()
     this.modelSchedule = { interval, startup, latest, intervalMs }
+  }
+
+  /** A desktop can start while its profile and the service have been running for hours. */
+  private refreshStaleModelsOnDesktopOpen(): void {
+    const now = this.now()
+    if (now - this.lastDesktopModelRefresh < DESKTOP_MODEL_REFRESH_INTERVAL_MS) return
+    this.lastDesktopModelRefresh = now
+    this.refreshModelPass(DESKTOP_MODEL_REFRESH_INTERVAL_MS, 'desktop')
+  }
+
+  private refreshModelPass(minAgeMs: number, reason: 'schedule' | 'desktop'): void {
+    if (this.stopped) return
+    for (const [instanceId, entry] of Object.entries(this.instanceMap.list())) {
+      // Pi already refreshes independently on the shared catalog's five-minute cycle.
+      if (!entry.enabled || entry.driver === 'pi') continue
+      void this.refreshModelsOf(instanceId, { minAgeMs, reason }).catch((error) => console.warn('[harness] background model refresh failed', { instanceId, reason, error: errorText(error) }))
+    }
   }
 
   /** A probe found another program than before: list its models now, when the instance qualifies. */

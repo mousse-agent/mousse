@@ -381,7 +381,7 @@ export class MmsListsSource {
           settledAt: thread.settledAt,
           startedAt: thread.startedAt,
           worktreeEnabled: thread.worktreeEnabled,
-          // When it deletes itself, for the menu's Delete after (a phone keeps "stop a running turn" when it changes the time).
+          // When it archives itself, for the menu's Archive after (a phone keeps "stop a running turn" when it changes the time).
           ...(thread.expiresAt ? { expiresAt: thread.expiresAt } : {}),
           ...(thread.expiresAt && thread.expiryStopsRun ? { expiryStopsRun: true } : {}),
           ...(own

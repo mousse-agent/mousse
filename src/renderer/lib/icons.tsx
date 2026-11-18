@@ -1,7 +1,8 @@
-import { forwardRef, type ForwardRefExoticComponent, type RefAttributes, type SVGProps } from 'react'
+import { forwardRef, useCallback, type ForwardRefExoticComponent, type RefAttributes, type SVGProps } from 'react'
 import { HugeiconsIcon, type IconSvgElement } from '@hugeicons/react'
 import '../styles/thinking-icon.css'
 import { turnable } from './turning'
+import { useOffscreenPause } from './offscreenMotion'
 import Activity01Icon from '@hugeicons/core-free-icons/Activity01Icon'
 import Add01Icon from '@hugeicons/core-free-icons/Add01Icon'
 import AddSquareIcon from '@hugeicons/core-free-icons/AddSquareIcon'
@@ -104,6 +105,7 @@ import KeyboardIcon from '@hugeicons/core-free-icons/KeyboardIcon'
 import LaptopIcon from '@hugeicons/core-free-icons/LaptopIcon'
 import Layers01Icon from '@hugeicons/core-free-icons/Layers01Icon'
 import Link01Icon from '@hugeicons/core-free-icons/Link01Icon'
+import Unlink01Icon from '@hugeicons/core-free-icons/Unlink01Icon'
 import LinkSquare02Icon from '@hugeicons/core-free-icons/LinkSquare02Icon'
 import Loading03Icon from '@hugeicons/core-free-icons/Loading03Icon'
 import Logout01Icon from '@hugeicons/core-free-icons/Logout01Icon'
@@ -116,6 +118,7 @@ import NetworkIcon from '@hugeicons/core-free-icons/NetworkIcon'
 import Notification02Icon from '@hugeicons/core-free-icons/Notification02Icon'
 import PaletteIcon from '@hugeicons/core-free-icons/PaletteIcon'
 import TextFontIcon from '@hugeicons/core-free-icons/TextFontIcon'
+import TextWrapIcon from '@hugeicons/core-free-icons/TextWrapIcon'
 import AppWindowIcon from '@hugeicons/core-free-icons/AppWindowIcon'
 import PanelLeftIcon from '@hugeicons/core-free-icons/PanelLeftIcon'
 import PanelRightCloseIcon from '@hugeicons/core-free-icons/PanelRightCloseIcon'
@@ -275,6 +278,7 @@ export const Laptop = /* @__PURE__ */ createIcon('Laptop', LaptopIcon)
 export const Layers = /* @__PURE__ */ createIcon('Layers', Layers01Icon)
 export const LayoutGrid = /* @__PURE__ */ createIcon('LayoutGrid', GridViewIcon)
 export const Link2 = /* @__PURE__ */ createIcon('Link2', Link01Icon)
+export const Unlink = /* @__PURE__ */ createIcon('Unlink', Unlink01Icon)
 export const ListTree = /* @__PURE__ */ createIcon('ListTree', Structure01Icon)
 export const Loader2 = /* @__PURE__ */ createIcon('Loader2', Loading03Icon)
 export const Lock = /* @__PURE__ */ createIcon('Lock', SquareLock01Icon)
@@ -292,6 +296,7 @@ export const MousePointer2 = /* @__PURE__ */ createIcon('MousePointer2', Cursor0
 export const Network = /* @__PURE__ */ createIcon('Network', NetworkIcon)
 export const Palette = /* @__PURE__ */ createIcon('Palette', PaletteIcon)
 export const TextFont = /* @__PURE__ */ createIcon('TextFont', TextFontIcon)
+export const WrapText = /* @__PURE__ */ createIcon('WrapText', TextWrapIcon)
 export const AppWindow = /* @__PURE__ */ createIcon('AppWindow', AppWindowIcon)
 export const PanelLeft = /* @__PURE__ */ createIcon('PanelLeft', PanelLeftIcon)
 export const PanelRightClose = /* @__PURE__ */ createIcon('PanelRightClose', PanelRightCloseIcon)
@@ -319,6 +324,13 @@ export const RotateCcw = /* @__PURE__ */ createIcon('RotateCcw', RotateCcwIcon)
 export const RotateCcwArrow = /* @__PURE__ */ createIcon('RotateCcwArrow', UndoIcon)
 export const Save = /* @__PURE__ */ createIcon('Save', SaveIcon)
 export const Search = /* @__PURE__ */ createIcon('Search', Search01Icon)
+/** Stacked layers with a lens: the search that finds everything (threads, archived, bots, chats, messages). */
+export const SearchEverything = /* @__PURE__ */ createIcon('SearchEverything', [
+  ['path', { d: 'M2.5 6.5 9 3.2l6.5 3.3L9 9.8z', stroke: 'currentColor', strokeLinecap: 'round', strokeLinejoin: 'round', key: '0' }],
+  ['path', { d: 'M2.5 10.5 9 13.8', stroke: 'currentColor', strokeLinecap: 'round', strokeLinejoin: 'round', key: '1' }],
+  ['circle', { cx: '16.5', cy: '16.5', r: '4', stroke: 'currentColor', key: '2' }],
+  ['path', { d: 'm22 22-2.6-2.6', stroke: 'currentColor', strokeLinecap: 'round', strokeLinejoin: 'round', key: '3' }]
+])
 export const Send = /* @__PURE__ */ createIcon('Send', SentIcon)
 export const Server = /* @__PURE__ */ createIcon('Server', ServerStack01Icon)
 export const Settings = /* @__PURE__ */ createIcon('Settings', Settings01Icon)
@@ -387,11 +399,28 @@ export interface ThinkingIconProps extends IconProps {
   active?: boolean
 }
 
-/** The chat's thinking icon (Hugeicons Brain 03). It pulses while `active` (thinking-icon.css). */
+/**
+ * The chat's thinking icon (Hugeicons Brain 03). It pulses while `active` (thinking-icon.css), and holds still while no
+ * one can see it (lib/offscreenMotion.ts).
+ */
 export const ThinkingIcon = /* @__PURE__ */ forwardRef<SVGSVGElement, ThinkingIconProps>(function ThinkingIcon(
   { size = 16, stroke, strokeWidth, active = false, className = '', ...props },
   ref,
 ) {
+  const pause = useOffscreenPause<SVGSVGElement>(active)
+  const setRef = useCallback((element: SVGSVGElement | null) => {
+    const forward = (value: SVGSVGElement | null) => {
+      if (typeof ref === 'function') ref(value)
+      else if (ref) ref.current = value
+    }
+    forward(element)
+    const stop = pause(element)
+    // A ref that returns a cleanup is not called again with null: the cleanup clears the forwarded ref itself.
+    return () => {
+      stop?.()
+      forward(null)
+    }
+  }, [ref, pause])
   const width = strokeWidth === undefined ? (typeof stroke === 'number' ? stroke : 1.5) : Number(strokeWidth)
   const color = typeof stroke === 'string' ? stroke : 'currentColor'
   const shapes = Brain03Icon as unknown as Array<[string, Record<string, string>]>
@@ -401,7 +430,7 @@ export const ThinkingIcon = /* @__PURE__ */ forwardRef<SVGSVGElement, ThinkingIc
   }
   return (
     <svg
-      ref={ref}
+      ref={setRef}
       xmlns="http://www.w3.org/2000/svg"
       width={size}
       height={size}

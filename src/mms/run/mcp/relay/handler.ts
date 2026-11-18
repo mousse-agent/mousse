@@ -86,8 +86,8 @@ export class RelayHandler {
 
   /**
    * Runs a relayed tool for the credential the request resolved to. The turn is admitted as every
-   * Mousse call is; a bot, definition, read-only or plan turn is refused before anything else (a
-   * JSON-RPC error, no ledger row, nobody asked); the tool resolves through the catalogue and the
+   * Mousse call is; a bot, definition, read-only or plan turn is refused before anything else (an
+   * error result in the refusal shape, no ledger row, nobody asked); the tool resolves through the catalogue and the
    * manager re-checks it is enabled now. Under `approvals: 'mousse'` the user is asked unless the
    * run's permission mode is Full access; a rejection runs nothing and writes no ledger row.
    */
@@ -148,8 +148,8 @@ export class RelayHandler {
     if (!mcp) throw unknownTool(name)
     const offered = bot.mcpTools?.find((tool) => tool.name === name)
     const ledger = offered ? this.host.toolLedger?.(active) : undefined
-    const ledgerId = ledger?.start({ type: 'toolCall', id: request.toolCallId, name, arguments: args } as ToolCall)
-    const outcome = await callForBot({ bot, name, args, signal: request.signal, mcp, ...(mcp.known ? { known: (relayed: string) => mcp.known!(relayed) } : {}), images })
+    const ledgerId = ledger?.start({ type: 'toolCall', id: request.toolCallId, name, arguments: bot.maskMcpArguments?.(args) ?? args } as ToolCall)
+    const outcome = await callForBot({ bot, name, args, toolCallId: request.toolCallId, signal: request.signal, mcp, ...(mcp.known ? { known: (relayed: string) => mcp.known!(relayed) } : {}), images })
     if (ledgerId) {
       if (outcome.isError) ledger?.failed(ledgerId)
       else ledger?.commit(ledgerId)

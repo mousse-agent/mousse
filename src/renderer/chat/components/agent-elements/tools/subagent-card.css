@@ -355,6 +355,10 @@ button.subagent-notice-row:focus-visible {
   background: var(--danger);
 }
 
+.subagent-notice-dot[data-tone="asking"] {
+  background: var(--warning);
+}
+
 /* A runtime's own subagent (Claude Code's Agent) has no thread: its row opens in place on its result and the calls it made. */
 .subagent-card-native .subagent-card-chevron {
   /* A down chevron: open turns it to point up (collapse.css turns it). */

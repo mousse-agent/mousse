@@ -78,7 +78,16 @@ export const AppletCard = memo(function AppletCard({ reference, conversation, on
   const threadId = conversation ? conversation.threadId : hostThreadId === activeThreadId ? activeThreadId : null
   const preview = useRef<HTMLDivElement>(null)
   const applet = useAppletRuntime(preview, { host: 'transcript', threadId, profileId, reference, enabled: true, restart: 0 })
-  const { error, scrollImage, conversationInput, setConversationInput } = applet
+  const { error, scrollImage, liveArea, conversationInput, setConversationInput } = applet
+  // The cached frame shows only where the live view is not drawn (while scrolling, or a strip cut away for a hover
+  // label): under the see-through live view its old pixels would show through as a second, outdated copy.
+  const frameClip = liveArea
+    ? (() => {
+        const { x, y, width, height } = liveArea
+        const right = x + width, bottom = y + height
+        return `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${x}px ${y}px, ${right}px ${y}px, ${right}px ${bottom}px, ${x}px ${bottom}px, ${x}px ${y}px)`
+      })()
+    : undefined
 
   const openInPanel = conversation ? onOpen : threadId ? () => useAppStore.getState().openAppletDocument(threadId, reference) : undefined
   return (
@@ -95,7 +104,7 @@ export const AppletCard = memo(function AppletCard({ reference, conversation, on
         aria-label="Applet preview"
       >
         {scrollImage && (
-          <img className="mousse-applet-scroll-frame" src={scrollImage} alt="" aria-hidden="true" />
+          <img className="mousse-applet-scroll-frame" src={scrollImage} alt="" aria-hidden="true" style={frameClip ? { clipPath: frameClip } : undefined} />
         )}
       </div>
       {conversationInput && threadId && (

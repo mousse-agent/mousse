@@ -10,7 +10,9 @@ const request = vi.fn()
 let profile = 0
 const local = (): ChatConversation => ({ id: 'chat', kind: 'group', name: 'Group', threadId: 'local-thread', participants: [], messages: [], createdAt: '', updatedAt: '' })
 beforeEach(() => {
-  vi.stubGlobal('window', { mousse: { platformRequest: { request } } })
+  // Bot activation loads its own list; these tests observe only chat requests.
+  vi.stubGlobal('window', { mousse: { platformRequest: { request: (method: string, args: unknown) =>
+    method === 'bots.personal.list' ? Promise.resolve({ bots: [] }) : request(method, args) } } })
   request.mockReset()
   useChatsStore.getState().activate(`profile-${++profile}`)
   useChatsStore.setState({ activeChatId: 'chat', conversation: local() })

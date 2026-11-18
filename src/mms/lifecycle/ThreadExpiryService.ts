@@ -1,16 +1,16 @@
 import type { Thread } from '../../shared/types'
 
 /**
- * Deletes threads whose expiry passed (`Thread.expiresAt`, issue #672), for good: the thread, its
- * subagents, worktree, checkpoints and attachments. Never to Settled, never to Recently deleted.
+ * Archives threads whose expiry passed (`Thread.expiresAt`, issue #672), as the sidebar's Archive does, and clears
+ * the expiry. Nothing is deleted: an archived thread is deleted only by a person, from Archived.
  *
- * - The time is absolute, so a pass at start deletes what expired while the daemon was not running.
+ * - The time is absolute, so a pass at start archives what expired while the daemon was not running.
  * - A thread with a run in progress waits for the run to end, unless it was set to stop it
  *   (`expiryStopsRun`). Questions and approvals waiting for an answer and open terminals are not a run: they end
  *   at expiry, so a run that waits on one ends too.
- * - Deleting can be refused for a while (other work running in the profile); the thread is tried again
- *   when a run ends and every minute, and in the meantime no turn starts in it (the orchestrator refuses).
- * - A delete that a crash cut short (trashed but not yet purged) is finished by the next pass.
+ * - Archiving can fail for a while; the thread is tried again when a run ends and every minute, and in the meantime
+ *   no turn starts in it (the orchestrator refuses).
+ * - A delete an expiry started when expiry still deleted (trashed but not yet purged) is finished by the next pass.
  */
 export interface ThreadExpiryDeps {
   listThreads(): readonly Thread[]
@@ -20,9 +20,11 @@ export interface ThreadExpiryDeps {
   runInProgress(threadId: string): boolean
   /** Stops every run in the thread and the threads it owns, and clears their queues. */
   stop(threadId: string): Promise<void>
-  /** Ends what is not a run but would keep the thread from being deleted: pending questions, open terminals. */
+  /** Ends what is not a run but would keep the thread from being archived: pending questions, open terminals. */
   quiesce(threadId: string): Promise<void> | void
-  /** Trash, then purge with the expiry's authority. Resumes a delete already under way. */
+  /** Archives the thread (when it is not already) and removes its expiry. */
+  archive(threadId: string): Promise<void>
+  /** Finishes a delete an earlier expiry started: purge with the expiry's authority. */
   deleteForGood(threadId: string): Promise<void>
   /** Called whenever a run ends; returns the unsubscribe. */
   onRunEnd(listener: (threadId: string) => void): () => void
@@ -45,7 +47,7 @@ export class ThreadExpiryService {
   private again = false
   private stopped = true
   private offRunEnd?: () => void
-  /** Expired threads not deleted yet (waiting for a run, or refused for now). */
+  /** Expired threads not archived yet (waiting for a run, or refused for now). */
   private readonly waiting = new Set<string>()
   /** Threads whose last failure was logged, so a delete refused every minute is logged once. */
   private readonly reported = new Set<string>()
@@ -174,14 +176,16 @@ export class ThreadExpiryService {
         await this.deps.stop(threadId)
         await this.deps.quiesce(threadId)
       }
-      await this.deps.deleteForGood(threadId)
+      // A listed thread is archived; one already in the trash is a delete an earlier expiry started, finished here.
+      if (thread) await this.deps.archive(threadId)
+      else await this.deps.deleteForGood(threadId)
       this.waiting.delete(threadId)
       this.reported.delete(threadId)
     } catch (error) {
       this.waiting.add(threadId)
       if (!this.reported.has(threadId)) {
         this.reported.add(threadId)
-        this.deps.log?.('an expired thread could not be deleted yet; it is tried again', { threadId, error: error instanceof Error ? error.message : String(error) })
+        this.deps.log?.('an expired thread could not be archived yet; it is tried again', { threadId, error: error instanceof Error ? error.message : String(error) })
       }
     }
   }

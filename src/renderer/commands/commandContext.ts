@@ -1,11 +1,13 @@
 import type { CommandContext, OverlayScope } from '../../shared/commands'
+import { isRunningSubagent } from '../../shared/subagents'
 import { isTurnStoppable } from '../../shared/types'
+import { selectSubagents } from '../hooks/useSubagents'
 import type { useAppStore } from '../stores/appStore'
 
 type AppSnapshot = ReturnType<typeof useAppStore.getState>
 
 /** The part of the store the command rules read. */
-export type CommandStateSlice = Pick<AppSnapshot, 'activeThreadId' | 'turnStates' | 'mainAreaOpen' | 'sidebarMode' | 'appInfo'>
+export type CommandStateSlice = Pick<AppSnapshot, 'activeThreadId' | 'turnStates' | 'subagentsByParent' | 'mainAreaOpen' | 'sidebarMode' | 'appInfo'>
 
 /** Elements that take typed text. Monaco and xterm both focus a textarea, so this covers them too. */
 export const TEXT_FIELD_SELECTOR = 'input, textarea, [contenteditable="true"]'
@@ -44,7 +46,8 @@ export function commandContextFromDom(
     inTerminal: Boolean(target?.closest('.xterm')),
     overlay: overlays.modalOpen ? 'modal' : (stack[stack.length - 1] ?? null),
     threadOpen: state.activeThreadId !== null,
-    runActive: isTurnStoppable(turn),
+    // A thread waiting for its subagents can be stopped too: Stop then stops them.
+    runActive: isTurnStoppable(turn) || selectSubagents(state, state.activeThreadId).some(isRunningSubagent),
     mainAreaOpen: state.mainAreaOpen,
     projectsMode: state.sidebarMode === 'projects',
     inFilesPanel: Boolean(target?.closest('.files-panel')),

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { isChildBusy } from '../../src/mms/run/delegation/hold'
 import { buildSubagentView, childActivity, outcomeOfRun, taskOutcome } from '../../src/mms/run/delegation/subagentView'
 import { subagentAncestorsOf, subagentParentsOfEvent } from '../../src/mms/run/delegation/subagentEvents'
-import { isRunningSubagent } from '../../src/shared/subagents'
+import { isRunningSubagent, isWorkingSubagent, type SubagentState, type SubagentWaitingOn } from '../../src/shared/subagents'
 import type { DelegationRecord, RunRecord } from '../../src/mms/run/types'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
@@ -471,5 +471,30 @@ describe('subagent status model (plan §3.3)', () => {
       ).toEqual(['child-1', 'parent'])
       expect(subagentAncestorsOf(f!.engine.delegations, 'parent')).toEqual([])
     })
+  })
+})
+
+describe('which subagents are doing work now (what holds a compaction back)', () => {
+  const on = (...states: SubagentState[]): SubagentWaitingOn[] => states.map((state, index) => ({ title: `s${index}`, state }))
+  // Every state a row can have; `waiting` with what it waits on.
+  const ROWS: Array<[SubagentState, SubagentWaitingOn[], boolean]> = [
+    ['queued', [], true],
+    ['starting', [], true],
+    ['working', [], true],
+    ['paused', [], false],
+    ['needs_input', [], false],
+    ['waiting', on('working'), true],
+    ['waiting', on('paused', 'queued'), true],
+    ['waiting', on('waiting'), true],
+    ['waiting', on('paused', 'needs_input'), false],
+    ['waiting', [], true],
+    ['done', [], false],
+    ['failed', [], false],
+    ['stopped', [], false],
+    ['interrupted', [], false],
+    ['idle', [], false]
+  ]
+  it.each(ROWS)('%s waiting on %j: %s', (state, waitingOn, working) => {
+    expect(isWorkingSubagent({ state, waitingOn })).toBe(working)
   })
 })

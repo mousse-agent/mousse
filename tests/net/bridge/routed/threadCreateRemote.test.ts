@@ -228,7 +228,9 @@ describe('thread_create on another computer (issue #1160)', () => {
       const out = await create({ computer: t.node, firstMessage: 'Hi.', ...args })
       expect(out.isError, JSON.stringify(out.body)).toBe(true)
       expect(before()).toBe(count)
-      return out.body
+      // A refusal: the fields kept beside it, with its words and how it may be retried.
+      const { refused, data } = out.body as { refused: Loose; data: Loose }
+      return { ...data, message: refused.message, refused }
     }
 
     it('offline', async () => {
@@ -236,7 +238,7 @@ describe('thread_create on another computer (issue #1160)', () => {
         const port = portOf()
         vi.spyOn(port, 'computers').mockReturnValue([{ node: t.node, name: 'Linux box', online: false }])
       })
-      expect(body).toMatchObject({ ok: false, code: 'computer_offline', computer: 'Linux box', message: expect.stringContaining('Linux box is offline') })
+      expect(body).toMatchObject({ ok: false, code: 'computer_offline', computer: 'Linux box', message: expect.stringContaining('Linux box is offline'), refused: { code: 'unavailable', retry: 'later' } })
     }, 120_000)
 
     it('not allowed here: the switch off, or that computer not ticked', async () => {
@@ -246,7 +248,7 @@ describe('thread_create on another computer (issue #1160)', () => {
 
     it('not allowed there: that computer lets no agent of this one work on it', async () => {
       const body = await refusal({}, {}, () => policy.set(t.callerNode, { agentReach: 'none' }))
-      expect(body).toMatchObject({ code: 'computer_not_allowed' })
+      expect(body).toMatchObject({ code: 'computer_not_allowed', refused: { code: 'scope_denied', retry: 'never' } })
     }, 120_000)
 
     it('outdated: a computer that does not know the agent mark gets no unmarked call', async () => {
@@ -269,14 +271,6 @@ describe('thread_create on another computer (issue #1160)', () => {
       } finally {
         await t.owner.net.request('bridge.workOnThreads', { enabled: true })
       }
-    }, 120_000)
-
-    it('notify, which does not reach another computer yet, is refused before anything is recorded', async () => {
-      const { thread, create } = await caller()
-      const count = before()
-      await expect(create({ computer: t.node, firstMessage: 'Hi.', notify: true })).rejects.toThrow(/notify/)
-      expect(before()).toBe(count)
-      expect(t.caller.runEngine.remoteLaunches.listForLauncher(thread.id)).toEqual([])
     }, 120_000)
 
     it('no project for the repository there', async () => {
@@ -302,12 +296,9 @@ describe('thread_create on another computer (issue #1160)', () => {
   })
 })
 
-/** The message of a call that throws (a key used for other arguments). */
-async function registryConflict(work: () => Promise<unknown>): Promise<string> {
-  try {
-    await work()
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error)
-  }
-  throw new Error('the call went through')
+/** The words of a call refused as a conflict (a key used for other arguments). */
+async function registryConflict(work: () => Promise<{ isError?: boolean; body: Loose }>): Promise<string> {
+  const out = await work()
+  if (out.isError && out.body.refused?.code === 'conflict') return out.body.refused.message
+  throw new Error(`the call went through: ${JSON.stringify(out.body)}`)
 }

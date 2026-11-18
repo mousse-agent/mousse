@@ -2,6 +2,7 @@ import React, { Suspense, useState } from 'react'
 import App from './App'
 import { createAppRoot, RootErrorBoundary } from './lib/appRoot'
 import { installWindowErrorReporting } from './services/rendererErrors'
+import { keepShellUnscrolled } from './lib/shellScroll'
 // Settings loads as its own chunk the first time it opens (preloaded once the workspace has painted).
 import { SettingsPage } from './lib/lazySurfaces'
 import { applyAppearance, useTheme } from './hooks/useTheme'
@@ -19,10 +20,14 @@ import './styles/compact-shell.css'
 import './styles/sentence-case.css'
 import './styles/polish.css'
 import './styles/ambient-glow.css'
+import './styles/wallpaper.css'
 import './styles/geist-fonts.css'
 
 // Uncaught errors and rejected promises outside React go to main's log, from here on.
 installWindowErrorReporting()
+
+// The page and the app's frame never scroll, whatever a scrollIntoView or focus deep inside asks.
+keepShellUnscrolled()
 
 // Apply the saved profile's appearance before React paints or MMS connects.
 const startupAppearance = window.mousse?.startupAppearance

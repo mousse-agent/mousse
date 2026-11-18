@@ -67,11 +67,9 @@
         "tests/sideCardDevice.test.ts",
         "tests/sideCardGit.test.ts",
         "tests/sideCardPresence.test.ts",
-        "tests/slashCommandPopoverStyles.test.ts",
         "tests/subagentCardView.test.ts",
         "tests/subagentComposerBanner.test.ts",
         "tests/themeSelectors.test.ts",
-        "tests/titleBarLayout.test.ts",
         "tests/titleBarThreadLabel.test.ts"
       ]
     },

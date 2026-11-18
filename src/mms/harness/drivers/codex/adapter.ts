@@ -28,7 +28,7 @@ import { retryContextOverflowOnce } from '../../../run/transcript/retryContextOv
 export type CodexClient = Pick<
   CodexProviderService,
   'chat' | 'commitConversation' | 'standaloneWorkspace' | 'configured' | 'interrupt' | 'userSetup'
-> & Partial<Pick<CodexProviderService, 'commitInterrupted' | 'stopThread'>>
+> & Partial<Pick<CodexProviderService, 'commitInterrupted' | 'stopThread' | 'stopHelper'>>
 
 /** How Codex 0.162.1 begins the message of a turn its `auth.command` failed (wire test). */
 const TOKEN_COMMAND_FAILED = 'provider auth command '
@@ -77,15 +77,20 @@ export function codexHarnessError(error: unknown, instanceId?: string): unknown 
 
 /**
  * A turn Codex ended on the provider's HTTP error (`unexpected status 400 Bad Request: …, url: …`, or a status in
- * `codexErrorInfo`) as the provider's status and message, for the transcript. Undefined for a failure with no error
- * status, and for a context overflow, which the overflow recovery reads as it is. The message is already redacted.
+ * `codexErrorInfo`) as the provider's status and message, for the transcript; a refused or dropped connection with no
+ * status as the provider being unreachable. Undefined for any other failure with no error status, and for a context overflow, which the overflow recovery reads as it is. The message is already redacted.
  */
 export function codexProviderError(error: CodexTurnFailure): AppError | undefined {
-  if (codexErrorKind(error.codexErrorInfo) === 'contextWindowExceeded') return undefined
+  const kind = codexErrorKind(error.codexErrorInfo)
+  if (kind === 'contextWindowExceeded') return undefined
   const read = readProviderStatus(error.message)
   const status = error.httpStatus ?? read?.status
+  // The request got no answer after Codex's own retries (a refused or dropped connection): what Codex said, as the
+  // provider being unreachable.
+  if (status === undefined && (kind === 'httpConnectionFailed' || kind === 'responseStreamConnectionFailed' || kind === 'responseStreamDisconnected'))
+    return providerStatusError(undefined, error.message, { provider: 'codex', code: 'provider_unavailable', cause: error, errorInfo: { category: 'unavailable', retryable: true } })
   if (status === undefined || status < 400) return undefined
-  const busy = status === 503 || codexErrorKind(error.codexErrorInfo) === 'serverOverloaded'
+  const busy = status === 503 || kind === 'serverOverloaded'
   return providerStatusError(status, read?.body ?? error.message, { provider: 'codex', cause: error, ...(busy ? { errorInfo: { category: 'unavailable', retryable: true } } : {}) })
 }
 
@@ -151,18 +156,18 @@ export class CodexAdapter implements ProviderAdapter {
   /**
    * What the user's own Codex setup allows for a child; nothing is changed. Mousse cannot deny a
    * Codex MCP tool call (it answers command, file and permission approvals and elicitations, but a
-   * tool the user's server offers runs under Codex's own rules), so a `shared` child is refused
+   * tool the user's server offers runs under Codex's own rules), so a read-only child is refused
    * while the config has any enabled MCP server, a Mousse-managed one included, or cannot be read;
-   * `isolated` still works. Codex's own subagents are left on: see `NativeHelpers`.
+   * any other child still works. Codex's own subagents are left on: see `NativeHelpers`.
    */
   async childPreflight(context: ChildPreflightContext): Promise<SubagentRefusal | null> {
     const service = this.service()
-    if (!service || context.workspace !== 'shared') return null
+    if (!service || !context.readOnly) return null
     const { mcpServers } = await service.userSetup(context.cwd)
     if (mcpServers === null)
-      return { code: 'shared_unsupported_for_provider', message: 'A read-only (shared) Codex subagent needs Mousse to read your Codex config, and it could not. Use workspace "isolated", or choose another provider or model.' }
+      return { code: 'shared_unsupported_for_provider', message: 'A read-only Codex subagent needs Mousse to read your Codex config, and it could not. Leave readOnly out, or choose another provider or model.' }
     return mcpServers.length
-      ? { code: 'shared_unsupported_for_provider', message: `A read-only (shared) Codex subagent is not possible while your Codex config has MCP servers (${mcpServers.join(', ')}): Mousse cannot stop one of their tools from writing and does not change your Codex config. Use workspace "isolated", or choose another provider or model.` }
+      ? { code: 'shared_unsupported_for_provider', message: `A read-only Codex subagent is not possible while your Codex config has MCP servers (${mcpServers.join(', ')}): Mousse cannot stop one of their tools from writing and does not change your Codex config. Leave readOnly out, or choose another provider or model.` }
       : null
   }
 
@@ -322,10 +327,12 @@ export class CodexAdapter implements ProviderAdapter {
           totalTokens: result.usage.totalTokens,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
         },
-        context: result.usage.context ? { ...result.usage.context, modelName: result.model } : undefined
+        context: result.usage.context ? { ...result.usage.context, modelName: result.model } : undefined,
+        ...(result.usage.quota?.length ? { quota: result.usage.quota } : {}),
+        ...(result.resumeLost ? { resumeLost: true } : {})
       })
       sink.usage(usage)
-    } else sink.providerMetrics({ realModelName, totalResponseTimeMs })
+    } else sink.providerMetrics({ realModelName, totalResponseTimeMs, ...(result.resumeLost ? { resumeLost: true } : {}) })
     streams.thinking.complete()
     service.commitConversation(input.threadId, host.context.nativeHistoryAfterTurn(result.text))
     streams.text.complete(result.text)
@@ -357,6 +364,11 @@ export class CodexAdapter implements ProviderAdapter {
    */
   async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
     return (await this.service()?.stopThread?.(threadId)) ?? 'not_active'
+  }
+
+  /** Stop of a native helper's mirror thread: Codex interrupts that helper's own turn (CodexProviderService.stopHelper). */
+  async stopNativeHelper(hostThreadId: string, agentId: string): Promise<'stopped' | 'not_active'> {
+    return this.service()?.stopHelper?.(hostThreadId, agentId) ?? 'not_active'
   }
 
   /**

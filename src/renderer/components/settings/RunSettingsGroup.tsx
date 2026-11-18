@@ -3,7 +3,7 @@ import { EXPIRY_PRESETS } from '../../../shared/threadExpiry'
 import { GOAL_TURN_LIMIT_CHOICES } from '../../../shared/threadGoal'
 import { Pause } from '../../lib/icons'
 import { Select } from '../ui/Select'
-import { SettingsGroup, SettingsRow } from './SettingsRow'
+import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 
 /** How many automatic resumes in a row a person can choose. A value saved by hand outside these stays listed. */
 export const USAGE_LIMIT_CAP_CHOICES = [1, 3, 5] as const
@@ -21,7 +21,7 @@ function capLabel(cap: number): string {
 
 /**
  * Settings → General → Threads: whether a run paused by a usage limit continues by itself, and how often in a row,
- * and when new private threads delete themselves. Resuming is one select: Off, or how many times in a row. Off keeps the
+ * whether the computer stays awake while runs work, and when new private threads archive themselves. Resuming is one select: Off, or how many times in a row. Off keeps the
  * saved count, so turning it back on offers the same one.
  */
 export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['runs']; onUpdate: (partial: MousseSettingsUpdate) => Promise<void> }) {
@@ -53,6 +53,18 @@ export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['run
         }
       />
       <SettingsRow
+        title="Keep computer awake"
+        anchor="general-keep-awake"
+        description={<span title="While a thread, subagent or bot is working, and for 90 seconds after the last one ends, the computer does not go to sleep. The screen can still turn off. Waiting for a reminder or schedule does not keep it awake.">While agents or bots are working.</span>}
+        control={
+          <Switch
+            label="Keep computer awake"
+            checked={runs.keepAwake}
+            onChange={(keepAwake) => void onUpdate({ runs: { ...runs, keepAwake } })}
+          />
+        }
+      />
+      <SettingsRow
         title="Goal turn limit"
         anchor="general-goal-turns"
         description={<span title="A goal set with /goal keeps starting turns until the agent reports it met or blocked. After this many turns it stops; Continue on the goal allows as many again. Messages you send don't count.">Turns a /goal may run before it stops.</span>}
@@ -69,12 +81,12 @@ export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['run
         }
       />
       <SettingsRow
-        title="Delete private threads after"
+        title="Archive private threads after"
         anchor="general-private-expiry"
-        description={<span title="A new private thread starts with this expiry; the composer can change it before the first message, and the thread can be extended or kept later. At expiry the thread, its subagents, worktree and checkpoints are deleted for good. Commits and pushed code are kept.">New private threads delete themselves after this time.</span>}
+        description={<span title="A new private thread starts with this expiry; the composer can change it before the first message, and the thread can be extended or kept later. At expiry the thread is archived, as Archive does; nothing is deleted.">New private threads archive themselves after this time.</span>}
         control={
           <Select
-            ariaLabel="Delete private threads after"
+            ariaLabel="Archive private threads after"
             value={runs.privateThreadExpiry}
             onChange={(next) => {
               if (next === runs.privateThreadExpiry) return

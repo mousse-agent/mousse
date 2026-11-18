@@ -93,6 +93,15 @@ async function main() {
     await settle()
     const narrowed = await execute(`qa.measure(${JSON.stringify(WIDE[1])})`)
     if (process.env.MOUSSE_BOT_CHAT_WIDTH_CAPTURE) writeFileSync(join(directory, 'narrowed.png'), (await window.webContents.capturePage()).toPNG())
+    // The first wide reply's reaction row, opened over the messages below it, then widened to every emoji.
+    await execute(`qa.remount(${ROOMY})`)
+    await settle()
+    await execute(`qa.openReactions(${JSON.stringify(WIDE[0])})`)
+    await settle()
+    const quickReactions = await execute(`qa.hitReactions(${JSON.stringify(WIDE[0])})`)
+    await execute(`qa.moreReactions(${JSON.stringify(WIDE[0])})`)
+    await settle()
+    const allReactions = await execute(`qa.hitReactions(${JSON.stringify(WIDE[0])})`)
     // A reply with an applet, in a fresh chat at each width.
     await execute('qa.addApplet()')
     await execute(`qa.remount(${NARROW})`)
@@ -102,7 +111,7 @@ async function main() {
     await settle()
     const appletRoomy = await execute('qa.applet()')
     await execute('qa.unmount()')
-    writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ hidden, appletNarrow, appletRoomy, hover, afterHover, keyboard, roomy, narrowed, pageErrors: await execute('qa.errors()'), rendererErrors }))
+    writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ hidden, quickReactions, allReactions, appletNarrow, appletRoomy, hover, afterHover, keyboard, roomy, narrowed, pageErrors: await execute('qa.errors()'), rendererErrors }))
   } finally {
     window.destroy()
     server.close()

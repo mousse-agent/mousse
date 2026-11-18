@@ -281,7 +281,11 @@ describe('stopping a Claude turn and continuing the thread (issue #142)', () => 
     cli.reply = undefined
     const session = d.orch.getOrCreateSession(thread.id)
     let external: string | undefined
+    // A turn the service runs has a run of its own; without one it would start with no Mousse context, and
+    // the live process would refuse the change of instructions while its helper runs.
+    const { runId } = d.engine.store.createRun({ threadId: thread.id, source: 'steer-followup' })
     const turn = (d.orch as any).runTurnOnSession(session, { content: 'two', mode: 'agent' }, false, true, {
+      runId,
       externalDrainSteer: () => {
         const text = external
         external = undefined

@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { CLAUDE_AUTO_MODE_MIN_VERSION, CLAUDE_CODE_CAPS, claudeCodeCaps } from '../../src/mms/harness/drivers/claudeCode'
+import { CLAUDE_CODE_CAPS, claudeCodeCaps } from '../../src/mms/harness/drivers/claudeCode'
 import { CODEX_CAPS, CODEX_PERMISSION_LIMITS } from '../../src/mms/harness/drivers/codex'
 import { claudeLockedCaps } from '../../src/mms/harness/claude/locked'
 import { autoPermissionModeAvailable, checkPermissionMode } from '../../src/mms/harness/policy'
@@ -122,7 +122,6 @@ describe('Auto on the shared permission model', () => {
 
 describe('Claude Code\'s auto mode', () => {
   it('is offered only on a Claude Code version that starts in it with --permission-mode auto alone', () => {
-    expect(CLAUDE_AUTO_MODE_MIN_VERSION).toBe('2.1.111')
     expect(claudeCodeCaps(undefined).autoPermissionMode).toBe(false)
     expect(claudeCodeCaps('2.1.110').autoPermissionMode).toBe(false)
     expect(claudeCodeCaps('2.1.111').autoPermissionMode).toBe(true)

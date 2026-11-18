@@ -17,7 +17,7 @@ import { BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_PERMISSION, BOT_PROFILER_TOOLS, B
 import { resolveMemoryThresholds } from '../../src/shared/diagnostics/memory'
 import { normalizeProfilerSettings, type ProfilerSettings } from '../../src/shared/diagnostics/profiler'
 import type { Thread } from '../../src/shared/types'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const NOW = '2026-11-15T10:00:00.000Z'
@@ -105,7 +105,8 @@ describe('a bot\'s profiler tools ("use the profiler")', () => {
     turns.register(appTurn({ threadId: 'home', runId: homeRun.runId, bot: authority }))
     const call = async (name: string, args: Record<string, unknown> = {}) => {
       const outcome = await registry.call(name, args, request({ threadId: 'home', runId: homeRun.runId }))
-      return { error: outcome.isError === true, text: outcome.text }
+      // A refusal reads as its words; its shape is checked in toolRefusalShape.test.ts.
+      return { error: outcome.isError === true, text: refusalOf(outcome)?.message ?? outcome.text }
     }
     const listed = () => profilerNames(registry.listForThread('home', 'default', homeRun.runId).map((tool) => tool.name))
     return { compiled, call, listed, runId: homeRun.runId, registry }
@@ -117,7 +118,9 @@ describe('a bot\'s profiler tools ("use the profiler")', () => {
     ['a chat turn: all but the minutes-long watch', { botTools: { frontDesk: true } }, BOT_PROFILER_CHAT_TOOLS],
     ['a bot without the permission', { grant: [] }, []],
     ['a consult', { botTools: { profiler: undefined } }, []],
-    ['a subagent of its work', { botTools: { subagent: true } }, []]
+    // A thread's subagent may read the profiler, so a bot's work's subagent may too, within the grant.
+    ['a subagent of its work', { botTools: { subagent: true } }, BOT_PROFILER_TOOLS],
+    ['a subagent compiled without it', { botTools: { subagent: true, profiler: undefined } }, []]
   ]
   it.each(lanes)('%s', async (_name, options, shown) => {
     const { compiled, listed } = await world(options)

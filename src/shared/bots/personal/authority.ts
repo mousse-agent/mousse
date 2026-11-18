@@ -29,11 +29,17 @@ export interface BotThreads {
    */
   botOf?(threadId: string): { botId: string; name: string } | undefined
   /**
-   * The chat turn (activation) when its owner's own message started it, the only turn that may start,
-   * message or stop the owner's threads, with `limit`: the permission limit of the other device that message came from
+   * The turn (activation) when it may start, message, stop or archive the owner's threads (a chat turn its owner's
+   * message or tapped answer started, or a run), with `limit`: the permission limit of the other device that message came from
    * (absent: this computer's own window). Undefined for any other turn. Never throws.
    */
   ownerTurn?(activationId: string): { limit?: PermissionMode } | undefined
+  /**
+   * The bot's chat thread (its home) for any of its threads (its chat, its work, a subagent, a consult): what it owns as
+   * one bot, whichever turn made it (the scheduled jobs it made, the secrets its owner gave it). Undefined when the thread
+   * is no bot's. Never throws.
+   */
+  homeOf?(threadId: string): string | undefined
 }
 
 /**
@@ -117,6 +123,13 @@ export type BotCheckDenied = Exclude<BotCheck, { ok: true }>
  */
 export type BotAllowedObserver = (call: NormalisedCall) => void
 
+/** Pi's read result metadata; absent bounds are never guessed when a read was truncated. */
+export interface BotFileReadResult {
+  truncated?: boolean
+  firstLineExceedsLimit?: boolean
+  outputLines?: number
+}
+
 /**
  * A bot activation's authority over one turn, registered with the turn's app tools (never in the
  * run policy, which carries only `RunPolicy.authority`'s kind and digest).
@@ -124,6 +137,12 @@ export type BotAllowedObserver = (call: NormalisedCall) => void
 export interface BotAuthority {
   activationId: string
   role: BotThreadRole
+  /**
+   * Set on a chat turn of the bot's own (lane, turn kind and compiled grant digest, as one key): its runtime may run it on a
+   * process kept warm between the chat's turns, reused only while this key and every launch input stay the same. Every call
+   * is still checked against this turn's authority. Absent: the turn runs on a process of its own.
+   */
+  warm?: string
   /** Granted built-ins (neutral names). */
   tools: ReadonlySet<NeutralTool>
   /** Granted Mousse app tools, by their app-tool name. */
@@ -136,6 +155,9 @@ export interface BotAuthority {
    * the turn starts; every call is checked again against `mcp` and the server as it is then.
    */
   mcpTools?: readonly BotMcpTool[]
+  /** Mousse holds calls requiring the owner's answer; undefined means the ordinary call path. */
+  holdMcp?(tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): { text: string; isError?: boolean } | undefined
+  maskMcpArguments?(args: Record<string, unknown>): Record<string, unknown>
   /**
    * The bot's own folders: its files folder (`files`) and the activation's private scratch folder, both writable;
    * `roots` is empty (a bot has no folder beyond them). Null when it may touch no folder at all.
@@ -161,6 +183,8 @@ export interface BotAuthority {
    * them passes. Decided without side effects, so a wall or an ask is raised once, only when all are refused.
    */
   checkAny?(calls: readonly NormalisedCall[]): BotCheck
+  /** Pi alone: prepare a file call after the grant check, before charging it. Complete only calls that ran. */
+  piFileCall?(tool: string, args: Record<string, unknown>): { refused: string } | { completed(success: boolean, read?: BotFileReadResult): void }
   /** The activation's request and tool-call counts: one atomic row, shared by its main run and consults. */
   counters: CounterScope
   time: ActiveTimeScope
@@ -194,11 +218,15 @@ export interface BotAuthority {
   subagents?: BotSubagents
   /**
    * Why this turn holds the owner's threads ("use your threads") to reading only, for the words of a refused start,
-   * message or Stop: `work` (work, a reminder's work or a schedule: starting is the chat's), or `not_owner` (a chat turn
-   * no message of the owner started, such as the bot's first message). Absent: the turn may act, or holds
-   * no thread tool at all.
+   * message or Stop: `not_owner` (a chat turn no message or tapped answer of the owner started, such as the bot's first
+   * message). Absent: the turn may act, or holds no thread tool at all.
    */
-  threadsReadOnly?: 'work' | 'not_owner'
+  threadsReadOnly?: 'not_owner'
+  /**
+   * How the turn reaches the tool catalogue (docs/plans/bot-context.md §15): `search` (Claude Code loads any listed tool
+   * itself) or `use_tool` (Codex, Pi: the thread lists the core set and calls the rest through `use_tool`). Absent: none.
+   */
+  catalogue?: 'search' | 'use_tool'
   /**
    * Why the turn may not use the app tool `tool` now (its grant was removed or replaced, this computer switched it off,
    * the activation ended), decided without asking anyone or showing a chip; undefined while it may. For a call that

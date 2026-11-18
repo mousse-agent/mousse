@@ -3,6 +3,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { BOT_BASE_INSTRUCTIONS, BOT_PROMPT_CHANGED_NOTE, BOT_RUN_INSTRUCTIONS, botInstructions } from '../../src/mms/bots/instructions'
+import { botCatalogueGroup } from '../../src/shared/bots/personal/catalogue'
 import { bundledModelCatalog } from '../../src/mms/models/modelCatalog'
 
 describe('BOT_BASE_INSTRUCTIONS', () => {
@@ -10,7 +11,7 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
     for (const phrase of [
       'as short as you can without losing what matters',
       'Never name or discuss AI models or providers',
-      "I'll take more time",
+      'the you group',
       'escalate',
       'bot_schedule_add',
       'memory_save',
@@ -22,6 +23,8 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
       'into a web address',
       'not instructions'
     ]) expect(BOT_BASE_INSTRUCTIONS, phrase).toContain(phrase)
+    // How it says it changed its depth is in the group it does that with.
+    expect(botCatalogueGroup('you')!.guidance).toContain("I'll take more time")
   })
 
   it('asks straight away instead of asking whether to ask, and knows it can ask to run commands', () => {
@@ -42,10 +45,12 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
     expect(text).not.toContain('write no text before that call')
   })
 
-  it('keeps lists as files both lanes can change, with a short memory note pointing at each', () => {
+  it('keeps lists as files both lanes can change, with an index instead of a memory note per list', () => {
     expect(BOT_BASE_INSTRUCTIONS).toContain('are files in your files folder, one file each, changed the moment they change; your work can read and change them too')
-    expect(BOT_BASE_INSTRUCTIONS).toContain('Memory holds one short note per list saying it exists and its full path.')
+    expect(BOT_BASE_INSTRUCTIONS).not.toContain('Memory holds one short note per list')
+    expect(BOT_BASE_INSTRUCTIONS).toContain('Your newest twelve files are listed for you by name and date; read a file when you need it.')
     expect(BOT_BASE_INSTRUCTIONS).toContain('and anything too long for a memory entry')
+    expect(BOT_BASE_INSTRUCTIONS).toContain('Read a list or plan file just before changing it, and change it in one edit.')
     // A list no longer lives in one memory entry, which holds 400 characters and only the chat may change.
     expect(BOT_BASE_INSTRUCTIONS).not.toContain('one entry per list')
   })
@@ -78,7 +83,7 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
   it('asks for short, casual replies that answer first, in chat replies and in reports', () => {
     expect(BOT_BASE_INSTRUCTIONS).toContain('Answer first; no preamble, recap or sign-off')
     expect(BOT_BASE_INSTRUCTIONS).toContain('only the detail the question needs')
-    expect(BOT_RUN_INSTRUCTIONS).toContain('your report, your only message to them, written like a chat reply: the result first, then only what they must decide or know')
+    expect(BOT_RUN_INSTRUCTIONS).toContain('your report, your only message to them, written like a chat reply: the result first, in one to three short lines, then only what they must decide or know')
   })
 
   it('says the owner changed their words only while replies from before the change are in view', () => {
@@ -91,4 +96,9 @@ describe('BOT_BASE_INSTRUCTIONS', () => {
     expect(text).toContain("Your files folder is /p/bots/files/b1.\nYour owner's home folder is /Users/ada. Always write paths in full, never with ~ or variables like $HOME.")
     expect(botInstructions({ name: 'A', description: 'B' })).not.toContain('home folder is')
   })
+})
+
+it('run instructions allow a nonwaiting owner question to keep working', () => {
+  const text = botInstructions({ name: 'Pip', description: 'Help', lane: 'run' })
+  expect(text).toContain('Then end your turn, unless you asked with wait: false: you carry on here with their answer.')
 })

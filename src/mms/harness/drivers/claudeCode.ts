@@ -282,6 +282,8 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
     // Claude Code passes MCP image content to the model, and every Claude model reads images.
     mcpImageResults: true,
     mirrorsVendorFile: true,
+    // Mousse's PostToolUse hook masks secret values in tool results before Claude Code keeps them.
+    masksToolResults: true,
     // Claude Code's documented switches (names checked in the 2.1.291 binary's text): usage
     // telemetry, and error reports.
     telemetryOff: () => ({ env: { DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1' } }),

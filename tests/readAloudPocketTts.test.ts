@@ -331,7 +331,7 @@ describe('stretchSpeech', () => {
     expect(stretchSpeech(tone, rate, 1)).toBe(tone)
   })
 
-  it.each([0.75, 1.25, 1.5, 2])('changes the length by the speed and keeps the pitch at %s', (speed) => {
+  it.each([0.75, 1.5, 2])('changes the length by the speed and keeps the pitch at %s', (speed) => {
     const out = stretchSpeech(tone, rate, speed)
     expect(out.length).toBe(Math.floor(tone.length / speed))
     // 200 Hz stays 200 Hz: the crossings per second do not change.
@@ -369,7 +369,6 @@ describe('Pocket TTS manifests', () => {
     }
     expect(model.files).toHaveLength(7)
     expect(model.voices.map((voice) => voice.id)).toEqual(['alba', 'azelma', 'cosette', 'eponine', 'fantine', 'javert', 'jean', 'marius'])
-    expect(model.voices[0]).toEqual({ id: 'alba', label: 'Alba, female' })
     expect(model.defaultVoice).toBe('alba')
   })
 

@@ -4,8 +4,8 @@ import { scaleMotionMs } from '../../lib/motion'
 export const SIDE_CARD_FADE_MS = 180
 
 /**
- * The exit wait at the current animation speed. Never shorter than 180ms: reduced motion keeps
- * a 180ms fade (sideCard.css), and with motion off the card is already invisible meanwhile.
+ * The exit wait at the current animation speed. Never shorter than 180ms; with motion off or
+ * reduced the card is already invisible meanwhile.
  */
 export function sideCardFadeMs(): number {
   return Math.max(SIDE_CARD_FADE_MS, scaleMotionMs(SIDE_CARD_FADE_MS))
@@ -76,9 +76,8 @@ export interface SideCardScheduler {
 const FRAME_MS = 16
 
 /**
- * Two frames let the faded-out styles paint once. Reduced motion changes how
- * the card looks (opacity only), not these timings: it still fades in and waits
- * for the fade-out.
+ * Two frames let the faded-out styles paint once. Reduced motion makes the
+ * fades instant in CSS, not these timings.
  */
 export const browserSideCardScheduler: SideCardScheduler = {
   afterPaint(callback) {

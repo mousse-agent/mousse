@@ -1,3 +1,4 @@
+import { BotActionChanged } from '../actions/BotActions'
 import { realpathSync } from 'node:fs'
 import { sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -18,8 +19,11 @@ import { copyBotAttachments, removeBotAttachments, type SavedBotAttachment } fro
 import { BotEngineError, type BotEngine } from '../activation/BotEngine'
 import type { BotMemoryAdmin } from '../seams'
 import type { BotQuestionRow, BotStore } from '../store/BotStore'
+import type { BotDeviceAccessStore } from '../definitions/BotDeviceAccessStore'
+import { botDeviceAccessProblem, type BotDeviceAccess } from '../../../shared/bots/personal/deviceAccess'
 import { lateAnsweringLine, plainChoices, type BotQuestionLateAnswer, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { grantedPermissions, permissionId, starterManifest, withoutPermission } from './projection'
+import { turnTimingBegin, turnTimingForget } from '../../diagnostics/turnTiming'
 
 /**
  * The Bot UI's daemon side (Bot Phase 1 §5.3, §5.11): create a bot from a look and a sentence,
@@ -239,6 +243,8 @@ export class BotChatService {
     computerName?(): string
     /** The person's other computers, online or not. */
     otherComputers?(): Array<{ node: string; name: string; online: boolean }>
+    /** Which devices reach each bot (`BotEngineHost.deviceAccess`). */
+    deviceAccess?: Pick<BotDeviceAccessStore, 'get' | 'set' | 'forget'>
   }) {}
 
   private get store(): BotStore {
@@ -246,11 +252,18 @@ export class BotChatService {
   }
 
   private summaryOf(botId: string): BotSummary {
-    return this.engine.chat.summary(this.engine.definitionOf(botId), this.options.now())
+    return this.withReach(this.engine.chat.summary(this.engine.definitionOf(botId), this.options.now()))
   }
 
   private detailOf(botId: string): BotDetail {
-    return this.engine.chat.detail(this.engine.definitionOf(botId), this.options.now())
+    const detail = this.engine.chat.detail(this.engine.definitionOf(botId), this.options.now())
+    return { ...detail, summary: this.withReach(detail.summary) }
+  }
+
+  /** The summary with which devices reach the bot, for the Bots list's lock. */
+  private withReach(summary: BotSummary): BotSummary {
+    const access = this.options.deviceAccess
+    return access ? { ...summary, reach: access.get(summary.id).access.mode } : summary
   }
 
   /** `bots.personal.list`: every bot that is not deleted, oldest first. */
@@ -269,8 +282,17 @@ export class BotChatService {
    * The models (#673, `slots`) are the owner's picks on every row, each offered now: one that is not is refused in plain
    * words, never swapped for another. The bot names itself and says its first message on its Talk pick. An app from
    * before rows sends one `model` by name (on every row), and one from before picks none (by usage).
+   * `access`: which devices reach it (New bot's Devices row, or what the device that made it asked for). It is saved
+   * before the bot is published, so a device outside it never lists the bot, not even for a moment; a repeat that finds
+   * the bot made changes nothing.
    */
-  async create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick }): Promise<{ bot: BotSummary }> {
+  async create(input: { look: BotLook; name?: string; description: string; clientRequestId: string; model?: string; slots?: BotModelSlots; image?: BotModelPick; access?: BotDeviceAccess }): Promise<{ bot: BotSummary }> {
+    if (input.access) {
+      const problem = botDeviceAccessProblem(input.access)
+      if (problem) throw new BotEngineError('invalid_params', problem)
+      // Without a place to keep the choice, a bot that should be held from some devices is not made at all.
+      if (!this.options.deviceAccess && input.access.mode !== 'all') throw new BotEngineError('invalid_params', 'Which devices reach a bot can only be set on its own computer.')
+    }
     const description = input.description.trim()
     if (!description || description.length > MAX_BOT_DESCRIPTION_CHARS) throw new BotEngineError('invalid_params', `Say what the bot should do in 1 to ${MAX_BOT_DESCRIPTION_CHARS} characters.`)
     const given = input.name?.trim()
@@ -325,9 +347,38 @@ export class BotChatService {
       await this.engine.finishCreation(key)
       return { bot: this.summaryOf(raced.botId) }
     }
-    this.engine.createBot(definition, { key, input: firstMessagePrompt(description, !named.chosen) })
+    // Which devices reach it is saved first: the bot is listed nowhere until `createBot` publishes it, and from then on
+    // every list and call reads this choice. A crash between the two leaves only a choice for a bot that does not exist,
+    // which the next start takes off (`BotDeviceAccessStore.dropBots`); a retry makes the bot under a new id.
+    const held = this.holdNewBot(botId, input.access)
+    try {
+      this.engine.createBot(definition, { key, input: firstMessagePrompt(description, !named.chosen) })
+    } catch (error) {
+      // Not published: its choice goes too. Published but a later step failed: the choice stays with the bot.
+      if (held && !this.store.registry(botId)) {
+        try { this.options.deviceAccess?.forget(botId) } catch { /* the next start takes it off */ }
+      }
+      throw error
+    }
     await this.engine.enqueueChat(botId, key, firstMessagePrompt(description, !named.chosen))
     return { bot: this.summaryOf(botId) }
+  }
+
+  /**
+   * Saves which devices reach a bot about to be made; true when something was written. Every device (the default) is
+   * written only when the stored default is something else (a file that can't be read), so a bot made the usual way
+   * leaves the file as it is. A choice that can't be saved refuses the create.
+   */
+  private holdNewBot(botId: string, access: BotDeviceAccess | undefined): boolean {
+    const store = this.options.deviceAccess
+    if (!access || !store) return false
+    if (access.mode === 'all' && store.get(botId).access.mode === 'all') return false
+    try {
+      store.set(botId, access)
+    } catch {
+      throw new BotEngineError('bot_create_failed', "Which devices reach the bot couldn't be saved, so it wasn't made. Try again.")
+    }
+    return true
   }
 
   /**
@@ -387,6 +438,7 @@ export class BotChatService {
    * answered together. Sending the same request again answers a wall the first one never reached.
    */
   async chatSend(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage }> {
+    this.engine.noteOwnerActivity()
     return this.send(input)
   }
 
@@ -394,9 +446,34 @@ export class BotChatService {
    * `bots.questions.answer`: the owner taps one of a question's answers. It is their reply to the question's bubble, the
    * same as writing it (it answers the question, moves past any other open one and starts or continues a chat turn), but
    * the turn it starts is not one the owner's own words started (`answer:`, not `chat:`): the label is the bot's words,
-   * so it never lets the bot start, message or stop a thread, or switch models. A question already answered, or no
+   * so it never lets the bot switch models. A question already answered, or no
    * longer open, is refused before anything is written. A repeat of `clientRequestId` returns the first answer.
    */
+  actionMessage(botId: string, actionId: string): BotChatMessage {
+    const action = this.engine.actions.get(actionId)
+    const message = action?.bot_id === botId ? this.store.message(action.message_id) : undefined
+    if (!message) throw new BotEngineError('not_found', 'No held action here.')
+    return this.engine.chat.toMessage(message)
+  }
+
+  actionCheck(input: { actionId: string; digest: string; answer: 'send' | 'not_now'; botId: string }): void {
+    const action = this.engine.actions.get(input.actionId)
+    if (action && action.bot_id !== input.botId) throw new BotEngineError('bot_action_gone', "This can't be sent any more.")
+    try { this.engine.actions.check(input) } catch (error) {
+      if (error instanceof BotActionChanged) throw new BotEngineError(error.code, error.message)
+      throw error
+    }
+  }
+
+  async answerAction(input: { actionId: string; digest: string; answer: 'send' | 'not_now'; botId?: string }): Promise<{ status: string }> {
+    const action = this.engine.actions.get(input.actionId)
+    if (input.botId && action?.bot_id !== input.botId) throw new BotEngineError('not_found', 'No held action here.')
+    try { return await this.engine.actions.answer(input) } catch (error) {
+      if (error instanceof BotActionChanged) throw new BotEngineError(error.code, error.message)
+      throw error
+    }
+  }
+
   async answerQuestion(input: { botId: string; questionId: string; choice: string; clientRequestId: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage; question?: BotChatMessage }> {
     this.engine.definitionOf(input.botId)
     const existing = this.store.messageByRequest(input.clientRequestId)
@@ -407,6 +484,7 @@ export class BotChatService {
     const question = this.questionToAnswer(input.botId, input.questionId)
     const choice = question.spec.choices.find((entry) => entry.label === input.choice)
     if (!choice) throw new BotEngineError('invalid_params', 'Pick one of the question\'s answers.')
+    this.engine.noteOwnerActivity()
     // A question the bot's work waits on: the tap answers the work, which goes on with it; no chat turn starts. Once the
     // work ended (it went on with its default), a late tap is an ordinary reply to the chat (below).
     if (question.lane === 'run') {
@@ -524,6 +602,7 @@ export class BotChatService {
    * and with the chat turn it queues; then a chat waiting at a wall continues with it, or the queued turn starts.
    */
   private async send(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode; node?: string } }, tap?: { questionId: string; choice: string }): Promise<{ message: BotChatMessage }> {
+    turnTimingBegin(input.botId)
     const definition = this.engine.definitionOf(input.botId)
     const text = input.text.trim()
     if (!text && !input.attachments?.length) throw new BotEngineError('invalid_params', 'The message is empty.')
@@ -621,6 +700,7 @@ export class BotChatService {
     for (const question of touched) for (const row of this.store.messagesForQuestion(question.id)) if (row.author === 'bot') this.engine.chat.republish(row.id)
     const message = this.engine.chat.toMessage(this.store.message(messageId)!)
     // A turn that runs now takes it as it answers: nothing else starts.
+    if (joined) turnTimingForget(input.botId)
     if (joined && this.store.activation(joined)?.status !== 'queued') return { message }
     try {
       // A limit answered Not now ends its walled turn first; the queued activation then starts. A tap leaves the wall be.
@@ -693,6 +773,11 @@ export class BotChatService {
     const result = await this.engine.stopWork(botId, workId)
     if (result === 'not_found') throw new BotEngineError('work_not_found', 'This bot has no such work.')
     return { stopped: result === 'stopped' }
+  }
+
+  reminderSnooze(botId: string, messageId: string, choice: import('../../../shared/bots/personal/chat').BotSnoozeChoice): BotChatMessage {
+    this.engine.snoozeReminder(botId, messageId, choice)
+    return this.engine.chat.toMessage(this.store.message(messageId)!)
   }
 
   /**
@@ -863,7 +948,7 @@ export class BotChatService {
       const pick = slots[row]
       return pick && !isPinned(pick) ? [[row, pick.model]] : []
     })) as Partial<Record<BotModelSlotKey, string>>
-    const { last: _last, ...offered } = choices
+    const { last: _last, reachOnCreate: _reach, ...offered } = choices
     const images = this.options.images ? { image: shownPick(this.engine.imagePick(botId)), images: this.options.images.usage(botId) } : {}
     // The custom slots, their picks shown as the rows' are: never what the sign-in was.
     const custom = this.engine.customSlots(botId).map((slot) => ({ name: slot.name, pick: shownPick(slot.pick)!, ...(slot.description ? { description: slot.description } : {}) }))
@@ -921,6 +1006,7 @@ export class BotChatService {
       ...imageChoices,
       ...(Object.keys(notes).length ? { notes } : {}),
       ...(last ? { last: { talk: offeredNow(last.talk), light: offeredNow(last.light), medium: offeredNow(last.medium), hard: offeredNow(last.hard) } } : {}),
+      ...(this.options.deviceAccess ? { reachOnCreate: true as const } : {}),
       computer: 'this_computer',
       computers: [
         { id: 'this_computer', name: computer },

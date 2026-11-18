@@ -72,12 +72,23 @@ const keys: Record<NetLocalMethod, readonly string[]> = {
   'net.recovery.import': ['file', 'passphrase', 'becomeAuthority'],
   'bridge.invite': ['ttlMs', 'name', 'caps'],
   'bridge.join': ['invite', 'name', 'passphrase', 'via'],
+  'net.join.retry': ['passphrase'],
+  'net.join.abandon': [],
+  'net.startOver.check': [],
+  'net.startOver': [],
+  'net.link.make': ['name', 'passphrase'],
+  'net.link.check': ['link'],
+  'net.link.paste': ['link', 'name', 'passphrase', 'startOver'],
   'bridge.nodes': [],
   'bridge.revoke': ['node'],
   'bridge.rename': ['node', 'name'],
   'bridge.setCaps': ['node', 'caps'],
   'bridge.setKind': ['node', 'kind'],
-  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal', 'editor', 'bots', 'agentReach'],
+  'bridge.policy': ['node', 'blocked', 'maxPermissionMode', 'terminal', 'editor', 'bots', 'agentReach', 'work'],
+  'bridge.connect': ['node'],
+  'bridge.disconnect': ['node'],
+  'bridge.allow': ['node'],
+  'bridge.access.there': ['node'],
   'bridge.workOnThreads': ['enabled'],
   'bridge.shareBots': ['enabled'],
   'bridge.editorServer': ['system']
@@ -248,6 +259,10 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       'bridge.setCaps',
       'bridge.setKind',
       'bridge.policy',
+      'bridge.connect',
+      'bridge.disconnect',
+      'bridge.allow',
+      'bridge.access.there',
       'net.editor.probe',
       'net.authority.transfer'
     ].includes(method) &&
@@ -277,9 +292,12 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       params.terminal === undefined &&
       params.editor === undefined &&
       params.bots === undefined &&
-      params.agentReach === undefined
+      params.agentReach === undefined &&
+      params.work === undefined
     )
       throw new DomainRpcError('invalid_params', 'Choose a limit to change')
+    if (params.work !== undefined && typeof params.work !== 'boolean')
+      throw new DomainRpcError('invalid_params', 'work must be boolean')
     if (params.blocked !== undefined && typeof params.blocked !== 'boolean')
       throw new DomainRpcError('invalid_params', 'blocked must be boolean')
     if (params.terminal !== undefined && typeof params.terminal !== 'boolean')
@@ -304,6 +322,15 @@ function validate(method: NetLocalMethod, value: unknown): Record<string, unknow
       'invalid_params',
       'A bounded recovery file and explicit authority selection are required'
     )
+  if (
+    (method === 'net.link.check' || method === 'net.link.paste') &&
+    (typeof params.link !== 'string' ||
+      !params.link.trim().startsWith('ml1_') ||
+      params.link.length > 4096)
+  )
+    throw new DomainRpcError('invalid_params', 'A connect link is required')
+  if (params.startOver !== undefined && typeof params.startOver !== 'boolean')
+    throw new DomainRpcError('invalid_params', 'startOver must be boolean')
   if (method === 'bridge.rename' && params.name === undefined)
     throw new DomainRpcError('invalid_params', 'A node name is required')
   if (
@@ -431,12 +458,21 @@ export function registerEditorTunnelMethods(
     })
 }
 
-function publicError(code: keyof typeof NET_ERRORS, cause?: unknown): AppError {
+/** Methods whose errors carry a reason (and for a join, the other computer's name) for the screen to word. */
+const DETAILED_METHODS: ReadonlySet<NetLocalMethod> = new Set([
+  'bridge.join',
+  'net.join.retry',
+  'net.startOver',
+  'net.link.make',
+  'net.link.paste'
+])
+function publicError(code: keyof typeof NET_ERRORS, cause?: unknown, details?: unknown): AppError {
   const entry = NET_ERRORS[code]
   return new AppError(
     {
       code,
       message: entry.message,
+      ...(details === undefined ? {} : { details }),
       errorInfo: { category: entry.category, retryable: entry.retryable }
     },
     cause
@@ -474,7 +510,8 @@ export function registerNetMethods(
         try {
           return await (await forProfile(binding!.profileId)).request(method, params)
         } catch (error) {
-          if (error instanceof NetError) throw publicError(error.code, error)
+          if (error instanceof NetError)
+            throw publicError(error.code, error, DETAILED_METHODS.has(method) ? error.details : undefined)
           throw error
         }
       }

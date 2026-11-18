@@ -214,6 +214,17 @@ const FRAME_TICKS: Record<BotFaceState, number> = {
   idle: 2,
   paused: 2
 }
+/**
+ * Faces smaller than this (the sidebar's, the chat header's) draw at most 15 frames a second in every state. At that size
+ * a busy face's motion reads the same at 15 as at 30, and a sidebar of busy bots then costs half as many draws and
+ * presented frames. Larger faces (a bot's About panel, the empty chat) keep 30.
+ */
+export const SMALL_FACE_PX = 40
+
+/** Shared ticks between frames of a face drawn as `spec`. */
+export function frameTicks(spec: Pick<FaceSpec, 'state' | 'size'>): number {
+  return Math.max(FRAME_TICKS[spec.state], spec.size < SMALL_FACE_PX ? 2 : 1)
+}
 /** Display frames come every few milliseconds; a frame due within this much of one draws on it. */
 const FRAME_SLACK = 1 / 240
 /**
@@ -914,7 +925,7 @@ export class FaceRenderer {
       slot.lastT = t
       // Every face's next frame is on the shared grid, whenever this one was drawn, so faces due
       // together draw together; a face that fell behind skips the ticks it missed.
-      slot.nextAt = gridAfter(t, SHARED_TICK * FRAME_TICKS[spec.state])
+      slot.nextAt = gridAfter(t, SHARED_TICK * frameTicks(spec))
       jobs.push({ slot, uniforms: faceUniforms(spec.look, slot.motion.frame(t, dt), view), x: 0, y: 0 })
     }
     // A moving face's still pose is drawn once too, with what the budget leaves, and saved: a later
@@ -1190,7 +1201,8 @@ export function createWebGlGpu(doc: Document): FaceGpu | null {
       const glY = canvas.height - y - side
       context.viewport(x, glY, side, side)
       context.uniform2f(uniforms.uRes, side, side)
-      context.uniform2f(uniforms.uOrg, x, glY)
+      // The picture's origin, moved by its pan: the shader draws the scene beyond it, so nothing is cut off.
+      context.uniform2f(uniforms.uOrg, x + u.pan[0] * side, glY + u.pan[1] * side)
       context.uniform3fv(uniforms.uCol, u.uCol)
       context.uniform4fv(uniforms.uAC, u.uAC)
       context.uniform1f(uniforms.uAcc, u.uAcc)

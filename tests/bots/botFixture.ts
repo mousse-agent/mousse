@@ -1,3 +1,4 @@
+import { tellMeOf, type ScheduledJob } from '../../src/shared/types'
 /**
  * A bot engine over a real `bots.db` and run database, with fakes for the Bot Phase 1 seams
  * (docs/plans/bot-architecture.md §7.1): the model resolver, the context packs and capture, the
@@ -6,6 +7,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
 import type { BotDispatchEnd, BotJournalInput, BotModelProblem, BotPickMiss } from '../../src/mms/bots/seams'
@@ -19,6 +21,7 @@ import { ToolInvocations } from '../../src/mms/run/ToolInvocations'
 import { isBotTurnPayload, type BotTurnPayload, type RunOutcome } from '../../src/mms/run/types'
 import type { BotChip, BotLaunchedThread } from '../../src/shared/bots/personal/chat'
 import type { BotDepth, BotModelPick } from '../../src/shared/bots/personal/definition'
+import type { BotDeviceAccess } from '../../src/shared/bots/personal/deviceAccess'
 import type { ProviderSelection } from '../../src/shared/harness/types'
 import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
@@ -77,7 +80,7 @@ export interface BotFixture {
   close(): void
 }
 
-export function botFixture(): BotFixture {
+export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'deviceAccess'> & { realWipe?: boolean } = {}): BotFixture {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-p1-')))
   const profile = join(base, 'profile')
   mkdirSync(profile, { recursive: true })
@@ -97,6 +100,7 @@ export function botFixture(): BotFixture {
   } as unknown as BotFixture
   const host: BotEngineHost = {
     profileHome: profile,
+    ...options,
     store,
     definitions: new BotDefinitionStore(store.directory, (botId) => store.registry(botId)?.revision ?? null),
     threads: { ensureExecutionThread: (key) => ({ id: `thread:${key}` }) },
@@ -178,7 +182,7 @@ export function botFixture(): BotFixture {
       reindex: async () => {},
       purge: async (botId) => { fixture.purged.push(botId) },
       forgetAll: () => 0,
-      wipeHistory: () => 0,
+      wipeHistory: (botId) => options.realWipe ? new BotMemoryStore({ db: store.db }).wipe(botId, true) : 0,
       reset: () => {}
     },
     clearContext: (threadId) => { fixture.cleared.push(threadId) },
@@ -207,7 +211,10 @@ export function botFixture(): BotFixture {
   fixture.automationRuns = automationRuns
   fixture.host = host
   fixture.bots = new BotEngine(host)
-  scheduler.setBotRunner({ findOccurrence: (input) => fixture.bots.findScheduledOccurrence(input), runOccurrence: (input) => fixture.bots.runScheduledOccurrence(input) })
+  scheduler.on('jobRemoved', (_id: string, job: ScheduledJob) => {
+    if (job.bot) fixture.bots.scheduleRemoved(job.bot.botId, job.bot.scheduleId, { tellMe: tellMeOf(job), canWakeMe: job.bot.canWakeMe })
+  })
+  scheduler.setBotRunner({ editSchedule: (botId, save) => fixture.bots.editSchedule(botId, save), findOccurrence: (input) => fixture.bots.findScheduledOccurrence(input), runOccurrence: (input) => fixture.bots.runScheduledOccurrence(input) })
   scheduler.setTickHook((now) => fixture.bots.maintain(now))
   fixture.tickSchedules = async (now) => {
     if (now) clock.now = now.getTime()
@@ -252,9 +259,9 @@ export async function start(f: BotFixture, activationId: string, n = 1): Promise
 }
 
 /** The run ends and the executor settles it with its final message; then everything that follows runs. */
-export async function finish(f: BotFixture, payload: BotTurnPayload, status: 'completed' | 'failed' | 'interrupted' = 'completed', options: { text?: string; outcome?: RunOutcome } = {}): Promise<void> {
+export async function finish(f: BotFixture, payload: BotTurnPayload, status: 'completed' | 'failed' | 'interrupted' = 'completed', options: { text?: string; outcome?: RunOutcome; unanswered?: boolean } = {}): Promise<void> {
   f.runs.markTerminal(payload.runId, status, options.outcome)
-  f.bots.settle(payload, options.text !== undefined ? { text: options.text } : {})
+  f.bots.settle(payload, { ...(options.text !== undefined ? { text: options.text } : {}), ...(options.unanswered ? { unanswered: true } : {}) })
   await flush()
 }
 
@@ -267,8 +274,8 @@ export async function runDispatch(f: BotFixture, activationId: string, n = 1, op
 }
 
 /** A new bot through `bots.create`, its first chat message answered with `reply`. */
-export async function createBot(f: BotFixture, options: { name?: string; description?: string; reply?: string } = {}): Promise<{ botId: string; firstActivation: string }> {
-  const { bot } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, ...(options.name ? { name: options.name } : {}), description: options.description ?? 'Check my inbox every morning and tell me what matters.', clientRequestId: `create-${Math.random().toString(16).slice(2)}` })
+export async function createBot(f: BotFixture, options: { name?: string; description?: string; reply?: string; access?: BotDeviceAccess; clientRequestId?: string } = {}): Promise<{ botId: string; firstActivation: string }> {
+  const { bot } = await f.bots.service.create({ look: { colour: 'teal', accessory: 'cap' }, ...(options.name ? { name: options.name } : {}), description: options.description ?? 'Check my inbox every morning and tell me what matters.', clientRequestId: options.clientRequestId ?? `create-${Math.random().toString(16).slice(2)}`, ...(options.access ? { access: options.access } : {}) })
   const first = f.store.listActivations(bot.id).find((activation) => activation.lane === 'chat')!
   if (options.reply !== undefined) await runDispatch(f, first.id, 1, { text: options.reply })
   return { botId: bot.id, firstActivation: first.id }

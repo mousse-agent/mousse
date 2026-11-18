@@ -341,18 +341,6 @@ describe('bot methods on a real bot', () => {
     expect(() => validateRemoteBotParams('bots.questions.answer', { botId, questionId: 'nope', choice: 'Flat A', clientRequestId: 'r' })).toThrow(NetError)
   })
 
-  it('answers a permission ask', async () => {
-    await f.bots.service.chatSend({ botId, text: 'Read my invoices', clientRequestId: 'm2' })
-    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
-    const { payload, prepared } = await start(f, activation.id)
-    prepared.authority.escalate!({ permission: { tool: 'shell' }, reason: 'To read them.' })
-    await finish(f, payload, 'completed', { text: 'May I?' })
-    const card = chatOf(f, botId).at(-1)!.ask!
-    expect(card.kind).toBe('permission')
-    const answered = (await call(methods, 'bots.asks.answer', { botId, askId: card.askId, answer: 'not_now' })) as { message: BotChatMessage }
-    expect(answered.message.ask).toMatchObject({ askId: card.askId, status: 'not_now' })
-  })
-
   it('the lists carry the bots, and push again when a bot changes', async () => {
     const services = {
       threads: Object.assign(new EventEmitter(), { listAllThreads: () => [] }),
@@ -412,11 +400,13 @@ describe('"Share bots with other devices"', () => {
       'bots.work.stop': { botId: BOT, workId: 'act_00000000-0000-0000-0000-000000000000' },
       'bots.chat.markRead': { botId: BOT, seq: 1 },
       'bots.asks.answer': { botId: BOT, askId: ASK, answer: 'allow' },
+      'bots.actions.answer': { botId: BOT, actionId: 'action_1', digest: 'digest', answer: 'send' },
       'bots.questions.answer': { botId: BOT, questionId: 'q_00000000-0000-0000-0000-000000000000', choice: 'Yes', clientRequestId: 'r-q' },
       'bots.personal.pause': { botId: BOT },
       'bots.personal.resume': { botId: BOT },
       'bots.create': { look: { colour: 'teal', accessory: 'cap' }, description: 'Tidy', clientRequestId: 'c1' },
       'bots.update': { botId: BOT, name: 'Pip' },
+      'bots.reminders.snooze': { botId: BOT, messageId: 'm1', choice: '10m' },
       'bots.reminders.cancel': { botId: BOT, reminderId: 'rem_00000000-0000-0000-0000-000000000000' },
       'bots.schedules.remove': { botId: BOT, scheduleId: 'daily' },
       'bots.permissions.set': { botId: BOT, permissionId: 'p1', enabled: false },
@@ -579,3 +569,20 @@ function listsServices(bots: unknown, botsSharing?: unknown): ListsServices {
     ...(botsSharing ? { botsSharing } : {})
   } as unknown as ListsServices
 }
+
+describe('device presets and bot answers', () => {
+  it('holds both held-action choices to the same Work gate as ordinary permission answers', async () => {
+    const { ACCESS_PRESETS } = await import('../../../../src/shared/net/accessPresets')
+    const { methodAccess, needsWork } = await import('../../../../src/shared/net/accessClasses')
+    for (const preset of ACCESS_PRESETS) {
+      // NetService's authorizeMethod reads this same decision on calls AND saved-result lookups.
+      const mayAnswer = (method: string) => preset.fields.work || !needsWork(methodAccess(method))
+      expect(mayAnswer('bots.chat.list'), preset.label).toBe(true)
+      expect(mayAnswer('bots.chat.send'), preset.label).toBe(true)
+      for (const choice of ['send', 'not_now']) {
+        expect(mayAnswer('bots.actions.answer'), `${preset.label}: ${choice}`).toBe(mayAnswer('bots.asks.answer'))
+        expect(mayAnswer('bots.actions.answer'), `${preset.label}: ${choice}`).toBe(preset.fields.work)
+      }
+    }
+  })
+})

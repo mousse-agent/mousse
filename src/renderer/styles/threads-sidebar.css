@@ -12,6 +12,8 @@
   max-width: 480px;
   min-height: 0;
   --threads-sidebar-row-height: 32px;
+  /* The extra height of a row that shows its latest reply under the title. */
+  --threads-sidebar-preview-line: 16px;
   container-type: inline-size;
   /* pill-tabs: the tab bar's width rules (components/ui/PillTabs.tsx) read this container. */
   container-name: threads-sidebar pill-tabs;
@@ -88,17 +90,13 @@
   color: var(--text-primary);
 }
 
-/* Projects · Threads · Chats, three equal segments, then Add project on the Projects tab only. */
+/* Projects · Threads · Chats, three equal segments. */
 .threads-sidebar-tabs-row {
   display: flex;
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
   margin: 8px 12px 10px;
-}
-
-.threads-sidebar-add-project {
-  flex-shrink: 0;
 }
 
 .threads-sidebar-tabs {
@@ -408,7 +406,9 @@
   transition: opacity 0.15s;
 }
 
-.threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:is(:hover, :focus-within) > .threads-sidebar-thread > .threads-sidebar-thread-trailing,
+/* The marks give way to the hover actions. A row without actions (a chat not sent yet, a send the service has not
+   made yet) keeps them. */
+.threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions):is(:hover, :has(:focus-visible)) > .threads-sidebar-thread > .threads-sidebar-thread-trailing,
 .threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions [aria-expanded='true']) > .threads-sidebar-thread > .threads-sidebar-thread-trailing {
   opacity: 0;
 }
@@ -433,8 +433,9 @@
   transition: opacity 0.15s;
 }
 
+/* Mouse clicks retain focus after pointer leave; only keyboard focus should keep actions visible. */
 .threads-sidebar-thread-container:hover .threads-sidebar-thread-actions,
-.threads-sidebar-thread-container:focus-within .threads-sidebar-thread-actions,
+.threads-sidebar-thread-container:has(:focus-visible) .threads-sidebar-thread-actions,
 .threads-sidebar-thread-actions:has([aria-expanded="true"]) {
   opacity: 1;
   pointer-events: auto;
@@ -468,13 +469,13 @@
 }
 
 .threads-sidebar-thread-list {
-  max-height: calc(var(--threads-sidebar-row-height) * 5);
+  max-height: calc(var(--threads-sidebar-row-height) * 5 + var(--threads-sidebar-preview-line) * var(--project-preview-shown, 0));
   overflow: hidden;
   transition: max-height calc(350ms * var(--ui-motion-scale)) cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .threads-sidebar-thread-list.expanded {
-  max-height: calc(var(--threads-sidebar-row-height) * var(--project-thread-count, 5));
+  max-height: calc(var(--threads-sidebar-row-height) * var(--project-thread-count, 5) + var(--threads-sidebar-preview-line) * var(--project-preview-count, 0));
 }
 
 .threads-sidebar-thread-root {
@@ -528,6 +529,15 @@ html[data-theme='light'] .threads-sidebar-thread.threads-sidebar-card.project-ti
   border-radius: inherit;
   background: color-mix(in srgb, var(--project-tint) var(--project-tint-strength), transparent);
   pointer-events: none;
+}
+
+.threads-sidebar-thread.threads-sidebar-card.project-color-outline::after {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--project-tint) 35%, transparent);
+}
+
+.threads-sidebar-thread.threads-sidebar-card.project-color-gradient::after {
+  background: linear-gradient(to left, color-mix(in srgb, var(--project-tint) var(--project-tint-strength), transparent), transparent);
 }
 
 /* The selected row keeps its plain raised look, so the selection reads first; its mark still shows the hue. */
@@ -787,6 +797,20 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 .threads-sidebar-thread-trailing .threads-sidebar-status-spinner,
 .threads-sidebar-thread-trailing .threads-sidebar-status-icon {
   margin-left: 0;
+}
+
+/* A thread whose composer holds unsent text: a small pencil among the row's marks, in a muted accent. Like the
+   other marks it gives way to the hover actions. */
+.threads-sidebar-draft-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: color-mix(in oklch, var(--accent) 70%, var(--text-secondary));
+  opacity: 0.85;
+}
+
+/* A new chat not sent yet is listed by its draft, in italics. */
+.threads-sidebar-thread.unsent-chat .threads-sidebar-thread-name {
+  font-style: italic;
 }
 
 .threads-sidebar-worktree-icon {
@@ -1344,23 +1368,99 @@ html:not([data-acrylic='true']) .threads-sidebar:has(> .threads-sidebar-scroll[d
   opacity: 1;
 }
 
-:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) > :not(.threads-sidebar-thread-trailing),
-:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) > .threads-sidebar-thread-trailing > :not(.turning) {
-  filter: opacity(var(--sidebar-row-dim));
-}
-
 :where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) > .threads-sidebar-thread-trailing > .turning {
   opacity: var(--sidebar-row-dim);
 }
 
-/* A row that needs the person fades everything but its status. */
-:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container:has(:is(.threads-sidebar-status-icon--question, .threads-sidebar-card-status-input)) :is(
-  .threads-sidebar-thread:not(.threads-sidebar-card) > :not(.threads-sidebar-thread-trailing),
-  .threads-sidebar-thread-trailing > :not(.threads-sidebar-status-icon--question),
-  .threads-sidebar-card > :not(.threads-sidebar-card-body),
-  .threads-sidebar-card-body > :not(.threads-sidebar-card-meta),
-  .threads-sidebar-card-meta > :not(.threads-sidebar-card-status-input)
-),
-:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row:has(.threads-sidebar-project-status--needs-me) > .threads-sidebar-project-toggle > :not(.threads-sidebar-project-status--needs-me, .project-icon) {
-  filter: opacity(var(--sidebar-row-dim));
+/* A row that needs the person fades everything but its status; a turning row, everything but its spinner.
+   The row decides: a :has() on the row itself sets the fade, and the parts read it. A :has() on an ancestor whose
+   subject is any child (`.row:has(…) > :not(…)`) makes Chromium restyle the whole window each time an element is
+   added anywhere, which made opening a long thread restyle its transcript about six times. */
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) {
+  --sidebar-turning-fade: opacity(var(--sidebar-row-dim));
+}
+
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container:has(:is(.threads-sidebar-status-icon--question, .threads-sidebar-card-status-input)),
+:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row:has(.threads-sidebar-project-status--needs-me) {
+  --sidebar-needs-fade: opacity(var(--sidebar-row-dim));
+}
+
+/* Faded when the row turns or needs the person. */
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) > :not(.threads-sidebar-thread-trailing),
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread > .threads-sidebar-thread-trailing > :not(.turning, .threads-sidebar-status-icon--question) {
+  filter: var(--sidebar-turning-fade, var(--sidebar-needs-fade, none));
+}
+
+/* Faded only when the row turns. */
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread > .threads-sidebar-thread-trailing > .threads-sidebar-status-icon--question {
+  filter: var(--sidebar-turning-fade, none);
+}
+
+/* Faded only when the row or project needs the person. */
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread > .threads-sidebar-thread-trailing > .turning,
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container .threads-sidebar-card > :not(.threads-sidebar-card-body),
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container .threads-sidebar-card-body > :not(.threads-sidebar-card-meta),
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container .threads-sidebar-card-meta > :not(.threads-sidebar-card-status-input),
+:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row > .threads-sidebar-project-toggle > :not(.threads-sidebar-project-status--needs-me, .project-icon) {
+  filter: var(--sidebar-needs-fade, none);
+}
+
+/* A thread's latest reply under its title, and its pull requests as a count (Settings > Appearance > Reply previews).
+   A row with a preview is one line taller; its title and count share the first line. */
+.threads-sidebar-thread.has-preview:not(.threads-sidebar-card) {
+  height: calc(var(--threads-sidebar-row-height) + var(--threads-sidebar-preview-line));
+}
+
+/* The marks and hover actions stay on the title line, so the preview runs the row's full width under them. */
+.threads-sidebar-thread-container > .threads-sidebar-thread.has-preview:not(.threads-sidebar-card) > .threads-sidebar-thread-trailing,
+.threads-sidebar-thread-container:has(> .threads-sidebar-thread.has-preview:not(.threads-sidebar-card)) > .threads-sidebar-thread-actions {
+  top: calc(var(--threads-sidebar-row-height) / 2);
+}
+
+.threads-sidebar-thread.has-preview:not(.threads-sidebar-card) .threads-sidebar-reply-preview {
+  margin-right: calc(var(--ui-row-x, 9px) - var(--thread-actions-room));
+}
+
+.threads-sidebar-thread-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.threads-sidebar-thread-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.threads-sidebar-reply-preview {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: var(--threads-sidebar-preview-line);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.threads-sidebar-pr-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+/* A run of archived rows not drawn (ArchivedList): it holds their room, and is never the row the scroll keeps in place. */
+.threads-sidebar-settled-spacer {
+  flex: none;
+  overflow-anchor: none;
 }

@@ -34,7 +34,7 @@ interface Scope {
   /** Enabled installations that have not answered a listing yet (just started, or slow): no tools known yet. */
   starting: Set<string>
   /** Each configured installation (enabled or not) with its name and identity (`mcpServerIdentity`). */
-  configured: Map<string, { serverName: string; identity: string }>
+  configured: Map<string, { serverName: string; identity: string; configDigest: string }>
   listing: RelayTool[]
   byName: Map<string, RelayTool>
   /** The listing before the last change, so a name a runtime still holds resolves for one generation more. */
@@ -86,12 +86,12 @@ export class RelayCatalog {
    * scope is cold; a server shows here as soon as the scope's configured servers are read, and its tools as soon as it
    * answers, whatever the others do.
    */
-  servers(projectPath?: string): Array<RelayServerTools & { failing: boolean; starting: boolean; identity?: string }> {
+  servers(projectPath?: string): Array<RelayServerTools & { failing: boolean; starting: boolean; identity?: string; configDigest?: string }> {
     const scope = this.scopes.get(scopeKey(projectPath))
     if (!scope) return []
     return [...scope.servers.values()].map((entry) => {
       const identity = scope.configured.get(entry.installationId)?.identity
-      return { ...entry, failing: scope.failing.has(entry.installationId), starting: scope.starting.has(entry.installationId), ...(identity ? { identity } : {}) }
+      return { ...entry, failing: scope.failing.has(entry.installationId), starting: scope.starting.has(entry.installationId), ...(identity ? { identity, configDigest: scope.configured.get(entry.installationId)?.configDigest } : {}) }
     })
   }
 
@@ -220,7 +220,7 @@ export class RelayCatalog {
       if (this.disposed) return
       const before = { servers: scope.servers, byName: scope.byName }
       const answered = new Map<string, RelayServerTools>()
-      scope.configured = new Map(configured.map((server) => [mcpInstallationId(server), { serverName: server.name, identity: mcpServerIdentity(server) }]))
+      scope.configured = new Map(configured.map((server) => [mcpInstallationId(server), { serverName: server.name, identity: mcpServerIdentity(server), configDigest: shortHash(canonicalJson(server), 64) }]))
       const publish = (final: boolean): void => {
         if (this.disposed) return
         const servers = new Map<string, RelayServerTools>()

@@ -16,9 +16,18 @@ export function isLocalOnlyThread(
   return Boolean(rootId && inventory?.some((candidate) => candidate.id === rootId && candidate.localOnly === true))
 }
 
-/** True for a thread a parent thread started as a subagent. */
+/**
+ * True for a thread shown under a parent: a subagent the parent started, or a mirror of a helper its runtime started
+ * (`isNativeHelperThread`). Lists fold both under the parent, and both take the root's visibility. Delegation rules
+ * read the run store's lineage, which never holds a mirror.
+ */
 export function isSubagentThread(thread: Pick<Thread, 'lineage'>): boolean {
-  return thread.lineage?.relationship === 'subagent'
+  return thread.lineage?.relationship === 'subagent' || thread.lineage?.relationship === 'native'
+}
+
+/** True for a watch-only mirror of a helper a provider runtime started on its own (`Thread.native`). */
+export function isNativeHelperThread(thread: Pick<Thread, 'lineage'>): boolean {
+  return thread.lineage?.relationship === 'native'
 }
 
 function indexById<T extends LineageThread>(threads: readonly T[]): Map<string, T> {
@@ -146,4 +155,23 @@ export function rollUpActivities(threads: readonly LineageThread[], activity: Th
     rows[thread.id] = rolledUp(activity[thread.id] ?? 'idle', descendantsIn(childrenOf, thread.id).map((id) => activity[id]))
   }
   return rows
+}
+
+/**
+ * True for a thread kept out of the owner's sidebar by one of their bots (`Thread.hidden`), and for any subagent
+ * below one: a subagent takes its root's visibility. Such a thread notifies the owner only when they chose
+ * `notifications.botThreads`; Show in sidebar clears the mark and it notifies like any thread again.
+ */
+export function hiddenFromOwner(
+  threadId: string,
+  threadOf: (id: string) => Pick<Thread, 'id' | 'lineage' | 'hidden'> | undefined
+): boolean {
+  let current = threadOf(threadId)
+  if (current?.lineage?.rootThreadId && threadOf(current.lineage.rootThreadId)?.hidden) return true
+  for (let depth = 0; current && depth < 64; depth++) {
+    if (current.hidden) return true
+    const parentId = current.lineage?.parentThreadId
+    current = parentId ? threadOf(parentId) : undefined
+  }
+  return false
 }

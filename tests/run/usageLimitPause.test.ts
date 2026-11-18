@@ -383,6 +383,80 @@ describe('a usage limit pauses the run', () => {
     })
   })
 
+  describe('a continue turn that hits the limit again', () => {
+    it('shows the new pause as limited again; a first pause does not', async () => {
+      const pi = scripted([{ fail: () => limit() }, { fail: () => limit({ ms: 60_000 }) }])
+      const d = boot(newHome(), [pi], { runs: { resumeAfterUsageLimit: false } })
+      const { thread, run } = await paused(d, pi)
+      expect(d.orch.getTurnState(thread.id).pause).not.toHaveProperty('again')
+
+      await d.orch.resumePausedRun(run.runId)
+      await waitFor(() => runsOf(d, thread.id).length === 2 && d.engine.getRun(runsOf(d, thread.id)[1].runId)!.status === 'paused', 'the second pause')
+
+      const again = runsOf(d, thread.id)[1]
+      expect(d.orch.getTurnState(thread.id)).toMatchObject({ phase: 'paused', pause: { runId: again.runId, again: true } })
+      // The same after a restart: the pause shown on boot comes from the run on disk.
+      ;(d.orch as any).setTurnPhase(thread.id, 'idle')
+      d.orch.restorePausedTurnStates()
+      expect(d.orch.getTurnState(thread.id).pause).toMatchObject({ runId: again.runId, again: true })
+    })
+  })
+
+  describe('subagents below a thread that resumes', () => {
+    /** A subagent thread below `parentThreadId` (and its root), whose first message hit the limit too. */
+    const pausedChild = async (d: Phase6Daemon, parentThreadId: string, rootThreadId: string, title: string) => {
+      const thread = d.store.createThread(title, undefined, undefined, { lineage: { parentThreadId, rootThreadId, relationship: 'subagent' } })
+      d.orch.setThreadModelOverride(thread.id, PI)
+      const response = await d.orch.send('Do the subtask', false, { threadId: thread.id, clientRequestId: `first:${thread.id}` })
+      const run = d.engine.getRun(response.runId!)!
+      expect(run.status).toBe('paused')
+      return { thread, run }
+    }
+
+    it('Try now on the parent continues every paused subagent below it, once each', async () => {
+      // Parent, child and grandchild each hit the limit; every continue turn after that replies.
+      const pi = scripted([{ fail: () => limit() }, { fail: () => limit() }, { fail: () => limit() }])
+      const d = boot(newHome(), [pi], { runs: { resumeAfterUsageLimit: false } })
+      const parent = await paused(d, pi, 'Parent')
+      const child = await pausedChild(d, parent.thread.id, parent.thread.id, 'Child')
+      const grandchild = await pausedChild(d, child.thread.id, parent.thread.id, 'Grandchild')
+      const unrelated = d.store.createThread('Elsewhere')
+
+      await d.orch.resumePausedRun(parent.run.runId)
+      const threads = [parent.thread.id, child.thread.id, grandchild.thread.id]
+      await waitFor(() => threads.every((id) => runsOf(d, id).length === 2 && settled(d, id)), 'every continuation to finish')
+
+      for (const id of threads) {
+        expect(runsOf(d, id)).toHaveLength(2)
+        expect(runsOf(d, id)[1]).toMatchObject({ source: 'resume_now', status: 'completed', outcome: { resumedFromPause: 'user' } })
+        expect(d.engine.store.getPausedRun(id)).toBeNull()
+      }
+      expect(pi.turns).toHaveLength(6)
+      expect(runsOf(d, unrelated.id)).toEqual([])
+    })
+
+    it('the parent\'s timer continues a subagent with no timer of its own, and leaves one whose own reset is still ahead', async () => {
+      const pi = scripted([{ fail: () => limit({ ms: 1_000 }) }, { fail: () => limit({ ms: 60_000 }) }, { fail: () => limit({ ms: 60_000 }) }])
+      const d = boot(newHome(), [pi])
+      const parent = await paused(d, pi, 'Parent')
+      // Paused with the setting off: no timer, only Try now (or its parent) continues it.
+      d.settings.runs.resumeAfterUsageLimit = false
+      const manual = await pausedChild(d, parent.thread.id, parent.thread.id, 'No timer')
+      d.settings.runs.resumeAfterUsageLimit = true
+      const timed = await pausedChild(d, parent.thread.id, parent.thread.id, 'Own timer')
+      expect(manual.run.outcome!.pause).toMatchObject({ autoResume: false })
+      expect(timed.run.outcome!.pause).toMatchObject({ autoResume: true })
+
+      await waitFor(() => [parent.thread.id, manual.thread.id].every((id) => runsOf(d, id).length === 2 && settled(d, id)), 'the parent and the subagent without a timer to continue')
+
+      expect(runsOf(d, manual.thread.id)[1]).toMatchObject({ source: 'resume', status: 'completed', outcome: { resumedFromPause: 'auto' } })
+      // Still paused, its own timer still armed for its own reset.
+      expect(d.engine.getRun(timed.run.runId)!.status).toBe('paused')
+      expect(runsOf(d, timed.thread.id)).toHaveLength(1)
+      expect(effectsOf(d, timed.run.runId, 'run.resume')).toEqual([expect.objectContaining({ status: 'pending', availableAt: timed.run.outcome!.pause!.until })])
+    })
+  })
+
   describe('a message sent during the pause', () => {
     /** A person's message from the composer, sent while the thread is paused. */
     const personSends = (d: Phase6Daemon, threadId: string, text: string, id: string) =>

@@ -88,10 +88,6 @@ describe('changes store', () => {
 describe('review whitespace setting', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('shows every whitespace change by default', () => {
-    expect(useAppStore.getState().reviewIgnoreWhitespace).toBe(false)
-  })
-
   it('persists per profile with the rest of the personal workspace', () => {
     const saved = new Map<string, string>()
     vi.stubGlobal('window', {

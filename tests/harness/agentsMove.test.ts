@@ -18,7 +18,7 @@ import { adapterDriver, testHarness } from '../../src/mms/run/testkit/harness'
 import { claudeFamilyAlias } from '../../src/mms/harness/drivers/claudeCode'
 import { rewriteMovedDefaults } from '../../src/mms/settings/movedDefaults'
 import { agentModelId } from '../../src/shared/modelSelection'
-import { FOLDED_INTO_AGENT, FOLDED_TARGETS, acceptsMove } from '../../src/shared/harness/move'
+import { acceptsMove } from '../../src/shared/harness/move'
 
 class Agent implements ProviderAdapter {
   readonly capabilities = CODEX_CAPABILITIES
@@ -87,12 +87,6 @@ function fixture(keys: { exported?: string; adopted?: string[] } = {}) {
 }
 
 describe('moving a model API to its agent', () => {
-  it('has a row per agent that took a model API over', () => {
-    expect(FOLDED_INTO_AGENT).toEqual({ anthropic: 'claude', cursor: 'cursor', xai: 'grok', 'openai-codex': 'codex' })
-    // Only Anthropic narrows the agent's entries: Claude Code on an API key, never the user's own.
-    expect(FOLDED_TARGETS).toEqual({ anthropic: { slug: 'api', displayName: 'Claude Code (API key)', loginMethod: 'api_key', copyKey: true } })
-  })
-
   it("copies the entry's API key only when asked, before anything moves", async () => {
     const adopted: string[] = []
     const { harness, stored } = fixture({ exported: 'saved-key', adopted })

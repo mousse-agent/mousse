@@ -1,3 +1,6 @@
+import { APP_PRESENCE_CAPABILITY } from '../../mms/notifications/OwnerQuietHours'
+import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
+import { KEEP_AWAKE_CAPABILITY } from '../../shared/keepAwake'
 import { ERROR_INFO_CAPABILITY } from '../../shared/errors'
 import { connectGuiClient } from './guiDaemonCompatibility'
 /**
@@ -25,6 +28,7 @@ import { resolveDaemonHostInvocation } from '../../cli/daemonHost'
 import { daemonCommand } from './daemonCommand'
 import {
   canonicalizeHome,
+  DAEMON_OWNER_TOKEN_ENV,
   pollUntilRuntimeReady,
   resolveRuntimeStatus,
   SERVICE_POLL_INTERVAL_MS,
@@ -32,6 +36,7 @@ import {
   type MmsRuntimeRecord
 } from '../../cli/mmsRuntime'
 import {
+  createOwnerToken,
   formatOwnerBusyMessage,
   readOwnerRecord,
   resolveOwnerStatus,
@@ -197,7 +202,10 @@ const GUI_PLATFORM_CAPABILITIES = [
   NET_LOCAL_CAPABILITY,
   BROWSER_VIEWER_CAPABILITY,
   BROWSER_SETUP_CAPABILITY,
-  FIRST_SEND_BINDING_CAPABILITY
+  FIRST_SEND_BINDING_CAPABILITY,
+  BOT_TELLING_CAPABILITY,
+  APP_PRESENCE_CAPABILITY,
+  KEEP_AWAKE_CAPABILITY
 ] as const
 
 export class GuiMmsController extends EventEmitter {
@@ -213,11 +221,12 @@ export class GuiMmsController extends EventEmitter {
   private state: GuiMmsConnectionState = 'idle'
   private quitting = false
   /**
-   * Set while an update installs (`stopForInstall`). Unlike `quitting`, `stop()` does not clear it: nothing may start
-   * or reconnect to the service until `resumeAfterInstall`, because a service started now runs the old executable and
-   * keeps the installer from replacing it.
+   * Set while an update installs (`stopForInstall`) or when Mousse quits and stops its service (`stopForQuit`). Unlike
+   * `quitting`, `stop()` does not clear it: nothing may start or reconnect to the service, because a service started
+   * during an install runs the old executable and keeps the installer from replacing it, and one started during that
+   * quit would keep running after the person stopped it. `resumeAfterInstall` lifts the install hold.
    */
-  private installing = false
+  private held: 'install' | 'quit' | null = null
   private reconnectAttempts = 0
   /** The thread of this computer each window shows (`setShownThreadSource`). */
   private shownThreadOf: ((senderId: number) => string | null) | null = null
@@ -228,6 +237,8 @@ export class GuiMmsController extends EventEmitter {
   private disconnectTimer: ReturnType<typeof setInterval> | null = null
   private lastHello: ProtocolHelloOk | null = null
   private startedDaemon: ChildProcess | null = null
+  /** The owner token `startedDaemon` takes the home with, chosen here so a stop can reach it before its lease exists. */
+  private startedDaemonToken: string | null = null
   private startPromise: Promise<ProtocolHelloOk> | null = null
   private readonly maxReconnect: number
   private readonly reconnectBaseMs: number
@@ -268,9 +279,15 @@ export class GuiMmsController extends EventEmitter {
     this.requestTimeoutMs = opts.requestTimeoutMs
   }
 
+  /** The owner token of a service this controller started whose process has not exited. */
+  get spawnedServiceToken(): string | null {
+    const child = this.startedDaemon
+    return child !== null && child.exitCode === null && child.signalCode === null ? this.startedDaemonToken : null
+  }
+
   /** True from `stopForInstall` until `resumeAfterInstall`. */
   get installingUpdate(): boolean {
-    return this.installing
+    return this.held === 'install'
   }
 
   setConnectionLog(log: GuiConnectionLogSink | null): void {
@@ -383,6 +400,7 @@ export class GuiMmsController extends EventEmitter {
     this.baseBinding = null
     // Do not kill startedDaemon — daemon lifetime is independent of Electron.
     this.startedDaemon = null
+    this.startedDaemonToken = null
     // Allow a later start() after stop (tests / relaunch of UI client).
     this.quitting = false
   }
@@ -393,18 +411,40 @@ export class GuiMmsController extends EventEmitter {
    * this, the first such request after the service stopped would start it again from the executable being replaced.
    */
   async stopForInstall(): Promise<void> {
-    this.installing = true
+    // A quit that stops the service stays held: an install that does not start must not bring the service back.
+    if (this.held !== 'quit') this.held = 'install'
     await this.stop()
+  }
+
+  /**
+   * Mousse quits and stops its service. From this call on, before anything is awaited and for good, the controller
+   * never starts, reconnects to or spawns the service again, so stopping the service cannot bring a new one up; then
+   * it disconnects like `stop()`, without waiting for a service that is still starting.
+   */
+  stopForQuit(): Promise<void> {
+    this.held = 'quit'
+    return this.stop()
   }
 
   /** The installer did not start: the controller may connect (and start the service) again. */
   resumeAfterInstall(): void {
-    this.installing = false
+    if (this.held === 'install') this.held = null
   }
 
   private assertMayConnect(): void {
-    if (this.installing) throw linkError('installing', 'Mousse is installing an update')
+    if (this.held) throw this.heldError()
     if (this.quitting) throw linkError('stopped', 'GuiMmsController is stopped')
+  }
+
+  private heldError(): Error {
+    return this.held === 'install'
+      ? linkError('installing', 'Mousse is installing an update')
+      : linkError('stopped', 'GuiMmsController is stopped')
+  }
+
+  /** A wait for the service to become ready ends once `stop()` begins or a hold is set. */
+  private stopWaiting(): boolean {
+    return this.quitting || this.held !== null
   }
 
   /** Clear reconnect/disconnect monitors and event unsub (all failure/stop paths). */
@@ -446,7 +486,7 @@ export class GuiMmsController extends EventEmitter {
    * their lists again and opens their connections again (`attemptReconnect`), so none of it can be skipped.
    */
   private mainConnectionLost(noticedBy: string): void {
-    if (this.quitting || this.installing) return
+    if (this.quitting || this.held) return
     const client = this.client
     if (this.state !== 'ready' || !client || client.connected) return
     this.log('service.lost', { noticedBy, lastSequence: client.lastKnownSequence })
@@ -577,6 +617,20 @@ export class GuiMmsController extends EventEmitter {
   }
 
   /** The service a window's connection talks to: answers and updates are numbered per service instance. */
+  tellsForSender(senderId: number): boolean {
+    return this.windowSessions.get(senderId)?.client.hello?.capabilities.includes(BOT_TELLING_CAPABILITY) ?? false
+  }
+
+  presenceAudience(senderId: number): string | undefined {
+    const session = this.windowSessions.get(senderId)
+    if (!session?.client.connected || !session.binding || !session.client.hello?.capabilities.includes(APP_PRESENCE_CAPABILITY)) return undefined
+    return `${session.client.hello.instanceId}:${session.binding.profileId}`
+  }
+  async sendPresence(senderId: number, presence: { activeAt: number; timeZone: string }): Promise<void> {
+    if (!this.presenceAudience(senderId)) return
+    await this.windowSessions.get(senderId)!.client.request('app.presence', presence)
+  }
+
   instanceForSender(senderId: number): string | undefined {
     return this.windowSessions.get(senderId)?.client.hello?.instanceId
   }
@@ -601,7 +655,7 @@ export class GuiMmsController extends EventEmitter {
     const sender = this.senderAls.getStore()
     if (!sender) {
       if (!this.client || !this.client.connected) {
-        if (this.installing) throw linkError('installing', 'Mousse is installing an update')
+        if (this.held) throw this.heldError()
         if (this.quitting || this.state === 'stopped') {
           throw linkError('not_connected', 'MMS client not connected')
         }
@@ -615,7 +669,7 @@ export class GuiMmsController extends EventEmitter {
       }
       return this.client
     }
-    if (this.installing) throw linkError('installing', 'Mousse is installing an update')
+    if (this.held) throw this.heldError()
     if (this.quitting || sender.isDestroyed()) throw linkError('window_closing', 'Window MMS session is closing')
     let session = this.windowSessions.get(sender.id)
     if (session && !session.client.connected) {
@@ -677,7 +731,7 @@ export class GuiMmsController extends EventEmitter {
     }
     openedSession = session
     this.rememberWindowProfile(sender, bound.profile.id)
-    if (this.quitting || this.installing || destroyed || sender.isDestroyed()) {
+    if (this.quitting || this.held || destroyed || sender.isDestroyed()) {
       await this.closeWindowSession(sender.id, session)
       throw new Error('Window MMS session closed while opening')
     }
@@ -699,6 +753,9 @@ export class GuiMmsController extends EventEmitter {
     this.windowEventUnsubs.set(sender.id, () => { unsubscribe(); unsubscribeConnection(); unsubscribeClosed() })
     const subscribed = await windowClient.subscribe(0)
     this.afterWindowSubscribe(sender.id, windowClient, subscribed, this.windowReopens.has(sender.id) ? 'reopened' : 'opened')
+    // A new desktop can attach to a service that never stopped. Refresh its bound profile in the
+    // background, after subscribing so the window hears the results. Older daemons just read the snapshots.
+    void windowClient.request('providers.snapshots', { scope: { kind: 'device' }, refreshStaleModels: true }).catch(() => undefined)
     await this.attachedBrowserHost?.acknowledgeClosed(sender)
     // A thread of this computer the window already shows is shown again on this connection; nothing waits for it.
     // Threads of other computers are focused through their router when they are selected.
@@ -768,7 +825,7 @@ export class GuiMmsController extends EventEmitter {
 
   /** A window's own connection closed. Main's own closes (`closeWindowSession`, `stop`) are not losses. */
   private windowConnectionLost(sender: WebContents, session: WindowSession, error: Error): void {
-    if (session.closing || this.quitting || this.installing || sender.isDestroyed()) return
+    if (session.closing || this.quitting || this.held || sender.isDestroyed()) return
     if (this.windowSessions.get(sender.id) !== session) return
     this.log('window.lost', { window: sender.id, error: describeLinkError(error), lastSequence: session.client.lastKnownSequence })
     // A service restart closes this connection and the main one together. When the window notices first, it hands the
@@ -802,7 +859,7 @@ export class GuiMmsController extends EventEmitter {
    * after as many tries as the main connection makes, and waits like the others.
    */
   private scheduleWindowReopen(sender: WebContents): void {
-    if (this.quitting || this.installing || sender.isDestroyed()) {
+    if (this.quitting || this.held || sender.isDestroyed()) {
       this.windowReopens.delete(sender.id)
       return
     }
@@ -855,7 +912,7 @@ export class GuiMmsController extends EventEmitter {
 
   private async reopenWindow(sender: WebContents, reopen: WindowReopen): Promise<void> {
     if (this.windowReopens.get(sender.id) !== reopen) return
-    if (this.quitting || this.installing || sender.isDestroyed()) {
+    if (this.quitting || this.held || sender.isDestroyed()) {
       this.windowReopens.delete(sender.id)
       return
     }
@@ -1036,9 +1093,11 @@ export class GuiMmsController extends EventEmitter {
       this.setState('connecting')
       const record = await pollUntilRuntimeReady(this.homeDir, {
         timeoutMs: SERVICE_START_TIMEOUT_MS,
-        intervalMs: SERVICE_POLL_INTERVAL_MS
+        intervalMs: SERVICE_POLL_INTERVAL_MS,
+        isAborted: () => this.stopWaiting()
       })
       if (record) return record
+      this.assertMayConnect()
       throw linkError('service_not_ready',
         formatOwnerBusyMessage(owner.record, owner.heldUnreadable) +
           ' (owner live but runtime readiness not published)'
@@ -1054,9 +1113,11 @@ export class GuiMmsController extends EventEmitter {
       this.setState('connecting')
       const record = await pollUntilRuntimeReady(this.homeDir, {
         timeoutMs: SERVICE_START_TIMEOUT_MS,
-        intervalMs: SERVICE_POLL_INTERVAL_MS
+        intervalMs: SERVICE_POLL_INTERVAL_MS,
+        isAborted: () => this.stopWaiting()
       })
       if (record) return record
+      this.assertMayConnect()
       throw linkError(this.managedDaemon ? 'service_not_ready' : 'service_not_running',
         this.managedDaemon
           ? `MMS daemon is not ready (managed by npm run dev). Waited ${SERVICE_START_TIMEOUT_MS}ms.`
@@ -1105,6 +1166,7 @@ export class GuiMmsController extends EventEmitter {
       host
     })
     mkdirSync(this.homeDir, { recursive: true })
+    const ownerToken = createOwnerToken()
     const logPath = join(this.homeDir, 'mms-startup.log')
     const logFd = openSync(logPath, 'a')
     let child: ChildProcess
@@ -1115,7 +1177,7 @@ export class GuiMmsController extends EventEmitter {
         {
           detached: true,
           stdio: ['ignore', logFd, logFd],
-          env: { ...env, MOUSSE_HOME: this.homeDir },
+          env: { ...env, MOUSSE_HOME: this.homeDir, [DAEMON_OWNER_TOKEN_ENV]: ownerToken },
           windowsHide: true
         }
       )
@@ -1128,12 +1190,14 @@ export class GuiMmsController extends EventEmitter {
     }
     child.unref()
     this.startedDaemon = child
+    this.startedDaemonToken = ownerToken
     return child
   }
 
   private async waitForSpawnedDaemon(child: ChildProcess): Promise<MmsRuntimeRecord | null> {
     const deadline = Date.now() + GUI_DAEMON_START_TIMEOUT_MS
     while (Date.now() < deadline) {
+      this.assertMayConnect()
       const runtime = resolveRuntimeStatus(this.homeDir)
       if (runtime.running && runtime.record) return runtime.record
       if (child.exitCode !== null || child.signalCode !== null) {
@@ -1235,7 +1299,7 @@ export class GuiMmsController extends EventEmitter {
         this.detachEventHandlers()
       }
       // After stop, the failure is stop's doing: stay stopped.
-      if (!this.quitting && !this.installing) this.enterFailed(err instanceof Error ? err : new Error(String(err)))
+      if (!this.quitting && !this.held) this.enterFailed(err instanceof Error ? err : new Error(String(err)))
       throw err
     }
   }
@@ -1252,13 +1316,13 @@ export class GuiMmsController extends EventEmitter {
       if (this.client === client) this.mainConnectionLost('closed')
     })
     this.disconnectTimer = setInterval(() => {
-      if (this.quitting || this.installing || this.client !== client) return
+      if (this.quitting || this.held || this.client !== client) return
       this.mainConnectionLost('check')
     }, 1000)
   }
 
   private scheduleReconnect(reason: string): void {
-    if (this.quitting || this.installing) return
+    if (this.quitting || this.held) return
     if (this.reconnectTimer || this.reconnecting) return
     if (this.reconnectAttempts >= this.maxReconnect) {
       this.enterFailed(linkError('reconnect_exhausted', `MMS reconnect exhausted after ${reason}`))
@@ -1275,13 +1339,13 @@ export class GuiMmsController extends EventEmitter {
   }
 
   private async reconnect(reason: string): Promise<void> {
-    if (this.quitting || this.installing || this.reconnecting) return
+    if (this.quitting || this.held || this.reconnecting) return
     // A request made before the first start schedules a reconnect, whose timer can fire while start() still waits for
     // the service it spawned. Run beside it, the reconnect would find no service yet and start a second one (which
     // fails: the first owns the home), or close the client the start just opened. It waits for the start instead, and
     // is not needed once the start connected.
     if (this.startPromise) await this.startPromise.catch(() => undefined)
-    if (this.connected || this.quitting || this.installing || this.reconnecting || this.startPromise) return
+    if (this.connected || this.quitting || this.held || this.reconnecting || this.startPromise) return
     const attempt = this.attemptReconnect(reason)
     this.reconnecting = attempt
     let retry = false
@@ -1318,7 +1382,7 @@ export class GuiMmsController extends EventEmitter {
       this.reopenWindowsAfterService()
       return false
     } catch (err) {
-      if (this.quitting || this.installing) return false
+      if (this.quitting || this.held) return false
       this.log('service.reconnect-failed', { reason, error: describeLinkError(err) })
       // Tests with auto-start off fail fast; managed daemon keeps retrying while dev restarts MMS.
       if (this.disableAutoStart && !this.managedDaemon) {

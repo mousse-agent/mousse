@@ -18,8 +18,7 @@ import {
   formatElapsed,
   lastResultText,
   LruCache,
-  plainResultText,
-  RESULT_CACHE_LIMIT
+  plainResultText
 } from '../src/renderer/chat/components/agent-elements/tools/subagent-card-logic'
 import { MessageList } from '../src/renderer/chat/components/agent-elements/message-list'
 import {
@@ -246,27 +245,20 @@ describe('the cache of subagent replies', () => {
     expect(cache.get('c')).toBeNull()
     expect(cache.get('missing')).toBeUndefined()
   })
-
-  it('is bounded for the cards, not growing with every subagent read', () => {
-    expect(RESULT_CACHE_LIMIT).toBe(200)
-    const cache = new LruCache<string | null>(RESULT_CACHE_LIMIT)
-    for (let index = 0; index < 1000; index += 1) cache.set(`thread-${index}`, 'reply')
-    expect(cache.size).toBe(RESULT_CACHE_LIMIT)
-  })
 })
 
 describe('SubagentCardView', () => {
   const render = (model: SubagentCardModel, result?: string | null) =>
     renderToStaticMarkup(createElement(SubagentCardView, { card: model, now: NOW, result, onOpen: () => undefined }))
 
-  it('shows the provider icon, title, provider and model, elapsed time, and the last result', () => {
+  it('shows the provider icon, title, model name, elapsed time, and the last result', () => {
     const html = render(card({ state: 'done', completedAt: Date.parse('2026-10-25T12:09:00.000Z') }), 'Found two issues.')
     expect(html).toContain('subagent-avatar')
     expect(html).toContain('background-color:#D97757')
     expect(html).toContain('API reviewer')
-    expect(html).toContain('claude · Claude Opus')
+    expect(html).toContain('subagent-card-model">Opus<')
     // A remote subagent's card says where it runs.
-    expect(render(card({ state: 'working', computer: 'Studio Mac' }))).toContain('claude · Claude Opus · on Studio Mac')
+    expect(render(card({ state: 'working', computer: 'Studio Mac' }))).toContain('Opus · on Studio Mac')
     expect(html).toContain('>1m 00s<')
     expect(html).not.toContain('>Done')
     expect(html).toContain('Found two issues.')
@@ -371,20 +363,19 @@ describe('a subagent tool row', () => {
     expect(status).toContain('API reviewer')
   })
 
-  it('folds two or more cards into a group with stacked icons, a coloured summary and a toggle', () => {
+  it('gathers two or more cards into a group with stacked icons, a coloured summary and a toggle, open by default', () => {
     const cards = ['a', 'b', 'c', 'd', 'e'].map((id, index) => card({ toolCallId: id, title: index === 0 ? 'Archive builder' : 'Other', state: index < 2 ? 'working' : 'done', completedAt: NOW - 1000 }))
     const html = withCards(cards, createElement(SubagentCardGroup, { toolCallIds: cards.map((entry) => entry.toolCallId) }, createElement('span', null, 'rows')))
     expect(html).toContain('aria-label="5 subagents · 2 working · 3 done"')
-    // Folded: the first subagent's name and how many more.
-    expect(html).toContain('title="Archive builder + 4"')
+    expect(html).toMatch(/class="subagent-group-title">5 subagents</)
     expect(html).toContain('data-tone="running">2 working<')
     expect(html).toContain('data-tone="done">3 done<')
     expect(html.match(/class="subagent-avatar is-chip"/g)).toHaveLength(3)
     expect(html).toMatch(/class="subagent-group-more">\+(<!-- -->)?2</)
     expect(html).toContain('subagent-group-elapsed')
-    // Folded by default, even while tasks are going.
-    expect(html).toContain('aria-expanded="false"')
-    expect(html).not.toContain('rows')
+    // Open by default, so every subagent's row is in sight once the turn ends.
+    expect(html).toContain('aria-expanded="true"')
+    expect(html).toContain('rows')
   })
 
   it('leaves a single card alone, with no group header', () => {
@@ -445,9 +436,9 @@ describe('the transcript with cards and notices', () => {
     const group = html.indexOf('Ran 2 commands')
     expect(group).toBeGreaterThan(-1)
     expect(html).toContain('2 subagents · 1 working · 1 done')
-    // The subagents' card, folded to its first name, comes after the tool group, not inside it.
-    expect(html).toContain('title="Reviewer one + 1"')
+    // The subagents' cards come after the tool group, not inside it.
     expect(html.indexOf('Reviewer one')).toBeGreaterThan(group)
+    expect(html.indexOf('Reviewer two')).toBeGreaterThan(group)
   })
 
   it('draws a wake message as a notice, not as something the user wrote', () => {
@@ -467,6 +458,24 @@ describe('the transcript with cards and notices', () => {
     expect(html).not.toContain('chat-user-bubble')
     expect(html).not.toContain('data-prompt-id')
     expect(html).toContain('Thanks, merging.')
+  })
+
+  it('draws a question of a subagent as a notice too: the text that tells the agent how to answer is not shown', () => {
+    const html = render(
+      [
+        message('wake', 'user', [{ type: 'text', text: 'Subagent "Builder" (thread a) is waiting for an answer to question q1.\nRAW QUESTION TEXT\nAnswer it with answer_subagent.' }], {
+          subagentNotice: [{ delegationId: 'd1', childThreadId: 'a', title: 'Builder', runStatus: 'needs_input', fullyShown: true, event: 'question', requestId: 'q1' }]
+        }),
+        message('a1', 'assistant', [{ type: 'text', text: 'The builder asks which database to use.' }])
+      ],
+      []
+    )
+    expect(html).toContain('Builder')
+    expect(html).toContain('asked a question')
+    expect(html).not.toContain('RAW QUESTION TEXT')
+    expect(html).not.toContain('answer_subagent')
+    expect(html).not.toContain('chat-user-bubble')
+    expect(html).toContain('The builder asks which database to use.')
   })
 
   it('still draws an ordinary user message as a bubble', () => {

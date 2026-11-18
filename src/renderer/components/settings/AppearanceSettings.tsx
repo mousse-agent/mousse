@@ -1,6 +1,9 @@
 import { useRef, useState, type CSSProperties } from 'react'
 import { ANIMATION_SPEEDS, type AnimationSpeed, type AppearanceSettings as AppearanceValues, type MousseSettings, type MousseSettingsUpdate, type SettingsOptions, type ThemeId } from '../../../shared/settings'
-import { activeUserTheme, isUserThemeBase, parseUserThemeFile, USER_THEME_LIMITS, userThemeFile, userThemeIdFor, type UserTheme } from '../../../shared/themes/userThemes'
+import { activeUserTheme, isUserThemeBase, parseUserThemeFile, USER_THEME_FILE_MAX_BYTES, USER_THEME_LIMITS, userThemeFile, userThemeIdFor, type UserTheme } from '../../../shared/themes/userThemes'
+import { wallpaperForExport } from '../../lib/wallpaper'
+import { useAppStore } from '../../stores/appStore'
+import { chooseWallpaper } from './WallpaperRows'
 import { Select } from '../ui/Select'
 import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import { FontPicker } from './FontPicker'
@@ -101,6 +104,8 @@ export function AppearanceSettings({
   const userTheme = activeUserTheme(appearance)
   const userThemes = appearance.userThemes ?? []
   const [importError, setImportError] = useState('')
+  const [wallpaperError, setWallpaperError] = useState('')
+  const profileId = useAppStore((state) => state.profileId)
   const importInput = useRef<HTMLInputElement>(null)
   /** A patch of appearance fields only; the daemon merges it into what is saved now. */
   const patch = (fields: Partial<AppearanceValues>): Promise<void> => onUpdate({ appearance: fields } as MousseSettingsUpdate)
@@ -114,13 +119,43 @@ export function AppearanceSettings({
     addUserTheme({ id: userThemeIdFor(name, userThemes.map((theme) => theme.id)), name, base, accent: '', colors: {}, css: '' })
   }
   const deleteUserTheme = (id: string) => void patch({ userThemes: userThemes.filter((theme) => theme.id !== id), userTheme: '' })
-  const exportUserTheme = (theme: UserTheme) => downloadJson(`${theme.id.replace(/^user-/, '')}.mousse-theme.json`, userThemeFile(theme))
+  const exportUserTheme = async (theme: UserTheme) => {
+    // The wallpaper travels in the file as its largest display copy; a theme whose image cannot be read exports without it.
+    const image = theme.wallpaper && profileId ? await wallpaperForExport(profileId, theme.wallpaper.id).catch(() => null) : null
+    downloadJson(`${theme.id.replace(/^user-/, '')}.mousse-theme.json`, userThemeFile(theme, image ?? undefined))
+  }
   const importUserTheme = async (file: File | undefined) => {
     if (!file) return
+    if (file.size > USER_THEME_FILE_MAX_BYTES) { setImportError('This file is too large to be a Mousse theme.'); return }
     const read = parseUserThemeFile(await file.text(), userThemes.map((theme) => theme.id))
     if ('error' in read) { setImportError(read.error); return }
-    setImportError('')
-    addUserTheme(read.theme)
+    let theme = read.theme
+    let note = ''
+    if (read.wallpaper) {
+      try {
+        const info = profileId ? await window.mousse.wallpapers.importBytes(profileId, read.wallpaper.data) : null
+        if (!info) throw new Error('unsupported')
+        theme = { ...theme, wallpaper: { id: info.id, type: info.type, width: info.width, height: info.height, fit: read.wallpaper.fit, position: read.wallpaper.position, dim: read.wallpaper.dim } }
+      } catch {
+        note = 'Imported without its wallpaper: the image could not be used.'
+      }
+    }
+    setImportError(note)
+    addUserTheme(theme)
+  }
+  /** On a built-in theme: a theme of your own over it, with the chosen image. */
+  const chooseWallpaperOnBuiltIn = async () => {
+    try {
+      const wallpaper = await chooseWallpaper()
+      setWallpaperError('')
+      if (!wallpaper) return
+      const base = isUserThemeBase(appearance.theme) ? appearance.theme : 'dark'
+      const label = options.themes.find((theme) => theme.id === appearance.theme)?.label ?? 'Theme'
+      const name = `${label} with wallpaper`
+      addUserTheme({ id: userThemeIdFor(name, userThemes.map((theme) => theme.id)), name, base, accent: '', colors: {}, css: '', wallpaper })
+    } catch (error) {
+      setWallpaperError((error as Error)?.message === 'unsupported' ? 'Needs a newer Mousse service.' : "Can't use that file.")
+    }
   }
   const atLimit = userThemes.length >= USER_THEME_LIMITS.themes
   const themeChosen = Boolean(userTheme) || options.themes.some((theme) => theme.id === appearance.theme)
@@ -203,6 +238,16 @@ export function AppearanceSettings({
             </button>
           </div>
         </SettingsRow>
+        {!userTheme && (
+          <SettingsRow
+            title="Wallpaper"
+            anchor="appearance-wallpaper"
+            description={wallpaperError
+              ? <span role="alert" className="user-theme-dropped" title="A PNG, JPEG or WebP on this computer, at most 32 MB, 16,384 pixels a side and 40 megapixels.">{wallpaperError}</span>
+              : <span title="Makes a theme of your own over this one, with the image behind the chat.">An image behind the chat.</span>}
+            control={<button type="button" className="settings-btn" disabled={atLimit} onClick={() => void chooseWallpaperOnBuiltIn()}>Choose…</button>}
+          />
+        )}
         <SettingsRow
           title="Accent color"
           anchor="appearance-accent"
@@ -231,12 +276,29 @@ export function AppearanceSettings({
         <SettingsRow
           title="Project colors on threads"
           anchor="appearance-project-colors"
-          description="Tint threads with their project's color."
+          control={
+            <Select
+              ariaLabel="Project colors on threads"
+              value={appearance.threadProjectColors}
+              options={[
+                { value: 'off', label: 'Off' },
+                { value: 'outline', label: 'Outline' },
+                { value: 'fill', label: 'Fill' },
+                { value: 'gradient', label: 'Gradient' }
+              ]}
+              onChange={(threadProjectColors) => void onUpdate({ appearance: { ...appearance, threadProjectColors } })}
+            />
+          }
+        />
+        <SettingsRow
+          title="Reply previews"
+          anchor="appearance-reply-previews"
+          description="The latest reply under each thread and bot."
           control={
             <Switch
-              label="Project colors on threads"
-              checked={appearance.threadProjectColors}
-              onChange={(threadProjectColors) => void onUpdate({ appearance: { ...appearance, threadProjectColors } })}
+              label="Reply previews"
+              checked={appearance.replyPreviews}
+              onChange={(replyPreviews) => void onUpdate({ appearance: { ...appearance, replyPreviews } })}
             />
           }
         />
@@ -249,7 +311,7 @@ export function AppearanceSettings({
             appearance={appearance}
             onSave={saveUserTheme}
             onDelete={deleteUserTheme}
-            onExport={exportUserTheme}
+            onExport={(theme) => void exportUserTheme(theme)}
           />
         </SettingsGroup>
       )}

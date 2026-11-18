@@ -10,6 +10,8 @@ import { useChatsStore } from '../stores/chatsStore'
 import { orderedThreadIds, threadAfterArchive } from './threadOrder'
 import { afterNextPaint } from './pendingThreadRows'
 import { runWithToast } from './actionToast'
+import { showProjectInSidebar } from './sidebarReveal'
+import { markPendingArchive } from './archiveMotion'
 import { loadProviderSnapshots, pickerListsModel, pickerProviders, projectScope, scopeKey, useProviderSnapshotsStore } from './providerSnapshots'
 
 /**
@@ -53,9 +55,18 @@ export async function selectOrSettle(threadId: string): Promise<void> {
   }
 }
 
-/** Opens the newest empty draft thread, or creates one, and selects it. The sidebar stays on its tab. A private draft is never reused for it. */
+/**
+ * Opens the newest empty draft thread, or creates one, and selects it, in the project last picked for a new thread
+ * (`lastNewThreadProjectId`) while it is still listed. The sidebar stays on its tab. A private draft is never reused for it.
+ */
 export async function createAndSelectThread(): Promise<void> {
   const store = useAppStore.getState()
+  // The project last picked for a new thread, while this computer still lists it.
+  const remembered = store.lastNewThreadProjectId
+  if (remembered && store.projects.some((project) => project.id === remembered && !project.node)) {
+    await createAndSelectProjectThread(remembered)
+    return
+  }
   const thread = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly)) ?? await window.mousse.threads.create()
   store.upsertThread(thread)
   await selectThread(thread.id)
@@ -123,6 +134,7 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
   // Decided from the store as it is now, with nothing awaited first.
   const store = useAppStore.getState()
   const profileId = store.profileId
+  store.setLastNewThreadProjectId(projectId)
   // A project just added (Add project) may not be listed in this window yet when the create answers.
   const listedBefore = store.projects.some((project) => project.id === projectId)
   const empty = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly), projectId)
@@ -142,10 +154,17 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
   await selectThread(thread.id)
 }
 
-/** Asks for a project folder, then opens a new thread in it. Nothing happens when the picker is cancelled. */
+/**
+ * Asks for a project folder, then opens a new thread in it. The project is listed at once, and an open sidebar shows
+ * its group. Nothing happens when the picker is cancelled.
+ */
 export async function addProjectAndStartThread(): Promise<void> {
   const project = await window.mousse.projects.open()
   if (!project) return
+  const store = useAppStore.getState()
+  // The service also pushes the list, but that can come after the new thread is open.
+  if (!store.projects.some((entry) => entry.id === project.id)) store.setProjects([...store.projects, project])
+  if (store.threadsSidebarOpen) showProjectInSidebar(project.id)
   await createAndSelectProjectThread(project.id)
 }
 
@@ -175,6 +194,21 @@ export function setThreadHidden(threadId: string, hidden: boolean): Promise<bool
   }, { retry: true })
 }
 
+/**
+ * Hide bot threads, Hide all bot threads: takes threads the owner's bots started out of the sidebar at once. Each bot's
+ * chat still lists them, with Show in sidebar. A failure shows as one toast with Retry. Resolves to whether all went through.
+ */
+export function hideThreads(threadIds: readonly string[]): Promise<boolean> {
+  return runWithToast(threadIds.length === 1 ? 'hide the thread' : 'hide the threads', async () => {
+    const results = await Promise.allSettled(threadIds.map((threadId) =>
+      window.mousse.platformRequest.request<{ thread?: Thread }>('threads.setHidden', { threadId, hidden: true })))
+    const store = useAppStore.getState()
+    for (const result of results) if (result.status === 'fulfilled' && result.value?.thread) store.upsertThread(result.value.thread)
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (failed) throw failed.reason
+  }, { retry: true })
+}
+
 /** Archives the open thread, and opens the next one in its project (see `archiveThread`). */
 export async function archiveOpenThread(): Promise<void> {
   const thread = openStartedThread()
@@ -182,18 +216,45 @@ export async function archiveOpenThread(): Promise<void> {
   await archiveThread(thread.id)
 }
 
+/** How long a confirmed archive is still shown from here when the thread's update has not arrived. */
+const ARCHIVE_UPDATE_WAIT_MS = 3000
+
+/**
+ * Archives (or unarchives) a thread through the service, and shows it so in the sidebar from the call on
+ * (`markPendingArchive`): its row starts to move at once. A failure throws, and the row moves back.
+ */
+export async function setThreadArchived(threadId: string, archived: boolean): Promise<void> {
+  const release = markPendingArchive(threadId, archived)
+  try {
+    await window.mousse.threads.settle(threadId, archived)
+  } catch (error) {
+    release()
+    throw error
+  }
+  // Shown from here until the thread's update arrives, so the row does not move back and forth meanwhile.
+  const arrived = () => Boolean(useAppStore.getState().threads.find((thread) => thread.id === threadId)?.settledAt) === archived
+  if (arrived()) return release()
+  const finish = () => {
+    clearTimeout(timer)
+    unsubscribe()
+    release()
+  }
+  const timer = setTimeout(finish, ARCHIVE_UPDATE_WAIT_MS)
+  const unsubscribe = useAppStore.subscribe(() => { if (arrived()) finish() })
+}
+
 /**
  * Archives a thread. When it is the thread open in the pane (or the parent of the open subagent thread), the pane then
  * opens the next thread in its project, or the one before it when it was the last; a project's only thread stays
- * open. A failed archive throws and changes nothing. The sidebar's rows move when the thread's update arrives, as for
- * an archive from anywhere else (`useArchiveMoves`).
+ * open. A failed archive throws and changes nothing. The sidebar's rows start to move at the call
+ * (`setThreadArchived`); an archive from anywhere else moves them when its update arrives (`useArchiveMoves`).
  */
 export async function archiveThread(threadId: string): Promise<void> {
   const { projects, threads, activeThreadId } = useAppStore.getState()
   const openRow = activeThreadId ? (openSubagentParentRow(activeThreadId, threads) ?? activeThreadId) : null
   const excluded = new Set(useChatsStore.getState().snapshot.chats.flatMap((chat) => (chat.threadId ? [chat.threadId] : [])))
   const next = openRow === threadId ? threadAfterArchive({ projects, threads, threadId, excluded }) : null
-  await window.mousse.threads.settle(threadId, true)
+  await setThreadArchived(threadId, true)
   // Only when the person has not moved on to another thread in the meantime.
   const now = useAppStore.getState().activeThreadId
   const stillOpen = now ? (openSubagentParentRow(now, useAppStore.getState().threads) ?? now) === threadId : false

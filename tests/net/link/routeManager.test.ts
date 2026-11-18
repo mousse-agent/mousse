@@ -146,6 +146,51 @@ describe('RouteManager real transport/TLS paths', () => {
   })
 })
 
+describe('RouteManager remembered addresses', () => {
+  // Each route answers with its own key: a remembered address now held by another device, and the peer's signed route.
+  const racing = (remembered: string[] | undefined) => {
+    const clock = new FakeClock(),
+      right = Buffer.from(credentials.publicKeySpki).toString('base64url'),
+      other = Buffer.from(generateSelfSignedCert('another-device').publicKeySpki).toString('base64url'),
+      keyOf = new WeakMap<Duplex, string>()
+    const transport = fakeTransport(async (route) => {
+      const raw = new Duplex({ read() {}, write(_chunk, _encoding, done) { done() } })
+      keyOf.set(raw, route.address === 'stale' ? other : right)
+      return raw
+    })
+    const openChannel: OpenSecureChannel = async (raw) => fakeChannel(raw as Duplex, keyOf.get(raw as Duplex)!)
+    const manager = new RouteManagerImpl({ node, transports: [transport], credentials, clock, staggerMs: 250, openChannel })
+    const target: PeerRef = {
+      ...peer(right),
+      routes: [
+        { transport: 'memory', address: 'stale', priority: -5 },
+        { transport: 'memory', address: 'target', priority: 0 }
+      ],
+      ...(remembered ? { remembered } : {})
+    }
+    const connected = manager.connect(target, new AbortController().signal)
+    return { clock, manager, connected }
+  }
+
+  it('a remembered address answering with another key fails alone, and the signed route still opens', async () => {
+    const { clock, manager, connected } = racing(['stale'])
+    await tick()
+    clock.advance(250)
+    const opened = await connected
+    cleanup.push(() => opened.channel.close())
+    expect(opened.route.address).toBe('target')
+    expect(manager.health(node).map((route) => [route.route.address, route.state, route.lastError])).toEqual([
+      ['stale', 'failing', 'peer_key_mismatch'],
+      ['target', 'ok', undefined]
+    ])
+  })
+
+  it('another key on a route that is not only remembered still ends the race', async () => {
+    const { connected } = racing(undefined)
+    await expect(connected).rejects.toMatchObject({ code: 'peer_key_mismatch' })
+  })
+})
+
 describe('RouteManager bounded phases and cancellation', () => {
   it.each(['resolve', 'connect', 'tls'] as const)(
     'budgets %s phase independently and cancels late work',

@@ -3,14 +3,12 @@ import { dirname, join } from 'node:path'
 import { PROFILER_TOOL_NAMES } from '../../../shared/diagnostics/profiler'
 import type { McpAttachment } from './MousseMcpServer'
 
-/** Name of the Mousse server in every runtime's MCP configuration; tools appear as `mcp__mousse__*`. */
-export const MOUSSE_MCP_SERVER_NAME = 'mousse'
+import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../shared/harness/mcpNames'
+export { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME } from '../../../shared/harness/mcpNames'
 /** Environment variable that carries the bearer token to the stdio bridge (never argv). */
 export const MOUSSE_MCP_TOKEN_ENV = 'MOUSSE_MCP_TOKEN'
 /** Per-call timeout runtimes should allow: `ask_user` may wait up to an hour. */
 export const MOUSSE_MCP_TOOL_TIMEOUT_MS = 60 * 60 * 1000
-/** Name of the MCP relay in a runtime's MCP configuration: the user's Mousse MCP servers, relayed. */
-export const MOUSSE_RELAY_SERVER_NAME = 'mousse-relay'
 /** Per-call timeout of a relayed tool: under the stdio bridge's 300 s fetch ceiling. */
 export const RELAY_CALL_TIMEOUT_MS = 4 * 60_000
 
@@ -160,7 +158,7 @@ export function isMousseServerTool(toolName: string): boolean {
  * the listed `reads` and `readsOthers` tools and the `readOnlySafe` ones of the app-tool registry (a test keeps them equal).
  * Runtimes that decide per tool name use it; the server refuses the rest in any case.
  */
-export const READ_ONLY_MOUSSE_TOOLS: ReadonlySet<string> = new Set(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'ask_user', 'delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'list_computers', 'list_models', 'list_skills', 'load_skill', 'web_search', 'web_fetch', 'git_status', 'git_diff', 'theme_read', ...PROFILER_TOOL_NAMES])
+export const READ_ONLY_MOUSSE_TOOLS: ReadonlySet<string> = new Set(['thread_read', 'thread_list', 'thread_search', 'thread_wait', 'queue_list', 'ask_user', 'withdraw_question', 'delegate_task', 'continue_subagent', 'answer_subagent', 'task_status', 'task_cancel', 'list_subagents', 'list_computers', 'list_models', 'list_skills', 'load_skill', 'web_search', 'web_fetch', 'git_status', 'git_diff', 'theme_read', 'terminal_read', 'running_list', 'tool_catalogue', ...PROFILER_TOOL_NAMES])
 
 export type AcpMcpServer =
   | { name: string; type: 'http'; url: string; headers: Array<{ name: string; value: string }> }

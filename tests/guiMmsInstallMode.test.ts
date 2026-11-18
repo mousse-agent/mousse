@@ -62,6 +62,18 @@ describe('GuiMmsController while an update installs', () => {
     expect(spawn).toHaveBeenCalledTimes(2)
   })
 
+  it("an update install that fails after the tray's Quit does not bring the service back", async () => {
+    const gui = new GuiMmsController({ homeDir: newHome() })
+    const spawn = vi.spyOn(gui as unknown as Internals, 'spawnDaemon').mockRejectedValue(new Error('spawned'))
+    await gui.stopForQuit()
+    // An install already under way stops the client for itself, its installer does not start, and it recovers.
+    await gui.stopForInstall()
+    gui.resumeAfterInstall()
+    await expect(gui.start()).rejects.toThrow('stopped')
+    await expect(gui.runWithSender(fakeWindow(43), () => gui.request('threads.list'))).rejects.toThrow('stopped')
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
   it('a connected window does not reconnect or start the service when it exits during the install', async () => {
     const home = newHome()
     const previousHome = process.env.MOUSSE_HOME

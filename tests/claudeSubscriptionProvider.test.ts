@@ -11,6 +11,8 @@ import { EffectOutbox } from '../src/mms/run/EffectOutbox'
 import { RunEngine } from '../src/mms/run/RunEngine'
 import { RunStore } from '../src/mms/run/RunStore'
 import { readUsageLimit } from '../src/mms/orchestrator/providerErrors'
+import { AppError } from '../src/shared/errors'
+import { providerFailureText } from '../src/shared/harness/types'
 import { parseModelCatalog, type ModelCatalog } from '../src/shared/modelCatalog'
 import { EMPTY_PREFS, modelsWithPrefs } from '../src/mms/harness/catalog'
 
@@ -1060,6 +1062,37 @@ describe('Claude reasoning levels', () => {
     ])
   })
 
+  it.each(['settings', 'list'] as const)('keeps the available model list when discovery times out reading %s', async (phase) => {
+    const query = Object.assign(fakeQuery(), {
+      supportedModels: vi.fn(async () => [opus, haiku]),
+      setModel: vi.fn(async () => {}),
+      getSettings: vi.fn(() => new Promise(() => {}))
+    })
+    if (phase === 'list') query.supportedModels.mockImplementation(() => new Promise(() => {}))
+    const { service, home, settings } = fixture(() => query)
+    await service.status()
+
+    vi.useFakeTimers()
+    try {
+      const refresh = service.refreshModels(home).then(() => ({ ok: true }), (error: Error) => ({ ok: false, message: error.message }))
+      await vi.advanceTimersByTimeAsync(15_000)
+      if (phase === 'settings') {
+        expect(await refresh).toEqual({ ok: true })
+        expect(service.llmProvider()?.models.map(({ id, label }) => [id, label])).toEqual([
+          ['opus', 'Opus 5.5'], ['haiku', 'Haiku 5.5']
+        ])
+        expect(settings().modelsRefreshedAt).toBeTruthy()
+      } else {
+        expect(await refresh).toEqual({ ok: false, message: 'Claude Code model discovery timed out' })
+        expect(settings().models).toEqual([{ id: 'sonnet', label: 'Sonnet' }])
+      }
+      expect(query.close).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+      service.stop()
+    }
+  })
+
   it('runs Ultracode with Claude Code\'s ultracode setting at the model\'s default effort', async () => {
     const captured: Options[] = []
     const { service, home } = fixture(({ options }) => { captured.push(options); return fakeQuery([result]) }, true, undefined, [{ id: 'opus', label: 'Opus 5.5', efforts: ['low', 'high', 'ultracode'] }])
@@ -1530,6 +1563,38 @@ it('records successful official file edits only once without asking', async () =
   expect(onLineEdits).toHaveBeenCalledExactlyOnceWith(2)
 })
 
+// #595: Claude Code keeps its own tools' results in its session file. Mousse's hook hands back each result with the
+// thread's secrets hidden (`updatedToolOutput`), read at that moment (a secret given mid-turn included), so neither
+// the model nor that file gets the value. tests/live/claudeSecretSessionFile.test.ts checks the real file.
+it("hides the thread's secrets in its own tools' results before Claude Code keeps them", async () => {
+  const SECRET = 'ghp_UnitCheckSecretValue0123456789'
+  let given = false
+  const outputs: unknown[] = []
+  const { service, home } = fixture(({ options }) => {
+    const q = fakeQuery()
+    q[Symbol.asyncIterator] = async function* () {
+      const post = options.hooks!.PostToolUse![0].hooks[0]
+      const fire = async (id: string, tool: string, response: unknown) => {
+        outputs.push(await post({ hook_event_name: 'PostToolUse', tool_use_id: id, tool_name: tool, tool_input: {}, tool_response: response } as never, id, { signal: new AbortController().signal }))
+      }
+      // Before the secret is given, nothing is rewritten.
+      await fire('before', 'Read', { type: 'text', file: { filePath: 'GH_TOKEN', content: `     1\t${SECRET}\n` } })
+      given = true
+      await fire('read', 'Read', { type: 'text', file: { filePath: 'GH_TOKEN', content: `     1\t${SECRET}\n` } })
+      await fire('bash', 'Bash', { stdout: `token: ${SECRET}`, stderr: '', interrupted: false })
+      await fire('plain', 'Bash', 'nothing secret here')
+      yield result as never
+    }
+    return q
+  })
+  const masker = (text: string) => text.split(SECRET).join('[secret GH_TOKEN hidden]')
+  await service.chat({ ...chatInput(home), secretMasker: () => (given ? masker : undefined) })
+  expect(outputs[0]).toEqual({})
+  expect(outputs[1]).toEqual({ hookSpecificOutput: { hookEventName: 'PostToolUse', updatedToolOutput: { type: 'text', file: { filePath: 'GH_TOKEN', content: '     1\t[secret GH_TOKEN hidden]\n' } } } })
+  expect(outputs[2]).toMatchObject({ hookSpecificOutput: { updatedToolOutput: { stdout: 'token: [secret GH_TOKEN hidden]' } } })
+  expect(outputs[3]).toEqual({})
+})
+
 
 it('resumes the same Claude session, with no replayed history, when the model changes', async () => {
   const inputs: Array<{ options: Options; prompt: unknown }> = []
@@ -1694,6 +1759,31 @@ describe('a plan usage limit (one-shot query)', () => {
     const { service, home } = fixture(() => fakeQuery([init, failure({ api_error_status: 400, errors: ['API Error: 400 messages.3.content.0: tool_use ids were found without tool_result blocks'] })]))
     const error = await service.chat(chatInput(home)).catch((caught: unknown) => caught)
     expect(error).toMatchObject({ code: 'provider_api_error', message: '400 · messages.3.content.0: tool_use ids were found without tool_result blocks', details: { provider: 'claude', status: 400 } })
+  })
+
+  // Hand-authored frames: the result's shape follows Claude Code's `API Error: <reason>` text for a request that got no
+  // HTTP answer, with the retries it made first (`api_retry`, `error_status: null`).
+  it('an unreachable provider fails the turn with what Claude Code said and the retries it made, never a generic line', async () => {
+    const retry = (attempt: number) => ({ type: 'system', subtype: 'api_retry', attempt, max_retries: 10, retry_delay_ms: 500, error_status: null, error: 'unknown', session_id: 'vendor-session' })
+    const said = 'API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)'
+    const { service, home } = fixture(() => fakeQuery([init, retry(1), retry(10), { type: 'result', subtype: 'success', is_error: true, result: said, session_id: 'vendor-session' }]))
+    const retries: unknown[] = []
+    const error = await service.chat({ ...chatInput(home), onRetry: (detail) => retries.push(detail) }).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({
+      code: 'provider_unavailable',
+      message: 'Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)',
+      errorInfo: { category: 'unavailable' },
+      details: { provider: 'claude', retries: { attempt: 10, max: 10 } }
+    })
+    expect(providerFailureText(error as AppError)).toBe('[provider_unavailable] Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED) (after 10/10 retries)')
+    expect(retries.at(-1)).toMatchObject({ attempt: 10, maxAttempts: 10, cause: 'connection error' })
+  })
+
+  it('a failure that is not recognisably the provider\'s stays an internal error, so its text is not shown', async () => {
+    const { service, home } = fixture(() => fakeQuery([init, { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['TypeError: x is undefined\n    at run (cli.js:1:2)'], session_id: 'vendor-session' }]))
+    const error = await service.chat(chatInput(home)).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(Error)
+    expect(error).not.toBeInstanceOf(AppError)
   })
 
   it('a failure that is not a limit saves no session, even when a rejected window was seen earlier', async () => {

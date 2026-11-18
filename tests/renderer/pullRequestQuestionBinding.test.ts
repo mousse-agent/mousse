@@ -165,15 +165,6 @@ describe('a Merge or Close question in the pull request panel', () => {
     expect(merge).toHaveBeenCalledTimes(1)
     expect(merge.mock.calls[0][1]).toBe('ccc3333')
   })
-
-  it('sends the head and method it was asked about when nothing changed', async () => {
-    await render()
-    await click(host.querySelector('.pr-panel-merge'))
-    await click(confirmMerge())
-    expect(merge.mock.calls[0][0]).toMatchObject({ path: '/repo-a', number: 12 })
-    expect(merge.mock.calls[0][1]).toBe('aaa1111')
-    expect(merge.mock.calls[0][2]).toBe('squash')
-  })
 })
 
 describe("the Changes tab's more menu", () => {

@@ -13,6 +13,7 @@ import { permissionActionForWrite } from '../../files/gitMetadataWrite'
 import { harnessAppError } from '../../../shared/harness/types'
 import type { CredentialKind } from '../../../shared/harness/status'
 import { parseThinkingSuffixFromModelId } from '../../../shared/modelVariants'
+import type { ChatImageAttachment } from '../../../shared/types'
 import { atomicWriteFileSync, atomicWriteJsonSync } from '../../data/AtomicFs'
 import { normalizeProviderError } from '../../orchestrator/providerErrors'
 import type {
@@ -51,7 +52,9 @@ import { piCredentialHandler, piOAuthCredential, piOAuthHandle, writePiAuth, typ
 import type { PiRpcEvent, PiRpcExit, PiRpcRequest } from './rpcClient'
 import { preparePiHome, type PiSettingsInput } from './settings'
 import { PI_NATIVE_TOOLS } from './nativeTools'
+import type { BotFileReadResult } from '../../../shared/bots/personal/authority'
 import { botAppToolRefusal, checkBuiltinCall, checkMessage } from '../../../shared/bots/personal/walls'
+import { refusalText, type RefusalCode } from '../../run/mcp/appTools/refusal'
 import { neutralToolIdempotent, neutralToolsOf } from '../../../shared/harness/tools'
 
 /**
@@ -291,6 +294,11 @@ function fingerprint(text: string): string {
   return createHash('sha256').update(text).digest('hex')
 }
 
+/** Images as Pi's image content (its `prompt` and `steer` commands take them). */
+function piImages(images: readonly ChatImageAttachment[] | undefined): Array<{ type: 'image'; data: string; mimeType: string }> {
+  return (images ?? []).map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }))
+}
+
 function textOf(message: unknown): string {
   const content = (message as { content?: unknown })?.content
   if (!Array.isArray(content)) return ''
@@ -358,6 +366,8 @@ export const PI_STEER_POLL_MS = 100
 interface PiSteer {
   text: string
   token: string
+  /** The images sent with it: they go to Pi with the text. */
+  images?: ChatImageAttachment[]
   /** A person's message: once a reply started after it was sent, it cuts in rather than wait for Pi's next step. */
   person: boolean
   state: 'sending' | 'queued' | 'cutHeld'
@@ -464,6 +474,8 @@ class PiTurn {
   progressed = false
   readonly startedAt = Date.now()
   readonly openTools = new Map<string, { name: string; mousse: boolean }>()
+  /** Pi file calls awaiting their success and truncation result, by call id. */
+  readonly fileCalls = new Map<string, { completed(success: boolean, read?: BotFileReadResult): void }>()
   /** A bot's built-in calls with a `started` ledger row, by call id. */
   readonly ledgerRows = new Map<string, string>()
   /** Steers the turn owns and Pi has not read, each with its drain's token: it is accepted by that token alone. */
@@ -1252,10 +1264,13 @@ export class PiRpcEngine implements ProviderAdapter {
     if (!turn || turn.attemptToken !== request.attemptToken || turn.phase === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }
     // A cut is aborting this prompt: Pi runs none of its calls.
     if (turn.gateRelease.signal.aborted) return { allow: false, reason: GATE_REFUSALS.denied }
-    if (!turn.active.has(request.toolName)) return { allow: false, reason: `${GATE_REFUSALS.denied}: ${request.toolName} is not available in this turn` }
+    const builtin = Object.hasOwn(BUILTIN_CLASSES, request.toolName)
+    // A refusal of a Mousse or proxied MCP tool is in the refusal shape every Mousse tool refuses in; Pi gives the reason
+    // to the model as the tool's error text. A built-in's stays in words.
+    const refuse = (code: RefusalCode, reason: string): PiGateResponse => ({ allow: false, reason: builtin ? reason : refusalText(code, reason) })
+    if (!turn.active.has(request.toolName)) return refuse('unavailable', `${GATE_REFUSALS.denied}: ${request.toolName} is not available in this turn`)
     const kind = turn.classes.get(request.toolName) ?? 'mutation'
     const access = turn.input.child?.readOnly ? turn.host.tools.toolAccess : undefined
-    const builtin = Object.hasOwn(BUILTIN_CLASSES, request.toolName)
     const definition = turn.host.definition
     let input = request.input
     let rewritten: Record<string, unknown> | undefined
@@ -1278,7 +1293,7 @@ export class PiRpcEngine implements ProviderAdapter {
       try {
         await access.execute(request.toolName, input, async () => undefined)
       } catch (error) {
-        return { allow: false, reason: error instanceof Error ? error.message : GATE_REFUSALS.denied }
+        return refuse('read_only', error instanceof Error ? error.message : GATE_REFUSALS.denied)
       }
     }
     // A bot turn: each built-in is held to the bot's grant (tools, roots, scratch) on the path Pi
@@ -1296,10 +1311,10 @@ export class PiRpcEngine implements ProviderAdapter {
       const mcp = bot.mcpTools?.find((tool) => tool.providerName === request.toolName)
       if (mcp) {
         const decided = bot.check({ kind: 'mcp', server: mcp.server, tool: mcp.tool, serverName: mcp.serverName, args })
-        if (!decided.ok) return { allow: false, reason: checkMessage(decided) }
+        if (!decided.ok) return refuse('not_granted', checkMessage(decided))
       } else {
         const refusal = botAppToolRefusal(bot, request.toolName, args)
-        if (refusal) return { allow: false, reason: refusal }
+        if (refusal) return refuse('not_granted', refusal)
       }
     }
     // A definition run: every call, built-in or app/MCP, is authorized in full (approval included)
@@ -1310,7 +1325,7 @@ export class PiRpcEngine implements ProviderAdapter {
       const uncontainedShell = builtin && isShellTool(request.toolName) && this.capabilities.containment !== 'strong'
       // The arguments checked (and approved) are the ones the tool runs with.
       const decided = await authorizeDefinitionCall(definition, { toolName: request.toolName, args: input, projectPath: thread.cwd, signal: turn.input.signal, ...(uncontainedShell ? { uncontainedShell } : {}) })
-      if (!decided.allowed) return { allow: false, reason: decided.message }
+      if (!decided.allowed) return refuse('not_granted', decided.message)
       // Stopped while the approval was pending, or the run is no longer the thread's active run (it
       // ended elsewhere, or another took the thread): nothing runs, as on the loop and the MCP path.
       if (thread.turn !== turn || (turn.phase as PiTurn['phase']) === 'stopping') return { allow: false, reason: GATE_REFUSALS.denied }
@@ -1331,6 +1346,13 @@ export class PiRpcEngine implements ProviderAdapter {
     if (definition && (turn.host.tools.runActive?.() === false || thread.turn !== turn || (turn.phase as PiTurn['phase']) === 'stopping')) {
       turn.episode.ended(request.toolCallId)
       return { allow: false, reason: `${GATE_REFUSALS.denied}: the run is no longer active` }
+    }
+    // After the writer wait, before any count or ledger row. A stale file is a tool error,
+    // never a wall or an ask. Other runtimes never call this Pi-only hook.
+    const fileCall = bot && builtin ? bot.piFileCall?.(request.toolName, input) : undefined
+    if (fileCall && 'refused' in fileCall) {
+      turn.episode.ended(request.toolCallId)
+      return { allow: false, reason: fileCall.refused }
     }
     const counted = turn.host.budget?.toolCall() ?? { ok: true }
     if (!counted.ok) {
@@ -1355,6 +1377,7 @@ export class PiRpcEngine implements ProviderAdapter {
       }
       turn.ledgerRows.set(request.toolCallId, row)
     }
+    if (fileCall) turn.fileCalls.set(request.toolCallId, fileCall)
     return rewritten ? { allow: true, input: rewritten } : { allow: true }
   }
 
@@ -1568,17 +1591,12 @@ export class PiRpcEngine implements ProviderAdapter {
       const appTools = new Set(tools.map((tool) => tool.name))
       tools = [...tools, ...(await this.options.userMcpTools(input.threadId, input.runId)).filter((tool) => !appTools.has(tool.name))]
     }
-    // An agent definition's turn offers exactly its grants (the policy's allowlist, else its effective
-    // grants), and never a delegation tool: a definition delegates nothing, as on the legacy loop.
+    // An agent definition's turn offers exactly its granted built-ins (the policy's allowlist, else its effective
+    // grants). Its Mousse and MCP tools come already held to its grants (`ToolRegistry.listForTurn`).
     if (host.definition) {
-      const { grants, mcpTools } = host.definition
-      const allowed = new Set(host.bridge?.toolPolicy?.allow ?? [
-        ...grants.builtinTools.map((grant) => canonicalizeBuiltinToolName(grant.id)),
-        ...grants.mcpTools.map((grant) => grant.id),
-        ...(mcpTools ?? []).map((tool) => tool.providerName)
-      ])
+      const { grants } = host.definition
+      const allowed = new Set(host.bridge?.toolPolicy?.allow ?? grants.builtinTools.map((grant) => canonicalizeBuiltinToolName(grant.id)))
       builtins = builtins.filter((name) => allowed.has(name))
-      tools = tools.filter((tool) => allowed.has(tool.name) && tool.class !== 'delegation')
     }
     // A bot's turn offers only its granted built-ins: an ungranted one does not exist for the model,
     // as on the locked Claude turn (`escalate` is how it asks). `bash` comes with "run commands",
@@ -1601,7 +1619,7 @@ export class PiRpcEngine implements ProviderAdapter {
       let message = `${handoff}${preamble}${input.prompt || '(image attachment)'}`
       // A leading `/` would run a Pi extension command instead of reaching the model.
       if (message.startsWith('/')) message = ` ${message}`
-      const images = (input.images ?? []).map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }))
+      const images = piImages(input.images)
       // Pi answers a prompt after its preflight (auth, compaction, extensions): bounded, and Stop cancels the wait.
       await this.send(thread, { type: 'prompt', message, ...(images.length ? { images } : {}) }, this.options.promptDeadlineMs ?? PI_PROMPT_DEADLINE_MS, input.signal)
       turn.promptAccepted = true
@@ -2122,7 +2140,7 @@ export class PiRpcEngine implements ProviderAdapter {
         if (onHold) sink.boundary?.()
         const entry = onHold ? turn.ctl.drainSteerEntry?.({ expect: 'native' }) : turn.ctl.drainSteerEntry?.()
         // Off the hold a steer keeps Pi's next-step path whoever sent it: it never cuts.
-        if (entry) this.sendNativeSteer(thread, turn, { text: entry.text, token: entry.token, person: onHold && entry.cut === true, state: 'sending' })
+        if (entry) this.sendNativeSteer(thread, turn, { text: entry.text, token: entry.token, ...(entry.images?.length ? { images: entry.images } : {}), person: onHold && entry.cut === true, state: 'sending' })
         return
       }
       case 'message_start': {
@@ -2212,6 +2230,10 @@ export class PiRpcEngine implements ProviderAdapter {
         turn.announced.delete(callId)
         turn.episode.ended(callId)
         const failed = event.isError === true
+        const fileCall = turn.fileCalls.get(callId)
+        turn.fileCalls.delete(callId)
+        const details = (event.result as { details?: { truncation?: { truncated?: boolean; firstLineExceedsLimit?: boolean; outputLines?: number } } } | undefined)?.details
+        fileCall?.completed(!failed, details?.truncation)
         const row = turn.ledgerRows.get(callId)
         if (row) {
           turn.ledgerRows.delete(callId)
@@ -2260,7 +2282,11 @@ export class PiRpcEngine implements ProviderAdapter {
           code: normalized.code,
           message: normalized.message,
           errorInfo: normalized.errorInfo,
-          details: { ...((normalized.details as Record<string, unknown> | undefined) ?? {}), retriesExhausted: true }
+          details: {
+            ...((normalized.details as Record<string, unknown> | undefined) ?? {}),
+            retriesExhausted: true,
+            retries: { attempt: Number(event.attempt) || turn.maxRetries, max: turn.maxRetries }
+          }
         }, cause)
         return
       }
@@ -2401,7 +2427,8 @@ export class PiRpcEngine implements ProviderAdapter {
     turn.awaitingModel = true
     // A leading `/` would be expanded by Pi (a skill or prompt template), and the text it shows would match no steer.
     const message = steer.text.startsWith('/') ? ` ${steer.text}` : steer.text
-    const sending: Promise<void> = this.send(thread, { type: 'steer', message }).then(() => {
+    const images = piImages(steer.images)
+    const sending: Promise<void> = this.send(thread, { type: 'steer', message, ...(images.length ? { images } : {}) }).then(() => {
       // Applied whatever the generation: a steer Pi read meanwhile stays taken, one still `sending` is queued now.
       if (steer.state === 'sending' && turn.steers.includes(steer)) steer.state = 'queued'
       this.releaseCheck(thread, turn)
@@ -2445,7 +2472,7 @@ export class PiRpcEngine implements ProviderAdapter {
     if (turn.stepTools && turn.openTools.size === 0) return
     const entry = ctl.drainSteerEntry?.({ expect: 'cut' })
     if (!entry) return
-    this.startCut(thread, turn, { text: entry.text, token: entry.token, person: entry.cut !== false, state: 'cutHeld' })
+    this.startCut(thread, turn, { text: entry.text, token: entry.token, ...(entry.images?.length ? { images: entry.images } : {}), person: entry.cut !== false, state: 'cutHeld' })
   }
 
   /** Starts a cut (§3.2 step 1): from here no native steer is sent, and the lane runs its steps. */
@@ -2533,8 +2560,10 @@ export class PiRpcEngine implements ProviderAdapter {
     turn.gateRelease = new AbortController()
     let message = texts.map((steer) => steer.text.trim()).join('\n')
     if (message.startsWith('/')) message = ` ${message}`
+    // The steers' images go with their text.
+    const images = piImages(texts.flatMap((steer) => steer.images ?? []))
     // Its answer is kept on the cut: a Stop meanwhile waits for it, since Pi keeps an accepted prompt in its session.
-    const answer = this.send(thread, { type: 'prompt', message }, this.options.promptDeadlineMs ?? PI_PROMPT_DEADLINE_MS).then(() => 'started' as const, () => 'refused' as const)
+    const answer = this.send(thread, { type: 'prompt', message, ...(images.length ? { images } : {}) }, this.options.promptDeadlineMs ?? PI_PROMPT_DEADLINE_MS).then(() => 'started' as const, () => 'refused' as const)
     cut.continuation = answer
     cut.carried = texts
     const halted = new Promise<'halted'>((resolve) => {
@@ -2576,7 +2605,7 @@ export class PiRpcEngine implements ProviderAdapter {
     for (let round = 0; round < 4 && ctl.peekSteer?.()?.delivery === 'cut'; round += 1) {
       const entry = ctl.drainSteerEntry?.({ expect: 'cut' })
       if (!entry) return
-      turn.steers.push({ text: entry.text, token: entry.token, person: entry.cut !== false, state: 'cutHeld' })
+      turn.steers.push({ text: entry.text, token: entry.token, ...(entry.images?.length ? { images: entry.images } : {}), person: entry.cut !== false, state: 'cutHeld' })
     }
   }
 

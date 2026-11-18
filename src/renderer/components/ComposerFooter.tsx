@@ -14,7 +14,7 @@ import { ProviderIcon } from '../lib/providerIcons'
 import { contextCompaction, ContextUsagePopover, ContextUsageRing, contextUsageKnown, type ContextCacheLine } from './ContextUsagePopover'
 import { IdleCompactionChip } from './IdleCompactionChip'
 import { useContextRingInComposer } from '../lib/contextRingSetting'
-import { cacheGoneCold, contextTokens, idleCompactionChip, promptCacheState, promptCacheText, suggestsCompaction, uncachedCostText, useMinuteClock } from '../lib/promptCache'
+import { cacheGoneCold, historyTokens, idleCompactionChip, promptCacheState, promptCacheText, suggestsCompaction, uncachedCostText, useMinuteClock } from '../lib/promptCache'
 import type { ContextSettings } from '../../shared/settings'
 import { formatBinding } from '../../shared/commands'
 import { shortcutTitle, useCommandBindings } from '../commands/commandRegistry'
@@ -84,6 +84,8 @@ export interface ComposerRunProps {
   onCompactNow?: () => void
   /** A compaction the person started is running: the chip reads "Compacting…". */
   compacting?: boolean
+  /** Work is going on that Compact now must not run beside; absent: whatever Stop stops. Subagents paused on a usage limit keep Stop but are not work. */
+  workInProgress?: boolean
   /** A bot's own thread: the bot keeps its context, so there is no ring, popover or Compact chip whatever the settings. */
   contextHidden?: boolean
 }
@@ -314,7 +316,8 @@ function ComposerRunControls({ run, permission }: { run: ComposerRunProps; permi
 /**
  * The context ring and its popover, while the context's fill is known and the ring is turned on (Settings ›
  * Appearance › Composer), and left of it the Full/Compact chip once the prompt cache has gone cold. The chip
- * shows with the ring off too.
+ * shows with the ring off too, and on a runtime that reports no context (an ACP agent, Cursor), sized by
+ * Mousse's estimate of the history.
  */
 function ComposerContextRing({ run, runActive }: { run: ComposerRunProps; runActive: boolean }) {
   const ringOn = useContextRingInComposer()
@@ -331,11 +334,13 @@ function ComposerContextRing({ run, runActive }: { run: ComposerRunProps; runAct
   useEffect(() => {
     if (!(contextShown && ringOn) && contextOpen) onContextOpenChange(false)
   }, [contextShown, ringOn, contextOpen, onContextOpenChange])
-  if (!contextShown) return null
+  // A runtime with no gauge still has a prompt cache that goes cold: the chip alone, when Mousse estimated the history.
+  const estimatedOnly = !showsContextGauge(selectedProvider) && contextUsage.historyEstimate !== undefined
+  if (!contextShown && !estimatedOnly) return null
   const cacheState = cache ? promptCacheState(cache, now) : undefined
   const canCompact = Boolean(onCompactNow)
   const chip = idleCompactionChip({ usage: contextUsage, now, setting: idleSetting, canCompact, runActive, compacting })
-  const historyTokens = contextTokens(contextUsage)
+  const history = historyTokens(contextUsage)
   const cacheLine: ContextCacheLine | undefined = cacheState && {
     text: promptCacheText(cacheState),
     tone: cacheState.kind === 'warm' ? 'warm' : cacheGoneCold(cacheState) ? 'cold' : 'unknown',
@@ -345,13 +350,14 @@ function ComposerContextRing({ run, runActive }: { run: ComposerRunProps; runAct
     {chip && cache && cacheLine ? (
       <IdleCompactionChip
         state={chip}
-        historyTokens={historyTokens}
+        historyTokens={history}
+        estimated={estimatedOnly}
         cacheText={cacheLine.text}
-        costText={uncachedCostText(cache, historyTokens)}
+        costText={uncachedCostText(cache, history)}
         onCompact={() => onCompactNow?.()}
       />
     ) : null}
-    {ringOn ? (
+    {ringOn && contextShown ? (
       <div className="composer-context-anchor">
         <ContextUsageRing
           usage={contextUsage}
@@ -479,7 +485,7 @@ export function ComposerFooter({
       </div>
 
       <div className="composer-footer-right">
-        {run && !run.contextHidden ? <ComposerContextRing run={run} runActive={stoppable} /> : null}
+        {run && !run.contextHidden ? <ComposerContextRing run={run} runActive={run.workInProgress ?? stoppable} /> : null}
 
         {extraActions}
 

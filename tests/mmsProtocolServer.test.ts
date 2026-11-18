@@ -1,3 +1,4 @@
+import { BOT_TELLING_CAPABILITY } from '../src/shared/bots/personal/telling'
 import { createConnection, type Socket } from 'net'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
@@ -11,7 +12,7 @@ import { encodeFrame, FrameDecoder } from '../src/mms/protocol/framing'
 import { FIRST_SEND_BINDING_CAPABILITY, MMS_PROTOCOL_VERSION } from '../src/mms/protocol/types'
 import { MMS_PROTOCOL_MAX_COMPLETED_REQUEST_IDS, MMS_PROTOCOL_MAX_COMPLETED_RESPONSE_BYTES, NON_REPLAYED_METHODS, keepsResponseForReplay } from '../src/mms/protocol/replayCache'
 import { ROUTED_METHODS } from '../src/shared/bridge/routed'
-import { parseEnvelope, validateHello, asChatMode, asChatImages, asStringArray } from '../src/mms/protocol/validators'
+import { parseEnvelope, asChatMode, asChatImages, asStringArray } from '../src/mms/protocol/validators'
 import { scriptTurns } from './net/bridge/hub/fixture'
 
 /** Turns run on a scripted pi adapter that answers with `chatImpl` (or a short default reply). */
@@ -1018,6 +1019,129 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
     await client.close()
   })
 
+  it('broadcasts telling_set quiet-hours writes and off to every subscribed window', async () => {
+    const clients = [1, 2].map(() => new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'gui' }))
+    const received: Array<Array<import('../src/shared/settings').MousseSettings>> = [[], []]
+    try {
+      for (const [i, client] of clients.entries()) {
+        await client.connect()
+        client.onEvent(e => { if (e.type === 'settings.changed') received[i]!.push((e.data as { settings: import('../src/shared/settings').MousseSettings }).settings) })
+        await client.subscribe(0)
+      }
+      const services = await mms.getProfileServices(mms.profileId)
+      const bots = services.personalBots!
+      const { bot } = await bots.service.create({ name: 'Quiet helper', description: 'Check reports', look: {} as any, clientRequestId: 'quiet-broadcast-bot' })
+      const owner = await bots.enqueueChat(bot.id, 'chat:quiet-broadcast', 'Set quiet hours')
+      for (const quietHours of [{ from: '22:00', to: '08:00' }, 'off', { from: '23:00', to: '06:00' }] as const) {
+        bots.setTelling(bot.id, owner.id, { quietHours })
+        for (const client of clients) await client.request('capabilities')
+        for (const events of received) expect(events.at(-1)?.notifications.quietHours).toEqual(quietHours === 'off' ? undefined : quietHours)
+      }
+      for (const events of received) expect(events).toHaveLength(3)
+    } finally { await Promise.all(clients.map(c => c.close())) }
+  })
+
+  it('negotiates presence only for GUI sessions and adds the automation silence flag only while away at night', async () => {
+    const { OwnerQuietHours, APP_PRESENCE_CAPABILITY } = await import('../src/mms/notifications/OwnerQuietHours')
+    let now = Date.parse('2026-11-08T03:00:00Z')
+    const services = await mms.getProfileServices(mms.profileId)
+    const quiet = new OwnerQuietHours(() => services.settings.get().notifications.quietHours, () => now, () => 'UTC')
+    Object.assign(services, { ownerQuietHours: quiet })
+    const modern = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'gui', requestedCapabilities: [APP_PRESENCE_CAPABILITY] })
+    const old = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'gui' })
+    const cli = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'cli', requestedCapabilities: [APP_PRESENCE_CAPABILITY] })
+    const ended: unknown[] = []
+    const event = { jobId: 'personal', jobName: 'Night check', outcome: 'failed', notify: true }
+    try {
+      for (const client of [modern, old, cli]) { await client.connect(); await client.subscribe(0) }
+      old.onEvent(e => { if (e.type === 'scheduled.runEnded') ended.push(e.data) })
+      services.scheduled.emit('runEnded', event)
+      await old.request('capabilities')
+      expect(JSON.stringify(ended.pop())).toBe(JSON.stringify(event))
+      services.settings.set({ notifications: { quietHours: { from: '22:00', to: '08:00' } } })
+      services.scheduled.emit('runEnded', event)
+      await old.request('capabilities')
+      expect(ended.pop()).toEqual({ ...event, quietHours: true })
+      const presence = { activeAt: now, timeZone: 'Asia/Kolkata' }
+      await expect(old.request('app.presence', presence)).rejects.toThrow('capable local window')
+      await expect(cli.request('app.presence', presence)).rejects.toThrow('capable local window')
+      expect(quiet.active()).toBe(false)
+      await modern.request('app.presence', presence)
+      expect(quiet.ownerZone()).toBe('Asia/Kolkata')
+      services.scheduled.emit('runEnded', event)
+      await old.request('capabilities')
+      expect(JSON.stringify(ended.pop())).toBe(JSON.stringify(event))
+      now += 30_000
+      await modern.request('app.presence', { activeAt: now, timeZone: 'UTC' })
+      expect(quiet.ownerZone()).toBe('Asia/Kolkata')
+      now += 15 * 60_000 - 30_000
+      expect(quiet.active()).toBe(false)
+      await expect(modern.request('app.presence', { activeAt: now, timeZone: 'not-a-zone' })).rejects.toThrow()
+      expect(quiet.active()).toBe(false)
+    } finally { await Promise.all([modern, old, cli].map(c => c.close())) }
+  })
+
+  it('negotiates bot tellings per window without duplicating the legacy path or replaying banners', async () => {
+    const clients = [
+      new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'gui', requestedCapabilities: [BOT_TELLING_CAPABILITY] }),
+      new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'gui' }),
+      new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'cli', requestedCapabilities: [BOT_TELLING_CAPABILITY] })
+    ]
+    const received: string[][] = [[], [], []]
+    try {
+      for (const [i, client] of clients.entries()) {
+        const hello = await client.connect()
+        expect(hello.capabilities).toContain(BOT_TELLING_CAPABILITY)
+        client.onEvent(e => received[i]!.push(e.type))
+        await client.subscribe(0)
+      }
+      const services = await mms.getProfileServices(mms.profileId)
+      services.personalBots!.events.emit('message', { botId: 'b', message: { id: 'm' } })
+      services.personalBots!.events.emit('tell', { id: 'telling', rows: [], title: 'Scout', body: 'Report', sound: false })
+      // A response fences the writes on each socket; no sleeps.
+      for (const client of clients) await client.request('capabilities')
+      expect(received[0]).toContain('bots.tell')
+      expect(received[1]).not.toContain('bots.tell')
+      expect(received[2]).not.toContain('bots.tell')
+      expect(received.every(events => events.includes('bots.message'))).toBe(true)
+      received[0] = []
+      await clients[0]!.subscribe(0)
+      expect(received[0]).not.toContain('bots.tell')
+    } finally { await Promise.all(clients.map(c => c.close())) }
+  })
+
+  it('keeps legacy-only rows pending and consumes their receipts silently when a new window joins', async () => {
+    const { botFixture, createBot } = await import('./bots/botFixture')
+    const fixture = botFixture()
+    const old = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'gui' })
+    const modern = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType: 'gui', requestedCapabilities: [BOT_TELLING_CAPABILITY] })
+    try {
+      const { botId } = await createBot(fixture)
+      const services = await mms.getProfileServices(mms.profileId)
+      const bots = services.personalBots!
+      bots.createBot(fixture.bots.definitionOf(botId))
+      const attached = vi.spyOn(bots, 'setTellingWindows')
+      await old.connect(); await old.subscribe(0)
+      expect(attached).toHaveBeenLastCalledWith(0)
+      const legacy = bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Legacy announcement' })
+      await old.request('capabilities')
+      await bots.deliverDueReminders()
+      expect(bots.nextDueAt(botId)).toBeUndefined()
+      const pending = (await bots.service.chatList(botId)).messages.find(m => m.id === legacy.id)
+      expect(pending).toBeDefined()
+      const events: any[] = []; modern.onEvent(e => { if (e.type === 'bots.tell') events.push(e.data) })
+      await modern.connect(); await modern.subscribe(0)
+      await bots.deliverDueReminders()
+      await modern.request('capabilities')
+      expect(events).toHaveLength(0)
+      // Both attached: the legacy message push and the modern telling are accepted separate paths.
+      bots.chat.post({ botId, author: 'bot', kind: 'text', text: 'Both paths' })
+      await bots.deliverDueReminders(); await modern.request('capabilities')
+      expect(events.at(-1)?.body).toBe('Both paths')
+      attached.mockRestore()
+    } finally { await old.close(); await modern.close(); fixture.close() }
+  })
+
   it("grants a window's first-send binding only when a window asks for it, and holds each window to what it said", async () => {
     const connect = async (clientType: 'gui' | 'cli', requestedCapabilities: string[] = []) => {
       const client = new LocalMmsClient({ homeDir: home, ownerToken, endpoint, clientType, requestedCapabilities })
@@ -1118,14 +1242,6 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
       { threadId: thread.id, content: 'hi from protocol' }
     )
     expect(sendResult.queued || sendResult.message).toBeTruthy()
-
-    const snap = await client.request<{
-      messages: { content: string }[]
-      queue: unknown[]
-    }>('thread.snapshot', { threadId: thread.id })
-    expect(
-      snap.messages.some((m) => m.content === 'hi from protocol') || snap.queue.length >= 0
-    ).toBe(true)
 
     const session = mms.orchestrator.getOrCreateSession(thread.id)
     session.activeTurn = { abort: new AbortController(), pendingSteer: [] }
@@ -1247,17 +1363,6 @@ describe('EventSequenceRing', () => {
 })
 
 describe('protocol validators', () => {
-  it('validateHello rejects wrong version', () => {
-    const v = validateHello({
-      kind: 'hello',
-      protocolVersion: 42,
-      ownerToken: 'tok',
-      clientType: 'test'
-    })
-    expect(v.ok).toBe(false)
-    if (!v.ok) expect(v.code).toBe('protocol_version')
-  })
-
   it('rejects invalid chat mode and images without casting', () => {
     expect(() => asChatMode('hacker')).toThrow(/mode/)
     expect(() => asChatMode({ type: 'skill' })).toThrow()

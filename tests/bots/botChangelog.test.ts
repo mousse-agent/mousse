@@ -1,3 +1,4 @@
+import { tellingLine } from '../../src/shared/bots/personal/tellingSettings'
 /**
  * What changed in Mousse for bots (src/mms/bots/changelog.ts): a bot with history is told the entries it has not seen,
  * after its memory, until a chat turn that carried them settles; a new bot is told nothing. And no bot prompt text or
@@ -7,7 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { BOT_CHANGELOG, BOT_CHANGELOG_LATEST } from '../../src/mms/bots/changelog'
+import { BOT_CHANGELOG, BOT_CHANGELOG_LATEST, BOT_CHANGELOG_PACK_ENTRIES } from '../../src/mms/bots/changelog'
 import { BotChatProjection } from '../../src/mms/bots/chat/projection'
 import { BOT_BASE_INSTRUCTIONS, BOT_CHAT_INSTRUCTIONS, BOT_RUN_INSTRUCTIONS, BOT_SUBAGENT_INSTRUCTIONS } from '../../src/mms/bots/instructions'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
@@ -49,12 +50,12 @@ const existingBot = () => {
 }
 
 describe('the bot changelog in the pack', () => {
-  it('tells a bot with history every unseen change after its memory, with the fix, until a chat turn carrying it settles', async () => {
+  it('tells a bot with history the newest unseen changes after its memory, with the fix, until a chat turn carrying it settles', async () => {
     existingBot()
     const provider = packs()
     const first = await provider.chatPreamble({ botId: 'ada', activationId: 'act-1' })
     expect(first.indexOf(HEADER)).toBeGreaterThan(first.indexOf('</bot_memory>'))
-    for (const entry of BOT_CHANGELOG) expect(first).toContain(entry.text)
+    for (const entry of BOT_CHANGELOG.slice(-BOT_CHANGELOG_PACK_ENTRIES)) expect(first).toContain(entry.text)
     expect(first).toContain(FIX)
 
     // A run follows the changes but can't fix core memory, and does not mark them seen.
@@ -78,14 +79,13 @@ describe('the bot changelog in the pack', () => {
     expect(pack).not.toContain(BOT_CHANGELOG[0]!.text)
   })
 
-  it('tells a bot that saw the old watcher advice which turns can still start commands', async () => {
+  it('tells a bot that saw the old watcher advice that every chat turn can start commands', async () => {
     existingBot()
     memory.write(() => memory.setState('ada', 'changelog_seen', 9))
     const pack = await packs().chatPreamble({ botId: 'ada', activationId: 'act-watch-rule' })
-    expect(pack).toContain('watch_start')
-    expect(pack).toMatch(/only.*chat turn.*owner.*own message/i)
-    expect(pack).toMatch(/wake-up.*work.*sandbox/i)
-    expect(pack).toMatch(/tell your owner what to start/i)
+    expect(pack).toMatch(/any chat turn can start a background command with watch_start/i)
+    expect(pack).not.toMatch(/only.*chat turn.*owner.*own message/i)
+    expect(pack).not.toMatch(/tell your owner what to start/i)
   })
 
   it('tells a new bot nothing: it has no history to correct', async () => {
@@ -121,4 +121,19 @@ describe('the bot changelog entries', () => {
       }
     }
   })
+})
+
+// Quiet settings and the changelog are read together by old bots.
+it('quiet-hour advice agrees with settings and later entries', () => {
+  const advice = BOT_CHANGELOG.map(entry => entry.text).join('\n')
+  expect(advice).not.toMatch(/there are no quiet hours|never tell your owner you hold anything/i)
+  expect(BOT_CHANGELOG.find(entry => entry.id === 15)!.text).toMatch(/quiet hours now exist/i)
+  for (const entry of BOT_CHANGELOG) for (const gone of entry.gone ?? []) {
+    for (const text of [tellingLine({}, { from: '22:00', to: '08:00' })!, ...BOT_CHANGELOG.filter(later => later.id > entry.id).map(later => later.text)]) expect(text).not.toMatch(gone)
+  }
+})
+it('all memory wish instructions route telling wishes to settings', () => {
+  for (const text of [BOT_BASE_INSTRUCTIONS, BOT_MEMORY_PROTOCOL, BOT_MEMORY_TOOL_DEFINITIONS.memory_save.description]) {
+    expect(text).toContain('(how or when to be told: telling_set instead)')
+  }
 })

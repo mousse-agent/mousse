@@ -86,7 +86,7 @@ describe('bot schedules in the shared scheduler', () => {
     expect(f.bots.get(botId).summary.schedules![0]!.skipped).toBeNull()
   })
 
-  it('a schedule whose last run still waits in the queue, or still runs, is skipped, never stacked', async () => {
+  it('a schedule whose last run still runs is skipped, never stacked', async () => {
     const tidy = await scheduled()
     const other = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Check links.' }, 'owner').scheduleId
     // The two schedules' runs run side by side.
@@ -94,13 +94,6 @@ describe('bot schedules in the shared scheduler', () => {
     expect(runs().map((row) => row.status)).toEqual(['running', 'running'])
     expect((await f.tickSchedules(new Date(T0 + 10 * MIN))).inserted).toEqual([])
     expect(f.book.list(botId).map((schedule) => [schedule.scheduleId, schedule.skip?.reason])).toEqual(expect.arrayContaining([[tidy, 'previous_run_still_running'], [other, 'previous_run_still_running']]))
-    // With every slot held, a new occurrence waits in the queue, and the next one of its schedule is skipped.
-    for (const row of runs()) f.store.run("UPDATE bot_activations SET status = 'done' WHERE id = ?", row.id)
-    for (const id of ['h1', 'h2', 'h3']) await f.bots.activate({ botId, input: id, clientRequestId: id })
-    await f.tickSchedules(new Date(T0 + 15 * MIN))
-    expect(scheduledRuns().filter((row) => row.status === 'queued')).toHaveLength(2)
-    expect((await f.tickSchedules(new Date(T0 + 20 * MIN))).inserted).toEqual([])
-    expect(f.book.list(botId).map((schedule) => [schedule.scheduleId, schedule.skip?.reason])).toEqual(expect.arrayContaining([[tidy, 'previous_run_still_queued'], [other, 'previous_run_still_queued']]))
   })
 
   it('a schedule every minute runs on each scheduler tick, and skips a tick while its last run still goes', async () => {
@@ -146,18 +139,13 @@ describe('bot schedules in the shared scheduler', () => {
     expect((await f.tickSchedules(new Date(T0 + 121 * MIN))).inserted).toEqual([])
   })
 
-  it('an occurrence runs beside what the bot runs, and waits in its queue only when every slot is held', async () => {
+  it('an occurrence runs beside what the bot runs, with no queue', async () => {
     await scheduled('Tidy.', 5)
     f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Links.' }, 'owner')
-    const busy = await f.bots.activate({ botId, input: 'busy', clientRequestId: 'busy' })
+    await f.bots.activate({ botId, input: 'busy', clientRequestId: 'busy' })
     await f.bots.activate({ botId, input: 'busy too', clientRequestId: 'busy2' })
     await f.tickSchedules(new Date(T0 + 5 * MIN))
-    // One slot was left: one schedule's run takes it, the other's waits.
-    const [first, second] = scheduledRuns()
-    expect([first!.status, second!.status].sort()).toEqual(['queued', 'running'])
-    const queued = first!.status === 'running' ? second! : first!
-    await runDispatch(f, busy.id, 1, { text: 'Done.' })
-    expect(f.store.activation(queued.id)!.status).toBe('running')
+    expect(scheduledRuns().map((row) => row.status)).toEqual(['running', 'running'])
   })
 
   it('an edited schedule restarts from now; a removed one is gone', async () => {
@@ -327,6 +315,7 @@ describe('bot schedules in the shared scheduler', () => {
     else {
       expect(report).toBeDefined()
       expect(!report!.quiet).toBe(notifies)
+      expect(f.store.message((report!.message as { id: string }).id)?.tell).toBe(notifies ? 'soon' : 'later')
     }
   })
 
@@ -342,6 +331,7 @@ describe('bot schedules in the shared scheduler', () => {
     const error = events.find((event) => event.message.kind === 'error')
     expect(error).toBeDefined()
     expect(error!.quiet).toBeUndefined()
+    expect(f.store.message((error!.message as { id: string }).id)?.tell).toBe('soon')
   })
 
   it('a scheduled run that reports quiet or says [SILENT] posts nothing in the chat; a report, and work the owner asked for, still show', async () => {

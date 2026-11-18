@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
 /**
  * A thought's streamed text lives in its own slice (liveTextStore), as a reply's does: a delta that only adds text
- * to the thought being written renders its row (or the header of the group it ends), never the transcript, the
- * message list or the store. Its start, its end and any other change go to the store, and its final text takes
+ * to the thought being written renders the turn's live row (and the thought's own row while the run is open), never
+ * the transcript, the message list or the store. Its start, its end and any other change go to the store, and its final text takes
  * over once.
  */
 import { act, createElement, useMemo, useRef } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import type { UIMessage } from 'ai'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
 import { TurnProgressContext, type TurnProgressState } from '../../src/renderer/chat/components/agent-elements/turn-progress'
 import { countRender, startRenderCounts, stopRenderCounts } from '../../src/renderer/chat/components/agent-elements/render-counts'
@@ -124,35 +124,38 @@ function messageWrites(run: () => void): number {
 /** The turn's thought rows (outside any group), by their header button, and the live ones' line. */
 const thoughtRows = () => [...host.querySelectorAll<HTMLButtonElement>('.turn-answer button[aria-expanded]')]
   .filter((button) => button.querySelector('svg.thinking-icon') && !button.closest('.an-tool-group-rows'))
-const liveRows = () => [...host.querySelectorAll<HTMLElement>('.turn-answer svg.thinking-icon.is-thinking')]
-  .filter((icon) => !icon.closest('[data-turn-progress]'))
+/** The live row at the end of the running turn: the current thought's headline (its full paragraph as the tooltip). */
+const liveRow = () => host.querySelector<HTMLElement>('[data-turn-live]')
+const headline = () => host.querySelector('.turn-live-headline')?.textContent ?? ''
+const tooltip = () => host.querySelector<HTMLElement>('.turn-live-thought')?.title ?? ''
 const answerText = () => [...host.querySelectorAll('.turn-answer')].at(-1)?.textContent ?? ''
 /** Opens the last turn's work, folded behind its "Worked for" line once the turn ends. */
 const openWork = () => act(() => [...host.querySelectorAll<HTMLButtonElement>('.turn-work-toggle')].at(-1)!.click())
 const progressLine = () => host.querySelector<HTMLElement>('[data-turn-progress]')
 
-describe('a streamed thought renders only its row', () => {
-  it('renders the thought row alone in a 40-turn thread, and leaves the store, the transcript and the list as they were', () => {
+describe('a streamed thought renders only the live row', () => {
+  it('renders the live row alone in a 40-turn thread, and leaves the store, the transcript and the list as they were', () => {
     mount(thread(40, '**Reading the tests**\n\nThe output says'))
     const before = useAppStore.getState().messages
     const counts = startRenderCounts()
     writes = 0
     stream(thinking('th', 85, '**Reading the tests**\n\nThe output says the reminder starts twice'))
-    expect(counts.ThinkingTool).toBe(1)
+    expect(counts.TurnProgressRow).toBe(1)
+    expect(counts.ThinkingTool ?? 0).toBe(0)
     expect(counts.Transcript ?? 0).toBe(0)
     expect(counts.MessageList ?? 0).toBe(0)
     expect(counts.TurnRow ?? 0).toBe(0)
     expect(counts.AssistantParts ?? 0).toBe(0)
-    expect(counts.TurnProgressRow ?? 0).toBe(0)
     expect(writes).toBe(0)
     expect(useAppStore.getState().messages).toBe(before)
-    // The row is the turn's live line: it follows the thought as it is written.
-    expect(liveRows()).toHaveLength(1)
-    expect(answerText()).toContain('the reminder starts twice')
-    expect(progressLine()).toBeNull()
+    // The thought is the live row's first line: its headline, its newest paragraph as the tooltip. No row of its own.
+    expect(headline()).toBe('Reading the tests')
+    expect(tooltip()).toBe('The output says the reminder starts twice')
+    expect(thoughtRows()).toHaveLength(0)
+    expect(progressLine()!.textContent).toContain('Thinking')
   })
 
-  it('renders the row once per delta over 30 deltas, and nothing else', () => {
+  it('renders the live row once per delta over 30 deltas, and nothing else', () => {
     mount(thread(10, 'Start'))
     const counts = startRenderCounts()
     let text = 'Start'
@@ -160,55 +163,62 @@ describe('a streamed thought renders only its row', () => {
       text += ` word${i}`
       stream(thinking('th', 25, text))
     }
-    expect(counts.ThinkingTool).toBe(30)
+    expect(counts.TurnProgressRow).toBe(30)
+    expect(counts.ThinkingTool ?? 0).toBe(0)
     expect(counts.MessageList ?? 0).toBe(0)
     expect(counts.TurnRow ?? 0).toBe(0)
     expect(counts.Transcript ?? 0).toBe(0)
-    expect(answerText()).toContain('word29')
+    // A sentence with no end yet: its first 200 code points, cut, and the whole of it as the tooltip.
+    expect(headline().endsWith('…')).toBe(true)
+    expect(tooltip()).toBe(text)
   })
 
-  it('after calls, renders only its own row, beside the calls\' group, and its line follows the thought', () => {
-    // Calls, then the thought: the calls fold into a group, and the thought stays out of it as the live line.
-    const mounted = startRenderCounts()
+  it('after calls, renders only the live row (which is the run of calls and the thought), and its headline follows the thought', () => {
     mount(thread(5, 'Checking the build', [tool('tool-1', 12), tool('tool-0', 13)]))
-    expect(mounted.ToolCallsGroup).toBeGreaterThan(0)
-    expect(liveRows()).toHaveLength(1)
+    const row = liveRow()
     const counts = startRenderCounts()
-    stream(thinking('th', 15, 'Checking the build output for the failing step'))
+    stream(thinking('th', 15, 'Checking the build output for the failing step. It exits 1.'))
     expect(hasLiveText('th')).toBe(true)
+    expect(counts.TurnProgressRow).toBe(1)
+    expect(counts.ThinkingTool ?? 0).toBe(0)
+    expect(counts.ToolCallsGroup ?? 0).toBe(0)
+    expect(counts.MessageList ?? 0).toBe(0)
+    expect(counts.TurnRow ?? 0).toBe(0)
+    expect(counts.Transcript ?? 0).toBe(0)
+    expect(liveRow()).toBe(row)
+    expect(headline()).toBe('Checking the build output for the failing step.')
+  })
+
+  it('opened, renders the live row and the thought\'s own row per delta, and nothing else', () => {
+    mount(thread(5, 'Checking the build', [tool('tool-1', 12), tool('tool-0', 13)]))
+    act(() => liveRow()!.querySelector<HTMLButtonElement>('button.turn-live-toggle')!.click())
+    const counts = startRenderCounts()
+    stream(thinking('th', 15, 'Checking the build output for the failing step. It exits 1.'))
+    expect(counts.TurnProgressRow).toBe(1)
     expect(counts.ThinkingTool).toBe(1)
     expect(counts.ToolCallsGroup ?? 0).toBe(0)
     expect(counts.MessageList ?? 0).toBe(0)
     expect(counts.TurnRow ?? 0).toBe(0)
     expect(counts.Transcript ?? 0).toBe(0)
-    expect(answerText()).toContain('for the failing step')
+    // The thought being written is open in the run's rows: its words as they arrive.
+    expect(liveRow()!.querySelector('.an-tool-group-rows')!.textContent).toContain('It exits 1.')
   })
 
-  it('a row that joins back-to-back thoughts shows the earlier ones, then the newest as it is written', () => {
+  it('a row that joins back-to-back thoughts heads the live row with the newest, and shows both once the turn ends', () => {
     mount(thread(3, 'Second thought', [thinking('th0', 7, 'First thought, done.', 'complete')]))
-    expect(thoughtRows()).toHaveLength(1)
     const counts = startRenderCounts()
     stream(thinking('th', 11, 'Second thought, still going'))
     expect(hasLiveText('th')).toBe(true)
     expect(counts.MessageList ?? 0).toBe(0)
-    expect(answerText()).toContain('still going')
+    expect(headline()).toBe('Second thought, still going')
+    act(() => root.render(createElement(Transcript, { progress: { phase: 'completed' } as TurnProgressState, status: 'ready' })))
+    openWork()
     // Opened, the row shows both thoughts, each once, in order.
+    expect(thoughtRows()).toHaveLength(1)
     act(() => thoughtRows()[0]!.click())
     const body = answerText()
     expect(body.split('First thought, done.').length - 1).toBe(1)
     expect(body.indexOf('First thought, done.')).toBeLessThan(body.lastIndexOf('Second thought, still going'))
-    expect(thoughtRows()).toHaveLength(1)
-  })
-
-  it('keeps an opened row open while its thought streams', () => {
-    mount(thread(3, 'One'))
-    const row = thoughtRows()[0]!
-    act(() => row.click())
-    expect(thoughtRows()[0]!.getAttribute('aria-expanded')).toBe('true')
-    stream(thinking('th', 11, 'One two three'))
-    expect(hasLiveText('th')).toBe(true)
-    expect(thoughtRows()[0]!.getAttribute('aria-expanded')).toBe('true')
-    expect(answerText()).toContain('One two three')
   })
 
   it('sends a thought\'s start, its end and any other change to the store', () => {
@@ -244,11 +254,20 @@ describe('the end of a thought', () => {
     const stored = useAppStore.getState().messages.filter((m) => m.id === 'th')
     expect(stored).toHaveLength(1)
     expect(stored[0]!.thinking).toEqual({ content: '**Plan**\n\nPart one. Part two. Part three. The end.', status: 'complete' })
-    // The row renders once, in the same pass as the transcript, and is no longer live.
-    expect(counts.ThinkingTool).toBe(1)
-    expect(liveRows()).toHaveLength(0)
-    // The turn ends: its work folds; opened, one row, its text once.
-    act(() => root.render(createElement(Transcript, { progress: { phase: 'completed' } as TurnProgressState, status: 'ready' })))
+    // The live row renders once, in the same pass as the transcript, and keeps the thought's headline.
+    expect(counts.TurnProgressRow).toBe(1)
+    expect(headline()).toBe('Plan')
+    expect(tooltip()).toBe('Part one. Part two. Part three. The end.')
+    // The turn ends: its work folds as motion; opened, one row, its text once.
+    vi.useFakeTimers()
+    try {
+      act(() => root.render(createElement(Transcript, { progress: { phase: 'completed' } as TurnProgressState, status: 'ready' })))
+      // Two frames drawn open, then the close.
+      act(() => vi.advanceTimersByTime(500))
+      act(() => vi.advanceTimersByTime(500))
+    } finally {
+      vi.useRealTimers()
+    }
     expect(thoughtRows()).toHaveLength(0)
     openWork()
     expect(thoughtRows()).toHaveLength(1)
@@ -298,9 +317,11 @@ describe('the end of a thought', () => {
     expect(hasLiveText('th')).toBe(false)
     expect(useAppStore.getState().messages.find((m) => m.id === 'th')!.thinking!.content).toContain('Running the tests')
     expect(useAppStore.getState().messages.at(-1)!.id).toBe('tool-2')
-    // The group is titled with its thought, then what its calls did; opened, its thought row holds the stored text in full.
-    const group = [...host.querySelectorAll<HTMLButtonElement>('.turn-answer button[aria-expanded]')].find((button) => button.textContent!.includes('· Read '))!
-    expect(group.textContent).toContain('Running the tests')
+    // No thought led to the group's first call: it keeps its calls' title, and the thought heads the live row.
+    expect(headline()).toBe('Running the tests')
+    const group = [...host.querySelectorAll<HTMLButtonElement>('.turn-answer button[aria-expanded]')].find((button) => !button.closest('.an-tool-group-rows'))!
+    expect(group.textContent).not.toContain('Running the tests')
+    // Opened, its thought row holds the stored text in full.
     act(() => group.click())
     act(() => host.querySelector<HTMLButtonElement>('.an-tool-group-rows button[aria-expanded]:has(svg.thinking-icon)')!.click())
     expect(answerText()).toContain('Running the tests')

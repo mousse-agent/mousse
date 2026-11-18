@@ -72,9 +72,12 @@ let openingEarly: { threadId: string; messages: ChatMessage[] } | null = null
 /**
  * The store update that shows thread `id`: its cached transcript when there is one, otherwise an empty one that
  * waits for its view (`transcriptPending`) unless the thread never started. Remembers the transcript left behind.
+ * `carry` moves messages shown here to `id`: they leave the transcript left behind and join the one shown.
  */
-function switchPatch(s: Pick<AppState, 'activeThreadId' | 'messages' | 'threads'>, id: string): Partial<AppState> {
-  if (s.activeThreadId && s.messages.length > 0) rememberMessages(s.activeThreadId, s.messages)
+function switchPatch(s: Pick<AppState, 'activeThreadId' | 'messages' | 'threads'>, id: string, carry: readonly ChatMessage[] = []): Partial<AppState> {
+  const carried = new Set(carry.map((message) => message.id))
+  const left = carried.size ? s.messages.filter((message) => !carried.has(message.id)) : s.messages
+  if (s.activeThreadId && (left.length > 0 || carried.size > 0)) rememberMessages(s.activeThreadId, left)
   const cached = takeCachedMessages(id)
   const early = openingEarly?.threadId === id ? openingEarly.messages : []
   openingEarly = null
@@ -83,8 +86,9 @@ function switchPatch(s: Pick<AppState, 'activeThreadId' | 'messages' | 'threads'
   return {
     activeThreadId: id,
     openingThreadId: null,
-    messages: early.reduce(upsertMessage, cached ?? []),
-    transcriptPending: !cached && !(target && !isThreadStarted(target)),
+    messages: carry.reduce(upsertMessage, early.reduce(upsertMessage, withoutLandedCopies(cached ?? [], early))),
+    // A carried message is the thread's newest: the view that comes joins what it holds.
+    transcriptPending: !cached && !carried.size && !(target && !isThreadStarted(target)),
     // Agents/tasks are always re-fetched with the snapshot (small, thread-scoped).
     agents: [],
     tasks: [],
@@ -205,6 +209,15 @@ export function withNewerTimes(incoming: Thread[], held: readonly Thread[]): Thr
   return out ?? incoming
 }
 
+/** Whether two rows count the same pull requests, each in the same state. */
+function samePullRequestRows(left: Thread, right: Thread): boolean {
+  if (left.pullRequest?.url !== right.pullRequest?.url) return false
+  const a = left.pullRequests ?? []
+  const b = right.pullRequests ?? []
+  return a.length === b.length && a.every((entry, index) =>
+    entry.url === b[index].url && entry.state === b[index].state && entry.isDraft === b[index].isDraft && entry.title === b[index].title)
+}
+
 /** Skip sidebar updates when a protocol event/reconciliation returns the same list. */
 export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
   if (a === b) return true
@@ -239,7 +252,10 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.goal?.setAt !== right.goal?.setAt ||
       left.goal?.updatedAt !== right.goal?.updatedAt ||
       // Hidden or shown again (`Thread.hidden`) is saved without touching `updatedAt` too.
-      left.hidden !== right.hidden
+      left.hidden !== right.hidden ||
+      // So are the reply preview and the pull requests a row shows (`Thread.lastReply`, `Thread.pullRequests`).
+      left.lastReply !== right.lastReply ||
+      !samePullRequestRows(left, right)
     ) {
       return false
     }
@@ -286,9 +302,15 @@ interface AppState {
   /** The bound profile's shortcut overrides (`settings.shortcuts`). Not persisted here; the daemon owns them. */
   shortcuts: ShortcutOverrides
   setShortcuts: (shortcuts: ShortcutOverrides) => void
+  /**
+   * The bound profile's `notifications.botThreads`: threads a bot keeps out of the sidebar count in Needs me and the
+   * app badge like any thread. Off until the profile's settings say otherwise.
+   */
+  notifyBotThreads: boolean
+  setNotifyBotThreads: (on: boolean) => void
   /** The command palette, which also searches threads and messages. Not persisted. */
   paletteOpen: boolean
-  /** What the palette leads with: `messages` puts message hits first (Search threads opens it so). Kept on close. */
+  /** What the palette leads with: `messages` is Search everything, with commands last (the rail's search opens it so). Kept on close. */
   paletteMode: PaletteMode
   setPaletteOpen: (open: boolean, mode?: PaletteMode) => void
   /** The sidebar's tab. It and `sidebarMode` always agree (`agreeWithTab`): setting either moves the other. */
@@ -316,12 +338,18 @@ interface AppState {
   /** Side card sections the user collapsed (true) or expanded (false) by hand, by section key; a missing key uses the section's default. */
   sideCardCollapsed: Record<string, boolean>
   setSideCardSectionCollapsed: (key: string, collapsed: boolean) => void
+  /** Chats sidebar sections (Bots, Groups, Recent) the user folded (true) or opened (false); a missing key is open. */
+  chatsSidebarCollapsed: Record<string, boolean>
+  setChatsSidebarSectionCollapsed: (key: string, collapsed: boolean) => void
   activeThreadId: string | null
   projects: Project[]
   threads: Thread[]
   threadActivity: ThreadActivitySnapshot
   /** Each thread's subagents as the daemon last reported them, by parent thread id. Not persisted. */
   subagentsByParent: Record<string, SubagentSummary[]>
+  /** Each thread's subagents whose thread is gone (`removed`), kept apart: only the transcript's cards read them. Not persisted. */
+  removedSubagentsByParent: Record<string, SubagentSummary[]>
+  /** Takes a thread's list as the daemon sent it: removed subagents go to `removedSubagentsByParent`, the rest to `subagentsByParent`. */
   setSubagents: (parentThreadId: string, subagents: SubagentSummary[]) => void
   turnStates: TurnStateSnapshot
   /** Stops shown before the daemon confirmed them, by thread (`lib/optimisticStop`). Not persisted. */
@@ -342,7 +370,10 @@ interface AppState {
   browserElementAttachmentsByThread: Record<string, BrowserElementAttachment[]>
   /** Workspace choices for each new-chat draft, isolated by profile. */
   composerWorkspaceDrafts: Record<string, ComposerWorkspace>
-  /** Settings → Runs: when a new private chat deletes itself; `never` keeps it. */
+  /** The project last picked for a new thread here (none: no project), so New thread opens in it again. */
+  lastNewThreadProjectId: string | null
+  setLastNewThreadProjectId: (projectId: string | null) => void
+  /** Settings → Runs: when a new private chat archives itself; `never`: it does not. */
   privateThreadExpiry: ExpiryPreset | 'never'
   /** Where a new thread in a project with no remembered checkout starts (`runs.newThreadWorktree`). */
   newThreadWorktree: boolean
@@ -406,6 +437,11 @@ interface AppState {
   setMessages: (messages: ChatMessage[]) => void
   applyThreadMessages: (snapshot: ThreadMessagesSnapshot, profileId: string | null) => void
   addMessage: (message: ChatMessage) => void
+  /**
+   * Takes message `id` out of thread `threadId`'s transcript, shown or kept for a later visit (`null`: the chat
+   * with no thread). For a copy painted at send whose send did not go ahead.
+   */
+  dropMessage: (threadId: string | null, id: string) => void
   updateMessage: (message: ChatMessage) => void
   /** Several updates of the selected thread in one store write (one frame of a stream). */
   updateMessages: (messages: ChatMessage[]) => void
@@ -428,7 +464,7 @@ interface AppState {
    * the main process's echo of a selection (and the thread it restores at launch) is not a request to open it.
    * That echo also leaves a held thread (`openingThreadId`) waiting for its view.
    */
-  switchToThread: (id: string, options?: { keepWorkspace?: boolean }) => void
+  switchToThread: (id: string, options?: { keepWorkspace?: boolean; carry?: readonly ChatMessage[] }) => void
   /** Apply daemon snapshot for the selected thread in a single paint. */
   applyThreadView: (view: ThreadViewSnapshot) => void
   setProjects: (projects: Project[]) => void
@@ -456,7 +492,7 @@ interface AppState {
   setActiveProjectTerminalTab: (threadId: string | null, tabId: string) => void
   updateProjectTerminalTab: (
     tabId: string,
-    patch: Partial<Pick<ProjectTerminalTab, 'ownerThreadId' | 'ptyId' | 'cwd' | 'exited' | 'title'>>
+    patch: Partial<Pick<ProjectTerminalTab, 'ownerThreadId' | 'ptyId' | 'cwd' | 'exited' | 'title' | 'quickAction'>>
   ) => void
   openDocument: (title: string, markdown: string) => string
   /** Shows a thread's applet in the side panel's Documents tab, reusing its tab when it is already open. */
@@ -568,6 +604,29 @@ function applyMessageUpdate(
   return upsertMessage(messages, message)
 }
 
+/** How far another computer's clock may lag this one's when it saves a message sent from here. */
+const COPY_CLOCK_SLACK_MS = 60_000
+
+/**
+ * `current` without the copy painted at send (an `optimistic:` id) of each user message in `incoming` that `current`
+ * does not hold yet: the saved message takes its place. One copy per saved message, and only one saved after the copy
+ * was painted (give or take another computer's clock), so the same text sent earlier never takes a new copy's place.
+ */
+export function withoutLandedCopies(current: ChatMessage[], incoming: readonly ChatMessage[]): ChatMessage[] {
+  if (!current.some((message) => message.id.startsWith('optimistic:'))) return current
+  const held = new Set(current.map((message) => message.id))
+  const dropped = new Set<string>()
+  for (const message of incoming) {
+    if (message.role !== 'user' || held.has(message.id) || message.id.startsWith('optimistic:')) continue
+    const savedAt = Date.parse(message.timestamp)
+    const copy = current.find((entry) =>
+      entry.id.startsWith('optimistic:') && !dropped.has(entry.id) && entry.role === 'user' && entry.content === message.content &&
+      savedAt >= Date.parse(entry.timestamp) - COPY_CLOCK_SLACK_MS)
+    if (copy) dropped.add(copy.id)
+  }
+  return dropped.size === 0 ? current : current.filter((message) => !dropped.has(message.id))
+}
+
 /**
  * Merge a full/paginated snapshot with live renderer state. Transcripts are append-only during
  * a session, so entries absent from an older snapshot are retained. This is important on long
@@ -578,7 +637,7 @@ export function reconcileMessageSnapshot(
   incoming: ChatMessage[]
 ): ChatMessage[] {
   if (current.length === 0) return sortMessagesDeterministic(incoming)
-  const merged = new Map(current.map((message) => [message.id, message]))
+  const merged = new Map(withoutLandedCopies(current, incoming).map((message) => [message.id, message]))
   for (const message of incoming) {
     const existing = merged.get(message.id)
     merged.set(message.id, existing ? newerMessageVersion(existing, message) : message)
@@ -600,9 +659,9 @@ const personalWorkspaceKeys = [
   'projectTerminalTabs', 'activeProjectTerminalTabByThread', 'browserTabs',
   'browserActiveTabByThread', 'browserElementAttachmentsByThread', 'mainView',
   'sidebarMode', 'mainAreaWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
-  'openedSurfaceKinds', 'sideCardCollapsed',
+  'openedSurfaceKinds', 'sideCardCollapsed', 'chatsSidebarCollapsed',
   'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView', 'lastThreadListView', 'threadFeedOrder',
-  'reviewIgnoreWhitespace', 'queueEditDrafts'
+  'reviewIgnoreWhitespace', 'queueEditDrafts', 'lastNewThreadProjectId'
 ] as const
 let profileActivated = false
 
@@ -701,6 +760,8 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   shortcuts: {},
   // Settings events repeat the same map; keep the old object so nothing re-resolves for no change.
   setShortcuts: (shortcuts) => set((s) => (JSON.stringify(s.shortcuts) === JSON.stringify(shortcuts) ? s : { shortcuts })),
+  notifyBotThreads: false,
+  setNotifyBotThreads: (notifyBotThreads) => set((s) => (s.notifyBotThreads === notifyBotThreads ? s : { notifyBotThreads })),
   paletteOpen: false,
   paletteMode: 'all',
   // Closing keeps the mode, so the fading palette keeps its rows; each opening sets it again.
@@ -711,13 +772,23 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   sideCardFits: null,
   sideCardOverlayOpen: false,
   sideCardCollapsed: {},
+  chatsSidebarCollapsed: {},
   activeThreadId: null,
   projects: [],
   threads: [],
   threadActivity: {},
   subagentsByParent: {},
-  setSubagents: (parentThreadId, subagents) =>
-    set((s) => ({ subagentsByParent: { ...s.subagentsByParent, [parentThreadId]: subagents } })),
+  removedSubagentsByParent: {},
+  setSubagents: (parentThreadId, subagents) => {
+    const live = subagents.filter((row) => !row.removed)
+    const removed = subagents.filter((row) => row.removed)
+    set((s) => ({
+      subagentsByParent: { ...s.subagentsByParent, [parentThreadId]: live },
+      ...(removed.length > 0 || s.removedSubagentsByParent[parentThreadId]
+        ? { removedSubagentsByParent: { ...s.removedSubagentsByParent, [parentThreadId]: removed } }
+        : {})
+    }))
+  },
   turnStates: {},
   stopRequests: {},
   mainView: DEFAULT_MAIN_VIEW,
@@ -754,6 +825,8 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   threadFeedOrder: [],
   setThreadFeedOrder: (threadFeedOrder) => set({ threadFeedOrder }),
   composerWorkspaceDrafts: {},
+  lastNewThreadProjectId: null,
+  setLastNewThreadProjectId: (lastNewThreadProjectId) => set({ lastNewThreadProjectId }),
   privateThreadExpiry: 'never',
   newThreadWorktree: true,
   setRunDefaults: ({ privateThreadExpiry, newThreadWorktree }) => set({ privateThreadExpiry, newThreadWorktree }),
@@ -860,6 +933,16 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
       return { messages }
     }),
+  dropMessage: (threadId, id) => {
+    const kept = threadId ? messageCache.get(threadId) : undefined
+    if (threadId && kept?.some((message) => message.id === id)) messageCache.set(threadId, kept.filter((message) => message.id !== id))
+    set((s) => {
+      if (s.activeThreadId !== threadId || !s.messages.some((message) => message.id === id)) return s
+      const messages = s.messages.filter((message) => message.id !== id)
+      if (s.activeThreadId) rememberMessages(s.activeThreadId, messages)
+      return { messages }
+    })
+  },
   updateMessage: (message) =>
     set((s) => {
       const messages = applyMessageUpdate(s, s.messages, message)
@@ -890,6 +973,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   setSideCardFits: (sideCardFits) => set({ sideCardFits }),
   setSideCardOverlayOpen: (sideCardOverlayOpen) => set({ sideCardOverlayOpen }),
   setSideCardSectionCollapsed: (key, collapsed) => set((s) => ({ sideCardCollapsed: { ...s.sideCardCollapsed, [key]: collapsed } })),
+  setChatsSidebarSectionCollapsed: (key, collapsed) => set((s) => ({ chatsSidebarCollapsed: { ...s.chatsSidebarCollapsed, [key]: collapsed } })),
   setTurnState: (state) => set((s) => {
     const request = s.stopRequests[state.threadId]
     if (!request) {
@@ -948,7 +1032,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       if (options?.keepWorkspace && s.openingThreadId === id) return s
       const opening = s.openingThreadId ? { openingThreadId: null } : {}
       if (s.activeThreadId === id) return options?.keepWorkspace && !s.openingThreadId ? s : { ...workspace, ...opening }
-      return { ...workspace, ...switchPatch(s, id) }
+      return { ...workspace, ...switchPatch(s, id, options?.carry) }
     }),
   applyThreadView: (view) =>
     set((current) => {
@@ -1139,6 +1223,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       lastThreadListView: 'projects' as ThreadListTab,
       threadFeedOrder: [] as string[],
       composerWorkspaceDrafts: {},
+      lastNewThreadProjectId: null as string | null,
       composerDrafts: {},
       composerReferences: {},
       queueEditDrafts: {} as Record<string, QueueEditDraft>,
@@ -1151,6 +1236,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       threadsSidebarOpen: true,
       mainAreaOpen: false,
       sideCardCollapsed: {} as Record<string, boolean>,
+      chatsSidebarCollapsed: {} as Record<string, boolean>,
       chatMode: DEFAULT_CHAT_MODE
     }
     if (typeof window !== 'undefined') {
@@ -1158,6 +1244,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
         const raw = window.localStorage.getItem(`mousse-profile-${profileId}-workspace`)
         if (raw) next = sanitizeSavedWorkspace({ ...next, ...JSON.parse(raw) })
         if (!Array.isArray(next.threadFeedOrder)) next.threadFeedOrder = []
+        if (typeof next.lastNewThreadProjectId !== 'string') next.lastNewThreadProjectId = null
         next.queueEditDrafts = queueEditDraftsFromStorage(next.queueEditDrafts)
       } catch { /* malformed profile-local state is discarded */ }
     }
@@ -1172,6 +1259,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       workspaceReady: false,
       // Another profile's shortcuts must not stay bound until its own settings arrive.
       shortcuts: {},
+      notifyBotThreads: false,
       paletteOpen: false,
       ...next,
       queueDraftNotices: {},
@@ -1185,6 +1273,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       threads: [],
       threadActivity: {},
       subagentsByParent: {},
+      removedSubagentsByParent: {},
       turnStates: {},
       stopRequests: {},
       documentTabs: [],

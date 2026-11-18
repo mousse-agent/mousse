@@ -2,14 +2,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ChatMessage, PendingUserQuestions, Thread } from '../../src/shared/types'
 import {
   ATTEMPT_TOKEN_KEY,
+  checkedInHandler,
   McpToolError,
+  refused,
   ToolRegistry,
   TURN_TOKEN_KEY,
   type McpCallRequest,
   type ThreadSearchHit,
   type ToolOutcome
 } from '../../src/mms/run/mcp/appTools'
-import { appToolRegistry, appTurn, fakeAppToolHost } from './appToolsFixture'
+import { appToolRegistry, appTurn, denied as refusalIn, fakeAppToolHost } from './appToolsFixture'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
 import { THREAD_MESSAGE_MAX_CHARS, THREAD_READ_MAX_BYTES, THREAD_RESULT_MAX_CHARS } from '../../src/mms/run/mcp/appTools/thread'
 import { AGENT_MESSAGE_END, AGENT_MESSAGE_PREFIX, agentMessage } from '../../src/mms/run/mcp/appTools/agentMessage'
@@ -89,9 +91,9 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
 
   it('refuses a queue tool on a thread the host does not know with mousse_scope_denied, and queues on its own', async () => {
     const { registry, ctx, enqueued } = await setup()
-    const denied = await registry.call('queue_enqueue', { content: 'hi', threadId: 'other', expectedRevision: 'rev-0' }, ctx()).catch((error) => error)
-    expect(denied).toBeInstanceOf(McpToolError)
-    expect(denied.code).toBe('mousse_scope_denied')
+    const denied = await refusalIn(registry.call('queue_enqueue', { content: 'hi', threadId: 'other', expectedRevision: 'rev-0' }, ctx()))
+    expect(denied?.refused.code).toBe('scope_denied')
+    expect(denied?.code).toBe('mousse_scope_denied')
     expect(enqueued).toEqual([])
     const ok = await registry.call('queue_enqueue', { content: 'hi' }, ctx())
     expect(ok.isError).toBeUndefined()
@@ -107,8 +109,8 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     const child = JSON.parse((await registry.call('thread_read', { threadId: 'child-1' }, ctx())).text)
     expect(child.events.some((event: { type: string }) => event.type === 'thread.lineage')).toBe(true)
     await fx.runningRun('stranger')
-    const denied = await registry.call('thread_read', { threadId: 'stranger' }, ctx()).catch((error) => error)
-    expect(denied.code).toBe('mousse_scope_denied')
+    const denied = await refusalIn(registry.call('thread_read', { threadId: 'stranger' }, ctx()))
+    expect(denied?.code).toBe('mousse_scope_denied')
     const badLimit = await registry.call('thread_read', { limit: 0 }, ctx())
     expect(badLimit.isError).toBe(true)
   })
@@ -267,21 +269,21 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     const { registry, ctx, delegation } = await setup('plan')
     await registry.call('delegate_task', { prompt: 'Look', title: 'Looker', workspace: 'shared', role: 'research' }, ctx({ toolCallId: 'mcp:a' }))
     expect(delegation.delegateTask).toHaveBeenCalledWith(expect.objectContaining({ modeCeiling: 'plan' }), { toolCallId: 'mcp:a' })
-    const broader = await registry.call('delegate_task', { prompt: 'Edit', title: 'Editor', workspace: 'isolated', modeCeiling: 'default' }, ctx()).catch((error) => error)
-    expect(broader.code).toBe('mousse_ceiling_exceeded')
+    const broader = await refusalIn(registry.call('delegate_task', { prompt: 'Edit', title: 'Editor', workspace: 'isolated', modeCeiling: 'default' }, ctx()))
+    expect(broader?.code).toBe('mousse_ceiling_exceeded')
     // The retired merge tool is not offered over MCP any more.
     await expect(registry.call('integrate_delegation', { delegationId: 'd1' }, ctx())).rejects.toMatchObject({ code: 'mousse_unknown_tool' })
     expect(delegation.reportResult).not.toHaveBeenCalled()
-    const agentTurn = await registry.call('queue_enqueue', { content: 'go', mode: 'agent' }, ctx()).catch((error) => error)
-    expect(agentTurn.code).toBe('mousse_ceiling_exceeded')
+    const agentTurn = await refusalIn(registry.call('queue_enqueue', { content: 'go', mode: 'agent' }, ctx()))
+    expect(agentTurn?.code).toBe('mousse_ceiling_exceeded')
   })
 
   it('a read-only child calls only reads and readOnlySafe tools', async () => {
     const { registry, ctx, enqueued } = await setup('default', { readOnlyThread: () => true })
-    const refused = await registry.call('queue_enqueue', { content: 'x' }, ctx()).catch((error) => error)
-    expect(refused.code).toBe('mousse_read_only')
+    const refused = await refusalIn(registry.call('queue_enqueue', { content: 'x' }, ctx()))
+    expect(refused?.code).toBe('mousse_read_only')
     expect(enqueued).toEqual([])
-    await expect(registry.call('create_quick_action', { label: 'x', kind: 'bash', payload: 'ls' }, ctx())).rejects.toMatchObject({ code: 'mousse_read_only' })
+    expect(await refusalIn(registry.call('create_quick_action', { label: 'x', kind: 'bash', payload: 'ls' }, ctx()))).toMatchObject({ code: 'mousse_read_only' })
     expect((await registry.call('queue_list', {}, ctx())).isError).toBeUndefined()
     const listed = registry.listForThread('parent', 'default').map((tool) => tool.name)
     expect(listed).toContain('ask_user')
@@ -294,7 +296,7 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     const { registry, ctx, turns, run, host } = await setup('default', { toolLedger: () => ledger })
     turns.register(appTurn({ threadId: 'parent', runId: run.runId, settingsEnabled: (name) => name !== 'ask_user' }))
     const outcome = await registry.call('ask_user', { questions: [{ id: 'q1', prompt: 'Which?', options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }] }, ctx())
-    expect(outcome).toEqual({ text: 'Tool "ask_user" is disabled in Settings → Skills & MCP.', isError: true })
+    expect(outcome).toEqual(refused('unavailable', 'Tool "ask_user" is disabled in Settings → Skills & MCP.'))
     expect(host.askUser).not.toHaveBeenCalled()
     expect(ledger.start).not.toHaveBeenCalled()
   })
@@ -338,8 +340,8 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
       registry.register({ name: 'refuses', description: '', inputSchema: { type: 'object' }, access: 'reads', class: 'read', handler: () => { throw new McpToolError('mousse_scope_denied', 'no') } })
       await call(registry, request, 'ok', { a: 1 }, 'c1')
       await call(registry, request, 'soft', {}, 'c2')
-      expect(await call(registry, request, 'throws', {}, 'c3')).toEqual({ text: 'boom', isError: true })
-      await expect(call(registry, request, 'refuses', {}, 'c4')).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+      expect(await call(registry, request, 'throws', {}, 'c3')).toEqual(refused('failed', 'boom'))
+      expect(await refusalIn(call(registry, request, 'refuses', {}, 'c4'))).toMatchObject({ code: 'mousse_scope_denied' })
       expect(rows).toEqual([
         'start:ok:c1', 'commit:inv:c1',
         'start:soft:c2', 'failed:inv:c2',
@@ -359,9 +361,9 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
       expect(ledger.start).toHaveBeenCalledWith({ type: 'toolCall', id: 'call-1', name: 'write', arguments: { text: 'x' } })
       rows.length = 0
       await expect(call(registry, request, 'missing')).rejects.toMatchObject({ code: 'mousse_unknown_tool' })
-      await expect(call(registry, request, 'write', { threadId: 'other' })).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+      expect(await refusalIn(call(registry, request, 'write', { threadId: 'other' }))).toMatchObject({ code: 'mousse_scope_denied' })
       const plan = request('run:active')
-      await expect(registry.call('spawn', {}, { ...plan, credential: { ...plan.credential, modeCeiling: 'plan' } })).rejects.toMatchObject({ code: 'mousse_ceiling_exceeded' })
+      expect(await refusalIn(registry.call('spawn', {}, { ...plan, credential: { ...plan.credential, modeCeiling: 'plan' } }))).toMatchObject({ code: 'mousse_ceiling_exceeded' })
       await expect(call(registry, request, 'write', {}, 'call-1', 'run:stale')).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
       active = null
       await expect(call(registry, request, 'write')).rejects.toMatchObject({ code: 'mousse_caller_not_live' })
@@ -380,12 +382,12 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
 
     it('thread_fork refuses a plan ceiling and a thread outside the caller lineage, creating nothing', async () => {
       const plan = await withFinishedChild('plan')
-      await expect(plan.registry.call('thread_fork', { sourceThreadId: 'child-1' }, plan.ctx())).rejects.toMatchObject({ code: 'mousse_ceiling_exceeded' })
+      expect(await refusalIn(plan.registry.call('thread_fork', { sourceThreadId: 'child-1' }, plan.ctx()))).toMatchObject({ code: 'mousse_ceiling_exceeded' })
       expect([...plan.fx.threads]).toEqual(['child-1'])
       fx?.dispose()
       const open = await withFinishedChild()
       await open.fx.runningRun('stranger')
-      await expect(open.registry.call('thread_fork', { sourceThreadId: 'stranger' }, open.ctx())).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+      expect(await refusalIn(open.registry.call('thread_fork', { sourceThreadId: 'stranger' }, open.ctx()))).toMatchObject({ code: 'mousse_scope_denied' })
       expect([...open.fx.threads]).toEqual(['child-1'])
     })
 
@@ -416,10 +418,11 @@ describe('Mousse tool registry (SPEC §15.1)', () => {
     })
 
     it('thread_merge_back acts for the caller\'s own fork only, and derives its clientRequestId from the run and call', async () => {
-      const { fx, registry, ctx, run } = await setup()
+      // Accept edits, so the call reaches the tool without asking (the asking is covered below).
+      const { fx, registry, ctx, run } = await setup('default', { permissionModeFor: () => 'accept_edits' })
       const mergeBack = vi.spyOn(fx.engine, 'mergeBack')
-      await expect(registry.call('thread_merge_back', { forkThreadId: 'someone-else' }, ctx())).rejects.toMatchObject({ code: 'mousse_scope_denied' })
-      await expect(registry.call('thread_merge_back', { threadId: 'someone-else' }, ctx())).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+      expect(await refusalIn(registry.call('thread_merge_back', { forkThreadId: 'someone-else' }, ctx()))).toMatchObject({ code: 'mousse_scope_denied' })
+      expect(await refusalIn(registry.call('thread_merge_back', { threadId: 'someone-else' }, ctx()))).toMatchObject({ code: 'mousse_scope_denied' })
       expect(mergeBack).not.toHaveBeenCalled()
       // `parent` is not a fork, so the engine refuses; the request id shows what the tool sent.
       const derived = await registry.call('thread_merge_back', {}, ctx({ toolCallId: 'mcp:merge' }))
@@ -478,7 +481,7 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     const runs: Record<string, string> = { parent: parentRun.runId, stranger: strangerRun.runId }
     const call = (who: string, name: string, args: Record<string, unknown> = {}) => registry.call(name, args, request({ threadId: who, runId: runs[who] }))
     const read = async (who: string, args: Record<string, unknown>) => JSON.parse((await call(who, 'thread_read', args)).text)
-    const denied = (promise: Promise<unknown>) => promise.then(() => undefined, (error: McpToolError) => error)
+    const denied = refusalIn
     return { fx, registry, turns, request, threads, messages, activity, hits, ledger, runs, call, read, denied, parentRun, strangerRun, ...fake }
   }
 
@@ -514,18 +517,18 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
       registry.register(tool('reads_others', 'readsOthers', { threadId: id }))
       registry.register(tool('manages_others', 'managesOthers', { threadId: id }))
       registry.register(tool('writes_own', 'writesThreads', { threadId: id }))
-      registry.register(tool('declared', 'reads', { threadId: id, sourceThreadId: id }, { threadArgChecked: 'the handler accepts the caller\'s own thread only' }))
+      registry.register(tool('declared', 'reads', { threadId: id, sourceThreadId: id }, { authorize: checkedInHandler('the handler accepts the caller\'s own thread only') }))
       registry.register(tool('plain', 'reads', { query: id, projectId: id }))
-      expect(() => registry.register(tool('blank', 'reads', { threadId: id }, { threadArgChecked: '  ' }))).toThrow(/does not cover/)
+      expect(() => registry.register(tool('blank', 'reads', { threadId: id }, { authorize: checkedInHandler('  ') }))).toThrow(/does not cover/)
     })
 
     it('every tool of the Mousse registry passes it, so a new one must declare how it checks a thread', async () => {
       const { registry } = await world()
       for (const registered of registry.list()) {
         const names = JSON.stringify(registered.inputSchema).match(/"\w*[tT]hreadIds?"\s*:/g) ?? []
-        if (names.length) expect(['readsOthers', 'managesOthers', 'writesThreads'].includes(registered.access) || Boolean(registered.threadArgChecked), registered.name).toBe(true)
+        if (names.length) expect(['readsOthers', 'managesOthers', 'writesThreads'].includes(registered.access) || Boolean(registered.authorize?.where), registered.name).toBe(true)
       }
-      expect(registry.get('thread_fork')!.threadArgChecked).toBeTruthy()
+      expect(registry.get('thread_fork')!.authorize?.where).toBeTruthy()
     })
   })
 
@@ -715,6 +718,14 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
 
     expect(ids(await list({ includeUnstarted: true }))).toContain('draft')
     expect(ids(await list({ includeSettled: true }))).toContain('old')
+    // Archived and hidden rows say so; open, shown rows carry neither.
+    threads.set('tucked', thread('tucked', { hidden: true }))
+    const settled = (await list({ includeSettled: true })).threads
+    expect(settled.find((row) => row.id === 'old')).toMatchObject({ archived: true, archivedAt: NOW })
+    expect(settled.find((row) => row.id === 'tucked')).toMatchObject({ hidden: true })
+    expect(settled.find((row) => row.id === 'quiet')).not.toHaveProperty('archived')
+    expect(settled.find((row) => row.id === 'quiet')).not.toHaveProperty('hidden')
+    threads.delete('tucked')
     expect(ids(await list({ includeSubagents: true }))).toContain(sub.childThreadId)
     expect(ids(await list({ projectId: 'p2' }))).toEqual(['elsewhere'])
     expect(ids(await list({ status: 'awaiting_input' }))).toEqual(['stranger'])
@@ -723,12 +734,16 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     expect(ids(await list({ limit: 1 }))).toHaveLength(1)
     expect((await call('parent', 'thread_list', { limit: 0 })).isError).toBe(true)
     expect((await call('parent', 'thread_list', { status: 'busy' })).isError).toBe(true)
-    // A thread the caller launched is listed even unstarted and settled; a private one is not listed for a shared caller.
-    threads.set('mine', thread('mine', { projectId: 'p2', startedAt: undefined, settledAt: NOW, createdByThreadId: 'parent' }))
+    // A thread the caller launched is listed even unstarted; a private one is not listed for a shared caller.
+    threads.set('mine', thread('mine', { projectId: 'p2', startedAt: undefined, createdByThreadId: 'parent' }))
     threads.set('secret', thread('secret', { localOnly: true }))
     expect(ids(await list())).toContain('mine')
     expect(ids(await list())).not.toContain('secret')
     expect(ids(await list({ projectId: 'p1' }))).not.toContain('mine')
+    // Once archived it leaves the default list like any other, and comes back marked with includeSettled.
+    threads.set('mine', { ...threads.get('mine')!, settledAt: NOW })
+    expect(ids(await list())).not.toContain('mine')
+    expect((await list({ includeSettled: true })).threads.find((row) => row.id === 'mine')).toMatchObject({ archived: true, archivedAt: NOW })
   })
 
   it('thread_search: titles, projects and message matches with snippets in every project, private threads left out before the limit', async () => {
@@ -756,6 +771,34 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     expect((await call('parent', 'thread_search', { query: 'work', limit: 201 })).isError).toBe(true)
   })
 
+  it('thread_search finds subagents, labelled with their parent, under the visibility of the thread at the top of their chain', async () => {
+    const seen: Array<{ hideSubagents?: boolean; allow?: (thread: Thread) => boolean }> = []
+    const { call, hits, host, threads, fx, strangerRun } = await world()
+    const sub = await fx.delegate(strangerRun.runId, 'call-sub')
+    const lineage = (parentThreadId: string, rootThreadId = parentThreadId) => ({ lineage: { parentThreadId, rootThreadId, relationship: 'subagent' as const } })
+    threads.set(sub.childThreadId, thread(sub.childThreadId, { name: 'Reviewer work', ...lineage('stranger') }))
+    hits.push({ threadId: sub.childThreadId, threadName: 'Reviewer work', projectId: 'p1', projectName: 'One', matchType: 'thread' })
+    const search = host.searchThreads!
+    host.searchThreads = (query, limit, options) => (seen.push({ ...options }), search(query, limit, options))
+    const results = JSON.parse((await call('parent', 'thread_search', { query: 'reviewer' })).text).results as Array<Record<string, unknown>>
+    expect(results).toEqual([expect.objectContaining({ threadId: sub.childThreadId, subagent: true, parentThreadId: 'stranger', link: `mousse://thread/${sub.childThreadId}` })])
+    // The store is asked not to fold subagents away, and decides each one by its chain.
+    expect(seen[0].hideSubagents).toBe(false)
+    const allow = seen[0].allow!
+    threads.set('private-root', thread('private-root', { localOnly: true }))
+    threads.set('bot-root', thread('bot-root', { botOwned: true } as Partial<Thread>))
+    threads.set('manager', thread('manager', { automationManager: true } as Partial<Thread>))
+    expect(allow(threads.get(sub.childThreadId)!)).toBe(true)
+    expect(allow(thread('under-private', lineage('private-root')))).toBe(false)
+    expect(allow(thread('under-bot', lineage('bot-root')))).toBe(false)
+    expect(allow(thread('under-manager', lineage('manager')))).toBe(false)
+    expect(allow(threads.get('manager')!)).toBe(false)
+    // A thread that is no subagent carries no label.
+    hits.push({ threadId: 'stranger', threadName: 'Stranger work', projectId: 'p1', projectName: 'One', matchType: 'thread' })
+    const plain = JSON.parse((await call('parent', 'thread_search', { query: 'stranger' })).text).results as Array<Record<string, unknown>>
+    expect(plain[0]).not.toHaveProperty('subagent')
+  })
+
   it('a definition run is held to the thread check before its approval is asked, so a refused call never prompts a person', async () => {
     fx = delegationFixture()
     const run = await fx.runningRun('parent')
@@ -780,7 +823,7 @@ describe('reading and managing other threads (SPEC §15.1)', () => {
     turns.register(appTurn({ threadId: 'parent', runId: run.runId, definition: definition as never }))
     const as = () => request({ threadId: 'parent', runId: run.runId })
     // A thread that does not exist: refused by the thread check, which comes before the definition's approval.
-    await expect(registry.call('thread_read', { threadId: 'no-such-thread' }, as())).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+    expect(await refusalIn(registry.call('thread_read', { threadId: 'no-such-thread' }, as()))).toMatchObject({ code: 'mousse_scope_denied' })
     expect(asked).toEqual([])
     // Another thread passes the check and then meets the definition's own approval.
     expect((await registry.call('thread_read', { threadId: 'stranger' }, as())).isError).toBeFalsy()
@@ -860,6 +903,12 @@ describe('workspace-changing tools and the permission mode', () => {
     await expect(dismissed.call()).resolves.toMatchObject({ isError: true })
   })
 
+  it('asks as under Ask when the host knows no permission mode', async () => {
+    const { call, asked } = await setup(undefined, 'reject')
+    await expect(call()).resolves.toMatchObject({ isError: true, text: expect.stringContaining('did not approve') })
+    expect(asked).toHaveLength(1)
+  })
+
   it.each(['accept_edits', 'full'] as const)('runs without asking under %s', async (mode) => {
     const { call, asked } = await setup(mode)
     expect(refused(await call().catch((error) => ({ isError: true, text: String(error) })))).toBe(false)
@@ -872,12 +921,12 @@ describe('workspace-changing tools and the permission mode', () => {
     expect(delegation.reportResult).not.toHaveBeenCalled()
     expect(asked).toEqual([])
     // In process it stays dispatchable for replayed transcripts, and changes no workspace.
-    expect(registry.get('integrate_delegation')).toMatchObject({ hidden: true, access: 'actsAsCaller', readOnlySafe: true })
+    expect(registry.get('integrate_delegation')).toMatchObject({ callable: 'in_process', access: 'actsAsCaller', readOnlySafe: true })
   })
 
   it('refuses a call that names another thread before it asks the user anything', async () => {
     const { call, asked } = await setup('ask')
-    await expect(call('thread_merge_back', { threadId: 'someone-else' })).rejects.toMatchObject({ code: 'mousse_scope_denied' })
+    expect(await refusalIn(call('thread_merge_back', { threadId: 'someone-else' }))).toMatchObject({ code: 'mousse_scope_denied' })
     expect(asked).toEqual([])
   })
 

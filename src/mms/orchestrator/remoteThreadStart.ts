@@ -1,4 +1,4 @@
-import type { RoutedAgentMark } from '../../shared/bridge/routed'
+import { ROUTED_DEADLINE_KEY, type RoutedAgentMark } from '../../shared/bridge/routed'
 import { isPermissionMode, narrowPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { DomainRpcError } from '../protocol/domainRegistry'
 
@@ -69,6 +69,8 @@ export interface RemoteThreadStart {
     clientRequestId: string
     /** A follow-up on a thread that may be paused by a usage limit refuses instead of waiting. */
     refuseWhilePaused?: boolean
+    /** The minutes of running time the run may use there (`ROUTED_DEADLINE_KEY`); only to a computer that takes it. */
+    deadlineMinutes?: number
   }
 }
 
@@ -137,6 +139,7 @@ export async function runRemoteThreadStart(start: RemoteThreadStart, io: RemoteT
     mode: start.message.mode,
     clientRequestId: start.message.clientRequestId,
     ...(start.message.refuseWhilePaused ? { refuseWhilePaused: true } : {}),
+    ...(start.message.deadlineMinutes ? { [ROUTED_DEADLINE_KEY]: start.message.deadlineMinutes } : {}),
     ...start.mark
   }, keys.send)
   return { remoteThreadId, mode, sent }

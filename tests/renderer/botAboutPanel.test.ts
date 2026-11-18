@@ -60,18 +60,14 @@ afterEach(() => {
 })
 
 describe('About this bot', () => {
-  it('switches a permission off and on and still removes it', async () => {
+  it('switches a permission off and on', async () => {
     await show()
     const toggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="use files on this computer"]')!
     expect(toggle().getAttribute('aria-checked')).toBe('true')
-    expect(button('Remove use files on this computer')).toBeTruthy()
     await click(toggle())
     expect(toggle().getAttribute('aria-checked')).toBe('false')
     await click(toggle())
     expect(toggle().getAttribute('aria-checked')).toBe('true')
-    await click(button('Remove use files on this computer'))
-    expect(toggle()).toBeNull()
-    expect(fake.details.b1.permissions.some((item) => item.id === 'fp1')).toBe(false)
   })
   it('shows the whole mouse, the name and the prompt', async () => {
     await show()
@@ -188,14 +184,6 @@ describe('About this bot', () => {
       expect(labels()).toEqual(['Talk', 'Work'])
     })
 
-    it('every row\'s control is in one column, as wide as the others', async () => {
-      withRows({ talk: { instanceId: 'claude', model: 'opus' }, light: null, medium: { instanceId: 'claude', model: 'haiku' }, hard: null })
-      await show()
-      // The rows sit in one grid: a label column and one control column, so each picker fills the same width.
-      const grid = host.querySelector('.bot-model-rows')!
-      expect([...grid.querySelectorAll('.bot-model-row')].every((row) => row.children.length === 2 && row.children[1]!.classList.contains('settings-model-picker'))).toBe(true)
-    })
-
     it('a row picked on a Codex not checked for bots says so once, with the versions in its tooltip, before any work is sent', async () => {
       const note = { text: 'Bots\' work won\'t run on this version of Codex: it hasn\'t been checked for bots yet.', title: 'Codex 0.999.0 is installed here. Checked for bots: 0.162.1.' }
       const onKey = { instanceId: 'pi:key', model: 'opus' }
@@ -254,6 +242,15 @@ describe('About this bot', () => {
     expect(button('Remove use your GitHub tools')).toBeDefined()
   })
 
+  it('says what a chat turn costs in one quiet line once turns reported usage, and nothing before', async () => {
+    await show()
+    expect(host.querySelector('[data-testid="bot-about-usage"]')).toBeNull()
+    fake.details.b1 = { ...fake.details.b1, usage: { turns: 12, inputPerTurn: 18_400, outputPerTurn: 640, cachedShare: 0.72 } }
+    await act(async () => { await useBotsStore.getState().loadDetail('b1') })
+    const line = host.querySelector<HTMLElement>('[data-testid="bot-about-usage"]')!
+    expect(line.textContent).toBe('18k tokens a turn · 72% from cache')
+    expect(line.title).toContain('Chat turns in the last 7 days: 12')
+  })
   it('lists its runs and removes one', async () => {
     await show()
     expect(rows('RUNS')).toEqual(['Every weekday · 09:00'])
@@ -437,4 +434,53 @@ describe("the bot's prompt in About", () => {
     expect(field()!.value).toBe('New words.')
     expect(body()).toBeUndefined()
   })
+})
+
+it('formats stored telling hours in the window’s clock format', async () => {
+  const { botGroupTime } = await import('../../src/renderer/components/bots/messageGroups')
+  fake.details.b1.telling = 'An older service-formatted string must not be used'
+  fake.details.b1.tellingSettings = { tellMe: 'needs_you', quietHours: { from: '22:00', to: '08:00' }, canWakeMe: true }
+  await show()
+  const from = botGroupTime(new Date(2000, 0, 1, 22, 0).toISOString())
+  const to = botGroupTime(new Date(2000, 0, 1, 8, 0).toISOString())
+  expect(host.textContent).toContain(`Tells you when it needs you · Quiet ${from} to ${to} · can wake you`)
+  expect(host.textContent).not.toContain(fake.details.b1.telling)
+})
+
+it.each([true, false])('keeps whole-service controls with asks-first projection %s', async (asking) => {
+  fake.details.b1.permissions = [{ id: 'mail', title: 'use Mail', enabled: true, grantedAt: AT, note: asking ? 'Asks you first before actions that can send or change things.' : 'Use the connected Mail service.', ...(asking ? { mark: 'Asks first' } : {}) }]
+  await show()
+  expect(host.textContent?.includes('Asks first')).toBe(asking)
+  const title = [...host.querySelectorAll('span')].find((item) => item.title.includes(asking ? 'Asks you first' : 'connected Mail'))
+  expect(title).toBeTruthy()
+  const toggle = () => host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="use Mail"]')!
+  await click(toggle())
+  expect(fake.calls).toContainEqual(['setPermission', 'b1', 'mail', false])
+  await click(toggle())
+  expect(fake.calls).toContainEqual(['setPermission', 'b1', 'mail', true])
+  await click(button('Remove use Mail'))
+  expect(fake.calls).toContainEqual(['revokePermission', 'b1', 'mail'])
+  expect(toggle()).toBeNull()
+})
+
+it('keeps chat usage and the service asks-first row together with whole-service controls', async () => {
+  fake.details.b1 = { ...fake.details.b1, usage: { turns: 12, inputPerTurn: 18_400, outputPerTurn: 640, cachedShare: 0.72 }, permissions: [{
+    id: 'mail', title: 'use your Mail tools', note: 'Asks you first before actions that can send or change things.', enabled: true, mark: 'Asks first', asksFirst: true, grantedAt: AT
+  }] }
+  await show()
+  const usage = () => host.querySelector<HTMLElement>('[data-testid="bot-about-usage"]')!
+  const service = () => [...host.querySelectorAll('.bot-about-permission')].find(element => element.textContent?.includes('Use your Mail tools'))!
+  expect(usage().textContent).toBe('18k tokens a turn · 72% from cache')
+  expect(usage().title).toContain('Chat turns in the last 7 days: 12')
+  expect(service().textContent).toContain('Asks first')
+  expect(service().contains(usage())).toBe(false)
+  const toggle = service().querySelector<HTMLButtonElement>('[role="switch"]')!
+  expect(toggle.getAttribute('aria-label')).toBe('use your Mail tools')
+  await click(toggle)
+  expect(fake.calls).toContainEqual(['setPermission', 'b1', 'mail', false])
+  expect(usage().textContent).toContain('72% from cache')
+  await click(button('Remove use your Mail tools'))
+  expect(fake.calls).toContainEqual(['revokePermission', 'b1', 'mail'])
+  expect(service()).toBeUndefined()
+  expect(usage().textContent).toContain('18k tokens a turn')
 })

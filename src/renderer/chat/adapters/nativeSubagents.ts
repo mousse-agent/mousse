@@ -16,6 +16,8 @@ import type { SubagentCardModel } from './subagentCards'
 export interface NativeSubagentInfo {
   /** The kind of agent the runtime ran ("Explore", "general-purpose"), when it said. */
   agentType: string | null
+  /** The model the call named for it ("sonnet"), when it named one. */
+  model: string | null
   /** The runtime's task id, which a continuation's notice names. */
   taskId: string | null
   /** What the agent reported when it ended, as Markdown with its line breaks, clipped by the daemon. */
@@ -110,7 +112,7 @@ export function nativeSubagentModel(
     completedAt: state === 'working' ? null : ended,
     ...(state === 'failed' && reported ? { error: reported } : {}),
     ...(spawning ? { spawning: true } : {}),
-    native: { agentType, taskId: text(input.task_id), result: state === 'done' ? reported : null }
+    native: { agentType, model: text(input.model), taskId: text(input.task_id), result: state === 'done' ? reported : null }
   }
 }
 
@@ -181,6 +183,7 @@ export function nativeSubagentsOfMessages(messages: readonly SavedMessage[], bac
       state: activity.status === 'failed' ? 'output-error' : activity.status === 'running' ? 'input-available' : 'output-available',
       input: {
         subagent_type: activity.agentType,
+        model: activity.model,
         description: activity.description,
         run_in_background: activity.background === true,
         task_id: activity.nativeId

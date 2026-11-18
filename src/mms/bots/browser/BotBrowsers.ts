@@ -10,7 +10,8 @@ import type {
 import type { WatchedBrowserPageSize, WatchedBrowserView } from '../../../shared/browser/watched'
 import { browserTakeoverMessage } from '../../../shared/browser/types'
 import type { BotLane } from '../../../shared/bots/personal/definition'
-import { BOT_BROWSER_TOOLS, MAX_BOT_ACTIVE_MS } from '../../../shared/bots/personal/manifest'
+import { BOT_BROWSER_TOOLS } from '../../../shared/bots/personal/manifest'
+import { BOT_TURN_WINDOW_MS } from '../../../shared/bots/personal/definition'
 import type { BrowserAutomationTool, BrowserToolContext, BrowserToolOutput } from '../../../shared/browser/automation'
 import type { BrowserRuntimePort } from '../../../shared/browser/runtime'
 import type { BrowserSetupStatus } from '../../../shared/browser/setup'
@@ -672,7 +673,8 @@ export class BotBrowsers implements BotBrowserHost {
       allowedCapabilities: [...new Set(BOT_BROWSER_TOOLS.map(browserToolCapability))],
       allowedEffects: ['read', 'external'],
       maxToolCalls,
-      maxElapsedMs: MAX_BOT_ACTIVE_MS,
+      // A bot's turn ends at its window, so its browser scope never needs to outlast one.
+      maxElapsedMs: BOT_TURN_WINDOW_MS,
       maxArtifactBytes: 16 * 1024 * 1024
     })
   }
