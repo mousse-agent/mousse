@@ -4300,6 +4300,7 @@ it('E1 consent uses only that automation’s newest sent call, skipping a newer 
 })
 it('E1 a prompt change is inert even when no pruning observer runs', async () => {
   const t = await aloneAsk()
+  vi.spyOn(f.bots, 'editSchedule').mockImplementation((_botId, save) => save())
   f.scheduler.updateJob(t.schedule.jobId, { prompt: 'Different task' })
   expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*'")).toHaveLength(1)
   expect(f.bots.alone.items(t.botId)[0]?.mark).toBe('Changed')
@@ -4307,9 +4308,10 @@ it('E1 a prompt change is inert even when no pruning observer runs', async () =>
 it.each(['edit', 'remove', 'bot-remove'] as const)('E1 %s removes consent through the scheduler update path', async kind => {
   const t = await aloneAsk()
   if (kind === 'edit') {
+    vi.spyOn(f.bots, 'editSchedule').mockImplementation((_botId, save) => save())
     f.scheduler.on('updated', () => f.bots.schedulesEdited(t.botId))
     f.scheduler.updateJob(t.schedule.jobId, { prompt: 'New automation task' })
-  } else if (kind === 'remove') f.scheduler.removeJob(t.schedule.jobId)
+  } else if (kind === 'remove') f.scheduler.deleteJob(t.schedule.jobId)
   else {
     vi.spyOn(f.bots, 'scheduleRemoved').mockImplementation(() => {})
     f.bots.removeSchedule(t.botId, t.schedule.scheduleId)
@@ -4321,7 +4323,7 @@ it.each(['identity', 'switched-off'] as const)('E1 %s makes standing consent ine
   if (kind === 'identity') vi.spyOn(t.mcp, 'binding').mockImplementation(() => ({ configDigest: 'config-1', schemaDigest: 'same', identity: 'another-server' }) as never)
   else {
     const id = f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => !p.id.startsWith('alone:') && p.title.includes('Mail'))!.id
-    f.bots.service.setPermission(t.botId, id, false)
+    f.store.keepDisabledPermission(t.botId, id, f.store.activeGrant(t.botId)!.manifest)
   }
   expect(f.bots.alone.items(t.botId)[0]?.mark).toBe('Changed')
 })
@@ -4330,8 +4332,8 @@ it('E1 the legacy respond Allow path saves the standing consent', async () => {
   await f.bots.respond({ escalationId: t.consent.id, answer: 'allow_bot' })
   expect((await aloneNext(t)).action.card_json).toBeNull()
 })
-it('E1 an MCP tool named browser still needs its own standing-consent card', async () => {
-  const t = await aloneAsk('pending', 'browser')
+it.each(['web', 'threads'])('E1 an MCP tool named %s still needs its own standing-consent card', async tool => {
+  const t = await aloneAsk('pending', tool)
   expect(f.store.escalation(t.consent.id)?.status).toBe('open')
 })
 it('E1 let-alone asks accept exactly their four fields', () => {
@@ -4376,6 +4378,8 @@ it.each(['tool', 'schedule', 'work', 'manual'] as const)('E1 consent grants no s
     const grant = f.store.activeGrant(t.botId)!
     const manifest = { ...grant.manifest, mcp: [...grant.manifest.mcp, { serverId: 'mail', tool: 'other', level: 'asks_first' as const }] }
     f.store.approve(t.botId, botManifestDigest(manifest), manifest)
+    const revision = f.host.definitions.publishRevision({ ...f.bots.definitionOf(t.botId), permissions: manifest })
+    f.store.setPublished(t.botId, revision.revision!)
     name = 'Mail__other'
   }
   if (scope === 'tool' || scope === 'schedule') {

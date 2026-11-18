@@ -145,8 +145,7 @@ it('C6 support rollback omits the switch-on advice and still delivers it after r
   const provider = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => on })
   const off = await provider.chatPreamble({ botId: 'ada', activationId: 'c6-off' })
   expect(off).not.toContain('Tools that send or change things now ask your owner first')
-  const bindingAdvice = BOT_CHANGELOG.find(entry => entry.id === 28)!.text
-  expect(off).toContain(bindingAdvice)
+  expect(off).not.toContain(BOT_CHANGELOG.find(entry => entry.id === 28)!.text)
   await settled(provider, 'c6-off')
   on = true
   // A later non-switch entry must not make the withheld switch entry count as delivered, including across restart.
@@ -154,7 +153,6 @@ it('C6 support rollback omits the switch-on advice and still delivers it after r
   expect(await restarted.chatPreamble({ botId: 'ada', activationId: 'c6-on' })).toContain('Tools that send or change things now ask your owner first')
   await settled(restarted, 'c6-on')
   const next = await restarted.chatPreamble({ botId: 'ada', activationId: 'c6-after' })
-  expect(next).not.toContain(bindingAdvice)
   expect(next).not.toContain('Tools that send or change things now ask your owner first')
 })
 
@@ -164,4 +162,22 @@ it('tells existing bots that a pasted secret arrives by name', async () => {
   const text = await packs().chatPreamble({ botId: 'ada', activationId: 'pasted-secret' })
   expect(text).toContain('Your owner can keep a pasted key as a secret')
   expect(text).toContain('secret_run')
+})
+
+it('rollback delivers later independent advice without marking hidden advice seen', async () => {
+  existingBot()
+  memory.write(() => memory.setState('ada', 'changelog_seen', 26))
+  // E1's entry 28 is gated too. Model a later independent entry without publishing a new changelog id.
+  const changes = BOT_CHANGELOG as import('../../src/mms/bots/changelog').BotChangelogEntry[]
+  const later = { id: BOT_CHANGELOG_LATEST + 1, date: '2026-11-19', text: 'Later independent advice.' }
+  changes.push(later)
+  try {
+    const off = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => false })
+    expect(await off.chatPreamble({ botId: 'ada', activationId: 'later-off' })).toContain(later.text)
+    await settled(off, 'later-off')
+    const restarted = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => true })
+    const text = await restarted.chatPreamble({ botId: 'ada', activationId: 'later-on' })
+    expect(text).toContain(BOT_CHANGELOG.find(e => e.id === 27)!.text)
+    expect(text).toContain(BOT_CHANGELOG.find(e => e.id === 28)!.text)
+  } finally { changes.pop() }
 })
