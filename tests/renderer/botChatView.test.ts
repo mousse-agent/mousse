@@ -2229,7 +2229,7 @@ describe('memory', () => {
     await open()
     await click(button('About Inbox helper'))
     const row = host.querySelector<HTMLButtonElement>('[data-testid="bot-about-memory"]')!
-    expect(row.textContent).toBe('Memory · 42 wishes · 2 notes')
+    expect(row.textContent).toBe('Memory2 wishes · 2 notes')
     await click(row)
     expect(dialog()?.querySelector('h2')?.textContent).toBe('Memory')
     expect(texts(group('Your wishes'))).toEqual(['Call me Sam.', 'No em dashes in my messages.'])
