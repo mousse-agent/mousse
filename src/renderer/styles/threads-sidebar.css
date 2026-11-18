@@ -1373,25 +1373,41 @@ html:not([data-acrylic='true']) .threads-sidebar:has(> .threads-sidebar-scroll[d
   opacity: 1;
 }
 
-:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) > :not(.threads-sidebar-thread-trailing),
-:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) > .threads-sidebar-thread-trailing > :not(.turning) {
-  filter: opacity(var(--sidebar-row-dim));
-}
-
 :where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) > .threads-sidebar-thread-trailing > .turning {
   opacity: var(--sidebar-row-dim);
 }
 
-/* A row that needs the person fades everything but its status. */
-:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container:has(:is(.threads-sidebar-status-icon--question, .threads-sidebar-card-status-input)) :is(
-  .threads-sidebar-thread:not(.threads-sidebar-card) > :not(.threads-sidebar-thread-trailing),
-  .threads-sidebar-thread-trailing > :not(.threads-sidebar-status-icon--question),
-  .threads-sidebar-card > :not(.threads-sidebar-card-body),
-  .threads-sidebar-card-body > :not(.threads-sidebar-card-meta),
-  .threads-sidebar-card-meta > :not(.threads-sidebar-card-status-input)
-),
-:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row:has(.threads-sidebar-project-status--needs-me) > .threads-sidebar-project-toggle > :not(.threads-sidebar-project-status--needs-me, .project-icon) {
-  filter: opacity(var(--sidebar-row-dim));
+/* A row that needs the person fades everything but its status; a turning row, everything but its spinner.
+   The row decides: a :has() on the row itself sets the fade, and the parts read it. A :has() on an ancestor whose
+   subject is any child (`.row:has(…) > :not(…)`) makes Chromium restyle the whole window each time an element is
+   added anywhere, which made opening a long thread restyle its transcript about six times. */
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:has(> .threads-sidebar-thread-trailing > .turning) {
+  --sidebar-turning-fade: opacity(var(--sidebar-row-dim));
+}
+
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container:has(:is(.threads-sidebar-status-icon--question, .threads-sidebar-card-status-input)),
+:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row:has(.threads-sidebar-project-status--needs-me) {
+  --sidebar-needs-fade: opacity(var(--sidebar-row-dim));
+}
+
+/* Faded when the row turns or needs the person. */
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) > :not(.threads-sidebar-thread-trailing),
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread > .threads-sidebar-thread-trailing > :not(.turning, .threads-sidebar-status-icon--question) {
+  filter: var(--sidebar-turning-fade, var(--sidebar-needs-fade, none));
+}
+
+/* Faded only when the row turns. */
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread > .threads-sidebar-thread-trailing > .threads-sidebar-status-icon--question {
+  filter: var(--sidebar-turning-fade, none);
+}
+
+/* Faded only when the row or project needs the person. */
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread > .threads-sidebar-thread-trailing > .turning,
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container .threads-sidebar-card > :not(.threads-sidebar-card-body),
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container .threads-sidebar-card-body > :not(.threads-sidebar-card-meta),
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container .threads-sidebar-card-meta > :not(.threads-sidebar-card-status-input),
+:where(.threads-sidebar-tree[role='tree']) .threads-sidebar-project-row > .threads-sidebar-project-toggle > :not(.threads-sidebar-project-status--needs-me, .project-icon) {
+  filter: var(--sidebar-needs-fade, none);
 }
 
 /* A thread's latest reply under its title, and its pull requests as a count (Settings > Appearance > Reply previews).

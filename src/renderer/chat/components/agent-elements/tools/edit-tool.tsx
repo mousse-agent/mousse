@@ -345,7 +345,7 @@ function EditLine({
           )}
         </button>
         {actions && (
-          <span className="an-edit-row-actions flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/edit-line:opacity-100 group-has-[:focus-visible]/edit-line:opacity-100">
+          <span className="an-edit-row-actions flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/edit-line:opacity-100">
             {actions}
           </span>
         )}
