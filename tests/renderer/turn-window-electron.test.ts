@@ -30,6 +30,11 @@ type Streamed = {
   samples: { top: number | null; scrollTop: number; mounted: number }[]
   endGap: number; jumpVisible: boolean
 }
+type FoldRun = {
+  start: { top: number | null; scrollTop: number; gap: number }
+  samples: { top: number | null; scrollTop: number; gap: number; hold: boolean }[]
+  windowed: boolean; folded: boolean | null; workMounted: boolean
+}
 type Evidence = {
   small: Mounted; large: Mounted; opened: Opened; positions: Position[]
   hold: { text: string; row: number; top: number }
@@ -58,6 +63,7 @@ type Evidence = {
   ten: { windowed: boolean; mounted: number; spacers: number; overflow: number; start: number; afterGrowth: number; row: number }
   small40: { windowed: boolean; mounted: number; spacers: number }; grown: { windowed: boolean; mounted: number; gap: number }
   afterLoad: { added: number; addedWithTurns: number; mounted: number; last: boolean; endGap: number }
+  fold: Record<'following' | 'readingWork' | 'older', FoldRun>
   find: {
     opened: boolean; focusFrames: number; farFrames: number; far: FindState; manyFrames: number; many: FindState
     last: FindState; wrapFrames: number; wrapped: FindState; backFrames: number; back: FindState
@@ -267,6 +273,28 @@ it('mounts only the turns near the viewport of a long thread and holds the readi
     expect(load.added, JSON.stringify(load)).toBeLessThanOrEqual(load.addedWithTurns + 2)
     expect(load.last).toBe(true)
     expect(load.endGap).toBeLessThan(2)
+
+    // A turn that worked ends in a long (windowed) thread: its work folds behind one closed line and leaves the page.
+    // Following the end, the end stays in view. Reading the turn's work (the answer starts below it) or an older turn,
+    // the row being read stays within 2 px of where it was on every frame of the fold, including the frame of the commit.
+    // While the reader is in the work, the fold's own holder keeps the place (the windowed list's holder stands down).
+    const fold = result.fold
+    for (const [name, run] of Object.entries(fold)) {
+      const label = `${name}: ${JSON.stringify({ ...run, samples: run.samples.slice(0, 16) })}`
+      expect(run.windowed, label).toBe(true)
+      if (run.folded !== null) expect(run.folded, label).toBe(true)
+      if (name === 'following') {
+        expect(run.folded, label).toBe(true)
+        expect(run.workMounted, label).toBe(false)
+        expect(run.samples.at(-1)!.gap, label).toBeLessThan(2)
+        continue
+      }
+      expect(run.start.top, label).not.toBeNull()
+      for (const sample of run.samples) expect(within(sample.top, run.start.top!), label).toBe(true)
+    }
+    expect(fold.readingWork.folded).toBe(true)
+    expect(fold.readingWork.workMounted).toBe(false)
+    expect(fold.readingWork.samples.some(sample => sample.hold)).toBe(true)
 
     // Find: the bar opens from the command and takes focus; a word that only exists in a turn that is not mounted is
     // counted from the messages, and landing on it mounts that turn and puts the match inside the visible area.

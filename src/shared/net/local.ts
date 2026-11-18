@@ -61,6 +61,9 @@ export const NET_LOCAL_METHODS = [
   'net.join.abandon',
   'net.startOver.check',
   'net.startOver',
+  'net.link.make',
+  'net.link.check',
+  'net.link.paste',
   'bridge.nodes',
   'bridge.revoke',
   'bridge.rename',
@@ -69,6 +72,8 @@ export const NET_LOCAL_METHODS = [
   'bridge.policy',
   'bridge.connect',
   'bridge.disconnect',
+  'bridge.allow',
+  'bridge.access.there',
   'bridge.workOnThreads',
   'bridge.shareBots',
   'bridge.editorServer',
@@ -118,11 +123,55 @@ export interface BridgeInviteInput {
 }
 /**
  * Whether another device of this user's list is connected here (`connection` on each `bridge.nodes` row, set with
- * `bridge.connect` and `bridge.disconnect`). `none`: never connected here; `disconnected`: someone disconnected it.
- * Either way this computer serves it nothing but the keeper's control traffic, and two members not connected on
- * both ends open no session.
+ * `bridge.connect` and `bridge.disconnect`). `none`: never connected here; `disconnected`: someone disconnected it;
+ * `held`: it came in by a connect link (made here, or pasted here to join it) and waits for `bridge.allow`. Until
+ * connected this computer serves it nothing but the keeper's control traffic, and two members not connected on both
+ * ends open no session.
  */
-export type BridgeNodeConnection = 'connected' | 'disconnected' | 'none'
+export type BridgeNodeConnection = 'connected' | 'disconnected' | 'held' | 'none'
+/** `net.link.make`: a connect link made on this computer. */
+export interface NetLinkMade {
+  /** The copyable text, `ml1_…`. */
+  link: string
+  /** It adds a computer (this computer keeps the list); otherwise it only connects devices already in the list. */
+  add: boolean
+  /** This computer had no network identity: making the link created it, and it now keeps the others connected. */
+  created: boolean
+  expiresAt: number
+  /** Some address in the link is not this computer's loopback; without one, only another copy here can use it. */
+  reachable: boolean
+  /** For a link that only connects: the name of the computer that adds computers. */
+  keeper?: string
+}
+/**
+ * `net.link.check`: what pasting a link here would do, read from the link alone with no network call. `join`: this
+ * computer joins the maker's list. `connect`: both are in one list; nothing is enrolled. `start_over`: this computer
+ * must start over first (it is alone), offered once a route answers. `refused`: `reason` says why.
+ */
+export interface NetLinkCheck {
+  row: 'join' | 'connect' | 'start_over' | 'refused'
+  add: boolean
+  reason?:
+    | 'connect_only'
+    | 'own_link'
+    | 'other_list'
+    | 'join_unfinished'
+    | 'space_host'
+    | 'mousse_id'
+    | 'live_devices'
+  /** For `start_over`, and for a refusal that comes from it. */
+  startOver?: NetStartOverCheck
+}
+/** `net.link.paste`: what the link did. The device reached is held here until Allow when this computer joined. */
+export interface NetLinkPasted {
+  row: 'join' | 'connect'
+  /** The computer that made the link. */
+  node: NodeId
+  name?: string
+  connection: BridgeNodeConnection
+  /** For a join: whether the first session opened in time. */
+  connected?: boolean
+}
 /**
  * What this computer lets another device do here (`bridge.policy`, and `policy` on each
  * `bridge.nodes` row). It is kept on this computer only, so every computer sets its own.
@@ -156,6 +205,38 @@ export interface BridgeNodePolicy {
    */
   work?: boolean
 }
+
+/**
+ * `bridge.access.mine`, a call one computer makes on another of its user's: what the computer that answers lets the
+ * caller do there now. Each field is the result of the same checks a real call from the caller meets there (connected
+ * there, the block, the grant, "Let my other computers work here", the per-device switches, Share bots). A caller that
+ * is not connected there is refused (`forbidden`, reason `not_connected`).
+ */
+export interface BridgeAccessMine {
+  v: 1
+  /** Every Bridge call from the caller is refused there. */
+  blocked: boolean
+  /** Reads threads there. */
+  threads: boolean
+  /** Starts and works on threads there, up to `maxPermissionMode`. */
+  work: boolean
+  terminal: boolean
+  editor: boolean
+  /** Reaches that computer's bots (each bot's own Devices choice still applies). */
+  bots: boolean
+  maxPermissionMode: PermissionMode
+  agentReach: AgentReach
+}
+/**
+ * `bridge.access.there { node }`: `bridge.access.mine` asked of `node`. `not_connected`: that computer has not connected
+ * this one. `unknown`: it could not answer now (`offline`), or runs a build without the call (`older`).
+ */
+export type BridgeAccessThere =
+  | { state: 'known'; access: BridgeAccessMine }
+  | { state: 'not_connected' }
+  /** It answered, and refused this computer the question: its grant there covers nothing. */
+  | { state: 'refused' }
+  | { state: 'unknown'; reason: 'offline' | 'older' }
 
 /** What a device's agents may change on this computer (`net_node_policy.agent_reach`). */
 export type AgentReach = 'none' | 'launched' | 'all'

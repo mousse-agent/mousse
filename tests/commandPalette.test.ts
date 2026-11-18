@@ -168,14 +168,6 @@ describe('opening and closing with Ctrl+K', () => {
     expect(focusLog).toEqual(['composer'])
     expect(run).not.toHaveBeenCalled()
   })
-
-  it('toggles', () => {
-    stubWindow(composer())
-    togglePalette()
-    expect(useAppStore.getState().paletteOpen).toBe(true)
-    togglePalette()
-    expect(useAppStore.getState().paletteOpen).toBe(false)
-  })
 })
 
 describe('opening thread search', () => {
@@ -282,16 +274,6 @@ describe('closePalette', () => {
       setOpen: (open) => void order.push(`open:${open}`)
     })
     expect(order).toEqual(['open:false', 'opener', 'then'])
-  })
-
-  it('leaves focus where a focus-changing command put it', () => {
-    let focused = ''
-    closePalette({
-      opener: { focus: () => void (focused = 'opener') },
-      then: () => void (focused = 'composer'),
-      setOpen: () => undefined
-    })
-    expect(focused).toBe('composer')
   })
 
   it('leaves focus on the opener when nothing was chosen, and copes with no opener', () => {

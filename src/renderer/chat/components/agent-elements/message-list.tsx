@@ -11,7 +11,7 @@ import React, {
 } from "react";
 import type { UIMessage, ChatStatus } from "ai";
 import { cn } from "./utils/cn";
-import { motionScale } from "../../../lib/motion";
+import { motionOff, motionScale } from "../../../lib/motion";
 import { ProviderIcon } from "../../../lib/providerIcons";
 import { inferModelBrand } from "../../../../shared/modelVariants";
 import { useProviderSnapshotsStore } from "../../../lib/providerSnapshots";
@@ -38,10 +38,12 @@ import {
   formatTokens,
   formatTokensPerSecond,
 } from "../../../utils/assistantMessageActions";
-import { createToolOpenStore, ToolOpenContext } from "./tools/tool-open-state";
+import { takeLiveRunFocus, ToolOpenContext } from "./tools/tool-open-state";
+import { threadOpenMemory } from "./thread-open-memory";
+import { Collapse } from "../../../components/ui/Collapse";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { ToolCallsGroup } from "./tools/tool-calls-group";
-import { TurnProgressRow, useTurnProgressState } from "./turn-progress";
+import { callTitle, TurnProgressRow, useTurnProgressState, type LiveRun } from "./turn-progress";
 import { ToolIcon } from "./tools/tool-icon";
 import {
   PermissionRequestRow,
@@ -63,8 +65,8 @@ import { getToolStatus } from "./utils/format-tool";
 import {
   analyzeAssistantMessage,
   foldTurnWork,
-  isLiveThoughtItem,
   isStandaloneToolType,
+  pendingFailures,
   settleEarlierThoughts,
   workGroupIconType,
   workGroupHeading,
@@ -78,6 +80,12 @@ import {
   isCompactionRow,
   settleFinishedTurn,
   turnAnswerText,
+  type AssistantToolItem,
+  turnFoldParts,
+  partWorkTimes,
+  turnWaitSpans,
+  activeMs,
+  type WaitSpan,
   type ToolPartBase,
 } from "./utils/assistant-blocks";
 import { PromptEditButton, PromptUndoButton, PromptVersionSwitcher } from "../../../components/PromptUndoControls";
@@ -86,7 +94,7 @@ import { TurnEditSummary } from "./turn-edit-summary";
 import { SpiralLoader } from "./spiral-loader";
 import { ReadAloudButton, useIsReadingAloud } from "../../../readAloud/ReadAloudButton";
 import { useVisiblePromptIds } from "./use-visible-prompt-ids";
-import { formatDurationLong, formatWorkedFor, formatWorkingFor } from "../../../utils/responseTimeline";
+import { formatContinuedFor, formatDurationLong, formatDurationShort, formatWorkedFor, formatWorkingFor } from "../../../utils/responseTimeline";
 import {
   classifyIntent,
   nextComposerCompact,
@@ -107,6 +115,7 @@ import {
 } from "./virtual/turn-window";
 import { useTurnWindow } from "./virtual/use-turn-window";
 import { createEndFollower, type EndFollower } from "./virtual/end-follower";
+import { captureFoldHold, runFoldHold, type FoldHold } from "./virtual/fold-hold";
 import { TurnIdContext } from "./turn-context";
 import { countRender } from "./render-counts";
 import { FindInThreadBar } from "./find/FindInThreadBar";
@@ -122,6 +131,8 @@ import "../../../styles/prompt-visibility.css";
 export type MessageListProps = {
   messages: UIMessage[];
   status: ChatStatus;
+  /** The thread shown: the folds, rows and groups the person opens stay open for it while the app runs. */
+  threadId?: string | null;
   className?: string;
   onAtBottomChange?: (atBottom: boolean) => void;
   /** The composer should fold to one line: the reader is browsing earlier messages. */
@@ -241,29 +252,6 @@ function readEndedAt(message: UIMessage): number | null {
 }
 
 /**
- * A finished turn's time, from saved timestamps: its prompt to where the last of its messages ended. A message's
- * timestamp is when it started; a reply also saves when it ended (`completedAt`), older ones do not. A turn a Stop cut
- * off runs to its Stop line too (`end.endedAt`), written as the turn stopped.
- */
-function turnDurationMs(
-  user: UIMessage | undefined,
-  assistants: UIMessage[],
-  turnEnd?: TurnEndMark,
-): number | null {
-  const start = readCreatedAt(user);
-  if (start == null) return null;
-  let end = start;
-  for (const message of assistants) {
-    // A compaction started after the turn (Compact now, hours later) is no part of its work.
-    if (isThreadNotice(message) || isCompactionRow(message)) continue;
-    const at = readEndedAt(message);
-    if (at != null && at > end) end = at;
-  }
-  if (turnEnd?.endedAt != null && turnEnd.endedAt > end) end = turnEnd.endedAt;
-  return Math.max(0, end - start);
-}
-
-/**
  * When a finished turn's work really ended, from what its messages saved: the newest end among them, once its newest
  * message has saved one (`completedAt`). Null while that message has none yet (still streaming, or not saved).
  */
@@ -289,6 +277,8 @@ function TurnWorkStatus({
   endYieldsToNotice = false,
   fold,
   foldedReplies = 0,
+  waits,
+  continued = false,
 }: {
   active: boolean;
   startedAt?: number | null;
@@ -303,69 +293,60 @@ function TurnWorkStatus({
    * A finished turn whose work folds behind this line: the line is the control that opens it ("Worked for 32s ›"),
    * and `open` says whether the work shows.
    */
-  fold?: { open: boolean; onToggle: () => void };
+  fold?: { open: boolean; onToggle: () => void; hiddenRuns?: readonly string[] };
   /** How many replies with text the fold hides, said on a finished turn's line so an earlier answer is not missed. */
   foldedReplies?: number;
+  /** While the turn runs: when it waited on the person, which its time does not count. */
+  waits?: readonly WaitSpan[];
+  /** The line after a steered message: "Continued for …", the time of the work that answered it. */
+  continued?: boolean;
 }) {
-  const fallbackStartRef = useRef<number | null>(null);
-  if (!active) fallbackStartRef.current = null;
-  else if (startedAt == null && fallbackStartRef.current == null) {
-    fallbackStartRef.current = Date.now();
+  // The live row's chevron, or the run's group line that took its focus, had focus when the turn ended and folded that
+  // run away: the line that opens it takes focus. Both leave in the commit this line appears, even while the fold still
+  // draws its work for the close: moving into the fold's Collapse remounts every row it holds.
+  const foldToggleRef = useRef<HTMLButtonElement>(null);
+  const hiddenRuns = fold?.hiddenRuns?.join("\n") ?? "";
+  useLayoutEffect(() => {
+    if (hiddenRuns && hiddenRuns.split("\n").some(takeLiveRunFocus)) foldToggleRef.current?.focus();
+  }, [hiddenRuns]);
+  if (active) {
+    return (
+      <div className="turn-work" data-find-ignore>
+        <LiveWorkLabel startedAt={startedAt ?? null} waits={waits ?? NO_WAITS} waitingLabel={waitingLabel} />
+        <div className="turn-work-rule" aria-hidden="true" />
+      </div>
+    );
   }
-  const origin = startedAt ?? fallbackStartRef.current;
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    if (!active) return;
-    const tick = () => setNow(Date.now());
-    tick();
-    const timer = window.setInterval(tick, 1000);
-    return () => window.clearInterval(timer);
-  }, [active]);
-
-  const elapsedMs =
-    active && origin != null ? Math.max(0, now - origin) : durationMs;
-  const label =
-    active && waitingLabel
-      ? waitingLabel
-      : elapsedMs == null
-        ? null
-        : active
-          ? formatWorkingFor(elapsedMs)
-          : formatWorkedFor(elapsedMs);
-  const mark = !active && end
-    ? endYieldsToNotice ? <LastTurnEndMark end={end} separate={Boolean(label)} /> : <TurnEndLabel end={end} separate={Boolean(label)} />
-    : null;
+  const finished = end
+    ? endYieldsToNotice
+      ? <LastTurnFinishedLabel durationMs={durationMs} continued={continued} end={end} />
+      : <FinishedLabel durationMs={durationMs} continued={continued} end={end} />
+    : <FinishedLabel durationMs={durationMs} continued={continued} />;
   // A turn with work to open always has its line, even when it has no time to show.
-  const shown = label ?? (fold && !active ? "Worked" : null);
-  if (!shown && !mark) return null;
-  const longLabel =
-    elapsedMs == null || (active && waitingLabel)
-      ? undefined
-      : `${active ? "Working for" : "Worked for"} ${formatDurationLong(elapsedMs)}`;
+  if (durationMs == null && !end && !fold) return null;
   return (
     <div className="turn-work" data-find-ignore>
-      {active && !waitingLabel ? (
-        <LiveWorkLabel working={label!} title={longLabel} />
-      ) : fold ? (
+      {fold ? (
         <button
+          ref={foldToggleRef}
           type="button"
           className="turn-work-label turn-work-toggle"
           aria-expanded={fold.open}
-          title={longLabel}
           onClick={fold.onToggle}
         >
-          {shown}{mark}
+          {finished}
           {foldedReplies > 0 ? <FoldedRepliesCount count={foldedReplies} /> : null}
           <IconChevronRight className="turn-work-chevron" data-open={fold.open || undefined} aria-hidden="true" />
         </button>
       ) : (
-        <div className="turn-work-label" title={longLabel}>{shown}{mark}</div>
+        <div className="turn-work-label">{finished}</div>
       )}
       <div className="turn-work-rule" aria-hidden="true" />
     </div>
   );
 }
+
+const NO_WAITS: readonly WaitSpan[] = [];
 
 /**
  * " · (message icon) 3" after a finished turn's time: how many replies its fold hides. Only the icon and number show;
@@ -391,40 +372,65 @@ const TURN_END_WORDS: Record<TurnEnd["cause"], { word: string; detail: string }>
 };
 
 /**
- * " · Stopped" after a cut-off turn's time: one muted word, with why in its tooltip. The mark takes no focus, so
- * screen readers get why as hidden text too; find in thread skips it with the rest of the header (`data-find-ignore`).
+ * A finished turn's line: "Worked for 32s", "Continued for 8s" after a steered message, or "Stopped after 32s" for a
+ * turn a Stop, a restart or a crash cut off, with why in its tooltip. The line takes no focus of its own, so screen
+ * readers get why as hidden text too; find in thread skips it with the rest of the header (`data-find-ignore`).
  */
-function TurnEndLabel({ end, separate }: { end: TurnEndMark; separate: boolean }) {
+function FinishedLabel({ durationMs, continued = false, end }: { durationMs: number | null; continued?: boolean; end?: TurnEndMark }) {
+  if (!end) {
+    const long = durationMs == null ? undefined : `${continued ? "Continued for" : "Worked for"} ${formatDurationLong(durationMs)}`;
+    const text = durationMs == null ? (continued ? "Continued" : "Worked") : continued ? formatContinuedFor(durationMs) : formatWorkedFor(durationMs);
+    return <span title={long}>{text}</span>;
+  }
   const { word, detail } = TURN_END_WORDS[end.cause] ?? TURN_END_WORDS.user;
-  const title = end.tools?.length ? `${detail} May have run: ${end.tools.join(", ")}` : detail;
+  const why = end.tools?.length ? `${detail} May have run: ${end.tools.join(", ")}` : detail;
   return (
-    <>
-      {separate ? " · " : null}
-      <span className="turn-work-end" data-turn-end={end.cause} title={title}>
-        {word}
-        <span className="sr-only">: {title}</span>
-      </span>
-    </>
+    <span className="turn-work-end" data-turn-end={end.cause} title={why}>
+      {durationMs == null ? word : `${word} after ${formatDurationShort(durationMs)}`}
+      <span className="sr-only">: {why}</span>
+    </span>
   );
 }
 
 /**
- * The last turn's mark, hidden while the thread's turn is stopped: the "Run interrupted" notice under its prompt says
- * the same. Only the last turn reads the thread's turn, so earlier turns do not render again as it changes.
+ * The last turn's line says only its time while the thread's turn is stopped: the "Run interrupted" notice under its
+ * prompt already says it stopped. Only the last turn reads the thread's turn, so earlier turns do not render again as
+ * it changes.
  */
-function LastTurnEndMark(props: { end: TurnEndMark; separate: boolean }) {
-  if (useTurnProgressState()?.phase === "stopped") return null;
-  return <TurnEndLabel {...props} />;
+function LastTurnFinishedLabel(props: { durationMs: number | null; continued?: boolean; end: TurnEndMark }) {
+  if (useTurnProgressState()?.phase === "stopped") return <FinishedLabel durationMs={props.durationMs} continued={props.continued} />;
+  return <FinishedLabel {...props} />;
 }
 
 /**
- * A running turn's header: Working, or what the run waits for when it is the person (an answer to its question).
- * Only a running turn reads the thread's turn, so a finished one does not render again as it changes.
+ * A running turn's header: "Working · 1m 4s", or what the run waits for when it is the person (an approval, a secret,
+ * an answer to its question). Time spent waiting on the person does not count: `waits` from the turn's messages, and
+ * the waits this line saw itself (the turn's phase said so). Only a running turn reads the thread's turn, so a
+ * finished one does not render again as it changes.
  */
-function LiveWorkLabel({ working, title }: { working: string; title?: string }) {
-  // The tooltip goes with the label: a run waiting for an answer is not "Working for …".
-  if (useTurnProgressState()?.phase === "awaiting_input") return <div className="turn-work-label">Waiting for your answer</div>;
-  return <div className="turn-work-label" title={title}>{working}</div>;
+function LiveWorkLabel({ startedAt, waits, waitingLabel }: { startedAt: number | null; waits: readonly WaitSpan[]; waitingLabel?: string }) {
+  const phase = useTurnProgressState()?.phase;
+  const fallbackStartRef = useRef<number | null>(null);
+  if (startedAt == null && fallbackStartRef.current == null) fallbackStartRef.current = Date.now();
+  const origin = startedAt ?? fallbackStartRef.current!;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const tick = () => setNow(Date.now());
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const waiting = phase === "awaiting_input" || Boolean(waitingLabel);
+  const seen = useRef<{ open: number | null; spans: WaitSpan[] }>({ open: null, spans: [] }).current;
+  if (waiting && seen.open == null) seen.open = Date.now();
+  else if (!waiting && seen.open != null) {
+    seen.spans = [...seen.spans, { from: seen.open, to: Date.now() }];
+    seen.open = null;
+  }
+  if (waitingLabel) return <div className="turn-work-label">{waitingLabel}</div>;
+  if (phase === "awaiting_input") return <div className="turn-work-label">Waiting for your answer</div>;
+  const elapsed = activeMs(origin, Math.max(origin, now), [...waits, ...seen.spans]);
+  return <div className="turn-work-label" title={`Working for ${formatDurationLong(elapsed)}`}>{formatWorkingFor(elapsed)}</div>;
 }
 
 function getTextFromParts(parts: unknown[], joiner: string): string {
@@ -1345,10 +1351,13 @@ export const MessageList = memo(function MessageList({
   slots,
   classNames,
   toolRenderers,
+  threadId,
 }: MessageListProps) {
   countRender("MessageList");
-  // The rows and groups the person opened, kept for the list's life (tools/tool-open-state.ts).
-  const [toolOpenStore] = useState(createToolOpenStore);
+  // The folds, rows and groups the person opened, kept per thread while the app runs (thread-open-memory.ts): the
+  // list mounts per thread, so switching away and back finds them as they were.
+  const [openMemory] = useState(() => threadOpenMemory(threadId));
+  const toolOpenStore = openMemory.tools;
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const contentWrapperRef = useRef<HTMLDivElement>(null);
   const rowsRef = useRef<HTMLDivElement>(null);
@@ -1381,8 +1390,10 @@ export const MessageList = memo(function MessageList({
   } | null>(null);
   const [settledWork, setSettledWork] = useState<Record<string, number>>({});
   // The optimistic send id is replaced by the saved id a moment later. Keep
-  // one React key so the bubble does not unmount and land again.
-  const turnKeyAliasRef = useRef<Map<string, string>>(new Map());
+  // one React key so the bubble does not unmount and land again. The aliases
+  // are the thread's (`openMemory`): the turn keeps that key after the list
+  // remounts, and so do the folds opened under it.
+  const turnKeyAliasRef = useRef<Map<string, string>>(openMemory.turnKeys);
   const replyHoldRef = useRef<{ sawStreaming: boolean } | null>(null);
   const liveOptimisticKeyRef = useRef<string | null>(null);
 
@@ -1399,22 +1410,26 @@ export const MessageList = memo(function MessageList({
     () => new Set([...subagentCards.values()].filter((card) => card.spawning).map((card) => card.toolCallId)),
     [subagentCards],
   );
-  // Finished turns whose work is open, by turn key: kept while the thread is open (the list mounts per thread).
-  const [openWork, setOpenWork] = useState<ReadonlySet<string>>(() => new Set());
+  // Finished turns' folds that are open, by fold key (`foldKey`): kept per thread (see `openMemory`).
+  const [openWork, setOpenWork] = useState<ReadonlySet<string>>(() => new Set(openMemory.folds));
   const openWorkRef = useRef(openWork);
   openWorkRef.current = openWork;
   const dispatchFollowRef = useRef<((event: FollowEvent) => void) | null>(null);
-  const toggleWork = useCallback((turnKey: string) => {
+  const toggleWork = useCallback((turnKey: string, part: number) => {
+    const key = foldKey(turnKey, part);
     // Opening grows the turn under the line that was clicked: the view stays where it is instead of following
     // the end, so the line does not move away from the pointer.
-    if (!openWorkRef.current.has(turnKey)) dispatchFollowRef.current?.({ type: "navigate" });
+    const opening = !openWorkRef.current.has(key);
+    if (opening) dispatchFollowRef.current?.({ type: "navigate" });
+    if (opening) openMemory.folds.add(key);
+    else openMemory.folds.delete(key);
     setOpenWork((current) => {
       const next = new Set(current);
-      if (next.has(turnKey)) next.delete(turnKey);
-      else next.add(turnKey);
+      if (opening) next.add(key);
+      else next.delete(key);
       return next;
     });
-  }, []);
+  }, [openMemory]);
   // Subagents (by task and by thread) whose state a card in the thread shows.
   const cardedSubagents = useMemo(() => {
     const ids = new Set<string>();
@@ -1876,6 +1891,30 @@ export const MessageList = memo(function MessageList({
   const windowed =
     typeof window !== "undefined" && turns.length > RENDER_ALL_THRESHOLD;
   windowedRef.current = windowed;
+  // The reply just ended and its work is about to fold: a reader up in the thread keeps their place
+  // (virtual/fold-hold.ts). Measured now, while the rows on screen are still the running turn's. A windowed thread's
+  // own holder stands down while the hold runs; a thread that follows the end has the follower.
+  const replyActiveSeenRef = useRef(replyActive);
+  const foldHoldRef = useRef<FoldHold | null>(null);
+  if (replyActiveSeenRef.current !== replyActive) {
+    replyActiveSeenRef.current = replyActive;
+    foldHoldRef.current =
+      !replyActive && followModeRef.current !== "following-end"
+        ? captureFoldHold(chatContainerRef.current, rowsRef.current)
+        : null;
+  }
+  const stopFoldHoldRef = useRef<(() => void) | null>(null);
+  useLayoutEffect(() => {
+    const hold = foldHoldRef.current;
+    if (!hold) return;
+    foldHoldRef.current = null;
+    stopFoldHoldRef.current?.();
+    stopFoldHoldRef.current = runFoldHold(hold, {
+      following: () => followModeRef.current === "following-end",
+      onWrite: markProgrammaticScroll,
+    });
+  });
+  useEffect(() => () => stopFoldHoldRef.current?.(), []);
   const virtualization = useTurnWindow({
     containerRef: chatContainerRef,
     rowsRef,
@@ -2142,7 +2181,7 @@ export const MessageList = memo(function MessageList({
                 cardedSubagents={cardedSubagents}
                 subagentCardIds={subagentCardIds}
                 spawningCardIds={spawningCardIds}
-                workOpen={openWork.has(turnKey)}
+                openFolds={openFoldsOf(openWork, turnKey)}
                 onToggleWork={toggleWork}
               />
             );
@@ -2197,6 +2236,51 @@ export const MessageList = memo(function MessageList({
   );
 });
 
+/** The key of a finished turn's fold: the turn's key for its first part, then one per steered message. */
+function foldKey(turnKey: string, part: number): string {
+  return part === 0 ? turnKey : `${turnKey}#${part}`;
+}
+
+/** The parts of a turn whose fold is open, as `TurnRow` takes them: a string, so an unchanged turn keeps its props. */
+function openFoldsOf(open: ReadonlySet<string>, turnKey: string): string {
+  const parts: number[] = [];
+  for (const key of open) {
+    if (key === turnKey) parts.push(0);
+    else if (key.startsWith(`${turnKey}#`)) parts.push(Number(key.slice(turnKey.length + 1)));
+  }
+  return parts.sort((a, b) => a - b).join(",");
+}
+
+/**
+ * True for the first two frames after a turn shown running ends: its work is still drawn open, inside the folds it
+ * is about to close, so the close plays as motion (the `Collapse` it is drawn in) instead of the rows vanishing.
+ * A turn that was already finished when it was drawn (a thread opened, a remount) folds without motion, and so
+ * does every turn when motion is off.
+ */
+function useFoldingIn(running: boolean): boolean {
+  const [seen, setSeen] = useState({ running, folding: false });
+  if (seen.running !== running) setSeen({ running, folding: !running && !motionOff() });
+  const folding = seen.folding && !running;
+  useEffect(() => {
+    if (!folding) return;
+    const done = () => setSeen((current) => (current.folding ? { ...current, folding: false } : current));
+    if (typeof requestAnimationFrame !== "function") {
+      const timer = setTimeout(done, 0);
+      return () => clearTimeout(timer);
+    }
+    let second = 0;
+    // Two frames: the open rows are painted once in their fold before it starts to close.
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(done);
+    });
+    return () => {
+      cancelAnimationFrame(first);
+      cancelAnimationFrame(second);
+    };
+  }, [folding]);
+  return folding;
+}
+
 type TurnRowProps = {
   turn: Turn;
   turnKey: string;
@@ -2229,10 +2313,10 @@ type TurnRowProps = {
   cardedSubagents: Set<string>;
   subagentCardIds: Set<string>;
   spawningCardIds: Set<string>;
-  /** Whether this finished turn's work is open under its "Worked for" line. */
-  workOpen: boolean;
-  /** Opens or closes a finished turn's work, by turn key. */
-  onToggleWork: (turnKey: string) => void;
+  /** Which parts of this finished turn (see `turnFoldParts`) have their work open, as part numbers ("0,2"). */
+  openFolds: string;
+  /** Opens or closes the work of a finished turn's part, by turn key and part number. */
+  onToggleWork: (turnKey: string, part: number) => void;
 };
 
 /** A failed call the agent did not get past: it stays in view when the turn's work folds. */
@@ -2240,10 +2324,7 @@ function isUnrecoveredFailure(part: unknown): boolean {
   return isV5ToolPart(part) && getToolStatus(part).isError && !(part as { failureRecovered?: boolean }).failureRecovered;
 }
 
-/** A call (not a thought) that has not finished. */
-function isRunningCall(part: ToolPartBase): boolean {
-  return part.type !== "tool-Thinking" && (part.state === "input-streaming" || part.state === "input-available");
-}
+const NO_FAILURES: ReadonlySet<string> = new Set();
 
 /**
  * What folding needs to know of one message of a finished turn: whether it is work (calls, thoughts), narration or
@@ -2262,6 +2343,7 @@ function foldRowOf(msg: UIMessage, toolsOnly: boolean, suppressQuestionTool: boo
   }
   let text = false;
   let work = false;
+  let failed = false;
   for (const part of normalizeAssistantToolParts(msg.parts ?? []) as unknown[]) {
     if (isTextPart(part)) {
       if (part.text.trim()) text = true;
@@ -2273,10 +2355,14 @@ function foldRowOf(msg: UIMessage, toolsOnly: boolean, suppressQuestionTool: boo
       if (suppressQuestionTool && part.type === "tool-Question") continue;
       if (isStandaloneToolType(part.type)) return { kind: "message", keep: true };
       work = true;
+      if (isUnrecoveredFailure(part)) failed = true;
     }
   }
-  // Text written beside calls in one message is part of the work.
-  if (work) return { kind: "message", toolsOnly: true, text };
+  // A failure the agent did not get past stays in view, with whatever text is beside it.
+  if (failed) return { kind: "message", text, keep: true };
+  // Calls alone are work. Text written beside calls in one message was said to the person: the message is a reply,
+  // and stays with its calls when it is its part's last one.
+  if (work && !text) return { kind: "message", toolsOnly: true };
   return { kind: "message", text };
 }
 
@@ -2311,11 +2397,12 @@ const TurnRow = memo(function TurnRow({
   cardedSubagents,
   subagentCardIds,
   spawningCardIds,
-  workOpen,
+  openFolds,
   onToggleWork,
 }: TurnRowProps) {
   countRender("TurnRow");
   const turnActionsForEdit = useTurnActions();
+  const foldingIn = useFoldingIn(replyActive && isLastTurn);
   return (
     <div
       ref={rowRef}
@@ -2417,9 +2504,30 @@ const TurnRow = memo(function TurnRow({
 
       {turn.userMsg && lastTurnNotice}
 
-      {turn.assistantMsgs.length > 0 &&
-        !(isLastTurn && showPlanning) &&
-        (() => {
+      {(() => {
+          // Sent, with no output yet: the live row alone, under Working. It is laid out like the turn's answer below,
+          // the same elements in the same places, so when the first output arrives the live row stays the same
+          // element and only rows above it are added.
+          const liveBeforeOutput = isLastTurn && (showAwaitingReply || showPlanning);
+          const hasOutput = turn.assistantMsgs.length > 0 && !(isLastTurn && showPlanning);
+          if (!hasOutput) {
+            if (!liveBeforeOutput) return null;
+            return (
+              <div className="group/assistant-turn">
+                <TurnWorkStatus
+                  active
+                  startedAt={liveStartedAt ?? readCreatedAt(turn.userMsg)}
+                  durationMs={null}
+                />
+                <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">
+                  <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>
+                    {null}
+                  </TurnIdContext.Provider>
+                  <TurnProgressRow messages={turn.assistantMsgs} standalone />
+                </div>
+              </div>
+            );
+          }
           const assistantText = getTextFromParts(
             turn.assistantMsgs.flatMap((msg) => msg.parts ?? []),
             "\n\n",
@@ -2449,10 +2557,9 @@ const TurnRow = memo(function TurnRow({
           // A finished turn of this thread can be forked from; a fork's copies of its source name no turn.
           const forkTurnId = isTurnStreaming ? undefined : (turn.userMsg as { turnId?: string } | undefined)?.turnId;
 
-          const workedMs = isTurnStreaming
-            ? null
-            : settledMs ?? turnDurationMs(turn.userMsg, turn.assistantMsgs, turn.end);
           const liveStart = liveStartedAt ?? readCreatedAt(turn.userMsg);
+          // When the turn waited on the person: its time does not count them.
+          const waits = turnWaitSpans(turn.assistantMsgs);
 
           // Subagent results whose subagents have a card in the thread show there, as the card's state: the
           // results add no line of their own. A thought with anything after it in the turn is done (the
@@ -2479,6 +2586,7 @@ const TurnRow = memo(function TurnRow({
               subagentCardIds,
             ),
           );
+          const turnFailures = isTurnStreaming ? pendingFailures(turnMsgs) : NO_FAILURES;
           // A finished turn ends on its answer: the work that led to it comes above it. A cut-off turn keeps
           // the order it ran in when work followed its last text.
           const settled = isTurnStreaming
@@ -2487,14 +2595,15 @@ const TurnRow = memo(function TurnRow({
           const answerMsgs = settled.order.map((index) => turnMsgs[index]!);
           const analyses = settled.order.map((index) => settled.analyses[index]!);
           // Consecutive calls and thoughts become one line that says what they did; narration between them
-          // splits them. While the turn runs, a call still running folds into such a line even alone: the live
-          // line under the work says what runs now, so it does not show twice.
+          // splits them. While the turn runs, every run with a call is such a line, even a run of one: a row never turns
+          // into a group (or back). The run at the very end is the live row's, below, until text closes it, so a group
+          // line is only drawn for a run that cannot grow, and keeps its title.
           const segments = partitionTurnSegments(
             analyses.map((a) => a.toolsOnly),
             analyses.map((a) => a.cardsOnly),
             analyses.map((a) => a.toolItems.length),
             isTurnStreaming
-              ? (run) => run.some((msgIndex) => analyses[msgIndex]!.toolItems.some((item) => isRunningCall(item.part)))
+              ? (run) => run.some((msgIndex) => analyses[msgIndex]!.toolItems.some((item) => item.part.type !== "tool-Thinking"))
               : undefined,
             // Subagents started in quick succession share one card: only thinking between them, and each started
             // within a short gap of the one before.
@@ -2520,7 +2629,35 @@ const TurnRow = memo(function TurnRow({
               toolRenderers={toolRenderers}
             />
           );
-          const rows = segments.map((segment): { node: React.ReactNode; fold: FoldRow } => {
+          // Only failures the agent did not get past are named on a group line; while the turn runs, a failure nothing
+          // has followed yet counts too, as it will if the turn ends there.
+          const failedNow = (item: AssistantToolItem) =>
+            isUnrecoveredFailure(item.part) || (isTurnStreaming && Boolean(item.part.toolCallId && turnFailures.has(item.part.toolCallId)));
+          // The turn's current run of work: its last segment while it streams, when that is calls and thoughts (a
+          // run of calls, or thoughts alone). The live row is that run: it has no group line while it runs, and takes
+          // one, titled once, when text starts or the turn ends.
+          const liveTurn = isLastTurn && isStreaming;
+          const lastSegment = segments[segments.length - 1];
+          const liveRunMsgs = !liveTurn || !lastSegment || lastSegment.kind === "cards"
+            ? []
+            : lastSegment.kind === "tools" ? lastSegment.msgIndices : [lastSegment.msgIndex];
+          const liveRunItems = liveRunMsgs.flatMap((msgIndex) => analyses[msgIndex]!.toolItems);
+          const liveRunIndex = liveRunItems.length > 0 ? segments.length - 1 : -1;
+          // The latest thought of the current run, for the live row's first line.
+          const runThought = liveRunItems.filter((item) => item.part.type === "tool-Thinking").at(-1)?.part;
+          const runKeyOf = (firstId: string) => (item: AssistantToolItem, k: number) => item.part.toolCallId ?? `${firstId}-tool-${k}`;
+          const liveRun: LiveRun | undefined = (() => {
+            if (liveRunIndex < 0) return undefined;
+            const firstId = answerMsgs[liveRunMsgs[0]!]!.id;
+            const keyOf = runKeyOf(firstId);
+            return {
+              openKey: `${firstId}-toolcalls`,
+              count: liveRunItems.length,
+              failed: liveRunItems.filter(failedNow).length,
+              rows: liveRunItems.map((item, k) => renderTool(item.part, item.nestedTools, keyOf(item, k))),
+            };
+          })();
+          const rows = segments.map((segment, segmentIndex): { node: React.ReactNode; fold: FoldRow } => {
             if (segment.kind === "cards") {
               // A card still starting is not drawn: the progress line says "Starting subagent…".
               const cardParts = segment.msgIndices.flatMap(
@@ -2596,6 +2733,8 @@ const TurnRow = memo(function TurnRow({
                 };
               }
               const isLastMsg = isLastTurn && segment.msgIndex === answerMsgs.length - 1;
+              // Thoughts alone at the end of a running turn are its current run: the live row shows them.
+              if (segmentIndex === liveRunIndex) return { fold, node: null };
               return {
                 fold,
                 node: (
@@ -2612,23 +2751,31 @@ const TurnRow = memo(function TurnRow({
                 ),
               };
             }
-            const items = segment.msgIndices.flatMap((msgIndex) => analyses[msgIndex]!.toolItems);
+            const grouped = segment.msgIndices.flatMap((msgIndex) => analyses[msgIndex]!.toolItems);
+            const unrecovered = grouped.filter(failedNow).length;
+            // The current run is the live row, not a group line.
+            if (segmentIndex === liveRunIndex) return { fold: { kind: "tools", keep: unrecovered > 0 }, node: null };
             const firstId = answerMsgs[segment.msgIndices[0]!]!.id;
-            const itemKey = (item: (typeof items)[number], k: number) => item.part.toolCallId ?? `${firstId}-tool-${k}`;
-            // A thought still being written stays out of the group: its own row is the turn's live line.
-            const liveThought = isLastTurn && isStreaming && isLiveThoughtItem(items[items.length - 1]) ? items[items.length - 1]! : undefined;
-            const grouped = liveThought ? items.slice(0, -1) : items;
+            const itemKey = runKeyOf(firstId);
             const iconType = workGroupIconType(grouped);
             // A group titled by a thought shows the thinking icon: the line is the agent's words, not a tool's.
             const heading = workGroupHeading(grouped);
-            const unrecovered = grouped.filter((item) => isUnrecoveredFailure(item.part)).length;
-            // One finished call left beside the live thought is its own row: it says more than "Read 1 file".
-            const single = grouped.length === 1 && !isRunningCall(grouped[0]!.part) ? grouped[0]! : undefined;
-            const group = grouped.length === 0 ? null : single ? renderTool(single.part, single.nestedTools, itemKey(single, 0)) : (
+            const calls = grouped.filter((item) => item.part.type !== "tool-Thinking");
+            // A run of one call says what that call does, as its own row would.
+            const title = !heading.thought && calls.length === 1 && isV5ToolPart(calls[0]!.part)
+              ? callTitle(calls[0]!.part, failedNow(calls[0]!))
+              : heading.title;
+            // Keyed by the run's first message, so the line stays one element while the run grows.
+            const group = grouped.length === 0 ? null : (
               <ToolCallsGroup
                 key={`${firstId}-toolcalls`}
                 openKey={`${firstId}-toolcalls`}
-                rowKeys={grouped.map((item, k) => itemKey(item, k))}
+                // Also the lines of the runs it takes in: when a turn ends, its narration moves below the work and a run
+                // the person opened live joins the thought before it, under that thought's key. It stays open.
+                rowKeys={[
+                  ...grouped.map((item, k) => itemKey(item, k)),
+                  ...segment.msgIndices.slice(1).map((msgIndex) => `${answerMsgs[msgIndex]!.id}-toolcalls`),
+                ]}
                 count={grouped.length}
                 icon={
                   heading.thought || iconType === "tool-Thinking" ? (
@@ -2639,39 +2786,135 @@ const TurnRow = memo(function TurnRow({
                     <RowTools size={18} />
                   )
                 }
-                title={heading.title}
+                title={title}
                 summary={heading.summary}
-                // Only failures the agent did not get past are named on the group line.
                 failed={unrecovered}
                 live={isLastTurn && isStreaming}
               >
                 {grouped.map((item, k) => renderTool(item.part, item.nestedTools, itemKey(item, k)))}
               </ToolCallsGroup>
             );
-            return {
-              fold: { kind: "tools", keep: unrecovered > 0 },
-              // One wrapper whether or not a thought is being written beside the calls, so the group is not rebuilt
-              // when one starts or ends.
-              node: (
-                <Fragment key={`${firstId}-toolcalls-live`}>
-                  {group}
-                  {liveThought && renderTool(liveThought.part, liveThought.nestedTools, itemKey(liveThought, items.length - 1))}
-                </Fragment>
-              ),
-            };
+            return { fold: { kind: "tools", keep: unrecovered > 0 }, node: group };
           });
-          // A finished turn folds its work behind its "Worked for" line; the line opens it in place.
-          const folded = isTurnStreaming ? rows.map(() => false) : foldTurnWork(rows.map((row) => row.fold));
-          const hasFold = folded.some((value, index) => value && rows[index]!.node != null);
-          // Replies the fold hides, narration as well as answers that closed an earlier run, so none is missed.
-          const foldedReplies = folded.filter((value, index) => value && rows[index]!.fold.text && rows[index]!.node != null).length;
+          // A finished turn folds its work behind its line, one line per part: "Worked for" under the prompt, then
+          // "Continued for" under each steered message. Each line opens its part's work in place.
+          const foldRows = rows.map((row) => row.fold);
+          const parts = turnFoldParts(foldRows);
+          const folded = isTurnStreaming ? rows.map(() => false) : foldTurnWork(foldRows);
+          const open = new Set(openFolds ? openFolds.split(",").map(Number) : []);
+          const partFolds = parts.map(({ from, to }) => {
+            let has = false;
+            let replies = 0;
+            for (let index = from; index < to; index += 1) {
+              if (!folded[index] || rows[index]!.node == null) continue;
+              has = true;
+              // Replies the fold hides, narration as well as answers that closed an earlier run, so none is missed.
+              if (rows[index]!.fold.text) replies += 1;
+            }
+            return { has, replies };
+          });
+          // Each part's own time: from its prompt or steered message to where its last message ended.
+          const msgsOfRow = (index: number) => {
+            const segment = segments[index]!;
+            return (segment.kind === "message" ? [segment.msgIndex] : segment.msgIndices).map((msgIndex) => answerMsgs[msgIndex]!);
+          };
+          const partTimes = (() => {
+            if (isTurnStreaming) return parts.map(() => null);
+            const start = readCreatedAt(turn.userMsg);
+            const bounds = parts.map(({ from, to }, k) => {
+              let endedAt: number | null = null;
+              for (let index = from; index < to; index += 1) {
+                for (const message of msgsOfRow(index)) {
+                  // A compaction started after the turn (Compact now, hours later) is no part of its work.
+                  if (isThreadNotice(message) || isCompactionRow(message)) continue;
+                  const at = readEndedAt(message);
+                  if (at != null && (endedAt == null || at > endedAt)) endedAt = at;
+                }
+              }
+              // A later part starts at its steered message.
+              const steerRow = msgsOfRow(from)[0];
+              return { startedAt: k === 0 ? start : readCreatedAt((steerRow && readSteerGroup(steerRow)?.[0]) ?? steerRow), endedAt };
+            });
+            const last = bounds[bounds.length - 1]!;
+            // The turn's end: as this view measured it, else what was saved (a Stop line runs to the Stop).
+            if (settledMs != null && start != null) last.endedAt = start + settledMs;
+            else if (turn.end?.endedAt != null && (last.endedAt == null || turn.end.endedAt > last.endedAt)) last.endedAt = turn.end.endedAt;
+            const times = partWorkTimes(bounds, waits);
+            if (times.length === 1 && times[0] == null && settledMs != null) times[0] = settledMs;
+            return times;
+          })();
+          const lastPart = parts.length - 1;
+          // The open keys of the runs a closed part hides, under every key the live row could have had for each (a
+          // message of the run: the run can join the thought before it once the turn settles).
+          const hiddenRunsOf = (k: number) => {
+            if (open.has(k)) return undefined;
+            const keys: string[] = [];
+            for (let index = parts[k]!.from; index < parts[k]!.to; index += 1) {
+              const segment = segments[index]!;
+              if (!folded[index] || segment.kind === "cards") continue;
+              for (const msgIndex of segment.kind === "message" ? [segment.msgIndex] : segment.msgIndices) {
+                keys.push(`${answerMsgs[msgIndex]!.id}-toolcalls`);
+              }
+            }
+            return keys;
+          };
+          const foldOf = (k: number) =>
+            partFolds[k]!.has
+              ? { open: open.has(k), onToggle: () => onToggleWork(turnKey, k), hiddenRuns: hiddenRunsOf(k) }
+              : undefined;
+          // The rows in order, a part's line under its steered message, and each run of folded rows in one fold that
+          // closes as motion (a turn that just ended draws its work open first: `foldingIn`).
+          const segmentKey = (index: number) => {
+            const segment = segments[index]!;
+            return segment.kind === "message" ? answerMsgs[segment.msgIndex]!.id : `${answerMsgs[segment.msgIndices[0]!]!.id}-${segment.kind}`;
+          };
+          const drawn: React.ReactNode[] = [];
+          parts.forEach(({ from, to }, k) => {
+            let run: React.ReactNode[] = [];
+            let runKey = "";
+            const flush = () => {
+              if (run.length === 0) return;
+              drawn.push(
+                <Collapse key={`fold-${runKey}`} open={open.has(k) || foldingIn} className="flex flex-col gap-3">
+                  {run}
+                </Collapse>,
+              );
+              run = [];
+            };
+            for (let index = from; index < to; index += 1) {
+              const node = rows[index]!.node;
+              if (node != null && folded[index]) {
+                if (run.length === 0) runKey = segmentKey(index);
+                run.push(node);
+                continue;
+              }
+              flush();
+              if (node != null) drawn.push(node);
+              if (k > 0 && index === from && !isTurnStreaming) {
+                drawn.push(
+                  <TurnWorkStatus
+                    key={`part-${segmentKey(index)}`}
+                    active={false}
+                    continued
+                    durationMs={partTimes[k] ?? null}
+                    end={k === lastPart ? turn.end : undefined}
+                    endYieldsToNotice={isLastTurn && Boolean(turn.userMsg)}
+                    fold={foldOf(k)}
+                    foldedReplies={partFolds[k]!.replies}
+                  />,
+                );
+              }
+            }
+            flush();
+          });
 
           return (
             <div className="group/assistant-turn">
               <TurnWorkStatus
                 active={isTurnStreaming}
                 startedAt={isTurnStreaming ? liveStart : null}
-                durationMs={workedMs}
+                durationMs={partTimes[0] ?? null}
+                waits={isTurnStreaming ? waits : undefined}
                 waitingLabel={
                   isTurnStreaming &&
                   turn.assistantMsgs.some(isWaitingPermissionRequest)
@@ -2680,17 +2923,23 @@ const TurnRow = memo(function TurnRow({
                       ? "Waiting for a secret"
                       : undefined
                 }
-                end={turn.end}
+                end={lastPart === 0 ? turn.end : undefined}
                 endYieldsToNotice={isLastTurn && Boolean(turn.userMsg)}
-                fold={hasFold ? { open: workOpen, onToggle: () => onToggleWork(turnKey) } : undefined}
-                foldedReplies={foldedReplies}
+                fold={foldOf(0)}
+                foldedReplies={partFolds[0]!.replies}
               />
               <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">
                 <TurnIdContext.Provider value={(turn.userMsg as { turnId?: string } | undefined)?.turnId}>
-                  {rows.map((row, index) => (folded[index] && !workOpen ? null : row.node))}
+                  {drawn}
                 </TurnIdContext.Provider>
-                {isTurnStreaming && (
-                  <TurnProgressRow messages={turn.assistantMsgs} awaitingSubagents={!isStreaming} />
+                {(isTurnStreaming || liveBeforeOutput) && (
+                  <TurnProgressRow
+                    messages={turn.assistantMsgs}
+                    awaitingSubagents={isTurnStreaming && !isStreaming}
+                    standalone={!isTurnStreaming}
+                    thought={runThought}
+                    run={liveRun}
+                  />
                 )}
               </div>
               {!isTurnStreaming && (
@@ -2727,20 +2976,6 @@ const TurnRow = memo(function TurnRow({
           );
         })()}
 
-      {isLastTurn && (showAwaitingReply || showPlanning) && (
-        // Laid out like the turn's answer below, so its first row
-        // takes the live row's place without moving.
-        <div className="group/assistant-turn">
-          <TurnWorkStatus
-            active
-            startedAt={liveStartedAt ?? readCreatedAt(turn.userMsg)}
-            durationMs={null}
-          />
-          <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">
-            <TurnProgressRow messages={turn.assistantMsgs} standalone />
-          </div>
-        </div>
-      )}
     </div>
   );
 });

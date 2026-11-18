@@ -4,7 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
-import { PROTOCOL_METHODS } from '../src/mms/protocol/types'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import type { GitPullRequestInfo, GitPullRequestLookup, Thread } from '../src/shared/types'
@@ -68,12 +67,6 @@ describe('pull request methods through the daemon protocol', () => {
     vi.spyOn(mms.gitService.codeHost, 'lookupPullRequest').mockResolvedValue(lookup)
   /** The folder a call ran in, with Windows and macOS path spellings made comparable. */
   const normalized = (path: unknown) => String(path).replace(/\\/g, '/').toLowerCase()
-
-  it('lists the methods', () => {
-    for (const method of ['pullRequests.get', 'pullRequests.detail', 'pullRequests.draft', 'pullRequests.create', 'pullRequests.merge', 'pullRequests.close', 'pullRequests.baseBranches', 'pullRequests.mergeMethod', 'pullRequests.link', 'pullRequests.unlink']) {
-      expect(PROTOCOL_METHODS).toContain(method)
-    }
-  })
 
   it('looks up in the project folder for a projectId and in the thread\'s own worktree for a threadId', async () => {
     const spy = lookupSpy()
@@ -696,8 +689,7 @@ describe('pull request methods through the daemon protocol', () => {
       vi.spyOn(mms.gitService.codeHost, 'listBaseBranches').mockResolvedValue({ defaultBranch: 'main', branches: ['main'] })
     })
 
-    it('lists the methods and rejects unknown keys and bad parameters', async () => {
-      for (const method of ['pullRequests.list', 'pullRequests.resolve', 'pullRequests.startThread', 'pullRequests.pushTarget']) expect(PROTOCOL_METHODS).toContain(method)
+    it('rejects unknown keys and bad parameters', async () => {
       const list = vi.spyOn(mms.gitService.codeHost, 'listPullRequests').mockResolvedValue([])
       const project = mms.projects.openProject(f.repo)
       const thread = mms.threads.createThread('Task A', project.id)

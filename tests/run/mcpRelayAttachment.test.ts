@@ -28,7 +28,6 @@ describe('MCP relay attachment', () => {
   it('names the relay and its Claude prefix, and tells Mousse servers\' tools apart', () => {
     expect(MOUSSE_RELAY_SERVER_NAME).toBe('mousse-relay')
     expect(CLAUDE_RELAY_TOOL_PREFIX).toBe('mcp__mousse-relay__')
-    expect(CLAUDE_RELAY_TOOL_PREFIX).toHaveLength(19)
     expect(RELAY_CALL_TIMEOUT_MS).toBe(240_000)
     expect(isMousseServerTool(`${CLAUDE_MOUSSE_TOOL_PREFIX}thread_read`)).toBe(true)
     expect(isMousseServerTool(`${CLAUDE_RELAY_TOOL_PREFIX}github__create_issue`)).toBe(true)

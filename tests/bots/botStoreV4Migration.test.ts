@@ -143,17 +143,6 @@ describe('bots.db v3 → v4', () => {
     expect(store.insertEscalation(ask('esc_b'))).toBe(true)
   })
 
-  it('keeps the last two copies', () => {
-    buildV3()
-    const dir = join(profile, 'bots')
-    writeFileSync(join(dir, 'bots.db.pre-v2'), 'old')
-    writeFileSync(join(dir, 'bots.db.pre-v3'), 'older build')
-    store = new BotStore({ profileHome: profile })
-    expect(existsSync(join(dir, `bots.db.pre-v${BOTS_MIGRATIONS.at(-1)!.version}`))).toBe(true)
-    expect(existsSync(join(dir, 'bots.db.pre-v3'))).toBe(true)
-    expect(existsSync(join(dir, 'bots.db.pre-v2'))).toBe(false)
-  })
-
   it('makes no copy for a new database', () => {
     store = new BotStore({ profileHome: profile })
     expect(existsSync(join(profile, 'bots', `bots.db.pre-v${BOTS_MIGRATIONS.at(-1)!.version}`))).toBe(false)

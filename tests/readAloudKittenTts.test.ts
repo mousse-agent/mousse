@@ -186,8 +186,4 @@ describe('Kitten TTS manifests', () => {
     expect(model.voices[0].label).toBe('Bella, female')
     expect(model.voices.some((voice) => voice.id === model.defaultVoice)).toBe(true)
   })
-
-  it('use the nano int8 build for Nano', () => {
-    expect(KITTEN_TTS_NANO.repo).toBe('KittenML/kitten-tts-nano-0.8-int8')
-  })
 })

@@ -36,7 +36,7 @@ interface NativeHelperNoticeViewProps {
 export function NativeHelperNoticeView({ native, hostName, onOpenHost, onStop, stopping }: NativeHelperNoticeViewProps) {
   const runtime = RUNTIME_NAMES[native.runtime]
   const host = hostName ?? 'its thread'
-  const write = native.runtime === 'claude' && native.sendTo ? ` To write to it, ask ${host} to use SendMessage with ${native.sendTo}.` : ''
+  const write = native.sendTo ? ` To write to it, ask ${host} to use SendMessage with ${native.sendTo}.` : ''
   return (
     <div className="composer-banner" role="status">
       <div className="composer-banner-row" title={`${runtime} runs this helper inside ${host}. Its approvals are asked there.${write}`}>
@@ -62,7 +62,7 @@ export function NativeHelperNotice({ thread }: { thread: Thread | undefined }) {
   const hostName = useAppStore((s) => (hostThreadId ? s.threads.find((candidate) => candidate.id === hostThreadId)?.name : undefined))
   const [stopping, setStopping] = useState(false)
   if (!thread?.native) return null
-  const canStop = thread.native.runtime === 'codex' && thread.native.state === 'running'
+  const canStop = thread.native.stoppable === true && thread.native.state === 'running'
   return (
     <NativeHelperNoticeView
       native={thread.native}

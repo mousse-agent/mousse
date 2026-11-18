@@ -61,6 +61,7 @@ import { startDevGuiPoller } from './devgui/devGuiPoller'
 import { configureLinuxGraphics, configureLinuxVsync, configureLinuxWindowing, linuxTransparencyOptions } from './linuxRendering'
 import { addToSwitchList, KEEP_GPU_PROGRAMS_FEATURE } from '../shared/chromiumSwitches'
 import { watchKeepAwake } from './keepAwake'
+import { createServiceTray, usesServiceTray } from './serviceTray'
 
 function configureBrowserPopupPolicy(contents: WebContents, parent: BrowserWindow): void {
   contents.setWindowOpenHandler(({ url }) => {
@@ -164,6 +165,8 @@ function startGuiApp(): void {
   let resumeRecoveryAttached = false
   let devGuiPollerStop: (() => void) | null = null
   let desktopUpdater: DesktopUpdater | null = null
+  let serviceTray: import('electron').Tray | null = null
+  let mousseHome: string | null = null
 
   const browserView = new BrowserViewManager()
   const presentation = new PresentationState()
@@ -176,12 +179,48 @@ function startGuiApp(): void {
   }
 
   app.on('second-instance', () => {
-    if (mainWindow) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.show()
       mainWindow.focus()
+    } else {
+      openWindowFromBackground()
     }
   })
+
+  function openWindowFromBackground(): void {
+    if (isQuitting) return
+    if (bootstrapComplete && guiMms) {
+      void createWindow().catch((error) => console.error('Failed to create Mousse window:', error))
+    } else {
+      void bootstrap()
+    }
+  }
+
+  /** Stops the background service, then quits; the tray's way to end everything. */
+  async function quitAndStopService(): Promise<void> {
+    if (isQuitting) return
+    try {
+      if (mousseHome) await stopRunningDaemon(canonicalizeHome(mousseHome), { reason: 'gui-quit', timeoutMs: SERVICE_STOP_TIMEOUT_MS })
+    } catch (error) {
+      console.error('Background service did not stop:', error instanceof Error ? error.message : String(error))
+    }
+    await beginQuit()
+  }
+
+  function ensureServiceTray(): void {
+    if (serviceTray || !usesServiceTray()) return
+    const iconPath = getAppIconPath()
+    if (!iconPath) return
+    try {
+      serviceTray = createServiceTray(iconPath, {
+        open: openWindowFromBackground,
+        quitAndStop: () => { void quitAndStopService() }
+      })
+    } catch (error) {
+      console.error('Tray icon could not start:', error instanceof Error ? error.message : String(error))
+    }
+  }
 
   async function createWindow(): Promise<void> {
     if (!settings) return
@@ -320,6 +359,7 @@ function startGuiApp(): void {
     bootstrapPromise = (async () => {
       const homeDir = resolveMousseHome(process.env.MOUSSE_HOME)
       process.env.MOUSSE_HOME = homeDir
+      mousseHome = homeDir
       const repoRoot =
         process.env.MOUSSE_REPO_ROOT || (app.isPackaged ? homedir() : process.cwd())
 
@@ -428,6 +468,7 @@ function startGuiApp(): void {
       // requests and their in-window Retry action rather than a splash/modal.
       // Restore the exact window's chats only after its renderer subscribes.
       await createWindow()
+      ensureServiceTray()
       const chromeSettings = settings
       void browserMms.start().then(async () => {
         if (isQuitting) return
@@ -469,6 +510,8 @@ function startGuiApp(): void {
         console.error('guiMms.stop failed during shutdown:', err)
       }
       guiMms = null
+      serviceTray?.destroy()
+      serviceTray = null
       try {
         browserView.destroy()
       } catch {
@@ -508,6 +551,8 @@ function startGuiApp(): void {
 
   app.on('window-all-closed', () => {
     if (process.platform === 'darwin') return
+    // The tray icon keeps the app reachable while the background service runs.
+    if (serviceTray && !isQuitting) return
     // No embedded MMS work to retain — quit disconnects client only.
     void beginQuit()
   })

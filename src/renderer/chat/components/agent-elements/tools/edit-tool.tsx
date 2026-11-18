@@ -335,11 +335,13 @@ function EditLine({
           {!isPending && <Stat added={added} removed={removed} />}
           {isFailed && recovered && <RecoveredFailureMark />}
           {canOpen && (
-            <IconChevronRight
-              aria-hidden="true"
-              className="an-edit-row-chevron ui-collapse-chevron shrink-0 size-[18px] -ml-1 text-muted-foreground"
-              data-open={open || undefined}
-            />
+            <span className="an-row-chevron-box -ml-1">
+              <IconChevronRight
+                aria-hidden="true"
+                className="an-edit-row-chevron ui-collapse-chevron an-row-chevron"
+                data-open={open || undefined}
+              />
+            </span>
           )}
         </button>
         {actions && (

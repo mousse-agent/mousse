@@ -3941,7 +3941,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'providers.snapshots': {
       const p = isObject(params) ? params : {}
       const scope = asProviderScope(p.scope)
-      const snapshots = await harnessGateway(ctx).instances.snapshots(scope)
+      const instances = harnessGateway(ctx).instances
+      if (p.refreshStaleModels === true && scope.kind === 'device' && ctx.connection?.clientType === 'gui')
+        instances.refreshStaleModelsOnDesktopOpen()
+      const snapshots = await instances.snapshots(scope)
       const instancesError = ctx.mms.providerInstances?.storeError()
       // Present while the profile's stored instance map cannot be read (nothing is overwritten).
       return { scope, snapshots, ...(instancesError ? { instancesError } : {}) }

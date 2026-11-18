@@ -550,6 +550,10 @@ describe('git section stylesheet', () => {
     expect(rule('.side-card-git-popover')).toMatch(/transition:\s*none/)
   })
 
+  it('stops the pending pull request animation when reduced motion is asked for', () => {
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\) \{\s*\.side-card-git-pr-pending \{\s*animation: none/)
+  })
+
   it('marks the selected branch with a neutral fill, not an accent tint', () => {
     const selected = rule(".side-card-git-option[aria-selected='true']")
     expect(selected).toMatch(/background:\s*var\(--ui-pressed\)/)
@@ -559,22 +563,6 @@ describe('git section stylesheet', () => {
   it('leaves the commit submit buttons neutral', () => {
     expect(rule('.side-card-git-submit')).not.toMatch(/accent/)
     expect(rule('.side-card-git-submit-quiet')).not.toMatch(/accent/)
-  })
-
-  it('removes the global focus ring from the branch search', () => {
-    const focus = rule('.side-card-git-search input:focus')
-    expect(focus).toMatch(/box-shadow:\s*none/)
-    expect(focus).toMatch(/outline:\s*none/)
-    expect(focus).toMatch(/border:\s*0/)
-  })
-
-  it('keeps each action button on one line and gives the branch its own full-width row', () => {
-    const actions = rule('.side-card-git-commit-button,\n.side-card-git-push,\n.side-card-git-pr-create')
-    expect(actions).toMatch(/flex:\s*none/)
-    expect(actions).toMatch(/white-space:\s*nowrap/)
-    expect(rule('.side-card-git-branch')).toMatch(/width:\s*100%/)
-    expect(rule('.side-card-git-branch-name')).toMatch(/min-width:\s*0/)
-    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\) \{\s*\.side-card-git-pr-pending \{\s*animation: none/)
   })
 })
 

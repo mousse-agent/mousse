@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * Settings → Devices: what another computer may do here, as one of three presets on its row (View and chat with bots,
+ * Settings → Devices: what another computer may do here, as one of three presets in its detail (View and chat with bots,
  * Work on threads, Full control). A preset sets the device's fields at once; fields that match none show as Custom,
  * with the single switches still there. A phone has no preset. The page is mounted as a person uses it, with only the
  * daemon stubbed; the daemon's side is `tests/net/bridge/routed/accessClasses.test.ts`.
@@ -67,9 +67,12 @@ afterEach(() => {
   host.remove()
 })
 
+/** Opens one device's detail; only one is open at a time. */
+const openDetail = (name: string) => click(document.querySelector(`[aria-label="Show details for ${name}"]`))
 const showDevices = async () => {
   await act(async () => root.render(createElement(NetDevicesSection)))
   await flush()
+  await openDetail('Mac')
 }
 const presets = () => [...document.querySelectorAll<HTMLElement>('[role="radiogroup"]')].filter((group) => group.querySelector('[role="radio"]')?.textContent === 'View and chat')
 const picked = () => presets()[0]!.querySelector('[role="radio"][aria-checked="true"]')?.textContent
@@ -79,6 +82,9 @@ it('a computer with the defaults works on threads; each preset sets its fields a
   await showDevices()
   // One preset control: the computer's. The phone has none.
   expect(presets()).toHaveLength(1)
+  await openDetail('Pocket')
+  expect(presets()).toHaveLength(0)
+  await openDetail('Mac')
   expect(picked()).toBe('Work on threads')
 
   await click(button('View and chat'))

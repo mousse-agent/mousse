@@ -1,9 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { accessSync, constants, existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { delimiter, isAbsolute, join, resolve } from 'node:path'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { isAbsolute, join, resolve } from 'node:path'
 import { AppError, redactSecrets } from '../../../../shared/errors'
 import { CODEX_INSTANCE_ID } from '../../../../shared/providerInstances'
 import { parseThinkingSuffixFromModelId, REASONING_LEVELS, supportedEffortOf } from '../../../../shared/modelVariants'
@@ -21,7 +20,7 @@ import type { LlmModelOption, LlmProviderOption } from '../../../../shared/setti
 import type { ChatImageAttachment } from '../../../../shared/types'
 import { mousseVersion } from '../../../appVersion'
 import { killTree } from '../../spawn'
-import { withEnforced } from '../../env'
+import { cliNames, codexStandalonePaths, findOnPath, withEnforced } from '../../env'
 import { atomicWriteJsonSync } from '../../../data/AtomicFs'
 import type { UserQuestionService } from '../../../orchestrator/UserQuestionService'
 import { MOUSSE_MCP_SERVER_NAME, MOUSSE_RELAY_SERVER_NAME, codexMcpConfigOverrides } from '../../../run/mcp/attachment'
@@ -39,7 +38,6 @@ import {
   type CliVersionCache,
   type StoredCliConfig
 } from '../../cliConfig'
-import { resolveWindowsShim } from '../../resolveWindowsShim'
 import {
   CodexAppServerClient,
   CodexRpcError,
@@ -551,25 +549,9 @@ export function codexEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJ
   return env
 }
 
-/**
- * `codex` on PATH (plus `~/.local/bin`, where the standalone installer puts it). On Windows an npm
- * `codex.cmd` shim counts only when it resolves to the program it runs (see `resolveWindowsShim`).
- */
+/** Codex on PATH or in the standalone installer's directory. */
 export function findCodexBinary(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  const names = process.platform === 'win32' ? ['codex.exe', 'codex.cmd'] : ['codex']
-  for (const directory of [...(env.PATH ?? '').split(delimiter), join(homedir(), '.local', 'bin')]) {
-    if (!directory) continue
-    for (const name of names) {
-      const candidate = resolve(directory, name)
-      try {
-        accessSync(candidate, constants.X_OK)
-      } catch {
-        continue
-      }
-      if (resolveWindowsShim(candidate, { env })) return candidate
-    }
-  }
-  return undefined
+  return findOnPath(cliNames('codex'), { env, searchPath: codexStandalonePaths(env) })
 }
 
 const historyKey = (history: string): string => createHash('sha256').update(history).digest('hex')

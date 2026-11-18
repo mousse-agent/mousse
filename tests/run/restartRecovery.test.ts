@@ -53,7 +53,7 @@ describe('restart recovery of a turn cut off by a killed daemon', () => {
   }
 
   const INTERRUPTED = 'system:Turn interrupted by a Mousse restart.'
-  // `steer-held-device`: a steer with no queue item of its own (a device's limited steer) held for a running tool; it
+  // `steer-held-device`: a steer with no queue item of its own (a device's limited steer) held for a running compaction; it
   // is saved as a `steering` row bound to the run, so the restart returns it once (docs/design/steer-and-interruptions.md §2.8).
   const SCENARIOS = ['starting', 'accepted', 'streaming', 'tool', 'uncertain', 'steer', 'steer-taken', 'steer-held', 'steer-held-device', 'approval', 'question'] as const
   /** What the provider was sent in the first process: `cut` reached it unless the turn died before its start. */
@@ -89,7 +89,7 @@ describe('restart recovery of a turn cut off by a killed daemon', () => {
       const queuedRun = scenario === 'steer' || scenario === 'steer-held' ? [['c-2', 'cancelled', 'user'], ['queue', 'completed', null]]
         : scenario === 'steer-held-device' ? [['queue', 'completed', null]]
         : taken ? [['c-2', 'cancelled', 'user']] : [['c-2', 'completed', null]]
-      // A steer held for a running tool was never drained before the kill (docs/design/steer-and-interruptions.md §2.8).
+      // A steer held for a compaction was never drained before the kill (docs/design/steer-and-interruptions.md §2.8).
       if (scenario === 'steer-held' || scenario === 'steer-held-device') expect(existsSync(join(home, 'cuts.log'))).toBe(false)
       expect(result.runs.map(({ clientRequestId, status, interruptedBy }) => [clientRequestId?.startsWith('queue:') ? 'queue' : clientRequestId, status, interruptedBy]).sort()).toEqual([
         ['c-0', 'completed', null],

@@ -683,7 +683,6 @@ describe('RunEngine pause (SPEC §5)', () => {
     const cases: Array<[RunPauseEnd, 'cancelled' | 'interrupted', 'user' | 'provider']> = [
       ['user_message', 'cancelled', 'user'],
       ['cancel', 'cancelled', 'user'],
-      ['stop', 'cancelled', 'user'],
       ['deleted', 'cancelled', 'user'],
       ['resume', 'interrupted', 'provider'],
       ['resume_now', 'interrupted', 'provider']

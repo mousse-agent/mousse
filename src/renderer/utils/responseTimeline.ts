@@ -28,5 +28,8 @@ export function formatDurationLong(milliseconds: number): string {
 /** "Worked for 4m 12s" under a finished turn. */
 export const formatWorkedFor = (milliseconds: number): string => `Worked for ${formatDurationShort(milliseconds)}`
 
+/** "Continued for 1m 3s" after a message steered into a finished turn: the time of the work that answered it. */
+export const formatContinuedFor = (milliseconds: number): string => `Continued for ${formatDurationShort(milliseconds)}`
+
 /** "Working · 4m 12s" while a turn runs. */
 export const formatWorkingFor = (milliseconds: number): string => `Working · ${formatDurationShort(milliseconds)}`

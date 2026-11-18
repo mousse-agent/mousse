@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   SIDE_CARD_FADE_MS,
@@ -7,8 +6,6 @@ import {
   sideCardPresenceView,
   type SideCardPhase
 } from '../src/renderer/components/sideCard/sideCardPresence'
-
-const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8')
 
 describe('nextSideCardPhase', () => {
   it('fades in: unmounted, entering, then shown once painted', () => {
@@ -96,16 +93,6 @@ describe('createSideCardPresence', () => {
     expect(phases).toEqual(['exiting', 'unmounted'])
   })
 
-  it('keeps the exit wait and fade-in whatever the motion preference, which only changes the styling', () => {
-    // The controller has no motion input: reduced motion makes the fades instant in CSS only.
-    const { presence } = setup('shown')
-    presence.setPresent(false)
-    vi.advanceTimersByTime(SIDE_CARD_FADE_MS / 2)
-    expect(sideCardPresenceView(presence.phase).mounted).toBe(true)
-    vi.advanceTimersByTime(SIDE_CARD_FADE_MS / 2)
-    expect(sideCardPresenceView(presence.phase).mounted).toBe(false)
-  })
-
   it('cancels the pending unmount when the card comes back mid-fade', () => {
     const { presence, phases } = setup('shown')
     presence.setPresent(false)
@@ -157,19 +144,5 @@ describe('createSideCardPresence', () => {
     presence.dispose()
     vi.advanceTimersByTime(SIDE_CARD_FADE_MS * 2)
     expect(phases).toEqual(['exiting'])
-  })
-})
-
-describe('side card stylesheet', () => {
-  const css = read('../src/renderer/components/sideCard/sideCard.css')
-
-  it('lifts the aside above the incoming app panel only while a card is mounted in a narrowed aside', () => {
-    expect(css).toMatch(/\.sidebar:not\(\.sidebar-full\):has\(> \.thread-side-card-layer > \.thread-side-card\) \{\s*z-index: 1;/)
-  })
-
-  it('leaves section headings in sentence case', () => {
-    const title = /\.side-card-section-title \{([^}]*)\}/.exec(css)?.[1] ?? ''
-    expect(title).toContain('font-size')
-    expect(title).not.toMatch(/text-transform|letter-spacing/)
   })
 })

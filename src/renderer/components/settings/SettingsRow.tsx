@@ -95,10 +95,13 @@ export function SettingsRow({
   indent,
   anchor,
   className,
+  leading,
   children,
   ...rest
 }: {
   title: ReactNode
+  /** A glyph that identifies the item (an avatar, a device kind), left of the text. */
+  leading?: ReactNode
   /** Where a settings search result lands (lib/settingsSearch.ts): Enter focuses the row's control. */
   anchor?: string
   /** Small inline action right after the title text, e.g. a reset icon button. */
@@ -130,6 +133,7 @@ export function SettingsRow({
   )
   return (
     <div className={classes.join(' ')} data-settings-anchor={anchor} {...rest}>
+      {leading && <div className="settings-item-lead" aria-hidden="true">{leading}</div>}
       <div className="settings-item-text">
         {titleAction ? (
           <div className="settings-item-title-row">

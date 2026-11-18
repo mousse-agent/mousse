@@ -19,12 +19,12 @@ const notices = () => chatOf(f, botId).filter(row => row.systemLine).map(row => 
 
 // At expiry: queued, wall-waiting, parked and paused work leaves quietly; an executing run reports.
 it.each(['queued', 'waiting_grant', 'blocked', 'paused'] as const)('expiry withdraws %s work without a stopped line', async status => {
-  if (status === 'queued') f.store.setError(botId, { code: 'bot_journal_failed', error: 'Journal is not writable' })
   const schedule = add()
   await f.tickSchedules(new Date(T0 + 5 * MIN))
   const row = ownRun()
   if (status === 'waiting_grant') f.bots.raiseWall(row.id, { dispatchN: 1, kind: 'gate', permission: { tool: 'write' }, reason: 'Need write.' })
-  else if (status !== 'queued') f.store.run('UPDATE bot_activations SET status = ? WHERE id = ?', status, row.id)
+  // The run lane has no count (#1452), so a scheduled run starts at once; the stored status stands in for a wait.
+  else f.store.run('UPDATE bot_activations SET status = ? WHERE id = ?', status, row.id)
   const beforeMessages = chatOf(f, botId).filter(message => message.activationId === row.id).map(message => message.id)
   await f.tickSchedules(new Date(T0 + 8 * MIN))
   expect(f.book.get(botId, schedule.scheduleId)).toBeUndefined()

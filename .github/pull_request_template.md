@@ -29,4 +29,4 @@ uploaded to the PR. -->
 ## Notes
 
 <!-- Optional, one or two lines: stacking, rollout or install steps, follow-ups.
-End with Closes #123 for completed work or Refs #123 for partial delivery. -->
+End with Closes #123 for completed work, Refs #123 for partial delivery, or "No issue". A check requires one of the three. -->

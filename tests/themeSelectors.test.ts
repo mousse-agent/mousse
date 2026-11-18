@@ -95,6 +95,7 @@ const PERMISSION_MODE_REVIEWED: Record<string, string> = {
   'src/renderer/components/ComposerEffortPicker.tsx': 'hosts the menu; the choices are ComposerPermissionPicker',
   'src/renderer/components/OrchestratorChat.tsx': 'the handler, no control',
   'src/renderer/components/settings/GeneralSettings.tsx': 'Settings → General, paused with the page',
+  'src/renderer/components/NetDevicesSection.tsx': 'Settings → Devices, paused with the page; names a device’s highest mode, no control',
   'src/renderer/components/automations/AutomationDetail.tsx': 'only on the Automations page, paused with it',
   'src/renderer/components/automations/inbox/EditDetailsPane.tsx': 'only on the Automations page, paused with it'
 }

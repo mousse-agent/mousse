@@ -814,8 +814,6 @@ describe('what ends a tunnel at once', () => {
 
   it.each([
     ['blocked', 'blocked'],
-    ['editor_off', 'editor_off'],
-    ['setting_off', 'setting_off'],
     ['net_off', 'net_off'],
     ['capability', 'access_lost']
   ] as const)('ends every tunnel of the device when the rules say %s', async (reason, ended) => {

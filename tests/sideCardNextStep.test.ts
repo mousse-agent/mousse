@@ -96,11 +96,6 @@ describe('nextStep', () => {
     expect(step(status({ branch: 'topic', upstream: 'origin/topic' }), tracked(), PROJECT, none)).toMatchObject({ kind: 'pull-request', label: 'Open pull request' })
     expect(step(status(), tracked())).toBeNull()
   })
-
-  it('counts with the look’s figures, so a branch the remote moved past is not offered a push', () => {
-    // The tracking ref still says 2 ahead; the remote has since taken 1 of them and added 3 more.
-    expect(step(status({ ahead: 2 }), tracked(1, 3))).toMatchObject({ kind: 'pull' })
-  })
 })
 
 describe('branchTag', () => {

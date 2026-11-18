@@ -590,9 +590,6 @@ describe('the person\'s input in the split view', () => {
     const pane = await held({ dialog: { type: 'confirm', message: 'Delete the draft?' } })
     const dialog = pane.querySelector('.watched-browser-dialog')!
     expect(dialog.textContent).toContain('Delete the draft?')
-    await click([...dialog.querySelectorAll('button')].find((entry) => entry.textContent === 'OK'))
-    await settle()
-    expect(sentInputs().map((sent) => sent.input)).toEqual([{ kind: 'dialog', accept: true }])
   })
 
   it('a page\'s file request names the site; only what this computer\'s own dialog answered goes, by its token, never a path', async () => {
@@ -804,7 +801,6 @@ describe('the bot browser\'s pictures', () => {
       const gaps = reads.slice(1).map((at, index) => at - reads[index]!)
       expect(gaps.length).toBeGreaterThanOrEqual(8)
       expect(gaps.every((gap) => gap === BOT_BROWSER_FRAME_MS)).toBe(true)
-      expect(BOT_BROWSER_FRAME_MS).toBeLessThanOrEqual(50)
       // Not seen: it stops asking (after a moment's grace).
       await act(async () => root.render(createElement(Probe, { seen: false })))
       await act(async () => { await vi.advanceTimersByTimeAsync(STOP_GRACE_MS) })

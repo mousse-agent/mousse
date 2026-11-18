@@ -191,10 +191,14 @@ describe('Settings → Devices → Bots on this computer', () => {
   it('a phone has the switch, on at first; off is saved for that device alone and reads Off', async () => {
     await act(async () => root.render(createElement(NetDevicesSection)))
     await flush()
+    // The switch is in each device's detail, one open at a time.
+    const details = (name: string) => click(host.querySelector(`[aria-label="Show details for ${name}"]`))
+    // A service from before the switch sends none for a device, and shows no switch for it.
+    await details('Old laptop')
+    expect(host.querySelector('[aria-label="Bots on this computer for Old laptop"]')).toBeNull()
+    await details('Pocket')
     expect(toggle()?.getAttribute('aria-checked')).toBe('true')
     expect(host.textContent).toContain('On · reaches this computer\'s bots')
-    // A service from before the switch sends none for a device, and shows no switch for it.
-    expect(host.querySelector('[aria-label="Bots on this computer for Old laptop"]')).toBeNull()
     await click(toggle())
     expect(request).toHaveBeenCalledWith('bridge.policy', { node: 'nod_pocket', bots: false })
     expect(request.mock.calls.filter(([method]) => method === 'bridge.policy')).toHaveLength(1)

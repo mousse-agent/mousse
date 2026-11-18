@@ -1,5 +1,4 @@
 import { actionContinuation } from '../../src/mms/bots/actions/BotActions'
-import { botActionRefusalText, type BotActionRefusalCode } from '../../src/shared/bots/personal/actionRefusal'
 import { foldChatSummary } from '../../src/mms/bots/memory/chatSummary'
 import { createBotContextProvider } from '../../src/mms/bots/memory/contextPack'
 import { BOT_SCHEDULE_ACT_TOOLS, botMayBeOffered } from '../../src/shared/bots/personal/manifest'
@@ -457,7 +456,7 @@ it.each(['repeat', 'three', 'forgotten'] as const)('removed or recreated schedul
   expect((await attempt(other.prepared.authority, 'second-schedule')).isError).toBe(true)
   expect(t.calls).toEqual([])
 })
-it('an edited schedule withdraws its card before edit observers see it and tells its run', async () => {
+it('an edited schedule withdraws its card before observers see it, tells its run and refuses Send', async () => {
   const t = await scheduledCall()
   await t.call()
   await finish(f, t.run.payload)
@@ -469,6 +468,8 @@ it('an edited schedule withdraws its card before edit observers see it and tells
   expect(seen).not.toContain('open')
   await flush()
   expect(f.store.lastMainDispatch(t.id)?.prompt.text).toContain('changed')
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow(/changed/)
+  expect(t.calls).toEqual([])
 })
 it('Send withdraws a stale schedule card even if the edit hook was missed', async () => {
   const t = await scheduledCall()
@@ -562,7 +563,10 @@ it.each([false, true])('one unattended chat starting twenty works has bounded op
   const actions = f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")
   expect(actions).toHaveLength(different ? 3 : 1)
   expect(t.results.filter(result => !result.isError)).toHaveLength(different ? 3 : 1)
-  expect(t.results.at(-1)?.text).toContain(different ? 'Three requests' : 'already waiting')
+  expect(t.results.at(-1)).toMatchObject({
+    isError: true,
+    text: expect.stringContaining(different ? 'Three requests for this tool are waiting or were not sent' : 'already waiting')
+  })
   expect(t.calls).toEqual([])
 })
 it('owner-started work retains five different open cards', async () => {
@@ -735,23 +739,6 @@ it.each([1, 60, 180])('a schedule card lives for one gap with an hour minimum: %
   const later = await start(f, due.inserted[0]!)
   expect(later.prepared.preamble).toContain('Checked through the first invoice')
 })
-it('editing a schedule refuses Send without sending its old call', async () => {
-  const t = await scheduledCall()
-  await t.call()
-  await finish(f, t.run.payload)
-  const a = f.bots.actions.forWork(t.id)!
-  f.book.update(f.scheduler.getJob(t.schedule.jobId)!, { prompt: 'A different email' })
-  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow(/changed/)
-  expect(t.calls).toEqual([])
-})
-it('removing a parked schedule withdraws its card in the ending transaction', async () => {
-  const t = await scheduledCall()
-  await t.call()
-  await finish(f, t.run.payload)
-  f.bots.removeSchedule(t.botId, t.schedule.scheduleId)
-  expect(f.bots.actions.forWork(t.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
-  expect(f.store.activation(t.id)?.status).toBe('done')
-})
 it('Not now refuses the identical call in the next occurrence until the owner writes', async () => {
   const t = await scheduledCall()
   await t.call()
@@ -785,11 +772,13 @@ it('restart while a schedule waits keeps one run and card and Send resumes once'
   expect(f.store.lastMainDispatch(t.id)?.n).toBe(2)
   expect(t.calls).toEqual([t.args])
 })
-it('removing a parked schedule delivers its last words once without a card', async () => {
+it('removing a parked schedule withdraws its card and delivers its last words once', async () => {
   const t = await scheduledCall()
   await t.call()
   await finish(f, t.run.payload, 'completed', { text: 'Draft ready; send still needs your answer.' })
   f.bots.removeSchedule(t.botId, t.schedule.scheduleId)
+  expect(f.bots.actions.forWork(t.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
+  expect(f.store.activation(t.id)?.status).toBe('done')
   await flush()
   const reports = f.bots.service.chatList(t.botId).messages.filter(m => m.activationId === t.id && m.kind === 'run_report')
   expect(reports).toHaveLength(1)
@@ -1881,21 +1870,6 @@ it('settled approval stranded before its readiness write ends with a line', asyn
   f.bots.afterForget()
   expect(f.store.activation(t.workId)).toMatchObject({ status: 'failed', endReason: 'action_gone' })
   expect(f.store.message(`bm_${t.workId}_ended`)?.text).toContain('nothing could let it carry on')
-})
-
-it.each(['stop', 'expiry', 'forget'] as const)('the disabled switch settles existing held rows on %s', async path => {
-  const t = await setup(true)
-  await t.call(); await finish(f, t.work.payload)
-  const a = f.bots.actions.forWork(t.workId)!
-  f.host.settings!.get().experimental.botAsksFirst = false
-  if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
-  if (path === 'expiry') { f.clock.now = Date.parse(a.expires_at); await f.bots.deliverDueReminders() }
-  if (path === 'forget') {
-    const memory = new BotMemoryStore({ db: f.store.db })
-    const seq = memory.append({ botId: t.botId, kind: 'notice', sourceKey: `bm:${a.message_id}`, who: 'bot', text: 'Held call' })!
-    memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
-  }
-  expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
 })
 
 it.each(['send', 'not_now'] as const)('owner %s resets detection of repeated waits, as a question answer does', async answer => {
@@ -3016,16 +2990,6 @@ it('review10 reads shared action nudge history once per bot per read or upkeep p
   expect(expensive()).toHaveLength(1)
 })
 
-it('review12 pending unattended cap does not claim its open cards were declined or already sent', async () => {
-  const t = await fanOut(true, false, 4, true)
-  const result = t.results.at(-1)!
-  expect(result.isError).toBe(true)
-  expect(result.text).toContain('waiting')
-  expect(result.text).toContain('waiting or were not sent')
-  expect(f.store.all("SELECT id FROM bot_actions WHERE status = 'open'")).toHaveLength(3)
-  expect(t.calls).toEqual([])
-})
-
 it.each([180, 48 * 60])('review12 scheduled cards at %s minutes share the nudge clock and expiry', async minutes => {
   const t = await scheduledCall(true, minutes)
   await t.call(); await finish(f, t.run.payload)
@@ -3235,7 +3199,6 @@ it.each([
   if (path !== 'forget') expect(text).toContain(ownerText)
   else expect(text).toContain('Your owner removed this request')
   expect(() => f.bots.actions.check({ actionId: a.id, digest: a.args_digest, answer: 'send' })).toThrow(expect.objectContaining({ code, message: ownerText }))
-  expect(botActionRefusalText(code as BotActionRefusalCode)).toBe(ownerText)
   expect(t.calls).toEqual([])
 })
 

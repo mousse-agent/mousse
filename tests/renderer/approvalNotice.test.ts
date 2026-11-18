@@ -89,6 +89,7 @@ class FakeIntersectionObserver {
     observers.push(this.entry)
   }
   observe(target: Element) { this.entry.target = target }
+  unobserve(target: Element) { if (this.entry.target === target) this.entry.target = null }
   disconnect() { this.entry.target = null }
 }
 const setRowInView = (visible: boolean) => act(async () => {

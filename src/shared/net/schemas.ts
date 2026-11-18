@@ -666,6 +666,7 @@ export const wireMessageSchemas = {
   }),
   revoked: message('revoked', { subject }),
   rosterUpdate: message('rosterUpdate', { roster: signed }),
+  'lan.port': message('lan.port', { port: integer(1, 65535) }),
   'enroll.request': message('enroll.request', {
     invite: id('inv'),
     node: id('nod'),
@@ -677,6 +678,18 @@ export const wireMessageSchemas = {
     oneOf: [
       message('enroll.result', { delegation: signed, roster: signed }),
       message('enroll.result', { error: wireError })
+    ]
+  },
+  'link.claim': message('link.claim', {
+    offer: id('ofr'),
+    want: enumeration(['add', 'connect']),
+    proof: fixedB64(32)
+  }),
+  'link.result': {
+    oneOf: [
+      message('link.result', { invite: text(MAX_INLINE_ENVELOPE_BYTES, 5) }),
+      message('link.result', { node: id('nod'), routes: signed }),
+      message('link.result', { error: wireError })
     ]
   },
   'space.join.request': message('space.join.request', {

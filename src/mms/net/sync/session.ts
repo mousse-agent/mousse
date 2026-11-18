@@ -141,6 +141,13 @@ export interface SyncSessionOptions {
   ) => boolean
   localRoutes?: () => Signed
   onPeerRoutes?: (routes: Signed, peer: SyncSession['peer']) => void
+  /**
+   * The port of this computer's automatic LAN listener, told to a peer of the same user once the session is open
+   * (`lan.port.v1`). Without it the capability is not offered.
+   */
+  lanPort?: () => number | undefined
+  /** A peer of the same user told its LAN listener port; at most once per session. */
+  onPeerLanPort?: (port: number, peer: SyncSession['peer']) => void
   /** Bounded retained evidence for a prepared Space snapshot; never grants a pin. */
   retainRosterEvidence?: (roster: Signed, peer: SyncSession['peer']) => void
   onAuthenticated?: () => void
@@ -239,6 +246,7 @@ export class NetSyncSession implements SyncSession, TunnelLink {
   private localCaps: SessionCapability[]
   private negotiatedCaps: SessionCapability[] = []
   private negotiatedMinor = NET_PROTO_MINOR
+  private lanPortTold = false
   private preauthBytes = 0
   private handshakeTimer: { cancel(): void }
   private pingTimer?: { cancel(): void }
@@ -321,10 +329,19 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       ...(options.tunnels ? ['tunnel.v1' as const] : []),
       ...(options.discovery || options.spaceIdentity ? ['space.discovery.v1' as const] : [])
     ]
-    // Added before duplicates are removed: a caller that lists it too still offers it once.
+    // Added before duplicates are removed: a caller that lists it too still offers it once. `lan.port.v1` is offered
+    // only by a session that can tell a port.
     this.localCaps = [
-      ...new Set([...caps, ...(caps.includes('streams.v1') ? ['snapshot.stale.v1' as const] : [])])
-    ].filter((cap) => cap !== 'presence.v1' || !!options.verifyPresence)
+      ...new Set<SessionCapability>([
+        ...caps,
+        ...(caps.includes('streams.v1') ? ['snapshot.stale.v1' as const] : []),
+        ...(options.lanPort ? ['lan.port.v1' as const] : [])
+      ])
+    ].filter(
+      (cap) =>
+        (cap !== 'presence.v1' || !!options.verifyPresence) &&
+        (cap !== 'lan.port.v1' || !!options.lanPort)
+    )
     this.opened = new Promise((resolve, reject) => {
       this.openResolve = resolve
       this.openReject = reject
@@ -1267,6 +1284,13 @@ export class NetSyncSession implements SyncSession, TunnelLink {
       }
       case 'revoked':
         return // Hint only. Independently verified roster controls teardown.
+      case 'lan.port':
+        this.requireCap('lan.port.v1')
+        // A hint between the user's own computers; another user's device is never dialled from it.
+        if (this.lanPortTold || this.peer.user !== this.options.identity.self()?.user) return
+        this.lanPortTold = true
+        this.options.onPeerLanPort?.(h.port, this.peer)
+        return
       case 'subscribe':
         this.requireCap('streams.v1')
         {
@@ -1656,6 +1680,19 @@ export class NetSyncSession implements SyncSession, TunnelLink {
     this.openResolve()
     this.schedulePing()
     this.refreshExpiry()
+    this.tellLanPort()
+  }
+  /** Tells a peer of the same user where this computer's LAN listener is, so it can dial back. Best effort. */
+  private tellLanPort(): void {
+    try {
+      if (!this.negotiatedCaps.includes('lan.port.v1')) return
+      if (this.peer.user !== this.options.identity.self()?.user) return
+      const port = this.options.lanPort?.()
+      if (!port || !Number.isInteger(port) || port > 65535) return
+      void this.send({ t: 'lan.port', port }).catch(() => {})
+    } catch {
+      // A hint only: the session works without it.
+    }
   }
   private refreshExpiry(): void {
     this.expiryTimer?.cancel()

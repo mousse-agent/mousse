@@ -113,8 +113,6 @@ describe.skipIf(!posix)('the running list on this computer', () => {
     return child
   }
 
-  const portOf = (url: string | undefined) => Number(new URL(url ?? 'http://x:0').port)
-
   it('a quick action\'s dev server in a terminal is listed by its name, as the user\'s, with the address it listens on', async () => {
     const registry = new RunningRegistry(sources())
     const running = terminal('t-other', 'Dev server')
@@ -142,7 +140,6 @@ describe.skipIf(!posix)('the running list on this computer', () => {
     await until(async () => (await new RunningRegistry(sources()).list({ threadId: 't-agent', folders: [project], projectId: 'p1' })).length === 0)
     entries = await new RunningRegistry(sources()).list({ threadId: 't-agent', folders: [project], projectId: 'p1' })
     expect(entries).toEqual([])
-    expect(portOf(printed[0])).toBeGreaterThan(0)
   })
 
   it('a command an agent left running is its thread\'s; one still in its tool call, or started before the call, is not', async () => {
@@ -153,7 +150,8 @@ describe.skipIf(!posix)('the running list on this computer', () => {
     // A command still in its call (a foreground command of a turn) is not a background one.
     registry.noteCommand({ threadId: 't-agent', callId: 'fg', command: 'node server.cjs', folder: project, ended: false })
     registry.noteCommand({ threadId: 't-agent', callId: 'bg', command: 'node server.cjs', folder: project, ended: false })
-    const server = background('node server.cjs')
+    // `exec`: the shell becomes the server, so the kill below ends it (a shell that keeps a child would leave it running).
+    const server = background('exec node server.cjs')
     registry.noteCommand({ threadId: 't-agent', callId: 'bg', command: 'node server.cjs', folder: project, ended: true })
     await until(async () => (await registry.list({ threadId: 't-agent', folders: [project], projectId: 'p1' }))[0]?.addresses.length === 1)
 

@@ -1,6 +1,6 @@
 /** How a bot chat's messages group: one sender, ten minutes apart at most, the same day (messageGroups.ts). */
 import { describe, expect, it } from 'vitest'
-import { GROUP_GAP_MS, botDayLabel, botGroupTime, placeMessages } from '../../src/renderer/components/bots/messageGroups'
+import { botDayLabel, botGroupTime, placeMessages } from '../../src/renderer/components/bots/messageGroups'
 
 const now = new Date(2026, 10, 11, 15, 0)
 const at = (day: number, hours: number, minutes: number, seconds = 0) => new Date(2026, 10, day, hours, minutes, seconds).toISOString()
@@ -11,7 +11,6 @@ const shape = (messages: Array<{ author: string; at: string }>) => placeMessages
 
 describe('groups', () => {
   it('keeps one sender together up to ten minutes apart, across minute changes, and breaks after', () => {
-    expect(GROUP_GAP_MS).toBe(10 * 60_000)
     expect(shape([owner(at(11, 11, 27)), owner(at(11, 11, 28)), owner(at(11, 11, 38)), owner(at(11, 11, 48, 1))])).toEqual([
       [true, false], [false, false], [false, true], [true, true]
     ])

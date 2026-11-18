@@ -61,7 +61,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Updates', section: 'general', anchor: 'general-updates', keywords: ['version', 'check for updates', 'about', 'upgrade'] },
 
   { title: 'Mousse ID', section: 'connections', anchor: 'account-mousse-id', keywords: ['sign in', 'login'] },
-  { title: 'Phones', section: 'connections', anchor: 'account-phones', keywords: ['mobile', 'pair'], needs: { anchor: 'account-mousse-id', reason: 'Phones appear once you sign in to Mousse ID.' } },
+  { title: 'Add a phone', section: 'connections', anchor: 'account-phones', keywords: ['phones', 'mobile', 'pair'] },
   { title: 'Activity', section: 'activity', anchor: 'account-activity', keywords: ['heatmap', 'line edits'] },
   { title: 'Token usage', section: 'activity', anchor: 'account-token-usage', keywords: ['tokens'] },
 
@@ -116,8 +116,10 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Device name', section: 'connections', anchor: 'devices-name', keywords: ['computer name'] },
   { title: 'Networking', section: 'connections', anchor: 'devices-networking', keywords: ['network', 'connection'] },
   { title: 'Let my other devices work here', section: 'connections', anchor: 'devices-inbound', keywords: ['remote', 'sharing', 'computers', "let my other devices work on this device's threads"] },
-  { title: 'Share bots with other devices', section: 'connections', anchor: 'devices-bots', keywords: ['bots', 'phone', 'mobile', 'sharing', 'personal bots', 'mousse bot'] },
+  { title: 'Share bots with other devices', section: 'connections', anchor: 'devices-bots', keywords: ['bots', 'phone', 'mobile', 'sharing', 'personal bots', 'mousse bot'], needs: { anchor: 'devices-list', reason: 'Open This computer in My devices to find it.' } },
   { title: 'Passphrase', section: 'connections', anchor: 'devices-passphrase', keywords: ['unlock', 'network keys'] },
+  { title: 'Finish connecting to another computer', section: 'connections', anchor: 'devices-join', keywords: ['join', 'retry', 'give up', 'pair', 'computers'], needs: { anchor: 'devices-networking', reason: 'This appears when a connection to another computer did not finish.' } },
+  { title: 'Start over', section: 'connections', anchor: 'devices-start-over', keywords: ['reset', 'new keys', 'leave devices', 'networking'], needs: { anchor: 'devices-networking', reason: 'Start over appears once this computer has joined your devices.' } },
   { title: 'My devices', section: 'connections', anchor: 'devices-list', keywords: ['pair', 'add device', 'computers'] },
   { title: 'Let my editor reach my other devices', section: 'connections', anchor: 'devices-editors', keywords: ['editors', 'ssh', 'computers'] },
   { title: 'Tailscale Serve', section: 'connections', anchor: 'devices-tailscale-serve' },

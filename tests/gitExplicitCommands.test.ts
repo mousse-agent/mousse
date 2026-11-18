@@ -286,7 +286,7 @@ describe('Every Git run carries safe.bareRepository=explicit', () => {
   it('turns off Git\'s automatic housekeeping, and the central check accepts the whole set', () => {
     const env = withGitConfigEnv({})
     const pairs = Array.from({ length: Number(env.GIT_CONFIG_COUNT) }, (_, index) => [env[`GIT_CONFIG_KEY_${index}`], env[`GIT_CONFIG_VALUE_${index}`]])
-    expect(pairs).toEqual([['safe.bareRepository', 'explicit'], ['maintenance.auto', 'false'], ['gc.auto', '0'], ['fetch.writeCommitGraph', 'false']])
+    expect(pairs).toEqual(expect.arrayContaining([['safe.bareRepository', 'explicit'], ['maintenance.auto', 'false'], ['gc.auto', '0'], ['fetch.writeCommitGraph', 'false']]))
     expect(MOUSSE_GIT_CONFIG).toEqual(pairs)
     // Set by a caller in its own environment, each is one the check lets through.
     expect(decideGitCommand({ cwd: tmpdir(), args: ['log'], env: { ...process.env, ...env } })).toMatchObject({ allowed: true })

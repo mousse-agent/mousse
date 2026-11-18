@@ -67,8 +67,6 @@ describe('the Steer block of a held steer', () => {
     expect(label().textContent).toBe('Steer·Waits for Bash·Send now')
     expect(wait()!.getAttribute('title')).toBe('Goes in when Bash finishes\nnpm test')
     expect(button()!.getAttribute('title')).toBe('Stop Bash and send now')
-    // A quiet text button: no border, no fill.
-    expect(button()!.className).toBe('steer-hold-send')
   })
 
   it('the button\'s accessible name starts with what it shows, and its description gives the command (a tooltip on text cannot take focus)', () => {

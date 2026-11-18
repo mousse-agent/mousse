@@ -147,20 +147,15 @@ describe('bot schedules after downtime', () => {
     if (!runs) expect(entry().skip).toEqual({ at: iso(due), reason: 'Missed Tue 09:00 (computer off)' })
   })
 
-  it('names the missed day when a caught-up run starts at once and reports tomorrow', async () => {
+  it('names the missed time when a caught-up run starts, and the day when it reports', async () => {
     const due = await schedule()
-    for (const id of ['owner1', 'owner2', 'owner3']) await f.bots.activate({ botId, input: id, clientRequestId: id })
-    await flush()
-    const owners = f.store.listActivations(botId).filter((row) => row.lane === 'run')
     heartbeat(T0)
     const { inserted } = await f.tickSchedules(new Date(due + 10 * MIN))
-    expect(f.store.activation(inserted[0]!)!.status).toBe('running')
-    f.clock.now = due + 1440 * MIN
-    for (const row of owners) await runDispatch(f, row.id, 1, { text: 'Finished.' })
-    await f.bots.maintain(new Date(f.clock.now))
     await flush()
-    const label = `${new Date(due).toLocaleDateString('en-US', { weekday: 'short' })} ${clockTime(iso(due))}`
+    // The run starts at once (#1452), the same day, so the prompt names the time only; a report written the next day names the day.
     expect(f.store.dispatch(inserted[0]!, 1)!.prompt.text).toContain(`This run was due at ${clockTime(iso(due))}; this computer was off or asleep.`)
+    f.clock.now = due + 1440 * MIN
+    const label = `${new Date(due).toLocaleDateString('en-US', { weekday: 'short' })} ${clockTime(iso(due))}`
     await runDispatch(f, inserted[0]!, 1, { text: 'All checked.' })
     expect(chatOf(f, botId).find((row) => row.kind === 'run_report' && row.activationId === inserted[0])!.text).toBe(`(Due ${label}, this computer was off or asleep) All checked.`)
   })

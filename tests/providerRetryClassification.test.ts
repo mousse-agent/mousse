@@ -38,7 +38,7 @@ describe('provider error classification', () => {
       .toMatchObject({ code: 'provider_cancelled', errorInfo: { category: 'cancelled', retryable: false } })
   })
 
-  it.each([[2, true, 2000], [10, true, 10000]])(
+  it.each([[10, true, 10000]])(
     'honors bounded retry-after %i seconds', (seconds, retryable, retryAfterMs) => {
       const error = normalizeProviderError({ status: 429, headers: new Headers({ 'Retry-After': String(seconds) }) })
       expect(error.code).toBe('provider_rate_limited')

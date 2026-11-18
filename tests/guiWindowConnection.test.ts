@@ -56,6 +56,22 @@ describe("a window's own service connection", () => {
   const windowSender = (id: number) => Object.assign(new EventEmitter(), { id, isDestroyed: () => false }) as unknown as WebContents
   const ringOf = (profileId: string): Ring => (server as unknown as { ringFor: (id: string) => Ring }).ringFor(profileId)
 
+  it('asks the running service to refresh stale models when the desktop reopens', async () => {
+    // Restart only the GUI connection. The service, and its provider state, survive.
+    const profile = await mms.getProfileServices(mms.profileId)
+    const refresh = vi.spyOn(profile.harness!.instances, 'refreshStaleModelsOnDesktopOpen')
+    // A normal provider snapshot read is not a desktop startup request.
+    await gui.request('providers.snapshots', { scope: { kind: 'device' } })
+    expect(refresh).not.toHaveBeenCalled()
+
+    await gui.stop()
+    gui = new GuiMmsController({ homeDir: home, disableAutoStart: true, endpointOverride: endpoint, ownerTokenOverride: ownerToken })
+    await gui.start()
+    await gui.prepareWindow(windowSender(910))
+
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledOnce())
+  })
+
   it('is opened again by itself when the service drops it, and the window is told to catch up', async () => {
     const sender = windowSender(901)
     await gui.prepareWindow(sender)

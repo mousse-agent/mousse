@@ -832,6 +832,8 @@ NULL `owner_set` means set before v10 (or by an older writer) and preserves toda
 
 ### Asks first
 
+Ordinary questions and approvals have no default timeout (#1481). Held-call cards keep their separate deadlines below; that policy is unchanged.
+
 Turning the switch off withdraws every open card and accepted call that has not started running, together in one transaction, at startup, on a settings change or on upkeep. Its chat row says Not sent. The work is told: “This could not wait for your owner after all, so nothing was sent. Say so in your report.” Running calls finish. With no rows, the switch-off path changes nothing. A chat turn cannot hold a call; its refusal tells it to start work with `work_start`.
 
 The engine for holding an MCP call until Send is built behind `experimental.botAsksFirst`, which defaults to off and has no settings control. With it off, new granted-tool calls run as before. Existing open and accepted unstarted rows withdraw when the switch is found off; running rows finish and clear their arguments. Tool selection remains separate work before this can be switched on. Scheduled runs can wait for approval only; every other parked reason stays work-only.

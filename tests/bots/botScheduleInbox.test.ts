@@ -35,11 +35,11 @@ it('settles a removed schedule\'s last report and creates its Needs you item', a
 })
 
 it('settles cancelled waiting runs after the job is removed without creating failure items', async () => {
-  f.store.setError(botId, { code: 'bot_journal_failed', error: 'Journal is not writable' })
   const schedule = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Check price.' }, 'owner')
   await f.tickSchedules(new Date(T0 + 5 * 60_000))
   const row = f.store.listActivations(botId).find(row => row.trigger.kind === 'schedule')!
-  expect(row.status).toBe('queued')
+  // The run lane has no count (#1452), so a scheduled run starts at once; the stored status stands in for a wait.
+  f.store.run('UPDATE bot_activations SET status = ? WHERE id = ?', 'queued', row.id)
   f.bots.removeSchedule(botId, schedule.scheduleId)
   syncInbox()
   expect(f.automationRuns.liveRunFor({ threadId: '', activationId: row.id })).toBeUndefined()

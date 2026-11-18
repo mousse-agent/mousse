@@ -58,7 +58,7 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
 
   it('a wake run that fails acknowledges nothing, and the reconciler delivers the row again', async () => {
     let fail = true
-    const { d, parent, out, reconciler, row } = await finished('Fine.', () => {
+    const { d, out, reconciler, row } = await finished('Fine.', () => {
       if (fail) throw new Error('provider unavailable')
       return 'Parent done.'
     })
@@ -70,7 +70,6 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
     const retried = reconciler.runOnce().wakes
     expect(retried.restored).toEqual([row.inboxId])
     await waitFor(() => d.engine.inbox.get(row.inboxId)!.status === 'acknowledged', 'the second delivery')
-    expect(parent.id).toBeTruthy()
   })
 
   describe('a steer that carries notices', () => {
@@ -139,7 +138,7 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
   describe('a row is delivered by one delivery at a time', () => {
     it('a queued steer drops the rows another delivery took over, and delivers only its own', async () => {
       const w = await finished()
-      const item = (w.d.orch as any).enqueueForThread(w.parent.id, { content: 'queued text' }, { source: 'steer-late', inboxIds: [w.row.inboxId] })
+      ;(w.d.orch as any).enqueueForThread(w.parent.id, { content: 'queued text' }, { source: 'steer-late', inboxIds: [w.row.inboxId] })
       // The row went back to pending and a wake took it: the queue item no longer owns it.
       const wake = w.d.engine.outbox.enqueue({ threadId: w.parent.id, runId: w.d.engine.listRuns(w.parent.id)[0].runId, kind: 'turn.steer', payload: { text: 'x' } })
       w.d.engine.inbox.markDelivered([w.row.inboxId], wake.effectId)
@@ -147,7 +146,6 @@ describe('delivering a subagent result to its parent (issue #142)', () => {
       await waitFor(() => w.d.orch.listQueue(w.parent.id).length === 0, 'the queue to be drained')
       expect(w.adapter.turns.filter((turn) => turn.threadId === w.parent.id && turn.prompt.startsWith(RESULT_NOTICE))).toEqual([])
       expect(w.d.engine.inbox.get(w.row.inboxId)).toMatchObject({ status: 'delivered', deliveredBy: wake.effectId })
-      expect(item.id).toBeTruthy()
     })
 
     it('rows a removed queue item carried go back to pending, without spending a delivery attempt', async () => {

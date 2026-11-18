@@ -107,15 +107,6 @@ describe('plain-words copy', () => {
     expect(text(rows()).split(WORKTREE_GROUP_DESCRIPTION)).toHaveLength(2)
   })
 
-  it('explains merged, restore, capture links and older downloads', () => {
-    expect(STORAGE_RULE_COPY.merged.note).toContain('A pull request’s state is not checked')
-    expect(STORAGE_RULE_COPY.merged.deletes).toContain('restored the next time you use the thread')
-    expect(STORAGE_RULE_COPY.inactive.deletes).toContain('restored the next time you use the thread')
-    expect(STORAGE_RULE_COPY.captures.deletes).toContain('Older capture links will no longer open.')
-    expect(STORAGE_RULE_COPY.captures.never).toContain('download')
-    expect(STORAGE_RULE_COPY.captures.note).toContain('.png')
-  })
-
   it('folds "keep a worktree when it has any local files" into the group note, with no row of its own', () => {
     const html = rows()
     expect(html).not.toContain('storage-keep-when')

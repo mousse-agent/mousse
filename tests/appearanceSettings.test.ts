@@ -22,13 +22,6 @@ describe('appearance settings', () => {
     expect(ids).not.toContain('system-acrylic')
   })
 
-  it('defaults acrylic off with a mid intensity dial', () => {
-    const appearance = getDefaultSettings().appearance
-    expect(appearance.theme).toBe('blacksphere-plus')
-    expect(appearance.acrylic).toBe(false)
-    expect(appearance.acrylicIntensity).toBe(55)
-  })
-
   it('renders math by default and keeps an explicit choice', () => {
     expect(getDefaultSettings().appearance.renderMath).toBe(true)
     expect(normalizeAppearance({}).renderMath).toBe(true)
@@ -70,34 +63,12 @@ describe('appearance settings', () => {
     expect(normalizeAppearance({ threadProjectColors: value } as never).threadProjectColors).toBe(expected)
   })
 
-  it.each([[false, false], [true, true], [undefined, true], ['off', true]])('keeps reply previews %s as %s', (value, expected) => {
+  it.each([[false, false], [true, true], [undefined, false], ['off', false]])('keeps reply previews %s as %s', (value, expected) => {
     expect(normalizeAppearance({ replyPreviews: value } as never).replyPreviews).toBe(expected)
   })
 
   it('migrates legacy acrylic theme ids', () => {
-    expect(normalizeAppearance({ theme: 'system-acrylic' as never })).toEqual({
-      theme: 'system',
-      accentColor: '#a785c7',
-      acrylic: true,
-      acrylicIntensity: 55,
-      renderMath: true,
-      replyPacing: true,
-      interfaceFont: { source: 'default' },
-      codeFont: { source: 'default' },
-      threadProjectColors: 'fill',
-      replyPreviews: true,
-      threadPathInTitleBar: true,
-      animationSpeed: 'normal',
-      turnChangedFiles: 'summary',
-      chatWidth: 'normal',
-      frostedComposer: false,
-      frostedComposerOpacity: 60,
-      frostedComposerBlur: 16,
-      frostedComposerSaturation: 1.12,
-      contextRingInComposer: false,
-      userThemes: [],
-      userTheme: ''
-    })
+    expect(normalizeAppearance({ theme: 'system-acrylic' as never })).toMatchObject({ theme: 'system', acrylic: true, acrylicIntensity: 55 })
     expect(normalizeAppearance({ theme: 'dark-acrylic' as never, accentColor: '#5b8def' })).toMatchObject({
       theme: 'dark',
       acrylic: true,

@@ -131,6 +131,10 @@ describe('a reply that launches subagents whose results arrive one by one', () =
 
     view = await show(21, all, 'completed', ['done', 'done', 'done'])
     expect(view).toMatchObject({ turns: 1, indicators: ['Worked for 21s·2, 2 replies inside'], notices: 0 })
+    // The turn ended in view: its work is still drawn as its fold starts to close, then is gone.
+    expect(view.text).toContain('One replied; two are still running.')
+    await act(async () => { vi.advanceTimersByTime(500) })
+    view = { ...view, text: host.textContent ?? '' }
     // The finished turn folds its work behind its line, but the cards stay where the subagents were started.
     expect(view.text).not.toContain('One replied; two are still running.')
     expect(view.text).toContain('All three test subagents')

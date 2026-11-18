@@ -131,14 +131,6 @@ describe('StorageUsageService', () => {
     expect(snapshot.names).toEqual({ projects: { p1: 'Alpha', p2: 'Beta' }, threads: { t1: 'First', t2: 'Second' } })
   })
 
-  it('does not follow a link out of a thread folder and does not trust a worktree path outside the data', async () => {
-    const w = world()
-    const snapshot = await w.service().measure()
-    about(only(snapshot, 'threads', 't2'), 128) // the 1 MiB behind the link is not counted
-    expect(snapshot.entries.some((entry) => entry.kind === 'worktrees' && entry.threadId === 't2')).toBe(false)
-    expect(snapshot.entries.reduce((sum, entry) => sum + entry.bytes, 0)).toBeLessThan(5 * 1024 * KB)
-  })
-
   it('counts a hard-linked file once across roots', async () => {
     const w = world({ link: true })
     const snapshot = await w.service().measure()

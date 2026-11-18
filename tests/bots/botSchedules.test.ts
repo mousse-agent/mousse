@@ -94,7 +94,6 @@ describe('bot schedules in the shared scheduler', () => {
     expect(runs().map((row) => row.status)).toEqual(['running', 'running'])
     expect((await f.tickSchedules(new Date(T0 + 10 * MIN))).inserted).toEqual([])
     expect(f.book.list(botId).map((schedule) => [schedule.scheduleId, schedule.skip?.reason])).toEqual(expect.arrayContaining([[tidy, 'previous_run_still_running'], [other, 'previous_run_still_running']]))
-
   })
 
   it('a schedule every minute runs on each scheduler tick, and skips a tick while its last run still goes', async () => {
@@ -140,14 +139,13 @@ describe('bot schedules in the shared scheduler', () => {
     expect((await f.tickSchedules(new Date(T0 + 121 * MIN))).inserted).toEqual([])
   })
 
-  it('every occurrence runs beside the bot’s other work', async () => {
+  it('an occurrence runs beside what the bot runs, with no queue', async () => {
     await scheduled('Tidy.', 5)
     f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Links.' }, 'owner')
-    const busy = await f.bots.activate({ botId, input: 'busy', clientRequestId: 'busy' })
+    await f.bots.activate({ botId, input: 'busy', clientRequestId: 'busy' })
     await f.bots.activate({ botId, input: 'busy too', clientRequestId: 'busy2' })
     await f.tickSchedules(new Date(T0 + 5 * MIN))
-    expect(scheduledRuns().map(row => row.status)).toEqual(['running', 'running'])
-    expect(f.store.activation(busy.id)!.status).toBe('running')
+    expect(scheduledRuns().map((row) => row.status)).toEqual(['running', 'running'])
   })
 
   it('an edited schedule restarts from now; a removed one is gone', async () => {

@@ -6,12 +6,18 @@ import { CONNECTIONS_MARKER, type NetDatabase } from './database'
 /**
  * Whether another device of this user's own list is connected here, on this computer alone. `none`: no record, so
  * not connected and open to the automatic rules (an invitation, Mousse ID). `connected` and `disconnected` are
- * records a person or a rule wrote; a disconnected device stays so until someone connects it again. A stored state
- * this build does not know reads as `other`: not connected, and still a record the automatic rules leave alone.
+ * records a person or a rule wrote; a disconnected device stays so until someone connects it again. `held`: it came
+ * in by a connect link (made here, or pasted here to join), so it is not connected until someone answers Allow here.
+ * A stored state this build does not know reads as `other`: not connected, and still a record the automatic rules
+ * leave alone.
  */
-export type ConnectionState = 'none' | 'connected' | 'disconnected' | 'other'
-/** What wrote a record: a person here, an invitation either side, Mousse ID, or the one-time step for older stores. */
-export type ConnectionSource = 'person' | 'invite' | 'join' | 'account' | 'migration'
+export type ConnectionState = 'none' | 'connected' | 'disconnected' | 'held' | 'other'
+/**
+ * What wrote a record: a person here, Allow for a held device, an invitation either side, a connect link either
+ * side, Mousse ID, or the one-time step for older stores.
+ */
+export type ConnectionSource = 'person' | 'allow' | 'invite' | 'join' | 'link' | 'account' | 'migration'
+type Written = 'connected' | 'disconnected' | 'held'
 
 export interface ConnectionEvent {
   node: NodeId
@@ -19,7 +25,7 @@ export interface ConnectionEvent {
   after: ConnectionState
 }
 
-const KNOWN = new Set(['connected', 'disconnected'])
+const KNOWN = new Set(['connected', 'disconnected', 'held'])
 
 /** `net_connections`, in the Net database. Read on every call and record push, so answered from memory. */
 export class SqliteConnections {
@@ -39,6 +45,11 @@ export class SqliteConnections {
   connected(node: NodeId): boolean {
     return this.states.get(node) === 'connected'
   }
+  /** What wrote the device's record, or undefined with none. */
+  source(node: NodeId): string | undefined {
+    const row = this.db.database.prepare('SELECT source FROM net_connections WHERE node=?').get(node)
+    return row ? String(row.source) : undefined
+  }
   /** The one-time step for a store from before this record: done, or not yet. */
   migrated(): boolean {
     return !!this.db.database
@@ -53,7 +64,7 @@ export class SqliteConnections {
     if (this.migrated()) return
     this.write(listed, 'connected', 'migration', { onlyUnrecorded: true, marker: true })
   }
-  set(node: NodeId, state: 'connected' | 'disconnected', source: ConnectionSource): void {
+  set(node: NodeId, state: Written, source: ConnectionSource): void {
     if (!isId('node', node) || !KNOWN.has(state)) throw new NetError('bad_request')
     this.write([node], state, source, { onlyUnrecorded: false, marker: false })
   }
@@ -69,7 +80,7 @@ export class SqliteConnections {
 
   private write(
     nodes: readonly NodeId[],
-    state: 'connected' | 'disconnected',
+    state: Written,
     source: ConnectionSource,
     options: { onlyUnrecorded: boolean; marker: boolean }
   ): void {
@@ -118,5 +129,5 @@ export class SqliteConnections {
 }
 
 function read(value: string): ConnectionState {
-  return value === 'connected' || value === 'disconnected' ? value : 'other'
+  return KNOWN.has(value) ? (value as Written) : 'other'
 }

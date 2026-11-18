@@ -1,7 +1,7 @@
 import { createElement, type ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { readFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   ComposerSuggestionList,
   MentionRowContent,
@@ -80,8 +80,11 @@ describe('mention suggestion list', () => {
   })
 
   it('keeps focus in the text box when the list is pressed, so composition is not interrupted', () => {
-    const source = readFileSync(new URL('../src/renderer/components/ComposerSuggestionList.tsx', import.meta.url), 'utf8')
-    expect(source).toMatch(/onMouseDown=\{\(event\) => event\.preventDefault\(\)\}/)
+    // The component is a plain function: call it and fire the handler of the element it returns.
+    const tree = ComposerSuggestionList({ rows: [], selected: 0, ariaLabel: 'Suggestions', onHover: noop, onPick: noop }) as unknown as { props: { onMouseDown?: (event: { preventDefault(): void }) => void } }
+    const preventDefault = vi.fn()
+    tree.props.onMouseDown?.({ preventDefault })
+    expect(preventDefault).toHaveBeenCalledTimes(1)
   })
 
   it('highlights the selected row with a background only, never a side or edge bar', () => {

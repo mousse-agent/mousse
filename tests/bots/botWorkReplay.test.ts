@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
-import { MAX_QUEUED_ACTIVATIONS } from '../../src/shared/bots/personal/definition'
 import { rollUpChips } from '../../src/shared/bots/personal/chips'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
@@ -55,13 +54,14 @@ describe('work_start through the production registry', () => {
     expect(f.store.listActivations(botId).filter((row) => row.trigger.kind === 'work')).toHaveLength(1)
   })
 
-  it('a repeated request returns the same running work', async () => {
+  it('a repeated queued request says it is already queued', async () => {
     const call = caller(await chat())
-    for (const title of ['First', 'Second', 'Third']) await call({ ...request, title })
     const queued = await call()
+    // The run lane has no count (#1452), so work starts at once; the stored status stands in for a wait.
+    f.store.run('UPDATE bot_activations SET status = ? WHERE id = ?', 'queued', queued.workId)
     const repeated = await call()
-    expect(repeated).toMatchObject({ workId: queued.workId, status: 'started', replayed: true, note: expect.stringMatching(/already in progress/i) })
-    expect(rollUpChips([{ tool: 'work_start', input: request, result: repeated }])).toMatchObject([{ text: 'already on it' }])
+    expect(repeated).toMatchObject({ workId: queued.workId, status: 'queued', replayed: true, note: expect.stringMatching(/already queued/i) })
+    expect(rollUpChips([{ tool: 'work_start', input: request, result: repeated }])).toMatchObject([{ text: 'already queued' }])
   })
 
   // Every field that chooses the job: changing any one makes a separate request, even with the same runtime id.

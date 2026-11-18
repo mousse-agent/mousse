@@ -755,16 +755,6 @@ describe('the transcript', () => {
     root = createRoot(host)
   })
 
-  it('pages back with beforeSeq when scrolled to the top', async () => {
-    fake.chats.inbox = Array.from({ length: 70 }, (_, index) => message(index + 1))
-    await open()
-    expect(transcript().querySelectorAll('article')).toHaveLength(50)
-    await act(async () => { transcript().dispatchEvent(new Event('scroll')) })
-    await act(async () => {})
-    expect(fake.calls).toContainEqual(['messages', 'inbox', { beforeSeq: 21, limit: 50 }])
-    expect(transcript().querySelectorAll('article')).toHaveLength(70)
-  })
-
   it('a quote of a message not loaded yet loads older pages until it is there, then scrolls to it and lights it', async () => {
     const scrolled: string[] = []
     const scrollIntoView = vi.fn(function (this: HTMLElement) { scrolled.push(this.getAttribute('data-message-id')!) })
@@ -838,6 +828,7 @@ describe('a long chat', () => {
         await scrollTo(0)
         expect(drawn()).toHaveLength(rows)
       }
+      expect(fake.calls).toContainEqual(['messages', 'inbox', { beforeSeq: 151, limit: 50 }])
       expect(drawn()[0]).toBe('m1')
 
       // Away to the Threads tab and back: the chat is still loaded, and only its newest rows are drawn.

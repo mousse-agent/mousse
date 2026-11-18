@@ -203,6 +203,7 @@ export function MousseAgentChatShell({
           showCopyToolbar
           enableImagePreview
           enableFind
+          threadId={threadId}
         />
       </HeldSteerProvider>
       </TurnProgressProvider>

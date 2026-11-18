@@ -25,6 +25,7 @@ export function AgentChat({
   initialScrollBehavior,
   enableImagePreview,
   enableFind,
+  threadId,
   suggestions,
   emptyStatePosition = "default",
   emptySuggestionsPlacement = "input",
@@ -170,6 +171,7 @@ export function AgentChat({
           initialScrollBehavior={initialScrollBehavior}
           enableImagePreview={enableImagePreview}
           enableFind={enableFind}
+          threadId={threadId}
           suppressQuestionTool={Boolean(pendingQuestion)}
         />
       )}

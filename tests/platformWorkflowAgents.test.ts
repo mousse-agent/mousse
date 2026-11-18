@@ -10,7 +10,6 @@ import { MmsWorkflowAgents } from '../src/mms/platform/MmsWorkflowAgents'
 import { defaultAgentSettings } from '../src/shared/agents/defaults'
 import type { ExecutionActor, ExecutionContext, ExecutionPolicyLayer, ExecutionPolicySnapshot } from '../src/shared/execution/types'
 import type { StartWorkflowRequest, WorkflowBundle, WorkflowRunManifest } from '../src/shared/workflows'
-import { WORKFLOW_MAIN_AGENT_DEFINITION_ID } from '../src/shared/workflows/agentExecutionBindings'
 import { providerResponse } from './fixtures/agent-platform/agent-runtime-policy/helpers'
 import { installExactDefinitionRuntime } from './fixtures/agent-platform/exactDefinitionRuntime'
 
@@ -514,7 +513,7 @@ describe('production workflow Agent/Instruction adapter', () => {
     } finally { await f.close() }
   }, 30_000)
 
-  it('fails closed on a runtime that cannot hold the definition, whatever its stored kind, and inherits parent pins without resolving later heads', async () => {
+  it('fails closed on a runtime that cannot hold the definition, whatever its stored kind', async () => {
     const f = await fixture()
     try {
       // A stored Claude Code-kind definition whose model's instance only asks for approval (as Claude
@@ -548,43 +547,6 @@ describe('production workflow Agent/Instruction adapter', () => {
       expect(JSON.stringify(cliError)).toContain("can't enforce this agent's workspace and tool limits")
       expect(JSON.stringify(cliError)).toContain('/settings/tools/mode')
       expect(f.captured).toEqual([])
-      f.setManifest(undefined)
-      // Back on the runtime that holds definitions for the rest.
-      f.services.orchestrator.setHarness(f.harness)
-
-      f.outputs.push(providerResponse([{ type: 'text', text: '{"summary":"child-pin"}' }], 'stop'))
-      const created = f.services.platform.agentDefinitions.createDraft({
-        settings: agentSettings('Inherited Agent', f.modelRef, ['read']),
-        systemPrompt: 'PARENT_PIN'
-      })
-      const published = f.services.platform.agentDefinitions.publish(created.id, created.draftHash)
-      const parentRecord = publishWorkflow(f, {
-        id: 'agent', type: 'agent', version: 1,
-        config: { agent: { kind: 'user', definitionId: created.id }, instructions: 'Parent pin.' }
-      })
-      const parentRequest = startRequest(f, parentRecord)
-      const parentPrepared = await f.agents.prepare(parentRequest, parentRecord)
-      const draft = f.services.platform.agentDefinitions.saveDraft(created.id, {
-        expectedDraftHash: created.draftHash, systemPrompt: 'CHILD_MUST_NOT_SEE'
-      })
-      f.services.platform.agentDefinitions.publish(created.id, draft.draftHash)
-      const childRecord = publishWorkflow(f, {
-        id: 'agent', type: 'agent', version: 1,
-        config: { agent: { kind: 'user', definitionId: created.id }, instructions: 'Child pin.' }
-      })
-      const childRequest = startRequest(f, childRecord)
-      const childPrepared = await f.agents.prepareInherited({ parent: parentPrepared.bindings, request: childRequest, record: childRecord })
-      expect(childPrepared.bindings.pins[0]?.revision).toBe(published.revision)
-      const policy = policyOf(f)
-      const manifest = runningManifest(f, childRequest, policy)
-      f.setManifest(manifest)
-      await f.agents.agent.invoke({
-        context: contextOf(manifest), policy, agent: { kind: 'user', definitionId: created.id },
-        instructions: 'Child pin.', input: {}, signal: new AbortController().signal, idempotencyKey: randomUUID()
-      })
-      expect(JSON.stringify(f.captured[0])).toContain('PARENT_PIN')
-      expect(JSON.stringify(f.captured[0])).not.toContain('CHILD_MUST_NOT_SEE')
-      expect(childPrepared.bindings.pins[0]?.definitionId).not.toBe(WORKFLOW_MAIN_AGENT_DEFINITION_ID)
     } finally { await f.close() }
   }, 30_000)
 })

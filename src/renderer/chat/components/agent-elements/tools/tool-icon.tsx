@@ -10,6 +10,7 @@ import {
   Wrench,
 } from "../../../../lib/icons";
 import { parseMcpToolType, toolRegistry } from "./tool-registry";
+import { useOffscreenPause } from "../../../../lib/offscreenMotion";
 import { mousseToolOf } from "./mousse-tools";
 import { MousseToolIcon } from "./mousse-tool-icon";
 import "./tool-icon.css";
@@ -61,14 +62,16 @@ export function toolIconFor(type: string | undefined): IconType {
 }
 
 /**
- * A tool row's icon in its state: running, it pulses gently (opacity only, still with motion off); done, it is still
- * and dimmed; failed, it takes the danger colour (tool-icon.css).
+ * A tool row's icon in its state: running, it pulses gently (opacity only, still with motion off, and held still while
+ * no one can see it: lib/offscreenMotion.ts); done, it is still and dimmed; failed, it takes the danger colour
+ * (tool-icon.css).
  */
 export function ToolStateIcon({ state, children }: { state: ToolIconState; children: ReactNode }) {
   // A failure the agent got past only dims the icon toward the danger colour (with the row's small ×).
   const { recovered } = useToolRowInfo();
+  const pause = useOffscreenPause<HTMLSpanElement>(state === "running");
   return (
-    <span className="an-tool-icon" data-state={state === "failed" && recovered ? "recovered" : state} aria-hidden="true">
+    <span ref={pause} className="an-tool-icon" data-state={state === "failed" && recovered ? "recovered" : state} aria-hidden="true">
       {children}
     </span>
   );

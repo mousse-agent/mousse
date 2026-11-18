@@ -29,11 +29,6 @@ describe('nextComposerCompact', () => {
     // Coming back down, it stays folded until the list follows the end again.
     expect(nextComposerCompact(true, { mode: 'free', distanceFromEnd: 90 })).toBe(true)
   })
-
-  it('folds far enough out that giving back the composer height cannot unfold it', () => {
-    // The fold returns ~30px of padding; the follow threshold is 80px.
-    expect(COMPOSER_FOLD_DISTANCE - 30).toBeGreaterThan(80)
-  })
 })
 
 let root: Root

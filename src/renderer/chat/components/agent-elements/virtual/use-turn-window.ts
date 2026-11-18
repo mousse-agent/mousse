@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { FollowMode } from "./follow-mode";
+import { foldHoldActive } from "./fold-hold";
 import {
   DEFAULT_VIEWPORT,
   INITIAL_SETTLE,
@@ -373,7 +374,9 @@ function createEngine(
     // A landing in progress re-aims at its target every frame; correcting
     // under it would only add a second writer. Following the end still has to
     // hold within the frame, so it is never skipped.
-    if (anchor && (!navigation.active || options.modeRef.current === "following-end")) {
+    // A finished turn folding its work holds the view itself (fold-hold.ts): one writer at a time. The reading
+    // point is still re-picked below, so the hold hands over a current one when it ends.
+    if (anchor && !foldHoldActive(container) && (!navigation.active || options.modeRef.current === "following-end")) {
       const scrollTop = container.scrollTop;
       // With a follower, what is on screen is held here and the follower takes the view to the
       // end, gliding while a turn runs.

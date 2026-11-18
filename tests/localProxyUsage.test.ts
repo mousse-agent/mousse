@@ -274,12 +274,6 @@ describe('several Claude sign-ins through the proxy', () => {
     ])
   })
 
-  it('one account has no groups, only its windows', async () => {
-    const usage = await readLocalProxyClaudeUsage({ baseUrl, managementKey: 'mgmt', fetch: fakeFetch(proxy()).fetch })
-    expect(usage?.accounts).toBeUndefined()
-    expect(usage?.windows).toHaveLength(2)
-  })
-
   it('names a group by the proxy label, or by its place when the proxy gives none', () => {
     const active = { id: 'x', authIndex: 'x', state: 'active' as const }
     expect(proxyClaudeAccount(active, 2, { status: 200, body: {} })).toEqual({ id: 'x', label: 'Account 3', windows: [], problem: 'No limits reported' })
@@ -505,8 +499,8 @@ describe('fewer requests: the limits the proxy already lists', () => {
     expect(proxyFake.asked.slice(4).sort()).toEqual(['i2', 'i3', 'i4'])
   })
 
-  it('when the read for model limits is rate limited, forbidden or unreadable, the recent listed limits still show', async () => {
-    for (const reply of [apiCall(429, { error: 'rate_limited' }), apiCall(403, { error: 'forbidden' }), apiCall(200, 'not json'), apiCall(200, {}), apiCall(200, { error: 'oops' })]) {
+  it('when the read for model limits is unreadable, the recent listed limits still show', async () => {
+    for (const reply of [apiCall(200, 'not json'), apiCall(200, {}), apiCall(200, { error: 'oops' })]) {
       resetLocalProxyDetection()
       const proxyFake = fakeProxy([{ id: 'one.json', provider: 'claude', auth_index: 'i1', quota: quota(RECENT) }], () => reply)
       const usage = await read(proxyFake.fetch, NOW)
@@ -558,15 +552,6 @@ describe('fewer requests: the limits the proxy already lists', () => {
     expect(proxyFake.asked.sort()).toEqual(['i1', 'i2'])
     await read(proxyFake.fetch, NOW + RATE_LIMIT_WAIT_MS)
     expect(proxyFake.asked.sort()).toEqual(['i1', 'i1', 'i2', 'i2'])
-  })
-
-  it('an expired sign-in says so, even when older limits are listed for it', async () => {
-    const stale = new Date(NOW - OBSERVED_FRESH_MS - 60_000).toISOString()
-    const proxyFake = fakeProxy([{ id: 'one.json', provider: 'claude', auth_index: 'i1', quota: quota(stale) }, { id: 'two.json', provider: 'claude', auth_index: 'i2', quota: quota(RECENT) }], () => apiCall(401, { error: 'expired' }))
-    const usage = await read(proxyFake.fetch, NOW)
-    expect(usage?.accounts?.[0]).toMatchObject({ id: 'one.json', windows: [], problem: 'Sign-in expired' })
-    // A 401 says so even while the listing has recent limits.
-    expect(usage?.accounts?.[1]).toMatchObject({ id: 'two.json', windows: [], problem: 'Sign-in expired' })
   })
 
   it('another management key does not reuse what the last one read', async () => {

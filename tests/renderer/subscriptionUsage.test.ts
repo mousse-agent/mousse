@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import type { ProviderUsage, ProvidersUsageResponse } from '../../src/shared/providerAuth'
 import { SubscriptionUsageView } from '../../src/renderer/components/SubscriptionUsagePage'
-import { DelayedLoader, LOADER_DELAY_MS } from '../../src/renderer/components/ui/DelayedLoader'
+import { DelayedLoader } from '../../src/renderer/components/ui/DelayedLoader'
 import { ALL_COMPUTERS, THIS_COMPUTER, usageRows, usageSelection, type ComputerUsage } from '../../src/renderer/lib/subscriptionUsage'
 import { formatCountdown, nextResetGain, resetsLabel, resetsTooltip, resetTooltip, resetTypeLabel, summarizeAccounts, totalResets } from '../../src/renderer/lib/subscriptionUsage'
 import { activeAccountsLabel } from '../../src/renderer/components/UsageAccountsView'
@@ -457,7 +457,6 @@ describe('several computers', () => {
 
 describe('the delayed loader', () => {
   it('renders nothing until the delay has passed, so quick loads never flash it', () => {
-    expect(LOADER_DELAY_MS).toBe(160)
     const html = renderToStaticMarkup(createElement(DelayedLoader, { label: 'Loading usage' }))
     expect(html).not.toContain('role="status"')
     expect(text(html)).toBe('')

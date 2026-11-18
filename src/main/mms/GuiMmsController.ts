@@ -719,6 +719,9 @@ export class GuiMmsController extends EventEmitter {
     this.windowEventUnsubs.set(sender.id, () => { unsubscribe(); unsubscribeConnection(); unsubscribeClosed() })
     const subscribed = await windowClient.subscribe(0)
     this.afterWindowSubscribe(sender.id, windowClient, subscribed, this.windowReopens.has(sender.id) ? 'reopened' : 'opened')
+    // A new desktop can attach to a service that never stopped. Refresh its bound profile in the
+    // background, after subscribing so the window hears the results. Older daemons just read the snapshots.
+    void windowClient.request('providers.snapshots', { scope: { kind: 'device' }, refreshStaleModels: true }).catch(() => undefined)
     await this.attachedBrowserHost?.acknowledgeClosed(sender)
     // A thread of this computer the window already shows is shown again on this connection; nothing waits for it.
     // Threads of other computers are focused through their router when they are selected.

@@ -191,7 +191,6 @@ describe('buildPaletteGroups', () => {
   it('caps the recent threads', () => {
     const many = Array.from({ length: 12 }, (_, i) => thread(`m${i}`, `Thread ${i}`, { updatedAt: `2026-06-${String(i + 10)}T00:00:00.000Z` }))
     const groups = buildPaletteGroups({ query: '', commands: [], threads: many, projects: [] })
-    expect(RECENT_THREAD_COUNT).toBe(5)
     expect(groups[0]!.items).toHaveLength(RECENT_THREAD_COUNT)
     expect(groups[0]!.items[0]).toMatchObject({ kind: 'thread', id: 'm11' })
   })
@@ -258,7 +257,6 @@ describe('message hits in the palette', () => {
     groups.find((group) => group.label === 'Messages')!.items.map((item) => `${item.kind}:${item.title}`)
 
   it('shows one row per thread, then its newest three hits and a "+N more" row', () => {
-    expect(MESSAGE_HITS_PER_THREAD).toBe(3)
     expect(messageRows(build('checkout'))).toEqual([
       'thread:Thread a',
       'message:…the Checkout test m5…',

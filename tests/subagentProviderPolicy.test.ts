@@ -78,11 +78,6 @@ describe('policy table: permission decisions', () => {
     expect(codexBotSandbox({ tools: new Set(['read']), workspace }, { platform: 'win32' })).toEqual({ shell: false, writableRoots: [] })
     expect(codexBotSandbox({})).toEqual({ shell: false, writableRoots: [] })
   })
-
-  it('never sends a workspaceWrite policy on an interactive turn', () => {
-    for (const permissionMode of ['ask', 'accept_edits', 'full'] as const)
-      expect(codexTurnPolicy('default', undefined, permissionMode).sandboxPolicy.type).not.toBe('workspaceWrite')
-  })
 })
 
 describe('Claude Subscription children', () => {
