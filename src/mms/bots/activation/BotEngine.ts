@@ -96,7 +96,7 @@ import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../ch
 import { nudgeSlot, actionNudgeId, type ActionNudgeFollowUp } from './questionFollowUps'
 import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WATCHER_MINUTES, watcherMatchProblem, type WatcherEnd, type WatcherSpec, type WatcherView } from '../watchers'
 import { lockedEnv } from '../../harness/env'
-import { BOT_MESSAGE_ROW_PREFIX, MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER, botMessageInput, botMessageKey, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
+import { MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER, botMessageInput, botMessageKey, botMessageRowId, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
 import { message as mousseMessage, notice as mousseNotice } from '../../../shared/mousseContext'
 import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_SAME_WAKES, MAX_WAKE_BRIEF_CHARS, WAKE_LINE_PREFIX, wakeCheckNames, wakeEventLabel, wakeFiredLabel, wakeInput, wakeLoopKey, SILENT_REPLY, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import type { LlmProviderOption } from '../../../shared/settings'
@@ -8797,7 +8797,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const refused = this.store.db.transaction(() => {
       const error = this.queueChatInTx(target.botId, botMessageKey(botId, messageId), botMessageInput({ fromName: sender.name, message, last }), activationId, undefined, sender)
       // The owner reads it in the receiving bot's chat, labelled as the sender's.
-      if (!error) this.chat.post({ id: `${BOT_MESSAGE_ROW_PREFIX}${messageId}`, botId: target.botId, author: 'bot', kind: 'notice', text: botMessageRowText(sender.name, message), lane: 'chat' })
+      if (!error) this.chat.post({ id: botMessageRowId(botId, messageId), botId: target.botId, author: 'bot', kind: 'notice', text: botMessageRowText(sender.name, message), lane: 'chat' })
       return error
     })
     if (refused) throw new BotEngineError(refused.code, `${target.name} can't take messages now. Nothing was sent: tell your owner instead.`)

@@ -16,7 +16,7 @@ import { ownerChatTurn } from '../../src/mms/bots/activation/BotEngine'
 import type { PreparedBotTurn } from '../../src/mms/bots/activation/dispatcher'
 import { botTools } from '../../src/mms/run/mcp/appTools/bots'
 import type { MousseTool, ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
-import { MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER } from '../../src/shared/bots/personal/botMessages'
+import { MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER, botMessageFrom } from '../../src/shared/bots/personal/botMessages'
 import { rollUpChips } from '../../src/shared/bots/personal/chips'
 import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
@@ -87,6 +87,8 @@ describe('a message to another bot', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ author: 'bot', kind: 'notice', text: '**Message from your bot Plusy**\n\n> The login page returns a 500.\n> Seen at 09:00.' })
     expect(rows[0]!.systemLine).toBeUndefined()
+    // The row keeps who sent it, so the chat draws it as that bot's own message (its face, name and colour).
+    expect(botMessageFrom(rows[0]!)).toEqual({ botId: plusy, name: 'Plusy', message: 'The login page returns a 500.\nSeen at 09:00.' })
     // Nothing is added to the sender's own chat by the send itself.
     expect(messageRows(plusy)).toEqual([])
     const got = await messageTurn(alpha)
