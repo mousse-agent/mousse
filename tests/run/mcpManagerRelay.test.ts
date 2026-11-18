@@ -202,3 +202,32 @@ it.each([false, true])('tracks certainty at the actual transport boundary, dispa
   expect(callTool).toHaveBeenCalledTimes(dispatched ? 1 : 0)
   await mcp.shutdown()
 })
+
+it('re-lists hints on tools/list_changed before publishing discovery changes', async () => {
+  let changed: (() => Promise<void>) | undefined
+  let readOnlyHint: boolean | undefined = true
+  const mcp = manager({ connect: async () => ({
+    listTools: async () => ({ tools: [{ name: 'get_items', inputSchema: { type: 'object' }, annotations: { readOnlyHint } }] }),
+    callTool: async () => ({}), close: async () => {},
+    onToolsChanged: (listener: () => Promise<void>) => { changed = listener }
+  }) })
+  try {
+    const [tool] = await mcp.getEnabledTools()
+    expect(tool!.readOnlyHint).toBe(true)
+    readOnlyHint = undefined
+    await changed?.()
+    expect(mcp.lookupTool(tool!.providerName)?.readOnlyHint).toBeUndefined()
+  } finally { await mcp.shutdown() }
+})
+it('re-lists tools after restarting a server', async () => {
+  let tools: Tools = [{ name: 'before' }]
+  const { factory } = clientFactory({ tools: () => tools })
+  const mcp = manager(factory)
+  try {
+    const [before] = await mcp.getEnabledTools()
+    tools = [{ name: 'after' }]
+    await mcp.restartServer(before!.installationId!)
+    expect(mcp.lookupTool(before!.providerName)).toBeUndefined()
+    expect((await mcp.getEnabledTools()).map(t => t.toolName)).toEqual(['after'])
+  } finally { await mcp.shutdown() }
+})
