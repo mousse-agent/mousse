@@ -6982,6 +6982,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   async reconcileOnStartup(): Promise<void> {
     try {
+      try { new PageChecks(this.store).cleanupOrphanFiles() } catch (error) { console.warn('orphan page-change files could not be removed', error) }
       try { new PageChecks(this.store).recoverFlights() } catch (error) { console.warn('interrupted page checks could not be recovered', error) }
       try { new PageChecks(this.store).sweep((botId, id) => this.host.schedules?.pageCheckExists?.(botId, id)) } catch (error) {
         console.warn('orphan page checks could not be removed at startup', error)

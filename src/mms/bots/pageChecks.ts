@@ -1,3 +1,4 @@
+import { lstatSync, readdirSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { removePageChange } from './pageChangeFiles'
@@ -39,6 +40,15 @@ export class PageChecks {
   sweep(exists: (botId: string, id: string) => boolean | undefined): void {
     for (const row of this.store.all("SELECT bot_id,key FROM bot_memory_state WHERE key LIKE 'pagecheck:%'"))
       if (exists(String(row.bot_id),String(row.key).slice(10)) === false) this.remove(String(row.bot_id),String(row.key).slice(10))
+  }
+  cleanupOrphanFiles(): void {
+    const root = join(this.store.directory, 'scratch')
+    try {
+      if (!lstatSync(root).isDirectory()) throw new Error('Invalid run root.')
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
+    for (const entry of readdirSync(root, { withFileTypes:true })) {
+      if (entry.isDirectory() && /^act_[a-zA-Z0-9_-]+$/.test(entry.name) && !this.store.activation(entry.name)) removePageChange(root, entry.name)
+    }
   }
   recoverFlights(): void {
     for (const row of this.store.all("SELECT bot_id,key,value FROM bot_memory_state WHERE key LIKE 'pagecheck:%'")) {
