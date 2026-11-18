@@ -2970,7 +2970,7 @@ it('review10 reads shared action nudge history once per bot per read or upkeep p
   expect(expensive()).toHaveLength(1)
 })
 
-it.each([180, 48 * 60])('review12 scheduled cards at %s minutes share the nudge clock and expiry', async minutes => {
+it.each([60, 180, 48 * 60])('C11 scheduled cards at %s minutes get two nudges and keep waiting', async minutes => {
   const t = await scheduledCall(true, minutes)
   await t.call(); await finish(f, t.run.payload)
   const a = f.bots.actions.forWork(t.id)!
@@ -2983,15 +2983,15 @@ it.each([180, 48 * 60])('review12 scheduled cards at %s minutes share the nudge 
   await f.bots.deliverDueReminders()
   expect(f.store.message(`${a.message_id}_n1`)).toBeDefined()
   expect(f.bots.service.chatList(t.botId).messages.find(row => row.id === `${a.message_id}_n1`)!.action?.actionId).toBe(a.id)
-  if (minutes === 48 * 60) {
+  {
     f.clock.now += 24 * 60 * 60_000
     await f.bots.deliverDueReminders()
     expect(f.store.message(`${a.message_id}_n2`)).toBeDefined()
   }
-  f.clock.now = Date.parse(a.expires_at)
+  f.clock.now += 30 * 24 * 3600_000
   await f.bots.deliverDueReminders()
-  expect(f.bots.actions.get(a.id)!.status).toBe('expired')
-  expect(!!f.store.message(`${a.message_id}_n2`)).toBe(minutes === 48 * 60)
+  expect(f.bots.actions.get(a.id)!.status).toBe('open')
+  expect(!!f.store.message(`${a.message_id}_n2`)).toBe(true)
   expect(f.store.message(`${a.message_id}_n3`)).toBeUndefined()
 })
 
