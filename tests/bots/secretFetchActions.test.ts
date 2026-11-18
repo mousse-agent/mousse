@@ -27,3 +27,10 @@ it('shares the hourly allowance for one secret across bots',async()=>{
  expect((await run(20,'second')).isError).toBe(true)
  expect((await run(21,'second','OTHER')).isError).not.toBe(true)
 })
+it('releases the hourly allowance when the rolling hour expires',async()=>{
+ const store=setup();const at=Date.parse('2026-11-19T00:00:00Z')
+ const run=(i:number,now:number)=>secretFetchAction(store,{botId:'b',activationId:'a',callKey:String(i),secret:'KEY',service:'OpenAI',args:{},mask:s=>s,now},async()=>({text:'ok'}))
+ for(let i=0;i<20;i++)await run(i,at)
+ expect((await run(20,at+3600000-1)).isError).toBe(true)
+ expect((await run(21,at+3600000)).isError).not.toBe(true)
+})
