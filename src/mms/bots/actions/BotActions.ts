@@ -468,7 +468,7 @@ export class BotActions {
     if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action, true)) throw changed()
     if (input.answer === 'send' && !this.host.binding(row!, JSON.parse(action.target_json))) {
       // Admission is synchronous at the bridge. Refuse before effects, then warm for a later tap.
-      this.warming ??= Promise.resolve().then(() => this.host.refresh()).catch(() => {}).finally(() => { this.warming = undefined })
+      this.warming ??= Promise.resolve().then(async () => { await this.host.refresh() }).catch(() => {}).finally(() => { this.warming = undefined })
       const service = JSON.parse(action.card_json ?? '{}').serverName ?? 'The service'
       throw new BotActionChanged(botActionRefusalText('bot_action_unreachable', { serverName: service }), 'bot_action_unreachable')
     }
