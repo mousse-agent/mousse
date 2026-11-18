@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
- * The sidebar's eye shows or hides, all at once, the threads a bot keeps out of the sidebar (`Thread.hidden`). It is
- * there only while such a thread exists, it is a view preference of the profile that lasts across a remount, and it
- * never unhides a thread. How a shown hidden row looks is checked in the real app (screenshots on the PR).
+ * The sidebar's eye shows or hides, all at once, the threads the owner's bots started, also those a bot keeps out of the
+ * sidebar (`Thread.hidden`). It is there only while such a thread exists, it is a view preference of the profile that
+ * lasts across a remount, and it never unhides a thread. How a shown hidden row looks is checked in the real app.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -27,7 +27,8 @@ const at = '2026-11-05T10:00:00.000Z'
 const project: Project = { id: 'p1', name: 'Mousse', path: '/p/Mousse', createdAt: at, order: 0 }
 const thread = (id: string, name: string, over: Partial<Thread> = {}): Thread =>
   ({ id, name, createdAt: at, updatedAt: at, order: 0, startedAt: at, projectId: 'p1', ...over })
-const botStarted = (id: string, name: string) => thread(id, name, { hidden: true, createdByThreadId: 'bot-chat', startedByBot: { botId: 'b1', name: 'Alpha' } })
+const botStarted = (id: string, name: string, hidden = true) =>
+  thread(id, name, { ...(hidden ? { hidden: true } : {}), createdByThreadId: 'bot-chat', startedByBot: { botId: 'b1', name: 'Alpha' } })
 
 const request = vi.fn(async () => undefined)
 function preload(): unknown {
@@ -69,15 +70,30 @@ const eye = () => host.querySelector<HTMLButtonElement>('button[aria-label*="bot
 const row = (id: string) => host.querySelector<HTMLElement>(`[role="tabpanel"]:not([hidden]) button[data-thread-id="${id}"]`)
 
 describe('the hidden bot threads eye', () => {
-  it('is absent while no thread is hidden', () => {
+  it('is absent while no bot started a thread', () => {
     show([thread('t1', 'Plain')])
     expect(row('t1')).not.toBeNull()
     expect(eye()).toBeNull()
   })
 
-  it('shows every hidden thread in its project and hides them again, without unhiding any', () => {
-    show([thread('t1', 'Plain'), botStarted('h1', 'Quick check'), botStarted('h2', 'Lookup')])
+  it('hides the threads a bot started and left in the sidebar, and shows them again', () => {
+    show([thread('t1', 'Plain'), botStarted('b1', 'Project job', false)])
+    expect(row('b1')).not.toBeNull()
+    expect(eye()!.getAttribute('aria-label')).toBe('Hide bot threads')
+
+    act(() => eye()!.click())
+    expect(row('b1')).toBeNull()
+    expect(row('t1')).not.toBeNull()
+    expect(eye()!.getAttribute('aria-label')).toBe('Show bot threads (1)')
+
+    act(() => eye()!.click())
+    expect(row('b1')).not.toBeNull()
+  })
+
+  it('shows every hidden thread in its project, then hides every bot thread, without unhiding any', () => {
+    show([thread('t1', 'Plain'), botStarted('h1', 'Quick check'), botStarted('h2', 'Lookup'), botStarted('b1', 'Project job', false)])
     expect(row('h1')).toBeNull()
+    expect(row('b1')).not.toBeNull()
     expect(eye()!.getAttribute('aria-label')).toBe('Show hidden bot threads (2)')
 
     act(() => eye()!.click())
@@ -90,7 +106,9 @@ describe('the hidden bot threads eye', () => {
     act(() => eye()!.click())
     expect(row('h1')).toBeNull()
     expect(row('h2')).toBeNull()
+    expect(row('b1')).toBeNull()
     expect(row('t1')).not.toBeNull()
+    expect(eye()!.getAttribute('aria-label')).toBe('Show bot threads (3)')
 
     // A view preference: the threads stay hidden and nothing asks the service to change them.
     expect(useAppStore.getState().threads.filter((item) => item.hidden).map((item) => item.id)).toEqual(['h1', 'h2'])
