@@ -412,8 +412,8 @@ describe('a wake-up with nothing to say', () => {
     const { payload, prepared } = await start(f, row.id)
     // The wake says it may end with no reply; the bot's standing text says how.
     expect(prepared.prompt).toContain('<mousse_notice kind="bot_wake" reply="if-needed"')
-    expect(prepared.instructions).toContain('reply="if-needed": nobody waits on this turn')
-    expect(prepared.instructions).toContain('Reply exactly [SILENT] (nothing is posted) unless your owner must act')
+    expect(prepared.instructions).toContain('reply="if-needed": your owner never sees what started this turn.')
+    expect(prepared.instructions).toContain('Reply exactly [SILENT] unless they must act')
     await finish(f, payload, 'completed', { text })
     expect(postedBy(row.id).map((message) => message.text)).toEqual(posted)
     expect(f.store.activation(row.id)?.status).toBe('done')
