@@ -1,5 +1,6 @@
 import Ajv from 'ajv'
 import { appendProjectAgentInstructions } from '../orchestrator/projectInstructions'
+import { effectiveAgentLimits } from '../../shared/agents/defaults'
 import { AgentDefinitionError, isAgentDefinitionError } from '../../shared/agents/errors'
 import type {
   AgentExecutionBindings,
@@ -70,7 +71,7 @@ function resolveBudget(
   requested: Partial<AgentExecutionBudget> | undefined
 ): AgentExecutionBudget {
   assertRequestedBudget(requested)
-  const limits = settings.limits
+  const limits = effectiveAgentLimits(settings.limits)
   return {
     maxTurns: clampLimit(requested?.maxTurns, limits.maxTurns),
     maxToolCalls: clampLimit(requested?.maxToolCalls, limits.maxToolCalls),

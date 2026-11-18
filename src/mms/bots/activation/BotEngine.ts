@@ -192,6 +192,10 @@ export interface BotEngineHost {
   trashThread?(threadId: string): Promise<unknown>
   /** How long stopping a bot's runs may take before a trash or delete gives up (default 15 s). */
   quiesceTimeoutMs?: number
+  /** Test seam: the most activations one lane keeps waiting (default `MAX_QUEUED_ACTIVATIONS`). */
+  maxQueuedActivations?: number
+  /** Test seam: the most continuations after a runtime's turn cap (default `MAX_TURN_CAP_CONTINUATIONS`). */
+  maxTurnCapContinuations?: number
   /** The profile's run engine (null while it is not running). */
   runs(): RunEngine | null
   /**
@@ -457,10 +461,10 @@ export const USAGE_RECHECK_MS = 30 * 60_000
 /**
  * Continuations after a dispatch reached its runtime's cap on model turns, in total per activation (not in a row: a
  * note or an Allow in between does not start the count again). Each one worked up to the cap (300 turns on Claude
- * Code), so this only bounds a runtime that keeps reaching the cap. A turn that reached the end of its window
- * (`endWindow`) is not counted: it was working, not stuck.
+ * Code), so real work never gets near this: it only ends a runtime caught in a loop of reaching the cap. A turn that
+ * reached the end of its window (`endWindow`) is not counted: it was working, not stuck.
  */
-export const MAX_TURN_CAP_CONTINUATIONS = 10
+export const MAX_TURN_CAP_CONTINUATIONS = 1000
 /** How often deleted bots are swept for the 30-day purge. */
 const SWEEP_EVERY_MS = 24 * 60 * 60_000
 /** The chat's one notice while an activation waits for the internet. */
@@ -1390,8 +1394,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /**
    * A manual activation. A repeat of `clientRequestId` returns the same activation. The chat lane
-   * runs one at a time, and later ones wait, at most 20 (the oldest waiting one is dropped); the run lane
-   * runs everything side by side.
+   * runs one at a time, and later ones wait; the run lane runs everything side by side. Only a runaway that has
+   * `MAX_QUEUED_ACTIVATIONS` waiting has a new one refused, with a line in the chat (`refuseOverQueue`).
    */
   async activate(input: { botId: string; input: string; clientRequestId: string }): Promise<BotActivationSummary> {
     return this.enqueue(input.botId, `manual:${input.clientRequestId}`, { kind: 'manual', input: input.input })
@@ -1455,7 +1459,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return this.activationSummary(this.store.activation(id)!)
   }
 
-  /** Inserts a queued activation (inside a transaction) and drops what waits beyond the queue; how many were dropped. */
+  /** Inserts a queued activation (inside a transaction), refused at once when its lane is full; how many were refused. */
   private insertQueued(botId: string, id: string, key: string, trigger: BotActivationTrigger, lane: BotLane, admitted: ReturnType<BotEngine['admissible']>): number {
     const { published, grant } = admitted
     this.store.insertActivation({
@@ -1469,7 +1473,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       createdAt: this.store.now(),
       lane
     }, limitsOf(intersectManifest(published.permissions, grant.manifest)))
-    return this.dropOverQueue(botId, lane)
+    return this.refuseOverQueue(botId, lane)
   }
 
   /**
@@ -1528,28 +1532,27 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * Cancels the oldest waiting activations of a lane beyond the queue's size (inside a transaction); how many. In the run
-   * lane, the size counts work that waits to go on too, except work waiting on a card. Running work
-   * is never dropped, nor counted.
+   * Cancels the newest waiting activations of a lane beyond `MAX_QUEUED_ACTIVATIONS` (inside a transaction): how many. A
+   * ceiling no real bot reaches, there only for a runaway (a loop queueing work), so what already waits is never
+   * dropped; what came last is refused, and its owner told. In the run lane, work that waits to go on counts too, except
+   * work waiting on a card. Running work is never refused, nor counted.
    */
-  private dropOverQueue(botId: string, lane: BotLane = 'run'): number {
+  private refuseOverQueue(botId: string, lane: BotLane = 'run'): number {
     const queued = this.store.laneActivations(botId, lane, ['queued'])
     const waiting = lane === 'run' ? this.store.laneActivations(botId, 'run', ['blocked']).filter(row => workWaits(row) && workWaitRule(row) !== WORK_WAIT_RULES.approval) : []
-    const all = [...queued, ...waiting].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
-    const over = all.slice(0, Math.max(0, all.length - MAX_QUEUED_ACTIVATIONS))
+    const ceiling = this.host.maxQueuedActivations ?? MAX_QUEUED_ACTIVATIONS
+    if (queued.length + waiting.length <= ceiling) return 0
+    // Only queued rows are refused: work that waits to go on was taken on already.
+    const newest = [...queued].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
+    const over = newest.slice(0, queued.length + waiting.length - ceiling)
     for (const activation of over) {
-      if (activation.status === 'blocked') {
-        const ended = this.endWaitingInTx(activation, 'queue_full', `I had too much waiting, so I dropped "${this.workTitle(activation)}". Ask me again when I'm less busy.`)
-        if (ended) this.store.db.afterCommit(() => this.afterEnd(ended))
-        continue
-      }
       if (!this.store.moveActivation(activation.id, ['queued'], 'cancelled', { endReason: 'queue_full' })) continue
-      // The owner's message is never dropped without a word: its chat says so. Nor is work the chat took on.
-      if (lane === 'chat')
-        this.chat.post({ botId, author: 'bot', kind: 'error', text: '', error: { text: failureText('queue_full') }, activationId: activation.id, lane, id: `bm_${activation.id}_dropped` })
-      else if (activation.trigger.kind === 'work')
-        this.chat.post({ botId, author: 'bot', kind: 'error', text: '', error: { text: `I had too much waiting, so I dropped "${activation.trigger.title}". Ask me again when I'm less busy.` }, ...(activation.trigger.replyTo ? { replyTo: activation.trigger.replyTo } : {}), activationId: activation.id, lane, id: `bm_${activation.id}_dropped` })
+      // Nothing is refused without a word: work the chat took on answers its message, a scheduled run is noted on its
+      // automation, and anything else (the owner's message) says so in the chat.
+      if (activation.trigger.kind === 'work')
+        this.chat.post({ botId, author: 'bot', kind: 'error', text: '', error: { text: queueFullWorkText(activation.trigger.title) }, ...(activation.trigger.replyTo ? { replyTo: activation.trigger.replyTo } : {}), activationId: activation.id, lane, id: `bm_${activation.id}_dropped` })
       else if (activation.trigger.kind === 'schedule') this.droppedScheduledRun(botId, activation.trigger)
+      else this.chat.post({ botId, author: 'bot', kind: 'error', text: '', error: { text: failureText('queue_full') }, activationId: activation.id, lane, id: `bm_${activation.id}_dropped` })
     }
     return over.length
   }
@@ -1681,7 +1684,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Said once per automation, with its first run on the bot's Work row (a fixed id: a later run posts nothing).
       if (inserted && ignoredName)
         this.chat.post({ id: `bm_${botId}_${scheduleId}_named_model`, botId, author: 'bot', kind: 'notice', text: OLD_MODEL_NAME_IGNORED, activationId: id, lane: 'run', hidden: true })
-      if (inserted) this.dropOverQueue(botId, 'run')
+      if (inserted) this.refuseOverQueue(botId, 'run')
       return inserted
     })
     if (skip) {
@@ -5327,7 +5330,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.carried.set(row.id, { chips: [...(before?.chips ?? []), ...(this.drained.get(key) ?? [])], ...(words ? { text: words } : before?.text ? { text: before.text } : {}) })
     this.drained.delete(key)
     this.lateTexts.delete(key)
-    if (this.store.dispatches(row.id).filter((dispatch) => dispatch.send.turnCap).length >= MAX_TURN_CAP_CONTINUATIONS)
+    if (this.store.dispatches(row.id).filter((dispatch) => dispatch.send.turnCap).length >= (this.host.maxTurnCapContinuations ?? MAX_TURN_CAP_CONTINUATIONS))
       return row.lane === 'run' && row.trigger.kind === 'work' ? this.endAtTurnCap(row, main) : this.failActivation(row, 'turn_cap_repeated')
     const counters = this.store.counters(row.id)
     const maxTurns = counters.limits.maxTurns
@@ -9514,8 +9517,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /**
-   * A schedule (§5.5): an automation whose Who is the bot, in the shared store. At most 8 per bot, at least a minute
-   * apart. The bot adds its own with `bot_schedule_add`, the owner from the Automations page; it needs no approval
+   * A schedule (§5.5): an automation whose Who is the bot, in the shared store. At least a minute apart, and at most
+   * `MAX_BOT_SCHEDULES` per bot (a ceiling only a runaway reaches). The bot adds its own with `bot_schedule_add`, the owner from the Automations page; it needs no approval
    * (schedules are not permissions) and changes no revision.
    */
   addSchedule(botId: string, input: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string; model?: string; pick?: BotModelPick }, createdBy: 'owner' | 'bot', ownerAsked = false): BotScheduleEntry {
@@ -10412,6 +10415,11 @@ const PROVIDER_FAILURE = /^\[provider_[a-z_]+\]\s*(\S[\s\S]*)$/
  * Why an activation stopped, in plain words for its chat. A provider's failure says what the provider said (redacted
  * when the error was made, on one line and capped) and how many retries it had; Mousse's own failures keep a fixed line.
  */
+/** The line for work refused because the bot already has `MAX_QUEUED_ACTIVATIONS` waiting. */
+function queueFullWorkText(title: string): string {
+  return `I had too much waiting, so I couldn't take on "${title}". Ask me again when I'm less busy.`
+}
+
 function failureText(reason: string): string {
   // A runtime that can't run the bot's work says why in the bot's own words (a Codex whose tools Mousse hasn't checked).
   if (isCodexBotRefusal(reason)) return reason

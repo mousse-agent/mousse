@@ -130,7 +130,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: 'bot_schedule_add',
-    description: `Run yourself on a schedule: each time, you get the prompt as your task. At most ${MAX_BOT_SCHEDULES} schedules, at most once a minute. A line you only need to say needs no run: use say instead of prompt. A schedule that should stop on a date takes until. Returns the schedule's id and its label; confirm it to the owner in words.`,
+    description: `Run yourself on a schedule: each time, you get the prompt as your task. At most once a minute. A line you only need to say needs no run: use say instead of prompt. A schedule that should stop on a date takes until. Returns the schedule's id and its label; confirm it to the owner in words.`,
     parameters: Type.Object({
       when: WHEN,
       prompt: Type.Optional(Type.String({ description: 'What to do on each run, in your own words. Give prompt or say. If it has an end condition, state it here.' })),
@@ -726,7 +726,7 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const problem = botScheduleProblem(args.when, prompt)
         if (problem) return error(problem)
         if (call.deps.host.schedules.list(call.botId).length >= MAX_BOT_SCHEDULES)
-          return error(`You already have ${MAX_BOT_SCHEDULES} schedules, the most a bot can have. Remove one first.`)
+          return error(`You already have ${MAX_BOT_SCHEDULES} schedules, a ceiling only a runaway reaches: nothing was added. Check for schedules you added by mistake (bot_schedule_list) and tell your owner.`)
         const when = args.when as BotSchedule['when']
         try {
           const added = call.deps.host.schedules.add(call.botId, { when: when.kind === 'interval' ? { kind: 'interval', minutes: when.minutes } : { kind: 'cron', expr: when.expr.trim() }, ...(args.say !== undefined ? { say: args.say as string } : { prompt }), ...(args.until !== undefined ? { until: args.until as string } : {}) }, call.activationId)

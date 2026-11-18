@@ -40,70 +40,77 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
 })
 
+/** The real orchestrator, Run Engine and effect worker, with one ACP agent that takes the prompt and never says a word. */
+function silentAgentThread(options: { promptSilenceMs: number; turnStall?: { stallMs: number; tickMs: number } }) {
+  const home = mkdtempSync(join(tmpdir(), 'mousse-acp-stall-'))
+  cleanups.push(() => rmSync(home, { recursive: true, force: true }))
+  const previousHome = process.env.MOUSSE_HOME
+  process.env.MOUSSE_HOME = home
+  cleanups.push(() => {
+    if (previousHome === undefined) delete process.env.MOUSSE_HOME
+    else process.env.MOUSSE_HOME = previousHome
+  })
+
+  // The agent opens a session, takes the prompt and never replies or sends an update.
+  const prompts: string[] = []
+  const agent = inProcessAgent((app) => {
+    app
+      .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentInfo: { name: 'silent-agent', version: '0.0.1' }, agentCapabilities: {}, authMethods: [] }))
+      .onRequest(methods.agent.session.new, () => ({ sessionId: 'silent-session' }))
+      .onRequest(methods.agent.session.prompt, (c) => {
+        prompts.push(c.params.sessionId)
+        return new Promise<never>(() => {})
+      })
+  })
+
+  const projects = new ProjectManager()
+  const store = new ThreadDataStore(projects)
+  const selection = { instanceId: 'acp:silent', llmProvider: '', model: 'default' }
+  // A generic ACP agent approves tools itself, so it runs only in Full access.
+  const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...selection }, permissions: { defaultMode: 'full' as const } }
+  const orch = new OrchestratorService(
+    new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(),
+    { get: () => settings } as never, {} as never, undefined, undefined, undefined, undefined, undefined, projects
+  )
+  orch.setThreadStore(store)
+  if (options.turnStall) (orch as unknown as { turnStall: { stallMs: number; tickMs: number } }).turnStall = options.turnStall
+  const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })), heartbeatMs: HEARTBEAT_MS })
+  orch.setRunEngine(engine)
+  orch.recoverRunEngineOnBoot()
+  const worker = new EffectWorker({ outbox: engine.outbox, executors: orch.effectExecutors(), owner: engine.leaseOwner })
+  worker.start()
+  orch.attachEffectWorker(worker)
+  const harness = createHarnessGateway({
+    profileHome: home,
+    installationHome: home,
+    instanceMap: new ProviderInstanceService(),
+    questions: new UserQuestionService(),
+    shellPath: async () => ({ entries: [], source: 'failed' }),
+    drivers: [
+      piDriver(),
+      acpDriver({ connect: (_context, request) => agent.connect(request), pty: { available: () => false }, promptSilenceMs: options.promptSilenceMs })
+    ]
+  })
+  harness.instanceMap.setEntry('acp:silent', { driver: 'acp', enabled: true, config: { displayName: 'Silent agent', binaryPath: process.execPath } })
+  orch.setHarness(harness)
+  cleanups.push(async () => {
+    await worker.stop()
+    orch.attachEffectWorker(null)
+    orch.setRunEngine(null)
+    engine.store.db.close()
+    harness.stop()
+  })
+
+  const workspace = join(home, 'workspace')
+  mkdirSync(workspace)
+  const project = projects.openProject(workspace)
+  const thread = store.createThread('silent', project.id, workspace)
+  return { orch, engine, thread, prompts, agent }
+}
+
 describe('an ACP agent that never answers session/prompt', () => {
   it('ends the run as a failed turn instead of leaving it running, and kills the agent process', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'mousse-acp-stall-'))
-    cleanups.push(() => rmSync(home, { recursive: true, force: true }))
-    const previousHome = process.env.MOUSSE_HOME
-    process.env.MOUSSE_HOME = home
-    cleanups.push(() => {
-      if (previousHome === undefined) delete process.env.MOUSSE_HOME
-      else process.env.MOUSSE_HOME = previousHome
-    })
-
-    // The agent opens a session, takes the prompt and never replies or sends an update.
-    const prompts: string[] = []
-    const agent = inProcessAgent((app) => {
-      app
-        .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentInfo: { name: 'silent-agent', version: '0.0.1' }, agentCapabilities: {}, authMethods: [] }))
-        .onRequest(methods.agent.session.new, () => ({ sessionId: 'silent-session' }))
-        .onRequest(methods.agent.session.prompt, (c) => {
-          prompts.push(c.params.sessionId)
-          return new Promise<never>(() => {})
-        })
-    })
-
-    const projects = new ProjectManager()
-    const store = new ThreadDataStore(projects)
-    const selection = { instanceId: 'acp:silent', llmProvider: '', model: 'default' }
-    // A generic ACP agent approves tools itself, so it runs only in Full access.
-    const settings = { ...getDefaultSettings(), provider: { ...getDefaultSettings().provider, ...selection }, permissions: { defaultMode: 'full' as const } }
-    const orch = new OrchestratorService(
-      new AgentRegistry(), new TaskQueue(), new WorktreeManager(home), new PtyManager(),
-      { get: () => settings } as never, {} as never, undefined, undefined, undefined, undefined, undefined, projects
-    )
-    orch.setThreadStore(store)
-    const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: home })), heartbeatMs: HEARTBEAT_MS })
-    orch.setRunEngine(engine)
-    orch.recoverRunEngineOnBoot()
-    const worker = new EffectWorker({ outbox: engine.outbox, executors: orch.effectExecutors(), owner: engine.leaseOwner })
-    worker.start()
-    orch.attachEffectWorker(worker)
-    const harness = createHarnessGateway({
-      profileHome: home,
-      installationHome: home,
-      instanceMap: new ProviderInstanceService(),
-      questions: new UserQuestionService(),
-      shellPath: async () => ({ entries: [], source: 'failed' }),
-      drivers: [
-        piDriver(),
-        acpDriver({ connect: (_context, request) => agent.connect(request), pty: { available: () => false }, promptSilenceMs: SILENCE_MS })
-      ]
-    })
-    harness.instanceMap.setEntry('acp:silent', { driver: 'acp', enabled: true, config: { displayName: 'Silent agent', binaryPath: process.execPath } })
-    orch.setHarness(harness)
-    cleanups.push(async () => {
-      await worker.stop()
-      orch.attachEffectWorker(null)
-      orch.setRunEngine(null)
-      engine.store.db.close()
-      harness.stop()
-    })
-
-    const workspace = join(home, 'workspace')
-    mkdirSync(workspace)
-    const project = projects.openProject(workspace)
-    const thread = store.createThread('silent', project.id, workspace)
+    const { orch, engine, thread, prompts, agent } = silentAgentThread({ promptSilenceMs: SILENCE_MS })
 
     // The reconciler runs throughout, with a silence window of 2 x 6 x HEARTBEAT_MS (120 ms) for this sparse adapter.
     const reconciler = new Reconciler({ store: engine.store, outbox: engine.outbox, tools: engine.tools, heartbeatMs: HEARTBEAT_MS, capabilitiesFor: (id) => orch.capabilitiesForThread(id) })
@@ -125,6 +132,18 @@ describe('an ACP agent that never answers session/prompt', () => {
     // A retryable timeout, said in the agent's name.
     expect(response.error).toMatchObject({ errorInfo: { retryable: true } })
     expect(response.message).toMatch(/Silent agent .*(timed out|did not answer)/i)
+    expect(agent.connections.at(-1)?.killed).toBe(true)
+  }, 20_000)
+
+  it('a turn its runtime says nothing for ends at the no-progress check, as failed and saying why, not as a Stop', async () => {
+    // The agent's own silence bound is far off, so only the turn's no-progress check can end it.
+    const { orch, engine, thread, prompts, agent } = silentAgentThread({ promptSilenceMs: 60_000, turnStall: { stallMs: 300, tickMs: 20 } })
+    const response = await orch.send('Do the thing', false, { threadId: thread.id, clientRequestId: 'stall-send' })
+    const run = engine.listRuns(thread.id).find((entry) => entry.clientRequestId === 'stall-send')!
+    expect(prompts).toEqual(['silent-session'])
+    expect(engine.getRun(run.runId)).toMatchObject({ status: 'failed' })
+    expect(response.error).toMatchObject({ code: 'turn_stalled' })
+    expect(response.message).toMatch(/made no progress .* so it was stopped/)
     expect(agent.connections.at(-1)?.killed).toBe(true)
   }, 20_000)
 })

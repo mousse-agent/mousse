@@ -1,3 +1,4 @@
+import { effectiveAgentLimits } from '../../../shared/agents/defaults'
 import { AGENT_CAPABILITY_KINDS } from '../../../shared/agents/types'
 import type {
   AgentCapabilityKind,
@@ -51,6 +52,8 @@ export function AgentSettingsForm({
   onMoreOpenChange
 }: AgentSettingsFormProps) {
   const identity = settings.identity
+  // The limits it runs under: a definition still on the old defaults shows (and, once edited, keeps) the ceilings.
+  const limits = effectiveAgentLimits(settings.limits)
   const promptPath = `agent-definitions/${definitionId}/system.md`
   const runsOn = runsOnLabel(catalogs, settings.primaryModel.ref)
 
@@ -796,9 +799,9 @@ export function AgentSettingsForm({
               id="max-turns-input"
               type="number"
               min={1}
-              value={settings.limits.maxTurns}
+              value={limits.maxTurns}
               onChange={(event) =>
-                onSettingsChange(patch(settings, 'limits', { ...settings.limits, maxTurns: Number(event.target.value) }))
+                onSettingsChange(patch(settings, 'limits', { ...limits, maxTurns: Number(event.target.value) }))
               }
             />
           </Field>
@@ -807,9 +810,9 @@ export function AgentSettingsForm({
               id="max-tools-input"
               type="number"
               min={1}
-              value={settings.limits.maxToolCalls}
+              value={limits.maxToolCalls}
               onChange={(event) =>
-                onSettingsChange(patch(settings, 'limits', { ...settings.limits, maxToolCalls: Number(event.target.value) }))
+                onSettingsChange(patch(settings, 'limits', { ...limits, maxToolCalls: Number(event.target.value) }))
               }
             />
           </Field>
@@ -818,9 +821,9 @@ export function AgentSettingsForm({
               id="max-elapsed-input"
               type="number"
               min={1}
-              value={settings.limits.maxElapsedMs}
+              value={limits.maxElapsedMs}
               onChange={(event) =>
-                onSettingsChange(patch(settings, 'limits', { ...settings.limits, maxElapsedMs: Number(event.target.value) }))
+                onSettingsChange(patch(settings, 'limits', { ...limits, maxElapsedMs: Number(event.target.value) }))
               }
             />
           </Field>
@@ -831,11 +834,11 @@ export function AgentSettingsForm({
             type="number"
             min={0}
             step="0.01"
-            value={settings.limits.maxCostUsd ?? ''}
+            value={limits.maxCostUsd ?? ''}
             onChange={(event) =>
               onSettingsChange(
                 patch(settings, 'limits', {
-                  ...settings.limits,
+                  ...limits,
                   maxCostUsd: event.target.value ? Number(event.target.value) : undefined
                 })
               )
@@ -847,10 +850,10 @@ export function AgentSettingsForm({
             id="max-artifact-input"
             type="number"
             min={1}
-            value={settings.limits.maxArtifactBytes}
+            value={limits.maxArtifactBytes}
             onChange={(event) =>
               onSettingsChange(
-                patch(settings, 'limits', { ...settings.limits, maxArtifactBytes: Number(event.target.value) })
+                patch(settings, 'limits', { ...limits, maxArtifactBytes: Number(event.target.value) })
               )
             }
           />

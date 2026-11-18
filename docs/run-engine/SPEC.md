@@ -213,7 +213,7 @@ CREATE TABLE effects(
   payload       TEXT NOT NULL,
   attempts      INTEGER NOT NULL DEFAULT 0,
   max_attempts  INTEGER NOT NULL DEFAULT 5,
-  timeout_ms    INTEGER NOT NULL,                 -- per-effect execution deadline; enforced
+  timeout_ms    INTEGER NOT NULL,                 -- per-effect execution deadline (enforced) and lease length; a kind with `deadline: false` (turn.start) uses it as the lease only
   available_at  TEXT NOT NULL,
   lease_owner   TEXT,                             -- "<daemonEpoch>:<pid>"
   lease_expires_at TEXT,                          -- checked on claim AND by the reconciler
@@ -251,7 +251,7 @@ CREATE INDEX tool_invocations_run ON tool_invocations(run_id, status);
 
 | kind | class | timeout | what it does |
 |---|---|---|---|
-| `turn.start` | process_bound | 6 h | run the provider turn (legacy `executeTurn` body, later adapters) |
+| `turn.start` | process_bound | 6 h (lease only, no deadline) | run the provider turn (legacy `executeTurn` body, later adapters); a turn has no time limit, only the no-progress check (`TURN_STALL_MS`, 2 h with no runtime event and nobody asked ends it as failed, `turn_stalled`) |
 | `turn.interrupt` | process_bound | 30 s | abort the live turn; "not active" counts as success |
 | `turn.steer` | process_bound | 30 s | deliver steer text to the live turn |
 | `request.respond` | process_bound | 30 s | deliver a settled approval request's answer to the provider callback waiting in this process (§17.4); control lane, never retried |
@@ -399,7 +399,7 @@ Pure functions from `(capabilities, runState)` to a decision; the engine and exe
 | `AcpAdapter` (Antigravity preset) | `AcpSessions.chat` (`harness/acp`) | interrupt_restart (cancel then re-prompt) / yes / sparse / weak |
 | `CodexAdapter` | `CodexProviderService.chat` over `codex app-server` | native (`turn/steer` joins the running turn) / yes (`turn/interrupt`) / rich / weak |
 
-There is no `terminalQuality` flag: every adapter's `startTurn` settles when its stream closes, and that settlement is the turn's terminal signal, so no code path would read a "stream closed without a terminal event" policy. Rule 2's heartbeat window (§12.4) does not catch a hung stream while the turn's `turn.start` effect is still running (rule 2 skips a run with a live effect), so a silent adapter is bounded only by that effect's six-hour timeout. ACP agents have their own bound: `AcpSessions` fails a prompt that gets no reply and no update for `PROMPT_SILENCE_MS` (15 minutes; time spent waiting on the user is not counted). The Claude, Codex and Cursor adapters have no such bound yet.
+There is no `terminalQuality` flag: every adapter's `startTurn` settles when its stream closes, and that settlement is the turn's terminal signal, so no code path would read a "stream closed without a terminal event" policy. Rule 2's heartbeat window (§12.4) does not catch a hung stream while the turn's `turn.start` effect is still running (rule 2 skips a run with a live effect), so a silent adapter is bounded by the turn's no-progress check (`watchTurnProgress`: no event from the runtime for `TURN_STALL_MS`, 2 hours, while no question or tool approval waits on a person, fails the turn with `turn_stalled`; a computer's sleep counts as at most two of its one-minute looks). ACP agents have their own bound: `AcpSessions` fails a prompt that gets no reply and no update for `PROMPT_SILENCE_MS` (15 minutes; time spent waiting on the user is not counted). The Claude, Codex and Cursor adapters have no such bound yet.
 
 Shared builders in `src/mms/run/transcript/` **before** the second adapter: streaming message assembly (text/thinking/tool start-end into `ChatMessage`s), usage recording, native history serialisation (`providers/nativeAgentHistory.ts`), steer draining. Without them, each adapter re-implements the same assembly.
 

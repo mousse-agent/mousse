@@ -10,7 +10,7 @@ import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { botInstructions } from '../../src/mms/bots/instructions'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import { SteerHold } from '../../src/mms/orchestrator/steerHold'
-import { BOT_SCHEDULE_SKIP_TEXT, BOT_TURN_WINDOW_MS, MAX_QUEUED_ACTIVATIONS } from '../../src/shared/bots/personal/definition'
+import { BOT_SCHEDULE_SKIP_TEXT, BOT_TURN_WINDOW_MS } from '../../src/shared/bots/personal/definition'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
 
@@ -105,8 +105,10 @@ describe('several pieces of work at once', () => {
     expect(runningWork()).toHaveLength(8)
   })
 
-  it('never drops running work to make room: more than 20 pieces all run', async () => {
-    const titles = Array.from({ length: MAX_QUEUED_ACTIVATIONS + 1 }, (_, index) => `Job ${index}`)
+  it('never refuses running work: more pieces than the waiting ceiling all run', async () => {
+    // Only a runaway reaches the ceiling (`MAX_QUEUED_ACTIVATIONS`); three stands in for it.
+    f.host.maxQueuedActivations = 3
+    const titles = Array.from({ length: 4 }, (_, index) => `Job ${index}`)
     const { work } = await handOff(titles, 'm1')
     expect(work.every((item) => f.store.activation(item.workId)!.status === 'running')).toBe(true)
     expect(chatOf(f, botId).some((message) => message.error?.text.includes('too much waiting'))).toBe(false)
@@ -133,7 +135,7 @@ describe('several pieces of work at once', () => {
     expect(all.map((item) => f.store.dispatches(item.workId).length)).toEqual(all.map(() => 2))
   })
 
-  it('a scheduled run dropped from a full queue says why on its automation, and the chat says so once a day', async () => {
+  it('a scheduled run refused by a full queue says why on its automation, and the chat says so once a day', async () => {
     const schedules = ['Inbox.', 'News.'].map((prompt) => f.book.add(botId, { when: { kind: 'interval', minutes: 60 }, prompt }, 'owner'))
     // Nothing starts while the bot's journal cannot be written, so its runs queue.
     f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
@@ -142,12 +144,13 @@ describe('several pieces of work at once', () => {
       const started = f.bots.runScheduledOccurrence({ botId, scheduleId, prompt, occurrenceAt: new Date(f.clock.now).toISOString() })
       return started.kind === 'started' ? started.activationId : ''
     }
+    // Only a runaway fills the queue; a ceiling of two stands in for it. Two runs fill it, so the scheduled runs that
+    // come after are refused, and the two that wait are kept.
+    f.host.maxQueuedActivations = 2
+    const more = [0, 1].map((index) => run(`more-${index}`, 'More.'))
     const ids = schedules.map((entry) => run(entry.scheduleId, entry.prompt))
     await flush()
-    expect(ids.map((id) => f.store.activation(id)!.status)).toEqual(['queued', 'queued'])
-    // 20 more waiting is two over 20, so the two oldest that wait, these scheduled runs, go.
-    for (let index = 0; index < MAX_QUEUED_ACTIVATIONS; index += 1) run(`more-${index}`, 'More.')
-    await flush()
+    expect(more.map((id) => f.store.activation(id)!.status)).toEqual(['queued', 'queued'])
     for (const id of ids) expect(f.store.activation(id)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
     for (const entry of schedules) expect(f.book.get(botId, entry.scheduleId)!.skip).toEqual({ at: expect.any(String), reason: 'dropped_queue_full' })
     expect(BOT_SCHEDULE_SKIP_TEXT.dropped_queue_full).toBe('dropped: the bot had too much waiting')
@@ -159,8 +162,9 @@ describe('several pieces of work at once', () => {
     { zone: 'America/Los_Angeles', times: ['2026-11-07T23:59:00Z', '2026-11-08T00:01:00Z', '2026-11-08T07:59:00Z', '2026-11-08T08:00:00Z'], days: ['2026-11-07', '2026-11-07', '2026-11-07', '2026-11-08'] }
   ])('dropped-run notices change at local midnight in $zone, not UTC midnight', async ({ zone, times, days }) => {
     vi.stubEnv('TZ', zone)
-    // Nothing starts while the bot's journal cannot be written, so its runs queue.
+    // Nothing starts while the bot's journal cannot be written, so its runs queue past a ceiling standing in for a runaway's.
     f.store.setError(botId, { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
+    f.host.maxQueuedActivations = 20
     for (const [index, time] of times.entries()) {
       f.clock.now = Date.parse(time)
       expect(new Date(f.clock.now).getDate()).toBe(Number(days[index].slice(-2)))

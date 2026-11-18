@@ -1,4 +1,5 @@
 import type { AssistantMessage, Message } from '../../shared/transcript'
+import { effectiveAgentLimits } from '../../shared/agents/defaults'
 import { AgentDefinitionError, type AgentDefinitionIssue } from '../../shared/agents/errors'
 import { definitionAuthorityDigest, type DefinitionAuthority } from './definitionGate'
 import type {
@@ -270,7 +271,7 @@ export function definitionCheckIssues(
   input: { threadId: string; definition: { id: string; revision: string }; settings: AgentDefinitionSettings; grants: EffectiveAgentGrants }
 ): AgentDefinitionIssue[] {
   const { settings } = input
-  const limits = settings.limits
+  const limits = effectiveAgentLimits(settings.limits)
   const budget: AgentExecutionBudget = {
     maxTurns: limits.maxTurns,
     maxToolCalls: limits.maxToolCalls,

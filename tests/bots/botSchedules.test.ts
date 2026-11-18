@@ -2,8 +2,7 @@
  * Path step 3, "One scheduler": a bot's schedules are automations whose Who is the bot, in the shared scheduled-job
  * store, and the one `ScheduledJobService` claims their occurrences. Each due occurrence is one run activation keyed
  * `sched:<botId>:<scheduleId>:<occurrenceAt>`, so a repeated hand-over (after a crash) inserts nothing. The bot keeps
- * its own rules: skipped while it is paused or its last run of the schedule still waits, at most 8, at most once
- * a minute, missed occurrences collapse into one, and nothing runs before the bot startup pass.
+ * its own rules: skipped while it is paused or its last run of the schedule still waits, at most once a minute, missed occurrences collapse into one, and nothing runs before the bot startup pass.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
@@ -189,7 +188,7 @@ describe('bot schedules in the shared scheduler', () => {
     expect(() => f.bots.addSchedule(botId, { when: { kind: 'cron', expr: '0 9 * * 1' }, prompt: '' }, 'bot')).toThrow(/something to do/)
   })
 
-  it('a bot\'s own schedules: at most 8, at least a minute apart, each with a label and no approval', () => {
+  it('a bot\'s own schedules: as many as it needs up to a runaway ceiling, at least a minute apart, each with a label and no approval', () => {
     const revision = f.store.registry(botId)!.revision
     // Every minute is the shortest: an interval of whole minutes, at least 1, or any cron expression.
     for (const when of [{ kind: 'interval', minutes: 1 }, { kind: 'interval', minutes: 2 }, { kind: 'cron', expr: '* * * * *' }, { kind: 'cron', expr: '*/2 * * * *' }])
@@ -198,14 +197,14 @@ describe('bot schedules in the shared scheduler', () => {
     expect(() => f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 0 }, prompt: 'p' }, 'bot')).toThrow(/at least 1/)
     const added = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 30 }, prompt: 'Check links.' }, 'bot')
     expect(added).toMatchObject({ scheduleId: expect.stringMatching(/^s-[0-9a-f]{8}$/), label: 'every 30 minutes', createdBy: 'bot', prompt: 'Check links.' })
-    for (let i = 1; i < 8; i += 1) f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, prompt: `p${i}` }, 'bot')
-    expect(() => f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, prompt: 'ninth' }, 'bot')).toThrow(expect.objectContaining({ code: 'schedule_limit' }))
+    // More than the eight an older build allowed: the ceiling (`MAX_BOT_SCHEDULES`) is one only a runaway reaches.
+    for (let i = 1; i < 9; i += 1) f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 60 }, prompt: `p${i}` }, 'bot')
     // Schedules change no revision, so no approval is needed.
     expect(f.store.registry(botId)!.revision).toBe(revision)
-    expect(f.bots.listSchedules(botId)).toHaveLength(8)
+    expect(f.bots.listSchedules(botId)).toHaveLength(9)
     expect(f.bots.removeSchedule(botId, added.scheduleId)).toBe(true)
     expect(f.bots.removeSchedule(botId, added.scheduleId)).toBe(false)
-    expect(f.bots.listSchedules(botId)).toHaveLength(7)
+    expect(f.bots.listSchedules(botId)).toHaveLength(8)
   })
 
   it('a paused bot skips its occurrences (chat is not affected); resuming runs the next one', async () => {

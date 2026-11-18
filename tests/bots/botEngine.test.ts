@@ -450,19 +450,20 @@ describe('activation and dispatch', () => {
     store = new BotStore({ profileHome: profile, clock: () => clock })
   })
 
-  it('keeps at most 20 waiting runs, running ones not counted; the oldest waiting one is dropped', async () => {
+  it('past the waiting ceiling only the newest run is refused; what waits is kept and running ones are not counted', async () => {
+    // Only a runaway reaches the ceiling (`MAX_QUEUED_ACTIVATIONS`); three stands in for it.
+    engineHost.maxQueuedActivations = 3
     const running = await bots.activate({ botId: 'site-editor', input: 'running', clientRequestId: 'run' })
     // Nothing starts while the bot's journal cannot be written, so the rest wait.
     store.setError('site-editor', { code: 'bot_journal_failed', error: BOT_JOURNAL_ERROR })
     const waiting = []
-    for (let index = 0; index < 21; index += 1) {
+    for (let index = 0; index < 4; index += 1) {
       clock += 1
       waiting.push(await bots.activate({ botId: 'site-editor', input: `q${index}`, clientRequestId: `q${index}` }))
     }
-    // Of the 21 that waited, the oldest is dropped; the running one is kept and not counted.
     expect(bots.getActivation(running.id).status).toBe('running')
-    expect(bots.getActivation(waiting[0].id)).toMatchObject({ status: 'cancelled', endReason: 'queue_full' })
-    expect(bots.listActivations('site-editor').filter((row) => row.status === 'queued')).toHaveLength(20)
+    expect(waiting.map((row) => bots.getActivation(row.id).status)).toEqual(['queued', 'queued', 'queued', 'cancelled'])
+    expect(bots.getActivation(waiting[3].id)).toMatchObject({ endReason: 'queue_full' })
   })
 
   it('deleting the bot cancels its activations, revokes its grant and archives its threads (Bot Phase 1 §5.3.3)', async () => {
