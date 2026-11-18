@@ -58,12 +58,14 @@ export function needsMeThreads(
 
 /**
  * `supervisedWaits` for the open profile: read again when the set of waiting threads changes, a request is asked or
- * settled, or a bot's state changes (a paused bot's threads wait on the owner again).
+ * settled, or a bot's state changes (a paused bot's threads wait on the owner again). A thread that starts waiting
+ * counts as supervised until that read comes back, so a wait its bot answers never flashes into Needs me.
  */
 export function useSupervisedWaits(): ReadonlySet<string> {
   const key = useAppStore((state) => Object.keys(state.threadActivity).filter((threadId) => state.threadActivity[threadId] === 'awaiting_input').sort().join('\n'))
   const botsKey = useBotsStore((state) => state.bots.map((bot) => `${bot.id}:${bot.state}`).join('\n'))
-  const [threads, setThreads] = useState<ReadonlySet<string>>(() => new Set())
+  // What the last read found, and for which waiting threads.
+  const [read, setRead] = useState<{ key: string; threads: ReadonlySet<string> }>(() => ({ key: '', threads: new Set() }))
   const [revision, setRevision] = useState(0)
 
   useEffect(() => {
@@ -79,26 +81,34 @@ export function useSupervisedWaits(): ReadonlySet<string> {
   }, [])
 
   useEffect(() => {
-    const read = window.mousse?.orchestrator?.pendingQuestions
-    if (!key) {
-      setThreads((current) => (current.size ? new Set() : current))
+    const pendingQuestions = window.mousse?.orchestrator?.pendingQuestions
+    // Nothing waits, or nothing to read: no thread is supervised.
+    if (!key || !pendingQuestions) {
+      setRead((current) => (current.key === key && !current.threads.size ? current : { key, threads: new Set() }))
       return
     }
-    if (!read) return
     let live = true
-    void read()
+    void pendingQuestions()
       .then((pending) => {
-        if (live) setThreads(supervisedWaits(pending ?? []))
+        if (live) setRead({ key, threads: supervisedWaits(pending ?? []) })
       })
       .catch(() => {
         // Unread: every waiting thread counts, as before.
+        if (live) setRead({ key, threads: new Set() })
       })
     return () => {
       live = false
     }
   }, [key, botsKey, revision])
 
-  return threads
+  return useMemo(() => {
+    const readable = typeof window !== 'undefined' && Boolean(window.mousse?.orchestrator?.pendingQuestions)
+    if (read.key === key || !readable) return read.threads
+    const known = new Set(read.key ? read.key.split('\n') : [])
+    const quiet = new Set(read.threads)
+    for (const threadId of key ? key.split('\n') : []) if (!known.has(threadId)) quiet.add(threadId)
+    return quiet
+  }, [read, key])
 }
 
 /** `needsMeThreads` for the open profile, kept current. */

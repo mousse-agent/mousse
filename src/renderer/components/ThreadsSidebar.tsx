@@ -1153,13 +1153,17 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   }
 
   /** The activity a row shows: rolled up over its subagents, or Working for a send that is starting it. */
-  const shownActivityOf = (threadId: string) => rolledUpActivity[threadId] ?? threadActivity[threadId]
+  // A wait the bot that started the thread answers shows as Working: it waits on no one the row speaks to.
+  const shownActivityOf = (threadId: string) => {
+    const activity = rolledUpActivity[threadId] ?? threadActivity[threadId]
+    return activity === 'awaiting_input' && supervisedWaits.has(threadId) ? 'processing' : activity
+  }
   /**
    * A plain thread's row reads its own activity: the list's may be one push behind on Working and Waiting. One with
    * subagents, or one a starting send shows Working, shows what the list computed.
    */
   const liveActivityOf = (threadId: string) =>
-    plainThreadIds.has(threadId) && rolledUpActivity[threadId] === undefined && threadActivity[threadId] === storeActivity[threadId]
+    plainThreadIds.has(threadId) && !supervisedWaits.has(threadId) && rolledUpActivity[threadId] === undefined && threadActivity[threadId] === storeActivity[threadId]
   const renderThreadStatus = (threadId: string) => {
     // A quiet thread shows nothing, whichever of Working and Waiting the list holds.
     if (threadStatus(shownActivityOf(threadId), approvalThreads.has(threadId)) === 'quiet') return null
