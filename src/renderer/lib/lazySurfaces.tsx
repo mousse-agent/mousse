@@ -34,6 +34,7 @@ export const SettingsPage = lazyNamed(() => import('../components/SettingsPage')
 export const AutomationsPage = lazyNamed(() => import('../components/AutomationsPage'), 'AutomationsPage', AutomationsLoadFailed)
 export const SubscriptionUsagePage = lazyNamed(() => import('../components/SubscriptionUsagePage'), 'SubscriptionUsagePage')
 export const ChatWorkspace = lazyNamed(() => import('../components/chats/ChatWorkspace'), 'ChatWorkspace')
+export const BotThreadHeader = lazyNamed(() => import('../components/bots/BotThreadHeader'), 'BotThreadHeader')
 export const NewBotDialogHost = lazyNamed(() => import('../components/bots/NewBotDialog'), 'NewBotDialogHost', NewBotLoadFailed)
 
 export const FilesPanel = lazyNamed(() => import('../components/FilesPanel'), 'FilesPanel')
@@ -86,6 +87,7 @@ export function preloadSplitSurfaces(): void {
     AutomationsPage.preload,
     SubscriptionUsagePage.preload,
     ChatWorkspace.preload,
+    BotThreadHeader.preload,
     NewBotDialogHost.preload
   ])
 }

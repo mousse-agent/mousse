@@ -36,10 +36,10 @@ export async function selectThread(threadId: string): Promise<void> {
 /**
  * Shows a thread and asks main to select it. Its row shows as chosen at once. A cached thread shows with its messages
  * once that frame has been drawn; a started one with nothing cached stays held until its view arrives
- * (`openThreadWhenReady`), so it never shows without them.
+ * (`openThreadWhenReady`), so it never shows without them. `keepWorkspace`: Chats stays on screen (a bot's thread in its pane).
  */
-export async function openAndSelect(threadId: string): Promise<void> {
-  const opening = useAppStore.getState().openThreadWhenReady(threadId)
+export async function openAndSelect(threadId: string, options?: { keepWorkspace?: boolean }): Promise<void> {
+  const opening = useAppStore.getState().openThreadWhenReady(threadId, options)
   if (opening === 'held') setTimeout(() => useAppStore.getState().showOpeningThread(threadId), OPEN_THREAD_HOLD_MS)
   if (opening === 'cached') void afterNextPaint().then(() => useAppStore.getState().showOpeningThread(threadId))
   await selectOrSettle(threadId)
