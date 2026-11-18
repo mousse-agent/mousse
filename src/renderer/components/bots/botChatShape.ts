@@ -1,4 +1,4 @@
-import { compareLaunched, launchedActive, launchedGoing, type BotAskCard, type BotChatMessage, type BotChip, type BotLaunchedThread, type BotSummary, type BotWorkItem } from '../../../shared/bots/personal/chat'
+import { compareLaunched, launchedActive, launchedDoneShown, launchedGoing, type BotAskCard, type BotChatMessage, type BotChip, type BotLaunchedThread, type BotSummary, type BotWorkItem } from '../../../shared/bots/personal/chat'
 import { guardTextCharacters } from '../../../shared/bots/personal/modelSlots'
 import { botGroupTime } from './messageGroups'
 import { askNoticeText } from '../../../shared/bots/personal/askText'
@@ -325,10 +325,11 @@ export function launchedLook(status: BotLaunchedThread['status']): { tone: Launc
 /**
  * The threads the bot started, split for its list: those still going (working first, then waiting on the owner, on hold
  * too), and the rest under "Done" (idle, then ended, the most recently updated first), in the summary's order (`compareLaunched`).
+ * "Done" keeps only those updated in the day before `now` (`launchedDoneShown`): one drops off by itself while the list is open.
  */
-export function launchedGroups(threads: readonly BotLaunchedThread[]): { going: BotLaunchedThread[]; ended: BotLaunchedThread[] } {
+export function launchedGroups(threads: readonly BotLaunchedThread[], now: number): { going: BotLaunchedThread[]; ended: BotLaunchedThread[] } {
   const ordered = [...threads].sort(compareLaunched)
-  return { going: ordered.filter(launchedGoing), ended: ordered.filter((thread) => !launchedGoing(thread)) }
+  return { going: ordered.filter(launchedGoing), ended: ordered.filter((thread) => !launchedGoing(thread) && launchedDoneShown(thread, now)) }
 }
 
 /** What the sticker on the header's face shows. */

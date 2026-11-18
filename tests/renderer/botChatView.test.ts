@@ -1891,6 +1891,24 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       expect(rows().map(([title]) => title)).toEqual(['Broken', 'Old run'])
     })
 
+    it('Done lists only threads updated in the last day, counts just those, and one drops off while the list is open', async () => {
+      const day = 24 * 60
+      await open({ ...inbox, threads: [thread('t1', 'Fresh', 'done', 10), thread('t2', 'Turning stale', 'failed', day - 1), thread('t3', 'Yesterday', 'done', day + 5)] })
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
+      try {
+        await click(presence())
+        const fold = () => host.querySelector<HTMLButtonElement>('.bot-thread-fold')!
+        expect(fold().textContent).toBe('Done2')
+        expect(rows().map(([title]) => title)).toEqual(['Fresh', 'Turning stale'])
+        // Two minutes on, the list's clock ticks and the thread that turned a day old leaves; the count follows.
+        await act(async () => { vi.advanceTimersByTime(120_000) })
+        expect(fold().textContent).toBe('Done1')
+        expect(rows().map(([title]) => title)).toEqual(['Fresh'])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     it('a thread it starts while the bot list is being read shows in the open chat without leaving it', async () => {
       const ended = threads.filter((item) => item.status === 'done')
       await open({ ...inbox, threads: ended })

@@ -127,7 +127,7 @@ describe('presence and sticker', () => {
       ['subagents', 'working', 'waiting on subagents'], ['on_hold', 'waiting', 'waiting on you']
     ]
     for (const [status, tone, label] of statuses) expect([status, launchedLook(status)]).toEqual([status, { tone, label }])
-    const { going, ended } = launchedGroups(statuses.map(([status]) => thread(status, status)))
+    const { going, ended } = launchedGroups(statuses.map(([status]) => thread(status, status)), Date.parse('2026-11-14T10:00:00.000Z'))
     // Started at the same time here, so ties go by id.
     expect(going.map((item) => item.status)).toEqual(['paused', 'queued', 'running', 'subagents', 'needs_input', 'on_hold'])
     expect(ended.map((item) => item.status)).toEqual(['idle', 'done', 'failed', 'stopped'])

@@ -160,12 +160,12 @@ export function BotPresenceLine({ bot, typing, offline }: { bot: BotSummary; typ
   const presence = presenceOf(bot, { typing, offline })
   const work = bot.work ?? []
   const watchers = bot.watchers ?? []
-  const { going, ended } = launchedGroups(bot.threads ?? [])
+  const [now, setNow] = useState(() => Date.now())
+  const { going, ended } = launchedGroups(bot.threads ?? [], now)
   const listed = work.length + watchers.length + going.length + ended.length
   const quiet = !work.length && !going.length
   const [open, setOpen] = useState(false)
   const [doneOpen, setDoneOpen] = useState<boolean | undefined>(undefined)
-  const [now, setNow] = useState(() => Date.now())
   const root = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const list = useRef<HTMLDivElement>(null)
