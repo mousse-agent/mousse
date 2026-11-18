@@ -2282,7 +2282,11 @@ export class PiRpcEngine implements ProviderAdapter {
           code: normalized.code,
           message: normalized.message,
           errorInfo: normalized.errorInfo,
-          details: { ...((normalized.details as Record<string, unknown> | undefined) ?? {}), retriesExhausted: true }
+          details: {
+            ...((normalized.details as Record<string, unknown> | undefined) ?? {}),
+            retriesExhausted: true,
+            retries: { attempt: Number(event.attempt) || turn.maxRetries, max: turn.maxRetries }
+          }
         }, cause)
         return
       }

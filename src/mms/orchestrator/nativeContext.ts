@@ -155,7 +155,7 @@ export function migrateLegacyContext(messages: ChatMessage[]): NativeLlmContext 
         ? ([{ type: 'text', text: message.content || '(image attachment)' }, ...images] satisfies Array<TextContent | ImageContent>)
         : message.content
       transcript.push({ role: 'user', content, timestamp: Date.parse(message.timestamp) || Date.now() })
-    } else if (message.role === 'assistant' && message.kind !== 'thinking' && message.kind !== 'context_handoff' && message.kind !== 'context_cleared' && message.kind !== 'context_compaction') {
+    } else if (message.role === 'assistant' && message.kind !== 'thinking' && message.kind !== 'context_handoff' && message.kind !== 'context_cleared' && message.kind !== 'context_compaction' && message.kind !== 'provider_retry') {
       transcript.push(legacyAssistant(message.content, Date.parse(message.timestamp) || Date.now()))
     }
   }

@@ -82,6 +82,8 @@ import { deleteRunResults, readRunResultText } from '../run/delegation/hold'
 import { SettleNotices, type PlannedSettleNotice } from './settleNotices'
 import { decideUsageLimit, usageLimitOf, type UsageLimitDecision } from '../run/pausePolicy'
 import { boundedResetIso, estimatedReset } from './providerErrors'
+import { TURN_RETRY, turnRetryCause, turnRetryDelay, waitOrAbort, withRetries } from './turnRetry'
+import { providerRetryText, type ProviderRetries, type ProviderRetryState } from '../../shared/providerRetry'
 import { CONTINUE_TEXT, MANUAL_CONTINUE_TEXT, pausedLine } from '../run/pauseText'
 import { currentStopGeneration, runStopGeneration } from '../run/stopGeneration'
 import { buildSubagentView } from '../run/delegation/subagentView'
@@ -13784,6 +13786,41 @@ export class OrchestratorService extends EventEmitter {
     let failureDiagnostic: Record<string, unknown> | undefined
     let compactionNote: ChatMessage | undefined
     let switchMarker: ChatMessage | undefined
+    /** The row counting the retries of the turn's current provider request (`provider_retry`), while it is open. */
+    let retryRow: ChatMessage | undefined
+    /** The retries of the turn's current request, until the provider answers it: a failure after them says how many. */
+    let pendingRetries: ProviderRetries | undefined
+    /** The runtime retried one of the turn's requests itself: Mousse never runs the turn again on top (`turnRetryDelay`). */
+    let runtimeRetried = false
+    /** The runtime or Mousse compacted the history inside the turn: the turn is never sent again as it was. */
+    let providerCompacted = false
+    const noteRetry = (attempt: number, maxAttempts: number | undefined, cause: string | undefined): void => {
+      pendingRetries = { attempt, ...(maxAttempts ? { max: maxAttempts } : {}) }
+      const state: ProviderRetryState = { status: 'retrying', attempt, ...(maxAttempts ? { maxAttempts } : {}), ...(cause ? { cause } : {}) }
+      if (!retryRow) {
+        retryRow = { id: uuidv4(), role: 'assistant', kind: 'provider_retry', content: providerRetryText(state), providerRetry: state,
+          streaming: true, timestamp: new Date().toISOString() }
+        session.messages.push(retryRow)
+        this.emitMessageAdded(retryRow)
+      } else {
+        retryRow.providerRetry = state
+        retryRow.content = providerRetryText(state)
+        this.emitMessageUpdated(retryRow)
+      }
+      this.persist()
+    }
+    /** The open retry row ends: the provider answered (`recovered`), or the turn stopped first. */
+    const endRetries = (status: 'recovered' | 'stopped'): void => {
+      pendingRetries = undefined
+      const row = retryRow
+      if (!row?.providerRetry) return
+      retryRow = undefined
+      row.providerRetry = { ...row.providerRetry, status }
+      row.content = providerRetryText(row.providerRetry)
+      row.streaming = false
+      this.emitMessageUpdated(row)
+      this.persist()
+    }
     // A retry or recovery of a run executes the binding its run recorded, never the current
     // selection. Otherwise migrated to the instance shape (SPEC §13.8): `llmProvider` is
     // re-derived from a known instance.
@@ -13843,6 +13880,8 @@ export class OrchestratorService extends EventEmitter {
         return false
       }
       this.nativeContext = compacted
+      // The turn's input no longer matches the history: it is never sent again as it was.
+      providerCompacted = true
       this.clearLastTurnUsage()
       this.persist(true)
       onCompaction('complete')
@@ -14158,22 +14197,29 @@ export class OrchestratorService extends EventEmitter {
         },
         compaction: (phase) => {
           // A person's steer waits for a compaction the provider runs inside the turn ("Waits for compaction").
+          providerCompacted = true
           hold.compacting(phase === 'start')
           onCompaction(phase)
           opts?.bot?.steer?.compacting?.(phase === 'start')
           // A bot's turn gets its memory pack and its job's brief again right after (at the next safe point).
           if (phase === 'complete') opts?.bot?.steer?.compacted()
         },
-        // The line under Working says it; nothing is saved to the transcript.
-        retry: (attempt, detail) => this.setTurnStep(session.threadId, {
-          kind: 'retrying', attempt,
-          ...(detail?.maxAttempts && !detail.noResponse ? { maxAttempts: detail.maxAttempts } : {}),
-          ...(detail?.delayMs !== undefined && detail.delayMs >= 0 ? { delayMs: detail.delayMs } : {}),
-          ...(detail?.noResponse ? { noResponse: true as const } : {})
-        }),
+        // The line under Working counts down to it; the turn's retry row counts the retries and keeps the outcome.
+        retry: (attempt, detail) => {
+          runtimeRetried = true
+          const maxAttempts = detail?.maxAttempts && !detail.noResponse ? detail.maxAttempts : undefined
+          this.setTurnStep(session.threadId, {
+            kind: 'retrying', attempt,
+            ...(maxAttempts ? { maxAttempts } : {}),
+            ...(detail?.delayMs !== undefined && detail.delayMs >= 0 ? { delayMs: detail.delayMs } : {}),
+            ...(detail?.noResponse ? { noResponse: true as const } : {})
+          })
+          noteRetry(attempt, maxAttempts, detail?.cause)
+        },
         progress: () => {
           providerProgress = true
           this.setTurnStep(session.threadId, undefined)
+          endRetries('recovered')
         },
         status: (status) => {
           // A runtime may name its session again once it writes; waiting is only before output.
@@ -14417,28 +14463,51 @@ export class OrchestratorService extends EventEmitter {
       }
       const previous = engineRunId ? this.runEngine?.previousBinding(session.threadId, engineRunId, binding.instanceId) : undefined
       const attemptOrdinal = engineRunId ? this.runEngine?.activeAttemptOrdinal(engineRunId) : undefined
-      const releaseCopies = this.secretCopiesForTurn(session.threadId, binding.driver)
       let result: Awaited<ReturnType<HarnessGateway['startTurn']>['result']>
       turnTimingMark(session.threadId, 'harness')
-      try {
-        result = await this.harness.startTurn({
-          binding,
-          ...(previous ? { previous } : {}),
-          ...(attemptOrdinal ? { attemptOrdinal } : {}),
-          input: turnInput,
-          sink: turnSink,
-          control: turnControl,
-          host: adapterHost,
-          ...(app ? { app } : {}),
-          // A bot turn: the activation's shared counts and spend (its instructions are in the preamble).
-          ...(opts?.bot ? {
-            counters: opts.bot.authority.counters,
-            ...(opts.bot.authority.spend ? { spend: opts.bot.authority.spend } : {})
-          } : {})
-        }).result
-      } finally {
-        // Copies held off for this turn come back once it has settled (a Claude Code turn holds none).
-        releaseCopies()
+      const firstRequestAt = Date.now()
+      // A request that failed for a passing reason before the provider answered, ran a tool or took a steer is sent
+      // again after a capped, spread-out wait (`turnRetryDelay`): nothing of it happened, so nothing is repeated. The
+      // run stays running meanwhile; a Stop ends the wait.
+      for (let retries = 0; ; retries += 1) {
+        const releaseCopies = this.secretCopiesForTurn(session.threadId, binding.driver)
+        let delay: number | undefined
+        try {
+          result = await this.harness.startTurn({
+            binding,
+            ...(previous ? { previous } : {}),
+            ...(attemptOrdinal ? { attemptOrdinal } : {}),
+            input: turnInput,
+            sink: turnSink,
+            control: turnControl,
+            host: adapterHost,
+            ...(app ? { app } : {}),
+            // A bot turn: the activation's shared counts and spend (its instructions are in the preamble).
+            ...(opts?.bot ? {
+              counters: opts.bot.authority.counters,
+              ...(opts.bot.authority.spend ? { spend: opts.bot.authority.spend } : {})
+            } : {})
+          }).result
+          break
+        } catch (error) {
+          delay = turn.abort.signal.aborted ? undefined : turnRetryDelay(error, {
+            retries,
+            elapsedMs: Date.now() - firstRequestAt,
+            answered: providerProgress || providerCompacted,
+            toolStarted: conversationToolsUsed,
+            steered: drains > 0 || acceptedDrains.size > 0 || takenDrains.size > 0,
+            runtimeRetried,
+            bot: Boolean(opts?.bot)
+          })
+          if (delay === undefined) throw error
+          logDebug('OrchestratorService', 'provider request failed before it was answered; trying again', error, { threadId: session.threadId, retry: retries + 1, delayMs: delay })
+          noteRetry(retries + 1, TURN_RETRY.attempts, turnRetryCause(error))
+          this.setTurnStep(session.threadId, { kind: 'retrying', attempt: retries + 1, maxAttempts: TURN_RETRY.attempts, delayMs: delay })
+        } finally {
+          // Copies held off for this turn come back once it has settled (a Claude Code turn holds none).
+          releaseCopies()
+        }
+        await waitOrAbort(delay, turn.abort.signal)
       }
       handoffs?.settle(result.aborted || turn.abort.signal.aborted ? 'aborted' : 'completed')
       assistantText = result.text
@@ -14459,7 +14528,7 @@ export class OrchestratorService extends EventEmitter {
       handoffs?.settle('failed', err instanceof Error ? err.message : String(err))
       if (!isAbort) {
         failureDiagnostic = errorDiagnostic(normalized, 'orchestrator.chat')
-        // A bot's failure reaches its owner only as a fixed line: the daemon log keeps what the provider said (redacted).
+        // A bot's owner sees the provider's redacted message on one capped line; the daemon log keeps the full cause.
         const cause = opts?.bot ? errorCauseText(normalized) : undefined
         if (cause) failureDiagnostic = { ...failureDiagnostic, cause }
       }
@@ -14469,11 +14538,11 @@ export class OrchestratorService extends EventEmitter {
       } else if (isRetriesExhausted(err) && !usageLimitOf(err)) {
         // A usage limit is never a connection failure, however often the provider's own retries met it: it pauses below.
         connectionFailed = true
-        providerError = serializeAppError(normalized)
+        providerError = withRetries(serializeAppError(normalized), pendingRetries)
         assistantText = ''
       } else {
         executionFailed = true
-        providerError = serializeAppError(normalized)
+        providerError = withRetries(serializeAppError(normalized), pendingRetries)
         // A plan usage limit pauses the run (it is not an error the run can retry now); once the
         // limit was hit again after the cap, it fails with a message that says why.
         const limit = opts?.bot || opts?.schedule ? undefined : this.usageLimitDecision(err, engineRunId)
@@ -14503,6 +14572,10 @@ export class OrchestratorService extends EventEmitter {
       opts?.externalSignal?.removeEventListener('abort', mirrorExternalAbort)
       // The turn remains active until post-stream persistence/actions finish.
     }
+
+    // The retry row ends with the provider's turn: stopped, or the provider got the request in the end. A failure turns
+    // it into the turn's error line instead (below), so the retries and their outcome stay one row.
+    if (!providerError || usagePause) endRetries(aborted || turn.abort.signal.aborted ? 'stopped' : 'recovered')
 
     let turnSettled = false
     const settleOnce = (wasAborted: boolean, failed = false, paused = false): void => {
@@ -14566,8 +14639,18 @@ export class OrchestratorService extends EventEmitter {
         : undefined
       this.transcript.abandonAssistant(this.transcript.openAssistantContent() ?? '', false)
       const message = providerFailureText(providerError)
-      this.addSystemMessage(message)
-      const failure = this.messages.at(-1)!
+      const failure = retryRow ?? (this.addSystemMessage(message), this.messages.at(-1)!)
+      if (failure === retryRow) {
+        // The retries ran out: their row is the turn's error now, where they were counted.
+        retryRow = undefined
+        pendingRetries = undefined
+        delete failure.kind
+        delete failure.providerRetry
+        delete failure.streaming
+        failure.role = 'system'
+        failure.content = message
+        failure.timestamp = new Date().toISOString()
+      }
       failure.error = providerError
       this.emitMessageUpdated(failure)
       // A bot turn is never retried as a plain turn (Retry is refused on its thread too).

@@ -71,6 +71,14 @@ describe('codexProviderError (any Codex)', () => {
     expect(error.message.length).toBeLessThanOrEqual(506)
   })
 
+  it('a refused or dropped connection with no status is the provider being unreachable, with what Codex said', () => {
+    for (const codexErrorInfo of [{ httpConnectionFailed: { httpStatusCode: null } }, { responseStreamDisconnected: { httpStatusCode: null } }]) {
+      const error = codexProviderError(failure({ message: 'error sending request for url (http://127.0.0.1:9841/v1/responses): Connection refused (os error 61)', codexErrorInfo } as Partial<TurnError>))
+      expect(error).toMatchObject({ code: 'provider_unavailable', errorInfo: { category: 'unavailable', retryable: true }, details: { provider: 'codex' } })
+      expect(error?.message).toContain('Connection refused')
+    }
+  })
+
   it('is undefined without an error status, and for a context overflow', () => {
     expect(codexProviderError(failure({ message: 'Upstream overloaded', codexErrorInfo: null }))).toBeUndefined()
     expect(codexProviderError(failure({ message: 'unexpected status 400 Bad Request: context window exceeded', codexErrorInfo: 'contextWindowExceeded' }))).toBeUndefined()

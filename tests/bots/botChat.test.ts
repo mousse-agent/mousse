@@ -210,7 +210,7 @@ describe('bots.chat.send', () => {
     await finish(f, stopped.payload, 'interrupted', { outcome: { interruptedBy: 'user' } })
     expect(f.afterDispatch.map((entry) => entry.endedBy)).toEqual(['settled', 'wall', 'failed', 'stopped'])
     expect(f.afterDispatch.every((entry) => entry.lane === 'chat' && entry.threadId === home())).toBe(true)
-    // A chat failure says so in plain words, without the provider's message.
+    // A chat failure that is not the provider's says so in plain words.
     expect(chatOf(f, botId).some((message) => message.kind === 'error' && message.error?.text === 'Something went wrong, so I stopped. Try again.')).toBe(true)
   })
 

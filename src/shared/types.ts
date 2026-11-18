@@ -3,6 +3,7 @@ import type { AppletReference } from './applets'
 import type { ModelOverride } from './providerInstances'
 import type { ThreadPullRequestLink } from './pullRequests'
 import type { PermissionMode } from './permissionMode'
+import type { ProviderRetryState } from './providerRetry'
 export type { PermissionMode } from './permissionMode'
 export type { GitPullRequestInfo, GitPullRequestLookup, PullRequestCheckState } from './pullRequests'
 export type MainView = 'browser' | 'terminal' | 'files' | 'git' | 'pullRequest' | 'documents'
@@ -996,6 +997,13 @@ export interface ChatMessage {
     | 'context_cleared'
     /** Presentation-only model transition; never injected into provider context. */
     | 'context_handoff'
+    /**
+     * Presentation-only row of a turn's failed provider requests and their retries (`providerRetry`); never injected
+     * into provider context. When the retries run out it becomes the turn's error line.
+     */
+    | 'provider_retry'
+  /** A `provider_retry` row's state. */
+  providerRetry?: ProviderRetryState
   /** Selection actually admitted for this user turn, independent of composer edits. */
   /** The model the message's turn ran (older messages carry the level packed into `model`). */
   modelSelection?: MessageModelSelection

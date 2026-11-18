@@ -48,7 +48,7 @@ type CapturedRow = BotJournalInput & { at: string }
 
 /** Presentation-only rows and hidden reasoning: never journaled. */
 const SKIPPED_KINDS: ReadonlySet<string> = new Set([
-  'thinking', 'progress', 'warning', 'context_compaction', 'context_cleared', 'context_handoff', 'plan_card', 'skill_loaded'
+  'thinking', 'progress', 'warning', 'context_compaction', 'context_cleared', 'context_handoff', 'plan_card', 'skill_loaded', 'provider_retry'
 ])
 const CALL_KINDS: ReadonlySet<string> = new Set(['tool_call', 'mcp_tool_call', 'build_tool_call'])
 const RESULT_KINDS: ReadonlySet<string> = new Set(['mcp_tool_result', 'build_tool_result'])
