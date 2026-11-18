@@ -832,7 +832,7 @@ NULL `owner_set` means set before v10 (or by an older writer) and preserves toda
 
 ### Asks first
 
-Ordinary questions and approvals have no default timeout (#1481). Held-call cards keep their separate deadlines below; that policy is unchanged.
+Thread questions and tool approvals have no default timeout (#1481). A bot’s own question can still take the default it named. Held-call cards keep their separate deadlines below; that policy is unchanged.
 
 Turning the switch off withdraws every open card and accepted call that has not started running, together in one transaction, at startup, on a settings change or on upkeep. Its chat row says Not sent. The work is told: “This could not wait for your owner after all, so nothing was sent. Do not make this call again in this work; say in your report what you would have sent.” Running calls finish. With no rows, the switch-off path changes nothing. Chat turns are not offered MCP tools. A run started by hand cannot hold a call: it is told, “A run started by hand can't wait for your owner. Say in your report what you would have sent.”
 
