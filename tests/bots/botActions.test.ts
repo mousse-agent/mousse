@@ -3906,3 +3906,23 @@ it('a declined schedule call frames leftOff as something to try again and a skip
   await finish(f, next.payload, 'completed', { text: 'Skipped the declined email.' })
   expect(f.store.all("SELECT text FROM bot_messages WHERE activation_id = ? AND kind = 'run_report'", id)).toEqual([expect.objectContaining({ text: 'Skipped the declined email.' })])
 })
+
+it('a successful scheduled retry clears the old decline for later quiet runs', async () => {
+  const t = await scheduledCall(true, 1)
+  await t.call(); await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' }); await flush()
+  const resumed = await start(f, t.id, 2); await finish(f, resumed.payload)
+  f.clock.now += 60_000
+  const retryDue = await f.tickSchedules(new Date(f.clock.now)), retryId = retryDue.inserted[0]!
+  const retry = await start(f, retryId)
+  await callForBot({ bot: retry.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'retry', signal: new AbortController().signal })
+  await finish(f, retry.payload)
+  const card = f.bots.actions.forWork(retryId)!
+  await f.bots.actions.answer({ actionId: card.id, digest: card.args_digest, answer: 'send' }); await flush()
+  const sent = await start(f, retryId, 2); await finish(f, sent.payload)
+  f.clock.now += 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now)), id = due.inserted[0]!
+  const next = await start(f, id)
+  expect(f.automationRuns.report({ threadId: next.payload.threadId, activationId: id }, 'quiet', 'Nothing new.').level).toBe('quiet')
+})
