@@ -5771,9 +5771,12 @@ export class OrchestratorService extends EventEmitter {
    * with "use your threads" (`botSenderOf`), as its message does: in the thread's own mode, or no wider than the device
    * its owner wrote from, labelled as the bot's words.
    */
-  private async steerRunAsAgent(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult> {
+  private async steerRunAsAgent(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor; tool?: 'thread_steer' | 'thread_send' }): Promise<AgentRunCommandResult> {
     const engine = this.requireRunEngine()
-    const bot = options.actor.remote ? undefined : this.botSenderOf(options.actor, 'thread_steer')
+    const bot = options.actor.remote ? undefined : this.botSenderOf(options.actor, options.tool ?? 'thread_steer')
+    // A steer settles what waits on the owner there (a question, an approval): a bot leaves those to them, with the same
+    // words as a message it may not send.
+    if (bot && this.awaitsAnswer(threadId)) return { status: 'rejected', reason: 'questions_pending' }
     let sender: AgentActor
     try {
       sender = bot ? botSenderHops(options.actor) : this.withAgentHops(options.actor)

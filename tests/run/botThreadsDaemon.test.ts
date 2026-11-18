@@ -183,6 +183,12 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     // A steer goes through to the engine as the bot's (no `bot_thread` refusal): here there is no such run to steer.
     const steered = await s.steerRunAsAgent(target.id, 'run-none', 'Use staging.', { clientRequestId: `thread_steer:${w.chat.id}:s1`, actor: w.actor })
     expect(steered.reason).not.toBe('bot_thread')
+    // A steer, or a message that joins the running turn, never settles a question waiting on the owner.
+    const waiting = w.d.store.createThread('Waiting', w.project.id)
+    void w.orch.questions.requestAnswers([{ id: 'q', prompt: 'Which?', options: [{ id: 'a', label: 'A' }] }], waiting.id, {})
+    for (const tool of ['thread_steer', 'thread_send'])
+      expect(await s.steerRunAsAgent(waiting.id, 'run-none', 'Use staging.', { clientRequestId: `${tool}:${w.chat.id}:w1`, actor: w.actor, tool })).toEqual({ status: 'rejected', reason: 'questions_pending' })
+    expect(w.orch.questions.listPendingForThread(waiting.id)).toHaveLength(1)
     // Its scheduled jobs run in Full access, or no wider than its owner's device; a turn that may not act gets Ask.
     expect(s.scheduledCreatorLimits({ threadId: w.chat.id, runId: w.actor.runId })).toEqual({ permissionCeiling: 'full' })
 

@@ -502,8 +502,11 @@ export interface AppToolHost extends DelegationToolsHost {
    * for the run's next Mousse tool call), or neither; null when the thread's runtime is not known.
    */
   steerStrategyOf?(threadId: string): SteerStrategy | null
-  /** Steers run `runId` of another thread with `text` as `actor`'s message (`thread_steer`). */
-  steerRun?(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<AgentRunCommandResult>
+  /**
+   * Steers run `runId` of another thread with `text` as `actor`'s message (`thread_steer`, and a personal bot's
+   * `thread_send` to a working thread). `tool` is the bot tool the call came from, for its grant (default `thread_steer`).
+   */
+  steerRun?(threadId: string, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor; tool?: 'thread_steer' | 'thread_send' }): Promise<AgentRunCommandResult>
   /** The profile's scheduled jobs (`schedule_*`); absent: the host registers no schedule tools. */
   schedules?: AgentScheduleHost
   /** Automation drafts (`automation_*`), read at every call: the Automation manager's and granted bots' tools. */
