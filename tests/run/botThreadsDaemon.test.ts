@@ -22,7 +22,7 @@ import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { AgentActor } from '../../src/mms/run/types'
 import type { EventEmitter } from 'node:events'
 import { launchedThreadsIn, watchLaunchedThreads } from '../../src/mms/bots/launchedThreads'
-import { launchedActive } from '../../src/shared/bots/personal/chat'
+import { BOT_LAUNCHED_RECENT_MS, launchedActive } from '../../src/shared/bots/personal/chat'
 import { appTurn } from './appToolsFixture'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
@@ -571,6 +571,12 @@ describe('a bot\'s threads in the service ("use your threads")', () => {
     expect(w.d.store.getThread(made.threadId)?.settledAt).toBeTruthy()
     expect(managed([w.chat.id]).map((thread) => [thread.threadId, launchedActive(thread)])).toEqual([[made.threadId, false]])
     expect(changed.length).toBeGreaterThan(seen)
+    // Its Recent list leaves the archived thread out at once; unarchived, it is back.
+    const recent = () => launchedThreadsIn({ threads: w.d.store, engine: w.d.engine, asks: () => false }, new Set([w.chat.id]), { doneSince: new Date(Date.now() - BOT_LAUNCHED_RECENT_MS).toISOString() })
+      .map((thread) => thread.threadId)
+    expect(recent()).toEqual([])
+    await w.archive(made.threadId, false)
+    expect(recent()).toEqual([made.threadId])
     unwatch()
   })
   it('a thread it starts that a usage limit paused keeps it busy while the pause ends by itself, and is on hold for the owner, not managed, once only Resume now ends it; each change tells its chat thread', async () => {

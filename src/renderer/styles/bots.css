@@ -552,12 +552,12 @@ html[data-theme] .bot-prompt-card textarea.bot-prompt-field { background: transp
 .bot-thread-show { position: absolute; right: 4px; bottom: 3px; display: grid; place-items: center; width: 22px; height: 20px; border-radius: 6px; color: var(--text-secondary); opacity: .75; }
 .bot-thread-show:hover:not(:disabled) { opacity: 1; background: color-mix(in srgb, var(--text-secondary) 14%, transparent); color: var(--text-primary); }
 .bot-thread-show:disabled { opacity: .4; cursor: default; }
-.bot-thread-fold { display: flex; align-items: center; gap: 4px; width: 100%; padding: 4px 8px 2px; border-radius: 6px; font-size: 11px; color: var(--text-secondary); text-align: left; }
-.bot-thread-fold:hover { color: var(--text-primary); }
-.bot-thread-fold svg { flex: none; transition: transform 150ms ease-out; }
-.bot-thread-fold svg[data-open] { transform: rotate(90deg); }
+/* "Recent": the threads that finished in the last six hours; "See all" lists every one in the sidebar. */
+.bot-thread-recent { display: flex; gap: 5px; margin-top: 8px; }
 .bot-thread-count { font-variant-numeric: tabular-nums; opacity: .8; }
-@media (prefers-reduced-motion: reduce) { .bot-thread-fold svg { transition: none; } }
+/* "See all" stays at the panel's bottom edge while a long Recent list scrolls under it (5px: the panel's padding). */
+.bot-thread-all { position: sticky; bottom: -5px; flex: none; display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; margin: 4px 0 -5px; padding: 7px 8px 10px; border-top: 1px solid var(--ui-line); border-radius: 0 0 7px 7px; background: var(--ui-raised, var(--surface-soft)); font-size: var(--bot-meta); color: var(--text-secondary); }
+.bot-thread-all:hover { color: var(--text-primary); }
 
 /* What waits on the owner (an open ask, the bot's error), pinned above the composer as one line each; a click shows
    the full message. */

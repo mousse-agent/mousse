@@ -48,6 +48,7 @@ const { ChatWorkspace } = await import('../../src/renderer/components/chats/Chat
 const { useChatsStore, OPEN_BOT_HOLD_MS } = await import('../../src/renderer/stores/chatsStore')
 const { ChatsSidebar } = await import('../../src/renderer/components/chats/ChatsSidebar')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
+const { useThreadFilterStore } = await import('../../src/renderer/stores/threadFilterStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 const { botMessageScroller, DOING_HOLD_MS } = await import('../../src/renderer/components/bots/BotChatView')
 const { SETTLE_MS, clearBotLiveReplies } = await import('../../src/renderer/stores/botLiveReplies')
@@ -1823,25 +1824,24 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     const rows = () => [...host.querySelectorAll('.bot-thread-line')].map((row) => [row.querySelector('.bot-thread-title')!.textContent, row.querySelector('.bot-thread-state')!.textContent, row.getAttribute('data-tone')])
     const keydown = async (key: string) => { await act(async () => { (document.activeElement as HTMLElement).dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })) }); await act(async () => {}) }
 
-    it('lists working threads first, then those waiting on you, each with its state, project and last update; the rest fold under Done', async () => {
+    const recent = () => host.querySelector('.bot-thread-recent')?.textContent
+
+    it('lists working threads first, then those waiting on you, each with its state, project and last update; the rest under Recent', async () => {
       await open({ ...inbox, state: 'working', stateText: 'Managing 2 threads', threads })
       expect(presence().textContent).toBe('Managing 2 threads')
       await click(presence())
-      expect(rows()).toEqual([['Dictation', 'working', 'working'], ['Typing dots', 'waiting on you', 'waiting']])
+      expect(rows().slice(0, 2)).toEqual([['Dictation', 'working', 'working'], ['Typing dots', 'waiting on you', 'waiting']])
       expect(host.querySelector('.bot-thread-meta')!.textContent).toBe('Mousse · updated 1m ago')
-      const fold = host.querySelector<HTMLButtonElement>('.bot-thread-fold')!
-      expect([fold.textContent, fold.getAttribute('aria-expanded')]).toEqual(['Done4', 'false'])
-      await click(fold)
+      expect(recent()).toBe('Recent4')
       expect(rows().slice(2)).toEqual([['Never ran', 'idle', 'idle'], ['Broken', 'failed', 'failed'], ['Halted', 'stopped', 'failed'], ['Old run', 'done', 'done']])
     })
 
-    it('a thread on hold for the owner is listed as waiting on you while the bot reads free, and the rest fold under Done', async () => {
+    it('a thread on hold for the owner is listed as waiting on you while the bot reads free, and the rest under Recent', async () => {
       await open({ ...inbox, state: 'idle', stateText: 'Done.', threads: [thread('t8', 'Fix login', 'on_hold', 20), thread('t3', 'Old run', 'done', 90)] })
       expect(presence().textContent).toBe('free')
       await click(presence())
-      expect(rows()).toEqual([['Fix login', 'waiting on you', 'waiting']])
-      const fold = host.querySelector<HTMLButtonElement>('.bot-thread-fold')!
-      expect([fold.textContent, fold.getAttribute('aria-expanded')]).toEqual(['Done1', 'false'])
+      expect(rows()).toEqual([['Fix login', 'waiting on you', 'waiting'], ['Old run', 'done', 'done']])
+      expect(recent()).toBe('Recent1')
     })
 
     it('opens a thread from its row, moves along the list with the arrow keys, and closes on Escape or a click away', async () => {
@@ -1884,11 +1884,47 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       expect(opened.ids).toEqual(['t7'])
     })
 
-    it('a free bot whose threads all ended still opens their list, Done unfolded', async () => {
+    it('a free bot whose threads all ended still opens their list', async () => {
       await open({ ...inbox, threads: threads.filter((item) => item.status === 'done' || item.status === 'failed') })
       expect(presence().textContent).toBe('free')
       await click(presence())
       expect(rows().map(([title]) => title)).toEqual(['Broken', 'Old run'])
+    })
+
+    it('Recent lists only threads updated in the last six hours, counts just those, and one drops off while the list is open', async () => {
+      const hours = 6 * 60
+      await open({ ...inbox, threads: [thread('t1', 'Fresh', 'done', 10), thread('t2', 'Turning stale', 'failed', hours - 1), thread('t3', 'This morning', 'done', hours + 5)] })
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
+      try {
+        await click(presence())
+        expect(recent()).toBe('Recent2')
+        expect(rows().map(([title]) => title)).toEqual(['Fresh', 'Turning stale'])
+        // Two minutes on, the list's clock ticks and the thread that turned six hours old leaves; the count follows.
+        await act(async () => { vi.advanceTimersByTime(120_000) })
+        expect(recent()).toBe('Recent1')
+        expect(rows().map(([title]) => title)).toEqual(['Fresh'])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it("See all counts the threads it started that are not archived, and opens the sidebar's Threads tab filtered to it", async () => {
+      const started = (id: string, over: Record<string, unknown> = {}) => ({ id, name: id, createdAt: ago(600), updatedAt: ago(600), startedByBot: { botId: inbox.id, name: inbox.name }, hidden: true as const, ...over })
+      useAppStore.setState({ threads: [started('s1'), started('s2'), started('s3', { settledAt: ago(500) }), started('s4', { lineage: { parentThreadId: 's1' } })] as never, threadsSidebarView: 'projects', sidebarMode: 'threads' })
+      try {
+        // Nothing works and nothing is recent, yet the line opens: See all is there.
+        await open({ ...inbox, threads: [] })
+        await click(presence())
+        const all = host.querySelector<HTMLButtonElement>('.bot-thread-all')!
+        expect(all.textContent).toBe('See all 2 threads')
+        await click(all)
+        expect(host.querySelector('.bot-work')).toBeNull()
+        expect(useThreadFilterStore.getState().botId).toBe(inbox.id)
+        expect(useAppStore.getState().threadsSidebarView).toBe('threads')
+      } finally {
+        useAppStore.setState({ threads: appInitial.threads, threadsSidebarView: appInitial.threadsSidebarView, sidebarMode: appInitial.sidebarMode })
+        useThreadFilterStore.setState(useThreadFilterStore.getInitialState(), true)
+      }
     })
 
     it('a thread it starts while the bot list is being read shows in the open chat without leaving it', async () => {

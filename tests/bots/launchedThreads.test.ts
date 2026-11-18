@@ -55,6 +55,36 @@ describe('a thread the bot started, while its subagents still work', () => {
   })
 })
 
+// The bot's "Recent" list (`doneSince`, six hours back in the app): an archived thread leaves it at once and one not updated
+// since drops off, so it no longer reads "Done 30" forever. What still goes is listed whatever its age; a job's ledger (no `doneSince`) still
+// reads an archived or old thread.
+describe("the bot's Recent list", () => {
+  const SINCE = '2026-11-14T10:00:00.000Z'
+  const OLD = '2026-11-14T09:59:59.999Z'
+  const meta = (id: string, more: Partial<LaunchedThreadMeta> = {}): LaunchedThreadMeta => ({ id, name: id, createdAt: OLD, updatedAt: NOW, createdByThreadId: 'home', ...more })
+  const rows: Array<[string, LaunchedThreadMeta, RunRecord['status'] | undefined, boolean]> = [
+    ['an ended thread updated since is listed', meta('recent'), undefined, true],
+    ['an ended thread updated exactly then is listed', meta('edge', { updatedAt: SINCE }), undefined, true],
+    ['an ended thread updated before is not', meta('stale', { updatedAt: OLD }), undefined, false],
+    ['a thread that never ran, made before, is not', meta('never', { updatedAt: undefined }), undefined, false],
+    ['an archived thread is not, however recent', meta('archived', { settledAt: NOW }), undefined, false],
+    ['a thread still working is listed however old', meta('working', { updatedAt: OLD }), 'running', true]
+  ]
+  const list = (thread: LaunchedThreadMeta, own: RunRecord['status'] | undefined, doneSince?: string) => launchedThreadsOf({
+    creators: new Set(['home']),
+    threads: [thread],
+    activeRuns: own ? [run(thread.id, own)] : [],
+    lastRun: (id) => (id === thread.id ? run(id, 'completed') : undefined),
+    asks: () => false,
+    standing: () => 'goes',
+    ...(doneSince ? { doneSince } : {})
+  }).map((listed) => listed.threadId)
+  it.each(rows)('%s', (_name, thread, own, shown) => {
+    expect(list(thread, own, SINCE)).toEqual(shown ? [thread.id] : [])
+    expect(list(thread, own)).toEqual([thread.id])
+  })
+})
+
 // A queued run nothing will start (its turn.start already came and went, as a bot's message to a thread on 15 Nov did)
 // never makes the thread go: the bot is not "Managing" a thread that sits idle. One that will start still counts.
 describe('a thread the bot started, with a queued run', () => {
