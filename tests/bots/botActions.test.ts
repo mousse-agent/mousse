@@ -4044,7 +4044,7 @@ async function aloneNext(t: Awaited<ReturnType<typeof aloneAsk>>, args = t.args)
 }
 it('E1 Allow lets only the same schedule destination run on the action ledger without a card', async () => {
   const t = await aloneAsk()
-  expect(f.bots.service.detail(t.botId).permissions.find(p => p.id.startsWith('alone:'))).toMatchObject({ enabled: undefined })
+  expect(f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))).toMatchObject({ enabled: undefined })
   const next = await aloneNext(t)
   expect(next.result.text).toContain('delivered')
   expect(next.action).toMatchObject({ status: 'done', card_json: null, exec_args: null })
@@ -4063,7 +4063,7 @@ it.each(['place', 'schema', 'config', 'off', 'hour', 'day', 'removed'] as const)
   if (change === 'schema') t.descriptor.inputSchema.properties.extra = { type: 'string' } as never
   if (change === 'config') t.server.configDigest = 'new-config'
   if (change === 'removed') {
-    const item = f.bots.service.detail(t.botId).permissions.find(p => p.id.startsWith('alone:'))!
+    const item = f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))!
     f.bots.service.revokePermission(t.botId, item.id)
   }
   if (change === 'off') f.host.settings!.get().experimental.botAsksFirstOff = true
@@ -4075,10 +4075,28 @@ it.each(['place', 'schema', 'config', 'off', 'hour', 'day', 'removed'] as const)
   const next = await aloneNext(t, args)
   if (change === 'off') { expect(next.action).toBeUndefined(); return }
   expect(next.action.status).toBe('open')
-  if (change === 'schema' || change === 'config') expect(f.bots.service.detail(t.botId).permissions.find(p => p.id.startsWith('alone:'))?.mark).toBe('Changed')
+  if (change === 'schema' || change === 'config') expect(f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))?.mark).toBe('Changed')
   if (change === 'hour' || change === 'day') {
     expect(next.action.card_json).toContain('too?')
     await f.bots.actions.answer({ actionId: next.action.id, digest: next.action.args_digest, answer: 'send' })
     expect(f.bots.actions.get(next.action.id)?.status).toBe('done')
   }
+})
+it('E1 a scheduled turn cannot ask for standing authority', async () => {
+  const t = await scheduledCall()
+  expect(t.run.prepared.authority.escalate!({ permission: { ask: 'let_alone', scheduleId: t.schedule.scheduleId, serverId: 'mail', tool: 'send' } as never, reason: 'alone' })).toBe('Only when your owner asks for it in their own message.')
+  expect(f.store.openAsks(t.botId)).toEqual([])
+})
+it('E1 revocation before dispatch invalidates an already approved automatic call', async () => {
+  const t = await aloneAsk()
+  const execute = vi.spyOn(f.host.mcp!, 'call')
+  const next = await aloneNext(t)
+  expect(execute).toHaveBeenCalledTimes(1)
+  expect(next.action.status).toBe('done')
+  const item = f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))!
+  f.bots.service.revokePermission(t.botId, item.id)
+  f.store.run("UPDATE bot_actions SET status = 'approved', exec_args = ?, result_json = NULL WHERE id = ?", JSON.stringify(t.args), next.action.id)
+  await f.bots.actions.retryApproved()
+  expect(execute).toHaveBeenCalledTimes(1)
+  expect(f.bots.actions.get(next.action.id)?.status).toBe('withdrawn')
 })
