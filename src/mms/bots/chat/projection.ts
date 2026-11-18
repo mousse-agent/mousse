@@ -485,14 +485,15 @@ export class BotChatProjection {
     const mcp = 'mcp' in escalation.permission ? escalation.permission.mcp : undefined
     const tools = mcp ? mcpAskTools(mcp) : []
     const more = mcp?.unusable ? `${mcp.unusable} more of ${mcp.name ? `${mcp.name}'s` : 'its'} tools can't be used by a bot.` : undefined
+    const asks = this.options.asksFirst?.() && mcp && tools.some(tool => {
+      const where = this.options.mcpWhere?.(mcp.serverId)
+      const server = where?.state === 'on' || where?.state === 'changed' ? where.server : undefined
+      return asksFirstFor({ tool, serverName: [server?.name ?? mcp.name ?? '', server?.installationId ?? installationOf(mcp.serverId)], readOnlyHint: server?.tools.find(t => t.tool === tool)?.readOnlyHint })
+    })
     return {
       askId: escalation.id,
       title: text.title,
-      note: text.note + (this.options.asksFirst?.() && mcp && tools.some(tool => {
-        const where = this.options.mcpWhere?.(mcp.serverId)
-        const server = where?.state === 'on' || where?.state === 'changed' ? where.server : undefined
-        return asksFirstFor({ tool, serverName: [server?.name ?? mcp.name ?? '', server?.installationId ?? installationOf(mcp.serverId)], readOnlyHint: server?.tools.find(t => t.tool === tool)?.readOnlyHint })
-      }) ? ' Some of these tools send or change things; those ask you before each use.' : ''),
+      note: asks ? 'Tools that may send or change things ask before each use. Tools that say they only read do not ask.' : text.note,
       ...(tip ? { tip } : {}),
       status: cardStatus(escalation.status),
       kind: isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission',
