@@ -1516,7 +1516,7 @@ it.each([true, false].flatMap(on => ['work', 'subagent'].map(caller => ({ on, ca
   expect(t.calls).toEqual(on ? [] : [t.args])
 })
 
-it('C4 service projects the complete stored review and settled results behind the switch', async () => {
+it('C4 service projects stored reviews even after the switch is turned off', async () => {
   const t = await setup(true)
   t.args.body = 'Long outside text <b>not markup</b>\u202e '.repeat(2000)
   Object.assign(t.args, { password: 'hidden-password', meta: { $mousse: 'hidden', text: 'hidden · will be sent' } })
@@ -1532,7 +1532,7 @@ it('C4 service projects the complete stored review and settled results behind th
     expect(card()).toMatchObject({ status, result: { text: 'masked answer', toolReportedError: true } })
   }
   f.host.settings!.get().experimental.botAsksFirst = false
-  expect(card()).toBeUndefined()
+  expect(card()).toMatchObject({ actionId: a.id, status: 'withdrawn' })
 })
 
 // Duplicate actions: same bot across work and schedules; only outcomes reaching the server count.
