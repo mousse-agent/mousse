@@ -267,3 +267,19 @@ it('refuses only the MCP server naming a bound key, and does not report that ref
   expect(missingReferences({TOKEN: '${secret:BOUND}'}, secrets)).toEqual(['secret:BOUND'])
   expect(JSON.stringify(result)).not.toContain('private-fixture-value')
 })
+it('marks a discovered server naming a bound key unavailable while leaving its neighbour configured', async () => {
+  const {McpRegistry} = await import('../src/mms/integrations/mcp/McpRegistry')
+  const {getManagedMcpConfigPath} = await import('../src/mms/integrations/nativePaths')
+  const root = temp()
+  const vault = new SecretVault({profileRoot: root, threadAlive: () => true})
+  vault.store('BOUND', 'private-fixture-value', {threadId: 'bot', keep: 'saved', binding: resolveSecretBinding({service: 'github'})})
+  const secrets = createProfileSecretAdapter({profileRoot: root, inheritProcessEnv: false})
+  const registry = new McpRegistry({profileId: 'e3', profileRoot: root, secrets})
+  await registry.writeManagedMcpConfig(getManagedMcpConfigPath(root), {version: 1, servers: {
+    bound: {id: 'e3-bound', name: 'e3-bound', command: 'must-not-start', env: {TOKEN: '${secret:BOUND}'}},
+    healthy: {id: 'e3-healthy', name: 'e3-healthy', command: 'healthy-mcp'}
+  }})
+  const snapshot = await registry.discover()
+  expect(snapshot.servers.find(server => server.name === 'e3-bound')).toMatchObject({status: 'missing-env', missingEnvVars: ['secret:BOUND']})
+  expect(snapshot.servers.find(server => server.name === 'e3-healthy')?.status).toBe('configured')
+})
