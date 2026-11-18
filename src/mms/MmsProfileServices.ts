@@ -1,3 +1,4 @@
+import { workWaits } from './bots/store/BotStore'
 import { tellMeOf } from '../shared/types'
 import { OwnerQuietHours } from './notifications/OwnerQuietHours'
 import { onSettingsSaved } from './settings/SettingsStore'
@@ -2074,7 +2075,7 @@ export class MmsProfileServices {
       try {
         const row = store.activation(open.activationId)
         if (!row || row.botId !== open.botId || row.trigger.kind !== 'schedule') continue
-        runs.syncBotRuns(open.jobId, [{ id: row.id, status: row.status, at: row.createdAt,
+        runs.syncBotRuns(open.jobId, [{ id: row.id, status: workWaits(row) ? 'running' : row.status, at: row.createdAt,
           ...(row.endedAt ? { endedAt: row.endedAt } : {}), ...(row.endReason ? { endReason: row.endReason } : {}),
           ...(row.threadId ? { threadId: row.threadId } : {}) }])
       } catch {
