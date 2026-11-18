@@ -14,10 +14,10 @@ it('stored asks-first is a floor even with a read-only hint', () => {
   expect(asksFirstFor({ tool: 'list', serverName: 'Mail', readOnlyHint: true, storedLevel: 'asks_first' })).toBe(true)
 })
 
-it('asks first defaults on but an explicit false keeps the support rollback', async () => {
+it('asks first defaults on but the new support lever turns it off', async () => {
   const { getDefaultSettings, normalizeExperimentalSettings } = await import('../../src/shared/settings')
-  expect(getDefaultSettings().experimental.botAsksFirst).toBe(true)
-  expect(normalizeExperimentalSettings({ botAsksFirst: false }).botAsksFirst).toBe(false)
+  expect(getDefaultSettings().experimental.botAsksFirstOff).toBe(false)
+  expect(normalizeExperimentalSettings({ botAsksFirstOff: true }).botAsksFirstOff).toBe(true)
 })
 
 it('turns on a profile saved with master defaults and only honors the new support lever', async () => {

@@ -142,7 +142,7 @@ describe('the ledger in the bot engine', () => {
     const jobId = await handOff('Fix the login page in project Web', 't3', 'm3')
     expect(f.bots.openJob(botId, f.store.listActivations(botId).at(-1)!.id, { threadId: 't3', title: 'Fix the login page', sent: 'Also the logout.' }).jobId).toBe(jobId)
 
-    const settings = getDefaultSettings(); settings.experimental.botAsksFirst = true
+    const settings = getDefaultSettings(); settings.experimental.botAsksFirstOff = false
     f.host.settings = { get: () => settings } as never
     await f.bots.service.pause(botId)
     threads.set('t3', { status: 'done', title: 'Fix the login page', result: 'Done.' })
@@ -240,7 +240,7 @@ describe('the ledger in the bot engine', () => {
     expect(messageTurns()).toHaveLength(6)
 
     // A paused bot reads no messages: the thread is told, and no turn starts.
-    const settings = getDefaultSettings(); settings.experimental.botAsksFirst = true
+    const settings = getDefaultSettings(); settings.experimental.botAsksFirstOff = false
     f.host.settings = { get: () => settings } as never
     await f.bots.service.pause(botId)
     await expect(f.bots.threadMessage(botId, 't7', { message: 'Hello?', title: 'Other', requestKey: 'p1', maxWaiting: 3 })).rejects.toMatchObject({ code: 'bot_paused' })

@@ -14,7 +14,7 @@ import type { ToolOutcome } from '../../run/mcp/appTools/types'
 
 /** The sole feature-switch read. The file setting remains a support rollback. */
 export function botAsksFirst(settings?: Pick<MousseSettings, 'experimental'>): boolean {
-  return settings?.experimental.botAsksFirst === true
+  return Boolean(settings && settings.experimental.botAsksFirstOff !== true)
 }
 export function readableActionTitle(name: string): string {
   const words = plainText(name, 160).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_ .:/-]+/g, ' ').trim()

@@ -437,14 +437,14 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
  * always has (`workspace` isolated or shared). Either way a subagent's work is reported, never merged.
  */
 export interface ExperimentalSettings {
-  botAsksFirst: boolean
+  botAsksFirstOff: boolean
   subagentWorktrees: boolean
   /** The profiler (Settings → Labs). */
   profiler: ProfilerSettings
 }
 
 export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings> | null): ExperimentalSettings {
-  return { botAsksFirst: raw?.botAsksFirst !== false, subagentWorktrees: raw?.subagentWorktrees === true, profiler: normalizeProfilerSettings(raw?.profiler) }
+  return { botAsksFirstOff: raw?.botAsksFirstOff === true, subagentWorktrees: raw?.subagentWorktrees === true, profiler: normalizeProfilerSettings(raw?.profiler) }
 }
 
 /** A worktree folder the person chose, and the id written in its marker (`.mousse-worktrees.json`) when it was chosen. */

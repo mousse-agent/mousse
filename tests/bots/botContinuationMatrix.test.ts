@@ -120,7 +120,7 @@ it.each([false, true].flatMap(hasWaited => [
 
 // Real schedule activations and stored action outcomes drive the ordered continuation path.
 it.each(actionLines)('schedule stored outcome %s shares the ordered continuation', async (status, line) => {
-  const settings = getDefaultSettings(); settings.experimental.botAsksFirst = true
+  const settings = getDefaultSettings(); settings.experimental.botAsksFirstOff = false
   f.host.settings = { get: () => settings } as never
   const mcp = new BotMcp({ enabled: () => true, catalog: {
     ensure: async () => undefined,

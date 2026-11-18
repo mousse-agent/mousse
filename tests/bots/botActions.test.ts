@@ -37,7 +37,7 @@ afterEach(async () => { f?.close(); await Promise.all(connections.splice(0).map(
 async function setup(on: boolean, realServer = false, secondTool = false, threads = false, ownerTools = false, realContext = false) {
   f = botFixture()
   const settings = getDefaultSettings()
-  settings.experimental.botAsksFirst = on
+  settings.experimental.botAsksFirstOff = !on
   f.host.settings = { get: () => settings, set: () => undefined } as never
   const calls: unknown[] = []
   const descriptor = { configRevision: 'revision-1', toolName: 'send', providerName: 'mail_send', inputSchema: { type: 'object', properties: Object.fromEntries(['password', 'token', 'access_token', 'client_secret', 'authorization', 'api_key', 'pin_password'].map(key => [key, { type: 'string' }])) }, installationId: 'mail', serverId: 'mail', serverName: 'Mail' }
@@ -914,7 +914,7 @@ it.each(['held', 'stopped', 'switch_off'] as const)('R1 summaries and lists surv
   await t.call()
   await finish(f, t.work.payload)
   if (state === 'stopped') await f.bots.service.workStop(t.botId, t.workId)
-  if (state === 'switch_off') f.host.settings!.get().experimental.botAsksFirst = false
+  if (state === 'switch_off') f.host.settings!.get().experimental.botAsksFirstOff = true
   const summary = f.bots.service.list().bots.find(b => b.id === t.botId)!
   expect(() => f.bots.service.get(t.botId)).not.toThrow()
   if (state === 'stopped') expect(summary.needsOwner).not.toBe(true)
@@ -1004,7 +1004,7 @@ it('R5-words gives by-hand runs and disabled answers their own refusal', async (
   const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'manual-call', signal: new AbortController().signal })
   expect(result.text).toContain("A run started by hand can't wait for your owner.")
   expect(result.text).not.toContain('scheduled')
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   await expect(f.bots.service.answerAction({ actionId: 'missing', digest: 'missing', answer: 'send' })).rejects.toThrow(/can.t be sent any more/i)
 })
 it('R5-time transports the sent instant instead of a UTC clock string', async () => {
@@ -1526,7 +1526,7 @@ it('C4 service projects stored reviews even after the switch is turned off', asy
     f.store.run('UPDATE bot_actions SET exec_args = NULL, status = ?, result_json = ?, ran_at = ? WHERE id = ?', status, JSON.stringify({ text: 'masked answer', toolReportedError: true }), f.store.now(), a.id)
     expect(card()).toMatchObject({ status, result: { text: 'masked answer', toolReportedError: true } })
   }
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   expect(card()).toMatchObject({ actionId: a.id, status: 'withdrawn' })
 })
 
@@ -1591,16 +1591,16 @@ it('C4 About marks one service that asks first, preserving invalid marks and the
   const t = await setup(true, false, true)
   const permission = () => f.bots.service.get(t.botId).permissions.find(p => p.title === 'use your Mail tools')!
   const settings = f.host.settings!.get()
-  settings.experimental.botAsksFirst = false
+  settings.experimental.botAsksFirstOff = true
   const before = permission()
-  settings.experimental.botAsksFirst = true
+  settings.experimental.botAsksFirstOff = false
   expect(permission()).toMatchObject({ mark: 'Asks first', asksFirst: true, note: 'Asks you first before sending or changing something. What it does through threads, commands or secrets you gave it does not wait for a card.' })
   expect(permission().note).not.toContain('send, other')
   for (const [state, mark] of [['gone', 'Gone from Mousse'], ['off', 'Switched off'], ['mcp_off', 'MCP is off'], ['changed', 'Changed']] as const) {
     vi.spyOn(t.mcp, 'where').mockReturnValueOnce({ state, name: 'Mail', server: t.mcp.servers()[0] } as never)
     expect(permission().mark).toBe(mark)
   }
-  settings.experimental.botAsksFirst = false
+  settings.experimental.botAsksFirstOff = true
   expect(permission()).toEqual(before)
 })
 
@@ -2234,7 +2234,7 @@ it.each(['stop', 'upkeep', 'forget'] as const)('R2-6 existing rows still settle 
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
   if (path === 'upkeep') await f.bots.deliverDueReminders()
   if (path === 'forget') {
@@ -2604,7 +2604,7 @@ it('C4 integration nudge ids project the same stored review and follow settlemen
   for (const suffix of ['n1', 'n2']) expect(projected(suffix).action).toEqual(original())
   expect(projected('n1').action?.status).toBe('done')
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   for (const suffix of ['n1', 'n2']) expect(projected(suffix).action).toEqual(original())
 })
 
@@ -2689,9 +2689,9 @@ it('C4 integration read-only profiles keep bytewise chat About bridge and tellin
     return JSON.stringify({ chat, detail, bridge, telling: f.store.messages(t.botId, { limit: 100 }).map(({ id, tell, tellAt }) => ({ id, tell, tellAt })) })
   }
   const off = await snapshot()
-  f.host.settings!.get().experimental.botAsksFirst = true
+  f.host.settings!.get().experimental.botAsksFirstOff = false
   expect(await snapshot()).toBe(off)
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   expect(await snapshot()).toBe(off)
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
 })
@@ -3057,7 +3057,7 @@ it.each(['startup', 'settings', 'upkeep'] as const)('C9 switch rollback withdraw
   const a = f.bots.actions.forWork(t.workId)!
   for (const status of ['approved', 'running']) f.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, card_json, status, bot_note, result_json, message_id, expires_at, created_at, answered_at, ran_at)
     SELECT id || ?, call_key || ?, bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, card_json, ?, bot_note, result_json, message_id, expires_at, created_at, answered_at, ran_at FROM bot_actions WHERE id = ?`, `_${status}`, `_${status}`, status, a.id)
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   if (path === 'startup') { f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup() }
   if (path === 'settings') f.bots.quietHoursChanged()
   if (path === 'upkeep') await f.bots.deliverDueReminders()
@@ -3143,7 +3143,7 @@ it.each([
   if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
   if (path === 'pause') { f.bots.actions.transition(a.id, 'open', 'approved'); f.bots.pauseBot(t.botId) }
   if (path === 'permission') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
-  if (path === 'switch') { f.host.settings!.get().experimental.botAsksFirst = false; f.bots.quietHoursChanged() }
+  if (path === 'switch') { f.host.settings!.get().experimental.botAsksFirstOff = true; f.bots.quietHoursChanged() }
   if (path === 'forget') {
     const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
     const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'card' })!
@@ -3233,7 +3233,7 @@ it('C9 switch rollback is atomic when a second row cannot be written', async () 
   f.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, card_json, status, message_id, expires_at, created_at, answered_at)
     SELECT id || '_accepted', call_key || '_accepted', bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, card_json, 'approved', message_id, expires_at, created_at, created_at FROM bot_actions WHERE id = ?`, a.id)
   f.store.run(`CREATE TRIGGER fail_switch_rollback BEFORE UPDATE OF status ON bot_actions WHEN OLD.status = 'approved' BEGIN SELECT RAISE(ABORT, 'write failed'); END`)
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   expect(() => f.bots.quietHoursChanged()).toThrow()
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'open', exec_args: JSON.stringify(t.args) })
   expect(f.bots.actions.get(`${a.id}_accepted`)).toMatchObject({ status: 'approved', exec_args: JSON.stringify(t.args) })
@@ -3259,7 +3259,7 @@ it('C9 an unread expiry from the earlier build uses the owner-writing rule too',
 it('C9 rollback on restart waits for catch-up and activation reconciliation', async () => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   f.bots.close(); f.bots = new BotEngine(f.host)
   let dispatchesAtCatchUp = -1
   let reconciled = false
