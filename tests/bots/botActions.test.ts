@@ -1107,7 +1107,7 @@ it('R3-binding tells the work why the pre-dispatch fence refused the call', asyn
   expect(t.calls).toEqual([])
 })
 
-it.each([`sk-${'Z'.repeat(48)}`, '-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----'])('B1-shape refuses credential shapes anywhere in arguments', async value => {
+it.each([`sk-${'Z'.repeat(30)}`, '-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----'])('B1-shape refuses credential shapes anywhere in arguments', async value => {
   const t = await setup(true)
   Object.assign(t.args, { headers: { authorization: { nested: [value] } } })
   expect(await t.call()).toMatchObject({ isError: true, text: expect.stringContaining('never sent through a tool this way') })
@@ -1187,7 +1187,7 @@ it.each(['credential', 'oversized'] as const)('B-recovery refuses a previously a
   await t.call()
   await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  const args = { ...t.args, body: kind === 'credential' ? `sk-${'Z'.repeat(48)}` : 'A'.repeat(256_001) }
+  const args = { ...t.args, body: kind === 'credential' ? `sk-${'Z'.repeat(30)}` : 'A'.repeat(256_001) }
   const { actionDigest } = await import('../../src/mms/bots/actions/BotActions')
   f.store.run('UPDATE bot_actions SET exec_args = ?, args_digest = ? WHERE id = ?', JSON.stringify(args), actionDigest(args), a.id)
   f.bots.actions.transition(a.id, 'open', 'approved')

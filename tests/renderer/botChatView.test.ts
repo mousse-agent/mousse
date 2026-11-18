@@ -3226,6 +3226,7 @@ it('keeping an AWS pair never leaves its secret half in the composer or send', a
   expect(field.value).toContain('the secret AWS_SECRET_ACCESS_KEY')
   expect(field.value).not.toContain(secret)
   await click(button('Send message'))
+  expect(fake.client.send).toHaveBeenCalledTimes(1)
   expect(JSON.stringify(fake.client.send.mock.calls)).not.toContain(secret)
 })
 
@@ -3336,4 +3337,9 @@ it('checks a key added directly to the store before Send in the same event',asyn
   await act(async()=>{useBotsStore.getState().setDraft('inbox',key);button('Send message')!.click()})
   expect(fake.client.send).not.toHaveBeenCalled()
   expect(JSON.stringify(useBotsStore.getState())).not.toContain(key)
+})
+
+it('asks for the AWS secret half without offering to keep a public ID',async()=>{
+ await open();await type(host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!,'AKIAIOSFODNN7EXAMPLE')
+ expect(button('Keep as secret')).toBeUndefined();expect(host.textContent).toContain('paste its secret access key too')
 })
