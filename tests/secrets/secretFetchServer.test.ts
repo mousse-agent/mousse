@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { createServer } from 'node:http'
 import { publicFetch } from '../../src/mms/net-public/publicFetch'
 it('connects to the trial resolver address once, preserves the bound host and returns a redirect',async()=>{
@@ -26,9 +26,10 @@ it('masks a mixed escaped echo split across transport chunks before writing a re
  try {
   const vault=new SecretVault({profileRoot:folder,threadAlive:()=>true})
   // HTTP exists only in this in-process transport fixture; production bindings require HTTPS.
-  vault.store('KEY',value,{threadId:'home',keep:'saved',binding:{origin:`http://api.example.com:${(server.address() as {port:number}).port}`,header:'Authorization',format:'Bearer {}'}})
+  vault.store('KEY',value,{threadId:'home',keep:'saved',binding:{origin:'https://api.example.com',header:'Authorization',format:'Bearer {}'}})
+  const binding=vi.spyOn(vault,'bindingFor').mockReturnValue({origin:`http://api.example.com:${(server.address() as {port:number}).port}`,header:'Authorization',format:'Bearer {}'})
   const out=await fetchWithSecret(vault,{threadId:'home',folder,args:{secret:'KEY',path:'/read'},signal:new AbortController().signal})
-  expect(out.isError).not.toBe(true)
+  binding.mockRestore();expect(out.isError).not.toBe(true)
   const text=readFileSync(out.text.split('File: ')[1]!,'utf8');expect(text).not.toContain(echo);expect(text).toContain('[secret KEY hidden]')
  }finally{if(previous===undefined)delete process.env.MOUSSE_TEST_SECRET_FETCH_RESOLVE;else process.env.MOUSSE_TEST_SECRET_FETCH_RESOLVE=previous;await new Promise<void>(resolve=>server.close(()=>resolve()));rmSync(folder,{recursive:true,force:true})}
 })
