@@ -47,6 +47,7 @@ export function whenChoices(schedule: JobSchedule | undefined, now: Date): Array
 
 /** When, for a trigger that is not a time: the CLI, a request, or a pull request's activity. */
 export function whenWords(item: Pick<AutomationItem, 'trigger' | 'whenText' | 'cliName'>): string | undefined {
+  if (item.trigger === 'time' && item.whenText) return item.whenText
   if (item.trigger === 'thread_event') return item.whenText
   if (item.trigger === 'request') return 'On request'
   if (item.trigger === 'on_demand') return item.cliName ? `From the CLI · ${item.cliName}` : 'When you run it'

@@ -1,3 +1,4 @@
+import { pageSetting } from '../../../bots/pageChecks'
 import { guardPackText, MEMORY_SECRET_MARKER } from '../../../bots/memory/guard'
 import { createHash } from 'node:crypto'
 import { Type, type Tool } from '@earendil-works/pi-ai'
@@ -722,6 +723,10 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         if (isOutcome(call)) return call
         if (call.lane !== 'chat') return error(OWNER_ONLY)
         if (args.say !== undefined && call.memoryLane !== 'chat') return error('Only a turn your owner’s message or tap started can set a fixed line. Use prompt instead of say here.')
+        if (args.onlyIfChanged) {
+          if (args.say !== undefined) return error('onlyIfChanged cannot be combined with say.')
+          try { pageSetting(args.onlyIfChanged as import('../../../bots/pageChecks').PageSetting) } catch (cause) { return error(cause instanceof Error ? cause.message : String(cause)) }
+        }
         let prompt: string
         try { prompt = schedulePrompt(args as { prompt?: string; say?: string }) } catch (failure) { return error(failure instanceof Error ? failure.message : String(failure)) }
         const problem = botScheduleProblem(args.when, prompt)

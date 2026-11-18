@@ -129,7 +129,7 @@ function botJobItem(job: ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> 
     name: job.name,
     trigger: 'time',
     schedule: job.schedule,
-    whenText: '',
+    whenText: facts.whenText ?? '',
     who: { kind: 'bot', name: facts.botName, look: facts.look },
     paused,
     ...(jobPaused && job.resumeAt ? { pausedUntil: job.resumeAt } : {}),

@@ -22,7 +22,7 @@ export function isPublicAddress(address: string): boolean {
   if (isIP(address) !== 6) return false
   const n = new Address6(address).bigInt()
   // Only ordinary global unicast. Exclude Teredo, documentation and 6to4 entirely.
-  return (n >> 125n) === 1n && (n >> 96n) !== 0x20010000n && (n >> 96n) !== 0x20010db8n && (n >> 112n) !== 0x2002n
+  return (n >> 125n) === 1n && !((n >> 96n) >= 0x20010000n && (n >> 96n) <= 0x200101ffn) && (n >> 96n) !== 0x20010db8n && (n >> 112n) !== 0x2002n && (n >> 112n) !== 0x3fffn
 }
 
 /** One resolution and one pinned connection, with no ambient agent, redirects, cookies or credentials. */
@@ -39,7 +39,7 @@ export async function publicFetch(value: string): Promise<PublicResponse> {
     return await new Promise<PublicResponse>((resolve, reject) => {
       const req = (url.protocol === 'https:' ? https : http).request({
         protocol: url.protocol, hostname, port: url.port || undefined, path: url.pathname + url.search,
-        method: 'GET', agent: false, servername: isIP(hostname) ? undefined : hostname,
+        method: 'GET', agent: false, autoSelectFamily: false, servername: isIP(hostname) ? undefined : hostname,
         headers: { host: url.host, 'user-agent': 'Mousse', accept: 'text/html, text/plain' },
         signal: controller.signal,
         lookup: (_host, _options, callback) => callback(null, pinned.address, pinned.family)

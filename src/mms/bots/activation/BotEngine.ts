@@ -19,7 +19,7 @@ import { startTurnMeter } from './turnUsage'
 import { turnTimingBind } from '../../diagnostics/turnTiming'
 import { chatEpochEnd, contextBudget, type BotChatDigestState, type BotChatEpoch, type BotChatEpochVerdict } from '../memory/contextBudget'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
@@ -1617,7 +1617,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const schedule = this.host.schedules?.get(botId, scheduleId)
       if (schedule) page = new PageChecks(this.store).check(botId, scheduleId, schedule.revision, input.occurrenceKey ?? occurrenceAt, input.now?.getTime() ?? this.now(), this.filesFolder(botId))
       if (page?.kind === 'checked') {
-        if (page.failure) this.chat.post({ id: `bm_page_${randomUUID()}`, botId, author: 'bot', kind: 'run_report', text: page.failure, lane: 'run' })
+        if (page.failure) this.chat.post({ id: `bm_page_${createHash('sha256').update(JSON.stringify([botId, scheduleId, input.occurrenceKey ?? occurrenceAt])).digest('hex')}`, botId, author: 'bot', kind: 'run_report', text: page.failure, lane: 'run' })
         return page
       }
       if (page?.kind === 'not_ready') return page
@@ -9485,7 +9485,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** The bot's schedules in the shared store; none when this profile has no scheduler for them. */
   schedulesOf(botId: string): BotScheduleEntry[] {
-    return this.host.schedules?.list(botId) ?? []
+    return (this.host.schedules?.list(botId) ?? []).map(schedule => {
+      const page = new PageChecks(this.store).read(botId, schedule.scheduleId)
+      return page ? { ...schedule, label: `${schedule.label} · runs when ${new URL(page.url).host} changes` } : schedule
+    })
   }
 
   private scheduleBook(): NonNullable<BotEngineHost['schedules']> {
@@ -9504,8 +9507,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const setting = input.onlyIfChanged ? pageSetting(input.onlyIfChanged) : undefined
     let added: BotScheduleEntry
     try {
-      added = this.scheduleBook().add(botId, { ...input, ...(setting ? { name: `${input.prompt?.slice(0, 60)} · runs when ${new URL(setting.url).host} changes` } : {}) }, createdBy, { ownerAsked })
-      if (setting) new PageChecks(this.store).set(botId, added.scheduleId, setting, added.revision)
+      added = this.scheduleBook().add(botId, input, createdBy, { ownerAsked })
+      if (setting) {
+        new PageChecks(this.store).set(botId, added.scheduleId, setting, added.revision)
+        added = { ...added, label: `${added.label} · runs when ${new URL(setting.url).host} changes` }
+      }
     } catch (error) {
       if (error instanceof BotScheduleError) throw new BotEngineError(error.code, error.message)
       throw error
