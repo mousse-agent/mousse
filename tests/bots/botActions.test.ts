@@ -3926,3 +3926,33 @@ it('a successful scheduled retry clears the old decline for later quiet runs', a
   const next = await start(f, id)
   expect(f.automationRuns.report({ threadId: next.payload.threadId, activationId: id }, 'quiet', 'Nothing new.').level).toBe('quiet')
 })
+
+it.each(['none', 'different', 'same'])('only the first successor reports an uncleared decline: %s', async retry => {
+  const t = await scheduledCall(true, 1)
+  const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now }); f.host.progress = memory
+  await t.call(); await finish(f, t.run.payload)
+  const declined = f.bots.actions.forWork(t.id)!
+  await f.bots.actions.answer({ actionId: declined.id, digest: declined.args_digest, answer: 'not_now' }); await flush()
+  const resumed = await start(f, t.id, 2); await finish(f, resumed.payload)
+  const levels: unknown[] = []
+  let note = 'Nothing new.'
+  for (let n = 0; n < 3; n++) {
+    f.clock.now += 60_000
+    const due = await f.tickSchedules(new Date(f.clock.now)), id = due.inserted[0]!
+    let turn = await start(f, id)
+    if (n === 0 && retry !== 'none') {
+      await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: retry === 'same' ? t.args : { ...t.args, body: 'Another call' }, toolCallId: 'retry', signal: new AbortController().signal })
+      await finish(f, turn.payload)
+      const card = f.bots.actions.forWork(id)!
+      await f.bots.actions.answer({ actionId: card.id, digest: card.args_digest, answer: 'send' }); await flush()
+      turn = await start(f, id, 2)
+    }
+    levels.push(f.automationRuns.report({ threadId: turn.payload.threadId, activationId: id }, 'quiet', 'Nothing new.').level)
+    f.bots.saveLeftOff(id, note); await finish(f, turn.payload, 'completed', { text: '[SILENT]' })
+    note = memory.progress(t.botId, t.schedule.scheduleId)!
+    expect((note.match(/A call was not sent last time/g) ?? []).length).toBeLessThanOrEqual(n === 0 && retry !== 'same' ? 1 : 0)
+    const messages = f.store.all("SELECT text FROM bot_messages WHERE activation_id = ? AND kind = 'run_report'", id)
+    expect(messages).toHaveLength(n === 0 && retry !== 'same' ? 1 : 0)
+  }
+  expect(levels).toEqual(retry === 'same' ? ['quiet','quiet','quiet'] : ['fyi','quiet','quiet'])
+})

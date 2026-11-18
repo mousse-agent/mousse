@@ -306,3 +306,23 @@ it.each(['enabled', 'disable', 'delete', 'edit', 'unauthorized', 'unreachable'])
     expect(seen).toEqual(['disable', 'delete'].includes(change) ? ['rev1'] : ['rev1', change === 'edit' ? 'rev2' : 'rev1'])
   } finally { await mcp.shutdown() }
 })
+
+it('a delete stops a queued list_changed pass from reconnecting', async () => {
+  let notify!: () => Promise<void>, release!: () => void, reads = 0, connects = 0
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const servers = [testServerConfig()]
+  const mcp = manager({ connect: async () => {
+    connects++
+    return { onToolsChanged: listener => { notify = listener }, listTools: async () => {
+      if (++reads === 2) await gate
+      return { tools: [{ name: 'echo', inputSchema: {} }] }
+    }, callTool: async () => ({}), close: async () => {} }
+  } }, servers)
+  try {
+    await mcp.getEnabledTools()
+    const first = notify(); await vi.waitFor(() => expect(reads).toBe(2))
+    const second = notify(); servers.splice(0)
+    await mcp.restartServer('inst-echo'); release(); await Promise.all([first, second])
+    expect(connects).toBe(1); expect(mcp.getActiveCount()).toBe(0)
+  } finally { release(); await mcp.shutdown() }
+})
