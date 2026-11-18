@@ -693,7 +693,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (ended) this.store.db.afterCommit(() => this.afterEnd(ended))
     },
     schema: (tool) => this.host.mcp?.inputSchema?.(tool),
-    alone: (row, tool, place, args) => row.trigger.kind === 'schedule' ? this.alone.match(row.botId, row.trigger.scheduleId, tool.server, tool.tool, place, args) : undefined,
+    alone: (row, tool, place, args, dispatch) => ['start', 'continue'].includes(this.store.dispatches(row.id).find(d => d.clientRequestId === dispatch)?.kind ?? '') && row.trigger.kind === 'schedule' ? this.alone.match(row.botId, row.trigger.scheduleId, tool.server, tool.tool, place, args) : undefined,
     binding: (row, tool) => {
       const pair = this.actionPair(row, tool)
       if (!pair) return undefined
@@ -725,7 +725,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     },
     post: (row, id, text) => this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text, external: true, ...(id === `bm_asks_first_${row.botId}` ? { quiet: true as const } : {}), activationId: row.id, lane: 'run', ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}) }),
     sentAlone: () => this.scheduledCallChecks.clear(),
-    settled: (row) => { this.chat.republish(this.actions.forWork(row.id)!.message_id); this.changed({ botId: row.botId }); this.pumpLater(row.botId) },
+    settled: (row) => { const action = this.actions.forWork(row.id); if (action?.card_json !== null) this.chat.republish(action!.message_id); this.changed({ botId: row.botId }); this.pumpLater(row.botId) },
     execute: async (row, target, args) => {
       const mcp = this.host.mcp
       const tool = mcp?.offered(new Set([`${target.server}::${target.tool}`]))[0]
@@ -1766,7 +1766,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const parked = this.store.laneActivations(botId, 'run', ['blocked']).find(row => same(row) && workWaits(row))
       const previous = parked ?? this.store.laneActivations(botId, 'run', ['running', 'waiting_grant']).find(same)
       // A run waiting for the internet has no expiry, so its schedule's later occurrences are skipped, not stacked.
-      if (previous) { skip = previous.status === 'waiting_grant' || parked || previous.endReason === 'approval_answered' || this.actions.forWork(previous.id) ? 'bot_waiting_for_owner' : previous.offline ? 'waiting_for_internet' : 'previous_run_still_running'; return false }
+      if (previous) { skip = previous.status === 'waiting_grant' || parked || previous.endReason === 'approval_answered' || this.actions.forWork(previous.id)?.card_json != null ? 'bot_waiting_for_owner' : previous.offline ? 'waiting_for_internet' : 'previous_run_still_running'; return false }
       const inserted = this.store.insertActivationOnce({
         id,
         botId,

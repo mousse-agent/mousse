@@ -199,7 +199,7 @@ interface Host {
   origin(row: BotActivationRow): 'owner' | 'unattended' | undefined
   schema(tool: BotMcpTool): unknown
   binding(row: BotActivationRow, tool: BotMcpTool): unknown | undefined
-  alone?(row: BotActivationRow, tool: BotMcpTool, place: Record<string, unknown> | undefined, args: Record<string, unknown>): string | undefined
+  alone?(row: BotActivationRow, tool: BotMcpTool, place: Record<string, unknown> | undefined, args: Record<string, unknown>, dispatch: string): string | undefined
   obsolete(action: ActionRow): boolean
   post(row: BotActivationRow, id: string, text: string): void
   sentAlone?(): void
@@ -333,8 +333,9 @@ export class BotActions {
     if (existing && (existing.args_digest !== actionDigest(args) || existing.target_json !== JSON.stringify({ server: tool.server, tool: tool.tool })))
       return { text: 'This call id was already used for a different call. Nothing was held for this call.', isError: true }
     if (existing?.card_json === null && existing.result_json && !pending.has(String(existing.status))) return JSON.parse(String(existing.result_json)) as ToolOutcome
-    if (existing) return pending.has(String(existing.status)) ? { text: 'This call is held for your owner. End your turn now.' } : { text: actionContinuation(existing as unknown as ActionRow), isError: true }
-    if (pending.has(this.forWork(row.id)?.status ?? '')) return { text: 'A call is already held for your owner. End your turn now.', isError: true }
+    if (existing) return pending.has(String(existing.status)) ? { text: existing.card_json === null ? 'This call is already running. Wait for its result before trying another call.' : 'This call is held for your owner. End your turn now.' } : { text: actionContinuation(existing as unknown as ActionRow), isError: true }
+    const active = this.forWork(row.id)
+    if (pending.has(active?.status ?? '')) return { text: active?.card_json === null ? 'A call is already running. Wait for its result before trying another call.' : 'A call is already held for your owner. End your turn now.', isError: true }
     const origin = this.host.origin(row)
     if (!origin) return { text: "This work's starting turn could not be established. Nothing was held or sent; say so in your report.", isError: true }
     const digest = actionDigest(args)
@@ -364,7 +365,8 @@ export class BotActions {
     if (exact.length > ACTION_MAX_ARGUMENT_CHARS)
       return { text: 'These arguments exceed the 256,000-character limit for a complete review. Nothing was held or sent. Send less.', isError: true }
     const place = actionPlace(this.host.schema(tool), args)
-    const exception = this.host.alone?.(row, tool, place, args)
+    const uncertain = history.some(a => a.activation_id === row.id && a.status === 'uncertain' && a.card_json === null && a.args_digest === digest)
+    const exception = !uncertain && this.host.alone?.(row, tool, place, args, dispatch)
     const now = Date.parse(this.host.store.now())
     const counts = exception ? this.host.store.get(`SELECT
       SUM(CASE WHEN target_json = ? AND ran_at >= ? THEN 1 ELSE 0 END) AS hour,
@@ -382,7 +384,7 @@ export class BotActions {
         VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), place ? JSON.stringify(place) : null, JSON.stringify(argumentContract(args)), alone ? null : JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: capNote ?? readableActionTitle(tool.tool), serverName: tool.serverName }), alone ? 'approved' : 'open', messageId,
       // expires_at is retained for older settled rows; open rows have no deadline.
-      '9999-12-31T23:59:59.999Z', this.host.store.now(), alone ? this.host.store.now() : null, alone ? `alone:${exception}` : null)
+      '9999-12-31T23:59:59.999Z', this.host.store.now(), alone ? this.host.store.now() : null, alone ? exception : null)
       if (alone) return
       this.host.park(row)
       this.host.post(row, messageId, `${tool.serverName} · ${tool.tool}\n${review.hasHiddenValues ? 'Hidden values will be sent.\n' : ''}${JSON.stringify(review.args)}`)
@@ -430,7 +432,7 @@ export class BotActions {
       const args: unknown = JSON.parse(action.exec_args)
       if (containsCredential(args) || actionDigest(args) !== action.args_digest) return undefined
       const target = JSON.parse(action.target_json)
-      if (action.card_json === null && (!action.answered_device?.startsWith('alone:') || `alone:${this.host.alone?.(row, target, actionPlace(this.host.schema(target), args as Record<string, unknown>), args as Record<string, unknown>)}` !== action.answered_device)) return undefined
+      if (action.card_json === null && (!action.answered_device?.startsWith('alone:') || this.host.alone?.(row, target, actionPlace(this.host.schema(target), args as Record<string, unknown>), args as Record<string, unknown>, JSON.parse(action.call_key)[1]) !== action.answered_device)) return undefined
       const binding = this.host.binding(row, target)
       // Admission may precede the first relay listing. Execution always requires the full binding.
       if (!binding && allowCold && !this.host.obsolete(action)) return row
@@ -549,7 +551,8 @@ export class BotActions {
   }
   private finish(action: ActionRow): void {
     const row = this.host.store.activation(action.activation_id)
-    if (!row || action.card_json === null) return
+    if (!row) return
+    if (action.card_json === null && row.endReason !== 'approval_answered') return
     this.host.settled(row)
   }
   async retryApproved(): Promise<void> {
