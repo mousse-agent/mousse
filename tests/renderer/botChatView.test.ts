@@ -3301,3 +3301,19 @@ it('explains the selected keep time beside the private paste offer',async()=>{
   await click(button('This thread only'))
   expect(host.textContent).toContain(secretKeepLine('thread'))
 })
+
+it('keeps two different keys one at a time before the message is sent',async()=>{
+  const first='sk-'+'M'.repeat(48),second='ghp_'+'G'.repeat(40)
+  let n=0
+  window.mousse.platformRequest={request:vi.fn(async(method:string)=>method==='secrets.keepPasted'?{name:++n===1?'OPENAI_API_KEY':'GITHUB_TOKEN'}:{requests:[]})} as never
+  await open();const field=host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
+  await type(field,first+' and '+second)
+  await click(button('Keep as secret'))
+  expect(field.value).toContain(second);expect(field.value).not.toContain(first)
+  expect(button('Keep as secret')).toBeTruthy()
+  await click(button('Keep as secret'))
+  expect(field.value).toBe('the secret OPENAI_API_KEY and the secret GITHUB_TOKEN')
+  await click(button('Send message'))
+  expect(JSON.stringify(fake.client.send.mock.calls)).not.toContain(first)
+  expect(JSON.stringify(fake.client.send.mock.calls)).not.toContain(second)
+})

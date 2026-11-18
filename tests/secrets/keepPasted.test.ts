@@ -97,3 +97,10 @@ it('keeps an Authorization bearer value by itself, without its header',async()=>
   expect(await call({value:'Authorization: Bearer '+token})).toEqual({name:'API_KEY'})
   expect(vault.value('API_KEY')).toBe(token)
 })
+
+it('keeps the secret half when it precedes the AWS ID',async()=>{
+  const {call,vault}=setup()
+  const secret='wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+  expect(await call({value:secret+' AKIAIOSFODNN7EXAMPLE'})).toEqual({name:'AWS_SECRET_ACCESS_KEY'})
+  expect(vault.value('AWS_SECRET_ACCESS_KEY')).toBe(secret)
+})

@@ -42,3 +42,8 @@ it('checks a pathological 64 KB draft within 50 ms', () => {
   expect(pastedSecretShape(text)).toBeUndefined()
   expect(performance.now()-start).toBeLessThan(50)
 })
+
+it('keeps the adjacent secret even when it precedes the AWS ID on the same line',()=>{
+  const text=aws+' AKIAIOSFODNN7EXAMPLE'
+  expect(pastedSecretShape(text)).toEqual({start:0,end:text.length,name:'AWS_SECRET_ACCESS_KEY'})
+})
