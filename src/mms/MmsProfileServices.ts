@@ -14,7 +14,7 @@ import { homedir, hostname } from 'os'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
 import { SettingsStore } from './settings/SettingsStore'
-import type { MousseSettingsUpdate } from '../shared/settings'
+import { normalizeExperimentalSettings, type MousseSettingsUpdate } from '../shared/settings'
 import { rewriteMovedDefaults } from './settings/movedDefaults'
 import { ProviderAuthService } from './providers/ProviderAuthService'
 import { AppletStore } from './applets/AppletStore'
@@ -1328,6 +1328,8 @@ export class MmsProfileServices {
       profileDir: this.homeDir,
       editorSsh: { home: homedir(), mousseHome: this.installationHome, profile: this.profileId },
       hosted: mousseIdNetModule,
+      // Settings → Labs → Mousse Plus (legacy); a later change applies at once (below).
+      plusLegacyOff: !normalizeExperimentalSettings(this.settings.get().experimental).plusLegacy,
       onChanged: (status) => this.events.emit({ channel: 'net:updated', data: status }),
       composeRuntime: (runtime) => {
         // Net closed its earlier runtime without stopping (a removed computer's identity was set
@@ -1361,6 +1363,14 @@ export class MmsProfileServices {
         }
       }
     })
+    this.platform.onDispose(
+      onSettingsSaved(() => {
+        const on = normalizeExperimentalSettings(this.settings.get().experimental).plusLegacy
+        void this.net.setPlusLegacy(on).catch((error) => {
+          console.warn('Mousse Plus (legacy) could not be switched', { error: error instanceof Error ? error.message : String(error) })
+        })
+      })
+    )
     this.chatNetwork = new ChatNetworkBindingService({
       profileId: this.profileId,
       profileHome: this.homeDir,
