@@ -1,3 +1,4 @@
+import { usePastedBotSecret } from './usePastedBotSecret'
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import { ArrowDown, Brain, ChevronRight, CircleAlert, Loader2, Reply, Shield, X } from '../../lib/icons'
 import { withAppletNames, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotError, type BotSummary } from '../../../shared/bots/personal/chat'
@@ -634,7 +635,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const load = useBotsStore((s) => s.chatLoad[bot.id])
   const pending = useBotsStore((s) => s.pending[bot.id] ?? EMPTY)
   const happy = useBotsStore((s) => s.happy[bot.id])
-  const draft = useBotsStore((s) => s.drafts[bot.id] ?? '')
+  const storedDraft = useBotsStore((s) => s.drafts[bot.id] ?? '')
+  const pasted = usePastedBotSecret(bot, storedDraft)
+  const draft = pasted.draft
   const attachments = useBotsStore((s) => s.attachments[bot.id])
   const replying = useBotsStore((s) => s.replyingTo[bot.id])
   const aboutOpen = useBotsStore((s) => s.aboutOpen)
@@ -936,6 +939,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         {!!pinnedOff.length && <div className="bot-pins" role="status" aria-label="Waiting on you">{pinnedOff.map((item) => <PinnedLine key={item.kind} botId={bot.id} item={item} />)}</div>}
         {/* A secret the bot asked for: typed into its private card, never into the chat. */}
         <BotSecretRequests homeThreadId={bot.homeThreadId} />
+        {pasted.offer}
         <ComposerNoticeProvider>
           <ComposerNoticeSource notice={error ? { tone: 'error', title: error, onDismiss: () => useBotsStore.setState({ error: null, errorBotId: null }) } : null} />
           <ComposerNoticeSlot />
@@ -948,7 +952,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           <ChatComposer
             key={bot.id}
             input={draft}
-            onInputChange={(value) => store().setDraft(bot.id, value)}
+            onInputChange={pasted.change}
             attachedFiles={files}
             onAttachedFilesChange={(next) => store().setAttachments(bot.id, next)}
             messageLimit={MAX_BOT_CHAT_TEXT}
@@ -961,8 +965,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             placeholder={`Message ${bot.name}`}
             stoppable={working}
             dictateWhileStoppable
-            extraActions={<BotEmojiButton field={composerField} value={draft} onChange={(value) => store().setDraft(bot.id, value)} />}
-            onSend={() => { void submitBotChat(bot.id) }}
+            extraActions={<BotEmojiButton field={composerField} value={draft} onChange={pasted.change} />}
+            onSend={() => { if (pasted.beforeSend()) void submitBotChat(bot.id) }}
             onStop={() => void store().stop(bot.id)}
             lastPrompt={lastPrompt}
           />
