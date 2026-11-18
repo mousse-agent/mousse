@@ -3,6 +3,7 @@ export const UNMISTAKABLE_KEYS = /sk-(?:(?:ant|or|proj)-[A-Za-z0-9_-]{32,}|[A-Za
 export interface SecretShape { start: number; end: number; name: string }
 const awsTail = /^(?:[ \t]+|\r?\n[ \t]*)(?:aws_secret_access_key[ \t]*[=:][ \t]*)?([A-Za-z0-9/+]{40})(?![A-Za-z0-9/+])/i
 const awsLabel = /aws_secret_access_key[ \t]*[=:][ \t]*[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+])/gi
+const awsHead = /(?<![A-Za-z0-9/+])(?:aws_secret_access_key[ \t]*[=:][ \t]*)?([A-Za-z0-9/+]{40})(?:[ \t]+|\r?\n[ \t]*)$/i
 
 function keyName(key: string): string {
   if (key.startsWith('sk-ant-')) return 'ANTHROPIC_API_KEY'
@@ -58,7 +59,9 @@ export function pastedSecretShape(text: string): SecretShape | undefined {
   if (match) {
     const start=match.index, key=match[0]
     const pair=/^(?:AKIA|ASIA)/.test(key)?awsTail.exec(text.slice(start+key.length)):null
-    choose(start, pair ? start+key.length+pair[0].length : key.startsWith('-----BEGIN') ? pemEnd(text,start,key) : start+key.length, pair?'AWS_SECRET_ACCESS_KEY':keyName(key))
+    const headStart=Math.max(0,start-512)
+    const preceding=/^(?:AKIA|ASIA)/.test(key)?awsHead.exec(text.slice(headStart,start)):null
+    choose(preceding?headStart+preceding.index:start, pair ? start+key.length+pair[0].length : key.startsWith('-----BEGIN') ? pemEnd(text,start,key) : start+key.length, pair||preceding?'AWS_SECRET_ACCESS_KEY':keyName(key))
   }
   awsLabel.lastIndex=0
   const labelled=awsLabel.exec(text)
@@ -87,9 +90,11 @@ export function pastedSecretValue(text: string): string {
   if (bearer) return bearer[1]
   const id=/^(?:AKIA|ASIA)[0-9A-Z]{16}/.exec(text)
   if (id) return awsTail.exec(text.slice(id[0].length))?.[1] ?? text
+  const reverse=/^([A-Za-z0-9/+]{40})(?:[ \t]+|\r?\n[ \t]*)(?:AKIA|ASIA)[0-9A-Z]{16}$/.exec(text)
+  if (reverse) return reverse[1]
   return /^aws_secret_access_key[ \t]*[=:][ \t]*([A-Za-z0-9/+]{40})$/i.exec(text)?.[1] ?? text
 }
 export function pastedSecretReplacement(text: string, name: string): string {
-  const id=/^(?:AKIA|ASIA)[0-9A-Z]{16}/.exec(text)
+  const id=/(?:AKIA|ASIA)[0-9A-Z]{16}/.exec(text)
   return `${id && pastedSecretValue(text)!==text ? id[0]+' ' : ''}the secret ${name}`
 }
