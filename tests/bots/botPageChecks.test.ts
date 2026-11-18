@@ -124,3 +124,8 @@ it('reports a day of failures before six attempts, and removes orphan state on s
   f.store.run("INSERT INTO bot_memory_state(bot_id,key,value) VALUES(?,?,?)",botId,'pagecheck:gone',state(entry.scheduleId)!.value)
   await f.bots.reconcileOnStartup(); expect(state('gone')).toBeUndefined()
 })
+it('keeps the watched URL in the saved prompt for older builds',async()=>{
+  const entry=await add('tickets')
+  expect(f.scheduler.getJob(entry.jobId)!.prompt).toContain('https://example.com/tickets')
+  expect(f.scheduler.getJob(entry.jobId)!.prompt).toContain('tickets')
+})
