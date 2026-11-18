@@ -999,13 +999,17 @@ export class McpManager {
         connection.projectPath = projectPath
         this.connections.set(key, connection)
         let relisting: Promise<void> | undefined
+        let listChanged = false
         connection.client.onToolsChanged?.(() => {
-          relisting ??= this.listToolsForServer(server, projectPath).then(() => {
-            this.invalidateDiscoveryCache()
-          }).catch(error => {
-            this.invalidateDiscoveryCache()
-            logWarn('McpManager', `Tools changed but could not be listed: ${redactSensitiveText(formatError(error))}`)
-          }).finally(() => { relisting = undefined })
+          listChanged = true
+          relisting ??= (async () => {
+            do {
+              listChanged = false
+              try { await this.listToolsForServer(server, projectPath) }
+              catch (error) { logWarn('McpManager', `Tools changed but could not be listed: ${redactSensitiveText(formatError(error))}`) }
+              this.invalidateDiscoveryCache()
+            } while (listChanged && !this.owned.stopping)
+          })().finally(() => { relisting = undefined })
           return relisting
         })
         this.retainConnection(connection)

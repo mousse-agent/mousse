@@ -270,8 +270,10 @@ export class RelayCatalog {
         scope.byName = new Map(tools.map((tool) => [tool.name, tool]))
         // A runtime reopens for a new revision: none is made while nothing answered yet.
         if (final || tools.length) scope.revision = catalogueRevision(eligible, digest)
-        scope.refreshedAt = this.now()
-        scope.settingsKey = settingsKey(settings)
+        if (!options.installationId) {
+          scope.refreshedAt = this.now()
+          scope.settingsKey = settingsKey(settings)
+        }
         this.published(projectPath)
       }
       publish(false)
@@ -300,8 +302,10 @@ export class RelayCatalog {
     } catch (error) {
       logWarn('McpRelay', `The relay catalogue could not be refreshed: ${redactSensitiveText(error instanceof Error ? error.message : String(error))}`)
     } finally {
-      scope.attemptedAt = this.now()
-      scope.seen = seen
+      if (!options.installationId) {
+        scope.attemptedAt = this.now()
+        scope.seen = seen
+      }
     }
   }
 }
