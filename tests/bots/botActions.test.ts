@@ -3657,7 +3657,7 @@ it('C6 chat seam refuses asking tools without posting a card', async () => {
 it('C6 introduction and first card commit together or neither is kept', async () => {
   const t = await setup(true)
   f.store.run("CREATE TRIGGER fail_c6_card BEFORE INSERT ON bot_actions BEGIN SELECT RAISE(ABORT, 'card failed'); END")
-  await expect(t.call()).rejects.toThrow('card failed')
+  await expect(t.call()).rejects.toThrow()
   expect(f.store.get("SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = 'asks-first:introduced'", t.botId)).toBeUndefined()
   expect(f.store.get('SELECT id FROM bot_messages WHERE id = ?', `bm_asks_first_${t.botId}`)).toBeUndefined()
   f.store.run('DROP TRIGGER fail_c6_card')

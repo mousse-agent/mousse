@@ -1283,7 +1283,7 @@ export class BotMemoryStore {
         this.run('DELETE FROM bot_memories WHERE bot_id = ?', botId)
       }
       this.run('DELETE FROM bot_journal WHERE bot_id = ?', botId)
-      this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND substr(key, 1, 7) <> 'cursor:' AND (? = 0 OR (key NOT LIKE 'schedule-said:%' AND key NOT LIKE 'schedule-ended:%'))", botId, keepSaved ? 1 : 0)
+      this.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND key <> 'asks-first:introduced' AND substr(key, 1, 7) <> 'cursor:' AND (? = 0 OR (key NOT LIKE 'schedule-said:%' AND key NOT LIKE 'schedule-ended:%'))", botId, keepSaved ? 1 : 0)
       return removed
     })
   }
