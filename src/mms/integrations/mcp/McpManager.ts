@@ -1,4 +1,5 @@
 import { canonicalJson, sha256Bytes } from '../revision'
+import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import type { OwnedWorkEntry } from '../../execution/OwnedWorkBarrier'
 import { getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -72,6 +73,7 @@ export interface InjectedMcpClient {
   ): Promise<unknown>
   /** MCP `ping`: whether the server still answers (after a call timed out). Absent: it is taken as stuck. */
   ping?(options?: { signal?: AbortSignal; timeout?: number }): Promise<unknown>
+  onToolsChanged?(listener: () => Promise<void>): void
   close(): Promise<void>
 }
 
@@ -133,6 +135,7 @@ interface ConnectedServer {
   config: McpServerConfig
   stderr: string[]
   key: string
+  projectPath?: string
   ownedStdio: boolean
   closing?: Promise<void>
   releaseLifetime?: () => void
@@ -756,8 +759,10 @@ export class McpManager {
         const connection = this.connections.get(key)
         if (!connection) return
         await this.closeConnected(connection)
+        await this.listToolsForServer(connection.config, connection.projectPath)
       })
     )
+    this.invalidateDiscoveryCache()
   }
 
   lookupTool(providerName: string): McpToolDescriptor | undefined {
@@ -991,7 +996,18 @@ export class McpManager {
           await this.closeConnected(connection)
           throw abortFrom(this.owned.signal.reason)
         }
+        connection.projectPath = projectPath
         this.connections.set(key, connection)
+        let relisting: Promise<void> | undefined
+        connection.client.onToolsChanged?.(() => {
+          relisting ??= this.listToolsForServer(server, projectPath).then(() => {
+            this.invalidateDiscoveryCache()
+          }).catch(error => {
+            this.invalidateDiscoveryCache()
+            logWarn('McpManager', `Tools changed but could not be listed: ${redactSensitiveText(formatError(error))}`)
+          }).finally(() => { relisting = undefined })
+          return relisting
+        })
         this.retainConnection(connection)
         return connection
       }, null)
@@ -1105,6 +1121,7 @@ export class McpManager {
     }
 
     const wrapped: InjectedMcpClient = {
+      onToolsChanged: listener => { client.setNotificationHandler(ToolListChangedNotificationSchema, listener) },
       listTools: async (options) => {
         const result = await requestWithSignal(
           client,
