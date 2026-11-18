@@ -900,6 +900,7 @@ export class MmsProfileServices {
           isSubagentThread: (threadId) => store.threadRole(threadId) === 'subagent'
         },
         context: {
+          asksFirstEnabled: () => botAsksFirst(this.settings.get()),
           filesFolder: (botId) => botFilesFolder(homeDir, botId),
           situation: (botId) => this.botSituation(botId),
           scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt,
@@ -1106,7 +1107,7 @@ export class MmsProfileServices {
     }
     // The Automations inbox: every run, its report, usage and the Needs you queue (`automations/automations.db`).
     try {
-      this.automationRuns = new AutomationRuns({ profileHome: homeDir })
+      this.automationRuns = new AutomationRuns({ profileHome: homeDir, botReportLevel: (id, level) => this.personalBots?.scheduledReportLevel(id, level) ?? level })
     } catch (error) {
       console.warn('the automations inbox could not be opened; runs are kept only in each automation\'s history', { error: error instanceof Error ? error.message : String(error) })
     }

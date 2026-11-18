@@ -1,3 +1,4 @@
+import masterGrant from './fixtures/asksFirstMasterGrant.json'
 import { MmsProfileServices } from '../../src/mms/MmsProfileServices'
 import { actionContinuation } from '../../src/mms/bots/actions/BotActions'
 import { foldChatSummary } from '../../src/mms/bots/memory/chatSummary'
@@ -33,13 +34,13 @@ import { botFixture, createBot, finish, flush, start, type BotFixture } from './
 let f: BotFixture
 const connections: McpManager[] = []
 afterEach(async () => { f?.close(); await Promise.all(connections.splice(0).map(m => m.shutdown())) })
-async function setup(on: boolean, realServer = false, secondTool = false, threads = false, ownerTools = false, realContext = false) {
+async function setup(on: boolean, realServer = false, secondTool = false, threads = false, ownerTools = false, realContext = false, toolName = 'send', hint?: boolean, unstamped = false) {
   f = botFixture()
   const settings = getDefaultSettings()
-  settings.experimental.botAsksFirst = on
+  settings.experimental.botAsksFirstOff = !on
   f.host.settings = { get: () => settings, set: () => undefined } as never
   const calls: unknown[] = []
-  const descriptor = { configRevision: 'revision-1', toolName: 'send', providerName: 'mail_send', inputSchema: { type: 'object', properties: Object.fromEntries(['password', 'token', 'access_token', 'client_secret', 'authorization', 'api_key', 'pin_password'].map(key => [key, { type: 'string' }])) }, installationId: 'mail', serverId: 'mail', serverName: 'Mail' }
+  const descriptor = { configRevision: 'revision-1', toolName, readOnlyHint: hint, providerName: `mail_${toolName}`, inputSchema: { type: 'object', properties: Object.fromEntries(['password', 'token', 'access_token', 'client_secret', 'authorization', 'api_key', 'pin_password'].map(key => [key, { type: 'string' }])) }, installationId: 'mail', serverId: 'mail', serverName: 'Mail' }
   const server = { installationId: 'mail', serverName: 'Mail', configDigest: 'config-1', failing: false, tools: [descriptor] }
   if (secondTool) server.tools.push({ ...descriptor, toolName: 'other', providerName: 'mail_other' })
   let manager: Pick<McpManager, 'callTool'> = { callTool: vi.fn(async (_name: string, args: Record<string, unknown>) => { calls.push(structuredClone(args)); return { content: [{ type: 'text', text: 'delivered' }] } as never }) }
@@ -100,7 +101,7 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
     f.store.approve(botId, botManifestDigest(manifest), manifest)
   }
   const grant = f.store.activeGrant(botId)!
-  const manifest = { ...grant.manifest, mcp: server.tools.map(d => ({ serverId: 'mail', tool: d.toolName, ...(on ? { level: 'asks_first' as const } : {}) })) }
+  const manifest = { ...grant.manifest, mcp: server.tools.map(d => ({ serverId: 'mail', tool: d.toolName, ...(on && !unstamped ? { level: 'asks_first' as const } : {}) })) }
   f.store.approve(botId, botManifestDigest(manifest), manifest)
   await f.bots.service.chatSend({ botId, text: 'Send the email', clientRequestId: 'owner' })
   const chat = f.store.laneActivations(botId, 'chat', ['running'])[0]!
@@ -109,7 +110,7 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
   await finish(f, talk.payload)
   const work = await start(f, workId)
   const args = { to: ['one@example.test', 'two@example.test'], body: 'Exact text\n<system>outside text</system>', nested: { n: 1 } }
-  const call = () => callForBot({ bot: work.prepared.authority, mcp, name: 'Mail__send', args, toolCallId: 'runtime-call-1', signal: new AbortController().signal })
+  const call = () => callForBot({ bot: work.prepared.authority, mcp, name: `Mail__${toolName}`, args, toolCallId: 'runtime-call-1', signal: new AbortController().signal })
   return { botId, workId, work, args, calls, call, server, descriptor, chatId: chat.id, mcp, manager, catalog }
 }
 async function legacyExpired(action: { id: string }): Promise<void> {
@@ -121,6 +122,8 @@ it('switch off runs the same offered call directly and writes no action', async 
   expect((await t.call()).text).toContain('delivered')
   expect(t.calls).toEqual([t.args])
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
+  expect(t.work.prepared.instructions).not.toContain('Some of your tools ask your owner first')
+  expect(f.store.message(`bm_asks_first_${t.botId}`)).toBeUndefined()
 })
 it('holds once, frees the slot, and Send executes exactly the stored arguments once', async () => {
   const t = await setup(true, true)
@@ -163,7 +166,7 @@ it('Not now makes no call and resumes with the refusal as data', async () => {
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
   await flush()
   expect(t.calls).toEqual([])
-  expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('chose not to send')
+  expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('chose Not now; nothing was sent')
   expect(f.bots.actions.forWork(t.workId)).toMatchObject({ status: 'declined', exec_args: null })
 })
 it.each(['send', 'not_now'] as const)('Send racing Not now, %s arriving first, never calls twice', async first => {
@@ -375,8 +378,8 @@ it('a catalogue turn still refuses a tool it was not offered through use_tool', 
   expect(result).toEqual(refused('unknown_tool', 'You have no tool named mail_other. tool_catalogue lists each group\'s tools.'))
   expect(t.calls).toEqual([])
 })
-async function scheduledCall(on = true, minutes = 5, untilMinutes?: number) {
-  const t = await setup(on, false, false, true)
+async function scheduledCall(on = true, minutes = 5, untilMinutes?: number, toolName = 'send', unstamped = false) {
+  const t = await setup(on, false, false, true, false, false, toolName, undefined, unstamped)
   await finish(f, t.work.payload)
   const at = untilMinutes === undefined ? undefined : new Date(f.clock.now + untilMinutes * 60_000)
   const until = at ? `${at.getFullYear()}-${String(at.getMonth()+1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}T${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}` : undefined
@@ -385,7 +388,7 @@ async function scheduledCall(on = true, minutes = 5, untilMinutes?: number) {
   const due = await f.tickSchedules(new Date(f.clock.now))
   const id = due.inserted[0]!
   const run = await start(f, id)
-  const call = (args = t.args) => callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId: 'scheduled-call', signal: new AbortController().signal })
+  const call = (args = t.args) => callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: `Mail__${toolName}`, args, toolCallId: 'scheduled-call', signal: new AbortController().signal })
   return { ...t, schedule, id, run, call }
 }
 it.each([true, false].flatMap(on => (['direct', 'use_tool'] as const).map(route => ({ on, route }))))('a scheduled $route call holds once and fences every later tool with asks first $on', async ({ on, route }) => {
@@ -424,7 +427,7 @@ it.each([true, false].flatMap(on => (['direct', 'use_tool'] as const).map(route 
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   expect(t.calls).toEqual([t.args])
 })
-it.each(['repeat', 'forgotten'] as const)('removed or recreated schedules and a second schedule cannot reset %s refusals', async rule => {
+it.each(['repeat', 'forgotten'] as const)('recreated schedules keep removed requests distinct from Not now: %s', async rule => {
   const t = await scheduledCall()
   let id = t.id, turn = t.run, schedule = t.schedule
   const count = 1
@@ -453,7 +456,7 @@ it.each(['repeat', 'forgotten'] as const)('removed or recreated schedules and a 
   }
   const args = t.args
   const attempt = (bot: typeof turn.prepared.authority, key: string) => callForBot({ bot, mcp: t.mcp, name: 'Mail__send', args, toolCallId: key, signal: new AbortController().signal })
-  expect((await attempt(turn.prepared.authority, 'recreated')).isError).toBe(true)
+  expect((await attempt(turn.prepared.authority, 'recreated')).isError).toBe(rule === 'forgotten' ? true : undefined)
   const second = f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Same task elsewhere' }, 'owner')
   f.clock.now += 5 * 60_000
   const due = await f.tickSchedules(new Date(f.clock.now))
@@ -647,7 +650,7 @@ it.each(['send', 'not_now'] as const)('different open calls remain independent w
   const a = f.bots.actions.forWork(first.id)!
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer })
   expect(f.bots.actions.forWork(first.id)?.status).toBe(answer === 'send' ? 'done' : 'declined')
-  expect(f.store.lastMainDispatch(first.id)?.prompt.text).toContain(answer === 'send' ? 'Your owner sent it' : 'chose not to send')
+  expect(f.store.lastMainDispatch(first.id)?.prompt.text).toContain(answer === 'send' ? 'Your owner sent it' : 'chose Not now; nothing was sent')
   const next = t.works[3]!
   const result = await callForBot({ bot: next.run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'A freed place' }, toolCallId: 'freed-place', signal: new AbortController().signal })
   expect(result.isError).not.toBe(true)
@@ -735,7 +738,7 @@ it.each([1, 60, 180])('an older expired schedule card keeps its outcome and prog
   const later = await start(f, due.inserted[0]!)
   expect(later.prepared.preamble).toContain('Checked through the first invoice')
 })
-it('Not now refuses the identical call in the next occurrence until the owner writes', async () => {
+it('Not now refuses an identical call within its occurrence, then a later occurrence asks', async () => {
   const t = await scheduledCall()
   await t.call()
   await finish(f, t.run.payload)
@@ -743,13 +746,14 @@ it('Not now refuses the identical call in the next occurrence until the owner wr
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
   await flush()
   const next = await start(f, t.id, 2)
+  expect(await callForBot({ bot: next.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'same-occurrence', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('Do not ask again') })
   await finish(f, next.payload)
   f.clock.now += 5 * 60_000
   const due = await f.tickSchedules(new Date(f.clock.now))
   const run = await start(f, due.inserted[0]!)
   const outcome = await callForBot({ bot: run.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'new-occurrence', signal: new AbortController().signal })
-  expect(outcome).toMatchObject({ isError: true, text: expect.stringContaining('Do not ask again') })
-  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
+  expect(outcome.text).toContain('held')
+  expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(2)
 })
 it('restart while a schedule waits keeps one run and card and Send resumes once', async () => {
   const t = await scheduledCall()
@@ -823,6 +827,9 @@ it('a subagent holds its call on its work and uses its own dispatch in the call 
   await t.work.prepared.authority.subagents!.start({ title: 'Sender', brief: 'Send mail', toolCallId: 'start-sender' })
   const childDispatch = f.store.dispatches(t.workId).find(d => d.kind === 'subagent')!
   const child = await start(f, t.workId, childDispatch.n)
+  expect(child.prepared.instructions).toContain('Some of your tools ask your owner first')
+  expect(child.prepared.instructions).toContain('If a call was not sent, say so plainly in your report.')
+  expect(child.prepared.instructions).toContain('Your owner sees only your report, not what you wrote before a held call; repeat any results they need.')
   await callForBot({ bot: child.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'child-call', signal: new AbortController().signal })
   const a = f.bots.actions.forWork(t.workId)!
   expect(JSON.parse(a.call_key)).toEqual([t.workId, childDispatch.clientRequestId, 'child-call'])
@@ -840,13 +847,13 @@ it('settlement persists readiness with the result, even when no wake callback ru
   await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   // The write commits; imagine shutdown before the post-commit pump.
-  f.bots.actions.transition(a.id, 'open', 'declined', { text: 'Your owner chose not to send this.' })
+  f.bots.actions.transition(a.id, 'open', 'declined', { text: 'Your owner chose Not now; nothing was sent this.' })
   expect(f.store.activation(t.workId)).toMatchObject({ status: 'blocked', endReason: 'approval_answered' })
   f.bots.close()
   f.bots = new BotEngine(f.host)
   await f.bots.reconcileOnStartup()
   await flush()
-  expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('chose not to send')
+  expect(f.store.lastMainDispatch(t.workId)?.prompt.text).toContain('chose Not now; nothing was sent')
   expect(t.calls).toEqual([])
 })
 it('restart after holding but before the runtime settles still resumes after Send', async () => {
@@ -911,7 +918,7 @@ it.each(['held', 'stopped', 'switch_off'] as const)('R1 summaries and lists surv
   await t.call()
   await finish(f, t.work.payload)
   if (state === 'stopped') await f.bots.service.workStop(t.botId, t.workId)
-  if (state === 'switch_off') f.host.settings!.get().experimental.botAsksFirst = false
+  if (state === 'switch_off') f.host.settings!.get().experimental.botAsksFirstOff = true
   const summary = f.bots.service.list().bots.find(b => b.id === t.botId)!
   expect(() => f.bots.service.get(t.botId)).not.toThrow()
   if (state === 'stopped') expect(summary.needsOwner).not.toBe(true)
@@ -1001,7 +1008,7 @@ it('R5-words gives by-hand runs and disabled answers their own refusal', async (
   const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'manual-call', signal: new AbortController().signal })
   expect(result.text).toContain("A run started by hand can't wait for your owner.")
   expect(result.text).not.toContain('scheduled')
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   await expect(f.bots.service.answerAction({ actionId: 'missing', digest: 'missing', answer: 'send' })).rejects.toThrow(/can.t be sent any more/i)
 })
 it('R5-time transports the sent instant instead of a UTC clock string', async () => {
@@ -1523,7 +1530,7 @@ it('C4 service projects stored reviews even after the switch is turned off', asy
     f.store.run('UPDATE bot_actions SET exec_args = NULL, status = ?, result_json = ?, ran_at = ? WHERE id = ?', status, JSON.stringify({ text: 'masked answer', toolReportedError: true }), f.store.now(), a.id)
     expect(card()).toMatchObject({ status, result: { text: 'masked answer', toolReportedError: true } })
   }
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   expect(card()).toMatchObject({ actionId: a.id, status: 'withdrawn' })
 })
 
@@ -1588,16 +1595,16 @@ it('C4 About marks one service that asks first, preserving invalid marks and the
   const t = await setup(true, false, true)
   const permission = () => f.bots.service.get(t.botId).permissions.find(p => p.title === 'use your Mail tools')!
   const settings = f.host.settings!.get()
-  settings.experimental.botAsksFirst = false
+  settings.experimental.botAsksFirstOff = true
   const before = permission()
-  settings.experimental.botAsksFirst = true
+  settings.experimental.botAsksFirstOff = false
   expect(permission()).toMatchObject({ mark: 'Asks first', asksFirst: true, note: 'Asks you first before sending or changing something. What it does through threads, commands or secrets you gave it does not wait for a card.' })
   expect(permission().note).not.toContain('send, other')
   for (const [state, mark] of [['gone', 'Gone from Mousse'], ['off', 'Switched off'], ['mcp_off', 'MCP is off'], ['changed', 'Changed']] as const) {
     vi.spyOn(t.mcp, 'where').mockReturnValueOnce({ state, name: 'Mail', server: t.mcp.servers()[0] } as never)
     expect(permission().mark).toBe(mark)
   }
-  settings.experimental.botAsksFirst = false
+  settings.experimental.botAsksFirstOff = true
   expect(permission()).toEqual(before)
 })
 
@@ -1748,6 +1755,7 @@ it.each(['stop', 'failed', 'limits', 'week', 'clear', 'reset', 'delete', 'forget
   f.store.run(`INSERT INTO bot_actions SELECT id || '_running', call_key || '_running', bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, place_json, card_json, bot_note, 'running', result_json, message_id, next_at, nudges, expires_at, answered_at, answered_device, created_at, ran_at FROM bot_actions WHERE id = ?`, a.id)
   if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
   if (['failed', 'limits', 'week'].includes(path)) f.store.moveActivation(t.workId, ['blocked'], 'failed', { endReason: path })
+  if (path === 'allowed') Object.assign(t.descriptor, { readOnlyHint: true })
   if (path === 'allowed') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: m.mcp.map(p => ({ ...p, level: 'allowed' as const })) }))
   if (path === 'server') { vi.spyOn(t.mcp, 'where').mockReturnValue({ state: 'gone' }); f.bots.fillMcpAsks() }
   if (path === 'card' || path === 'request') {
@@ -1885,7 +1893,7 @@ it.each(['stop', 'failed', 'limits', 'week', 'clear', 'reset', 'delete', 'forget
   if (path === 'stop') change = () => f.bots.stopWork(t.botId, t.workId)
   else if (['failed', 'limits', 'week'].includes(path)) change = () => f.store.moveActivation(t.workId, ['blocked'], 'failed', { endReason: path })
   else if (path === 'forget history') change = () => f.bots.wipeMemory(t.botId, 'saved')
-  else if (path === 'allowed') change = () => f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: m.mcp.map(p => ({ ...p, level: 'allowed' as const })) }))
+  else if (path === 'allowed') { Object.assign(t.descriptor, { readOnlyHint: true }); change = () => f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: m.mcp.map(p => ({ ...p, level: 'allowed' as const })) })) }
   else if (path === 'tool' || path === 'server') change = () => {
     if (path === 'tool') t.server.tools.splice(0)
     else vi.spyOn(t.mcp, 'where').mockReturnValue({ state: 'gone' })
@@ -2129,7 +2137,7 @@ it('R2-4 older expired cards refuse exact repeats but do not count changed calls
     await legacyExpired(a)
     runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
   }
-  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'expires 0' }, toolCallId: 'old-exact-repeat', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('did not send this exact request') })
+  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'expires 0' }, toolCallId: 'old-exact-repeat', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('This expired, so nothing was sent') })
   expect((await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'changed-after-old-expiry', signal: new AbortController().signal })).isError).not.toBe(true)
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(4)
 })
@@ -2230,7 +2238,7 @@ it.each(['stop', 'upkeep', 'forget'] as const)('R2-6 existing rows still settle 
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
   if (path === 'upkeep') await f.bots.deliverDueReminders()
   if (path === 'forget') {
@@ -2274,19 +2282,19 @@ it.each(['paused', 'expired', 'withdrawn', 'binding'] as const)('R2-8 Send repor
   expect(t.calls).toEqual([])
 })
 
-it('R2-5 accepts Send before refreshing tools so the timer cannot overtake it', async () => {
+it('R2-5 keeps Send unapproved until its fresh listing is checked', async () => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
   f.clock.now += 48 * 3600_000 - 1000
   let release!: () => void
   const refresh = new Promise<void>(resolve => { release = resolve })
-  vi.spyOn(t.mcp, 'warm').mockImplementationOnce(() => refresh)
+  Object.assign(t.catalog, { refreshServer: () => refresh })
   const sending = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   await flush()
-  expect(f.bots.actions.get(a.id)?.status).toBe('approved')
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
   f.clock.now += 2000; await f.bots.deliverDueReminders()
-  expect(f.bots.actions.get(a.id)?.status).toBe('approved')
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
   release(); await sending
   expect(t.calls).toEqual([t.args])
   expect(f.bots.actions.get(a.id)?.status).toBe('done')
@@ -2506,7 +2514,7 @@ it.each(['done', 'declined', 'tool_error', 'uncertain'] as const)('R4-1 forgetti
   memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
   await finish(f, t.work.payload); await flush()
   const prompt = f.store.lastMainDispatch(t.workId)!.prompt.text
-  const line = outcome === 'done' ? 'Your owner sent it' : outcome === 'declined' ? 'Your owner chose not to send' : outcome === 'tool_error' ? 'The tool reported an error' : 'It could not be confirmed whether this went through'
+  const line = outcome === 'done' ? 'Your owner sent it' : outcome === 'declined' ? 'Your owner chose Not now; nothing was sent' : outcome === 'tool_error' ? 'The tool reported an error' : 'It could not be confirmed whether this went through'
   expect(prompt).toContain(line)
   expect(prompt).not.toContain('[forgotten]')
   expect(prompt).not.toContain('private tool answer')
@@ -2600,7 +2608,7 @@ it('C4 integration nudge ids project the same stored review and follow settlemen
   for (const suffix of ['n1', 'n2']) expect(projected(suffix).action).toEqual(original())
   expect(projected('n1').action?.status).toBe('done')
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(1)
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   for (const suffix of ['n1', 'n2']) expect(projected(suffix).action).toEqual(original())
 })
 
@@ -2670,8 +2678,8 @@ it('C4 integration bridge timeout stub retains the service sentence and settleme
   expect(card).toMatchObject({ tooLarge: true, status: 'failed', at: JSON.parse(f.bots.actions.get(a.id)!.card_json!).settledAt, result: { notSentInTime: true, text: "Mail couldn't be reached, so nothing was sent." } })
 })
 
-it('C4 integration no-action profiles keep bytewise chat About bridge and telling snapshots across the switch', async () => {
-  const t = await setup(false)
+it('C4 integration read-only profiles keep bytewise chat About bridge and telling snapshots across the switch', async () => {
+  const t = await setup(false, false, false, false, false, false, 'send', true)
   await t.call()
   const methods = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: () => 'full' })
   const remote = methods.find(method => method.method === 'bots.chat.list')!
@@ -2684,9 +2692,9 @@ it('C4 integration no-action profiles keep bytewise chat About bridge and tellin
     return JSON.stringify({ chat, detail, bridge, telling: f.store.messages(t.botId, { limit: 100 }).map(({ id, tell, tellAt }) => ({ id, tell, tellAt })) })
   }
   const off = await snapshot()
-  f.host.settings!.get().experimental.botAsksFirst = true
+  f.host.settings!.get().experimental.botAsksFirstOff = false
   expect(await snapshot()).toBe(off)
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   expect(await snapshot()).toBe(off)
   expect(f.store.all('SELECT id FROM bot_actions')).toEqual([])
 })
@@ -3052,7 +3060,7 @@ it.each(['startup', 'settings', 'upkeep'] as const)('C9 switch rollback withdraw
   const a = f.bots.actions.forWork(t.workId)!
   for (const status of ['approved', 'running']) f.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, card_json, status, bot_note, result_json, message_id, expires_at, created_at, answered_at, ran_at)
     SELECT id || ?, call_key || ?, bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, card_json, ?, bot_note, result_json, message_id, expires_at, created_at, answered_at, ran_at FROM bot_actions WHERE id = ?`, `_${status}`, `_${status}`, status, a.id)
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   if (path === 'startup') { f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup() }
   if (path === 'settings') f.bots.quietHoursChanged()
   if (path === 'upkeep') await f.bots.deliverDueReminders()
@@ -3138,7 +3146,7 @@ it.each([
   if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
   if (path === 'pause') { f.bots.actions.transition(a.id, 'open', 'approved'); f.bots.pauseBot(t.botId) }
   if (path === 'permission') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
-  if (path === 'switch') { f.host.settings!.get().experimental.botAsksFirst = false; f.bots.quietHoursChanged() }
+  if (path === 'switch') { f.host.settings!.get().experimental.botAsksFirstOff = true; f.bots.quietHoursChanged() }
   if (path === 'forget') {
     const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
     const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'card' })!
@@ -3228,7 +3236,7 @@ it('C9 switch rollback is atomic when a second row cannot be written', async () 
   f.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, card_json, status, message_id, expires_at, created_at, answered_at)
     SELECT id || '_accepted', call_key || '_accepted', bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, card_json, 'approved', message_id, expires_at, created_at, created_at FROM bot_actions WHERE id = ?`, a.id)
   f.store.run(`CREATE TRIGGER fail_switch_rollback BEFORE UPDATE OF status ON bot_actions WHEN OLD.status = 'approved' BEGIN SELECT RAISE(ABORT, 'write failed'); END`)
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   expect(() => f.bots.quietHoursChanged()).toThrow()
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'open', exec_args: JSON.stringify(t.args) })
   expect(f.bots.actions.get(`${a.id}_accepted`)).toMatchObject({ status: 'approved', exec_args: JSON.stringify(t.args) })
@@ -3254,7 +3262,7 @@ it('C9 an unread expiry from the earlier build uses the owner-writing rule too',
 it('C9 rollback on restart waits for catch-up and activation reconciliation', async () => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   f.bots.close(); f.bots = new BotEngine(f.host)
   let dispatchesAtCatchUp = -1
   let reconciled = false
@@ -3308,7 +3316,7 @@ it.each((['network', 'usage retry', 'usage reset', 'restart', 'reload', 'more ro
     else await (f.bots as any).continueWith(t.workId, [f.store.activation(t.workId)!.status], input)
     await flush()
     const dispatch = f.store.lastMainDispatch(t.workId)!
-    const line = answer === 'send' ? 'Your owner sent it' : 'Your owner chose not to send'
+    const line = answer === 'send' ? 'Your owner sent it' : 'Your owner chose Not now; nothing was sent'
     expect(dispatch.prompt.text).toContain(line)
     expect(dispatch.prompt.workActionIds).toContain(a.id)
     const resumed = await start(f, t.workId, dispatch.n)
@@ -3413,7 +3421,7 @@ it('C10 review in-turn Not now and replay describe an answered action, not a que
   expect(JSON.stringify(sibling)).toContain('your owner already answered the request in this turn')
   expect(JSON.stringify(sibling)).not.toContain('question')
   const replay = await t.call()
-  expect(replay.text).toContain('chose not to send')
+  expect(replay.text).toContain('chose Not now; nothing was sent')
   expect(replay.text).not.toContain('held for your owner')
 })
 
@@ -3548,7 +3556,7 @@ it('C11 repeat refusal explains an unsent request without promising expiry', asy
   await flush()
   const turn = await start(f, t.workId, 2)
   const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'repeat-copy', signal: new AbortController().signal })
-  expect(result.text).toBe('Your owner did not send this exact request. Do not ask again unless they write. Carry on without it.')
+  expect(result.text).toBe('Your owner chose Not now; nothing was sent. Do not ask again unless they write; carry on without it and say in your report what you skipped.')
 })
 
 it.each(['stop', 'not_now', 'send', 'withdraw', 'forget', 'clear'] as const)('C11 hidden arguments stay while waiting and clear on %s', async path => {
@@ -3570,4 +3578,436 @@ it.each(['stop', 'not_now', 'send', 'withdraw', 'forget', 'clear'] as const)('C1
     memory.forget(t.botId, { refs: [`j${seq}`], by: 'owner_ui' })
   }
   expect(f.bots.actions.get(a.id)?.exec_args).toBeNull()
+})
+
+// C6: existing grants have no stored level. Classification must never rewrite them.
+it.each(['work', 'schedule'] as const)('C6 classifies an existing %s grant at call time without rewriting it', async kind => {
+  const t = kind === 'work' ? await setup(true) : await scheduledCall()
+  const grant = f.store.activeGrant(t.botId)!
+  const manifest = masterGrant.manifest as typeof grant.manifest
+  expect(botManifestDigest(manifest)).toBe(masterGrant.digest)
+  f.store.approve(t.botId, botManifestDigest(manifest), manifest)
+  expect(('run' in t ? t.run : t.work).prepared.instructions).toContain('Some of your tools ask your owner first')
+  const before = structuredClone(f.store.activeGrant(t.botId))
+  const revision = f.bots.definitionOf(t.botId).revision
+  await t.call()
+  expect(t.calls).toEqual([])
+  expect(f.bots.actions.forWork('id' in t ? t.id : t.workId)?.status).toBe('open')
+  expect(f.store.activeGrant(t.botId)).toEqual(before)
+  expect(f.bots.definitionOf(t.botId).revision).toBe(revision)
+  expect(botManifestDigest(f.store.activeGrant(t.botId)!.manifest)).toBe(before!.digest)
+})
+it('C6 a hint changing to read-only invalidates an existing card', async () => {
+  const t = await setup(true)
+  const grant = f.store.activeGrant(t.botId)!
+  f.store.approve(t.botId, botManifestDigest({ ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send' }] }), { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send' }] })
+  await t.call()
+  const a = f.bots.actions.forWork(t.workId)!
+  Object.assign(t.descriptor, { readOnlyHint: true })
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('This changed since you saw it')
+  expect(t.calls).toEqual([])
+})
+it('C6 introduces asks first once before the first card, surviving restart', async () => {
+  const t = await setup(true)
+  await t.call()
+  const messages = () => f.store.all('SELECT text FROM bot_messages WHERE bot_id = ? ORDER BY seq', t.botId).map(m => String(m.text))
+  const introduction = `${f.bots.definitionOf(t.botId).name} asks you before using tools that may send or change things. Tools that say they only read don't ask.`
+  expect(messages().filter(text => text === introduction)).toHaveLength(1)
+  expect(f.bots.service.chatList(t.botId).messages.find(m => m.text === introduction)?.systemLine).toBe(true)
+  expect(messages().indexOf(introduction)).toBeLessThan(messages().findIndex(text => text.startsWith('Mail · send')))
+  f.bots.close(); f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  await t.call()
+  expect(messages().filter(text => text === introduction)).toHaveLength(1)
+})
+it('C6 About classifies unstamped grants and respects current hints', async () => {
+  const t = await setup(true)
+  const grant = f.store.activeGrant(t.botId)!
+  const manifest = { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send' }] }
+  const about = () => f.bots.chat.permissionItems(t.botId, manifest, grant.approvedAt).find(p => p.title === 'use your Mail tools')
+  expect(about()?.mark).toBe('Asks first')
+  Object.assign(t.descriptor, { readOnlyHint: true })
+  expect(about()?.mark).toBeUndefined()
+})
+it.each(['withdrawn', 'expired'] as const)('C6 a %s schedule card never claims the owner answered', async status => {
+  const t = await scheduledCall()
+  await t.call(); await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  f.bots.actions.transition(a.id, 'open', status, { text: 'Nothing was sent.' })
+  expect(f.bots.service.automationFacts(t.botId, t.schedule.scheduleId)?.runs[0]?.endReason).toBe(`approval_${status}`)
+})
+
+it.each([true, false])('C6 a new service ask explains per-use cards only with the switch on=%s', async on => {
+  const t = await setup(on)
+  const ask = f.store.all('SELECT id FROM bot_escalations WHERE bot_id = ?', t.botId)[0]
+  const row = f.store.escalation(String(ask!.id))!
+  expect(f.bots.chat.card(row).note.includes('Tools that may send or change things ask before each use')).toBe(on)
+})
+it.each([true, false])('C6 call-time hint true reads directly; hint false holds, hint=%s', async readOnlyHint => {
+  const t = await setup(true, false, false, false, false, false, 'send', readOnlyHint, true)
+  const grant = f.store.activeGrant(t.botId)!
+  const manifest = { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send' }] }
+  f.store.approve(t.botId, botManifestDigest(manifest), manifest)
+  Object.assign(t.descriptor, { readOnlyHint })
+  await t.call()
+  expect(t.calls).toEqual(readOnlyHint ? [t.args] : [])
+  expect(f.bots.actions.forWork(t.workId)?.status).toBe(readOnlyHint ? undefined : 'open')
+})
+it('C6 chat seam refuses asking tools without posting a card', async () => {
+  const t = await setup(true)
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Send', clientRequestId: 'chat-seam' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  const tool = t.mcp.offered(new Set(['mail::send']))[0]!
+  expect(turn.prepared.authority.holdMcp!(tool, t.args, 'chat-seam')).toMatchObject({ isError: true, text: 'Hand this to work: it asks your owner first.' })
+  expect(f.bots.actions.forWork(row.id)).toBeUndefined()
+})
+
+it('C6 introduction and first card commit together or neither is kept', async () => {
+  const t = await setup(true)
+  f.store.run("CREATE TRIGGER fail_c6_card BEFORE INSERT ON bot_actions BEGIN SELECT RAISE(ABORT, 'card failed'); END")
+  await expect(t.call()).rejects.toThrow()
+  expect(f.store.get("SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = 'asks-first:introduced'", t.botId)).toBeUndefined()
+  expect(f.store.get('SELECT id FROM bot_messages WHERE id = ?', `bm_asks_first_${t.botId}`)).toBeUndefined()
+  f.store.run('DROP TRIGGER fail_c6_card')
+  await t.call()
+  expect(f.store.message(`bm_asks_first_${t.botId}`)?.tell).toBeNull()
+})
+it('C6 a second card after restart and a history wipe never repeats the introduction', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' })
+  await flush()
+  f.bots.close(); f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup()
+  const memory = new BotMemoryStore({ db: f.store.db })
+  memory.wipe(t.botId, true)
+  expect(memory.getState(t.botId, 'asks-first:introduced')).toBe(1)
+  const turn = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
+  await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'A different email' }, toolCallId: 'second-card', signal: new AbortController().signal })
+  expect(f.store.all("SELECT id FROM bot_actions WHERE bot_id = ?", t.botId)).toHaveLength(2)
+  expect(f.store.all('SELECT id FROM bot_messages WHERE id = ?', `bm_asks_first_${t.botId}`)).toHaveLength(1)
+  expect(memory.getState(t.botId, 'asks-first:introduced')).toBe(1)
+})
+
+it.each(['failing', 'starting', 'cold restart'] as const)('keeps an unstamped reading-name false-hint card through %s', async state => {
+  const t = await setup(true, false, false, false, false, false, 'get_items', false, true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const tools = t.server.tools.splice(0)
+  if (state === 'failing') t.server.failing = true
+  if (state === 'starting') Object.assign(t.server, { starting: true })
+  const cold = state === 'cold restart' ? vi.spyOn(t.catalog, 'servers').mockReturnValue([]) : undefined
+  const listed = cold ? vi.spyOn(t.catalog, 'listed').mockReturnValue(false) : undefined
+  if (cold) { f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup() }
+  else f.bots.fillMcpAsks()
+  expect(f.bots.actions.get(a.id)?.status).toBe('open')
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
+  t.server.tools.push(...tools); t.server.failing = false; Object.assign(t.server, { starting: false }); cold?.mockRestore(); listed?.mockRestore()
+  f.bots.fillMcpAsks()
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(t.calls).toEqual([t.args])
+})
+it('keeps the offered false hint when a reading tool changes its listing mid-turn', async () => {
+  const t = await setup(true, false, false, false, false, false, 'get_items', false, true)
+  t.descriptor.readOnlyHint = true
+  await t.call()
+  expect(f.bots.actions.forWork(t.workId)?.status).toBe('open')
+  expect(t.calls).toEqual([])
+  await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('changed since')
+  expect(t.calls).toEqual([])
+})
+it('does not dispatch a reading tool missing from its current listing', async () => {
+  const t = await setup(true, false, false, false, false, false, 'get_items', true, true)
+  t.server.tools.splice(0)
+  await t.call()
+  expect(t.calls).toEqual([])
+})
+
+it('Send re-lists a warm server before checking the held effective level', async () => {
+  const t = await setup(true, false, false, false, false, false, 'get_items', false, true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  const refresh = vi.fn(async () => { t.descriptor.readOnlyHint = true })
+  Object.assign(t.catalog, { refreshServer: refresh })
+  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow('changed since')
+  expect(refresh).toHaveBeenCalled()
+  expect(t.calls).toEqual([])
+})
+it('Send refuses a bounded re-list that does not finish, keeping the card open', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  Object.assign(t.catalog, { refreshServer: () => new Promise<void>(() => {}) })
+  vi.useFakeTimers()
+  try {
+    const answer = expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_unreachable' })
+    await vi.advanceTimersByTimeAsync(3001)
+    await answer
+    expect(f.bots.actions.get(a.id)?.status).toBe('open')
+    expect(t.calls).toEqual([])
+  } finally { vi.useRealTimers() }
+})
+
+it('Not now on a fixed-text minute schedule allows a fresh card next occurrence', async () => {
+  const t = await scheduledCall(true, 1)
+  await t.call(); await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' }); await flush()
+  const resumed = await start(f, t.id, 2); await finish(f, resumed.payload)
+  f.clock.now += 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  const id = due.inserted[0]!, turn = await start(f, id)
+  const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'next-occurrence', signal: new AbortController().signal })
+  expect(result.isError).not.toBe(true)
+  expect(f.bots.actions.forWork(id)?.status).toBe('open')
+  expect(f.bots.actions.forWork(id)?.id).not.toBe(a.id)
+  expect(t.calls).toEqual([])
+})
+it.each(['work', 'schedule'].flatMap(lane => ['get_items', 'get_and_send'].map(tool => ({ lane, tool }))))('no-hint $tool in $lane uses the name rule', async ({ lane, tool }) => {
+  const t = lane === 'schedule' ? await scheduledCall(true, 1, undefined, tool, true) : await setup(true, false, false, false, false, false, tool, undefined, true)
+  await t.call()
+  const id = 'id' in t ? t.id : t.workId
+  expect(f.bots.actions.forWork(id)?.status).toBe(tool === 'get_items' ? undefined : 'open')
+  expect(t.calls).toEqual(tool === 'get_items' ? [t.args] : [])
+})
+
+it('chat explains waiting without promising which calls ask', async () => {
+  const t = await setup(true)
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Schedule mail', clientRequestId: 'waiting-guidance' })
+  const talk = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, talk.id)
+  expect(turn.prepared.instructions).toContain('When you set up work or a schedule')
+  expect(turn.prepared.instructions).toContain('one card at a time')
+  expect(turn.prepared.instructions).toContain('Never promise which calls will or will not ask')
+})
+
+it('the permission card describes mixed read-only and missing hints without repetition', async () => {
+  const t = await setup(true, false, true)
+  t.descriptor.readOnlyHint = true
+  const row = f.store.escalation(String(f.store.all('SELECT id FROM bot_escalations WHERE bot_id = ?', t.botId)[0]!.id))!
+  const permission = structuredClone(row.permission) as any
+  permission.mcp.changes = 'unknown'
+  const note = f.bots.chat.card({ ...row, permission, title: null, note: null }).note
+  expect(note).not.toContain("doesn't say whether these tools")
+  expect(note.match(/ask before each use/g)).toHaveLength(1)
+  expect(note).not.toContain('Some of these tools send or change things; those')
+})
+
+it('reserves the first answer while Send checks its fresh listing', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  let release!: () => void
+  Object.assign(t.catalog, { refreshServer: () => new Promise<void>(resolve => { release = resolve }) })
+  const send = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  await flush()
+  const notNow = await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' }).then(() => 'answered', () => 'refused')
+  release(); await send.catch(() => undefined)
+  expect(notNow).toBe('refused')
+  expect(t.calls).toEqual([t.args])
+})
+it('a successful fresh check retains the accepted-call recovery window', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  Object.assign(t.catalog, { refreshServer: async () => {} })
+  vi.spyOn(t.mcp, 'warm').mockImplementationOnce(async () => { t.server.tools.splice(0); t.server.failing = true })
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+  expect(f.bots.actions.get(a.id)?.status).toBe('approved')
+  expect(t.calls).toEqual([])
+})
+
+it.each([true, undefined])('a past unknown hint never claims current reading tools lack hints: %s', async hint => {
+  const t = await setup(true, false, true)
+  t.descriptor.readOnlyHint = true
+  t.server.tools[1]!.toolName = 'get_items'
+  t.server.tools[1]!.readOnlyHint = hint
+  const row = f.store.escalation(String(f.store.all('SELECT id FROM bot_escalations WHERE bot_id = ?', t.botId)[0]!.id))!
+  const permission = structuredClone(row.permission) as any
+  permission.mcp.changes = 'unknown'; permission.mcp.tools = ['send', 'get_items']
+  const note = f.bots.chat.card({ ...row, permission, title: null, note: null }).note
+  expect(note).not.toContain("doesn't say whether these tools")
+  expect(note).toContain('Mousse decides which calls ask at each use')
+  expect(note).not.toContain('Some tools do not provide a read-only hint')
+})
+
+it.each([false, undefined])('asks when the offered reading hint is taken away mid-turn: %s', async hint => {
+  const t = await setup(true, false, false, false, false, false, 'send', true, true)
+  t.descriptor.readOnlyHint = hint
+  await t.call()
+  expect(t.calls).toEqual([])
+  expect(f.bots.actions.forWork(t.workId)?.status).toBe('open')
+})
+
+it.each([0, 26_999, 27_001, 31_000])('Send with a slow listing uses only recent matching evidence, age=%s', async age => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  vi.useFakeTimers()
+  const refreshedAt = performance.now() - age
+  const wallAt = Date.now() - age
+  Object.assign(t.catalog, { serverRefreshedAt: () => refreshedAt, serverRefreshedWallAt: () => wallAt, refreshServer: () => new Promise<void>(() => {}) })
+  vi.useFakeTimers()
+  try {
+    const sending = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
+    const outcome = age <= 26_999 ? expect(sending).resolves.toBeTruthy() : expect(sending).rejects.toMatchObject({ code: 'bot_action_unreachable' })
+    await vi.advanceTimersByTimeAsync(3001)
+    await outcome
+    expect(t.calls).toEqual(age <= 26_999 ? [t.args] : [])
+  } finally { vi.useRealTimers() }
+})
+it('a slow listing cannot reuse a recent hint that changed during the check', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  Object.assign(t.catalog, { serverRefreshedAt: () => performance.now(), refreshServer: () => { t.descriptor.readOnlyHint = true; return new Promise<void>(() => {}) } })
+  vi.useFakeTimers()
+  try {
+    const answer = expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
+    await vi.advanceTimersByTimeAsync(3001); await answer
+    expect(t.calls).toEqual([])
+  } finally { vi.useRealTimers() }
+})
+
+it('a work report repeats results from the hidden held turn', async () => {
+  const t = await setup(true)
+  expect(t.work.prepared.instructions).toContain('Your owner sees only your report, not what you wrote before a held call; repeat any results they need.')
+})
+it.each([true, false])('chat asks-first guidance depends on holding or being able to ask for MCP, canAsk=%s', async canAsk => {
+  const t = await setup(true)
+  f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [], appTools: canAsk ? m.appTools : m.appTools.filter(tool => tool !== 'escalate') }))
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Hi', clientRequestId: 'guidance-scope' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  expect(turn.prepared.instructions?.includes('When you set up work or a schedule')).toBe(canAsk)
+})
+it('each scheduled run is told that an earlier Not now is not a standing refusal', async () => {
+  const t = await scheduledCall(true, 1)
+  expect(t.run.prepared.instructions).toContain("Your owner's Not now covers only that run. Each new run tries again and asks again if needed; never skip a call only because an earlier run's call was not sent.")
+})
+it('a declined schedule call frames leftOff as something to try again and a skipped retry cannot report quiet', async () => {
+  const t = await scheduledCall(true, 1)
+  const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
+  f.host.progress = memory
+  await t.call(); await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' }); await flush()
+  const resumed = await start(f, t.id, 2)
+  f.bots.saveLeftOff(t.id, 'The email was declined.')
+  await finish(f, resumed.payload)
+  expect(memory.progress(t.botId, t.schedule.scheduleId)).not.toContain('not sent last time; ask again this run')
+  f.clock.now += 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now)), id = due.inserted[0]!
+  const next = await start(f, id)
+  const report = f.automationRuns.report({ threadId: next.payload.threadId, activationId: id }, 'quiet', 'Skipped the declined email.')
+  expect.soft(report.level).toBe('fyi')
+  await finish(f, next.payload, 'completed', { text: 'Skipped the declined email.' })
+  expect(f.store.all("SELECT text FROM bot_messages WHERE activation_id = ? AND kind = 'run_report'", id)).toEqual([expect.objectContaining({ text: 'Skipped the declined email.' })])
+})
+
+it('a successful scheduled retry clears the old decline for later quiet runs', async () => {
+  const t = await scheduledCall(true, 1)
+  await t.call(); await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' }); await flush()
+  const resumed = await start(f, t.id, 2); await finish(f, resumed.payload)
+  f.clock.now += 60_000
+  const retryDue = await f.tickSchedules(new Date(f.clock.now)), retryId = retryDue.inserted[0]!
+  const retry = await start(f, retryId)
+  await callForBot({ bot: retry.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'retry', signal: new AbortController().signal })
+  await finish(f, retry.payload)
+  const card = f.bots.actions.forWork(retryId)!
+  await f.bots.actions.answer({ actionId: card.id, digest: card.args_digest, answer: 'send' }); await flush()
+  const sent = await start(f, retryId, 2); await finish(f, sent.payload)
+  f.clock.now += 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now)), id = due.inserted[0]!
+  const next = await start(f, id)
+  expect(f.automationRuns.report({ threadId: next.payload.threadId, activationId: id }, 'quiet', 'Nothing new.').level).toBe('quiet')
+})
+
+it.each(['none', 'different', 'same'])('only the first successor reports an uncleared decline: %s', async retry => {
+  const t = await scheduledCall(true, 1)
+  const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now }); f.host.progress = memory
+  await t.call(); await finish(f, t.run.payload)
+  const declined = f.bots.actions.forWork(t.id)!
+  await f.bots.actions.answer({ actionId: declined.id, digest: declined.args_digest, answer: 'not_now' }); await flush()
+  const resumed = await start(f, t.id, 2); await finish(f, resumed.payload)
+  const levels: unknown[] = []
+  let note = 'Nothing new.'
+  for (let n = 0; n < 3; n++) {
+    f.clock.now += 60_000
+    const due = await f.tickSchedules(new Date(f.clock.now)), id = due.inserted[0]!
+    let turn = await start(f, id)
+    if (n === 0 && retry !== 'none') {
+      expect(f.bots.scheduledReportLevel(id, 'quiet')).toBe('fyi')
+      await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: retry === 'same' ? t.args : { ...t.args, body: 'Another call' }, toolCallId: 'retry', signal: new AbortController().signal })
+      await finish(f, turn.payload)
+      const card = f.bots.actions.forWork(id)!
+      await f.bots.actions.answer({ actionId: card.id, digest: card.args_digest, answer: 'send' }); await flush()
+      turn = await start(f, id, 2)
+    }
+    levels.push(f.automationRuns.report({ threadId: turn.payload.threadId, activationId: id }, 'quiet', 'Nothing new.').level)
+    f.bots.saveLeftOff(id, note); await finish(f, turn.payload, 'completed', { text: '[SILENT]' })
+    note = memory.progress(t.botId, t.schedule.scheduleId)!
+    expect((note.match(/A call was not sent last time/g) ?? []).length).toBeLessThanOrEqual(n === 0 && retry !== 'same' ? 1 : 0)
+    const messages = f.store.all("SELECT text FROM bot_messages WHERE activation_id = ? AND kind = 'run_report'", id)
+    expect(messages).toHaveLength(n === 0 && retry !== 'same' ? 1 : 0)
+  }
+  expect(levels).toEqual(retry === 'same' ? ['quiet','quiet','quiet'] : ['fyi','quiet','quiet'])
+})
+
+it('a backwards wall clock cannot renew an old Send listing', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  vi.useFakeTimers()
+  const refreshedAt = performance.now() - 31_000
+  vi.setSystemTime(-1_000_000)
+  Object.assign(t.catalog, { serverRefreshedAt: () => refreshedAt, refreshServer: () => new Promise<void>(() => {}) })
+  try {
+    const result = expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_unreachable' })
+    await vi.advanceTimersByTimeAsync(3001); await result
+    expect(t.calls).toEqual([])
+  } finally { vi.useRealTimers() }
+})
+
+it.each([false, true])('scheduled decline lookup is bounded and reused, declined=%s', async declined => {
+  const t = await scheduledCall(true, 1)
+  let id = t.id
+  if (declined) {
+    await t.call(); await finish(f, t.run.payload)
+    const card = f.bots.actions.forWork(id)!
+    await f.bots.actions.answer({ actionId: card.id, digest: card.args_digest, answer: 'not_now' }); await flush()
+    const resumed = await start(f, id, 2); await finish(f, resumed.payload)
+    f.clock.now += 60_000
+    id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
+    await start(f, id)
+  }
+  const all = vi.spyOn(f.store, 'all'), get = vi.spyOn(f.store, 'get')
+  for (let n = 0; n < 3; n++) expect(f.bots.scheduledReportLevel(id, 'quiet')).toBe(declined ? 'fyi' : 'quiet')
+  expect(all.mock.calls.filter(([sql]) => /FROM bot_activations/i.test(sql))).toHaveLength(0)
+  const probes = get.mock.calls.filter(([sql]) => /SELECT a.id FROM bot_actions/i.test(sql))
+  expect(probes).toHaveLength(1)
+  expect(probes[0]![0]).toContain('INDEXED BY bot_actions_bot')
+  const previous = get.mock.calls.filter(([sql]) => /SELECT id FROM bot_activations/i.test(sql))
+  expect(previous).toHaveLength(declined ? 1 : 0)
+  if (previous.length) expect(previous[0]![0]).toMatch(/json_extract.*scheduleId.*LIMIT 1/s)
+})
+it('sleep cannot keep an old listing fresh when the monotonic clock pauses', async () => {
+  const t = await setup(true)
+  await t.call(); await finish(f, t.work.payload)
+  const a = f.bots.actions.forWork(t.workId)!
+  vi.useFakeTimers()
+  const monotonic = performance.now(), wall = Date.now()
+  Object.assign(t.catalog, { serverRefreshedAt: () => monotonic, serverRefreshedWallAt: () => wall, refreshServer: () => new Promise<void>(() => {}) })
+  vi.setSystemTime(wall + 60_000)
+  try {
+    const answer = expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_unreachable' })
+    await vi.advanceTimersByTimeAsync(3001); await answer
+    expect(t.calls).toEqual([])
+  } finally { vi.useRealTimers() }
 })

@@ -11,7 +11,7 @@ afterEach(() => f?.close())
 async function held(on = true, options: { quietFor?: number; canWake?: boolean } = {}) {
   f = botFixture()
   const settings = getDefaultSettings()
-  settings.experimental.botAsksFirst = on
+  settings.experimental.botAsksFirstOff = !on
   f.host.settings = { get: () => settings, set: () => undefined } as never
   const descriptor = { configRevision: 'revision-1', toolName: 'send', providerName: 'mail_send', inputSchema: { type: 'object', properties: {} }, installationId: 'mail', serverId: 'mail', serverName: 'Mail' }
   const server = { installationId: 'mail', serverName: 'Mail', configDigest: 'config-1', failing: false, tools: [descriptor] }
@@ -224,7 +224,7 @@ it('suppresses an untold settled nudge even after asks first is switched off', a
   f.clock.now += HOUR
   await f.bots.deliverDueReminders()
   expect(t.nudges()).toHaveLength(1)
-  f.host.settings!.get().experimental.botAsksFirst = false
+  f.host.settings!.get().experimental.botAsksFirstOff = true
   f.bots.actions.transition(t.action.id, 'open', 'declined')
   const events: any[] = []
   f.bots.events.on('tell', event => { if (event.rows.length) events.push(event) })

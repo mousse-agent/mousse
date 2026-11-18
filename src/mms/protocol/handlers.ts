@@ -3678,6 +3678,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const serverId = asString(p.serverId, 'serverId', 256)
       await ctx.mms.mcpManager.restartServer(serverId)
+      await ctx.mms.mcpManager.refreshEnabledServer(serverId)
       ctx.emitEvent?.('mcp.changed', {})
       return { ok: true }
     }
