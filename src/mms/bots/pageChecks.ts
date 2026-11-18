@@ -9,9 +9,9 @@ interface Flight { key: string; generation: string; startedAt: number; token: st
 interface Result { flight: Flight; hash?: string; text?: string; error?: string; checked?: boolean; failure?: string }
 interface State extends PageSetting { generation: string; handedHash: string | null; inFlight?: Flight; result?: Result; failures: number; firstFailureAt?: number; toldUnreadable: boolean }
 export function pageSetting(value: PageSetting): PageSetting {
-  publicUrl(value.url)
+  const url = publicUrl(value.url)
   if (value.contains !== undefined && (typeof value.contains !== 'string' || value.contains.length > 200)) throw new Error('contains is plain text up to 200 characters.')
-  return { url: value.url, ...(value.contains !== undefined ? { contains: value.contains } : {}) }
+  return { url: url.href, ...(value.contains !== undefined ? { contains: value.contains } : {}) }
 }
 export function comparedText(body: string, contains?: string): string {
   const text = htmlToText(body).replace(/\s+/g, ' ').trim()
@@ -49,7 +49,7 @@ export class PageChecks {
     }
   }
   check(botId: string, id: string, generation: string, key: string, now: number, folder: string):
-    | { kind:'not_ready' } | { kind:'checked'; failure?: string } | { kind:'changed'; text:string; url:string; commit: () => void } | undefined {
+    | { kind:'not_ready' } | { kind:'checked'; failure?: string; reportSaved?: () => void } | { kind:'changed'; text:string; url:string; commit: () => void } | undefined {
     const state = this.read(botId,id)
     if (!state) return undefined
     if (state.generation !== generation) { this.set(botId,id,state,generation); return this.check(botId,id,generation,key,now,folder) }
@@ -60,14 +60,21 @@ export class PageChecks {
     }
     if (state.result) {
       const result = state.result
-      if (result.checked) return {kind:'checked', ...(result.failure ? {failure:result.failure} : {})}
+      const checked = () => ({ kind:'checked' as const, ...(result.failure ? { failure:result.failure, reportSaved:() => {
+        const latest = this.read(botId,id)
+        if (latest?.result?.flight.token !== result.flight.token) return
+        latest.toldUnreadable = true
+        this.save(botId,id,latest)
+      } } : {}) })
+      if (result.checked) return checked()
       if (result.error) {
         state.failures++; state.firstFailureAt ??= now
         let failure: string | undefined
         if (!state.toldUnreadable && (state.failures >= 6 || now-state.firstFailureAt >= 86_400_000)) {
-          failure = `I can't read ${new URL(state.url).host} any more: ${result.error}`; state.toldUnreadable = true
+          const reason = result.error.replace(/^The page /, 'it ')
+          failure = `I can't read ${new URL(state.url).host} any more: ${reason.charAt(0).toLowerCase()}${reason.slice(1).replace(/[.]+$/, '')}.`
         }
-        result.checked=true; result.failure=failure; this.save(botId,id,state); return {kind:'checked',...(failure ? {failure} : {})}
+        result.checked=true; result.failure=failure; this.save(botId,id,state); return checked()
       }
       state.failures=0; state.firstFailureAt=undefined; state.toldUnreadable=false
       if (state.handedHash === null || state.handedHash === result.hash) {

@@ -1,5 +1,5 @@
 import { closeSync, constants, lstatSync, mkdirSync, openSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 export function pageChangePath(root: string, activationId: string): string {
   if (!/^[a-zA-Z0-9_-]+$/.test(activationId)) throw new Error('Invalid page-change run folder.')
@@ -13,7 +13,7 @@ function inRun<T>(root: string, activationId: string, create: boolean, use: (lea
   if (create) {
     mkdirSync(root, { recursive: true, mode: 0o700 })
   }
-  const expectedRoot = join(realpathSync(dirname(root)), root.slice(root.lastIndexOf('/') + 1))
+  const expectedRoot = join(realpathSync(dirname(root)), basename(root))
   if (!lstatSync(root).isDirectory() || realpathSync(root) !== expectedRoot) throw new Error('Invalid run root.')
   if (create) {
     try { mkdirSync(parent, { mode: 0o700 }) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
