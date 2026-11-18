@@ -1,3 +1,4 @@
+import { resolveSecretBinding } from '../../../secrets/secretBinding'
 import { Type, type Tool } from '@earendil-works/pi-ai'
 import { isKeyName } from '../../../../shared/automationKeys'
 import type { AppToolHost } from './host'
@@ -103,7 +104,15 @@ export function secretTools(host: AppToolHost): MousseTool[] {
     const label = text(args.label, 120)
     const reason = text(args.reason, 600)
     if (!label || !reason) return { text: 'A secret request needs a label and a reason.', isError: true }
+    let binding: SecretRequestInput['binding']
+    if (args.for !== undefined) {
+      if (!ctx.turn.bot) return { text: 'Service bindings are available to bots only.', isError: true }
+      try { binding = resolveSecretBinding(args.for) } catch (error) {
+        return { text: error instanceof Error ? error.message : 'Choose a service or an https origin.', isError: true }
+      }
+    }
     const input: SecretRequestInput = {
+      ...(binding ? { binding } : {}),
       label,
       reason,
       ...(typeof args.link === 'string' ? { link: args.link } : {}),
@@ -158,7 +167,7 @@ export function secretTools(host: AppToolHost): MousseTool[] {
     } catch (error) {
       // The host's own refusals name a secret, never its value; anything else is reported by kind only.
       const message = error instanceof Error ? error.message : ''
-      outcome = { text: /^(This thread has no secret named|The secret [A-Z][A-Z0-9_]* is gone)/.test(message) ? message : 'The command could not run.', isError: true }
+      outcome = { text: /^(This thread has no secret named|The secret [A-Z][A-Z0-9_]* is gone|[A-Z][A-Z0-9_]* is bound to [^\r\n]+; use secret_fetch\.)/.test(message) ? message : 'The command could not run.', isError: true }
     }
     if (ctx.transport !== 'mcp') ctx.timeline?.record({ kind: 'build_tool_result', title, summary: outcome.isError ? 'The command failed.' : 'The command finished.', details: ['Tool: secret_run'], response: truncateForDisplay(outcome.text) }, 'complete')
     return outcome
@@ -170,12 +179,19 @@ export function secretTools(host: AppToolHost): MousseTool[] {
       description: REQUEST_DEFINITION.description,
       inputSchema: plainSchema(REQUEST_DEFINITION),
       definition: () => REQUEST_DEFINITION,
+      botInputSchema: plainSchema({ ...REQUEST_DEFINITION, parameters: Type.Object({
+        ...REQUEST_DEFINITION.parameters.properties,
+        for: Type.Optional(Type.Union([
+          Type.Object({ service: Type.String({ description: 'Known service: openai, anthropic, github, stripe, notion, huggingface.' }) }, { additionalProperties: false }),
+          Type.Object({ origin: Type.String({ description: 'Public https origin only, without a path or user name.' }) }, { additionalProperties: false })
+        ]))
+      }) }),
       access: 'actsAsCaller',
       class: 'read',
       asksUser: 'question',
       // A personal bot's card shows in its own chat, where its owner types the secret; its turn waits for that answer.
       botAsksOwner: true,
-      botDescription: 'Ask your owner for a secret (an API key, a token, a password) when the work your owner asked for needs one. A private card shows in your chat, where your owner types it or picks a saved one; never ask for a secret in a message, and never repeat one. You get only its name (like HF_TOKEN), never the value: use it with secret_run. The call waits for your owner\'s answer (up to an hour), so ask only when they are expecting it.',
+      botDescription: 'Ask your owner for a secret (an API key, a token, a password) when the work your owner asked for needs one. A private card shows in your chat, where your owner types it or picks a saved one; never ask for a secret in a message, and never repeat one. You get only its name (like HF_TOKEN), never the value. Optionally bind it with for: {service} or {origin}, read only: Mousse keeps its value for secret_fetch when available; secret_run refuses bound secrets. Without a binding use secret_run. The call waits for your owner\'s answer (up to an hour), so ask only when they are expecting it.',
       listed: () => Boolean(secrets()),
       available: () => (secrets() ? true : 'Secret requests are not available here.'),
       offered: (turn) => requestOffered(turn) && Boolean(secrets()),
