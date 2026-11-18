@@ -1773,7 +1773,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const botId of this.host.definitions.ids()) {
       try {
         for (const ended of endedSchedules.filter(schedule => schedule.botId === botId)) {
-          new PageChecks(this.store).remove(botId, ended.scheduleId)
+          const checks = new PageChecks(this.store)
+          if (checks.read(botId, ended.scheduleId)) checks.remove(botId, ended.scheduleId)
           if (this.store.registry(botId)?.deletedAt) continue
           const endedKey = `schedule-ended:${ended.jobId}`
           if (this.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, endedKey)) continue

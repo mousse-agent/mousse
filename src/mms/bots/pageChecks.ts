@@ -35,7 +35,6 @@ export class PageChecks {
     this.save(botId,id,{url:setting.url,...(setting.contains !== undefined ? {contains:setting.contains} : {}),generation,handedHash:null,failures:0,toldUnreadable:false})
   }
   remove(botId: string, id: string): void {
-    for (const row of this.store.listActivations(botId)) if (row.trigger.kind === 'schedule' && row.trigger.scheduleId === id) removePageChange(join(this.store.directory, 'scratch'), row.id)
     this.store.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?',botId,`pagecheck:${id}`) }
   sweep(exists: (botId: string, id: string) => boolean | undefined): void {
     for (const row of this.store.all("SELECT bot_id,key FROM bot_memory_state WHERE key LIKE 'pagecheck:%'"))
