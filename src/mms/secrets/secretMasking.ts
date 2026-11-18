@@ -42,11 +42,11 @@ function secretLines(value: string): string[] {
 }
 
 /** Match character by character: encoders may escape any subset, not just the whole value.
- * UTF-16 code units also cover JSON surrogate pairs. Include two enclosing JSON strings for stored tool history.
+ * Unicode escape tokens cover UTF-16 surrogate pairs too. Include two enclosing JSON strings for stored tool history.
  */
 function jsonEchoPatterns(value: string): RegExp[] {
   const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return [0, 1, 2].map(depth => new RegExp(value.split('').map(char => {
+  return [0, 1, 2].map(depth => new RegExp(Array.from(value).map(char => {
     // Each JSON layer is consistent across the value. Tokens have distinct prefixes, including for
     // backslashes, so near-matching responses cannot trigger exponential regex backtracking.
     const forms = new Set([jsonEscaped(char)])
@@ -56,8 +56,10 @@ function jsonEchoPatterns(value: string): RegExp[] {
       for (let n = 0; n < depth; n++) form = jsonEscaped(form)
       return literal(form)
     })
-    const hex = char.charCodeAt(0).toString(16).padStart(4, '0').replace(/[a-f]/g, h => `[${h}${h.toUpperCase()}]`)
-    alternatives.push(literal('\\'.repeat(2 ** depth) + 'u') + hex)
+    alternatives.push(char.split('').map(unit => {
+      const hex = unit.charCodeAt(0).toString(16).padStart(4, '0').replace(/[a-f]/g, h => `[${h}${h.toUpperCase()}]`)
+      return literal('\\'.repeat(2 ** depth) + 'u') + hex
+    }).join(''))
     return `(?:${alternatives.join('|')})`
   }).join(''), 'g'))
 }
