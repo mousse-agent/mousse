@@ -23,6 +23,8 @@ export async function createDaemonOwner(
   opts?: {
     start?: boolean
     requireOwnership?: boolean
+    /** See `MmsOptions.ownerToken`. */
+    ownerToken?: string
   }
 ): Promise<{ homeDir: string; mms: MousseMainService }> {
   const homeDir = resolveMousseHome(globals.homeDir || undefined)
@@ -34,6 +36,7 @@ export async function createDaemonOwner(
       headless: true,
       ownerKind: 'daemon',
       requireOwnership: opts?.requireOwnership,
+      ownerToken: opts?.ownerToken,
       version: process.env.MOUSSE_VERSION ?? process.env.npm_package_version
     }
     const mms = await MousseMainService.create(createOpts)

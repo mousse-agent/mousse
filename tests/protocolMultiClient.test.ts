@@ -203,7 +203,7 @@ describe('daemon protocol across clients', () => {
   it('daemon.shutdown writes a stop request fenced by the owner token', async () => {
     const c = await connect()
     await c.request('daemon.shutdown', { reason: 'test' })
-    expect(readStopRequest(home)?.token).toBe(ownerToken)
+    expect(readStopRequest(home, ownerToken)?.token).toBe(ownerToken)
     await c.close()
   })
 

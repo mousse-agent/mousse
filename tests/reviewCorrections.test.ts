@@ -3,7 +3,7 @@
  * projects/threads fan-out, daemon.shutdown, activity map.
  */
 
-import { existsSync, mkdtempSync, rmSync } from 'fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { createConnection } from 'net'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -13,13 +13,15 @@ import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import {
   requestDaemonShutdown,
+  sendDaemonStop,
   shutdownDaemonLifecycle,
+  stopRunningDaemon,
   type DaemonLifecycleState
 } from '../src/cli/daemonShutdown'
 import { getMmsRuntimePath, readStopRequest } from '../src/cli/mmsRuntime'
 import { resolveLocalEndpoint } from '../src/mms/protocol/endpoint'
 import type { MousseMainService as MmsInstance } from '../src/cli/contract'
-import { resolveOwnerStatus } from '../src/mms/ownership/MmsOwnerLease'
+import { acquireMmsOwnerLease, getMmsOwnerPath, resolveOwnerStatus } from '../src/mms/ownership/MmsOwnerLease'
 import { runDaemonForeground } from '../src/cli/commands/service'
 import type { ProtocolEvent } from '../src/mms/protocol/types'
 import { bridgeProtocolEvent } from '../src/main/mms/protocolEventBridge'
@@ -47,7 +49,7 @@ describe('Review: daemon.shutdown shared implementation', () => {
     const res = requestDaemonShutdown(home, token, 'unit')
     expect(res.accepted).toBe(true)
     expect(res.reason).toBe('unit')
-    const onDisk = readStopRequest(home)
+    const onDisk = readStopRequest(home, token)
     expect(onDisk?.token).toBe(token)
   })
 
@@ -82,6 +84,82 @@ describe('Review: daemon.shutdown shared implementation', () => {
     await Promise.all([first, second])
     expect(mmsStopped).toBe(true)
     expect(state.mms).toBeNull()
+  })
+
+  it("a drain that outlasts the stop's deadline is waited for, with the service kept, before teardown ends", async () => {
+    let attempts = 0
+    let finishDrain!: () => void
+    const drain = new Promise<void>((resolve) => { finishDrain = resolve })
+    const busy = Object.assign(new Error('Profile work is still draining'), { code: 'profile_busy' })
+    const mms = {
+      stop: async () => {
+        attempts += 1
+        // The installation's stop gives up waiting after its deadline; the drain itself goes on.
+        if (attempts === 1) throw new AggregateError([busy], 'Failed to stop installation services')
+        await drain
+      }
+    } as unknown as MmsInstance
+    const state: DaemonLifecycleState = {
+      homeDir: home,
+      mms,
+      protocolServer: null,
+      ownerToken: null,
+      runtimeWritten: false,
+      pollStop: null,
+      shuttingDown: false,
+      drainWait: { retryDelayMs: 5, stuckAfterMs: 60_000 }
+    }
+    let done = false
+    const teardown = shutdownDaemonLifecycle(state).then(() => { done = true })
+    await vi.waitFor(() => expect(attempts).toBe(2))
+    expect(done).toBe(false)
+    expect(state.mms).toBe(mms)
+    finishDrain()
+    await teardown
+    expect(state.mms).toBeNull()
+  })
+
+  it('a drain that never finishes is stuck: after the bounded wait the stop goes ahead, logged, and teardown ends', async () => {
+    const busy = Object.assign(new Error('Profile work is still draining'), { code: 'profile_busy' })
+    let attempts = 0
+    const mms = {
+      stop: async () => {
+        attempts += 1
+        throw new AggregateError([busy], 'Failed to stop installation services')
+      }
+    } as unknown as MmsInstance
+    const state: DaemonLifecycleState = {
+      homeDir: home,
+      mms,
+      protocolServer: null,
+      ownerToken: null,
+      runtimeWritten: false,
+      pollStop: null,
+      shuttingDown: false,
+      drainWait: { retryDelayMs: 5, stuckAfterMs: 100 }
+    }
+    const logs: string[] = []
+    await shutdownDaemonLifecycle(state, { onLog: (msg) => logs.push(msg) })
+    expect(attempts).toBeGreaterThan(1)
+    expect(state.mms).toBeNull()
+    expect(logs.at(-1)).toMatch(/forcing the stop/)
+  }, 10_000)
+
+  it('a stop reaches a daemon whose lease is unreadable for a moment while it is rewritten', async () => {
+    const lease = acquireMmsOwnerLease(home, { kind: 'daemon' })
+    try {
+      const path = getMmsOwnerPath(home)
+      const contents = readFileSync(path, 'utf-8')
+      // Mid-write: the file is there, its contents are not yet.
+      writeFileSync(path, '')
+      const sending = sendDaemonStop(home, { reason: 'unit', intervalMs: 20 })
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      writeFileSync(path, contents)
+      expect(await sending).toMatchObject({ kind: 'running', token: lease.owner.token })
+      expect(readStopRequest(home, lease.owner.token)).not.toBeNull()
+    } finally {
+      lease.release()
+    }
   })
 })
 
@@ -152,6 +230,45 @@ describe('Review: service startup fault cleanup', () => {
     } finally {
       if (state.pollStop) clearInterval(state.pollStop)
       await state.protocolServer?.stop().catch(() => undefined)
+      await state.mms?.stop().catch(() => undefined)
+    }
+  }, 60_000)
+
+  it('service stop reaches a daemon that is still starting: it stops as soon as it holds the home and never starts', async () => {
+    home = mkdtempSync(join(tmpdir(), 'mousse-stop-starting-'))
+    process.env.MOUSSE_HOME = home
+    // Holds the owner's creation after it took the home's lease, like a slow start does.
+    let releaseCreation!: () => void
+    const creationGate = new Promise<void>((resolve) => { releaseCreation = resolve })
+    const initialize = MousseMainService.prototype.initialize
+    vi.spyOn(MousseMainService.prototype, 'initialize').mockImplementation(async function (this: MousseMainService) {
+      await creationGate
+      return initialize.call(this)
+    })
+    const start = vi.spyOn(MousseMainService.prototype, 'start')
+    const logs: string[] = []
+    // Only for cleanup when the test fails.
+    const cleanup = new AbortController()
+    const running = runDaemonForeground({ homeDir: home, skipSignals: true, stopSignal: cleanup.signal, onLog: (msg) => logs.push(msg) })
+    try {
+      await vi.waitFor(() => expect(resolveOwnerStatus(home).owned).toBe(true), { timeout: 20_000 })
+      // Before, this found no runtime record and answered `unreadable` without asking the daemon to stop.
+      const stopped = stopRunningDaemon(home, { timeoutMs: 20_000, intervalMs: 20 })
+      // Picked up while the owner is still being created, not once startup is over.
+      await vi.waitFor(() => expect(logs.join('')).toContain('Shutting down MMS (stop-request)'), { timeout: 5_000 })
+      releaseCreation()
+      const state = await running
+      expect((await stopped).kind).toBe('stopped')
+      expect(start).not.toHaveBeenCalled()
+      expect(state.mms).toBeNull()
+      expect(existsSync(getMmsRuntimePath(home))).toBe(false)
+      expect(resolveOwnerStatus(home).owned).toBe(false)
+      expect(await endpointAccepts(resolveLocalEndpoint(home).path)).toBe(false)
+    } finally {
+      releaseCreation()
+      vi.restoreAllMocks()
+      cleanup.abort()
+      const state = await running
       await state.mms?.stop().catch(() => undefined)
     }
   }, 60_000)
@@ -332,7 +449,7 @@ describe('Review: protocol live events and fan-out', () => {
       reason: 'protocol-test'
     })
     expect(res.accepted).toBe(true)
-    expect(readStopRequest(home)?.token).toBe(ownerToken)
+    expect(readStopRequest(home, ownerToken)?.token).toBe(ownerToken)
     await c.close()
   })
 })
