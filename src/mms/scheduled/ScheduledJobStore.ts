@@ -1444,7 +1444,7 @@ export class ScheduledJobStore {
    * ends without a run record (the bot's activations are its runs) and the schedule moves on; occurrences missed while
    * Mousse was closed collapse into this one, so a backlog never runs.
    */
-  finishBotClaim(id: string, claimToken: string, outcome: { skipped?: string; occurrenceAt?: string }, now: Date = new Date()): ScheduledJob | null {
+  finishBotClaim(id: string, claimToken: string, outcome: { skipped?: string; occurrenceAt?: string; checked?: boolean }, now: Date = new Date()): ScheduledJob | null {
     return withFileLock(join(this.homeDir, 'scheduled', '.jobs.lock'), () => {
       const jobs = this.listJobs()
       const job = jobs.find((entry) => entry.id === id)
@@ -1453,7 +1453,7 @@ export class ScheduledJobStore {
       const occurrenceAt = outcome.occurrenceAt ?? claim.occurrenceKey
       job.runClaim = undefined
       job.botSkip = outcome.skipped ? { at: occurrenceAt, reason: outcome.skipped } : undefined
-      if (!outcome.skipped) {
+      if (!outcome.skipped && !outcome.checked) {
         job.lastRunAt = occurrenceAt
         job.lastStatus = 'ok'
         job.lastError = undefined

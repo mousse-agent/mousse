@@ -1,3 +1,4 @@
+import { PageChecks, pageSetting, type PageSetting } from '../pageChecks'
 import { WORK_WAIT_RULES, workWaitInput, workWaitRule, workReadiness, workWaitLine, parkedNeedsOwner, type WorkWaitLookups, type WorkWaitFacts, type WorkWaitReason } from './workWaiting'
 import { unattendedChatTurn } from './unattended'
 import { BotActions, BotActionChanged, actionContinuation, removeHiddenArguments, botAsksFirst, maskedActionData, readableActionTitle } from '../actions/BotActions'
@@ -1585,9 +1586,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     | { kind: 'started'; activationId: string }
     | { kind: 'said'; messageId: string }
     | { kind: 'skipped'; reason: string }
+    | { kind: 'checked'; failure?: string }
     | { kind: 'not_ready' } {
     if (!this.startupPassed) return { kind: 'not_ready' }
-    const { botId, scheduleId, prompt, occurrenceAt } = input
+    const { botId, scheduleId, occurrenceAt } = input
+    let prompt = input.prompt
     if (this.scheduleHasCompletion(botId, scheduleId)) return { kind: 'skipped', reason: 'schedule_completed' }
     const registry = this.store.registry(botId)
     if (!registry || registry.deletedAt) return { kind: 'skipped', reason: 'bot_deleted' }
@@ -1609,6 +1612,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.endUsagePauseIfDue(botId, input.now ?? new Date(this.now()))
     const paused = this.store.registry(botId)?.pausedReason
     let skip: string | undefined = paused ? (paused === 'usage_limit' ? 'usage_limited' : 'paused') : undefined
+    let page: ReturnType<PageChecks['check']>
+    if (!skip) {
+      const schedule = this.host.schedules?.get(botId, scheduleId)
+      if (schedule) page = new PageChecks(this.store).check(botId, scheduleId, schedule.revision, input.occurrenceKey ?? occurrenceAt, input.now?.getTime() ?? this.now(), this.filesFolder(botId))
+      if (page?.kind === 'checked') {
+        if (page.failure) this.chat.post({ id: `bm_page_${randomUUID()}`, botId, author: 'bot', kind: 'run_report', text: page.failure, lane: 'run' })
+        return page
+      }
+      if (page?.kind === 'not_ready') return page
+      if (page?.kind === 'changed') prompt += `\n\n${page.prompt}`
+    }
     let admitted: ReturnType<BotEngine['admissible']> | undefined
     if (!skip) {
       try {
@@ -1663,6 +1677,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         createdAt: this.store.now(),
         lane: 'run'
       }, limitsOf(intersectManifest(admitted.published.permissions, admitted.grant.manifest)))
+      if (inserted && page?.kind === 'changed') page.commit()
       if (inserted && own) this.store.setModelOverride(id, { mode: 'named', ...own, depth: admitted.published.main.model.depth })
       // Said once per automation, with its first run on the bot's Work row (a fixed id: a later run posts nothing).
       if (inserted && ignoredName)
@@ -1734,6 +1749,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (this.closed) return
     this.checkOpenJobs()
     this.retryCompletedScheduleRemovals()
+    new PageChecks(this.store).sweep((botId, id) => Boolean(this.host.schedules?.get(botId, id)))
     if (this.removedScheduleSweepPending) this.tryDropRemovedScheduleRuns()
     let endedSchedules: ReturnType<BotScheduleBook['ended']> = []
     try { endedSchedules = this.host.schedules?.ended?.() ?? [] } catch (error) {
@@ -6950,6 +6966,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    */
   async reconcileOnStartup(): Promise<void> {
     try {
+      new PageChecks(this.store).sweep((botId, id) => Boolean(this.host.schedules?.get(botId, id)))
       try { this.quietHoursChanged() } catch (error) {
         console.warn('bot quiet hours could not be checked at startup', error)
       }
@@ -9443,6 +9460,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
 
   /** Keep the deleted job's telling wishes for work whose final report is still pending. */
   scheduleRemoved(botId: string, scheduleId: string, telling: { tellMe: TellMe; canWakeMe?: boolean }): void {
+    new PageChecks(this.store).remove(botId, scheduleId)
     this.store.db.transaction(() => {
       for (const row of this.store.activationsWith(['queued', 'running', 'waiting_grant', 'paused', 'blocked'])) {
         if (row.botId !== botId || row.trigger.kind !== 'schedule' || row.trigger.scheduleId !== scheduleId) continue
@@ -9480,11 +9498,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * `MAX_BOT_SCHEDULES` per bot (a ceiling only a runaway reaches). The bot adds its own with `bot_schedule_add`, the owner from the Automations page; it needs no approval
    * (schedules are not permissions) and changes no revision.
    */
-  addSchedule(botId: string, input: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string; model?: string; pick?: BotModelPick }, createdBy: 'owner' | 'bot', ownerAsked = false): BotScheduleEntry {
+  addSchedule(botId: string, input: { when: BotSchedule['when']; prompt?: string; say?: string; until?: string; model?: string; pick?: BotModelPick; onlyIfChanged?: PageSetting }, createdBy: 'owner' | 'bot', ownerAsked = false): BotScheduleEntry {
     this.entry(botId)
+    if (input.onlyIfChanged && input.say !== undefined) throw new Error('onlyIfChanged cannot be combined with say.')
+    const setting = input.onlyIfChanged ? pageSetting(input.onlyIfChanged) : undefined
     let added: BotScheduleEntry
     try {
-      added = this.scheduleBook().add(botId, input, createdBy, { ownerAsked })
+      added = this.scheduleBook().add(botId, { ...input, ...(setting ? { name: `${input.prompt?.slice(0, 60)} · runs when ${new URL(setting.url).host} changes` } : {}) }, createdBy, { ownerAsked })
+      if (setting) new PageChecks(this.store).set(botId, added.scheduleId, setting, added.revision)
     } catch (error) {
       if (error instanceof BotScheduleError) throw new BotEngineError(error.code, error.message)
       throw error
@@ -9663,6 +9684,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   removeSchedule(botId: string, scheduleId: string): boolean {
     this.entry(botId)
     const removed = this.host.schedules?.remove(botId, scheduleId) ?? false
+    new PageChecks(this.store).remove(botId, scheduleId)
     this.dropRemovedScheduleRuns(botId)
     if (removed) this.changed({ botId })
     return removed

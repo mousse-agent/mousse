@@ -1,8 +1,11 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { EventEmitter } from 'node:events'
 import * as dns from 'node:dns/promises'
 import * as https from 'node:https'
 import { isPublicAddress, publicFetch } from '../src/mms/net-public/publicFetch'
+vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }))
+vi.mock('node:https', () => ({ request: vi.fn() }))
+beforeEach(() => vi.clearAllMocks())
 afterEach(() => vi.restoreAllMocks())
 describe('public GET address boundary', () => {
   it.each(['127.0.0.1','10.0.0.1','172.16.0.1','192.168.1.1','169.254.1.1','100.64.0.1','224.0.0.1','0.0.0.0','::1','::','fe80::1','fc00::1','ff02::1','::ffff:127.0.0.1','::ffff:7f00:1','::ffff:192.168.1.1','2002:7f00:1::','64:ff9b::7f00:1'])('refuses %s', address => expect(isPublicAddress(address)).toBe(false))
