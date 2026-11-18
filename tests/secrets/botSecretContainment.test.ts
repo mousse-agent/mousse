@@ -1,3 +1,5 @@
+import { createBotJournal } from '../../src/mms/bots/memory/capture'
+import { memoryFixture, disposeFixtures } from '../bots/memory/memoryFixture'
 import { resolveSecretBinding } from '../../src/mms/secrets/secretBinding'
 /**
  * A personal bot's secrets, through the real path (bot/thread parity, "use secrets you give it").
@@ -162,6 +164,7 @@ describe('a bot\'s secret is masked in what a turn of its work keeps', () => {
     daemon = undefined
     rmSync(home, { recursive: true, force: true })
     delete process.env.MOUSSE_HOME
+    disposeFixtures()
   })
 
   /** Every file under `root` but the secret store's own value file and the threads' private copies, with its text. */
@@ -214,12 +217,19 @@ describe('a bot\'s secret is masked in what a turn of its work keeps', () => {
     const reply = await orch.send('Open the pull request', false, { threadId: work.id })
     await waitFor(() => results.length >= 1, 'the run to end')
     await waitFor(() => !orch.activeTurnThreadIds().includes(work.id), 'the turn to end')
+    const memory = memoryFixture()
+    const journal = createBotJournal({ store: memory.store, readThread: id => store.loadThreadData(id), listThreads: () => [] })
+    await journal.syncThread({ botId: 'alpha', threadId: work.id, lane: 'run', activationId: 'act' })
     requests.dispose()
-    return { reply: JSON.stringify(reply), messages: JSON.stringify(orch.getMessages(work.id)), native: JSON.stringify(orch.getNativeContext(work.id)), result: results.join('\n') }
+    return { journal: JSON.stringify(memory.store.journal('alpha')), reply: JSON.stringify(reply), messages: JSON.stringify(orch.getMessages(work.id)), native: JSON.stringify(orch.getNativeContext(work.id)), result: results.join('\n') }
   }
 
   it.each([false, true])('in its messages, recorded result, native history, reply and profile files (bound: %s)', async bound => {
+    const logs: unknown[][] = []
+    for (const level of ['log', 'info', 'warn', 'error', 'debug'] as const) vi.spyOn(console, level).mockImplementation((...args) => { logs.push(args) })
     const kept = await run(true, bound)
+    expect(JSON.stringify(logs)).not.toContain(VALUE)
+    expect(kept.journal).toContain('[secret API_TOKEN hidden]')
     for (const [where, text] of Object.entries(kept)) expect({ where, leaked: text.includes(VALUE) }).toEqual({ where, leaked: false })
     expect(kept.messages).toContain('[secret API_TOKEN hidden]')
     expect(kept.result).toContain('[secret API_TOKEN hidden]')
