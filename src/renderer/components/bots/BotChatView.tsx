@@ -10,6 +10,7 @@ import { Markdown } from '../../chat/components/agent-elements/markdown'
 import { CopyButton } from '../../chat/components/agent-elements/copy-button'
 import { ReadAloudButton } from '../../readAloud/ReadAloudButton'
 import { useMotionScale } from '../../lib/motion'
+import { watchOffscreen } from '../../lib/offscreenMotion'
 import { BotFace } from './face/BotFace'
 import { BotSteps } from './BotSteps'
 import { BOT_IMAGES, BotFilePane, BotFilesProvider, BotMarkdown, BotPathChip, fileActions } from './BotFiles'
@@ -559,6 +560,7 @@ const TYPING_SHIMMER_DELAY_MS = 2 * TYPING_DOT_STEP_MS + 0.3 * TYPING_CYCLE_MS +
 function TypingDots({ status }: { status: string }) {
   const dotsRef = useRef<HTMLSpanElement>(null)
   const glintRef = useRef<HTMLSpanElement>(null)
+  const bubbleRef = useRef<HTMLSpanElement>(null)
   const still = useMotionScale() === 0
   useLayoutEffect(() => {
     if (still) return
@@ -580,7 +582,18 @@ function TypingDots({ status }: { status: string }) {
     if (lead?.startTime !== null && lead?.startTime !== undefined) for (const animation of shimmer) animation.startTime = lead.startTime
     return () => shimmer.forEach((animation) => animation.cancel())
   }, [still])
-  return <span className={`bot-bubble bot-typing-bubble${still ? ' is-still' : ''}`}>
+  // Paused, all together so the wave stays in step, while the bubble is scrolled out of view or the window is hidden.
+  useLayoutEffect(() => {
+    const bubble = bubbleRef.current
+    if (still || !bubble || typeof bubble.getAnimations !== 'function') return
+    return watchOffscreen(bubble, (offscreen) => {
+      for (const animation of bubble.getAnimations({ subtree: true })) {
+        if (offscreen) animation.pause()
+        else animation.play()
+      }
+    })
+  }, [still])
+  return <span ref={bubbleRef} className={`bot-bubble bot-typing-bubble${still ? ' is-still' : ''}`}>
     <span ref={dotsRef} className="bot-typing-dots" aria-hidden><i /><i /><i /></span>
     <span className="bot-typing-status">
       {status}

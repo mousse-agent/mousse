@@ -1240,6 +1240,22 @@ describe('shared ticks', () => {
     renderer.dispose()
   })
 
+  it('moves faces smaller than 40 px (the sidebar, the chat header) 15 times a second in every state', () => {
+    const fake = fakeEnv()
+    const renderer = new FaceRenderer(fake.env)
+    const faces = [{ state: 'working', size: 36 }, { state: 'needs_you', size: 32 }, { state: 'happy', size: 36 }, { state: 'idle', size: 36 }, { state: 'working', size: 88 }] as const
+    faces.forEach(({ state, size }, i) => {
+      renderer.register(document.createElement('canvas'), { ...face(i, state), size })
+      fake.display(13, 100)
+    })
+    const from = fake.draws.length
+    fake.display(3000, 100)
+    expect(faces.map((_, i) => drawnAt(fake, i, from).length)).toEqual([45, 45, 45, 45, 90])
+    // Still on the shared ticks: a small busy face draws on the same ticks as a large one.
+    for (const at of drawnAt(fake, 0, from)) expect(drawnAt(fake, 4, from)).toContain(at)
+    renderer.dispose()
+  })
+
   it('sleeps between ticks: no frame is asked for while nothing is due, and a timer asks for the next tick', () => {
     const fake = fakeEnv()
     const renderer = new FaceRenderer(fake.env)
