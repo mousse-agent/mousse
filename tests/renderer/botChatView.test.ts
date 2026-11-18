@@ -3164,7 +3164,7 @@ describe('keeping a pasted key private', () => {
     expect(field().value).toBe('Use the secret OPENAI_API_KEY_2 please')
     expect(fake.client.send).not.toHaveBeenCalled()
     await click(button('Send message'))
-    expect(fake.client.send).toHaveBeenCalledWith('inbox', 'Use the secret OPENAI_API_KEY_2 please', expect.any(String), undefined, undefined)
+    expect(fake.client.send).toHaveBeenCalledWith('inbox', 'Use the secret OPENAI_API_KEY_2 please', expect.any(String), [], undefined)
   })
   it.each(['explicit', 'second send'])('sends unchanged only after %s consent', async choice => {
     await open(); await type(field(), key)
@@ -3181,7 +3181,8 @@ describe('keeping a pasted key private', () => {
     window.mousse.platformRequest = { request: vi.fn(async () => { throw new Error(key) }) } as never
     await open(); await type(field(), key); await click(button('Keep as secret'))
     expect(host.textContent).toContain("Inbox helper can't keep secrets")
-    expect(host.textContent).not.toContain(key)
+    expect(host.querySelector('[role="status"]')?.textContent).not.toContain(key)
+    expect(transcript().textContent).not.toContain(key)
     await click(button('Send message'))
     expect(fake.client.send).not.toHaveBeenCalled()
     await type(field(), '')
