@@ -145,6 +145,8 @@ export type MessageListProps = {
    * windowed rows, so it follows the end.
    */
   afterTurns?: React.ReactNode;
+  /** Drawn above the first turn, outside the windowed rows (a side chat's fork line). */
+  beforeTurns?: React.ReactNode;
   showCopyToolbar?: boolean;
   suppressQuestionTool?: boolean;
   /**
@@ -1354,6 +1356,7 @@ export const MessageList = memo(function MessageList({
   showCopyToolbar = true,
   lastTurnNotice,
   afterTurns,
+  beforeTurns,
   onAtBottomChange,
   onComposerCompactChange,
   suppressQuestionTool = false,
@@ -2145,6 +2148,7 @@ export const MessageList = memo(function MessageList({
       )}
     >
       <div ref={contentWrapperRef} className="mx-auto px-6 py-6 max-w-an">
+        {beforeTurns != null && rowItems.length > 0 && <div data-before-turns>{beforeTurns}</div>}
         <div ref={rowsRef} className="flex flex-col gap-6">
           {rowItems.map((item) => {
             // Spacers stand in for the turns outside the window. They are not

@@ -190,9 +190,14 @@ interface MentionSearchState {
 }
 
 /** Caret of a text box, or -1 while a range is selected. */
-/** A kept-mounted pane that is not the one in view is inert; its composer must not answer shortcuts. */
+/**
+ * A kept-mounted pane that is not the one in view is inert; its composer must not answer shortcuts. A side chat's
+ * composer answers only while focus is in that side chat: the thread's own composer keeps every other key.
+ */
 function isShown(input: HTMLElement | null): boolean {
-  return !input?.closest('[inert]')
+  if (input?.closest('[inert]')) return false
+  const sideChat = input?.closest('[data-side-chat]')
+  return !sideChat || sideChat.contains(document.activeElement)
 }
 
 function readCaret(node: HTMLTextAreaElement): number {

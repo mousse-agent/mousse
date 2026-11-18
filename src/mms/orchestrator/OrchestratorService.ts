@@ -397,7 +397,7 @@ import {
   userMessage,
   type NativeMessageCheckpoint
 } from './nativeContext'
-import { isLocalOnlyThread, subagentDescendants } from '../../shared/threadLineage'
+import { isLocalOnlyThread, sideChatsOf, subagentDescendants } from '../../shared/threadLineage'
 import { isThreadExpired } from '../../shared/threadExpiry'
 
 /** What an agent in a private thread is told when it asks for work on another computer. */
@@ -5551,6 +5551,8 @@ export class OrchestratorService extends EventEmitter {
       })
       // An archived thread's runtime goes now when nothing holds it; otherwise the idle sweep drops it once free.
       this.runtimeManager?.releaseRuntime(threadId, (id) => this.runtimeKeepReason(id))
+      // Its side chats end with it, and stay ended when it comes back.
+      for (const side of sideChatsOf(threadId, this.threadStore.listAllThreads())) await this.settleThread(side.id, true)
     }
     return thread
   }
@@ -7508,6 +7510,14 @@ export class OrchestratorService extends EventEmitter {
     const engine = this.runEngine
     if (!engine || session.sharedWorkspace) return
     try {
+      // A side chat keeps the parent's checkout it was made in (`createForkThread`).
+      const thread = this.threadStore?.getThread(session.threadId)
+      if (thread?.lineage?.relationship === 'side') {
+        const binding = thread.workspaceBinding
+        if (binding?.policy === 'shared' && binding.sharedPath)
+          session.sharedWorkspace = { path: binding.sharedPath, parentThreadId: thread.lineage.parentThreadId, access: binding.access === 'write' ? 'write' : 'read-only' }
+        return
+      }
       const lineage = engine.delegations.getLineage(session.threadId)
       if (lineage?.relationship !== 'subagent') return
       // A child created with a recorded binding keeps exactly that; older children fall back to the
@@ -7558,9 +7568,21 @@ export class OrchestratorService extends EventEmitter {
     const sourceThread = this.threadStore.getThread(creation.sourceThreadId)
     if (!sourceThread) throw new Error(`Thread not found: ${creation.sourceThreadId}`)
     const source = this.getOrCreateSession(creation.sourceThreadId)
-    const title = creation.title?.trim() || `Fork of ${sourceThread.name}`.slice(0, 120)
+    // A side chat lives in its parent's side panel: a child of it (so archiving, deleting and expiring the parent
+    // take it along) that works in the parent's checkout as it is now, never in a worktree of its own. It is named
+    // from its first message like a new thread.
+    const sideChat = creation.sideChat === true
+    const sideFolder = sideChat ? this.threadCheckoutOf(sourceThread.id) : undefined
+    const title = sideChat ? 'New chat' : creation.title?.trim() || `Fork of ${sourceThread.name}`.slice(0, 120)
     const fork = this.threadStore.createThread(title, sourceThread.projectId, undefined, {
-      ...(sourceThread.worktreeEnabled === undefined ? {} : { worktreeEnabled: sourceThread.worktreeEnabled }),
+      ...(sideFolder || sourceThread.worktreeEnabled === undefined ? {} : { worktreeEnabled: sourceThread.worktreeEnabled }),
+      ...(sideChat ? {
+        // Started from the first write, so "New chat" never reuses it as an empty draft.
+        started: true,
+        lineage: { parentThreadId: sourceThread.id, rootThreadId: sourceThread.lineage?.rootThreadId ?? sourceThread.id, relationship: 'side' as const },
+        ownerThreadId: sourceThread.id,
+        ...(sideFolder ? { workspaceBinding: { policy: 'shared' as const, sharedPath: sideFolder, access: 'write' as const } } : {})
+      } : {}),
       // A fork carries the conversation, so a private thread's fork is private too.
       localOnly: this.isLocalOnly(sourceThread.id)
     })

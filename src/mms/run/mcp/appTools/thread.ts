@@ -1,6 +1,6 @@
 import { ALWAYS_OPTION_ID, PERMISSION_KEYS } from '../../../../shared/permissionKeys'
 import type { PermissionMode } from '../../../../shared/permissionMode'
-import { isLocalOnlyThread, isNativeHelperThread, subagentDescendantsIn, visibleThreads } from '../../../../shared/threadLineage'
+import { isLocalOnlyThread, isNativeHelperThread, isSideChatThread, subagentDescendantsIn, visibleThreads } from '../../../../shared/threadLineage'
 import type { QueuedMessage, Thread, ThreadNativeHelper, UserQuestionAnswers } from '../../../../shared/types'
 import { describeApprovalRefusal } from '../../approvalRights'
 import { QueueAccessError, QueueConflictError } from '../../../queue/ThreadMessageQueue'
@@ -2824,8 +2824,14 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
       target: (args) => ({ threadId: typeof (args.forkThreadId ?? args.threadId) === 'string' ? (args.forkThreadId ?? args.threadId) as string : undefined }),
       handler: async (args, ctx) => {
         const bot = botThreadCall(bots, ctx)
+        // A side chat stays on the side: nothing it says reaches the thread it was opened from.
+        const refuseSideChat = (threadId: string) => {
+          const thread = host.threadMeta?.(threadId)
+          if (thread && isSideChatThread(thread)) throw new McpToolError('mousse_conflict', 'A side chat does not hand its work back to its thread.')
+        }
         if (bot) {
           const forkThreadId = targetThread({ forkThreadId: args.forkThreadId ?? args.threadId }, ctx, 'forkThreadId')
+          refuseSideChat(forkThreadId)
           // The thread it was forked from receives the summary: it must be one the bot may reach too.
           const parentThreadId = engine.delegations.getLineage(forkThreadId)?.parentThreadId
           if (parentThreadId) requireBotReach(host, engine, ctx.caller.threadId, parentThreadId)
@@ -2837,6 +2843,7 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           return json({ transferId: merged.transferId, parentThreadId: merged.parentThreadId, note: 'The thread it was forked from gets a summary on its next turn; code is not merged.' })
         }
         const forkThreadId = callerThreadOnly({ threadId: args.forkThreadId ?? args.threadId }, ctx.caller)
+        refuseSideChat(forkThreadId)
         const merged = await engine.mergeBack({
           forkThreadId,
           clientRequestId: `thread_merge_back:${ctx.caller.runId}:${toolRequestId(args, ctx)}`

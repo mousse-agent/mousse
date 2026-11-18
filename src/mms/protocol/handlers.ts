@@ -114,7 +114,7 @@ import { buildRemovedSubagentView, buildSubagentView } from '../run/delegation/s
 import { connectionIsLocal, listedProjectsFor, listedThreadsFor } from './threadVisibility'
 import { localOnlyThreadIds, threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { threadFolderExpired } from '../data/expiredThreads'
-import { isLocalOnlyThread } from '../../shared/threadLineage'
+import { isLocalOnlyThread, isSideChatThread } from '../../shared/threadLineage'
 import { isQualifiedId, parseQualifiedId } from '../../shared/threadRef'
 import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
@@ -2906,7 +2906,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'thread.fork': {
       const p = isObject(params) ? params : {}
-      rejectUnknownKeys(p, ['sourceThreadId', 'atRunOrdinal', 'title', 'clientRequestId', 'seedFrom'])
+      rejectUnknownKeys(p, ['sourceThreadId', 'atRunOrdinal', 'title', 'clientRequestId', 'seedFrom', 'sideChat'])
       const sourceThreadId = asString(p.sourceThreadId, 'sourceThreadId', 256)
       const atRunOrdinal = p.atRunOrdinal === 'latest_stable'
         ? 'latest_stable' as const
@@ -2916,8 +2916,13 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (p.seedFrom !== undefined && p.seedFrom !== 'checkpoint' && p.seedFrom !== 'current_head')
         throw new DomainRpcError('invalid_params', "seedFrom must be 'checkpoint' or 'current_head'")
       const seedFrom = p.seedFrom as 'checkpoint' | 'current_head' | undefined
-      if (!ctx.mms.threads.getThread(sourceThreadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: sourceThreadId })
-      const forked = await asRpcRejection(() => ctx.mms.runEngine.forkThread({ sourceThreadId, atRunOrdinal, title, clientRequestId, seedFrom }))
+      if (p.sideChat !== undefined && typeof p.sideChat !== 'boolean') throw new DomainRpcError('invalid_params', 'sideChat must be a boolean')
+      const sideChat = p.sideChat === true
+      const source = ctx.mms.threads.getThread(sourceThreadId)
+      if (!source) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: sourceThreadId })
+      // A side chat lives in its parent's panel; a side chat has no panel of its own to hold one.
+      if (sideChat && isSideChatThread(source)) throw new DomainRpcError('invalid_params', 'A side chat cannot have side chats of its own.')
+      const forked = await asRpcRejection(() => ctx.mms.runEngine.forkThread({ sourceThreadId, atRunOrdinal, title, clientRequestId, seedFrom, ...(sideChat ? { sideChat } : {}) }))
       if (!forked.replayed) ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreads() })
       return { threadId: forked.threadId, transferId: forked.transferId, replayed: forked.replayed }
     }
@@ -2926,7 +2931,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       rejectUnknownKeys(p, ['forkThreadId', 'clientRequestId'])
       const forkThreadId = asString(p.forkThreadId, 'forkThreadId', 256)
       const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
-      if (!ctx.mms.threads.getThread(forkThreadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: forkThreadId })
+      const fork = ctx.mms.threads.getThread(forkThreadId)
+      if (!fork) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId: forkThreadId })
+      // A side chat stays on the side: nothing it says reaches the thread it was opened from.
+      if (isSideChatThread(fork)) throw new DomainRpcError('invalid_params', 'A side chat does not hand its work back to its thread.')
       const merged = await asRpcRejection(() => ctx.mms.runEngine.mergeBack({ forkThreadId, clientRequestId }))
       return { transferId: merged.transferId, parentThreadId: merged.parentThreadId, replayed: merged.replayed }
     }

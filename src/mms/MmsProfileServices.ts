@@ -2424,7 +2424,8 @@ export class MmsProfileServices {
   private repairSubagentLineage(): void {
     try {
       const rows = this.runEngine.delegations.listLineage('subagent')
-      const known = new Set(rows.map((row) => row.threadId))
+      // A side chat is a child too; the run store keeps it as a fork.
+      const known = new Set([...rows, ...this.runEngine.delegations.listLineage('fork')].map((row) => row.threadId))
       this.threads.discardOrphanedSubagents((threadId) => known.has(threadId))
       backfillSubagentLineage(this.threads, rows)
     } catch (error) {
