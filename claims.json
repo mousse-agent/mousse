@@ -74,6 +74,22 @@
       "expiresAt": "2026-11-18T09:11:07.367Z"
     },
     {
+      "task": "bot-service-bound-secrets",
+      "session": "agibook-fbd710",
+      "machine": "agibook",
+      "branch": "bot-service-bound-secrets",
+      "paths": [
+        "src/mms/secrets",
+        "src/shared/secretServices.ts",
+        "src/shared/secretRequests.ts",
+        "src/mms/run/mcp/appTools/secrets.ts",
+        "src/renderer/components/secrets",
+        "src/renderer/components/settings/SecretsSettings.tsx"
+      ],
+      "claimedAt": "2026-11-18T20:02:57.857Z",
+      "expiresAt": "2026-11-18T22:02:57.857Z"
+    },
+    {
       "task": "bot-threads-hidden-by-default",
       "session": "Animatrix-7d7f46",
       "machine": "Animatrix",
