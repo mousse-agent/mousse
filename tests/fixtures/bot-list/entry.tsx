@@ -60,7 +60,12 @@ function liveFace(attributes: Record<string, string>) {
   face.style.width = face.style.height = '36px'
   face.innerHTML = '<canvas class="bot-face-canvas"></canvas><span class="bot-face-z" style="font-size:8px">z</span>'
   const z = face.querySelector('.bot-face-z')!
-  const measured = { canvasOpacity: Number(getComputedStyle(face.querySelector('canvas')!).opacity), zOpacity: Number(getComputedStyle(z).opacity), zAnimation: getComputedStyle(z).animationName, zDisplay: getComputedStyle(z).display, z: rect(z), face: rect(face) }
+  const measured = { canvasOpacity: Number(getComputedStyle(face.querySelector('canvas')!).opacity), zOpacity: Number(getComputedStyle(z).opacity), zAnimation: getComputedStyle(z).animationName, zDisplay: getComputedStyle(z).display, z: rect(z), face: rect(face), zSettledOpacity: null as number | null }
+  // The z's animations run to their end, and its opacity then; finish() throws on a loop that never ends.
+  try {
+    for (const animation of z.getAnimations()) animation.finish()
+    measured.zSettledOpacity = Number(getComputedStyle(z).opacity)
+  } catch {}
   face.remove()
   return measured
 }

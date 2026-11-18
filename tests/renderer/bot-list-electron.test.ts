@@ -25,7 +25,7 @@ type Row = {
   z: { text: string; rect: Box; opacity: number } | null
   row: Box
 }
-type Live = { canvasOpacity: number; zOpacity: number; zAnimation: string; zDisplay: string; z: Box; face: Box }
+type Live = { canvasOpacity: number; zOpacity: number; zAnimation: string; zDisplay: string; z: Box; face: Box; zSettledOpacity: number | null }
 type Measured = {
   sidebar: Box; rows: Row[]; colours: { secondary: number[]; warning: number[] }
   live: { paused: Live; resting: Live; restingStill: Live }
@@ -92,10 +92,11 @@ it('shows each bot’s state in coloured words with no status dots, idle bots as
     }
     expect([row('Busy').z, row('Asking').z], all).toEqual([null, null])
 
-    // The live face's CSS: a resting face keeps its colour, a paused one fades. Its z drifts, and with motion off it
-    // rests in view.
+    // The live face's CSS: a resting face keeps its colour, a paused one fades. Its z drifts up a few times and then
+    // rests in view (no loop runs for as long as the bot is paused), and with motion off it rests in view.
     expect([open.live.resting.canvasOpacity, open.live.paused.canvasOpacity], all).toEqual([1, 0.6])
-    expect(open.live.resting.zAnimation, all).toBe('bot-face-z')
+    expect(open.live.resting.zAnimation, all).toBe('bot-face-z, bot-face-z-settle')
+    expect(open.live.resting.zSettledOpacity, all).toBeGreaterThan(0.5)
     expect([open.live.restingStill.zAnimation, open.live.restingStill.zDisplay], all).toEqual(['none', 'block'])
     expect(open.live.restingStill.zOpacity, all).toBeGreaterThan(0.5)
     expect(open.live.restingStill.z.right <= open.live.restingStill.face.right + 1 && open.live.restingStill.z.width > 0, all).toBe(true)

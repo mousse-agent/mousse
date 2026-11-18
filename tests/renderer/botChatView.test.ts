@@ -954,6 +954,41 @@ describe('while it works', () => {
     }
   })
 
+  it('pauses the typing dots and the shimmer together while the window is hidden, and plays them when it shows', async () => {
+    // jsdom has no Web Animations: animate and getAnimations are recorded here. Out of view counts the same as a hidden
+    // window (lib/offscreenMotion.ts, tested in offscreenMotion.test.ts).
+    const started: Array<{ element: Element; calls: string[] }> = []
+    const prototype = HTMLElement.prototype as { animate?: unknown; getAnimations?: unknown }
+    prototype.animate = function (this: Element) {
+      const record = { element: this, calls: [] as string[] }
+      started.push(record)
+      return { cancel: () => record.calls.push('cancel'), pause: () => record.calls.push('pause'), play: () => record.calls.push('play') }
+    }
+    prototype.getAnimations = function (this: Element) {
+      return started.filter((record) => this.contains(record.element) && !record.calls.includes('cancel'))
+        .map((record) => ({ pause: () => record.calls.push('pause'), play: () => record.calls.push('play') }))
+    }
+    let visibility: DocumentVisibilityState = 'visible'
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility })
+    const windowShown = (shown: boolean) => act(() => {
+      visibility = shown ? 'visible' : 'hidden'
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    try {
+      await open({ ...inbox, state: 'working', stateText: 'Working…' })
+      expect(started).toHaveLength(5)
+      const last = () => started.map((record) => record.calls.at(-1))
+      windowShown(false)
+      expect(last()).toEqual(['pause', 'pause', 'pause', 'pause', 'pause'])
+      windowShown(true)
+      expect(last()).toEqual(['play', 'play', 'play', 'play', 'play'])
+    } finally {
+      delete prototype.animate
+      delete prototype.getAnimations
+      delete (document as { visibilityState?: unknown }).visibilityState
+    }
+  })
+
   it('says Waiting for internet where it would type, with nothing moving, and still offers Stop', async () => {
     await open({ ...inbox, state: 'working', stateText: 'Waiting for internet', waiting: 'internet' })
     expect(transcript().querySelector('.bot-typing')?.textContent).toBe('Waiting for internet')

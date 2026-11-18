@@ -9,7 +9,8 @@
 /* The flat drawing over a live face until its first frame: the live face shows the z. */
 .bot-face-cover .bot-face-z-still { display: none; }
 
-/* Paused: a floating "z". It rests visible, so reduced motion keeps it. */
+/* Paused: a floating "z". It floats up three times when the bot pauses, then rests visible, as reduced motion shows
+   it: a bot stays paused for hours, and a loop on every paused face kept the window drawing several frames a second. */
 .bot-face-z {
   position: absolute;
   top: 2%;
@@ -20,11 +21,16 @@
   opacity: 0.9;
   pointer-events: none;
 }
-.bot-face-live:not([data-still]) .bot-face-z { animation: bot-face-z 2.6s steps(16, jump-none) infinite; }
+.bot-face-live:not([data-still]) .bot-face-z {
+  animation: bot-face-z 2.6s steps(16, jump-none) 3, bot-face-z-settle 0.4s steps(6, jump-none) 7.8s;
+}
 @keyframes bot-face-z {
   0% { opacity: 0; transform: translate(0, 6px) scale(0.7); }
   30% { opacity: 0.95; }
   100% { opacity: 0; transform: translate(6px, -10px) scale(1.1); }
+}
+@keyframes bot-face-z-settle {
+  from { opacity: 0; }
 }
 
 /* The look picker: a large preview with Shuffle and the character on the left; colours, eyes and
