@@ -2135,7 +2135,7 @@ it('R2-4 older expired cards refuse exact repeats but do not count changed calls
     await legacyExpired(a)
     runtime = await start(f, t.workId, f.store.lastMainDispatch(t.workId)!.n)
   }
-  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'expires 0' }, toolCallId: 'old-exact-repeat', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('did not send this exact request') })
+  expect(await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'expires 0' }, toolCallId: 'old-exact-repeat', signal: new AbortController().signal })).toMatchObject({ isError: true, text: expect.stringContaining('chose Not now for this same request') })
   expect((await callForBot({ bot: runtime.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'one more change' }, toolCallId: 'changed-after-old-expiry', signal: new AbortController().signal })).isError).not.toBe(true)
   expect(f.store.all('SELECT id FROM bot_actions')).toHaveLength(4)
 })

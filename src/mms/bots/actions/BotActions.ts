@@ -326,7 +326,7 @@ export class BotActions {
     return this.host.store.ownerLastWroteSeq(action.bot_id) > Number((removed ? card.removedOwnerSeq : card.ownerSeq) ?? (action.status === 'open' ? this.host.store.message(action.message_id)?.seq : 0) ?? 0) || note > Number((removed ? card.removedNoteSeq : card.noteSeq) ?? 0)
   }
   private refuse(row: BotActivationRow, action: ActionRow, text: string): ToolOutcome {
-    this.host.store.recordWorkRefusal(row.id, row.botId, `${action.id}:${text.startsWith('Your owner did not send') ? 'repeat' : 'loop'}`, text)
+    this.host.store.recordWorkRefusal(row.id, row.botId, `${action.id}:${text.startsWith('Your owner chose Not now') ? 'repeat' : 'loop'}`, text)
     return { text, isError: true }
   }
   hold(row: BotActivationRow, dispatch: string, tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): ToolOutcome {
@@ -360,7 +360,7 @@ export class BotActions {
     const unanswered = history.filter(action => (['declined', 'expired'].includes(action.status) || origin === 'unattended' && action.status === 'open') && !this.ownerWroteAfter(action))
     const refused = unanswered.find(action => action.args_digest === digest && (row.trigger.kind !== 'schedule' || action.activation_id === row.id))
     if (refused)
-      return this.refuse(row, refused, 'Your owner did not send this exact request. Do not ask again unless they write. Carry on without it.')
+      return this.refuse(row, refused, 'Your owner chose Not now for this same request. Do not ask again unless they write; carry on without it and say in your report what you skipped.')
     const binding = this.host.binding(row, tool)
     if (!binding) return { text: 'This tool changed. Carry on without it.', isError: true }
     if (containsCredential(args)) return { text: 'This contains something that looks like a secret. It is never sent through a tool this way. Send it without that value.', isError: true }
@@ -372,7 +372,7 @@ export class BotActions {
     const messageId = `bm_${id}`
     this.host.store.db.transaction(() => {
       const introduced = this.host.store.run("INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, 'asks-first:introduced', '1')", row.botId)
-      if (introduced) this.host.post(row, `bm_asks_first_${row.botId}`, `From now on ${this.host.name(row.botId)} asks you before it sends or changes anything with your tools. Tools that only read don't ask.`)
+      if (introduced) this.host.post(row, `bm_asks_first_${row.botId}`, `${this.host.name(row.botId)} asks you before using tools that may send or change things. Tools that say they only read don't ask.`)
       this.host.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args,
         args_json, args_digest, binding_json, card_json, status, message_id, expires_at, created_at)
         VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
