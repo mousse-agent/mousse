@@ -261,3 +261,24 @@ it('re-lists again when a hint changes during an in-flight notification listing'
     expect(mcp.lookupTool(tool!.providerName)?.readOnlyHint).toBeUndefined()
   } finally { release(); await mcp.shutdown() }
 })
+
+// Config changes close the old connection; only an explicit Restart may re-list.
+it.each(['disable', 'delete', 'edit', 'unauthorized', 'unreachable'])('restart stays close-only after %s', async change => {
+  const servers = [testServerConfig()]
+  let broken = false
+  const { factory, clients } = clientFactory({ tools: () => {
+    if (broken) throw new Error(change)
+    return [{ name: 'echo' }]
+  } })
+  const mcp = manager(factory, servers)
+  try {
+    await mcp.getEnabledTools()
+    if (change === 'disable') servers[0]!.enabled = false
+    if (change === 'delete') servers.splice(0)
+    if (change === 'edit') servers[0] = { ...servers[0]!, url: 'http://example.test/new', configRevision: 'rev2' }
+    broken = change === 'unauthorized' || change === 'unreachable'
+    await expect(mcp.restartServer('inst-echo')).resolves.toBeUndefined()
+    expect(clients).toHaveLength(1)
+    expect(mcp.getActiveCount()).toBe(0)
+  } finally { await mcp.shutdown() }
+})
