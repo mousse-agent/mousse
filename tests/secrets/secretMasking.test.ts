@@ -69,8 +69,11 @@ it.each([
  expect(maskedCopy(holder,masker).content).toBe('echo: [secret TOKEN hidden]')
 })
 
-it('keeps literal surrogate pairs covered when an encoder escapes another character',()=>{
+it.each([0,1,2])('keeps literal surrogate pairs covered through %s enclosing JSON strings',depth=>{
  const value='token/🔐+0123456789'
- const form=value.replace('+','\\u002B')
- expect(secretMasker([{name:'UNICODE_KEY',value}])!(form)).toBe('[secret UNICODE_KEY hidden]')
+ let form=value.replace('+','\\u002B')
+ for(let n=0;n<depth;n++)form=JSON.stringify(form).slice(1,-1)
+ const mask=secretMasker([{name:'UNICODE_KEY',value}])!
+ expect(mask(form)).toBe('[secret UNICODE_KEY hidden]')
+ expect(maskedCopy({content:form},mask).content).toBe('[secret UNICODE_KEY hidden]')
 })

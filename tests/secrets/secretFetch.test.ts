@@ -74,7 +74,7 @@ it.each(escapedEchoes.flatMap(([encoding, echo]) => ['application/x-ndjson', 'te
 it.each(['..;', 'file;version=1', '%3b', '․', '‥', '…', '．', '｡', '。', '︒', '﹒'])('refuses ambiguous path segment %s',async segment=>{
  const {run}=fixture();vi.mocked(publicFetch).mockClear()
  const out=await run({path:`/v1/models/${segment}/x`})
- expect(out.isError).toBe(true);expect(out.text).toContain('ambiguous');expect(publicFetch).not.toHaveBeenCalled()
+ expect(out.isError).toBe(true);expect(out.text).toContain('ambiguous');expect(out.text).toContain('/v1/files');expect(publicFetch).not.toHaveBeenCalled()
 })
 it('lists allowed prefixes for a path outside a known service',async()=>{
  const {run}=fixture('github');const out=await run({path:'/gists'})
