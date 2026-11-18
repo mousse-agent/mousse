@@ -75,6 +75,13 @@ export interface EngineLimits {
    * collected on the new path (`result.get`). Within the renewal lead, so the old path's own deadline is later.
    */
   pathDrainMs: number
+  /**
+   * How long a device's row may read "Finishing pairing…", or one direction of a paired computer be down, before
+   * the row says so and offers Retry (design §5.2).
+   */
+  rowStuckMs: number
+  /** Most addresses the user may add for one paired computer (Add address). */
+  maxManualAddresses: number
 }
 
 /** The helper's `APP_READ_AHEAD_BYTES`: a stream's credit must cover it before the helper reads that stream. */
@@ -113,7 +120,9 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   pairbackDeadlineMs: 60_000,
   pairingRetryMs: 5_000,
   pathSwitchDeadlineMs: 30_000,
-  pathDrainMs: 25 * 60_000
+  pathDrainMs: 25 * 60_000,
+  rowStuckMs: 2 * 60_000,
+  maxManualAddresses: 8
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -149,7 +158,9 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   pairbackDeadlineMs: 'MOUSSE_NET_ENGINE_PAIRBACK_DEADLINE_MS',
   pairingRetryMs: 'MOUSSE_NET_ENGINE_PAIRING_RETRY_MS',
   pathSwitchDeadlineMs: 'MOUSSE_NET_ENGINE_PATH_SWITCH_DEADLINE_MS',
-  pathDrainMs: 'MOUSSE_NET_ENGINE_PATH_DRAIN_MS'
+  pathDrainMs: 'MOUSSE_NET_ENGINE_PATH_DRAIN_MS',
+  rowStuckMs: 'MOUSSE_NET_ENGINE_ROW_STUCK_MS',
+  maxManualAddresses: 'MOUSSE_NET_ENGINE_MAX_MANUAL_ADDRESSES'
 })
 
 /** Reads the limits from `env`; each problem names the variable, the value and the default kept. */

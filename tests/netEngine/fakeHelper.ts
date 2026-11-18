@@ -183,6 +183,12 @@ export class FakeNetwork {
         this.down(conn, 'path_lost')
   }
 
+  /** Cuts the connections `from` dialled to `to` only, as a path lost one way does; the other direction stays. */
+  cutFrom(from: string, to: string): void {
+    for (const conn of [...this.conns])
+      if (conn.a.identity === from && conn.b.identity === to) this.down(conn, 'path_lost')
+  }
+
   private down(conn: Conn, reason: string): void {
     if (!conn.up) return
     conn.up = false
@@ -333,6 +339,8 @@ export class FakeHelper {
   dropped = 0
   /** It neither answers `shutdown` nor exits for it (a helper that hangs). */
   ignoreShutdown = false
+  /** The addresses the app set for each peer (`peer.addresses.set`), by identity. */
+  readonly addresses = new Map<string, string[]>()
 
   constructor(
     private readonly network: FakeNetwork,
@@ -629,6 +637,17 @@ export class FakeHelper {
           return reply({ forgotten: this.network.forget(this.identity, String(message.identity)) })
         case 'join.cancel':
           return reply()
+        case 'peer.addresses.set': {
+          // As the helper: private ranges only (RFC 1918, link-local, ULA).
+          const routes = (message.routes as unknown[]).map(String)
+          const bad = routes.find(
+            (route) =>
+              !/^tcp:\/\/(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[f[cd])/i.test(route)
+          )
+          if (bad) return reply({ error: 'bad_route', reason: `${bad} is not a private-range address` })
+          this.addresses.set(String(message.identity), routes)
+          return reply({ routes })
+        }
         case 'stream.open': {
           const conn = this.conns.get(Number(message.conn))
           if (!conn || !conn.up) return reply({ error: 'peer_offline' })

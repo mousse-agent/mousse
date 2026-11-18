@@ -12,7 +12,8 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.approve',
   'netEngine.join',
   'netEngine.retry',
-  'netEngine.remove'
+  'netEngine.remove',
+  'netEngine.address.add'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
 
@@ -38,6 +39,17 @@ export interface NetEngineDevice {
   online: boolean
   /** It refuses this computer (it removed it, or never let it in): only Remove helps. */
   notAccepted?: boolean
+  /** Pairing has been finishing for longer than it should (`rowStuckMs`): Retry and Remove are offered. */
+  stuck?: boolean
+  /**
+   * One direction has been down for `rowStuckMs` while the other works: `in`, it cannot reach this computer;
+   * `out`, this computer cannot reach it.
+   */
+  unreachable?: 'in' | 'out'
+  /** Its last connection attempt failed on a certificate outside its validity window (either clock may be wrong). */
+  certificateWindow?: boolean
+  /** Addresses added for it by hand (`tcp://host:port`); none means it is found on the local network. */
+  addresses?: string[]
 }
 
 /** A computer asking to join this one, waiting for this computer's window to answer (§5.1 step 3). */
@@ -64,4 +76,8 @@ export interface NetEngineStatus {
   devices: NetEngineDevice[]
   /** Computers waiting for Yes or No. */
   approvals: NetEngineApproval[]
+  /** Where this computer listens (`tcp://host:port`), for Add address on the other computer. */
+  routes?: string[]
+  /** Another profile under this OS account has the new networking on too, so they can read each other's keys. */
+  sharedAccount?: boolean
 }

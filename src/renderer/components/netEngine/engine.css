@@ -1,0 +1,76 @@
+/* New networking (design §7): Settings -> Devices and its Add device dialog. */
+
+.engine-group-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+/* The row whose Access is open: a background mark only, never an edge bar. */
+.engine-row-selected {
+  background: var(--ui-hover);
+}
+
+.engine-row-line > span[title] {
+  cursor: default;
+}
+
+.engine-row-line svg {
+  vertical-align: -1px;
+}
+
+.engine-row-id {
+  font-family: var(--font-mono);
+}
+
+.engine-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  min-width: 280px;
+}
+
+.engine-dialog-choices {
+  display: flex;
+  gap: var(--space-8);
+}
+
+.engine-qr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.engine-qr p {
+  margin: 0;
+}
+
+.engine-approval p,
+.engine-confirm p {
+  margin: 0 0 var(--space-8);
+}
+
+.engine-scan {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.engine-scan-video {
+  width: 100%;
+  max-height: 260px;
+  border-radius: var(--ui-control-radius);
+  background: var(--ui-hover);
+  object-fit: cover;
+}
+
+.engine-paste {
+  display: flex;
+  gap: var(--space-8);
+}
+
+.engine-paste .settings-input {
+  flex: 1;
+  min-width: 0;
+}

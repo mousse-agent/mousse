@@ -10,6 +10,13 @@ export interface TicketFacts {
   expiresAt?: number
   /** The addresses the ticket names. */
   routes: string[]
+  /** The name the host's link gives it (`?n=`), shown before the host says its own. */
+  name?: string
+}
+
+/** The link a host's QR code holds: its name for the joiner's question, then the ticket after `#`. */
+export function pairingLink(ticket: string, name: string): string {
+  return `mousse://pair?n=${encodeURIComponent(name)}#${ticket}`
 }
 
 const badTicket = (why: string): NetError =>
@@ -23,7 +30,9 @@ const badTicket = (why: string): NetError =>
  */
 export function readTicket(ticket: string): TicketFacts {
   const text = ticket.trim()
-  const encoded = text.includes('#') ? text.slice(text.lastIndexOf('#') + 1) : text
+  const hash = text.lastIndexOf('#')
+  const encoded = hash >= 0 ? text.slice(hash + 1) : text
+  const name = hash >= 0 ? linkName(text.slice(0, hash)) : undefined
   if (!encoded || !/^[A-Za-z0-9_-]+$/.test(encoded)) throw badTicket('not base64url')
   const bytes = Buffer.from(encoded, 'base64url')
   let value: unknown
@@ -48,7 +57,20 @@ export function readTicket(ticket: string): TicketFacts {
     ...(typeof expires === 'number' ? { expiresAt: expires } : {}),
     routes: Array.isArray(routes)
       ? routes.filter((route): route is string => typeof route === 'string')
-      : []
+      : [],
+    ...(name ? { name } : {})
+  }
+}
+
+/** The `n` parameter of a link's query, trimmed and bounded; anything unreadable is no name. */
+function linkName(link: string): string | undefined {
+  const query = link.indexOf('?')
+  if (query < 0) return undefined
+  try {
+    const value = new URLSearchParams(link.slice(query + 1)).get('n')?.trim()
+    return value ? value.slice(0, 80) : undefined
+  } catch {
+    return undefined
   }
 }
 

@@ -22,6 +22,8 @@ export interface EnginePeerRow {
   invitation?: string
   /** The ticket this computer consented to join: kept until `joined`, so a join cut short is repeated with it. */
   ticket?: string
+  /** Addresses the user added for the other computer (Add address), as routes (`tcp://host:port`). */
+  addresses?: string[]
 }
 
 /** What a pairing's row may change after it is saved; `ticket: null` deletes the stored ticket. */
@@ -61,16 +63,16 @@ export class EnginePeerStore {
   constructor(private readonly db: NetDatabase) {
     db.transaction(() => {
       db.database.exec(
-        'CREATE TABLE IF NOT EXISTS net_engine_peers(local_id TEXT PRIMARY KEY,endpoint TEXT NOT NULL,fingerprint TEXT NOT NULL,grant TEXT NOT NULL,name TEXT NOT NULL,state TEXT NOT NULL,receipt TEXT,paired_at INTEGER NOT NULL,invitation TEXT,ticket TEXT) STRICT; CREATE TABLE IF NOT EXISTS net_engine_streams(stream TEXT PRIMARY KEY,peer_local_id TEXT NOT NULL) STRICT; CREATE INDEX IF NOT EXISTS net_engine_streams_peer ON net_engine_streams(peer_local_id)'
+        'CREATE TABLE IF NOT EXISTS net_engine_peers(local_id TEXT PRIMARY KEY,endpoint TEXT NOT NULL,fingerprint TEXT NOT NULL,grant TEXT NOT NULL,name TEXT NOT NULL,state TEXT NOT NULL,receipt TEXT,paired_at INTEGER NOT NULL,invitation TEXT,ticket TEXT,addresses TEXT) STRICT; CREATE TABLE IF NOT EXISTS net_engine_streams(stream TEXT PRIMARY KEY,peer_local_id TEXT NOT NULL) STRICT; CREATE INDEX IF NOT EXISTS net_engine_streams_peer ON net_engine_streams(peer_local_id)'
       )
-      // A table from before the journal columns gets them.
+      // A table from before the journal or address columns gets them.
       const columns = new Set(
         db.database
           .prepare('PRAGMA table_info(net_engine_peers)')
           .all()
           .map((row) => String(row.name))
       )
-      for (const column of ['invitation', 'ticket'])
+      for (const column of ['invitation', 'ticket', 'addresses'])
         if (!columns.has(column))
           db.database.exec(`ALTER TABLE net_engine_peers ADD COLUMN ${column} TEXT`)
     })
@@ -123,6 +125,17 @@ export class EnginePeerStore {
   /** The serving pairing with the helper identity `endpoint`. */
   byEndpoint(endpoint: string): EnginePeerRow | undefined {
     return this.all().find((row) => row.endpoint === endpoint && isServingState(row.state))
+  }
+
+  /** Saves the addresses the user added for a pairing (empty: none). */
+  setAddresses(localId: NodeId, addresses: string[]): EnginePeerRow | undefined {
+    this.db.transaction(() => {
+      this.db.charge(1)
+      this.db.database
+        .prepare('UPDATE net_engine_peers SET addresses=? WHERE local_id=?')
+        .run(addresses.length ? JSON.stringify(addresses) : null, localId)
+    })
+    return this.get(localId)
   }
 
   setState(localId: NodeId, state: EnginePeerState): void {
@@ -271,7 +284,8 @@ function toRow(row: Record<string, unknown>): EnginePeerRow {
     value === null || value === undefined ? undefined : String(value)
   const receipt = text(row.receipt),
     invitation = text(row.invitation),
-    ticket = text(row.ticket)
+    ticket = text(row.ticket),
+    addresses = readAddresses(row.addresses)
   return {
     localId: row.local_id as NodeId,
     endpoint: String(row.endpoint),
@@ -282,6 +296,19 @@ function toRow(row: Record<string, unknown>): EnginePeerRow {
     ...(receipt === undefined ? {} : { receipt }),
     pairedAt: Number(row.paired_at),
     ...(invitation === undefined ? {} : { invitation }),
-    ...(ticket === undefined ? {} : { ticket })
+    ...(ticket === undefined ? {} : { ticket }),
+    ...(addresses.length ? { addresses } : {})
+  }
+}
+
+function readAddresses(value: unknown): string[] {
+  if (typeof value !== 'string') return []
+  try {
+    const list: unknown = JSON.parse(value)
+    return Array.isArray(list)
+      ? list.filter((item): item is string => typeof item === 'string')
+      : []
+  } catch {
+    return []
   }
 }

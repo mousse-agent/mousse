@@ -8,7 +8,7 @@ import type { EngineHelper } from './helper/connections'
 import { engineControl, engineLimits } from './limits'
 import type { EngineSessions } from './sessions'
 import type { EnginePeerRow, EnginePeerStore } from './store'
-import { readTicket } from './ticket'
+import { pairingLink, readTicket } from './ticket'
 
 /**
  * The points of the ceremony and of a removal where a test may stop this computer as a crash would (`crashAt`):
@@ -63,6 +63,8 @@ export class EnginePairing {
   private readonly approvedNames = new Map<string, string>()
   /** Pairings the other computer no longer accepts (`not_authorized`, `grant_revoked`), until they connect again. */
   private readonly notAccepted = new Set<NodeId>()
+  /** Pairings whose last dial failed on a certificate outside its validity window, until they connect again. */
+  private readonly outsideWindow = new Set<NodeId>()
   /** The step a pairing is running, so one runs at a time per pairing. */
   private readonly running = new Map<NodeId, Promise<void>>()
   private readonly waiters = new Set<() => void>()
@@ -86,14 +88,20 @@ export class EnginePairing {
   accepted(node: NodeId): boolean {
     return !this.notAccepted.has(node)
   }
+  /** Its last dial failed on a certificate outside its window: either computer's clock may be wrong. */
+  certificateWindow(node: NodeId): boolean {
+    return this.outsideWindow.has(node)
+  }
 
   // ---------------------------------------------------------------- host: invitation and approval
 
-  async invite(): Promise<{ invitation: string; uri: string; expiresAt?: number }> {
+  /** Show QR: a new invitation, and the link its code holds (with `name`, this computer's, for the question). */
+  async invite(name?: string): Promise<{ invitation: string; uri: string; expiresAt?: number }> {
     const answer = await this.helper().request('invite.create')
+    const ticket = String(answer.uri)
     return {
       invitation: String(answer.invitation),
-      uri: String(answer.uri),
+      uri: name ? pairingLink(ticket.slice(ticket.lastIndexOf('#') + 1), name) : ticket,
       ...(typeof answer.expires_at === 'number' ? { expiresAt: answer.expires_at } : {})
     }
   }
@@ -124,8 +132,10 @@ export class EnginePairing {
    * ceremony runs. Resolves with the row once the host said yes and this computer recorded `joined`; the other
    * direction finishes on its own.
    */
-  async join(ticket: string): Promise<EnginePeerRow> {
-    const facts = readTicket(ticket)
+  async join(link: string): Promise<EnginePeerRow> {
+    const facts = readTicket(link)
+    // The helper and the journal take the ticket alone, without the link around it.
+    const ticket = link.trim().slice(link.trim().lastIndexOf('#') + 1)
     const helper = this.helper()
     const { peers } = this.port
     let row = peers.byEndpoint(facts.host)
@@ -134,7 +144,7 @@ export class EnginePairing {
         endpoint: facts.host,
         fingerprint: fingerprintOf(facts.host),
         grant: '',
-        name: shortName(facts.host),
+        name: facts.name ?? shortName(facts.host),
         state: 'consented',
         receipt: facts.invitation,
         invitation: facts.invitation,
@@ -395,6 +405,7 @@ export class EnginePairing {
   /** A client of a pairing is ready: waiters wake, and a pairing that owes its pairback sends it now. */
   clientReady(node: NodeId): void {
     this.notAccepted.delete(node)
+    this.outsideWindow.delete(node)
     for (const wake of [...this.waiters]) wake()
     const row = this.port.peers.serving(node)
     if (row && (row.state === 'granted' || row.state === 'joined')) void this.advance(node)
@@ -462,16 +473,23 @@ export class EnginePairing {
         }
         case 'dial.failed':
         case 'conn.down': {
-          const reason = String(event.reason ?? '')
-          if (reason !== 'not_authorized' && reason !== 'grant_revoked') return
+          // A failed dial names its code in `why` (`reason` is its text); a closed connection in `reason`.
+          const reason = String((event.ev === 'dial.failed' ? event.why : event.reason) ?? '')
           const row =
             typeof event.identity === 'string'
               ? this.port.peers.byEndpoint(event.identity)
               : undefined
-          if (row) {
-            this.notAccepted.add(row.localId)
+          if (!row) return
+          if (
+            reason === 'peer_certificate' &&
+            /validity|window/i.test(String(event.reason ?? ''))
+          ) {
+            this.outsideWindow.add(row.localId)
             this.port.changed()
           }
+          if (reason !== 'not_authorized' && reason !== 'grant_revoked') return
+          this.notAccepted.add(row.localId)
+          this.port.changed()
           return
         }
       }

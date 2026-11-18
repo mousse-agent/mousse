@@ -11,7 +11,8 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.approve': ['request'],
   'netEngine.join': ['ticket'],
   'netEngine.retry': ['node'],
-  'netEngine.remove': ['node']
+  'netEngine.remove': ['node'],
+  'netEngine.address.add': ['node', 'address']
 }
 
 /** Every method takes an object, with the string fields it needs (`approve` takes `yes` too). */
@@ -43,7 +44,7 @@ export function registerNetEngineMethods(
       capability: NET_LOCAL_CAPABILITY,
       requiredCapabilities: [NET_LOCAL_CAPABILITY],
       validate: (params) => validate(method, params),
-      async handle(_context, params, binding) {
+      async handle(context, params, binding) {
         const engine = await forProfile(binding!.profileId)
         const p = params as Record<string, any>
         try {
@@ -56,8 +57,16 @@ export function registerNetEngineMethods(
             case 'netEngine.disable':
               await engine.disable()
               return engine.status()
-            case 'netEngine.invite':
-              return await engine.pairing().invite()
+            case 'netEngine.invite': {
+              const invite = await engine.pairing().invite(engine.ownName())
+              // The window that showed the code closed, or switched profile: its invitation ends (§8).
+              context.connection?.lifetime?.addEventListener(
+                'abort',
+                () => void engine.cancelInvite(invite.invitation),
+                { once: true }
+              )
+              return invite
+            }
             case 'netEngine.invite.cancel':
               await engine.pairing().cancelInvite(p.invitation)
               return engine.status()
@@ -73,6 +82,9 @@ export function registerNetEngineMethods(
               return engine.status()
             case 'netEngine.remove':
               await engine.pairing().remove(p.node)
+              return engine.status()
+            case 'netEngine.address.add':
+              await engine.addAddress(p.node, p.address)
               return engine.status()
           }
         } catch (error) {

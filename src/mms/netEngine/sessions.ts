@@ -15,6 +15,8 @@ export interface EngineSessionHooks {
    * (`path.reopened`), which makes it current there and closes the older one with `PATH_REPLACED`.
    */
   onPathInUse?(connection: EngineConnection): void
+  /** An inbound connection of this pairing came up or closed (whether it can reach this computer). */
+  onServingChanged?(node: NodeId): void
 }
 
 /**
@@ -43,7 +45,11 @@ export class EngineSessions {
     if (connection.direction === 'inbound') {
       const host = new EngineHost(connection, this.options.host)
       this.hosts.add(host)
-      connection.onClose(() => this.hosts.delete(host))
+      connection.onClose(() => {
+        this.hosts.delete(host)
+        this.options.hooks.onServingChanged?.(connection.peer)
+      })
+      this.options.hooks.onServingChanged?.(connection.peer)
       return
     }
     const node = connection.peer
@@ -122,6 +128,13 @@ export class EngineSessions {
 
   online(node: NodeId): boolean {
     return this.ready.get(node)?.state() === 'open'
+  }
+
+  /** Whether the other computer has a connection open to this one (it can reach this computer). */
+  serving(node: NodeId): boolean {
+    for (const host of this.hosts)
+      if (host.connection.peer === node && host.connection.isOpen()) return true
+    return false
   }
 
   /** A record was stored on `stream`: each subscription caught up on it sends it. */

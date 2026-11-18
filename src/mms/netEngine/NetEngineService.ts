@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { hostname } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { NetError } from '../../shared/net/errors'
 import type { BlobId, NodeCapability, NodeId, StoredRecord, StreamId } from '../../shared/net'
 import type { BridgeNodePolicy } from '../../shared/net/local'
@@ -16,7 +16,7 @@ import { engineControl, engineControlProblems, engineLimitProblems, engineLimits
 import { EngineSessions } from './sessions'
 import type { BridgeClient, EngineClient } from './session/client'
 import type { EngineConnection } from './session/transport'
-import { AppChannel, type AppPipe } from './helper/appChannel'
+import { AppChannel, helperCode, type AppPipe } from './helper/appChannel'
 import { EngineHelper } from './helper/connections'
 import {
   findNetHelper,
@@ -86,6 +86,10 @@ export class NetEngineService implements EngineDirectoryPort {
   /** Tests stop this computer at a pairing step, as a crash would (until the engine starts again). */
   pairingCrash?: (step: PairingStep) => boolean
   private starting?: Promise<void>
+  /** When each condition a device's row reports began (`<node> finishing|in|out`), while it holds. */
+  private readonly since = new Map<string, number>()
+  /** Wakes the windows when a condition is due to show (`rowStuckMs` after it began). */
+  private stuckTimer?: ReturnType<typeof setTimeout>
   constructor(
     private readonly options: {
       profileDir: string
@@ -116,6 +120,10 @@ export class NetEngineService implements EngineDirectoryPort {
   }
   /** The name this computer gives itself to its pairings, when set (tests name their computers). */
   displayName?: string
+  /** The name this computer gives itself (what a joiner's question shows). */
+  ownName(): string {
+    return this.selfName()
+  }
 
   /** Every pairing row, tombstones too (read-only; for diagnostics and tests). */
   peerRows(): EnginePeerRow[] {
@@ -174,8 +182,76 @@ export class NetEngineService implements EngineDirectoryPort {
       ...(this.helper?.paused ? { paused: this.helper.paused } : {}),
       ...(typeof this.helper?.info.identity === 'string' ? { identity: this.helper.info.identity } : {}),
       devices: this.devices(),
-      approvals: this.started?.pairing.pendingApprovals() ?? []
+      approvals: this.started?.pairing.pendingApprovals() ?? [],
+      ...(this.routes().length ? { routes: this.routes() } : {}),
+      ...(this.sharedAccount() ? { sharedAccount: true } : {})
     }
+  }
+
+  /** Where this computer's helper listens, as it said in `hello`. */
+  private routes(): string[] {
+    const routes: unknown = this.helper?.info.routes
+    return Array.isArray(routes)
+      ? routes.filter((route): route is string => typeof route === 'string')
+      : []
+  }
+
+  /**
+   * Whether another profile of this installation (so of this OS account) has the switch on as well as this one:
+   * profiles under one OS account can read each other's files and keys.
+   */
+  sharedAccount(): boolean {
+    if (!this.settings()?.enabled) return false
+    const home = resolve(this.options.profileDir)
+    const nested = basename(dirname(home)) === 'profiles'
+    const installation = nested ? dirname(dirname(home)) : home
+    const homes = [installation]
+    try {
+      for (const name of readdirSync(join(installation, 'profiles')))
+        homes.push(join(installation, 'profiles', name))
+    } catch {
+      // No other profiles.
+    }
+    return homes.some((other) => resolve(other) !== home && engineOn(other))
+  }
+
+  /**
+   * Add address on a device's row: the other computer is dialled at `address` too (`host:port`, or a
+   * `tcp://` route), beside what the local network finds. Private-range addresses only (§5.3).
+   */
+  async addAddress(node: NodeId, address: string): Promise<void> {
+    const started = this.require()
+    const row = started.peers.serving(node)
+    if (!row) throw new NetError('bad_request', 'Unknown device.')
+    const route = toRoute(address)
+    if (!route)
+      throw new NetError('bad_request', 'Use an address and port, like 192.168.1.20:47100.', {
+        details: { reason: 'bad_address' }
+      })
+    const addresses = [...(row.addresses ?? []).filter((known) => known !== route), route]
+    if (addresses.length > engineLimits().maxManualAddresses)
+      throw new NetError('bad_request', 'Remove an address first.', {
+        details: { reason: 'too_many' }
+      })
+    if (!this.helper) throw new NetError('peer_offline', 'Turn networking on first.')
+    try {
+      await this.helper.request('peer.addresses.set', { identity: row.endpoint, routes: addresses })
+    } catch (error) {
+      // The helper allows private ranges only (§5.3).
+      if (helperCode(error) === 'bad_route')
+        throw new NetError('bad_request', 'Only local network addresses can be added for now.', {
+          details: { reason: 'not_private' }
+        })
+      throw error
+    }
+    started.peers.setAddresses(node, addresses)
+    this.changed()
+  }
+
+  /** Ends an invitation if it is still open (the window that showed it went away); nothing if it ended. */
+  async cancelInvite(invitation: string): Promise<void> {
+    if (!this.started || !this.helper) return
+    await this.started.pairing.cancelInvite(invitation).catch(() => undefined)
   }
 
   /** Pairing and removal for this run of the engine (§5). */
@@ -198,31 +274,80 @@ export class NetEngineService implements EngineDirectoryPort {
   private devices(): NetEngineDevice[] {
     const started = this.started
     if (!started) return []
-    return started.peers
+    const now = Date.now()
+    const stuckMs = engineLimits().rowStuckMs
+    const seen = new Set<string>()
+    // How long a condition of a row has held, from when the status first saw it.
+    const held = (key: string, holds: boolean): number => {
+      if (!holds) return 0
+      seen.add(key)
+      let at = this.since.get(key)
+      if (at === undefined) this.since.set(key, (at = now))
+      return now - at
+    }
+    const devices = started.peers
       .all()
       .filter((row) => row.state !== 'removed')
-      .map((row) => {
-        const online = started.sessions.online(row.localId)
+      .map((row): NetEngineDevice => {
+        const node = row.localId
+        const online = started.sessions.online(node)
+        const state =
+          row.state === 'removing'
+            ? 'removing'
+            : row.state !== 'connected'
+              ? 'finishing'
+              : online
+                ? 'connected'
+                : 'offline'
+        const stuck = held(`${node} finishing`, state === 'finishing') >= stuckMs
+        // One direction down for the bound while the other works.
+        const paired = row.state === 'connected'
+        const serving = started.sessions.serving(node)
+        const outDown = held(`${node} out`, paired && !online) >= stuckMs
+        const inDown = held(`${node} in`, paired && !serving) >= stuckMs
+        const unreachable = outDown && serving ? 'out' : inDown && online ? 'in' : undefined
         return {
-          node: row.localId,
+          node,
           name: row.name,
           shortId: row.endpoint.slice(0, 8),
-          ...(started.pairing.accepted(row.localId) ? {} : { notAccepted: true }),
-          state:
-            row.state === 'removing'
-              ? 'removing'
-              : row.state !== 'connected'
-                ? 'finishing'
-                : online
-                  ? 'connected'
-                  : 'offline',
-          online
+          ...(started.pairing.accepted(node) ? {} : { notAccepted: true }),
+          state,
+          online,
+          ...(stuck ? { stuck: true } : {}),
+          ...(unreachable ? { unreachable } : {}),
+          ...(started.pairing.certificateWindow(node) ? { certificateWindow: true } : {}),
+          ...(row.addresses?.length ? { addresses: row.addresses } : {})
         }
       })
+    for (const key of [...this.since.keys()]) if (!seen.has(key)) this.since.delete(key)
+    this.wakeWhenStuck(now, stuckMs)
+    return devices
+  }
+
+  /** A condition that has not shown yet shows once it has held for the bound: the windows read again then. */
+  private wakeWhenStuck(now: number, stuckMs: number): void {
+    const due = [...this.since.values()].map((at) => at + stuckMs).filter((at) => at > now)
+    if (this.stuckTimer) clearTimeout(this.stuckTimer)
+    this.stuckTimer = undefined
+    if (!due.length || !this.started) return
+    this.stuckTimer = setTimeout(
+      () => {
+        this.stuckTimer = undefined
+        this.changed()
+      },
+      Math.min(...due) - now + 50
+    )
+    this.stuckTimer.unref?.()
   }
 
   /** Tells the windows to read the status again. */
   private changed(): void {
+    try {
+      // The rows' conditions are timed from the change that began them.
+      if (this.started) this.devices()
+    } catch {
+      // Stopping: its database closed already.
+    }
     try {
       this.options.onChanged?.()
     } catch {
@@ -302,6 +427,7 @@ export class NetEngineService implements EngineDirectoryPort {
           this.options.bridge()?.peerOffline(node)
           this.changed()
         },
+        onServingChanged: () => this.changed(),
         // The helper keeps a newer outbound path (renewed, or dialled while one was up) waiting until told.
         onPathInUse: (connection) => {
           const conn = Number(connection.id)
@@ -467,6 +593,9 @@ export class NetEngineService implements EngineDirectoryPort {
     this.started = undefined
     this.own = undefined
     started.pairing.stop()
+    if (this.stuckTimer) clearTimeout(this.stuckTimer)
+    this.stuckTimer = undefined
+    this.since.clear()
     this.helper?.close()
     this.helper = undefined
     clearInterval(started.timer)
@@ -725,4 +854,25 @@ export class NetEngineService implements EngineDirectoryPort {
     )
       throw new NetError('forbidden')
   }
+}
+
+/** Whether the profile at `home` has the new networking's switch on. */
+function engineOn(home: string): boolean {
+  try {
+    const value = JSON.parse(readFileSync(join(home, 'net-engine', 'settings.json'), 'utf8')) as {
+      enabled?: unknown
+    }
+    return value?.enabled === true
+  } catch {
+    return false
+  }
+}
+
+/** `host:port` or `tcp://host:port` as a route, IPv6 hosts in brackets; anything else is not an address. */
+export function toRoute(address: string): string | undefined {
+  const text = address.trim()
+  const bare = text.startsWith('tcp://') ? text.slice('tcp://'.length) : text
+  const match = /^(\[[0-9A-Fa-f:.]+\]|[0-9]{1,3}(?:\.[0-9]{1,3}){3}):([1-9][0-9]{0,4})$/.exec(bare)
+  if (!match || Number(match[2]) > 65535) return undefined
+  return `tcp://${match[1]!.toLowerCase()}:${match[2]}`
 }
