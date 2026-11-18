@@ -133,7 +133,6 @@ export function BotActionCard({ card, botId, botName, messageId }: { card: BotAc
     : new Date(previous.at).toLocaleString([], { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }))
   const argumentsView = <>
     {!card.tooLarge && <Arguments value={card.args} />}
-    {card.note && <blockquote className="bot-action-note" aria-label="Bot note">{actionText(botName).replace(/\s+/g, " ")} says: <span>{actionText(card.note).replace(/\s+/g, " ")}</span></blockquote>}
   </>
   return <section className="bot-action-card bot-ask-replies" aria-label="Action to review">
     <p className="bot-action-title" aria-label="Action summary"><span data-find-text data-message-id={messageId} data-part-index="0">{actionTitle(card)}</span>{!card.forgotten && <> · <span className="bot-action-server">{actionText(card.serverName)}</span></>}</p>
