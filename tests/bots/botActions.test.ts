@@ -3851,7 +3851,7 @@ it.each([0, 26_999, 27_001, 31_000])('Send with a slow listing uses only recent 
   vi.useFakeTimers()
   try {
     const sending = f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
-    const outcome = age <= 26_999 ? expect(sending).resolves.toBeDefined() : expect(sending).rejects.toMatchObject({ code: 'bot_action_unreachable' })
+    const outcome = age <= 26_999 ? expect(sending).resolves.toBeTruthy() : expect(sending).rejects.toMatchObject({ code: 'bot_action_unreachable' })
     await vi.advanceTimersByTimeAsync(3001)
     await outcome
     expect(t.calls).toEqual(age <= 26_999 ? [t.args] : [])
@@ -3868,4 +3868,40 @@ it('a slow listing cannot reuse a recent hint that changed during the check', as
     await vi.advanceTimersByTimeAsync(3001); await answer
     expect(t.calls).toEqual([])
   } finally { vi.useRealTimers() }
+})
+
+it('a work report repeats results from the hidden held turn', async () => {
+  const t = await setup(true)
+  expect(t.work.prepared.instructions).toContain('Your earlier words in this turn were not shown to your owner; repeat any results they need.')
+})
+it.each([true, false])('chat asks-first guidance depends on holding or being able to ask for MCP, canAsk=%s', async canAsk => {
+  const t = await setup(true)
+  f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [], appTools: canAsk ? m.appTools : m.appTools.filter(tool => tool !== 'escalate') }))
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Hi', clientRequestId: 'guidance-scope' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  expect(turn.prepared.instructions?.includes('When you set up work or a schedule')).toBe(canAsk)
+})
+it('each scheduled run is told that an earlier Not now is not a standing refusal', async () => {
+  const t = await scheduledCall(true, 1)
+  expect(t.run.prepared.instructions).toContain("Your owner's Not now covers only that run. Each new run tries again and asks again if needed; never skip a call only because an earlier run's call was not sent.")
+})
+it('a declined schedule call frames leftOff as something to try again and a skipped retry cannot report quiet', async () => {
+  const t = await scheduledCall(true, 1)
+  const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
+  f.host.progress = memory
+  await t.call(); await finish(f, t.run.payload)
+  const a = f.bots.actions.forWork(t.id)!
+  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'not_now' }); await flush()
+  const resumed = await start(f, t.id, 2)
+  f.bots.saveLeftOff(t.id, 'The email was declined.')
+  await finish(f, resumed.payload)
+  expect.soft(memory.progress(t.botId, t.schedule.scheduleId)).toContain('not sent last time; ask again this run')
+  f.clock.now += 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now)), id = due.inserted[0]!
+  const next = await start(f, id)
+  const report = f.automationRuns.report({ threadId: next.payload.threadId, activationId: id }, 'quiet', 'Skipped the declined email.')
+  expect.soft(report.level).toBe('fyi')
+  await finish(f, next.payload, 'completed', { text: 'Skipped the declined email.' })
+  expect(f.store.all("SELECT text FROM bot_messages WHERE activation_id = ? AND kind = 'run_report'", id)).toEqual([expect.objectContaining({ text: 'Skipped the declined email.' })])
 })
