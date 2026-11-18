@@ -22,10 +22,16 @@ import {
   helperProfileId,
   initEndpoint,
   insecureFileKey,
+  insecureFileKeyProblems,
   launchHelper,
   type LaunchedHelper
 } from './helper/process'
-import { HELPER_TEXT, HelperNotInBuild, HelperSupervisor, type HelperStatus } from './helper/supervisor'
+import {
+  HELPER_TEXT,
+  HelperNotInBuild,
+  HelperSupervisor,
+  type HelperStatus
+} from './helper/supervisor'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 
 export const NON_KEEPER_MESSAGE =
@@ -139,7 +145,11 @@ export class NetEngineService implements EngineDirectoryPort {
   private async startNow(): Promise<void> {
     if (!this.settings()?.enabled) return
     // The limits are read once, here; a variable with a bad value keeps its default and is said so.
-    for (const problem of [...engineLimitProblems(), ...engineControlProblems()])
+    for (const problem of [
+      ...engineLimitProblems(),
+      ...engineControlProblems(),
+      ...insecureFileKeyProblems()
+    ])
       console.warn(`network engine limit: ${problem}`)
     const { net } = this.options
     const rt = net.runtime()
@@ -216,7 +226,10 @@ export class NetEngineService implements EngineDirectoryPort {
   private renewOwn(rt: NetRuntime): void {
     if (engineControl('no-renewal')) return
     const limits = engineLimits()
-    const { issuedAt, expiresAt } = rt.identity.renewSelf(limits.renewDueWithinMs, limits.clockSkewMs)
+    const { issuedAt, expiresAt } = rt.identity.renewSelf(
+      limits.renewDueWithinMs,
+      limits.clockSkewMs
+    )
     this.own = { issuedAt, expiresAt }
   }
   /**
@@ -229,7 +242,11 @@ export class NetEngineService implements EngineDirectoryPort {
     if (!started || !started.rt.identity.isKeeper()) return
     const now = Date.now()
     const limits = engineLimits()
-    if (this.own && this.own.expiresAt - now > limits.renewDueWithinMs && this.own.issuedAt <= now + limits.clockSkewMs)
+    if (
+      this.own &&
+      this.own.expiresAt - now > limits.renewDueWithinMs &&
+      this.own.issuedAt <= now + limits.clockSkewMs
+    )
       return
     try {
       this.renewOwn(started.rt)
@@ -268,7 +285,8 @@ export class NetEngineService implements EngineDirectoryPort {
   /** Where this profile's helper is, and what the switch shows. */
   helperStatus(): HelperStatus | { state: 'failed'; text: string } {
     const status = this.supervisor?.status()
-    if (this.problem && (!status || status.state === 'off')) return { state: 'failed', text: this.problem }
+    if (this.problem && (!status || status.state === 'off'))
+      return { state: 'failed', text: this.problem }
     return status ?? { state: 'off' }
   }
 
@@ -290,19 +308,28 @@ export class NetEngineService implements EngineDirectoryPort {
     const insecure = insecureFileKey()
     if (!existsSync(join(this.endpointPath, 'identity.json'))) {
       mkdirSync(this.directory, { recursive: true })
-      await initEndpoint(binary, this.endpointPath, helperProfileId(this.options.profileId), insecure)
+      await initEndpoint(
+        binary,
+        this.endpointPath,
+        helperProfileId(this.options.profileId),
+        insecure
+      )
     }
     return launchHelper(binary, this.endpointPath, insecure)
   }
 
   private writeSettings(enabled: boolean): void {
     mkdirSync(this.directory, { recursive: true })
-    writeFileSync(this.settingsPath, JSON.stringify({ enabled, profile: this.options.profileId } satisfies EngineSettings))
+    writeFileSync(
+      this.settingsPath,
+      JSON.stringify({ enabled, profile: this.options.profileId } satisfies EngineSettings)
+    )
   }
 
   /** The endpoint goes aside; the next start makes a new one, and its pairings show "Pair again". */
   private setEndpointAside(why: string): void {
-    if (existsSync(this.endpointPath)) renameSync(this.endpointPath, `${this.endpointPath}.${why}-${Date.now()}`)
+    if (existsSync(this.endpointPath))
+      renameSync(this.endpointPath, `${this.endpointPath}.${why}-${Date.now()}`)
   }
 
   async stop(): Promise<void> {

@@ -16,7 +16,8 @@ import {
   helperArgs,
   helperProfileId,
   initEndpoint,
-  launchHelper
+  launchHelper,
+  readInsecureFileKey
 } from '../../src/mms/netEngine/helper/process'
 
 const binary = findNetHelper()
@@ -32,6 +33,17 @@ const alive = (pid: number): boolean => {
     return false
   }
 }
+
+describe('the identity key file', () => {
+  it('is for development runs only: an installed app keeps its key in the keystore and says so', () => {
+    const env = { MOUSSE_NET_ENGINE_INSECURE_FILE_KEY: '1' }
+    expect(readInsecureFileKey(env, false)).toEqual({ on: true, problems: [] })
+    const installed = readInsecureFileKey(env, true)
+    expect(installed.on).toBe(false)
+    expect(installed.problems).toEqual(['MOUSSE_NET_ENGINE_INSECURE_FILE_KEY is ignored by an installed app'])
+    expect(readInsecureFileKey({ MOUSSE_NET_ENGINE_INSECURE_FILE_KEY: 'yes' }, false).on).toBe(false)
+  })
+})
 
 describe.skipIf(!binary)('the helper process', () => {
   const folder = realpathSync(mkdtempSync(join(tmpdir(), 'helper-process-')))

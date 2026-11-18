@@ -8,12 +8,21 @@
  *
  * On macOS the daemon is Electron's main process, which only gets ready in a logged-in GUI session (not over ssh).
  *
- * It uses a fresh home in the temp folder, keeps the helper's key in a file and has it listen on loopback (a headless
- * run touches no keystore and opens no firewall prompt). Prints `PASS net-helper-hard-kill helper_exit_ms=<n>` or
+ * It uses a fresh home in the temp folder and has the helper listen on loopback (no firewall prompt). An installed app
+ * keeps its identity key in the OS keystore only, so the run makes one keystore entry, `endpoint-<id>` of service
+ * `mousse-net`, and deletes it at the end. Prints `PASS net-helper-hard-kill helper_exit_ms=<n>` or
  * `FAIL net-helper-hard-kill reason=<word>`.
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -54,21 +63,47 @@ const env = {
   ...process.env,
   MOUSSE_CLI: '1',
   MOUSSE_HOME: home,
-  MOUSSE_NET_ENGINE_INSECURE_FILE_KEY: '1',
   MOUSSE_NET_ENGINE_HELPER_LISTEN_IP: '127.0.0.1'
 }
 delete env.MOUSSE_NET_HELPER
+delete env.MOUSSE_NET_ENGINE_INSECURE_FILE_KEY
 delete env.ELECTRON_RUN_AS_NODE
 const started = []
 
 function cleanup() {
   for (const child of started) if (child.exitCode === null) child.kill('SIGKILL')
   for (const { pid } of processes()) if (started.some((child) => child.pid === pid)) kill(pid)
+  forgetKeys()
   if (keep) return console.log(`home=${home}`)
   try {
     rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 })
   } catch {
     // Left to the temp folder.
+  }
+}
+
+/** Deletes the keystore entry of every endpoint the run made (named in its `identity.json`). */
+function forgetKeys() {
+  const profiles = join(home, 'profiles')
+  if (!existsSync(profiles)) return
+  for (const profile of readdirSync(profiles)) {
+    const identity = join(profiles, profile, 'net-engine', 'endpoint', 'identity.json')
+    if (!existsSync(identity)) continue
+    let user
+    try {
+      user = JSON.parse(readFileSync(identity, 'utf8')).keyring_user
+    } catch {
+      continue
+    }
+    if (typeof user !== 'string' || !/^endpoint-[\w-]+$/.test(user)) continue
+    const done = win
+      ? spawnSync('cmdkey', [`/delete:${user}.mousse-net`], { encoding: 'utf8', windowsHide: true })
+      : spawnSync('security', ['delete-generic-password', '-s', 'mousse-net', '-a', user], {
+          encoding: 'utf8'
+        })
+    console.log(
+      done.status === 0 ? `keystore entry ${user} deleted` : `keystore entry ${user} not deleted`
+    )
   }
 }
 

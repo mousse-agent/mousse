@@ -20,10 +20,17 @@ function checkoutRoot(moduleFolder: string): string | undefined {
   const parts = moduleFolder.split(/[\\/]+/u).filter(Boolean)
   for (const tail of CHECKOUT_LAYOUTS) {
     const at = parts.length - tail.length
-    if (at < 1 || !tail.every((part, index) => parts[at + index]!.toLowerCase() === part.toLowerCase())) continue
+    if (
+      at < 1 ||
+      !tail.every((part, index) => parts[at + index]!.toLowerCase() === part.toLowerCase())
+    )
+      continue
     const root = resolve(moduleFolder, ...tail.map(() => '..'))
     try {
-      if ((JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { name?: unknown }).name === 'mousse')
+      if (
+        (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { name?: unknown })
+          .name === 'mousse'
+      )
         return root
     } catch {
       // Not a checkout.
@@ -63,12 +70,41 @@ export function findNetHelper(
   return built && existsSync(built) ? built : undefined
 }
 
+const FILE_KEY_VARIABLE = 'MOUSSE_NET_ENGINE_INSECURE_FILE_KEY'
+
 /**
  * Whether the identity key goes to a plain file instead of the OS keystore (`MOUSSE_NET_ENGINE_INSECURE_FILE_KEY=1`): for
- * tests and headless runs only, where no keystore can be unlocked (a daemon started over SSH on macOS).
+ * tests and development runs only, where no keystore can be unlocked (a daemon started over SSH on macOS). Like the
+ * owner checks' controls, an installed app ignores it and says so: its keys always go to the keystore.
  */
-export function insecureFileKey(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.MOUSSE_NET_ENGINE_INSECURE_FILE_KEY?.trim() === '1'
+export function readInsecureFileKey(
+  env: NodeJS.ProcessEnv,
+  packaged = packagedBuild()
+): { on: boolean; problems: string[] } {
+  const raw = env[FILE_KEY_VARIABLE]?.trim()
+  if (!raw) return { on: false, problems: [] }
+  if (packaged)
+    return { on: false, problems: [`${FILE_KEY_VARIABLE} is ignored by an installed app`] }
+  if (raw !== '1')
+    return {
+      on: false,
+      problems: [`${FILE_KEY_VARIABLE}=${JSON.stringify(raw)} is not 1; the keystore is used`]
+    }
+  return { on: true, problems: [] }
+}
+
+let fileKey: { on: boolean; problems: string[] } | undefined
+
+/** Whether this process keeps new identity keys in a file (read once; see `readInsecureFileKey`). */
+export function insecureFileKey(): boolean {
+  fileKey ??= readInsecureFileKey(process.env)
+  return fileKey.on
+}
+
+/** What was wrong with the file-key variable, reported with the limits. */
+export function insecureFileKeyProblems(): readonly string[] {
+  fileKey ??= readInsecureFileKey(process.env)
+  return fileKey.problems
 }
 
 /**
@@ -82,7 +118,9 @@ export function helperListenIp(env: NodeJS.ProcessEnv = process.env): string {
 /** The helper's id for a profile: 32 hex digits (a profile's UUID without its dashes, else a digest of it). */
 export function helperProfileId(profileId: string): string {
   const plain = profileId.replace(/-/g, '').toLowerCase()
-  return /^[0-9a-f]{32}$/.test(plain) ? plain : createHash('sha256').update(profileId).digest('hex').slice(0, 32)
+  return /^[0-9a-f]{32}$/.test(plain)
+    ? plain
+    : createHash('sha256').update(profileId).digest('hex').slice(0, 32)
 }
 
 /** One run of a helper: its stdio as the app channel's pipe, how it ended, and a kill. */
@@ -110,13 +148,22 @@ export function helperArgs(state: string, command: string[], insecureFileKey: bo
 }
 
 /** Runs `init` for a new endpoint; rejects with what the helper said. */
-export function initEndpoint(binary: string, state: string, profile: string, insecureFileKey: boolean): Promise<void> {
+export function initEndpoint(
+  binary: string,
+  state: string,
+  profile: string,
+  insecureFileKey: boolean
+): Promise<void> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(binary, helperArgs(state, ['init', '--profile', profile], insecureFileKey), {
-      stdio: ['ignore', 'ignore', 'pipe'],
-      env: helperEnv(),
-      windowsHide: true
-    })
+    const child = spawn(
+      binary,
+      helperArgs(state, ['init', '--profile', profile], insecureFileKey),
+      {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: helperEnv(),
+        windowsHide: true
+      }
+    )
     let stderr = ''
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (text: string) => (stderr = (stderr + text).slice(-4096)))
@@ -134,17 +181,28 @@ export function initEndpoint(binary: string, state: string, profile: string, ins
 }
 
 export function lastLine(text: string): string {
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
   return (lines[lines.length - 1] ?? '').replace(/^error:\s*/i, '')
 }
 
 /** Starts `serve --app` for `state` and wraps its stdin and stdout as the app channel's pipe. */
-export function launchHelper(binary: string, state: string, insecureFileKey: boolean): LaunchedHelper {
-  const child = spawn(binary, helperArgs(state, ['serve', '--app', '--listen-ip', helperListenIp()], insecureFileKey), {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: helperEnv(),
-    windowsHide: true
-  })
+export function launchHelper(
+  binary: string,
+  state: string,
+  insecureFileKey: boolean
+): LaunchedHelper {
+  const child = spawn(
+    binary,
+    helperArgs(state, ['serve', '--app', '--listen-ip', helperListenIp()], insecureFileKey),
+    {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: helperEnv(),
+      windowsHide: true
+    }
+  )
   let stderr = ''
   child.stderr.setEncoding('utf8')
   child.stderr.on('data', (text: string) => (stderr = (stderr + text).slice(-4096)))
@@ -155,19 +213,21 @@ export function launchHelper(binary: string, state: string, insecureFileKey: boo
     closed = true
     for (const listener of closeListeners.splice(0)) listener()
   }
-  const exited = new Promise<{ code: number | null; signal: string | null; stderr: string }>((resolvePromise) => {
-    child.on('error', (error) => {
-      stderr += `\n${error.message}`
-      closeOnce()
-      resolvePromise({ code: null, signal: null, stderr })
-    })
-    child.on('exit', (code, signal) => {
-      closeOnce()
-      // What the helper wrote last on its way out arrives before its streams close.
-      child.stderr.once('close', () => resolvePromise({ code, signal, stderr }))
-      if (child.stderr.closed) resolvePromise({ code, signal, stderr })
-    })
-  })
+  const exited = new Promise<{ code: number | null; signal: string | null; stderr: string }>(
+    (resolvePromise) => {
+      child.on('error', (error) => {
+        stderr += `\n${error.message}`
+        closeOnce()
+        resolvePromise({ code: null, signal: null, stderr })
+      })
+      child.on('exit', (code, signal) => {
+        closeOnce()
+        // What the helper wrote last on its way out arrives before its streams close.
+        child.stderr.once('close', () => resolvePromise({ code, signal, stderr }))
+        if (child.stderr.closed) resolvePromise({ code, signal, stderr })
+      })
+    }
+  )
   // A write to a helper that is gone is lost with it; the pipe closes on its exit.
   child.stdin.on('error', () => undefined)
   child.stdout.on('end', closeOnce)
