@@ -54,6 +54,18 @@
       "expiresAt": "2026-11-18T08:04:59.558Z"
     },
     {
+      "task": "sidebar-draft-pencil",
+      "session": "Animatrix-0a2ccc",
+      "machine": "Animatrix",
+      "branch": "sidebar-draft-pencil",
+      "paths": [
+        "src/renderer/components/ThreadsSidebar.tsx",
+        "src/renderer/styles/threads-sidebar.css"
+      ],
+      "claimedAt": "2026-11-18T08:35:39.552Z",
+      "expiresAt": "2026-11-18T10:35:39.552Z"
+    },
+    {
       "task": "startup-delete-retry-after-ready",
       "session": "Animatrix-3930ac",
       "machine": "Animatrix",
