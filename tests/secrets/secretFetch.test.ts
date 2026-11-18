@@ -14,7 +14,7 @@ const VALUE='private-test-value-0123456789'
 function fixture(service='openai') {
  const home=mkdtempSync(join(tmpdir(),'secret-fetch-'));homes.push(home)
  const vault=new SecretVault({profileRoot:home,threadAlive:()=>true})
- vault.store({name:'KEY',value:VALUE,threadId:'home',keep:'saved',binding:resolveSecretBinding({service})})
+ vault.store('KEY',VALUE,{threadId:'home',keep:'saved',binding:resolveSecretBinding({service})})
  const host=createSecretToolHost({vault,requests:new SecretRequests(vault),scratchRoot:home})
  vi.mocked(publicFetch).mockResolvedValue({status:200,headers:{'content-type':'application/json'},body:Buffer.from(JSON.stringify({echo:VALUE}))})
  return {home,vault,host,run:(args:Record<string,unknown>={})=>host.fetch!({threadId:'home',folder:home,args:{secret:'KEY',path:'/v1/models',...args},signal:new AbortController().signal})}
@@ -33,7 +33,7 @@ it('adds fixed service headers and refuses their override',async()=>{
  const {run}=fixture('anthropic');expect((await run({headers:{'Anthropic-Version':'other'}})).isError).toBe(true)
  await run();expect(vi.mocked(publicFetch).mock.lastCall?.[1]?.headers).toEqual({'x-api-key':VALUE,'anthropic-version':'2023-06-01'})
 })
-it('refuses unbound and ungranted secrets',async()=>{const {run,vault}=fixture();vault.store({name:'OLD',value:VALUE,threadId:'home',keep:'saved'});expect((await run({secret:'OLD'})).text).toContain("isn't bound");expect((await run({secret:'MISSING'})).isError).toBe(true)})
+it('refuses unbound and ungranted secrets',async()=>{const {run,vault}=fixture();vault.store('OLD',VALUE,{threadId:'home',keep:'saved'});expect((await run({secret:'OLD'})).text).toContain("isn't bound");expect((await run({secret:'MISSING'})).isError).toBe(true)})
 it('returns masked redirect metadata without another request',async()=>{const {run}=fixture();vi.mocked(publicFetch).mockClear().mockResolvedValue({status:302,headers:{location:`https://other.com/${VALUE}`},body:Buffer.from(VALUE)});const out=await run();expect(out.text).toContain('302');expect(out.text).toContain('Location:');expect(out.text).not.toContain(VALUE);expect(publicFetch).toHaveBeenCalledTimes(1)})
 it.each(['text/plain','application/octet-stream'])('writes only masked bytes to a private file for %s',async type=>{const {run}=fixture();vi.mocked(publicFetch).mockResolvedValue({status:200,headers:{'content-type':type},body:Buffer.from(VALUE+'x'.repeat(70000))});const out=await run();const path=out.text.split('File: ')[1];expect(path).toBeTruthy();expect(readFileSync(path!,'utf8')).not.toContain(VALUE)})
 it('never returns or logs transport diagnostics containing the value',async()=>{const {run}=fixture();const warn=vi.spyOn(console,'warn');const log=vi.spyOn(console,'log');vi.mocked(publicFetch).mockRejectedValue(new Error(`header ${VALUE}`));const out=await run();expect(out.isError).toBe(true);expect(JSON.stringify([out,warn.mock.calls,log.mock.calls])).not.toContain(VALUE)})
