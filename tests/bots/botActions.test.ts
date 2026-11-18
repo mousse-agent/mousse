@@ -1005,7 +1005,7 @@ it('R5-words gives by-hand runs and disabled answers their own refusal', async (
   const manual = await f.bots.activate({ botId: t.botId, input: 'Send', clientRequestId: 'manual-refusal' })
   const turn = await start(f, manual.id)
   const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'manual-call', signal: new AbortController().signal })
-  expect(result.text).toContain('Start it as work with work_start')
+  expect(result.text).toContain("A run started by hand can't wait for your owner.")
   expect(result.text).not.toContain('scheduled')
   f.host.settings!.get().experimental.botAsksFirst = false
   await expect(f.bots.service.answerAction({ actionId: 'missing', digest: 'missing', answer: 'send' })).rejects.toThrow(/can.t be sent any more/i)
@@ -3253,12 +3253,15 @@ it('C9 a scheduled unsent loop ends at its report', async () => {
   const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { body: 'fourth request' }, toolCallId: 'fourth', signal: new AbortController().signal })
   expect(result).toMatchObject({ isError: true, text: 'Three requests for this tool are waiting or were not sent. Say what you need in your report.' })
 })
-it('C9 chat asks-first refusal tells the bot to start work', async () => {
+it('C9 a hand-started run cannot hold a call or start work', async () => {
   const t = await setup(true)
-  const chat = await f.bots.enqueueChat(t.botId, 'chat:needs-work', 'Send another email')
-  const turn = await start(f, chat.id)
-  const result = turn.prepared.authority.holdMcp!(t.work.prepared.authority.mcpTools![0]!, t.args, 'chat-send')
-  expect(result).toMatchObject({ isError: true, text: 'This tool needs your owner to approve each request. Start it as work with work_start so they can answer it in the chat.' })
+  const manual = await f.bots.activate({ botId: t.botId, input: 'Send another email', clientRequestId: 'manual-needs-answer' })
+  const turn = await start(f, manual.id)
+  const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'manual-send', signal: new AbortController().signal })
+  expect(result).toMatchObject({ isError: true, text: "A run started by hand can't wait for your owner. Say in your report what you would have sent." })
+  expect(turn.prepared.authority.appTools).not.toContain('work_start')
+  expect(f.bots.actions.forWork(manual.id)).toBeUndefined()
+  expect(t.calls).toEqual([])
 })
 
 it('C9 switch rollback is atomic when a second row cannot be written', async () => {
