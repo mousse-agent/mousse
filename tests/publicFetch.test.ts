@@ -162,3 +162,21 @@ it('keeps test address overrides unavailable in packaged builds and without expl
  expect(secretFetchTestAddress('api.openai.com',env,false)).toEqual({address:'127.0.0.1',family:4})
  expect(secretFetchTestAddress('other.com',env,false)).toBeUndefined()
 })
+
+it('enforces the secret read 5 MiB bound without changing the page bound',async()=>{
+ vi.mocked(dns.lookup).mockResolvedValue([{address:'8.8.8.8',family:4}] as never)
+ vi.mocked(https.request).mockImplementation(((_options:any,callback:any)=>{
+  const req=new EventEmitter() as any;req.destroy=(e:Error)=>req.emit('error',e)
+  req.end=()=>{const res=new EventEmitter() as any;res.statusCode=200;res.headers={};callback(res);res.emit('data',Buffer.alloc(5*1024*1024+1));res.emit('end')};return req
+ }) as any)
+ await expect(publicFetch('https://example.com',{secretRead:true})).rejects.toThrow('5 MiB')
+})
+it('aborts secret reads at 30 seconds',async()=>{
+ vi.useFakeTimers()
+ try {
+  vi.mocked(dns.lookup).mockResolvedValue([{address:'8.8.8.8',family:4}] as never)
+  vi.mocked(https.request).mockImplementation(((options:any)=>{const req=new EventEmitter() as any;req.end=()=>{};options.signal.addEventListener('abort',()=>req.emit('error',new Error('stopped')));return req}) as any)
+  const result=expect(publicFetch('https://example.com',{secretRead:true})).rejects.toThrow('30 seconds')
+  await vi.advanceTimersByTimeAsync(30_000);await result
+ }finally{vi.useRealTimers()}
+})
