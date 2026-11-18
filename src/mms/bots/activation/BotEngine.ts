@@ -14,6 +14,7 @@ import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
 import { startTurnMeter } from './turnUsage'
+import { turnTimingBind } from '../../diagnostics/turnTiming'
 import { chatEpochEnd, contextBudget, type BotChatDigestState, type BotChatEpoch, type BotChatEpochVerdict } from '../memory/contextBudget'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
 import { randomUUID } from 'node:crypto'
@@ -2824,6 +2825,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       row, n: dispatch.n, fresh: dispatch.kind === 'start' && (cleared || row.lane !== 'chat'), contextGen: epoch?.id ?? row.id, prompt,
       ...(told.instructions ? { instructions: told.instructions } : {}), ...(preamble ? { preamble } : {})
     }, { store: this.store, now: () => this.now(), ...(this.host.toolList ? { tools: () => this.host.toolList!(payload.threadId, payload.runId) } : {}) })
+    // Where the reply's time goes, marked from here on the bot's thread (`turnTiming`).
+    if (row.lane === 'chat') turnTimingBind(row.botId, payload.threadId)
     return {
       activationId: row.id,
       dispatchN: dispatch.n,

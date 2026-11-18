@@ -1,7 +1,7 @@
 /**
  * A bot's chat keeps one Claude Code process warm between its turns on the owner's entry (docs/bots.md, Warm chat
- * process): reused only while its launch stays the same, refusing every call between turns, closed when a turn fails
- * or the bot's launch changes. Work turns and turns that offer Bash stay one process per turn.
+ * process): reused only while its launch stays the same, refusing every call between turns, closed when a turn fails,
+ * runs a command, or the bot's launch changes. Work turns stay one process per turn.
  */
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import type { HookCallback, Options } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
+import { turnTimingBegin, turnTimingBind, turnTimingForget } from '../../src/mms/diagnostics/turnTiming'
 import type { ClaudeLockedTurn } from '../../src/mms/harness/claude/locked'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
@@ -29,7 +30,7 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-function fixture() {
+function fixture(runAuth: () => Promise<string> = async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })) {
   const home = temp('claude-warm-home-')
   const binary = join(home, 'claude')
   writeFileSync(binary, 'fixture')
@@ -41,12 +42,12 @@ function fixture() {
     launchConfig: () => ({ binaryPath: binary }),
     query: cli.query,
     live: { noticeDelayMs: 10 },
-    runAuth: vi.fn(async () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
+    runAuth: vi.fn(runAuth)
   })
   const root = temp('claude-warm-files-')
   const scratch = temp('claude-warm-scratch-')
   /** A chat turn of the bot: `warm` is what `BotEngine.authorityFor` sets for the chat's own turns. */
-  const lockedTurn = (options: { warm?: string; tools?: NeutralTool[]; systemPrompt?: string } = {}): ClaudeLockedTurn => {
+  const lockedTurn = (options: { warm?: string; tools?: NeutralTool[]; systemPrompt?: string; commandsRefused?: string } = {}): ClaudeLockedTurn => {
     const controller = new AbortController()
     const authority = createBotAuthority({
       activationId: 'act-1',
@@ -66,6 +67,7 @@ function fixture() {
       shellOpen: true,
       temps: [],
       systemPrompt: options.systemPrompt ?? 'You are a bot.',
+      ...(options.commandsRefused ? { commandsRefused: options.commandsRefused } : {}),
       ledger: { start: () => 'row', commit: () => undefined, failed: () => undefined }
     }
   }
@@ -131,13 +133,98 @@ describe("a bot's warm chat process", () => {
     expect(service.releaseBotProcess('bot-home')).toBe(false)
   })
 
-  it.each([
-    ['a work turn', { warm: undefined }],
-    ['a turn that offers Bash', { tools: ['read', 'shell'] as NeutralTool[] }]
-  ] as const)('keeps %s to one process per turn', async (_name, options) => {
+  it('keeps a work turn to one process per turn', async () => {
     const { cli, lockedTurn, turn } = fixture()
-    await turn(lockedTurn(options))
-    await turn(lockedTurn(options))
+    await turn(lockedTurn({ warm: undefined }))
+    await turn(lockedTurn({ warm: undefined }))
     expect(cli.processes).toHaveLength(2)
+  })
+
+  it("gives a new process its prompt without waiting for the turn's sign-in reading while the last one said signed in", async () => {
+    let reading = false
+    let read: ((text: string) => void) | undefined
+    const { service, cli, lockedTurn, turn } = fixture(() => reading ? new Promise((resolve) => { read = resolve }) : Promise.resolve(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })))
+    await service.status()
+    reading = true
+    const replied = turn(lockedTurn())
+    for (let i = 0; i < 100 && !cli.processes[0]?.inputs.length; i++) await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(cli.processes[0]!.inputs).toHaveLength(1)
+    expect(read).toBeDefined()
+    read!(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))
+    await expect(replied).resolves.toBe('reply to 1')
+  })
+})
+
+// A chat turn offered commands keeps its process for the next turn unless it ran one. A command is noted before the
+// call is let through, by the hook or by canUseTool, whichever comes first: it may outlive its call, so the process
+// that ran it closes at the turn's end with everything it started.
+type Call = { tool: string; input: Record<string, unknown>; through: 'hook' | 'canUseTool' | 'both' }
+const BASH = { command: 'echo hi' }
+describe('a warm chat turn offered commands', () => {
+  it.each<{ case: string; calls: Call[]; commandsRefused?: string; kept: boolean }>([
+    { case: 'runs none', calls: [], kept: true },
+    { case: 'reads a file', calls: [{ tool: 'Read', input: { file_path: 'notes.md' }, through: 'both' }], kept: true },
+    { case: 'runs a command', calls: [{ tool: 'Bash', input: BASH, through: 'both' }], kept: false },
+    { case: 'runs a command only the hook saw', calls: [{ tool: 'Bash', input: BASH, through: 'hook' }], kept: false },
+    { case: 'runs a command only canUseTool saw', calls: [{ tool: 'Bash', input: BASH, through: 'canUseTool' }], kept: false },
+    { case: 'asks for a command that is refused', calls: [{ tool: 'Bash', input: BASH, through: 'both' }], commandsRefused: 'Commands are off for this bot.', kept: true }
+  ])('$case: process kept $kept', async ({ calls, commandsRefused, kept }) => {
+    const { cli, lockedTurn, turn } = fixture()
+    const decisions: string[] = []
+    let first = true
+    cli.reply = async (message, process) => {
+      if (first) {
+        first = false
+        for (const [index, call] of calls.entries()) {
+          const id = `tu-${index}`
+          if (call.through !== 'canUseTool') {
+            const hooked = await preToolUse(process.options)({ hook_event_name: 'PreToolUse', tool_name: call.tool, tool_input: call.input, tool_use_id: id } as never, id, { signal: new AbortController().signal })
+            decisions.push(`hook:${decision(hooked) ?? 'ask'}`)
+          }
+          if (call.through !== 'hook') {
+            const allowed = await process.options.canUseTool!(call.tool, call.input, { signal: new AbortController().signal, toolUseID: id, requestId: 'r' } as never)
+            decisions.push(`canUse:${allowed.behavior}`)
+          }
+        }
+      }
+      process.answer(String(message.uuid), `reply to ${process.inputs.length}`)
+    }
+    const offered = { tools: ['read', 'shell'] as NeutralTool[], ...(commandsRefused ? { commandsRefused } : {}) }
+    expect(await turn(lockedTurn(offered))).toBe('reply to 1')
+    // Calls the gate refused ran nothing; the rest were let through.
+    expect(decisions.every((made) => commandsRefused ? made.endsWith('deny') : !made.endsWith('deny'))).toBe(true)
+    await turn(lockedTurn(offered))
+    expect(cli.processes).toHaveLength(kept ? 1 : 2)
+    expect(cli.processes[0]!.closed).toBe(!kept)
+  })
+})
+
+// Where a chat reply's time went: one line per turn, from the owner's message to the reply's first word, in order.
+describe("a bot chat turn's timing line", () => {
+  const timed = async (prepare: () => void) => {
+    const { lockedTurn, turn } = fixture()
+    const lines: string[] = []
+    const info = vi.spyOn(console, 'info').mockImplementation((line: unknown) => { if (String(line).startsWith('[turn-timing]')) lines.push(String(line)) })
+    try {
+      for (let i = 0; i < 2; i++) {
+        prepare()
+        await turn(lockedTurn())
+      }
+    } finally { info.mockRestore() }
+    return lines.map((line) => JSON.parse(line.slice('[turn-timing] '.length)) as { threadId: string; ms: Record<string, number> })
+  }
+
+  it('is logged once per turn, with the steps in the order they happened and the warm process named', async () => {
+    const turns = await timed(() => { turnTimingBegin('bot-1'); turnTimingBind('bot-1', 'bot-home') })
+    expect(turns.map((logged) => logged.threadId)).toEqual(['bot-home', 'bot-home'])
+    expect(turns.map((logged) => Object.keys(logged.ms))).toEqual([
+      ['dispatch', 'provider', 'processNew', 'signIn', 'prompt', 'firstFrame', 'firstText'],
+      ['dispatch', 'provider', 'processWarm', 'signIn', 'prompt', 'firstFrame', 'firstText']
+    ])
+    for (const { ms } of turns) expect(Object.values(ms)).toEqual([...Object.values(ms)].sort((a, b) => a - b))
+  })
+
+  it('is not logged for a turn no dispatch bound, nor for a message that joined a turn under way', async () => {
+    expect(await timed(() => { turnTimingBegin('bot-1'); turnTimingForget('bot-1') })).toEqual([])
   })
 })
