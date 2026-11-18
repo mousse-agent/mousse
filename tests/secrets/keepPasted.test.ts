@@ -114,3 +114,11 @@ it.each([
  const {vault,call}=setup();const shape=pastedSecretShape(value)!;await call({value:value.slice(shape.start,shape.end)});expect(vault.value('AWS_SECRET_ACCESS_KEY')).toBe('wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY')
 })
 it('refuses keeping an AWS ID alone',async()=>{const {call}=setup();await expect(call({value:'AKIAIOSFODNN7EXAMPLE'})).rejects.toMatchObject({code:'invalid_params'})})
+
+it('stores a labelled AWS secret rather than an older base64 value',async()=>{
+ const {call,vault}=setup()
+ const text='older '+ 'B'.repeat(40)+' AKIAIOSFODNN7EXAMPLE '+ 'C'.repeat(40)+' SecretAccessKey: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+ const shape=pastedSecretShape(text)!
+ await call({value:text.slice(shape.start,shape.end)})
+ expect(vault.value('AWS_SECRET_ACCESS_KEY')).toBe('wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY')
+})

@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { pastedSecretShape, unmistakableCredential } from '../../src/shared/secretShapes'
+import { pastedSecretShape, unmistakableCredential, pastedSecretValue, pastedSecretReplacement } from '../../src/shared/secretShapes'
 const a = 'A'.repeat(48)
 const aws = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
 const pem = '-----BEGIN PRIVATE KEY-----\nMIIabc==\n-----END PRIVATE KEY-----'
@@ -85,5 +85,20 @@ it('scales the long URL token walk across two sizes',()=>{
  const measure=(n:number)=>{const text='https://example.com/'+'.'.repeat(n)+'x';const start=performance.now();for(let i=0;i<5;i++) pastedSecretShape(text);return performance.now()-start}
  const small=measure(32000),large=measure(64000)
  expect(large).toBeLessThan(1000)
- expect(large).toBeLessThan(small*6+100)
+ expect(large).toBeLessThan(Math.max(small,1)*3)
+})
+
+it.each([
+ `path ${'P'.repeat(40)} then ${id} ${aws}`,
+ `older ${'B'.repeat(40)} then ${id} secret is ${aws}`,
+ ...['aws_secret_access_key','AWS_SECRET_ACCESS_KEY','SecretAccessKey'].map(label=>`older ${'B'.repeat(40)} ${id} ${'C'.repeat(40)} "${label}":"${aws}"`),
+ `"SecretAccessKey":"${aws}" older ${'B'.repeat(40)} ${id}`
+])('prefers the labelled AWS secret, otherwise the nearest token: %s',text=>{
+ const shape=pastedSecretShape(text)!
+ const span=text.slice(shape.start,shape.end)
+ expect(pastedSecretValue(span)).toBe(aws)
+ const replaced=text.slice(0,shape.start)+pastedSecretReplacement(span,'AWS_SECRET_ACCESS_KEY')+text.slice(shape.end)
+ expect(replaced).toContain(id)
+ expect(replaced).not.toContain(aws)
+ if(text.includes('B'.repeat(40))) expect(replaced).toContain('B'.repeat(40))
 })
