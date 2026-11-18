@@ -25,7 +25,9 @@ export function isPublicAddress(address: string): boolean {
   return (n >> 125n) === 1n && !((n >> 96n) >= 0x20010000n && (n >> 96n) <= 0x200101ffn) && (n >> 96n) !== 0x20010db8n && (n >> 112n) !== 0x2002n && (n >> 112n) !== 0x3fffn
 }
 
-/** One resolution and one pinned connection, with no ambient agent, redirects, cookies or credentials. */
+class ConnectionFailure extends Error {}
+
+/** One resolution and pinned connections, with no ambient agent, redirects, cookies or credentials. */
 export async function publicFetch(value: string): Promise<PublicResponse> {
   const url = publicUrl(value)
   const hostname = url.hostname.replace(/^\[|\]$/g, '')
@@ -35,8 +37,12 @@ export async function publicFetch(value: string): Promise<PublicResponse> {
     const aborted = new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true }))
     const addresses = await Promise.race([isIP(hostname) ? Promise.resolve([{ address: hostname, family: isIP(hostname) }]) : lookup(hostname, { all: true }), aborted])
     if (!addresses.length || addresses.some(({ address }) => !isPublicAddress(address))) throw new Error('The page must resolve only to public addresses.')
-    const pinned = addresses[0]!
-    return await new Promise<PublicResponse>((resolve, reject) => {
+    let lastError: unknown
+    for (const pinned of addresses) {
+      if (controller.signal.aborted) throw controller.signal.reason
+      if (!isPublicAddress(pinned.address)) throw new Error('The page must resolve only to public addresses.')
+      try { return await new Promise<PublicResponse>((resolve, reject) => {
+      let responded = false
       const req = (url.protocol === 'https:' ? https : http).request({
         protocol: url.protocol, hostname, port: url.port || undefined, path: url.pathname + url.search,
         method: 'GET', agent: false, family: pinned.family, servername: isIP(hostname) ? undefined : hostname,
@@ -44,6 +50,7 @@ export async function publicFetch(value: string): Promise<PublicResponse> {
         signal: controller.signal,
         lookup: (_host, _options, callback) => callback(null, pinned.address, pinned.family)
       }, res => {
+        responded = true
         const status = res.statusCode ?? 0
         if (status < 200 || status >= 300) {
           let reason = `The page returned HTTP ${status}.`
@@ -62,8 +69,13 @@ export async function publicFetch(value: string): Promise<PublicResponse> {
         res.on('aborted', () => reject(new Error('The page response was interrupted.')))
         res.on('end', () => resolve({ status, headers: res.headers, body: Buffer.concat(chunks) }))
       })
-      req.on('error', reject)
+      req.on('error', error => reject(!responded && !controller.signal.aborted ? new ConnectionFailure(error.message) : error))
       req.end()
-    })
+    }) } catch (error) {
+      if (!(error instanceof ConnectionFailure)) throw error
+      lastError = error
+    }
+    }
+    throw lastError
   } finally { clearTimeout(timer) }
 }
