@@ -90,17 +90,13 @@
   color: var(--text-primary);
 }
 
-/* Projects · Threads · Chats, three equal segments, then Add project on the Projects tab only. */
+/* Projects · Threads · Chats, three equal segments, then the bot threads eye while bots have started threads. */
 .threads-sidebar-tabs-row {
   display: flex;
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
   margin: 8px 12px 10px;
-}
-
-.threads-sidebar-add-project {
-  flex-shrink: 0;
 }
 
 .threads-sidebar-tabs {
@@ -415,7 +411,9 @@
   transition: opacity 0.15s;
 }
 
-.threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:is(:hover, :has(:focus-visible)) > .threads-sidebar-thread > .threads-sidebar-thread-trailing,
+/* The marks give way to the hover actions. A row without actions (a chat not sent yet, a send the service has not
+   made yet) keeps them. */
+.threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions):is(:hover, :has(:focus-visible)) > .threads-sidebar-thread > .threads-sidebar-thread-trailing,
 .threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions [aria-expanded='true']) > .threads-sidebar-thread > .threads-sidebar-thread-trailing {
   opacity: 0;
 }
@@ -804,6 +802,20 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 .threads-sidebar-thread-trailing .threads-sidebar-status-spinner,
 .threads-sidebar-thread-trailing .threads-sidebar-status-icon {
   margin-left: 0;
+}
+
+/* A thread whose composer holds unsent text: a small pencil among the row's marks, in a muted accent. Like the
+   other marks it gives way to the hover actions. */
+.threads-sidebar-draft-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: color-mix(in oklch, var(--accent) 70%, var(--text-secondary));
+  opacity: 0.85;
+}
+
+/* A new chat not sent yet is listed by its draft, in italics. */
+.threads-sidebar-thread.unsent-chat .threads-sidebar-thread-name {
+  font-style: italic;
 }
 
 .threads-sidebar-worktree-icon {

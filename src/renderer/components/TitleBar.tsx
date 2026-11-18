@@ -1,7 +1,8 @@
 import { useEffect } from 'react'
-import { Edit, Info, PanelLeft, PanelRightClose, PanelRightOpen } from '../lib/icons'
+import { Edit, FolderPlus, Info, PanelLeft, PanelRightClose, PanelRightOpen } from '../lib/icons'
 import { useShortcutTitle } from '../commands/commandRegistry'
-import { createAndSelectThread } from '../lib/threadActions'
+import { addProjectAndStartThread, createAndSelectThread } from '../lib/threadActions'
+import { runWithToast } from '../lib/actionToast'
 import { useChatsStore } from '../stores/chatsStore'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
 import { TitleBarNav } from './TitleBarNav'
@@ -48,6 +49,7 @@ export function TitleBar() {
   const sidebarLabel = threadsSidebarOpen ? 'Hide sidebar' : showBadge ? `Show sidebar · ${needsMeLabel(needsMe.threads, needsMe.bots)}` : 'Show sidebar'
   const sidebarTitle = useShortcutTitle(sidebarLabel, 'sidebar.toggle')
   const newThreadTitle = useShortcutTitle('New thread', 'thread.new')
+  const addProjectTitle = useShortcutTitle('Add project', 'project.open')
   const detailsTitle = useShortcutTitle('Thread details', 'sideCard.toggle')
   // A disabled button explains why instead of offering its key.
   const sideCardTitle = sideCardUnavailable ? sideCardButtonTitle(sideCardUnavailable) : detailsTitle
@@ -100,6 +102,16 @@ export function TitleBar() {
                 </span>
               )}
             </IconButton>
+            {/* Projects hold threads, so the Chats tab has no use for it. */}
+            {!chatsMode && (
+              <IconButton
+                icon={FolderPlus}
+                label="Add project"
+                title={addProjectTitle}
+                variant="titlebar"
+                onClick={() => void runWithToast('add the project', addProjectAndStartThread)}
+              />
+            )}
             <IconButton
               icon={Edit}
               label={chatsMode ? 'New chat' : 'New thread'}
