@@ -372,7 +372,7 @@ export class BotActions {
     const messageId = `bm_${id}`
     this.host.store.db.transaction(() => {
       const introduced = this.host.store.run("INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, 'asks-first:introduced', '1')", row.botId)
-      if (introduced) this.host.post(row, `bm_${id}_intro`, `From now on ${this.host.name(row.botId)} asks you before it sends or changes anything with your tools. Tools that only read don't ask.`)
+      if (introduced) this.host.post(row, `bm_asks_first_${row.botId}`, `From now on ${this.host.name(row.botId)} asks you before it sends or changes anything with your tools. Tools that only read don't ask.`)
       this.host.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args,
         args_json, args_digest, binding_json, card_json, status, message_id, expires_at, created_at)
         VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,

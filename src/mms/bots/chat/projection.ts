@@ -124,6 +124,7 @@ export interface PostInput {
    * For the owner's eyes only (#673: a picked model that can't run, by name): journaled as a hidden kind, which no
    * pack, search or read gives the bot, so it never learns a model's or an entry's name from its own chat.
    */
+  quiet?: true
   hidden?: true
   /** Trusted job facts from the scheduler, used only by the post-time telling classifier. */
   scheduleLine?: { say: string; ownerAsked?: boolean }
@@ -330,7 +331,7 @@ export class BotChatProjection {
       })
       // A row the chat never shows (an event's line, `outOfSightRow`) is kept for the bot's memory and its guards only:
       // it tells nobody and reaches no window.
-      const tell = outOfSightRow(input.kind, id) ? null : this.options.classify?.(this.toMessage(this.store.message(id)!), input) ?? null
+      const tell = input.quiet || outOfSightRow(input.kind, id) ? null : this.options.classify?.(this.toMessage(this.store.message(id)!), input) ?? null
       this.store.run('UPDATE bot_messages SET tell = ?, tell_at = ? WHERE id = ?', tell, tell ? this.options.tellAt?.(input.botId, tell, at, id) ?? at : null, id)
       return { row: this.store.message(id)!, inserted: true }
     })

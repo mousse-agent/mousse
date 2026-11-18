@@ -1886,7 +1886,7 @@ it.each(['stop', 'failed', 'limits', 'week', 'clear', 'reset', 'delete', 'forget
   if (path === 'stop') change = () => f.bots.stopWork(t.botId, t.workId)
   else if (['failed', 'limits', 'week'].includes(path)) change = () => f.store.moveActivation(t.workId, ['blocked'], 'failed', { endReason: path })
   else if (path === 'forget history') change = () => f.bots.wipeMemory(t.botId, 'saved')
-  else if (path === 'allowed') change = () => f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: m.mcp.map(p => ({ ...p, level: 'allowed' as const })) }))
+  else if (path === 'allowed') { Object.assign(t.descriptor, { readOnlyHint: true }); change = () => f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: m.mcp.map(p => ({ ...p, level: 'allowed' as const })) })) }
   else if (path === 'tool' || path === 'server') change = () => {
     if (path === 'tool') t.server.tools.splice(0)
     else vi.spyOn(t.mcp, 'where').mockReturnValue({ state: 'gone' })
