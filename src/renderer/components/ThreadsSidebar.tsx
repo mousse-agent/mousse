@@ -31,9 +31,10 @@ import { PillTabs, type PillTab } from './ui/PillTabs'
 import { ChatsSidebar } from './chats/ChatsSidebar'
 import { ProfileSwitcher } from './profiles/ProfileSwitcher'
 import { DeleteArchivedDialog } from './sidebar/DeleteArchivedDialog'
+import { ArchivedList } from './sidebar/ArchivedList'
 import { clearAllRequest, deleteThreads, type DeleteRequest } from '../lib/archivedThreads'
 import { threadsForList, useArchiveMotionRows } from '../lib/archiveMotion'
-import { Collapse, motionAllowed } from './ui/Collapse'
+import { Collapse, COLLAPSE_LONG_LIST, motionAllowed } from './ui/Collapse'
 import { scaleMotionMs, useMotionScale, VIEW_SWAP_IN_MS } from '../lib/motion'
 
 import {
@@ -1978,14 +1979,25 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             </button>
           </div>
 
-          <Collapse open={archivedExpanded} itemCount={archivedThreads.length}>
+          {/* Built only while open, and only the cards in view (ArchivedList). A long list opens at once: its height
+              motion would lay out the footer on every frame. */}
+          <Collapse open={archivedExpanded} itemCount={archivedThreads.length} animate={archivedThreads.length <= COLLAPSE_LONG_LIST}>
+            {archivedThreads.length === 0 ? (
               <div className="threads-sidebar-tree threads-sidebar-thread-feed threads-sidebar-settled-list">
-                {archivedThreads.length === 0 ? (
-                  <div className="threads-sidebar-empty">No archived threads</div>
-                ) : (
-                  archivedThreads.map((thread) => renderThreadRow(thread, { root: true, layout: 'card' }))
-                )}
+                <div className="threads-sidebar-empty">No archived threads</div>
               </div>
+            ) : (
+              <ArchivedList
+                threads={archivedThreads}
+                renderRow={(thread) => renderThreadRow(thread, { root: true, layout: 'card' })}
+                scrollRef={footerRef}
+                keepIds={[
+                  ...(contextMenu?.target.type === 'thread' && !contextMenu.inNeedsMe ? [contextMenu.target.id] : []),
+                  ...(renaming?.type === 'thread' && !renaming.inNeedsMe ? [renaming.id] : []),
+                ]}
+                revealId={openSubagentParentId ?? activeThreadId ?? undefined}
+              />
+            )}
           </Collapse>
 
         </section>
