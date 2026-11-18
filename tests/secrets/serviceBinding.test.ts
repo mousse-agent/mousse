@@ -208,13 +208,14 @@ it('stores known service ids and uses the current service table for saved reuse'
     expect(vault.isSaved('KEY', binding)).toBe(true)
   } finally { SECRET_SERVICES.notion = original; requests.dispose() }
 })
-it('caches binding file reads across references while observing atomic replacements', () => {
+it.each(['valid', 'malformed'] as const)('caches %s binding file reads across references while observing atomic replacements', state => {
   const {home, vault, requests} = fixture()
   vault.store('KEY', VALUE, {threadId: 'bot', keep: 'saved', binding: resolveSecretBinding({service: 'github'})})
+  if (state === 'malformed') writeFileSync(join(home, 'secrets/bindings.json'), '{')
   const adapter = createProfileSecretAdapter({profileRoot: home, inheritProcessEnv: false})
   const spy = vi.mocked(readFileSync).mockClear()
   try {
-    for (let n = 0; n < 4; n++) expect(() => adapter.resolveEnv('${secret:KEY}')).toThrow(/GitHub/)
+    for (let n = 0; n < 4; n++) expect(() => adapter.resolveEnv('${secret:KEY}')).toThrow(/bound/)
     expect(spy.mock.calls.filter(([path]) => String(path).endsWith('/bindings.json'))).toHaveLength(1)
     const path = join(home, 'secrets/bindings.json')
     const replacement = path + '.new'
