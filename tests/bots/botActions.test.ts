@@ -4211,7 +4211,7 @@ it('E1 restart tells the run an uncertain automatic outcome, finishes, and admit
   await f.bots.reconcileOnStartup(); await flush()
   expect(f.bots.actions.get(action.id)?.status).toBe('uncertain')
   const resumed = await start(f, id, 2)
-  expect(resumed.payload.prompt).toContain('check before trying again')
+  expect(f.store.lastMainDispatch(id)?.prompt.text).toContain('check before trying again')
   await finish(f, resumed.payload, 'completed', { text: 'The upload could not be confirmed.' })
   expect(f.store.activation(id)?.status).toBe('done')
   expect(f.store.message(action.message_id)).toBeUndefined()
@@ -4237,6 +4237,7 @@ it.each(['saved', 'all', 'source', 'revoke'] as const)('E1 forgetting or revokin
 })
 it('E1 clearing chat removes withdrawn consent snapshots', async () => {
   const t = await aloneAsk('not_now')
+  const reply = await start(f, t.consentActivation, 2); await finish(f, reply.payload)
   await f.bots.service.chatSend({ botId: t.botId, text: 'Ask again', clientRequestId: 'alone-again' })
   const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
   const turn = await start(f, row.id)
@@ -4271,6 +4272,7 @@ it('E1 consent and About use verb phrases and place values joined in words', asy
 })
 it('E1 an MCP tool name without ask points to the let-alone request shape', async () => {
   const t = await aloneAsk('not_now')
+  const reply = await start(f, t.consentActivation, 2); await finish(f, reply.payload)
   await f.bots.service.chatSend({ botId: t.botId, text: 'Without asking please', clientRequestId: 'wrong-shape' })
   const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
   const turn = await start(f, row.id)
