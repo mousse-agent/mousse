@@ -2408,12 +2408,8 @@ export class MmsProfileServices {
       if (existsSync(episodes.path)) episodes.interruptOrphans()
     }
     this.repairSubagentLineage()
-    // A packaged GUI can start before the user opens a Git project. Keep the
-    // worktree manager lazy in that state; project-bound operations still call
-    // RepositoryContext.open() and fail clearly if their project is invalid.
-    if (await this.gitService.isRepo(this.worktrees.getRepoRoot())) {
-      await this.worktrees.init()
-    }
+    // The worktree manager opens its repository when an operation first needs it (`WorktreeManager.getRepository`);
+    // project-bound operations call RepositoryContext.open() themselves and fail clearly if their project is invalid.
     this.config.startWatching(() => {
       /* external edits reload sections; stores read on demand */
     })

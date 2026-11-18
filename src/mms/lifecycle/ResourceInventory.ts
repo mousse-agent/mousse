@@ -149,9 +149,19 @@ export function finalReads(facts: OwnershipFacts): OwnershipReads {
 
 const realpathLikeSync = promisify(realpathCallback)
 
-/** Reads the facts in `needs` into `facts`, without blocking. */
+/** How many facts are read at once: each worktree's is a few Git processes, and an installation may have a hundred. */
+const FACT_READS_AT_ONCE = 4
+
+/** Reads the facts in `needs` into `facts`, without blocking, a few at a time. */
 export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts: OwnershipFacts): Promise<void> {
+  // Each fact once, though several records may name it.
+  const unique = new Map<string, OwnershipNeed>()
   for (const need of needs) {
+    const key = need.kind === 'worktree' ? `worktree\0${worktreeKey(need.store, need.path, need.branch, need.repository)}` : need.kind === 'legacy' ? `legacy\0${need.root}` : `${need.kind}\0${need.path}`
+    if (!unique.has(key)) unique.set(key, need)
+  }
+  const queue = [...unique.values()]
+  const readOne = async (need: OwnershipNeed): Promise<void> => {
     if (need.kind === 'present') {
       if (!facts.present.has(need.path)) facts.present.set(need.path, await access(need.path).then(() => true, () => false))
     } else if (need.kind === 'worktree') {
@@ -163,6 +173,8 @@ export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts:
       if (!facts.commonDirs.has(need.path)) facts.commonDirs.set(need.path, await gitCommonDirAsync(need.path) ?? null)
     } else if (!facts.legacy.has(need.root)) facts.legacy.set(need.root, await scanLegacyFolder(need.root))
   }
+  const worker = async (): Promise<void> => { for (let need = queue.shift(); need; need = queue.shift()) await readOne(need) }
+  await Promise.all(Array.from({ length: Math.min(FACT_READS_AT_ONCE, queue.length) }, worker))
 }
 
 /**
