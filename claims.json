@@ -89,22 +89,6 @@
       "expiresAt": "2026-11-18T12:35:24.569Z"
     },
     {
-      "task": "global-search-every-tab",
-      "session": "Animatrix-769916",
-      "machine": "Animatrix",
-      "branch": "global-search-every-tab",
-      "paths": [
-        "src/renderer/commands/paletteItems.ts",
-        "src/renderer/components/CommandPalette.tsx",
-        "src/renderer/components/NavigationRail.tsx",
-        "src/renderer/components/chats/ChatsSidebar.tsx",
-        "src/renderer/stores/chatsStore.ts",
-        "src/renderer/lib/icons.ts"
-      ],
-      "claimedAt": "2026-11-18T13:55:16.935Z",
-      "expiresAt": "2026-11-18T15:55:16.935Z"
-    },
-    {
       "task": "mousse/owner-request-in-a-personal-bot-chat",
       "session": "Animatrix-71802f",
       "machine": "Animatrix",
