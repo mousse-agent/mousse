@@ -260,6 +260,13 @@ describe('the inbox page', () => {
     expect($('[data-testid="inbox-filter-automation"]')).toBeNull()
   })
 
+  it('keeps the normal interval wording alongside a watched host in Manage',async()=>{
+    await mount([], [automation({id:'watched',schedule:{kind:'interval',minutes:15},whenText:'when example.com changes',who:{kind:'bot',name:'Pip'}})])
+    await click($('[data-testid="inbox-manage-btn"]'))
+    const row=$('[data-automation="watched"]')!
+    expect(row.querySelector('td:nth-child(2)')?.textContent).toBe('Every 15 min · when example.com changes')
+  })
+
   it('shows Manage as a table with a switch per row: When, Who, Next run, Last run; no spend; the rest in the menu', async () => {
     const next = new Date(NOW.getTime() + 3_600_000).toISOString()
     const mousse = await mount(RUNS, [{ ...AUTOMATIONS[0]!, next: { at: next, timeZone: ZONE } }, AUTOMATIONS[1]!, automation({ id: 'off', name: 'Deploy preview', paused: true })], {
