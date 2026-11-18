@@ -361,7 +361,7 @@ it.each(['malformed', 'directory'] as const)('still expires keys and deletes in 
   expect(()=>adapter.resolveEnv('${secret:KEEP_BOUND}')).toThrow(/bound/)
   expect(()=>vault.store('REMOVE_BOUND','fresh-value',{threadId:'bot',keep:'saved'})).toThrow(/unavailable|binding/i)
   if(state==='malformed') expect(readFileSync(path,'utf8')).toBe('{not json')
-  else {expect(lstatSync(path).isDirectory()).toBe(true);rmSync(path)}
+  else {expect(lstatSync(path).isDirectory()).toBe(true);rmSync(path,{recursive:true})}
   writeFileSync(path,original)
   // An intact entry still denies the name after the unreadable file becomes readable again.
   expect(vault.bindingFor('REMOVE_BOUND')).toEqual(binding)
