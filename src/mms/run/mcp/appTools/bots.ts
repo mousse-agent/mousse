@@ -54,7 +54,7 @@ const PERMISSION = Type.Union([
       amount: Type.Optional(Type.Number({ description: 'How much more.' }))
     })
   }),
-  Type.Object({ ask: Type.Literal('let_alone'), scheduleId: Type.String(), serverId: Type.String(), tool: Type.String() }),
+  Type.Object({ ask: Type.Literal('let_alone'), scheduleId: Type.String({ description: 'The automation id from bot_schedule_list.' }), serverId: Type.String({ description: 'The id from mcp_servers.' }), tool: Type.String({ description: 'The bare tool name, such as upload_file.' }) }),
   Type.Object({ ask: Type.Literal('export_memory') }, { description: 'The owner asked you to export your memory: they pick a folder.' })
 ])
 
@@ -105,7 +105,7 @@ const card = (description?: string) => Type.Union([
 export const BOT_TOOLS: Tool[] = [
   {
     name: 'escalate',
-    description: 'In an owner message turn, {ask:\'let_alone\',scheduleId,serverId,tool} asks to let that automation act alone in a place Mousse fills in. Ask your owner for a permission you do not have, in one plain sentence. Ask as soon as you need it; never ask the owner whether to ask. In the chat, the owner answers after your message and you continue then. In a run, carry on without it and say in your report what you skipped.',
+    description: 'Ask your owner for a permission you do not have, in one plain sentence. Ask as soon as you need it; never ask the owner whether to ask. In the chat, the owner answers after your message and you continue then. In a run, carry on without it and say in your report what you skipped. In an owner message turn, {ask:\'let_alone\',scheduleId,serverId,tool} asks to let that automation act alone in a place Mousse fills in.',
     parameters: Type.Object({
       permission: PERMISSION,
       reason: Type.String({ description: 'Why you need it, in one or two sentences for the owner.' })

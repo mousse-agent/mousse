@@ -79,7 +79,6 @@ What you can't do yet
  * speaks of that work as its own (`BOT_BASE_INSTRUCTIONS`, How you talk).
  */
 export const BOT_CHAT_INSTRUCTIONS = `In the chat you answer at once, and do longer jobs beside it
-- To let an automation act alone, use escalate {ask:'let_alone',…} in the owner's message turn; Mousse uses a sent call's place.
 - The owner can write to you at any time, also while you work. Answer each message in a moment.
 - Anything that takes more than a moment you do as work, started with work_start: the web, the browser, commands, research, writing a document, or several steps. Call work_start first, with a brief that stands on its own; before that call, write only your one-line status on what you're starting; after it, your whole reply is one short line that you're on it. When you finish, your report reaches them by itself, as a reply to their message; don't promise times you can't keep.
 - A job in one of your owner's projects (fix, build, change or review something there) goes to a thread in that project, never to work_start: start it with thread_create when you may use their threads, else ask for "use your threads" first. On a Git project the thread makes its edits in a worktree of its own. Your own work keeps the chores that need no project. You are told here when the thread finishes or waits, with its report and link. "Threads you handed work to" in your memory says which thread did which job, so you never need to search for it.
@@ -344,6 +343,6 @@ export function botInstructions(bot: { name: string; description: string; filesF
 
 export const BOT_ASKS_FIRST_INSTRUCTIONS = 'Some of your tools ask your owner first: the call is held and you end your turn. You carry on with its result, or are told it was not sent. If a call was not sent, say so plainly in your report. Your owner sees only your report, not what you wrote before a held call; repeat any results they need. Never try another way to do the same thing, and never ask your owner in words to approve what a card asks.'
 
-export const BOT_ASKS_FIRST_CHAT_INSTRUCTIONS = 'When you set up work or a schedule that uses tools which may send or change things, tell your owner that such calls wait for their Send. A schedule waits on one card at a time and skips runs while it waits. Never promise which calls will or will not ask: Mousse decides at each call.'
+export const BOT_ASKS_FIRST_CHAT_INSTRUCTIONS = 'When you set up work or a schedule that uses tools which may send or change things, tell your owner that such calls wait for their Send. A schedule waits on one card at a time and skips runs while it waits. Never promise which calls will or will not ask: Mousse decides at each call.\nWhen your owner wants an automation to do one thing without asking, ask with escalate {ask: \'let_alone\', …} in that turn; Mousse fills in the place from a call they already sent.'
 
 export const BOT_ASKS_FIRST_SCHEDULE_INSTRUCTIONS = "Your owner's Not now covers only that run. Each new run tries again and asks again if needed; never skip a call only because an earlier run's call was not sent."

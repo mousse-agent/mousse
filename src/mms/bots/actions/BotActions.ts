@@ -375,7 +375,7 @@ export class BotActions {
       COUNT(*) AS day FROM bot_actions WHERE bot_id = ? AND kind = 'mcp' AND ran_at >= ?`, target, new Date(now - 3600_000).toISOString(), row.botId, new Date(now - 86400_000).toISOString()) : undefined
     const capped = !!exception && (Number(counts?.hour) >= BOT_ALONE_HOURLY_CALLS || Number(counts?.day) >= BOT_ALONE_DAILY_CALLS)
     const alone = exception && !capped
-    const capNote = capped ? `${this.host.name(row.botId)} has used this action ${Number(counts?.hour) >= BOT_ALONE_HOURLY_CALLS ? `${counts?.hour} times this hour` : `${counts?.day} times today`}. Send this one too?` : undefined
+    const capNote = capped ? `${this.host.name(row.botId)} has used ${Number(counts?.hour) >= BOT_ALONE_HOURLY_CALLS ? `this action ${counts?.hour} times this hour` : `tools ${counts?.day} times today`}. Send this one too?` : undefined
     const id = `action_${randomUUID()}`
     const messageId = `bm_${id}`
     this.host.store.db.transaction(() => {
@@ -384,7 +384,7 @@ export class BotActions {
       this.host.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args,
         args_json, args_digest, binding_json, place_json, bot_note, card_json, status, message_id, expires_at, created_at, answered_at, answered_device)
         VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), place ? JSON.stringify(place) : null, JSON.stringify(argumentContract(args)), alone ? null : JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: capNote ?? readableActionTitle(tool.tool), serverName: tool.serverName }), alone ? 'approved' : 'open', messageId,
+      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), place ? JSON.stringify(place) : null, JSON.stringify(argumentContract(args)), alone ? null : JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: capNote ?? readableActionTitle(tool.tool), actionTitle: readableActionTitle(tool.tool), serverName: tool.serverName }), alone ? 'approved' : 'open', messageId,
       // expires_at is retained for older settled rows; open rows have no deadline.
       '9999-12-31T23:59:59.999Z', this.host.store.now(), alone ? this.host.store.now() : null, alone ? exception : null)
       if (alone) return

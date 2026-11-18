@@ -624,7 +624,7 @@ export class BotChatProjection {
     // The legacy message begins with a raw tool id. Reuse the review's stored display names for the sidebar.
     const approvalMetadata = approval && this.options.asksFirst?.() === true ? JSON.parse(String(approval.card_json ?? '{}')) ?? {} : undefined
     const approvalLabel = approvalMetadata
-      ? `${typeof approvalMetadata.title === 'string' ? approvalMetadata.title : readableActionTitle(JSON.parse(String(approval!.target_json)).tool)} · ${typeof approvalMetadata.serverName === 'string' ? approvalMetadata.serverName : 'Your service'}`
+      ? `${typeof approvalMetadata.actionTitle === 'string' ? approvalMetadata.actionTitle : typeof approvalMetadata.title === 'string' ? approvalMetadata.title : readableActionTitle(JSON.parse(String(approval!.target_json)).tool)} · ${typeof approvalMetadata.serverName === 'string' ? approvalMetadata.serverName : 'Your service'}`
       : String(approval?.text ?? 'Send this action?').split('\n')[0]
     const waitingOn = this.store.waitingQuestions(definition.id)
     const chatQuestions = this.store.openChatQuestions(definition.id)
