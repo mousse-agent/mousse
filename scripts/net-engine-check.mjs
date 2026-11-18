@@ -15,7 +15,8 @@
  * that dials, with `--topology` naming the cell's endpoints. The run gets them as `MOUSSE_NET_ENGINE_CHECK_ROLE` and
  * `MOUSSE_NET_ENGINE_CHECK_TOPOLOGY`. A caller writes the builds its host reported over the test link to the run's
  * folder (`host_build`, `host_app_build`), printed here as `host_build=` and `host_app_build=` lines. A check with
- * no cross-machine form refuses a role.
+ * no cross-machine form refuses a role. The caller finds its host at `MOUSSE_NET_ENGINE_CHECK_HOST` (its local network
+ * address; the test link is `tests/netEngine/checks/link.ts`).
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
@@ -30,10 +31,12 @@ const CHECKS = {
   'phase1a.pair-both-ways': 'tests/netEngine/checks/pairBothWays.test.ts',
   'phase1a.removal': 'tests/netEngine/checks/removal.test.ts',
   'phase1a.reconnect': 'tests/netEngine/checks/reconnect.test.ts',
-  'phase1a.path-switch': 'tests/netEngine/checks/pathSwitch.test.ts'
+  'phase1a.path-switch': 'tests/netEngine/checks/pathSwitch.test.ts',
+  'phase1a.pair-offline': 'tests/netEngine/checks/pairOffline.test.ts',
+  'phase1a.shared-computer': 'tests/netEngine/checks/sharedComputer.test.ts'
 }
 /** The checks that run as cross-machine cells, one role per computer. */
-const CROSS_MACHINE = new Set([])
+const CROSS_MACHINE = new Set(['phase1a.pair-offline', 'phase1a.shared-computer'])
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const usage = `Usage: node scripts/net-engine-check.mjs <${Object.keys(CHECKS).join('|')}> [--out <folder>] [--role host|caller] [--topology <name>]`
@@ -61,7 +64,8 @@ if (flags.role !== undefined && !['host', 'caller'].includes(flags.role))
   refuse(`--role is host or caller, not ${flags.role}.`)
 if ((flags.role !== undefined || flags.topology !== undefined) && !CROSS_MACHINE.has(id))
   refuse(`${id} runs on one computer; it takes no --role or --topology.`)
-if (CROSS_MACHINE.has(id) && flags.role === undefined) refuse(`${id} is a cross-machine cell: give --role.`)
+if (CROSS_MACHINE.has(id) && flags.role === undefined)
+  refuse(`${id} is a cross-machine cell: give --role.`)
 const out = flags.out ? resolve(flags.out) : mkdtempSync(join(tmpdir(), 'net-engine-check-'))
 mkdirSync(out, { recursive: true })
 
@@ -76,7 +80,8 @@ if (helper && !existsSync(helper)) {
   process.exit(1)
 }
 console.log(helper ? `helper=${helper}` : 'helper=fake')
-if (process.env.MOUSSE_NET_ENGINE_CONTROL) console.log(`control=${process.env.MOUSSE_NET_ENGINE_CONTROL}`)
+if (process.env.MOUSSE_NET_ENGINE_CONTROL)
+  console.log(`control=${process.env.MOUSSE_NET_ENGINE_CONTROL}`)
 if (flags.role) console.log(`role=${flags.role}`)
 if (flags.topology) console.log(`topology=${flags.topology}`)
 
@@ -87,6 +92,7 @@ const run = spawnSync(process.execPath, [vitest, 'run', CHECKS[id], '--reporter=
   env: {
     ...process.env,
     MOUSSE_NET_ENGINE_CHECK_OUT: out,
+    MOUSSE_NET_ENGINE_CHECK_APP_BUILD: `${commit}${dirty ? '-dirty' : ''}`,
     ...(flags.role ? { MOUSSE_NET_ENGINE_CHECK_ROLE: flags.role } : {}),
     ...(flags.topology ? { MOUSSE_NET_ENGINE_CHECK_TOPOLOGY: flags.topology } : {})
   }

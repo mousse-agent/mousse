@@ -59,11 +59,18 @@ export function codeOf(error: unknown): string | undefined {
     : undefined
 }
 
-let recorded = false
+let recorded: string | undefined
+
+/** The reason the first failed step gave, if one failed. */
+export function recordedReason(): string | undefined {
+  return recorded
+}
+
 function record(reason: string): void {
+  if (recorded) return
+  recorded = reason
   const out = process.env.MOUSSE_NET_ENGINE_CHECK_OUT
-  if (recorded || !out) return
-  recorded = true
+  if (!out) return
   try {
     writeFileSync(join(out, 'reason'), reason)
   } catch {
@@ -153,7 +160,10 @@ export class Fabric {
     const computer = {} as Computer
     if (REAL_HELPER) {
       process.env.MOUSSE_NET_ENGINE_INSECURE_FILE_KEY = '1'
-      process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP ||= '127.0.0.1'
+      // A cross-machine cell's computers listen on every interface; the others only on loopback.
+      process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP ||= process.env.MOUSSE_NET_ENGINE_CHECK_ROLE
+        ? '0.0.0.0'
+        : '127.0.0.1'
       mms.netEngine.launcher = async () => {
         const launched = await mms.netEngine.launchBuilt(
           computer.port === undefined ? {} : { port: computer.port }
@@ -260,8 +270,12 @@ export class Fabric {
     computer.engine = await running(computer.mms, before)
   }
 
-  shells(owner: Computer): Spawned[] {
-    return fakeShells(owner.mms.ptyManager, this.cleanups as Array<() => void | Promise<void>>)
+  shells(owner: Computer, onSpawn?: (shell: Spawned) => void): Spawned[] {
+    return fakeShells(
+      owner.mms.ptyManager,
+      this.cleanups as Array<() => void | Promise<void>>,
+      onSpawn
+    )
   }
 
   folder(): string {
