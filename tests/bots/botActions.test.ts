@@ -1748,6 +1748,7 @@ it.each(['stop', 'failed', 'limits', 'week', 'clear', 'reset', 'delete', 'forget
   f.store.run(`INSERT INTO bot_actions SELECT id || '_running', call_key || '_running', bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, place_json, card_json, bot_note, 'running', result_json, message_id, next_at, nudges, expires_at, answered_at, answered_device, created_at, ran_at FROM bot_actions WHERE id = ?`, a.id)
   if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
   if (['failed', 'limits', 'week'].includes(path)) f.store.moveActivation(t.workId, ['blocked'], 'failed', { endReason: path })
+  if (path === 'allowed') Object.assign(t.descriptor, { readOnlyHint: true })
   if (path === 'allowed') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: m.mcp.map(p => ({ ...p, level: 'allowed' as const })) }))
   if (path === 'server') { vi.spyOn(t.mcp, 'where').mockReturnValue({ state: 'gone' }); f.bots.fillMcpAsks() }
   if (path === 'card' || path === 'request') {
@@ -2670,8 +2671,9 @@ it('C4 integration bridge timeout stub retains the service sentence and settleme
   expect(card).toMatchObject({ tooLarge: true, status: 'failed', at: JSON.parse(f.bots.actions.get(a.id)!.card_json!).settledAt, result: { notSentInTime: true, text: "Mail couldn't be reached, so nothing was sent." } })
 })
 
-it('C4 integration no-action profiles keep bytewise chat About bridge and telling snapshots across the switch', async () => {
+it('C4 integration read-only profiles keep bytewise chat About bridge and telling snapshots across the switch', async () => {
   const t = await setup(false)
+  Object.assign(t.descriptor, { readOnlyHint: true })
   await t.call()
   const methods = remoteBotMethods({ bots: () => f.bots.service, deviceLimit: () => 'full' })
   const remote = methods.find(method => method.method === 'bots.chat.list')!
@@ -3579,10 +3581,12 @@ it.each(['work', 'schedule'] as const)('C6 classifies an existing %s grant at ca
   const manifest = { ...grant.manifest, mcp: grant.manifest.mcp.map(({ level: _level, ...pair }) => pair) }
   f.store.approve(t.botId, botManifestDigest(manifest), manifest)
   const before = structuredClone(f.store.activeGrant(t.botId))
+  const revision = f.bots.definitionOf(t.botId).revision
   await t.call()
   expect(t.calls).toEqual([])
   expect(f.bots.actions.forWork('id' in t ? t.id : t.workId)?.status).toBe('open')
   expect(f.store.activeGrant(t.botId)).toEqual(before)
+  expect(f.bots.definitionOf(t.botId).revision).toBe(revision)
   expect(botManifestDigest(f.store.activeGrant(t.botId)!.manifest)).toBe(before!.digest)
 })
 it('C6 a hint changing to read-only invalidates an existing card', async () => {
@@ -3622,4 +3626,30 @@ it.each(['withdrawn', 'expired'] as const)('C6 a %s schedule card never claims t
   const a = f.bots.actions.forWork(t.id)!
   f.bots.actions.transition(a.id, 'open', status, { text: 'Nothing was sent.' })
   expect(f.bots.service.automationFacts(t.botId, t.schedule.scheduleId)?.runs[0]?.endReason).toBe(`approval_${status}`)
+})
+
+it.each([true, false])('C6 a new service ask explains per-use cards only with the switch on=%s', async on => {
+  const t = await setup(on)
+  const ask = f.store.all('SELECT id FROM bot_escalations WHERE bot_id = ?', t.botId)[0]
+  const row = f.store.escalation(String(ask!.id))!
+  expect(f.bots.chat.card(row).note.includes('those ask you before each use')).toBe(on)
+})
+it.each([true, false])('C6 call-time hint true reads directly; hint false holds, hint=%s', async readOnlyHint => {
+  const t = await setup(true)
+  const grant = f.store.activeGrant(t.botId)!
+  const manifest = { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send' }] }
+  f.store.approve(t.botId, botManifestDigest(manifest), manifest)
+  Object.assign(t.descriptor, { readOnlyHint })
+  await t.call()
+  expect(t.calls).toEqual(readOnlyHint ? [t.args] : [])
+  expect(f.bots.actions.forWork(t.workId)?.status).toBe(readOnlyHint ? undefined : 'open')
+})
+it('C6 chat seam refuses asking tools without posting a card', async () => {
+  const t = await setup(true)
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Send', clientRequestId: 'chat-seam' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  const tool = t.mcp.offered(new Set(['mail::send']))[0]!
+  expect(turn.prepared.authority.holdMcp!(tool, t.args, 'chat-seam')).toMatchObject({ isError: true, text: 'Hand this to work: it asks your owner first.' })
+  expect(f.bots.actions.forWork(row.id)).toBeUndefined()
 })
