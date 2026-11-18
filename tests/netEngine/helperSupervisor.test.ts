@@ -25,6 +25,8 @@ function harness(
     failLaunch?: () => Error | undefined
     /** What a helper says on its way out as soon as it starts, before any hello. */
     exitAtStart?: () => string | undefined
+    /** The profile the helper's endpoint belongs to (the app says `mine`). */
+    endpointProfile?: () => string
   } = {}
 ) {
   const network = new FakeNetwork()
@@ -35,7 +37,7 @@ function harness(
     launch: async () => {
       const failure = options.failLaunch?.()
       if (failure) throw failure
-      const fake = network.helper('endpoint-a')
+      const fake = network.helper('endpoint-a', options.endpointProfile?.())
       let exit!: (value: { code: number; signal: null; stderr: string }) => void
       const exited = new Promise<{ code: number; signal: null; stderr: string }>((resolve) => (exit = resolve))
       let said = ''
@@ -63,7 +65,8 @@ function harness(
       const helper = new EngineHelper(new AppChannel(pipe), {
         peers: { byIdentity: () => undefined },
         attach: async () => undefined,
-        name: () => 'Desk'
+        name: () => 'Desk',
+        profile: () => 'mine'
       })
       await helper.hello()
       if (options.proto !== undefined) helper.info.proto = [options.proto, 0]
@@ -191,6 +194,23 @@ describe('the helper supervisor', () => {
     expect(mismatch).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(600_000)
     expect(runs).toHaveLength(1)
+  })
+
+  it('sets an endpoint of another profile aside once its helper exits, and starts again', async () => {
+    let profile = 'theirs'
+    const { supervisor, wrongProfile, runs } = harness({ endpointProfile: () => profile })
+    wrongProfile.mockImplementation(() => {
+      expect(runs[0]!.fake.alive).toBe(false)
+      profile = 'mine'
+    })
+    supervisor.start()
+    await settle()
+    expect(wrongProfile).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(500)
+    await settle()
+    expect(supervisor.status().state).toBe('running')
+    expect(runs).toHaveLength(2)
+    await supervisor.stop()
   })
 
   it('says "Not in this build" when there is no helper', async () => {

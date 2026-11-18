@@ -1,0 +1,186 @@
+#!/usr/bin/env node
+/**
+ * The packaged parent hard-kill check (design §1, row M2): a packaged app's daemon runs a networked profile's helper
+ * from the package's own resources; the daemon is killed outright; the helper must exit within a second (its stdin
+ * closes, it sends GOAWAY and exits).
+ *
+ *   node scripts/net-helper-hard-kill.mjs <unpacked Windows app folder | Mousse.app>
+ *
+ * It uses a fresh home in the temp folder, keeps the helper's key in a file and has it listen on loopback (a headless
+ * run touches no keystore and opens no firewall prompt). Prints `PASS net-helper-hard-kill helper_exit_ms=<n>` or
+ * `FAIL net-helper-hard-kill reason=<word>`.
+ */
+import { spawn, spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+
+const EXIT_WITHIN_MS = 1_000
+const target = process.argv[2] && resolve(process.argv[2])
+const win = process.platform === 'win32'
+const daemon = !target
+  ? undefined
+  : win
+    ? join(target, 'mousse-cli.exe')
+    : join(target, 'Contents', 'MacOS', 'Mousse')
+const helperName = win ? 'mousse-helper.exe' : 'mousse-helper'
+const packagedHelper = !target
+  ? undefined
+  : win
+    ? join(target, 'resources', 'net-helper', helperName)
+    : join(target, 'Contents', 'Resources', 'net-helper', helperName)
+
+function fail(reason, detail) {
+  if (detail) console.log(detail)
+  console.log(`FAIL net-helper-hard-kill reason=${reason}`)
+  cleanup()
+  process.exit(1)
+}
+
+if (!daemon || !existsSync(daemon)) fail('no_app', `Usage: node scripts/net-helper-hard-kill.mjs <app folder | Mousse.app>`)
+if (!existsSync(packagedHelper)) fail('no_helper', `${packagedHelper} is not in the package`)
+
+const home = mkdtempSync(join(tmpdir(), 'net-hard-kill-'))
+const env = {
+  ...process.env,
+  MOUSSE_CLI: '1',
+  MOUSSE_HOME: home,
+  MOUSSE_NET_ENGINE_INSECURE_FILE_KEY: '1',
+  MOUSSE_NET_ENGINE_HELPER_LISTEN_IP: '127.0.0.1'
+}
+delete env.MOUSSE_NET_HELPER
+delete env.ELECTRON_RUN_AS_NODE
+const started = []
+
+function cleanup() {
+  for (const child of started) if (child.exitCode === null) child.kill('SIGKILL')
+  for (const { pid } of processes()) if (started.some((child) => child.pid === pid)) kill(pid)
+  try {
+    rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 })
+  } catch {
+    // Left to the temp folder.
+  }
+}
+
+/** Every process: pid, parent pid and executable. */
+function processes() {
+  if (win) {
+    const out = spawnSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-Command',
+        'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.ExecutablePath)" }'
+      ],
+      { encoding: 'utf8', windowsHide: true }
+    ).stdout
+    return out
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => {
+        const [pid, ppid, path] = line.split('\t')
+        return { pid: Number(pid), ppid: Number(ppid), path: path ?? '' }
+      })
+  }
+  const out = spawnSync('ps', ['-axo', 'pid=,ppid=,comm='], { encoding: 'utf8' }).stdout
+  return out
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const [, pid, ppid, path] = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line) ?? []
+      return { pid: Number(pid), ppid: Number(ppid), path: path ?? '' }
+    })
+}
+
+function alive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error.code === 'EPERM'
+  }
+}
+
+function kill(pid) {
+  if (win) spawnSync('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true })
+  else {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // Gone already.
+    }
+  }
+}
+
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
+
+function startDaemon(log) {
+  const child = spawn(daemon, ['--cli', 'service', 'run', '--home', home], {
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true
+  })
+  child.stdout.on('data', (bytes) => log.push(String(bytes)))
+  child.stderr.on('data', (bytes) => log.push(String(bytes)))
+  started.push(child)
+  return child
+}
+
+/** Whether `pid` descends from `root`. */
+function descends(list, pid, root) {
+  const parent = new Map(list.map((row) => [row.pid, row.ppid]))
+  for (let at = pid, hops = 0; at && hops < 32; at = parent.get(at), hops++) if (at === root) return true
+  return false
+}
+
+async function main() {
+  // The first run makes the home and its default profile; the networking switch is then turned on in it.
+  const first = []
+  const setup = startDaemon(first)
+  const profiles = join(home, 'profiles')
+  let profile
+  for (const until = Date.now() + 90_000; Date.now() < until && !profile; await sleep(500)) {
+    profile = existsSync(profiles)
+      ? readdirSync(profiles).find((name) => existsSync(join(profiles, name, 'mousse.conf')))
+      : undefined
+    if (setup.exitCode !== null) fail('daemon_exited', first.join('').slice(-2000))
+  }
+  if (!profile) fail('no_profile', first.join('').slice(-2000))
+  await sleep(3_000)
+  spawnSync(daemon, ['--cli', 'service', 'stop', '--home', home], { env, stdio: 'ignore', windowsHide: true, timeout: 60_000 })
+  for (const until = Date.now() + 30_000; Date.now() < until && setup.exitCode === null; ) await sleep(250)
+  if (setup.exitCode === null) kill(setup.pid)
+  await sleep(1_000)
+  mkdirSync(join(profiles, profile, 'net-engine'), { recursive: true })
+  writeFileSync(join(profiles, profile, 'net-engine', 'settings.json'), JSON.stringify({ enabled: true, profile }))
+
+  // The second run starts the helper once it is ready.
+  const log = []
+  const root = startDaemon(log)
+  let helper
+  for (const until = Date.now() + 90_000; Date.now() < until && !helper; await sleep(500)) {
+    const list = processes()
+    helper = list.find((row) => row.path.endsWith(helperName) && descends(list, row.pid, root.pid))
+    if (root.exitCode !== null) fail('daemon_exited', log.join('').slice(-2000))
+  }
+  if (!helper) fail('no_helper_started', log.join('').slice(-2000))
+  if (win && resolve(helper.path).toLowerCase() !== resolve(packagedHelper).toLowerCase())
+    fail('wrong_helper', `${helper.path} is not ${packagedHelper}`)
+  console.log(`daemon=${helper.ppid} helper=${helper.pid} ${helper.path}`)
+  // Up a moment, as a helper in use is.
+  await sleep(2_000)
+  if (!alive(helper.pid)) fail('helper_stopped_early', log.join('').slice(-2000))
+  const killedAt = Date.now()
+  kill(helper.ppid)
+  while (alive(helper.pid) && Date.now() - killedAt < 10_000) await sleep(20)
+  const took = Date.now() - killedAt
+  if (alive(helper.pid)) {
+    kill(helper.pid)
+    fail('helper_outlived_daemon', `the helper was still running ${took} ms after its daemon was killed`)
+  }
+  if (took > EXIT_WITHIN_MS) fail('helper_exit_slow', `the helper exited ${took} ms after its daemon was killed`)
+  cleanup()
+  console.log(`PASS net-helper-hard-kill helper_exit_ms=${took}`)
+}
+
+main().catch((error) => fail('error', String(error?.stack ?? error)))

@@ -112,8 +112,8 @@ export class FakeNetwork {
   }
 
   /** A new helper for `identity` (replacing a killed one). */
-  helper(identity: string): FakeHelper {
-    const helper = new FakeHelper(this, identity)
+  helper(identity: string, profile?: string): FakeHelper {
+    const helper = new FakeHelper(this, identity, profile)
     this.helpers.set(identity, helper)
     return helper
   }

@@ -146,9 +146,17 @@ export class HelperSupervisor {
       if (generation !== this.generation) return
       const code = helperCode(error)
       if (code === 'unsupported_proto') return this.mismatched(launched)
-      if (code === 'wrong_profile') this.deps.wrongProfile()
       // The exit that follows starts it again.
       launched.kill()
+      if (code === 'wrong_profile') {
+        // Once it let go of the endpoint, the endpoint goes aside and the next start makes a new one.
+        await launched.exited
+        try {
+          this.deps.wrongProfile()
+        } catch (error) {
+          this.deps.log?.(`could not set the endpoint aside: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
       return
     }
     if (generation !== this.generation) return
