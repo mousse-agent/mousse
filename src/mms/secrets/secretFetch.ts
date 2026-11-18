@@ -1,5 +1,6 @@
 import { secretMasker } from './secretMasking'
 import { randomUUID } from 'node:crypto'
+import { validateHeaderName, validateHeaderValue } from 'node:http'
 import { lstatSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isKeyName } from '../../shared/automationKeys'
@@ -10,6 +11,9 @@ import type { ToolOutcome } from '../run/mcp/appTools/types'
 
 export interface SecretFetchInput { threadId: string; folder: string; args: Record<string, unknown>; signal: AbortSignal }
 const refuse = (text: string): ToolOutcome => ({ text, isError: true })
+function validHeader(name: string, value: string): boolean {
+  try { validateHeaderName(name); validateHeaderValue(name, value); return true } catch { return false }
+}
 /** Decode once, reject ambiguous delimiters (including nested escapes), then send those exact segments. */
 export function boundReadPath(raw: unknown, paths?: readonly string[]): string | undefined {
   if (typeof raw !== 'string' || !raw.startsWith('/') || /[?#\\\x00-\x20\x7f]|%2f|%5c/i.test(raw)) return
@@ -53,7 +57,7 @@ export function prepareSecretFetch(vault: SecretVault, input: SecretFetchInput):
     const seen = new Set<string>()
     for (const [k,v] of Object.entries(args.headers)) {
       const key = k.toLowerCase()
-      if (!allowed.has(key) || fixed.has(key) || seen.has(key) || /[\r\n\x00]/.test(v) || !safe(k) || !safe(v)) return reject('That request header is not allowed.')
+      if (!allowed.has(key) || fixed.has(key) || seen.has(key) || /[\r\n\x00]/.test(v) || !safe(k) || !safe(v) || !validHeader(k,v)) return reject('That request header is not allowed.')
       seen.add(key); headers[key] = v
     }
   }
@@ -62,6 +66,7 @@ export function prepareSecretFetch(vault: SecretVault, input: SecretFetchInput):
   if (!value || /[\r\n\x00]/.test(value)) return reject('That secret is unavailable for a service read.')
   const key = value
   headers[binding.header] = binding.format.replace('{}', () => key)
+  if (!Object.entries(headers).every(([name,value]) => validHeader(name,value))) return reject('That secret is unavailable for a service read.')
   return {service: binding.service ?? new URL(binding.origin).host, send: async () => {
    try {
     vault.markUsed(name)
