@@ -85,7 +85,7 @@ it.each(actionCells)('action $status / waited=$hasWaited / cause=$cause / $reaso
   if (input.notes) expect(prompt.split(NOTE)).toHaveLength(2)
   if (input.answered) expect(prompt.split(ANSWER)).toHaveLength(2)
   for (const answer of input.answers) expect(prompt.split(answer.status === 'denied' ? 'The owner wrote instead of answering' : 'The owner allowed: run commands.')).toHaveLength(2)
-  if (cause) expect(prompt.startsWith(`[Mousse] ${line}`)).toBe(true)
+  if (cause) expect(prompt.startsWith(`[Mousse] ${status === 'declined' ? 'Your owner chose Not now; nothing was sent. Carry on without it and say what you skipped.' : line}`)).toBe(true)
   else if (input.notes) expect(prompt.indexOf(NOTE)).toBeLessThan(prompt.indexOf(actionText))
   expect(prompt).not.toContain('Continue where you left off. Continue.')
 })
@@ -103,6 +103,7 @@ it.each(['question answer', 'note and answer'] as const)('N3 a live wait plus a 
 
 it.each([false, true].flatMap(hasWaited => [
   'Not sent: three requests for this tool already wait for your owner. Say in your report what you would have sent; do not ask again until one is answered.',
+  'Your owner chose Not now for this same request. Do not ask again unless they write; carry on without it and say in your report what you skipped.',
   'Your owner did not send this exact request. Do not ask again unless they write. Carry on without it.',
   'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.',
   'An identical call is already waiting for your owner on an earlier card. If your owner sends that card, the call goes out once. Say that in your report; do not say it was not sent. Do not ask again.',
@@ -120,7 +121,7 @@ it.each([false, true].flatMap(hasWaited => [
 
 // Real schedule activations and stored action outcomes drive the ordered continuation path.
 it.each(actionLines)('schedule stored outcome %s shares the ordered continuation', async (status, line) => {
-  const settings = getDefaultSettings(); settings.experimental.botAsksFirst = true
+  const settings = getDefaultSettings(); settings.experimental.botAsksFirstOff = false
   f.host.settings = { get: () => settings } as never
   const mcp = new BotMcp({ enabled: () => true, catalog: {
     ensure: async () => undefined,
@@ -149,7 +150,7 @@ it.each(actionLines)('schedule stored outcome %s shares the ordered continuation
   await f.bots.maintain(new Date(f.clock.now)); await flush()
   const prompt = f.store.lastMainDispatch(id)!.prompt
   expect(prompt.workActionIds).toEqual([action.id])
-  expect(prompt.text.split(line)).toHaveLength(2)
+  expect(prompt.text.split(status === 'declined' ? 'Your owner chose Not now; nothing was sent. Carry on without it and say what you skipped.' : line)).toHaveLength(2)
   expect(prompt.text).toContain('<mousse_notice kind="bot_action"')
   const resumed = await start(f, id, 2)
   await finish(f, resumed.payload)

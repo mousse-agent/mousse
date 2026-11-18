@@ -2,7 +2,7 @@
 
 A bot that works while its owner is away needs five things that a chat assistant does not: nothing that starts it may be lost, its timers must survive a closed laptop, its memory must stay small and true, it must be able to act without holding keys or acting unasked, and it must not ring at 3 AM. This plan says how personal bots get all five while the bot chat stays what it is: a messenger with bubbles, quick replies and one About panel.
 
-**Status:** phases 0 and 1 are built and merged (issues #1288 and #1312; see [What phases 0 and 1 built](#what-phases-0-and-1-built) for where they differ from the text below). Phase 2 is built behind an experimental switch that is off; phases 3 and 4 remain design. See [What phase 2 built](#what-phase-2-built). Written against `origin/master` at `0bfd7f476` (15 Nov 2026), where the line numbers below point, and checked again for substance at `2e8a5b9ca` by an independent review, which this version takes in (see How this was decided). The line numbers have not been kept up as the code changed: find things by name. Paths are relative to the repository. Terms are the [glossary](../GLOSSARY.md)'s; how bots work today is in [`docs/bots.md`](../bots.md) and [`docs/bot-memory.md`](../bot-memory.md).
+**Status:** phases 0 and 1 are built and merged (issues #1288 and #1312; see [What phases 0 and 1 built](#what-phases-0-and-1-built) for where they differ from the text below). Phase 2 is built and asks first is on by default; phases 3 and 4 remain design. See [What phase 2 built](#what-phase-2-built). Written against `origin/master` at `0bfd7f476` (15 Nov 2026), where the line numbers below point, and checked again for substance at `2e8a5b9ca` by an independent review, which this version takes in (see How this was decided). The line numbers have not been kept up as the code changed: find things by name. Paths are relative to the repository. Terms are the [glossary](../GLOSSARY.md)'s; how bots work today is in [`docs/bots.md`](../bots.md) and [`docs/bot-memory.md`](../bot-memory.md).
 
 ## The request, and the short answer
 
@@ -272,8 +272,8 @@ About → Runs words each combination: "Inbox check · every weekday 09:00", "Sa
 
 **Decisions**
 
-- **A third level beside allowed and not allowed: asks first.** It is stored in the grant beside the allowed tool, so About, Remove and approval work unchanged.
-- **Not built (C6): Mousse decides what asks first, and when it can't tell, it asks.** An MCP tool that says it is read-only does not ask. One with no hints does not ask when its name starts with a reading word (get, list, search, read, find, fetch, show, describe, query, count). Every other MCP tool asks. `secret_fetch` asks for anything but a read, when the secret may change things at all. MCP tools and `secret_fetch` exist only in work and runs, so a chat turn never meets a card of this kind.
+- **Asks first is computed at call time.** The hint offered to the turn wins; a missing current tool asks. Without a hint the first reading word, later changing words and joining words decide. Server restarts and tools/list_changed re-list tools; Send requires a fresh bounded listing, and cold listings do not withdraw a waiting card. A stored development asks-first level is a floor. Computing instead of rewriting grants preserves their canonical form, digest and revision, warm chats and waiting-card bindings, and lets older builds read the profile without recomputing incompatible digests. About uses the same classifier.
+- **Built in C6: Mousse decides what asks first, and when it can't tell, it asks.** An MCP tool that says it is read-only does not ask. One with no hints does not ask when its whole first word is a reading word (get, list, search, read, find, fetch, show, describe, query, count), no later word changes things, and no word joins actions (and, then, or). Every other MCP tool asks. An explicit `readOnlyHint: false` always asks. Secret commands are outside this cover. MCP tools and `secret_fetch` exist only in work and runs, so a chat turn never meets a card of this kind.
 - **Mousse holds the call and runs it.** The deferred tool call of Claude Code was considered and rejected: it works only when a turn makes a single call, only in one runtime, and needs sessions kept on disk. The calls worth holding are ones Mousse already runs itself (`callForBot`, the app-tool registry). So Mousse stores the exact call in `bot_actions`, the work parks as `approval` between provider turns, and on **Send** Mousse makes the stored call and the work goes on with its result.
 - **What a held call is bound to**, so that Send does exactly what the card showed and does it once:
   - **One row per call.** The row is unique on the activation, its dispatch and the runtime's tool call id, so a call the runtime makes again returns the same row and the same card.
@@ -292,7 +292,7 @@ About → Runs words each combination: "Inbox check · every weekday 09:00", "Sa
 
 ### What asks first does not cover
 
-As built on master, it holds a bot's own MCP tool calls marked asks-first, through direct calls and `use_tool`. No classifier marks tools yet; only the development setter does.
+Asks first is on by default for a bot’s own MCP tool calls, through direct calls and `use_tool`, classified at call time from their hints and names. Threads, commands and secrets remain outside it.
 
 It does not cover:
 
@@ -301,7 +301,7 @@ It does not cover:
 - Commands, including background commands and secret commands; where no sandbox holds them they run as the owner's account.
 - Messages to other bots, whose turn may itself start a background command.
 - The bot's browser and anything it can do in its signed-in browser session.
-- MCP tools not marked asks-first.
+- MCP tools that only read.
 
 ## 5. Telling
 
@@ -372,7 +372,7 @@ Each phase ships on its own and leaves bots working. The order is: what is unsaf
 
 - One park path, with the schedule's skip check counting a parked run.
 - `work_wait`.
-- Asks first, built behind a switch that is off and turned on when the whole of it is in: the engine and the held call's contract, the card, a scheduled run that parks, the phone.
+- Asks first, on by default since C6: the engine and the held call's contract, the card, a scheduled run that parks, the phone.
 
 **Phase 3: what needs approvals first.**
 
@@ -417,11 +417,11 @@ Both phases are on `master`. Each item was one pull request, reviewed on its own
 
 ## What phase 2 built
 
-C0, C1, C2, C3a, C8, C3b (#1392), C5 (#1403 and #1475), and C4 (#1390) are merged. Asks first remains behind a switch that is off. The classifier and switch-on are C6. Where this differs from the design above, this section records the built behaviour:
+C0, C1, C2, C3a, C8, C3b (#1392), C5 (#1403 and #1475), and C4 (#1390) are merged. C6 adds call-time classification, turns asks first on by default, and introduces the first held card once per bot. The explicit false setting remains a support rollback. Where this differs from the design above, this section records the built behaviour:
 
 - **Accepted Send:** at most ten minutes after the tap to reach the service, independent of how long the card waited. Before dispatch it says Waiting for the service; afterwards Sending. A timeout sends nothing, clears executable arguments and tells the work. The work may ask again.
 - **Owner notes:** An owner note does not fence an open card; it only lifts refusals.
-- **Binding:** exact arguments and their digest, installed server id and tool name, configuration and schema digests, the granted pair's level, the starting device's limit, and schedule revision for a scheduled call. An unrelated permission or grant revision change does not invalidate it. Cards from #1340's older binding withdraw on upgrade (development profiles only).
+- **Binding:** exact arguments and their digest, installed server id and tool name, configuration and schema digests, the granted pair’s effective call-time level, the starting device's limit, and schedule revision for a scheduled call. An unrelated permission or grant revision change does not invalidate it. Cards from #1340's older binding withdraw on upgrade (development profiles only).
 - **No card expiry:** the 48-hour and schedule-gap expiry were replaced after #1481. Work and schedule cards, including already-open development cards, wait for Send, Not now, Stop or an existing withdrawal cause. Already-expired rows keep their text and refusals. New rows fill the unused `expires_at` with `9999-12-31T23:59:59.999Z`; open-card timers and Send ignore it, without a database-version change. A running call finishes. Switch rollback withdraws open and accepted unstarted calls with a truthful outcome.
 - **Unattended limits:** schedules and unattended work share history for each bot and tool. Asks are not counted, aligning with the tool plan’s no-counts rule. An identical declined/expired request is refused until the owner writes. Unattended work and schedules share a limit of three open cards per bot and tool. Only open cards count; answering one frees a place. Declined, sent, withdrawn and older expired cards never count. Owner-started work has no such cap beyond its one waiting call. Owner-started work keeps its own history. An identical open request is refused with a pointer to the existing card, not a second card.
 - **Nudges:** at most two, one hour after the card was told and a day after the first nudge was told; questions and cards share spacing, and quiet hours defer them. Hourly schedule cards nudge on the same rule. No third nudge is sent; the card keeps waiting. Nothing nudges with the switch off.
@@ -433,7 +433,7 @@ C0, C1, C2, C3a, C8, C3b (#1392), C5 (#1403 and #1475), and C4 (#1390) are merge
 
 ## Open questions
 
-- After a rollback, should a tool marked asks-first run without asking, or be refused until the switch is on again?
+- **Answered by C6:** support can set `experimental.botAsksFirstOff` to true (the old `botAsksFirst` key is ignored). New calls run without asking; open and accepted unstarted cards withdraw, and running calls finish.
 
 
 1. **Commands where no sandbox holds them** (Pi, Windows, Linux without bubblewrap). A bot with "run commands" there can do anything the owner's account can, in a run nobody is watching too, and no card can hold it. The review behind this version would switch commands off in runs nobody started on those computers. That would end every scheduled bot that runs a script on Windows. The original recommendation to refuse secrets is superseded by #1375. The remaining original recommendation was to keep commands, since the owner allowed it and can switch it off for the computer; and make the "run commands" ask say, on those computers, that it is the owner's whole account.

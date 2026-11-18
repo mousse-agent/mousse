@@ -1,3 +1,4 @@
+import { asksFirstFor } from '../../../shared/bots/personal/asksFirst'
 import { readableActionTitle, type ActionRow } from '../actions/BotActions'
 import type { BotActionCard } from '../../../shared/bots/personal/chat'
 import { workWaitLine, parkedNeedsOwner } from '../activation/workWaiting'
@@ -15,7 +16,7 @@ import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
 import { workModelDetail } from '../../../shared/bots/personal/chips'
 import type { BotJournal } from '../seams'
-import type { BotMcpWhere } from '../mcp/BotMcp'
+import { installationOf, type BotMcpWhere } from '../mcp/BotMcp'
 import { outOfSightRow, workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotQuestionRow, type BotStore } from '../store/BotStore'
 import { plainChoices, type BotChatQuestion } from '../../../shared/bots/personal/questions'
 import { cardFileName, plainCards, type BotCard, type BotChatCard } from '../../../shared/bots/personal/cards'
@@ -27,7 +28,7 @@ import { WAKE_LINE_PREFIX, wakeEventLabel } from '../../../shared/bots/personal/
 import { BOT_FOLD_LINE_PREFIX, BOT_FOLD_LINE_TITLE } from '../../../shared/bots/personal/memory'
 
 function isServiceLine(id: string): boolean {
-  return ['bm_permission_', 'bm_schedule_ended_', 'bm_schedule_done_', WAKE_LINE_PREFIX, BOT_FOLD_LINE_PREFIX].some(prefix => id.startsWith(prefix))
+  return ['bm_asks_first_', 'bm_permission_', 'bm_schedule_ended_', 'bm_schedule_done_', WAKE_LINE_PREFIX, BOT_FOLD_LINE_PREFIX].some(prefix => id.startsWith(prefix))
 }
 import type { AppletReference } from '../../../shared/applets'
 import { BOT_USAGE_WINDOW_MS, botContextSummary, turnUsageSummary } from '../activation/turnUsage'
@@ -129,6 +130,8 @@ export interface PostInput {
    * message of a dispatch also takes the cards its turn made (`show_card`), and a question's bubble its question's card.
    */
   cards?: BotCard[]
+  /** A service notice that stays in chat without its own notification. */
+  quiet?: true
   /**
    * For the owner's eyes only (#673: a picked model that can't run, by name): journaled as a hidden kind, which no
    * pack, search or read gives the bot, so it never learns a model's or an entry's name from its own chat.
@@ -339,7 +342,7 @@ export class BotChatProjection {
       })
       // A row the chat never shows (an event's line, `outOfSightRow`) is kept for the bot's memory and its guards only:
       // it tells nobody and reaches no window.
-      const tell = outOfSightRow(input.kind, id) ? null : this.options.classify?.(this.toMessage(this.store.message(id)!), input) ?? null
+      const tell = input.quiet || outOfSightRow(input.kind, id) ? null : this.options.classify?.(this.toMessage(this.store.message(id)!), input) ?? null
       this.store.run('UPDATE bot_messages SET tell = ?, tell_at = ? WHERE id = ?', tell, tell ? this.options.tellAt?.(input.botId, tell, at, id) ?? at : null, id)
       return { row: this.store.message(id)!, inserted: true }
     })
@@ -492,10 +495,15 @@ export class BotChatProjection {
     const mcp = 'mcp' in escalation.permission ? escalation.permission.mcp : undefined
     const tools = mcp ? mcpAskTools(mcp) : []
     const more = mcp?.unusable ? `${mcp.unusable} more of ${mcp.name ? `${mcp.name}'s` : 'its'} tools can't be used by a bot.` : undefined
+    const asks = this.options.asksFirst?.() && mcp && tools.some(tool => {
+      const where = this.options.mcpWhere?.(mcp.serverId)
+      const server = where?.state === 'on' || where?.state === 'changed' ? where.server : undefined
+      return asksFirstFor({ tool, serverName: [server?.name ?? mcp.name ?? '', server?.installationId ?? installationOf(mcp.serverId)], readOnlyHint: server?.tools.find(t => t.tool === tool)?.readOnlyHint })
+    })
     return {
       askId: escalation.id,
       title: text.title,
-      note: text.note,
+      note: asks ? 'Tools that may send or change things ask before each use. Tools that say they only read do not ask.' : this.options.asksFirst?.() && mcp?.changes === 'unknown' ? 'Mousse decides which calls ask at each use. Tools that say they only read do not ask.' : text.note,
       ...(tip ? { tip } : {}),
       status: cardStatus(escalation.status),
       kind: isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission',
@@ -739,7 +747,7 @@ export class BotChatProjection {
         if (where?.state === 'off') return { id, title, note: `${name} is switched off in Settings → Skills & MCP, so this gives nothing while it is. Switch it on there to use it again, or remove it.`, grantedAt, mark: 'Switched off' }
         if (where?.state === 'mcp_off') return { id, title, note: `MCP is turned off in Settings → Skills & MCP, so this gives nothing while it is. Turn it on there to use it again, or remove it.`, grantedAt, mark: 'MCP is off' }
         if (where?.state === 'changed') return { id, title, note: `${name} was changed since you allowed it (it runs from another address or command now), so this gives nothing until ${name} is allowed again. The bot asks when it needs it; you can also remove it.`, grantedAt, mark: 'Changed' }
-        if (this.options.asksFirst?.() && manifest.mcp.some(tool => tool.serverId === permission.mcp.serverId && tool.level === 'asks_first'))
+        if (this.options.asksFirst?.() && manifest.mcp.some(tool => tool.serverId === permission.mcp.serverId && asksFirstFor({ tool: tool.tool, serverName: [name, live?.installationId ?? installationOf(permission.mcp.serverId)], readOnlyHint: live?.tools.find(t => t.tool === tool.tool)?.readOnlyHint, storedLevel: tool.level })))
           return { id, title, note: 'Asks you first before sending or changing something. What it does through threads, commands or secrets you gave it does not wait for a card.', grantedAt, mark: 'Asks first', asksFirst: true }
         const shown = tools.slice(0, 6).join(', ')
         const unusable = live?.unusable.length ? ` (${live.unusable.length} more of its tools can't be used by a bot)` : ''

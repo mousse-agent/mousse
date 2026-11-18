@@ -1,4 +1,5 @@
 import { canonicalJson, sha256Bytes } from '../revision'
+import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import type { OwnedWorkEntry } from '../../execution/OwnedWorkBarrier'
 import { getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -72,6 +73,7 @@ export interface InjectedMcpClient {
   ): Promise<unknown>
   /** MCP `ping`: whether the server still answers (after a call timed out). Absent: it is taken as stuck. */
   ping?(options?: { signal?: AbortSignal; timeout?: number }): Promise<unknown>
+  onToolsChanged?(listener: () => Promise<void>): void
   close(): Promise<void>
 }
 
@@ -133,6 +135,7 @@ interface ConnectedServer {
   config: McpServerConfig
   stderr: string[]
   key: string
+  projectPath?: string
   ownedStdio: boolean
   closing?: Promise<void>
   releaseLifetime?: () => void
@@ -305,7 +308,7 @@ export class McpManager {
   async getEnabledToolsByServer(
     projectPath?: string,
     actor: IntegrationActor = defaultIntegrationActor(false),
-    options: { signIn?: false; onServer?: (entry: McpServerTools) => void } = {}
+    options: { signIn?: false; installationId?: string; onServer?: (entry: McpServerTools) => void } = {}
   ): Promise<McpServerTools[]> {
     this.owned.assertAccepting()
     const settings = this.settingsStore.get().integrations.mcp
@@ -314,7 +317,7 @@ export class McpManager {
       servers: snapshot.servers,
       settings,
       actor
-    }).filter((server) => server.status !== 'missing-env' && server.status !== 'failed')
+    }).filter((server) => server.status !== 'missing-env' && server.status !== 'failed' && (!options.installationId || mcpInstallationId(server) === options.installationId))
 
     const entryOf = (server: McpServerConfig, result: PromiseSettledResult<McpToolDescriptor[]>): McpServerTools => {
       const entry = {
@@ -751,13 +754,24 @@ export class McpManager {
       .map(([key]) => key)
     const exact = this.connections.get(serverId)
     const targets = exact ? [serverId] : keys.length > 0 ? keys : []
-    await Promise.all(
-      targets.map(async (key) => {
+    try {
+      await Promise.all(targets.map(async (key) => {
         const connection = this.connections.get(key)
-        if (!connection) return
-        await this.closeConnected(connection)
-      })
-    )
+        if (connection) await this.closeConnected(connection)
+      }))
+    } finally {
+      this.invalidateDiscoveryCache()
+    }
+  }
+
+  /** Only the explicit Restart action re-lists; config and sign-in changes merely close. */
+  async refreshEnabledServer(serverId: string): Promise<void> {
+    try {
+      const entries = await this.getEnabledToolsByServer(undefined, undefined, { signIn: false, installationId: serverId })
+      for (const entry of entries) if (entry.error) logWarn('McpManager', `Restarted MCP server could not be listed: ${redactSensitiveText(entry.error)}`)
+    } catch (error) {
+      logWarn('McpManager', `Restarted MCP server could not be listed: ${redactSensitiveText(formatError(error))}`)
+    }
   }
 
   lookupTool(providerName: string): McpToolDescriptor | undefined {
@@ -991,7 +1005,23 @@ export class McpManager {
           await this.closeConnected(connection)
           throw abortFrom(this.owned.signal.reason)
         }
+        connection.projectPath = projectPath
         this.connections.set(key, connection)
+        let relisting: Promise<void> | undefined
+        let listChanged = false
+        connection.client.onToolsChanged?.(() => {
+          if (connection.closing || this.connections.get(key) !== connection) return Promise.resolve()
+          listChanged = true
+          relisting ??= (async () => {
+            do {
+              listChanged = false
+              try { await this.listToolsForServer(server, projectPath) }
+              catch (error) { logWarn('McpManager', `Tools changed but could not be listed: ${redactSensitiveText(formatError(error))}`) }
+              this.invalidateDiscoveryCache()
+            } while (listChanged && !this.owned.stopping && !connection.closing && this.connections.get(key) === connection)
+          })().finally(() => { relisting = undefined })
+          return relisting
+        })
         this.retainConnection(connection)
         return connection
       }, null)
@@ -1105,6 +1135,7 @@ export class McpManager {
     }
 
     const wrapped: InjectedMcpClient = {
+      onToolsChanged: listener => { client.setNotificationHandler(ToolListChangedNotificationSchema, listener) },
       listTools: async (options) => {
         const result = await requestWithSignal(
           client,

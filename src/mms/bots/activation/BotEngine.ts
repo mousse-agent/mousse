@@ -1,3 +1,5 @@
+import { asksFirstFor } from '../../../shared/bots/personal/asksFirst'
+import { BOT_ASKS_FIRST_INSTRUCTIONS, BOT_ASKS_FIRST_CHAT_INSTRUCTIONS, BOT_ASKS_FIRST_SCHEDULE_INSTRUCTIONS } from '../instructions'
 import { dataFrame } from '../../../shared/bots/personal/dataFrames'
 import { pageChangePath, writePageChange, removePageChange } from '../pageChangeFiles'
 import { PageChecks, pageSetting, type PageSetting } from '../pageChecks'
@@ -651,7 +653,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
   private createActions(): BotActions { return new BotActions({
     store: this.host.store,
-    refresh: async () => { await this.host.mcp?.warm() },
+    refresh: async tool => {
+      if (tool && this.host.mcp?.refresh) return this.host.mcp.refresh(tool.server, tool.tool)
+      await this.host.mcp?.warm()
+    },
     park: (row) => { if (!this.park(row, 'approval')) throw new Error('work ended') },
     origin: row => {
       if (row.trigger.kind === 'schedule') return 'unattended'
@@ -665,6 +670,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     name: botId => this.definitionOf(botId).name,
     enabled: () => botAsksFirst(this.host.settings?.get()),
     publish: id => {
+      this.scheduledCallChecks.clear()
       // State changes are new Mousse facts for resumed chat epochs, not another chat turn or the bot's words.
       const action = this.store.get('SELECT bot_id, activation_id, status, args_digest FROM bot_actions WHERE message_id = ?', id)
       if (action && action.args_digest !== '[forgotten]' && ['done', 'failed', 'uncertain', 'declined', 'expired', 'withdrawn'].includes(String(action.status))) this.store.db.transaction(() => this.host.journal?.appendInTx(this.store.db, {
@@ -695,7 +701,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const limit = source?.trigger.kind === 'manual' ? source.trigger.owner?.limit ?? null : null
       const schedule = row.trigger.kind === 'schedule' ? this.host.schedules?.get(row.botId, row.trigger.scheduleId) : undefined
       if (row.trigger.kind === 'schedule' && (!schedule || schedule.paused)) return undefined
-      return { ...server, pairLevel: pair.level ?? 'allowed', deviceLimit: limit, ...(schedule ? { scheduleRevision: schedule.revision } : {}) }
+      return { ...server, pairLevel: this.actionLevel(tool, pair.level, Object.hasOwn(tool, 'readOnlyHint')), deviceLimit: limit, ...(schedule ? { scheduleRevision: schedule.revision } : {}) }
     },
     obsolete: action => {
       const row = this.store.activation(action.activation_id)
@@ -703,7 +709,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (row?.trigger.kind === 'schedule' && this.host.schedules?.get(row.botId, row.trigger.scheduleId)?.revision !== held.scheduleRevision) return true
       const tool = JSON.parse(action.target_json) as BotMcpTool
       const pair = row && this.actionPair(row, tool)
-      if (!pair || held.pairLevel !== (pair.level ?? 'allowed')) return true
+      if (!pair) return true
       const where = this.host.mcp?.where?.(tool.server)
       if (!where) return false // A cold catalogue is not evidence of removal.
       if (where.state !== 'on') return true
@@ -711,10 +717,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (config && config !== held.configDigest) return true
       if (where.server.failing || where.server.starting) return false
       if (!where.server.tools.some(t => t.tool === tool.tool)) return true
+      if (held.pairLevel !== this.actionLevel(tool, pair.level)) return true
       const binding = this.host.mcp?.binding?.(tool)
       return Boolean(binding && (binding.configDigest !== held.configDigest || binding.schemaDigest !== held.schemaDigest))
     },
-    post: (row, id, text) => this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text, external: true, activationId: row.id, lane: 'run', ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}) }),
+    post: (row, id, text) => this.chat.post({ id, botId: row.botId, author: 'bot', kind: 'notice', text, external: true, ...(id === `bm_asks_first_${row.botId}` ? { quiet: true as const } : {}), activationId: row.id, lane: 'run', ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}) }),
     settled: (row) => { this.chat.republish(this.actions.forWork(row.id)!.message_id); this.changed({ botId: row.botId }); this.pumpLater(row.botId) },
     execute: async (row, target, args) => {
       const mcp = this.host.mcp
@@ -919,10 +926,44 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     }
   }
 
+  // Bounded per-run memo; action publications invalidate it, including a matching Send.
+  private readonly scheduledCallChecks = new Map<string, { revision: string; value: boolean }>()
+
+  /** An unchanged schedule's first run after a decline, unless that exact call was sent. */
+  private scheduledCallNotSent(row: BotActivationRow): boolean {
+    if (!botAsksFirst(this.host.settings?.get()) || row.trigger.kind !== 'schedule') return false
+    const scheduleId = row.trigger.scheduleId
+    const revision = this.host.schedules?.get(row.botId, scheduleId)?.revision
+    if (!revision) return false
+    const cached = this.scheduledCallChecks.get(row.id)
+    if (cached?.revision === revision) return cached.value
+    const value = this.readScheduledCallNotSent(row, scheduleId, revision)
+    if (this.scheduledCallChecks.size >= 256) this.scheduledCallChecks.delete(this.scheduledCallChecks.keys().next().value!)
+    this.scheduledCallChecks.set(row.id, { revision, value })
+    return value
+  }
+
+  private readScheduledCallNotSent(row: BotActivationRow, scheduleId: string, revision: string): boolean {
+    // bot_actions_bot narrows this to the bot's declined actions, before any history lookup.
+    if (!this.store.get("SELECT a.id FROM bot_actions a INDEXED BY bot_actions_bot JOIN bot_activations w ON w.id = a.activation_id WHERE a.bot_id = ? AND a.status = 'declined' AND json_extract(w.trigger_json, '$.kind') = 'schedule' AND json_extract(w.trigger_json, '$.scheduleId') = ? AND json_extract(a.binding_json, '$.scheduleRevision') = ? LIMIT 1", row.botId, scheduleId, revision)) return false
+    const previous = this.store.get("SELECT id FROM bot_activations WHERE bot_id = ? AND rowid < (SELECT rowid FROM bot_activations WHERE id = ?) AND json_extract(trigger_json, '$.kind') = 'schedule' AND json_extract(trigger_json, '$.scheduleId') = ? ORDER BY rowid DESC LIMIT 1", row.botId, row.id, scheduleId)
+    if (!previous) return false
+    return this.store.all("SELECT rowid AS n, target_json, args_digest, binding_json FROM bot_actions WHERE activation_id = ? AND status = 'declined' AND args_digest != '[forgotten]'", String(previous.id)).some(action => {
+      if (JSON.parse(String(action.binding_json)).scheduleRevision !== revision) return false
+      return !this.store.get("SELECT id FROM bot_actions WHERE bot_id = ? AND rowid > ? AND target_json = ? AND args_digest = ? AND status IN ('done', 'failed', 'uncertain') LIMIT 1", row.botId, Number(action.n), String(action.target_json), String(action.args_digest))
+    })
+  }
+
+  /** A skipped retry must stay visible instead of teaching the next run to skip silently. */
+  scheduledReportLevel(activationId: string, level: RunLevel): RunLevel {
+    const row = this.store.activation(activationId)
+    return level === 'quiet' && row && this.scheduledCallNotSent(row) ? 'fyi' : level
+  }
+
   /** Whether a run's activation reported `quiet`: nothing worth saying. A lookup that fails counts as not quiet. */
   private quietLevel(activationId: string): boolean {
     try {
-      return this.host.runLevel?.(activationId) === 'quiet'
+      return this.scheduledReportLevel(activationId, this.host.runLevel?.(activationId) ?? 'fyi') === 'quiet'
     } catch {
       return false
     }
@@ -937,7 +978,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const scheduleId = row.trigger.scheduleId
       const tellMe = row.trigger.completed?.tellMe ?? row.trigger.removedTelling?.tellMe ?? this.host.schedules?.get(botId, scheduleId)?.tellMe
         ?? this.host.schedules?.ended?.(botId).find(schedule => schedule.scheduleId === scheduleId)?.tellMe
-      return tellMe ? !tellMeNotifies(tellMe, 'done', this.host.runLevel?.(message.activationId)) : false
+      const level = this.host.runLevel?.(message.activationId)
+      return tellMe ? !tellMeNotifies(tellMe, 'done', level ? this.scheduledReportLevel(message.activationId, level) : undefined) : false
     } catch {
       return false
     }
@@ -3001,6 +3043,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // What the owner allows now, from the permissions this dispatch runs with: a chat turn is told what its work
     // holds (it hands those jobs off), a run what it holds itself, and whether its browser could be offered.
     const told = this.instructionsOf(definition, definition.main, row.lane, {
+      canAskMcp: effective.appTools.includes('escalate'), scheduled: row.trigger.kind === 'schedule',
       allowed: { ...botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)), ...(compiled.permissions.appTools.includes(BOT_IMAGE_TOOL) ? { images: true } : {}) },
       ...(row.lane !== 'chat' && compiled.permissions.browser && !browser ? { browserOffline: true } : {})
     })
@@ -3226,13 +3269,23 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     live.controller.abort(new BotWallAbort())
   }
 
+  private actionLevel(tool: { server: string; tool: string; serverName?: string; readOnlyHint?: boolean }, storedLevel?: string, offered = false): 'asks_first' | 'allowed' {
+    const server = findServer(this.host.mcp?.servers() ?? [], tool.server)
+    const listed = server?.tools.find(t => t.tool === tool.tool)
+    if (!listed) return 'asks_first'
+    const classification = { tool: tool.tool, serverName: [tool.serverName ?? server?.name ?? '', server?.installationId ?? installationOf(tool.server)], storedLevel }
+    return (asksFirstFor({ ...classification, readOnlyHint: listed.readOnlyHint }) || offered && asksFirstFor({ ...classification, readOnlyHint: tool.readOnlyHint })) ? 'asks_first' : 'allowed'
+  }
+
+
   /**
    * A thread's instructions: the bot's system text (its name, description and files folder, then
    * the base instructions), its role when that says more than its description (a bot made before the
    * Bot UI), then the thread's own. Built at each dispatch from the words published now, so a rename or the owner's
    * prompt edit applies at the next turn, while a turn already running keeps the text it was given.
    */
-  private instructionsOf(definition: BotDefinition, thread: BotThreadSpec, lane?: BotLane, permissions?: { allowed: BotAllowed; browserOffline?: boolean; subagent?: true; withheld?: readonly string[] }): { instructions?: string } {
+
+  private instructionsOf(definition: BotDefinition, thread: BotThreadSpec, lane?: BotLane, permissions?: { allowed: BotAllowed; canAskMcp?: boolean; scheduled?: boolean; browserOffline?: boolean; subagent?: true; withheld?: readonly string[] }): { instructions?: string } {
     if (permissions) {
       // Commands, the browser and the owner's threads the owner switched off for the bot are named as off.
       const off: Partial<Record<BotNamedPower, true>> = {}
@@ -3258,7 +3311,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const role = system && words.role.trim() === words.description.trim() ? undefined : words.role.trim()
     const disabled = this.store.disabledPermissions(definition.id).flatMap((off) => grantedPermissions(off.manifest).filter((item) => permissionId(item) === off.id).map((item) => askText(item).title))
     const offNote = disabled.length ? `Your owner has switched off for now: ${disabled.join(', ')}. These are not offered and you must not ask for them. Carry on without them.` : undefined
-    const parts = [system?.trim(), role, own?.trim(), offNote].filter((part): part is string => Boolean(part))
+    const asksFirst = botAsksFirst(this.host.settings?.get())
+      ? lane === 'chat' ? permissions?.allowed.mcp?.length || permissions?.canAskMcp ? BOT_ASKS_FIRST_CHAT_INSTRUCTIONS : undefined
+        : lane === 'run' && (!permissions?.subagent || permissions.allowed.mcp?.length) ? BOT_ASKS_FIRST_INSTRUCTIONS : undefined
+      : undefined
+    const parts = [system?.trim(), role, own?.trim(), offNote, asksFirst, asksFirst && permissions?.scheduled ? BOT_ASKS_FIRST_SCHEDULE_INSTRUCTIONS : undefined].filter((part): part is string => Boolean(part))
     return parts.length ? { instructions: [...new Set(parts)].join('\n\n') } : {}
   }
 
@@ -3769,7 +3826,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         maskMcpArguments: (args: Record<string, unknown>) => maskedActionData(args) as Record<string, unknown>,
         holdMcp: (tool: import('../../../shared/bots/personal/authority').BotMcpTool, args: Record<string, unknown>, toolCallId?: string) => {
           const pair = this.store.activeGrant(row.botId)?.manifest.mcp.find(p => p.serverId === tool.server && p.tool === tool.tool)
-          if (pair?.level !== 'asks_first') return undefined
+          if (!pair || this.actionLevel(tool, pair.level, true) !== 'asks_first') return undefined
+          if (row.lane === 'chat') return { text: 'Hand this to work: it asks your owner first.', isError: true }
           if (row.trigger.kind !== 'work' && row.trigger.kind !== 'schedule') return { text: "A run started by hand can't wait for your owner. Say in your report what you would have sent.", isError: true }
           if (row.trigger.kind === 'schedule' && !this.host.schedules?.get(row.botId, row.trigger.scheduleId)) return { text: "This schedule has ended, so this can't wait for your owner. Say in your report what you would have sent.", isError: true }
           const existing = toolCallId && this.store.get('SELECT id FROM bot_actions WHERE call_key = ?', JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, toolCallId]))
@@ -5403,8 +5461,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // Its marker is a line of its own: a reply that also says something posts what it says, without the marker.
     const quietTurn = unattendedChatTurn(row) || (report && row.trigger.kind === 'work' && unattendedChatTurn(this.store.activation(row.trigger.from) ?? { lane: 'run', idempotencyKey: '' }))
     const marked = quietTurn ? withoutSilentMarker(said) : undefined
-    const written = marked?.text ?? said
-    const silent = (report && row.trigger.kind === 'schedule' && (isSilentOutput(written) || this.quietLevel(row.id))) || (marked?.marked === true && written === '')
+    const skippedCall = report && this.scheduledCallNotSent(row)
+    const written = skippedCall && isSilentOutput(said) ? 'A scheduled call was not sent this run.' : marked?.text ?? said
+    const silent = (report && row.trigger.kind === 'schedule' && !skippedCall && (isSilentOutput(written) || this.quietLevel(row.id))) || (marked?.marked === true && written === '')
     if (silent && !asks.length && !waiting && !cards && !questions.length) return
     const lateReport = report && row.trigger.kind === 'schedule' && row.trigger.missed && this.now() - Date.parse(row.trigger.occurrenceAt) > 15 * 60_000
       ? `(Due ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}, this computer was off or asleep) ` : ''
@@ -9875,7 +9934,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (!row || row.trigger.kind !== 'schedule') return 'not kept: only a bot scheduled run keeps leftOff'
     if (!this.host.schedules?.get(row.botId, row.trigger.scheduleId)) return 'not kept: the schedule was removed'
     if (!this.host.progress) return 'not kept: bot memory is unavailable'
-    this.host.progress.stageProgress(row.botId, row.trigger.scheduleId, row.id, text)
+    const prefix = 'A call was not sent last time; ask again this run if needed. '
+    const plain = text.replace(/^(?:A call was not sent last time; ask again this run if needed\.\s*)+/, '')
+    const note = this.scheduledCallNotSent(row) ? `${prefix}${plain}`.slice(0, 600) : plain
+    this.host.progress.stageProgress(row.botId, row.trigger.scheduleId, row.id, note)
     return 'pending: kept only when this run ends done'
   }
 

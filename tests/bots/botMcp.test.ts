@@ -1,3 +1,4 @@
+import { getDefaultSettings } from '../../src/shared/settings'
 /**
  * A bot uses its owner's MCP tools (docs/bots.md, "Use your MCP tools"): the grant compiles with them and each turn is
  * offered only the granted tools of servers set up now; work has them and a chat turn does not; the first need of a
@@ -8,7 +9,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BOT_ASK_DEFERRED_TEXT, BOT_ASK_ENOUGH_TEXT, BOT_ASK_NOT_NOW_TEXT, BOT_ASK_REFUSED_TEXT, BOT_PERMISSION_REMOVED_TEXT, BOT_WORK_HAS_TEXT } from '../../src/mms/bots/activation/BotEngine'
-import { BOT_MCP_NOT_READ_TEXT, BotMcp } from '../../src/mms/bots/mcp/BotMcp'
+import { BOT_MCP_NOT_READ_TEXT, BotMcp, callForBot } from '../../src/mms/bots/mcp/BotMcp'
 import { botInstructions } from '../../src/mms/bots/instructions'
 import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import type { RelayTool } from '../../src/mms/run/mcp/relay/names'
@@ -487,4 +488,41 @@ describe('a server removed from Mousse', () => {
     f.bots.service.revokePermission(botId, github)
     expect(granted()).toEqual([])
   })
+})
+
+it('losing a read-only hint through tools/list_changed makes the next work call ask', async () => {
+  let notify: (() => Promise<void>) | undefined
+  let hint: boolean | undefined = true
+  const store = settingsStore(settings => {
+    settings.integrations.mcp.enabled = true
+    settings.integrations.mcp.enabledServers = ['srv-github']
+  })
+  const config = testServerConfig({ id: 'mousse:srv-github', installationId: 'srv-github', name: 'GitHub' })
+  const manager = new McpManager({ discover: async () => ({ servers: [config], sources: [], diagnostics: [] }) } as never, store as never, async () => {}, {
+    clientFactory: { connect: async () => ({
+      onToolsChanged: listener => { notify = listener },
+      listTools: async () => ({ tools: [{ name: 'create_issue', inputSchema: { type: 'object' }, annotations: { readOnlyHint: hint } }] }),
+      callTool: async () => ({ content: [{ type: 'text', text: 'created' }] }), close: async () => {}
+    }) }
+  })
+  const catalog = new RelayCatalog({ manager, settings: () => store.get().integrations.mcp, listProfile: () => true })
+  const mcp = new BotMcp({ catalog, manager, enabled: () => true })
+  f.host.mcp = mcp
+  f.host.settings = { get: () => getDefaultSettings() } as never
+  try {
+    await mcp.warm(); await allowGitHub()
+    const owner = await chat('Create an issue', 'notification-owner')
+    const { workId } = await f.bots.tools.work.start(botId, owner.activation.id, { title: 'Issue', brief: 'Create an issue', key: 'notify' })
+    await finish(f, owner.payload)
+    const before = await start(f, workId)
+    expect((await callForBot({ bot: before.prepared.authority, mcp, name: mcp.offered(new Set(['srv-github::create_issue']))[0]!.name, args: {}, toolCallId: 'read', signal: new AbortController().signal })).text).toContain('created')
+    await finish(f, before.payload)
+    hint = undefined; await notify?.()
+    await vi.waitFor(() => expect(mcp.servers()[0]?.tools[0]?.readOnlyHint).toBeUndefined())
+    const { workId: next } = await f.bots.tools.work.start(botId, owner.activation.id, { title: 'Next issue', brief: 'Create another issue', key: 'next-notify' })
+    const turn = await start(f, next)
+    const result = await callForBot({ bot: turn.prepared.authority, mcp, name: turn.prepared.authority.mcpTools![0]!.name, args: {}, toolCallId: 'change', signal: new AbortController().signal })
+    expect(result.text).toContain('held')
+    expect(f.bots.actions.forWork(next)?.status).toBe('open')
+  } finally { catalog.dispose(); await manager.shutdown() }
 })

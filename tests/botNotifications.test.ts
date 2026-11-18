@@ -117,7 +117,7 @@ it('keeps an owner MCP review readable in its sidebar summary, card and notifica
   const f = botFixture()
   try {
     const settings = getDefaultSettings()
-    settings.experimental.botAsksFirst = true
+    settings.experimental.botAsksFirstOff = false
     f.host.settings = { get: () => settings } as never
     const descriptor = { configRevision: 'r1', toolName: 'send_email', providerName: 'mail_send_email', inputSchema: { type: 'object' }, installationId: 'mail', serverId: 'mail', serverName: 'Mail' }
     const mcp = new BotMcp({ enabled: () => true, catalog: {

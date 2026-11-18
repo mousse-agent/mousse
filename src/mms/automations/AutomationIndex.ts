@@ -108,9 +108,9 @@ export function jobEffectiveMay(job: ScheduledJob, threadMode: PermissionMode): 
  */
 function botJobItem(job: ScheduledJob & { bot: NonNullable<ScheduledJob['bot']> }, facts: BotAutomationFacts, computer: AutomationItem['computer']): AutomationItem {
   const runs = facts.runs.map(run => {
-    const held = run.status === 'blocked' && ['approval', 'approval_answered'].includes(run.endReason ?? '')
+    const held = run.status === 'blocked' && ['approval', 'approval_answered', 'approval_withdrawn', 'approval_expired'].includes(run.endReason ?? '')
     if (!held) return botRun(run)
-    return { ...botRun({ ...run, status: 'running' }), detail: run.endReason === 'approval_answered' ? 'Carrying on with your answer' : job.botSkip?.reason === 'bot_waiting_for_owner'
+    return { ...botRun({ ...run, status: 'running' }), detail: run.endReason === 'approval_withdrawn' ? 'Carrying on after the request was withdrawn' : run.endReason === 'approval_expired' ? 'Carrying on after the request expired' : run.endReason === 'approval_answered' ? 'Carrying on with your answer' : job.botSkip?.reason === 'bot_waiting_for_owner'
       ? 'Later runs skipped: the bot is waiting for your answer'
       : run.endReason === 'approval' ? 'Waiting for your answer' : 'Carrying on with your answer' }
   })

@@ -908,13 +908,15 @@ export class BotChatService {
       botId, scheduleId, runsPerSchedule
     ).map((row) => {
       // Send can be accepted while the activation still waits for its service.
-      const sending = row.end_reason === 'approval' && ['approved', 'running'].includes(this.engine.actions.forWork(String(row.id))?.status ?? '')
+      const action = this.engine.actions.forWork(String(row.id))
+      const settledWithoutAnswer = row.end_reason === 'approval_answered' && ['withdrawn', 'expired'].includes(action?.status ?? '')
+      const sending = row.end_reason === 'approval' && ['approved', 'running'].includes(action?.status ?? '')
       return {
         id: row.id as string,
         status: row.status as BotAutomationRunStatus,
         at: row.created_at as string,
         ...(typeof row.ended_at === 'string' ? { endedAt: row.ended_at } : {}),
-        ...(typeof row.end_reason === 'string' ? { endReason: sending ? 'approval_answered' : row.end_reason } : {}),
+        ...(typeof row.end_reason === 'string' ? { endReason: settledWithoutAnswer ? `approval_${action!.status}` : sending ? 'approval_answered' : row.end_reason } : {}),
         ...(typeof row.thread_id === 'string' ? { threadId: row.thread_id } : {})
       }
     })

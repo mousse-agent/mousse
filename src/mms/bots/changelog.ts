@@ -11,6 +11,7 @@
 export interface BotChangelogEntry {
   /** Increasing from 1; a bot keeps the highest it has seen. */
   id: number
+  asksFirst?: true
   /** When it landed, `YYYY-MM-DD`. */
   date: string
   /** One or two plain sentences, to the bot. */
@@ -145,6 +146,12 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     id: 26,
     date: '2026-11-18',
     text: 'Your owner can keep a pasted key as a secret in the desktop composer. You receive its name, never its value. Use that name with secret_run in your work, under your existing permissions; never ask your owner to paste a key into a message.'
+  },
+  {
+    id: 27,
+    asksFirst: true,
+    date: '2026-11-18',
+    text: 'Tools that send or change things now ask your owner first. End your turn when a call is held; carry on with its result and never try another way around it. A scheduled run waits for the card, with later occurrences skipped. Run now is an ordinary scheduled occurrence and waits too. If a call was not sent, say so plainly in your report.'
   }
 ]
 
