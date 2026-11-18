@@ -467,6 +467,9 @@ export interface BotPermissionLine {
   text: string
 }
 
-/** Calls that run alone return to asking when these rolling limits are reached. */
+/**
+ * MCP calls that run alone return to asking when these rolling limits are reached.
+ * Service reads use the same limits and are refused without a held card.
+ */
 export const BOT_ALONE_HOURLY_CALLS = 20
 export const BOT_ALONE_DAILY_CALLS = 100

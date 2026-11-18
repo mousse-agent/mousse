@@ -21,6 +21,8 @@ export function boundReadPath(raw: unknown, paths?: readonly string[]): string |
   try { decoded = decodeURIComponent(raw) } catch { return }
   if (/[;\\%?#\x00-\x1f\x7f\u2024-\u2026\u3002\ufe12\ufe19\ufe30\ufe52\uff0e\uff61]/.test(decoded) || decoded.includes('//') || decoded.split('/').some(s => s === '.' || s === '..')) return
   if (paths && !paths.some(p => decoded === p || decoded.startsWith(p + '/'))) return
+  // Encoding each checked segment also escapes colons (for example GitHub compare refs);
+  // the listed services decode them as segment data, never as a new URL authority.
   return decoded.split('/').map(encodeURIComponent).join('/')
 }
 /** A local closure keeps the checked request and value inside the vault, before a ledger slot is reserved. */

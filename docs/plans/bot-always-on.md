@@ -427,6 +427,10 @@ C0, C1, C2, C3a, C8, C3b (#1392), C5 (#1403 and #1475), and C4 (#1390) are merge
 - **Nudges:** at most two, one hour after the card was told and a day after the first nudge was told; questions and cards share spacing, and quiet hours defer them. Hourly schedule cards nudge on the same rule. No third nudge is sent; the card keeps waiting. Nothing nudges with the switch off.
 - **Devices and waiting:** Work access is required to answer a card. The queue cap excludes work waiting on a card. There are no run slots or general week expiry since #1452. Thread and command authority is as described under What asks first does not cover; the older secrets and background-command restrictions above were superseded.
 
+## What phase 3 built
+
+Bound secrets use the private desktop card and vault bindings from E3. `secret_fetch` reads from that binding in work and scheduled runs; chat hands it to work. It checks decoded whole path segments, uses the table’s fixed headers, pins a public address, and follows no redirect. GET and HEAD only; writes remain in the [tool plan’s request service](tool-api.md). Calls have masked `secret_fetch` action rows without a card, and rolling limits of 20 reads per secret per hour and 100 per bot per day. Response bodies are masked before inline delivery or a file in the run’s `fetches/` folder; binary files preserve bytes around masked values. No database version or wire contract changes.
+
 ## Superseded decisions
 
 **Superseded after #1481: card expiry and ask counts.** The three-card rule was also removed to align with the tool plan’s no-counts rule; exact-repeat refusals remain. Unattended work and schedules share a limit of three open cards per bot and tool. Only open cards count; answering one frees a place. Declined, sent, withdrawn and older expired cards never count. Owner-started work has no such cap beyond its one waiting call. The 48-hour work deadline and one schedule gap (at least an hour) were replaced by no expiry. A waiting schedule skips later occurrences until the owner answers or the run is withdrawn. Asks first holds actions that send or change something; what it does through threads, commands or secrets it was given does not wait for a card. Wider cover belongs to `tool-api.md`.
@@ -485,7 +489,3 @@ What an independent review changed (GPT-6.1-Sol, against `2e8a5b9ca`, after the 
 - **The interface:** tool names left About; a card has two buttons.
 
 Not taken from that review: switching commands off in unattended runs where no sandbox holds them (open question 1), and an approval for what a bot does in its browser, for which no bounded mechanism exists yet.
-
-## What phase 3 built
-
-Bound secrets use the private desktop card and vault bindings from E3. `secret_fetch` reads from that binding in work and scheduled runs; chat hands it to work. It checks decoded whole path segments, uses the table’s fixed headers, pins a public address, and follows no redirect. GET and HEAD only; writes remain in the [tool plan’s request service](tool-api.md). Calls have masked `secret_fetch` action rows without a card, and rolling limits of 20 reads per secret per hour and 100 per bot per day. Response bodies are masked before inline delivery or a file in the run’s `fetches/` folder; binary files preserve bytes around masked values. No database version or wire contract changes.
