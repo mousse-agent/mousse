@@ -2,19 +2,6 @@
   "version": 1,
   "claims": [
     {
-      "task": "archived-list-windowing",
-      "session": "Animatrix-ff7afd",
-      "machine": "Animatrix",
-      "branch": "archived-list-windowing",
-      "paths": [
-        "src/renderer/components/ThreadsSidebar.tsx",
-        "src/renderer/components/sidebar/ArchivedList.tsx",
-        "src/renderer/lib/virtualRows.ts"
-      ],
-      "claimedAt": "2026-11-18T07:27:15.536Z",
-      "expiresAt": "2026-11-18T09:27:15.536Z"
-    },
-    {
       "task": "bot-phase-two-followups",
       "session": "agibook-f42da1",
       "machine": "agibook",
