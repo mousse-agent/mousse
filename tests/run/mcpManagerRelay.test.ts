@@ -231,3 +231,13 @@ it('re-lists tools after restarting a server', async () => {
     expect((await mcp.getEnabledTools()).map(t => t.toolName)).toEqual(['after'])
   } finally { await mcp.shutdown() }
 })
+
+it('a targeted server listing leaves other servers alone', async () => {
+  const seen: string[] = []
+  const { factory } = clientFactory({ tools: server => { seen.push(server.installationId!); return [{ name: 'echo' }] } })
+  const mcp = manager(factory, [testServerConfig(), two])
+  try {
+    await mcp.getEnabledToolsByServer(undefined, undefined, { installationId: 'inst-two' })
+    expect(seen).toEqual(['inst-two'])
+  } finally { await mcp.shutdown() }
+})

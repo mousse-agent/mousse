@@ -3640,10 +3640,10 @@ it.each([true, false])('C6 a new service ask explains per-use cards only with th
   const t = await setup(on)
   const ask = f.store.all('SELECT id FROM bot_escalations WHERE bot_id = ?', t.botId)[0]
   const row = f.store.escalation(String(ask!.id))!
-  expect(f.bots.chat.card(row).note.includes('those ask you before each use')).toBe(on)
+  expect(f.bots.chat.card(row).note.includes('Tools that may send or change things ask before each use')).toBe(on)
 })
 it.each([true, false])('C6 call-time hint true reads directly; hint false holds, hint=%s', async readOnlyHint => {
-  const t = await setup(true)
+  const t = await setup(true, false, false, false, false, false, 'send', readOnlyHint, true)
   const grant = f.store.activeGrant(t.botId)!
   const manifest = { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send' }] }
   f.store.approve(t.botId, botManifestDigest(manifest), manifest)
@@ -3778,4 +3778,16 @@ it('chat explains waiting without promising which calls ask', async () => {
   expect(turn.prepared.instructions).toContain('When you set up work or a schedule')
   expect(turn.prepared.instructions).toContain('one card at a time')
   expect(turn.prepared.instructions).toContain('Never promise which calls will or will not ask')
+})
+
+it('the permission card describes mixed read-only and missing hints without repetition', async () => {
+  const t = await setup(true, false, true)
+  t.descriptor.readOnlyHint = true
+  const row = f.store.escalation(String(f.store.all('SELECT id FROM bot_escalations WHERE bot_id = ?', t.botId)[0]!.id))!
+  const permission = structuredClone(row.permission) as any
+  permission.mcp.changes = 'unknown'
+  const note = f.bots.chat.card({ ...row, permission, title: null, note: null }).note
+  expect(note).not.toContain("doesn't say whether these tools")
+  expect(note.match(/ask before each use/g)).toHaveLength(1)
+  expect(note).not.toContain('Some of these tools send or change things; those')
 })
