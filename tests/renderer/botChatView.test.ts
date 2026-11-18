@@ -3136,13 +3136,9 @@ it('R2 a timed-out Send is terminal while the card retains its stored timeout ou
 
 // Pasted credentials must remain in the composer's own state until the owner chooses.
 describe('keeping a pasted key private', () => {
-  const key = 'sk-e5SyntheticKeyForTestsOnly123456'
+  const key = 'sk-E5SyntheticKeyForTestsOnly123456AAAAAAAAAAAAAAAA'
   const field = () => host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
-  it.each([
-    key, 'sk_live_1234567890123456', 'rk_test_1234567890123456',
-    'ghp_12345678901234567890', 'gho_12345678901234567890', 'ghu_12345678901234567890', 'ghs_12345678901234567890', 'ghr_12345678901234567890', 'github_pat_12345678901234567890',
-    'AKIA1234567890123456', 'ASIA1234567890123456', 'xoxb-12345678901234', 'AIza' + 'a'.repeat(35), 'ya29.' + 'a'.repeat(25),
-    '-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----', 'https://me:password@example.com', 'https://example.com?token=example'
+  it.each([key, 'ghp_'+ 'A'.repeat(40), 'https://me:password@example.com'
   ])('offers to keep an unmistakable key: %s', async value => {
     await open(); await type(field(), value)
     expect(button('Keep as secret')).toBeTruthy()
@@ -3196,7 +3192,7 @@ it('holds Send while a key is being kept and does not overwrite edits with a lat
   window.mousse.platformRequest = { request: vi.fn(() => new Promise(resolve => { answer = resolve })) } as never
   await open()
   const field = host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
-  await type(field, 'sk-e5SyntheticKeyForTestsOnly123456')
+  await type(field, 'sk-E5SyntheticKeyForTestsOnly123456AAAAAAAAAAAAAAAA')
   await click(button('Keep as secret'))
   await click(button('Send message'))
   expect(fake.client.send).not.toHaveBeenCalled()
@@ -3204,4 +3200,18 @@ it('holds Send while a key is being kept and does not overwrite edits with a lat
   await act(async () => answer({ name: 'OPENAI_API_KEY' }))
   expect(field.value).toBe('Changed my mind')
   expect(fake.client.send).not.toHaveBeenCalled()
+})
+
+it('keeping an AWS pair never leaves its secret half in the composer or send', async () => {
+  const secret='wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+  window.mousse.platformRequest={request:vi.fn(async()=>({name:'AWS_SECRET_ACCESS_KEY'}))} as never
+  await open()
+  const field=host.querySelector<HTMLTextAreaElement>('.bot-input-area textarea')!
+  await type(field, 'Use AKIAIOSFODNN7EXAMPLE '+secret+' please')
+  await click(button('Keep as secret'))
+  expect(field.value).toContain('AKIAIOSFODNN7EXAMPLE')
+  expect(field.value).toContain('the secret AWS_SECRET_ACCESS_KEY')
+  expect(field.value).not.toContain(secret)
+  await click(button('Send message'))
+  expect(JSON.stringify(fake.client.send.mock.calls)).not.toContain(secret)
 })

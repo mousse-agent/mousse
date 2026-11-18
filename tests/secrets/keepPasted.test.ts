@@ -9,7 +9,7 @@ import { SecretVault } from '../../src/mms/secrets/SecretVault'
 import { createSecretToolHost } from '../../src/mms/secrets/secretToolHost'
 import { SecretRequests } from '../../src/mms/secrets/SecretRequests'
 
-const value = 'sk-e5SyntheticKeyForTestsOnly123456'
+const value = 'sk-E5SyntheticKeyForTestsOnly123456AAAAAAAAAAAAAAAA'
 const homes: string[] = []
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }) })
 function setup(allowed = true) {
@@ -38,7 +38,7 @@ it.each(['cli', 'bridge', 'agent'])('refuses %s without storing or echoing', asy
   await expect(call({}, client)).rejects.toThrow(/window/)
   expect(vault.list()).toEqual([])
 })
-it.each([{ value: 'ordinary prose' }, { value: 'sk-e5SyntheticKeyForTestsOnly123456\u0000' }, { keep: 'forever' }])('refuses invalid input without echoing it: %j', async params => {
+it.each([{ value: 'ordinary prose' }, { value: `Use ${value} please` }, { value: 'sk-E5SyntheticKeyForTestsOnly123456AAAAAAAAAAAAAAAA\u0000' }, { keep: 'forever' }])('refuses invalid input without echoing it: %j', async params => {
   const { vault, call } = setup()
   const error = await call(params).catch(error => error)
   expect(error).toBeInstanceOf(Error)
@@ -82,4 +82,11 @@ it('never puts a storage error containing the value in a reply or a log', async 
     expect(JSON.stringify(log.mock.calls)).not.toContain(value)
     expect(vault.list()).toEqual([])
   } finally { vi.restoreAllMocks() }
+})
+
+it('keeps only the secret half of an AWS pair', async () => {
+  const { call, vault } = setup()
+  const secret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+  expect(await call({ value: 'AKIAIOSFODNN7EXAMPLE '+secret })).toEqual({ name: 'AWS_SECRET_ACCESS_KEY' })
+  expect(vault.value('AWS_SECRET_ACCESS_KEY')).toBe(secret)
 })
