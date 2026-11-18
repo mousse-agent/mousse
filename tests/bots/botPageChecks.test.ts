@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
+import { PageChecks } from '../../src/mms/bots/pageChecks'
 import { writePageChange } from '../../src/mms/bots/pageChangeFiles'
 import * as fetcher from '../../src/mms/net-public/publicFetch'
 import { botFixture, createBot, T0, flush, runDispatch, type BotFixture } from './botFixture'
@@ -82,11 +83,13 @@ it('six failures report once in chat and the failed-run ledger, and success clea
   await check(45)
   expect(JSON.parse(state(entry.scheduleId)!.value)).toMatchObject({failures:0,toldUnreadable:false})
 })
-it('times out a persisted in-flight check after restart and ignores its late response',async () => {
+it('retries an expired in-flight check without counting a failure',async () => {
   const entry=await add()
   vi.mocked(fetcher.publicFetch).mockImplementationOnce(() => new Promise(() => {}))
   await f.tickSchedules(new Date(T0+5*60_000)); await f.tickSchedules(new Date(T0+8*60_000))
-  expect(JSON.parse(state(entry.scheduleId)!.value).failures).toBe(1)
+  expect(JSON.parse(state(entry.scheduleId)!.value).failures).toBe(0)
+  await flush(); await f.tickSchedules(new Date(T0+8*60_000))
+  expect(JSON.parse(state(entry.scheduleId)!.value).handedHash).not.toBeNull()
 })
 it('names the page in the returned and About labels',async () => {
   const entry=await add()
@@ -167,4 +170,43 @@ it('deletes the change file when its run ends',async()=>{
   expect(existsSync(file)).toBe(true)
   await runDispatch(f,row.id)
   expect(existsSync(file)).toBe(false)
+})
+
+it('startup cleanup failure does not stop crash reconciliation or drop watches',async()=>{
+  const entry=await add()
+  const read=vi.spyOn(f.scheduler,'listJobs').mockImplementation(()=>{throw Error('job list unavailable')})
+  const reconcile=vi.spyOn(f.bots,'reconcileAll')
+  await f.bots.reconcileOnStartup()
+  expect(reconcile).toHaveBeenCalled()
+  expect(state(entry.scheduleId)).toBeDefined()
+  read.mockRestore()
+  body='restart baseline'; await check(5)
+  expect(runs()).toEqual([])
+})
+it('an unsupported When keeps its watch and orphan cleanup runs at startup only',async()=>{
+  const entry=await add()
+  f.scheduler.updateJob(entry.jobId,{schedule:{kind:'manual'}})
+  await f.bots.reconcileOnStartup()
+  expect(state(entry.scheduleId)).toBeDefined()
+  const sweep=vi.spyOn(PageChecks.prototype,'sweep')
+  await f.bots.maintain(new Date(T0+60_000))
+  expect(sweep).not.toHaveBeenCalled()
+})
+it('startup retries an interrupted fetch immediately and fences its late response',async()=>{
+  let old!:(r:fetcher.PublicResponse)=>void
+  const entry=await add()
+  vi.mocked(fetcher.publicFetch).mockImplementationOnce(()=>new Promise(r=>{old=r}))
+  await f.tickSchedules(new Date(T0+5*60_000))
+  await f.bots.reconcileOnStartup()
+  body='fresh after restart'; await check(5)
+  old({status:200,headers:{},body:Buffer.from('stale')}); await flush()
+  const saved=JSON.parse(state(entry.scheduleId)!.value)
+  expect(saved.failures).toBe(0); expect(saved.handedHash).not.toBeNull(); expect(saved.inFlight).toBeUndefined()
+})
+it('schedule end removes its watch and change file',async()=>{
+  const entry=await add(); await check(5); body='changed'; await check(10)
+  const row=runs()[0]!,file=join(f.store.directory,'scratch',row.id,'page-change.txt')
+  f.scheduler.updateJob(entry.jobId,{state:'completed',expiresAt:new Date(T0+11*60_000).toISOString()})
+  await f.bots.maintain(new Date(T0+12*60_000))
+  expect(state(entry.scheduleId)).toBeUndefined(); expect(existsSync(file)).toBe(false)
 })
