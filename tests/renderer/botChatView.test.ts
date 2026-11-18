@@ -3005,3 +3005,32 @@ describe('a message from another of the owner\'s bots', () => {
     expect(sent(id).textContent).not.toContain('Message from your bot')
   })
 })
+
+// Settled identifiers use the first visible recipient/subject field, never hidden content.
+it.each([
+  [{ to: 'alex@example.test', subject: 'Later subject' }, 'alex@example.test'],
+  [{ recipient: ['a@example.test', 'b@example.test'] }, 'a@example.test, b@example.test'],
+  [{ email: 'a@example.test' }, 'a@example.test'],
+  [{ channel: '#team' }, '#team'],
+  [{ subject: 'One\nline' }, 'One line'],
+  [{ title: 'A title' }, 'A title'],
+  [{ to: { $mousse: 'hidden', text: 'hidden · will be sent' }, subject: 'Visible subject' }, 'Visible subject'],
+  [{ nested: { subject: '<b>Plain</b>' } }, '<b>Plain</b>'],
+  [{ body: 'No identifying field' }, undefined]
+])('C10 settled cards identify their stored call: %j', async (args, expected) => {
+  fake.chats.inbox = [held({ status: 'done', args })]
+  await open()
+  const card = host.querySelector('[aria-label="Action to review"]')!
+  const identity = card.querySelector('[aria-label="Request identification"]')
+  if (expected === undefined) expect(identity).toBeNull()
+  else {
+    expect(identity?.textContent).toBe(expected)
+    expect(identity?.closest('details')).toBeNull()
+    expect(identity?.querySelector('b, a')).toBeNull()
+  }
+})
+it.each(['open', 'approved', 'running', 'forgotten'])('C10 no compact identifier for %s cards', async state => {
+  fake.chats.inbox = [held(state === 'forgotten' ? { status: 'done', forgotten: true, args: null } : { status: state })]
+  await open()
+  expect(host.querySelector('[aria-label="Request identification"]')).toBeNull()
+})
