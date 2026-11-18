@@ -19,7 +19,7 @@
  * address; the test link is `tests/netEngine/checks/link.ts`).
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -68,6 +68,9 @@ if (CROSS_MACHINE.has(id) && flags.role === undefined)
   refuse(`${id} is a cross-machine cell: give --role.`)
 const out = flags.out ? resolve(flags.out) : mkdtempSync(join(tmpdir(), 'net-engine-check-'))
 mkdirSync(out, { recursive: true })
+// What an earlier run left in the folder is not this run's.
+for (const key of ['reason', 'host_build', 'host_app_build'])
+  rmSync(join(out, key), { force: true })
 
 const git = (...gitArgs) => spawnSync('git', gitArgs, { cwd: root, encoding: 'utf8' })
 const commit = git('rev-parse', 'HEAD').stdout.trim() || 'unknown'
