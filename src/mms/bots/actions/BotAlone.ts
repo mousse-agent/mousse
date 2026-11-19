@@ -117,9 +117,9 @@ export class BotAlone {
   private holds(botId: string, entry: Exception): boolean {
     const schedule = this.host.schedule(botId, entry.scheduleId)
     const binding = this.host.binding(botId, entry.serverId, entry.tool)
-    const intact = entry.arguments?.version === 4 && !!binding && !!schedule && actionDigest(schedule.prompt) === entry.promptDigest && actionDigest(binding) === actionDigest(entry.binding) && actionDigest(entry.place) === entry.placeDigest
+    const intact = entry.arguments?.version === 4 && !!schedule && actionDigest(schedule.prompt) === entry.promptDigest && (!binding || actionDigest(binding) === actionDigest(entry.binding)) && actionDigest(entry.place) === entry.placeDigest
     if (!intact) this.remove(botId, aloneKey(entry))
-    return this.host.enabled() && intact
+    return this.host.enabled() && !!binding && intact
   }
   prepare(botId: string, activationId: string, request: AloneRequest): string | undefined {
     if (!this.host.enabled()) return 'Asks first is off'
@@ -189,7 +189,8 @@ export class BotAlone {
       const entry = this.read(botId, String(row.key))
       if (!entry) continue
       const schedule = this.host.schedule(botId, entry.scheduleId)
-      const pair = this.host.store.activeGrant(botId)?.manifest.mcp.some(p => p.serverId === entry.serverId && p.tool === entry.tool)
+      const grant = this.host.store.activeGrant(botId)
+      const pair = grant && [grant.manifest, ...this.host.store.disabledPermissions(botId).map(p => p.manifest)].some(manifest => manifest.mcp.some(p => p.serverId === entry.serverId && p.tool === entry.tool))
       if (!pair || !schedule || actionDigest(schedule.prompt) !== entry.promptDigest) this.remove(botId, String(row.key))
     }
   }
