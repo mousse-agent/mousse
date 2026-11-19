@@ -961,8 +961,10 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // from here always goes to the end, as in a messenger.
   // Scrolled up, a new message from the bot leaves the reader where they are; Go to latest shows while scrolled up, and
   // says New message once one has come in. `heading`: on the way to the end after Go to latest, so the smooth scroll's
-  // own steps don't bring the button back. `top`: where the last scroll left it.
-  const anchor = useRef<{ firstId?: string; lastSeq?: number; height: number; atEnd: boolean; sent: number; heading?: boolean; top?: number }>({ height: 0, atEnd: true, sent: 0 })
+  // own steps don't bring the button back. `top`: where the last scroll left it. `landing`: Find is taking the reader to
+  // a match, which may first have to be drawn; until it is there, a scroll that still finds the end (a write of the
+  // reply's follow, a frame before) does not make the chat follow it again and pull the reader back.
+  const anchor = useRef<{ firstId?: string; lastSeq?: number; height: number; atEnd: boolean; sent: number; heading?: boolean; top?: number; landing?: boolean }>({ height: 0, atEnd: true, sent: 0 })
   const [unseen, setUnseen] = useState(false)
   const [away, setAway] = useState(false)
   useLayoutEffect(() => {
@@ -978,7 +980,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     if (held.firstId && firstShown !== held.firstId && !held.atEnd) element.scrollTop += element.scrollHeight - held.height
     else if (held.atEnd) element.scrollTop = element.scrollHeight
     if (!held.atEnd && held.lastSeq !== undefined && lastSeq !== undefined && lastSeq > held.lastSeq && messages.at(-1)?.author === 'bot') setUnseen(true)
-    anchor.current = { firstId: firstShown, lastSeq, height: element.scrollHeight, atEnd: held.atEnd, sent: pending.length, heading: held.heading, top: held.top }
+    anchor.current = { firstId: firstShown, lastSeq, height: element.scrollHeight, atEnd: held.atEnd, sent: pending.length, heading: held.heading, top: held.top, landing: held.landing }
   }, [firstShown, lastSeq, messages, pending.length, working, offline, replying?.id])
   useEffect(() => {
     anchor.current = { lastSeq: anchor.current.lastSeq, height: 0, atEnd: true, sent: anchor.current.sent }
@@ -1022,7 +1024,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     onNavigate: () => {
       anchor.current.atEnd = false
       anchor.current.heading = false
-    }
+      anchor.current.landing = true
+    },
+    onLanded: () => { anchor.current.landing = false }
   })
 
   const act = useCallback((action: NonNullable<BotError['action']>) => {
@@ -1110,7 +1114,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
       <div data-mousse="transcript" className="chat-transcript" data-applet-scroller ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
         const element = event.currentTarget
         const down = element.scrollTop >= (anchor.current.top ?? 0)
-        anchor.current.atEnd = element.scrollHeight - element.scrollTop - element.clientHeight < 40
+        anchor.current.atEnd = !anchor.current.landing && element.scrollHeight - element.scrollTop - element.clientHeight < 40
         anchor.current.height = element.scrollHeight
         // Reaching the end, or any scroll back up (the reader took over), ends the way to the end.
         if (anchor.current.atEnd || element.scrollTop < (anchor.current.top ?? 0)) anchor.current.heading = false
