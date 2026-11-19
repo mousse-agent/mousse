@@ -4691,3 +4691,32 @@ it('E1 r3 a sentence after the same URL can change', async () => {
   const t = await aloneAsk('allow', 'send', 'See https://ok.com/r. Thanks')
   expect((await aloneNext(t, { ...t.args, body: 'See https://ok.com/r. Cheers' })).action.status).toBe('done')
 })
+
+it.each([
+  ['new scan 2026-11-19 08:02 Asia/Kolkata', 'new scan 2026-11-19 08:06:08 Asia/Kolkata'],
+  ['Checked at 8:02am', 'Checked at 10:30 PM'],
+  ['Total 3.5 EUR', 'Total 1,234.50 EUR'],
+  ['Report 18.11.2026', 'Report 19.11.2026'],
+  ['Report 18/11/2026', 'Report 19/11/2026'],
+  ['Scans filed: 3', 'Scans filed: 5'],
+  ['Label : old value', 'Label : new value']
+])('E1 r3 times, amounts, dates and labels are ordinary text: %s', async (before, after) => {
+  const t = await aloneAsk('allow', 'send', before)
+  const next = await aloneNext(t, { ...t.args, body: after })
+  expect(next.action.status).toBe('done')
+  expect(t.calls).toHaveLength(2)
+})
+it('E1 r3 a realistic daily report can vary around its fixed signature', async () => {
+  const signature = '\n\n-- Kai (kai@example.test)'
+  const t = await aloneAsk('allow', 'send', 'I filed 3 scans today. Two were invoices.\nNext check: tomorrow at 07:00.\nTotal 12.50 EUR on 18.11.2026.' + signature)
+  const next = await aloneNext(t, { ...t.args, body: 'I filed 5 scans today. One was a receipt.\nNext check: tomorrow at 07:30.\nTotal 1,234.50 EUR on 19.11.2026.' + signature })
+  expect(next.action).toMatchObject({ status: 'done', card_json: null })
+  expect(t.calls).toHaveLength(2)
+})
+it.each(['example.net:8080', '[::1]:80', 'mailto:x@y.z', '::1', 'fe80::1', 'fe80::', '::', '10.0.0.1', '10.0.0.1:8080', 'x://local'])(
+  'E1 r3 time exceptions leave real addresses asking: %s', async body => {
+    const t = await aloneAsk('allow', 'send', 'A plain message')
+    expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('open')
+    expect(t.calls).toHaveLength(1)
+  }
+)
