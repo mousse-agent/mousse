@@ -4846,3 +4846,21 @@ it.each([
  expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('open')
  expect(t.calls).toHaveLength(1)
 })
+
+it.each([
+ ['$1,234.56', '$2,234.56'], ['€12.50', '€13.50'], ['12.50€', '13.50€'], ['3.5%', '3.6%'],
+ ['Up 3.5%.', 'Up 3.6%.'], ['12.5k users', '13.5k users'], ['p95 1.2s', 'p95 1.3s'],
+ ['1.2M', '2.3B'], ['1.2ms', '2.3ms'], ['1.2h', '2.3d'], ['1.2x', '2.3x'],
+ ['2026-11-18T10:30', '2026-11-19T11:31:02Z'], ['3:1', '12:2'], ['07:00-08:00', '08:00-09:00'], ['Tickets:4','Tickets:5']
+])('E1 r4 report numbers vary both ways: %s', async (before, after) => {
+ for (const [source, body] of [[before,after],[after,before]]) {
+  const t = await aloneAsk('allow', 'send', source)
+  expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('done')
+  f.close()
+ }
+})
+it.each(['https://3.5', '@3.5', '3.5/path', '1.2.3.4', 'v1.2.3', 'Tickets:evil.com'])(
+ 'E1 r4 numeric exceptions do not admit destinations: %s', async body => {
+ const t = await aloneAsk('allow', 'send', 'A plain message')
+ expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('open')
+})
