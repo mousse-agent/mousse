@@ -141,3 +141,22 @@ it('keeps a close failure local and releases the parent handle', async () => {
   expect(result.text).not.toContain('private close diagnostic')
   expect(opened.size).toBe(0)
 })
+
+it('does not count a file removed before its open-fd location can be checked', async () => {
+  const f = fixture(), store = new BotStore({ profileHome: f.home })
+  cleanup.push(() => store.close())
+  hooks.afterOpen = path => {
+    if (!String(path).startsWith('/proc/self/fd/')) return
+    hooks.afterOpen = undefined
+    unlinkSync(String(path))
+  }
+  const prepared = f.secrets.prepareFetch!(f.input)
+  expect(prepared.refusal).toBeUndefined()
+  const result = await secretFetchAction(store, {
+    botId: 'owner', activationId: 'a', callKey: 'removed', secret: 'KEY', service: 'OpenAI', args: {}, mask: text => text
+  }, uncount => prepared.send!(uncount))
+  expect(result.isError).toBe(true)
+  expect(result.text).toMatch(/folder.*(?:changed|unavailable)/i)
+  expect(store.get('SELECT ran_at FROM bot_actions')?.ran_at).toBeNull()
+  expect(readdirSync(join(f.scratch, 'fetches'))).toEqual([])
+})
