@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { BOT_EYES } from '../../src/shared/bots/personal/look'
-import { eyeGeometry, FOLLOW_X, FOLLOW_Y, mouseArcPath, mouseEyePath, pointerLook } from '../../src/renderer/components/bots/face/hybridEyes'
+import { eyeGeometry, FOLLOW_DOWN, FOLLOW_UP, FOLLOW_X, mouseArcPath, mouseEyePath, pointerLook } from '../../src/renderer/components/bots/face/hybridEyes'
 
 /** A 96 px face whose middle is at (500, 400). */
 const box = { left: 452, top: 352, width: 96, height: 96 }
@@ -10,8 +10,8 @@ describe('eyes that follow the pointer', () => {
     ['on the face', 500, 400, 0, 0],
     ['far to the left', -5000, 400, -FOLLOW_X, 0],
     ['far to the right', 5000, 400, FOLLOW_X, 0],
-    ['far above', 500, -5000, 0, FOLLOW_Y],
-    ['far below', 500, 5000, 0, -FOLLOW_Y]
+    ['far above', 500, -5000, 0, FOLLOW_UP],
+    ['far below', 500, 5000, 0, -FOLLOW_DOWN]
   ])('look %s', (_where, x, y, lookX, lookY) => {
     const look = pointerLook(box, x, y)
     expect(look.x).toBeCloseTo(lookX, 5)
@@ -23,7 +23,7 @@ describe('eyes that follow the pointer', () => {
     const further = pointerLook(box, 700, 400).x
     expect(near).toBeGreaterThan(0)
     expect(further).toBeGreaterThan(near)
-    expect(Math.hypot(pointerLook(box, 9000, 9000).x / FOLLOW_X, pointerLook(box, 9000, 9000).y / FOLLOW_Y)).toBeLessThanOrEqual(1.0001)
+    expect(Math.hypot(pointerLook(box, 9000, 9000).x / FOLLOW_X, pointerLook(box, 9000, 9000).y / FOLLOW_DOWN)).toBeLessThanOrEqual(1.0001)
   })
 
   it('stay in the middle for a face with no size yet', () => {
@@ -81,6 +81,20 @@ describe('where the flat eyes sit', () => {
     expect(left.y).toBeLessThan(96)
     expect(left.sx).toBeGreaterThan(0)
     expect(Math.abs(left.angle)).toBeLessThan(0.06)
+  })
+
+  /** Each open eye's half width at scale 1, in eye units, as `EyeShape` draws it (the star and the code with their strokes). */
+  const HALF_WIDTH = { pill: 0.155, round: 0.2, dot: 0.105, tall: 0.115, square: 0.175, heart: 0.2, star: 0.272, code: 0.16 } as const
+
+  it.each(BOT_EYES.flatMap((eyes) => [['mouse', eyes], ['mousse', eyes]] as const))('a %s with %s eyes keeps a gap between them at their biggest', (kind, eyes) => {
+    const look = { colour: 'coral', accessory: 'none', kind, eyes } as const
+    // Needs you draws the eyes biggest.
+    const { eyes: [left, right], es } = eyeGeometry(look, 'needs_you', 'full', 200)
+    // A mouse's eye is the part its head leaves showing; the Mousse's is drawn whole.
+    const leftEdge = kind === 'mouse' ? ends(mouseEyePath(look, -1, es)!).right : HALF_WIDTH[eyes]
+    const rightEdge = kind === 'mouse' ? -ends(mouseEyePath(look, 1, es)!).left : HALF_WIDTH[eyes]
+    const gap = right.x - right.sx * es * rightEdge - (left.x + left.sx * es * leftEdge)
+    expect(gap).toBeGreaterThan(1)
   })
 
   it('a mouse whose head leans, asleep, has its eyes turned with the head', () => {

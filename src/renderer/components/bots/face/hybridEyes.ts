@@ -1,6 +1,8 @@
-import { BOT_COLOUR_HEX, BOT_EYES, botEyesOf, botKindOf, type BotEyes, type KnownBotLook } from '../../../../shared/bots/personal/look'
+import { BOT_COLOUR_HEX, botKindOf, type BotEyes, type KnownBotLook } from '../../../../shared/bots/personal/look'
 import type { BotFaceState } from './BotFace'
-import { faceUniforms, mousseEyesWhite, stillPose, type FacePose } from './facePoses'
+import { EYE_SCALE, EYE_SPREAD, eyeShapeOf, faceUniforms, mousseEyesWhite, stillPose, type FacePose } from './facePoses'
+
+export { eyeShapeOf } from './facePoses'
 
 /**
  * Where the flat eyes of a hybrid face go (`HybridFace.tsx`): the shader's own eye positions, put
@@ -25,7 +27,7 @@ export interface EyePlace {
 
 export interface EyeGeometry {
   eyes: [EyePlace, EyePlace]
-  /** The pose's eye values: scale, how open, closed (0 or 1), the closed arc's way up, worried. */
+  /** The pose's eye values: scale (with `EYE_SCALE`), how open, closed (0 or 1), the closed arc's way up, worried. */
   es: number
   open: number
   closed: number
@@ -97,17 +99,18 @@ export function eyeGeometry(look: KnownBotLook, state: BotFaceState, view: 'head
     return [(ux * 0.5 + 0.5 + uniforms.pan[0]) * size, (0.5 - uy * 0.5 - uniforms.pan[1]) * size]
   }
   const toWorld = mousse ? mousseHeadToWorld : mouseHeadToWorld
+  const spread = EYE_SPREAD[eyeShapeOf(look)]
   const place = (side: -1 | 1): EyePlace => {
     let centre: V3
     let across: V3
     let upward: V3
     if (mousse) {
-      const a = side * 0.255
+      const a = side * spread.mousse
       centre = [Math.sin(a) * 1.465, 2.2, Math.cos(a) * 1.465]
       across = [Math.cos(a) * 1.35, 0, -Math.sin(a) * 1.35]
       upward = [0, 1.35, 0]
     } else {
-      const x = side * 0.37
+      const x = side * spread.mouse
       centre = [x, HEAD_Y, headDepth(x, HEAD_Y) + 0.03]
       across = [1, 0, 0]
       upward = [0, 1, 0]
@@ -124,7 +127,7 @@ export function eyeGeometry(look: KnownBotLook, state: BotFaceState, view: 'head
   const [x1] = project(bodyToWorld([1, -0.66, 0], pose))
   return {
     eyes: [place(-1), place(1)],
-    es: pose.es,
+    es: pose.es * EYE_SCALE,
     open: pose.open,
     closed: pose.closed,
     arc: pose.arc,
@@ -136,15 +139,20 @@ export function eyeGeometry(look: KnownBotLook, state: BotFaceState, view: 'head
   }
 }
 
-/** How far eyes that follow the pointer go, in units of look (the idle glance reaches 0.5 across and 0.04 up). */
-export const FOLLOW_X = 0.6
-export const FOLLOW_Y = 0.07
+/**
+ * How far eyes that follow the pointer go, in units of look: cartoon-far across, and well up or down (the idle
+ * glance reaches 0.7 across and 0.12 up or down).
+ */
+export const FOLLOW_X = 1.3
+export const FOLLOW_UP = 0.34
+export const FOLLOW_DOWN = 0.22
 /** The pointer's distance, in face sizes, at which the eyes are fully turned. */
-export const FOLLOW_REACH = 3
+export const FOLLOW_REACH = 1.8
 
 /**
  * Where eyes that follow the pointer look, in units of look (x right, y up), for a face in `box` and a pointer
- * at (x, y), all in window pixels. A near pointer turns the eyes a little; a far one no further than the limit.
+ * at (x, y), all in window pixels. The turn eases out with distance, so even a near pointer gets a clear look,
+ * and a far one goes no further than the limits.
  */
 export function pointerLook(box: { left: number; top: number; width: number; height: number }, x: number, y: number): { x: number; y: number } {
   if (!(box.width > 0)) return { x: 0, y: 0 }
@@ -152,9 +160,9 @@ export function pointerLook(box: { left: number; top: number; width: number; hei
   const dx = (x - (box.left + box.width / 2)) / reach
   const dy = (y - (box.top + box.height / 2)) / reach
   const far = Math.hypot(dx, dy)
-  const pull = far > 0 ? Math.min(1, far) / far : 0
+  const pull = far > 0 ? Math.pow(Math.min(1, far), 0.6) / far : 0
   // `+ 0` keeps a pointer straight above or beside the face from giving -0.
-  return { x: dx * pull * FOLLOW_X + 0, y: -dy * pull * FOLLOW_Y + 0 }
+  return { x: dx * pull * FOLLOW_X + 0, y: -dy * pull * (dy < 0 ? FOLLOW_UP : FOLLOW_DOWN) + 0 }
 }
 
 /** Half the height of each open eye shape (the shader's `eyeHH`), for the worried lid. */
@@ -176,11 +184,6 @@ export function eyeColour(look: KnownBotLook): string {
   // The mouse's eyes are lit clay: near-black that shows as dark grey under the shader's light.
   if (botKindOf(look) !== 'mousse') return '#2c2c2e'
   return mousseEyesWhite(BOT_COLOUR_HEX[look.colour]) ? '#ffffff' : '#050505'
-}
-
-export function eyeShapeOf(look: KnownBotLook): BotEyes {
-  const eyes = botEyesOf(look)
-  return BOT_EYES.includes(eyes) ? eyes : 'pill'
 }
 
 /** The shader's `heart2`: negative inside. */
@@ -244,7 +247,7 @@ export function mouseEyePath(look: KnownBotLook, side: -1 | 1, es: number): stri
   const key = `${shape}|${side}|${es.toFixed(3)}`
   const known = outlines.get(key)
   if (known !== undefined) return known
-  const x0 = side * 0.37
+  const x0 = side * EYE_SPREAD[shape].mouse
   const centre = headDepth(x0, HEAD_Y) - 0.035
   /** Whether the eye's front at (x, y), in head units from the eye's middle, is in front of the head. */
   const seen = (x: number, y: number): boolean => {
@@ -264,10 +267,11 @@ export function mouseEyePath(look: KnownBotLook, side: -1 | 1, es: number): stri
  */
 export function mouseArcPath(look: KnownBotLook, side: -1 | 1, es: number, up: number): string | undefined {
   if (botKindOf(look) === 'mousse' || !(es > 0)) return undefined
-  const key = `arc|${side}|${es.toFixed(3)}|${up > 0 ? 1 : -1}`
+  const spread = EYE_SPREAD[eyeShapeOf(look)].mouse
+  const key = `arc|${side}|${es.toFixed(3)}|${up > 0 ? 1 : -1}|${spread}`
   const known = outlines.get(key)
   if (known !== undefined) return known
-  const x0 = side * 0.37
+  const x0 = side * spread
   const front = headDepth(x0, HEAD_Y) - 0.035 + 0.05
   const [sin, cos] = [Math.sin(1.1), Math.cos(1.1)]
   const path = rows((lx, ly) => {

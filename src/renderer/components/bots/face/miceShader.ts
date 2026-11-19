@@ -41,8 +41,9 @@
  *   `uH2` (right ear, left arm, right arm, laptop), `uE` (open, closed, arc, worried),
  *   `uE2` (look x, look y, eye scale, sweat): the pose.
  * - `uV`: camera target height, field of view, samples per axis (1 or 2), and 1 to drop the whiskers.
- * - `uK`: the kind (0 mouse, 1 Mousse), the eye shape (`BOT_EYES` order), and 1 for white eyes (the
- *   Mousse picks black or white eyes to contrast with its colour).
+ * - `uK`: the kind (0 mouse, 1 Mousse), the eye shape (`BOT_EYES` order), 1 for white eyes (the
+ *   Mousse picks black or white eyes to contrast with its colour), and how far each eye sits from the
+ *   middle (`EYE_SPREAD`: the mouse's eye x, the Mousse's angle round its glass).
  *
  * The Mousse (kind 1) is the app logo as a character, built in the logo's own units (100 logo units
  * = 1, the foot at 0) and scaled into the mouse's frame by `MS`. Its mousse is one round body whose
@@ -60,7 +61,7 @@ export const MICE_UNIFORMS = ['uRes', 'uOrg', 'uCol', 'uB', 'uH', 'uH2', 'uE', '
 export type MiceUniform = (typeof MICE_UNIFORMS)[number]
 
 export const MICE_FRAGMENT_SHADER = `precision highp float;
-uniform vec2 uRes,uOrg;uniform vec3 uCol,uK;uniform vec4 uB,uH,uH2,uE,uE2,uV,uAC;uniform float uAcc;
+uniform vec2 uRes,uOrg;uniform vec3 uCol;uniform vec4 uK,uB,uH,uH2,uE,uE2,uV,uAC;uniform float uAcc;
 const vec3 HC=vec3(0.,.55,0.),HR=vec3(1.05,.92,.88);
 mat2 R(float a){float c=cos(a),s=sin(a);return mat2(c,s,-s,c);}
 float sdE(vec3 p,vec3 r){float k0=length(p/r),k1=length(p/(r*r));return k0*(k0-1.)/max(k1,1e-5);}
@@ -194,7 +195,7 @@ float stemM(vec3 P){float d=sdE(P-vec3(0.,.04,0.),vec3(.87,.045,.87));
 // crosses their plane, over whatever the ray hit behind that plane (w <= .012, the old slab's front).
 float eyesM(vec3 Q){
  float blk=1e5,es=uE2.z,op=uE.x;
- for(int i=0;i<2;i++){float s=i==0?-1.:1.;float a=s*.255+uE2.x*.22,ey=2.2+uE2.y*1.2;vec3 n=vec3(sin(a),0.,cos(a)),tg=vec3(cos(a),0.,-sin(a)),e=n*1.465+vec3(0.,ey,0.);
+ for(int i=0;i<2;i++){float s=i==0?-1.:1.;float a=s*uK.w+uE2.x*.22,ey=2.2+uE2.y*1.2;vec3 n=vec3(sin(a),0.,cos(a)),tg=vec3(cos(a),0.,-sin(a)),e=n*1.465+vec3(0.,ey,0.);
   vec3 r=Q-e;float w=dot(r,n);r-=gRd*w/dot(gRd,n);vec2 f=vec2(dot(r,tg),r.y)/1.35;
   float d2=eye2(f,op,es,s,uK.y);float top=max(eyeHH(uK.y)*op,.012)*es*(1.-.3*uE.w)-uE.w*.6*(f.x*s);d2=-smin(-d2,-(f.y-top)*.7,.03);
   float py=uE.z>0.?f.y:-f.y;float dc=arc(vec2(f.x,py+.13),1.1,.17)-.045*es;d2=mix(d2,dc,uE.y)*1.35;
@@ -240,7 +241,7 @@ vec2 map(vec3 p){
   blk=1e5;
   float es=uE2.z,op=uE.x;
   for(int i=0;i<2;i++){float s=i==0?-1.:1.;
-   float x0=s*.37+uE2.x*.09,y0=.55+uE2.y;vec3 eq=q-vec3(x0,y0,zs(x0,y0)-.035);
+   float x0=s*uK.w+uE2.x*.09,y0=.55+uE2.y;vec3 eq=q-vec3(x0,y0,zs(x0,y0)-.035);
    float dp=eyeD(eq,op,es,s,uK.y);
    float top=max(eyeHH(uK.y)*op,.012)*es*(1.-.3*uE.w)-uE.w*.6*(eq.x*s);dp=-smin(-dp,-(eq.y-top)*.7,.03);
    float py=uE.z>0.?eq.y:-eq.y;float d2=arc(vec2(eq.x,py+.13),1.1,.17)-.045*es;

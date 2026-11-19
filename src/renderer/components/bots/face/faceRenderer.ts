@@ -1212,7 +1212,7 @@ export function createWebGlGpu(doc: Document): FaceGpu | null {
       context.uniform4fv(uniforms.uE, u.uE)
       context.uniform4fv(uniforms.uE2, u.uE2)
       context.uniform4fv(uniforms.uV, u.uV)
-      context.uniform3fv(uniforms.uK, u.uK)
+      context.uniform4fv(uniforms.uK, u.uK)
       context.drawArrays(context.TRIANGLES, 0, 3)
     },
     timer: timerExt
