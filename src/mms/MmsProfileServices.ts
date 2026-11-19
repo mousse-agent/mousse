@@ -747,6 +747,8 @@ export class MmsProfileServices {
           return this.threads.getThread(threadId) ? 'active' : record ? 'trashed' : 'missing'
         }
       },
+      // A bot's checklist: the task list of its thread (read when its summary is built).
+      threadTasks: (threadId) => this.threadRuntimes.listTasks(threadId),
       // A deleted bot's home thread: like the lifecycle RPCs, wait briefly for other requests to
       // finish, and retry a busy refusal a few times before reporting it.
       trashThread: async (threadId) => {
@@ -1054,6 +1056,14 @@ export class MmsProfileServices {
       questions: this.questions,
       unseenDone: new UnseenDoneStore(homeDir)
     })
+    // A bot's task list changed: its header's checklist reads it again.
+    if (personalBots) {
+      const onTasks = (payload: { threadId?: unknown }): void => {
+        if (typeof payload?.threadId === 'string') personalBots.threadTasksChanged(payload.threadId)
+      }
+      this.threadRuntimes.on('tasks.updated', onTasks)
+      this.platform.onDispose(() => { this.threadRuntimes.off('tasks.updated', onTasks) })
+    }
     // Minimum MMS-owned persistence so headless turns survive without the GUI.
     // Load-merges agents/tasks/mousse sessions; never writes messageQueue (queue API only).
     this.orchestrator.setPersistCallback((threadId) => {

@@ -221,10 +221,27 @@ export interface BotSummary {
   /** Background commands it runs now (`watch_start`), oldest first: the chat's Background work, each with Stop. Absent from older services and while none runs. */
   watchers?: BotWatcherItem[]
   /**
+   * Its checklist (`create_task`, `update_task`): the tasks of its chat's thread, then of the threads its work runs in now,
+   * oldest first and at most `BOT_TASKS_SHOWN`. Absent from older services and while it keeps none.
+   */
+  tasks?: BotTaskItem[]
+  /**
    * Which devices reach it (About's Devices), on its own computer's window only: anything but `all` shows a lock in the
    * Bots list. Absent from older services and from what other devices get.
    */
   reach?: BotDeviceAccessMode
+}
+
+/** How many of a bot's tasks its summary carries. */
+export const BOT_TASKS_SHOWN = 50
+
+/** One line of a bot's checklist: its words, how far it is, and the bot's last short note on it. */
+export interface BotTaskItem {
+  id: string
+  text: string
+  status: import('../../types').TaskStatus
+  /** The bot's latest short progress or failure note. */
+  note?: string
 }
 
 /** A background command a bot runs now: its title, the command, when it started and when its time limit ends. */
