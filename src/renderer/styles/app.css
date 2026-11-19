@@ -2328,7 +2328,7 @@ html[data-chat-width='full'] .chat {
 
 .composer-attachments {
   padding: 8px 10px 0;
-  border-bottom: 1px solid rgba(var(--accent-pale-rgb), 0.1);
+  border-bottom: none;
   border-radius: 12px 12px 0 0;
 }
 
@@ -6139,7 +6139,7 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
 
 .composer-command-suggestion { border-radius: 10px; padding: 9px 12px; }
 
-.composer-attachments { border-bottom: 1px solid rgba(var(--accent-pale-rgb), 0.08); }
+.composer-attachments { border-bottom: none; }
 
 .composer-attachment-pill {
   border-radius: 999px;

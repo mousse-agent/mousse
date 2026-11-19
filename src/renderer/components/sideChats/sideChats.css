@@ -47,6 +47,12 @@
   cursor: pointer;
 }
 
+.side-chats-new:disabled,
+.side-chats-list .side-chats-new-row:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .side-chats-error {
   margin: 8px 18px 0;
   color: var(--danger);
