@@ -10,7 +10,7 @@ document.getElementById('root')!.innerHTML = `
     <main class="main-area" style="flex:0 0 0">${past}</main>
     <div class="keep-mounted-pane">${past}<main class="chat-workspace">
       <section class="chat-conversation"><div class="chat-transcript"><p>Hello</p></div></section>
-      <aside class="bot-about"><div style="height:1400px"></div><div id="bot-about-runs-on" style="height:80px"><button id="pick">Model</button></div></aside>
+      <aside class="bot-about" style="width:300px"><div class="bot-about-scroll"><div style="height:1400px"></div><div id="bot-about-runs-on" style="height:80px"><button id="pick">Model</button></div></div></aside>
     </main></div>
   </div>
 </div></div>`
@@ -22,7 +22,8 @@ document.body.append(control)
 
 const FRAME = ['body', '#root', '.app', '.app-content', '.main-area', '.keep-mounted-pane']
 const box = (selector: string) => document.querySelector(selector)!
-const panel = () => box('.bot-about')
+// The panel's own scroller (BotAboutPanel.tsx), inside the aside that holds its resize edge.
+const panel = () => box('.bot-about-scroll')
 const target = () => box('#bot-about-runs-on')
 const frames = (count: number) => new Promise<void>((done) => {
   const step = (left: number) => (left ? requestAnimationFrame(() => step(left - 1)) : done())
