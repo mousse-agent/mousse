@@ -325,7 +325,7 @@ export interface BotEngineHost {
    * instructions and what its owner allows now (`allowed`). Built at each dispatch, never stored, so
    * a rename or a changed permission applies at the next turn.
    */
-  instructions?(bot: { name: string; description: string; filesFolder: string; lane?: BotLane; allowed?: BotAllowed; browserOffline?: boolean; subagent?: true; withheld?: readonly string[]; promptChanged?: true }): string
+  instructions?(bot: { name: string; description: string; filesFolder: string; lane?: BotLane; allowed?: BotAllowed; secretFetchOffered?: boolean; browserOffline?: boolean; subagent?: true; withheld?: readonly string[]; promptChanged?: true }): string
   /** A schedule in plain words ("every weekday · 09:00"; WP3's `describeSchedule`). */
   scheduleLabel?(when: BotSchedule['when']): string
   /** The provider family of an instance in plain words ("Claude"), never a model. */
@@ -3045,6 +3045,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // holds (it hands those jobs off), a run what it holds itself, and whether its browser could be offered.
     const told = this.instructionsOf(definition, definition.main, row.lane, {
       canAskMcp: effective.appTools.includes('escalate'), scheduled: row.trigger.kind === 'schedule',
+      // Guidance follows the actual local service-read authority; hand-started runs have none.
+      secretFetchOffered: Boolean(authority.secretFetch),
       allowed: { ...botAllowedOf(narrowManifest(effective, definition.main.narrow), (ids) => this.mcpServerNames(ids)), ...(compiled.permissions.appTools.includes(BOT_IMAGE_TOOL) ? { images: true } : {}) },
       ...(row.lane !== 'chat' && compiled.permissions.browser && !browser ? { browserOffline: true } : {})
     })
@@ -3286,7 +3288,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * prompt edit applies at the next turn, while a turn already running keeps the text it was given.
    */
 
-  private instructionsOf(definition: BotDefinition, thread: BotThreadSpec, lane?: BotLane, permissions?: { allowed: BotAllowed; canAskMcp?: boolean; scheduled?: boolean; browserOffline?: boolean; subagent?: true; withheld?: readonly string[] }): { instructions?: string } {
+  private instructionsOf(definition: BotDefinition, thread: BotThreadSpec, lane?: BotLane, permissions?: { allowed: BotAllowed; canAskMcp?: boolean; scheduled?: boolean; secretFetchOffered?: boolean; browserOffline?: boolean; subagent?: true; withheld?: readonly string[] }): { instructions?: string } {
     if (permissions) {
       // Commands, the browser and the owner's threads the owner switched off for the bot are named as off.
       const off: Partial<Record<BotNamedPower, true>> = {}
