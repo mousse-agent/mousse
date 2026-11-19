@@ -175,9 +175,12 @@ export async function prepare(port: PreparePort, request: PrepareRequest): Promi
         return done(port, engine, record, selector, true)
       }
       if (row && row.requestId === request.requestId) key = row.key
-      else key = engine.writeOwnRow(request)
+      else {
+        key = engine.writeOwnRow(request)
+        // A crash here leaves the row unrecorded on the request: the repeat finds it by its request id.
+        crash(port, 'row')
+      }
       record = port.requests.update(request.requestId, { row: 'own', rowKey: key })
-      crash(port, 'row')
     }
     if (record.row === 'existing') return done(port, engine, record, selector, true)
 
@@ -213,9 +216,10 @@ function done(
     already: false,
     starts_at_login: port.startsAtLogin()
   }
-  // The control keeps no reply for an existing row: a repeat after a lost reply then has nothing to answer.
-  if (!(existing && engineControl('existing-reply-not-kept')))
-    port.requests.update(record.requestId, { state: 'done', reply: { ...reply } })
+  // The control keeps no reply for an existing row: a repeat after a lost reply then has nothing to answer, and
+  // reads removed.
+  const keep = !(existing && engineControl('existing-reply-not-kept'))
+  port.requests.update(record.requestId, { state: 'done', ...(keep ? { reply: { ...reply } } : {}) })
   return reply
 }
 
