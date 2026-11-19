@@ -118,7 +118,8 @@ export const BotThreadLine = memo(function BotThreadLine({ botId, thread, now, o
 /** Moves focus among the list's rows and buttons with the arrow keys, Home and End. */
 function moveFocus(event: ReactKeyboardEvent<HTMLElement>): void {
   if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
-  const items = [...event.currentTarget.querySelectorAll<HTMLElement>('[data-nav]')]
+  // Rows folded away under Show more are skipped.
+  const items = [...event.currentTarget.querySelectorAll<HTMLElement>('[data-nav]')].filter((item) => !item.closest('[inert]'))
   if (!items.length) return
   event.preventDefault()
   const at = items.indexOf(document.activeElement as HTMLElement)
@@ -157,8 +158,9 @@ export function BotActivitySticker({ bot, typing, offline }: { bot: BotSummary; 
  * Under the bot's name in the header: "typing…", "System check +1", "Managing 2 threads", "paused", "free". While it has
  * work, or has started threads, the line opens their list: work with Stop (queued pieces last), then the threads it
  * started that still go (working, then waiting on you), then under "Recent" those that finished in the last six hours,
- * and "See all" at the bottom: the sidebar's Threads tab, filtered to this bot. A row opens its thread. Arrow keys move
- * along the list; Escape or a click away closes it.
+ * and "See all" at the bottom: the sidebar's Threads tab, filtered to this bot. While something runs, Recent opens
+ * folded: Show more unfolds it and Show less folds it again, and each opening of the list starts folded. A row opens
+ * its thread. Arrow keys move along the list; Escape or a click away closes it.
  */
 export function BotPresenceLine({ bot, typing, offline }: { bot: BotSummary; typing: boolean; offline: boolean }) {
   const presence = presenceOf(bot, { typing, offline })
@@ -170,6 +172,8 @@ export function BotPresenceLine({ bot, typing, offline }: { bot: BotSummary; typ
   const allThreads = useAppStore((s) => botThreadCount(s.threads, bot.id))
   const listed = work.length + watchers.length + going.length + ended.length + allThreads
   const [open, setOpen] = useState(false)
+  // Recent unfolded by Show more; every opening starts folded.
+  const [more, setMore] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const list = useRef<HTMLDivElement>(null)
@@ -196,10 +200,13 @@ export function BotPresenceLine({ bot, typing, offline }: { bot: BotSummary; typ
   // Running work first, then what waits, each in the order it came.
   const ordered = [...work.filter((item) => item.status !== 'queued'), ...work.filter((item) => item.status === 'queued')]
   const close = () => setOpen(false)
+  // With nothing running, Recent is all there is, so it shows unfolded and has no Show more.
+  const folds = ordered.length + watchers.length + going.length > 0 && ended.length > 0
+  const recentShown = !folds || more
   return <div className="bot-presence-root" ref={root}>
     <button type="button" ref={trigger} className="bot-presence is-button" data-kind={presence.kind} aria-expanded={open} aria-haspopup="dialog"
-      onClick={(event) => { focusFirst.current = event.detail === 0; setOpen((was) => !was) }}
-      onKeyDown={(event) => { if (event.key === 'ArrowDown' && !open) { event.preventDefault(); focusFirst.current = true; setOpen(true) } }}>
+      onClick={(event) => { focusFirst.current = event.detail === 0; setMore(false); setOpen((was) => !was) }}
+      onKeyDown={(event) => { if (event.key === 'ArrowDown' && !open) { event.preventDefault(); focusFirst.current = true; setMore(false); setOpen(true) } }}>
       <span role="status">{presence.text}</span><ChevronDown size={12} aria-hidden />
     </button>
     {open && <div className="bot-work" ref={list} role="dialog" aria-label={`What ${bot.name} is running`} onKeyDown={moveFocus}>
@@ -209,14 +216,20 @@ export function BotPresenceLine({ bot, typing, offline }: { bot: BotSummary; typ
         <ul className="bot-work-list" aria-label="Background work">{watchers.map((item) => <WatcherLine key={item.id} botId={bot.id} item={item} now={now} />)}</ul>
       </>}
       {going.length > 0 && <ul className="bot-work-list" aria-label="Threads it started">{going.map((thread) => <BotThreadLine key={thread.threadId} botId={bot.id} thread={thread} now={now} onOpen={close} />)}</ul>}
-      {ended.length > 0 && <>
+      {ended.length > 0 && <div className="bot-work-fold" id={`bot-recent-${bot.id}`} data-open={recentShown || undefined} inert={!recentShown}><div>
         <p className="bot-work-heading bot-thread-recent">Recent<span className="bot-thread-count">{ended.length}</span></p>
         <ul className="bot-work-list" aria-label="Recent">{ended.map((thread) => <BotThreadLine key={thread.threadId} botId={bot.id} thread={thread} now={now} onOpen={close} />)}</ul>
-      </>}
-      {allThreads > 0 && <button type="button" className="bot-thread-all" data-nav
-        onClick={() => { close(); void showBotThreads(bot.id) }}>
-        See all {allThreads === 1 ? '1 thread' : `${allThreads} threads`}<ArrowRight size={13} aria-hidden />
-      </button>}
+      </div></div>}
+      {(folds || allThreads > 0) && <div className="bot-work-foot">
+        {folds && <button type="button" className="bot-work-more" data-nav aria-expanded={more} aria-controls={`bot-recent-${bot.id}`}
+          onClick={() => setMore((was) => !was)}>
+          {more ? 'Show less' : <>Show more<span className="bot-thread-count">{ended.length}</span></>}
+        </button>}
+        {allThreads > 0 && <button type="button" className="bot-thread-all" data-nav
+          onClick={() => { close(); void showBotThreads(bot.id) }}>
+          See all {allThreads === 1 ? '1 thread' : `${allThreads} threads`}<ArrowRight size={13} aria-hidden />
+        </button>}
+      </div>}
     </div>}
   </div>
 }

@@ -602,7 +602,9 @@ html[data-theme] .bot-prompt-card textarea.bot-prompt-field { background: transp
 .bot-conversation button:focus-visible, .bot-about button:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 
 /* Work beside the chat (docs/plans/bot-always-free.md): a small list under the header's presence, one line each, with Stop. */
-.bot-work { position: absolute; z-index: 40; top: calc(100% + 6px); left: 0; width: min(380px, 70vw); max-height: min(420px, 70vh); overflow-y: auto; display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 5px; border-radius: 10px; border: 1px solid var(--ui-line-strong, rgba(255, 255, 255, .14)); background: var(--ui-raised, var(--surface-soft)); box-shadow: var(--ui-raised-shadow, 0 10px 32px rgba(0, 0, 0, .32)); }
+/* The list grows with its rows, never showing a scrollbar; past the window's height (the header above it, 130px) it
+   still scrolls, without a bar. */
+.bot-work { position: absolute; z-index: 40; top: calc(100% + 6px); left: 0; width: min(380px, 70vw); max-height: calc(100vh - 130px); overflow-y: auto; scrollbar-width: none; display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 5px; border-radius: 10px; border: 1px solid var(--ui-line-strong, rgba(255, 255, 255, .14)); background: var(--ui-raised, var(--surface-soft)); box-shadow: var(--ui-raised-shadow, 0 10px 32px rgba(0, 0, 0, .32)); }
 .bot-work-line { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 3px 4px 3px 8px; font-size: var(--bot-meta); color: var(--text-secondary); }
 .bot-work-line svg { flex: none; }
 .bot-work-title { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
@@ -638,9 +640,17 @@ html[data-theme] .bot-prompt-card textarea.bot-prompt-field { background: transp
 /* "Recent": the threads that finished in the last six hours; "See all" lists every one in the sidebar. */
 .bot-thread-recent { display: flex; gap: 5px; margin-top: 8px; }
 .bot-thread-count { font-variant-numeric: tabular-nums; opacity: .8; }
-/* "See all" stays at the panel's bottom edge while a long Recent list scrolls under it (5px: the panel's padding). */
-.bot-thread-all { position: sticky; bottom: -5px; flex: none; display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; margin: 4px 0 -5px; padding: 7px 8px 10px; border-top: 1px solid var(--ui-line); border-radius: 0 0 7px 7px; background: var(--ui-raised, var(--surface-soft)); font-size: var(--bot-meta); color: var(--text-secondary); }
-.bot-thread-all:hover { color: var(--text-primary); }
+.bot-work::-webkit-scrollbar { display: none; width: 0; }
+/* Recent folded under Show more: it opens and closes by its height, and takes no gap while folded. */
+.bot-work-fold { display: grid; grid-template-rows: 0fr; margin-top: -4px; opacity: 0; transition: grid-template-rows var(--ui-dur-slow) var(--ui-collapse-ease), margin-top var(--ui-dur-slow) var(--ui-collapse-ease), opacity var(--ui-dur-slow) ease; }
+.bot-work-fold[data-open] { grid-template-rows: 1fr; margin-top: 0; opacity: 1; }
+.bot-work-fold > div { min-height: 0; overflow: hidden; }
+/* The bottom row: Show more or Show less on the left, "See all" on the right (centred when alone). It stays at the
+   panel's bottom edge if the list ever scrolls (5px: the panel's padding). */
+.bot-work-foot { position: sticky; bottom: -5px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 4px -5px -5px; padding: 3px 5px 5px; border-top: 1px solid var(--ui-line); border-radius: 0 0 9px 9px; background: var(--ui-raised, var(--surface-soft)); }
+.bot-work-foot > :only-child { flex: 1; justify-content: center; }
+.bot-work-more, .bot-thread-all { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 6px; font-size: var(--bot-meta); color: var(--text-secondary); }
+.bot-work-more:hover, .bot-thread-all:hover { color: var(--text-primary); }
 
 /* What waits on the owner (an open ask, the bot's error), pinned above the composer as one line each; a click shows
    the full message. */
