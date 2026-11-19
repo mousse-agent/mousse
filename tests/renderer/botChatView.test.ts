@@ -1641,6 +1641,22 @@ describe('the menu', () => {
     expect(host.querySelector('aside.bot-about')?.getAttribute('aria-label')).toBe('About Inbox helper')
   })
 
+  it("the header's panel button shows About and hides it again", async () => {
+    act(() => setAnimationSpeed('off'))
+    try {
+      await open()
+      expect(button('Show About')?.getAttribute('aria-expanded')).toBe('false')
+      await click(button('Show About'))
+      expect(host.querySelector('aside.bot-about')?.getAttribute('aria-label')).toBe('About Inbox helper')
+      expect(button('Hide About')?.getAttribute('aria-expanded')).toBe('true')
+      await click(button('Hide About'))
+      expect(host.querySelector('aside.bot-about')).toBeNull()
+      expect(button('Show About')?.getAttribute('aria-expanded')).toBe('false')
+    } finally {
+      act(() => setAnimationSpeed('normal'))
+    }
+  })
+
   it('renames the bot', async () => {
     await open()
     await click(button('Bot menu'))

@@ -1,6 +1,6 @@
 import { usePastedBotSecret } from './usePastedBotSecret'
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
-import { ArrowDown, Brain, ChevronRight, CircleAlert, Loader2, Reply, Shield, X } from '../../lib/icons'
+import { ArrowDown, Brain, ChevronRight, CircleAlert, Loader2, PanelRightClose, PanelRightOpen, Reply, Shield, X } from '../../lib/icons'
 import { withAppletNames, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotError, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_COLOUR_HEX, DEFAULT_BOT_LOOK, normalizeBotLook } from '../../../shared/bots/personal/look'
 import { botMessageFrom, type BotMessageFrom } from '../../../shared/bots/personal/botMessages'
@@ -30,7 +30,7 @@ import { BotCards, galleryPaths } from './BotCards'
 import { BotActivitySticker, BotPresenceLine } from './BotPresence'
 import { askAnswerLine } from '../asks/AskCard'
 import { BotMenu } from './BotMenu'
-import { BotAboutPanel } from './BotAboutPanel'
+import { BotAboutSlide } from './BotAboutPanel'
 import { BotTasksButton } from './BotTasksButton'
 import { BotMemoryDialog } from './BotMemoryDialog'
 import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
@@ -1084,6 +1084,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           <BotPresenceLine bot={bot} typing={typing} offline={offline} />
         </div>
         <BotTasksButton tasks={bot.tasks} />
+        <button type="button" className={`bot-header-panel${aboutOpen ? ' is-open' : ''}`} aria-label={aboutOpen ? 'Hide About' : 'Show About'} title={aboutOpen ? 'Hide About' : 'Show About'} aria-expanded={aboutOpen} onClick={toggleAbout}>
+          {aboutOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
+        </button>
         {/* From the menu, whose item goes as it closes: Escape then gives the focus to the composer. */}
         <BotMenu bot={bot} {...(find.openFind ? { onFind: () => { composerField()?.focus({ preventScroll: true }); find.openFind!() } } : {})} />
       </header>
@@ -1187,7 +1190,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     {file && <BotFilePane botId={bot.id} path={file} onClose={() => setFile(null)} />}
     {paneOpen && browser && <BotBrowserPane bot={bot} view={browser} fullScreen={{ on: fullScreen, toggle: () => setBrowserFull(!fullScreen) }} />}
     {appletOpen && <BotAppletPane botId={bot.id} applet={appletOpen} onClose={() => setAppletOpen(null)} />}
-    {aboutOpen && <BotAboutPanel bot={bot} />}
+    <BotAboutSlide open={aboutOpen} bot={bot} />
     {memoryOpen && <BotMemoryDialog bot={bot} {...(memoryOpen.focus ? { focus: memoryOpen.focus } : {})} />}
   </ImageGalleryProvider></BotFilesProvider>
 }
