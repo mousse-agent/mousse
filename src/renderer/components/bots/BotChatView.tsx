@@ -31,6 +31,7 @@ import { BotActivitySticker, BotPresenceLine } from './BotPresence'
 import { askAnswerLine } from '../asks/AskCard'
 import { BotMenu } from './BotMenu'
 import { BotAboutPanel } from './BotAboutPanel'
+import { BotTasksButton } from './BotTasksButton'
 import { BotMemoryDialog } from './BotMemoryDialog'
 import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
 import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
@@ -870,6 +871,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           <button type="button" className="bot-header-name" tabIndex={-1} aria-hidden onClick={toggleAbout}><h1>{bot.name}</h1></button>
           <BotPresenceLine bot={bot} typing={typing} offline={offline} />
         </div>
+        <BotTasksButton tasks={bot.tasks} />
         {/* From the menu, whose item goes as it closes: Escape then gives the focus to the composer. */}
         <BotMenu bot={bot} {...(find.openFind ? { onFind: () => { composerField()?.focus({ preventScroll: true }); find.openFind!() } } : {})} />
       </header>

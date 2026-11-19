@@ -103,6 +103,7 @@ import { defaultChatInput, defaultWorkLine, lateWorkNote, DEFAULT_NUDGE_AFTER_MI
 import { CARD_SHOWN_TEXT, type BotCard } from '../../../shared/bots/personal/cards'
 import { checkedCard, hasReplyCards, keepMousseCard, keepReplyCard } from '../chat/replyCards'
 import { nudgeSlot, actionNudgeId, type ActionNudgeFollowUp } from './questionFollowUps'
+import { botTaskItems } from './botTasks'
 import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WATCHER_MINUTES, watcherMatchProblem, type WatcherEnd, type WatcherSpec, type WatcherView } from '../watchers'
 import { lockedEnv } from '../../harness/env'
 import { MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER, botMessageInput, botMessageKey, botMessageRowId, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
@@ -315,6 +316,8 @@ export interface BotEngineHost {
   toolList?(threadId: string, runId: string): { count: number; chars: number } | undefined
   /** Archives a thread (#681): a deleted bot's threads, kept 30 days before the purge. */
   archiveThread?(threadId: string): Promise<unknown> | void
+  /** The task list (`create_task`) kept on a thread, oldest first. Absent: no checklist is shown. */
+  threadTasks?(threadId: string): import('../../../shared/types').Task[]
   /**
    * A deleted bot's private temporary folder outside Mousse's data, named after its turns' working folder (`cwd`: its files
    * folder), is removed (Claude Code's commands on Linux). Must not throw.
@@ -911,6 +914,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // The threads it started that still work: it is busy while it manages them.
       launched: (botId) => this.launchedThreads(botId),
       watchers: (botId) => this.watchers.list(botId).map((view) => ({ id: view.id, title: view.title, command: view.command, startedAt: view.startedAt, until: view.until, ...(view.lastLine ? { lastLine: view.lastLine } : {}) })),
+      tasks: (threadIds) => botTaskItems(threadIds, (threadId) => this.host.threadTasks?.(threadId) ?? []),
       // Where each granted MCP server stands now, for About (on, switched off, changed, gone, or MCP off). Before the
       // servers were read since Mousse started, nothing is known: they are read in the background, and About names what
       // it can.
@@ -7672,6 +7676,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const home = this.store.registry(botId)?.homeThreadId
     if (home) creators.add(home)
     return creators.size ? this.host.launchedThreads(creators) : []
+  }
+
+  /** The task list of a bot's thread changed (`create_task`, `update_task`): its summary is read again. Never throws. */
+  threadTasksChanged(threadId: string): void {
+    const bot = this.botOf(threadId)
+    if (bot) this.changed({ botId: bot.botId })
   }
 
   /**
