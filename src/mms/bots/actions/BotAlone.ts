@@ -54,7 +54,9 @@ export class BotAlone {
   private holds(botId: string, entry: Exception): boolean {
     const schedule = this.host.schedule(botId, entry.scheduleId)
     const binding = this.host.binding(botId, entry.serverId, entry.tool)
-    return this.host.enabled() && !!binding && !!schedule && actionDigest(schedule.prompt) === entry.promptDigest && actionDigest(binding) === actionDigest(entry.binding) && actionDigest(entry.place) === entry.placeDigest
+    const intact = entry.arguments?.version === 2 && !!binding && !!schedule && actionDigest(schedule.prompt) === entry.promptDigest && actionDigest(binding) === actionDigest(entry.binding) && actionDigest(entry.place) === entry.placeDigest
+    if (!intact) this.remove(botId, aloneKey(entry))
+    return this.host.enabled() && intact
   }
   prepare(botId: string, activationId: string, request: AloneRequest): string | undefined {
     if (!this.host.enabled()) return 'Asks first is off'
@@ -95,15 +97,14 @@ export class BotAlone {
   match(botId: string, scheduleId: string, serverId: string, tool: string, place: Record<string, unknown> | undefined, args: Record<string, unknown>): string | undefined {
     const key = aloneKey({ scheduleId, serverId, tool })
     const entry = this.read(botId, key)
-    return entry && place && argumentsMatch(entry.arguments, args) && this.holds(botId, entry) && actionDigest(place) === entry.placeDigest ? key : undefined
+    return entry && place && this.holds(botId, entry) && argumentsMatch(entry.arguments, args) && actionDigest(place) === entry.placeDigest ? key : undefined
   }
   items(botId: string): BotPermissionItem[] {
     return this.host.store.all("SELECT key FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'", botId).flatMap(row => {
       const entry = this.read(botId, String(row.key))
-      if (!entry) return []
+      if (!entry || !this.holds(botId, entry)) return []
       return [{ id: String(row.key), title: entry.title, grantedAt: entry.grantedAt,
-        note: this.holds(botId, entry) ? 'Only this automation, this tool and this place. Anything else asks you first.' : 'Send a call from this automation and ask again.',
-        ...(!this.holds(botId, entry) ? { mark: 'Changed' } : {}) }]
+        note: 'Only this automation, this tool and this place. Anything else asks you first.' }]
     })
   }
   clear(botId: string): void {
