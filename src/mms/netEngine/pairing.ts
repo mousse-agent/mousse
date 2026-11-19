@@ -150,6 +150,10 @@ export class EnginePairing {
   joins(): NetEngineLinkJoin[] {
     return [...this.linkJoins.values()].map((running) => ({ ...running }))
   }
+  /** A Send link join for this row is running (it may wait for the code). */
+  linkJoining(node: NodeId): boolean {
+    return [...this.linkJoins.values()].some((running) => running.node === node)
+  }
   /** Its Send link did not finish: the row offers Retry while the ticket is valid, and Remove. */
   linkUnfinished(node: NodeId): boolean {
     return this.unfinished.has(node)
@@ -350,11 +354,11 @@ export class EnginePairing {
         await this.waitOnline(node, engineLimits().pairbackDeadlineMs, () => this.dial(row))
         this.alive()
         const helper = this.helper()
-        // Only this computer's private LAN literals, plus what the owner ticked under "Also share" (§1.3).
+        // Not this computer's tailnet, public or tunnel routes unless the owner ticked them under "Also share"
+        // (§1.3): its private LAN literals (and a debug helper's loopback one), which the other helper decides on.
         const own = Array.isArray(helper.info.routes)
           ? helper.info.routes.filter(
-              (route: unknown): route is string =>
-                typeof route === 'string' && privateRoute(route)
+              (route: unknown): route is string => typeof route === 'string' && !sharedOnlyIfTicked(route)
             )
           : []
         const routes = [...new Set([...own, ...(row.link?.share ?? [])])]
@@ -767,6 +771,19 @@ export class EnginePairing {
     this.port.changed()
   }
 
+  /**
+   * The other computer said its name in `hello` (§5.1): a row still under its placeholder name (a Send link
+   * enrolls with no approval, so no name) takes it. A name the row already has stays.
+   */
+  named(node: NodeId, said: string): void {
+    const row = this.port.peers.serving(node)
+    // Printable text only, trimmed and bounded as a link's name is.
+    const name = said.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 80)
+    if (!row || !name || row.name !== shortName(row.endpoint)) return
+    this.port.peers.update(node, { name })
+    this.port.changed()
+  }
+
   // ---------------------------------------------------------------- connections and recovery
 
   /** A client of a pairing is ready: waiters wake, and a pairing that owes its pairback sends it now. */
@@ -1013,6 +1030,12 @@ export class EnginePairing {
 }
 
 const SERVING = ['consented', 'joined', 'granted', 'awaiting_pairback', 'connected'] as const
+
+/** A route of this computer that pairback sends only when ticked under "Also share" (tailnet, public, tunnel). */
+function sharedOnlyIfTicked(route: string): boolean {
+  const kind = destinationClass(route)
+  return kind !== undefined && kind !== 'lan'
+}
 
 /** A ticket destination Connect approves: dialable (§1.3) and not a private literal, which needs no approval. */
 function linkApprovable(route: string): boolean {

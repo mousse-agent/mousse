@@ -10,7 +10,10 @@ import { readEngineControl } from '../mms/netEngine/limits'
 export const MOUSSE_SCHEME = 'mousse'
 
 /** The IPC a window invokes to take the waiting link, and the event that says one waits. */
-export const PAIR_LINK_IPC = { take: 'netEngine:takePairLink', arrived: 'netEngine:pairLink' } as const
+export const PAIR_LINK_IPC = {
+  take: 'netEngine:takePairLink',
+  arrived: 'netEngine:pairLink'
+} as const
 
 /** Longest link accepted from the OS: a ticket is a few hundred bytes. */
 const PAIR_LINK_MAX_CHARS = 4096

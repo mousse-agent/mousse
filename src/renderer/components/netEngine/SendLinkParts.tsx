@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type FormEvent,
+  type KeyboardEvent
+} from 'react'
 import type {
   NetEngineDestination,
   NetEngineLinkFacts,
@@ -367,11 +374,7 @@ export function CodeEntry({ join }: { join: NetEngineLinkJoin }) {
         </p>
       )}
       <div className="devices-dialog-actions">
-        <button
-          type="submit"
-          className="settings-btn primary"
-          disabled={busy || code.length !== 6}
-        >
+        <button type="submit" className="settings-btn primary" disabled={busy || code.length !== 6}>
           Confirm
         </button>
       </div>

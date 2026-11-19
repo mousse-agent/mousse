@@ -28,6 +28,8 @@ import {
 
 const TAILNET = 'tcp://100.101.7.2:7443'
 const LAN = 'tcp://192.168.1.20:7443'
+const JOINER_LAN = 'tcp://192.168.1.30:7443'
+const JOINER_TAILNET = 'tcp://100.101.7.3:7443'
 
 interface Link {
   invitation: string
@@ -54,12 +56,10 @@ function connect(
   link: string,
   fields: { approved?: string[]; share?: string[] } = {}
 ): Promise<{ node?: NodeId; error?: unknown }> {
-  return joiner
-    .dispatch('netEngine.join', { ticket: link, arrival: 'link', ...fields }, true)
-    .then(
-      (answer: { node: NodeId }) => ({ node: answer.node }),
-      (error: unknown) => ({ error })
-    )
+  return joiner.dispatch('netEngine.join', { ticket: link, arrival: 'link', ...fields }, true).then(
+    (answer: { node: NodeId }) => ({ node: answer.node }),
+    (error: unknown) => ({ error })
+  )
 }
 
 /** Waits until the joiner's helper asks for the code (with `attemptsLeft`, when given). */
@@ -102,6 +102,9 @@ describe('phase1b.link-app', () => {
     // The host listens on a LAN and a tailnet address (a helper says its routes at hello).
     if (!REAL_HELPER) fabric.network.routes.set(fakeIdentity('link-host'), [LAN, TAILNET])
     const host = await fabric.computer('link-host')
+    // The joiner listens on a LAN and a tailnet address too; it shares none it was not asked to.
+    if (!REAL_HELPER)
+      fabric.network.routes.set(fakeIdentity('link-joiner'), [JOINER_LAN, JOINER_TAILNET])
     const joiner = await fabric.computer('link-joiner')
     const link = await sendLink(host)
     await step('no_link', () => {
@@ -142,8 +145,7 @@ describe('phase1b.link-app', () => {
     const approved = (facts.destinations as Array<{ route: string; class: string }>)
       .filter((destination) => destination.class !== 'lan')
       .map((destination) => destination.route)
-    if (!REAL_HELPER)
-      await step('approval_lost', () => expect(approved).toEqual([TAILNET]))
+    if (!REAL_HELPER) await step('approval_lost', () => expect(approved).toEqual([TAILNET]))
 
     const joined = connect(joiner, opened, { approved })
     let askedCode = false
@@ -181,6 +183,18 @@ describe('phase1b.link-app', () => {
       expect(await grants(host, joiner)).toBe(1)
       expect(await grants(joiner, host)).toBe(1)
     })
+    // Pairback carried the joiner's LAN address only: its tailnet one was not ticked under "Also share".
+    if (!REAL_HELPER)
+      await step('route_leak', () => {
+        const sent = fabric.crossed
+          .filter((message) => message.from === joiner.endpoint && message.header.t === 'pairback')
+          .map((message) => message.header.routes)
+        expect(sent).toEqual([[JOINER_LAN]])
+      })
+    // No approval named the joiner: the host's row takes the name its hello says.
+    await step('unnamed', () =>
+      eventually(() => expect(rowFor(host, joiner)?.name).toContain('link-joiner computer'))
+    )
   }, 180_000)
 
   it.skipIf(REAL_HELPER)(
@@ -198,7 +212,11 @@ describe('phase1b.link-app', () => {
         codeNeeded(joiner, swapped.invitation).then(() => ({ asked: true }))
       ])
       await step('swapped_link_trusted', () => expect('asked' in outcome).toBe(true))
-      await typeCode(joiner, swapped.invitation, real.code === swapped.code ? wrong(real.code) : real.code)
+      await typeCode(
+        joiner,
+        swapped.invitation,
+        real.code === swapped.code ? wrong(real.code) : real.code
+      )
       await step('swapped_link_trusted', () =>
         eventually(() => expect(running(joiner, swapped.invitation)?.wrong).toBe(true))
       )
@@ -289,16 +307,25 @@ describe('phase1b.link-app', () => {
       })
       return found!
     })
-    const retried = joiner
-      .dispatch('netEngine.retry', { node }, true)
-      .then(
-        () => ({}),
-        (error: unknown) => ({ error })
-      )
+    const retried = joiner.dispatch('netEngine.retry', { node }, true).then(
+      () => ({}),
+      (error: unknown) => ({ error })
+    )
     await step('attempts_reset', () => codeNeeded(joiner, link.invitation, 2))
     await step('attempts_reset', () => expect(shown(host, link.invitation)?.attemptsLeft).toBe(2))
+    // One more wrong code leaves one try on each side: neither started counting again.
+    await typeCode(joiner, link.invitation, wrong(shown(host, link.invitation)!.code))
+    await step('attempts_reset', () =>
+      eventually(() => {
+        expect(running(joiner, link.invitation)?.attemptsLeft).toBe(1)
+        expect(shown(host, link.invitation)?.attemptsLeft).toBe(1)
+      })
+    )
+    await codeNeeded(joiner, link.invitation, 1)
     await typeCode(joiner, link.invitation, shown(host, link.invitation)!.code)
-    await step('pairing_failed', async () => expect(((await retried) as { error?: unknown }).error).toBeUndefined())
+    await step('pairing_failed', async () =>
+      expect(((await retried) as { error?: unknown }).error).toBeUndefined()
+    )
     await step('one_way_stuck', () => connectedBothWays(host, joiner))
   }, 180_000)
 
@@ -324,7 +351,13 @@ describe('phase1b.link-app', () => {
       /** Whether this computer refuses it before the helper sees it. */
       local?: boolean
     }> = [
-      { name: 'bad base64', make: (uri) => `${uri}!`, reason: ['bad_ticket'], spends: false, local: true },
+      {
+        name: 'bad base64',
+        make: (uri) => `${uri}!`,
+        reason: ['bad_ticket'],
+        spends: false,
+        local: true
+      },
       {
         name: 'bad CBOR',
         make: () => `mousse://pair#${Buffer.from([0xa7, 0x01]).toString('base64url')}`,
@@ -332,23 +365,88 @@ describe('phase1b.link-app', () => {
         spends: false,
         local: true
       },
-      { name: 'kind 2 to 1', make: (uri) => changed(uri, (f) => (f.kind = 1)), reason: ['pairing_failed', 'bad_ticket'], spends: false },
-      { name: 'secret', make: (uri) => changed(uri, (f) => (f.secret = flip(f.secret))), reason: ['invitation_invalid'], spends: false },
-      { name: 'invitation id', make: (uri) => changed(uri, (f) => (f.invitation = flip(f.invitation))), reason: ['invitation_invalid'], spends: false },
-      { name: 'host key', make: (uri) => changed(uri, (f) => (f.host = flip(f.host))), reason: ['no_route', 'unreachable', 'pairing_failed', 'invitation_invalid'], spends: false },
-      { name: 'route hint', make: (uri) => changed(uri, (f) => (f.routes = [...f.routes, 'tcp://192.168.1.99:7000'])), reason: ['pairing_failed'], spends: true },
-      { name: 'expires_at later', make: (uri) => changed(uri, (f) => (f.expiresAt = f.expiresAt + 60)), reason: ['pairing_failed'], spends: true },
-      { name: 'expires_at past', make: (uri) => changed(uri, (f) => (f.expiresAt = now() - 60)), reason: ['expired'], spends: false, local: true }
+      {
+        name: 'kind 2 to 1',
+        make: (uri) => changed(uri, (f) => (f.kind = 1)),
+        reason: ['pairing_failed', 'bad_ticket'],
+        spends: false
+      },
+      {
+        name: 'secret',
+        make: (uri) => changed(uri, (f) => (f.secret = flip(f.secret))),
+        reason: ['invitation_invalid'],
+        spends: false
+      },
+      {
+        name: 'invitation id',
+        make: (uri) => changed(uri, (f) => (f.invitation = flip(f.invitation))),
+        reason: ['invitation_invalid'],
+        spends: false
+      },
+      {
+        name: 'host key',
+        make: (uri) => changed(uri, (f) => (f.host = flip(f.host))),
+        reason: ['bad_ticket', 'no_route', 'unreachable', 'pairing_failed', 'invitation_invalid'],
+        spends: false
+      },
+      {
+        name: 'route hint',
+        make: (uri) => changed(uri, (f) => (f.routes = [...f.routes, 'tcp://192.168.1.99:7000'])),
+        reason: ['pairing_failed'],
+        spends: true
+      },
+      {
+        name: 'expires_at later',
+        make: (uri) => changed(uri, (f) => (f.expiresAt = f.expiresAt + 60)),
+        reason: ['pairing_failed'],
+        spends: true
+      },
+      {
+        name: 'expires_at past',
+        make: (uri) => changed(uri, (f) => (f.expiresAt = now() - 60)),
+        reason: ['expired'],
+        spends: false,
+        local: true
+      }
     ]
     for (const tamper of cases) {
       const link = await sendLink(host)
       const helperJoins = fabric.network.approvedSent.length
-      const result = await connect(joiner, tamper.make(link.uri))
+      const joined = connect(joiner, tamper.make(link.uri))
+      if (tamper.spends) {
+        // The code is asked; even the right one fails, because the changed ticket breaks key confirmation.
+        await step('tamper_accepted', () => codeNeeded(joiner, link.invitation))
+        await typeCode(joiner, link.invitation, shown(host, link.invitation)!.code)
+        const outcome = await Promise.race([
+          joined,
+          eventually(() => expect(running(joiner, link.invitation)?.wrong).toBe(true)).then(() => ({
+            wrong: true
+          }))
+        ])
+        await step('tamper_accepted', () =>
+          expect((outcome as { node?: NodeId }).node, tamper.name).toBeUndefined()
+        )
+        // Give up on the changed link: Remove ends its join.
+        const row = rowFor(joiner, host)
+        if (row) await joiner.dispatch('netEngine.remove', { node: row.localId }, true)
+      }
+      // Refused outright: neither paired nor waiting for a code (or for anything else).
+      const result = tamper.spends
+        ? await joined
+        : await step('tamper_accepted', () =>
+            Promise.race([
+              joined,
+              codeNeeded(joiner, link.invitation).then(() => ({
+                node: 'asked for a code' as NodeId
+              }))
+            ])
+          )
       await step('tamper_accepted', () => {
         expect(result.node, tamper.name).toBeUndefined()
-        expect(tamper.reason, `${tamper.name}: ${reasonOf(result.error)}`).toContain(
-          reasonOf(result.error)
-        )
+        if (!tamper.spends)
+          expect(tamper.reason, `${tamper.name}: ${reasonOf(result.error)}`).toContain(
+            reasonOf(result.error)
+          )
       })
       // Refused before dialling: the helper never saw a join.
       if (tamper.local && !REAL_HELPER)
@@ -357,7 +455,9 @@ describe('phase1b.link-app', () => {
         )
       await step('tamper_accepted', () =>
         eventually(() =>
-          expect(shown(host, link.invitation)?.attemptsLeft, tamper.name).toBe(tamper.spends ? 2 : 3)
+          expect(shown(host, link.invitation)?.attemptsLeft, tamper.name).toBe(
+            tamper.spends ? 2 : 3
+          )
         )
       )
       // The real link is untouched by the changed one (unless a try was spent on it, as the design says).
@@ -387,7 +487,9 @@ describe('phase1b.link-app', () => {
       await step('promoted_without_completion', async () => {
         await eventually(() => {
           const row = rowFor(joiner, host)
-          const device = joiner.mms.netEngine.status().devices.find((item) => item.node === row?.localId)
+          const device = joiner.mms.netEngine
+            .status()
+            .devices.find((item) => item.node === row?.localId)
           expect(device?.unfinished).toBe(true)
         })
         // Settled: nothing moves on later either.
@@ -428,7 +530,9 @@ describe('phase1b.link-app', () => {
       joined = connect(joiner2, link.uri, { approved: [TAILNET] })
       await codeNeeded(joiner2, link.invitation)
       const sentBefore = fabric.network.approvedSent.length
-      await typeCode(joiner2, link.invitation, shown(host2, link.invitation)!.code).catch(() => undefined)
+      await typeCode(joiner2, link.invitation, shown(host2, link.invitation)!.code).catch(
+        () => undefined
+      )
       await joined
       await step('pending_after_done', () => connectedBothWays(host2, joiner2))
       await step('approval_lost', () => {
@@ -473,7 +577,7 @@ describe('phase1b.link-app', () => {
   )
 
   it.skipIf(REAL_HELPER)(
-    'a Send link between computers added over SSH converts both rows only on the ticket\'s PAIRED',
+    "a Send link between computers added over SSH converts both rows only on the ticket's PAIRED",
     async () => {
       const a = await fabric.computer('convert-a'),
         b = await fabric.computer('convert-b')
@@ -500,7 +604,6 @@ describe('phase1b.link-app', () => {
     },
     120_000
   )
-
 })
 
 /** The identity the fake helper of the computer `name` has. */

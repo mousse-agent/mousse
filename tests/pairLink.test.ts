@@ -17,7 +17,11 @@ describe('pairLinkFrom', () => {
   it.each([
     ['the link after the program and its flags', ['Mousse.exe', '--hidden', LINK], LINK],
     ['an upper-case scheme', ['Mousse', 'MOUSSE://pair#AAAA'], 'MOUSSE://pair#AAAA'],
-    ['a link with a name query', ['Mousse', 'mousse://pair?n=Studio#AAAA'], 'mousse://pair?n=Studio#AAAA'],
+    [
+      'a link with a name query',
+      ['Mousse', 'mousse://pair?n=Studio#AAAA'],
+      'mousse://pair?n=Studio#AAAA'
+    ],
     ['no link', ['Mousse.exe', '--hidden'], undefined],
     ['another mousse:// path', ['Mousse', 'mousse://settings#x'], undefined],
     ['a link without a ticket', ['Mousse', 'mousse://pair'], undefined],
@@ -33,7 +37,12 @@ describe('shouldRegisterMousseScheme', () => {
     ['a packaged build', true, {}, true],
     ['a packaged build a check started', true, { MOUSSE_CHECK: '1' }, false],
     ['a dev build', false, {}, false],
-    ['a dev build under the control', false, { MOUSSE_NET_ENGINE_CONTROL: 'link-scheme-registered' }, true]
+    [
+      'a dev build under the control',
+      false,
+      { MOUSSE_NET_ENGINE_CONTROL: 'link-scheme-registered' },
+      true
+    ]
   ] as const)('%s', (_name, packaged, env, registers) => {
     expect(shouldRegisterMousseScheme({ packaged, env: { ...env } })).toBe(registers)
   })

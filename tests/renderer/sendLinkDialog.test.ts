@@ -13,8 +13,10 @@ import type { NetEngineDevice, NetEngineStatus } from '../../src/shared/netEngin
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const { EngineDevicesSection } = await import('../../src/renderer/components/netEngine/EngineDevicesSection')
-const { AddEngineDeviceDialog } = await import('../../src/renderer/components/netEngine/AddEngineDeviceDialog')
+const { EngineDevicesSection } =
+  await import('../../src/renderer/components/netEngine/EngineDevicesSection')
+const { AddEngineDeviceDialog } =
+  await import('../../src/renderer/components/netEngine/AddEngineDeviceDialog')
 const { PairLinkHost } = await import('../../src/renderer/components/netEngine/PairLinkHost')
 const { engineRow } = await import('../../src/renderer/components/netEngine/engineRows')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
@@ -103,7 +105,8 @@ function daemon(initial: Partial<NetEngineStatus> = {}, options: { damaged?: boo
   }
   return {
     state,
-    called: (method: string) => calls.filter(([name]) => name === method).map(([, params]) => params),
+    called: (method: string) =>
+      calls.filter(([name]) => name === method).map(([, params]) => params),
     /** Main says a `mousse://` link arrived. */
     arrive: async (link: string) => {
       pairLink.waiting = link
@@ -311,12 +314,7 @@ describe('a Send link that did not finish (§5.4)', () => {
 
 describe('a mousse:// link that opened Mousse (§5.2)', () => {
   const both = () =>
-    createElement(
-      Fragment,
-      null,
-      createElement(PairLinkHost),
-      createElement(EngineDevicesSection)
-    )
+    createElement(Fragment, null, createElement(PairLinkHost), createElement(EngineDevicesSection))
 
   it('opens Enter link with it in Settings → Devices', async () => {
     const d = daemon()

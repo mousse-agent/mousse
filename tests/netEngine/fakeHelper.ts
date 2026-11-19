@@ -411,6 +411,7 @@ export class FakeHelper {
       hash: string
       /** The app passed `pinned` (a Send link join never should). */
       pinned: boolean
+      changed: boolean
     }
   >()
 
@@ -675,17 +676,18 @@ export class FakeHelper {
       return false
     }
     if (this.network.defects.has('host-attempts-reset-on-reconnect')) invite.attemptsLeft = 3
-    if (invite.hash !== hash) {
-      // A route hint or expires_at changed: the hash differs, CPace fails, one try spent on each side.
-      this.spend(host, invite, record)
-      reply({ error: 'pairing_failed', reason: 'key confirmation failed' })
-      return false
-    }
     if (this.network.defects.has('skip-code-confirm')) {
       this.linkPaired(host, invite, record, reply)
       return false
     }
-    this.codeWaits.set(invite.invitation, { reply, invite, hash, pinned: message.pinned === true })
+    this.codeWaits.set(invite.invitation, {
+      reply,
+      invite,
+      hash,
+      pinned: message.pinned === true,
+      // A route hint or expires_at changed: the hash differs, so key confirmation fails whatever code is typed.
+      changed: invite.hash !== hash
+    })
     this.event({
       ev: 'join.code_needed',
       invitation: invite.invitation,
@@ -708,7 +710,7 @@ export class FakeHelper {
     const record = this.network.flowsOf(this).get(waiting.hash)!
     this.codeWaits.delete(invitation)
     if (!host?.alive) return waiting.reply({ error: 'no_route', reason: 'the host went away' })
-    if (code === waiting.invite.code)
+    if (code === waiting.invite.code && !waiting.changed)
       return this.linkPaired(host, waiting.invite, record, waiting.reply)
     // A pinned join trusted as journaled (the defect): a failed key confirmation ends as "already paired".
     if (waiting.pinned && this.network.defects.has('journal-pins-link'))

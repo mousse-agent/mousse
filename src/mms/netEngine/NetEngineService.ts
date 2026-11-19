@@ -383,7 +383,10 @@ export class NetEngineService implements EngineDirectoryPort {
                 : online || serving
                   ? 'connecting'
                   : 'offline'
-        const stuck = held(`${node} finishing`, state === 'finishing') >= stuckMs
+        // A Send link join waiting for its code is a person's wait, not a stuck pairing.
+        const stuck =
+          held(`${node} finishing`, state === 'finishing' && !started.pairing.linkJoining(node)) >=
+          stuckMs
         // One direction down for the bound while the other works.
         const paired = row.state === 'connected'
         const outDown = held(`${node} out`, paired && !online) >= stuckMs
@@ -500,7 +503,8 @@ export class NetEngineService implements EngineDirectoryPort {
           append: (...args) => bridge().artifacts.append(...args)
         },
         name: () => this.selfName(),
-        pairback: (caller, request) => pairing.pairback(caller, request)
+        pairback: (caller, request) => pairing.pairback(caller, request),
+        calledBy: (caller, name) => pairing.named(caller.node, name)
       },
       client: {
         get store() {
