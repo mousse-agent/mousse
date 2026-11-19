@@ -1,4 +1,5 @@
 import { createHmac, randomBytes } from 'node:crypto'
+import { isIP } from 'node:net'
 const PLACE_NAMES = new Set('folder folderid parent parentid path dir directory channel channelid repo repository owner project projectid calendar calendarid list listid board to recipient recipients email space spaceid database databaseid drive driveid cc bcc from sender replyto url uri link webhook endpoint host domain account accountid address destination target remote branch'.split(' '))
 const normalizedKey = (key: string): string => key.toLowerCase().replace(/[_-]/g, '')
 const FREE_CONTENT = new Set(['body', 'subject', 'text', 'content'])
@@ -10,7 +11,10 @@ const normalizedText = (value: string): string => value.normalize('NFKC').replac
 /** Bounded labels keep long punctuation-free attachments linear. Keep URL punctuation inside its token. */
 function addressTokens(value: string): string[] {
   const text = normalizedText(value).replace(/[。｡]/g, '.').replace(/\s+/gu, ' ').replace(/ +\. +/gu, '.').replace(/ +([.:])/gu, '$1').replace(/ ?([@/\\]) ?/gu, '$1')
-  return [...new Set(text.split(' ').filter(token => /[:@\\]|[\p{L}\p{N}_-]{1,63}\.[\p{L}\p{N}_-]{1,63}/iu.test(token)))]
+  return [...new Set(text.split(' ').map(token => {
+    const unwrapped = token.replace(/^[([{'"<]+/u, '').replace(/[.,!?;)\]}'">]+$/u, '')
+    return unwrapped.endsWith(':') && isIP(unwrapped) === 6 ? unwrapped : unwrapped.replace(/:+$/u, '')
+  }).filter(token => /[:@\\]|[\p{L}\p{N}_-]{1,63}\.[\p{L}\p{N}_-]{1,63}/iu.test(token)))]
 }
 function filenameExtension(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
