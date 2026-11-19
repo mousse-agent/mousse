@@ -24,7 +24,7 @@ import type { BotDeviceAccessStore } from '../definitions/BotDeviceAccessStore'
 import { botDeviceAccessProblem, type BotDeviceAccess } from '../../../shared/bots/personal/deviceAccess'
 import { lateAnsweringLine, plainChoices, type BotQuestionLateAnswer, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { grantedPermissions, permissionId, starterManifest, withoutPermission } from './projection'
-import { turnTimingBegin, turnTimingForget } from '../../diagnostics/turnTiming'
+import { turnTimingBegin, turnTimingBotMark, turnTimingForget } from '../../diagnostics/turnTiming'
 
 /**
  * The Bot UI's daemon side (Bot Phase 1 §5.3, §5.11): create a bot from a look and a sentence,
@@ -615,6 +615,8 @@ export class BotChatService {
   private async send(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode; node?: string } }, tap?: { questionId: string; choice: string }): Promise<{ message: BotChatMessage }> {
     turnTimingBegin(input.botId)
     const definition = this.engine.definitionOf(input.botId)
+    // The turn's internet check starts beside the work below, so it is ready when the turn is sent.
+    if (!tap) this.engine.prefetchChatChecks(input.botId)
     const text = input.text.trim()
     if (!text && !input.attachments?.length) throw new BotEngineError('invalid_params', 'The message is empty.')
     const existing = this.store.messageByRequest(input.clientRequestId)
@@ -707,6 +709,7 @@ export class BotChatService {
       this.engine.journalFailedFor(input.botId)
       throw new BotEngineError('bot_journal_failed', 'I can\'t save my work. Free some disk space.')
     }
+    turnTimingBotMark(input.botId, 'saved')
     // The bubbles of the questions it answered or moved past show it, in every window.
     for (const question of touched) for (const row of this.store.messagesForQuestion(question.id)) if (row.author === 'bot') this.engine.chat.republish(row.id)
     const message = this.engine.chat.toMessage(this.store.message(messageId)!)

@@ -22,7 +22,7 @@ import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
 import { startTurnMeter } from './turnUsage'
-import { turnTimingBind } from '../../diagnostics/turnTiming'
+import { turnTimingBind, turnTimingBotMark } from '../../diagnostics/turnTiming'
 import { chatEpochEnd, contextBudget, type BotChatDigestState, type BotChatEpoch, type BotChatEpochVerdict } from '../memory/contextBudget'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
 import { createHash, randomUUID } from 'node:crypto'
@@ -466,6 +466,8 @@ const REPLY_WAIT_MS = 5_000
  * reaches the bot as one input.
  */
 export const NOTICE_SETTLE_MS = 4_000
+/** How long an internet check started as the owner wrote (`prefetchChatChecks`) answers their turn's own: as long as a check's round is kept (`PROBE_CACHE_MS`). */
+export const CHAT_CHECK_KEPT_MS = 5_000
 /** The longest the oldest notice waits while more keep arriving. */
 export const NOTICE_SETTLE_MAX_MS = 30_000
 /** Most characters of notices one turn takes in, whole notices oldest first; the rest start the next turn at once. */
@@ -863,6 +865,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly wrapUps = new Set<string>()
   /** Each bot's next look at notices that wait to settle (`nextChat`). */
   private readonly settleTimers = new Map<string, { clear(): void }>()
+  /** Per bot, the internet check started as its owner wrote (`prefetchChatChecks`), until a chat turn's first check takes it. */
+  private readonly chatChecks = new Map<string, { instanceId: string; at: number; online: Promise<boolean> }>()
   /**
    * Notice classes of a bot (`<botId>:<class>`) whose last batch was cut at `NOTICE_BATCH_MAX_CHARS`: what stayed queued
    * starts at once. In memory only: after a restart it settles from when it was queued.
@@ -1587,6 +1591,25 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return undefined
   }
 
+  /**
+   * The owner wrote: the internet check their turn makes before it is sent (`onlineBeforeSend`) starts now, on the entry
+   * Talk last ran on, beside saving the message, resolving the model and reading the context. The turn's first check
+   * takes this round when it is on that entry and under `CHAT_CHECK_KEPT_MS` old, as it would take a round the check
+   * kept; anything else checks as before, and an offline answer is still confirmed by a fresh round.
+   */
+  prefetchChatChecks(botId: string): void {
+    const connectivity = this.host.connectivity
+    if (!connectivity) return
+    try {
+      const model = this.store.registry(botId)?.model
+      const { slot } = turnModelOf(this.published(botId).main, { lane: 'chat', trigger: { kind: 'manual', input: '' } })
+      const instanceId = model?.rows?.[slot]?.instanceId ?? model?.selection.instanceId
+      if (instanceId) this.chatChecks.set(botId, { instanceId, at: this.monotonic(), online: connectivity.online({ instanceId }).catch(() => false) })
+    } catch {
+      // Only a head start: the turn checks as it always does.
+    }
+  }
+
   /** After `queueChatInTx`'s commit: the chat lane starts what waits. */
   async startQueuedChat(botId: string, activationId: string): Promise<void> {
     await this.pump(botId)
@@ -2274,6 +2297,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         rmSync(scratch, { recursive: true, force: true })
         return
       }
+      timingMark(row, 'written')
       await this.sendDispatch(this.store.activation(row.id)!, this.store.dispatch(row.id, 1)!)
     } catch (error) {
       const reason = error instanceof BotEngineError ? error.code : 'bot_start_failed'
@@ -2373,6 +2397,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return true
       })
       if (!saved) return false
+      timingMark(row, 'model')
     }
     // Read at each main dispatch: the provider freezes the pack per activation, and a memory save or forget drops it.
     if (this.host.context) {
@@ -2407,6 +2432,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         else this.failActivation(row, 'bot_context_failed')
         return false
       }
+      timingMark(row, 'context')
     }
     return true
   }
@@ -2920,12 +2946,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // A dispatch resent after a restart: its model and pack are made again before it is prepared.
     if (row && dispatch && row.status === 'running' && dispatch.startedAt === null) await this.ready(row, dispatch).catch(() => false)
     const current = this.store.activation(payload.activationId)
+    if (current) timingMark(current, 'refreshStart')
     const selection = current?.selection
-    if (selection) await this.refreshInstance(selection.instanceId)
     // A turn of a bot that holds MCP tools reads the owner's servers first when the listing is cold, old or changed
     // (bounded, at most `BOT_MCP_WARM_MS`; a warm one returns at once), so work is offered the granted tools. A bot with
-    // no MCP permission starts and lists nothing: it reads the servers only when it calls `mcp_servers`.
-    if (this.host.mcp && current && (this.store.activeGrant(current.botId)?.manifest.mcp.length ?? 0) > 0) await this.host.mcp.warm()
+    // no MCP permission starts and lists nothing: it reads the servers only when it calls `mcp_servers`. The two reads
+    // are independent, so they run side by side.
+    const mcp = this.host.mcp && current && (this.store.activeGrant(current.botId)?.manifest.mcp.length ?? 0) > 0 ? this.host.mcp : undefined
+    await Promise.all([
+      selection ? this.refreshInstance(selection.instanceId).then(() => { if (current) timingMark(current, 'providerRefresh') }) : undefined,
+      mcp ? mcp.warm().then(() => { if (current) timingMark(current, 'mcpWarm') }) : undefined
+    ])
   }
 
   prepare(payload: BotTurnPayload): PreparedBotTurn | { refused: string; code: string } {
@@ -4085,6 +4116,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private async online(row: BotActivationRow, options: { fresh?: boolean } = {}): Promise<boolean> {
     const connectivity = this.host.connectivity
     if (!connectivity) return true
+    const early = row.lane === 'chat' && !options.fresh ? this.chatChecks.get(row.botId) : undefined
+    if (early) {
+      this.chatChecks.delete(row.botId)
+      if (early.instanceId === row.selection?.instanceId && this.monotonic() - early.at < CHAT_CHECK_KEPT_MS) return early.online
+    }
     try {
       return await connectivity.online({ ...(row.selection ? { instanceId: row.selection.instanceId } : {}), ...(options.fresh ? { fresh: true } : {}) })
     } catch {
@@ -6041,6 +6077,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const online = await this.onlineBeforeSend(current)
         current = this.store.activation(row.id) ?? current
         if (current.status !== 'running') return
+        timingMark(row, 'online')
         if (!online) return this.awaitInternet(current)
         if (current.offline) {
           this.clearInternetCheck(row.id)
@@ -6068,6 +6105,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (sent.status !== 'accepted') throw new BotEngineError('bot_dispatch_refused', `The bot's run was refused (${sent.reason}).`)
       this.store.setDispatchRun(row.id, dispatch.n, sent.runId)
       this.host.notifyEffects()
+      timingMark(row, 'sent')
     }
   }
 
@@ -10798,4 +10836,9 @@ function scheduledDueTime(at: string, now: number): string {
   const due = new Date(at)
   const day = due.toDateString() === new Date(now).toDateString() ? '' : `${due.toLocaleDateString('en-US', { weekday: 'short' })} `
   return `${day}${clockTime(at)}`
+}
+
+/** A step of a chat turn before its dispatch knows its thread (`turnTiming`): a run's steps are not the chat's. */
+function timingMark(row: Pick<BotActivationRow, 'lane' | 'botId'>, label: string): void {
+  if (row.lane === 'chat') turnTimingBotMark(row.botId, label)
 }
