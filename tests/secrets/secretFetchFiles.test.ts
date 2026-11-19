@@ -124,8 +124,11 @@ it('checks the opened file before writing and removes it while it is still empty
 
 it('keeps a close failure local and releases the parent handle', async () => {
   const f = fixture(), opened = new Set<number>()
-  hooks.afterOpen = (_path, fd) => { opened.add(fd) }
+  hooks.afterOpen = (path, fd) => {
+    if (path === join(f.scratch, 'fetches') || String(path).startsWith('/proc/self/fd/')) opened.add(fd)
+  }
   hooks.afterClose = fd => {
+    if (!opened.has(fd)) return
     opened.delete(fd)
     hooks.afterClose = next => { opened.delete(next) }
     throw new Error('private close diagnostic')
