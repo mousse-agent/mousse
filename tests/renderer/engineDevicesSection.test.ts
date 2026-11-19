@@ -270,4 +270,19 @@ describe('Add device', () => {
     expect(d.called('netEngine.join')).toEqual([{ ticket: link }])
     expect(onClose).toHaveBeenCalled()
   })
+
+  it('reads camera frames as often as the daemon says (the engine limit scanIntervalMs)', async () => {
+    const d = daemon({ scanIntervalMs: 75 })
+    const every = vi.spyOn(globalThis, 'setInterval')
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null)
+    const stream = { getTracks: () => [] } as unknown as MediaStream
+    try {
+      await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined, initial: 'scan', camera: async () => stream }))
+      await act(async () => undefined)
+      expect(every.mock.calls.map(([, ms]) => ms)).toContain(75)
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
 })

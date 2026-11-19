@@ -17,6 +17,12 @@ export const NET_ENGINE_LOCAL_METHODS = [
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
 
+/**
+ * The default of the engine limit `scanIntervalMs` (`MOUSSE_NET_ENGINE_SCAN_INTERVAL_MS`). A window uses the value in
+ * the daemon's status; this only until the status arrives.
+ */
+export const DEFAULT_SCAN_INTERVAL_MS = 200
+
 /** Where one paired computer is, as its row in Settings → Devices reads (design §5.2). */
 export type NetEngineDeviceState =
   /** Both directions work. */
@@ -85,4 +91,6 @@ export interface NetEngineStatus {
   routes?: string[]
   /** Another profile under this OS account has the new networking on too, so they can read each other's keys. */
   sharedAccount?: boolean
+  /** How often Add device reads a camera frame for a pairing code (the engine limit `scanIntervalMs`). */
+  scanIntervalMs?: number
 }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import jsQR from 'jsqr'
-import type { NetEngineStatus } from '../../../shared/netEngine/local'
+import { DEFAULT_SCAN_INTERVAL_MS, type NetEngineStatus } from '../../../shared/netEngine/local'
 import { qrSvgPath } from '../../lib/plusQr'
 import { CopyButton } from '../settings/IconButtons'
 import { Modal } from '../ui/Modal'
@@ -162,7 +162,13 @@ export function AddEngineDeviceDialog({
             !error && <p className="settings-muted">Making a code…</p>
           ))}
 
-        {step.kind === 'scan' && <Scanner camera={camera} onText={read} />}
+        {step.kind === 'scan' && (
+          <Scanner
+            camera={camera}
+            everyMs={status?.scanIntervalMs ?? DEFAULT_SCAN_INTERVAL_MS}
+            onText={read}
+          />
+        )}
 
         {step.kind === 'confirm' && (
           <div className="engine-confirm">
@@ -232,15 +238,15 @@ async function defaultCamera(): Promise<MediaStream | undefined> {
   }
 }
 
-/** How often a camera frame is read for a code. */
-const SCAN_EVERY_MS = 200
-
 /** Scan: the camera's frames are read for a pairing code; without a camera, the other computer scans instead. */
 function Scanner({
   camera,
+  everyMs,
   onText
 }: {
   camera: () => Promise<MediaStream | undefined>
+  /** How often a camera frame is read for a code (the engine limit `scanIntervalMs`). */
+  everyMs: number
   onText: (text: string) => boolean
 }) {
   const video = useRef<HTMLVideoElement>(null)
@@ -280,14 +286,14 @@ function Scanner({
           inversionAttempts: 'dontInvert'
         })
         if (code?.data && onTextRef.current(code.data) && timer) clearInterval(timer)
-      }, SCAN_EVERY_MS)
+      }, everyMs)
     })
     return () => {
       stopped = true
       if (timer) clearInterval(timer)
       stream?.getTracks().forEach((track) => track.stop())
     }
-  }, [camera])
+  }, [camera, everyMs])
 
   const paste = (event: FormEvent) => {
     event.preventDefault()

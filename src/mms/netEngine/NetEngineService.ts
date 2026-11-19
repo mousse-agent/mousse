@@ -210,7 +210,8 @@ export class NetEngineService implements EngineDirectoryPort {
       devices: this.devices(),
       approvals: this.started?.pairing.pendingApprovals() ?? [],
       ...(this.routes().length ? { routes: this.routes() } : {}),
-      ...(this.sharedAccount() ? { sharedAccount: true } : {})
+      ...(this.sharedAccount() ? { sharedAccount: true } : {}),
+      scanIntervalMs: engineLimits().scanIntervalMs
     }
   }
 

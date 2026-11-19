@@ -1,4 +1,5 @@
 import { BLOB_CHUNK_BYTES, DEFAULT_MAX_BLOB_BYTES, MAX_FRAME_BYTES } from '../../shared/net/limits'
+import { DEFAULT_SCAN_INTERVAL_MS } from '../../shared/netEngine/local'
 
 /**
  * Every limit of the network engine: a named default here, each overridable by one environment variable. The
@@ -131,7 +132,7 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   helperFastExits: 3,
   helperShutdownGraceMs: 3_000,
   helperStderrMaxBytes: 4096,
-  scanIntervalMs: 200,
+  scanIntervalMs: DEFAULT_SCAN_INTERVAL_MS,
   helperLockWaitMs: 5_000,
   helperInitDeadlineMs: 60_000,
   joinDeadlineMs: 15 * 60_000,
