@@ -3021,7 +3021,8 @@
    "memory_search",
    "memory_read",
    "memory_save",
-   "item_save"
+   "item_save",
+   "item_list"
   ],
   "pi": [
    "thread_read:read",
@@ -3044,7 +3045,8 @@
    "memory_search:read",
    "memory_read:read",
    "memory_save:read",
-   "item_save:read"
+   "item_save:read",
+   "item_list:read"
   ],
   "userMcp": [],
   "usable": [
@@ -3065,7 +3067,8 @@
    "memory_search",
    "memory_read",
    "memory_save",
-   "item_save"
+   "item_save",
+   "item_list"
   ],
   "dispatch": {
    "delegate_task": "lacks not_granted: This bot is not allowed to use delegate_task.",

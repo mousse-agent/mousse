@@ -130,7 +130,8 @@ export function botItemTools(source: BotMemoryToolHost | (() => BotMemoryToolHos
         ...(!result.added && !str(args.id) ? { note: 'That item is already on your list.' } : {})
       })
     }),
-    tool('item_list', false, () => 'Check the list', (args, activation, store) => {
+    // And so is the list: a status answer reads it first.
+    tool('item_list', true, () => 'Check the list', (args, activation, store) => {
       const state = str(args.state)
       if (state && !LIST_STATES.includes(state)) return error(`state is one of ${LIST_STATES.join(', ')}.`)
       const listing = listBotItems(store, activation.botId, {

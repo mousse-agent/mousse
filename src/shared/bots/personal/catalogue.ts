@@ -26,8 +26,9 @@ export const BOT_USE_TOOL = 'use_tool'
  */
 export const BOT_CORE_TOOLS: readonly string[] = [
   'memory_save', 'memory_search', 'memory_read',
-  // The open items: an ask is listed in the turn it is made, so the tool is never a lookup away.
-  'item_save',
+  // The open items: an ask is listed in the turn it is made and a status answer reads the list first, so neither tool
+  // is a lookup away.
+  'item_save', 'item_list',
   'work_start', 'work_note', 'work_list',
   'remind', 'wake',
   'escalate', 'ask_owner',
@@ -94,7 +95,7 @@ const YOU_GUIDANCE = [
   'set_profile changes your name or description, when your owner asks.'
 ].join('\n')
 
-const MEMORY_GUIDANCE = 'memory_list lists your saved entries; memory_forget removes one the owner wants gone, or that is wrong and has no replacement (replace a wrong one with memory_save instead). item_list shows your items as they stand now: the open ones, or with state closed or all the finished and dropped ones, and query finds one by its words.'
+const MEMORY_GUIDANCE = 'memory_list lists your saved entries; memory_forget removes one the owner wants gone, or that is wrong and has no replacement (replace a wrong one with memory_save instead).'
 
 const SHOWING_GUIDANCE = [
   'When a chart, a comparison, a calculator or a small dashboard says more than words, publish an applet with publish_applet beside a short answer: it shows under your message. Simple answers stay words.',
@@ -162,7 +163,7 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
     guidance: COMMANDS_GUIDANCE
   },
   { id: 'you', line: 'how much time you take, your model, your name and description', tools: ['set_depth', 'use_model', 'set_profile'], guidance: YOU_GUIDANCE },
-  { id: 'memory', line: 'list or forget memory entries, list your items', tools: ['memory_list', 'memory_forget', 'item_list'], guidance: MEMORY_GUIDANCE },
+  { id: 'memory', line: 'list or forget memory entries', tools: ['memory_list', 'memory_forget'], guidance: MEMORY_GUIDANCE },
   { id: 'showing', line: 'applets and pictures under your message', tools: ['publish_applet', 'make_image'], guidance: SHOWING_GUIDANCE },
   { id: 'bots', line: "your owner's other bots", tools: [BOT_LIST_TOOL, BOT_SEND_TOOL], guidance: BOTS_GUIDANCE },
   {

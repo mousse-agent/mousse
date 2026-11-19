@@ -318,6 +318,8 @@ describe('asks the bot did not list itself', () => {
   it.each([
     ['at the end', 'Headline: H\nKey facts:\n- none\nUntracked asks:\n- Ship it (j12)\n- none', 'Headline: H\nKey facts:\n- none', [{ text: 'Ship it', seq: 12 }]],
     ['in the middle', 'Headline: H\nUntracked asks:\n- Ship it (j12, j14).\nKey facts:\n- a fact (j3)', 'Headline: H\nKey facts:\n- a fact (j3)', [{ text: 'Ship it', seq: 12 }]],
+    // The first ref is the message that asked, however the model joins the later ones.
+    ['with its refs joined in words', 'Headline: H\nKey facts:\n- none\nUntracked asks:\n- Find why the nightly is slow (j13 and j16)', 'Headline: H\nKey facts:\n- none', [{ text: 'Find why the nightly is slow', seq: 13 }]],
     ['absent', 'Headline: H\nKey facts:\n- a fact (j3)', 'Headline: H\nKey facts:\n- a fact (j3)', []],
     ['with nothing', 'Headline: H\nKey facts:\n- none\nUntracked asks:\n- none', 'Headline: H\nKey facts:\n- none', []]
   ])('reads the untracked asks of a digest answer: %s', (_name, answer, kept, asks) => {

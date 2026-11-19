@@ -207,7 +207,7 @@ export const DIGEST_SYSTEM = "You write a digest of part of a chat between a per
 export function digestPrompt(input: { transcript: string; carried: readonly string[]; from: string; to: string; tracked?: readonly string[] }): string {
   const untracked = input.tracked === undefined ? [] : [
     `${UNTRACKED_HEADING}:`,
-    '- after the digest, each thing the owner asked for or the bot promised in this chat that is still open at its end and is not among the open items below: one short line saying what, ending with the ref of the message it comes from, like (j123). Leave out what was finished, dropped or is already listed. Never guess: "- none" when there is nothing.'
+    '- after the digest, each thing the owner asked for or the bot promised in this chat that is still open at its end and is not among the open items below: one short line saying what was asked or promised, ending with the ref of the message that asked or promised it, like (j123). The list below is the only record of what is listed: the bot saying it listed or noted something does not count. Leave out what was finished or dropped. Never guess: "- none" when there is nothing.'
   ]
   return [
     `Write a digest of the chat below (${input.from} to ${input.to}). Use exactly these headings, in this order:`,
@@ -255,7 +255,8 @@ export function untrackedAsks(answer: string): { digest: string; asks: Array<{ t
       kept.push(line)
       continue
     }
-    const item = /^\s*-\s*(.+?)\s*\(\s*j(\d{1,15})\s*(?:[,–-][^)]*)?\)\s*\.?\s*$/.exec(line)
+    // The first ref a line ends with is the message that asked: "(j13)", "(j13, j16)", "(j13 and j16)".
+    const item = /^\s*-\s*(.+?)\s*\(\s*j(\d{1,15})\b[^)]*\)\s*\.?\s*$/.exec(line)
     const text = item?.[1]?.trim().replace(/\s+/g, ' ')
     if (item && text) asks.push({ text, seq: Number(item[2]) })
   }
