@@ -1,3 +1,4 @@
+import { secretFetchTestAddress } from './secretFetchTestAddress'
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
 import * as http from 'node:http'
@@ -28,31 +29,45 @@ export function isPublicAddress(address: string): boolean {
 class ConnectionFailure extends Error {}
 
 /** One resolution and pinned connections, with no ambient agent, redirects, cookies or credentials. */
-export async function publicFetch(value: string): Promise<PublicResponse> {
+export interface PublicFetchOptions {
+  method?: 'GET' | 'HEAD'
+  headers?: Record<string, string>
+  /** Authenticated service reads return all statuses, with a 30s / 5 MiB limit. */
+  secretRead?: boolean
+  signal?: AbortSignal
+}
+export async function publicFetch(value: string, options: PublicFetchOptions = {}): Promise<PublicResponse> {
   const url = publicUrl(value)
   const hostname = url.hostname.replace(/^\[|\]$/g, '')
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(new Error('The page took more than 15 seconds.')), 15_000)
+  const timeout = options.secretRead ? 30_000 : 15_000
+  const limit = options.secretRead ? 5 * 1024 * 1024 : 2 * 1024 * 1024
+  const abort = () => controller.abort(new Error('The request stopped.'))
+  options.signal?.addEventListener('abort', abort, { once: true })
+  if (options.signal?.aborted) abort()
+  const timer = setTimeout(() => controller.abort(new Error(options.secretRead ? 'The request took more than 30 seconds.' : 'The page took more than 15 seconds.')), timeout)
   try {
+    if (controller.signal.aborted) throw controller.signal.reason
     const aborted = new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true }))
-    const addresses = await Promise.race([isIP(hostname) ? Promise.resolve([{ address: hostname, family: isIP(hostname) }]) : lookup(hostname, { all: true }), aborted])
-    if (!addresses.length || addresses.some(({ address }) => !isPublicAddress(address))) throw new Error('The page must resolve only to public addresses.')
+    const trialAddress = options.secretRead ? secretFetchTestAddress(hostname) : undefined
+    const addresses = await Promise.race([trialAddress ? Promise.resolve([trialAddress]) : isIP(hostname) ? Promise.resolve([{ address: hostname, family: isIP(hostname) }]) : lookup(hostname, { all: true }), aborted])
+    if (!addresses.length || addresses.some(({ address }) => !isPublicAddress(address) && address !== trialAddress?.address)) throw new Error('The page must resolve only to public addresses.')
     let lastError: unknown
     for (const pinned of addresses) {
       if (controller.signal.aborted) throw controller.signal.reason
-      if (!isPublicAddress(pinned.address)) throw new Error('The page must resolve only to public addresses.')
+      if (!isPublicAddress(pinned.address) && pinned.address !== trialAddress?.address) throw new Error('The page must resolve only to public addresses.')
       try { return await new Promise<PublicResponse>((resolve, reject) => {
       let responded = false
       const req = (url.protocol === 'https:' ? https : http).request({
         protocol: url.protocol, hostname, port: url.port || undefined, path: url.pathname + url.search,
-        method: 'GET', agent: false, family: pinned.family, servername: isIP(hostname) ? undefined : hostname,
-        headers: { host: url.host, 'user-agent': 'Mousse', accept: 'text/html, text/plain' },
+        method: options.method ?? 'GET', agent: false, family: pinned.family, servername: isIP(hostname) ? undefined : hostname,
+        headers: { host: url.host, 'user-agent': 'Mousse', accept: options.secretRead ? 'application/json, text/plain;q=0.9, */*;q=0.8' : 'text/html, text/plain', ...options.headers },
         signal: controller.signal,
         lookup: (_host, _options, callback) => callback(null, pinned.address, pinned.family)
       }, res => {
         responded = true
         const status = res.statusCode ?? 0
-        if (status < 200 || status >= 300) {
+        if (!options.secretRead && (status < 200 || status >= 300)) {
           let reason = `The page returned HTTP ${status}.`
           if (status >= 300 && status < 400 && res.headers.location) {
             try { reason = `it moved to ${new URL(res.headers.location, url).host}` } catch { reason = 'The page returned an invalid redirect.' }
@@ -62,7 +77,7 @@ export async function publicFetch(value: string): Promise<PublicResponse> {
         const chunks: Buffer[] = []; let size = 0
         res.on('data', (chunk: Buffer) => {
           size += chunk.length
-          if (size > 2 * 1024 * 1024) { req.destroy(new Error('The page exceeds 2 MiB.')); return }
+          if (size > limit) { req.destroy(new Error(options.secretRead ? 'The response exceeds 5 MiB.' : 'The page exceeds 2 MiB.')); return }
           chunks.push(chunk)
         })
         res.on('error', error => reject(controller.signal.aborted ? controller.signal.reason : error))
@@ -77,7 +92,7 @@ export async function publicFetch(value: string): Promise<PublicResponse> {
     }
     }
     throw lastError
-  } finally { clearTimeout(timer) }
+  } finally { clearTimeout(timer); options.signal?.removeEventListener('abort', abort) }
 }
 
 /** Only controlled clauses reach the owner; transport diagnostics stay out of chat. */

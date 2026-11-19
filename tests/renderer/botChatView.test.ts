@@ -1420,6 +1420,7 @@ describe('the composer', () => {
       await press('Enter')
       await settle()
       expect(dialog()).not.toBeNull()
+      if (command.startsWith('/forget')) expect(dialog()!.textContent).toContain('what automations do without asking')
       await click(button('Cancel', dialog()!))
       expect(dialog()).toBeNull()
       expect(fake.client.wipeMemory).not.toHaveBeenCalled()
@@ -3373,4 +3374,62 @@ it('forgets the kept value after its day expires',async()=>{
  clock.mockReturnValue(start+24*60*60*1000+1)
  await type(field,key);expect(field.value).toBe(key);expect(button('Keep as secret')).toBeTruthy()
  } finally {clock.mockRestore()}
+})
+
+it.each([
+  [{ service: 'OpenAI', host: 'api.openai.com', readOnly: true }, 'OpenAI', false],
+  [{ host: 'api.example.com', readOnly: true }, 'api.example.com', true]
+] as const)('names the service on a private bound card above the bot composer: %s', async (binding, name, warning) => {
+  const calls: string[] = []
+  installPreload(fake, { platformRequest: { request: async (method: string) => {
+    calls.push(method)
+    if (method === 'secrets.requests.list') return { requests: [{ requestId: 'bound', threadId: 'home-key', label: 'API key', reason: 'Read updates', name: 'KEY', binding, savedExists: false }] }
+    return {}
+  } } })
+  await open(summary('inbox', { name: 'Kai', homeThreadId: 'home-key' }))
+  await settle()
+  const card = host.querySelector('.bot-secret-requests .secret-request-card')!
+  expect(card?.textContent).toContain(`For ${name}, read only. Kai can't see it or send it anywhere else.`)
+  expect(card.textContent?.includes("Mousse can't tell what this service's reads do.")).toBe(warning)
+  expect(card.textContent).toContain('Kai never sees it.')
+  expect(card.textContent).not.toContain('The agent')
+  expect(calls).toContain('secrets.requests.list')
+})
+
+it.each([
+  ['thread', 'for this thread only, and deleted with the thread.'],
+  ['day', 'for 24 hours, then deleted.'],
+  ['saved', 'until you remove it in Settings → Agents → Secrets.']
+] as const)('builds the bound keep sentence for %s without changing the ordinary agent line', async (keep, duration) => {
+  const {secretKeepLine}=await import('../../src/shared/secretRequests')
+  const bound=secretKeepLine(keep,{bound:'Kai'})
+  expect(bound).toContain(duration)
+  expect(bound).toContain('Kai never sees it.')
+  expect(bound).not.toContain('The agent')
+  expect(secretKeepLine(keep)).toContain('The agent can use it but never shows it in the chat.')
+})
+
+it('draws a let-alone consent and a natural answered line in the bot chat', async () => {
+  const title = 'let ‘Sort new scans’ upload to Scans in Trial drive without asking'
+  fake.chats.inbox = [
+    message(1, { id: 'alone-open', text: 'May I?', ask: { askId: 'alone', title, note: 'Only this automation.', status: 'open' } }),
+    message(2, { id: 'alone-answered', text: 'May I?', ask: { askId: 'answered', title, note: 'Only this automation.', status: 'allowed' } }),
+    message(3, { id: 'alone-changed', text: 'May I?', ask: { askId: 'changed', title, note: 'This automation or tool changed. Nothing was allowed. Ask again.', status: 'withdrawn' } })
+  ]
+  await open()
+  expect(transcript().querySelector('[data-message-id="alone-open"] .bot-bubble-ask')?.textContent).toBe('Wants to let ‘Sort new scans’ upload to Scans in Trial drive without asking')
+  const answered = transcript().querySelector('[data-message-id="alone-answered"]')!
+  expect(answered.nextElementSibling?.textContent).toBe('You let Inbox helper’s automation ‘Sort new scans’ upload to Scans in Trial drive without asking')
+  expect(transcript().querySelector('[data-message-id="alone-changed"]')?.nextElementSibling?.textContent).toBe('This automation or tool changed. Nothing was allowed. Ask again.')
+})
+
+it('draws a non-upload automation consent and its answered line naturally', async () => {
+  const title = 'let ‘Organise notes’ use Create page in Projects in Notion without asking'
+  fake.chats.inbox = [
+    message(1, { id: 'page-open', text: 'May I?', ask: { askId: 'page', title, status: 'open' } }),
+    message(2, { id: 'page-answered', text: 'May I?', ask: { askId: 'page-done', title, status: 'allowed' } })
+  ]
+  await open()
+  expect(transcript().querySelector('[data-message-id="page-open"] .bot-bubble-ask')?.textContent).toBe('Wants to let ‘Organise notes’ use Create page in Projects in Notion without asking')
+  expect(transcript().querySelector('[data-message-id="page-answered"]')?.nextElementSibling?.textContent).toBe('You let Inbox helper’s automation ‘Organise notes’ use Create page in Projects in Notion without asking')
 })

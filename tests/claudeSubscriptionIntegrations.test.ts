@@ -13,7 +13,10 @@ import {
   claudeMcpToolBlocked,
   claudeProxiedMcpServer
 } from '../src/mms/harness/vendors/claude/integrations'
-import { resolveEnvValue } from '../src/mms/integrations/secrets'
+import { createProfileSecretAdapter } from '../src/mms/profiles/secrets'
+import { SecretVault } from '../src/mms/secrets/SecretVault'
+import { resolveSecretBinding } from '../src/mms/secrets/secretBinding'
+import { missingReferences, resolveEnvValue } from '../src/mms/integrations/secrets'
 
 const roots: string[] = []
 afterEach(() => {
@@ -36,6 +39,7 @@ function skill(root: string, name: string, body = 'Do the thing.'): SkillDescrip
   return { id: name, name, description: `${name} skill`, rootPath, skillPath: join(rootPath, 'SKILL.md'), scope: 'global', source: 'mousse-profile', managed: true }
 }
 function resolver(options: {
+  secrets?: ConstructorParameters<typeof ClaudeIntegrationResolver>[0]['secrets']
   servers?: McpServerConfig[]
   skills?: SkillDescriptor[]
   mainAgent?: boolean
@@ -58,7 +62,7 @@ function resolver(options: {
       ...(options.mcpManager ? { mcpManager: options.mcpManager } : {}),
       skillsRegistry: { discover: async () => ({ skills: options.skills ?? [], sources: [], diagnostics: [] }) },
       settings: { get: () => ({ integrations }) },
-      secrets: { resolveEnv: (value) => value.replace('${secret:KEY}', 'resolved-key').replace('${env:MISSING}', '') },
+      secrets: options.secrets ?? { resolveEnv: (value) => value.replace('${secret:KEY}', 'resolved-key').replace('${env:MISSING}', '') },
       pluginRoot
     })
   }
@@ -246,4 +250,40 @@ describe('Claude Subscription integrations', () => {
     expect(readdirSync(join(result.pluginPath!, 'skills'))).toEqual(['safe'])
     expect(result.warnings).toEqual([expect.stringContaining('Skill unsafe was not attached: it contains a symlink')])
   })
+})
+
+it('refuses only the MCP server naming a bound key, and does not report that reference as ready', async () => {
+  const root = temp()
+  const vault = new SecretVault({profileRoot: root, threadAlive: () => true})
+  vault.store('BOUND', 'private-fixture-value', {threadId: 'bot', keep: 'saved', binding: resolveSecretBinding({service: 'github'})})
+  const secrets = createProfileSecretAdapter({profileRoot: root, inheritProcessEnv: false})
+  const {resolver: claude} = resolver({secrets, servers: [
+    server({name: 'bound', command: 'must-not-start', env: {TOKEN: '${secret:BOUND}'}}),
+    server({name: 'healthy', command: 'healthy-mcp'})
+  ]})
+  const result = await claude.resolve()
+  expect(Object.keys(result.mcpServers)).toEqual(['healthy'])
+  expect(result.warnings).toEqual([expect.stringMatching(/bound.*bound to GitHub/)])
+  expect(missingReferences({TOKEN: '${secret:BOUND}'}, secrets)).toEqual(['secret:BOUND'])
+  expect(JSON.stringify(result)).not.toContain('private-fixture-value')
+})
+it('marks a discovered server naming a bound key unavailable while leaving its neighbour configured', async () => {
+  const {McpRegistry} = await import('../src/mms/integrations/mcp/McpRegistry')
+  const {getManagedMcpConfigPath} = await import('../src/mms/integrations/nativePaths')
+  const root = temp()
+  const vault = new SecretVault({profileRoot: root, threadAlive: () => true})
+  vault.store('BOUND', 'private-fixture-value', {threadId: 'bot', keep: 'saved', binding: resolveSecretBinding({service: 'github'})})
+  const secrets = createProfileSecretAdapter({profileRoot: root, inheritProcessEnv: false})
+  const registry = new McpRegistry({profileId: 'e3', profileRoot: root, secrets})
+  await registry.writeManagedMcpConfig(getManagedMcpConfigPath(root), {version: 1, servers: {
+    bound: {id: 'e3-bound', name: 'e3-bound', command: 'must-not-start', env: {TOKEN: '${secret:BOUND}'}},
+    healthy: {id: 'e3-healthy', name: 'e3-healthy', command: 'healthy-mcp'}
+  }})
+  const snapshot = await registry.discover()
+  expect(snapshot.servers.find(server => server.name === 'e3-bound')).toMatchObject({status: 'missing-env', missingEnvVars: ['secret:BOUND']})
+  expect(snapshot.servers.find(server => server.name === 'e3-healthy')?.status).toBe('configured')
+  const {resolver: claude} = resolver({secrets, servers: snapshot.servers.filter(server=>server.name.startsWith('e3-'))})
+  const result = await claude.resolve()
+  expect(Object.keys(result.mcpServers)).toEqual(['e3-healthy'])
+  expect(result.warnings).toEqual([expect.stringMatching(/bound to GitHub/)] )
 })

@@ -318,7 +318,7 @@ export function ownerWords(text: string): string {
  */
 export const BOT_PROMPT_CHANGED_NOTE = 'Your owner changed these words after some of your replies in this chat: follow them as they are now, not how those replies were written.'
 
-export function botInstructions(bot: { name: string; description: string; filesFolder?: string; homeFolder?: string; lane?: BotLane; allowed?: BotAllowed; browserOffline?: boolean; subagent?: true; withheld?: readonly string[]; promptChanged?: true }): string {
+export function botInstructions(bot: { name: string; description: string; filesFolder?: string; homeFolder?: string; lane?: BotLane; allowed?: BotAllowed; secretFetchOffered?: boolean; browserOffline?: boolean; subagent?: true; withheld?: readonly string[]; promptChanged?: true }): string {
   if (bot.subagent) {
     // A subagent of the bot's work: who it works for, its one part of the job, and what it may use, with nothing to ask.
     const who = [`You work for ${bot.name.trim()}, a personal bot in Mousse. Its owner's words on what it does:\n${ownerWords(bot.description)}`]
@@ -333,6 +333,7 @@ export function botInstructions(bot: { name: string; description: string; filesF
   if (bot.promptChanged) who.push(BOT_PROMPT_CHANGED_NOTE)
   if (bot.filesFolder) who.push(`Your files folder is ${bot.filesFolder}.`)
   if (bot.homeFolder) who.push(`Your owner's home folder is ${bot.homeFolder}. Always write paths in full, never with ~ or variables like $HOME.`)
+  if (bot.secretFetchOffered && bot.lane === 'run' && bot.allowed?.secrets && !bot.allowed.mcpNotHere) who.push("To read from a service your owner gave you a key for, use secret_fetch with the key's name. You never see the key.")
   const lane = bot.lane === 'run' ? BOT_RUN_INSTRUCTIONS : bot.lane === 'chat' ? chatInstructionsWithout(bot.allowed?.off) : undefined
   const allowed = bot.allowed ? botAllowedText(bot.allowed, bot.lane, bot.browserOffline) : undefined
   // A main turn's tool catalogue, one line a group (docs/plans/bot-context.md §15): each group's guidance, the applet
@@ -343,6 +344,6 @@ export function botInstructions(bot: { name: string; description: string; filesF
 
 export const BOT_ASKS_FIRST_INSTRUCTIONS = 'Some of your tools ask your owner first: the call is held and you end your turn. You carry on with its result, or are told it was not sent. If a call was not sent, say so plainly in your report. Your owner sees only your report, not what you wrote before a held call; repeat any results they need. Never try another way to do the same thing, and never ask your owner in words to approve what a card asks.'
 
-export const BOT_ASKS_FIRST_CHAT_INSTRUCTIONS = 'When you set up work or a schedule that uses tools which may send or change things, tell your owner that such calls wait for their Send. A schedule waits on one card at a time and skips runs while it waits. Never promise which calls will or will not ask: Mousse decides at each call.'
+export const BOT_ASKS_FIRST_CHAT_INSTRUCTIONS = 'When you set up work or a schedule that uses tools which may send or change things, tell your owner that such calls wait for their Send. A schedule waits on one card at a time and skips runs while it waits. Never promise which calls will or will not ask: Mousse decides at each call.\nWhen your owner wants an automation to do one thing without asking, ask with escalate {ask: \'let_alone\', …} in that turn; Mousse fills in the place from a call they already sent.'
 
 export const BOT_ASKS_FIRST_SCHEDULE_INSTRUCTIONS = "Your owner's Not now covers only that run. Each new run tries again and asks again if needed; never skip a call only because an earlier run's call was not sent."

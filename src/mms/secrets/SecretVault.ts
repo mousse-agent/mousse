@@ -1,3 +1,5 @@
+import { SecretBindings, UNAVAILABLE_BINDING } from './SecretBindings'
+import { sameSecretBinding, secretBindingView, type SecretBinding } from '../../shared/secretServices'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isKeyName } from '../../shared/automationKeys'
@@ -92,6 +94,7 @@ export interface SecretVaultOptions {
  * expired or no longer given to a thread loses its file, and an archived thread loses its folder.
  */
 export class SecretVault {
+  private readonly bindings: SecretBindings
   private readonly metaPath: string
   private readonly filesRoot: string
   private readonly now: () => number
@@ -116,41 +119,73 @@ export class SecretVault {
   private readonly values: ReturnType<typeof createProfileSecretAdapter>
 
   constructor(private readonly options: SecretVaultOptions) {
+    this.bindings = new SecretBindings(options.profileRoot)
     this.metaPath = join(options.profileRoot, 'secrets', 'meta.json')
     this.filesRoot = join(options.profileRoot, 'secrets', 'threads')
     this.now = options.now ?? Date.now
     this.values = createProfileSecretAdapter({ profileRoot: options.profileRoot, inheritProcessEnv: false })
   }
 
-  /** Whether the store holds a secret by this name (a saved key or one given in a thread). */
+  /** Whether a value or leftover binding reserves this name for the owner's card. */
   has(name: string): boolean {
+    return this.hasValue(name) || Boolean(this.bindingFor(name))
+  }
+
+  private hasValue(name: string): boolean {
     return listProfileKeyNames(this.options.profileRoot).includes(name)
   }
 
+  /** A fresh value must never inherit authority approved for a deleted value. Existing bound values stay refused. */
+  private prepareUnbound(name: string): void {
+    // A deleted guard cannot identify a stale entry in unreadable JSON, so new stores wait until it can be read.
+    this.bindings.requireReadable()
+    if (!this.bindingFor(name)) return
+    // listProfileKeyNames deliberately hides read failures. Authority removal needs proof of absence instead.
+    let entries: unknown
+    try { entries = JSON.parse(readFileSync(join(this.options.profileRoot, 'secrets/refs.json'), 'utf8')) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('The secret store could not be read. Nothing was stored.')
+    }
+    if (entries !== undefined) {
+      if (!entries || typeof entries !== 'object' || Array.isArray(entries)) throw new Error('The secret store could not be read.')
+      if (Object.hasOwn(entries, name)) throw new Error(`${name} is bound to a service and cannot be replaced as an ordinary key.`)
+    }
+    this.bindings.delete(name)
+  }
+
+  setKey(name: string, value: string): void {
+    if (!isKeyName(name)) throw new Error('A key name is a word like GITHUB_TOKEN')
+    this.prepareUnbound(name)
+    writeProfileSecret(this.options.profileRoot, name, value)
+    this.refresh()
+  }
+
   /** A saved secret (Settings or an automation's key field) the person may give to another thread. */
-  isSaved(name: string): boolean {
-    if (!this.has(name)) return false
+  isSaved(name: string, binding?: SecretBinding): boolean {
+    if (!this.hasValue(name)) return false
     const meta = this.readMeta()[name]
-    return !meta || meta.keep === 'saved'
+    return (!meta || meta.keep === 'saved') && sameSecretBinding(this.bindingFor(name), binding)
   }
 
   /** `base`, or `base_2`, `base_3`… when the store already holds `base`. */
   freeName(base: string): string {
     const taken = new Set(listProfileKeyNames(this.options.profileRoot))
-    if (!taken.has(base)) return base
+    if (!taken.has(base) && !this.bindingFor(base)) return base
     for (let n = 2; n < 1000; n++) {
       const suffix = `_${n}`
       const name = `${base.slice(0, 64 - suffix.length)}${suffix}`
-      if (!taken.has(name)) return name
+      if (!taken.has(name) && !this.bindingFor(name)) return name
     }
     throw new Error('Too many secrets share this name.')
   }
 
   /** Keeps a value the person typed, for the thread that asked. The name must be free (`freeName`). */
-  store(name: string, value: string, input: { keep: SecretKeep; threadId: string; label?: string }): void {
+  store(name: string, value: string, input: { keep: SecretKeep; threadId: string; label?: string; binding?: SecretBinding }): void {
     if (!isKeyName(name)) throw new Error('A secret name is a word like GITHUB_TOKEN.')
-    if (this.has(name)) throw new Error(`A secret named ${name} already exists.`)
+    if (this.hasValue(name)) throw new Error(`A secret named ${name} already exists.`)
     const now = this.now()
+    if (input.binding) this.bindings.set(name, input.binding)
+    else this.prepareUnbound(name)
     writeProfileSecret(this.options.profileRoot, name, value)
     this.writeMeta({
       ...this.readMeta(),
@@ -167,8 +202,8 @@ export class SecretVault {
   }
 
   /** Lets a thread's agents use a saved secret by name (the person chose "Use saved" on its card). */
-  grant(name: string, threadId: string): void {
-    if (!this.isSaved(name)) throw new Error(`No saved secret is named ${name}.`)
+  grant(name: string, threadId: string, binding?: SecretBinding): void {
+    if (!this.isSaved(name, binding)) throw new Error(`No saved secret is named ${name}.`)
     const meta = this.readMeta()
     const current = meta[name] ?? { keep: 'saved' as const, createdAt: new Date(this.now()).toISOString(), threads: [] }
     if (current.threads.includes(threadId)) return
@@ -178,7 +213,7 @@ export class SecretVault {
 
   /** Whether the thread's agents may use the secret by name. */
   usableIn(name: string, threadId: string): boolean {
-    if (!this.has(name)) return false
+    if (!this.hasValue(name)) return false
     return this.readMeta()[name]?.threads.includes(threadId) ?? false
   }
 
@@ -227,7 +262,7 @@ export class SecretVault {
 
   /** The private file that holds the secret for the thread's agents to read; undefined when the thread may not use it. */
   fileFor(name: string, threadId: string): string | undefined {
-    if (!isKeyName(name) || !FOLDER_ID.test(threadId) || !this.usableIn(name, threadId)) return undefined
+    if (!isKeyName(name) || !FOLDER_ID.test(threadId) || !this.usableIn(name, threadId) || this.bindingFor(name)) return undefined
     const path = join(this.filesRoot, threadId, name)
     return existsSync(path) ? path : undefined
   }
@@ -235,6 +270,10 @@ export class SecretVault {
   /** The value for a command or a tool's settings; undefined when it is gone. */
   value(name: string): string | undefined {
     return isKeyName(name) ? this.values.resolveSecretRef?.(name) : undefined
+  }
+
+  bindingFor(name: string): SecretBinding | undefined {
+    return this.bindings.get(name)
   }
 
   markUsed(name: string): void {
@@ -325,10 +364,13 @@ export class SecretVault {
     const meta = this.readMeta()
     return listProfileKeyNames(this.options.profileRoot).map((name): SecretEntryView => {
       const entry = meta[name]
-      if (!entry) return { name, keep: 'key' }
+      const binding = this.bindingFor(name)
+      const bindingView = binding ? {binding: binding === UNAVAILABLE_BINDING ? {host: '', readOnly: true as const, unavailable: true as const} : secretBindingView(binding)} : {}
+      if (!entry) return { name, keep: 'key', ...bindingView }
       const title = entry.threadId ? this.options.threadTitle?.(entry.threadId) : undefined
       return {
         name,
+        ...bindingView,
         keep: entry.keep,
         ...(entry.label ? { label: entry.label } : {}),
         ...(entry.expiresAt ? { expiresAt: entry.expiresAt } : {}),
@@ -343,7 +385,7 @@ export class SecretVault {
   /** The names a saved key list shows: secrets given in a thread for a while are not saved keys. */
   savedKeyNames(): string[] {
     const meta = this.readMeta()
-    return listProfileKeyNames(this.options.profileRoot).filter((name) => !meta[name] || meta[name].keep === 'saved')
+    return listProfileKeyNames(this.options.profileRoot).filter((name) => !this.bindingFor(name) && (!meta[name] || meta[name].keep === 'saved'))
   }
 
   /** Removes a secret and its record; false when there was none. */
@@ -351,6 +393,7 @@ export class SecretVault {
     if (!isKeyName(name)) return false
     const existed = this.has(name)
     deleteProfileSecret(this.options.profileRoot, name)
+    this.bindings.delete(name)
     const meta = this.readMeta()
     if (meta[name]) {
       delete meta[name]
@@ -365,13 +408,14 @@ export class SecretVault {
     const meta = this.readMeta()
     const now = this.now()
     const gone = Object.entries(meta).filter(([name, entry]) => {
-      if (!this.has(name)) return true
+      if (!this.hasValue(name)) return true
       if (entry.keep === 'day') return !entry.expiresAt || Date.parse(entry.expiresAt) <= now
       if (entry.keep === 'thread') return !entry.threadId || !this.options.threadAlive(entry.threadId)
       return false
     }).map(([name]) => name)
     for (const name of gone) {
       deleteProfileSecret(this.options.profileRoot, name)
+      this.bindings.delete(name)
       delete meta[name]
     }
     if (gone.length) {
@@ -423,6 +467,7 @@ export class SecretVault {
     try {
       const wanted = new Map<string, Map<string, string>>()
       for (const [name, entry] of Object.entries(this.readMeta())) {
+        if (this.bindingFor(name)) continue
         const threads = entry.threads.filter((threadId) => FOLDER_ID.test(threadId) && this.copyThreads.has(threadId) && !this.holds.has(threadId) && this.options.threadAlive(threadId))
         const value = threads.length ? this.value(name) : undefined
         if (!value) continue

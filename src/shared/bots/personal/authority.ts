@@ -137,6 +137,21 @@ export interface BotFileReadResult {
  * run policy, which carries only `RunPolicy.authority`'s kind and digest).
  */
 export interface BotAuthority {
+  /** Local service-read ledger, never serialized. Only main work and scheduled turns receive it.
+   * The callback releases a reserved slot when a changed response folder makes the save unsafe.
+   */
+  secretFetch?(
+    input: {
+      callKey: string
+      secret: string
+      service: string
+      args: Record<string, unknown>
+      refusal?: string
+      mask(text: string): string
+    },
+    run: (refuseWithoutCounting: () => void) => Promise<{ text: string; isError?: boolean }>
+  ): Promise<{ text: string; isError?: boolean }>
+
   activationId: string
   role: BotThreadRole
   /**
@@ -158,7 +173,7 @@ export interface BotAuthority {
    */
   mcpTools?: readonly BotMcpTool[]
   /** Mousse holds calls requiring the owner's answer; undefined means the ordinary call path. */
-  holdMcp?(tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): { text: string; isError?: boolean } | undefined
+  holdMcp?(tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): { text: string; isError?: boolean } | Promise<{ text: string; isError?: boolean }> | undefined
   maskMcpArguments?(args: Record<string, unknown>): Record<string, unknown>
   /**
    * The bot's own folders: its files folder (`files`) and the activation's private scratch folder, both writable;

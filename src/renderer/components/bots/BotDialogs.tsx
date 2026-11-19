@@ -96,8 +96,8 @@ function DeleteDialog({ bot }: { bot: BotSummary }) {
 
 /** What each confirming `/` command asks, and its button. */
 const COMMAND_CONFIRMS: Record<BotConfirmCommand, { title: (name: string) => string; text: string; action: string }> = {
-  forget: { title: (name) => `Wipe ${name}'s memory?`, text: 'Every saved memory entry is forgotten.', action: 'Wipe memory' },
-  'forget-history': { title: () => 'Wipe chat history?', text: 'The chat and run notes go; saved memory stays.', action: 'Wipe history' },
+  forget: { title: (name) => `Wipe ${name}'s memory?`, text: 'Every saved memory entry and what automations do without asking are forgotten.', action: 'Wipe memory' },
+  'forget-history': { title: () => 'Wipe chat history?', text: 'The chat, run notes and what automations do without asking go; saved memory stays.', action: 'Wipe history' },
   reset: { title: (name) => `Reset ${name}?`, text: 'Chat, memory, schedules and reminders go. Name, look, permissions and models stay.', action: 'Reset' }
 }
 

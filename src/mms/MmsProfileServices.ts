@@ -112,7 +112,6 @@ import { UnseenDoneStore } from './runtime/UnseenDoneStore'
 import { UserQuestionService } from './orchestrator/UserQuestionService'
 import { ModeRegistry } from './modes/ModeRegistry'
 import { createProfileSecretAdapter, deleteProfileSecret, listProfileKeyNames, writeProfileSecret } from './profiles/secrets'
-import { isKeyName } from '../shared/automationKeys'
 import { AutomationDrafts } from './automations/AutomationDrafts'
 import { AutomationRuns } from './automations/AutomationRuns'
 import type { AutomationInbox, InboxCounts } from '../shared/automationInbox'
@@ -1314,9 +1313,7 @@ export class MmsProfileServices {
       // Secrets given in a thread for a while are not saved keys; a saved one is.
       list: () => vault.savedKeyNames(),
       set: (name, value) => {
-        if (!isKeyName(name)) throw new Error('A key name is a word like GITHUB_TOKEN')
-        writeProfileSecret(homeDir, name, value)
-        vault.refresh()
+        vault.setKey(name, value)
         this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
       },
       has: (name) => listProfileKeyNames(homeDir).includes(name)

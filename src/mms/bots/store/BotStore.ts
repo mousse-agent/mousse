@@ -1920,13 +1920,13 @@ export class BotStore {
 
   /** The answered escalation whose continuation has not been applied yet. */
   pendingAnswer(activationId: string): BotEscalationRow | undefined {
-    const row = this.get("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1", activationId)
+    const row = this.get("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND (status IN ('allowed_bot', 'allowed_once', 'denied') OR (status = 'withdrawn' AND json_extract(permission_json, '$.ask') = 'let_alone')) AND applied_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1", activationId)
     return row ? escalationOf(row) : undefined
   }
 
   /** Every answered wall of an activation whose continuation has not been applied yet, oldest first. */
   pendingAnswers(activationId: string): BotEscalationRow[] {
-    return this.all("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at, rowid", activationId).map(escalationOf)
+    return this.all("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND (status IN ('allowed_bot', 'allowed_once', 'denied') OR (status = 'withdrawn' AND json_extract(permission_json, '$.ask') = 'let_alone')) AND applied_at IS NULL ORDER BY created_at, rowid", activationId).map(escalationOf)
   }
 
   markApplied(id: string): void {
@@ -2385,7 +2385,7 @@ export class BotStore {
 
   /** Model output or completion consumes an outcome. Continuation admission restores running before this read; inactive terminal work has nobody to tell. */
   unreadWorkActions(workId: string): ActionRow[] {
-    return this.all(`SELECT a.* FROM bot_actions a WHERE a.activation_id = ? AND a.status NOT IN ('open', 'approved', 'running')
+    return this.all(`SELECT a.* FROM bot_actions a WHERE a.kind = 'mcp' AND a.activation_id = ? AND a.status NOT IN ('open', 'approved', 'running')
       AND EXISTS (SELECT 1 FROM bot_activations w WHERE w.id = a.activation_id AND w.status NOT IN ('done', 'failed', 'cancelled'))
       AND NOT EXISTS (SELECT 1 FROM bot_dispatches d, json_each(d.prompt_json, '$.workActionIds') told
         WHERE d.activation_id = a.activation_id AND ${WORK_TOLD} AND told.value = a.id)

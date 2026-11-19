@@ -877,6 +877,7 @@ export class BotChatService {
 
   revokePermission(botId: string, id: string): BotDetail {
     this.engine.definitionOf(botId)
+    if (id.startsWith('alone:')) { this.engine.alone.remove(botId, id); return this.detailOf(botId) }
     const off = this.store.disabledPermissions(botId).find((item) => item.id === id)
     const grant = this.store.activeGrant(botId)
     const permission = grant ? grantedPermissions(off?.manifest ?? grant.manifest).find((item) => permissionId(item) === id) : undefined

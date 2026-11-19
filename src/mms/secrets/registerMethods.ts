@@ -1,3 +1,4 @@
+import { SecretBindingUnavailableError } from './SecretBindings'
 import { pastedSecretShape, pastedSecretValue } from '../../shared/secretShapes'
 import { SECRET_KEEPS, secretValueProblem, type SecretKeep } from '../../shared/secretRequests'
 import type { SecretVault } from './SecretVault'
@@ -36,6 +37,7 @@ function fromWindow(context: HandlerContext): void {
 function refusal(error: unknown): never {
   if (error instanceof DomainRpcError) throw error
   if (error instanceof SecretRequestError) throw new DomainRpcError(error.code === 'invalid' ? 'invalid_params' : 'not_found', error.message)
+  if (error instanceof SecretBindingUnavailableError) throw new DomainRpcError('secret_store_failed', error.message)
   // Anything else (a disk error while saving) is reported by kind only.
   throw new DomainRpcError('secret_store_failed', 'The secret could not be saved. Nothing was stored.')
 }
