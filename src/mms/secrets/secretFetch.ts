@@ -1,6 +1,10 @@
 import { secretMasker } from './secretMasking'
 import { validateHeaderName, validateHeaderValue } from 'node:http'
-import { checkSecretFetchFolder, saveSecretFetchResponse, SecretFetchFileError } from './secretFetchFiles'
+import {
+  checkSecretFetchFolder,
+  saveSecretFetchResponse,
+  SecretFetchFileError
+} from './secretFetchFiles'
 import { isKeyName } from '../../shared/automationKeys'
 import { pastedSecretShape } from '../../shared/secretShapes'
 import { pageFailureReason, publicFetch } from '../net-public/publicFetch'
@@ -45,8 +49,15 @@ export function boundReadPath(raw: unknown, paths?: readonly string[]): string |
   const normalized = decoded.normalize('NFKC')
   if (normalized.split('/').length !== decoded.split('/').length || normalized.includes('\\'))
     return
-  if (decoded.split('/').some(segment => !/^[A-Za-z0-9._~!$&'()*+,=:@-]*$/.test(segment) ||
-      /[%?#]/.test(segment.normalize('NFKC')))) return
+  if (
+    decoded
+      .split('/')
+      .some(
+        (segment) =>
+          !/^[A-Za-z0-9._~!$&'()*+,=:@-]*$/.test(segment) || /[%?#]/.test(segment.normalize('NFKC'))
+      )
+  )
+    return
   if (paths && !paths.some((p) => decoded === p || decoded.startsWith(p + '/'))) return
   // Encoding each checked segment also escapes colons (for example GitHub compare refs);
   // the listed services decode them as segment data, never as a new URL authority.
@@ -147,7 +158,11 @@ export function prepareSecretFetch(
         checkSecretFetchFolder(input.folder)
       } catch {
         refuseWithoutCounting?.()
-        return refuse(mask('The fetch folder changed or is unavailable. The request was not sent; restore your work folder before retrying.'))
+        return refuse(
+          mask(
+            'The fetch folder changed or is unavailable. The request was not sent; restore your work folder before retrying.'
+          )
+        )
       }
       try {
         vault.markUsed(name)

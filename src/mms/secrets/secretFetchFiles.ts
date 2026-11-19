@@ -73,7 +73,8 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
     } catch {
       throw new SecretFetchFileError(true)
     }
-    if (!same(fstatSync(directoryFd, { bigint: true }), checked)) throw new SecretFetchFileError(true)
+    if (!same(fstatSync(directoryFd, { bigint: true }), checked))
+      throw new SecretFetchFileError(true)
     const pinned = `/proc/self/fd/${directoryFd}`
     const unchanged = (): boolean => {
       try {
@@ -189,8 +190,12 @@ export function checkSecretFetchFolder(scratch: string): void {
     if (process.platform !== 'win32') {
       fd = openSync(folder, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
       const current = lstatSync(folder, { bigint: true })
-      if (!current.isDirectory() || !same(current, checked) ||
-          !same(fstatSync(fd, { bigint: true }), checked)) throw new Error()
+      if (
+        !current.isDirectory() ||
+        !same(current, checked) ||
+        !same(fstatSync(fd, { bigint: true }), checked)
+      )
+        throw new Error()
     }
   } catch {
     throw new SecretFetchFileError(true)

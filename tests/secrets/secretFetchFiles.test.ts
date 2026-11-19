@@ -82,11 +82,13 @@ function fixture() {
     requests: new SecretRequests(vault),
     scratchRoot: scratch
   })
-  vi.mocked(publicFetch).mockClear().mockResolvedValue({
-    status: 200,
-    headers: { 'content-type': 'text/plain' },
-    body: Buffer.alloc(70000, 'x')
-  })
+  vi.mocked(publicFetch)
+    .mockClear()
+    .mockResolvedValue({
+      status: 200,
+      headers: { 'content-type': 'text/plain' },
+      body: Buffer.alloc(70000, 'x')
+    })
   const input = {
     threadId: 'owner',
     folder: scratch,
@@ -206,7 +208,10 @@ it('keeps a close failure local and releases the parent handle', async () => {
   }
   hooks.afterClose = (fd) => {
     if (!opened.has(fd)) return
-    if (opened.size < 2) { opened.delete(fd); return }
+    if (opened.size < 2) {
+      opened.delete(fd)
+      return
+    }
     opened.delete(fd)
     hooks.afterClose = (next) => {
       opened.delete(next)
@@ -262,13 +267,23 @@ it('counts a sent request even when its file disappears before verification', as
 
 async function countedRead(f: ReturnType<typeof fixture>, store: BotStore, n: number) {
   const prepared = f.secrets.prepareFetch!(f.input)
-  return secretFetchAction(store, {
-    botId: 'owner', activationId: 'a', callKey: `cap-${n}`, secret: 'KEY',
-    service: 'OpenAI', args: {}, mask: text => text
-  }, uncount => prepared.send!(uncount))
+  return secretFetchAction(
+    store,
+    {
+      botId: 'owner',
+      activationId: 'a',
+      callKey: `cap-${n}`,
+      secret: 'KEY',
+      service: 'OpenAI',
+      args: {},
+      mask: (text) => text
+    },
+    (uncount) => prepared.send!(uncount)
+  )
 }
 it('refuses a persistent linked folder before sending and leaves no counted request', async () => {
-  const f = fixture(), store = new BotStore({ profileHome: f.home })
+  const f = fixture(),
+    store = new BotStore({ profileHome: f.home })
   cleanup.push(() => store.close())
   symlinkSync(f.outside, join(f.scratch, 'fetches'), 'dir')
   for (let i = 0; i < 21; i++) expect((await countedRead(f, store, i)).isError).toBe(true)
@@ -276,7 +291,8 @@ it('refuses a persistent linked folder before sending and leaves no counted requ
   expect(store.get('SELECT count(*) AS n FROM bot_actions WHERE ran_at IS NOT NULL')?.n).toBe(0)
 })
 it('counts all sent requests when a linked folder prevents saving, then refuses call 21', async () => {
-  const f = fixture(), store = new BotStore({ profileHome: f.home })
+  const f = fixture(),
+    store = new BotStore({ profileHome: f.home })
   cleanup.push(() => store.close())
   const folder = join(f.scratch, 'fetches')
   vi.mocked(publicFetch).mockImplementation(async () => {
@@ -296,8 +312,9 @@ it('counts all sent requests when a linked folder prevents saving, then refuses 
   expect(store.get('SELECT count(*) AS n FROM bot_actions WHERE ran_at IS NOT NULL')?.n).toBe(20)
 })
 it('pins the directory opened just before replacement by a link', async () => {
-  const f = fixture(), folder = join(f.scratch, 'fetches')
-  hooks.afterOpen = path => {
+  const f = fixture(),
+    folder = join(f.scratch, 'fetches')
+  hooks.afterOpen = (path) => {
     if (path !== folder) return
     hooks.afterOpen = undefined
     renameSync(folder, folder + '-original')
