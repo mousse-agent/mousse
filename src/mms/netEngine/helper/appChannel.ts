@@ -104,6 +104,8 @@ interface SendStream {
   /** Credit the helper granted for this stream's DATA. */
   credit: number
   queue: Array<{ bytes: Uint8Array; fin: boolean }>
+  /** Bytes in `queue`. */
+  bytes: number
 }
 
 interface ReceiveStream {
@@ -122,10 +124,17 @@ type Json = Record<string, unknown>
  * first, then interactive DATA, then bulk DATA, with streams taking turns within a class. The app grants the
  * helper credit from one budget, at most a stream's share per stream, with a reserve only interactive streams
  * use; a stream that cannot get credit waits until some returns.
+ *
+ * What this side queues is bounded too: a stream past `appStreamQueueBytes` has its producer wait (`whenRoom`), one
+ * past `appStreamQueueMaxBytes` is refused, and requests past `appControlQueueBytes` of control are refused.
  */
 export class AppChannel {
   private readonly reader = new FrameReader()
   private readonly control: Uint8Array[] = []
+  /** Bytes in `control`. */
+  private controlBytes = 0
+  /** Producers waiting for room on a stream's queue, by handle. */
+  private readonly roomWaiters = new Map<number, Array<() => void>>()
   /** Streams this side may still write on. */
   private readonly sending = new Map<number, SendStream>()
   /** Streams with bytes queued, including ones whose writing side has ended. */
@@ -178,13 +187,16 @@ export class AppChannel {
   ): Promise<Json> {
     if (this.closed) return Promise.reject(new NetError('peer_offline'))
     const id = this.nextId++
+    const frame = jsonFrame({ id, op: name, ...fields })
+    if (this.controlBytes + frame.byteLength > engineLimits().appControlQueueBytes)
+      return Promise.reject(new NetError('rate_limited', 'Too much waiting for the helper.'))
     return new Promise<Json>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(new NetError('deadline_exceeded'))
       }, deadlineMs)
       this.pending.set(id, { resolve, reject, timer, onReply })
-      this.sendControl(jsonFrame({ id, op: name, ...fields }))
+      this.sendControl(frame)
     })
   }
 
@@ -223,7 +235,7 @@ export class AppChannel {
       sink.reset('helper_exit')
       return
     }
-    this.sending.set(handle, { handle, cls, credit: 0, queue: [] })
+    this.sending.set(handle, { handle, cls, credit: 0, queue: [], bytes: 0 })
     this.receiving.set(handle, { handle, cls, sink, outstanding: 0, finished: false })
     this.topUp(handle)
   }
@@ -232,6 +244,9 @@ export class AppChannel {
   send(handle: number, bytes: Uint8Array, fin = false): void {
     const stream = this.sending.get(handle)
     if (!stream || this.closed) throw new NetError('peer_offline')
+    if (stream.bytes + bytes.byteLength > engineLimits().appStreamQueueMaxBytes)
+      throw new NetError('too_large', 'The stream has too much waiting for the helper.')
+    stream.bytes += bytes.byteLength
     const max = engineLimits().appDataMaxBytes
     if (!bytes.byteLength && fin) stream.queue.push({ bytes, fin })
     for (let at = 0; at < bytes.byteLength; at += max) {
@@ -242,6 +257,30 @@ export class AppChannel {
     if (fin) this.sending.delete(handle) // Nothing more is written; the queue keeps its place in the turns.
     this.queued.set(handle, stream)
     this.pump()
+  }
+
+  /** Whether a stream's producer may write more now (its queue is below `appStreamQueueBytes`, or it is gone). */
+  hasRoom(handle: number): boolean {
+    const stream = this.queued.get(handle) ?? this.sending.get(handle)
+    return !stream || this.closed || stream.bytes < engineLimits().appStreamQueueBytes
+  }
+
+  /** Settles once the stream has room (see `hasRoom`), or is gone. */
+  whenRoom(handle: number): Promise<void> {
+    if (this.hasRoom(handle)) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      const waiting = this.roomWaiters.get(handle) ?? []
+      waiting.push(resolve)
+      this.roomWaiters.set(handle, waiting)
+    })
+  }
+
+  /**
+   * Drops a stream here without a word to the helper, which ended it already (its connection went down): its
+   * queue, its credit from the budget and its producers' waits go.
+   */
+  release(handle: number): void {
+    this.forget(handle)
   }
 
   /** Ends a stream at once both ways (it may overtake queued data, which is dropped). */
@@ -272,6 +311,14 @@ export class AppChannel {
     }
     const starved = this.starved.indexOf(handle)
     if (starved >= 0) this.starved.splice(starved, 1)
+    this.wakeRoom(handle)
+  }
+
+  private wakeRoom(handle: number): void {
+    const waiting = this.roomWaiters.get(handle)
+    if (!waiting) return
+    this.roomWaiters.delete(handle)
+    for (const resolve of waiting) resolve()
   }
 
   private shut(reason: string): void {
@@ -286,19 +333,25 @@ export class AppChannel {
     this.receiving.clear()
     this.sending.clear()
     this.queued.clear()
+    this.control.length = 0
+    this.controlBytes = 0
+    for (const handle of [...this.roomWaiters.keys()]) this.wakeRoom(handle)
     for (const listener of [...this.closeListeners]) listener(reason)
     this.closeListeners.clear()
   }
 
   private sendControl(frame: Uint8Array): void {
     this.control.push(frame)
+    this.controlBytes += frame.byteLength
     this.pump()
   }
 
   /** Writes while the pipe takes it: control first, then interactive, then bulk, streams taking turns. */
   private pump(): void {
     while (this.writable && !this.closed) {
-      const frame = this.control.shift() ?? this.nextData('interactive') ?? this.nextData('bulk')
+      const control = this.control.shift()
+      if (control) this.controlBytes -= control.byteLength
+      const frame = control ?? this.nextData('interactive') ?? this.nextData('bulk')
       if (!frame) return
       this.writable = this.pipe.write(frame)
     }
@@ -318,8 +371,10 @@ export class AppChannel {
       }
       stream.queue.shift()
       stream.credit -= next.bytes.byteLength
+      stream.bytes -= next.bytes.byteLength
       if (stream.queue.length) turns.push(handle)
       else if (!this.sending.has(handle)) this.queued.delete(handle)
+      if (stream.bytes < engineLimits().appStreamQueueBytes) this.wakeRoom(handle)
       return dataFrame(handle, next.bytes, next.fin)
     }
     return undefined

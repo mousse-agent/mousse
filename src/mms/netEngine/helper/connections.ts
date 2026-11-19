@@ -27,6 +27,10 @@ class HelperStream implements EngineStream {
   private readonly dataListeners: Array<(bytes: Uint8Array) => void> = []
   private readonly endListeners: Array<(reason?: string) => void> = []
   private readonly held: Event[] = []
+  /** Bytes written before the helper named the stream. */
+  private earlyBytes = 0
+  /** Producers waiting for the helper to name the stream (or for it to end first). */
+  private readonly boundWaiters: Array<() => void> = []
   private writable = true
   private ended = false
   constructor(
@@ -51,19 +55,50 @@ class HelperStream implements EngineStream {
   /** The helper named the stream: what was written before goes out now. */
   bound(handle: number): void {
     this.handle = handle
+    this.earlyBytes = 0
     for (const write of this.early.splice(0)) this.channel.send(handle, write.bytes, write.fin)
+    this.wakeBound()
   }
   /** The stream never opened. */
   failed(reason: string): void {
     this.writable = false
     this.early.length = 0
+    this.wakeBound()
+    this.deliver({ kind: 'end', reason })
+  }
+  /**
+   * The helper ended the stream with its connection (`conn.down`): its handle is released here (its credit, its
+   * queue, its producers' waits) and its reader sees the end.
+   */
+  dropped(reason: string): void {
+    this.writable = false
+    this.early.length = 0
+    if (this.handle !== undefined) this.channel.release(this.handle)
+    this.wakeBound()
     this.deliver({ kind: 'end', reason })
   }
 
   write(bytes: Uint8Array): void {
     if (!this.writable) throw new NetError('peer_offline')
-    if (this.handle === undefined) this.early.push({ bytes: Uint8Array.from(bytes), fin: false })
-    else this.channel.send(this.handle, bytes)
+    try {
+      if (this.handle !== undefined) return this.channel.send(this.handle, bytes)
+      if (this.earlyBytes + bytes.byteLength > engineLimits().appStreamQueueMaxBytes)
+        throw new NetError('too_large', 'The stream has too much waiting for the helper.')
+      this.earlyBytes += bytes.byteLength
+      this.early.push({ bytes: Uint8Array.from(bytes), fin: false })
+    } catch (error) {
+      if (error instanceof NetError && error.code === 'too_large') this.reset('too_large')
+      throw error
+    }
+  }
+  /** Settles once a producer may write more: the stream's queue has room, or the stream is gone. */
+  async ready(): Promise<void> {
+    if (this.handle === undefined && this.writable)
+      await new Promise<void>((resolve) => this.boundWaiters.push(resolve))
+    if (this.handle !== undefined && this.writable) await this.channel.whenRoom(this.handle)
+  }
+  private wakeBound(): void {
+    for (const wake of this.boundWaiters.splice(0)) wake()
   }
   end(): void {
     if (!this.writable) return
@@ -76,6 +111,7 @@ class HelperStream implements EngineStream {
     this.writable = false
     if (this.handle !== undefined && wasOpen) this.channel.reset(this.handle, reason)
     this.early.length = 0
+    this.wakeBound()
     this.deliver({ kind: 'end', reason })
   }
   onData(listener: (bytes: Uint8Array) => void): void {
@@ -112,6 +148,8 @@ export class HelperConnection implements EngineConnection {
   private readonly streamListeners: Array<(stream: EngineStream) => void> = []
   private readonly closeListeners: Array<(reason: string) => void> = []
   private readonly early: EngineStream[] = []
+  /** Every stream of this connection not ended yet, to release when the connection goes down. */
+  private readonly streams = new Set<HelperStream>()
   private open_ = true
   private live = 0
   /** This side's opens past the connection's stream cap, in order. */
@@ -133,9 +171,10 @@ export class HelperConnection implements EngineConnection {
 
   open(label: EngineLabel, method?: string): EngineStream {
     if (!this.open_) throw new NetError('peer_offline')
-    const stream = new HelperStream(label, classOf(label, method), this.channel, () =>
-      this.released()
+    const stream: HelperStream = new HelperStream(label, classOf(label, method), this.channel, () =>
+      this.released(stream)
     )
+    this.streams.add(stream)
     const start = (): void => {
       if (!this.open_) return stream.failed('peer_offline')
       this.live += 1
@@ -159,7 +198,8 @@ export class HelperConnection implements EngineConnection {
       return
     }
     this.live += 1
-    const stream = new HelperStream(label, cls, this.channel, () => this.released())
+    const stream: HelperStream = new HelperStream(label, cls, this.channel, () => this.released(stream))
+    this.streams.add(stream)
     this.channel.bind(handle, cls, stream.sink)
     stream.bound(handle)
     void this.channel
@@ -184,11 +224,26 @@ export class HelperConnection implements EngineConnection {
     this.waiting.length = 0
     for (const listener of this.closeListeners.splice(0)) listener(reason)
   }
+  /**
+   * The helper closed the connection (`conn.down`), and every stream on it with it: each is released here and its
+   * reader sees the end.
+   */
+  down(reason: string): void {
+    this.close(reason)
+    for (const stream of [...this.streams]) stream.dropped(reason)
+    this.streams.clear()
+  }
+  /** This side stops using the connection's streams while the helper keeps it up (it is attached again). */
+  resetStreams(reason: string): void {
+    for (const stream of [...this.streams]) stream.reset(reason)
+    this.streams.clear()
+  }
   isOpen(): boolean {
     return this.open_ && this.channel.isOpen()
   }
 
-  private released(): void {
+  private released(stream: HelperStream): void {
+    this.streams.delete(stream)
     this.live = Math.max(0, this.live - 1)
     const next = this.waiting.shift()
     next?.()
@@ -273,6 +328,7 @@ export class EngineHelper {
       if (event.identity !== identity || event.dir !== 'out' || this.unclaimed.has(conn)) continue
       const connection = this.connections.get(conn)
       if (connection?.isOpen()) continue
+      connection?.resetStreams('cancelled')
       this.connections.delete(conn)
       this.up(event)
     }
@@ -376,7 +432,7 @@ export class EngineHelper {
       const connection = this.connections.get(event.conn)
       if (!connection) return
       this.connections.delete(event.conn)
-      connection.close(typeof event.reason === 'string' ? event.reason : 'closed')
+      connection.down(typeof event.reason === 'string' ? event.reason : 'closed')
       return
     }
     if (event.ev === 'net.paused') {

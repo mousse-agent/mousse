@@ -233,10 +233,14 @@ export class EngineClient implements BridgeClient {
       {
         deadlineMs: engineLimits().blobDeadlineMs,
         until: 'stored',
-        after: (channel) => {
+        after: async (channel) => {
           const chunk = engineLimits().blobChunkBytes
-          for (let at = 0; at < bytes.byteLength; at += chunk)
+          for (let at = 0; at < bytes.byteLength; at += chunk) {
             channel.send({ t: 'bytes' }, [bytes.subarray(at, at + chunk)])
+            // A slow host holds the next chunk back here, not in memory.
+            await channel.drained()
+            if (!channel.isOpen()) return
+          }
           channel.send({ t: 'commit' })
         }
       }
@@ -354,7 +358,7 @@ export class EngineClient implements BridgeClient {
       onMessage?: (message: EngineMessage) => void
       until?: string
       keepOpen?: boolean
-      after?: (channel: Channel) => void
+      after?: (channel: Channel) => void | Promise<void>
     }
   ): Promise<EngineMessage> {
     if (this.state() !== 'open') return Promise.reject(new NetError('peer_offline'))
@@ -406,11 +410,13 @@ export class EngineClient implements BridgeClient {
           finish(error instanceof NetError ? error : new NetError('internal'))
         }
       })
+      const failed = (error: unknown): void =>
+        finish(error instanceof NetError ? error : new NetError('internal'))
       try {
         channel.send(header, parts)
-        options.after?.(channel)
+        void Promise.resolve(options.after?.(channel)).catch(failed)
       } catch (error) {
-        finish(error instanceof NetError ? error : new NetError('internal'))
+        failed(error)
       }
     })
   }

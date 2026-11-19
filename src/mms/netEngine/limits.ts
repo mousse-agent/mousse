@@ -46,6 +46,15 @@ export interface EngineLimits {
   appInteractiveReserveBytes: number
   /** Streams one connection may have open, both directions counted; this computer queues its own opens past it. */
   appStreamsPerConnection: number
+  /**
+   * Bytes one stream may have queued for the helper before its producer waits (a blob sender, a replay or a
+   * snapshot waits between chunks or pages until the queue is below this).
+   */
+  appStreamQueueBytes: number
+  /** Bytes one stream may have queued at all: a write past this resets the stream (`too_large`). */
+  appStreamQueueMaxBytes: number
+  /** Bytes of requests, credit and resets queued for the helper: a request past this is refused (`rate_limited`). */
+  appControlQueueBytes: number
   /** How long a request to the helper (`dial`, `stream.open`, ...) waits for its answer. */
   appRequestDeadlineMs: number
   /** The first wait before a helper that exited is started again; each exit in a row doubles it. */
@@ -58,6 +67,10 @@ export interface EngineLimits {
   helperFastExits: number
   /** How long a helper asked to shut down has before it is killed. */
   helperShutdownGraceMs: number
+  /** How much of what the helper (or its first-run `init`) wrote on stderr is kept, from the end, for the status. */
+  helperStderrMaxBytes: number
+  /** How often Add device reads a camera frame for a pairing code. */
+  scanIntervalMs: number
   /** How long a start keeps trying while another helper still holds the endpoint. */
   helperLockWaitMs: number
   /** How long `init` (a new endpoint, its key into the keystore) may take. */
@@ -108,12 +121,17 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   appStreamCreditBytes: 256 * 1024,
   appInteractiveReserveBytes: 1024 * 1024,
   appStreamsPerConnection: 32,
+  appStreamQueueBytes: 1024 * 1024,
+  appStreamQueueMaxBytes: 16 * 1024 * 1024,
+  appControlQueueBytes: 4 * 1024 * 1024,
   appRequestDeadlineMs: 15_000,
   helperRestartFirstMs: 500,
   helperRestartMaxMs: 5 * 60_000,
   helperUpResetMs: 60_000,
   helperFastExits: 3,
   helperShutdownGraceMs: 3_000,
+  helperStderrMaxBytes: 4096,
+  scanIntervalMs: 200,
   helperLockWaitMs: 5_000,
   helperInitDeadlineMs: 60_000,
   joinDeadlineMs: 15 * 60_000,
@@ -146,12 +164,17 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   appStreamCreditBytes: 'MOUSSE_NET_ENGINE_APP_STREAM_CREDIT_BYTES',
   appInteractiveReserveBytes: 'MOUSSE_NET_ENGINE_APP_INTERACTIVE_RESERVE_BYTES',
   appStreamsPerConnection: 'MOUSSE_NET_ENGINE_APP_STREAMS_PER_CONNECTION',
+  appStreamQueueBytes: 'MOUSSE_NET_ENGINE_APP_STREAM_QUEUE_BYTES',
+  appStreamQueueMaxBytes: 'MOUSSE_NET_ENGINE_APP_STREAM_QUEUE_MAX_BYTES',
+  appControlQueueBytes: 'MOUSSE_NET_ENGINE_APP_CONTROL_QUEUE_BYTES',
   appRequestDeadlineMs: 'MOUSSE_NET_ENGINE_APP_REQUEST_DEADLINE_MS',
   helperRestartFirstMs: 'MOUSSE_NET_ENGINE_HELPER_RESTART_FIRST_MS',
   helperRestartMaxMs: 'MOUSSE_NET_ENGINE_HELPER_RESTART_MAX_MS',
   helperUpResetMs: 'MOUSSE_NET_ENGINE_HELPER_UP_RESET_MS',
   helperFastExits: 'MOUSSE_NET_ENGINE_HELPER_FAST_EXITS',
   helperShutdownGraceMs: 'MOUSSE_NET_ENGINE_HELPER_SHUTDOWN_GRACE_MS',
+  helperStderrMaxBytes: 'MOUSSE_NET_ENGINE_HELPER_STDERR_MAX_BYTES',
+  scanIntervalMs: 'MOUSSE_NET_ENGINE_SCAN_INTERVAL_MS',
   helperLockWaitMs: 'MOUSSE_NET_ENGINE_HELPER_LOCK_WAIT_MS',
   helperInitDeadlineMs: 'MOUSSE_NET_ENGINE_HELPER_INIT_DEADLINE_MS',
   joinDeadlineMs: 'MOUSSE_NET_ENGINE_JOIN_DEADLINE_MS',
@@ -207,6 +230,10 @@ export function readEngineLimits(env: NodeJS.ProcessEnv): {
       'appStreamCreditBytes',
       `is below the helper's read-ahead (${HELPER_READ_AHEAD_BYTES} bytes)`
     )
+  // A stream's hard cap holds its soft one and one whole message past it (the producer checks between messages).
+  if (limits.appStreamQueueBytes + limits.maxMessageBytes > limits.appStreamQueueMaxBytes)
+    for (const key of ['appStreamQueueBytes', 'appStreamQueueMaxBytes'] as const)
+      keep(key, 'leaves no room for a whole message past the soft queue limit')
   if (limits.helperRestartFirstMs > limits.helperRestartMaxMs)
     for (const key of ['helperRestartFirstMs', 'helperRestartMaxMs'] as const)
       keep(key, 'makes the first restart wait longer than the longest')

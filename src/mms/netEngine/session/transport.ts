@@ -23,6 +23,11 @@ export interface EngineStream {
   end(): void
   /** Ends both ways at once. */
   reset(reason?: string): void
+  /**
+   * Settles once a producer may write more (what it wrote has mostly left), or the stream ended. A stream without
+   * it never holds a producer back.
+   */
+  ready?(): Promise<void>
   onData(listener: (bytes: Uint8Array) => void): void
   /** The other side's FIN (no reason) or a reset (with its reason). */
   onEnd(listener: (reason?: string) => void): void
@@ -76,6 +81,10 @@ export class Channel {
   send(header: EngineMessage['header'], parts: readonly Uint8Array[] = []): void {
     if (!this.writable) throw new NetError('peer_offline')
     this.stream.write(encodeMessage(header, parts))
+  }
+  /** Waits until the stream takes more (`EngineStream.ready`); producers of many messages wait between them. */
+  async drained(): Promise<void> {
+    await this.stream.ready?.()
   }
   onMessage(listener: (message: EngineMessage) => void): void {
     this.listeners.add(listener)

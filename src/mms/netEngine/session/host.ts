@@ -234,7 +234,10 @@ export class EngineHost {
       if (!channel.isOpen()) return
       if (!this.port.canFetchBlob(stream, blob, caller)) throw new NetError('forbidden')
       channel.send({ t: 'bytes' }, [this.port.blobs.read(blob, at, Math.min(blobChunkBytes, size - at))])
+      // A slow reader holds the next chunk back here, not in memory.
+      await channel.drained()
     }
+    if (!channel.isOpen()) return
     channel.send({ t: 'done' })
     channel.end()
   }
@@ -301,6 +304,8 @@ class HostSubscription {
   private cursor?: StreamHead
   private pumping = false
   private ended = false
+  /** Counts each `subscribe` and `snapshot.get`: a replay or snapshot that waited for room stops if a newer one began. */
+  private run = 0
   constructor(
     readonly stream: StreamId,
     private readonly channel: Channel,
@@ -311,9 +316,14 @@ class HostSubscription {
 
   request(h: EngineMessage['header']): void {
     if (this.ended) return
+    const run = ++this.run
+    const done = (work: Promise<void>): void =>
+      void work.catch((error) => {
+        if (this.run === run) this.end(error)
+      })
     try {
-      if (h.t === 'subscribe') this.serve(h.after as StreamHead)
-      else if (h.t === 'snapshot.get') this.snapshot()
+      if (h.t === 'subscribe') done(this.serve(h.after as StreamHead, run))
+      else if (h.t === 'snapshot.get') done(this.snapshot(run))
       else if (h.t === 'unsubscribe') this.drop()
       else throw new NetError('bad_request')
     } catch (error) {
@@ -321,7 +331,13 @@ class HostSubscription {
     }
   }
 
-  private serve(after: StreamHead): void {
+  /** Waits for room on the stream; answers whether this run still goes on. */
+  private async room(run: number): Promise<boolean> {
+    await this.channel.drained()
+    return this.run === run && !this.ended && this.channel.isOpen()
+  }
+
+  private async serve(after: StreamHead, run: number): Promise<void> {
     if (
       !after ||
       !Number.isSafeInteger(after.epoch) ||
@@ -341,6 +357,7 @@ class HostSubscription {
       const page = this.page(cursor, head.seq)
       if (!page) return this.requireSnapshot()
       cursor = this.send(page)
+      if (!(await this.room(run))) return
     }
     this.port.assertReadable(this.stream, this.caller)
     this.channel.send({ t: 'caughtUp' })
@@ -349,10 +366,17 @@ class HostSubscription {
     this.pump()
   }
 
-  /** Sends what was stored after the cursor. Runs on every notification; a batch is checked before it goes. */
+  /**
+   * Sends what was stored after the cursor. Runs on every notification; a batch is checked before it goes, and the
+   * next waits for room on the stream (a notification meanwhile finds the pump running, which reads to the head).
+   */
   pump(): void {
+    void this.pumpPages()
+  }
+  private async pumpPages(): Promise<void> {
     if (!this.live || this.pumping || this.ended || !this.cursor) return
     this.pumping = true
+    const run = this.run
     try {
       for (;;) {
         const head = this.port.store.head(this.stream)
@@ -367,6 +391,7 @@ class HostSubscription {
           return this.requireSnapshot()
         }
         this.cursor = this.send(page)
+        if (!(await this.room(run)) || !this.live || !this.cursor) return
       }
     } catch (error) {
       this.end(error)
@@ -385,7 +410,7 @@ class HostSubscription {
     }
   }
 
-  private snapshot(): void {
+  private async snapshot(run: number): Promise<void> {
     this.live = false
     const reader = this.port.store.openSnapshot(this.stream)
     try {
@@ -399,6 +424,7 @@ class HostSubscription {
           { t: 'snapshot', target: reader.target, done, records: page.records.map(meta) },
           parts(page.records)
         )
+        if (!done && !(await this.room(run))) return
       }
     } finally {
       reader.close()
