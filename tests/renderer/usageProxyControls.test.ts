@@ -60,7 +60,7 @@ describe('a detected proxy without a key', () => {
     render(claude({ address: '100.101.102.103:8317', key: 'none' }))
     expect(q('usage-proxy-note')?.textContent).toContain('Detected CLI API proxy')
     expect(q('usage-proxy-enter')?.textContent).toBe('Enter proxy key')
-    expect(document.querySelector('.settings-group-title')?.textContent).toBe('Claude Subscription')
+    expect(document.querySelector('.settings-group-title')?.textContent).toBe('Anthropic · Claude Subscription')
     expect(document.body.textContent).not.toMatch(/via local proxy|Proxy key missing|CLIPROXY_MANAGEMENT_KEY/)
     expect(q('usage-settings')?.getAttribute('title')).toBe('Usage settings')
   })
