@@ -4631,7 +4631,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
         const path = requiredContainedPath(ctx, root, p.path)
         const piece = await ctx.mms.fileService.readAssetRange(root, path, offset, length, guardFor(ctx))
-        return { path, mimeType: piece.mimeType, size: piece.size, offset, data: Buffer.from(piece.data).toString('base64') }
+        return { path, mimeType: piece.mimeType, size: piece.size, mtimeMs: piece.mtimeMs, offset, data: Buffer.from(piece.data).toString('base64') }
       })
     }
     case 'files.writeDirect': {

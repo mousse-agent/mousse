@@ -12,42 +12,64 @@ import { SHOWN_IMAGE_TYPES, botImageSource, fileNameOf, isImageAttachment } from
  * when it loads), the name or alt text on hover, and a click opens the chat's preview with Previous and Next.
  */
 
-type FileImage = { url?: string; failed?: true }
+type FileImage = { url?: string; failed?: true; /** The file's size and write time when it was read; absent when unknown. */ stamp?: string }
 
-/** Image files read once per window: a chat's copies never change, so each path's picture is kept for the session. */
+/**
+ * Each path's picture, kept for the window. A file can be written again at the same path (a bot saving a new
+ * picture over its last one), so each new look at a path checks the file's size and write time and rereads it only
+ * when they changed; the picture already shown stays until the new one is read.
+ */
 const fileImages = new Map<string, FileImage>()
+/** Checks and reads in flight; a path's next look after one ends checks again. */
 const loading = new Map<string, Promise<void>>()
 const listeners = new Set<() => void>()
+
+const stampOf = (file: { size: number; mtimeMs?: number }) => (typeof file.mtimeMs === 'number' ? `${file.size}:${file.mtimeMs}` : undefined)
 
 /** The picture of an image file of this computer, once read; undefined while it is read or when it can't be. */
 export function botFileImageUrl(path: string): string | undefined {
   return fileImages.get(path)?.url
 }
 
-/** Reads an image file through the Files panel's preview path; only PNG, JPEG, GIF and WebP become a picture. */
+/**
+ * Reads an image file through the Files panel's preview path; only PNG, JPEG, GIF and WebP become a picture. A path
+ * read before is read again only when its size or write time changed since.
+ */
 function loadFileImage(path: string): Promise<void> {
   const known = loading.get(path)
   if (known) return known
   const done = (image: FileImage) => {
+    const was = fileImages.get(path)
     fileImages.set(path, image)
     for (const listener of listeners) listener()
+    // The old picture goes once everything showing it has been told about the new one.
+    if (was?.url && was.url !== image.url) URL.revokeObjectURL(was.url)
   }
   const at = fileLocation(path)
   const read = (async () => {
+    const was = fileImages.get(path)
+    // A picture read without a write time (an older daemon) can't be checked: it stays, as it always did.
+    if (was?.url && !was.stamp) return
+    if (was?.stamp) {
+      const stamp = await window.mousse.fs.assetStamp(at.path, undefined, null, at.root).then(stampOf, () => undefined)
+      if (stamp === was.stamp) return
+    }
     try {
       const asset = await window.mousse.fs.readAsset(at.path, undefined, null, at.root)
-      if (!SHOWN_IMAGE_TYPES.has(asset.mimeType)) return done({ failed: true })
+      const stamp = stampOf(asset)
+      if (!SHOWN_IMAGE_TYPES.has(asset.mimeType)) return done({ failed: true, stamp })
       const bytes = Uint8Array.from(asset.data)
-      done({ url: URL.createObjectURL(new Blob([bytes.buffer], { type: asset.mimeType })) })
+      done({ url: URL.createObjectURL(new Blob([bytes.buffer], { type: asset.mimeType })), stamp })
     } catch {
-      done({ failed: true })
+      // A picture already shown stays when the file can't be read again (gone, or the read failed).
+      if (!was?.url) done({ failed: true })
     }
-  })()
+  })().finally(() => loading.delete(path))
   loading.set(path, read)
   return read
 }
 
-/** An image file's picture, read once per window (the Files pane shows it too). */
+/** An image file's picture, kept for the window and read again when the file changed (the Files pane shows it too). */
 export function useFileImage(path: string | undefined): FileImage | undefined {
   const [image, setImage] = useState(() => (path ? fileImages.get(path) : undefined))
   useEffect(() => {
@@ -99,7 +121,9 @@ export function resetBotFileImages(): void {
 function Thumb({ id, url, name, failed, className }: { id: string; url?: string; name?: string; failed?: boolean; className?: string }) {
   const gallery = useImageGallery()
   const [open, setOpen] = useState(false)
-  const [broken, setBroken] = useState(false)
+  // Broken is that picture only: a file read again gives a new one.
+  const [brokenUrl, setBrokenUrl] = useState<string>()
+  const broken = !!url && brokenUrl === url
   const label = name?.trim() || undefined
   const classes = `bot-image${className ? ` ${className}` : ''}`
   if (!url || broken) {
@@ -110,7 +134,7 @@ function Thumb({ id, url, name, failed, className }: { id: string; url?: string;
   const image: LightboxImage = { id, url, filename: label }
   return <>
     <button type="button" className={classes} title={label} aria-label={label ? `Open image: ${label}` : 'Open image'} onClick={() => (gallery ? gallery.open(image) : setOpen(true))}>
-      <img src={url} alt={label ?? ''} loading="lazy" decoding="async" draggable={false} onError={() => setBroken(true)} />
+      <img src={url} alt={label ?? ''} loading="lazy" decoding="async" draggable={false} onError={() => setBrokenUrl(url)} />
     </button>
     {!gallery && <ImageLightbox open={open} onClose={() => setOpen(false)} images={[image]} />}
   </>

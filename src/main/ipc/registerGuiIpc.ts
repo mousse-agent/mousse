@@ -30,7 +30,7 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, powerMonitor, screen, session, shell } from 'electron'
 import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
-import { readAssetInPieces } from './assetPieces'
+import { readAssetInPieces, readAssetStamp } from './assetPieces'
 import { browsedRootParams, browseSupport } from './browsedRoot'
 import { daemonGitParams } from './daemonGitParams'
 import { PROJECT_ICON_EXTENSIONS, type ProjectIconChoice, type ProjectIconImage } from '../../shared/projectIcon'
@@ -3129,6 +3129,16 @@ export function registerGuiIpc(
     async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> => {
       const browsed = await browsedRoot(root)
       return readAssetInPieces((offset, length) =>
+        guiMms.request('files.readAsset', { ...filesScope(projectId, threadId), ...browsed, path: filePath, offset, length })
+      )
+    }
+  )
+  registerHandler(
+    'fs:assetStamp',
+    // A preview's size and write time without its bytes, so a picture read earlier is reread only when the file changed.
+    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string) => {
+      const browsed = await browsedRoot(root)
+      return readAssetStamp((offset, length) =>
         guiMms.request('files.readAsset', { ...filesScope(projectId, threadId), ...browsed, path: filePath, offset, length })
       )
     }
