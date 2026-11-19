@@ -16,12 +16,16 @@ export const BOT_ITEM_TOOLS = ['item_save', 'item_list'] as const
 export type BotItemTool = (typeof BOT_ITEM_TOOLS)[number]
 
 /**
- * How an item stands: not started (`todo`), being done (`doing`), waiting on the owner (`waiting`: a question, an
- * approval, a "say go"), delivered as asked (`done`), or no longer wanted (`dropped`). The stage in between ("built,
- * in the dev app, not shipped") is the item's note.
+ * The stage an item is at: not started (`todo`), being looked into (`investigating`), being made (`building`), made and
+ * awaiting the owner's review (`in_dev`), approved and not yet merged or shipped (`approved`), waiting on the owner for
+ * anything else (`waiting`: a question, a "say go"), merged or shipped as asked (`done`), or no longer wanted
+ * (`dropped`). The bot moves it as the work moves, and answers "what is open, what is left" from it.
  */
-export const BOT_ITEM_STATES = ['todo', 'doing', 'waiting', 'done', 'dropped'] as const
+export const BOT_ITEM_STATES = ['todo', 'investigating', 'building', 'in_dev', 'approved', 'waiting', 'done', 'dropped'] as const
 export type BotItemState = (typeof BOT_ITEM_STATES)[number]
+
+/** The stages in which an item waits on the owner: a review, or an answer. */
+export const BOT_ITEM_WAITS_ON_OWNER: ReadonlySet<BotItemState> = new Set(['in_dev', 'waiting'])
 
 /** The states an item is closed in: it leaves the open list, and stays readable with `item_list`. */
 export const BOT_ITEM_CLOSED: ReadonlySet<BotItemState> = new Set(['done', 'dropped'])
@@ -193,10 +197,21 @@ export function itemsBlock(items: readonly BotItem[], input: ItemLineInput & { n
   return blocks.join('\n')
 }
 
+/** How many open items are at each stage, in the order of the stages: what "how far is it all" is answered from. */
+export function itemStages(items: readonly BotItem[]): Partial<Record<BotItemState, number>> {
+  const open = openItems(items)
+  const stages: Partial<Record<BotItemState, number>> = {}
+  for (const state of BOT_ITEM_STATES) {
+    const count = open.filter((item) => item.state === state).length
+    if (count) stages[state] = count
+  }
+  return stages
+}
+
 /** One line for a run's brief: that the list exists and how long it is. */
 export function itemsCountLine(items: readonly BotItem[]): string {
   const open = openItems(items)
   if (!open.length) return ''
-  const waiting = open.filter((item) => item.state === 'waiting').length
+  const waiting = open.filter((item) => BOT_ITEM_WAITS_ON_OWNER.has(item.state)).length
   return `Open items your owner asked for or you promised: ${open.length}${waiting ? `, ${waiting} waiting on your owner` : ''}. item_list shows them; item_save updates one this work moves.`
 }

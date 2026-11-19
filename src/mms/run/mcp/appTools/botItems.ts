@@ -24,11 +24,11 @@ const LIST_STATES: readonly string[] = ['open', 'closed', 'all', ...BOT_ITEM_STA
 export const BOT_ITEM_TOOL_DEFINITIONS: Record<BotItemTool, Tool> = {
   item_save: {
     name: 'item_save',
-    description: 'Add or change one of your open items: something your owner asked for or you promised. No id adds one; id changes one as it moves. done means your owner has it as asked, not that it is built or handed off.',
+    description: 'Add or change one of your open items: something your owner asked for or you promised. No id adds one; id changes one as its stage moves. done means merged or shipped, not built or handed off.',
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: 'The item to change (i12); none adds one.' })),
       text: Type.Optional(Type.String({ description: `What was asked or promised: one line under ${MAX_BOT_ITEM_TEXT_CHARS} characters, absolute dates. Needed to add one.` })),
-      state: Type.Optional(Type.Union(BOT_ITEM_STATES.map((state) => Type.Literal(state)), { description: 'todo (default), doing, waiting (on your owner), done, dropped.' })),
+      state: Type.Optional(Type.Union(BOT_ITEM_STATES.map((state) => Type.Literal(state)), { description: 'Its stage: todo (default), investigating, building, in_dev (built, awaits review), approved, waiting (on your owner), done (merged or shipped), dropped.' })),
       note: Type.Optional(Type.String({ description: 'Where it is now, one line: "built, in the dev app, not shipped". Empty clears it.' })),
       links: Type.Optional(Type.Array(Type.String(), { description: 'Links to add: a thread, a pull request, a page, a file.' })),
       source: Type.Optional(Type.String({ description: "The chat row it comes from (j123). Default: your owner's message that started this turn." }))
@@ -36,7 +36,7 @@ export const BOT_ITEM_TOOL_DEFINITIONS: Record<BotItemTool, Tool> = {
   },
   item_list: {
     name: 'item_list',
-    description: 'Your items as they stand now, latest change first: the open ones by default, state closed or all for finished and dropped ones, query for words. Each has its ref, state, note, the chat row it came from (memory_read shows it) and its links.',
+    description: 'Your items as they stand now, latest change first, with a count per stage: the open ones by default, state closed or all for finished and dropped ones, query for words.',
     parameters: Type.Object({
       state: Type.Optional(Type.Union(LIST_STATES.map((state) => Type.Literal(state)), { description: 'open (default), closed, all, or one state.' })),
       query: Type.Optional(Type.String({ description: 'Words every listed item holds.' })),
@@ -144,7 +144,8 @@ export function botItemTools(source: BotMemoryToolHost | (() => BotMemoryToolHos
         items: listing.items.map((item) => itemLine(item, { day: (iso) => dayLabel(iso, zone) })),
         ...(listing.more ? { more: listing.more } : {}),
         open: listing.open,
-        closed: listing.closed
+        closed: listing.closed,
+        stages: listing.stages
       })
     })
   ]

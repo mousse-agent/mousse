@@ -72,8 +72,8 @@ describe('the open items tools', () => {
     // The same ask again adds nothing.
     expect((await call('item_save', 'ada-home', { text: 'redesign the usage page' })).value).toMatchObject({ id: 'i1', open: 1, note: 'That item is already on your list.' })
 
-    const moved = await call('item_save', 'ada-home', { id: 'i1', state: 'doing', note: 'built, in the dev app, not shipped', links: ['mousse://thread/t9'] })
-    expect(moved.value.item).toContain('- i1 · doing · Redesign the usage page (built, in the dev app, not shipped)')
+    const moved = await call('item_save', 'ada-home', { id: 'i1', state: 'building', note: 'built, in the dev app, not shipped', links: ['mousse://thread/t9'] })
+    expect(moved.value.item).toContain('- i1 · building · Redesign the usage page (built, in the dev app, not shipped)')
     expect(moved.value.item).toContain('mousse://thread/t9')
 
     await call('item_save', 'ada-home', { id: 'i1', state: 'done' })
@@ -81,6 +81,18 @@ describe('the open items tools', () => {
     const closed = await call('item_list', 'ada-home', { state: 'closed', query: 'usage' })
     expect(closed.value.items).toHaveLength(1)
     expect(closed.value.items![0]).toContain('- i1 · done · Redesign the usage page')
+  })
+
+  it('counts the open items at each stage, so a status answer comes from the list', async () => {
+    const fx = memoryFixture()
+    const { call } = setup(fx)
+    const stages = ['investigating', 'building', 'in_dev', 'in_dev', 'approved', 'waiting', 'done', 'dropped']
+    for (const [index, state] of stages.entries()) expect((await call('item_save', 'ada-home', { text: `Ask ${index}`, state })).isError).toBeFalsy()
+    const listing = (await call('item_list', 'ada-home', {})).value as { open?: number; closed?: number; stages?: Record<string, number>; items?: string[] }
+    expect(listing).toMatchObject({ open: 6, closed: 2, stages: { investigating: 1, building: 1, in_dev: 2, approved: 1, waiting: 1 } })
+    // Closed stages are not counted as open work.
+    expect(listing.stages).not.toHaveProperty('done')
+    expect((await call('item_list', 'ada-home', { state: 'in_dev' })).value.items).toHaveLength(2)
   })
 
   it('marks what unattended work adds, and never shows one bot another bot\'s items', async () => {
@@ -95,7 +107,7 @@ describe('the open items tools', () => {
   })
 
   it.each([
-    ['a new item without words', { state: 'doing' }],
+    ['a new item without words', { state: 'building' }],
     ['an unknown state', { text: 'Ship it', state: 'shipped' }],
     ['an item that does not exist', { id: 'i404', state: 'done' }],
     ['a source that is no row of the chat', { text: 'Ship it', source: 'j999' }],

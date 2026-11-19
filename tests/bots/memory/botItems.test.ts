@@ -95,8 +95,8 @@ describe('the list', () => {
     saved(saveBotItem(fx.store, 'ada', { text: 'Redesign the usage page', ...chat('a1') }))
     // The same words again are the same item, not a second one.
     expect(saveBotItem(fx.store, 'ada', { text: '  redesign the  usage page ', ...chat('a1') })).toMatchObject({ added: false, item: { id: 'i1' } })
-    const moved = saved(saveBotItem(fx.store, 'ada', { id: 'i1', state: 'doing', note: 'built, in the dev app, not shipped', links: ['mousse://thread/t1', 'mousse://thread/t1', 'PR #1416'], ...chat('a2') }))
-    expect(moved).toMatchObject({ state: 'doing', note: 'built, in the dev app, not shipped', links: ['mousse://thread/t1', 'PR #1416'], source: seq })
+    const moved = saved(saveBotItem(fx.store, 'ada', { id: 'i1', state: 'building', note: 'built, in the dev app, not shipped', links: ['mousse://thread/t1', 'mousse://thread/t1', 'PR #1416'], ...chat('a2') }))
+    expect(moved).toMatchObject({ state: 'building', note: 'built, in the dev app, not shipped', links: ['mousse://thread/t1', 'PR #1416'], source: seq })
     expect(saved(saveBotItem(fx.store, 'ada', { id: 'i1', note: '', links: ['PR #1416'], ...chat('a3') }))).toMatchObject({ links: ['mousse://thread/t1', 'PR #1416'] })
     expect(botItems(fx.store, 'ada')[0]).not.toHaveProperty('note')
     later(fx, DAY)
@@ -116,7 +116,7 @@ describe('the list', () => {
     saved(saveBotItem(fx.store, 'ada', { text: 'Tell the owner when the nightly is green', source: `j${seq}`, lane: 'run', activationId: 'w1' }))
     expect(botItems(fx.store, 'ada')[0]).toMatchObject({ by: 'run', source: seq })
     // Work that moves it leaves the mark; the chat's own change clears it.
-    expect(saved(saveBotItem(fx.store, 'ada', { id: 'i1', state: 'doing', lane: 'run', activationId: 'w2' })).by).toBe('run')
+    expect(saved(saveBotItem(fx.store, 'ada', { id: 'i1', state: 'building', lane: 'run', activationId: 'w2' })).by).toBe('run')
     expect(saved(saveBotItem(fx.store, 'ada', { id: 'i1', note: 'watching', ...chat('a2') })).by).toBe('chat')
   })
 
@@ -157,11 +157,11 @@ describe('the list in a chat pack', () => {
     expect((await turn('a2')).text).not.toContain('Open items')
     await settle('a2')
     // Work moves it, and a consult of the chat adds one: neither is in the conversation.
-    saved(saveBotItem(fx.store, 'ada', { id: 'i1', state: 'doing', lane: 'run', activationId: 'w1' }))
+    saved(saveBotItem(fx.store, 'ada', { id: 'i1', state: 'building', lane: 'run', activationId: 'w1' }))
     saved(saveBotItem(fx.store, 'ada', { text: 'Send the invoice', lane: 'run', activationId: 'a2', inConversation: false }))
     const third = await turn('a3')
     expect(third.text).toContain(ITEMS_CHANGES_HEADING)
-    expect(third.text).toMatch(/- i1 · doing · Redesign the usage page/)
+    expect(third.text).toMatch(/- i1 · building · Redesign the usage page/)
     expect(third.text).toMatch(/- i2 · todo · Send the invoice .* added in your unattended work/)
     await settle('a3')
     expect((await turn('a4')).text).not.toContain('Open items')
@@ -171,20 +171,21 @@ describe('the list in a chat pack', () => {
     const job: BotJob = { id: 'j1', botId: 'ada', activationId: 'a0', threadId: 't1', title: 'Usage redesign', request: 'Redesign the usage page', askedBy: 'owner', state: 'running', createdAt: '2026-11-07T09:00:00.000Z', updatedAt: '2026-11-07T09:00:00.000Z' }
     const jobs = [job]
     const { fx, turn, settle } = setup(jobs)
-    saved(saveBotItem(fx.store, 'ada', { text: 'Redesign the usage page', state: 'doing', links: ['mousse://thread/t1'], ...chat('a0') }))
+    saved(saveBotItem(fx.store, 'ada', { text: 'Redesign the usage page', state: 'building', links: ['mousse://thread/t1'], ...chat('a0') }))
     expect((await turn('a1')).text).toContain('mousse://thread/t1 (thread working)')
     await settle('a1')
     jobs[0] = { ...job, state: 'done', line: 'Built; preview in the dev app.', updatedAt: '2026-11-08T09:00:00.000Z', endedAt: '2026-11-08T09:00:00.000Z' }
     const second = await turn('a2')
     expect(second.text).toContain(ITEMS_CHANGES_HEADING)
-    expect(second.text).toContain('- i1 · doing · Redesign the usage page')
+    expect(second.text).toContain('- i1 · building · Redesign the usage page')
     expect(second.text).toContain('mousse://thread/t1 (thread done → Built; preview in the dev app.)')
   })
 
   it('a run is told the list exists, in one line', async () => {
     const { fx, packs } = setup()
     expect(await packs.runPreamble({ botId: 'ada', activationId: 'w0', scheduleId: undefined })).not.toContain('Open items')
-    saved(saveBotItem(fx.store, 'ada', { text: 'Redesign the usage page', state: 'waiting', lane: 'run' }))
+    // Built and awaiting the owner's review waits on the owner, as a question does.
+    saved(saveBotItem(fx.store, 'ada', { text: 'Redesign the usage page', state: 'in_dev', lane: 'run' }))
     expect(await packs.runPreamble({ botId: 'ada', activationId: 'w1', scheduleId: undefined })).toContain('Open items your owner asked for or you promised: 1, 1 waiting on your owner.')
   })
 })
@@ -236,17 +237,17 @@ describe('asks the bot did not list itself', () => {
     await turn('a1')
     await settle('a1')
     await settle('a1')
-    expect(botItems(fx.store, 'ada')).toMatchObject([{ id: 'i1', text: 'Usage page redesign', state: 'doing', source: seq, links: ['mousse://thread/t1'], by: 'mousse' }])
+    expect(botItems(fx.store, 'ada')).toMatchObject([{ id: 'i1', text: 'Usage page redesign', state: 'building', source: seq, links: ['mousse://thread/t1'], by: 'mousse' }])
     // The next turn of the conversation is told, with what to do about it.
     owner(fx, 'o2', 'Thanks.', 'a2')
-    expect((await turn('a2')).text).toMatch(/- i1 · doing · Usage page redesign .* added by Mousse when you handed this to a thread/)
+    expect((await turn('a2')).text).toMatch(/- i1 · building · Usage page redesign .* added by Mousse when you handed this to a thread/)
   })
 
   it('joins the item the turn wrote for it instead of adding a second one', async () => {
     const { fx, turn, settle } = setup([job()])
     owner(fx, 'o1', 'Please redesign the usage page.', 'a1')
     await turn('a1')
-    saved(saveBotItem(fx.store, 'ada', { text: 'Redesign the usage page', state: 'doing', ...chat('a1') }))
+    saved(saveBotItem(fx.store, 'ada', { text: 'Redesign the usage page', state: 'building', ...chat('a1') }))
     await settle('a1')
     expect(botItems(fx.store, 'ada')).toMatchObject([{ id: 'i1', text: 'Redesign the usage page', links: ['mousse://thread/t1'], by: 'chat' }])
   })

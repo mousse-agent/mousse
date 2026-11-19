@@ -2,7 +2,7 @@ import type { BotLane } from '../../../shared/bots/personal/definition'
 import {
   BOT_ITEM_CLOSED, BOT_ITEM_KEY, BOT_ITEM_LIST_LIMIT, BOT_ITEM_NEXT_KEY, BOT_ITEM_REV_KEY, BOT_ITEM_STATES, BOT_ITEMS_FROM_DIGEST,
   MAX_BOT_ITEM_LINK_CHARS, MAX_BOT_ITEM_LINKS, MAX_BOT_ITEM_LIST_LIMIT, MAX_BOT_ITEM_NOTE_CHARS, MAX_BOT_ITEM_TEXT_CHARS, MAX_BOT_ITEMS,
-  itemThreads, openItems, parseItemRef, parseJournalRef, type BotItem, type BotItemBy, type BotItemState
+  itemStages, itemThreads, openItems, parseItemRef, parseJournalRef, type BotItem, type BotItemBy, type BotItemState
 } from '../../../shared/bots/personal/items'
 import type { BotJob } from '../../../shared/bots/personal/jobs'
 import { threadLink } from '../../../shared/threadLink'
@@ -178,7 +178,7 @@ export interface BotItemListInput {
 }
 
 /** `item_list`: the items as they stand, latest change first, and how many more match. */
-export function listBotItems(store: BotMemoryStore, botId: string, input: BotItemListInput = {}): { items: BotItem[]; more: number; open: number; closed: number } {
+export function listBotItems(store: BotMemoryStore, botId: string, input: BotItemListInput = {}): { items: BotItem[]; more: number; open: number; closed: number; stages: Partial<Record<BotItemState, number>> } {
   const all = botItems(store, botId)
   const state = input.state ?? 'open'
   const words = oneLine(input.query ?? '').toLowerCase().split(' ').filter(Boolean)
@@ -191,7 +191,7 @@ export function listBotItems(store: BotMemoryStore, botId: string, input: BotIte
   })
   const limit = Math.max(1, Math.min(MAX_BOT_ITEM_LIST_LIMIT, Math.floor(input.limit ?? BOT_ITEM_LIST_LIMIT)))
   const open = openItems(all).length
-  return { items: matching.slice(0, limit), more: Math.max(0, matching.length - limit), open, closed: all.length - open }
+  return { items: matching.slice(0, limit), more: Math.max(0, matching.length - limit), open, closed: all.length - open, stages: itemStages(all) }
 }
 
 /**
@@ -215,7 +215,7 @@ export function linkHandoffs(store: BotMemoryStore, botId: string, activationId:
       const candidates = near.filter((item) => !(item.by === 'mousse' && itemThreads(item).length))
       // Linked by Mousse outside the conversation: who wrote the item stays as it was, and the next turn is told.
       if (candidates.length === 1 && handed.length === 1) saveBotItem(store, botId, { id: candidates[0]!.id, links: [link], lane: 'run' })
-      else if (!candidates.length) saveBotItem(store, botId, { text: oneLine(job.title).slice(0, MAX_BOT_ITEM_TEXT_CHARS) || 'Work handed to a thread', state: 'doing', links: [link], ...(source !== undefined ? { source } : {}), lane: 'run', by: 'mousse' })
+      else if (!candidates.length) saveBotItem(store, botId, { text: oneLine(job.title).slice(0, MAX_BOT_ITEM_TEXT_CHARS) || 'Work handed to a thread', state: 'building', links: [link], ...(source !== undefined ? { source } : {}), lane: 'run', by: 'mousse' })
     }
   })
 }
