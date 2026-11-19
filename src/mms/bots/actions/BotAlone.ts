@@ -57,7 +57,8 @@ function filenameExtension(value: unknown): string | undefined {
     || !/^[\p{L}\p{N}][\p{L}\p{N} ._()+,-]*$/u.test(name)
     || /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/iu.test(name.split('.')[0]!.trimEnd())) return undefined
   const dot = name.lastIndexOf('.')
-  return dot < 0 ? '' : name.slice(dot + 1).toLowerCase()
+  const extension = dot < 0 ? '' : name.slice(dot + 1).toLowerCase()
+  return new Set('com net org io dev app co ai info biz gov edu me us uk de'.split(' ')).has(extension) ? undefined : extension
 }
 class TooManyAddresses extends Error {}
 const tokenDigest = (key: string, field: string, token: string): string => createHmac('sha256', key).update(JSON.stringify([field, token])).digest('hex')
