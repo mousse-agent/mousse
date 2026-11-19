@@ -7229,8 +7229,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * chat says so in plain words (a runtime that cannot hold the bot is the bot's stuck error).
    */
   private block(row: BotActivationRow, code: string, reason: string): { refused: string; code: string } {
+    // The runtime's own reason follows, so the chat says what to change rather than only that something is wrong.
+    const why = reason.trim() ? failureWords(reason) : ''
     const stuck: BotStoredError | undefined = code === 'policy_unenforceable'
-      ? { code, error: { text: 'I can\'t run on the providers set up here.', action: { kind: 'open_providers', label: 'Open providers' } } }
+      ? { code, error: { text: why ? `I can't run on the providers set up here: ${why}` : 'I can\'t run on the providers set up here.', action: { kind: 'open_providers', label: 'Open providers' } } }
       : undefined
     // Nobody waits on a run to continue it: it ends failed, and counts toward the failure pause.
     if (row.lane === 'run') {
@@ -10811,44 +10813,68 @@ function chatTurnEndRow(row: Pick<BotActivationRow, 'id' | 'botId' | 'threadId'>
 /** What a chat turn says when its reply was cut off twice and the owner's message is still unanswered. */
 export const UNANSWERED_REPLY = 'My reply got cut off before it reached you. Could you send that again?'
 
-/** A turn's failure the provider reported (`providerFailureText`): its message, already redacted, after its code. */
-const PROVIDER_FAILURE = /^\[provider_[a-z_]+\]\s*(\S[\s\S]*)$/
-
-/**
- * Why an activation stopped, in plain words for its chat. A provider's failure says what the provider said (redacted
- * when the error was made, on one line and capped) and how many retries it had; Mousse's own failures keep a fixed line.
- */
 /** The line for work refused because the bot already has `MAX_QUEUED_ACTIVATIONS` waiting. */
 function queueFullWorkText(title: string): string {
   return `I had too much waiting, so I couldn't take on "${title}". Ask me again when I'm less busy.`
 }
 
-function failureText(reason: string): string {
-  // A runtime that can't run the bot's work says why in the bot's own words (a Codex whose tools Mousse hasn't checked).
-  if (isCodexBotRefusal(reason)) return reason
-  const provider = PROVIDER_FAILURE.exec(reason)
-  if (provider) {
-    const said = provider[1]!.replace(/\s+/g, ' ').trim()
-    return `The provider failed, so I stopped: ${said.length > CHAT_TURN_ERROR_CHARS ? `${said.slice(0, CHAT_TURN_ERROR_CHARS - 1)}…` : said}`
-  }
-  switch (reason) {
-    case 'bot_grant_revoked': return 'My permissions changed, so I stopped.'
-    case 'bot_context_failed': return 'I couldn\'t read my notes, so I stopped. Try again.'
-    case 'bot_context_not_cleared': return 'I couldn\'t start fresh, so I stopped. Try again.'
-    case 'bot_home_trashed': return 'My chat is in the trash. Restore it to keep going.'
-    case 'budget_denied': return 'I stopped here: I ran out of room for this.'
-    case 'asked_too_often': return 'I stopped: I asked too many times in one go.'
-    case 'bot_permissions_invalid': return 'My permissions are broken, so I stopped.'
-    case 'bots_unavailable': return 'Mousse isn\'t ready to run me yet. Try again in a moment.'
-    case 'unknown_calls':
-    case 'uncertain': return 'I was interrupted and can\'t tell what my last step did, so I stopped here.'
-    case 'restarted_twice': return 'Mousse restarted twice while I was working, so I stopped here.'
-    case 'queue_full': return 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.'
-    case 'no_progress': return 'I couldn\'t get anything done on this, so I stopped.'
-    // Older builds ended an activation after a count of turn-cap continuations; its record keeps the line.
-    case 'turn_cap_repeated': return 'I kept going without finishing, so I stopped here.'
-    default: return 'Something went wrong, so I stopped. Try again.'
-  }
+/** A failure with its code in front of its words, as a run records it (`[code] message`, `providerFailureText`). */
+const CODED_FAILURE = /^\[([a-z][a-z0-9_.-]*)\]\s*(\S[\s\S]*)$/i
+/** A code alone, with no words of its own (`bot_state_invalid`, a run's status). */
+const BARE_CODE = /^[a-z][a-z0-9_.-]*$/i
+
+/** Mousse's own failures, by code, each with its fixed line. */
+const FAILURE_LINES: Readonly<Record<string, string>> = {
+  bot_grant_revoked: 'My permissions changed, so I stopped.',
+  bot_context_failed: 'I couldn\'t read my notes, so I stopped. Try again.',
+  bot_context_not_cleared: 'I couldn\'t start fresh, so I stopped. Try again.',
+  bot_home_trashed: 'My chat is in the trash. Restore it to keep going.',
+  budget_denied: 'I stopped here: I ran out of room for this.',
+  asked_too_often: 'I stopped: I asked too many times in one go.',
+  bot_permissions_invalid: 'My permissions are broken, so I stopped.',
+  bots_unavailable: 'Mousse isn\'t ready to run me yet. Try again in a moment.',
+  unknown_calls: 'I was interrupted and can\'t tell what my last step did, so I stopped here.',
+  uncertain: 'I was interrupted and can\'t tell what my last step did, so I stopped here.',
+  restarted_twice: 'Mousse restarted twice while I was working, so I stopped here.',
+  queue_full: 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.',
+  no_progress: 'I couldn\'t get anything done on this, so I stopped.',
+  // Older builds ended an activation after a count of turn-cap continuations; its record keeps the line.
+  turn_cap_repeated: 'I kept going without finishing, so I stopped here.',
+  // A run that ended without an error of its own: its status.
+  interrupted: 'I was interrupted before I finished. Try again.',
+  cancelled: 'My turn was cancelled before I finished. Try again.',
+  failed: 'My turn failed before I finished. Try again.',
+  // A bot turn Mousse could not start (`executeBotEffect`).
+  bot_prepare_failed: 'I couldn\'t get ready to work, so I stopped. Try again.',
+  bot_state_invalid: 'My chat wasn\'t ready for a new turn, so I stopped. Try again.'
+}
+
+/** One line of an error's words, capped (`CHAT_TURN_ERROR_CHARS`): enough to say what went wrong, never a whole stack. */
+function failureWords(text: string): string {
+  const said = text.replace(/\s+/g, ' ').trim()
+  return said.length > CHAT_TURN_ERROR_CHARS ? `${said.slice(0, CHAT_TURN_ERROR_CHARS - 1)}…` : said
+}
+
+/**
+ * Why an activation stopped, in plain words for its chat. A run records its error with its code in front
+ * (`[code] message`): a runtime that can't run the bot's work keeps its own sentence (a Codex whose tools Mousse hasn't
+ * checked); a provider's failure says what the provider said (redacted when the error was made, on one line and capped)
+ * and how many retries it had; Mousse's own failures keep a fixed line. Any other error says its own words, and a code
+ * with no words says its code: the chat never hides the reason behind a line that names none.
+ */
+export function failureText(reason: string): string {
+  const trimmed = reason.trim()
+  const coded = CODED_FAILURE.exec(trimmed)
+  const code = coded?.[1]
+  const said = coded ? coded[2]! : trimmed
+  if (isCodexBotRefusal(said)) return said
+  if (code?.startsWith('provider_')) return `The provider failed, so I stopped: ${failureWords(said)}`
+  const key = code ?? said
+  const line = Object.hasOwn(FAILURE_LINES, key) ? FAILURE_LINES[key] : undefined
+  if (line) return line
+  if (!said) return 'I hit an error, so I stopped. Try again.'
+  if (!coded && BARE_CODE.test(said)) return said.startsWith('provider_') ? 'The provider failed, so I stopped. Try again.' : `I hit an error (${said}), so I stopped. Try again.`
+  return `I hit an error, so I stopped: ${failureWords(said)}`
 }
 
 /** An ask in plain words where no card title was stored (rows of an older build). */
