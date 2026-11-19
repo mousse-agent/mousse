@@ -397,6 +397,7 @@ export class BotActions {
   }
   /** The only status writer. Settlement clears executable arguments in the same statement. */
   transition(id: string, from: string, to: string, result?: BotMcpCallOutcome, withdrawalReason?: BotActionRefusalCode): boolean {
+    if (to === 'uncertain') result = { ...result, text: 'It could not be confirmed whether this went through: check before trying again.' }
     return this.host.store.db.transaction(() => {
       const moved = this.host.store.run(`UPDATE bot_actions SET status = ?, exec_args = CASE WHEN ? THEN exec_args ELSE NULL END,
         result_json = CASE WHEN args_json = '"[forgotten]"' THEN '{"text":"[forgotten]"}' ELSE ? END, answered_at = CASE WHEN ? = 'open' THEN ? ELSE answered_at END,
