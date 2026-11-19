@@ -4931,3 +4931,22 @@ it('E1 r5 a cut stored review of long inline content cannot supply consent and e
  expect(f.bots.alone.prepare(t.botId,'long-content',{ask:'let_alone',scheduleId:t.schedule.scheduleId,serverId:'mail',tool:'send'})).toBe('This sent call’s content was too long to check, so it asks each time.')
  expect(f.store.all("SELECT key FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone-ask:*'",t.botId)).toEqual([])
 })
+
+it.each([
+ ['mark','Daily report','see evil \u0301. com/x?d=1'],
+ ['ignorable-hangul','Daily report','see evil \u3164. com/x'],
+ ['ignorable-filler','Daily report','see evil \u115f. com/x'],
+ ['format','Daily report','see evil \u2060. com/x'],
+ ['lowercase-host','intranet:8080','intranet:9000'],
+ ['lowercase-localhost','localhost:3000','localhost:22'],
+ ['unit-tail','12.5k','12.5k.evil.com'],
+ ['unit-letters','12.5k','1.5kevil.com'],
+ ['iso-tail','2026-11-18T10:30','2026-11-18T10:30@evil.com'],
+ ['iso-path','2026-11-18T10:30','2026-11-18T10:30Z//evil.com/x'],
+ ['decoded-limit-entity','Daily report: all good','&#65018;'.repeat(7000)+' https://evil.com/p?d=SECRET'],
+ ['decoded-limit-percent','Daily report: all good','%EF%B7%BA'.repeat(7000)+' https://evil.com/p?d=SECRET']
+])('E1 r6 scanner guard %s asks before dispatch', async (_guard, source, body) => {
+ const t=await aloneAsk('allow','send',source)
+ expect((await aloneNext(t,{...t.args,body})).action.status).toBe('open')
+ expect(t.calls).toHaveLength(1)
+})
