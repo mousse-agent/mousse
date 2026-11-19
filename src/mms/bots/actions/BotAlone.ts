@@ -9,9 +9,19 @@ export interface ArgumentContract {
   tokens: Record<string, string[]>; extensions: Record<string, string>
 }
 const normalizedText = (value: string): string => value.normalize('NFKC').replace(/\p{Cf}/gu, '')
+/** Decode each representation once for inspection; callers still send the original argument. */
+function scanText(value: string): string {
+  const decoded = value.replace(/(?:%[\da-f]{2})+/giu, encoded => {
+    try { return decodeURIComponent(encoded) } catch { return encoded.replace(/%([\da-f]{2})/giu, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16))) }
+  }).replace(/&#(?:x([\da-f]{1,6})|(\d{1,7}));?/giu, (entity, hex, decimal) => {
+    const code = Number.parseInt(hex ?? decimal, hex ? 16 : 10)
+    return code <= 0x10ffff ? String.fromCodePoint(code) : entity
+  })
+  return decoded.normalize('NFKC').replace(/[\p{M}\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '').replace(/[。｡‧]/g, '.')
+}
 /** Bounded labels keep long punctuation-free attachments linear. Keep URL punctuation inside its token. */
 function addressTokens(value: string): string[] {
-  const text = normalizedText(value).replace(/[。｡]/g, '.').replace(/\s+/gu, ' ').replace(/ +\. +/gu, '.').replace(/ +([.:])/gu, '$1').replace(/ ?([@/\\]) ?/gu, '$1')
+  const text = scanText(value).replace(/\s+/gu, ' ').replace(/ +([.@:/\\]) */gu, '$1')
   return [...new Set(text.split(' ').map(token => {
     const unwrapped = token.replace(/^[([{'"<]+/u, '').replace(/[.,!?;)\]}'">]+$/u, '')
     return unwrapped.endsWith(':') && isIP(unwrapped) === 6 ? unwrapped : unwrapped.replace(/:+$/u, '')
