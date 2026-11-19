@@ -919,9 +919,9 @@ export class NetEngineService implements EngineDirectoryPort {
         const unreachable = outDown && serving ? 'out' : inDown && online ? 'in' : undefined
         // The class of the route its connection came up on (§7 `conn.up.route`), this computer's dial first; a
         // relay connection names its relay.
-        const up = started.sessions.route(node)
-        const route = up?.kind === 'relay' ? 'relay' : (up?.class as NetEngineDevice['route'])
-        const via = up?.kind === 'relay' && up.destination ? relayText(up.destination) : undefined
+        const connectedOn = started.sessions.route(node)
+        const route = connectedOn?.kind === 'relay' ? 'relay' : (connectedOn?.class as NetEngineDevice['route'])
+        const via = connectedOn?.kind === 'relay' && connectedOn.destination ? relayText(connectedOn.destination) : undefined
         const relay = this.relayView ? deviceRelay(this.relayView, row.endpoint, now) : undefined
         return {
           node,
