@@ -15,22 +15,6 @@
       "expiresAt": "2026-11-19T08:18:05.846Z"
     },
     {
-      "task": "bot-chat-faster-start",
-      "session": "Animatrix-917c6d",
-      "machine": "Animatrix",
-      "branch": "bot-chat-faster-start",
-      "paths": [
-        "src/mms/diagnostics/turnTiming.ts",
-        "src/mms/bots/activation/BotEngine.ts",
-        "src/mms/bots/chat/BotChatService.ts",
-        "src/mms/orchestrator/OrchestratorService.ts",
-        "src/mms/integrations/skills/SkillsRegistry.ts",
-        "src/mms/run/mcp/appTools/assemble.ts"
-      ],
-      "claimedAt": "2026-11-19T10:01:59.998Z",
-      "expiresAt": "2026-11-19T12:01:59.998Z"
-    },
-    {
       "task": "bot-done-list-drops-archived-and-old",
       "session": "Animatrix-5ccb01",
       "machine": "Animatrix",
