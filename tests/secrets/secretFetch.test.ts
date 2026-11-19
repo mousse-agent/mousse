@@ -128,3 +128,15 @@ it('lists the allowed request headers when refusing another header', async () =>
   const out = await run({ headers: { Cookie: 'anything' } })
   for (const name of ['Accept', 'Accept-Language', 'If-None-Match', 'If-Modified-Since']) expect(out.text).toContain(name)
 })
+
+it('masks a key that also occurs in fixed failure wording', async () => {
+  const { run, vault } = fixture()
+  const value = 'The service'
+  vault.delete('KEY')
+  vault.store('KEY', value, { threadId: 'home', keep: 'saved', binding: resolveSecretBinding({ service: 'openai' }) })
+  vi.mocked(publicFetch).mockRejectedValue(new Error('connection failed'))
+  const result = await run()
+  expect(result.isError).toBe(true)
+  expect(result.text).not.toContain(value)
+  expect(result.text).toContain('[secret KEY hidden]')
+})
