@@ -57,7 +57,7 @@ async function main() {
       acrylic.push(await execute(`(() => {
         const style = element => ({background:getComputedStyle(element).backgroundColor,image:getComputedStyle(element).backgroundImage});
         const divider = getComputedStyle(document.querySelector('.resizer')).backgroundColor;
-        return {root:style(document.querySelector('.app')),panes:[...document.querySelectorAll('.sidebar,.threads-sidebar,.navigation-rail,.titlebar,.main-area,.main-area>.header')].map(style),dividerAlpha:Number(divider.match(/\\/\\s*([\\d.]+)/)?.[1] ?? divider.match(/,\\s*([\\d.]+)\\)$/)?.[1]),visiblePanes:[...document.querySelectorAll('.main-area>.keep-mounted-stack>.keep-mounted-pane')].filter(element=>getComputedStyle(element).display!=='none' && getComputedStyle(element).opacity!=='0').length};
+        return {root:style(document.querySelector('.app')),panes:[...document.querySelectorAll('.sidebar,.threads-sidebar,.navigation-rail,.titlebar,.main-area,.main-area>.header')].map(element => ({...style(element),chatPane:element.matches('.sidebar')})),dividerAlpha:Number(divider.match(/\\/\\s*([\\d.]+)/)?.[1] ?? divider.match(/,\\s*([\\d.]+)\\)$/)?.[1]),visiblePanes:[...document.querySelectorAll('.main-area>.keep-mounted-stack>.keep-mounted-pane')].filter(element=>getComputedStyle(element).display!=='none' && getComputedStyle(element).opacity!=='0').length};
       })()`))
     }
     const overlays = []

@@ -1309,7 +1309,7 @@ export class MmsProfileServices {
     this.secretRequests = new SecretRequests(this.secretVault)
     const vault = this.secretVault
     // Bug reports (Settings → General → Error reports): the Report button's and report_bug's filing.
-    const gh = createGhFallbackRunner(execRunner)
+    const runner = createGhFallbackRunner(execRunner)
     this.bugReports = new BugReportService({
       installationHome: this.installationHome,
       profileHome: homeDir,
@@ -1317,7 +1317,7 @@ export class MmsProfileServices {
       secret: (name) => (vault.has(name) ? vault.value(name) : undefined),
       ghToken: async () => {
         try {
-          const token = (await gh('gh', ['auth', 'token'], { timeoutMs: 10_000, userRequested: userAction('button', 'File a bug report') })).stdout.trim()
+          const token = (await runner('gh', ['auth', 'token'], { timeoutMs: 10_000, userRequested: userAction('button', 'File a bug report') })).stdout.trim()
           return token || undefined
         } catch {
           return undefined

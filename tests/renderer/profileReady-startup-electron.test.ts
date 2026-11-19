@@ -31,7 +31,10 @@ it('paints the real shell and retryable skeleton before trusted binding, then pr
           ? `import {createElement} from 'react'; export function OrchestratorChat(){return createElement('div',{className:'startup-transcript'})}`
           : args.path === 'SettingsPage' || args.path === 'AutomationsPage'
             ? `import {createElement} from 'react'; import {useAppStore} from './src/renderer/stores/appStore'; export function ${args.path}(){const open=useAppStore(s=>s.${args.path === 'SettingsPage' ? 'settingsOpen' : 'scheduledOpen'});return createElement('div',{className:'${args.path === 'SettingsPage' ? 'settings-page' : 'automations-page'} overlay-page',hidden:!open},createElement('header',{className:'overlay-titlebar'},'Page'))}`
-            : `export function ${args.path}(){return null}`, loader: 'js', resolveDir: process.cwd() }))
+            // Thread links (ThreadChip) draw the sidebar's thread card on hover.
+            : args.path === 'ThreadsSidebar'
+              ? `export function ThreadsSidebar(){return null}; export function ThreadCardBody(){return null}`
+              : `export function ${args.path}(){return null}`, loader: 'js', resolveDir: process.cwd() }))
       } }]
     })
     await build({ entryPoints: [resolve('tests/fixtures/renderer-startup/main.ts')], outfile: join(directory, 'main.mjs'), bundle: true, platform: 'node', format: 'esm', external: ['electron'] })
@@ -58,11 +61,15 @@ it('paints the real shell and retryable skeleton before trusted binding, then pr
     for (const call of browserCalls) expect(call.input).toEqual({ profileId: 'prf_startup-bound' })
     for (const sample of report.acrylic) {
       expect(sample.root.background).not.toBe('rgba(0, 0, 0, 0)')
+      // The shell is the glass itself; the chat pane is a faint lift of it (frameless-shell.css).
+      expect(sample.panes.filter((pane: any) => pane.chatPane)).toHaveLength(1)
       for (const pane of sample.panes) {
-        expect(pane.background).toBe('rgba(0, 0, 0, 0)')
+        if (pane.chatPane) expect(pane.background).toMatch(/\/ 0\.05\)$/)
+        else expect(pane.background).toBe('rgba(0, 0, 0, 0)')
         expect(pane.image).toBe('none')
       }
-      expect(sample.dividerAlpha).toBeCloseTo(0.06)
+      // No divider line at rest: the pane's rounded edge divides, and hover or drag lights the divider.
+      expect(sample.dividerAlpha).toBe(0)
       expect(sample.visiblePanes).toBe(1)
     }
     expect(report.acrylic[0].root.background).not.toBe(report.acrylic[1].root.background)

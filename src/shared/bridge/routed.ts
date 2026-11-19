@@ -1067,6 +1067,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     reason: 'Settings and services of the computer, not thread features.'
   },
   {
+    prefixes: ['computerUse.'],
+    reason: 'Cua Driver is found and installed on the computer itself; only a person at a window of that computer installs software.'
+  },
+  {
     methods: ['automations.asks.answer', 'automations.keep'],
     reason: 'An agent’s ask and Keep are answered on the computer that holds them.'
   },
