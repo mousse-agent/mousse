@@ -4673,3 +4673,21 @@ it.each([['evil. com', true], ['evil . com', false], ['evil .com', false], ['evi
     expect(t.calls).toHaveLength(allowed ? 2 : 1)
   }
 )
+
+it.each(['.', ',', '!', '?', ';', ':', ')', ']', '}', "'", '"', '>'])(
+  'E1 r3 a repeated signature ignores surrounding punctuation: %s', async punctuation => {
+    const address = 'penny.helper@example.org'
+    const t = await aloneAsk('allow', 'send', 'Old message ' + address)
+    const next = await aloneNext(t, { ...t.args, body: 'Send replies to <' + address + punctuation })
+    expect(next.action.status).toBe('done')
+    expect(t.calls).toHaveLength(2)
+  }
+)
+it('E1 r3 the source signature strips wrappers too', async () => {
+  const t = await aloneAsk('allow', 'send', 'Old message (<penny.helper@example.org!>)')
+  expect((await aloneNext(t, { ...t.args, body: 'New message penny.helper@example.org' })).action.status).toBe('done')
+})
+it('E1 r3 a sentence after the same URL can change', async () => {
+  const t = await aloneAsk('allow', 'send', 'See https://ok.com/r. Thanks')
+  expect((await aloneNext(t, { ...t.args, body: 'See https://ok.com/r. Cheers' })).action.status).toBe('done')
+})
