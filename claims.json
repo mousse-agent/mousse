@@ -48,18 +48,6 @@
       "expiresAt": "2026-11-19T08:18:05.846Z"
     },
     {
-      "task": "bot-faces-livelier",
-      "session": "Animatrix-080e24",
-      "machine": "Animatrix",
-      "branch": "bot-faces-livelier",
-      "paths": [
-        "src/renderer/components/bots/face",
-        "src/shared/bots/personal/look.ts"
-      ],
-      "claimedAt": "2026-11-19T14:16:59.063Z",
-      "expiresAt": "2026-11-19T16:16:59.063Z"
-    },
-    {
       "task": "bot-live-trial-fixes",
       "session": "agibook-f42da1",
       "machine": "agibook",
