@@ -19,9 +19,17 @@ Each computer also keeps, per device, the last address a session with it opened 
 - When this computer dialled, it is the route it dialled, if that was a LAN hint or a direct route. A relay is never kept.
 - When this computer accepted the session on its LAN listener, it only sees the peer's source port. Each side therefore tells the other its listener port on the session (`lan.port`, unsigned, same user only), and the accepting side keeps the peer's source address with that port.
 
-The last address is tried after the live LAN hints and before signed routes: a hint is fresher, and on the same network the last address is likelier to answer than a published route. A dead one delays the next route only by the dial stagger (250 ms). Records of devices that leave the list are dropped.
+The last address is tried after the live LAN hints and before signed routes: a hint is fresher, and on the same network the last address is likelier to answer than a published route. A dead one delays the next local route only by the dial stagger (250 ms). Records of devices that leave the list are dropped.
 
 `lan.port` is a session capability (`lan.port.v1`). A build from before it does not offer the capability and is never sent the message, so it keeps working; such a peer just cannot be dialled back by a computer that only accepted from it.
+
+## Before the relay
+
+Routes with a priority below 0 (LAN hints and the last address) get a 1.5 s head start before any route above 0 (Tailscale, the relay, tunnels) is dialled. A LAN dial with its pinned TLS finishes well within that, so two devices on one network do not open a relay connection at all. When every local route has failed, the remote routes start at once. Configured direct routes (priority 0) keep the ordinary 250 ms stagger.
+
+## Phones
+
+A phone learns the listener's addresses from `net.direct.endpoints` (see `protocol.md`): one `ws://<address>:<port>/mousse-net` per private IPv4 address of the computer, at most eight, only for another device of the same account. The listener binds IPv4 only, so unique local IPv6 addresses are not offered. A phone that remembers them can open its next session on the LAN with no relay. Its session on the listener passes the same pinned TLS, signed hello, delegation, revocation and connected-here checks as a session through the relay.
 
 ## Trust
 

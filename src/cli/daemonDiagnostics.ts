@@ -30,6 +30,17 @@ function describeFailure(error: unknown): string {
   }
 }
 
+/**
+ * A child program's output pipe that failed to start reading (`read ENOTCONN`, seen on Windows while the service
+ * starts several programs at once). Node raises it on the pipe with no listener, so it lands here; the program's own
+ * call still ends (it closes or fails), so the service only logs it instead of shutting down.
+ */
+export function isChildPipeReadFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const { code, syscall } = error as NodeJS.ErrnoException
+  return code === 'ENOTCONN' && syscall === 'read' && /\bcreateSocket\b[\s\S]*\bChildProcess\.spawn\b/.test(error.stack ?? '')
+}
+
 export function createProcessFailureHandlers(deps: ProcessFailureHandlerDeps): ProcessFailureHandlers {
   let crashing = false
   return {
@@ -37,6 +48,10 @@ export function createProcessFailureHandlers(deps: ProcessFailureHandlerDeps): P
       deps.logLine(`[error:daemon] unhandledRejection: ${describeFailure(reason)}`)
     },
     onUncaughtException(error) {
+      if (isChildPipeReadFailure(error)) {
+        deps.logLine(`[warn:daemon] child program pipe failed, kept running: ${describeFailure(error)}`)
+        return
+      }
       deps.logLine(`[error:daemon] uncaughtException: ${describeFailure(error)}`)
       if (crashing) return
       crashing = true

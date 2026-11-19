@@ -10,13 +10,13 @@ import { getDefaultSettings, normalizeAgentAccessSettings } from '../src/shared/
 
 describe('agent access settings (SPEC §15.1)', () => {
   it('defaults to no approval answers and no subagents on other devices', () => {
-    expect(normalizeAgentAccessSettings()).toEqual({ answerApprovals: false, remoteSubagents: false, computers: [] })
-    expect(getDefaultSettings().agentAccess).toEqual({ answerApprovals: false, remoteSubagents: false, computers: [] })
-    expect(normalizeAgentAccessSettings(null)).toEqual({ answerApprovals: false, remoteSubagents: false, computers: [] })
+    expect(normalizeAgentAccessSettings()).toEqual({ answerApprovals: false, remoteSubagents: false, computerUse: true, computers: [] })
+    expect(getDefaultSettings().agentAccess).toEqual({ answerApprovals: false, remoteSubagents: false, computerUse: true, computers: [] })
+    expect(normalizeAgentAccessSettings(null)).toEqual({ answerApprovals: false, remoteSubagents: false, computerUse: true, computers: [] })
   })
 
   it('drops the removed level and project list of an older profile, and keeps its approvals switch', () => {
-    expect(normalizeAgentAccessSettings({ level: 'lineage', projectIds: ['p1'], projectsUnreadable: true, answerApprovals: true } as never)).toEqual({ answerApprovals: true, remoteSubagents: false, computers: [] })
+    expect(normalizeAgentAccessSettings({ level: 'lineage', projectIds: ['p1'], projectsUnreadable: true, answerApprovals: true } as never)).toEqual({ answerApprovals: true, remoteSubagents: false, computerUse: true, computers: [] })
     expect(normalizeAgentAccessSettings({ answerApprovals: 'yes' as never }).answerApprovals).toBe(false)
   })
 
@@ -54,9 +54,9 @@ describe('agent access settings (SPEC §15.1)', () => {
       const settings = new SettingsStore(MousseConfigStore.load(home))
       settings.set({ agentAccess: { answerApprovals: true, remoteSubagents: true, computers: ['node-a'] } })
       const reloaded = new SettingsStore(MousseConfigStore.load(home))
-      expect(reloaded.get().agentAccess).toEqual({ answerApprovals: true, remoteSubagents: true, computers: ['node-a'] })
+      expect(reloaded.get().agentAccess).toEqual({ answerApprovals: true, remoteSubagents: true, computerUse: true, computers: ['node-a'] })
       reloaded.set({ agentAccess: { answerApprovals: false } as never })
-      expect(new SettingsStore(MousseConfigStore.load(home)).get().agentAccess).toEqual({ answerApprovals: false, remoteSubagents: true, computers: ['node-a'] })
+      expect(new SettingsStore(MousseConfigStore.load(home)).get().agentAccess).toEqual({ answerApprovals: false, remoteSubagents: true, computerUse: true, computers: ['node-a'] })
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

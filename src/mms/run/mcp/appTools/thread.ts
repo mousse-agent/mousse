@@ -715,6 +715,24 @@ function deliveryOf(sent: { queued: boolean }): 'started' | 'queued' {
   return sent.queued ? 'queued' : 'started'
 }
 
+/**
+ * What a caller that started work on a thread is told about its setup: nothing more once the thread's folder is set up;
+ * the reason and the link when setting up its worktree failed (the thread shows the same, with Retry); a line when it
+ * is still being set up. Only a run that started now is waited for, never the model's reply.
+ */
+async function setupOf(host: AppToolHost, threadId: string, sent: { runId?: string; queued?: boolean; replayed?: boolean } | undefined): Promise<Record<string, unknown>> {
+  if (!sent?.runId || sent.queued || sent.replayed || !host.waitForSetup) return {}
+  const setup = await host.waitForSetup(threadId, sent.runId)
+  if (setup.status === 'ready') return { setup: 'ready' }
+  if (setup.status === 'pending') return { setup: 'pending', setupNote: 'Its worktree is still being set up. If that fails, the thread shows why, with a Retry button.' }
+  const why = setup.failure ? `${setup.failure.reason}${setup.failure.detail ? ` Git said: ${setup.failure.detail}` : ''}` : (setup.error ?? 'Its run ended before the agent started.')
+  return {
+    setup: 'failed',
+    setupError: why,
+    setupNote: `The thread did not start: ${why} It shows this reason${setup.failure?.retryable ? ' and a Retry button that sends the same message again' : ''}: ${threadLink(threadId)}. Tell your owner in one line, with the link.`
+  }
+}
+
 /** The transcript row of a change the call made; the `agent.action` event is the record, so a row that fails to write is not an error. */
 function showAction(host: AppToolHost, threadId: string, actor: AgentActor, summary: string, options?: { notice?: boolean }): void {
   try {
@@ -1946,9 +1964,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           // The ledger follows the thread and tells the bot: `notify` is then not a second wake.
           const job = sent.replayed ? undefined : botJob(threadId, title, host.threadMeta?.(threadId)?.projectId, args.content, ctx)
           const told = job ?? (notify && !sent.replayed ? await botNotify(threadId, title, args.content, ctx) : {})
-          return json({ threadId, title: title ?? null, ...sent, delivery: deliveryOf(sent), ...(notJoined ? { notJoined } : {}), ...told, note: 'It runs in that thread\'s own mode. Approvals and questions there wait for your owner, never for you.' })
+          return json({ threadId, title: title ?? null, ...sent, delivery: deliveryOf(sent), ...(notJoined ? { notJoined } : {}), ...told, ...await setupOf(host, threadId, sent), note: 'It runs in that thread\'s own mode. Approvals and questions there wait for your owner, never for you.' })
         }
-        return json({ threadId, ...sent, delivery: deliveryOf(sent), ...(notify ? watchSent(threadId, requestKey, actor, sent.runId, ctx) : {}) })
+        return json({ threadId, ...sent, delivery: deliveryOf(sent), ...(notify ? watchSent(threadId, requestKey, actor, sent.runId, ctx) : {}), ...await setupOf(host, threadId, sent) })
       }
     },
     {
@@ -2555,8 +2573,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           // The ledger follows the thread and tells the bot: `notify` is then not a second wake.
           const job = firstSent ? botJob(created.threadId, created.title, created.projectId, args.firstMessage as string, ctx) : undefined
           const told = job ?? (notify && firstSent ? await botNotify(created.threadId, created.title, args.firstMessage as string, ctx) : {})
+          const setup = firstSent && created.firstMessage?.sent === true ? await setupOf(host, created.threadId, created.firstMessage) : {}
           return json({
             ...told,
+            ...setup,
             threadId: created.threadId,
             link: threadLink(created.threadId),
             title: created.title,
@@ -2583,7 +2603,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         }
         // The first message's work is watched once it was sent; one that was not sent has nothing to watch yet (a retry sends it).
         const watched = notify && created.firstMessage?.sent === true ? watchSent(created.threadId, requestKey, actor, created.firstMessage.runId, ctx) : {}
-        return json({ ...created, link: threadLink(created.threadId), ...watched })
+        const setup = !created.replayed && created.firstMessage?.sent === true ? await setupOf(host, created.threadId, created.firstMessage) : {}
+        return json({ ...created, link: threadLink(created.threadId), ...watched, ...setup })
       }
     },
     {

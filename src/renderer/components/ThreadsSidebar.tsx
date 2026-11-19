@@ -286,7 +286,7 @@ function ThreadCardBody({
   preview,
   pullRequests
 }: {
-  thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly' | 'expiresAt' | 'expiryStopsRun'>
+  thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly' | 'expiresAt' | 'expiryStopsRun' | 'setupFailure'>
   projectName?: string
   /** The thread's project, for its own icon in the mark. */
   project?: Project
@@ -328,7 +328,7 @@ function ThreadCardBody({
           <span className="threads-sidebar-card-project">{projectName ?? 'No project'}</span>
           {thread.pinnedAt && <Pin size={11} strokeWidth={2} className="threads-sidebar-card-pin" aria-label="Pinned" />}
           <ThreadPullRequestCount pullRequests={pullRequests} />
-          <ThreadCardStatus threadId={threadId} activity={activity} live={liveActivity} awaitsApproval={awaitsApproval} updatedAt={thread.updatedAt} />
+          <ThreadCardStatus threadId={threadId} activity={activity} live={liveActivity} awaitsApproval={awaitsApproval} updatedAt={thread.updatedAt} setupFailed={thread.setupFailure?.reason} />
         </span>
         {isRenaming ? (
           <SidebarRenameInput initialName={renamingName} onSubmit={onRename} onCancel={onCancelRename} />
@@ -1164,10 +1164,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
    */
   const liveActivityOf = (threadId: string) =>
     plainThreadIds.has(threadId) && !supervisedWaits.has(threadId) && rolledUpActivity[threadId] === undefined && threadActivity[threadId] === storeActivity[threadId]
-  const renderThreadStatus = (threadId: string) => {
-    // A quiet thread shows nothing, whichever of Working and Waiting the list holds.
-    if (threadStatus(shownActivityOf(threadId), approvalThreads.has(threadId)) === 'quiet') return null
-    return <ThreadRowStatusIcon threadId={threadId} activity={shownActivityOf(threadId)} live={liveActivityOf(threadId)} awaitsApproval={approvalThreads.has(threadId)} />
+  const renderThreadStatus = (threadId: string, setupFailed?: string) => {
+    // A quiet thread shows nothing, whichever of Working and Waiting the list holds, unless its message did not start.
+    if (!setupFailed && threadStatus(shownActivityOf(threadId), approvalThreads.has(threadId)) === 'quiet') return null
+    return <ThreadRowStatusIcon threadId={threadId} activity={shownActivityOf(threadId)} live={liveActivityOf(threadId)} awaitsApproval={approvalThreads.has(threadId)} setupFailed={setupFailed} />
   }
 
   useEffect(() => {
@@ -1265,7 +1265,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id && Boolean(renaming.inNeedsMe) === inNeedsMe
     // A row already named (a pending send's, from its prompt) shows its name, not a placeholder.
     const isGeneratingTitle = pendingTitleIds.has(thread.id) && isDefaultThreadName(thread.name)
-    const statusNode = renderThreadStatus(thread.id)
+    const statusNode = renderThreadStatus(thread.id, thread.setupFailure?.reason)
     const preview = replyPreviews ? thread.lastReply : undefined
     const pullRequests = threadPullRequestsOf(thread)
     // A row with a preview is two lines tall (`rowShowsPreview` sizes its group's list to match).

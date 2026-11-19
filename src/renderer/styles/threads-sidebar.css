@@ -105,7 +105,7 @@
   min-width: 0;
   gap: 2px;
   padding: 2px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.09);
+  border: 0;
   border-radius: 10px;
   background: color-mix(in srgb, var(--text-secondary) 5%, transparent);
 }
@@ -541,8 +541,8 @@ html[data-theme='light'] .threads-sidebar-thread.threads-sidebar-card.project-ti
   background: linear-gradient(to left, color-mix(in srgb, var(--project-tint) var(--project-tint-strength), transparent), transparent);
 }
 
-/* The selected row keeps its plain raised look, so the selection reads first; its mark still shows the hue. */
-.threads-sidebar-thread.threads-sidebar-card.project-tinted.active::after,
+/* The selected row shows the selection band instead of its tint (specular.css), so the selection reads first; its
+   mark still shows the hue. A row whose subagent is open drops the tint the same way. */
 .threads-sidebar-thread.threads-sidebar-card.project-tinted.has-open-subagent::after,
 html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.project-tinted::after {
   content: none;
@@ -664,6 +664,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 .threads-sidebar-card-status-waiting { color: var(--status-waiting); }
 .threads-sidebar-card-status-done { color: var(--status-done); }
 .threads-sidebar-card-status-paused { color: var(--warning); }
+.threads-sidebar-card-status-failed { color: var(--danger); }
 
 .threads-sidebar-card-title {
   display: block;
@@ -785,6 +786,12 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 
 .threads-sidebar-status-icon--paused {
   color: var(--warning);
+}
+
+/* A thread whose message did not start (its worktree could not be set up). */
+.threads-sidebar-status-icon--failed {
+  display: inline-flex;
+  color: var(--danger);
 }
 
 .threads-sidebar-thread-trailing {

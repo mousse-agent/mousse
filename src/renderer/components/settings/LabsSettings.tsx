@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { PROFILER_TOOL_LABELS, PROFILER_TOOL_NAMES, type ProfilerSettings } from '../../../shared/diagnostics/profiler'
 import type { MousseSettings, MousseSettingsUpdate } from '../../../shared/settings'
-import { Cloud, Cpu } from '../../lib/icons'
+import { Cloud, Cpu, Gauge } from '../../lib/icons'
 import { showToast } from '../ui/Toast'
 import { MemoryRows } from './MemoryRows'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
@@ -37,6 +37,26 @@ export function LabsSettings({ settings, onUpdate }: { settings: MousseSettings;
               label="Mousse Plus (legacy)"
               checked={settings.experimental.plusLegacy !== false}
               onChange={(plusLegacy) => void onUpdate({ experimental: { ...settings.experimental, plusLegacy } })}
+            />
+          }
+        />
+      </SettingsGroup>
+      <SettingsGroup title="Performance" icon={Gauge}>
+        <SettingsRow
+          title="Performance"
+          anchor="labs-hybrid-bot-faces"
+          htmlFor="labs-hybrid-bot-faces"
+          description={
+            <span title="On: each bot's body is drawn once per state and kept as a picture, and only its flat 2D eyes move. Off: every bot face is drawn in 3D as it moves.">
+              Bots use less GPU using 2D hybrid rendering
+            </span>
+          }
+          control={
+            <Switch
+              id="labs-hybrid-bot-faces"
+              label="Performance"
+              checked={settings.experimental.hybridBotFaces === true}
+              onChange={(hybridBotFaces) => void onUpdate({ experimental: { ...settings.experimental, hybridBotFaces } })}
             />
           }
         />

@@ -22,6 +22,8 @@ import { BOTS_BROWSER_METHODS } from '../../shared/bots/personal/browser'
 import type { BotChatMessage } from '../../shared/bots/personal/chat'
 import { AUTOMATIONS_METHODS, type ScheduledRunEnded } from '../../shared/automations'
 import { SECRET_METHODS } from '../../shared/secretRequests'
+import { COMPUTER_USE_METHODS } from '../../shared/computerUse'
+import { BUG_REPORT_METHODS } from '../../shared/bugReports'
 import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
@@ -30,7 +32,7 @@ import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 
 import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, powerMonitor, screen, session, shell } from 'electron'
 import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
-import { readAssetInPieces } from './assetPieces'
+import { readAssetInPieces, readAssetStamp } from './assetPieces'
 import { browsedRootParams, browseSupport } from './browsedRoot'
 import { daemonGitParams } from './daemonGitParams'
 import { PROJECT_ICON_EXTENSIONS, type ProjectIconChoice, type ProjectIconImage } from '../../shared/projectIcon'
@@ -252,6 +254,8 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...BOTS_BROWSER_METHODS,
   ...AUTOMATIONS_METHODS,
   ...SECRET_METHODS,
+  ...COMPUTER_USE_METHODS,
+  ...BUG_REPORT_METHODS,
   ...SPACE_ARCHIVE_METHODS,
   ...SPEECH_HOST_METHODS,
   ...BROWSER_ACCESS_METHODS,
@@ -1964,6 +1968,10 @@ export function registerGuiIpc(
     return res.ok
   })
 
+  registerHandler('orchestrator:retrySetup', async (_e, threadId: string) => {
+    return await guiMms.request<{ ok: boolean; queued: boolean }>('orchestrator.retrySetup', { threadId })
+  })
+
   registerHandler('queue:list', async (_e, threadId: string) => {
     const res = await guiMms.request<{ items: unknown[] }>('queue.list', { threadId })
     return res.items
@@ -2168,6 +2176,18 @@ export function registerGuiIpc(
     })
     broadcast('projects:updated', res.projects)
     return res.project
+  })
+  /** Settings → Computer use: the person picks a Cua Driver file; the page saves its path and the daemon checks it. */
+  registerHandler('computerUse:chooseDriver', async () => {
+    const win = getWindow()
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose Cua Driver',
+      buttonLabel: 'Use this driver',
+      properties: ['openFile'],
+      ...(process.platform === 'win32' ? { filters: [{ name: 'Programs', extensions: ['exe'] }] } : {})
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
   /** The icon file picker, starting in the project's folder. */
   registerHandler('projects:pickIcon', async (_e, defaultPath: unknown) => {
@@ -3113,6 +3133,16 @@ export function registerGuiIpc(
     async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> => {
       const browsed = await browsedRoot(root)
       return readAssetInPieces((offset, length) =>
+        guiMms.request('files.readAsset', { ...filesScope(projectId, threadId), ...browsed, path: filePath, offset, length })
+      )
+    }
+  )
+  registerHandler(
+    'fs:assetStamp',
+    // A preview's size and write time without its bytes, so a picture read earlier is reread only when the file changed.
+    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string) => {
+      const browsed = await browsedRoot(root)
+      return readAssetStamp((offset, length) =>
         guiMms.request('files.readAsset', { ...filesScope(projectId, threadId), ...browsed, path: filePath, offset, length })
       )
     }

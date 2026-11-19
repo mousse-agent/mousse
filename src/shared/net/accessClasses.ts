@@ -215,6 +215,7 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
     'orchestrator.abort': 'work',
     'orchestrator.steerNow': 'work',
     'orchestrator.retry': 'work',
+    'orchestrator.retrySetup': 'work',
     'threads.clearContext': 'work',
     'threads.compact': 'work',
     'threads.stopCompaction': 'work',

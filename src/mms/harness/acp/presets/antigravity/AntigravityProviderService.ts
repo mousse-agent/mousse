@@ -187,9 +187,8 @@ export class AntigravityProviderService {
     } catch (error) {
       return { success: false, sessionId: session.sessionId, error: error instanceof Error ? error.message : String(error) }
     } finally {
+      // The session is not aborted here: the gateway reads an aborted session as a cancelled sign-in.
       this.loginSessions.delete(session)
-      // Withdraw the fallback callback prompt and release profile-owned login work.
-      session.abort.abort()
     }
   }
 
@@ -197,25 +196,36 @@ export class AntigravityProviderService {
   private async runLogin(session: LoginSession, cwd: string): Promise<ProviderLoginResult> {
     if (!this.binary()) throw new Error(NOT_INSTALLED_MESSAGE)
     session.abort.signal.throwIfAborted()
+    // The agent prints Google's link a moment after it starts; until then the sign-in shows as starting.
+    session.emitEvent({ sessionId: session.sessionId, type: 'progress', message: 'Starting Google sign-in…' })
+    // Ends with this sign-in however it ends (cancelled, failed or signed in): withdraws the paste field.
+    const ended = new AbortController()
+    const live = AbortSignal.any([session.abort.signal, ended.signal])
     let authUrl: string | undefined
+    let linkShown!: () => void
+    const firstLink = new Promise<void>((resolve) => { linkShown = resolve })
     const process = this.acp.launch('sign_in', (url) => {
+      // The same link printed twice (stdout and the browser helper) is shown once.
+      if (url === authUrl || live.aborted) return
       authUrl = url
       session.emitEvent({ sessionId: session.sessionId, type: 'auth_url', url, usesCallbackServer: true,
         instructions: 'Sign in through Google. If the browser is on another machine, paste its final redirect URL here.' })
+      linkShown()
     })
-    session.abort.signal.addEventListener('abort', () => this.acp.close(process), { once: true })
+    live.addEventListener('abort', () => { linkShown(); this.acp.close(process) }, { once: true })
     try {
+      // The pasted-redirect fallback is offered only under Google's link, never before it: a redirect
+      // is checked against the latest link's own loopback callback and state.
       void (async () => {
-        while (!session.abort.signal.aborted) {
-          const callback = await session.waitForCallbackUrl()
+        await firstLink
+        while (!live.aborted) {
+          const callback = await session.waitForCallbackUrl(live)
           try {
-            if (!authUrl) throw new Error('Wait for Google to start sign-in before forwarding a redirect')
-            await forwardAntigravityCallback(authUrl, callback)
+            await forwardAntigravityCallback(authUrl!, callback)
             return
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
-            if (authUrl) session.emitEvent({ sessionId: session.sessionId, type: 'auth_url', url: authUrl, usesCallbackServer: true, instructions: message })
-            else session.emitEvent({ sessionId: session.sessionId, type: 'progress', message })
+            if (!live.aborted) session.emitEvent({ sessionId: session.sessionId, type: 'auth_url', url: authUrl!, usesCallbackServer: true, instructions: message })
           }
         }
       })().catch(() => undefined)
@@ -232,7 +242,7 @@ export class AntigravityProviderService {
     } catch (error) {
       const cancelled = session.abort.signal.aborted
       return { success: false, sessionId: session.sessionId, error: cancelled ? 'Login cancelled' : error instanceof Error ? error.message : String(error) }
-    } finally { this.acp.close(process) }
+    } finally { ended.abort() }
   }
 
   /** Record only the canonical history that the owning turn durably committed. */

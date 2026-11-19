@@ -29,6 +29,7 @@ import type {
   SubagentWorkspaceBinding,
   Task,
   Thread,
+  ThreadSetupFailure,
   ThreadData,
   ThreadLineage,
   ThreadListVersion,
@@ -1694,6 +1695,26 @@ export class ThreadDataStore extends EventEmitter {
     })
     if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
     this.patchListCache(updated)
+    this.emit('list-changed', { id })
+    return true
+  }
+
+  /**
+   * Keeps or clears why the thread's last message could not start (`Thread.setupFailure`). Not activity: `updatedAt`
+   * stays. Writes and announces the list only when it changed; a missing thread is left alone.
+   */
+  setThreadSetupFailure(id: string, failure: ThreadSetupFailure | undefined): boolean {
+    const thread = this.getThread(id)
+    if (!thread || (!thread.setupFailure && !failure) || JSON.stringify(thread.setupFailure) === JSON.stringify(failure)) return false
+    const updated = this.writeThreadMeta(thread, (base) => {
+      const next: Thread = { ...base }
+      if (failure) next.setupFailure = failure
+      else delete next.setupFailure
+      return next
+    })
+    if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+    this.patchListCache(updated)
+    this.emit('updated', updated)
     this.emit('list-changed', { id })
     return true
   }

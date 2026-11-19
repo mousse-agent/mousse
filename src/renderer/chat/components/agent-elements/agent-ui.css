@@ -743,8 +743,8 @@ html[data-theme='light'] .chat-user-bubble {
 }
 
 .thread-side-card-layer > .chat-find-bar {
-  top: var(--side-card-gutter);
-  right: var(--side-card-gutter);
+  top: var(--side-card-edge);
+  right: var(--side-card-edge);
   width: var(--side-card-width);
 }
 

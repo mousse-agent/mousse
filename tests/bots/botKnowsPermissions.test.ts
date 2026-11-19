@@ -161,6 +161,7 @@ describe('the stated permissions match the tools a run is given', () => {
       '- Run commands: yes',
       "- Use the browser (your own): yes, but it can't open on this run",
       "- Use your owner's threads: no",
+      '- Use apps on this computer: no',
       "- Read Mousse's profiler: no",
       '- Change how Mousse looks: no',
       "- Schedule work in your owner's threads: no",

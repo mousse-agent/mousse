@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ComponentType, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react'
 import {
   Activity, Automations, Bell, BookOpen, BrainMemory, BrowserTab, ChevronRight, CircleGauge, Clock, Coins, Cpu, ExternalLink, FileText, Folder,
-  FolderSearch, GitPullRequest, Globe, Lock, MessagesSquare, Palette, Pause, Pencil, Play, Plug, Search, ShieldCheck, Sparkles, Terminal, Trash2, X, Zap
+  FolderSearch, GitPullRequest, Globe, Lock, MessagesSquare, Monitor, Palette, Pause, Pencil, Play, Plug, Search, ShieldCheck, Sparkles, Terminal, Trash2, X, Zap
 } from '../../lib/icons'
 import type { BotContextSummary, BotDetail, BotPermissionItem, BotReminderItem, BotRunItem, BotSummary, BotTurnUsageSummary } from '../../../shared/bots/personal/chat'
 import type { BotModelPick } from '../../../shared/bots/personal/definition'
@@ -21,6 +21,8 @@ import { BotPrompt } from './BotPrompt'
 import { promptCacheState, shortDuration, useMinuteClock } from '../../lib/promptCache'
 import { profilePreferenceKey } from '../../lib/profilePreferences'
 import { centerWithin } from '../../lib/shellScroll'
+import { motionOff, scaleMotionMs } from '../../lib/motion'
+import { Collapse } from '../ui/Collapse'
 import { canonicalModelName, modelNameFromId, shortModelName } from '../../../shared/modelNames'
 
 type Icon = ComponentType<{ size?: number; strokeWidth?: number; className?: string; 'aria-hidden'?: boolean }>
@@ -92,6 +94,7 @@ export function permissionIcon(item: Pick<BotPermissionItem, 'title'>): Icon {
   if (/search the web/.test(title)) return Search
   if (/web pages/.test(title)) return Globe
   if (/browser/.test(title)) return BrowserTab
+  if (/the computer/.test(title)) return Monitor
   if (/run commands/.test(title)) return Terminal
   if (/threads/.test(title)) return MessagesSquare
   if (/search in files|look through folders/.test(title)) return FolderSearch
@@ -112,6 +115,9 @@ export function permissionIcon(item: Pick<BotPermissionItem, 'title'>): Icon {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+/** The width of the row About shares with the chat, which bounds its width (its slide frame sits between them). */
+const rowWidthOf = (handle: HTMLElement) => (handle.closest('.bot-about-slide') ?? handle.closest('.bot-about'))?.parentElement?.getBoundingClientRect().width
+
 // Width and folds, kept per profile like the sidebars' widths.
 
 const WIDTH_KEY = 'mousse:bot-about-width'
@@ -164,7 +170,8 @@ function useFolds(profileId: string) {
 
 /**
  * One section of About, as Settings folds its sections (`.settings-fold`): a bare 15px glyph, the title, and while it is
- * closed one quiet line of what is inside, so a closed panel still reads at a glance.
+ * closed one quiet line of what is inside, so a closed panel still reads at a glance. Its content opens and closes with
+ * the shared `Collapse` (height and fade) as the chevron turns; with motion off, at once.
  */
 function Fold({ id, icon: Glyph, title, summary, open, onToggle, children }: {
   id: FoldId
@@ -182,7 +189,7 @@ function Fold({ id, icon: Glyph, title, summary, open, onToggle, children }: {
       {summary ? <span className="bot-about-fold-summary">{summary}</span> : null}
       <ChevronRight size={14} aria-hidden className="bot-about-fold-chevron" />
     </button>
-    {open ? <div className="bot-about-fold-body">{children}</div> : null}
+    <Collapse open={open} className="bot-about-fold-body" animate={!motionOff()}>{children}</Collapse>
   </section>
 }
 
@@ -481,7 +488,7 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
     event.preventDefault()
     const startX = event.clientX
     const startWidth = width
-    const rowWidth = event.currentTarget.parentElement?.parentElement?.getBoundingClientRect().width
+    const rowWidth = rowWidthOf(event.currentTarget)
     event.currentTarget.setPointerCapture(event.pointerId)
     const previous = [document.body.style.cursor, document.body.style.userSelect] as const
     document.body.style.cursor = 'col-resize'
@@ -500,7 +507,7 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
   const resizeKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
     event.preventDefault()
-    setWidth(width + (event.key === 'ArrowLeft' ? 16 : -16), event.currentTarget.parentElement?.parentElement?.getBoundingClientRect().width)
+    setWidth(width + (event.key === 'ArrowLeft' ? 16 : -16), rowWidthOf(event.currentTarget))
   }
 
   // What the bot may use and which devices reach it are changed here: the panel pauses a theme while it is open.
@@ -590,15 +597,50 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
           {telling ? <Row icon={Bell} title="Tells you" desc={telling} /> : null}
         </div>
       </Fold>
-
-      <div className="bot-about-foot">
-        <button type="button" className="settings-btn" onClick={() => void (paused ? store().resume(bot.id) : store().pause(bot.id))}>
-          {paused ? <Play size={14} aria-hidden /> : <Pause size={14} aria-hidden />}{paused ? 'Resume' : 'Pause'}
-        </button>
-        <button type="button" className="settings-btn danger" onClick={() => useBotsStore.setState({ dialog: { kind: 'delete', botId: bot.id }, error: null })}>
-          <Trash2 size={14} aria-hidden />Delete bot
-        </button>
-      </div>
+    </div>
+    <div className="bot-about-foot">
+      <button type="button" className="settings-btn" onClick={() => void (paused ? store().resume(bot.id) : store().pause(bot.id))}>
+        {paused ? <Play size={14} aria-hidden /> : <Pause size={14} aria-hidden />}{paused ? 'Resume' : 'Pause'}
+      </button>
+      <button type="button" className="settings-btn danger" onClick={() => useBotsStore.setState({ dialog: { kind: 'delete', botId: bot.id }, error: null })}>
+        <Trash2 size={14} aria-hidden />Delete bot
+      </button>
     </div>
   </aside>
+}
+
+/**
+ * About, sliding in from the right edge as it fades in, and back out as it fades out (`--ui-dur-slow`, so Settings'
+ * Animation speed and reduced motion apply; with motion off it shows and goes at once). Open on arrival, it is there
+ * at once. Its width is the panel's own, so a drag of its edge is never animated.
+ */
+export function BotAboutSlide({ open, bot }: { open: boolean; bot: BotSummary }) {
+  const [mounted, setMounted] = useState(open)
+  const [shown, setShown] = useState(open)
+  const [settled, setSettled] = useState(open)
+  useEffect(() => {
+    if (open) {
+      setMounted(true)
+      if (motionOff()) { setShown(true); setSettled(true); return }
+      // Two frames: the closed state is laid out first, so the change to open is a transition.
+      let inner = 0
+      const outer = requestAnimationFrame(() => { inner = requestAnimationFrame(() => setShown(true)) })
+      return () => { cancelAnimationFrame(outer); cancelAnimationFrame(inner) }
+    }
+    setShown(false)
+    setSettled(false)
+    if (motionOff()) { setMounted(false); return }
+    // transitionend, or this backstop when it never comes (a tab hidden mid-slide).
+    const timer = window.setTimeout(() => setMounted(false), scaleMotionMs(200) + 80)
+    return () => window.clearTimeout(timer)
+  }, [open])
+  if (!mounted) return null
+  return <div className={`bot-about-slide${shown ? ' is-open' : ''}${settled ? ' is-settled' : ''}`} inert={!open || undefined}
+    onTransitionEnd={(event) => {
+      if (event.target !== event.currentTarget || event.propertyName !== 'width') return
+      if (open) setSettled(true)
+      else setMounted(false)
+    }}>
+    <BotAboutPanel bot={bot} />
+  </div>
 }

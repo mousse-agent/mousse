@@ -1,4 +1,5 @@
 import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
+import type { BugReportService } from '../../../bugReports/BugReportService'
 import type { AgentJobLimits } from '../../../../shared/agentJobLimits'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ModelOverride } from '../../../../shared/providerInstances'
@@ -6,7 +7,7 @@ import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
 import type { RemoteComputerReach, RemoteListedThread, RemoteReach, RemoteSearchResult, RemoteTarget, RemoteUncertain, RemoteWaitResult } from '../../../orchestrator/RemoteLaunchedThreads'
 import type { MessageRow } from './messageRows'
 import type { ThreadEvent } from '../../types'
-import type { ChatMessage, ThreadActivityState, CreateScheduledJobInput, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, UserQuestion, UserQuestionAnswers, UserQuestionAttachments } from '../../../../shared/types'
+import type { ChatMessage, ThreadActivityState, CreateScheduledJobInput, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, ThreadSetupFailure, UserQuestion, UserQuestionAnswers, UserQuestionAttachments } from '../../../../shared/types'
 import type { ScheduledJobOptionsInput } from '../../../scheduled/validateJobOptions'
 import type { DevGuiTools } from '../../../devgui/DevGuiTools'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
@@ -348,6 +349,10 @@ export interface AppToolHost extends DelegationToolsHost {
   withdrawQuestion?(threadId: string, requestId: string): boolean
   /** Secret requests and commands that use them (`secret_request`, `secret_run`); absent: those tools refuse. */
   secrets?(): SecretToolHost | undefined
+  /** Bug reports (`report_bug`); absent: the tool is not offered. */
+  bugReports?(): BugReportService | undefined
+  /** A thread's name, for the person to see who asked. */
+  threadName?(threadId: string): string | undefined
   /** The threads' terminals as `terminal_read` reads them (never writes); absent: the tool is not listed. */
   terminals?(): TerminalReadHost | undefined
   /** The thread's task queue; null when the owner keeps none (no task tools). */
@@ -411,6 +416,11 @@ export interface AppToolHost extends DelegationToolsHost {
   // "not available in this host".
   /** The thread's metadata, or undefined when it does not exist. */
   threadMeta?(threadId: string): Thread | undefined
+  /**
+   * Waits until the run got past setting up its thread's folder (`ready`), setting up its worktree failed (`failed`,
+   * with why), or a short while passed (`pending`). Never waits for the model's reply.
+   */
+  waitForSetup?(threadId: string, runId: string): Promise<{ status: 'ready' | 'failed' | 'pending'; failure?: ThreadSetupFailure; error?: string }>
   /** Every thread of the profile, subagents included, unfiltered. */
   listThreads?(): Thread[]
   /** The profile's projects. */
@@ -523,6 +533,8 @@ export interface AppToolHost extends DelegationToolsHost {
   schedules?: AgentScheduleHost
   /** Automation drafts (`automation_*`), read at every call: the Automation manager's and granted bots' tools. */
   automations?(): import('./automations').AutomationToolHost | undefined
+  /** Computer use (Settings → Computer use), read at every listing and call; absent: its tools are never listed. */
+  computerUse?(): import('./computer').ComputerUseToolHost | undefined
   /** The profiler's tools (Settings → Labs), read at every call; absent: they are never listed. */
   profiler?(): import('./profiler').ProfilerToolHost | undefined
   /** The profile's appearance settings (`theme_read`, `theme_set`), read at every call; absent: the tools say themes are unavailable. */

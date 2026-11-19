@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { readAssetInPieces } from '../src/main/ipc/assetPieces'
+import { readAssetInPieces, readAssetStamp } from '../src/main/ipc/assetPieces'
 import { FILE_ASSET_PIECE_BYTES, FILES_WRITE_DIRECT_MAX_BYTES, saveExceedsRequest } from '../src/shared/fileAssets'
 
 function sourcesUnder(directory: string): string[] {
@@ -70,6 +70,18 @@ describe('a preview read in pieces', () => {
   it('refuses pieces of a file that changed size between them', async () => {
     await expect(readAssetInPieces(async (offset) => (offset === 0 ? piece(Buffer.alloc(4), 10) : piece(Buffer.alloc(6), 9)))).rejects.toThrow(/changed while/)
     await expect(readAssetInPieces(async (offset) => (offset === 0 ? piece(Buffer.alloc(8), 10) : piece(Buffer.alloc(8), 10)))).rejects.toThrow(/changed while/)
+  })
+
+  it('refuses pieces of a file written again between them at the same size, and keeps its write time', async () => {
+    await expect(readAssetInPieces(async (offset) => ({ ...piece(Buffer.alloc(5), 10), mtimeMs: offset === 0 ? 1 : 2 }))).rejects.toThrow(/changed while/)
+    expect(await readAssetInPieces(async () => ({ ...piece(Buffer.alloc(3)), mtimeMs: 7 }))).toMatchObject({ size: 3, mtimeMs: 7 })
+  })
+
+  it('tells a file’s size and write time from one byte, without reading the rest', async () => {
+    const requests: Array<[number, number]> = []
+    const stamp = await readAssetStamp(async (offset, length) => { requests.push([offset, length]); return { ...piece(Buffer.alloc(1), 500), mtimeMs: 9 } })
+    expect(stamp).toEqual({ size: 500, mtimeMs: 9 })
+    expect(requests).toEqual([[0, 1]])
   })
 
   it('stops when the file shrinks under the read', async () => {

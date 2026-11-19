@@ -4,6 +4,9 @@ import { OwnerQuietHours } from './notifications/OwnerQuietHours'
 import { onSettingsSaved } from './settings/SettingsStore'
 import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
 import { SecretVault, secretThreadBusy } from './secrets/SecretVault'
+import { BugReportService } from './bugReports/BugReportService'
+import { createGhFallbackRunner, execRunner } from './git/ghRunner'
+import { userAction } from './git/gitPolicy'
 import { SecretRequests } from './secrets/SecretRequests'
 import { createSecretToolHost } from './secrets/secretToolHost'
 import { forgetWorktreeFolders, refreshWorktreeFolders, setWorktreeFolders } from './worktree/worktreeLayout'
@@ -15,6 +18,7 @@ import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
 import { SettingsStore } from './settings/SettingsStore'
 import { normalizeExperimentalSettings, type MousseSettingsUpdate } from '../shared/settings'
+import { normalizeErrorReportSettings } from '../shared/bugReports'
 import { rewriteMovedDefaults } from './settings/movedDefaults'
 import { ProviderAuthService } from './providers/ProviderAuthService'
 import { AppletStore } from './applets/AppletStore'
@@ -80,7 +84,7 @@ import { botThreadsForCatchUp } from './bots/memory/capture'
 import { BOT_PACK_REACTIONS, type BotSituation } from './bots/memory/contextPack'
 import { BOT_CHAT_DIGEST } from '../shared/bots/personal/memory'
 import { BOT_LAUNCHED_RECENT_MS } from '../shared/bots/personal/chat'
-import { BOT_THREADS_PERMISSION } from '../shared/bots/personal/manifest'
+import { BOT_COMPUTER_PERMISSION, BOT_THREADS_PERMISSION } from '../shared/bots/personal/manifest'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
@@ -980,7 +984,8 @@ export class MmsProfileServices {
     chat?.setReplyParts({ published: (threadId) => publishedApplets(this.threads.loadThreadData(threadId).messages) })
     if (chat) botBrowsers.setNotice((botId, text) => {
       try {
-        chat.post({ botId, author: 'bot', kind: 'notice', text })
+        // Once in a row: a hold that ends while the chat still shows the same line (another window gone, the app restarted) adds none.
+        chat.post({ botId, author: 'bot', kind: 'notice', text, unlessLatest: true })
       } catch (error) {
         console.warn('a bot browser notice could not be posted', { botId, error: error instanceof Error ? error.message : String(error) })
       }
@@ -1003,6 +1008,11 @@ export class MmsProfileServices {
       if (!row || row.deletedAt || row.pausedReason) return undefined
       if (!botStore.activeGrant(botId)?.manifest.appTools.includes(BOT_THREADS_PERMISSION)) return undefined
       return { name: personalBots.botName(botId) ?? botId }
+    } : null)
+    // A thread a bot started uses the computer only while the bot exists, is not paused and holds "use the computer".
+    this.orchestrator.setBotComputer(personalBots && botStore ? (botId) => {
+      const row = botStore.registry(botId)
+      return Boolean(row && !row.deletedAt && !row.pausedReason && botStore.activeGrant(botId)?.manifest.appTools.includes(BOT_COMPUTER_PERMISSION))
     } : null)
     this.orchestrator.setRunning(new RunningRegistry({
       terminals: () => ptys.runningTerminals(),
@@ -1300,6 +1310,23 @@ export class MmsProfileServices {
     })
     this.secretRequests = new SecretRequests(this.secretVault)
     const vault = this.secretVault
+    // Bug reports (Settings → General → Error reports): the Report button's and report_bug's filing.
+    const gh = createGhFallbackRunner(execRunner)
+    this.bugReports = new BugReportService({
+      installationHome: this.installationHome,
+      profileHome: homeDir,
+      settings: () => normalizeErrorReportSettings(this.settings.get().errorReports),
+      secret: (name) => (vault.has(name) ? vault.value(name) : undefined),
+      ghToken: async () => {
+        try {
+          const token = (await gh('gh', ['auth', 'token'], { timeoutMs: 10_000, userRequested: userAction('button', 'File a bug report') })).stdout.trim()
+          return token || undefined
+        } catch {
+          return undefined
+        }
+      }
+    })
+    this.orchestrator.setBugReports(this.bugReports)
     this.orchestrator.setSecrets({
       masker: (threadId) => vault.maskerFor(threadId),
       storeMasker: (threadId) => vault.maskerForStore(threadId),
@@ -2081,6 +2108,8 @@ export class MmsProfileServices {
   secretRequests!: SecretRequests
   /** Emits `changed` when a secret is added, used, removed or expires (Settings → Secrets refreshes). */
   readonly secretsChanged = new EventEmitter()
+  /** Bug reports: filing, the reports filed from here, and agents' drafts waiting for the person. */
+  bugReports!: BugReportService
   private secretSweepTimer: ReturnType<typeof setInterval> | null = null
   automationDrafts!: AutomationDrafts
 
@@ -2362,6 +2391,7 @@ export class MmsProfileServices {
     if (this.secretSweepTimer) clearInterval(this.secretSweepTimer)
     this.secretSweepTimer = null
     this.secretRequests?.dispose()
+    this.bugReports?.dispose()
     this.webhooksClosed = true
     if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
     this.webhookRetryTimer = null
@@ -2947,6 +2977,7 @@ export class MmsProfileServices {
         this.orchestrator.setBotDispatcher(null)
         this.orchestrator.setBotThreads(null)
         this.orchestrator.setBotSupervision(null)
+        this.orchestrator.setBotComputer(null)
         this.orchestrator.setBotAppTools(null)
       }],
       ['personal bots close', () => this.personalBots?.close()],

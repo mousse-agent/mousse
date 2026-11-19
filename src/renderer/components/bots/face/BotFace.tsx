@@ -4,6 +4,8 @@ import { BOT_ACCESSORY_HEX, BOT_ACCESSORY_LABELS, BOT_COLOUR_HEX, botEyesOf, bot
 import { useMotionScale } from '../../../lib/motion'
 import { hexToRgb, mousseEyesWhite } from './facePoses'
 import { sharedFaceRenderer, sharedFaceRendererStatus, subscribeSharedFaceRenderer, type FaceHandle, type FaceSpec } from './faceRenderer'
+import { useFaceMode } from './faceMode'
+import { HybridFace } from './HybridFace'
 import './face.css'
 
 /**
@@ -75,6 +77,8 @@ export function BotFace(input: BotFaceProps) {
   const props = drawnProps(input)
   const status = useSyncExternalStore(subscribeSharedFaceRenderer, sharedFaceRendererStatus, () => 'unavailable' as const)
   const [broken, setBroken] = useState(false)
+  const mode = useFaceMode()
+  const motionOff = useMotionScale() === 0
   // The spec whose saved picture turned out missing; its face draws flat until the renderer is live.
   const [noPictureFor, setNoPictureFor] = useState<string | null>(null)
   // Whether this face's canvas has been drawn live, so it holds a real picture through a context loss.
@@ -91,6 +95,10 @@ export function BotFace(input: BotFaceProps) {
     wasFlatRef.current = flat
     if (flat) drawnRef.current = false
   })
+  // Settings → Labs → Performance (faceMode.ts): a moving face as a kept body picture with flat eyes over it.
+  if (mode === 'hybrid' && status === 'ready' && !broken && !props.still && !motionOff) {
+    return <HybridFace look={normalized.look} state={normalized.state} size={normalized.size} view={normalized.view} className={props.className} label={props.label} resting={props.resting} />
+  }
   if (flat) return <BotFaceStill {...props} />
   return (
     <BotFaceLive

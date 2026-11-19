@@ -239,6 +239,8 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.permissionMode !== right.permissionMode ||
       left.settingsRevision !== right.settingsRevision ||
       left.firstSendPending !== right.firstSendPending ||
+      // Why its last message did not start: saved without touching `updatedAt`; each failure has its own time.
+      left.setupFailure?.at !== right.setupFailure?.at ||
       // A thread of another computer going offline (or coming back) changes its row.
       left.node !== right.node ||
       left.offline !== right.offline ||

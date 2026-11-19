@@ -1,5 +1,5 @@
 import type { BotLane, BotManifest } from '../../shared/bots/personal/definition'
-import { BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from '../../shared/bots/personal/manifest'
+import { BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from '../../shared/bots/personal/manifest'
 import type { BotAskRequest } from '../../shared/bots/personal/escalation'
 import { botCatalogueIndex } from '../../shared/bots/personal/catalogue'
 
@@ -20,7 +20,7 @@ How you talk
 - Say the result, not how you got it: no steps, checks, commands, paths, branch or worktree names, ids or scores unless your owner asks or must act on them, and no housekeeping (cleanup, what you left alone). Never write "No response requested.": it is never a reply.
 - Never show tool names, raw tool output or long file contents in the chat.
 - Before every step that takes a while (a search, a page, a long read, work_start, a thread tool), always write one short line first on what you're doing now, like "Checking prices at Indian stores now". Never start such a step without it. The owner sees your latest such line beside your typing dots until your reply comes. Keep it to one line of about eight words: no second sentence, no findings, and don't repeat it in your reply.
-- To your owner you are one person, doing one thing at a time or several. Speak of everything you do as yourself, in the first person, in chat replies and in reports alike: "I'll use that open tab from here on, so you can watch me there", "I found three SSDs under ₹6,000". This chat, the work you do beside it, your reminders and schedules, and any help you get on part of a job are all you. Never speak of your work as someone else ("the search knows…", "it will…"), and never mention passing something on, handing off, notes, runs, turns, threads or how Mousse runs you. Naming a job by its title is fine ("for the SSD search, I'll…").
+- To your owner you are one person, doing one thing at a time or several. Speak of everything you do as yourself, in the first person, in chat replies and in reports alike: "I'll use that open tab from here on, so you can watch me there", "I found three SSDs under ₹6,000". This chat, the work you do beside it, threads you start, your schedules and any help you get are all you. Never speak of your work as someone else ("it will…"), and never mention handing off, notes, runs, turns, threads, worktrees or how Mousse runs you, unless asked what you can do or how you work. Naming a job by its title is fine ("for the SSD search, I'll…").
 - Never name or discuss AI models or providers, yours or any other, unless the owner asks for one for a piece of work. When the owner asks you to think harder or be quicker from now on, or names a model for you, use the tools of the you group.
 
 Permissions
@@ -122,6 +122,8 @@ export interface BotAllowed {
   shell: boolean
   /** "Use the browser". */
   browser: boolean
+  /** "Use the computer": apps on this computer, through Cua Driver. */
+  computer?: boolean
   /** "Use your threads". */
   threads: boolean
   /** "Use the profiler". */
@@ -179,6 +181,7 @@ export function botAllowedOf(manifest: BotManifest, mcpNames?: (serverIds: strin
   return {
     shell: has('shell'),
     browser: manifest.appTools.includes(BOT_BROWSER_PERMISSION),
+    computer: manifest.appTools.includes(BOT_COMPUTER_PERMISSION),
     threads: manifest.appTools.includes(BOT_THREADS_PERMISSION),
     profiler: manifest.appTools.includes(BOT_PROFILER_PERMISSION),
     themes: manifest.appTools.includes(BOT_THEMES_PERMISSION),
@@ -206,6 +209,7 @@ export function botAllowedText(allowed: BotAllowed, lane?: BotLane, browserOffli
     `- Run commands: ${off('shell') ? BOT_SWITCHED_OFF_ANSWER : yes(allowed.shell)}`,
     `- Use the browser (your own): ${off('browser') ? BOT_SWITCHED_OFF_ANSWER : allowed.browser && browserOffline ? "yes, but it can't open on this run" : yes(allowed.browser)}`,
     `- Use your owner's threads: ${off('threads') ? BOT_SWITCHED_OFF_ANSWER : !allowed.threads ? 'no' : lane === 'chat' ? "yes: list, search, read and wait on them, and start, message, steer, stop, fork or archive one, or change its queue, when your owner's message asks for it" : "yes: list, search, read and wait on them, and start, message, steer, stop, fork or archive one, or change its queue, when the work your owner asked for needs it"}`,
+    `- Use apps on this computer: ${!allowed.computer ? 'no' : allowed.mcpNotHere ? 'not in this consult' : lane === 'chat' ? 'yes, in your work' : 'yes'}`,
     `- Read Mousse's profiler: ${!allowed.profiler ? 'no' : allowed.mcpNotHere ? 'not in this consult' : lane === 'chat' ? 'yes (a watch over minutes is for your work)' : 'yes'}`,
     `- Change how Mousse looks: ${!allowed.themes ? 'no' : allowed.mcpNotHere || subagent ? `not in this ${subagent ? 'part of the work' : 'consult'}` : 'yes'}`,
     `- Schedule work in your owner's threads: ${!allowed.schedules ? 'no' : allowed.mcpNotHere || subagent ? `not in this ${subagent ? 'part of the work' : 'consult'}` : 'yes'}`,

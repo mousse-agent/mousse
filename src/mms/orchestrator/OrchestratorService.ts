@@ -1,4 +1,5 @@
 import { profilerService } from '../diagnostics/profilerService'
+import type { BugReportService } from '../bugReports/BugReportService'
 import { turnTimingMark } from '../diagnostics/turnTiming'
 import { describeQuestionAnswers } from './questionAnswers'
 import type { OpenQuestionCloseReason } from '../run/OpenQuestions'
@@ -24,7 +25,9 @@ import { join, resolve } from 'node:path'
 import { projectKeptFilesOwner, registerProjectKeptFilesFolder } from '../actions/keptCopies'
 import { getMousseHomeDir } from '../data/paths'
 import { tmpdir } from 'node:os'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { atomicWriteJsonSync as writeSetupRetry } from '../data/AtomicFs'
+import { setupFailureDetail, setupFailureReason } from '../../shared/setupFailure'
 import {
   normalizeAgentAccessSettings,
   normalizeContextSettings,
@@ -204,6 +207,8 @@ import {
   type QueuedMessage,
   type Thread,
   type ThreadTitleSource,
+  type ThreadSetupFailure,
+  type OrchestratorSendRequest,
   type TurnEnd,
   type TurnPhase,
   type TurnStep,
@@ -400,6 +405,8 @@ import {
 } from './nativeContext'
 import { isLocalOnlyThread, sideChatsOf, subagentDescendants } from '../../shared/threadLineage'
 import { isThreadExpired } from '../../shared/threadExpiry'
+import { ComputerUseDriver } from '../computerUse/ComputerUseDriver'
+import { computerUseAllowed } from '../run/mcp/appTools/computer'
 
 /** What an agent in a private thread is told when it asks for work on another computer. */
 const PRIVATE_THREAD_REMOTE_REFUSAL = 'This is a private thread: it stays on this computer, so it cannot start or continue subagents on other computers.'
@@ -1189,6 +1196,16 @@ function durableSendInput(input: OrchestratorSendInput): OrchestratorSendInput {
 }
 
 
+/** The thread folder's copy of a message whose worktree could not be set up, for Retry (`OrchestratorService.retrySetup`). */
+const SETUP_RETRY_FILE = 'setup-retry.json'
+/** How long a bot's or agent's `thread_create` / `thread_send` waits for the thread's worktree to be set up. */
+const SETUP_WAIT_MS = 45_000
+/** How long a setup's outcome is kept for a waiter that asks after it ended. */
+const SETUP_OUTCOME_KEEP_MS = 5 * 60_000
+
+/** What `OrchestratorService.waitForSetup` found. */
+export interface SetupWaitResult { status: 'ready' | 'failed' | 'pending'; failure?: ThreadSetupFailure; error?: string }
+
 export class OrchestratorService extends EventEmitter {
   private appletStore?: AppletStore
   setAppletStore(store: AppletStore): void { this.appletStore = store }
@@ -1247,6 +1264,7 @@ export class OrchestratorService extends EventEmitter {
     this.runTimeLimits?.close()
     this.remoteLaunches?.close()
     this.remoteThreads?.close()
+    void this.computerDriver?.close()
     await this.lifecycle.waitForIdle(timeoutMs)
     for (const timer of this.persistTimers.values()) clearTimeout(timer)
     this.persistTimers.clear()
@@ -1284,6 +1302,11 @@ export class OrchestratorService extends EventEmitter {
    * output holds never leaves the run's memory.
    */
   private secretTools?: SecretToolHost
+  /** Bug reports (`report_bug`); absent: the tool is not offered. */
+  private bugReports?: BugReportService
+  setBugReports(service: BugReportService | undefined): void {
+    this.bugReports = service
+  }
   private secretMaskerFor?: (threadId: string) => SecretMasker | undefined
   /**
    * Masks every secret in the profile's store (a terminal's output, which may show any of them), and the values the
@@ -1968,6 +1991,39 @@ export class OrchestratorService extends EventEmitter {
 
   setBotSupervision(supervision: ((botId: string) => { name: string } | undefined) | null): void {
     this.botSupervision = supervision
+  }
+
+  /** Whether a personal bot holds "use the computer" now; null: no bots. A bot that can't be read holds nothing. */
+  private botComputer: ((botId: string) => boolean) | null = null
+
+  setBotComputer(holds: ((botId: string) => boolean) | null): void {
+    this.botComputer = holds
+  }
+
+  private computerDriver?: ComputerUseDriver
+
+  /** This profile's Cua Driver (Settings → Computer use), made on first use. */
+  computerUse(): ComputerUseDriver {
+    this.computerDriver ??= new ComputerUseDriver({
+      settings: () => {
+        const access = this.settingsStore.get().agentAccess
+        return { enabled: access.computerUse !== false, ...(access.computerDriver ? { driverPath: access.computerDriver } : {}) }
+      }
+    })
+    return this.computerDriver
+  }
+
+  /**
+   * Whether `threadId`'s agents may use the computer: every thread, except one a personal bot started (or a thread
+   * below one: a subagent, or a thread its agent started) while that bot lacks "use the computer". A thread the store
+   * doesn't hold was started by no bot; a store that fails to read, or a lineage that loops, allows nothing.
+   */
+  computerUseFor(threadId: string): boolean {
+    try {
+      return computerUseAllowed(threadId, (id) => this.threadStore?.getThread(id) ?? undefined, (botId) => this.botComputer?.(botId) === true)
+    } catch {
+      return false
+    }
   }
 
   /** A command an agent's tool call runs, noted for the running list: its process may outlive the call. */
@@ -4580,6 +4636,8 @@ export class OrchestratorService extends EventEmitter {
       withdrawQuestion: (threadId, requestId) => this.questions.withdraw(requestId, threadId),
       dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
       secrets: () => this.secretTools,
+      bugReports: () => this.bugReports,
+      threadName: (threadId) => this.threadStore?.getThread(threadId)?.name ?? undefined,
       // The thread's terminals, read from memory: no lease, nothing written to them (`terminal_read`).
       terminals: () => ({
         list: (threadId) => this.ptyManager.terminalsOf(threadId),
@@ -4626,6 +4684,17 @@ export class OrchestratorService extends EventEmitter {
       awaitLiveRun: (threadId) => this.continuationGate(threadId),
       permissionModeFor: (runId) => this.runPermissionMode(runId),
       askApproval: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
+      // Settings → Computer use, read at every listing and call.
+      computerUse: () => {
+        const driver = this.computerUse()
+        return {
+          enabled: () => this.settingsStore.get().agentAccess.computerUse !== false,
+          known: () => driver.known(),
+          allowedFor: (threadId) => this.computerUseFor(threadId),
+          listTools: () => driver.listTools(),
+          call: (name, args, signal) => driver.call(name, args, signal)
+        }
+      },
       // Settings → Labs → Profiler, read at every listing and call; the service's profiler is installation-wide.
       profiler: () => ({
         settings: this.settingsStore.get().experimental.profiler,
@@ -4634,6 +4703,7 @@ export class OrchestratorService extends EventEmitter {
         turnActive: (threadId) => this.isTurnActive(threadId)
       }),
       threadMeta: (threadId) => this.threadStore?.getThread(threadId),
+      waitForSetup: (threadId, runId) => this.waitForSetup(threadId, runId),
       listThreads: () => this.threadStore?.listAllThreads() ?? [],
       listProjects: () => (this.threadStore?.listProjects() ?? []).map(({ id, name }) => ({ id, name })),
       // What the composer's picker lists on this computer: each entry's models, by the entry's id and name.
@@ -9305,6 +9375,131 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /** How a turn's worktree setup ended, by run, for `waitForSetup` callers that ask after it ended. Kept briefly. */
+  private readonly setupOutcomes = new Map<string, { ok: boolean; failure?: ThreadSetupFailure }>()
+
+  /** A turn got past setting up its folder (`ok`), or setting up its worktree failed. */
+  private noteSetupOutcome(threadId: string, runId: string | undefined, ok: boolean, failure?: ThreadSetupFailure): void {
+    if (runId) {
+      this.setupOutcomes.set(runId, { ok, ...(failure ? { failure } : {}) })
+      setTimeout(() => this.setupOutcomes.delete(runId), SETUP_OUTCOME_KEEP_MS).unref?.()
+    }
+    this.emit('workspace-setup', { threadId, runId, ok, ...(failure ? { failure } : {}) })
+  }
+
+  /**
+   * Setting up the thread's worktree failed before its agent ran: the thread says why in its chat and sidebar row
+   * (`Thread.setupFailure`), and keeps the message (`SETUP_RETRY_FILE`) so Retry sends it again, once. Best effort: a
+   * failure to record it never hides the setup's own error.
+   */
+  private recordSetupFailure(threadId: string, threadDir: string, request: OrchestratorSendRequest, error: unknown, options: { runId?: string; retryable: boolean }): void {
+    try {
+      const message = error instanceof Error ? error.message : String(error)
+      const at = new Date().toISOString()
+      let retryable = options.retryable
+      if (retryable) {
+        try {
+          writeSetupRetry(join(threadDir, SETUP_RETRY_FILE), {
+            schemaVersion: 1,
+            at,
+            ...(options.runId ? { runId: options.runId } : {}),
+            content: request.content,
+            ...(request.mode ? { mode: request.mode } : {}),
+            ...(request.images?.length ? { images: request.images } : {})
+          })
+        } catch {
+          retryable = false
+        }
+      }
+      const detail = setupFailureDetail(message)
+      const failure: ThreadSetupFailure = { reason: setupFailureReason(message), ...(detail ? { detail } : {}), at, ...(options.runId ? { runId: options.runId } : {}), retryable }
+      this.threadStore?.setThreadSetupFailure(threadId, failure)
+      this.setTurnPhase(threadId, 'failed', { error: failure.reason })
+      this.noteSetupOutcome(threadId, options.runId, false, failure)
+    } catch (recordError) {
+      console.warn("a thread's setup failure could not be recorded", { threadId, error: recordError instanceof Error ? recordError.message : String(recordError) })
+    }
+  }
+
+  /** The thread's worktree is set up: whatever an earlier message's failure said, and the message kept for Retry, go. */
+  private clearSetupFailure(threadId: string, threadDir: string): void {
+    if (!this.threadStore?.getThread(threadId)?.setupFailure) return
+    try {
+      this.threadStore.setThreadSetupFailure(threadId, undefined)
+      rmSync(join(threadDir, SETUP_RETRY_FILE), { force: true })
+    } catch (error) {
+      console.warn("a thread's setup failure could not be cleared", { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * Retry on a thread whose worktree could not be set up: the message it kept is sent again on this thread, as it was
+   * sent, exactly once (the kept message is taken by a rename, so a second click finds nothing). Setting up starts over;
+   * a turn never runs in the project's own folder instead.
+   */
+  async retrySetup(threadId: string): Promise<OrchestratorResponse> {
+    const threadDir = this.resolveThreadDir(threadId)
+    if (!threadDir || !this.threadStore?.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+    const file = join(threadDir, SETUP_RETRY_FILE)
+    const claimed = `${file}.${randomUUID()}.taken`
+    try {
+      renameSync(file, claimed)
+    } catch {
+      throw new DomainRpcError('nothing_to_retry', 'This message was already sent again.', { threadId })
+    }
+    let kept: { content?: unknown; mode?: unknown; images?: unknown }
+    try {
+      kept = JSON.parse(readFileSync(claimed, 'utf8')) as typeof kept
+    } finally {
+      rmSync(claimed, { force: true })
+    }
+    if (typeof kept.content !== 'string' || !kept.content) throw new DomainRpcError('nothing_to_retry', 'The message to send again could not be read.', { threadId })
+    this.threadStore.setThreadSetupFailure(threadId, undefined)
+    const input: OrchestratorSendRequest = {
+      content: kept.content,
+      ...(typeof kept.mode === 'string' ? { mode: kept.mode as OrchestratorSendRequest['mode'] } : {}),
+      ...(Array.isArray(kept.images) && kept.images.length ? { images: kept.images as OrchestratorSendRequest['images'] } : {})
+    }
+    // Pressed by the person: their message now. Answered once the send is committed, not when the reply ends.
+    return await this.send(input, false, { threadId, source: 'setup-retry', awaitMode: 'ack' })
+  }
+
+  /**
+   * Waits until the run `runId` of the thread got past setting up its folder (`ready`), setting up its worktree failed
+   * (`failed`, with why), or `timeoutMs` passed (`pending`): what a bot or agent that started the work is told, instead
+   * of a thread that silently never started. Never waits for the model's reply.
+   */
+  waitForSetup(threadId: string, runId: string, timeoutMs = SETUP_WAIT_MS): Promise<SetupWaitResult> {
+    return new Promise((settle) => {
+      let done = false
+      const finish = (value: SetupWaitResult): void => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        clearInterval(poll)
+        this.off('workspace-setup', onSetup)
+        settle(value)
+      }
+      const fromOutcome = (outcome: { ok: boolean; failure?: ThreadSetupFailure }): void => finish(outcome.ok ? { status: 'ready' } : { status: 'failed', ...(outcome.failure ? { failure: outcome.failure } : {}) })
+      const onSetup = (event: { threadId: string; runId?: string; ok: boolean; failure?: ThreadSetupFailure }): void => {
+        if (event.threadId === threadId && event.runId === runId) fromOutcome(event)
+      }
+      const check = (): void => {
+        const outcome = this.setupOutcomes.get(runId)
+        if (outcome) return fromOutcome(outcome)
+        const run = this.runEngine?.getRun(runId)
+        if (!run || !TERMINAL_RUN_STATUSES.has(run.status)) return
+        const failure = this.threadStore?.getThread(threadId)?.setupFailure
+        if (failure?.runId === runId) return finish({ status: 'failed', failure })
+        finish(run.status === 'completed' ? { status: 'ready' } : { status: 'failed', ...(run.outcome?.error ? { error: run.outcome.error } : {}) })
+      }
+      this.on('workspace-setup', onSetup)
+      const poll = setInterval(check, 500)
+      const timer = setTimeout(() => finish({ status: 'pending' }), timeoutMs)
+      check()
+    })
+  }
+
   /**
    * Safety net after a legacy turn returns or throws: a run handed to the turn must end terminal
    * unless the turn put it back on the queue (lease race / released claim keep the runId).
@@ -13679,12 +13874,19 @@ export class OrchestratorService extends EventEmitter {
         )
         const threadDir = this.resolveThreadDir(session.threadId)
         if (projectPath && threadDir) {
-          await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease)
-          const pending = opts?.agent ? agentMessageWords(request.content, agentOriginOf(opts.agent)) : request.content
-          await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, pending))
-          session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.placementOf(session.threadId), this.restoreNotifier(session.threadId))
-            .resolve(request.mode, 'main', setupSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, pending))
+          try {
+            await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease)
+            const pending = opts?.agent ? agentMessageWords(request.content, agentOriginOf(opts.agent)) : request.content
+            await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, pending))
+            session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.placementOf(session.threadId), this.restoreNotifier(session.threadId))
+              .resolve(request.mode, 'main', setupSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, pending))
+          } catch (error) {
+            // Never a silent blank thread: the chat, the sidebar row and whoever sent it are told why (`Thread.setupFailure`).
+            if (!setupSignal.aborted && !this.lifecycle.signal.aborted) this.recordSetupFailure(session.threadId, threadDir, request, error, { runId: opts?.runId, retryable: !reuseLastUser && !request.workflowInvocationId && !(typeof input !== 'string' && input.continuationOfRunId) })
+            throw error
+          }
           session.projectCwd = session.workspace.projectPath
+          this.clearSetupFailure(session.threadId, threadDir)
         } else {
           session.workspace = null
           session.projectCwd = projectPath ? resolveProjectWorkingDirectory(projectPath) : this.automationManagerCwd(session.threadId)
@@ -13698,6 +13900,7 @@ export class OrchestratorService extends EventEmitter {
     }
 
     turnTimingMark(session.threadId, 'workspace')
+    this.noteSetupOutcome(session.threadId, opts?.runId, true)
     // Pull any messages peers enqueued before we started.
     this.refreshSessionQueueFromDisk(session)
     session.drainedExternalSteerIds.clear()

@@ -38,6 +38,11 @@ const TOOL_TEXT: Record<string, AskText> = {
   web_search: { title: 'search the web', note: 'It sees search results, not your files.' },
   web_fetch: { title: 'read web pages', note: 'It sees the pages, not your files.' },
   browser: { title: 'use the browser', note: 'Its own browser, apart from your tabs. It can open pages, click and type. Sites you sign in to there stay signed in for it.' },
+  computer: {
+    title: 'use the computer',
+    note: 'Sees and operates apps on this computer: windows, clicks and typing.',
+    tip: "It can read app windows, click, type and run steps in apps on this computer through Cua Driver, as a thread's agent can, in its work (never in the chat itself). Threads it starts get it too. Settings → Computer use can still turn it off for everyone."
+  },
   threads: THREADS_TEXT,
   profiler: {
     title: 'use the profiler',

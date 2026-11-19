@@ -102,6 +102,7 @@ function splitSettings(full: MousseSettings): {
       runs: full.runs,
       experimental: full.experimental,
       storage: full.storage,
+      errorReports: full.errorReports,
       integrations: full.integrations,
       title: full.title,
       botModel: full.botModel
@@ -612,6 +613,7 @@ export class MousseConfigStore {
       partial.runs ||
       partial.experimental ||
       partial.storage ||
+      partial.errorReports ||
       partial.integrations ||
       partial.title ||
       partial.botModel
@@ -622,6 +624,7 @@ export class MousseConfigStore {
         ...(partial.runs ? { runs: partial.runs as MousseSettingsSection['runs'] } : {}),
         ...(partial.experimental ? { experimental: partial.experimental as MousseSettingsSection['experimental'] } : {}),
         ...(partial.storage ? { storage: partial.storage as MousseSettingsSection['storage'] } : {}),
+        ...(partial.errorReports ? { errorReports: partial.errorReports as MousseSettingsSection['errorReports'] } : {}),
         ...(partial.profile ? { profile: partial.profile as MousseSettingsSection['profile'] } : {}),
         ...(partial.appearance
           ? { appearance: partial.appearance as MousseSettingsSection['appearance'] }

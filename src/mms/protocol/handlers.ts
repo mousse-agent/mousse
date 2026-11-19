@@ -1870,7 +1870,7 @@ function scheduledJobOptionsDeps(ctx: HandlerContext): ScheduledJobOptionsDeps {
  */
 const FOLDER_METHOD_PREFIXES = ['git.', 'files.', 'workspace.', 'review.', 'actions.', 'pullRequests.', 'publish.', 'skills.']
 const FOLDER_METHODS = new Set([
-  'projects.open', 'projects.identity', 'projects.trustGitSettings', 'projects.icon', 'projects.setIcon', 'orchestrator.send', 'orchestrator.retry',
+  'projects.open', 'projects.identity', 'projects.trustGitSettings', 'projects.icon', 'projects.setIcon', 'orchestrator.send', 'orchestrator.retry', 'orchestrator.retrySetup',
   'thread.fork', 'thread.mergeBack', 'threads.setWorktreeEnabled', 'threads.delete', 'agents.spawn', 'tasks.create',
   'pty.create', 'editor.folder', 'github.cloneRepository', 'github.createRepository', 'mcp.getConfigSources',
   'mcp.listServers', 'mcp.writeCursorConfig', 'storage.cleanup.plan', 'storage.cleanup.run'
@@ -1879,7 +1879,7 @@ const FOLDER_METHODS = new Set([
 const FOLDER_FREE_METHODS = new Set(['git.cancelOperation', 'pullRequests.watchStatus'])
 
 /** Methods that start a turn: like the turn, they wait for a volume that is not answering instead of failing. */
-const WAIT_WHEN_NOT_ANSWERING = new Set(['orchestrator.send', 'orchestrator.retry'])
+const WAIT_WHEN_NOT_ANSWERING = new Set(['orchestrator.send', 'orchestrator.retry', 'orchestrator.retrySetup'])
 
 function readsFolder(method: string): boolean {
   if (FOLDER_FREE_METHODS.has(method)) return false
@@ -2789,6 +2789,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
       const result = await ctx.mms.orchestrator.steerNow({ threadId, runId, holdGeneration, itemIds, clientRequestId })
       return { ...runCommandResponse(result, runId), clientRequestId }
+    }
+    case 'orchestrator.retrySetup': {
+      // Retry on a thread whose worktree could not be set up (`Thread.setupFailure`): its kept message, sent once.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      if (ctx.mms.threads.getThread(threadId)) await ctx.mms.orchestrator.ensureSessionLoaded(threadId).catch(() => undefined)
+      showWrittenThread(ctx, threadId)
+      const response = await ctx.mms.orchestrator.retrySetup(threadId)
+      return { ok: true, queued: response.queued === true }
     }
     case 'orchestrator.retry': {
       const p = isObject(params) ? params : {}
@@ -4621,7 +4631,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
         const path = requiredContainedPath(ctx, root, p.path)
         const piece = await ctx.mms.fileService.readAssetRange(root, path, offset, length, guardFor(ctx))
-        return { path, mimeType: piece.mimeType, size: piece.size, offset, data: Buffer.from(piece.data).toString('base64') }
+        return { path, mimeType: piece.mimeType, size: piece.size, mtimeMs: piece.mtimeMs, offset, data: Buffer.from(piece.data).toString('base64') }
       })
     }
     case 'files.writeDirect': {
@@ -5423,7 +5433,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     // Settings → Storage → Worktree folder: where new worktrees go. Existing worktrees stay where they are.
     case 'storage.worktreeFolder':
-      return { status: await worktreeFolderStatus(ctx.mms.settings, ctx.mms.getHomeDir()) }
+      return { status: await worktreeFolderStatus(ctx.mms.settings, ctx.mms.getHomeDir(), ctx.mms.getProfileHomeDir()) }
     case 'storage.setWorktreeFolder': {
       if (ctx.connection?.clientType !== 'gui') throw new DomainRpcError('forbidden', 'Only the Storage settings can choose the worktree folder')
       const p = isObject(params) ? params : {}

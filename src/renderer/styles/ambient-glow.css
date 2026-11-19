@@ -109,14 +109,13 @@
   --ambient-rim-hi: color-mix(in srgb, color-mix(in srgb, rgb(var(--accent-rgb)) 38%, white) 50%, transparent);
   --ambient-rim-wash: 0.11;
   /* The rim draws the lit top edge; the flat top light and the centred glint step aside for it. */
-  --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.05), inset 0 -1px 0 rgba(0, 0, 0, 0.27);
+  --ui-specular: 0 0 #0000;
   --ui-glint: transparent;
   --ui-sheen: radial-gradient(125% 78% at 50% -8%, rgba(var(--accent-rgb), 0.06) 0%, rgba(var(--accent-rgb), 0.015) 34%, transparent 64%);
   --ui-raised-shadow: var(--ui-specular), 0 10px 32px rgba(0, 0, 0, 0.32);
 }
 
 html[data-theme='blacksphere-plus'] .app .chat--empty .chat-input-area .composer {
-  --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -1px 0 rgba(0, 0, 0, 0.48);
   --ui-glint: transparent;
   --ui-sheen: radial-gradient(125% 80% at 50% -10%, rgba(var(--accent-rgb), 0.07) 0%, rgba(var(--accent-rgb), 0.018) 36%, transparent 66%);
 }

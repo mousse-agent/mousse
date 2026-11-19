@@ -19,7 +19,7 @@ import { normalizeStorageSettings, type WorktreeFolderEntry } from '../src/share
 import {
   checkWorktreeFolder, chosenWorktreeFolder, disconnectedWorktreeFolder, DriveNotConnectedError, folderConnected, forgetWorktreeFolders,
   isAgentWorktreePlace, isThreadWorktreePlace, placeAgentWorktreeBase, placeThreadWorktree, refreshWorktreeFolders,
-  setWorktreeFolders, threadTag, trashRootFor, waitForWorktreeFolder, worktreeFolderStillNeeded, WORKTREE_FOLDER_MARKER, WORKTREE_TRASH_FOLDER,
+  setWorktreeFolders, shortWorktreeRoot, threadTag, trashRootFor, waitForWorktreeFolder, worktreeFolderStillNeeded, WORKTREE_FOLDER_MARKER, WORKTREE_TRASH_FOLDER,
   WorktreeFolderRefused
 } from '../src/mms/worktree/worktreeLayout'
 import { fixtureGit as git, ownedHome } from './support/fixtureGit'
@@ -118,6 +118,42 @@ test('a new thread worktree goes to <folder>/<project>-<short key>/<slug>-<threa
   expect(isAgentWorktreePlace(join(f.repositoryFolder, 'agents', 'worker'), { home: f.home, repositoryId: f.key, agentId: 'worker' })).toBe(true)
   expect(trashRootFor(first.path, f.home)).toBe(join(f.folder, WORKTREE_TRASH_FOLDER))
   expect(trashRootFor(join(f.home, 'repositories', f.key, 'worktrees', 'threads', 't', 'main'), f.home)).toBe(join(f.home, 'trash'))
+})
+
+test('with no folder chosen, a short worktree root takes new worktrees with short names; worktrees made before in Mousse’s own folder stay put', async () => {
+  const f = await fixture()
+  const previousRoot = process.env.MOUSSE_WORKTREE_ROOT
+  const base = scratch('mousse-short-root-')
+  try {
+    // Before: Mousse's own folder.
+    process.env.MOUSSE_WORKTREE_ROOT = 'off'
+    await f.choose(null)
+    const before = await new ThreadWorkspaceManager(f.thread('thread-before')).provision('thread-before', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Before' })
+    expect(before.worktreePath).toBe(join(f.home, 'repositories', f.key, 'worktrees', 'threads', 'thread-before', 'main'))
+    // Then a short root: the same on every start, with its marker written.
+    process.env.MOUSSE_WORKTREE_ROOT = base
+    const short = shortWorktreeRoot(f.home)!
+    expect(short).toEqual(shortWorktreeRoot(f.home))
+    expect(dirname(short.path)).toBe(base)
+    await f.choose(null)
+    const location = f.thread('thread-short')
+    expect(chosenWorktreeFolder(location)).toBe(short.path)
+    const made = await new ThreadWorkspaceManager(location).provision('thread-short', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Fix the checkout total when the cart has a discount' })
+    expect(JSON.parse(readFileSync(join(short.path, WORKTREE_FOLDER_MARKER), 'utf8')).id).toBe(short.id)
+    // `<project, at most 16>-<short key>/<slug, at most 20>-<thread tag>`.
+    const leaf = made.worktreePath.slice(short.path.length + 1).split(/[\\/]/)
+    expect(leaf).toEqual([`shop-${f.key.slice(0, 12)}`, `fix-the-checkout-tot-${threadTag('thread-short')}`])
+    expect((await new ThreadWorkspaceManager(location).verify(made)).lifecycle).toBe('ready')
+    expect(trashRootFor(made.worktreePath, f.home)).toBe(join(short.path, WORKTREE_TRASH_FOLDER))
+    // The worktree made before is still Mousse's and still ready.
+    expect((await new ThreadWorkspaceManager(join(f.home, 'thread-data', 'thread-before')).verify(before)).lifecycle).toBe('ready')
+    // A folder chosen later takes new worktrees; the short root stays known, so its worktrees stay Mousse's.
+    await f.choose(f.entry)
+    expect(chosenWorktreeFolder(location)).toBe(f.folder)
+    expect(isThreadWorktreePlace(made.worktreePath, { home: f.home, repositoryId: f.key, threadId: 'thread-short' })).toBe(true)
+  } finally {
+    if (previousRoot === undefined) delete process.env.MOUSSE_WORKTREE_ROOT; else process.env.MOUSSE_WORKTREE_ROOT = previousRoot
+  }
 })
 
 test('a thread named "Agents" never takes the agents folder', async () => {
