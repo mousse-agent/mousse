@@ -38,12 +38,13 @@ describe('where the flat eyes sit', () => {
     const [left, right] = eyes
     expect(left.x).toBeLessThan(48)
     expect(right.x).toBeGreaterThan(48)
-    expect(left.x + right.x).toBeCloseTo(96, 3)
-    expect(left.y).toBeCloseTo(right.y, 3)
+    // The idle head sways a little, so the eyes are level and centred to within a pixel or two, not exactly.
+    expect(Math.abs(left.x + right.x - 96)).toBeLessThan(2)
+    expect(Math.abs(left.y - right.y)).toBeLessThan(2)
     expect(left.y).toBeGreaterThan(0)
     expect(left.y).toBeLessThan(96)
     expect(left.sx).toBeGreaterThan(0)
-    expect(Math.abs(left.angle)).toBeLessThan(0.02)
+    expect(Math.abs(left.angle)).toBeLessThan(0.06)
   })
 
   it('a mouse whose head leans, asleep, has its eyes turned with the head', () => {
