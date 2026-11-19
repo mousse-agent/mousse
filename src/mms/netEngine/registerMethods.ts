@@ -10,6 +10,8 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.invite.cancel': ['invitation'],
   'netEngine.approve': ['request'],
   'netEngine.join': ['ticket'],
+  'netEngine.join.code': ['invitation', 'code'],
+  'netEngine.link.read': ['link'],
   'netEngine.retry': ['node'],
   'netEngine.remove': ['node'],
   'netEngine.address.add': ['node', 'address']
@@ -26,6 +28,19 @@ function validate(method: NetEngineLocalMethod, params: unknown): Record<string,
       throw new DomainRpcError('bad_request', `${method} needs ${field}`)
   if (method === 'netEngine.approve' && typeof fields.yes !== 'boolean')
     throw new DomainRpcError('bad_request', `${method} needs yes`)
+  if (method === 'netEngine.invite' && fields.kind !== undefined && fields.kind !== 'link')
+    throw new DomainRpcError('bad_request', `${method} takes kind "link" or none`)
+  if (method === 'netEngine.join') {
+    if (fields.arrival !== undefined && fields.arrival !== 'scan' && fields.arrival !== 'link')
+      throw new DomainRpcError('bad_request', `${method} takes arrival "scan" or "link"`)
+    for (const list of ['approved', 'share'])
+      if (
+        fields[list] !== undefined &&
+        (!Array.isArray(fields[list]) ||
+          (fields[list] as unknown[]).some((route) => typeof route !== 'string'))
+      )
+        throw new DomainRpcError('bad_request', `${method} takes ${list} as a list of routes`)
+  }
   return fields
 }
 
@@ -59,7 +74,9 @@ export function registerNetEngineMethods(
               return engine.status()
             case 'netEngine.invite': {
               await engine.tellName()
-              const invite = await engine.pairing().invite(engine.ownName())
+              const invite = await engine
+                .pairing()
+                .invite(engine.ownName(), p.kind === 'link' ? 'link' : undefined)
               // The window that showed the code closed, or switched profile: its invitation ends (§8).
               context.connection?.lifetime?.addEventListener(
                 'abort',
@@ -77,9 +94,18 @@ export function registerNetEngineMethods(
               return engine.status()
             case 'netEngine.join': {
               await engine.tellName()
-              const row = await engine.pairing().join(p.ticket)
+              const row = await engine.join(p.ticket, {
+                ...(p.arrival ? { arrival: p.arrival } : {}),
+                ...(p.approved ? { approved: p.approved } : {}),
+                ...(p.share ? { share: p.share } : {})
+              })
               return { node: row.localId, status: engine.status() }
             }
+            case 'netEngine.join.code':
+              await engine.pairing().submitCode(p.invitation, p.code)
+              return engine.status()
+            case 'netEngine.link.read':
+              return engine.readLink(p.link)
             case 'netEngine.retry':
               await engine.retry(p.node)
               return engine.status()

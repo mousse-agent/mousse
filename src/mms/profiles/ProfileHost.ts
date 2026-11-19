@@ -131,7 +131,18 @@ export class ProfileHost {
       avatar: record.avatar,
       status: record.status,
       revision: record.revision,
-      isDefault: record.id === this.getDefaultProfileId()
+      isDefault: record.id === this.getDefaultProfileId(),
+      ...(this.networked(record) ? { networked: true } : {})
+    }
+  }
+
+  /** Its new networking's switch is on (read from its running services; a profile not started has none on). */
+  private networked(record: ProfileRecord): boolean {
+    if (record.status !== 'active') return false
+    try {
+      return !!this.live.get(record.id)?.netEngine.settings()?.enabled
+    } catch {
+      return false
     }
   }
 

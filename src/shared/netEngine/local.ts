@@ -11,11 +11,55 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.invite.cancel',
   'netEngine.approve',
   'netEngine.join',
+  'netEngine.join.code',
+  'netEngine.link.read',
   'netEngine.retry',
   'netEngine.remove',
   'netEngine.address.add'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
+
+/** Where a destination is, as the join dialog labels it (design 1b §1.2): LAN, Tailnet, Internet or Tunnel. */
+export type NetEngineRouteClass = 'lan' | 'tailnet' | 'public' | 'tunnel'
+
+export interface NetEngineDestination {
+  route: string
+  class: NetEngineRouteClass
+}
+
+/** A Send link's ticket as this computer reads it before Connect (`netEngine.link.read`). */
+export interface NetEngineLinkFacts {
+  invitation: string
+  /** 2 for a Send link; a scanned code is 1. */
+  kind?: number
+  /** The start of the host's endpoint id. */
+  host: string
+  expiresAt?: number
+  /** The destinations Connect lets this computer contact (§1.3); LAN addresses need no approval. */
+  destinations: NetEngineDestination[]
+}
+
+/** A Send link this computer shows (§5.1): the code to read out and the tries left, until it ends. */
+export interface NetEngineLinkInvite {
+  invitation: string
+  code: string
+  attemptsLeft: number
+  expiresAt?: number
+  /** Why it ended: `used`, `attempts_exhausted`, `expired`, `cancelled`. */
+  ended?: string
+  /** The pairing it made, once the other computer was let in. */
+  node?: string
+}
+
+/** A Send link join running here (§5.3): whether it waits for the code, and the tries left. */
+export interface NetEngineLinkJoin {
+  invitation: string
+  node?: string
+  needsCode: boolean
+  attemptsLeft?: number
+  /** The last code typed did not work. */
+  wrong?: boolean
+}
 
 /**
  * The default of the engine limit `scanIntervalMs` (`MOUSSE_NET_ENGINE_SCAN_INTERVAL_MS`). A window uses the value in
@@ -61,6 +105,10 @@ export interface NetEngineDevice {
   certificateWindow?: boolean
   /** Addresses added for it by hand (`tcp://host:port`); none means it is found on the local network. */
   addresses?: string[]
+  /** A Send link it consented to did not finish (no code confirmed, or the outcome was lost): Retry or Remove. */
+  unfinished?: boolean
+  /** That link is still valid, so Retry may ask for the code again. */
+  linkValid?: boolean
 }
 
 /** A computer asking to join this one, waiting for this computer's window to answer (§5.1 step 3). */
@@ -93,4 +141,12 @@ export interface NetEngineStatus {
   sharedAccount?: boolean
   /** How often Add device reads a camera frame for a pairing code (the engine limit `scanIntervalMs`). */
   scanIntervalMs?: number
+  /** The helper speaks protocol 1.1, so Send link and Enter link work. */
+  sendLink?: boolean
+  /** Send links this computer shows. */
+  links?: NetEngineLinkInvite[]
+  /** Send link joins running here. */
+  joins?: NetEngineLinkJoin[]
+  /** This computer's tailnet, public and tunnel routes, which "Also share" may send in pairback (§1.3). */
+  shareable?: NetEngineDestination[]
 }

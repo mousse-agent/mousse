@@ -48,8 +48,11 @@ describe('readTicket', () => {
       expiresAt: 0x6a000000,
       routes: ['tcp://192.168.1.5:7000']
     }
-    expect(readTicket(encoded)).toEqual(expected)
-    expect(readTicket(`mousse://pair#${encoded}`)).toEqual(expected)
+    expect(readTicket(encoded)).toMatchObject(expected)
+    expect(readTicket(`mousse://pair#${encoded}`)).toMatchObject(expected)
+    // The ticket hash is of the ticket's bytes, whatever link is around it.
+    expect(readTicket(`mousse://pair#${encoded}`).hash).toBe(readTicket(encoded).hash)
+    expect(readTicket(encoded).fragment).toBe(encoded)
   })
 
   it('refuses what is not a ticket', () => {

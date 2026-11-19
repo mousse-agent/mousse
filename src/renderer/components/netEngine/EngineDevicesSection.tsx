@@ -11,6 +11,8 @@ import { SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
 import { Modal } from '../ui/Modal'
 import { AddEngineDeviceDialog } from './AddEngineDeviceDialog'
 import { engineRow, engineWhere, SHARED_ACCOUNT_DETAIL, SHARED_ACCOUNT_LINE } from './engineRows'
+import { takeOfferedPairLink, useOfferedPairLink } from './PairLinkHost'
+import { CodeEntry } from './SendLinkParts'
 import './engine.css'
 
 /** Reads `netEngine.status` for this window's profile, again whenever the daemon says it changed. */
@@ -65,6 +67,14 @@ export function EngineDevicesSection() {
   const [selected, setSelected] = useState<string>()
   const [addressFor, setAddressFor] = useState<NetEngineDevice>()
   const [removing, setRemoving] = useState<NetEngineDevice>()
+  // A `mousse://pair` link that opened Mousse opens Enter link with it.
+  const offered = useOfferedPairLink()
+  const [linkToEnter, setLinkToEnter] = useState<string>()
+  useEffect(() => {
+    if (!offered || !status) return
+    const link = takeOfferedPairLink()
+    if (link) setLinkToEnter(link)
+  }, [offered, status])
 
   const action = async (method: PlatformRequestMethod, params: unknown): Promise<boolean> => {
     setBusy(true)
@@ -218,6 +228,29 @@ export function EngineDevicesSection() {
       </SettingsGroup>
 
       {adding && <AddEngineDeviceDialog status={status} onClose={() => setAdding(false)} />}
+
+      {linkToEnter && !adding && (
+        <AddEngineDeviceDialog
+          status={status}
+          initial="enter"
+          initialLink={linkToEnter}
+          onClose={() => setLinkToEnter(undefined)}
+        />
+      )}
+
+      {/* A Send link join repeated by Retry or after a restart asks for the code here. */}
+      {!adding &&
+        !linkToEnter &&
+        (() => {
+          const waiting = status.joins?.find((join) => join.needsCode && join.node)
+          if (!waiting) return null
+          const device = status.devices.find((item) => item.node === waiting.node)
+          return (
+            <Modal open title={device ? `Pair with ${device.name}` : 'Enter link'} onClose={() => undefined}>
+              <CodeEntry join={waiting} />
+            </Modal>
+          )
+        })()}
 
       {addressFor && (
         <AddAddressDialog

@@ -12,7 +12,12 @@ import { NetError } from '../../shared/net/errors'
 import type { BlobId, NodeCapability, NodeId, StoredRecord, StreamId } from '../../shared/net'
 import type { BridgeNodePolicy } from '../../shared/net/local'
 import { ENGINE_OWNER_METHODS } from '../../shared/netEngine/allowlist'
-import type { NetEngineDevice, NetEngineStatus } from '../../shared/netEngine/local'
+import type {
+  NetEngineDestination,
+  NetEngineDevice,
+  NetEngineLinkFacts,
+  NetEngineStatus
+} from '../../shared/netEngine/local'
 import type { BridgeProfileService } from '../bridge/BridgeProfileService'
 import type { EngineDirectoryPort, PeerRow } from '../bridge/peers'
 import { checkNodePolicy } from '../net/checkNodePolicy'
@@ -40,7 +45,9 @@ import {
   HelperSupervisor,
   type HelperStatus
 } from './helper/supervisor'
-import { EnginePairing, type PairingStep } from './pairing'
+import { EnginePairing, type JoinOptions, type PairingStep } from './pairing'
+import { destinationClass } from './routes'
+import { readTicket } from './ticket'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 
 export const NON_KEEPER_MESSAGE =
@@ -211,8 +218,50 @@ export class NetEngineService implements EngineDirectoryPort {
       approvals: this.started?.pairing.pendingApprovals() ?? [],
       ...(this.routes().length ? { routes: this.routes() } : {}),
       ...(this.sharedAccount() ? { sharedAccount: true } : {}),
-      scanIntervalMs: engineLimits().scanIntervalMs
+      scanIntervalMs: engineLimits().scanIntervalMs,
+      ...(this.helper && this.helper.minor() >= 1 ? { sendLink: true } : {}),
+      ...(this.started?.pairing.links().length ? { links: this.started.pairing.links() } : {}),
+      ...(this.started?.pairing.joins().length ? { joins: this.started.pairing.joins() } : {}),
+      ...(this.shareable().length ? { shareable: this.shareable() } : {})
     }
+  }
+
+  /** This computer's tailnet, public and tunnel routes: what "Also share" may send in pairback (§1.3). */
+  private shareable(): NetEngineDestination[] {
+    return this.routes().flatMap((route) => {
+      const kind = destinationClass(route)
+      return kind && kind !== 'lan' ? [{ route, class: kind }] : []
+    })
+  }
+
+  /**
+   * Enter link reads a link before Connect (§5.3): a decode error is "damaged"; the destinations it lists are the
+   * ticket's dialable hints with their classes. Nothing is dialled.
+   */
+  readLink(link: string): NetEngineLinkFacts {
+    let facts
+    try {
+      facts = readTicket(link)
+    } catch {
+      throw new NetError('bad_request', 'This link is damaged. Ask for a new one.', {
+        details: { reason: 'damaged' }
+      })
+    }
+    return {
+      invitation: facts.invitation,
+      ...(facts.kind !== undefined ? { kind: facts.kind } : {}),
+      host: facts.host.slice(0, 8),
+      ...(facts.expiresAt !== undefined ? { expiresAt: facts.expiresAt } : {}),
+      destinations: facts.routes.flatMap((route) => {
+        const kind = destinationClass(route)
+        return kind ? [{ route, class: kind }] : []
+      })
+    }
+  }
+
+  /** Connect: joins the computer in a pairing link (§5.1, and a Send link's §5.3). */
+  async join(link: string, options: JoinOptions = {}): Promise<EnginePeerRow> {
+    return this.pairing().join(link, options)
   }
 
   /** Where this computer's helper listens, as it said in `hello`. */
@@ -292,6 +341,10 @@ export class NetEngineService implements EngineDirectoryPort {
     const row = started.peers.get(node)
     if (!row || row.state === 'removed') throw new NetError('bad_request', 'Unknown device.')
     if (row.state === 'removing') return started.pairing.remove(node)
+    if (started.pairing.linkUnfinished(node)) {
+      await started.pairing.retryLink(node)
+      return
+    }
     if (row.state !== 'connected' && row.state !== 'awaiting_pairback')
       await started.pairing.advance(node)
     if (!started.sessions.online(node) && this.helper && row.state !== 'consented')
@@ -346,7 +399,15 @@ export class NetEngineService implements EngineDirectoryPort {
           ...(stuck ? { stuck: true } : {}),
           ...(unreachable ? { unreachable } : {}),
           ...(started.pairing.certificateWindow(node) ? { certificateWindow: true } : {}),
-          ...(row.addresses?.length ? { addresses: row.addresses } : {})
+          ...(row.addresses?.length ? { addresses: row.addresses } : {}),
+          ...(started.pairing.linkUnfinished(node)
+            ? {
+                unfinished: true,
+                ...(row.link?.expiresAt === undefined || row.link.expiresAt * 1000 > now
+                  ? { linkValid: true }
+                  : {})
+              }
+            : {})
         }
       })
     for (const key of [...this.since.keys()]) if (!seen.has(key)) this.since.delete(key)
@@ -479,7 +540,8 @@ export class NetEngineService implements EngineDirectoryPort {
       helper: () => this.helper,
       teardown: (node) => this.teardown(node),
       changed: () => this.changed(),
-      crashAt: (step) => !!this.pairingCrash?.(step)
+      crashAt: (step) => !!this.pairingCrash?.(step),
+      shareable: () => this.shareable().map(({ route }) => route)
     })
     const timer = setInterval(() => {
       try {
@@ -889,7 +951,7 @@ export class NetEngineService implements EngineDirectoryPort {
 }
 
 /** Whether the profile at `home` has the new networking's switch on. */
-function engineOn(home: string): boolean {
+export function engineOn(home: string): boolean {
   try {
     const value = JSON.parse(readFileSync(join(home, 'net-engine', 'settings.json'), 'utf8')) as {
       enabled?: unknown

@@ -26,6 +26,21 @@ export const SHARED_ACCOUNT_DETAIL =
 export function engineRow(device: NetEngineDevice): EngineRowView {
   const name = device.name
   if (device.state === 'removing') return { line: 'Removing…', actions: [] }
+  // A Send link it consented to that did not finish (design 1b §5.4).
+  if (device.unfinished)
+    return device.linkValid
+      ? {
+          line: "Pairing didn't finish",
+          detail: 'Retry asks for the code again. Or ask for a new link.',
+          warn: true,
+          actions: ['retry', 'remove']
+        }
+      : {
+          line: "Pairing didn't finish",
+          detail: 'The link has expired. Remove this, then ask for a new link.',
+          warn: true,
+          actions: ['remove']
+        }
   if (device.notAccepted)
     return {
       line: `${name} no longer accepts this computer`,

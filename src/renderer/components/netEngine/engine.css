@@ -74,3 +74,73 @@
   flex: 1;
   min-width: 0;
 }
+
+/* Send link (design 1b §5.1): the link with Copy, then the code to read out. */
+.engine-link {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.engine-link p,
+.engine-link-ended p,
+.engine-code-entry p {
+  margin: 0;
+}
+
+.engine-link-code {
+  font-family: var(--font-mono);
+  font-size: 28px;
+  letter-spacing: 0.08em;
+  text-align: center;
+  cursor: default;
+}
+
+.engine-link-ended,
+.engine-code-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-8);
+}
+
+/* Enter link: six boxes for the code. */
+.engine-code-boxes {
+  display: flex;
+  gap: var(--space-6, 6px);
+}
+
+.engine-code-box {
+  width: 36px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 18px;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.engine-share {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4, 4px);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.engine-share legend {
+  padding: 0;
+  margin-bottom: var(--space-4, 4px);
+}
+
+.engine-share-option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6, 6px);
+}
+
+.engine-profile-choice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}

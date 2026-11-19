@@ -242,7 +242,7 @@ describe('the helper, as the app sees it', () => {
     helper.onPaused((reason) => seen.push(reason))
     const hello = helper.hello()
     const asked = JSON.parse(p.written[0]!.body.toString('utf8'))
-    expect(asked).toMatchObject({ op: 'hello', proto: [1, 0], name: 'Desk', profile: 'profile-1' })
+    expect(asked).toMatchObject({ op: 'hello', proto: [1, 1], name: 'Desk', profile: 'profile-1' })
     p.push(jsonFrame({ re: asked.id, proto: [1, 0], identity: 'ab', paused: 'journal' }))
     await hello
     expect(helper.paused).toBe('journal')

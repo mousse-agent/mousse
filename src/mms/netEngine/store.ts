@@ -24,6 +24,29 @@ export interface EnginePeerRow {
   ticket?: string
   /** Addresses the user added for the other computer (Add address), as routes (`tcp://host:port`). */
   addresses?: string[]
+  /** How the pairing began when not by a ticket: `ssh`, added over SSH (design 1b §3.6). */
+  source?: string
+  /** The Send link this computer consented to join (design 1b §5.3), while its outcome is open and until pairback. */
+  link?: EngineLink
+}
+
+/**
+ * A Send link joined from this computer (kind 2): what Connect approved and what it shares back, kept on the row so
+ * a join repeated after a restart sends the same lists. `pending` while the ticket's `PAIRED` has not been seen: on a
+ * row added another way (over SSH) it is a pending link beside the row, which converts only on that `PAIRED`.
+ */
+export interface EngineLink {
+  ticket: string
+  /** The ticket hash (hex): `join.status` and `join.ack` name the flow by it. */
+  ticketHash: string
+  invitation: string
+  /** The ticket's non-private destinations the owner approved at Connect (`join {approved}`). */
+  approved: string[]
+  /** This computer's tailnet and public routes the owner ticked under "Also share", sent in pairback. */
+  share: string[]
+  /** When the ticket's invitation ends, in seconds since 1970. */
+  expiresAt?: number
+  pending: boolean
 }
 
 /** What a pairing's row may change after it is saved; `ticket: null` deletes the stored ticket. */
@@ -32,7 +55,7 @@ export type EnginePeerChange = Partial<
     EnginePeerRow,
     'endpoint' | 'fingerprint' | 'grant' | 'name' | 'state' | 'receipt' | 'invitation'
   >
-> & { ticket?: string | null }
+> & { ticket?: string | null; source?: string | null; link?: EngineLink | null }
 
 const COLUMNS: Record<keyof EnginePeerChange, string> = {
   endpoint: 'endpoint',
@@ -42,7 +65,16 @@ const COLUMNS: Record<keyof EnginePeerChange, string> = {
   state: 'state',
   receipt: 'receipt',
   invitation: 'invitation',
-  ticket: 'ticket'
+  ticket: 'ticket',
+  source: 'source',
+  link: 'link'
+}
+
+/** A change's value as its column holds it (the link as JSON). */
+const columnValue = (key: keyof EnginePeerChange, change: EnginePeerChange): string | null => {
+  const value = change[key]
+  if (value === null || value === undefined) return null
+  return key === 'link' ? JSON.stringify(value) : String(value)
 }
 
 export const isServingState = (state: EnginePeerState): boolean =>
@@ -72,7 +104,7 @@ export class EnginePeerStore {
           .all()
           .map((row) => String(row.name))
       )
-      for (const column of ['invitation', 'ticket', 'addresses'])
+      for (const column of ['invitation', 'ticket', 'addresses', 'source', 'link'])
         if (!columns.has(column))
           db.database.exec(`ALTER TABLE net_engine_peers ADD COLUMN ${column} TEXT`)
     })
@@ -85,7 +117,7 @@ export class EnginePeerStore {
       this.db.charge(1)
       this.db.database
         .prepare(
-          'INSERT INTO net_engine_peers(local_id,endpoint,fingerprint,grant,name,state,receipt,paired_at,invitation,ticket) VALUES(?,?,?,?,?,?,?,?,?,?)'
+          'INSERT INTO net_engine_peers(local_id,endpoint,fingerprint,grant,name,state,receipt,paired_at,invitation,ticket,source,link) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)'
         )
         .run(
           saved.localId,
@@ -97,7 +129,9 @@ export class EnginePeerStore {
           saved.receipt ?? null,
           saved.pairedAt,
           saved.invitation ?? null,
-          saved.ticket ?? null
+          saved.ticket ?? null,
+          saved.source ?? null,
+          saved.link ? JSON.stringify(saved.link) : null
         )
     })
     return saved
@@ -154,7 +188,7 @@ export class EnginePeerStore {
           .prepare(
             `UPDATE net_engine_peers SET ${keys.map((key) => `${COLUMNS[key]}=?`).join(',')} WHERE local_id=?`
           )
-          .run(...keys.map((key) => change[key] ?? null), localId)
+          .run(...keys.map((key) => columnValue(key, change)), localId)
       })
     return this.get(localId)
   }
@@ -179,9 +213,19 @@ export class EnginePeerStore {
           .prepare(
             `UPDATE net_engine_peers SET ${keys.map((key) => `${COLUMNS[key]}=?`).join(',')} WHERE local_id=? AND state IN (${from.map(() => '?').join(',')})`
           )
-          .run(...keys.map((key) => change[key] ?? null), localId, ...from).changes > 0
+          .run(...keys.map((key) => columnValue(key, change)), localId, ...from).changes > 0
     })
     return changed ? this.get(localId) : undefined
+  }
+
+  /** Deletes a row that never served (a consented link whose join ended without pairing): nothing else holds it. */
+  forgetUnpaired(localId: NodeId): void {
+    this.db.transaction(() => {
+      this.db.charge(1)
+      this.db.database
+        .prepare("DELETE FROM net_engine_peers WHERE local_id=? AND state='consented' AND grant=''")
+        .run(localId)
+    })
   }
 
   /** Every row in `state`, oldest first. */
@@ -206,7 +250,7 @@ export class EnginePeerStore {
       this.db.charge(16)
       this.dropRows(localId)
       this.db.database
-        .prepare("UPDATE net_engine_peers SET state='removed',ticket=NULL WHERE local_id=?")
+        .prepare("UPDATE net_engine_peers SET state='removed',ticket=NULL,link=NULL WHERE local_id=?")
         .run(localId)
     })
   }
@@ -310,6 +354,8 @@ function toRow(row: Record<string, unknown>): EnginePeerRow {
   const receipt = text(row.receipt),
     invitation = text(row.invitation),
     ticket = text(row.ticket),
+    source = text(row.source),
+    link = readLink(row.link),
     addresses = readAddresses(row.addresses)
   return {
     localId: row.local_id as NodeId,
@@ -322,7 +368,30 @@ function toRow(row: Record<string, unknown>): EnginePeerRow {
     pairedAt: Number(row.paired_at),
     ...(invitation === undefined ? {} : { invitation }),
     ...(ticket === undefined ? {} : { ticket }),
-    ...(addresses.length ? { addresses } : {})
+    ...(addresses.length ? { addresses } : {}),
+    ...(source === undefined ? {} : { source }),
+    ...(link ? { link } : {})
+  }
+}
+
+function readLink(value: unknown): EngineLink | undefined {
+  if (typeof value !== 'string') return undefined
+  try {
+    const link = JSON.parse(value) as Partial<EngineLink>
+    if (typeof link?.ticket !== 'string' || typeof link.ticketHash !== 'string') return undefined
+    const strings = (list: unknown): string[] =>
+      Array.isArray(list) ? list.filter((item): item is string => typeof item === 'string') : []
+    return {
+      ticket: link.ticket,
+      ticketHash: link.ticketHash,
+      invitation: typeof link.invitation === 'string' ? link.invitation : '',
+      approved: strings(link.approved),
+      share: strings(link.share),
+      ...(typeof link.expiresAt === 'number' ? { expiresAt: link.expiresAt } : {}),
+      pending: link.pending === true
+    }
+  } catch {
+    return undefined
   }
 }
 

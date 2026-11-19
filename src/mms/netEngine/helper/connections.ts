@@ -272,6 +272,11 @@ export class EngineHelper {
   paused?: string
   /** What the helper said of itself in `hello` (`identity`, `device`, `port`, `routes`, `build`). */
   info: Record<string, any> = {}
+  /** The protocol minor the helper answered in `hello`: 1 serves Send link (design 1b §7). */
+  minor(): number {
+    const proto: unknown = this.info.proto
+    return Array.isArray(proto) && typeof proto[1] === 'number' ? proto[1] : 0
+  }
   constructor(
     readonly channel: AppChannel,
     private readonly options: {
@@ -293,11 +298,14 @@ export class EngineHelper {
     })
   }
 
-  /** The helper's `hello` (protocol 1.0) with this computer's name and profile; answers what it said of itself. */
+  /**
+   * The helper's `hello` with this computer's name and profile, offering protocol 1.1 (a 1.0 helper answers 1.0, and
+   * serves the 1a messages only); answers what it said of itself.
+   */
   async hello(): Promise<Record<string, unknown>> {
     const profile = this.options.profile?.()
     const answer = await this.channel.request('hello', {
-      proto: [1, 0],
+      proto: [1, 1],
       name: this.options.name(),
       ...(profile ? { profile } : {})
     })

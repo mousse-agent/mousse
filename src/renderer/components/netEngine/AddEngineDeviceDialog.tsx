@@ -6,6 +6,7 @@ import { CopyButton } from '../settings/IconButtons'
 import { Modal } from '../ui/Modal'
 import { useDaemonCall } from '../devices/useDaemonCall'
 import { readPairingLink } from './engineRows'
+import { EnterLinkPanel, SendLinkPanel } from './SendLinkParts'
 
 type Step =
   | { kind: 'choose' }
@@ -13,6 +14,8 @@ type Step =
   | { kind: 'scan' }
   | { kind: 'confirm'; ticket: string; host: string }
   | { kind: 'joining'; host: string }
+  | { kind: 'link' }
+  | { kind: 'enter' }
 
 /** The other computer, before it says its own name. */
 const UNNAMED_HOST = 'the other computer'
@@ -26,11 +29,14 @@ export function AddEngineDeviceDialog({
   status,
   onClose,
   initial = 'choose',
+  initialLink,
   camera = defaultCamera
 }: {
   status: NetEngineStatus | undefined
   onClose: () => void
-  initial?: 'choose' | 'show' | 'scan'
+  initial?: 'choose' | 'show' | 'scan' | 'link' | 'enter'
+  /** A `mousse://pair` link that opened Mousse: Enter link reads it at once. */
+  initialLink?: string
   /** Opens a camera stream; tests and computers without one answer undefined. */
   camera?: () => Promise<MediaStream | undefined>
 }) {
@@ -90,7 +96,16 @@ export function AddEngineDeviceDialog({
     return true
   }
 
-  const title = step.kind === 'show' ? 'Show QR' : step.kind === 'scan' ? 'Scan' : 'Add device'
+  const title =
+    step.kind === 'show'
+      ? 'Show QR'
+      : step.kind === 'scan'
+        ? 'Scan'
+        : step.kind === 'link'
+          ? 'Send link'
+          : step.kind === 'enter'
+            ? 'Enter link'
+            : 'Add device'
   return (
     <Modal open title={title} onClose={onClose}>
       <div className="engine-dialog" data-step={step.kind}>
@@ -110,7 +125,40 @@ export function AddEngineDeviceDialog({
             >
               Scan
             </button>
+            {status?.sendLink && (
+              <>
+                <button
+                  type="button"
+                  className="settings-btn"
+                  title="For a computer that is not next to you"
+                  onClick={() => setStep({ kind: 'link' })}
+                >
+                  Send link
+                </button>
+                <button
+                  type="button"
+                  className="settings-btn"
+                  onClick={() => setStep({ kind: 'enter' })}
+                >
+                  Enter link
+                </button>
+              </>
+            )}
           </div>
+        )}
+
+        {step.kind === 'link' && (
+          <SendLinkPanel
+            status={status}
+            onInvitation={(invitation) => {
+              // Closing the dialog ends the link's invitation while it is open.
+              inviteRef.current = invitation
+            }}
+          />
+        )}
+
+        {step.kind === 'enter' && (
+          <EnterLinkPanel status={status} initialLink={initialLink} onJoined={onClose} />
         )}
 
         {step.kind === 'show' &&

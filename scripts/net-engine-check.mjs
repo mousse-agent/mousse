@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Runs one Phase 1a owner check in this checkout and prints what the check kit judges:
+ * Runs one owner check (Phase 1a or 1b) in this checkout and prints what the check kit judges:
  *
  *   app_build=<commit>[-dirty]
  *   PASS <id>            (exit 0)
@@ -33,7 +33,8 @@ const CHECKS = {
   'phase1a.reconnect': 'tests/netEngine/checks/reconnect.test.ts',
   'phase1a.path-switch': 'tests/netEngine/checks/pathSwitch.test.ts',
   'phase1a.pair-offline': 'tests/netEngine/checks/pairOffline.test.ts',
-  'phase1a.shared-computer': 'tests/netEngine/checks/sharedComputer.test.ts'
+  'phase1a.shared-computer': 'tests/netEngine/checks/sharedComputer.test.ts',
+  'phase1b.link-app': 'tests/netEngine/checks/linkApp.test.ts'
 }
 /** The checks that run as cross-machine cells, one role per computer. */
 const CROSS_MACHINE = new Set(['phase1a.pair-offline', 'phase1a.shared-computer'])
