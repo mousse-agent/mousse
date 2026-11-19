@@ -33,7 +33,8 @@ export interface ComputerUseLineage {
 /**
  * Whether `threadId`'s agents may use the computer: yes, unless the thread or one above it (its parent, or the thread
  * whose agent started it) was started by a bot that doesn't hold "use the computer". The nearest bot decides. A thread
- * the store doesn't hold was started by no bot; a lineage that loops or runs past 32 threads allows nothing.
+ * the store doesn't hold was started by no bot; a missing thread above it, or a lineage that loops or runs past 32
+ * threads, allows nothing.
  */
 export function computerUseAllowed(threadId: string, readThread: (id: string) => ComputerUseLineage | undefined, botHolds: (botId: string) => boolean): boolean {
   const seen = new Set<string>()
@@ -41,7 +42,9 @@ export function computerUseAllowed(threadId: string, readThread: (id: string) =>
     if (seen.has(current) || seen.size >= 32) return false
     seen.add(current)
     const thread = readThread(current)
-    if (!thread) return true
+    // The thread asked about may be one the store doesn't hold (started by no bot); a missing thread above it may have
+    // been a bot's, so it allows nothing.
+    if (!thread) return current === threadId
     if (thread.startedByBot?.botId) return botHolds(thread.startedByBot.botId)
     current = thread.lineage?.parentThreadId ?? thread.createdByThreadId
   }

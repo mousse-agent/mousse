@@ -25,6 +25,8 @@ describe('which threads may use the computer', () => {
     'sub-of-bot-yes': { lineage: { parentThreadId: 'bot-yes' } },
     // The nearest bot decides: "no" started a thread that "yes"'s agent then started work below.
     'bot-yes-under-bot-no': { startedByBot: { botId: 'yes' }, lineage: { parentThreadId: 'bot-no' } },
+    // Its parent is gone: it may have been a bot's thread.
+    orphan: { lineage: { parentThreadId: 'deleted' } },
     'loop-a': { lineage: { parentThreadId: 'loop-b' } },
     'loop-b': { lineage: { parentThreadId: 'loop-a' } }
   }
@@ -40,6 +42,7 @@ describe('which threads may use the computer', () => {
     ['started-by-agent-of-bot-no', false],
     ['deep-under-bot-yes', true],
     ['bot-yes-under-bot-no', true],
+    ['orphan', false],
     ['loop-a', false]
   ] as const)('%s → %s', (id, expected) => {
     expect(allowed(id)).toBe(expected)
@@ -150,6 +153,43 @@ describe('what Settings is told about the driver', () => {
     expect(runInstaller).toHaveBeenCalledTimes(1)
     expect(first).toMatchObject({ state: 'found', version: '0.38.0' })
     expect(second).toBe(first)
+  })
+
+  it('never runs an action twice when the driver goes away during it; the next call starts it again', async () => {
+    const callTool = vi.fn(async () => { throw new Error('Connection closed') })
+    const connect = vi.fn(async () => ({ listTools: async () => [], instructions: () => undefined, callTool, close: async () => undefined }))
+    const d = new ComputerUseDriver({ settings: () => ({ enabled: true }), platform: 'linux', env: { PATH: '' }, home: join('/home', 'me'), version: async () => 'cua-driver 0.38.0', exists: (path) => path === exe, connect })
+    await expect(d.call('click', {}, new AbortController().signal)).rejects.toThrow(/may or may not have run/)
+    expect(callTool).toHaveBeenCalledTimes(1)
+    await expect(d.call('click', {}, new AbortController().signal)).rejects.toThrow()
+    expect(connect).toHaveBeenCalledTimes(2)
+  })
+
+  it('runs nothing when computer use is switched off while the driver is being checked', async () => {
+    const setting = { enabled: true }
+    const connect = vi.fn()
+    const d = new ComputerUseDriver({
+      settings: () => setting, platform: 'linux', env: { PATH: '' }, home: join('/home', 'me'), exists: (path) => path === exe, connect,
+      version: async () => { setting.enabled = false; return 'cua-driver 0.38.0' }
+    })
+    await expect(d.call('click', {}, new AbortController().signal)).rejects.toThrow(/off in Settings/)
+    expect(connect).not.toHaveBeenCalled()
+  })
+
+  it('an older look that ends after a newer one does not replace it', async () => {
+    const other = join('/opt', 'cua-driver')
+    const setting: { enabled: boolean; driverPath?: string } = { enabled: true }
+    let finishOld: (output: string) => void = () => undefined
+    const d = new ComputerUseDriver({
+      settings: () => setting, platform: 'linux', env: { PATH: '' }, home: join('/home', 'me'), exists: (path) => path === exe || path === other,
+      version: (path) => (path === exe ? new Promise<string>((resolve) => { finishOld = resolve }) : Promise.resolve('cua-driver 0.39.0'))
+    })
+    const old = d.status(true)
+    setting.driverPath = other
+    expect(await d.status(true)).toMatchObject({ path: other, version: '0.39.0' })
+    finishOld('cua-driver 0.38.0')
+    await old
+    expect(d.known()).toMatchObject({ path: other, version: '0.39.0' })
   })
 
   it("says it didn't start when the driver fails to run, and says why an install failed", async () => {

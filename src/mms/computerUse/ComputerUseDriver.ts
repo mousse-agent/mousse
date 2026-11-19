@@ -122,7 +122,8 @@ function runVersion(path: string): Promise<string> {
 function runInstaller(platform: NodeJS.Platform): Promise<void> {
   const [command, args] = platform === 'win32'
     ? ['powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', `irm ${CUA_INSTALL_PS1} | iex`]] as const
-    : ['/bin/bash', ['-c', `curl -fsSL ${CUA_INSTALL_SH} | /bin/bash`]] as const
+    // pipefail: a failed download fails the install, instead of an empty script exiting 0.
+    : ['/bin/bash', ['-c', `set -o pipefail; curl -fsSL ${CUA_INSTALL_SH} | /bin/bash`]] as const
   return new Promise((resolve, reject) => {
     const child = spawn(command, [...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, shell: false })
     trackChildProcess(child, 'installer')
@@ -143,7 +144,14 @@ function runInstaller(platform: NodeJS.Platform): Promise<void> {
 async function connectDriver(path: string): Promise<DriverConnection> {
   const transport = new OwnedStdioClientTransport({ command: path, args: ['mcp'] })
   const client = new Client({ name: 'mousse', version: mousseVersion() }, { capabilities: {} })
-  await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS })
+  try {
+    await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS })
+  } catch (error) {
+    // A driver that started but never answered must not stay running.
+    await client.close().catch(() => undefined)
+    await transport.close().catch(() => undefined)
+    throw error
+  }
   return {
     listTools: async () => {
       const tools: DriverTool[] = []
@@ -167,6 +175,8 @@ export class ComputerUseDriver {
   private readonly env: NodeJS.ProcessEnv
   private readonly home: string
   private cached: { key: string; at: number; status: ComputerUseStatus } | undefined
+  /** Counts looks, so an older look that ends after a newer one changes nothing. */
+  private looks = 0
   private installing: Promise<ComputerUseStatus> | undefined
   private installError: string | undefined
   private connection: { path: string; ready: Promise<DriverConnection> } | undefined
@@ -185,6 +195,7 @@ export class ComputerUseDriver {
     if (this.installing) return { ...base, state: 'installing' }
     const key = driverPath ?? ''
     if (!refresh && this.cached && this.cached.key === key && Date.now() - this.cached.at < STATUS_TTL_MS) return { ...this.cached.status, ...base }
+    const look = ++this.looks
     const found = locateDriver({ chosen: driverPath, platform: this.platform, env: this.env, home: this.home, exists: this.options.exists })
     let status: ComputerUseStatus
     if (!found) {
@@ -197,6 +208,7 @@ export class ComputerUseDriver {
         status = { ...base, state: 'broken', path: found.path, source: found.source, error: line(error) }
       }
     }
+    if (look !== this.looks) return status
     this.cached = { key, at: Date.now(), status }
     // Another driver than the one running now: the next call starts that one.
     if (this.connection && this.connection.path !== status.path) void this.close()
@@ -239,7 +251,8 @@ export class ComputerUseDriver {
   /** The driver's path when it runs and computer use is on; undefined otherwise. */
   async ready(): Promise<string | undefined> {
     const status = await this.status()
-    return status.enabled && status.state === 'found' ? status.path : undefined
+    // The switch as it is now: it may have been turned off while the driver was being checked.
+    return this.options.settings().enabled && status.state === 'found' ? status.path : undefined
   }
 
   private async connect(path: string): Promise<DriverConnection> {
@@ -262,7 +275,7 @@ export class ComputerUseDriver {
     return { tools: this.tools.list, ...(instructions ? { instructions } : {}) }
   }
 
-  /** Runs one of the driver's tools. A driver that went away is started again once. */
+  /** Runs one of the driver's tools. A driver that went away is started again by the next call, never this one. */
   async call(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<DriverCallResult> {
     const path = await this.ready()
     if (!path) throw new Error(this.unavailable(await this.status()))
@@ -271,8 +284,10 @@ export class ComputerUseDriver {
       return await connection.callTool(name, args, signal)
     } catch (error) {
       if (signal.aborted || !/closed|not connected|EPIPE/i.test(line(error))) throw error
+      // Never sent again by itself: the action (a click, typing) may have run before the driver went away. The next
+      // call starts the driver again.
       await this.close()
-      return await (await this.connect(path)).callTool(name, args, signal)
+      throw new Error(`Cua Driver stopped during ${name}; it may or may not have run. Check the window, then try again.`)
     }
   }
 
