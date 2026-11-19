@@ -20,6 +20,7 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
   const folder = join(scratch, 'fetches')
   let directoryFd: number | undefined, fileFd: number | undefined
   let created: string | undefined, finished = false
+  let failure: SecretFetchFileError | undefined
   try {
     mkdirSync(folder, { recursive: true, mode: 0o700 })
     const expected = join(realpathSync(scratch), 'fetches')
@@ -90,18 +91,24 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
     }
     return file
   } catch (error) {
-    throw error instanceof SecretFetchFileError ? error : new SecretFetchFileError()
+    failure = error instanceof SecretFetchFileError ? error : new SecretFetchFileError()
+    throw failure
   } finally {
+    let closeFailed = false
     if (fileFd !== undefined) {
-      const opened = fstatSync(fileFd)
-      closeSync(fileFd)
-      if (!finished && created && opened.size === 0) {
+      let opened: Stats | undefined
+      try { opened = fstatSync(fileFd) } catch { closeFailed = true }
+      try { closeSync(fileFd) } catch { closeFailed = true }
+      if (!finished && created && opened?.size === 0) {
         try {
           const entry = lstatSync(created)
           if (entry.isFile() && entry.size === 0 && same(entry, opened)) unlinkSync(created)
         } catch { /* Only our still-empty file is eligible for cleanup. */ }
       }
     }
-    if (directoryFd !== undefined) closeSync(directoryFd)
+    if (directoryFd !== undefined) {
+      try { closeSync(directoryFd) } catch { closeFailed = true }
+    }
+    if (closeFailed && !failure) throw new SecretFetchFileError()
   }
 }
