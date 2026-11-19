@@ -31,6 +31,7 @@ import { BotActivitySticker, BotPresenceLine } from './BotPresence'
 import { askAnswerLine } from '../asks/AskCard'
 import { BotMenu } from './BotMenu'
 import { BotTasksButton } from './BotTasksButton'
+import { BotModelButton } from './BotModelButton'
 import { BotSidePanel, botFilesFolder, useBotSidePanel } from './BotSidePanel'
 import { BotMemoryDialog } from './BotMemoryDialog'
 import { BotBrowserPreview } from './BotBrowser'
@@ -1097,6 +1098,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           <BotPresenceLine bot={bot} typing={typing} offline={offline} />
         </div>
         <BotTasksButton botId={bot.id} tasks={bot.tasks} />
+        {/* The provider it talks on, ringed by the usage left, and its model rows. */}
+        <BotModelButton bot={bot} />
         <button type="button" className={`bot-header-panel${side.open ? ' is-open' : ''}`} aria-label={side.open ? 'Hide side panel' : 'Show side panel'} title={side.open ? 'Hide side panel' : 'Show side panel'} aria-expanded={side.open} onClick={side.toggle}>
           {side.open ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
         </button>

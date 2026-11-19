@@ -32,6 +32,30 @@ export function cachedUsage(owner: object, id: string): ProviderUsage | undefine
   return { ...entry.usage, readAt: entry.usage.readAt ?? new Date(entry.at).toISOString() }
 }
 
+type KeptListener = (providerId: string) => void
+const keptListeners = new WeakMap<object, Set<KeptListener>>()
+
+/**
+ * Calls `listener` with the provider's id each time a reading of it is kept, whichever read made it (the usage page,
+ * the background reads, a bot header's refresh). The protocol server pushes each one to every window.
+ */
+export function onUsageKept(owner: object, listener: KeptListener): () => void {
+  let set = keptListeners.get(owner)
+  if (!set) keptListeners.set(owner, (set = new Set()))
+  set.add(listener)
+  return () => { set.delete(listener) }
+}
+
+function usageKept(owner: object, providerId: string): void {
+  for (const listener of keptListeners.get(owner) ?? []) {
+    try {
+      listener(providerId)
+    } catch {
+      // A listener never fails the read that kept the reading.
+    }
+  }
+}
+
 /** Keeps a provider's fresh reading. A preview of sign-ins keeps the windows each one had last time. */
 export function keepUsage(owner: object, usage: ProviderUsage, now = Date.now()): void {
   const map = kept(owner)
@@ -42,6 +66,7 @@ export function keepUsage(owner: object, usage: ProviderUsage, now = Date.now())
     return last && !last.pending ? last : account
   })
   map.set(usage.id, { usage: { ...usage, ...(accounts ? { accounts } : {}) }, at: now })
+  usageKept(owner, usage.id)
 }
 
 /** Keeps one sign-in's fresh reading inside its provider's last reading. */
@@ -50,6 +75,7 @@ export function keepAccount(owner: object, providerId: string, account: UsageAcc
   if (!entry?.usage.accounts) return
   const accounts = entry.usage.accounts.map((existing) => (existing.id === account.id ? account : existing))
   kept(owner).set(providerId, { usage: { ...entry.usage, accounts }, at: now })
+  usageKept(owner, providerId)
 }
 
 /**
@@ -171,4 +197,37 @@ export async function readProviderUsage(mms: MmsProfileServices, providerId: str
   )
   if (provider) keepReading(mms, provider)
   return provider
+}
+
+/** The CLI API proxy's Claude sign-ins before their usage, kept with each one's last numbers; undefined without such a proxy. */
+export async function readClaudeAccountsPreview(mms: MmsProfileServices): Promise<ProviderUsage | undefined> {
+  // Turned off in Settings: not on the page, so not read either.
+  if (mms.providerInstances?.isDisabled?.('claude')) return undefined
+  const provider = await withUsageDeadline((signal) => mms.claudeSubscription.usageAccountsPreview(signal), () => undefined)
+  if (provider) keepUsage(mms, provider)
+  return provider
+}
+
+/** One proxy sign-in's usage, read within its deadline and kept (a rate-limited answer keeps the last numbers). */
+export async function readClaudeAccount(mms: MmsProfileServices, accountId: string): Promise<UsageAccount | undefined> {
+  if (mms.providerInstances?.isDisabled?.('claude')) return undefined
+  const read = await withUsageDeadline<UsageAccount | undefined>((signal) => mms.claudeSubscription.usageAccount(accountId, signal), () => ({ id: accountId, label: accountId, windows: [], problem: 'Not reachable' }))
+  const account = read && steadyAccount(mms, CLAUDE_USAGE_ID, read)
+  if (account) keepAccountReading(mms, CLAUDE_USAGE_ID, 'Claude subscription', account)
+  return account
+}
+
+/**
+ * One provider read as the usage page reads it: Claude through the proxy's sign-ins one by one when it has several,
+ * any other provider (and Claude without them) in one read. Every read goes through the provider's own reader.
+ */
+export async function readUsageAsPage(mms: MmsProfileServices, providerId: string): Promise<void> {
+  if (providerId === CLAUDE_USAGE_ID) {
+    const preview = await readClaudeAccountsPreview(mms)
+    if (preview?.accounts?.length) {
+      await Promise.all(preview.accounts.filter((account) => account.pending).map((account) => readClaudeAccount(mms, account.id)))
+      return
+    }
+  }
+  await readProviderUsage(mms, providerId)
 }

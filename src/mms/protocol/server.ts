@@ -59,6 +59,7 @@ import {
   MMS_PROTOCOL_MAX_REPLAYED_RESPONSE_BYTES
 } from './replayCache'
 import { envelopeFrames } from './envelopeChunks'
+import { cachedUsage, onUsageKept } from './usageReads'
 import { maxConnectionEventBytes, PROTOCOL_CONNECTION_EVENT_TYPES } from './types'
 import { BOTS_BROWSER_STREAM_CAPABILITY } from '../../shared/bots/personal/browser'
 import { BROWSER_VIEW_CAPABILITY } from '../../shared/browser/threadView'
@@ -560,6 +561,24 @@ export class MmsProtocolServer {
         if (event.type === 'snapshots') emitToSubscribers(this.ring.push('providers.snapshots', event.data))
         else emitToSubscribers(this.ring.push('providers.operation', { event: event.data }))
       }))
+    }
+    // Each usage reading kept, whichever read made it, reaches every window (bot headers' usage rings). The sign-ins
+    // of a proxy are kept one by one: those kept in one turn of the event loop go as one event per provider.
+    {
+      const pending = new Set<string>()
+      let usageTimer: ReturnType<typeof setImmediate> | undefined
+      disposers.push(onUsageKept(services, (providerId) => {
+        pending.add(providerId)
+        usageTimer ??= setImmediate(() => {
+          usageTimer = undefined
+          for (const id of pending) {
+            const usage = cachedUsage(services, id)
+            if (usage) emitToSubscribers(this.ring.push('providers.usage', { usage }))
+          }
+          pending.clear()
+        })
+      }))
+      disposers.push(() => { if (usageTimer) clearImmediate(usageTimer); pending.clear() })
     }
     // Some daemon-owned producers (Telegram/Discord/webhooks and scheduled jobs)
     // create threads directly rather than through a protocol request. Fan those
