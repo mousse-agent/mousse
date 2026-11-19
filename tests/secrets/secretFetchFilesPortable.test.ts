@@ -8,7 +8,8 @@ import { saveSecretFetchResponse } from '../../src/mms/secrets/secretFetchFiles'
 const hooks = vi.hoisted(() => ({
   unlink: undefined as undefined | ((path: unknown) => void),
   spawnError: undefined as undefined | string,
-  afterCwd: undefined as undefined | (() => void)
+  afterCwd: undefined as undefined | (() => void),
+  write: undefined as undefined | (() => void)
 }))
 vi.mock('node:fs', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs')>()
@@ -17,6 +18,10 @@ vi.mock('node:fs', async (importOriginal) => {
     unlinkSync: (path: fs.PathLike) => {
       hooks.unlink?.(path)
       return original.unlinkSync(path)
+    },
+    writeFileSync: (...args: Parameters<typeof original.writeFileSync>) => {
+      hooks.write?.()
+      return original.writeFileSync(...args)
     }
   }
 })
@@ -55,6 +60,7 @@ afterEach(() => {
   hooks.unlink = undefined
   hooks.spawnError = undefined
   hooks.afterCwd = undefined
+  hooks.write = undefined
   vi.unstubAllGlobals()
   homes.splice(0).forEach((path) => fs.rmSync(path, { recursive: true, force: true }))
 })
@@ -140,3 +146,39 @@ it('leaves a folder lost during the child identity check uncounted', () => {
   expect(error).toMatchObject({ unsafe: true })
   expect(fs.readdirSync(join(scratch, 'moved'))).toEqual([])
 })
+
+it.each(['linux', 'darwin', 'win32'])(
+  'writes through the open fd when the path changes at the write on %s',
+  (platform) => {
+    const home = fs.mkdtempSync(join(tmpdir(), 'fetch-write-fd-'))
+    homes.push(home)
+    const scratch = join(home, 'scratch'),
+      outside = join(home, 'outside'),
+      folder = join(scratch, 'fetches')
+    fs.mkdirSync(scratch)
+    fs.mkdirSync(outside)
+    vi.stubGlobal(
+      'process',
+      new Proxy(process, {
+        get: (target, key) => (key === 'platform' ? platform : Reflect.get(target, key))
+      })
+    )
+    let swapped = false
+    hooks.write = () => {
+      hooks.write = undefined
+      swapped = true
+      fs.renameSync(folder, folder + '-original')
+      fs.symlinkSync(outside, folder, 'dir')
+    }
+    try {
+      saveSecretFetchResponse(scratch, Buffer.from('response'))
+    } catch {
+      /* A safe refusal may discard the file. */
+    }
+    expect(swapped).toBe(true)
+    expect(fs.readdirSync(outside)).toEqual([])
+    for (const name of fs.readdirSync(folder + '-original')) {
+      expect(fs.readFileSync(join(folder + '-original', name), 'utf8')).toBe('response')
+    }
+  }
+)
