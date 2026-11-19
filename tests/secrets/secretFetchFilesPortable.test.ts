@@ -5,7 +5,7 @@ import { basename, isAbsolute, join } from 'node:path'
 import { runInNewContext } from 'node:vm'
 import { saveSecretFetchResponse } from '../../src/mms/secrets/secretFetchFiles'
 
-const hooks = vi.hoisted(() => ({ unlink: undefined as undefined | ((path: unknown) => void) }))
+const hooks = vi.hoisted(() => ({ unlink: undefined as undefined | ((path: unknown) => void), spawnError: undefined as undefined | string }))
 vi.mock('node:fs', async importOriginal => {
   const original = await importOriginal<typeof import('node:fs')>()
   return { ...original, unlinkSync: (path: fs.PathLike) => {
@@ -16,6 +16,7 @@ vi.mock('node:fs', async importOriginal => {
 // Hand-authored child adapter: run the exact fixed helper source in-process. A held Linux
 // dirfd models the kernel-pinned child cwd, without adding a process-owning Vitest lane.
 vi.mock('node:child_process', () => ({ spawnSync: (_exe: string, args: string[], options: { cwd: string; input: Buffer }) => {
+  if (hooks.spawnError) return { status: null, error: { code: hooks.spawnError } }
   const directory = fs.openSync(options.cwd, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY)
   const relative = (path: string) => isAbsolute(path) ? path : `/proc/self/fd/${directory}/${path}`
   const child = { argv: ['node', ...args.slice(2)], exitCode: 0 }
@@ -33,6 +34,7 @@ vi.mock('node:child_process', () => ({ spawnSync: (_exe: string, args: string[],
 const homes: string[] = []
 afterEach(() => {
   hooks.unlink = undefined
+  hooks.spawnError = undefined
   vi.unstubAllGlobals()
   homes.splice(0).forEach(path => fs.rmSync(path, { recursive: true, force: true }))
 })
@@ -56,4 +58,15 @@ it.each(['linux', 'darwin', 'win32'])('pins pruning even when the path changes a
   try { saveSecretFetchResponse(scratch, Buffer.from('response')) } catch { /* Fixed save refusal is allowed. */ }
   expect(fs.readFileSync(join(outside, name), 'utf8')).toBe('owner file')
   expect(fs.readdirSync(outside)).toEqual([name])
+})
+
+
+it.each(['ENOENT', 'ENOTDIR'])('treats a folder lost before child startup as an uncounted refusal: %s', code => {
+  const home = fs.mkdtempSync(join(tmpdir(), 'fetch-portable-lost-'))
+  homes.push(home)
+  vi.stubGlobal('process', new Proxy(process, { get: (target, key) => key === 'platform' ? 'darwin' : Reflect.get(target, key) }))
+  hooks.spawnError = code
+  let error: unknown
+  try { saveSecretFetchResponse(home, Buffer.from('response')) } catch (caught) { error = caught }
+  expect(error).toMatchObject({ unsafe: true })
 })

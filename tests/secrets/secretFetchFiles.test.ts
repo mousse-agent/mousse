@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { SecretVault } from '../../src/mms/secrets/SecretVault'
@@ -132,7 +132,7 @@ it('keeps a close failure local and releases the parent handle', async () => {
   }
   cleanup.push(() => {
     for (const fd of opened) {
-      try { require('node:fs').closeSync(fd) } catch { /* The old implementation leaked this parent. */ }
+      try { closeSync(fd) } catch { /* The old implementation leaked this parent. */ }
     }
   })
   const result = await f.run()
