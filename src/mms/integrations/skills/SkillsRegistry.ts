@@ -103,12 +103,11 @@ export class SkillsRegistry {
 
     const generation = this.sharedGeneration
     const { snapshot, scannedAt } = await this.discoverUncached(options)
-    // A scan that started before a change Mousse made is not kept as the last snapshot.
-    if (generation === this.sharedGeneration) {
-      this.lastSnapshots.delete(cacheKey)
-      this.lastSnapshots.set(cacheKey, snapshot)
-      while (this.lastSnapshots.size > SkillsRegistry.MAX_DISCOVERY_ENTRIES) this.lastSnapshots.delete(this.lastSnapshots.keys().next().value!)
-    }
+    // A scan that started before a change Mousse made is returned to its caller but kept for no one else.
+    if (generation !== this.sharedGeneration) return snapshot
+    this.lastSnapshots.delete(cacheKey)
+    this.lastSnapshots.set(cacheKey, snapshot)
+    while (this.lastSnapshots.size > SkillsRegistry.MAX_DISCOVERY_ENTRIES) this.lastSnapshots.delete(this.lastSnapshots.keys().next().value!)
     this.discoveryCache.delete(cacheKey)
     // The snapshot is as old as the oldest scan in it, so it never outlives a shared scan it reused.
     this.discoveryCache.set(cacheKey, { snapshot, fetchedAt: scannedAt })

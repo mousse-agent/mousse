@@ -196,6 +196,49 @@ describe('Skills discovery cache', () => {
         await rm(lateFolder(), { recursive: true, force: true })
       }
     })
+
+    it('a message that names a skill added since a scan still within its time scans the folders again and loads it', async () => {
+      const skills = registry()
+      const path = await project(3)
+      let lateId = ''
+      try {
+        await skills.discover({ projectPath: path })
+        await writeSkill(lateFolder(), 'late', 'Late body.')
+        const late = (await registry().discover({ projectPath: path })).skills.find((skill) => skill.name === 'late')!
+        lateId = late.installationId ?? late.id
+        const loaded = await prepareSkills({ registry: skills, settings: () => getDefaultSettings().integrations.skills, projectPath: path, mode: 'agent', userContent: 'please /late now', actor: { kind: 'main', skillIds: [lateId] }, stale: true })
+        expect(loaded.loadedSkills.map((skill) => skill.name)).toEqual(['late'])
+      } finally {
+        await rm(lateFolder(), { recursive: true, force: true })
+      }
+    })
+
+    it('a background scan that started before a change Mousse made is not kept for later turns', async () => {
+      const skills = registry()
+      const path = await project(4)
+      const start = Date.now()
+      const now = vi.spyOn(Date, 'now').mockReturnValue(start)
+      type Uncached = (options: object) => Promise<{ snapshot: SkillsRegistrySnapshot; scannedAt: number }>
+      const uncached = vi.spyOn(skills as unknown as { discoverUncached: Uncached }, 'discoverUncached')
+      try {
+        const before = await skills.discover({ projectPath: path })
+        now.mockReturnValue(start + 31_000)
+        // The background scan reads the folders before the change and finishes after it.
+        let finish = () => {}
+        uncached.mockImplementationOnce(() => new Promise((resolve) => { finish = () => resolve({ snapshot: before, scannedAt: Date.now() }) }))
+        expect(names(await skills.discover({ projectPath: path, stale: true }))).not.toContain('late')
+        await writeSkill(lateFolder(), 'late')
+        skills.invalidateDiscoveryCache()
+        finish()
+        await settle()
+        expect(names(await skills.discover({ projectPath: path }))).toContain('late')
+        expect(names(await skills.discover({ projectPath: path, stale: true }))).toContain('late')
+      } finally {
+        uncached.mockRestore()
+        now.mockRestore()
+        await rm(lateFolder(), { recursive: true, force: true })
+      }
+    })
   })
 
   it('keeps no SKILL.md text alive through parsed names and descriptions', async () => {
