@@ -4904,7 +4904,7 @@ it.each(['intranet:8080', 'localhost:443', 'Exfil:80'])('E1 r4 a numeric label n
  expect(t.calls).toHaveLength(1)
 })
 
-it('E1 r5 a declined retry prepends its outcome and preserves every report line', async () => {
+it.each(['report','quiet'] as const)('E1 r6 a plain decline leaves a %s report unchanged', async kind => {
  const t=await aloneAsk()
  const next=await aloneNext(t,{...t.args,to:['another@example.test']})
  expect(next.action.status).toBe('open')
@@ -4912,10 +4912,10 @@ it('E1 r5 a declined retry prepends its outcome and preserves every report line'
  await f.bots.actions.answer({actionId:next.action.id,digest:next.action.args_digest,answer:'not_now'}); await flush()
  const resumed=await start(f,next.id,2)
  const report="Filed 3 scans and emailed Ana the summary.\nI didn't resend because you chose Not now."
- await finish(f,resumed.payload,'completed',{text:report})
+ await finish(f,resumed.payload,'completed',{text:kind==='quiet'?'[SILENT]':report})
  const reports=f.bots.service.chatList(t.botId).messages.filter(m=>m.activationId===next.id&&m.kind==='run_report')
- expect(reports).toHaveLength(1)
- expect(reports[0]!.text).toBe("The retry didn't go out.\n\n"+report)
+ if(kind==='quiet') expect(reports).toEqual([])
+ else { expect(reports).toHaveLength(1); expect(reports[0]!.text).toBe(report) }
 })
 
 it('E1 r5 a cut stored review of long inline content cannot supply consent and explains why', async () => {
