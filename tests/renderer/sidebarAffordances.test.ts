@@ -360,10 +360,42 @@ describe('row marks', () => {
     expect(worktreeMark({ worktreeEnabled: false }, worktrees)).toBeUndefined()
   })
 
-  it('shows the mark on the row with its name as the tooltip', () => {
+  it('marks only a row on its own worktree with the branch icon', () => {
+    const folderFirst = { ...project('p1', 'Mousse'), newThread: { worktreeEnabled: false } }
+    show([thread('a', 'Fix tests', { worktreeEnabled: true }), thread('b', 'Docs', { worktreeEnabled: false })], { active: 'a', projects: [folderFirst] })
+    expect(row('a').querySelector('.threads-sidebar-worktree-icon')?.getAttribute('title')).toBe('Worktree')
+    expect(row('b').querySelector('.threads-sidebar-worktree-icon')).toBeNull()
     show([thread('a', 'Fix tests', { worktreeEnabled: true }), thread('b', 'Docs', { worktreeEnabled: false })], { active: 'a' })
     expect(row('a').querySelector('.threads-sidebar-worktree-icon')).toBeNull()
-    expect(row('b').querySelector('.threads-sidebar-worktree-icon')?.getAttribute('title')).toBe('Primary checkout')
+    expect(row('b').querySelector('.threads-sidebar-worktree-icon')).toBeNull()
+  })
+
+  it("names every card's branch: its own worktree's, with the branch icon, else its project folder's; none without Git", async () => {
+    const status = vi.fn(async (scope: { projectId: string | null; workspaceThreadId: string | null }) =>
+      scope.workspaceThreadId === 'own' ? { isRepo: true, branch: 'mousse/fix-parser' } : scope.projectId === 'repo' ? { isRepo: true, branch: 'main' } : { isRepo: false, branch: null })
+    const getStatus = vi.fn(async (threadId: string) => threadId === 'own'
+      ? { metadata: { branch: 'mousse/fix-parser' }, execution: { lifecycle: 'ready' } }
+      : { metadata: null })
+    Object.assign((window as unknown as { mousse: Record<string, unknown> }).mousse, { git: { status }, workspace: { getStatus } })
+    const settle = () => act(async () => { for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0)) })
+    const card = (id: string) => host.querySelector(`.threads-sidebar-card[data-thread-id="${id}"] .threads-sidebar-card-sub`)
+    show([
+      thread('own', 'Fix parser', { projectId: 'repo', worktreeEnabled: true }),
+      thread('folder', 'Docs', { projectId: 'repo', worktreeEnabled: false }),
+      thread('unmade', 'New', { projectId: 'repo' })
+    ], { view: 'threads', active: 'own', projects: [project('repo', 'Repo')] })
+    await settle()
+    expect(card('own')?.textContent).toBe('mousse/fix-parser')
+    expect(card('own')?.querySelector('svg')).not.toBeNull()
+    expect(card('folder')?.textContent).toBe('main')
+    expect(card('folder')?.querySelector('svg')).toBeNull()
+    expect(card('unmade')?.textContent).toBe('main')
+    // The worktree is read only through a scope that names the thread once its workspace is ready.
+    expect(status.mock.calls.map(([scope]) => scope.workspaceThreadId).filter(Boolean)).toEqual(['own'])
+
+    show([thread('plain', 'Notes', { projectId: 'plain' })], { view: 'threads', active: 'plain', projects: [project('plain', 'Plain')] })
+    await settle()
+    expect(card('plain')).toBeNull()
   })
 
   it('gives a title a tooltip only when it does not fit', () => {

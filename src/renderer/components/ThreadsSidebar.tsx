@@ -10,6 +10,7 @@ import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
 import type { Project, Thread, ThreadActivitySnapshot, ThreadActivityState } from '../../shared/types'
 import { worktreeMark } from '../lib/worktreeMark'
+import { useThreadBranch } from '../hooks/useThreadBranch'
 import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { arrangeThreadFeed, sortArchivedThreads, sortSidebarThreads, sortThreadFeed } from '../../shared/threadSidebarSort'
 import { openSubagentParentRow, rollUpActivities, visibleThreads } from '../../shared/threadLineage'
@@ -280,7 +281,6 @@ export function ThreadCardBody({
   isRenaming,
   renamingName,
   isGeneratingTitle,
-  worktree,
   fullTitle,
   onRename,
   onCancelRename,
@@ -290,7 +290,7 @@ export function ThreadCardBody({
   statusWithAge = false,
   linkStatus
 }: {
-  thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly' | 'expiresAt' | 'expiryStopsRun' | 'setupFailure'>
+  thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly' | 'expiresAt' | 'expiryStopsRun' | 'setupFailure' | 'worktreeEnabled'>
   projectName?: string
   /** The thread's project, for its own icon in the mark. */
   project?: Project
@@ -306,8 +306,6 @@ export function ThreadCardBody({
   isRenaming: boolean
   renamingName: string
   isGeneratingTitle: boolean
-  /** Set only where the thread's checkout differs from the default for new threads. */
-  worktree?: 'Worktree' | 'Primary checkout'
   /** The tooltip of a title that does not fit. */
   fullTitle: string
   onRename: (name: string) => void
@@ -322,6 +320,8 @@ export function ThreadCardBody({
   /** A thread link's card: the status its link shows (`threadLinkStatus`), so the two never differ. */
   linkStatus?: ThreadLinkStatus
 }) {
+  // Every card names the branch its thread works on; none in a project without Git (or another computer's).
+  const branch = useThreadBranch(thread, threadId)
   return (
     <>
       {projectName ? (
@@ -350,15 +350,12 @@ export function ThreadCardBody({
           </span>
         )}
         {preview && !isRenaming && !isGeneratingTitle && <ThreadReplyPreview text={preview} className="threads-sidebar-card-preview" />}
-        {(worktree || thread.node) && (
+        {(branch || thread.node) && (
           <span className="threads-sidebar-card-sub">
             <ThreadComputerBadge thread={thread} withName className="threads-sidebar-card-device" />
-            {worktree && (
-              <>
-                <GitBranch size={11} strokeWidth={2} aria-hidden="true" />
-                {worktree}
-              </>
-            )}
+            {/* The branch icon marks a thread in its own worktree only. */}
+            {branch?.worktree && <GitBranch size={11} strokeWidth={2} aria-hidden="true" />}
+            {branch?.branch}
           </span>
         )}
       </span>
@@ -1294,7 +1291,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const rowPreview = layout === 'row' && preview && !isRenaming && !isGeneratingTitle ? preview : undefined
     const worktree = worktreeMark(thread, projects)
     const hasDraft = draftedIds.has(thread.id)
-    const showTrailing = Boolean(statusNode || worktree || thread.node || hasDraft)
+    const showTrailing = Boolean(statusNode || worktree === 'Worktree' || thread.node || hasDraft)
     const groupId = groupIdOf(thread.projectId)
     const group = groupId ? groupById.get(groupId) : undefined
     // Only the Threads tab's cards carry the project's tint, unless Appearance turns it off; a thread without a
@@ -1433,7 +1430,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             isRenaming={isRenaming}
             renamingName={renaming?.name ?? ''}
             isGeneratingTitle={isGeneratingTitle}
-            worktree={worktree}
             fullTitle={fullTitle}
             onRename={(name) => void submitRename(name)}
             onCancelRename={endRename}
@@ -1502,7 +1498,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
               </span>
             )}
             <ThreadComputerBadge thread={thread} className="threads-sidebar-device-icon" />
-            {worktree && (
+            {worktree === 'Worktree' && (
               <span className="threads-sidebar-worktree-icon" role="img" aria-label={worktree} title={worktree}>
                 <GitBranch size={12} strokeWidth={2} aria-hidden="true" />
               </span>
