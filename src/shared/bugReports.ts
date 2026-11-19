@@ -98,8 +98,8 @@ export interface FiledBugReportView extends FiledBugReport {
   state: 'open' | 'closed' | 'unknown'
   /** `completed` when it was fixed; `not_planned` when closed otherwise. */
   stateReason?: string
-  /** Pull requests that mention the issue, from its timeline (newest last). */
-  pullRequests?: number[]
+  /** Merged pull requests of this repository whose description closes the issue (`Closes #N`), from its timeline. */
+  closedBy?: number[]
 }
 
 /** An agent's report waiting for the person to file it or not. */
@@ -296,20 +296,25 @@ export function prefilledIssueUrl(draft: Pick<BugReportDraft, 'title' | 'body'>)
   return base + encodeURIComponent(body === draft.body ? body : `${body}\n\n(cut to fit)`)
 }
 
-/** Issue numbers a release's notes name (`#123`). */
-export function numbersInNotes(items: readonly string[]): Set<number> {
-  const found = new Set<number>()
-  for (const item of items) for (const match of item.matchAll(/#(\d{1,7})\b/g)) found.add(Number(match[1]))
-  return found
+const CLOSING_KEYWORD = '(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)'
+const escapedRepository = escapeRegExp(BUG_REPORT_REPOSITORY)
+
+/**
+ * Whether a pull request's description closes issue `number` of the report repository the way GitHub reads it: a
+ * closing keyword, then `#N`, `owner/repo#N` or the issue's URL. A plain mention (`Refs #N`) does not.
+ */
+export function closesIssue(body: string, number: number): boolean {
+  const reference = `(?:#|${escapedRepository}#|https://github\\.com/${escapedRepository}/issues/)${number}(?!\\d)`
+  return new RegExp(`\\b${CLOSING_KEYWORD}:?\\s+${reference}`, 'i').test(body)
 }
 
 /**
- * The reports a release fixes: fixed (closed as completed), not revoked, and the release's notes name the issue or a
- * pull request that mentions it.
+ * The reports an update fixes: fixed (closed as completed), not revoked, and closed by a pull request the update
+ * brings. Nothing is matched on a mere mention.
  */
-export function reportsFixedBy(reports: readonly FiledBugReportView[], notes: readonly string[]): FiledBugReportView[] {
-  const named = numbersInNotes(notes)
-  if (!named.size) return []
+export function reportsFixedBy(reports: readonly FiledBugReportView[], pullRequests: readonly number[]): FiledBugReportView[] {
+  if (!pullRequests.length) return []
+  const brought = new Set(pullRequests)
   return reports.filter((report) => !report.revokedAt && report.state === 'closed' && report.stateReason !== 'not_planned' &&
-    (named.has(report.number) || (report.pullRequests ?? []).some((pr) => named.has(pr))))
+    (report.closedBy ?? []).some((pr) => brought.has(pr)))
 }

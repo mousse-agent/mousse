@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { BugReportService } from '../../src/mms/bugReports/BugReportService'
-import { bugSignature, buildBugReportDraft, cleanReportText, finalDraft, reportsFixedBy, type FiledBugReportView } from '../../src/shared/bugReports'
+import { bugSignature, buildBugReportDraft, cleanReportText, closesIssue, finalDraft, reportsFixedBy, type FiledBugReportView } from '../../src/shared/bugReports'
 
 describe('a bug report draft', () => {
   it('takes out secrets, the home folder, the account name, emails and addresses', () => {
@@ -39,18 +39,33 @@ describe('the reports a release fixes', () => {
   const report = (patch: Partial<FiledBugReportView>): FiledBugReportView => ({
     number: 10, url: 'u', title: 't', signature: 's', filedAt: '2026-11-01T00:00:00Z', anonymous: true, state: 'closed', stateReason: 'completed', ...patch
   })
-  it('are the fixed, unrevoked reports whose issue or pull request the notes name', () => {
+  it('are the fixed, unrevoked reports a pull request in the update closes', () => {
     const reports = [
-      report({ number: 10 }),
-      report({ number: 11, pullRequests: [40] }),
-      report({ number: 12, stateReason: 'not_planned' }),
-      report({ number: 13, revokedAt: '2026-11-02T00:00:00Z' }),
-      report({ number: 14, state: 'open' }),
-      report({ number: 15 })
+      report({ number: 10, closedBy: [40] }),
+      report({ number: 11, closedBy: [41, 52] }),
+      report({ number: 12, closedBy: [40], stateReason: 'not_planned' }),
+      report({ number: 13, closedBy: [40], revokedAt: '2026-11-02T00:00:00Z' }),
+      report({ number: 14, closedBy: [40], state: 'open' }),
+      report({ number: 15, closedBy: [99] }),
+      // Closed, but by nothing the update brings: never matched on its own number.
+      report({ number: 40 })
     ]
-    const fixed = reportsFixedBy(reports, ['Fix the save (#10)', 'Faster start (#40)', 'Docs (#12) (#13) (#14)'])
-    expect(fixed.map((entry) => entry.number)).toEqual([10, 11])
-    expect(reportsFixedBy(reports, ['No numbers here'])).toEqual([])
+    expect(reportsFixedBy(reports, [40, 52]).map((entry) => entry.number)).toEqual([10, 11])
+    expect(reportsFixedBy(reports, [])).toEqual([])
+  })
+
+  it.each([
+    ['Closes #10', true],
+    ['fixes: #10.', true],
+    ['Resolved mousse-agent/mousse#10', true],
+    ['Fix https://github.com/mousse-agent/mousse/issues/10', true],
+    ['Refs #10', false],
+    ['Closes #100', false],
+    ['Closes other/repo#10', false],
+    ['discloses #10', false],
+    ['See #10; closes #11', false]
+  ])('%s closes #10: %s', (body, closes) => {
+    expect(closesIssue(body, 10)).toBe(closes)
   })
 })
 
@@ -59,7 +74,7 @@ describe('the bug report service', () => {
   afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 
   /** A GitHub that holds issues in memory. */
-  function github(existing: Array<{ number: number; state: string; body: string }> = []) {
+  function github(existing: Array<{ number: number; state: string; body: string }> = [], timelines: Record<number, unknown[]> = {}) {
     const issues = [...existing]
     const calls: string[] = []
     const fetch = (async (url: string, init?: RequestInit) => {
@@ -77,6 +92,8 @@ describe('the bug report service', () => {
         issues.push({ number, state: 'open', body: body.body.match(/mousse-sig-[0-9a-f]+/)![0] })
         return json({ number, html_url: `https://gh/${number}` }, 201)
       }
+      const timeline = /\/issues\/(\d+)\/timeline/.exec(path)
+      if (timeline) return json(timelines[Number(timeline[1])] ?? [])
       const issue = /\/issues\/(\d+)$/.exec(path)
       if (issue && method === 'PATCH') { issues.find((entry) => entry.number === Number(issue[1]))!.state = 'closed'; return json({}) }
       if (issue) { const found = issues.find((entry) => entry.number === Number(issue[1])); return found ? json({ state: found.state }) : json({}, 404) }
@@ -112,6 +129,28 @@ describe('the bug report service', () => {
     expect(revoked.revokedAt).toBeTruthy()
     expect(gh.calls).toContain('PATCH /repos/mousse-agent/mousse/issues/100')
     expect(gh.issues[0]!.state).toBe('closed')
+  })
+
+  it('lists as closing a fixed issue only the merged pull requests of this repository that close it', async () => {
+    const reference = (number: number, body: string, merged: boolean, repository = 'mousse-agent/mousse', pr = true) => ({
+      event: 'cross-referenced',
+      source: { issue: { number, body, repository: { full_name: repository }, ...(pr ? { pull_request: { merged_at: merged ? '2026-11-18T10:00:00Z' : null } } : {}) } }
+    })
+    const gh = github([], {
+      100: [
+        reference(40, 'Fixes the save.\n\nCloses #100', true),
+        reference(41, 'Refs #100', true),
+        reference(42, 'Closes #100', false),
+        reference(43, 'Closes mousse-agent/mousse#100', true, 'someone/fork-tools'),
+        reference(44, 'Closes #100', true, 'mousse-agent/mousse', false),
+        { event: 'closed' }
+      ]
+    })
+    const reports = service(gh.fetch)
+    await reports.file(reports.draft({ kind: 'button', title: 'Save failed', message: 'disk full' }))
+    expect((await reports.list())[0]!.closedBy).toBeUndefined()
+    gh.issues[0]!.state = 'closed'
+    expect((await reports.list())[0]).toMatchObject({ state: 'closed', closedBy: [40] })
   })
 
   it('opens a prefilled page instead when it has no way to file', async () => {
