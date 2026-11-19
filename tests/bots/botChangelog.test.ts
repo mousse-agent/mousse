@@ -247,3 +247,20 @@ it('E1 r2 existing bots learn the argument rule with entry 28', async () => {
   expect(pack).toContain('only plain text like a message body or a file name may change')
   expect(pack).toContain('New addresses and other destinations still ask')
 })
+
+it.each([28, 29])('entry 30 supersedes the binding-only advice after seen entry %s', async seen => {
+  existingBot()
+  memory.write(() => memory.setState('ada', 'changelog_seen', seen))
+  const pack = await packs().chatPreamble({ botId: 'ada', activationId: 'service-reads-30' })
+  const binding = BOT_CHANGELOG.find(entry => entry.id === 29)!
+  const reads = BOT_CHANGELOG.find(entry => entry.id === 30)!
+  expect(reads.text).toContain('secret_fetch is now available')
+  expect(reads.text).toContain('replaces the earlier advice to keep working without a bound key')
+  expect(pack).toContain(reads.text)
+  if (seen === 28) {
+    expect(pack).toContain(binding.text)
+    expect(pack.indexOf(binding.text)).toBeLessThan(pack.indexOf(reads.text))
+  } else {
+    expect(pack).not.toContain(binding.text)
+  }
+})
