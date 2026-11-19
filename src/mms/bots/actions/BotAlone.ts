@@ -21,14 +21,16 @@ function scanText(value: string): string {
 }
 /** Every scan and edge trim is linear, including text expanded by NFKC. */
 function addressTokens(value: string): string[] {
-  const text = scanText(value).replace(/\s+/gu, ' ').replace(/ +([.@:/\\]) */gu, '$1')
+  const text = scanText(value).replace(/\s+/gu, ' ').replace(/ +\. */gu, '.').replace(/ +:/gu, ':').replace(/ +([@/\\]) */gu, '$1')
   const tokens = new Set<string>()
   for (const word of text.split(' ')) {
     let start = 0, end = word.length
-    while (end > 0 && ".,!?;)]}'\">".includes(word[end - 1]!)) end--
     while (start < end && "([{'\"<".includes(word[start]!)) start++
-    // A trailing colon is prose punctuation, except at the end of an IPv6 address.
-    if (word[end - 1] === ':' && isIP(word.slice(start, end)) !== 6) while (end > start && word[end - 1] === ':') end--
+    while (end > start && ".,!?;:)]}'\">".includes(word[end - 1]!)) {
+      // The longest plain IPv6 form has 39 characters. Bound this check during a punctuation run.
+      if (word[end - 1] === ':' && end - start <= 45 && isIP(word.slice(start, end)) === 6) break
+      end--
+    }
     const token = word.slice(start, end)
     // Inspect before removing opening quotes so a code fragment such as ".com" is also frozen.
     if (!ordinaryNumber(token) && /[:@\\]|\/\/|\S\.\S/u.test(word.slice(0, end))) tokens.add(token)
