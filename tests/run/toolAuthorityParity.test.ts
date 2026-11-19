@@ -18,7 +18,7 @@ import { AppToolTurns, createAppToolRegistry, type AppToolHost, type AppToolTurn
 import type { McpToolDescriptor } from '../../src/shared/integrations'
 import type { AgentRuntimePolicy } from '../../src/shared/agents/execution'
 import type { PermissionMode } from '../../src/shared/permissionMode'
-import { BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THREADS_PERMISSION, botStarterManifest } from '../../src/shared/bots/personal/manifest'
+import { BOT_THREADS_PERMISSION, botStarterManifest } from '../../src/shared/bots/personal/manifest'
 import type { ModeCeiling } from '../../src/mms/run/types'
 import { appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { delegationFixture } from './delegationFixture'
@@ -39,7 +39,7 @@ function botAuthority(role: 'activation' | 'subagent', botTools: CompileInput['b
   const grant = {
     ...starter,
     tools: [...starter.tools, 'shell' as const],
-    appTools: [...starter.appTools, BOT_THREADS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION]
+    appTools: [...starter.appTools, BOT_THREADS_PERMISSION]
   }
   const compiled = compileBotThread({
     grant, digest: botManifestDigest(grant), thread: {}, scratch, profileHome: base, filesFolder: files,

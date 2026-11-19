@@ -41,15 +41,8 @@ const LET_ALONE_PERMISSION = Type.Object({ ask: Type.Literal('let_alone'), sched
 
 const PERMISSION = Type.Union([
   // What a bot may ask for is in its instructions, which leave out what this computer has switched off (What bots may do
-  // here): these words describe the fields and offer nothing themselves.
+  // here): these words describe the fields and offer nothing themselves. The owner's MCP servers and skills need no asking.
   Type.Object({ tool: Type.String({ description: 'A tool name, as your instructions say you can ask for it.' }) }),
-  Type.Object({ skill: Type.String({ description: 'A skill id.' }) }),
-  Type.Object({
-    mcp: Type.Object({
-      server: Type.String({ description: 'One of your owner\'s MCP servers, by the name mcp_servers gives it. This asks for every tool it offers, once.' }),
-      tool: Type.Optional(Type.String({ description: 'The tool you need, if you know it; the ask is for the whole server anyway.' }))
-    })
-  }),
   Type.Object({
     budget: Type.Object({
       key: Type.Union(['maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTokens', 'maxUsd'].map((key) => Type.Literal(key))),
@@ -152,7 +145,7 @@ export const BOT_TOOLS: Tool[] = [
   },
   {
     name: BOT_MCP_LIST_TOOL,
-    description: 'List your owner\'s MCP servers set up in Mousse (tools for services like GitHub or their notes): each by name, what it has, and whether you can use it. To use one you can\'t yet, ask once with escalate ({"mcp": {"server": "<name>"}}).',
+    description: 'List your owner\'s MCP servers set up in Mousse (tools for services like GitHub or their notes): each by name, what it has, and whether you can use it. Your work uses their tools without asking; one your owner switched off stays off.',
     parameters: Type.Object({})
   },
   {

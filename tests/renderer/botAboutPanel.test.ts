@@ -260,6 +260,23 @@ describe('About this bot', () => {
     expect(rows('Can use')).toEqual(['Use the pdf skill'])
   })
 
+  it('what every bot has by default has a switch and no Remove, each MCP server its own', async () => {
+    const grantedAt = '2026-11-06T10:00:00.000Z'
+    fake.details.b1!.permissions = [
+      { id: 'default:mcp', enabled: true, builtIn: true, title: 'use your MCP servers', note: 'Every MCP server set up in Mousse, in its work, without asking.', grantedAt },
+      { id: 'default:mcp:srv-github', enabled: true, builtIn: true, under: 'default:mcp', title: 'use your GitHub tools', note: '2 tools: create_issue, list_issues', grantedAt },
+      { id: 'default:skills', enabled: false, builtIn: true, title: 'use your skills', note: 'Every skill you have in Mousse, without asking.', grantedAt }
+    ]
+    await show()
+    expect(rows('Can use')).toEqual(['Use your MCP servers', 'Use your GitHub tools', 'Use your skills'])
+    expect([...section('Can use')!.querySelectorAll('button')].some((element) => element.getAttribute('aria-label')?.startsWith('Remove'))).toBe(false)
+    const github = host.querySelector<HTMLButtonElement>('[role="switch"][aria-label="use your GitHub tools"]')!
+    await click(github)
+    expect(fake.calls).toContainEqual(['setPermission', 'b1', 'default:mcp:srv-github', false])
+    await click(host.querySelector('[role="switch"][aria-label="use your skills"]') ?? undefined)
+    expect(fake.calls).toContainEqual(['setPermission', 'b1', 'default:skills', true])
+  })
+
   it('marks an MCP server that gives nothing now with what is true of it, keeping Remove', async () => {
     fake.details.b1!.permissions = [
       { id: 'fp3', title: 'use your GitHub tools', note: 'GitHub is switched off in Settings → Skills & MCP, so this gives nothing while it is. Switch it on there to use it again, or remove it.', grantedAt: '2026-11-06T10:00:00.000Z', mark: 'Switched off' },

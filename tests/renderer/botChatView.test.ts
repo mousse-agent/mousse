@@ -3382,8 +3382,8 @@ describe('keeping a pasted key private', () => {
     await click(button('Send message'))
     expect(vi.mocked(fake.client.send).mock.calls[0]?.[1]).toBe(key)
   })
-  it('a forbidden save explains Use secrets without sending; removing the key cancels the offer', async () => {
-    window.mousse.platformRequest = { request: vi.fn(async () => { throw Object.assign(new Error('Allow Use secrets in About.'), {code:'forbidden'}) }) } as never
+  it('a forbidden save explains it without sending; removing the key cancels the offer', async () => {
+    window.mousse.platformRequest = { request: vi.fn(async () => { throw Object.assign(new Error("This bot is not set up yet, so it can't keep a key."), {code:'forbidden'}) }) } as never
     await open(); await type(field(), key); await click(button('Keep as secret'))
     expect(host.textContent).toContain("Inbox helper can't keep secrets")
     expect(host.querySelector('[role="status"]')?.textContent).not.toContain(key)

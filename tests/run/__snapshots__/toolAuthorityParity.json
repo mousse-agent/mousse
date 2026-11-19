@@ -2670,6 +2670,8 @@
    "memory_forget",
    "item_save",
    "item_list",
+   "theme_read",
+   "theme_set",
    "terminal_read"
   ],
   "pi": [
@@ -2745,6 +2747,8 @@
    "memory_forget:read",
    "item_save:read",
    "item_list:read",
+   "theme_read:read",
+   "theme_set:mutation",
    "terminal_read:read"
   ],
   "userMcp": [],
@@ -2806,6 +2810,8 @@
    "memory_forget",
    "item_save",
    "item_list",
+   "theme_read",
+   "theme_set",
    "terminal_read"
   ],
   "dispatch": {
@@ -2980,8 +2986,8 @@
    "profiler_sample_now": "lacks unavailable: This Mousse service has no profiler.",
    "profiler_watch": "lacks unavailable: This Mousse service has no profiler.",
    "profiler_heap_summary": "lacks unavailable: This Mousse service has no profiler.",
-   "theme_read": "lacks not_granted: This bot is not allowed to use theme_read.",
-   "theme_set": "lacks not_granted: This bot is not allowed to use theme_set.",
+   "theme_read": "held",
+   "theme_set": "held",
    "terminal_read": "lacks scope_denied (mousse_scope_denied): Thread thread-a is not available to you.",
    "terminal_read thread-b": "lacks scope_denied (mousse_scope_denied): Thread thread-b is not available to you.",
    "terminal_read thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to you."
@@ -3230,8 +3236,8 @@
    "profiler_sample_now": "lacks unavailable: This Mousse service has no profiler.",
    "profiler_watch": "lacks unavailable: This Mousse service has no profiler.",
    "profiler_heap_summary": "lacks unavailable: This Mousse service has no profiler.",
-   "theme_read": "lacks not_granted: This bot is not allowed to use theme_read.",
-   "theme_set": "lacks not_granted: This bot is not allowed to use theme_set.",
+   "theme_read": "held",
+   "theme_set": "held",
    "terminal_read": "lacks scope_denied (mousse_scope_denied): Thread thread-a is not available to you.",
    "terminal_read thread-b": "lacks scope_denied (mousse_scope_denied): Thread thread-b is not available to you.",
    "terminal_read thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to you."
@@ -3314,6 +3320,8 @@
    "memory_forget",
    "item_save",
    "item_list",
+   "theme_read",
+   "theme_set",
    "terminal_read"
   ],
   "pi": [
@@ -3392,6 +3400,8 @@
    "memory_forget:read",
    "item_save:read",
    "item_list:read",
+   "theme_read:read",
+   "theme_set:mutation",
    "terminal_read:read"
   ],
   "userMcp": [],
@@ -3442,6 +3452,8 @@
    "memory_forget",
    "item_save",
    "item_list",
+   "theme_read",
+   "theme_set",
    "terminal_read"
   ],
   "dispatch": {
@@ -3616,8 +3628,8 @@
    "profiler_sample_now": "lacks unavailable: This Mousse service has no profiler.",
    "profiler_watch": "lacks unavailable: This Mousse service has no profiler.",
    "profiler_heap_summary": "lacks unavailable: This Mousse service has no profiler.",
-   "theme_read": "lacks not_granted: This bot is not allowed to use theme_read.",
-   "theme_set": "lacks not_granted: This bot is not allowed to use theme_set.",
+   "theme_read": "held",
+   "theme_set": "held",
    "terminal_read": "lacks scope_denied (mousse_scope_denied): Thread thread-a is not available to you.",
    "terminal_read thread-b": "lacks scope_denied (mousse_scope_denied): Thread thread-b is not available to you.",
    "terminal_read thread-private": "lacks scope_denied (mousse_scope_denied): Thread thread-private is not available to you."

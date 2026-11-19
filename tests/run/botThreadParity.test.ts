@@ -15,7 +15,7 @@ import { botManifestDigest, compileBotThread, type CompileInput } from '../../sr
 import { QuickActionTools } from '../../src/mms/orchestrator/QuickActionTools'
 import type { AgentScheduleHost, AppToolHost, BotAppToolDeps, RemoteThreadsHost } from '../../src/mms/run/mcp/appTools'
 import {
-  BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_TASK_TOOLS, BOT_THREAD_ACT_TOOLS,
+  BOT_SCHEDULE_ACT_TOOLS, BOT_TASK_TOOLS, BOT_THREAD_ACT_TOOLS,
   BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, botStarterManifest
 } from '../../src/shared/bots/personal/manifest'
 import { BOT_SCHEDULES_NOT_OWNER_TEXT } from '../../src/shared/bots/personal/walls'
@@ -26,8 +26,8 @@ import { delegationFixture, type DelegationFixture } from './delegationFixture'
 const NOW = '2026-11-16T10:00:00.000Z'
 const thread = (id: string, patch: Partial<Thread> = {}): Thread => ({ id, name: `Thread ${id}`, createdAt: NOW, updatedAt: NOW, startedAt: NOW, projectId: 'p1', ...patch }) as Thread
 
-/** Every permission this PR's tools fall under. */
-const ALL = [BOT_THREADS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION]
+/** The one permission this PR's tools fall under: scheduled jobs, secrets and quick actions need none. */
+const ALL = [BOT_THREADS_PERMISSION]
 
 describe('a bot uses what a thread\'s agent can', () => {
   let fx: DelegationFixture | undefined
@@ -41,7 +41,7 @@ describe('a bot uses what a thread\'s agent can', () => {
 
   /**
    * A bot whose chat thread is `home` and whose work runs on `work`, holding a live run there that nobody answers. `grant`
-   * adds permissions to the starter grant (default: all of this PR's); `tools` adds built-ins; `botTools` is what the turn
+   * adds permissions to the starter grant (default: use your threads); `tools` adds built-ins; `botTools` is what the turn
    * is compiled with (default: work, which may act); `role` is the calling thread's.
    */
   const world = async (options: { grant?: string[]; tools?: Array<'shell'>; botTools?: CompileInput['botTools']; role?: 'activation' | 'subagent'; host?: Partial<AppToolHost> } = {}) => {
@@ -116,7 +116,7 @@ describe('a bot uses what a thread\'s agent can', () => {
     ['without "run commands", secrets are asked for and never run', {}, { has: ['secret_request'], lacks: ['secret_run'] }],
     ['a turn that may only read lists its jobs and reads threads, and changes nothing', { botTools: { escalate: true, consult: false, threads: 'read', owner: true, tasks: true } },
       { has: [...BOT_THREAD_READ_TOOLS, 'schedule_list'], lacks: [...BOT_THREAD_ACT_TOOLS, ...BOT_SCHEDULE_ACT_TOOLS] }],
-    ['a bot without the permissions has its task list only', { grant: [] }, { has: BOT_TASK_TOOLS, lacks: [...BOT_THREAD_READ_TOOLS, 'schedule_list', 'secret_request', 'create_quick_action'] }],
+    ['a bot without "use your threads" keeps its jobs, secrets, quick actions and task list', { grant: [] }, { has: [...BOT_TASK_TOOLS, 'schedule_list', ...BOT_SCHEDULE_ACT_TOOLS, 'secret_request', 'create_quick_action'], lacks: BOT_THREAD_READ_TOOLS }],
     ['a consult has none', { botTools: { escalate: false, consult: false } }, { has: [], lacks: [...BOT_THREAD_READ_TOOLS, 'schedule_list', 'secret_request', 'create_quick_action', ...BOT_TASK_TOOLS] }],
     ['a subagent of the work: what a thread\'s subagent may use', { tools: ['shell'], role: 'subagent', botTools: { escalate: false, consult: false, subagent: true, threads: 'all', profiler: true, tasks: true } },
       { has: [...BOT_THREAD_READ_TOOLS, ...BOT_THREAD_ACT_TOOLS, ...BOT_TASK_TOOLS], lacks: ['schedule_list', ...BOT_SCHEDULE_ACT_TOOLS, 'secret_request', 'secret_run', 'create_quick_action', 'theme_set'] }]
@@ -213,7 +213,7 @@ describe('a bot uses what a thread\'s agent can', () => {
     })
   })
 
-  describe('scheduled jobs ("schedule work in your threads")', () => {
+  describe('scheduled jobs', () => {
     const scheduleHost = () => {
       const jobs: ScheduledJob[] = []
       const schedules = {
@@ -257,15 +257,9 @@ describe('a bot uses what a thread\'s agent can', () => {
       expect(await call('schedule_create', { name: 'x', prompt: 'y', schedule: { kind: 'cron', expr: '0 2 * * *' }, projectId: 'p1' })).toEqual({ error: true, text: BOT_SCHEDULES_NOT_OWNER_TEXT })
       expect(schedules.create).not.toHaveBeenCalled()
     })
-
-    it('without the permission, refused', async () => {
-      const { schedules } = scheduleHost()
-      const { call } = await world({ grant: [], host: { schedules } })
-      expect(await call('schedule_list')).toMatchObject({ error: true, text: expect.stringMatching(/not allowed to use schedule_list/) })
-    })
   })
 
-  describe('secrets ("use secrets you give it")', () => {
+  describe('secrets', () => {
     it('asks with the card in its chat, though nobody answers the turn, and runs a command from its files folder without asking', async () => {
       const request = vi.fn(async () => ({ kind: 'stored' as const, name: 'API_TOKEN', keep: 'thread' as const }))
       const run = vi.fn(async () => ({ exitCode: 0, output: 'ok', timedOut: false, stopped: false }))
@@ -278,27 +272,16 @@ describe('a bot uses what a thread\'s agent can', () => {
       expect(run).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'home', cwd: files }))
       expect(asked).toEqual([])
     })
-
-    it('without the permission, refused', async () => {
-      const secrets = { request: vi.fn(), run: vi.fn(), usableIn: vi.fn(() => true), masker: () => undefined, endThread: vi.fn() }
-      const { call } = await world({ grant: [], host: { secrets: () => secrets as never } })
-      expect(await call('secret_request', { label: 'API token', reason: 'x' })).toMatchObject({ error: true, text: expect.stringMatching(/not allowed to use secret_request/) })
-      expect(secrets.request).not.toHaveBeenCalled()
-    })
   })
 
-  describe('quick actions ("add quick actions") and its task list', () => {
-    it('adds a quick action without asking; without the permission it is refused', async () => {
+  describe('quick actions and its task list', () => {
+    it('adds a quick action without asking', async () => {
       const approve = vi.fn(async () => false)
       const created = vi.fn()
       const { call } = await world({ host: { quickActions: new QuickActionTools(approve, created) } })
       expect(await call('create_quick_action', { label: 'Run tests', kind: 'send-current', payload: 'Run the tests.' })).toMatchObject({ error: false, text: expect.stringMatching(/Quick action created/) })
       expect(approve).not.toHaveBeenCalled()
       expect(created).toHaveBeenCalledWith(expect.objectContaining({ label: 'Run tests' }))
-      fx?.dispose()
-      fx = undefined
-      const without = await world({ grant: [], host: { quickActions: new QuickActionTools(approve, created) } })
-      expect(await without.call('create_quick_action', { label: 'x', kind: 'send-current', payload: 'y' })).toMatchObject({ error: true, text: expect.stringMatching(/not allowed to use create_quick_action/) })
     })
 
     it('keeps a task list with no permission', async () => {

@@ -199,7 +199,7 @@ export interface BotToolHost {
  * text but its tools' names.
  */
 export interface BotMcpListing {
-  servers: Array<{ server: string; id: string; about: string; yours: 'yes' | 'no' | 'some: it has new tools' | 'no: it changed since you were allowed it'; answering?: false; starting?: true }>
+  servers: Array<{ server: string; id: string; about: string; yours: 'yes' | 'no' | 'no: switched off by your owner'; answering?: false; starting?: true }>
   note: string
 }
 

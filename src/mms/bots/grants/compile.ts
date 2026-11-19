@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { BotManifest, BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_RETIRED_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL, BOT_GROUP_PERMISSIONS, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_COMPUTER_TOOLS, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_PERMISSION, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SCHEDULES_PERMISSION, BOT_SECRET_TOOLS, BOT_SECRETS_PERMISSION, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THEMES_PERMISSION, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_RETIRED_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL, BOT_GROUP_PERMISSIONS, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_COMPUTER_TOOLS, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SECRET_TOOLS, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
 import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from '../../../shared/bots/personal/catalogue'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
 import { BOT_ITEM_TOOLS } from '../../../shared/bots/personal/items'
@@ -38,6 +38,8 @@ export interface BotPermissions {
   appTools: string[]
   mcp: Array<`${string}::${string}`>
   skills: string[]
+  /** Every skill the owner has (skills are on by default; About can switch them off): `skills` lists none of them. */
+  allSkills?: true
   /**
    * The bot's own folders: its scratch folder and its files folder (`files`), both writable, and nothing else. A bot
    * has no folder beyond them ("use files on this computer" was removed), so `roots` and `writeRoots` are empty, and a
@@ -48,15 +50,15 @@ export interface BotPermissions {
   browser?: true
   /** "Use your threads": `appTools` holds the thread tools of this turn, to read (`read`) or also to start, message and stop (`all`). */
   threads?: 'read' | 'all'
-  /** "Use the profiler": `appTools` holds the profiler tools of this turn. */
+  /** The profiler: `appTools` holds the profiler tools of this turn. */
   profiler?: true
-  /** "Change how Mousse looks": `appTools` holds the theme tools of this turn. */
+  /** Mousse's look: `appTools` holds the theme tools of this turn. */
   themes?: true
-  /** "Schedule work in your threads": `appTools` holds the scheduled-job tools of this turn (`read`: the list only). */
+  /** The owner's scheduled jobs: `appTools` holds the scheduled-job tools of this turn (`read`: the list only). */
   schedules?: 'read' | 'all'
-  /** "Use secrets you give it": `appTools` holds the secret tools of this turn. */
+  /** Secrets the owner gives: `appTools` holds the secret tools of this turn. */
   secrets?: true
-  /** "Add quick actions": `appTools` holds `create_quick_action`. */
+  /** Quick actions: `appTools` holds `create_quick_action`. */
   quickActions?: true
   /**
    * How this turn reaches the tool catalogue (docs/plans/bot-context.md §15): `search`, Claude Code's own tool search,
@@ -89,6 +91,11 @@ export interface CompileInput {
    */
   filesFolder?: string
   /**
+   * Every skill the owner has, beside the ones the grant names: skills are on by default, unless the owner switched them
+   * off for the bot in About (`BOT_SKILLS_SWITCH`).
+   */
+  allSkills?: boolean
+  /**
    * The bot tools the thread gets beside its grant (6c-2): `escalate` on every bot thread, and
    * `consult` on the activation thread of a bot with context threads. `memory`: the five
    * `memory_*` tools (Bot Phase 1 §5.10) and the listing of the owner's MCP servers (`mcp_servers`), always on and
@@ -113,20 +120,17 @@ export interface CompileInput {
      */
     threads?: 'read' | 'all'
     /**
-     * A main turn, chat or work: "use the profiler", when the grant holds it, gives it the profiler tools (in the chat
-     * all but `profiler_watch`, which samples for minutes). Absent: none (a consult; a subagent never has them).
+     * A main turn, chat or work, or a subagent: the profiler tools, whatever the grant says (in the chat all but
+     * `profiler_watch`, which samples for minutes). Each call is held to Settings → Labs. Absent: none (a consult).
      */
     profiler?: boolean
-    /**
-     * A main turn, chat or work: "change how Mousse looks", when the grant holds it, gives it the theme tools. Absent: none
-     * (a consult; a subagent never has them).
-     */
+    /** A main turn, chat or work: the theme tools, whatever the grant says. Absent: none (a consult; a subagent never has them). */
     themes?: boolean
     /**
-     * A main turn, chat or work: "schedule work in your threads", when the grant holds it, gives it `schedule_list`, and
-     * the tools that make and change jobs in a turn whose `threads` is `all` (one that may act on the owner's threads).
-     * "Use secrets you give it" gives it `secret_request`, and `secret_run` where it also holds "run commands" (never
-     * the chat). "Add quick actions" gives it `create_quick_action`. Absent: none (a consult; a subagent never has them).
+     * A main turn, chat or work: the owner's scheduled jobs, secrets and quick actions, whatever the grant says:
+     * `schedule_list`, and the tools that make and change jobs in a turn whose `threads` is `all` (one that may act on
+     * the owner's threads); `secret_request`, and `secret_run` where it also holds "run commands" (never the chat);
+     * `create_quick_action`. Absent: none (a consult; a subagent never has them).
      */
     owner?: boolean
     /**
@@ -214,7 +218,8 @@ export function compileBotThread(input: CompileInput): CompileResult {
   // Checked again here, so a grant stored before a tool was refused can never widen later.
   const refusedApp = manifest.appTools.find((tool) => !BOT_APP_TOOLS.has(tool))
   if (refusedApp !== undefined) return unenforceable(`The Mousse tool ${refusedApp} would reach other threads, act in your name or ask you.`)
-  // The owner's MCP tools (granted per server, stored per tool) reach every runtime through Mousse, which checks each
+  // The owner's MCP tools (every server set up now unless switched off for the bot, `BotEngine.effectiveManifest`, and any
+  // an older grant names per tool) reach every runtime through Mousse, which checks each
   // call against these pairs before the server sees it: the MCP relay on Claude Code and Codex, the user MCP proxy on
   // Pi. Each turn is offered only the granted tools of servers set up now (`BotMcp.offered`); a chat turn none.
   // `shell` ("run commands") is one permission, granted as a whole: each runtime runs its commands
@@ -239,12 +244,18 @@ export function compileBotThread(input: CompileInput): CompileResult {
   const browser = manifest.appTools.includes(BOT_BROWSER_PERMISSION)
   const computer = manifest.appTools.includes(BOT_COMPUTER_PERMISSION)
   const threads = manifest.appTools.includes(BOT_THREADS_PERMISSION) ? shared?.threads : undefined
-  const profiler = manifest.appTools.includes(BOT_PROFILER_PERMISSION) && shared?.profiler === true
-  const themes = manifest.appTools.includes(BOT_THEMES_PERMISSION) && own?.themes === true
-  // The owner's scheduled jobs, secrets and quick actions: a main turn's, chat or work, never a consult's or a subagent's.
-  const schedules = manifest.appTools.includes(BOT_SCHEDULES_PERMISSION) && own?.owner === true ? (own.threads === 'all' ? 'all' as const : 'read' as const) : undefined
-  const secrets = manifest.appTools.includes(BOT_SECRETS_PERMISSION) && own?.owner === true
-  const quickActions = manifest.appTools.includes(BOT_QUICK_ACTIONS_PERMISSION) && own?.owner === true
+  // The profiler, Mousse's look, the owner's scheduled jobs, secrets and quick actions need no grant (a name an older
+  // build's grant still lists gives nothing more): a main turn's, chat or work, and the profiler a subagent's too; never a
+  // consult's.
+  const profiler = shared?.profiler === true
+  const themes = own?.themes === true
+  const schedules = own?.owner === true ? (own.threads === 'all' ? 'all' as const : 'read' as const) : undefined
+  const secrets = own?.owner === true
+  const quickActions = own?.owner === true
+  // Every skill, unless the owner switched skills off for the bot; a thread narrowed to some skills has just those.
+  const narrowSkills = input.thread.narrow?.skills
+  const allSkills = input.allSkills === true && !narrowSkills
+  const skills = [...new Set([...manifest.skills, ...(input.allSkills === true && narrowSkills ? narrowSkills : [])])].sort()
   const appTools = [...new Set([
     ...manifest.appTools.filter((tool) => !BOT_GROUP_PERMISSIONS.has(tool)),
     ...(themes ? BOT_THEME_TOOLS : []),
@@ -259,7 +270,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(secrets ? BOT_SECRET_TOOLS.filter((tool) => (tool !== 'secret_run' || manifest.tools.includes('shell')) && (tool !== 'secret_fetch' || own?.frontDesk !== true)) : []),
     ...(quickActions ? BOT_QUICK_ACTION_TOOLS : []),
     ...(shared?.tasks ? BOT_TASK_TOOLS : []),
-    ...(manifest.skills.length ? ['list_skills', 'load_skill'] : []),
+    ...(skills.length || allSkills ? ['list_skills', 'load_skill'] : []),
     ...(own?.escalate ? ['escalate'] : []),
     ...(own?.consult ? ['consult'] : []),
     ...(own?.workWaiting ? ['work_wait'] : []),
@@ -295,7 +306,8 @@ export function compileBotThread(input: CompileInput): CompileResult {
       tools: [...new Set(manifest.tools)].sort(),
       appTools,
       mcp,
-      skills: [...new Set(manifest.skills)].sort(),
+      skills,
+      ...(allSkills ? { allSkills: true as const } : {}),
       ...(browser ? { browser: true as const } : {}),
       ...(threads ? { threads } : {}),
       ...(profiler ? { profiler: true as const } : {}),

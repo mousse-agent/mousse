@@ -298,12 +298,12 @@ describe('a bot through the v2 methods', () => {
 
     // About: what was allowed is listed and can be removed; so can a schedule.
     let detail = await call<BotDetail>('bots.get', { botId })
-    expect(detail.permissions).toMatchObject([{ title: 'run commands', note: expect.any(String) }])
+    expect(detail.permissions.filter((item) => !item.builtIn)).toMatchObject([{ title: 'run commands', note: expect.any(String) }])
     f.bots.addSchedule(botId, { when: { kind: 'cron', expr: '0 9 * * 1-5' }, prompt: 'Sum up new invoices.' }, 'bot')
     await f.tickSchedules(new Date(f.clock.now))
     detail = await call<BotDetail>('bots.get', { botId })
     expect(detail.runs).toMatchObject([{ label: 'every weekday · 09:00', kind: 'schedule' }])
-    expect((await call<BotDetail>('bots.permissions.revoke', { botId, permissionId: detail.permissions[0]!.id })).permissions).toEqual([])
+    expect((await call<BotDetail>('bots.permissions.revoke', { botId, permissionId: detail.permissions.find((item) => !item.builtIn)!.id })).permissions.filter((item) => !item.builtIn)).toEqual([])
     expect((await call<BotDetail>('bots.schedules.remove', { botId, scheduleId: detail.runs[0]!.id })).runs).toEqual([])
 
     expect(await call('bots.personal.pause', { botId })).toMatchObject({ bot: { state: 'paused', stateText: 'Paused' } })

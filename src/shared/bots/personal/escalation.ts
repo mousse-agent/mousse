@@ -1,7 +1,7 @@
 import { isNeutralTool } from '../../harness/tools'
 import { stableStringify } from '../../workflows/canonical'
 import type { BotManifest } from './definition'
-import { BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from './manifest'
+import { BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from './manifest'
 
 /**
  * Walls and escalations of personal bots (PR 6 §5). A wall ends the dispatch and asks the owner:
@@ -166,11 +166,6 @@ export function permissionText(permission: BotPermissionRequest): string {
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_BROWSER_PERMISSION) return 'Use the browser'
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_COMPUTER_PERMISSION) return 'Use the computer'
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_THREADS_PERMISSION) return 'Use your threads'
-  if ('tool' in permission && botGrantTool(permission.tool) === BOT_PROFILER_PERMISSION) return 'Use the profiler'
-  if ('tool' in permission && botGrantTool(permission.tool) === BOT_THEMES_PERMISSION) return 'Change how Mousse looks'
-  if ('tool' in permission && botGrantTool(permission.tool) === BOT_SCHEDULES_PERMISSION) return 'Schedule work in your threads'
-  if ('tool' in permission && botGrantTool(permission.tool) === BOT_SECRETS_PERMISSION) return 'Use secrets you give it'
-  if ('tool' in permission && botGrantTool(permission.tool) === BOT_QUICK_ACTIONS_PERMISSION) return 'Add quick actions'
   if ('tool' in permission) return `Use the tool \`${permission.tool}\``
   if ('path' in permission) return 'Use files on this computer'
   if ('skill' in permission) return `Use the skill *${permission.skill}*`
@@ -222,7 +217,7 @@ export function permissionProblem(value: unknown): string | undefined {
 }
 
 /** What a bot is told it may ask for, after an ask it wrote wrongly. */
-export const WHAT_TO_ASK_TEXT = "Ask for a tool, a skill, the tools of one of your owner's MCP servers, a limit, or to export your memory."
+export const WHAT_TO_ASK_TEXT = "Ask for a tool, a limit, or to export your memory: your owner's MCP servers and skills need no asking."
 export const WHAT_TO_ASK_ALONE_TEXT = " To let one automation act without asking, use permission: {ask:'let_alone', scheduleId, serverId, tool}."
 
 /** Why a value is not something `escalate` may ask for, or undefined when it is one. */

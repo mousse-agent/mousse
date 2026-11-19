@@ -116,11 +116,11 @@ const SECRETS_GUIDANCE = 'For work that needs an API key, a token or a password:
 
 const QUICK_ACTIONS_GUIDANCE = 'create_quick_action adds a button to your owner\'s Actions list for something they do often: it sends a message or runs a command when they press it.'
 
-const AUTOMATION_GUIDANCE = 'When the owner asks you, from Automations, to set up an automation that another agent runs, write it as a draft with automation_draft_save (ask for the tool with escalate if you don\'t have it). Ask one question at a time with automation_ask. Never turn a draft on: the owner does. automation_list, automation_update and automation_pause read and change their automations.'
+const AUTOMATION_GUIDANCE = 'When the owner asks you, from Automations, to set up an automation that another agent runs, write it as a draft with automation_draft_save. Ask one question at a time with automation_ask. Never turn a draft on: the owner does. automation_list, automation_update and automation_pause read and change their automations.'
 
-const MCP_GUIDANCE = "mcp_servers lists your owner's MCP servers and which ones you can use. To use one, ask for that server with escalate (mcp with its server), once; your work then has its tools."
+const MCP_GUIDANCE = "mcp_servers lists your owner's MCP servers and which ones you can use. Your work uses their tools without asking; one your owner switched off stays off, and asking won't help."
 
-const SKILLS_GUIDANCE = 'list_skills lists the skills your owner gave you; load_skill loads one, with its instructions, when a job fits it.'
+const SKILLS_GUIDANCE = 'list_skills lists your owner\'s skills; load_skill loads one, with its instructions, when a job fits it.'
 
 /** The catalogue's groups, in the order the system text lists them. Static: the same text for every bot and turn. */
 export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
@@ -167,23 +167,23 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   { id: 'bots', line: "your owner's other bots", tools: [BOT_LIST_TOOL, BOT_SEND_TOOL], guidance: BOTS_GUIDANCE },
   {
     id: 'schedules',
-    line: 'scheduled jobs in your owner\'s threads (needs "schedule work in your threads", escalate with the tool schedules)',
+    line: 'scheduled jobs in your owner\'s threads',
     tools: ['schedule_list', 'schedule_create', 'schedule_update', 'schedule_pause', 'schedule_run', 'schedule_delete'],
     guidance: SCHEDULES_GUIDANCE
   },
   {
     id: 'profiler',
-    line: 'why Mousse is slow or uses a lot of memory (needs "use the profiler", escalate with the tool profiler)',
+    line: 'why Mousse is slow or uses a lot of memory',
     // Never the heap summary, which pauses the service: no bot holds it.
     tools: PROFILER_TOOL_NAMES.filter((tool) => tool !== 'profiler_heap_summary'),
     guidance: PROFILER_GUIDANCE
   },
-  { id: 'themes', line: 'Mousse\'s look, live: theme, colors, CSS, wallpaper (needs "change how Mousse looks", escalate with the tool themes)', tools: ['theme_read', 'theme_set'], guidance: THEMES_GUIDANCE },
-  { id: 'secrets', line: 'API keys, tokens and passwords your owner gives you (needs "use secrets you give it", escalate with the tool secrets)', tools: ['secret_request', 'secret_run', 'secret_fetch'], guidance: SECRETS_GUIDANCE },
-  { id: 'quick_actions', line: 'buttons in your owner\'s Actions list (needs "add quick actions", escalate with the tool quick_actions)', tools: ['create_quick_action'], guidance: QUICK_ACTIONS_GUIDANCE },
+  { id: 'themes', line: 'Mousse\'s look, live: theme, colors, CSS, wallpaper', tools: ['theme_read', 'theme_set'], guidance: THEMES_GUIDANCE },
+  { id: 'secrets', line: 'API keys, tokens and passwords your owner gives you', tools: ['secret_request', 'secret_run', 'secret_fetch'], guidance: SECRETS_GUIDANCE },
+  { id: 'quick_actions', line: 'buttons in your owner\'s Actions list', tools: ['create_quick_action'], guidance: QUICK_ACTIONS_GUIDANCE },
   { id: 'automation', line: 'automation drafts, when your owner asks from Automations', tools: ['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause'], guidance: AUTOMATION_GUIDANCE },
   { id: 'mcp', line: "your owner's MCP servers", tools: ['mcp_servers'], guidance: MCP_GUIDANCE },
-  { id: 'skills', line: 'the skills your owner gave you', tools: ['list_skills', 'load_skill'], guidance: SKILLS_GUIDANCE }
+  { id: 'skills', line: 'your owner\'s skills', tools: ['list_skills', 'load_skill'], guidance: SKILLS_GUIDANCE }
 ]
 
 const GROUPS: ReadonlyMap<string, BotCatalogueGroup> = new Map(BOT_CATALOGUE.map((group) => [group.id, group]))
