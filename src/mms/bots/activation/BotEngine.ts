@@ -10124,7 +10124,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * The bot renames itself or changes its description (`set_profile`), or the owner renames it or changes its look. A
    * description the owner wrote in About (`setOwnerPrompt`) is theirs: the bot can't change it.
    */
-  setProfile(botId: string, profile: { name?: string; description?: string; look?: { colour: string; accessory: string; kind?: string; eyes?: string } }): BotDefinition {
+  setProfile(botId: string, profile: { name?: string; description?: string; look?: { colour: string; accessory: string; kind?: string; eyes?: string; eyeColour?: string } }): BotDefinition {
     const name = profile.name?.trim()
     if (profile.name !== undefined && (!name || name.length > 60)) throw new BotEngineError('invalid_profile', 'A name is 1 to 60 characters.')
     const description = profile.description?.trim()

@@ -1,4 +1,4 @@
-import { BOT_ACCESSORIES, BOT_ACCESSORY_HEX, BOT_COLOUR_HEX, BOT_COLOURS, BOT_EYES, BOT_KINDS, type KnownBotLook } from '../../../../shared/bots/personal/look'
+import { BOT_ACCESSORIES, BOT_ACCESSORY_HEX, BOT_COLOUR_HEX, BOT_COLOURS, BOT_EYES, BOT_KINDS, botEyeColourOf, type KnownBotLook } from '../../../../shared/bots/personal/look'
 import type { BotFaceState } from './BotFace'
 import { browserFrameCodec, hashText, indexedDbFrameBackend, SavedFaceFrames, type FaceFrameStore } from './faceFrameStore'
 import { FaceMotion, faceUniforms, stillPose, WHISKER_MIN_SIZE, type FaceUniforms } from './facePoses'
@@ -250,10 +250,10 @@ export function faceDrawSide(size: number, pixelRatio: number): number {
   return Math.max(1, Math.round(size * (size < WHISKER_MIN_SIZE ? MAX_PIXEL_RATIO : pixelRatio)))
 }
 
-/** The key of a face's still frame, in memory and saved: its look, state, view and size, and its canvas's side in device pixels. */
+/** The key of a face's still frame, in memory and saved: its look (with the eye colour it shows), state, view and size, and its canvas's side in device pixels. */
 export function stillFrameKey(spec: Pick<FaceSpec, 'look' | 'state' | 'view' | 'size'>, px: number): string {
   const { look } = spec
-  return `${look.colour}|${look.accessory}|${look.kind ?? 'mouse'}|${look.eyes ?? 'pill'}|${spec.state}|${spec.view}|${spec.size}|${px}`
+  return `${look.colour}|${look.accessory}|${look.kind ?? 'mouse'}|${look.eyes ?? 'pill'}|${botEyeColourOf(look)}|${spec.state}|${spec.view}|${spec.size}|${px}`
 }
 
 const ART_STATES: readonly BotFaceState[] = ['idle', 'working', 'needs_you', 'stuck', 'paused', 'happy']
@@ -543,7 +543,7 @@ export class FaceRenderer {
     const prev = slot.spec
     if (
       prev.look.colour === next.look.colour && prev.look.accessory === next.look.accessory && prev.look.kind === next.look.kind &&
-      prev.look.eyes === next.look.eyes && prev.state === next.state &&
+      prev.look.eyes === next.look.eyes && prev.look.eyeColour === next.look.eyeColour && prev.state === next.state &&
       prev.size === next.size && prev.view === next.view && prev.still === next.still
     ) return
     slot.spec = next
