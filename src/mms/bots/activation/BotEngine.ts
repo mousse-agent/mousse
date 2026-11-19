@@ -5505,8 +5505,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const quietTurn = unattendedChatTurn(row) || (report && row.trigger.kind === 'work' && unattendedChatTurn(this.store.activation(row.trigger.from) ?? { lane: 'run', idempotencyKey: '' }))
     const marked = quietTurn ? withoutSilentMarker(said) : undefined
     const skippedCall = report && this.scheduledCallNotSent(row)
-    const written = skippedCall && isSilentOutput(said) ? 'A scheduled call was not sent this run.' : marked?.text ?? said
-    const silent = (report && row.trigger.kind === 'schedule' && !skippedCall && (isSilentOutput(written) || this.quietLevel(row.id))) || (marked?.marked === true && written === '')
+    const uncertainCall = report && !!this.store.get("SELECT id FROM bot_actions WHERE activation_id = ? AND kind = 'mcp' AND status = 'uncertain' LIMIT 1", row.id)
+    const plain = skippedCall && isSilentOutput(said) ? 'A scheduled call was not sent this run.' : marked?.text ?? said
+    const written = uncertainCall ? `${isSilentOutput(plain) ? '' : plain}${plain && !isSilentOutput(plain) ? '\n\n' : ''}The first attempt may already have gone through. Check before trying again.` : plain
+    const silent = !uncertainCall && ((report && row.trigger.kind === 'schedule' && !skippedCall && (isSilentOutput(written) || this.quietLevel(row.id))) || (marked?.marked === true && written === ''))
     if (silent && !asks.length && !waiting && !cards && !questions.length) return
     const lateReport = report && row.trigger.kind === 'schedule' && row.trigger.missed && this.now() - Date.parse(row.trigger.occurrenceAt) > 15 * 60_000
       ? `(Due ${scheduledDueTime(row.trigger.occurrenceAt, this.now())}, this computer was off or asleep) ` : ''
