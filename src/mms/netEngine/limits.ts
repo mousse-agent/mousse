@@ -96,6 +96,19 @@ export interface EngineLimits {
   rowStuckMs: number
   /** Most addresses the user may add for one paired computer (Add address). */
   maxManualAddresses: number
+  /** App deadline for the helper's `ssh.*` requests and one SSH add try (design §13.3). */
+  sshRequestDeadlineMs: number
+  /**
+   * Largest request `mousse-cli net-engine ssh` reads from stdin, the line another computer sent over SSH.
+   * Security-bound: it can only be lowered.
+   */
+  sshRemoteRequestMaxBytes: number
+  /** How long `mousse-cli net-engine ssh` waits for that line. Security-bound: it can only be lowered. */
+  sshRemoteReadMs: number
+  /** How often a waiting `mousse-cli net-engine invite` or `join` reads the status again when no change was announced. */
+  cliStatusReadMs: number
+  /** How long `mousse-cli net-engine join` waits for the other computer to let it in (its owner taps Yes there). */
+  cliJoinWaitMs: number
 }
 
 /** The helper's `APP_READ_AHEAD_BYTES`: a stream's credit must cover it before the helper reads that stream. */
@@ -141,7 +154,12 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   pathSwitchDeadlineMs: 30_000,
   pathDrainMs: 25 * 60_000,
   rowStuckMs: 2 * 60_000,
-  maxManualAddresses: 8
+  maxManualAddresses: 8,
+  sshRequestDeadlineMs: 120_000,
+  sshRemoteRequestMaxBytes: 64 * 1024,
+  sshRemoteReadMs: 30_000,
+  cliStatusReadMs: 2_000,
+  cliJoinWaitMs: 16 * 60_000
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -184,8 +202,16 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   pathSwitchDeadlineMs: 'MOUSSE_NET_ENGINE_PATH_SWITCH_DEADLINE_MS',
   pathDrainMs: 'MOUSSE_NET_ENGINE_PATH_DRAIN_MS',
   rowStuckMs: 'MOUSSE_NET_ENGINE_ROW_STUCK_MS',
-  maxManualAddresses: 'MOUSSE_NET_ENGINE_MAX_MANUAL_ADDRESSES'
+  maxManualAddresses: 'MOUSSE_NET_ENGINE_MAX_MANUAL_ADDRESSES',
+  sshRequestDeadlineMs: 'MOUSSE_NET_ENGINE_SSH_REQUEST_DEADLINE_MS',
+  sshRemoteRequestMaxBytes: 'MOUSSE_NET_ENGINE_SSH_REMOTE_REQUEST_MAX_BYTES',
+  sshRemoteReadMs: 'MOUSSE_NET_ENGINE_SSH_REMOTE_READ_MS',
+  cliStatusReadMs: 'MOUSSE_NET_ENGINE_CLI_STATUS_READ_MS',
+  cliJoinWaitMs: 'MOUSSE_NET_ENGINE_CLI_JOIN_WAIT_MS'
 })
+
+/** Limits that guard this computer against another: a value above the default is refused, so they only tighten. */
+const TIGHTEN_ONLY: ReadonlySet<keyof EngineLimits> = new Set(['sshRemoteRequestMaxBytes', 'sshRemoteReadMs'])
 
 /** Reads the limits from `env`; each problem names the variable, the value and the default kept. */
 export function readEngineLimits(env: NodeJS.ProcessEnv): {
@@ -207,6 +233,8 @@ export function readEngineLimits(env: NodeJS.ProcessEnv): {
     // Skew alone may be none.
     if (!Number.isSafeInteger(value) || value < 0 || (value === 0 && key !== 'clockSkewMs'))
       keep(key, 'is not a positive whole number')
+    else if (TIGHTEN_ONLY.has(key) && value > ENGINE_LIMIT_DEFAULTS[key])
+      keep(key, 'can only be lowered')
     else limits[key] = value
   }
   // A message must hold its header and a whole blob chunk; when it cannot, the three sizes keep their defaults,
@@ -273,7 +301,9 @@ export const ENGINE_CONTROLS = [
   'keep-engine-work',
   'teardown-on-event-only',
   // phase1a.path-switch
-  'abort-on-path-replaced'
+  'abort-on-path-replaced',
+  // phase1b.ssh-add-app: `mousse-cli net-engine ssh` starts the service
+  'remote-autostart'
 ] as const
 export type EngineControl = (typeof ENGINE_CONTROLS)[number]
 

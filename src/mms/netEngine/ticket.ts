@@ -12,6 +12,8 @@ export interface TicketFacts {
   routes: string[]
   /** The name the host's link gives it (`?n=`), shown before the host says its own. */
   name?: string
+  /** The ticket's kind: 1 in person (scanned), 2 a Send link (confirmed by a code). */
+  kind?: number
 }
 
 /** The link a host's QR code holds: its name for the joiner's question, then the ticket after `#`. */
@@ -44,7 +46,8 @@ export function readTicket(ticket: string): TicketFacts {
     throw badTicket(error instanceof Error ? error.message : 'not CBOR')
   }
   if (!(value instanceof Map)) throw badTicket('not a map')
-  const host = value.get(3),
+  const kind = value.get(2),
+    host = value.get(3),
     invitation = value.get(4),
     expires = value.get(6),
     routes = value.get(7)
@@ -58,7 +61,8 @@ export function readTicket(ticket: string): TicketFacts {
     routes: Array.isArray(routes)
       ? routes.filter((route): route is string => typeof route === 'string')
       : [],
-    ...(name ? { name } : {})
+    ...(name ? { name } : {}),
+    ...(typeof kind === 'number' ? { kind } : {})
   }
 }
 

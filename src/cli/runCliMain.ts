@@ -20,6 +20,7 @@ import { runService } from './commands/service'
 import { runThreadActionCommand } from './commands/threadActions'
 import { runRelay } from './commands/relay'
 import { runNet, runBridge } from './commands/net'
+import { runNetEngine } from './commands/netEngine'
 import { isBridgeHubCommand, runBridgeHubCommand } from './commands/bridge'
 import { runSpacesCommand } from './commands/spaces'
 import { runBotsCommand } from './commands/bots'
@@ -115,6 +116,9 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
         break
       case 'net':
         await runNet(args)
+        break
+      case 'net-engine':
+        await runNetEngine(args)
         break
       case 'bridge':
         if (isBridgeHubCommand(args)) {

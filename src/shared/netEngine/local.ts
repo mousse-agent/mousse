@@ -93,4 +93,34 @@ export interface NetEngineStatus {
   sharedAccount?: boolean
   /** How often Add device reads a camera frame for a pairing code (the engine limit `scanIntervalMs`). */
   scanIntervalMs?: number
+  /** This computer's open invitations (Phase 1b: a Send link's code and tries left). */
+  invites?: NetEngineInviteState[]
+  /** Joins of a Send link waiting for their code (Phase 1b). */
+  joins?: NetEngineJoinState[]
 }
+
+/** An invitation this computer made, while it is open (Phase 1b §5). */
+export interface NetEngineInviteState {
+  invitation: string
+  kind: 'in_person' | 'link'
+  /** A Send link's six-digit code, read to the other person another way. */
+  code?: string
+  attemptsLeft?: number
+  /** Why it ended (`attempts_exhausted`, `expired`, `cancelled`), shown once before it leaves the list. */
+  ended?: string
+}
+
+/** A join of a Send link this computer runs, while it waits for the code typed here (Phase 1b §5). */
+export interface NetEngineJoinState {
+  invitation: string
+  codeNeeded: boolean
+  attemptsLeft?: number
+  /** The last code typed did not work. */
+  failed?: boolean
+}
+
+/**
+ * The line `mousse-cli net-engine ssh` writes to stdout before anything else (Phase 1b §3.3): the computer that ran
+ * it over SSH skips whatever a login shell printed up to it. Fixed on purpose.
+ */
+export const NET_ENGINE_SSH_MARKER = 'mousse-ssh/1'
