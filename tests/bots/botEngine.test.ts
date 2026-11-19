@@ -166,6 +166,8 @@ describe('approval', () => {
     expect(bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))).toMatchObject({ code: 'policy_unenforceable', refused: 'Codex can\'t limit tools to this list.' })
     // Nobody waits on a run: it ends failed (and counts toward the failure pause).
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'failed', endReason: 'policy_unenforceable' })
+    // Its error says the runtime's own reason, not only that it can't run here.
+    expect(store.registry('site-editor')?.error?.error.text).toBe('I can\'t run on the providers set up here: Codex can\'t limit tools to this list.')
   })
 
   it('a narrower revision runs without asking; a wider one waits for the owner', async () => {
