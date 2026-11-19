@@ -35,7 +35,7 @@ status shows whether networking is on, this computer's identity and where it lis
 computers. A <device> is a device's id, its name or the start of its identity.
 invite shows a pairing code for a computer next to this one, and waits: when that computer asks to join, it asks
 you to confirm. invite --link makes a link to send in a chat, and shows a six-digit code to read to the other
-person another way. Both wait until the pairing finishes or you press Ctrl+C, which ends the invitation.
+person another way; after a wrong code it shows a new one. Both wait until the pairing finishes or you press Ctrl+C, which ends the invitation.
 join opens a link made with invite --link. It lists the addresses it will contact and asks before dialling, then
 asks for the code shown on the other computer. The code is read from the terminal only, never from an argument or
 a pipe; without a terminal join refuses. --yes skips the address question and also needs a terminal.

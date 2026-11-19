@@ -85,7 +85,7 @@ describe('net-engine command lines', () => {
 })
 
 /** A terminal for one command: what it printed, and answers typed in turn. */
-function terminal(answers: string[] = [], tty = true) {
+function terminal(answers: Array<string | (() => string | undefined)> = [], tty = true) {
   const emitted: Array<{ value: any; text: string }> = []
   const said: string[] = []
   const asked: string[] = []
@@ -96,7 +96,8 @@ function terminal(answers: string[] = [], tty = true) {
     tty,
     ask: async (question) => {
       asked.push(question)
-      return answers.shift()
+      const next = answers.shift()
+      return typeof next === 'function' ? next() : next
     },
     changed: (signal) =>
       new Promise((resolve) => {
@@ -200,6 +201,34 @@ describe('net-engine routes through a profile with a 1.1 helper', () => {
     await executeNetEngineCommand(prepare('routes'), cli(), read.io)
     expect(read.emitted[0]!.value).toMatchObject({ reach: { public: ['tcp://93.184.216.34:7443'] } })
     expect(read.emitted[0]!.value.restarted).toBeUndefined()
+  }, 120_000)
+})
+
+describe('net-engine invite --link and join, through two profiles', () => {
+  const fabric = new Fabric()
+  afterAll(() => fabric.close(), 120_000)
+
+  it('pairs with the code typed at the joining terminal, after a wrong one and the new code the host shows', async () => {
+    const host = await fabric.computer('cli-host')
+    const joiner = await fabric.computer('cli-joiner')
+    const cli = (on: Computer): NetEngineCliClient => ({ request: (method, params, ms) => on.dispatch(method, params ?? {}, true) })
+    const hosting = terminal()
+    const inviting = executeNetEngineCommand(prepare('invite', '--link'), cli(host), hosting.io)
+    await eventually(() => expect(hosting.emitted).toHaveLength(1))
+    const { uri, code } = hosting.emitted[0]!.value
+    expect(code).toMatch(/^[0-9]{6}$/)
+    // The code is shown beside the link, never in it.
+    expect(uri).not.toContain(code)
+    const wrongCode = String((Number(code) + 1) % 1_000_000).padStart(6, '0')
+    // After a wrong code the host shows a new one: the person reads that one out.
+    const shownNow = () => host.mms.netEngine.status().links?.find((open) => open.code)?.code
+    const joining = terminal(['y', wrongCode, shownNow])
+    expect(await executeNetEngineCommand(prepare('join', uri), cli(joiner), joining.io)).toBe(0)
+    expect(joining.said.some((line) => /didn't work/.test(line))).toBe(true)
+    expect(joining.emitted[0]!.text).toMatch(/^Paired with/)
+    expect(await inviting).toBe(0)
+    // The host heard the wrong code too, and showed the new code.
+    expect(hosting.said.some((line) => /didn't work there\. Code: [0-9]{3} [0-9]{3} \(2 tries left\)/.test(line))).toBe(true)
   }, 120_000)
 })
 
