@@ -5,7 +5,7 @@ import { basename, isAbsolute, join } from 'node:path'
 import { runInNewContext } from 'node:vm'
 import { saveSecretFetchResponse } from '../../src/mms/secrets/secretFetchFiles'
 
-const hooks = vi.hoisted(() => ({ unlink: undefined as undefined | ((path: unknown) => void), spawnError: undefined as undefined | string }))
+const hooks = vi.hoisted(() => ({ unlink: undefined as undefined | ((path: unknown) => void), spawnError: undefined as undefined | string, afterCwd: undefined as undefined | (() => void) }))
 vi.mock('node:fs', async importOriginal => {
   const original = await importOriginal<typeof import('node:fs')>()
   return { ...original, unlinkSync: (path: fs.PathLike) => {
@@ -18,6 +18,7 @@ vi.mock('node:fs', async importOriginal => {
 vi.mock('node:child_process', () => ({ spawnSync: (_exe: string, args: string[], options: { cwd: string; input: Buffer }) => {
   if (hooks.spawnError) return { status: null, error: { code: hooks.spawnError } }
   const directory = fs.openSync(options.cwd, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY)
+  hooks.afterCwd?.()
   const relative = (path: string) => isAbsolute(path) ? path : `/proc/self/fd/${directory}/${path}`
   const child = { argv: ['node', ...args.slice(2)], exitCode: 0 }
   try {
@@ -35,6 +36,7 @@ const homes: string[] = []
 afterEach(() => {
   hooks.unlink = undefined
   hooks.spawnError = undefined
+  hooks.afterCwd = undefined
   vi.unstubAllGlobals()
   homes.splice(0).forEach(path => fs.rmSync(path, { recursive: true, force: true }))
 })
@@ -69,4 +71,17 @@ it.each(['ENOENT', 'ENOTDIR'])('treats a folder lost before child startup as an 
   let error: unknown
   try { saveSecretFetchResponse(home, Buffer.from('response')) } catch (caught) { error = caught }
   expect(error).toMatchObject({ unsafe: true })
+})
+
+it('leaves a folder lost during the child identity check uncounted', () => {
+  const home = fs.mkdtempSync(join(tmpdir(), 'fetch-portable-cwd-check-'))
+  homes.push(home)
+  const scratch = join(home, 'scratch')
+  fs.mkdirSync(scratch)
+  vi.stubGlobal('process', new Proxy(process, { get: (target, key) => key === 'platform' ? 'darwin' : Reflect.get(target, key) }))
+  hooks.afterCwd = () => { fs.renameSync(join(scratch, 'fetches'), join(scratch, 'moved')) }
+  let error: unknown
+  try { saveSecretFetchResponse(scratch, Buffer.from('response')) } catch (caught) { error = caught }
+  expect(error).toMatchObject({ unsafe: true })
+  expect(fs.readdirSync(join(scratch, 'moved'))).toEqual([])
 })
