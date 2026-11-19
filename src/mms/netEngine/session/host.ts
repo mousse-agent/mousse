@@ -89,6 +89,9 @@ export class EngineHost {
     let count = 0
     let sub: HostSubscription | undefined
     const refuse = (error: unknown): void => {
+      // Once this side has answered (an upload refused at its first message, whose chunks were already on the
+      // way), what follows is read and dropped: a reset now could discard the answer before it leaves.
+      if (!channel.isOpen()) return
       try {
         channel.send({ t: 'error', error: toWireError(error) })
         channel.end()

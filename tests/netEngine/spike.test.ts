@@ -18,6 +18,7 @@
  * - the node-id, reader and stream fields that cross the link, pinned, with no private key and no reader id.
  */
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -379,26 +380,49 @@ describe('Bridge over an engine session, v1 off', () => {
     await dispatch('threads.focus', { threadId: q(threadId) })
     await dispatch('thread.snapshot', { threadId: q(threadId) })
     const stream = owner.bridge.threads.privateHead(callerOnOwner, threadId)!.stream
-    const otherOnOwner = owner.netEngine.pair({
-      endpoint: 'other.test:7000',
-      fingerprint: 'sha256:other',
-      grant: 'grant-held-by-other',
-      name: 'Other computer',
-      state: 'connected'
-    }).localId
-    const other = fakeLink({
-      ownerOnCaller: newId('node'),
-      callerOnOwner: otherOnOwner,
-      grant: 'grant-held-by-other',
-      endpoint: 'other.test:7000'
-    })
-    await owner.netEngine.attach(other.inbound)
+    const other = await secondCaller('other')
     const channel = new Channel(other.outbound.open('mousse.sub'))
     const answer = new Promise<Record<string, unknown>>((resolve) => channel.onMessage((m) => resolve(m.header)))
     channel.send({ t: 'subscribe', stream, after: { epoch: 0, seq: 0 } })
     expect(await answer).toMatchObject({ t: 'end', error: { code: 'forbidden' } })
     other.cut()
   })
+
+  it('answers a second caller’s upload forbidden though its chunks were sent before the refusal', async () => {
+    const threadId = owner.threads.createThread('Not yours').id
+    await dispatch('thread.snapshot', { threadId: q(threadId) })
+    const stream = owner.bridge.threads.privateHead(callerOnOwner, threadId)!.stream
+    const other = await secondCaller('uploader')
+    // A put sends its chunks and commit without waiting, so they reach the owner after it refused the first message.
+    const channel = new Channel(other.outbound.open('mousse.put'))
+    const answer = new Promise<unknown>((resolve) => {
+      channel.onMessage((m) => resolve(m.header))
+      channel.onEnd((reason) => resolve({ endedWith: reason }))
+    })
+    const bytes = new TextEncoder().encode('written by another caller')
+    const blob = `blb_${createHash('sha256').update(bytes).digest('hex')}`
+    channel.send({ t: 'blob.put', stream, blob, bytes: bytes.byteLength, sealed: false })
+    channel.send({ t: 'bytes' }, [bytes])
+    channel.send({ t: 'commit' })
+    expect(await answer).toMatchObject({ t: 'error', error: { code: 'forbidden' } })
+    other.cut()
+  })
+
+  /** Another computer paired with the owner, linked to it by its own connection. */
+  async function secondCaller(name: string): Promise<ReturnType<typeof fakeLink>> {
+    const endpoint = `${name}.test:7000`
+    const grant = `grant-held-by-${name}`
+    const localId = owner.netEngine.pair({
+      endpoint,
+      fingerprint: `sha256:${name}`,
+      grant,
+      name: `${name} computer`,
+      state: 'connected'
+    }).localId
+    const link = fakeLink({ ownerOnCaller: newId('node'), callerOnOwner: localId, grant, endpoint })
+    await owner.netEngine.attach(link.inbound)
+    return link
+  }
 
   describe('a terminal', () => {
     const output = (ptyId: string) =>

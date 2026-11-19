@@ -1,7 +1,7 @@
 /**
  * An in-memory engine link for tests: one outbound connection on the calling computer and the inbound one it
  * reaches on the owner, with streams that carry bytes in order, a FIN or a reset, delivered on a later turn as a
- * network would. Every message written is decoded and recorded, so a test can list what crossed.
+ * network would. A reset drops what was written and not yet delivered, as a QUIC reset abandons unacknowledged data. Every message written is decoded and recorded, so a test can list what crossed.
  */
 import type { NodeId } from '../../src/shared/net'
 import { MessageReader } from '../../src/mms/netEngine/session/frame'
@@ -30,6 +30,8 @@ class FakeStream implements EngineStream {
   private readonly reader = new MessageReader()
   private writable = true
   private ended = false
+  /** Reset by this side: what it wrote and was not delivered yet is dropped. */
+  private abandoned = false
   constructor(
     readonly label: EngineLabel,
     private readonly side: 'caller' | 'owner',
@@ -40,15 +42,20 @@ class FakeStream implements EngineStream {
     const copy = Uint8Array.from(bytes)
     for (const message of this.reader.push(copy))
       this.crossed.push({ from: this.side, label: this.label, header: message.header, parts: message.parts })
-    setImmediate(() => this.other.deliver({ kind: 'data', bytes: copy }))
+    setImmediate(() => {
+      if (!this.abandoned) this.other.deliver({ kind: 'data', bytes: copy })
+    })
   }
   end(): void {
     if (!this.writable) return
     this.writable = false
-    setImmediate(() => this.other.deliver({ kind: 'end' }))
+    setImmediate(() => {
+      if (!this.abandoned) this.other.deliver({ kind: 'end' })
+    })
   }
   reset(reason = 'reset'): void {
     this.writable = false
+    this.abandoned = true
     this.other.writable = false
     setImmediate(() => {
       this.other.deliver({ kind: 'end', reason })
