@@ -2,6 +2,25 @@
   "version": 1,
   "claims": [
     {
+      "task": "antigravity-owner-only-turns",
+      "session": "Animatrix-4789ec",
+      "machine": "Animatrix",
+      "branch": "t3/antigravity-personal-oauth-admission-gate",
+      "paths": [
+        "src/mms/harness/gateway.ts",
+        "src/mms/harness/ownerOnly.ts",
+        "src/mms/run/ownerProof.ts",
+        "src/mms/run/RunEngine.ts",
+        "src/mms/run/RunStore.ts",
+        "src/mms/run/db/migrations.ts",
+        "src/mms/run/types.ts",
+        "src/mms/protocol/handlers.ts",
+        "src/mms/orchestrator/OrchestratorService.ts"
+      ],
+      "claimedAt": "2026-11-19T12:00:47.116Z",
+      "expiresAt": "2026-11-19T14:00:47.116Z"
+    },
+    {
       "task": "bot-automation-let-alone",
       "session": "agibook-66458b",
       "machine": "agibook",
