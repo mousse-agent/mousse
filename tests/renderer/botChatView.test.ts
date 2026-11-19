@@ -1420,6 +1420,7 @@ describe('the composer', () => {
       await press('Enter')
       await settle()
       expect(dialog()).not.toBeNull()
+      if (command.startsWith('/forget')) expect(dialog()!.textContent).toContain('what automations do without asking')
       await click(button('Cancel', dialog()!))
       expect(dialog()).toBeNull()
       expect(fake.client.wipeMemory).not.toHaveBeenCalled()

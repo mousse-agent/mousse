@@ -4499,3 +4499,51 @@ it('E1 r2 ordinary held and sent calls do not compute a contract', async () => {
   await f.bots.actions.answer({ actionId: first.id, digest: first.args_digest, answer: 'send' })
   expect(classify).not.toHaveBeenCalled()
 })
+
+it('E1 r2 re-approving without a pair then restoring it never restores consent', async () => {
+  const t = await aloneAsk()
+  const original = f.bots.definitionOf(t.botId)
+  for (const mcp of [[], original.permissions.mcp]) {
+    const definition = f.host.definitions.publishRevision({ ...original, permissions: { ...original.permissions, mcp } })
+    f.store.setPublished(t.botId, definition.revision!)
+    f.bots.approve(t.botId, botManifestDigest(definition.permissions))
+  }
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*'")).toEqual([])
+  expect((await aloneNext(t)).action.status).toBe('open')
+})
+it('E1 r2 forgetting a sent call clears its exact place as well as authority', async () => {
+  const t = await aloneAsk()
+  const action = f.bots.actions.forWork(t.id)!
+  f.bots.actions.forgetText(t.botId, action.id)
+  expect(f.store.get('SELECT place_json FROM bot_actions WHERE id = ?', action.id)?.place_json).toBeNull()
+  expect(f.bots.alone.prepare(t.botId, 'after-forget', t.request as never)).toContain('Let it ask once first')
+})
+it('E1 r2 startup clears pending snapshots even for a bot no longer registered', async () => {
+  f = botFixture()
+  f.store.run('INSERT INTO bot_memory_state(bot_id,key,value) VALUES(?,?,?)', 'removed-bot', 'alone-ask:orphan', '{}')
+  await f.bots.reconcileOnStartup()
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone-ask:*'")).toEqual([])
+})
+it('E1 r2 restoring a changed binding never revives consent', async () => {
+  const t = await aloneAsk()
+  t.server.configDigest = 'changed'
+  expect(f.bots.alone.match(t.botId, t.schedule.scheduleId, 'mail', 'send', { to: t.args.to }, t.args)).toBeUndefined()
+  t.server.configDigest = 'config-1'
+  expect(f.bots.alone.items(t.botId)).toEqual([])
+  expect((await aloneNext(t)).action.status).toBe('open')
+})
+it('E1 r2 an uncertain stored outcome never claims the call did not run', async () => {
+  const t = await aloneAsk()
+  vi.mocked(t.manager.callTool).mockRejectedValueOnce(new Error('Connection closed after dispatch'))
+  const next = await aloneNext(t)
+  expect(next.action.status).toBe('uncertain')
+  expect(JSON.parse(next.action.result_json!).text).toContain('could not be confirmed whether this went through')
+  expect(JSON.parse(next.action.result_json!).text).not.toContain("couldn't run")
+})
+it.each([true, false])('E1 r2 malformed asks mention let-alone only while asks first is on: %s', async on => {
+  const t = await setup(on)
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Please ask', clientRequestId: 'r2-malformed' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  expect(turn.prepared.authority.escalate!({ permission: undefined, reason: 'Ask' }).includes('let_alone')).toBe(on)
+})
