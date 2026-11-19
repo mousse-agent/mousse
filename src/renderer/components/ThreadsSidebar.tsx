@@ -985,6 +985,14 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     void hideThreads(ids)
   }
 
+  // One thread a bot started, from its row's menu.
+  const handleHideThread = () => {
+    if (!contextMenu || contextMenu.target.type !== 'thread') return
+    const id = contextMenu.target.id
+    closeContextMenu()
+    void hideThreads([id])
+  }
+
   const startRename = (target: RenamingTarget) => setRenaming(target)
 
   /** After a rename ends, focus goes back to its row, unless the person already moved it somewhere else. */
@@ -2138,6 +2146,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           onDeleteAllArchived={localArchivedCount > 0 ? handleDeleteAllArchived : undefined}
           {...projectIconActions(contextMenu.target)}
           onHideBotThreads={contextMenu.target.type === 'project' && botThreadsOfProject(contextMenu.target.id).length > 0 ? handleHideProjectBotThreads : undefined}
+          onHideThread={contextMenu.target.type === 'thread' && shownBotThreads.some((thread) => thread.id === contextMenu.target.id) ? handleHideThread : undefined}
 
         />
 

@@ -91,6 +91,8 @@ interface ThreadsContextMenuProps {
   onUseFolderIcon?: () => void
   /** Projects with bot threads in the sidebar: hide them all (`Thread.hidden`). */
   onHideBotThreads?: () => void
+  /** Threads a bot started: hide this one from the sidebar (`Thread.hidden`). */
+  onHideThread?: () => void
 }
 
 const Separator = () => <div className="threads-context-menu-separator" role="separator" />
@@ -194,7 +196,8 @@ export function ThreadsContextMenu({
   onChangeIcon,
   onResetIcon,
   onUseFolderIcon,
-  onHideBotThreads
+  onHideBotThreads,
+  onHideThread
 }: ThreadsContextMenuProps) {
   return (
     <MenuFrame x={x} y={y} label={target.type === 'project' ? `Project ${target.name}` : `Thread ${target.name}`} onClose={onClose}>
@@ -251,6 +254,12 @@ export function ThreadsContextMenu({
         <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onArchive}>
           {target.settled ? <ArchiveArrowBackRegular /> : <ArchiveRegular />}
           <span>{target.settled ? 'Unarchive' : 'Archive'}</span>
+        </button>
+      )}
+      {target.type === 'thread' && onHideThread && (
+        <button type="button" className="threads-context-menu-item" role="menuitem" title={BOT_THREADS_HIDE_HINT} onClick={onHideThread}>
+          <EyeOff />
+          <span>Hide</span>
         </button>
       )}
       {target.type === 'thread' && (
