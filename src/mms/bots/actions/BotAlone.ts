@@ -9,13 +9,13 @@ export interface ArgumentContract {
 const normalizedText = (value: string): string => value.normalize('NFKC').replace(/\p{Cf}/gu, '')
 /** Bounded labels keep long punctuation-free attachments linear. Keep URL punctuation inside its token. */
 function addressTokens(value: string): string[] {
-  const text = normalizedText(value).replace(/[。｡]/g, '.').replace(/\s+/gu, ' ').replace(/ ?([.@:/\]) ?/gu, '$1')
-  return [...new Set(text.split(' ').filter(token => /[:@\]|[\p{L}\p{N}_-]{1,63}\.[\p{L}\p{N}_-]{1,63}/iu.test(token)))]
+  const text = normalizedText(value).replace(/[。｡]/g, '.').replace(/\s+/gu, ' ').replace(/ ?([.@:/\\]) ?/gu, '$1')
+  return [...new Set(text.split(' ').filter(token => /[:@\\]|[\p{L}\p{N}_-]{1,63}\.[\p{L}\p{N}_-]{1,63}/iu.test(token)))]
 }
 function filenameExtension(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const name = normalizedText(value)
-  if (!name || name.length > 255 || name.startsWith('.') || name.includes('..') || /[/\:@\p{Cc}]/u.test(name)) return undefined
+  if (!name || name.length > 255 || name.startsWith('.') || name.includes('..') || /[/\\:@\p{Cc}]/u.test(name)) return undefined
   const dot = name.lastIndexOf('.')
   return dot < 0 ? '' : name.slice(dot + 1).toLowerCase()
 }
