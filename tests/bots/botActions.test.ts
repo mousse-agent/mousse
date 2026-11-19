@@ -4460,7 +4460,7 @@ it.each(['restart', 'same-run', 'sent-card'] as const)('E1 r2 uncertain target r
     id = next.id; turn = next.turn
     if (kind === 'sent-card') {
       await finish(f, turn.payload)
-      await f.bots.actions.answer({ actionId: next.action.id, digest: next.action.args_digest, answer: 'send' })
+      await f.bots.actions.answer({ actionId: next.action.id, digest: next.action.args_digest, answer: 'send' }); await flush()
       turn = await start(f, id, 2)
     }
   }
