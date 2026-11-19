@@ -1879,6 +1879,29 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       expect(rows().slice(2)).toEqual([['Never ran', 'idle', 'idle'], ['Broken', 'failed', 'failed'], ['Halted', 'stopped', 'failed'], ['Old run', 'done', 'done']])
     })
 
+    it('while something runs, Recent opens folded: Show more unfolds it, Show less folds it, and every opening starts folded', async () => {
+      await open({ ...inbox, state: 'working', stateText: 'Managing 2 threads', threads })
+      const fold = () => host.querySelector('.bot-work-fold')!
+      const more = () => host.querySelector<HTMLButtonElement>('.bot-work-more')!
+      await click(presence())
+      expect(fold().hasAttribute('inert')).toBe(true)
+      expect(more().textContent).toBe('Show more4')
+      await click(more())
+      expect(fold().hasAttribute('inert')).toBe(false)
+      expect([more().textContent, more().getAttribute('aria-expanded')]).toEqual(['Show less', 'true'])
+      await click(more())
+      expect(fold().hasAttribute('inert')).toBe(true)
+      // Unfolded, closed by a click away and opened again: folded.
+      await click(more())
+      await act(async () => { document.body.dispatchEvent(new Event('pointerdown', { bubbles: true })) })
+      await click(presence())
+      expect(fold().hasAttribute('inert')).toBe(true)
+      // The arrow keys pass over the folded rows: from the last working row to Show more.
+      await act(async () => host.querySelector<HTMLElement>('.bot-thread-line[data-tone="waiting"]')!.focus())
+      await keydown('ArrowDown')
+      expect(document.activeElement).toBe(more())
+    })
+
     it('a thread on hold for the owner is listed as waiting on you while the bot reads free, and the rest under Recent', async () => {
       await open({ ...inbox, state: 'idle', stateText: 'Done.', threads: [thread('t8', 'Fix login', 'on_hold', 20), thread('t3', 'Old run', 'done', 90)] })
       expect(presence().textContent).toBe('free')
@@ -1935,6 +1958,9 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       expect(presence().textContent).toBe('free')
       await click(presence())
       expect(rows().map(([title]) => title)).toEqual(['Broken', 'Old run'])
+      // Nothing runs, so Recent shows unfolded with no Show more.
+      expect(host.querySelector('.bot-work-fold')!.hasAttribute('inert')).toBe(false)
+      expect(host.querySelector('.bot-work-more')).toBeNull()
     })
 
     it('Recent lists only threads updated in the last six hours, counts just those, and one drops off while the list is open', async () => {
