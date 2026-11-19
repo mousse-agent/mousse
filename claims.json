@@ -146,6 +146,20 @@
       "expiresAt": "2026-11-18T22:19:26.984Z"
     },
     {
+      "task": "computer-use",
+      "session": "Animatrix-a0abb1",
+      "machine": "Animatrix",
+      "branch": "computer-use",
+      "paths": [
+        "src/mms/computerUse",
+        "src/mms/run/mcp/appTools/computer.ts",
+        "src/renderer/components/settings/ComputerUseSettings.tsx",
+        "src/shared/computerUse.ts"
+      ],
+      "claimedAt": "2026-11-19T11:28:15.719Z",
+      "expiresAt": "2026-11-19T13:28:15.719Z"
+    },
+    {
       "task": "net-engine-1a",
       "session": "Animatrix-880838",
       "machine": "Animatrix",
