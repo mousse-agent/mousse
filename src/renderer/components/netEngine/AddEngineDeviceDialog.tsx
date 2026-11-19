@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import jsQR from 'jsqr'
-import { DEFAULT_SCAN_INTERVAL_MS, type NetEngineStatus } from '../../../shared/netEngine/local'
+import {
+  DEFAULT_SCAN_INTERVAL_MS,
+  type NetEngineJoinPreview,
+  type NetEngineStatus
+} from '../../../shared/netEngine/local'
+import { ROUTE_CLASS_LABEL } from '../../../shared/netEngine/routes'
 import { qrSvgPath } from '../../lib/plusQr'
 import { CopyButton } from '../settings/IconButtons'
 import { Modal } from '../ui/Modal'
@@ -76,9 +81,27 @@ export function AddEngineDeviceDialog({
     }
   }
 
+  // Confirm: the ticket's destinations and this computer's routes it may also share (1b §1.3).
+  const [preview, setPreview] = useState<{ ticket: string; value: NetEngineJoinPreview }>()
+  const [share, setShare] = useState<string[]>([])
+  const confirmTicket = step.kind === 'confirm' ? step.ticket : undefined
+  useEffect(() => {
+    if (!confirmTicket) return
+    let live = true
+    void window.mousse.platformRequest
+      .request<NetEngineJoinPreview>('netEngine.join.preview', { ticket: confirmTicket })
+      .then((value) => {
+        if (live) setPreview({ ticket: confirmTicket, value })
+      })
+      .catch(() => undefined)
+    return () => {
+      live = false
+    }
+  }, [confirmTicket])
+
   const join = async (ticket: string, host: string) => {
     setStep({ kind: 'joining', host })
-    if (await call('netEngine.join', { ticket })) onClose()
+    if (await call('netEngine.join', { ticket, ...(share.length ? { share } : {}) })) onClose()
     else setStep({ kind: 'confirm', ticket, host })
   }
 
@@ -176,6 +199,17 @@ export function AddEngineDeviceDialog({
               Connect to {step.host}? {capitalize(step.host)} will also be able to use this
               computer.
             </p>
+            {preview && preview.ticket === step.ticket && (
+              <JoinRoutes
+                preview={preview.value}
+                share={share}
+                onShare={(route, on) =>
+                  setShare((list) =>
+                    on ? [...list, route] : list.filter((item) => item !== route)
+                  )
+                }
+              />
+            )}
             <div className="devices-dialog-actions">
               <button
                 type="button"
@@ -206,6 +240,50 @@ export function AddEngineDeviceDialog({
 }
 
 const capitalize = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1)
+
+/**
+ * The Connect dialog's routes (1b §1.3): every destination the ticket names, with its class (Connect approves
+ * them), and this computer's tailnet, internet and tunnel routes as unticked boxes under "Also share".
+ */
+function JoinRoutes({
+  preview,
+  share,
+  onShare
+}: {
+  preview: NetEngineJoinPreview
+  share: string[]
+  onShare: (route: string, on: boolean) => void
+}) {
+  return (
+    <>
+      {!!preview.destinations?.length && (
+        <p
+          className="settings-muted engine-destinations"
+          title="Connect lets this computer dial these addresses."
+        >
+          {preview.destinations
+            .map((item) => `${item.label} (${ROUTE_CLASS_LABEL[item.cls]})`)
+            .join(', ')}
+        </p>
+      )}
+      {!!preview.shareable?.length && (
+        <fieldset className="engine-share">
+          <legend title="It can reach this computer at the ticked addresses too.">Also share</legend>
+          {preview.shareable.map((item) => (
+            <label key={item.route} className="engine-share-item">
+              <input
+                type="checkbox"
+                checked={share.includes(item.route)}
+                onChange={(event) => onShare(item.route, event.target.checked)}
+              />
+              {ROUTE_CLASS_LABEL[item.cls]} {item.label}
+            </label>
+          ))}
+        </fieldset>
+      )}
+    </>
+  )
+}
 
 function QrCode({ text }: { text: string }) {
   const { size, path } = useMemo(() => qrSvgPath(text), [text])

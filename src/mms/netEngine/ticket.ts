@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { NetError } from '../../shared/net/errors'
 
 /** What this computer reads from a pairing ticket before it joins (the helper checks the rest). */
@@ -12,6 +13,10 @@ export interface TicketFacts {
   routes: string[]
   /** The name the host's link gives it (`?n=`), shown before the host says its own. */
   name?: string
+  /** 1: an in-person ticket (QR); 2: a send link (wire 10.1). */
+  kind?: number
+  /** SHA-256 of the ticket's CBOR bytes, hex (wire 10.2): the key of its flow and completion records. */
+  hash: string
 }
 
 /** The link a host's QR code holds: its name for the joiner's question, then the ticket after `#`. */
@@ -45,6 +50,7 @@ export function readTicket(ticket: string): TicketFacts {
   }
   if (!(value instanceof Map)) throw badTicket('not a map')
   const host = value.get(3),
+    kind = value.get(2),
     invitation = value.get(4),
     expires = value.get(6),
     routes = value.get(7)
@@ -58,7 +64,9 @@ export function readTicket(ticket: string): TicketFacts {
     routes: Array.isArray(routes)
       ? routes.filter((route): route is string => typeof route === 'string')
       : [],
-    ...(name ? { name } : {})
+    ...(name ? { name } : {}),
+    ...(typeof kind === 'number' ? { kind } : {}),
+    hash: createHash('sha256').update(bytes).digest('hex')
   }
 }
 

@@ -15,6 +15,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { Socket } from 'node:net'
 import { join } from 'node:path'
 import { vi } from 'vitest'
 import { MousseMainService } from '../../../src/mms/MousseMainService'
@@ -32,6 +33,28 @@ export type { Crossed } from './tap'
 
 /** Whether the checks run the real helper (`MOUSSE_NET_HELPER`) instead of the fake one. */
 export const REAL_HELPER = !!process.env.MOUSSE_NET_HELPER?.trim()
+
+/**
+ * The route a 1b routes check runs over (`--route`, 1b §14): each computer is given only that route, and every
+ * connection must come up on it (`conn.up.route`), else the run fails with `route_mismatch`. Unset: 1a's checks.
+ */
+export const CHECK_ROUTE = readCheckRoute()
+/** The class `tcp` is mapped to for this run (`MOUSSE_NET_ENGINE_CHECK_CLASS`): tailnet, then public. */
+export const CHECK_CLASS: 'tailnet' | 'public' =
+  process.env.MOUSSE_NET_ENGINE_CHECK_CLASS === 'public' ? 'public' : 'tailnet'
+
+function readCheckRoute(): 'tcp' | 'ws' | 'ssh' | undefined {
+  const value = process.env.MOUSSE_NET_ENGINE_CHECK_ROUTE?.trim()
+  return value === 'tcp' || value === 'ws' || value === 'ssh' ? value : undefined
+}
+
+/** The route kind and class every connection of a routes run must report. */
+export function expectedRoute(): { kind: string; class: string } | undefined {
+  if (CHECK_ROUTE === 'tcp') return { kind: 'tcp', class: CHECK_CLASS }
+  if (CHECK_ROUTE === 'ws') return { kind: 'ws', class: 'tunnel' }
+  if (CHECK_ROUTE === 'ssh') return { kind: 'ssh', class: 'ssh' }
+  return undefined
+}
 
 export const DAY = 24 * 60 * 60_000
 export const eventually = (check: () => unknown, timeout = 15_000) => vi.waitFor(check, { timeout })
@@ -123,6 +146,58 @@ export class Fabric {
   /** Every engine message each app sent its helper; `decide` may drop one. */
   private readonly tap: Tap = { crossed: [] }
   private readonly cleanups: Array<() => unknown> = []
+  /** In a routes run, each computer taps Use on offered addresses by itself; a check of Use itself turns it off. */
+  autoUse = true
+  /** The computers made so far (each fake one gets its own route in a routes run). */
+  private made = 0
+  /** Every `conn.up` route a helper reported in a routes run, by the app it went to. */
+  readonly routesSeen: Array<{ to: string; route: unknown }> = []
+
+  constructor() {
+    const expected = expectedRoute()
+    if (!expected) return
+    if (!REAL_HELPER) {
+      // A 1.1 fake: routes with approvals, and the class map the debug helper reads.
+      this.network.minor = 1
+      this.network.classMap = {}
+      process.env.MOUSSE_NET_TEST_CLASS_MAP ||= 'fake'
+    }
+    // Every connection must come up on the route under test (1b §14).
+    this.tap.watch = (message, to) => {
+      if (message.ev !== 'conn.up') return
+      this.routesSeen.push({ to, route: message.route })
+      const route = message.route as { kind?: unknown; class?: unknown } | undefined
+      if (route?.kind !== expected.kind || route?.class !== expected.class)
+        record('route_mismatch')
+    }
+  }
+
+  /**
+   * In a routes run, the fake helper of computer `n` advertises only the route under test, and listens on its
+   * loopback port besides (as a 1.1 helper with nothing selected does, 1b §1.5).
+   */
+  private routeFor(identity: string, n: number): void {
+    if (!CHECK_ROUTE || REAL_HELPER) return
+    const port = 47100 + n
+    const route =
+      CHECK_ROUTE === 'tcp'
+        ? `tcp://100.101.0.${n}:${port}`
+        : CHECK_ROUTE === 'ws'
+          ? `wss://tunnel-${n}.check.invalid/mousse-net/1`
+          : undefined
+    this.network.ports.set(identity, port)
+    this.network.listening.set(identity, [`tcp://127.0.0.1:${port}`])
+    if (!route) return
+    this.network.routes.set(identity, [route])
+    if (CHECK_ROUTE === 'tcp') this.network.classMap![route] = CHECK_CLASS
+    this.network.reach.set(identity, {
+      lan: false,
+      tailnet: CHECK_ROUTE === 'tcp',
+      public: [],
+      tunnels: CHECK_ROUTE === 'ws' ? [route] : [],
+      port
+    })
+  }
 
   get crossed(): Crossed[] {
     return this.tap.crossed
@@ -172,9 +247,11 @@ export class Fabric {
         return { ...launched, pipe: tapPipe(launched.pipe, () => endpoint, this.tap) }
       }
     } else {
+      const identity = Buffer.from(`endpoint-${name}`).toString('hex')
+      this.routeFor(identity, ++this.made)
       mms.netEngine.launcher = async () => {
         // Hex, as a real identity is: tickets carry it as bytes.
-        const fake = this.network.helper(Buffer.from(`endpoint-${name}`).toString('hex'))
+        const fake = this.network.helper(identity)
         computer.fake = fake
         kill = () => fake.kill()
         const exited = new Promise<{ code: number; signal: null; stderr: string }>((resolve) =>
@@ -205,7 +282,7 @@ export class Fabric {
       capabilities: new Set(local ? [NET_LOCAL_CAPABILITY] : []),
       binding: { profileId: mms.profileId, epoch: 1 }
     })
-    return Object.assign(computer, {
+    Object.assign(computer, {
       name,
       mms,
       endpoint,
@@ -217,9 +294,12 @@ export class Fabric {
         dispatchMethod(
           { mms, connection: window(local), globalSequence: () => mms.protocolSequence() },
           method,
-          params
+          routedParams(mms, method, params)
         )
     })
+    // A routes run: each owner taps Use on what its pairings offer, as its window would (unless a check says no).
+    if (CHECK_ROUTE && this.autoUse) this.cleanups.push(useOffered(computer))
+    return computer
   }
 
   /**
@@ -317,6 +397,83 @@ export function approveAll(owner: Computer): () => void {
           .dispatch('netEngine.approve', { request: approval.request, yes: true }, true)
           .catch(() => undefined)
       }
+  }, 25)
+  return () => clearInterval(timer)
+}
+
+/**
+ * A window's join in a routes run: unless the check chose what to share, the joiner ticks every route it may share,
+ * so the reverse direction runs over the route under test too (1b §14).
+ */
+function routedParams(mms: MousseMainService, method: string, params: unknown): unknown {
+  if (!CHECK_ROUTE || method !== 'netEngine.join' || !params || typeof params !== 'object') return params
+  if ('share' in params) return params
+  const share = mms.netEngine.shareable()
+  return share.length ? { ...params, share } : params
+}
+
+let guarded = false
+
+/**
+ * The routes checks' egress guard in this process (1b §14, as the kit's preload does for the app): a request to
+ * Plus (`MOUSSE_ID_ORIGIN`, pointed at a name that never resolves when unset) records `plus_contacted`; a connection
+ * to any address but loopback records `egress_attempted` and fails before a packet leaves.
+ */
+export function guardEgress(): void {
+  if (guarded) return
+  guarded = true
+  process.env.MOUSSE_ID_ORIGIN ||= 'https://plus.check.invalid'
+  const plus = new URL(process.env.MOUSSE_ID_ORIGIN).host
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url)
+    if (url.host === plus) record('plus_contacted')
+    else if (!/^(localhost|127\.|\[::1\])/.test(url.host)) record('egress_attempted')
+    else return realFetch(input, init)
+    throw new Error('egress denied by the check')
+  }) as typeof fetch
+  const connect = Socket.prototype.connect as (...args: unknown[]) => Socket
+  Socket.prototype.connect = function (this: Socket, ...args: unknown[]) {
+    const first = args[0] as { host?: unknown; path?: unknown } | unknown[] | number | string
+    const options = (Array.isArray(first) ? first[0] : first) as
+      | { host?: unknown; path?: unknown }
+      | number
+      | string
+    const host =
+      typeof options === 'object' && options
+        ? options.path
+          ? 'pipe'
+          : String(options.host ?? 'localhost')
+        : typeof options === 'number'
+          ? String(args[1] ?? 'localhost')
+          : 'pipe'
+    if (!['pipe', 'localhost', '::1'].includes(host) && !host.startsWith('127.')) {
+      record('egress_attempted')
+      process.nextTick(() => this.destroy(new Error('egress denied by the check')))
+      return this
+    }
+    return connect.apply(this, args)
+  } as typeof Socket.prototype.connect
+}
+
+/** Taps Use on every "Addresses <B> offered" on `owner`, as its window would, until stopped. */
+export function useOffered(owner: Pick<Computer, 'mms' | 'dispatch'>): () => void {
+  const used = new Set<string>()
+  const timer = setInterval(() => {
+    let devices: Array<{ node: string; offered?: string[] }> = []
+    try {
+      devices = owner.mms.netEngine.status().devices
+    } catch {
+      return
+    }
+    for (const device of devices) {
+      const key = `${device.node} ${device.offered?.join(' ')}`
+      if (!device.offered?.length || used.has(key)) continue
+      used.add(key)
+      void owner
+        .dispatch('netEngine.address.use', { node: device.node }, true)
+        .catch(() => used.delete(key))
+    }
   }, 25)
   return () => clearInterval(timer)
 }

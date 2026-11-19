@@ -51,7 +51,10 @@ describe('a device row (§5.2)', () => {
 })
 
 /** The daemon behind the section: a status, and every call it was asked. */
-function daemon(initial: Partial<NetEngineStatus> = {}) {
+function daemon(
+  initial: Partial<NetEngineStatus> = {},
+  answers: Record<string, (params: any) => unknown> = {}
+) {
   const state: { status: NetEngineStatus } = {
     status: {
       enabled: true,
@@ -66,6 +69,7 @@ function daemon(initial: Partial<NetEngineStatus> = {}) {
   const changed = new Set<(change: { profileId?: string }) => void>()
   const request = vi.fn(async (method: string, params: any) => {
     calls.push([method, params])
+    if (answers[method]) return answers[method]!(params)
     switch (method) {
       case 'netEngine.status':
         return state.status
@@ -284,5 +288,81 @@ describe('Add device', () => {
     } finally {
       vi.restoreAllMocks()
     }
+  })
+})
+
+describe('routes (1b §1.3, §1.5)', () => {
+  const tailnet = (host: string) => ({ route: `tcp://${host}:47100`, label: `${host}:47100`, cls: 'tailnet' as const })
+
+  it('lists the ticket destinations with their class, and shares only the routes ticked', async () => {
+    const d = daemon({}, {
+      'netEngine.join.preview': () => ({
+        kind: 1,
+        destinations: [{ ...tailnet('100.101.7.2'), automatic: false }],
+        shareable: [tailnet('100.101.7.9')]
+      })
+    })
+    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined, initial: 'scan', camera: async () => undefined }))
+    const link = 'mousse://pair?n=Studio#AAAAAAAAAAAAAAAAAAAAAAAA'
+    await type(document.querySelector<HTMLInputElement>('input[aria-label="Pairing link"]')!, link)
+    await click(button('Continue'))
+    expect(document.body.textContent).toContain('100.101.7.2:47100 (Tailnet)')
+    const box = document.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+    expect(box.checked).toBe(false)
+    expect(box.closest('label')?.textContent).toBe('Tailnet 100.101.7.9:47100')
+
+    await click(button('Connect'))
+    expect(d.called('netEngine.join').at(-1)).toEqual({ ticket: link })
+  })
+
+  it('sends a ticked route in the join', async () => {
+    const d = daemon({}, {
+      'netEngine.join.preview': () => ({ kind: 1, destinations: [], shareable: [tailnet('100.101.7.9')] }),
+      'netEngine.join': () => {
+        throw new Error('stop here')
+      }
+    })
+    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined, initial: 'scan', camera: async () => undefined }))
+    await type(document.querySelector<HTMLInputElement>('input[aria-label="Pairing link"]')!, 'mousse://pair?n=Studio#AAAAAAAAAAAAAAAAAAAAAAAA')
+    await click(button('Continue'))
+    await click(document.querySelector<HTMLInputElement>('input[type="checkbox"]')!)
+    await click(button('Connect'))
+    expect(d.called('netEngine.join').at(-1)).toMatchObject({ share: ['tcp://100.101.7.9:47100'] })
+  })
+
+  it('names the class a device is connected on, and offers its offered addresses with Use', async () => {
+    const d = daemon({
+      devices: [device({ node: 'n1', route: 'tailnet', offered: ['wss://x.example/mousse-net/1'] })]
+    })
+    await mount()
+    expect(rowText('n1')).toContain('a1b2c3d4 · Connected · Tailnet')
+    expect(host.textContent).toContain('Addresses Studio offered')
+    expect(host.textContent).toContain('x.example')
+    await click(button('Use'))
+    expect(d.called('netEngine.address.use')).toEqual([{ node: 'n1' }])
+  })
+
+  it('saves Reach through the daemon, tests a route, and says a failed test may be the network', async () => {
+    const d = daemon(
+      {
+        routes: ['tcp://192.168.1.20:47100', 'wss://x.example/mousse-net/1'],
+        reach: { lan: true, tailnet: false, public: [], tunnels: ['wss://x.example/mousse-net/1'], port: 47100, wsPort: 47101 }
+      },
+      {
+        'netEngine.routes.test': () => ({ ok: false, reason: 'unreachable' }),
+        'netEngine.routes.config': () => ({ restarted: true })
+      }
+    )
+    await mount()
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Tunnel URL"]')!.value).toBe('https://x.example')
+    expect(host.textContent).toContain('cloudflared tunnel --url http://127.0.0.1:47101')
+    await click(host.querySelector<HTMLElement>('[role="switch"][aria-label="Tailnet"]') ?? undefined)
+    expect(d.called('netEngine.routes.config')).toEqual([{ tailnet: true }])
+
+    const tests = [...document.querySelectorAll<HTMLButtonElement>('button')].filter((item) => item.textContent === 'Test')
+    await click(tests.at(-1))
+    expect(d.called('netEngine.routes.test')).toEqual([{ route: 'wss://x.example/mousse-net/1' }])
+    const failed = [...host.querySelectorAll<HTMLElement>('[role="status"]')].find((item) => item.textContent === "Couldn't confirm from this network")
+    expect(failed?.title).toMatch(/Saving still works/)
   })
 })

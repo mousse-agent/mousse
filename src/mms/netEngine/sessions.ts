@@ -3,7 +3,7 @@ import type { NodeId, StreamId } from '../../shared/net'
 import { engineLimits } from './limits'
 import { EngineClient, type EngineClientPort } from './session/client'
 import { EngineHost, type EngineHostPort } from './session/host'
-import type { EngineConnection } from './session/transport'
+import type { EngineConnection, EngineRoute } from './session/transport'
 
 export interface EngineSessionHooks {
   /** A client of this pairing answered `hello` and is the newest one: new calls use it. */
@@ -128,6 +128,19 @@ export class EngineSessions {
 
   online(node: NodeId): boolean {
     return this.ready.get(node)?.state() === 'open'
+  }
+
+  /**
+   * The route a pairing's connection came up on (`conn.up.route`): this computer's open client first, else the
+   * other computer's open connection here. Undefined from a 1.0 helper or with nothing open.
+   */
+  route(node: NodeId): EngineRoute | undefined {
+    const client = this.ready.get(node)
+    if (client?.state() === 'open' && client.connection.route) return client.connection.route
+    for (const host of this.hosts)
+      if (host.connection.peer === node && host.connection.isOpen() && host.connection.route)
+        return host.connection.route
+    return undefined
   }
 
   /** Whether the other computer has a connection open to this one (it can reach this computer). */
