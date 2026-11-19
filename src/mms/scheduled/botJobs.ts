@@ -105,7 +105,6 @@ export interface BotScheduleEntry {
   /** Paused from the Automations page (the bot's own pause is the bot's). */
   paused: boolean
   tellMe: TellMe
-  canWakeMe?: boolean
   /** The last occurrence that did not start, and why. */
   skip?: { at: string; reason: string }
 }
@@ -176,15 +175,6 @@ export class BotScheduleBook {
     return Boolean(job && job.state !== 'completed')
   }
 
-  setTelling(botId: string, change: { tellMe?: TellMe; canWakeMe?: boolean; scheduleId?: string }): void {
-    const jobs = this.options.jobs.listJobs().filter(job => job.bot?.botId === botId && (!change.scheduleId || job.bot.scheduleId === change.scheduleId))
-    if (change.scheduleId && !jobs.length) throw new BotScheduleError('schedule_not_found', 'No automation of yours has that id. Use bot_schedule_list first.')
-    for (const job of jobs) this.options.jobs.updateJob(job.id, {
-      ...(change.tellMe ? { tellMe: change.tellMe } : {}),
-      ...(change.canWakeMe !== undefined ? { bot: { ...job.bot!, canWakeMe: change.canWakeMe } } : {})
-    })
-  }
-
   private now(): Date {
     return this.options.now?.() ?? new Date()
   }
@@ -208,7 +198,6 @@ export class BotScheduleBook {
       ...(job.nextRunAt && job.state !== 'paused' && job.enabled ? { nextAt: job.nextRunAt } : {}),
       paused: job.state === 'paused' || !job.enabled,
       tellMe: tellMeOf(job),
-      ...(job.bot.canWakeMe !== undefined ? { canWakeMe: job.bot.canWakeMe } : {}),
       ...(job.botSkip ? { skip: job.botSkip } : {})
     }
   }
@@ -225,8 +214,8 @@ export class BotScheduleBook {
   }
 
   /** Completed schedules stay in Automations; upkeep writes their quiet end line once. */
-  ended(botId?: string): Array<{ botId: string; jobId: string; scheduleId: string; name: string; tellMe: TellMe; canWakeMe?: boolean }> {
-    return this.options.jobs.listJobs().filter((job) => job.bot && (botId === undefined || job.bot.botId === botId) && job.state === 'completed' && Boolean(job.expiresAt)).map((job) => ({ botId: job.bot!.botId, jobId: job.id, scheduleId: job.bot!.scheduleId, name: job.name, tellMe: tellMeOf(job), ...(job.bot!.canWakeMe !== undefined ? { canWakeMe: job.bot!.canWakeMe } : {}) }))
+  ended(botId?: string): Array<{ botId: string; jobId: string; scheduleId: string; name: string; tellMe: TellMe }> {
+    return this.options.jobs.listJobs().filter((job) => job.bot && (botId === undefined || job.bot.botId === botId) && job.state === 'completed' && Boolean(job.expiresAt)).map((job) => ({ botId: job.bot!.botId, jobId: job.id, scheduleId: job.bot!.scheduleId, name: job.name, tellMe: tellMeOf(job) }))
   }
 
   /** Every bot's schedules, oldest first. */

@@ -144,7 +144,6 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   secret_run: ["run", "a command with a secret"],
   // A bot's settings
   consult: ["ask", "a context thread"],
-  telling_set: ["set", "how you're told"],
   use_model: ["change", "the model"],
   set_depth: ["change", "how deeply it thinks"],
   set_profile: ["update", "its profile"],

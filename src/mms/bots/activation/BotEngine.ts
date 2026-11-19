@@ -12,8 +12,7 @@ import { callForBot, type BotMcp } from '../mcp/BotMcp'
 import { isQuietHours, settingCompactionPoint } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
 import type { SettingsStore } from '../../settings/SettingsStore'
-import { isTellMe, type TellMe } from '../../../shared/types'
-import { readBotTelling, tellingLine, type TellingChange } from '../../../shared/bots/personal/tellingSettings'
+import { type TellMe } from '../../../shared/types'
 import { tellingClass } from '../chat/telling'
 import { hasToolImages } from '../chat/toolImages'
 import { extractAppletParts } from '../../../shared/applets'
@@ -30,7 +29,7 @@ import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { basename, join } from 'node:path'
-import { askCallNote, askNoticeText, askText } from '../../../shared/bots/personal/askText'
+import { askNoticeText, askText } from '../../../shared/bots/personal/askText'
 import { lookFields } from '../../../shared/bots/personal/look'
 import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHold, type BotSubagentHold } from '../../../shared/bots/personal/subagentHold'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotSubagents, BotSubagentView, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
@@ -260,7 +259,7 @@ export interface BotEngineHost {
    * The bots' schedules, in the shared scheduled-job store (`BotScheduleBook`): automations whose Who is the bot. The
    * one scheduler claims each occurrence and hands it to `runScheduledOccurrence`. Absent: no bot has schedules here.
    */
-  schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped' | 'ended' | 'setTelling' | 'pageCheckExists'>>
+  schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped' | 'ended' | 'pageCheckExists'>>
   /** Per-schedule progress in bot memory; pending reports are published only on successful completion. */
   progress?: Pick<BotMemoryStore, 'stageProgress' | 'finishProgress' | 'progress'>
   /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). */
@@ -901,19 +900,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.tellings.read()
         this.armDue()
       },
-      tellAt: (botId, tell, at, messageId) => actionNudgeId(messageId) ? new Date(this.followUpTime(botId, Date.parse(at))).toISOString() : tell === 'soon' && !this.ownerActive() && !this.canWake(botId, messageId) ? new Date(this.host.quietHoursFor?.(botId, Date.parse(at))?.end ?? Date.parse(at)).toISOString() : at,
+      tellAt: (botId, tell, at, messageId) => actionNudgeId(messageId) ? new Date(this.followUpTime(botId, Date.parse(at))).toISOString() : tell === 'soon' && !this.ownerActive() ? new Date(this.host.quietHoursFor?.(botId, Date.parse(at))?.end ?? Date.parse(at)).toISOString() : at,
       classify: (message, input) => {
         const actionId = actionNudgeId(message.id)
         if (actionId && botAsksFirst(this.host.settings?.get())) return this.actions.get(actionId)?.status === 'open' ? 'soon' : null
         const activation = message.activationId ? this.store.activation(message.activationId) : undefined
         const reminder = message.id.startsWith('bm_rem_') ? this.store.reminder(message.id.slice(3)) : undefined
-        const botId = this.store.message(message.id)!.botId
-        const tellMe = activation?.trigger.kind === 'schedule' ? undefined : readBotTelling(this.store.registry(botId)?.tellJson).tellMe
-        return tellingClass({ tellMe, level: activation ? this.host.runLevel?.(activation.id) : undefined, message, scheduleLine: input.scheduleLine, ownerTurn: !!activation && memoryLaneOf(activation) === 'chat',
+        return tellingClass({ message, scheduleLine: input.scheduleLine, ownerTurn: !!activation && memoryLaneOf(activation) === 'chat',
           reminder: !!reminder, reminderOwner: reminder?.ownerSet, quiet: this.quietReport(this.store.message(message.id)!.botId, message) })
       },
-      tellingSettings: (botId) => this.tellingSettings(botId),
-      telling: (botId) => this.tellingLine(botId),
       schedules: (botId) => this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), jobId: schedule.jobId, paused: schedule.paused, name: schedule.name, prompt: schedule.prompt })),
       // The threads it started that still work: it is busy while it manages them.
       launched: (botId) => this.launchedThreads(botId),
@@ -3879,12 +3874,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const held = heldNow(permission)
       if (held) return { ok: false, refused: { text: held, askId: '' } }
       if (firstMessage) return { ok: false, refused: { text: BOT_ASK_NOT_YET_TEXT, askId: '' } }
-      const note = call.kind === 'app' ? askCallNote(call.tool, call.args) : undefined
       if (row.lane === 'run') {
         this.refused(row.id, permission)
-        return this.raiseAsk(row, input.mainN, 'gate', permission, wallMessage(decided.wall), undefined, note)
+        return this.raiseAsk(row, input.mainN, 'gate', permission, wallMessage(decided.wall))
       }
-      return { ok: false, wall: this.raiseWall(row.id, { dispatchN: input.mainN, kind: 'gate', permission, reason: wallMessage(decided.wall), ...(note ? { note } : {}) }) }
+      return { ok: false, wall: this.raiseWall(row.id, { dispatchN: input.mainN, kind: 'gate', permission, reason: wallMessage(decided.wall) }) }
     }
     const readOnly = threadsReadOnlyOf(row)
     const authority: BotAuthority = {
@@ -4325,7 +4319,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * consults stop with it). Asks never expire. The sixth wall of an activation ends it `blocked`
    * instead. The returned wall is what the refused call tells the model.
    */
-  raiseWall(activationId: string, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string; note?: string }): WallReason {
+  raiseWall(activationId: string, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): WallReason {
     const current = this.store.activation(activationId)
     if (current && this.removedExecutingSchedule(current)) return this.endRemovedScheduleAtWall(current)
     if (current?.lane === 'run' && input.kind === 'budget') return this.budgetEnd(current, input)
@@ -4693,19 +4687,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** An ask in plain words for its card (`askText`), with the bot's current limits. */
-  private askCardText(row: BotActivationRow, permission: BotAskRequest, callNote?: string): { title: string; note: string } {
+  private askCardText(row: BotActivationRow, permission: BotAskRequest): { title: string; note: string } {
     if ('ask' in permission && permission.ask === 'let_alone') {
       const pending = this.alone.pending(row.botId, row.id, permission)
       if (pending) return { title: pending.title, note: 'Only this automation, this tool and this place. Anything else asks you first.' }
     }
     const budget = this.store.activeGrant(row.botId)?.manifest.budget
-    const text = askText(permission, budget ? { budget } : {})
-    // What the refused call would have done ("It would set: …") says more than the permission's own line.
-    return callNote ? { title: text.title, note: callNote } : text
+    return askText(permission, budget ? { budget } : {})
   }
 
   /** The bot's open ask for `fingerprint` becomes this activation's wall, or a new one is written. */
-  private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string; note?: string }): BotEscalationRow {
+  private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): BotEscalationRow {
     const input = { ...asked, permission: this.limitAsk(row.botId, asked.permission) }
     const fingerprint = this.fingerprintOf(row.id, input.kind, input.permission)
     const open = this.store.openAsk(row.botId, fingerprint)
@@ -4713,7 +4705,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (open.activationId !== row.id || open.mode !== 'wall') this.store.moveAskToWall(open.id, row.id, input.dispatchN)
       return this.store.escalation(open.id)!
     }
-    const text = this.askCardText(row, input.permission, asked.note)
+    const text = this.askCardText(row, input.permission)
     const escalation = {
       id: `esc_${randomUUID()}`,
       botId: row.botId,
@@ -4735,7 +4727,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return this.store.escalation(escalation.id)!
   }
 
-  private wallInTransaction(activationId: string, from: readonly BotActivationRow['status'][], input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string; note?: string }): { kind: 'wall'; escalation: BotEscalationRow } | { kind: 'blocked' } | { kind: 'none' } {
+  private wallInTransaction(activationId: string, from: readonly BotActivationRow['status'][], input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): { kind: 'wall'; escalation: BotEscalationRow } | { kind: 'blocked' } | { kind: 'none' } {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return { kind: 'none' }
     if (this.store.countEscalations(activationId) >= MAX_BOT_WALLS) {
@@ -4795,7 +4787,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * owner said Not now to it in the last 24 hours: then no card is made, and the bot is told the owner
    * said not now (never that it asked). The bot is told it asked only when a card is there.
    */
-  private raiseAsk(row: BotActivationRow, dispatchN: number, kind: BotWallKind, asked: BotAskRequest, reason: string, toolCallId?: string, note?: string): BotCheck {
+  private raiseAsk(row: BotActivationRow, dispatchN: number, kind: BotWallKind, asked: BotAskRequest, reason: string, toolCallId?: string): BotCheck {
     const permission = this.limitAsk(row.botId, asked)
     const fingerprint = this.fingerprintOf(row.id, kind, permission)
     let raised: { askId: string; created: boolean } | { refused: string }
@@ -4809,7 +4801,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (this.store.countNewAsks(row.botId, { activationId: row.id }) >= MAX_RUN_ASKS ||
           this.store.countNewAsks(row.botId, { since: new Date(this.now() - 24 * 60 * 60_000).toISOString() }) >= MAX_BOT_ASKS_PER_DAY)
           return { refused: BOT_ASK_ENOUGH_TEXT }
-        const text = this.askCardText(row, permission, note)
+        const text = this.askCardText(row, permission)
         const id = `esc_${randomUUID()}`
         this.store.insertEscalation({
           id, botId: row.botId, activationId: row.id, dispatchN, toolCallId: toolCallId ?? null, kind, permission, reason: reason.slice(0, 2000),
@@ -8317,7 +8309,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       done: (threadId, why) => this.completeSchedule(threadId, why),
       list: (botId) => this.listSchedules(botId)
     },
-    setTelling: (botId, activationId, change) => this.setTelling(botId, activationId, change),
     setProfile: (botId, profile) => this.setProfile(botId, profile),
     setModel: (botId, activationId, scope, choice) => this.setModel(botId, activationId, scope, choice),
     ownerWords: (botId, activationId) => this.ownerWords(botId, activationId),
@@ -8852,40 +8843,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.changed({ botId })
   }
 
-  tellingSettings(botId: string): import('../../../shared/bots/personal/tellingSettings').BotTellingPreferences {
-    const quietHours = this.host.settings?.get().notifications.quietHours
-    return { ...readBotTelling(this.store.registry(botId)?.tellJson), ...(quietHours ? { quietHours } : {}) }
-  }
-
-  tellingLine(botId: string): string | undefined {
-    const settings = this.tellingSettings(botId)
-    return tellingLine(settings, settings.quietHours)
-  }
-
-  setTelling(botId: string, activationId: string, change: TellingChange): string {
-    if (!this.timerOwnerSet(botId, activationId)) throw new BotEngineError('owner_only', 'Only a turn your owner’s own message or tap started can change telling. Suggest it in your report instead.')
-    if (change.tellMe !== undefined && !isTellMe(change.tellMe)) throw new BotEngineError('invalid_params', 'tellMe is needs_you, look, fyi or every.')
-    if (change.quietHours !== undefined && change.quietHours !== 'off' && !isQuietHours(change.quietHours)) throw new BotEngineError('invalid_params', 'Quiet hours need different from and to times in HH:MM (00:00 to 23:59), or off.')
-    if (change.canWakeMe !== undefined && typeof change.canWakeMe !== 'boolean' || change.schedules !== undefined && typeof change.schedules !== 'boolean') throw new BotEngineError('invalid_params', 'canWakeMe and schedules must be true or false.')
-    if (change.scheduleId !== undefined && (typeof change.scheduleId !== 'string' || !change.scheduleId || change.canWakeMe === undefined || change.tellMe !== undefined || change.schedules)) throw new BotEngineError('invalid_params', 'For one automation give scheduleId and canWakeMe only.')
-    if (change.quietHours !== undefined && !this.host.settings) throw new BotEngineError('unavailable', 'Quiet hours cannot be changed here.')
-    if ((change.schedules || change.scheduleId) && !this.host.schedules?.setTelling) throw new BotEngineError('unavailable', 'Automations cannot be changed here.')
-    if (change.schedules || change.scheduleId) this.host.schedules!.setTelling!(botId, { ...(change.schedules ? { tellMe: change.tellMe } : {}), ...(change.scheduleId ? { scheduleId: change.scheduleId, canWakeMe: change.canWakeMe } : {}) })
-    if (change.quietHours !== undefined) {
-      const settings = this.host.settings!.set({ notifications: { quietHours: change.quietHours === 'off' ? null : change.quietHours } })
-      this.host.settingsChanged?.(settings)
-    }
-    this.store.db.transaction(() => {
-      const previous = readBotTelling(this.store.registry(botId)?.tellJson)
-      this.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ ...previous, ...(change.tellMe !== undefined ? { tellMe: change.tellMe } : {}), ...(!change.scheduleId && change.canWakeMe !== undefined ? { canWakeMe: change.canWakeMe } : {}) }), botId)
-    })
-    this.changed({ botId })
-    this.quietHoursChanged()
-    const line = this.tellingLine(botId)
-    if (change.scheduleId) return [line, `That automation ${change.canWakeMe ? 'can' : 'cannot'} wake you.`].filter(Boolean).join('\n')
-    return line ?? 'No telling preferences set.'
-  }
-
   private timerOwnerSet(botId: string, from: string): boolean {
     const row = this.store.activation(from)
     return !!row && row.botId === botId && memoryLaneOf(row) === 'chat'
@@ -9356,18 +9313,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private ownerActive(): boolean { return this.host.ownerActive?.() ?? false }
-  private canWake(botId: string, messageId: string): boolean {
-    if (readBotTelling(this.store.registry(botId)?.tellJson).canWakeMe === true) return true
-    const activationId = this.store.message(messageId)?.activationId
-    const trigger = activationId ? this.store.activation(activationId)?.trigger : undefined
-    if (trigger?.kind !== 'schedule') return false
-    if (trigger.completed) return trigger.completed.canWakeMe === true
-    if (trigger.removedTelling) return trigger.removedTelling.canWakeMe === true
-    try {
-      return (this.host.schedules?.get(botId, trigger.scheduleId)?.canWakeMe
-        ?? this.host.schedules?.ended?.(botId).find(schedule => schedule.scheduleId === trigger.scheduleId)?.canWakeMe) === true
-    } catch { return false } // An unavailable job store never prevents the report from being posted.
-  }
   private followUpTime(botId: string, at: number): number { return this.host.quietHoursFor?.(botId, at)?.end ?? at }
   noteOwnerActivity(): void { this.host.ownerActivity?.(); this.quietHoursChanged() }
   /** Only future tell_at on a soon row denotes a hold; no additional stored state. */
@@ -9376,7 +9321,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const now = this.now()
     for (const row of this.store.all("SELECT id, bot_id, at FROM bot_messages INDEXED BY bot_messages_tell_due WHERE tell IS NOT NULL AND tell = 'soon' AND told_at IS NULL AND (tell_at > at OR id GLOB 'bm_action_*_n[12]')")) {
       const botId = String(row.bot_id)
-      const end = (actionNudgeId(String(row.id)) || !this.ownerActive() && !this.canWake(botId, String(row.id))) ? this.host.quietHoursFor?.(botId, now)?.end : undefined
+      const end = (actionNudgeId(String(row.id)) || !this.ownerActive()) ? this.host.quietHoursFor?.(botId, now)?.end : undefined
       this.store.run('UPDATE bot_messages SET tell_at = ? WHERE id = ?', new Date(end ?? Math.max(now, Date.parse(String(row.at)) + 1)).toISOString(), String(row.id))
     }
     // Reconstruct the normal due time from the saved bubble/last nudge, so an old quiet-hours end
@@ -9866,7 +9811,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** Keep the deleted job's telling wishes for work whose final report is still pending. */
-  scheduleRemoved(botId: string, scheduleId: string, telling: { tellMe: TellMe; canWakeMe?: boolean }): void {
+  scheduleRemoved(botId: string, scheduleId: string, telling: { tellMe: TellMe }): void {
     new PageChecks(this.store).remove(botId, scheduleId)
     this.alone.prune(botId)
     this.store.db.transaction(() => {
@@ -10079,7 +10024,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const schedule = this.host.schedules?.get(row.botId, trigger.scheduleId)
     if (!schedule) return
     // Persist the intent before removing the shared job: retry after a crash can finish its removal.
-    this.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ ...trigger, completed: { why, name: schedule.name, tellMe: schedule.tellMe, ...(schedule.canWakeMe !== undefined ? { canWakeMe: schedule.canWakeMe } : {}) } }), row.id)
+    this.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ ...trigger, completed: { why, name: schedule.name, tellMe: schedule.tellMe } }), row.id)
     this.pendingScheduleRemovals.set(this.scheduleKey(row.botId, trigger.scheduleId), row.id)
     this.removeSchedule(row.botId, trigger.scheduleId)
     this.markCompletedScheduleRemoved(row)

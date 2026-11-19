@@ -470,19 +470,19 @@ describe('a message sent while the chat waits on an ask', () => {
 })
 
 describe('a card for one of the bot\'s own tools', () => {
-  // A bot made before telling_set existed has none of it in its grant, so the owner's "notify me when it's all done"
-  // asks for it. The card and the line its answer leaves say what it does, never "use the telling set tool".
-  it('reads in plain words, says what the call would set, and Not now keeps them', async () => {
-    f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, appTools: manifest.appTools.filter((tool) => tool !== 'telling_set') }))
-    const { payload, prepared } = await chat('Notify me when all done.', 'm-tell')
-    const call: NormalisedCall = { kind: 'app', tool: 'telling_set', args: { tellMe: 'look', quietHours: { from: '22:00', to: '07:00' } } }
-    expect(prepared.authority.check(call)).toMatchObject({ ok: false, wall: { kind: 'escalated', permission: 'change when it tells you' } })
+  // A bot made before set_profile existed has none of it in its grant, so the owner's "call yourself Scout" asks for it.
+  // The card and the line its answer leaves say what it does, never "use the set profile tool".
+  it('reads in plain words, and Not now keeps them', async () => {
+    f.bots.narrowGrant(botId, (manifest) => ({ ...manifest, appTools: manifest.appTools.filter((tool) => tool !== 'set_profile') }))
+    const { payload, prepared } = await chat('Call yourself Scout.', 'm-rename')
+    const call: NormalisedCall = { kind: 'app', tool: 'set_profile', args: { name: 'Scout' } }
+    expect(prepared.authority.check(call)).toMatchObject({ ok: false, wall: { kind: 'escalated', permission: 'change its name or description' } })
     await finish(f, payload, 'interrupted', { text: 'I need your OK first.', outcome: { interruptedBy: 'bot_wall' } })
     const reply = chatOf(f, botId).at(-1)!
-    expect(reply.ask).toMatchObject({ status: 'open', title: 'change when it tells you', note: 'It would set: tell you when something is worth a look, quiet hours 22:00 to 07:00.' })
-    expect(JSON.stringify(reply.ask)).not.toMatch(/telling/)
+    expect(reply.ask).toMatchObject({ status: 'open', title: 'change its name or description' })
+    expect(JSON.stringify(reply.ask)).not.toMatch(/set_profile|set profile/)
     const { message } = await f.bots.service.answer(botId, reply.ask!.askId, 'not_now')
-    expect(askAnsweredLine('Penny', message.ask!)).toBe('You said not now to Penny: change when it tells you')
+    expect(askAnsweredLine('Penny', message.ask!)).toBe('You said not now to Penny: change its name or description')
   })
 })
 

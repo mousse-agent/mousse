@@ -823,7 +823,6 @@ export class MmsProfileServices {
       schedulesChanged: () => { this.scheduled?.wake() },
       // The shared store, through the book made once the scheduler exists below (nothing reads it before that).
       schedules: {
-        setTelling: (botId, change) => this.botSchedules.setTelling(botId, change),
         list: (botId) => this.botSchedules?.list(botId) ?? [],
         get: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId),
         add: (botId, input, createdBy, options) => this.botSchedules.add(botId, input, createdBy, options),
@@ -1155,7 +1154,7 @@ export class MmsProfileServices {
     this.scheduled.on('jobRemoved', (jobId: string) => botMemory?.removeProgressForJob(jobId))
     if (personalBots) {
       this.scheduled.on('jobRemoved', (_jobId: string, job: ScheduledJob) => {
-        if (job.bot) personalBots.scheduleRemoved(job.bot.botId, job.bot.scheduleId, { tellMe: tellMeOf(job), canWakeMe: job.bot.canWakeMe })
+        if (job.bot) personalBots.scheduleRemoved(job.bot.botId, job.bot.scheduleId, { tellMe: tellMeOf(job) })
       })
       this.scheduled.setBotRunner({ editSchedule: (botId, save) => personalBots.editSchedule(botId, save), findOccurrence: (input) => personalBots.findScheduledOccurrence(input), runOccurrence: (input) => personalBots.runScheduledOccurrence(input) })
       // Each tick also brings the inbox's bot runs up to date, so their items appear without the page open.
@@ -2419,7 +2418,6 @@ export class MmsProfileServices {
     const slots = engine.customSlots(botId).map((slot) => ({ name: slot.name, ...(slot.description ? { description: slot.description } : {}) }))
     return {
       ...(ownerName ? { ownerName } : {}), ...(openAsks.length ? { openAsks } : {}), ...(schedules.length ? { schedules } : {}),
-      telling: engine.tellingLine(botId),
       work, ...(reminders.length ? { reminders } : {}), ...(blocked.length ? { blocked } : {}), ...(questions.length ? { questions } : {}),
       ...(slots.length ? { slots } : {})
     }

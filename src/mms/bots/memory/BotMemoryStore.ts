@@ -448,7 +448,7 @@ export class BotMemoryStore {
     const owner = this.all("SELECT * FROM bot_journal WHERE bot_id = ? AND activation_id = ? AND kind = 'owner_msg' AND seq > ? AND redacted_at IS NULL ORDER BY seq LIMIT 20",
       botId, activationId, afterSeq).map(journalRowOf)
     const saved = this.get(`SELECT 1 FROM bot_journal WHERE bot_id = ? AND activation_id = ? AND seq > ? AND (
-      (kind = 'tool_call' AND json_extract(json, '$.tool') IN ('memory_save', 'telling_set')) OR (kind = 'memory_op' AND json_extract(json, '$.op') = 'save')) LIMIT 1`,
+      (kind = 'tool_call' AND json_extract(json, '$.tool') = 'memory_save') OR (kind = 'memory_op' AND json_extract(json, '$.op') = 'save')) LIMIT 1`,
     botId, activationId, afterSeq) !== undefined
     return { owner, saved }
   }
