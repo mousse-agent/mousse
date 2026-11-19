@@ -282,7 +282,19 @@ export const ENGINE_CONTROLS = [
   'plus-probe',
   'egress-probe',
   'lan-only-candidates',
-  'route-leak'
+  'route-leak',
+  // phase1b.ssh-add-app
+  'refuse-if-paired',
+  'ssh-row-pairback',
+  'profile-before-journal',
+  'grant-id-not-checked',
+  'retry-after-connected',
+  'overwrite-1a-row',
+  'own-row-not-resumed',
+  'existing-reply-not-kept',
+  'removal-skips-unsaved-grant',
+  'ssh-row-not-converted',
+  'remote-autostart'
 ] as const
 export type EngineControl = (typeof ENGINE_CONTROLS)[number]
 

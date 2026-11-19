@@ -42,7 +42,13 @@ export interface PairingPort {
   changed(): void
   /** A test stops this computer at `step` when this answers true. */
   crashAt?(step: PairingStep): boolean
+  /** Whether a grant's receipt names an SSH add request this computer knows (1b §3.6): host recovery leaves it. */
+  sshRequest?(receipt: string): boolean
 }
+
+/** A row added over SSH runs its own steps (1b §3.6): 1a's ceremony, pairback and recovery skip it. */
+const skipsCeremony = (row: EnginePeerRow): boolean =>
+  row.source === 'ssh' && !engineControl('ssh-row-pairback')
 
 export const fingerprintOf = (identity: string): string =>
   `sha256:${createHash('sha256')
@@ -235,7 +241,7 @@ export class EnginePairing {
     for (;;) {
       this.alive()
       const row = peers.serving(node)
-      if (!row) return
+      if (!row || skipsCeremony(row)) return
       if (row.state === 'consented') {
         await this.rejoin(row)
         if (peers.get(node)?.state === 'consented') return
@@ -372,6 +378,8 @@ export class EnginePairing {
     for (const grant of Array.isArray(answer.grants) ? answer.grants : []) {
       if (!grant || typeof grant.identity !== 'string') continue
       if (grant.role !== undefined && grant.role !== 'owner') continue
+      // A grant an SSH add made belongs to its request, never to an owed row.
+      if (typeof grant.receipt === 'string' && this.port.sshRequest?.(grant.receipt)) continue
       if (typeof grant.expires_at === 'number' && grant.expires_at <= now) continue
       this.owe(
         grant.identity,
@@ -453,7 +461,8 @@ export class EnginePairing {
     this.outsideWindow.delete(node)
     for (const wake of [...this.waiters]) wake()
     const row = this.port.peers.serving(node)
-    if (row && (row.state === 'granted' || row.state === 'joined')) void this.advance(node)
+    if (row && !skipsCeremony(row) && (row.state === 'granted' || row.state === 'joined'))
+      void this.advance(node)
   }
 
   /**
@@ -469,7 +478,12 @@ export class EnginePairing {
       if (this.crashed || this.stopped) return
       if (row.state === 'consented' || row.state === 'joined' || row.state === 'granted')
         void this.advance(row.localId)
-      if (row.state === 'joined' || row.state === 'granted' || row.state === 'connected')
+      if (
+        row.state === 'joined' ||
+        row.state === 'granted' ||
+        row.state === 'connected' ||
+        row.state === 'ssh_granted'
+      )
         void this.dial(row).catch(() => undefined)
     }
   }
