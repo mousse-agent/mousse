@@ -145,8 +145,8 @@ it('C6 support rollback omits the switch-on advice and still delivers it after r
   const provider = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => on })
   const off = await provider.chatPreamble({ botId: 'ada', activationId: 'c6-off' })
   expect(off).not.toContain('Tools that send or change things now ask your owner first')
-  const bindingAdvice = BOT_CHANGELOG.find(entry => entry.id === 28)!.text
-  expect(off).toContain(bindingAdvice)
+  expect(off).not.toContain(BOT_CHANGELOG.find(entry => entry.id === 28)!.text)
+  expect(off).toContain(BOT_CHANGELOG.find(entry => entry.id === 29)!.text)
   await settled(provider, 'c6-off')
   on = true
   // A later non-switch entry must not make the withheld switch entry count as delivered, including across restart.
@@ -154,23 +154,34 @@ it('C6 support rollback omits the switch-on advice and still delivers it after r
   expect(await restarted.chatPreamble({ botId: 'ada', activationId: 'c6-on' })).toContain('Tools that send or change things now ask your owner first')
   await settled(restarted, 'c6-on')
   const next = await restarted.chatPreamble({ botId: 'ada', activationId: 'c6-after' })
-  expect(next).not.toContain(bindingAdvice)
   expect(next).not.toContain('Tools that send or change things now ask your owner first')
 })
 
-it('C6 support rollback advances a bot that already saw entry 27 after delivering entry 28 once', async () => {
+it('C6 support rollback shows entry 29 while E1 entry 28 stays pending, then delivers 28 once', async () => {
   existingBot()
   memory.write(() => memory.setState('ada', 'changelog_seen', 27))
+  const e1 = BOT_CHANGELOG.find(entry => entry.id === 28)!
+  const bindingAdvice = BOT_CHANGELOG.find(entry => entry.id === 29)!
+  // The experimental support switch withholds E1. The contiguous cursor must wait at 27.
   const provider = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => false })
-  const laterAdvice = BOT_CHANGELOG.find(entry => entry.id === 28)!.text
   for (let turn = 0; turn < 3; turn++) {
-    const activationId = `c6-already-seen-${turn}`
-    const pack = await provider.chatPreamble({ botId: 'ada', activationId })
-    expect(pack).not.toContain('Tools that send or change things now ask your owner first')
-    if (turn === 0) expect(pack).toContain(laterAdvice)
-    else expect(pack).not.toContain(laterAdvice)
+    const activationId = `c6-seen-off-${turn}`
+    const off = await provider.chatPreamble({ botId: 'ada', activationId })
+    expect(off).toContain(bindingAdvice.text)
+    expect(off).not.toContain(e1.text)
     await settled(provider, activationId)
-    expect(memory.getState<number>('ada', 'changelog_seen')).toBe(BOT_CHANGELOG_LATEST)
+    expect(memory.getState<number>('ada', 'changelog_seen')).toBe(27)
+  }
+  const on = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => true })
+  const enabled = await on.chatPreamble({ botId: 'ada', activationId: 'c6-seen-on' })
+  expect(enabled).toContain(e1.text)
+  expect(enabled).toContain(bindingAdvice.text)
+  await settled(on, 'c6-seen-on')
+  expect(memory.getState<number>('ada', 'changelog_seen')).toBe(29)
+  for (let turn = 0; turn < 3; turn++) {
+    const after = await on.chatPreamble({ botId: 'ada', activationId: `c6-seen-after-${turn}` })
+    expect(after).not.toContain(e1.text)
+    expect(after).not.toContain(bindingAdvice.text)
   }
 })
 
@@ -182,14 +193,22 @@ it('tells existing bots that a pasted secret arrives by name', async () => {
   expect(text).toContain('secret_run')
 })
 
-it('introduces binding and service reads together without promising a later tool', async () => {
+it('rollback delivers later independent advice without marking hidden advice seen', async () => {
   existingBot()
-  memory.write(() => memory.setState('ada', 'changelog_seen', 27))
-  const pack = await packs().chatPreamble({ botId: 'ada', activationId: 'service-reads' })
-  expect(pack).toContain('secret bound to one service')
-  expect(pack).toContain('use secret_fetch')
-  expect(pack).not.toContain('secret_fetch comes later')
-  expect(pack).not.toContain('keep working without using a bound key')
+  memory.write(() => memory.setState('ada', 'changelog_seen', 26))
+  // E1's entry 28 is gated too. Model a later independent entry without publishing a new changelog id.
+  const changes = BOT_CHANGELOG as import('../../src/mms/bots/changelog').BotChangelogEntry[]
+  const later = { id: BOT_CHANGELOG_LATEST + 1, date: '2026-11-19', text: 'Later independent advice.' }
+  changes.push(later)
+  try {
+    const off = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => false })
+    expect(await off.chatPreamble({ botId: 'ada', activationId: 'later-off' })).toContain(later.text)
+    await settled(off, 'later-off')
+    const restarted = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => true })
+    const text = await restarted.chatPreamble({ botId: 'ada', activationId: 'later-on' })
+    expect(text).toContain(BOT_CHANGELOG.find(e => e.id === 27)!.text)
+    expect(text).toContain(BOT_CHANGELOG.find(e => e.id === 28)!.text)
+  } finally { changes.pop() }
 })
 
 it('C6 support rollback stops before the next unseen hidden entry when there are two', async () => {
@@ -218,4 +237,13 @@ it('C6 support rollback stops before the next unseen hidden entry when there are
   await settled(restarted,'two-hidden-on')
   expect(memory.getState<number>('ada','changelog_seen')).toBe(30)
   expect(await restarted.chatPreamble({botId:'ada',activationId:'two-hidden-after'})).not.toContain(HEADER)
+})
+
+it('E1 r2 existing bots learn the argument rule with entry 28', async () => {
+  existingBot()
+  memory.write(() => memory.setState('ada', 'changelog_seen', 27))
+  const pack = await packs().chatPreamble({ botId: 'ada', activationId: 'act-argument-rule' })
+  expect(pack).toContain('same top-level argument names')
+  expect(pack).toContain('only plain text like a message body or a file name may change')
+  expect(pack).toContain('New addresses and other destinations still ask')
 })

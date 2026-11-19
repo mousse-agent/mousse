@@ -173,7 +173,7 @@ export interface BotAuthority {
    */
   mcpTools?: readonly BotMcpTool[]
   /** Mousse holds calls requiring the owner's answer; undefined means the ordinary call path. */
-  holdMcp?(tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): { text: string; isError?: boolean } | undefined
+  holdMcp?(tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): { text: string; isError?: boolean } | Promise<{ text: string; isError?: boolean }> | undefined
   maskMcpArguments?(args: Record<string, unknown>): Record<string, unknown>
   /**
    * The bot's own folders: its files folder (`files`) and the activation's private scratch folder, both writable;

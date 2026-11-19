@@ -1,8 +1,8 @@
 /**
  * A steer/send that lands after the model finished streaming but before the
- * final response is fully written (post-LLM finalizing) must still be treated
- * as mid-turn: steers accepted, sends queued — never a concurrent turn and
- * never silently dropped.
+ * final response is fully written (post-LLM finalizing): the model can no longer
+ * read a steer, so it becomes the next turn, first in the queue; a send is queued
+ * behind it — never a concurrent turn and never silently dropped.
  */
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
@@ -40,7 +40,7 @@ describe('late-turn steer/send during finalizing', () => {
     delete process.env.MOUSSE_HOME
   })
 
-  it('steer is accepted and send is queued while the final response finalizes', async () => {
+  it('a steer is queued as the next turn and a send behind it while the final response finalizes', async () => {
     const projectRepo = mkdtempSync(join(tmpdir(), 'mousse-late-repo-'))
     try {
       const thread = store.createThread('late')
@@ -65,24 +65,25 @@ describe('late-turn steer/send during finalizing', () => {
 
       // The first turn is past the provider and shows finished while it records its checkpoint: the steer and the send
       // land in that exact window, before the final response is written and the turn settles.
-      let steered: boolean | undefined
+      let steered: ReturnType<OrchestratorService['steerThreadOrEnqueueExternal']> | undefined
       let late: ReturnType<OrchestratorService['send']> | undefined
       const realSetTurnPhase = (orch as any).setTurnPhase.bind(orch)
       ;(orch as any).setTurnPhase = (threadId: string, phase: string, ...rest: unknown[]) => {
         realSetTurnPhase(threadId, phase, ...rest)
         if (phase === 'completed' && !late) {
-          steered = orch.steerActiveTurn('late steer', thread.id)
+          // The composer's steer, as the app sends it.
+          steered = orch.steerThreadOrEnqueueExternal(thread.id, 'late steer', { source: 'gui-steer' })
           late = orch.send('second', false, { threadId: thread.id })
         }
       }
 
       const r1 = await orch.send('first', false, { threadId: thread.id })
       expect(r1.queued).not.toBe(true)
-      expect(steered).toBe(true)
+      expect(steered).toMatchObject({ steered: false, queued: true })
       expect((await late!).queued).toBe(true)
 
-      // Both the queued send and the leftover steer follow-up must drain as
-      // sequential turns — never concurrently with the first.
+      // The steer and then the queued send drain as sequential turns — never
+      // concurrently with the first.
       await waitFor(
         () => chatCalls >= 3 && !orch.isActiveTurnRunning(thread.id),
         15_000,
@@ -94,11 +95,12 @@ describe('late-turn steer/send during finalizing', () => {
       const contents = orch.getMessages(thread.id).map((m) => m.content)
       expect(contents).toContain('first')
       expect(contents).toContain('second')
-      // The steer echo is added exactly once, when accepted mid-turn.
+      // The steer shows exactly once, as its own turn.
       expect(contents.filter((c) => c === 'late steer')).toHaveLength(1)
-      // The leftover steer ran as a follow-up turn after the last drain.
-      expect(lastUserPerCall.some((t) => t.includes('second'))).toBe(true)
-      expect(lastUserPerCall.some((t) => t.includes('late steer'))).toBe(true)
+      // The steer runs next, before the send that was queued after it.
+      const turnOf = (text: string) => lastUserPerCall.findIndex((t) => t.includes(text))
+      expect(turnOf('late steer')).toBe(1)
+      expect(turnOf('second')).toBe(2)
     } finally {
       rmSync(projectRepo, { recursive: true, force: true })
     }

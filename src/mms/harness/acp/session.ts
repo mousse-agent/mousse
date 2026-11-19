@@ -763,7 +763,9 @@ export class AcpSessions {
         silenceFailure = harnessAppError({
           code: 'timeout',
           message: `${label} did not answer: it sent no reply and no update for ${describeDuration(silenceMs)}, so it was stopped. Send the message again.`,
-          instanceId
+          instanceId,
+          // The agent had the prompt the whole time and may have acted on it without saying so.
+          promptTaken: true
         })
         closeAcpConnection(current)
       }, silenceMs)

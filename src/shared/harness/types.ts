@@ -313,8 +313,18 @@ export interface HarnessError {
    * turn shows the connection-failed retry affordance, and no turn-level retry runs again.
    */
   retriesExhausted?: true
+  /**
+   * The agent took the prompt and then went silent: it may have acted on it unseen, so Mousse never sends the turn
+   * again itself (the person may).
+   */
+  promptTaken?: true
   /** `permission_mode_unenforceable`: the modes the instance can enforce. */
   supportedModes?: PermissionMode[]
+}
+
+/** A turn error whose details say the agent took the prompt before it failed (`HarnessError.promptTaken`). */
+export function isPromptTaken(error: unknown): boolean {
+  return error instanceof AppError && (error.details as { promptTaken?: unknown } | undefined)?.promptTaken === true
 }
 
 /** A turn error whose details say the runtime's own request retries ran out (`HarnessError.retriesExhausted`). */

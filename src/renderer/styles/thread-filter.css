@@ -38,8 +38,8 @@
   background: color-mix(in srgb, var(--text-primary) 7%, transparent);
 }
 
-.thread-filter-field:focus-visible,
-.thread-filter-button:focus-visible {
+/* The field brightens its own hairline; the button takes the app's focus fill (polish.css), as every button does. */
+.thread-filter-field:focus-visible {
   border-color: rgba(var(--accent-rgb), 0.45);
   outline: none;
 }

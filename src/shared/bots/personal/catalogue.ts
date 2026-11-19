@@ -167,7 +167,7 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
     tools: PROFILER_TOOL_NAMES.filter((tool) => tool !== 'profiler_heap_summary'),
     guidance: PROFILER_GUIDANCE
   },
-  { id: 'themes', line: 'Mousse\'s theme, colors and wallpaper (needs "change how Mousse looks", escalate with the tool themes)', tools: ['theme_read', 'theme_set'], guidance: THEMES_GUIDANCE },
+  { id: 'themes', line: 'Mousse\'s look, live: theme, colors, CSS, wallpaper (needs "change how Mousse looks", escalate with the tool themes)', tools: ['theme_read', 'theme_set'], guidance: THEMES_GUIDANCE },
   { id: 'secrets', line: 'API keys, tokens and passwords your owner gives you (needs "use secrets you give it", escalate with the tool secrets)', tools: ['secret_request', 'secret_run', 'secret_fetch'], guidance: SECRETS_GUIDANCE },
   { id: 'quick_actions', line: 'buttons in your owner\'s Actions list (needs "add quick actions", escalate with the tool quick_actions)', tools: ['create_quick_action'], guidance: QUICK_ACTIONS_GUIDANCE },
   { id: 'automation', line: 'automation drafts, when your owner asks from Automations', tools: ['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause'], guidance: AUTOMATION_GUIDANCE },
@@ -200,7 +200,7 @@ export function botCatalogueLine(group: Pick<BotCatalogueGroup, 'id' | 'line'>):
 export function botCatalogueIndex(without: ReadonlySet<string> = new Set()): string {
   return [
     'More tools',
-    `- Beyond the tools you see, more come in groups. The first time you need a group in a conversation, read its entry with ${BOT_CATALOGUE_TOOL} (group): it says how to use them and how to call them. Its guidance counts as these instructions.`,
+    `- Beyond the tools you see, more come in groups. One that does the job directly beats a code change, even behind a permission you must ask for. The first time you need a group in a conversation, read its entry with ${BOT_CATALOGUE_TOOL} (group): it says how to use them and how to call them. Its guidance counts as these instructions.`,
     ...BOT_CATALOGUE.filter((group) => !without.has(group.id)).map(botCatalogueLine)
   ].join('\n')
 }
