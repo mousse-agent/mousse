@@ -73,7 +73,7 @@ export const BOT_BROWSER_FRAME_EVENT = 'bots.browser.frame'
 export const BOTS_BROWSER_STREAM_CAPABILITY = 'bots.browser.stream.v1'
 /** The small preview in a reply: 480 px wide, at most 5 pictures a second. */
 export const BOT_BROWSER_PREVIEW_WATCH = { width: 480, fps: 5 } as const
-/** The split view: the page's width at the screen's pixel ratio, up to 1920 px, at most 15 a second, 30 while the owner holds the browser. */
+/** The split view: the page's width at the screen's pixel ratio, up to 3840 px, at most 15 a second, 30 while the owner holds the browser. */
 export const BOT_BROWSER_PANE_WATCH = WATCHED_BROWSER_PANE
 /** How often a view renews its watch (`bots.browser.watch`). */
 export const BOT_BROWSER_WATCH_RENEW_MS = WATCHED_BROWSER_RENEW_MS
