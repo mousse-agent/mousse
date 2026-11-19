@@ -11,11 +11,13 @@ import { CopyButton } from '../settings/IconButtons'
 import { Modal } from '../ui/Modal'
 import { useDaemonCall } from '../devices/useDaemonCall'
 import { readPairingLink } from './engineRows'
+import { SshAddSteps } from './SshAddSteps'
 
 type Step =
   | { kind: 'choose' }
   | { kind: 'show' }
   | { kind: 'scan' }
+  | { kind: 'ssh' }
   | { kind: 'confirm'; ticket: string; host: string }
   | { kind: 'joining'; host: string }
 
@@ -35,7 +37,7 @@ export function AddEngineDeviceDialog({
 }: {
   status: NetEngineStatus | undefined
   onClose: () => void
-  initial?: 'choose' | 'show' | 'scan'
+  initial?: 'choose' | 'show' | 'scan' | 'ssh'
   /** Opens a camera stream; tests and computers without one answer undefined. */
   camera?: () => Promise<MediaStream | undefined>
 }) {
@@ -113,7 +115,14 @@ export function AddEngineDeviceDialog({
     return true
   }
 
-  const title = step.kind === 'show' ? 'Show QR' : step.kind === 'scan' ? 'Scan' : 'Add device'
+  const title =
+    step.kind === 'show'
+      ? 'Show QR'
+      : step.kind === 'scan'
+        ? 'Scan'
+        : step.kind === 'ssh'
+          ? 'Add over SSH'
+          : 'Add device'
   return (
     <Modal open title={title} onClose={onClose}>
       <div className="engine-dialog" data-step={step.kind}>
@@ -133,8 +142,20 @@ export function AddEngineDeviceDialog({
             >
               Scan
             </button>
+            {status?.reach && (
+              <button
+                type="button"
+                className="settings-btn"
+                title="Use another computer you can reach over SSH. One way: this computer uses it."
+                onClick={() => setStep({ kind: 'ssh' })}
+              >
+                Over SSH
+              </button>
+            )}
           </div>
         )}
+
+        {step.kind === 'ssh' && <SshAddSteps onDone={onClose} />}
 
         {step.kind === 'show' &&
           (joined ? (
