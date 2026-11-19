@@ -2662,6 +2662,10 @@ export class OrchestratorService extends EventEmitter {
     // A thread's sidebar row shows its latest reply, kept in its metadata when each turn ends (`Thread.lastReply`).
     for (const event of ['turn-completed', 'turn-failed', 'turn-interrupted', 'turn-paused'] as const)
       this.on(event, (payload: { threadId?: string }) => { if (payload?.threadId) this.recordLastReply(payload.threadId) })
+    // Its links show how its latest run ended once it is quiet, after a restart too (`Thread.lastRun`).
+    const runEnds = { 'turn-completed': 'done', 'turn-failed': 'failed', 'turn-interrupted': undefined } as const
+    for (const [event, lastRun] of Object.entries(runEnds))
+      this.on(event, (payload: { threadId?: string }) => { if (payload?.threadId) this.recordLastRun(payload.threadId, lastRun) })
     // A thread's goal decides after each of its turns whether the next goal turn is queued.
     const outcomes = { 'turn-completed': 'completed', 'turn-failed': 'failed', 'turn-interrupted': 'interrupted', 'turn-paused': 'paused' } as const
     for (const [event, outcome] of Object.entries(outcomes) as Array<[keyof typeof outcomes, GoalTurnOutcome]>)
@@ -11569,6 +11573,16 @@ export class OrchestratorService extends EventEmitter {
       }
       if (title) this.writeThreadTitle(threadId, shown, title, 'auto')
     })
+  }
+
+  /** Keeps how the thread's latest run ended (`Thread.lastRun`) in its metadata, for its links. Never fails the turn. */
+  private recordLastRun(threadId: string, lastRun: Thread['lastRun']): void {
+    if (!this.threadStore || threadId === '__unbound__') return
+    try {
+      this.threadStore.setThreadLastRun(threadId, lastRun)
+    } catch (error) {
+      console.warn('how the run ended could not be kept', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   /**

@@ -13,7 +13,7 @@ import { worktreeMark } from '../lib/worktreeMark'
 import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { arrangeThreadFeed, sortArchivedThreads, sortSidebarThreads, sortThreadFeed } from '../../shared/threadSidebarSort'
 import { openSubagentParentRow, rollUpActivities, visibleThreads } from '../../shared/threadLineage'
-import { needsMeLabel, threadAttention, threadStatus, worstOf, type ThreadAttention } from '../../shared/threadAttention'
+import { needsMeLabel, threadAttention, threadStatus, worstOf, type ThreadAttention, type ThreadLinkStatus } from '../../shared/threadAttention'
 import { needsMeThreads, useSupervisedWaits } from '../lib/needsMe'
 import { hasMoreBelow, revealDelta } from '../lib/sidebarScroll'
 import { SIDEBAR_REVEAL_TIMEOUT_MS, useSidebarRevealStore } from '../lib/sidebarReveal'
@@ -267,7 +267,8 @@ function SidebarRenameInput({
 
 
 
-function ThreadCardBody({
+/** A thread's card: its project mark, project and status, title, latest reply and computer. Also a thread link's hover card. */
+export function ThreadCardBody({
   thread,
   projectName,
   project,
@@ -285,7 +286,9 @@ function ThreadCardBody({
   onCancelRename,
   onStartRename,
   preview,
-  pullRequests
+  pullRequests,
+  statusWithAge = false,
+  linkStatus
 }: {
   thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly' | 'expiresAt' | 'expiryStopsRun' | 'setupFailure'>
   projectName?: string
@@ -314,6 +317,10 @@ function ThreadCardBody({
   /** The latest reply, shown under the title; absent when it has none or previews are off. */
   preview?: string
   pullRequests: readonly ThreadPullRequestSummary[]
+  /** The status says how long ago too when it is Done or waits for the person (`ThreadCardStatus`'s `withAge`). */
+  statusWithAge?: boolean
+  /** A thread link's card: the status its link shows (`threadLinkStatus`), so the two never differ. */
+  linkStatus?: ThreadLinkStatus
 }) {
   return (
     <>
@@ -329,7 +336,7 @@ function ThreadCardBody({
           <span className="threads-sidebar-card-project">{projectName ?? 'No project'}</span>
           {thread.pinnedAt && <Pin size={11} strokeWidth={2} className="threads-sidebar-card-pin" aria-label="Pinned" />}
           <ThreadPullRequestCount pullRequests={pullRequests} />
-          <ThreadCardStatus threadId={threadId} activity={activity} live={liveActivity} awaitsApproval={awaitsApproval} updatedAt={thread.updatedAt} setupFailed={thread.setupFailure?.reason} />
+          <ThreadCardStatus threadId={threadId} activity={activity} live={liveActivity} awaitsApproval={awaitsApproval} updatedAt={thread.updatedAt} withAge={statusWithAge} setupFailed={thread.setupFailure?.reason} linkStatus={linkStatus} />
         </span>
         {isRenaming ? (
           <SidebarRenameInput initialName={renamingName} onSubmit={onRename} onCancel={onCancelRename} />
