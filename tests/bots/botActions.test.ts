@@ -4676,7 +4676,7 @@ it.each([['evil. com', true], ['evil . com', false], ['evil .com', false], ['evi
   }
 )
 
-it.each(['.', ',', '!', '?', ';', ':', ')', ']', '}', "'", '"', '>'])(
+it.each(['.', ',', '!', '?', ';', ':', ')', ']', '}', "'", '"', '>', '.:', '!:', '!>)'])(
   'E1 r3 a repeated signature ignores surrounding punctuation: %s', async punctuation => {
     const address = 'penny.helper@example.org'
     const t = await aloneAsk('allow', 'send', 'Old message ' + address)
@@ -4756,7 +4756,7 @@ it('E1 r3c an unsafe raw source filename does not grant variation', async () => 
 it.each([
   '<a href="https&#58;//evil&#46;com">x</a>', '<a href="https&#x3a;//evil&#x2e;com">x</a>',
   'see evil<b></b>.com', 'curl "evil"".com"', 'u = "evil" + ".com"',
-  'evil\u034f.com', 'evil\ufe0f.com', 'evil.\u0301com', 'evil\u2060.com',
+  'evil\u034f.com', 'evil\ufe0f.com', 'evil.\u0301com', 'evil\u2060.com', 'evil‧com',
   '//intranet/x', 'evil%2Ecom', 'evil%EF%BC%8Ecom', 'evil&#46;com', 'evil&#x2e;com',
   'https%3A%2F%2Fevil.example/x', 'https%253A%252F%252Fevil.example/x', 'owner%40evil.example'
 ])('E1 r3c encoded and mark-padded destinations still ask: %s', async body => {
