@@ -38,7 +38,11 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
     // Never searched on PATH: only the verified install or a manual path runs.
     binaryNames: [],
     ...compatibilityFields('antigravity'),
-    latestVersion: { kind: 'pinned', version: ANTIGRAVITY_VERSION },
+    // Update offers only a release Mousse reviewed and ships, never the vendor feed's latest: the
+    // native CLI's where it qualifies, else the 1.1.1 server's. Read on every update check.
+    get latestVersion() {
+      return { kind: 'pinned' as const, version: options.builtIn().pinnedVersion() }
+    },
     multiInstance: false,
     privateHome: false,
     canInstall: true,
@@ -87,10 +91,8 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
           onProgress({ message, ...(fraction !== undefined ? { fraction } : {}), ...(bytes ?? {}) }))),
         cancelInstall: () => service.cancelInstall(),
         installState: () => service.installState(),
-        managed: () => {
-          const path = service.managedBinary()
-          return path ? { path, version: ANTIGRAVITY_VERSION } : undefined
-        },
+        // The verified install that runs: the native CLI where it qualifies, else the 1.1.1 server.
+        managed: () => service.managedRuntime(),
         validateOverride: (path) => void validateManualAntigravityBinary(path),
         forgetConversation: (threadId) => service.forgetConversation(threadId),
         stop: () => {}
