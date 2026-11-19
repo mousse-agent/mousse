@@ -1112,7 +1112,8 @@ describe('a reply as it is written', () => {
     act(() => setAnimationSpeed('normal'))
     await openWriting()
     expect(transcript().querySelector('.bot-typing')).not.toBeNull()
-    const bubble = transcript().querySelector('.bot-turn-bubble')
+    const bubble = transcript().querySelector('.bot-typing')?.closest('.bot-bubble')
+    expect(bubble).toBeTruthy()
     // A word still being written is not shown: the dots stay until one is whole.
     await write('The')
     expect(live()).toBeNull()
@@ -1122,7 +1123,7 @@ describe('a reply as it is written', () => {
     expect(live()?.textContent).toBe('The')
     expect(transcript().querySelector('.bot-typing')).toBeNull()
     // The same bubble takes the words: the typing row fades out over them, then stays unseen, holding the bubble's size.
-    expect(transcript().querySelector('.bot-turn-bubble')).toBe(bubble)
+    expect(live()?.closest('.bot-bubble')).toBe(bubble)
     expect(transcript().querySelector('.bot-turn-typing.is-leaving')?.getAttribute('aria-hidden')).toBe('true')
     expect(live()?.classList.contains('is-arriving')).toBe(true)
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, BOT_HANDOFF_MS + 20)) })
@@ -1146,6 +1147,8 @@ describe('a reply as it is written', () => {
     await act(async () => fake.emit.message('inbox', message(2, { text: 'The first drive is faster.\n\nThe second one is cheaper.', activationId: 'act_c1' })))
     expect(live()).toBeNull()
     expect(transcript().querySelectorAll('.bot-message:not(.bot-typing)')).toHaveLength(1)
+    // It is drawn in the bubble that was typing and writing it: nothing new mounts.
+    expect(transcript().querySelector('.bot-message .bot-bubble')).toBe(bubble)
     expect(stopped()).toBeNull()
   })
 
