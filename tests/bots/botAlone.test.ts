@@ -39,9 +39,8 @@ it('E1 r2 object names are fixed, while plain string content can vary', () => {
 it.each(['hex', 'base64url'])('E1 r2 address scan bounds 256000 characters of %s', kind => {
   const body = (kind === 'hex' ? '0123456789abcdef' : 'aZ09_-bX47').repeat(25600).slice(0, 256000)
   const start = performance.now()
-  const result = argumentContract({ body }, 'test-key')
+  expect(() => argumentContract({ body }, 'test-key')).toThrow(/too long/)
   expect(performance.now() - start).toBeLessThan(200)
-  expect(result.varying).toEqual(['body'])
 })
 
 it('E1 r2 object-valued places show scalar leaves and associated names in words', () => {
@@ -67,6 +66,12 @@ it.each([undefined, { repo: 'r' }, { database: 'd' }])('E1 r3c non-file places n
 it('E1 r3c address scan bounds NFKC-expanding content', () => {
   const body = '㌖'.repeat(255000)
   const start = performance.now()
-  expect(argumentContract({ body }, 'test-key').tokens.body).toEqual([])
+  expect(() => argumentContract({ body }, 'test-key')).toThrow(/too long/)
   expect(performance.now() - start).toBeLessThan(200)
+})
+
+it.each(['ﷺ', '㌖'])('E1 r4 refuses expanded text before scanning: %s', char => {
+ const start=performance.now()
+ expect(()=>argumentContract({body:char.repeat(255000)},'test-key')).toThrow(/too long/)
+ expect(performance.now()-start).toBeLessThan(200)
 })

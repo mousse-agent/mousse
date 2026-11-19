@@ -4864,3 +4864,24 @@ it.each(['https://3.5', '@3.5', '3.5/path', '1.2.3.4', 'v1.2.3', 'Tickets:evil.c
  const t = await aloneAsk('allow', 'send', 'A plain message')
  expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('open')
 })
+
+it('E1 r4 keyed token digests bind the field even for identical source tokens', async () => {
+ const t = await aloneAsk('allow', 'send', 'owner@example.test', { subject:'owner@example.test' })
+ const entry = JSON.parse(String(f.store.get("SELECT value FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'",t.botId)!.value))
+ expect(entry.arguments.tokens.body[0]).not.toBe(entry.arguments.tokens.subject[0])
+})
+it('E1 r4 a valid exception is inert with asks first disabled', async () => {
+ const t = await aloneAsk()
+ f.host.settings!.get().experimental.botAsksFirstOff = true
+ expect(f.bots.alone.match(t.botId,t.schedule.scheduleId,'mail','send',{to:t.args.to},t.args)).toBeUndefined()
+ expect(f.bots.alone.items(t.botId)).toEqual([])
+})
+it.each(['a.com','www.ex.com'])('E1 r4 host-shaped names stay exact: %s', async name => {
+ const t = await aloneAsk('allow','upload_file',undefined,{folder:'scans',name})
+ expect((await aloneNext(t,{...t.args,name:name==='a.com'?'evil.com':'mail.ex.com'} as never)).action.status).toBe('open')
+})
+it('E1 r4 expanded text above 64k asks without scanning', async () => {
+ const t=await aloneAsk('allow','send','A small message')
+ expect((await aloneNext(t,{...t.args,body:'ﷺ'.repeat(255000)})).action.status).toBe('open')
+ expect(t.calls).toHaveLength(1)
+})
