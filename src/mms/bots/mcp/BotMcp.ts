@@ -511,7 +511,7 @@ export async function callForBot(input: {
   const offered = input.bot.mcpTools?.find((tool) => tool.name === input.name || tool.providerName === input.name)
   const target = offered ?? input.known?.(input.name)
   if (!target) return { text: `There is no tool called ${input.name} for you.`, isError: true }
-  const held = offered && input.bot.holdMcp?.(offered, input.args, input.toolCallId)
+  const held = offered && await input.bot.holdMcp?.(offered, input.args, input.toolCallId)
   if (held) return held
   const decided = input.bot.check({ kind: 'mcp', server: target.server, tool: target.tool, serverName: target.serverName, args: input.args })
   if (!decided.ok) return { ...(input.heldAction ? { callState: 'failed' as const } : {}), text: checkMessage(decided), isError: true }

@@ -1,3 +1,4 @@
+import type { AloneRequest } from '../actions/BotAlone'
 import { asksFirstFor } from '../../../shared/bots/personal/asksFirst'
 import { readableActionTitle, type ActionRow } from '../actions/BotActions'
 import type { BotActionCard } from '../../../shared/bots/personal/chat'
@@ -226,6 +227,8 @@ export class BotChatProjection {
   constructor(private readonly options: {
     store: BotStore
     asksFirst?(): boolean
+    aloneItems?(botId: string): BotPermissionItem[]
+    aloneAsk?(botId: string, activationId: string, request: AloneRequest): { title: string; details: { summary: string; items: string[] } } | undefined
     journal?: BotJournal
     /** `bots.message`, after the row's transaction committed. */
     emit(event: { botId: string; message: BotChatMessage }): void
@@ -506,9 +509,10 @@ export class BotChatProjection {
       note: asks ? 'Tools that may send or change things ask before each use. Tools that say they only read do not ask.' : this.options.asksFirst?.() && mcp?.changes === 'unknown' ? 'Mousse decides which calls ask at each use. Tools that say they only read do not ask.' : text.note,
       ...(tip ? { tip } : {}),
       status: cardStatus(escalation.status),
-      kind: isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission',
+      kind: isSpecialAsk(escalation.permission) && escalation.permission.ask === 'export_memory' ? 'export_memory' : 'permission',
       ...(tools.length ? { details: { summary: `${tools.length} ${mcp?.added ? 'new ' : ''}tool${tools.length === 1 ? '' : 's'}`, items: tools, ...(more ? { more } : {}) } } : {}),
       ...(mcp && !tools.length && escalation.status === 'open' ? { loading: true as const } : {}),
+      ...('ask' in escalation.permission && escalation.permission.ask === 'let_alone' ? this.options.aloneAsk?.(escalation.botId, escalation.activationId, escalation.permission) : {}),
       ...this.limitOutcome(escalation),
       ...this.permissionOutcome(escalation)
     }
@@ -620,7 +624,7 @@ export class BotChatProjection {
     // The legacy message begins with a raw tool id. Reuse the review's stored display names for the sidebar.
     const approvalMetadata = approval && this.options.asksFirst?.() === true ? JSON.parse(String(approval.card_json ?? '{}')) ?? {} : undefined
     const approvalLabel = approvalMetadata
-      ? `${typeof approvalMetadata.title === 'string' ? approvalMetadata.title : readableActionTitle(JSON.parse(String(approval!.target_json)).tool)} · ${typeof approvalMetadata.serverName === 'string' ? approvalMetadata.serverName : 'Your service'}`
+      ? `${typeof approvalMetadata.actionTitle === 'string' ? approvalMetadata.actionTitle : typeof approvalMetadata.title === 'string' ? approvalMetadata.title : readableActionTitle(JSON.parse(String(approval!.target_json)).tool)} · ${typeof approvalMetadata.serverName === 'string' ? approvalMetadata.serverName : 'Your service'}`
       : String(approval?.text ?? 'Send this action?').split('\n')[0]
     const waitingOn = this.store.waitingQuestions(definition.id)
     const chatQuestions = this.store.openChatQuestions(definition.id)
@@ -716,6 +720,7 @@ export class BotChatProjection {
       ...(this.options.tellingSettings ? { tellingSettings: this.options.tellingSettings(definition.id) } : {}),
       ...(this.options.telling?.(definition.id) ? { telling: this.options.telling(definition.id) } : {}),
       permissions: grant ? [
+        ...(this.options.aloneItems?.(definition.id) ?? []),
         ...this.permissionItems(definition.id, grant.manifest, grant.approvedAt).filter((item) => !this.store.disabledPermissions(definition.id).some((off) => off.id === item.id)).map((item) => ({ ...item, enabled: true })),
         ...this.store.disabledPermissions(definition.id).flatMap((off) => this.permissionItems(definition.id, off.manifest, grant.approvedAt).filter((item) => item.id === off.id).map((item) => ({ ...item, enabled: false, note: `Switched off for this bot. ${item.note}` })))
       ] : [],

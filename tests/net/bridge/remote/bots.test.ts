@@ -26,6 +26,10 @@ import { MmsListsSource, type ListsServices } from '../../../../src/mms/bridge/r
 import type { BotChatMessage, BotSummary } from '../../../../src/shared/bots/personal/chat'
 import type { PermissionMode } from '../../../../src/shared/permissionMode'
 import { botFixture, chatOf, createBot, finish, start, type BotFixture } from '../../../bots/botFixture'
+import { actionDigest } from '../../../../src/mms/bots/actions/BotActions'
+import { aloneKey, argumentContract } from '../../../../src/mms/bots/actions/BotAlone'
+import { botManifestDigest } from '../../../../src/mms/bots/grants/compile'
+import { getDefaultSettings } from '../../../../src/shared/settings'
 
 const at = '2026-11-07T09:00:00.000Z'
 const BOT = 'bot-0123456789ab'
@@ -260,6 +264,42 @@ describe('bot methods on a real bot', () => {
     // An ask that is not there is a plain refusal too.
     const missing = await refused(() => call(methods, 'bots.asks.answer', { botId, askId: ASK, answer: 'allow' }))
     expect(missing.code).toBe('stream_unknown')
+  })
+
+  it('a phone can remove one automation exception without widening a grant', async () => {
+    f.host.settings = { get: getDefaultSettings } as never
+    const binding = { identity: 'mail', configDigest: 'same', schemaDigest: 'same' }
+    f.host.mcp = { binding: () => binding, servers: () => [], offered: () => [] } as never
+    const schedule = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send digest' }, 'owner')
+    const manifest = { ...f.store.activeGrant(botId)!.manifest, mcp: [{ serverId: 'mail', tool: 'send', level: 'asks_first' as const }] }
+    f.store.approve(botId, botManifestDigest(manifest), manifest)
+    const request = { scheduleId: schedule.scheduleId, serverId: 'mail', tool: 'send' }
+    const key = aloneKey(request)
+    const place = { to: 'inbox@example.test' }
+    const entry = { ...request, place, placeDigest: actionDigest(place), binding, promptDigest: actionDigest('Send digest'),
+      arguments: argumentContract({ ...place, body: 'A plain message' }, 'phone-test-key'), grantedAt: f.store.now(),
+      title: '‘Send digest’ sends to Inbox in Mail without asking', askTitle: 'let ‘Send digest’ send to Inbox in Mail without asking' }
+    f.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, key, JSON.stringify(entry))
+    expect(f.bots.service.get(botId).permissions.some(item => item.id === key)).toBe(true)
+    const before = f.store.activeGrant(botId)!.digest
+    await call(methods, 'bots.permissions.revoke', { botId, permissionId: key })
+    expect(f.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, key)).toBeUndefined()
+    expect(f.store.activeGrant(botId)!.digest).toBe(before)
+  })
+
+  it('refuses a let-alone answer on a phone without changing authority', async () => {
+    await f.bots.service.chatSend({ botId, text: 'Ask', clientRequestId: 'alone' })
+    const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    const { payload, prepared } = await start(f, activation.id)
+    prepared.authority.escalate!({ permission: { ask: 'export_memory' }, reason: 'Ask' })
+    await finish(f, payload, 'completed', { text: 'Allow?' })
+    const ask = f.store.openAsks(botId)[0]!
+    f.store.run('UPDATE bot_escalations SET permission_json = ? WHERE id = ?', JSON.stringify({ ask: 'let_alone', scheduleId: 's', serverId: 'mail', tool: 'send' }), ask.id)
+    const before = f.store.all('SELECT * FROM bot_memory_state')
+    const error = await refused(() => call(methods, 'bots.asks.answer', { botId, askId: ask.id, answer: 'allow' }))
+    expect(error).toMatchObject({ code: 'forbidden', message: 'Answer this on the computer.' })
+    expect(f.store.escalation(ask.id)?.status).toBe('open')
+    expect(f.store.all('SELECT * FROM bot_memory_state')).toEqual(before)
   })
 
   it('"use your threads" from a device: its message holds the turn to its own limit, and only a Full access device may Allow the card', async () => {

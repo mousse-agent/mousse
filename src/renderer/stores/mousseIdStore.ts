@@ -34,6 +34,8 @@ interface MousseIdState {
   net?: NetStatus
   /** Runtime `MOUSSE_ID_ORIGIN` from the main process. */
   runtimeOrigin: string
+  /** Settings → Labs → Mousse Plus (legacy) for this profile; off hides Mousse ID as if no service were set. */
+  plusLegacy?: boolean
   pending?: PendingSignIn
   busy: boolean
   error: string
@@ -56,10 +58,11 @@ export const mousseIdOrigin = (state: Pick<MousseIdState, 'runtimeOrigin'>): str
 
 /**
  * Mousse ID exists in this window only when a service address is set, at build time or with
- * `MOUSSE_ID_ORIGIN` at launch. Without one, no account UI is shown and no account status is read.
+ * `MOUSSE_ID_ORIGIN` at launch, and Mousse Plus (legacy) is on. Otherwise no account UI is shown and no account
+ * status is read.
  */
-export const mousseIdAvailable = (state: Pick<MousseIdState, 'runtimeOrigin'>): boolean =>
-  mousseIdOrigin(state) !== ''
+export const mousseIdAvailable = (state: Pick<MousseIdState, 'runtimeOrigin' | 'plusLegacy'>): boolean =>
+  state.plusLegacy !== false && mousseIdOrigin(state) !== ''
 
 /** Signed in, including while the daemon renews a registration that lapsed during sleep. */
 export const mousseIdSignedIn = (plus?: PlusStatus): boolean => !!plus?.connected || !!plus?.reconnecting
@@ -258,6 +261,14 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
     }
   }
 }))
+
+/** Follows this profile's Settings → Labs → Mousse Plus (legacy); a change reads the account status again. */
+export function applyPlusLegacy(settings: { experimental?: { plusLegacy?: boolean } } | null | undefined): void {
+  const plusLegacy = settings?.experimental?.plusLegacy !== false
+  if ((useMousseIdStore.getState().plusLegacy !== false) === plusLegacy) return
+  useMousseIdStore.setState({ plusLegacy, plus: undefined })
+  void useMousseIdStore.getState().refresh()
+}
 
 /** True when this window has a Mousse ID service; see {@link mousseIdAvailable}. */
 export function useMousseIdAvailable(): boolean {

@@ -14009,6 +14009,11 @@ export class OrchestratorService extends EventEmitter {
     let runtimeRetried = false
     /** The runtime or Mousse compacted the history inside the turn: the turn is never sent again as it was. */
     let providerCompacted = false
+    /**
+     * The runtime checkpointed its native history inside the turn: a provider reply (and any tool it ran) is part of the
+     * thread now, so the turn is never sent again as it was.
+     */
+    let nativeCheckpointed = false
     const noteRetry = (attempt: number, maxAttempts: number | undefined, cause: string | undefined): void => {
       pendingRetries = { attempt, ...(maxAttempts ? { max: maxAttempts } : {}) }
       const state: ProviderRetryState = { status: 'retrying', attempt, ...(maxAttempts ? { maxAttempts } : {}), ...(cause ? { cause } : {}) }
@@ -14402,6 +14407,7 @@ export class OrchestratorService extends EventEmitter {
         boundary: (at) => hold.boundary(at),
         providerTurn: () => hold.providerTurn(),
         nativeMessages: (nativeMessages, checkpoint) => {
+          nativeCheckpointed = true
           // A completed-turn measurement becomes stale as soon as the live loop
           // appends or compacts native history. Estimate until the final provider
           // response supplies a new authoritative prompt measurement.
@@ -14727,7 +14733,7 @@ export class OrchestratorService extends EventEmitter {
           delay = turn.abort.signal.aborted ? undefined : turnRetryDelay(error, {
             retries,
             elapsedMs: Date.now() - firstRequestAt,
-            answered: providerProgress || providerCompacted,
+            answered: providerProgress || providerCompacted || nativeCheckpointed,
             toolStarted: conversationToolsUsed,
             steered: drains > 0 || acceptedDrains.size > 0 || takenDrains.size > 0,
             runtimeRetried,

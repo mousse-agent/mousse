@@ -141,7 +141,7 @@ function budgetText(key: string, amount: number | undefined, budget: BotBudget |
 
 /** `request` in plain words. `budget`, the bot's current limits, turns a limit ask into its new total. */
 export function askText(request: BotAskRequest, options: { budget?: BotBudget } = {}): AskText {
-  if (isSpecialAsk(request)) return { title: 'save its memory to a folder', note: 'You pick the folder. Nothing else changes.' }
+  if (isSpecialAsk(request)) return request.ask === 'export_memory' ? { title: 'save its memory to a folder', note: 'You pick the folder. Nothing else changes.' } : { title: 'allow this request', note: 'This request grants no tools.' }
   if ('path' in request) return OLD_FILES_TEXT
   if ('skill' in request) return { title: `use the ${request.skill} skill`, note: '' }
   // The owner's MCP tools are one ask per server: "use your GitHub tools", and "use GitHub's new tools" once it added some.
