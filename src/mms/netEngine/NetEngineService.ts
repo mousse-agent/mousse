@@ -41,6 +41,7 @@ import {
   type HelperStatus
 } from './helper/supervisor'
 import { EnginePairing, type PairingStep } from './pairing'
+import { EnginePlus } from './plus'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 
 export const NON_KEEPER_MESSAGE =
@@ -97,6 +98,8 @@ export class NetEngineService implements EngineDirectoryPort {
   private readonly since = new Map<string, number>()
   /** Wakes the windows when a condition is due to show (`rowStuckMs` after it began). */
   private stuckTimer?: ReturnType<typeof setTimeout>
+  /** Mousse Plus and "Remove on all my hosts", as the helper reports them (Phase 4). */
+  readonly plus = new EnginePlus(() => this.changed())
   constructor(
     private readonly options: {
       profileDir: string
@@ -211,8 +214,24 @@ export class NetEngineService implements EngineDirectoryPort {
       approvals: this.started?.pairing.pendingApprovals() ?? [],
       ...(this.routes().length ? { routes: this.routes() } : {}),
       ...(this.sharedAccount() ? { sharedAccount: true } : {}),
-      scanIntervalMs: engineLimits().scanIntervalMs
+      scanIntervalMs: engineLimits().scanIntervalMs,
+      ...(this.helper ? this.plus.view((identity) => this.peerName(identity)) : {})
     }
+  }
+
+  /** The other computer of a pairing: its endpoint id and name, for "Remove on all my hosts". */
+  device(node: NodeId): { identity: string; name: string } {
+    const row = this.require()
+      .peers.all()
+      .find((r) => r.localId === node && r.state !== 'removed')
+    if (!row) throw new NetError('bad_request', 'No such device.')
+    return { identity: row.endpoint, name: row.name }
+  }
+
+  /** A paired computer's name by its endpoint id. */
+  private peerName(identity: string): string | undefined {
+    return this.started?.peers.all().find((r) => r.endpoint === identity && r.state !== 'removed')
+      ?.name
   }
 
   /** Where this computer's helper listens, as it said in `hello`. */
@@ -705,6 +724,7 @@ export class NetEngineService implements EngineDirectoryPort {
     })
     const told = this.selfName()
     await helper.hello()
+    this.plus.attach(helper)
     this.toldName = told
     this.changed()
     // Removals finish, ceremonies resume, owed rows are written and every pairing is dialled again.

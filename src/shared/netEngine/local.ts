@@ -13,7 +13,14 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.join',
   'netEngine.retry',
   'netEngine.remove',
-  'netEngine.address.add'
+  'netEngine.address.add',
+  'netEngine.plus.signIn',
+  'netEngine.plus.cancel',
+  'netEngine.plus.refresh',
+  'netEngine.plus.signOut',
+  'netEngine.removeEverywhere.plan',
+  'netEngine.removeEverywhere',
+  'netEngine.removeEverywhere.answer'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
 
@@ -73,6 +80,77 @@ export interface NetEngineApproval {
   device: string
 }
 
+/** One class of the paid relay (typing, or copies) as the helper's blocks stand. */
+export interface NetEngineRelayClass {
+  /** `funded`: blocks are held; `paused`: its refill failed or is late (copies only); `unfunded`: none held. */
+  state: 'funded' | 'paused' | 'unfunded'
+  bytesLeft: number
+  /** How long the held blocks last at the recent rate, or until they expire; also through a Plus outage. */
+  lastsSecs?: number
+  /** Why the last refill failed (`allowance_used`, `balance_empty`, ...). */
+  refillError?: string
+}
+
+/** A Plus balance (bytes). */
+export interface NetEnginePlusPool {
+  allowance?: number
+  available?: number
+  debt?: number
+}
+
+/** Mousse Plus as this computer's helper sees it (Phase 4, M16). */
+export interface NetEnginePlus {
+  /** This build has a Plus address. */
+  configured: boolean
+  /** This computer is signed in to Plus. */
+  linked: boolean
+  /** Sign-in in progress: the code to type on the Plus website, and where. */
+  link?: { userCode: string; verifyUrl: string; expiresAt: number }
+  /** How the last sign-in ended: `approved`, `denied`, `expired`, `gone` (start again) or `unlinked`. */
+  linkResult?: string
+  /** `active`, `past_due`, `cancelled` or `none`. */
+  plan?: string
+  periodEndsAt?: number
+  bulk?: NetEnginePlusPool
+  interactive?: NetEnginePlusPool
+  /** Plus can't be reached since this time (Unix seconds). */
+  unreachableSince?: number
+  /** The paid relay, per class, while this computer uses one. */
+  relay?: { interactive?: NetEngineRelayClass; bulk?: NetEngineRelayClass }
+}
+
+/** One removal sent from this computer for one host ("Remove on all my hosts", design D.3). */
+export interface NetEngineRemoval {
+  id: string
+  /** The host's endpoint id, and its name here when this computer knows it. */
+  host: string
+  hostName?: string
+  /** The removed device's endpoint id and name. */
+  removed: string
+  name: string
+  grant: number
+  /** `waiting`, `sent`, `quota`, `delivered`, `done` or `expired`. */
+  state: string
+  /** With `done`: `applied`, `stale` or `refused`. */
+  result?: string
+}
+
+/** A host that learned the removed device later: the user is asked again (design D.1). */
+export interface NetEngineRemovalAsk {
+  identity: string
+  name: string
+  host: string
+  hostName?: string
+  grant: number
+}
+
+/** One host in "Remove on all my hosts": the grant id its last list named for the device, or none. */
+export interface NetEngineRemovalHost {
+  host: string
+  name: string
+  grant: number | null
+}
+
 export interface NetEngineStatus {
   /** The switch, as saved for this profile. */
   enabled: boolean
@@ -93,4 +171,9 @@ export interface NetEngineStatus {
   sharedAccount?: boolean
   /** How often Add device reads a camera frame for a pairing code (the engine limit `scanIntervalMs`). */
   scanIntervalMs?: number
+  /** Mousse Plus, once the helper said. */
+  plus?: NetEnginePlus
+  /** "Remove on all my hosts": what was sent, and the questions waiting. */
+  removals?: NetEngineRemoval[]
+  removalAsks?: NetEngineRemovalAsk[]
 }

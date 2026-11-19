@@ -12,7 +12,10 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.join': ['ticket'],
   'netEngine.retry': ['node'],
   'netEngine.remove': ['node'],
-  'netEngine.address.add': ['node', 'address']
+  'netEngine.address.add': ['node', 'address'],
+  'netEngine.removeEverywhere.plan': ['node'],
+  'netEngine.removeEverywhere': ['node'],
+  'netEngine.removeEverywhere.answer': ['identity', 'host']
 }
 
 /** Every method takes an object, with the string fields it needs (`approve` takes `yes` too). */
@@ -24,8 +27,26 @@ function validate(method: NetEngineLocalMethod, params: unknown): Record<string,
   for (const field of NEEDS[method] ?? [])
     if (typeof fields[field] !== 'string' || !fields[field])
       throw new DomainRpcError('bad_request', `${method} needs ${field}`)
-  if (method === 'netEngine.approve' && typeof fields.yes !== 'boolean')
+  if (
+    (method === 'netEngine.approve' || method === 'netEngine.removeEverywhere.answer') &&
+    typeof fields.yes !== 'boolean'
+  )
     throw new DomainRpcError('bad_request', `${method} needs yes`)
+  if (method === 'netEngine.removeEverywhere.answer' && !Number.isSafeInteger(fields.grant))
+    throw new DomainRpcError('bad_request', `${method} needs grant`)
+  if (method === 'netEngine.removeEverywhere') {
+    const hosts = fields.hosts
+    const ok =
+      Array.isArray(hosts) &&
+      hosts.every(
+        (h) =>
+          h &&
+          typeof h === 'object' &&
+          typeof (h as Record<string, unknown>).host === 'string' &&
+          Number.isSafeInteger((h as Record<string, unknown>).grant)
+      )
+    if (!ok) throw new DomainRpcError('bad_request', `${method} needs hosts [{host, grant}]`)
+  }
   return fields
 }
 
@@ -88,6 +109,29 @@ export function registerNetEngineMethods(
               return engine.status()
             case 'netEngine.address.add':
               await engine.addAddress(p.node, p.address)
+              return engine.status()
+            case 'netEngine.plus.signIn':
+              return await engine.plus.signIn()
+            case 'netEngine.plus.cancel':
+              await engine.plus.cancelSignIn()
+              return engine.status()
+            case 'netEngine.plus.refresh':
+              await engine.plus.refresh()
+              return engine.status()
+            case 'netEngine.plus.signOut':
+              await engine.plus.signOut()
+              return engine.status()
+            case 'netEngine.removeEverywhere.plan': {
+              const { identity } = engine.device(p.node)
+              return { hosts: await engine.plus.plan(identity) }
+            }
+            case 'netEngine.removeEverywhere': {
+              const { identity, name } = engine.device(p.node)
+              await engine.plus.removeEverywhere(identity, name, p.hosts)
+              return engine.status()
+            }
+            case 'netEngine.removeEverywhere.answer':
+              await engine.plus.answer(p.identity, p.host, p.grant, p.yes)
               return engine.status()
           }
         } catch (error) {
