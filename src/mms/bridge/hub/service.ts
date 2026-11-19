@@ -44,6 +44,10 @@ import type { NetIdentityService } from '../../net/identity/NetIdentityService'
 import { decodeBase64 } from '../../net/identity/crypto'
 import type { BridgeDisplayPosition } from '../../../shared/bridge'
 import { DispatchInputJournal } from './inputs'
+
+/** How long a usage history read on another computer may take: its first read of many logs runs for minutes. */
+const USAGE_HISTORY_DEADLINE_MS = 10 * 60_000
+
 interface Request extends BridgeHubRequestStatus {
   caller: NodeId
   user: string
@@ -770,6 +774,10 @@ export class BridgeHub {
   /** The other computer's cached disk usage: totals by project, thread and kind. */
   storage(target: NodeId): Promise<unknown> {
     return this.call(target, 'storage.usage', {})
+  }
+  /** The other computer's usage history, read from its own agents' logs; a first read there can take minutes. */
+  usageHistory(target: NodeId, request: BridgeRemoteParams['usage.history']): Promise<unknown> {
+    return this.call(target, 'usage.history', request, { deadlineMs: USAGE_HISTORY_DEADLINE_MS })
   }
   get(ref: BridgeEntityRef): Promise<unknown> {
     return this.call(ref.nodeId, 'threads.get', { threadId: ref.entityId })

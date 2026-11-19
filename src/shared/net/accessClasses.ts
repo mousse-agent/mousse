@@ -57,6 +57,7 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
   'composer.options': 'view',
   'queue.list': 'view',
   'storage.usage': 'view',
+  'usage.history': 'view',
   'threads.create': 'work',
   'projects.open': 'work',
   'threads.rename': 'work',

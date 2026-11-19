@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { describe, expect, it, vi } from 'vitest'
 import { cachedUsage, keepAccount, keepUsage, steadyAccount, steadyUsage, unreachableUsage, usageSlots, withUsageDeadline } from '../src/mms/protocol/usageReads'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
@@ -120,11 +123,26 @@ describe('the protocol methods', () => {
     expect(useLimitReset).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps every limit the page reads for its trends, and answers them in the range asked', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'usage-reads-'))
+    try {
+      const mms = { ...services(), getProfileHomeDir: () => home }
+      await call(mms, 'providers.getUsageFor', { providerId: 'xai' })
+      await vi.waitFor(async () => {
+        const { trends } = await call(mms, 'providers.limitTrends', { range: '24h' }) as { trends: Array<{ id: string; windows: Array<{ id: string; points: unknown[] }> }> }
+        expect(trends.map((trend) => [trend.id, trend.windows.map((window) => [window.id, window.points.length])])).toEqual([['xai', [['five_hour', 1]]]])
+      })
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   it('answers only a window or the CLI on this computer', async () => {
     const mms = services()
     const remote = (method: string, params?: unknown) => dispatchMethod({ mms: mms as never, globalSequence: () => 0, connection: { clientType: 'bridge' } as never }, method, params)
     await expect(remote('providers.usageSlots')).rejects.toMatchObject({ code: 'forbidden' })
     await expect(remote('providers.getUsageFor', { providerId: 'xai' })).rejects.toMatchObject({ code: 'forbidden' })
+    await expect(remote('providers.limitTrends', { range: '7d' })).rejects.toMatchObject({ code: 'forbidden' })
     expect(mms.providerAccess.usageFor).not.toHaveBeenCalled()
   })
 })

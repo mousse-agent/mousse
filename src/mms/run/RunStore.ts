@@ -417,6 +417,21 @@ export class RunStore {
     return row ? toAttempt(row) : null
   }
 
+  /** The thread that ran each of these agent sessions (a Claude Code session, a Codex thread), where one did. */
+  threadsForSessions(sessionIds: readonly string[]): Map<string, string> {
+    const found = new Map<string, string>()
+    if (sessionIds.length === 0) return found
+    const rows = this.db
+      .statement(
+        `SELECT DISTINCT json_extract(a.provider_ref, '$.sessionId') AS session_id, r.thread_id AS thread_id
+           FROM run_attempts a JOIN runs r ON r.run_id = a.run_id
+          WHERE json_extract(a.provider_ref, '$.sessionId') IN (${sessionIds.map(() => '?').join(', ')})`
+      )
+      .all(...sessionIds)
+    for (const row of rows) found.set(String(row.session_id), String(row.thread_id))
+    return found
+  }
+
   listAttempts(runId: string): AttemptRecord[] {
     return this.db
       .statement('SELECT * FROM run_attempts WHERE run_id = ? ORDER BY ordinal')

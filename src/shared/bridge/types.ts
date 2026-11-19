@@ -7,6 +7,7 @@ import type {
   NetErrorCode
 } from '../net'
 import type { AgentExecutionBudget } from '../agents/execution'
+import type { UsageAgentId, UsageHistoryRange } from '../usageHistory'
 export interface BridgeEntityRef {
   nodeId: NodeId
   entityId: string
@@ -156,6 +157,7 @@ export interface BridgeRemoteParams {
     requestId: string
   }
   'storage.usage': Record<string, never>
+  'usage.history': { range: UsageHistoryRange; timeZone?: string; agent?: UsageAgentId }
   'bridge.thread.open': {
     threadId: string
   }
@@ -219,7 +221,8 @@ export const BRIDGE_HUB_LOCAL_METHODS = [
   'bridge.hub.result',
   'bridge.hub.cancel',
   'bridge.hub.requests',
-  'bridge.hub.storage'
+  'bridge.hub.storage',
+  'bridge.hub.usageHistory'
 ] as const
 export type BridgeHubLocalMethod = (typeof BRIDGE_HUB_LOCAL_METHODS)[number]
 /** Trusted local ingress uses the already authenticated network capability. */
@@ -319,6 +322,12 @@ export interface BridgeHubLocalParams {
   }
   'bridge.hub.storage': {
     target: NodeId
+  }
+  'bridge.hub.usageHistory': {
+    target: NodeId
+    range: UsageHistoryRange
+    timeZone?: string
+    agent?: UsageAgentId
   }
 }
 export type BridgeHubThreadEvent = import('./display').BridgeDisplayPart

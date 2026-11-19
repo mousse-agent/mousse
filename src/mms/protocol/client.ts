@@ -75,6 +75,8 @@ export function requestTimeoutFor(method: string): number {
   if (method === 'diagnostics.memory.heapSnapshot') return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
   // Downloads and installs Cua Driver: the installer may take minutes.
   if (method === 'computerUse.install') return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
+  // A first read of many agent logs, here or on another computer, can take minutes; later reads use the cache.
+  if (method === 'usage.history' || method === 'bridge.hub.usageHistory') return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
   // Answers when the compaction ended: up to the service's own time limit for it.
   if (method === 'threads.compact') return MMS_PROTOCOL_COMPACT_TIMEOUT_MS
   return MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS

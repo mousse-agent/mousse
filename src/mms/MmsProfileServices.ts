@@ -179,6 +179,7 @@ import { resolveThreadProjectPath } from './data/resolveActiveProjectPath'
 import { SpeechRelay } from './speech/SpeechRelay'
 import { systemClock } from './net/clock'
 import { trustExistingProjectsOnce } from './git/repoPrograms'
+import { LimitPoller } from './usageHistory/limitPoller'
 
 const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.delete'
@@ -402,6 +403,8 @@ export class MmsProfileServices {
   private readonly botStore: BotStore | null
   /** The daily purge of deleted bots past their 30 days, also while the schedulers are off. */
   private botSweepTimer: ReturnType<typeof setInterval> | null = null
+  /** The background read of the usage limits, for their trends (`limitPoller.ts`). */
+  private readonly limitPoller = new LimitPoller(this)
   /** Phase 5 (SPEC §15.1): durable bearer credentials of the Mousse MCP server. */
   readonly mcpCredentials: McpCredentials
   /** Phase 5: Mousse's tools for vendor runtimes over MCP Streamable HTTP on 127.0.0.1. */
@@ -2362,6 +2365,7 @@ export class MmsProfileServices {
     this.scheduled.beginShutdown()
     if (this.botSweepTimer) clearInterval(this.botSweepTimer)
     this.botSweepTimer = null
+    this.limitPoller.stop()
     if (this.secretSweepTimer) clearInterval(this.secretSweepTimer)
     this.secretSweepTimer = null
     this.secretRequests?.dispose()
@@ -2631,6 +2635,8 @@ export class MmsProfileServices {
       this.botSweepTimer = setInterval(() => { void bots.sweepDeleted().catch(() => []) }, BOT_SWEEP_EVERY_MS)
       this.botSweepTimer.unref?.()
     }
+    // Reads the usage limits every 15 minutes, its first read a full interval after start.
+    this.limitPoller.start()
   }
 
   private async startOwned(): Promise<void> {
