@@ -4894,3 +4894,9 @@ it('E1 r4 dotted versions remain address-like in both directions', async () => {
   f.close()
  }
 })
+
+it.each(['intranet:8080', 'localhost:443', 'Exfil:80'])('E1 r4 a numeric label never admits a new host: %s', async body => {
+ const t=await aloneAsk('allow','send','Tickets:4')
+ expect((await aloneNext(t,{...t.args,body})).action.status).toBe('open')
+ expect(t.calls).toHaveLength(1)
+})
