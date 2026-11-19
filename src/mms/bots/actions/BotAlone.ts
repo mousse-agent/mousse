@@ -2,6 +2,7 @@ import { createHmac, randomBytes } from 'node:crypto'
 import { isIP } from 'node:net'
 const PLACE_NAMES = new Set('folder folderid parent parentid path dir directory channel channelid repo repository owner project projectid calendar calendarid list listid board to recipient recipients email space spaceid database databaseid drive driveid cc bcc from sender replyto url uri link webhook endpoint host domain account accountid address destination target remote branch'.split(' '))
 const normalizedKey = (key: string): string => key.toLowerCase().replace(/[_-]/g, '')
+const FILE_PLACES = new Set('folder folderid parent parentid path dir directory drive driveid'.split(' '))
 const FREE_CONTENT = new Set(['body', 'subject', 'text', 'content'])
 export interface ArgumentContract {
   version: 3; keys: string[]; digests: Record<string, string>; varying: string[]
@@ -30,10 +31,10 @@ function filenameExtension(value: unknown): string | undefined {
   return dot < 0 ? '' : name.slice(dot + 1).toLowerCase()
 }
 const tokenDigest = (key: string, field: string, token: string): string => createHmac('sha256', key).update(JSON.stringify([field, token])).digest('hex')
-export function argumentContract(args: Record<string, unknown>, tokenKey: string): ArgumentContract {
+export function argumentContract(args: Record<string, unknown>, tokenKey: string, place?: Record<string, unknown>): ArgumentContract {
   const keys = Object.keys(args).sort()
   const varying = keys.filter(k => FREE_CONTENT.has(normalizedKey(k)) && typeof args[k] === 'string')
-  const extensions = Object.fromEntries(keys.filter(k => normalizedKey(k) === 'name' && filenameExtension(args[k]) !== undefined).map(k => [k, filenameExtension(args[k])!]))
+  const extensions = Object.fromEntries(keys.filter(k => normalizedKey(k) === 'name' && Object.keys(place ?? {}).some(key => FILE_PLACES.has(normalizedKey(key))) && !!filenameExtension(args[k])).map(k => [k, filenameExtension(args[k])!]))
   return { version: 3, keys, digests: Object.fromEntries(keys.map(k => [k, actionDigest(args[k])])), varying: [...varying, ...Object.keys(extensions)], extensions,
     tokens: Object.fromEntries(varying.map(k => [k, addressTokens(args[k] as string).map(token => tokenDigest(tokenKey, k, token))])) }
 }
@@ -116,8 +117,8 @@ export class BotAlone {
     const source = JSON.parse(String(previous.args_json)) as Record<string, unknown>
     // The masked review can supply the source only when it is still exactly what was sent.
     if (actionDigest(source) !== previous.args_digest) return 'This sent call has hidden arguments, so it always asks.'
-    const contract = argumentContract(source, this.tokenKey())
     const place = JSON.parse(String(previous.place_json)) as Record<string, unknown>
+    const contract = argumentContract(source, this.tokenKey(), place)
     const result = JSON.parse(String(previous.result_json ?? '{}')).text ?? ''
     const values = Object.values(maskedActionData(place) as object).map(v => placeLabel(v, result)).join(' and ')
     const name = shortAutomationName(schedule.name)
