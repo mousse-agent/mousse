@@ -4593,7 +4593,7 @@ it.each([
   ['scan-2.pdf', true], ['scan-2.PDF', true], ['scan-2.exe', false], ['../x.pdf', false],
   ['a/b.pdf', false], ['a\\b.pdf', false], ['hidden..pdf', false], ['.hidden.pdf', false],
   ['x:scan.pdf', false], ['x@scan.pdf', false], ['x\u0000.pdf', false], ['x\n.pdf', false],
-  ['x'.repeat(252) + '.pdf', false], ['x'.repeat(251) + '.pdf', true], ['ｓｃａｎ-２.ｐｄｆ', true], ['scan。pdf', false], ['ａ／ｂ.pdf', false], ['sc\u200ban-2.pdf', true]
+  ['x'.repeat(252) + '.pdf', false], ['x'.repeat(251) + '.pdf', true], ['ｓｃａｎ-２.ｐｄｆ', false], ['scan。pdf', false], ['ａ／ｂ.pdf', false], ['sc\u200ban-2.pdf', false]
 ])('E1 r2b a filename stays within the sent extension: %j', async (name, allowed) => {
   const t = await aloneAsk('allow', 'send', undefined, { name: 'scan-1.pdf', folder: 'scans' })
   const args = { ...t.args, name: 'scan-1.pdf' }
@@ -4737,4 +4737,18 @@ it('E1 r3c a filename with an extension can vary within a folder', async () => {
   const t = await aloneAsk('allow', 'upload_file', undefined, { folder: 'scans', name: 'scan-1.pdf' })
   expect((await aloneNext(t, { ...t.args, name: 'scan-2.pdf' } as never)).action.status).toBe('done')
   expect(t.calls).toHaveLength(2)
+})
+
+it.each([
+  'evil.ｐｄｆ', 'evil.exe\u200b.pdf', ('a\u200b').repeat(200) + '.pdf', 'evil\u202efdp.exe.pdf',
+  ' .bashrc.pdf', '%2E%2E%2Fsecrets%2Fx.pdf', 'CON.pdf', 'prn.pdf', 'AUX.pdf', 'nul.pdf',
+  'COM1.pdf', 'com9.pdf', 'LPT1.pdf', 'lpt9.pdf', 'CON .pdf', '*.pdf', '$(id).pdf', 'x;rm.pdf', 'report.pdf ', 'report.pdf.'
+])('E1 r3c varying filenames validate the raw bytes sent: %j', async name => {
+  const t = await aloneAsk('allow', 'upload_file', undefined, { folder: 'scans', name: 'scan-1.pdf' })
+  expect((await aloneNext(t, { ...t.args, name } as never)).action.status).toBe('open')
+  expect(t.calls).toHaveLength(1)
+})
+it('E1 r3c an unsafe raw source filename does not grant variation', async () => {
+  const t = await aloneAsk('allow', 'upload_file', undefined, { folder: 'scans', name: 'scan-１.pdf' })
+  expect((await aloneNext(t, { ...t.args, name: 'scan-2.pdf' } as never)).action.status).toBe('open')
 })
