@@ -45,7 +45,7 @@ function reach(fields: Record<string, unknown>): void {
   if (fields.port !== undefined && typeof fields.port !== 'number') throw bad('port')
 }
 
-/** Every method takes an object, with the string fields it needs (`approve` takes `yes` too). */
+/** Every method takes an object, with the string fields it needs (`approve` takes `yes`, `loginStart` `start`). */
 function validate(method: NetEngineLocalMethod, params: unknown): Record<string, unknown> {
   const value = params ?? {}
   if (typeof value !== 'object' || Array.isArray(value))
@@ -56,6 +56,8 @@ function validate(method: NetEngineLocalMethod, params: unknown): Record<string,
       throw new DomainRpcError('bad_request', `${method} needs ${field}`)
   if (method === 'netEngine.approve' && typeof fields.yes !== 'boolean')
     throw new DomainRpcError('bad_request', `${method} needs yes`)
+  if (method === 'netEngine.loginStart' && typeof fields.start !== 'boolean')
+    throw new DomainRpcError('bad_request', `${method} needs start`)
   if (method === 'netEngine.invite' && fields.kind !== undefined && fields.kind !== 'link')
     throw new DomainRpcError('bad_request', `${method} takes kind "link" or none`)
   if (method === 'netEngine.join' && fields.share !== undefined && !strings(fields.share))
@@ -138,6 +140,9 @@ export function registerNetEngineMethods(
               return engine.status()
             case 'netEngine.address.add':
               await engine.addAddress(p.node, p.address)
+              return engine.status()
+            case 'netEngine.loginStart':
+              await engine.answerLoginStart(p.start)
               return engine.status()
             case 'netEngine.address.remove':
               await engine.removeAddress(p.node, p.address)

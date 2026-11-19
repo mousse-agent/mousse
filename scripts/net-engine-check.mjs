@@ -40,6 +40,8 @@ const CHECKS = {
   'phase1a.path-switch': 'tests/netEngine/checks/pathSwitch.test.ts',
   'phase1a.pair-offline': 'tests/netEngine/checks/pairOffline.test.ts',
   'phase1a.shared-computer': 'tests/netEngine/checks/sharedComputer.test.ts',
+  'phase1b.editor-app': 'tests/netEngine/checks/editorApp.test.ts',
+  'phase1b.no-rpc-without-grant': 'tests/netEngine/checks/noRpcWithoutGrant.test.ts',
   // 1a's app cases on one route, and the routes' own (1b §14).
   'phase1b.routes-app': [
     'tests/netEngine/checks/routesApp.test.ts',

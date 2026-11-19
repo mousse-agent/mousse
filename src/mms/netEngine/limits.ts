@@ -29,6 +29,11 @@ export interface EngineLimits {
   appendDeadlineMs: number
   /** The least time a result lookup is given, however little of the call's own deadline is left. */
   resultWaitFloorMs: number
+  /**
+   * How long the Hub waits for an engine pairing to open a thread's private stream (`bridge.hub.attach`), and for
+   * each page of a large answer it fetches.
+   */
+  hubRoutedDeadlineMs: number
   /** How often this profile's own delegation is checked for renewal while the engine is on. */
   renewIntervalMs: number
   /** The own delegation is renewed once it is due within this long. */
@@ -106,6 +111,17 @@ export interface EngineLimits {
   sshRequestKeepSecs: number
   /** How often B drops request records past their keep time. */
   sshRequestPruneMs: number
+  /**
+   * Largest request `mousse-cli net-engine ssh` reads from stdin, the line another computer sent over SSH.
+   * Security-bound: it can only be lowered.
+   */
+  sshRemoteRequestMaxBytes: number
+  /** How long `mousse-cli net-engine ssh` waits for that line. Security-bound: it can only be lowered. */
+  sshRemoteReadMs: number
+  /** How often a waiting `mousse-cli net-engine invite` or `join` reads the status again when no change was announced. */
+  cliStatusReadMs: number
+  /** How long `mousse-cli net-engine join` waits for the other computer to let it in (its owner taps Yes there). */
+  cliJoinWaitMs: number
 }
 
 /** The helper's `APP_READ_AHEAD_BYTES`: a stream's credit must cover it before the helper reads that stream. */
@@ -123,6 +139,7 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   blobDeadlineMs: 120_000,
   appendDeadlineMs: 60_000,
   resultWaitFloorMs: 15_000,
+  hubRoutedDeadlineMs: 30_000,
   renewIntervalMs: 60 * 60_000,
   renewDueWithinMs: 24 * 60 * 60_000,
   clockSkewMs: 600_000,
@@ -156,7 +173,11 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   sshRequestDeadlineMs: 120_000,
   sshRequestMaxAgeSecs: 86_400,
   sshRequestKeepSecs: 604_800,
-  sshRequestPruneMs: 60 * 60_000
+  sshRequestPruneMs: 60 * 60_000,
+  sshRemoteRequestMaxBytes: 64 * 1024,
+  sshRemoteReadMs: 30_000,
+  cliStatusReadMs: 2_000,
+  cliJoinWaitMs: 16 * 60_000
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -171,6 +192,7 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   blobDeadlineMs: 'MOUSSE_NET_ENGINE_BLOB_DEADLINE_MS',
   appendDeadlineMs: 'MOUSSE_NET_ENGINE_APPEND_DEADLINE_MS',
   resultWaitFloorMs: 'MOUSSE_NET_ENGINE_RESULT_WAIT_FLOOR_MS',
+  hubRoutedDeadlineMs: 'MOUSSE_NET_ENGINE_HUB_ROUTED_DEADLINE_MS',
   renewIntervalMs: 'MOUSSE_NET_ENGINE_RENEW_INTERVAL_MS',
   renewDueWithinMs: 'MOUSSE_NET_ENGINE_RENEW_DUE_WITHIN_MS',
   clockSkewMs: 'MOUSSE_NET_ENGINE_CLOCK_SKEW_MS',
@@ -204,8 +226,15 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   sshRequestDeadlineMs: 'MOUSSE_NET_ENGINE_SSH_REQUEST_DEADLINE_MS',
   sshRequestMaxAgeSecs: 'MOUSSE_NET_ENGINE_SSH_REQUEST_MAX_AGE_SECS',
   sshRequestKeepSecs: 'MOUSSE_NET_ENGINE_SSH_REQUEST_KEEP_SECS',
-  sshRequestPruneMs: 'MOUSSE_NET_ENGINE_SSH_REQUEST_PRUNE_MS'
+  sshRequestPruneMs: 'MOUSSE_NET_ENGINE_SSH_REQUEST_PRUNE_MS',
+  sshRemoteRequestMaxBytes: 'MOUSSE_NET_ENGINE_SSH_REMOTE_REQUEST_MAX_BYTES',
+  sshRemoteReadMs: 'MOUSSE_NET_ENGINE_SSH_REMOTE_READ_MS',
+  cliStatusReadMs: 'MOUSSE_NET_ENGINE_CLI_STATUS_READ_MS',
+  cliJoinWaitMs: 'MOUSSE_NET_ENGINE_CLI_JOIN_WAIT_MS'
 })
+
+/** Limits that guard this computer against another: a value above the default is refused, so they only tighten. */
+const TIGHTEN_ONLY: ReadonlySet<keyof EngineLimits> = new Set(['sshRemoteRequestMaxBytes', 'sshRemoteReadMs'])
 
 /** Reads the limits from `env`; each problem names the variable, the value and the default kept. */
 export function readEngineLimits(env: NodeJS.ProcessEnv): {
@@ -227,6 +256,8 @@ export function readEngineLimits(env: NodeJS.ProcessEnv): {
     // Skew alone may be none.
     if (!Number.isSafeInteger(value) || value < 0 || (value === 0 && key !== 'clockSkewMs'))
       keep(key, 'is not a positive whole number')
+    else if (TIGHTEN_ONLY.has(key) && value > ENGINE_LIMIT_DEFAULTS[key])
+      keep(key, 'can only be lowered')
     else limits[key] = value
   }
   // A message must hold its header and a whole blob chunk; when it cannot, the three sizes keep their defaults,
@@ -324,7 +355,11 @@ export const ENGINE_CONTROLS = [
   'existing-reply-not-kept',
   'removal-skips-unsaved-grant',
   'ssh-row-not-converted',
-  'remote-autostart'
+  'remote-autostart',
+  // phase1b.editor-app, phase1b.no-rpc-without-grant: the engine editor refusal skips the editor switch
+  'tunnel-ignores-editor',
+  // phase1b.editor-app: engine rights changes do not run reconcile
+  'no-reconcile'
 ] as const
 export type EngineControl = (typeof ENGINE_CONTROLS)[number]
 

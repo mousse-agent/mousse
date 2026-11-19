@@ -8,7 +8,9 @@ export const ENGINE_LABELS = [
   'mousse.rpc',
   'mousse.sub',
   'mousse.blob',
-  'mousse.put'
+  'mousse.put',
+  // Phase 1b: one editor tunnel per stream, opened by the caller (§9.2).
+  'mousse.tunnel'
 ] as const
 export type EngineLabel = (typeof ENGINE_LABELS)[number]
 

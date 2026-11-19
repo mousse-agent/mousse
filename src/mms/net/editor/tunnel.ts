@@ -32,6 +32,9 @@ import { isHostKey } from './sshConfig'
 /**
  * Editor tunnels.
  *
+ * **Kept through Phase 2.** This folder (`net/editor/`) is not part of v1's removal: the network engine builds its
+ * own `EditorTunnels` and `EditorEndpoint` from it (`netEngine/editor.ts`), over `mousse.tunnel` streams.
+ *
  * An editor reaches a folder on another computer by running `ssh` against it. Here that SSH connection
  * rides the Mousse Net session between the two computers instead of the network: the caller's bytes go in
  * `tunnel.data` messages on a lane of their own, and the computer that carries the far end writes them to

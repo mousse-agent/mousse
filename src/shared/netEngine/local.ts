@@ -17,6 +17,7 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.retry',
   'netEngine.remove',
   'netEngine.address.add',
+  'netEngine.loginStart',
   // Phase 1b: routes (§1.3, §1.5, §4.3)
   'netEngine.address.remove',
   'netEngine.address.use',
@@ -176,6 +177,11 @@ export interface NetEngineStatus {
   sharedAccount?: boolean
   /** How often Add device reads a camera frame for a pairing code (the engine limit `scanIntervalMs`). */
   scanIntervalMs?: number
+  /**
+   * `ask`: the start-at-login question waits for this window (design §10). Answered with `netEngine.loginStart
+   * {start}`; asked once per installation, while the switch is on.
+   */
+  loginStart?: 'ask'
   /** This computer's own routes, when its helper speaks protocol 1.1. */
   reach?: NetEngineReach
   /** The helper speaks protocol 1.1, so Send link and Enter link work. */
@@ -185,3 +191,4 @@ export interface NetEngineStatus {
   /** Send link joins running here. */
   joins?: NetEngineLinkJoin[]
 }
+

@@ -27,6 +27,7 @@ function project(name: string): { source: string; pinned: string; later: string 
   mkdirSync(join(folder, 'scripts'), { recursive: true })
   mkdirSync(source, { recursive: true })
   copyFileSync(SCRIPT, join(folder, 'scripts', 'build-net-helper.mjs'))
+  copyFileSync(join(SCRIPT, '..', 'net-helper-build.mjs'), join(folder, 'scripts', 'net-helper-build.mjs'))
   git(source, 'init', '-q')
   writeFileSync(join(source, '.gitignore'), '/target\n')
   writeFileSync(join(source, 'kept.txt'), 'pinned\n')

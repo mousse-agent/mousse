@@ -20,6 +20,7 @@ import { runService } from './commands/service'
 import { runThreadActionCommand } from './commands/threadActions'
 import { runRelay } from './commands/relay'
 import { runNet, runBridge } from './commands/net'
+import { runNetEngine } from './commands/netEngine'
 import { isBridgeHubCommand, runBridgeHubCommand } from './commands/bridge'
 import { runSpacesCommand } from './commands/spaces'
 import { runBotsCommand } from './commands/bots'
@@ -116,11 +117,14 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
       case 'net':
         await runNet(args)
         break
-      case 'net-engine': {
-        const { runNetEngineCommand } = await import('./commands/netEngineSsh')
-        await runNetEngineCommand(args)
+      case 'net-engine':
+        // `net-engine ssh` with nothing after it is what Add over SSH runs on this computer (1b M10, served by
+        // `netEngine.ssh.serve`); every other `net-engine` command is the M12 command line.
+        if (args.subcommand === 'ssh' && !args.positional.length) {
+          const { runNetEngineCommand } = await import('./commands/netEngineSsh')
+          await runNetEngineCommand(args)
+        } else await runNetEngine(args)
         break
-      }
       case 'bridge':
         if (isBridgeHubCommand(args)) {
           await runBridgeHubCommand(args)

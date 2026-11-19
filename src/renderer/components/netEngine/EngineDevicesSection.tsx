@@ -236,6 +236,31 @@ export function EngineDevicesSection() {
             {line}
           </p>
         )}
+        {status.enabled && status.loginStart === 'ask' && (
+          <SettingsRow
+            title="Start Mousse at login so your other computers can reach this one?"
+            control={
+              <span className="engine-group-actions">
+                <button
+                  type="button"
+                  className="settings-btn"
+                  disabled={busy}
+                  onClick={() => void action('netEngine.loginStart', { start: false })}
+                >
+                  Not now
+                </button>
+                <button
+                  type="button"
+                  className="settings-btn primary"
+                  disabled={busy}
+                  onClick={() => void action('netEngine.loginStart', { start: true })}
+                >
+                  Start at login
+                </button>
+              </span>
+            }
+          />
+        )}
         {status.on && status.devices.flatMap(row)}
         {status.on && !status.devices.length && (
           <p className="settings-muted devices-note">No computers yet.</p>
