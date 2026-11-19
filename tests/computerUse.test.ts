@@ -132,18 +132,23 @@ describe('what Settings is told about the driver', () => {
   function driver(opts: { files?: string[]; version?: () => Promise<string>; installer?: () => Promise<void>; chosen?: string }) {
     const files = new Set(opts.files ?? [])
     const runInstaller = vi.fn(async () => { await opts.installer?.(); files.add(exe) })
+    const telemetryOff = vi.fn(async () => undefined)
     const d = new ComputerUseDriver({
       settings: () => ({ enabled: true, ...(opts.chosen ? { driverPath: opts.chosen } : {}) }),
       platform: 'linux', env: { PATH: '' }, home: join('/home', 'me'),
       version: opts.version ?? (async () => 'cua-driver 0.38.0 — test'),
       runInstaller,
+      telemetryOff,
       exists: (path: string) => files.has(path)
     })
-    return { d, runInstaller }
+    return { d, runInstaller, telemetryOff }
   }
 
-  it('says installed with its version and where it came from', async () => {
-    expect(await driver({ files: [exe] }).d.status(true)).toMatchObject({ state: 'found', version: '0.38.0', path: exe, source: 'default' })
+  it('says installed with its version and where it came from, and turns its telemetry off once', async () => {
+    const { d, telemetryOff } = driver({ files: [exe] })
+    expect(await d.status(true)).toMatchObject({ state: 'found', version: '0.38.0', path: exe, source: 'default' })
+    await d.status(true)
+    expect(telemetryOff.mock.calls).toEqual([[exe]])
   })
 
   it('says missing with the install command, installs once for two clicks, then says installed', async () => {
@@ -158,7 +163,7 @@ describe('what Settings is told about the driver', () => {
   it('never runs an action twice when the driver goes away during it; the next call starts it again', async () => {
     const callTool = vi.fn(async () => { throw new Error('Connection closed') })
     const connect = vi.fn(async () => ({ listTools: async () => [], instructions: () => undefined, callTool, close: async () => undefined }))
-    const d = new ComputerUseDriver({ settings: () => ({ enabled: true }), platform: 'linux', env: { PATH: '' }, home: join('/home', 'me'), version: async () => 'cua-driver 0.38.0', exists: (path) => path === exe, connect })
+    const d = new ComputerUseDriver({ settings: () => ({ enabled: true }), platform: 'linux', env: { PATH: '' }, home: join('/home', 'me'), telemetryOff: async () => undefined, version: async () => 'cua-driver 0.38.0', exists: (path) => path === exe, connect })
     await expect(d.call('click', {}, new AbortController().signal)).rejects.toThrow(/may or may not have run/)
     expect(callTool).toHaveBeenCalledTimes(1)
     await expect(d.call('click', {}, new AbortController().signal)).rejects.toThrow()
@@ -169,7 +174,7 @@ describe('what Settings is told about the driver', () => {
     const setting = { enabled: true }
     const connect = vi.fn()
     const d = new ComputerUseDriver({
-      settings: () => setting, platform: 'linux', env: { PATH: '' }, home: join('/home', 'me'), exists: (path) => path === exe, connect,
+      settings: () => setting, platform: 'linux', env: { PATH: '' }, home: join('/home', 'me'), telemetryOff: async () => undefined, exists: (path) => path === exe, connect,
       version: async () => { setting.enabled = false; return 'cua-driver 0.38.0' }
     })
     await expect(d.call('click', {}, new AbortController().signal)).rejects.toThrow(/off in Settings/)
@@ -181,7 +186,7 @@ describe('what Settings is told about the driver', () => {
     const setting: { enabled: boolean; driverPath?: string } = { enabled: true }
     let finishOld: (output: string) => void = () => undefined
     const d = new ComputerUseDriver({
-      settings: () => setting, platform: 'linux', env: { PATH: '' }, home: join('/home', 'me'), exists: (path) => path === exe || path === other,
+      settings: () => setting, platform: 'linux', env: { PATH: '' }, home: join('/home', 'me'), telemetryOff: async () => undefined, exists: (path) => path === exe || path === other,
       version: (path) => (path === exe ? new Promise<string>((resolve) => { finishOld = resolve }) : Promise.resolve('cua-driver 0.39.0'))
     })
     const old = d.status(true)

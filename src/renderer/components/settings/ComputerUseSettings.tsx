@@ -8,7 +8,7 @@ import { SettingsGroup, SettingsRow, Switch } from './SettingsRow'
 import '../../styles/computerUse.css'
 
 /** Why Mousse finds or installs Cua Driver instead of shipping it, for the status row's tooltip. */
-export const CUA_DRIVER_WHY = 'Cua Driver (MIT) is found or installed, not bundled: it is about 65 MB per platform, updates often, and on macOS its own signed app keeps the Accessibility and Screen Recording grants.'
+export const CUA_DRIVER_WHY = 'Cua Driver (MIT) is found or installed, not bundled: it is about 65 MB per platform, updates often, and on macOS its own signed app keeps the Accessibility and Screen Recording grants. Mousse runs it with its usage telemetry off.'
 
 /** The status word, in plain words. */
 export function driverStateText(status: ComputerUseStatus | null): string {

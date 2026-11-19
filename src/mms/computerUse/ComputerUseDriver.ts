@@ -25,6 +25,13 @@ const CONNECT_TIMEOUT_MS = 30_000
 /** Longest error line kept. */
 const MAX_ERROR = 300
 
+/**
+ * Cua Driver sends usage telemetry unless told not to. Every driver process Mousse starts gets it off for that process,
+ * and the driver's saved preference is set off once it is found or installed (`cua-driver telemetry disable`).
+ */
+export const DRIVER_TELEMETRY_OFF_ENV: Readonly<Record<string, string>> = { CUA_DRIVER_RS_TELEMETRY_ENABLED: '0', CUA_TELEMETRY_ENABLED: '0' }
+const driverEnv = (): NodeJS.ProcessEnv => ({ ...process.env, ...DRIVER_TELEMETRY_OFF_ENV })
+
 export interface DriverTool {
   name: string
   description: string
@@ -49,6 +56,8 @@ export interface ComputerUseDriverOptions {
   version?(path: string): Promise<string>
   /** Runs the official installer; resolves when it exits 0. Tests replace it. */
   runInstaller?(platform: NodeJS.Platform): Promise<void>
+  /** Runs `cua-driver telemetry disable`. Tests replace it. */
+  telemetryOff?(path: string): Promise<void>
   /** An MCP client connected to `path mcp`. Tests replace it. */
   connect?(path: string): Promise<DriverConnection>
 }
@@ -112,7 +121,7 @@ export function parseDriverVersion(output: string): string | undefined {
 
 function runVersion(path: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(path, ['--version'], { timeout: VERSION_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 }, (error, stdout, stderr) => {
+    execFile(path, ['--version'], { timeout: VERSION_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024, env: driverEnv() }, (error, stdout, stderr) => {
       if (error) reject(error)
       else resolve(`${stdout}\n${stderr}`)
     })
@@ -125,7 +134,7 @@ function runInstaller(platform: NodeJS.Platform): Promise<void> {
     // pipefail: a failed download fails the install, instead of an empty script exiting 0.
     : ['/bin/bash', ['-c', `set -o pipefail; curl -fsSL ${CUA_INSTALL_SH} | /bin/bash`]] as const
   return new Promise((resolve, reject) => {
-    const child = spawn(command, [...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, shell: false })
+    const child = spawn(command, [...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, shell: false, env: driverEnv() })
     trackChildProcess(child, 'installer')
     let tail = ''
     const keep = (chunk: Buffer) => { tail = (tail + chunk.toString('utf8')).slice(-4_000) }
@@ -141,8 +150,14 @@ function runInstaller(platform: NodeJS.Platform): Promise<void> {
   })
 }
 
+function runTelemetryOff(path: string): Promise<void> {
+  return new Promise((resolve) => {
+    execFile(path, ['telemetry', 'disable'], { timeout: VERSION_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024, env: driverEnv() }, () => resolve())
+  })
+}
+
 async function connectDriver(path: string): Promise<DriverConnection> {
-  const transport = new OwnedStdioClientTransport({ command: path, args: ['mcp'] })
+  const transport = new OwnedStdioClientTransport({ command: path, args: ['mcp'], env: { ...DRIVER_TELEMETRY_OFF_ENV } })
   const client = new Client({ name: 'mousse', version: mousseVersion() }, { capabilities: {} })
   try {
     await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS })
@@ -181,6 +196,8 @@ export class ComputerUseDriver {
   private installError: string | undefined
   private connection: { path: string; ready: Promise<DriverConnection> } | undefined
   private tools: { path: string; list: DriverTool[] } | undefined
+  /** Drivers whose saved telemetry preference was set off. */
+  private readonly telemetryOffFor = new Set<string>()
 
   constructor(private readonly options: ComputerUseDriverOptions) {
     this.platform = options.platform ?? process.platform
@@ -204,6 +221,10 @@ export class ComputerUseDriver {
       try {
         const version = parseDriverVersion(await (this.options.version ?? runVersion)(found.path))
         status = version ? { ...base, state: 'found', path: found.path, source: found.source, version } : { ...base, state: 'broken', path: found.path, source: found.source, error: "It ran but didn't say its version." }
+        if (version && !this.telemetryOffFor.has(found.path)) {
+          this.telemetryOffFor.add(found.path)
+          void (this.options.telemetryOff ?? runTelemetryOff)(found.path).catch(() => undefined)
+        }
       } catch (error) {
         status = { ...base, state: 'broken', path: found.path, source: found.source, error: line(error) }
       }
