@@ -159,6 +159,25 @@ export function normalizeAddress(address: string): string {
   return words.join(':')
 }
 
+/** The RPC carrier name of a session that arrived on the automatic LAN listener. */
+export const PHONE_LAN_CARRIER = 'lan'
+/** At most this many LAN addresses go to a phone. */
+export const PHONE_LAN_MAX_ADDRESSES = 8
+
+/**
+ * The LAN listener's URLs a phone of this account may dial with no relay: one per private IPv4
+ * address of this computer. The listener binds IPv4 only, so unique local IPv6 addresses are not
+ * offered; Tailscale, global, loopback and link-local addresses never are.
+ */
+export function phoneLanAddresses(port: number, hosts: Iterable<string>): string[] {
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return []
+  return [...hosts]
+    .filter((host) => classifyAddress(host) === 'private4')
+    .sort()
+    .slice(0, PHONE_LAN_MAX_ADDRESSES)
+    .map((host) => `ws://${host}:${port}/mousse-net`)
+}
+
 // ---------------------------------------------------------------- configuration
 
 /** Mousse ID's settings for the direct path, from its configuration document. */
