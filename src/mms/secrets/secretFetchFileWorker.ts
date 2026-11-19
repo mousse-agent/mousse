@@ -9,13 +9,16 @@ const fs = require('node:fs')
 const same = (a, b) => a.dev === b.dev && a.ino === b.ino
 const [folder, dev, ino, name, ...prune] = process.argv.slice(1)
 const checked = { dev: Number(dev), ino: Number(ino) }
-let fd, identity, wrote = false, unsafe = false
+let fd, parent, identity, wrote = false, unsafe = false
 const current = () => {
-  const atPath = fs.lstatSync(folder)
-  return atPath.isDirectory() && !atPath.isSymbolicLink()
-    && same(fs.statSync('.'), checked) && same(atPath, checked)
+  try {
+    const atPath = fs.lstatSync(folder)
+    const held = parent === undefined ? fs.statSync('.') : fs.fstatSync(parent)
+    return atPath.isDirectory() && !atPath.isSymbolicLink() && same(held, checked) && same(atPath, checked)
+  } catch { return false }
 }
 try {
+  if (process.platform !== 'win32') parent = fs.openSync('.', fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW)
   if (![name, ...prune].every(value => /^[0-9a-f-]{36}$/.test(value)) || !current()) {
     unsafe = true
     throw new Error()
@@ -34,7 +37,8 @@ try {
     catch (error) { if (error.code !== 'ENOENT') throw error }
   }
   wrote = true
-} catch {
+} catch (error) {
+  if (['ENOENT', 'ENOTDIR', 'ELOOP'].includes(error.code)) unsafe = true
   process.exitCode = unsafe ? 2 : 1
 } finally {
   if (fd !== undefined) {
@@ -46,6 +50,7 @@ try {
       } catch {}
     }
   }
+  if (parent !== undefined) fs.closeSync(parent)
 }
 `
 
@@ -67,5 +72,6 @@ export function saveSecretFetchAtCwd(input: {
     windowsHide: true,
     stdio: ['pipe', 'ignore', 'ignore']
   })
+  if (result.error && ['ENOENT', 'ENOTDIR', 'ELOOP'].includes((result.error as NodeJS.ErrnoException).code ?? '')) return 'unsafe'
   return result.status === 0 ? 'saved' : result.status === 2 ? 'unsafe' : 'failed'
 }
