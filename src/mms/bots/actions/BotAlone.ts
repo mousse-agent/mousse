@@ -5,7 +5,8 @@ export interface ArgumentContract { version: 2; keys: string[]; digests: Record<
 /** Each match has bounded runs, including content with no punctuation. Normalisation fails closed. */
 function restricted(value: string): boolean {
   const text = value.normalize('NFKC').replace(/\p{Cf}/gu, '').replace(/[。｡]/g, '.').replace(/\s+/gu, '')
-  return /@|\\|::|[a-z][a-z0-9+.-]{0,31}:|[\p{L}\p{N}_-]{1,63}\.[\p{L}\p{N}_-]{1,63}|(?:[a-f0-9]{1,4}:){2}[a-f0-9:]{1,39}/iu.test(text)
+  // A colon covers every scheme, IPv6 and host:port without scanning for a scheme name.
+  return /[:@\\]|[\p{L}\p{N}_-]{1,63}\.[\p{L}\p{N}_-]{1,63}/iu.test(text)
 }
 export function argumentContract(args: Record<string, unknown>): ArgumentContract {
   const keys = Object.keys(args).sort()
