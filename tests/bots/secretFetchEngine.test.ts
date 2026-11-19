@@ -57,6 +57,7 @@ it('supplies the ledger to a scheduled run', async () => {
   await f.bots.reconcileOnStartup()
   const { inserted } = await f.tickSchedules(new Date(f.clock.now + 5 * 60000))
   expect(inserted).toHaveLength(1)
+  f.store.putOverlay(inserted[0]!, 'secrets', { tool: 'secrets' })
   expect((await start(f, inserted[0]!)).prepared.authority.secretFetch).toBeTypeOf('function')
 })
 it.each(['approved', 'running'])('fails an interrupted %s service read at startup without replay', async status => {

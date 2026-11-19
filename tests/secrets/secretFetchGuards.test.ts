@@ -8,7 +8,7 @@ import { fetchWithSecret } from '../../src/mms/secrets/secretFetch'
 import { resolveSecretBinding } from '../../src/mms/secrets/secretBinding'
 import { publicFetch } from '../../src/mms/net-public/publicFetch'
 
-vi.mock('../../src/mms/net-public/publicFetch', () => ({ publicFetch: vi.fn() }))
+vi.mock('../../src/mms/net-public/publicFetch', async importOriginal => ({ ...await importOriginal<object>(), publicFetch: vi.fn() }))
 vi.mock('node:crypto', async importOriginal => {
   const original = await importOriginal<typeof import('node:crypto')>()
   return { ...original, randomUUID: vi.fn(original.randomUUID) }

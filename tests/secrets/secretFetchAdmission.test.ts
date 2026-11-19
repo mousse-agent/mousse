@@ -13,7 +13,7 @@ import { appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import type { ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import { publicFetch } from '../../src/mms/net-public/publicFetch'
-vi.mock('../../src/mms/net-public/publicFetch',()=>({publicFetch:vi.fn()}))
+vi.mock('../../src/mms/net-public/publicFetch', async importOriginal => ({ ...await importOriginal<object>(), publicFetch: vi.fn() }))
 const cleanups:Array<()=>void>=[]
 afterEach(()=>{cleanups.splice(0).forEach(f=>f());vi.restoreAllMocks()})
 function fixture(value='sk-test-private/a+B0123456789'){
