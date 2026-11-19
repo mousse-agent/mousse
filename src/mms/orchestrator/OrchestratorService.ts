@@ -137,7 +137,7 @@ import type { RunProvenance } from '../harness/ownerOnly'
 import type { OwnerProof } from '../run/ownerProof'
 import type { BotThreads } from '../../shared/bots/personal/authority'
 import { BOT_COMPACTION_HOLD_MS, isBotRoomAbort, isBotWallAbort, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from '../bots/activation/dispatcher'
-import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type HarnessDriverKind, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
+import { harnessAppError, isProviderTurnCap, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type HarnessDriverKind, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider, McpToolBoundary } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
@@ -9346,7 +9346,8 @@ export class OrchestratorService extends EventEmitter {
     try {
       const continued = engine.getRun(runId)?.outcome?.continuationOf
       const source = continued ? engine.getRun(continued) : null
-      if (source) this.addSystemMessage(source.outcome?.pause ? `Continuing run ${source.ordinal} after the usage limit reset.` : `Continuing run ${source.ordinal} after a restart.`)
+      // A bot's work that reached its runtime's step cap goes on in a fresh turn: no restart happened.
+      if (source) this.addSystemMessage(source.outcome?.pause ? `Continuing run ${source.ordinal} after the usage limit reset.` : isProviderTurnCap(source.outcome?.error) ? `Continuing run ${source.ordinal}, which took the most steps one turn may take.` : `Continuing run ${source.ordinal} after a restart.`)
     } catch (error) {
       console.warn('run engine continuation note failed', { runId, error: error instanceof Error ? error.message : String(error) })
     }
@@ -14052,8 +14053,11 @@ export class OrchestratorService extends EventEmitter {
     }
 
     // The mode the turn runs in is known before its message is admitted, so a change reaches the
-    // agent with that message and the message records the mode.
-    const turnPermission = !reuseLastUser && displayUserMessage ? this.previewTurnPermission(session, mode, opts) : undefined
+    // agent with that message and the message records the mode. A bot's turn runs under its grant, never a thread
+    // permission mode, and nobody is asked before its commands and edits: it gets no mode and no notice of one. (Its
+    // first turn was stamped "Auto-accept edits" and its continuation "Ask before acting", so work that went on past
+    // the turn cap was told, wrongly, that its edits now wait for the owner.)
+    const turnPermission = !reuseLastUser && displayUserMessage && !opts?.bot ? this.previewTurnPermission(session, mode, opts) : undefined
     // The approvals this run was started to deliver (a continue turn, or a message that denied them).
     const approvalNote = !reuseLastUser ? this.approvalDecisionNote(opts?.runId) : undefined
     try {
