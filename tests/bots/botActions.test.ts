@@ -4790,3 +4790,19 @@ it.each(['MCP off', 'server down', 'permission off'] as const)(
     expect((await aloneNext(t)).action.status).toBe('done')
   }
 )
+
+it.each([['body', 256, true], ['body', 257, false], ['split', 257, false], ['repeat', 256, true]] as const)(
+  'E1 r3c consent caps distinct source tokens across the call: %s %s', async (shape, count, allowed) => {
+    const t = await scheduledCall(true, 1)
+    const tokens = Array.from({ length: count }, (_, n) => `a${n}.example`)
+    Object.assign(t.args, { body: (shape === 'split' ? tokens.slice(0, 128) : tokens).join(' '),
+      ...(shape === 'body' ? {} : { subject: (shape === 'split' ? tokens.slice(128) : tokens).join(' ') }) })
+    t.descriptor.inputSchema.properties.to = { type: 'array' } as never
+    await t.call(); await finish(f, t.run.payload)
+    const source = f.bots.actions.forWork(t.id)!
+    await f.bots.actions.answer({ actionId: source.id, digest: source.args_digest, answer: 'send' }); await flush()
+    const result = f.bots.alone.prepare(t.botId, 'token-cap', { ask: 'let_alone', scheduleId: t.schedule.scheduleId, serverId: 'mail', tool: 'send' })
+    expect(result).toBe(allowed ? undefined : 'This sent call has too many addresses to let alone.')
+    expect(f.store.all("SELECT key FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone-ask:*'", t.botId)).toHaveLength(allowed ? 1 : 0)
+  }
+)
