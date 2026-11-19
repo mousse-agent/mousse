@@ -201,6 +201,9 @@ export function signInErrorMessage(cause: unknown, origin: string, net?: NetStat
       return 'Your other computer signed in to this Mousse ID adds this one to your devices. Open Mousse on it, then sign in again.'
     case 'expired':
       return 'The sign-in code expired. Sign in again.'
+    case 'conflict':
+      // The daemon words every conflict the same; at sign-in it means this computer still holds the old account.
+      return 'This computer is still set up for an earlier sign-in. Sign out, then sign in again.'
     case 'bad_delegation':
     case 'revoked':
       if (net?.self?.removed) return REMOVED_FROM_DEVICES

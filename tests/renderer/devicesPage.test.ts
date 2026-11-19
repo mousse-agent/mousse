@@ -115,4 +115,18 @@ describe('Settings → Devices', () => {
     expect(host.textContent).not.toContain('Reconnecting')
     expect([...host.querySelectorAll('button')].map((button) => button.textContent)).toContain('Sign in')
   })
+
+  it('a disconnected account can be signed out, so signing in to a different one is never stuck', async () => {
+    daemon.plus = { configured: true, connected: false, email: 'me@example.com' }
+    useMousseIdStore.setState({ runtimeOrigin: 'https://id.example' })
+    await act(async () => root.render(createElement(MousseIdAccount, { onSetUp: () => undefined })))
+    await flush()
+    expect(host.textContent).toContain('Disconnected')
+    const buttons = [...host.querySelectorAll('button')]
+    expect(buttons.map((button) => button.textContent)).toEqual(expect.arrayContaining(['Sign out', 'Sign in']))
+    request.mockClear()
+    await act(async () => buttons.find((button) => button.textContent === 'Sign out')!.click())
+    await flush()
+    expect(request.mock.calls.map(([method]) => method)).toContain('net.plus.disconnect')
+  })
 })

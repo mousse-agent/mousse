@@ -177,6 +177,11 @@ describe('sign-in errors', () => {
     expect(mousseIdSetupStep(undefined)).toBe('Create a network identity for this device first.')
   })
 
+  it('tells a computer still holding an earlier account to sign out first, not the bare conflict text', () => {
+    expect(signInErrorMessage({ code: 'conflict', message: 'The same identifier was used with different content.' }, origin))
+      .toBe('This computer is still set up for an earlier sign-in. Sign out, then sign in again.')
+  })
+
   it('keeps other messages as they are', () => {
     expect(signInErrorMessage(new Error('Something else'), origin)).toBe('Something else')
   })
