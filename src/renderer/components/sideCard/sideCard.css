@@ -72,7 +72,8 @@
   overscroll-behavior: contain;
   scrollbar-width: thin;
   border: 1px solid var(--ui-line);
-  border-radius: var(--ui-card-radius);
+  /* Square top-left and bottom-right, rounded top-right and bottom-left. */
+  border-radius: 0 var(--ui-card-radius);
   background: var(--ui-raised);
   box-shadow: var(--ui-raised-shadow);
   color: var(--text-primary);

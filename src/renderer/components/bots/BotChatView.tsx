@@ -663,7 +663,7 @@ function BotTurnBody({ botId, botName, live, onSize, follow }: { botId: string; 
     {offline && !writing ? <span className="bot-status-line">{OFFLINE_TEXT}</span> : <TypingDots status={writing ? held.current : doing} still={writing && !leaving} />}
   </span>
   return <div className={`bot-turn-body ${writing ? 'bot-live-reply' : 'bot-typing'}`}
-    {...(writing ? { 'aria-busy': true } : { role: 'status', 'aria-label': offline ? OFFLINE_TEXT : `${botName}: ${doing}` })}>
+    {...(writing ? { 'aria-busy': true } : { role: 'status', 'aria-label': offline ? OFFLINE_TEXT : doing ? `${botName}: ${doing}` : `${botName} is typing` })}>
     {/* A paragraph's line box, as the reply's own first line has: the typing row is as tall as one line of it. */}
     <div className="an-markdown bot-markdown bot-turn-place">{typing}</div>
     {writing && <BotMarkdown text={shown} className={`bot-markdown bot-turn-reply${leaving ? ' is-arriving' : ''}`} streaming />}
@@ -710,13 +710,11 @@ function BotCutReply({ text, starts }: { text: string; starts: boolean }) {
 }
 
 /**
- * The words beside the typing dots, held calm. `line` is what the turn does now (`botDoingLine`), `turn` the chat turn
- * it belongs to.
+ * The words beside the typing dots, held calm. `line` is what the turn does now (`botDoingLine`: only the bot's own
+ * words), `turn` the chat turn it belongs to.
  * - The bot's own words show at once, and so does the first line of a turn.
- * - Mousse's words replace what is shown only once it has stayed `DOING_HOLD_MS`; the newest waits, so calls that
- *   come and go faster than that never show.
  * - Once the turn has said what it does, a moment with nothing to say (its step ended, its reply not begun) keeps the
- *   last words: the line never falls back to "Reading your message" or "Working" in between.
+ *   last words: the line never falls back to the dots alone in between.
  */
 function useDoingLine(turn: string | undefined, line: { text: string; own?: true; idle?: true }): string {
   const [shown, setShown] = useState(() => ({ turn, text: line.text, idle: Boolean(line.idle), at: Date.now() }))
@@ -801,7 +799,8 @@ function TypingDots({ status, still: hold = false }: { status: string; still?: b
     const lead = dotsRef.current?.firstElementChild?.getAnimations?.()[0]
     if (lead?.startTime !== null && lead?.startTime !== undefined) for (const animation of shimmer) animation.startTime = lead.startTime
     return () => shimmer.forEach((animation) => animation.cancel())
-  }, [still])
+    // The words (and their shimmer) appear only once the bot says what it does.
+  }, [still, Boolean(status)])
   // Paused, all together so the wave stays in step, while the bubble is scrolled out of view or the window is hidden.
   useLayoutEffect(() => {
     const bubble = bubbleRef.current
@@ -812,13 +811,13 @@ function TypingDots({ status, still: hold = false }: { status: string; still?: b
         else animation.play()
       }
     })
-  }, [still])
+  }, [still, Boolean(status)])
   return <span ref={bubbleRef} className={`bot-typing-row${still ? ' is-still' : ''}`}>
     <span ref={dotsRef} className="bot-typing-dots" aria-hidden><i /><i /><i /></span>
-    <span className="bot-typing-status">
+    {status && <span className="bot-typing-status">
       {status}
       {!still && <span ref={glintRef} className="bot-typing-glint" aria-hidden><span>{status}</span></span>}
-    </span>
+    </span>}
   </span>
 }
 
@@ -858,8 +857,6 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // The chat's turn (a service from before work: the bot's working activation), and what it said it is doing now.
   const turn = useBotsStore((s) => bot.chat?.activationId ?? (legacy ? s.live[bot.id]?.activationId : undefined))
   const status = useBotsStore((s) => (turn ? s.statuses[turn] : undefined))
-  // Its live step: the call its turn is making now. A chat opened mid-turn has it from the page it loaded (`live`).
-  const step = useBotsStore((s) => (turn ? s.activity[turn] ?? (s.live[bot.id]?.activationId === turn ? s.live[bot.id]!.chip : undefined) : undefined))
   const lastSeq = messages.at(-1)?.seq
   const firstId = messages[0]?.id
   const files = attachments ?? NO_FILES
@@ -1036,8 +1033,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const typingStarts = !((last?.kind === 'message' && last.message.author === 'bot') || (last?.kind === 'system' && last.cut))
   // The reply the chat's turn is writing takes the typing bubble's place, and the end stays in view as it grows.
   const writing = useHasBotLiveReply(bot.id)
-  // What the turn is doing now, beside its typing dots: the owner's message is unanswered while it is the newest row.
-  const doing = useDoingLine(turn, botDoingLine({ status, writing, chip: step, unanswered: last?.kind === 'message' && last.message.author === 'owner' }))
+  // What the bot says it is doing now, beside its typing dots; nothing of Mousse's own.
+  const doing = useDoingLine(turn, botDoingLine({ status }))
   // The turn's live bubble is drawn as the bot message it becomes, under the key its message takes over.
   const replyKeys = useReplyKeys(shown, turn)
   const live = useMemo<BotLive>(() => ({ offline, doing }), [offline, doing])

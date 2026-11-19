@@ -52,6 +52,8 @@ const text = (node: Element | null | undefined) => node?.textContent?.trim()
 
 const newSideChat = vi.fn<(threadId: string) => Promise<{ threadId: string }>>()
 
+const ASKED = { id: 'u1', role: 'user' as const, content: 'Fix the build', timestamp: '2026-11-18T10:00:00.000Z' }
+
 beforeEach(() => {
   host = document.createElement('div')
   document.body.append(host)
@@ -67,6 +69,8 @@ beforeEach(() => {
       thread('ended', 'Old question', sideOf('parent'), { settledAt: '2026-11-18T11:00:00.000Z' }),
       thread('theirs', 'Elsewhere', sideOf('other'))
     ],
+    // The thread's first run has ended: there is something to fork.
+    messages: [ASKED],
     openedSurfaceKinds: ['sideChats'],
     mainView: 'sideChats',
     mainAreaOpen: true,
@@ -110,6 +114,19 @@ describe('the Side chats panel', () => {
     act(() => tab().querySelector<HTMLButtonElement>('.main-view-tab-select')!.click())
     expect(host.querySelector('[data-side-chat]')).toBeNull()
     expect(text(tab().querySelector('.main-view-tab-label'))).toBe('Side chats')
+  })
+
+  it('keeps New side chat off until the thread has started and its first run ended', () => {
+    useAppStore.setState({ threads: [thread('parent', 'Fix the build')], messages: [] })
+    render()
+    const button = () => host.querySelector<HTMLButtonElement>('.side-chats-new')!
+    expect(button().disabled).toBe(true)
+    expect(button().getAttribute('title')).toBe('Send this thread a message first')
+    act(() => useAppStore.setState({ messages: [ASKED], turnStates: { parent: { threadId: 'parent', phase: 'thinking' } } as never }))
+    expect(button().disabled).toBe(true)
+    act(() => useAppStore.setState({ turnStates: {} }))
+    expect(button().disabled).toBe(false)
+    expect(button().getAttribute('title')).toBe('Fork this thread into a side chat')
   })
 
   it('shows the empty state, and says why a thread with nothing to fork has no side chat yet', async () => {

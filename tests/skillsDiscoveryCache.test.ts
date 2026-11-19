@@ -5,6 +5,8 @@ import { getHeapSnapshot } from 'v8'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { SkillsRegistry } from '../src/mms/integrations/skills/SkillsRegistry'
 import { createLegacySingleProfileContext } from '../src/mms/integrations/profileContext'
+import { prepareSkills } from '../src/mms/run/mcp/appTools/assemble'
+import { getDefaultSettings } from '../src/shared/settings'
 import type { SkillsRegistrySnapshot } from '../src/shared/integrations'
 
 let root: string
@@ -135,6 +137,108 @@ describe('Skills discovery cache', () => {
       now.mockRestore()
       await writeSkill(shared, 'alpha')
     }
+  })
+
+  describe('a caller that takes the last scan (a bot\'s turn)', () => {
+    const names = (snapshot: SkillsRegistrySnapshot) => snapshot.skills.map((skill) => skill.name)
+    const lateFolder = () => join(userHome, '.claude', 'skills', 'late')
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 50))
+
+    it('past its time gets the last scan at once, and the next caller gets the scan made meanwhile', async () => {
+      const skills = registry()
+      const path = await project(0)
+      const start = Date.now()
+      const now = vi.spyOn(Date, 'now').mockReturnValue(start)
+      try {
+        await skills.discover({ projectPath: path })
+        await writeSkill(lateFolder(), 'late')
+        now.mockReturnValue(start + 31_000)
+        expect(names(await skills.discover({ projectPath: path, stale: true }))).not.toContain('late')
+        await settle()
+        expect(names(await skills.discover({ projectPath: path, stale: true }))).toContain('late')
+      } finally {
+        now.mockRestore()
+        await rm(lateFolder(), { recursive: true, force: true })
+      }
+    })
+
+    it('after a change Mousse made, or with nothing scanned yet, scans first', async () => {
+      const skills = registry()
+      const path = await project(1)
+      expect(names(await skills.discover({ projectPath: path, stale: true }))).toContain('local-1')
+      await writeSkill(lateFolder(), 'late')
+      try {
+        skills.invalidateDiscoveryCache()
+        expect(names(await skills.discover({ projectPath: path, stale: true }))).toContain('late')
+      } finally {
+        await rm(lateFolder(), { recursive: true, force: true })
+      }
+    })
+
+    it('a message that names a skill the last scan lacks waits for a new scan and loads it', async () => {
+      const skills = registry()
+      const path = await project(2)
+      const start = Date.now()
+      const now = vi.spyOn(Date, 'now').mockReturnValue(start)
+      // The actor is granted the new skill by its id, as read by a registry of its own.
+      let lateId = ''
+      const turn = (userContent: string) => prepareSkills({ registry: skills, settings: () => getDefaultSettings().integrations.skills, projectPath: path, mode: 'agent', userContent, actor: { kind: 'main', skillIds: [lateId] }, stale: true })
+      try {
+        await skills.discover({ projectPath: path })
+        await writeSkill(lateFolder(), 'late', 'Late body.')
+        const late = (await registry().discover({ projectPath: path })).skills.find((skill) => skill.name === 'late')!
+        lateId = late.installationId ?? late.id
+        now.mockReturnValue(start + 31_000)
+        const loaded = await turn('please /late now')
+        expect(loaded.loadedSkills.map((skill) => skill.name)).toEqual(['late'])
+      } finally {
+        now.mockRestore()
+        await rm(lateFolder(), { recursive: true, force: true })
+      }
+    })
+
+    it('a message that names a skill added since a scan still within its time scans the folders again and loads it', async () => {
+      const skills = registry()
+      const path = await project(3)
+      let lateId = ''
+      try {
+        await skills.discover({ projectPath: path })
+        await writeSkill(lateFolder(), 'late', 'Late body.')
+        const late = (await registry().discover({ projectPath: path })).skills.find((skill) => skill.name === 'late')!
+        lateId = late.installationId ?? late.id
+        const loaded = await prepareSkills({ registry: skills, settings: () => getDefaultSettings().integrations.skills, projectPath: path, mode: 'agent', userContent: 'please /late now', actor: { kind: 'main', skillIds: [lateId] }, stale: true })
+        expect(loaded.loadedSkills.map((skill) => skill.name)).toEqual(['late'])
+      } finally {
+        await rm(lateFolder(), { recursive: true, force: true })
+      }
+    })
+
+    it('a background scan that started before a change Mousse made is not kept for later turns', async () => {
+      const skills = registry()
+      const path = await project(4)
+      const start = Date.now()
+      const now = vi.spyOn(Date, 'now').mockReturnValue(start)
+      type Uncached = (options: object) => Promise<{ snapshot: SkillsRegistrySnapshot; scannedAt: number }>
+      const uncached = vi.spyOn(skills as unknown as { discoverUncached: Uncached }, 'discoverUncached')
+      try {
+        const before = await skills.discover({ projectPath: path })
+        now.mockReturnValue(start + 31_000)
+        // The background scan reads the folders before the change and finishes after it.
+        let finish = () => {}
+        uncached.mockImplementationOnce(() => new Promise((resolve) => { finish = () => resolve({ snapshot: before, scannedAt: Date.now() }) }))
+        expect(names(await skills.discover({ projectPath: path, stale: true }))).not.toContain('late')
+        await writeSkill(lateFolder(), 'late')
+        skills.invalidateDiscoveryCache()
+        finish()
+        await settle()
+        expect(names(await skills.discover({ projectPath: path }))).toContain('late')
+        expect(names(await skills.discover({ projectPath: path, stale: true }))).toContain('late')
+      } finally {
+        uncached.mockRestore()
+        now.mockRestore()
+        await rm(lateFolder(), { recursive: true, force: true })
+      }
+    })
   })
 
   it('keeps no SKILL.md text alive through parsed names and descriptions', async () => {

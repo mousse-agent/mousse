@@ -63,11 +63,21 @@ export async function prepareSkills(input: {
   userContent: string
   actor: IntegrationActor
   grants?: EffectiveAgentGrants
+  /**
+   * The last scan of the Skills folders may answer, while they are scanned again in the background (`SkillsDiscoveryOptions.stale`):
+   * a bot's turn starts without walking them. A message that names a skill that scan doesn't have waits for a new scan of the folders.
+   */
+  stale?: boolean
 }): Promise<SkillsContext> {
   const { registry, projectPath, mode } = input
   if (!registry) return { enabledSkills: [], loadedSkills: [] }
-  const snapshot = await registry.discover({ projectPath })
-  const enabledSkills = filterEnabledSkills(snapshot, mode, input.settings(), input.actor)
+  let snapshot = await registry.discover({ projectPath, ...(input.stale && !input.grants ? { stale: true } : {}) })
+  let enabledSkills = filterEnabledSkills(snapshot, mode, input.settings(), input.actor)
+  if (input.stale && !input.grants && explicitSkillNames(input.userContent).some((name) => !enabledSkills.some((skill) => normalizeSkillName(skill.name) === name))) {
+    // A scan, not the cache: the skill may have been added since a scan that is still within its time.
+    snapshot = await registry.discover({ projectPath, refresh: true })
+    enabledSkills = filterEnabledSkills(snapshot, mode, input.settings(), input.actor)
+  }
   const modeSkills = input.grants ? [] : await loadSkillForMode(registry, mode, projectPath, snapshot)
   const explicitSkills = await loadExplicitSkills(registry, input.userContent, enabledSkills, projectPath, snapshot)
   const grants = input.grants

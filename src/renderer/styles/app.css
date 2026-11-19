@@ -409,6 +409,30 @@ html.platform-darwin .titlebar-left {
   container-name: main-area;
 }
 
+/* Opening and closing, the panel slides in from the right edge as it fades, and the conversation eases to its new
+   width. The panel keeps its own width (KeepMounted's last measured one) the whole way, so its content never
+   reflows: a negative right margin of that width is what hands the room to the conversation. Hidden at once when
+   it goes for another reason (Chats), and still with motion off (--ui-dur-slow is 0). */
+.app-workspace:has(> .main-area) {
+  overflow-x: clip;
+}
+
+.main-area:not(.keep-mounted-layout-inactive) {
+  transition:
+    margin-right var(--ui-dur-slow) var(--ui-collapse-ease),
+    opacity var(--ui-dur-slow) ease;
+}
+
+.main-area.keep-mounted-layout-inactive,
+.main-area.is-closing {
+  margin-right: calc(-1 * var(--keep-mounted-width, 480px));
+}
+
+.main-area.is-closing {
+  opacity: 0;
+  pointer-events: none;
+}
+
 .header {
   display: flex;
   align-items: center;
@@ -2328,7 +2352,7 @@ html[data-chat-width='full'] .chat {
 
 .composer-attachments {
   padding: 8px 10px 0;
-  border-bottom: 1px solid rgba(var(--accent-pale-rgb), 0.1);
+  border-bottom: none;
   border-radius: 12px 12px 0 0;
 }
 
@@ -6139,7 +6163,7 @@ html[data-theme='high-contrast'] .composer-input::placeholder {
 
 .composer-command-suggestion { border-radius: 10px; padding: 9px 12px; }
 
-.composer-attachments { border-bottom: 1px solid rgba(var(--accent-pale-rgb), 0.08); }
+.composer-attachments { border-bottom: none; }
 
 .composer-attachment-pill {
   border-radius: 999px;

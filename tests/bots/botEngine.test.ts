@@ -200,6 +200,21 @@ describe('approval', () => {
     expect(refreshed).toEqual(['pi:openrouter', 'pi:openrouter'])
   })
 
+  it('a bot with MCP tools reads its servers while its runtime\'s policy facts are still being read', async () => {
+    publish({ mcp: [{ serverId: 'github.abc123def0', tool: 'list_issues' }] })
+    approve()
+    const order: string[] = []
+    let factsRead!: () => void
+    engineHost.harness.refreshPolicyFacts = () => new Promise<void>((done) => { order.push('facts'); factsRead = done })
+    engineHost.mcp = { warm: async () => { order.push('mcp') }, servers: () => [] }
+    const activation = await bots.activate({ botId: 'site-editor', input: 'go', clientRequestId: 'c1' })
+    const refreshed = bots.refresh(turnStart(store.dispatch(activation.id, 1)!.runId!))
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(order).toEqual(['facts', 'mcp'])
+    factsRead()
+    await refreshed
+  })
+
   it('"run commands" (shell) is approvable like any other tool', () => {
     publish({ tools: ['read', 'shell'] })
     expect(bots.approval('site-editor').threads[0]).toMatchObject({ ok: true })
