@@ -205,10 +205,6 @@ export const DIGEST_SYSTEM = "You write a digest of part of a chat between a per
 
 /** The digest call's prompt: the format, the constraints to carry over, and the transcript as data. */
 export function digestPrompt(input: { transcript: string; carried: readonly string[]; from: string; to: string; tracked?: readonly string[] }): string {
-  const untracked = input.tracked === undefined ? [] : [
-    `${UNTRACKED_HEADING}:`,
-    '- after the digest, each thing the owner asked for or the bot promised in this chat that is still open at its end and is not among the open items below: one short line saying what was asked or promised, ending with the ref of the message that asked or promised it, like (j123). The list below is the only record of what is listed: the bot saying it listed or noted something does not count. Leave out what was finished or dropped. Never guess: "- none" when there is nothing.'
-  ]
   return [
     `Write a digest of the chat below (${input.from} to ${input.to}). Use exactly these headings, in this order:`,
     '',
@@ -218,12 +214,11 @@ export function digestPrompt(input: { transcript: string; carried: readonly stri
     'Decisions:',
     '- what was decided.',
     'Open threads:',
-    '- questions, tasks and promises still open.',
+    `- questions, tasks and promises still open${input.tracked === undefined ? '' : ', one line each, citing first the message that asked or promised it. When one is an open item listed below, add that item\'s ref after the journal refs, like (j123, i4)'}.`,
     'Finished work:',
     '- what was done, with its artifacts: file names, links, ids.',
     'Key facts:',
     '- names, numbers, dates and ids worth keeping.',
-    ...untracked,
     '',
     `End every item with the journal refs it comes from, like (j123). Write "- none" under a heading with nothing. Use absolute dates. Keep it under ${Math.floor(BOT_CHAT_DIGEST.digest * 0.6)} words. Never copy a password, key or token.`,
     '',
@@ -236,31 +231,33 @@ export function digestPrompt(input: { transcript: string; carried: readonly stri
 
 const isHeading = (line: string, section: string) => line.trim().toLowerCase().replace(/:$/, '') === section.toLowerCase()
 
-/** The heading a digest call lists open asks under that the bot's open items lack; never part of the digest's text. */
-export const UNTRACKED_HEADING = 'Untracked asks'
+/** One line of a digest's "Open threads": what is open, the chat rows it cites in order, and the open items it names. */
+export interface DigestOpenThread {
+  text: string
+  seqs: number[]
+  items: string[]
+}
 
 /**
- * Splits a digest call's answer: the digest itself, and the asks it found open and unlisted, each with the chat row its
- * ref names. A line without a ref, or "- none", is no ask. The section is taken out wherever the model put it.
+ * A digest's open threads, read from its text: the open items are checked against them, so what the chat left open and
+ * no item holds is listed (`addUntrackedAsks`). A line without a journal ref, or "- none", is no thread. The refs are
+ * read however the model joins them: "(j13)", "(j13, j16)", "(j13 and j16, i4)".
  */
-export function untrackedAsks(answer: string): { digest: string; asks: Array<{ text: string; seq: number }> } {
-  const lines = answer.replace(/\r\n?/g, '\n').split('\n')
-  const kept: string[] = []
-  const asks: Array<{ text: string; seq: number }> = []
-  let inside = false
-  for (const line of lines) {
-    if (isHeading(line, UNTRACKED_HEADING)) inside = true
-    else if (inside && (DIGEST_SECTIONS.some((section) => isHeading(line, section)) || /^[ \t]*Headline:/i.test(line))) inside = false
-    if (!inside) {
-      kept.push(line)
-      continue
-    }
-    // The first ref a line ends with is the message that asked: "(j13)", "(j13, j16)", "(j13 and j16)".
-    const item = /^\s*-\s*(.+?)\s*\(\s*j(\d{1,15})\b[^)]*\)\s*\.?\s*$/.exec(line)
-    const text = item?.[1]?.trim().replace(/\s+/g, ' ')
-    if (item && text) asks.push({ text, seq: Number(item[2]) })
+export function digestOpenThreads(text: string): DigestOpenThread[] {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n')
+  const start = lines.findIndex((line) => isHeading(line, 'Open threads'))
+  if (start < 0) return []
+  const threads: DigestOpenThread[] = []
+  for (const line of lines.slice(start + 1)) {
+    if (DIGEST_SECTIONS.some((section) => isHeading(line, section))) break
+    const match = /^\s*-\s*(.+?)\s*\(([^()]*\bj\d[^()]*)\)\s*\.?\s*$/.exec(line)
+    const words = match?.[1]?.trim().replace(/\s+/g, ' ')
+    if (!match || !words) continue
+    const seqs = [...match[2]!.matchAll(/\bj(\d{1,15})\b/g)].map((ref) => Number(ref[1]))
+    const items = [...match[2]!.matchAll(/\bi(\d{1,9})\b/g)].map((ref) => `i${Number(ref[1])}`)
+    if (seqs.length) threads.push({ text: words, seqs, items })
   }
-  return { digest: kept.join('\n'), asks }
+  return threads
 }
 
 /** A digest's standing constraints, one item a line: the next digest carries them over. */

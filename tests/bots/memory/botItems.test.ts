@@ -3,7 +3,7 @@ import { estimateTokens } from '../../../src/shared/bots/personal/memory'
 import { BOT_ITEMS_PACK_TOKENS, ITEMS_CHANGES_HEADING, ITEMS_HEADING, itemsBlock, type BotItem } from '../../../src/shared/bots/personal/items'
 import type { BotJob } from '../../../src/shared/bots/personal/jobs'
 import { createBotJournal } from '../../../src/mms/bots/memory/capture'
-import { untrackedAsks, type ChatSummaryState } from '../../../src/mms/bots/memory/chatSummary'
+import { digestOpenThreads, type ChatSummaryState } from '../../../src/mms/bots/memory/chatSummary'
 import { createBotContextProvider } from '../../../src/mms/bots/memory/contextPack'
 import type { BotChatDigestState, BotChatEpoch, BotChatEpochVerdict } from '../../../src/mms/bots/memory/contextBudget'
 import { botItems, listBotItems, saveBotItem } from '../../../src/mms/bots/memory/items'
@@ -265,34 +265,43 @@ describe('asks the bot did not list itself', () => {
     if (items === 2) expect(botItems(fx.store, 'ada').map((item) => item.links[0]).sort()).toEqual(['mousse://thread/t1', 'mousse://thread/t2'])
   })
 
-  const digest = (asks: string[]) => [
+  const digest = (threads: string[]) => [
     'Headline: Planning the usage page',
     'Standing constraints:', '- none',
     'Decisions:', '- none',
-    'Open threads:', '- The usage page redesign is not shipped (j1).',
-    'Finished work:', '- none',
-    'Key facts:', '- none',
-    'Untracked asks:', ...asks
+    'Open threads:', ...threads,
+    'Finished work:', '- Added the nightly check to the list (j2).',
+    'Key facts:', '- none'
   ].join('\n')
 
-  it('the digest of a chat lists what it left open that the bot had not, and keeps that out of its own text', async () => {
+  it('an open thread of the digest that no item holds is listed, whatever the chat says was listed', async () => {
     const { fx, calls, size, turn, settle } = setup()
     const first = owner(fx, 'ask1', 'Please redesign the usage page.', 'a0')
     const second = owner(fx, 'ask2', 'And tell me when the copy-thread fix is merged.', 'a0')
+    const promised = fx.message({ botId: 'ada', id: 'said', author: 'bot', text: 'I have added both to my list.', activationId: 'a0' })
     const listed = owner(fx, 'ask3', 'Also rename the export button.', 'a0')
     saved(saveBotItem(fx.store, 'ada', { text: 'Rename the export button', source: `j${listed}`, ...chat('a0') }))
+    // An item with no source: the digest can only name it by its ref.
+    const unsourced = saved(saveBotItem(fx.store, 'ada', { text: 'Check the nightly build', lane: 'run' }))
     for (let n = 1; n <= 40; n++) exchange(fx, n)
     await turn('a1')
     await settle('a1')
+    // The message the next turn answers is the newest row the digest reads.
+    const answering = owner(fx, 'now', 'For reference only, just say ok: the birds fly south.', 'a2')
     size.now = 'high'
     await turn('a2')
     expect(calls).toHaveLength(1)
-    // The call reads the list as it stands, so it can tell what is missing from it.
-    expect(calls[0]!.prompt).toContain('Open items the bot already lists:\n- i1 · todo · Rename the export button')
+    // The call reads the list as it stands, so a thread can name its item.
+    expect(calls[0]!.prompt).toContain('Open items the bot already lists:')
+    expect(calls[0]!.prompt).toContain('- i1 · todo · Rename the export button')
+    expect(calls[0]!.prompt).toContain('the birds fly south')
     await calls[0]!.answer(digest([
       `- Redesign the usage page (j${first})`,
-      `- Tell the owner when the copy-thread fix is merged (j${second}).`,
-      `- Rename the export button again (j${listed})`,
+      // The bot said it listed this one; only the list counts. The first row cited is the one that asked.
+      `- Tell the owner when the copy-thread fix is merged (j${second} and j${promised}).`,
+      `- The export button still has its old name (j${listed})`,
+      `- The nightly build is not checked yet (j${promised}, ${unsourced.id})`,
+      `- Say ok to the reading about birds (j${answering})`,
       '- Something with no ref at all',
       '- Something from a row that does not exist (j99999)'
     ]))
@@ -301,29 +310,28 @@ describe('asks the bot did not list itself', () => {
       ['Redesign the usage page', first],
       ['Tell the owner when the copy-thread fix is merged', second]
     ])
-    expect(items).toHaveLength(3)
-    // The conversation is told, marked for the bot to confirm or drop.
+    expect(items).toHaveLength(4)
+    // The conversation is told, marked for the bot to confirm with its owner or drop.
     await settle('a2')
     size.now = 'small'
-    expect((await turn('a3')).text).toMatch(/- i\d+ · todo · Redesign the usage page .* found open in a chat summary: confirm or drop it/)
+    expect((await turn('a3')).text).toMatch(/- i\d+ · todo · Redesign the usage page .* found open in a chat summary, not listed by you: ask your owner to confirm or drop it/)
     await settle('a3')
-    // The digest itself is adopted without the section.
+    // The digest is adopted as it was written, and a second look at the same threads adds nothing.
     size.now = 'hard'
-    const next = await turn('a4')
-    expect(next).toMatchObject({ fresh: true, folded: { digest: true } })
-    expect(fx.store.getState<ChatSummaryState>('ada', 'chat_summary')!.text).toContain('The usage page redesign is not shipped')
-    expect(fx.store.getState<ChatSummaryState>('ada', 'chat_summary')!.text).not.toContain('Untracked asks')
+    expect(await turn('a4')).toMatchObject({ fresh: true, folded: { digest: true } })
+    expect(fx.store.getState<ChatSummaryState>('ada', 'chat_summary')!.text).toContain('Redesign the usage page')
+    expect(botItems(fx.store, 'ada')).toHaveLength(4)
   })
 
   it.each([
-    ['at the end', 'Headline: H\nKey facts:\n- none\nUntracked asks:\n- Ship it (j12)\n- none', 'Headline: H\nKey facts:\n- none', [{ text: 'Ship it', seq: 12 }]],
-    ['in the middle', 'Headline: H\nUntracked asks:\n- Ship it (j12, j14).\nKey facts:\n- a fact (j3)', 'Headline: H\nKey facts:\n- a fact (j3)', [{ text: 'Ship it', seq: 12 }]],
-    // The first ref is the message that asked, however the model joins the later ones.
-    ['with its refs joined in words', 'Headline: H\nKey facts:\n- none\nUntracked asks:\n- Find why the nightly is slow (j13 and j16)', 'Headline: H\nKey facts:\n- none', [{ text: 'Find why the nightly is slow', seq: 13 }]],
-    ['absent', 'Headline: H\nKey facts:\n- a fact (j3)', 'Headline: H\nKey facts:\n- a fact (j3)', []],
-    ['with nothing', 'Headline: H\nKey facts:\n- none\nUntracked asks:\n- none', 'Headline: H\nKey facts:\n- none', []]
-  ])('reads the untracked asks of a digest answer: %s', (_name, answer, kept, asks) => {
-    expect(untrackedAsks(answer)).toEqual({ digest: kept, asks })
+    ['one ref', '- Ship it (j12)', [{ text: 'Ship it', seqs: [12], items: [] }]],
+    ['several refs and a full stop', '- Ship it (j12, j14).', [{ text: 'Ship it', seqs: [12, 14], items: [] }]],
+    ['refs joined in words', '- Find why the nightly is slow (j13 and j16)', [{ text: 'Find why the nightly is slow', seqs: [13, 16], items: [] }]],
+    ['an item it belongs to', '- The redesign waits for a go (j5, i1)', [{ text: 'The redesign waits for a go', seqs: [5], items: ['i1'] }]],
+    ['no ref', '- Ship it', []],
+    ['nothing open', '- none', []]
+  ])('reads the open threads of a digest: %s', (_name, line, threads) => {
+    expect(digestOpenThreads(`Standing constraints:\n- Never ship on Friday (j1)\nOpen threads:\n${line}\nFinished work:\n- Shipped the fix (j40)`)).toEqual(threads)
   })
 })
 

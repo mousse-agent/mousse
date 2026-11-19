@@ -113,7 +113,7 @@ export function itemThreads(item: Pick<BotItem, 'links'>): string[] {
 const BY_WORDS: Partial<Record<BotItemBy, string>> = {
   run: 'added in your unattended work',
   mousse: 'added by Mousse when you handed this to a thread: reword or drop it as needed',
-  digest: 'found open in a chat summary: confirm or drop it'
+  digest: 'found open in a chat summary, not listed by you: ask your owner to confirm or drop it'
 }
 
 export interface ItemLineInput {

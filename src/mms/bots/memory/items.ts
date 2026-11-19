@@ -221,20 +221,29 @@ export function linkHandoffs(store: BotMemoryStore, botId: string, activationId:
 }
 
 /**
- * What a chat digest found still open and not listed (`untrackedAsks`): each becomes an item marked as found by a digest,
- * for the bot to confirm or drop. Only an ask whose ref names a chat row of the digest's range is kept, and only when no
- * item came from that row or says the same; the guard refuses what reads like a secret or an instruction.
+ * The open threads of a chat digest (`digestOpenThreads`) that no item holds: each becomes an item marked as found by a
+ * digest, for the bot to confirm with its owner or drop. Whether an item holds a thread is read from the list, never
+ * from what the chat says was listed: the thread names an item, or cites the chat row an item (open or closed) came
+ * from, or says the same words. The item points to the first row the thread cites in the digest's range that the owner
+ * or the bot wrote, leaving out `answering` (the owner's message the running turn is still answering); the guard
+ * refuses what reads like a secret or an instruction.
  */
-export function addUntrackedAsks(store: BotMemoryStore, botId: string, asks: ReadonlyArray<{ text: string; seq: number }>, range: { fromSeq: number; throughSeq: number }): number {
+export function addUntrackedAsks(store: BotMemoryStore, botId: string, threads: ReadonlyArray<{ text: string; seqs: readonly number[]; items?: readonly string[] }>, range: { fromSeq: number; throughSeq: number; answering?: number }): number {
   let added = 0
   store.write(() => {
-    for (const ask of asks) {
+    for (const thread of threads) {
       if (added >= BOT_ITEMS_FROM_DIGEST) break
-      if (ask.seq < range.fromSeq || ask.seq > range.throughSeq) continue
       const all = botItems(store, botId)
-      if (all.some((item) => item.source === ask.seq || sameText(item.text, ask.text))) continue
-      const result = saveBotItem(store, botId, { text: ask.text.slice(0, MAX_BOT_ITEM_TEXT_CHARS), source: ask.seq, lane: 'run', by: 'digest' })
-      if ('item' in result && result.added) added++
+      if (thread.items?.some((id) => all.some((item) => item.id === id))) continue
+      if (all.some((item) => (item.source !== undefined && thread.seqs.includes(item.source)) || sameText(item.text, thread.text))) continue
+      const text = thread.text.slice(0, MAX_BOT_ITEM_TEXT_CHARS)
+      for (const seq of thread.seqs) {
+        if (seq < range.fromSeq || seq > range.throughSeq || seq === range.answering) continue
+        const result = saveBotItem(store, botId, { text, source: seq, lane: 'run', by: 'digest' })
+        if ('error' in result) continue
+        if (result.added) added++
+        break
+      }
     }
   })
   return added

@@ -16,7 +16,7 @@ import { guardPackText } from './guard'
 import { availableHistoryLines } from './availableHistory'
 import {
   CHAT_DIGEST_KEY, DIGEST_SYSTEM, type ChatDigest, type ChatSummaryState, OUTSIDE_SPEAKER, adoptDigest, chatFingerprint, digestConstraints,
-  digestPrompt, firstLine, foldChatSummary, packText, parseDigest, replaceDigest, speaker, summaryHead, untrackedAsks, withinBudget
+  digestOpenThreads, digestPrompt, firstLine, foldChatSummary, packText, parseDigest, replaceDigest, speaker, summaryHead, withinBudget
 } from './chatSummary'
 import { agoLabel, cut, dayLabel, renderMemoryBlocks, timeLabel } from './render'
 import { BOT_CHANGELOG, BOT_CHANGELOG_PACK_ENTRIES, changelogBlock, type BotChangelogEntry } from '../changelog'
@@ -536,23 +536,19 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
   }
 
   /** Runs one digest call for `botId` in the background; `done` takes the checked answer, or undefined. */
-  const call = (botId: string, selection: { instanceId: string; model: string }, prompt: string, done: (digest: { text: string; headline: string } | undefined, asks: Array<{ text: string; seq: number }>) => void): void => {
+  const call = (botId: string, selection: { instanceId: string; model: string }, prompt: string, done: (digest: { text: string; headline: string } | undefined) => void): void => {
     const digest = options.digest!
     const work = (async () => {
       let parsed: { text: string; headline: string } | undefined
-      let asks: Array<{ text: string; seq: number }> = []
       try {
-        // What it found open and unlisted is not part of the digest's text: it becomes items.
-        const answer = untrackedAsks(await digest({ botId, selection, system: DIGEST_SYSTEM, prompt, signal: AbortSignal.timeout(BOT_CHAT_DIGEST.timeoutMs) }))
-        parsed = parseDigest(answer.digest)
-        asks = answer.asks
+        parsed = parseDigest(await digest({ botId, selection, system: DIGEST_SYSTEM, prompt, signal: AbortSignal.timeout(BOT_CHAT_DIGEST.timeoutMs) }))
       } catch (error) {
         console.warn("a bot's chat digest could not be written", { botId, error: error instanceof Error ? error.message : String(error) })
       }
       if (parsed) failedAt.delete(botId)
       else failedAt.set(botId, store.clock())
       try {
-        done(parsed, parsed ? asks : [])
+        done(parsed)
       } catch (error) {
         console.warn("a bot's chat digest could not be kept", { botId, error: error instanceof Error ? error.message : String(error) })
       }
@@ -579,18 +575,22 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
       at: store.now()
     }
     store.write(() => store.setState(botId, CHAT_DIGEST_PENDING_KEY, pending))
-    // The digest also reads the open items, and names what the chat left open that is not among them: the summary
-    // lets pending things go, so whatever the bot did not list is listed before the rows fold away.
+    // The digest also reads the open items, so its open threads can name the item each belongs to: the summary lets
+    // pending things go, so an open thread no item holds is listed before its rows fold away.
     const tracked = openItems(botItems(store, botId)).map((item) => shortItemLine(item, { day: (iso) => dayLabel(iso, zone()) }))
     const prompt = digestPrompt({ transcript: text, carried: digestConstraints(newest?.text), from: dayLabel(pending.firstAt, zone()), to: dayLabel(pending.lastAt, zone()), tracked: withinBudget(tracked, BOT_ITEMS_PACK_TOKENS) })
-    call(botId, selection, prompt, (parsed, asks) => store.write(() => {
+    // The owner's newest message, when nothing answers it yet: the turn that reads it is running, so it is no open thread.
+    const lastOwner = [...rows].reverse().find((row) => row.kind === 'owner_msg')
+    const answering = lastOwner && !rows.some((row) => row.seq > lastOwner.seq && row.kind === 'bot_msg') ? lastOwner.seq : undefined
+    call(botId, selection, prompt, (parsed) => store.write(() => {
       // Kept only if it is still the digest asked for: a forget or a wipe meanwhile dropped it.
       if (pendingOf(botId)?.id !== pending.id) return
       if (!parsed) store.deleteState(botId, CHAT_DIGEST_PENDING_KEY)
       else {
         store.setState(botId, CHAT_DIGEST_PENDING_KEY, { ...pending, status: 'ready', at: store.now(), ...parsed })
-        // Only while the rows it read are unchanged: a forget meanwhile may have removed what an ask repeats.
-        if (asks.length && chatFingerprint(store.digestRows(botId, pending)) === pending.fingerprint) addUntrackedAsks(store, botId, asks, pending)
+        // Only while the rows it read are unchanged: a forget meanwhile may have removed what a thread repeats.
+        const threads = digestOpenThreads(parsed.text)
+        if (threads.length && chatFingerprint(store.digestRows(botId, pending)) === pending.fingerprint) addUntrackedAsks(store, botId, threads, { ...pending, ...(answering === undefined ? {} : { answering }) })
       }
     }))
   }
