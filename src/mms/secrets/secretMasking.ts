@@ -7,6 +7,9 @@ export function secretForms(value: string): string[] {
   const base64 = Buffer.from(value, 'utf8').toString('base64')
   forms.add(base64)
   forms.add(base64.replace(/=+$/, ''))
+  const base64url = base64.replace(/\+/g, '-').replace(/\//g, '_')
+  forms.add(base64url)
+  forms.add(base64url.replace(/=+$/, ''))
   forms.add(encodeURIComponent(value))
   forms.add(encodeURIComponent(value).replace(/%[0-9A-F]{2}/g, (hex) => hex.toLowerCase()))
   forms.add(Buffer.from(value, 'utf8').toString('hex'))
@@ -58,10 +61,14 @@ function jsonEchoPatterns(value: string): RegExp[] {
             const forms = new Set([jsonEscaped(char)])
             if (!/[\"\\\x00-\x1f]/.test(char)) forms.add(char)
             if (char === '/') forms.add('\\/')
-            const alternatives = [...forms].map((form) => {
-              for (let n = 0; n < depth; n++) form = jsonEscaped(form)
-              return literal(form)
-            })
+            let layers = forms
+            for (let n = 0; n < depth; n++) {
+              layers = new Set([...layers].flatMap(form => {
+                const outer = jsonEscaped(form)
+                return [outer, outer.replaceAll('/', '\\/')]
+              }))
+            }
+            const alternatives = [...layers].map(literal)
             alternatives.push(
               char
                 .split('')
@@ -83,6 +90,15 @@ function jsonEchoPatterns(value: string): RegExp[] {
   )
 }
 
+/** Percent escapes may cover any subset of bytes, including unreserved characters such as ~. */
+function percentEchoPattern(value: string): RegExp {
+  const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(Array.from(value).map(char => {
+    const encoded = [...Buffer.from(char)].map(byte => '%' + byte.toString(16).padStart(2, '0').replace(/[a-f]/g, h => `[${h}${h.toUpperCase()}]`)).join('')
+    return `(?:${literal(char)}|${encoded})`
+  }).join(''), 'g')
+}
+
 /** A function that replaces every form of the given secrets in a text with `[secret NAME hidden]`; undefined when there is none. */
 export function secretMasker(
   secrets: ReadonlyArray<{ name: string; value: string }>
@@ -96,7 +112,7 @@ export function secretMasker(
     [value, ...secretLines(value)]
       .filter((form) => form.length >= MIN_SECRET_VALUE_LENGTH)
       .flatMap((form) =>
-        jsonEchoPatterns(form).map((pattern) => ({ pattern, mask: secretMask(name) }))
+        [...jsonEchoPatterns(form), percentEchoPattern(form)].map((pattern) => ({ pattern, mask: secretMask(name) }))
       )
   )
   return (text) => {
