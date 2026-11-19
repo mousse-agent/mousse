@@ -10,21 +10,21 @@ import {
   realpathSync,
   unlinkSync,
   writeFileSync,
-  type Stats
+  type BigIntStats
 } from 'node:fs'
 import { join } from 'node:path'
 
 /** Only these daemon-created names may be pruned; directory contents are never trusted. */
-const responses = new Map<string, { dev: number; ino: number; names: string[] }>()
-const same = (a: Pick<Stats, 'dev' | 'ino'>, b: Pick<Stats, 'dev' | 'ino'>): boolean =>
+const responses = new Map<string, { dev: bigint; ino: bigint; names: string[] }>()
+const same = (a: Pick<BigIntStats, 'dev' | 'ino'>, b: Pick<BigIntStats, 'dev' | 'ino'>): boolean =>
   a.dev === b.dev && a.ino === b.ino
 
 export class SecretFetchFileError extends Error {
   constructor(readonly unsafe = false) {
     super(
       unsafe
-        ? 'The fetch folder changed or is unavailable. The response was not saved; try again after restoring your work folder.'
-        : 'The response could not be saved on this computer. Check the available space and folder permissions before retrying.'
+        ? 'The request was sent, but the fetch folder changed or is unavailable and the response could not be saved on this computer. Restore your work folder before retrying.'
+        : 'The request was sent, but the response could not be saved on this computer. Check the available space and folder permissions before retrying.'
     )
   }
 }
@@ -40,7 +40,7 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
   try {
     mkdirSync(folder, { recursive: true, mode: 0o700 })
     const expected = join(realpathSync(scratch), 'fetches')
-    const checked = lstatSync(folder)
+    const checked = lstatSync(folder, { bigint: true })
     if (!checked.isDirectory() || checked.isSymbolicLink()) throw new SecretFetchFileError(true)
     // Non-Linux Node cannot locate a file's parent through its fd. A child pins cwd instead;
     // merely comparing the bot-controlled path before/after open would leave another race.
@@ -71,16 +71,16 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
     } catch {
       throw new SecretFetchFileError(true)
     }
-    if (!same(fstatSync(directoryFd), checked)) throw new SecretFetchFileError(true)
+    if (!same(fstatSync(directoryFd, { bigint: true }), checked)) throw new SecretFetchFileError(true)
     const pinned = `/proc/self/fd/${directoryFd}`
     const unchanged = (): boolean => {
       try {
-        const current = lstatSync(folder)
+        const current = lstatSync(folder, { bigint: true })
         return (
           current.isDirectory() &&
           !current.isSymbolicLink() &&
           same(current, checked) &&
-          same(fstatSync(directoryFd!), checked) &&
+          same(fstatSync(directoryFd!, { bigint: true }), checked) &&
           realpathSync(pinned) === expected
         )
       } catch {
@@ -96,8 +96,8 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
       0o600
     )
-    const opened = fstatSync(fileFd)
-    const entry = lstatSync(created)
+    const opened = fstatSync(fileFd, { bigint: true })
+    const entry = lstatSync(created, { bigint: true })
     const inCheckedFolder =
       same(opened, entry) && realpathSync(`/proc/self/fd/${fileFd}`) === join(expected, name)
     if (!opened.isFile() || !inCheckedFolder || !unchanged()) throw new SecretFetchFileError(true)
@@ -109,7 +109,7 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
     // Drop records for ended runs. Nothing is removed from disk while forgetting their names.
     for (const [path, record] of responses) {
       try {
-        if (!same(lstatSync(path), record)) responses.delete(path)
+        if (!same(lstatSync(path, { bigint: true }), record)) responses.delete(path)
       } catch {
         responses.delete(path)
       }
@@ -144,9 +144,9 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
   } finally {
     let closeFailed = false
     if (fileFd !== undefined) {
-      let opened: Stats | undefined
+      let opened: BigIntStats | undefined
       try {
-        opened = fstatSync(fileFd)
+        opened = fstatSync(fileFd, { bigint: true })
       } catch {
         closeFailed = true
       }
@@ -155,10 +155,10 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
       } catch {
         closeFailed = true
       }
-      if (!finished && created && opened && (writing || opened.size === 0)) {
+      if (!finished && created && opened && (writing || opened.size === 0n)) {
         try {
-          const entry = lstatSync(created)
-          if (entry.isFile() && same(entry, opened) && (writing || entry.size === 0))
+          const entry = lstatSync(created, { bigint: true })
+          if (entry.isFile() && same(entry, opened) && (writing || entry.size === 0n))
             unlinkSync(created)
         } catch {
           /* Only our exclusive inode is eligible; before writing, it must still be empty. */
@@ -173,5 +173,26 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
       }
     }
     if (closeFailed && !failure) throw new SecretFetchFileError()
+  }
+}
+
+/** A rejected preflight has not used the credential. Save repeats these checks after sending. */
+export function checkSecretFetchFolder(scratch: string): void {
+  const folder = join(scratch, 'fetches')
+  let fd: number | undefined
+  try {
+    mkdirSync(folder, { recursive: true, mode: 0o700 })
+    const checked = lstatSync(folder, { bigint: true })
+    if (!checked.isDirectory() || checked.isSymbolicLink()) throw new Error()
+    if (process.platform !== 'win32') {
+      fd = openSync(folder, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+      const current = lstatSync(folder, { bigint: true })
+      if (!current.isDirectory() || !same(current, checked) ||
+          !same(fstatSync(fd, { bigint: true }), checked)) throw new Error()
+    }
+  } catch {
+    throw new SecretFetchFileError(true)
+  } finally {
+    if (fd !== undefined) closeSync(fd)
   }
 }

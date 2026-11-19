@@ -1,6 +1,6 @@
 import { secretMasker } from './secretMasking'
 import { validateHeaderName, validateHeaderValue } from 'node:http'
-import { saveSecretFetchResponse, SecretFetchFileError } from './secretFetchFiles'
+import { checkSecretFetchFolder, saveSecretFetchResponse, SecretFetchFileError } from './secretFetchFiles'
 import { isKeyName } from '../../shared/automationKeys'
 import { pastedSecretShape } from '../../shared/secretShapes'
 import { pageFailureReason, publicFetch } from '../net-public/publicFetch'
@@ -45,6 +45,8 @@ export function boundReadPath(raw: unknown, paths?: readonly string[]): string |
   const normalized = decoded.normalize('NFKC')
   if (normalized.split('/').length !== decoded.split('/').length || normalized.includes('\\'))
     return
+  if (decoded.split('/').some(segment => !/^[A-Za-z0-9._~!$&'()*+,=:@-]*$/.test(segment) ||
+      /[%?#]/.test(segment.normalize('NFKC')))) return
   if (paths && !paths.some((p) => decoded === p || decoded.startsWith(p + '/'))) return
   // Encoding each checked segment also escapes colons (for example GitHub compare refs);
   // the listed services decode them as segment data, never as a new URL authority.
@@ -142,6 +144,12 @@ export function prepareSecretFetch(
     service: binding.service ?? new URL(binding.origin).host,
     send: async (refuseWithoutCounting) => {
       try {
+        checkSecretFetchFolder(input.folder)
+      } catch {
+        refuseWithoutCounting?.()
+        return refuse(mask('The fetch folder changed or is unavailable. The request was not sent; restore your work folder before retrying.'))
+      }
+      try {
         vault.markUsed(name)
         const response = await publicFetch(url.href, {
           method,
@@ -178,7 +186,6 @@ export function prepareSecretFetch(
         }
       } catch (error) {
         if (error instanceof SecretFetchFileError) {
-          if (error.unsafe) refuseWithoutCounting?.()
           return refuse(mask(error.message))
         }
         return refuse(mask(serviceReadFailure(error)))
