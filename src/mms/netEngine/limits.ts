@@ -96,6 +96,8 @@ export interface EngineLimits {
   rowStuckMs: number
   /** Most addresses the user may add for one paired computer (Add address). */
   maxManualAddresses: number
+  /** How long Test on one of this computer's routes waits for its helper to reach itself (`routes.test`). */
+  routeTestDeadlineMs: number
 }
 
 /** The helper's `APP_READ_AHEAD_BYTES`: a stream's credit must cover it before the helper reads that stream. */
@@ -141,7 +143,8 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   pathSwitchDeadlineMs: 30_000,
   pathDrainMs: 25 * 60_000,
   rowStuckMs: 2 * 60_000,
-  maxManualAddresses: 8
+  maxManualAddresses: 8,
+  routeTestDeadlineMs: 20_000
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -184,7 +187,8 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   pathSwitchDeadlineMs: 'MOUSSE_NET_ENGINE_PATH_SWITCH_DEADLINE_MS',
   pathDrainMs: 'MOUSSE_NET_ENGINE_PATH_DRAIN_MS',
   rowStuckMs: 'MOUSSE_NET_ENGINE_ROW_STUCK_MS',
-  maxManualAddresses: 'MOUSSE_NET_ENGINE_MAX_MANUAL_ADDRESSES'
+  maxManualAddresses: 'MOUSSE_NET_ENGINE_MAX_MANUAL_ADDRESSES',
+  routeTestDeadlineMs: 'MOUSSE_NET_ENGINE_ROUTE_TEST_DEADLINE_MS'
 })
 
 /** Reads the limits from `env`; each problem names the variable, the value and the default kept. */
@@ -279,7 +283,24 @@ export const ENGINE_CONTROLS = [
   'already-grants-back',
   'pin-promotes-kind2',
   'link-approvals-lost',
-  'link-scheme-registered'
+  'link-scheme-registered',
+  // phase1b.routes-app (and phase1b.ssh-add-app)
+  'plus-probe',
+  'egress-probe',
+  'lan-only-candidates',
+  'route-leak',
+  // phase1b.ssh-add-app
+  'refuse-if-paired',
+  'ssh-row-pairback',
+  'profile-before-journal',
+  'grant-id-not-checked',
+  'retry-after-connected',
+  'overwrite-1a-row',
+  'own-row-not-resumed',
+  'existing-reply-not-kept',
+  'removal-skips-unsaved-grant',
+  'ssh-row-not-converted',
+  'remote-autostart'
 ] as const
 export type EngineControl = (typeof ENGINE_CONTROLS)[number]
 

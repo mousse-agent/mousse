@@ -1,3 +1,5 @@
+import type { RouteClass } from './routes'
+
 /**
  * The daemon methods a Mousse window calls for the new networking (Phase 1a): the switch, the devices and their
  * pairing. They are local only: a window of this computer calls them, and no paired computer can (they are not on
@@ -12,32 +14,17 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.approve',
   'netEngine.join',
   'netEngine.join.code',
-  'netEngine.link.read',
   'netEngine.retry',
   'netEngine.remove',
-  'netEngine.address.add'
+  'netEngine.address.add',
+  // Phase 1b: routes (§1.3, §1.5, §4.3)
+  'netEngine.address.remove',
+  'netEngine.address.use',
+  'netEngine.join.preview',
+  'netEngine.routes.config',
+  'netEngine.routes.test'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
-
-/** Where a destination is, as the join dialog labels it (design 1b §1.2): LAN, Tailnet, Internet or Tunnel. */
-export type NetEngineRouteClass = 'lan' | 'tailnet' | 'public' | 'tunnel'
-
-export interface NetEngineDestination {
-  route: string
-  class: NetEngineRouteClass
-}
-
-/** A Send link's ticket as this computer reads it before Connect (`netEngine.link.read`). */
-export interface NetEngineLinkFacts {
-  invitation: string
-  /** 2 for a Send link; a scanned code is 1. */
-  kind?: number
-  /** The start of the host's endpoint id. */
-  host: string
-  expiresAt?: number
-  /** The destinations Connect lets this computer contact (§1.3); LAN addresses need no approval. */
-  destinations: NetEngineDestination[]
-}
 
 /** A Send link this computer shows (§5.1): the code to read out and the tries left, until it ends. */
 export interface NetEngineLinkInvite {
@@ -103,8 +90,14 @@ export interface NetEngineDevice {
   unreachable?: 'in' | 'out'
   /** Its last connection attempt failed on a certificate outside its validity window (either clock may be wrong). */
   certificateWindow?: boolean
-  /** Addresses added for it by hand (`tcp://host:port`); none means it is found on the local network. */
+  /** Addresses added for it by hand (routes of any owner kind); none means it is found on the local network. */
   addresses?: string[]
+  /** The class of the route its connection runs over now (`conn.up.route`), while one is up. */
+  route?: RouteClass
+  /** Routes it offered in pairback that need the owner's Use before they are dialled (§1.3 suggestions). */
+  offered?: string[]
+  /** It was added over SSH (§3.4): one way only, until a Send link adds the other direction. */
+  source?: 'ssh'
   /** A Send link it consented to did not finish (no code confirmed, or the outcome was lost): Retry or Remove. */
   unfinished?: boolean
   /** That link is still valid, so Retry may ask for the code again. */
@@ -119,6 +112,40 @@ export interface NetEngineApproval {
   name: string
   /** The start of its endpoint id. */
   device: string
+}
+
+/** This computer's own routes (§1.5): what its helper listens on and advertises. */
+export interface NetEngineReach {
+  lan: boolean
+  tailnet: boolean
+  /** Port forwards, as `tcp://<public host>:<port>` routes. */
+  public: string[]
+  /** The LAN address the router forwards to, when port forwarding without LAN. */
+  forwardTo?: string
+  /** Tunnel URLs, as `wss://…/mousse-net/1` routes. */
+  tunnels: string[]
+  /** The kept TCP port. */
+  port?: number
+  /** The loopback port a tunnel client forwards to, while a tunnel is set. */
+  wsPort?: number
+  /** Addresses the helper could not bind yet (it retries them). */
+  unbound?: string[]
+}
+
+/** What a ticket asks before Connect (§1.3): where it will dial, and what this computer may also share. */
+export interface NetEngineJoinPreview {
+  /** The name the link gives the other computer, if any. */
+  name?: string
+  /** 1: shown in person (QR); 2: sent as a link. */
+  kind: number
+  /** The invitation id (hex): a Send link join's code requests and status name it. */
+  invitation?: string
+  /** The ticket has expired by this computer's clock. */
+  expired?: boolean
+  /** Every hint this computer would dial, with its class; the non-automatic ones are what Connect approves. */
+  destinations: Array<{ route: string; label: string; cls: RouteClass; automatic: boolean }>
+  /** This computer's tailnet and public routes and tunnels: pairback sends one only when ticked. */
+  shareable: Array<{ route: string; label: string; cls: RouteClass }>
 }
 
 export interface NetEngineStatus {
@@ -141,12 +168,12 @@ export interface NetEngineStatus {
   sharedAccount?: boolean
   /** How often Add device reads a camera frame for a pairing code (the engine limit `scanIntervalMs`). */
   scanIntervalMs?: number
+  /** This computer's own routes, when its helper speaks protocol 1.1. */
+  reach?: NetEngineReach
   /** The helper speaks protocol 1.1, so Send link and Enter link work. */
   sendLink?: boolean
   /** Send links this computer shows. */
   links?: NetEngineLinkInvite[]
   /** Send link joins running here. */
   joins?: NetEngineLinkJoin[]
-  /** This computer's tailnet, public and tunnel routes, which "Also share" may send in pairback (§1.3). */
-  shareable?: NetEngineDestination[]
 }

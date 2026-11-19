@@ -7,27 +7,16 @@ import {
   type KeyboardEvent
 } from 'react'
 import type {
-  NetEngineDestination,
-  NetEngineLinkFacts,
+  NetEngineJoinPreview,
   NetEngineLinkJoin,
   NetEngineStatus
 } from '../../../shared/netEngine/local'
+import { ROUTE_CLASS_LABEL } from '../../../shared/netEngine/routes'
 import { CopyButton } from '../settings/IconButtons'
 import { errorText, useDaemonCall } from '../devices/useDaemonCall'
 
-/** How Send link and Enter link name a destination's class (design 1b §1.2). */
-const CLASS_LABEL: Record<NetEngineDestination['class'], string> = {
-  lan: 'LAN',
-  tailnet: 'Tailnet',
-  public: 'Internet',
-  tunnel: 'Tunnel'
-}
-
-/** "192.168.1.20 (LAN)": a destination as the consent lists it. */
-export function destinationText(destination: NetEngineDestination): string {
-  const shown = destination.route.replace(/^(tcp|wss?):\/\//, '').replace(/\/mousse-net\/1$/, '')
-  return `${shown} (${CLASS_LABEL[destination.class]})`
-}
+/** What Enter link says of a link it cannot read. */
+const DAMAGED = 'This link is damaged. Ask for a new one.'
 
 /** `123456` as `123 456`. */
 export const spacedCode = (code: string): string =>
@@ -138,8 +127,9 @@ export function SendLinkPanel({
 }
 
 /**
- * Enter link (§5.3): the link, read here before anything is dialled; the consent with the destinations it will
- * contact and "Also share", unticked; then the code, typed in six boxes while the join waits for it.
+ * Enter link (§5.3): the link, read here before anything is dialled (a decode error says the link is damaged);
+ * the consent with the destinations it will contact and "Also share", unticked; then the code, typed in six boxes
+ * while the join waits for it.
  */
 export function EnterLinkPanel({
   status,
@@ -153,13 +143,21 @@ export function EnterLinkPanel({
 }) {
   const { busy, error, setError, call } = useDaemonCall()
   const [text, setText] = useState(initialLink ?? '')
-  const [facts, setFacts] = useState<NetEngineLinkFacts & { link: string }>()
+  const [preview, setPreview] = useState<NetEngineJoinPreview & { link: string }>()
   const [share, setShare] = useState<string[]>([])
   const [joining, setJoining] = useState(false)
 
   const read = async (link: string) => {
-    const answer = await call<NetEngineLinkFacts>('netEngine.link.read', { link })
-    if (answer) setFacts({ ...answer.value, link })
+    setError('')
+    try {
+      const value = await window.mousse.platformRequest.request<NetEngineJoinPreview>(
+        'netEngine.join.preview',
+        { ticket: link }
+      )
+      setPreview({ ...value, link })
+    } catch {
+      setError(DAMAGED)
+    }
   }
   // A link that opened Mousse is read at once.
   const readInitial = useRef(initialLink)
@@ -170,25 +168,24 @@ export function EnterLinkPanel({
   }, [])
 
   const connect = async () => {
-    if (!facts) return
+    if (!preview) return
     setJoining(true)
-    const approved = facts.destinations
-      .filter((destination) => destination.class !== 'lan')
-      .map((destination) => destination.route)
     const answer = await call('netEngine.join', {
-      ticket: facts.link,
+      ticket: preview.link,
       arrival: 'link',
-      approved,
-      share
+      ...(share.length ? { share } : {})
     })
     setJoining(false)
     if (answer) onJoined()
-    else setFacts(undefined)
+    else setPreview(undefined)
   }
 
-  const running = facts && status?.joins?.find((join) => join.invitation === facts.invitation)
+  const running =
+    preview?.invitation !== undefined
+      ? status?.joins?.find((join) => join.invitation === preview.invitation)
+      : undefined
 
-  if (joining && facts)
+  if (joining && preview)
     return running?.needsCode ? (
       <CodeEntry join={running} />
     ) : (
@@ -197,42 +194,17 @@ export function EnterLinkPanel({
       </p>
     )
 
-  if (facts)
+  if (preview)
     return (
       <div className="engine-confirm">
         <p>Connect to the computer in this link? It will also be able to use this computer.</p>
-        {facts.destinations.length > 0 && (
-          <p
-            className="settings-muted"
-            title="Connect lets this computer contact these addresses from the link."
-          >
-            {facts.destinations.map(destinationText).join(', ')}
-          </p>
-        )}
-        {(status?.shareable ?? []).length > 0 && (
-          <fieldset
-            className="engine-share"
-            title="The other computer gets only this computer's local addresses unless you tick more."
-          >
-            <legend>Also share</legend>
-            {status!.shareable!.map((destination) => (
-              <label key={destination.route} className="engine-share-option">
-                <input
-                  type="checkbox"
-                  checked={share.includes(destination.route)}
-                  onChange={(event) =>
-                    setShare(
-                      event.target.checked
-                        ? [...share, destination.route]
-                        : share.filter((route) => route !== destination.route)
-                    )
-                  }
-                />
-                {destinationText(destination)}
-              </label>
-            ))}
-          </fieldset>
-        )}
+        <JoinRoutes
+          preview={preview}
+          share={share}
+          onShare={(route, on) =>
+            setShare((list) => (on ? [...list, route] : list.filter((item) => item !== route)))
+          }
+        />
         <div className="devices-dialog-actions">
           <button
             type="button"
@@ -253,7 +225,6 @@ export function EnterLinkPanel({
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
-    setError('')
     void read(text.trim())
   }
   return (
@@ -379,5 +350,51 @@ export function CodeEntry({ join }: { join: NetEngineLinkJoin }) {
         </button>
       </div>
     </form>
+  )
+}
+
+/**
+ * The Connect dialog's routes (1b §1.3): every destination the ticket names, with its class (Connect approves
+ * them), and this computer's tailnet, internet and tunnel routes as unticked boxes under "Also share".
+ */
+export function JoinRoutes({
+  preview,
+  share,
+  onShare
+}: {
+  preview: NetEngineJoinPreview
+  share: string[]
+  onShare: (route: string, on: boolean) => void
+}) {
+  return (
+    <>
+      {!!preview.destinations?.length && (
+        <p
+          className="settings-muted engine-destinations"
+          title="Connect lets this computer dial these addresses."
+        >
+          {preview.destinations
+            .map((item) => `${item.label} (${ROUTE_CLASS_LABEL[item.cls]})`)
+            .join(', ')}
+        </p>
+      )}
+      {!!preview.shareable?.length && (
+        <fieldset className="engine-share">
+          <legend title="It can reach this computer at the ticked addresses too.">
+            Also share
+          </legend>
+          {preview.shareable.map((item) => (
+            <label key={item.route} className="engine-share-item">
+              <input
+                type="checkbox"
+                checked={share.includes(item.route)}
+                onChange={(event) => onShare(item.route, event.target.checked)}
+              />
+              {ROUTE_CLASS_LABEL[item.cls]} {item.label}
+            </label>
+          ))}
+        </fieldset>
+      )}
+    </>
   )
 }

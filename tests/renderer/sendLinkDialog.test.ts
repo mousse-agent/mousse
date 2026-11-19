@@ -27,7 +27,13 @@ const TAILNET = 'tcp://100.101.7.2:7443'
 type Profile = { id: string; displayName: string; networked?: boolean }
 
 /** The daemon: a status the test changes, the link facts, and every call it was asked. */
-function daemon(initial: Partial<NetEngineStatus> = {}, options: { damaged?: boolean } = {}) {
+function daemon(
+  initial: Partial<NetEngineStatus> = {},
+  options: {
+    damaged?: boolean
+    shareable?: Array<{ route: string; label: string; cls: string }>
+  } = {}
+) {
   const state: { status: NetEngineStatus; profiles: Profile[] } = {
     status: {
       enabled: true,
@@ -49,16 +55,22 @@ function daemon(initial: Partial<NetEngineStatus> = {}, options: { damaged?: boo
       case 'netEngine.invite':
         invites += 1
         return { invitation: `inv${invites}`, uri: LINK, code: '123456', attemptsLeft: 3 }
-      case 'netEngine.link.read':
-        if (options.damaged) throw new Error('This link is damaged. Ask for a new one.')
+      case 'netEngine.join.preview':
+        // The daemon refuses what it cannot decode (`bad_ticket`).
+        if (options.damaged) throw new Error("This isn't a Mousse pairing code.")
         return {
           invitation: 'inv-j',
           kind: 2,
-          host: 'a1b2c3d4',
           destinations: [
-            { route: 'tcp://192.168.1.20:7443', class: 'lan' },
-            { route: TAILNET, class: 'tailnet' }
-          ]
+            {
+              route: 'tcp://192.168.1.20:7443',
+              label: '192.168.1.20:7443',
+              cls: 'lan',
+              automatic: true
+            },
+            { route: TAILNET, label: '100.101.7.2:7443', cls: 'tailnet', automatic: false }
+          ],
+          shareable: options.shareable ?? []
         }
       case 'netEngine.join':
         // The join waits for the code until the test ends.
@@ -218,8 +230,11 @@ describe('Send link (§5.1)', () => {
 })
 
 describe('Enter link (§5.3)', () => {
-  it('asks consent with the destinations, approves the non-LAN ones, shares nothing unticked, then asks for the code', async () => {
-    const d = daemon({ shareable: [{ route: 'tcp://203.0.113.7:7443', class: 'public' }] })
+  it('asks consent with the destinations, shares nothing unticked, then asks for the code', async () => {
+    const d = daemon(
+      {},
+      { shareable: [{ route: 'tcp://203.0.113.7:7443', label: '203.0.113.7:7443', cls: 'public' }] }
+    )
     const update = await dialog(d)
     await click(button('Enter link'))
     await type(field('Link'), LINK)
@@ -230,12 +245,10 @@ describe('Enter link (§5.3)', () => {
     expect(text()).toContain('192.168.1.20:7443 (LAN), 100.101.7.2:7443 (Tailnet)')
     const share = document.querySelector<HTMLInputElement>('input[type="checkbox"]')!
     expect(share.checked).toBe(false)
-    expect(share.parentElement!.textContent).toContain('203.0.113.7:7443 (Internet)')
+    expect(share.parentElement!.textContent).toContain('Internet 203.0.113.7:7443')
 
     await click(button('Connect'))
-    expect(d.called('netEngine.join')).toEqual([
-      { ticket: LINK, arrival: 'link', approved: [TAILNET], share: [] }
-    ])
+    expect(d.called('netEngine.join')).toEqual([{ ticket: LINK, arrival: 'link' }])
     expect(text()).toContain('Connecting…')
 
     await update({ joins: [{ invitation: 'inv-j', needsCode: true, attemptsLeft: 3 }] })
@@ -258,7 +271,10 @@ describe('Enter link (§5.3)', () => {
   })
 
   it('sends a ticked "Also share" route', async () => {
-    const d = daemon({ shareable: [{ route: 'tcp://203.0.113.7:7443', class: 'public' }] })
+    const d = daemon(
+      {},
+      { shareable: [{ route: 'tcp://203.0.113.7:7443', label: '203.0.113.7:7443', cls: 'public' }] }
+    )
     await dialog(d, { initial: 'enter' })
     await type(field('Link'), LINK)
     await submit(field('Link'))
@@ -322,7 +338,7 @@ describe('a mousse:// link that opened Mousse (§5.2)', () => {
     useAppStore.setState({ profileId: 'p1' })
     await mount(both())
     await d.arrive(LINK)
-    expect(d.called('netEngine.link.read')).toEqual([{ link: LINK }])
+    expect(d.called('netEngine.join.preview')).toEqual([{ ticket: LINK }])
     expect(text()).toContain('Connect to the computer in this link?')
   })
 
@@ -339,8 +355,8 @@ describe('a mousse:// link that opened Mousse (§5.2)', () => {
     expect(text()).toContain('Which profile joins?')
     expect(button('Home')).toBeTruthy()
     expect(button('Off')).toBeUndefined()
-    expect(d.called('netEngine.link.read')).toEqual([])
+    expect(d.called('netEngine.join.preview')).toEqual([])
     await click(button('Work'))
-    expect(d.called('netEngine.link.read')).toEqual([{ link: LINK }])
+    expect(d.called('netEngine.join.preview')).toEqual([{ ticket: LINK }])
   })
 })

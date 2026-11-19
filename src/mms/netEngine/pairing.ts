@@ -10,7 +10,7 @@ import type { EngineCaller } from '../net/contracts'
 import { helperCode } from './helper/appChannel'
 import type { EngineHelper } from './helper/connections'
 import { engineControl, engineLimits } from './limits'
-import { destinationClass, privateRoute } from './routes'
+import { approvedHints, pairbackRoutes, privateRoute, splitPairback } from './routes'
 import type { EngineSessions } from './sessions'
 import {
   isServingState,
@@ -51,15 +51,13 @@ export interface PairingPort {
   changed(): void
   /** A test stops this computer at `step` when this answers true. */
   crashAt?(step: PairingStep): boolean
-  /** This computer's tailnet, public and tunnel routes, which a Send link join may share in pairback (§1.3). */
-  shareable?(): string[]
+  /** Whether a grant's receipt names an SSH add request this computer knows (1b §3.6): host recovery leaves it. */
+  sshRequest?(receipt: string): boolean
 }
 
 /** How Connect joins: the arrival the ticket came by and, for a Send link, what the owner approved and shares. */
 export interface JoinOptions {
   arrival?: 'scan' | 'link'
-  /** The ticket's non-private destinations the owner approved at Connect. */
-  approved?: string[]
   /** This computer's tailnet and public routes the owner ticked under "Also share". */
   share?: string[]
 }
@@ -91,6 +89,10 @@ const LINK_TEXT: Record<string, string> = {
   bad_ticket: LINK_DAMAGED,
   not_supported: LINK_DAMAGED
 }
+
+/** A row added over SSH runs its own steps (1b §3.6): 1a's ceremony, pairback and recovery skip it. */
+const skipsCeremony = (row: EnginePeerRow): boolean =>
+  row.source === 'ssh' && !engineControl('ssh-row-pairback')
 
 export const fingerprintOf = (identity: string): string =>
   `sha256:${createHash('sha256')
@@ -241,6 +243,9 @@ export class EnginePairing {
     const ticket = facts.fragment
     const helper = this.helper()
     const { peers } = this.port
+    // Connect approves the ticket's destinations (§1.3); the ticked routes of this computer go in pairback.
+    const approved = approvedHints(facts.routes)
+    const share = options.share ?? []
     let row = peers.byEndpoint(facts.host)
     if (!row && !engineControl('no-consent-journal'))
       row = peers.add({
@@ -252,23 +257,28 @@ export class EnginePairing {
         receipt: facts.invitation,
         invitation: facts.invitation,
         ticket,
+        ...(approved.length ? { approved } : {}),
+        ...(share.length ? { share } : {}),
         pairedAt: Date.now()
       })
+    else if (row && isServingState(row.state))
+      row = peers.update(row.localId, { approved, share })
     this.port.changed()
     this.at('consented')
     const joined = await helper.request(
       'join',
-      { ticket, pinned: true },
+      joinFields(helper, ticket, approved),
       engineLimits().joinDeadlineMs
     )
-    return this.joined(row, facts, joined)
+    return this.joined(row, facts, joined, share)
   }
 
   /** `join` answered: `joined` is written (the ticket goes), the join's connection attaches, the ceremony goes on. */
   private joined(
     row: EnginePeerRow | undefined,
     facts: { host: string; invitation: string },
-    joined: Record<string, unknown>
+    joined: Record<string, unknown>,
+    share: string[] = []
   ): EnginePeerRow {
     this.at('join-replied')
     const identity = typeof joined.identity === 'string' ? joined.identity : facts.host
@@ -298,6 +308,7 @@ export class EnginePairing {
             state: 'joined',
             receipt: facts.invitation,
             invitation: facts.invitation,
+            ...(share.length ? { share } : {}),
             pairedAt: Date.now()
           })
     this.helper().claim(identity)
@@ -332,7 +343,7 @@ export class EnginePairing {
         if (peers.get(node)?.link?.pending) return
         continue
       }
-      if (!isServingState(row.state)) return
+      if (!isServingState(row.state) || skipsCeremony(row)) return
       // A Send link's row is never joined from a pin (§5.4): only its own outcome moves it.
       if (row.state === 'consented' && row.link) return
       if (row.state === 'consented') {
@@ -353,21 +364,14 @@ export class EnginePairing {
         this.at('granted')
         await this.waitOnline(node, engineLimits().pairbackDeadlineMs, () => this.dial(row))
         this.alive()
-        const helper = this.helper()
-        // Not this computer's tailnet, public or tunnel routes unless the owner ticked them under "Also share"
-        // (§1.3): its private LAN literals (and a debug helper's loopback one), which the other helper decides on.
-        const own = Array.isArray(helper.info.routes)
-          ? helper.info.routes.filter(
-              (route: unknown): route is string => typeof route === 'string' && !sharedOnlyIfTicked(route)
-            )
-          : []
-        const routes = [...new Set([...own, ...(row.link?.share ?? [])])]
+        // Its LAN routes, and only the ticked ones of the rest (§1.3).
+        const routes = pairbackRoutes(this.helper().info, row.share ?? [])
         await this.port.sessions.client(node).pairback({
           routes,
           ...(row.receipt ? { receipt: row.receipt } : {})
         })
         this.alive()
-        peers.advance(node, ['granted'], { state: 'connected', ...(row.link ? { link: null } : {}) })
+        peers.advance(node, ['granted'], { state: 'connected' })
         this.notAccepted.delete(node)
         this.port.changed()
         return
@@ -407,7 +411,7 @@ export class EnginePairing {
     try {
       joined = await this.helper().request(
         'join',
-        { ticket: row.ticket, pinned: true },
+        joinFields(this.helper(), row.ticket, row.approved ?? []),
         engineLimits().joinDeadlineMs
       )
     } catch (error) {
@@ -435,14 +439,13 @@ export class EnginePairing {
     if (facts.expiresAt !== undefined && facts.expiresAt * 1000 <= Date.now())
       throw linkError('expired')
     this.helper()
-    const dialable = new Set(facts.routes.filter(linkApprovable))
-    const offered = new Set(this.port.shareable?.() ?? [])
+    // Connect approves the ticket's destinations (§1.3), as for a scanned code.
     const link: EngineLink = {
       ticket: facts.fragment,
       ticketHash: facts.hash,
       invitation: facts.invitation,
-      approved: [...new Set(options.approved ?? [])].filter((route) => dialable.has(route)),
-      share: [...new Set(options.share ?? [])].filter((route) => offered.has(route)),
+      approved: approvedHints(facts.routes),
+      share: [...new Set(options.share ?? [])],
       ...(facts.expiresAt !== undefined ? { expiresAt: facts.expiresAt } : {}),
       pending: true
     }
@@ -530,15 +533,19 @@ export class EnginePairing {
       throw new NetError('cancelled', 'Removed while joining.')
     const identity = typeof paired.identity === 'string' ? paired.identity : now.endpoint
     const name = typeof paired.name === 'string' && paired.name ? paired.name : shortName(identity)
+    // A row added over SSH converts here, keeping its addresses (§3.6); the link's lists become the row's, so a
+    // repeated grant-back and pairback use them as 1a's do.
     const saved = peers.update(node, {
       state: 'joined',
-      source: null,
+      ...(engineControl('ssh-row-not-converted') ? {} : { source: null }),
       endpoint: identity,
       name,
       receipt: link.invitation,
       invitation: link.invitation,
       ticket: null,
-      link: { ...link, ticket: '', pending: false }
+      approved: link.approved,
+      share: link.share,
+      link: null
     })!
     this.unfinished.delete(node)
     void this.helper()
@@ -724,6 +731,8 @@ export class EnginePairing {
     for (const grant of Array.isArray(answer.grants) ? answer.grants : []) {
       if (!grant || typeof grant.identity !== 'string') continue
       if (grant.role !== undefined && grant.role !== 'owner') continue
+      // A grant an SSH add made belongs to its request, never to an owed row.
+      if (typeof grant.receipt === 'string' && this.port.sshRequest?.(grant.receipt)) continue
       if (typeof grant.expires_at === 'number' && grant.expires_at <= now) continue
       this.owe(
         grant.identity,
@@ -745,16 +754,22 @@ export class EnginePairing {
     if (!row) throw new NetError('forbidden')
     if (row.state === 'connected' && this.port.sessions.online(row.localId)) return
     this.at('pairback')
+    // LAN routes are dialled at once; the others wait on the row until the owner taps Use (§1.3).
+    const split = splitPairback(request.routes)
+    if (!split)
+      throw new NetError('bad_request', 'Those addresses cannot be dialled.', {
+        details: { reason: 'bad_route' }
+      })
     const add = (routes: string[]) =>
       this.helper().request('peer.add', { identity: row.endpoint, name: row.name, routes })
     try {
       try {
-        await add(request.routes)
+        await add(split.automatic)
       } catch (error) {
-        // The helper refuses the whole list for one address outside a private range (a tailnet's, say), which
-        // the other computer's helper lists too: the private ones are kept.
-        const usable = request.routes.filter(privateRoute)
-        if (helperCode(error) !== 'bad_route' || usable.length === request.routes.length)
+        // A 1.0 helper refuses the whole list for one address outside a private range (loopback, say): the
+        // private ones are kept.
+        const usable = split.automatic.filter(privateRoute)
+        if (helperCode(error) !== 'bad_route' || usable.length === split.automatic.length)
           throw error
         await add(usable)
       }
@@ -765,9 +780,29 @@ export class EnginePairing {
         })
       throw error
     }
+    await this.offer(row, split.offered)
     await this.waitOnline(row.localId, engineLimits().pairbackDeadlineMs, () => this.dial(row))
     this.alive()
     peers.advance(row.localId, ['awaiting_pairback'], { state: 'connected' })
+    this.port.changed()
+  }
+
+  /**
+   * The routes a pairback offered outside the automatic rule, kept on the row as "Addresses <B> offered" (those it
+   * dials already are left out). Under the `route-leak` control they are used at once, first, without the owner.
+   */
+  private async offer(row: EnginePeerRow, offered: string[]): Promise<void> {
+    const { peers } = this.port
+    const known = row.addresses ?? []
+    const fresh = offered.filter((route) => !known.includes(route))
+    if (engineControl('route-leak') && fresh.length) {
+      const addresses = [...fresh, ...known]
+      await this.helper().request('peer.addresses.set', { identity: row.endpoint, routes: addresses })
+      peers.setAddresses(row.localId, addresses)
+      return
+    }
+    if (!fresh.length && !row.offered?.length) return
+    peers.update(row.localId, { offered: fresh })
     this.port.changed()
   }
 
@@ -792,7 +827,8 @@ export class EnginePairing {
     this.outsideWindow.delete(node)
     for (const wake of [...this.waiters]) wake()
     const row = this.port.peers.serving(node)
-    if (row && (row.state === 'granted' || row.state === 'joined')) void this.advance(node)
+    if (row && !skipsCeremony(row) && (row.state === 'granted' || row.state === 'joined'))
+      void this.advance(node)
   }
 
   /**
@@ -813,7 +849,12 @@ export class EnginePairing {
         row.link?.pending
       )
         void this.advance(row.localId)
-      if (row.state === 'joined' || row.state === 'granted' || row.state === 'connected')
+      if (
+        row.state === 'joined' ||
+        row.state === 'granted' ||
+        row.state === 'connected' ||
+        row.state === 'ssh_granted'
+      )
         void this.dial(row).catch(() => undefined)
     }
   }
@@ -1031,18 +1072,6 @@ export class EnginePairing {
 
 const SERVING = ['consented', 'joined', 'granted', 'awaiting_pairback', 'connected'] as const
 
-/** A route of this computer that pairback sends only when ticked under "Also share" (tailnet, public, tunnel). */
-function sharedOnlyIfTicked(route: string): boolean {
-  const kind = destinationClass(route)
-  return kind !== undefined && kind !== 'lan'
-}
-
-/** A ticket destination Connect approves: dialable (§1.3) and not a private literal, which needs no approval. */
-function linkApprovable(route: string): boolean {
-  const kind = destinationClass(route)
-  return kind !== undefined && kind !== 'lan'
-}
-
 /** A Send link join that ended, as the joiner's dialog says it; `already` is existing access (§3.6). */
 function linkError(reason: string): NetError {
   return new NetError('bad_request', LINK_TEXT[reason] ?? LINK_NOT_USED, {
@@ -1054,4 +1083,20 @@ function linkError(reason: string): NetError {
 function isRefusal(error: unknown): boolean {
   const code = helperCode(error)
   return code === 'not_authorized' || code === 'grant_revoked' || code === 'pairing_declined'
+}
+
+/**
+ * A join's fields (§1.3): the ticket, pinned, and to a 1.1 helper the hints Connect approved. A 1.0 helper dials
+ * the private ones only and takes no `approved`.
+ */
+function joinFields(
+  helper: EngineHelper,
+  ticket: string,
+  approved: readonly string[]
+): Record<string, unknown> {
+  return {
+    ticket,
+    pinned: true,
+    ...(helper.speaks(1) && approved.length ? { approved: [...approved] } : {})
+  }
 }

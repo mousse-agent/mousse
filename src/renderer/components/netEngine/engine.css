@@ -120,24 +120,71 @@
   padding-right: 0;
 }
 
+/* 1b: route lists, Also share and Reach. */
+.engine-destinations {
+  margin: 0 0 var(--space-8);
+  overflow-wrap: anywhere;
+}
+
 .engine-share {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4, 4px);
-  margin: 0;
+  gap: var(--space-4);
+  margin: 0 0 var(--space-8);
   padding: 0;
   border: 0;
 }
 
 .engine-share legend {
   padding: 0;
-  margin-bottom: var(--space-4, 4px);
+  margin-bottom: var(--space-4);
 }
 
-.engine-share-option {
+.engine-share-item {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-6, 6px);
+  gap: var(--space-8);
+}
+
+.engine-address-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.engine-address-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+}
+
+.engine-reach-control,
+.engine-reach-form,
+.engine-reach-command {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+  flex-wrap: wrap;
+}
+
+.engine-reach-form .settings-input {
+  min-width: 0;
+  width: 220px;
+}
+
+.engine-reach-tunnel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: 0 var(--space-12) var(--space-8);
+}
+
+.engine-reach-command code {
+  font-family: var(--font-mono);
 }
 
 .engine-profile-choice {

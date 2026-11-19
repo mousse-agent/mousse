@@ -27,6 +27,33 @@ import {
   type EngineMessage
 } from '../../src/mms/netEngine/session/frame'
 import { decodeTicket, encodeTicket, ticketHash, type TicketFields } from './ticketCbor'
+import {
+  automaticRoute,
+  isLoopbackIp,
+  parseRoute,
+  routeClass,
+  type RouteClass
+} from '../../src/shared/netEngine/routes'
+
+/** What a 1.1 helper keeps for one peer: the hints it heard (ticket, `peer.add`), the owner's addresses, approvals. */
+interface Known {
+  hints: string[]
+  owner: string[]
+  /** Destinations approved for this peer (`join {approved}` and the owner's addresses). */
+  approved: Set<string>
+  /** The owner's SSH routes (`{route_id, selector, shell}`). */
+  ssh: Array<Record<string, unknown>>
+}
+
+/** A helper's routes as `routes.config` keeps them (§1.5). */
+export interface FakeReach {
+  lan: boolean
+  tailnet: boolean
+  public: string[]
+  forward_to?: string | null
+  tunnels: string[]
+  port?: number
+}
 
 const STREAM_CREDIT = 256 * 1024
 
@@ -85,6 +112,8 @@ interface Conn {
   b: FakeHelper
   ends: Set<End>
   up: boolean
+  /** The route it came up on (1.1). */
+  route?: { kind: string; class: RouteClass }
 }
 
 export class FakeNetwork {
@@ -96,7 +125,7 @@ export class FakeNetwork {
   /** For each identity, the identities it may dial (its peers). */
   private readonly peers = new Map<string, Set<string>>()
   /** Open invitations by ticket, with their host. */
-  readonly invitations = new Map<string, { host: string; invitation: string }>()
+  readonly invitations = new Map<string, { host: string; invitation: string; routes: string[] }>()
   private nextGrant = 1
   private readonly conns = new Set<Conn>()
   private next = 1
@@ -115,6 +144,65 @@ export class FakeNetwork {
   readonly defects = new Set<string>()
   /** Decides each message that crosses; `drop` loses it on the way. */
   tap?: (message: Crossed) => 'drop' | void
+  /**
+   * The protocol minor its helpers speak: 0 (1a, the default: dials by identity, private addresses only) or 1
+   * (1b: routes with approvals, `routes.config`, `routes.test`, `conn.up.route`).
+   */
+  minor = 0
+  /** What each identity's helper listens on besides what it advertises (its loopback listener, say). */
+  readonly listening = new Map<string, string[]>()
+  /** Each identity's kept TCP port (`hello.port`). */
+  readonly ports = new Map<string, number>()
+  /** Each identity's routes config (`routes.config`, `hello.routes_config`). */
+  readonly reach = new Map<string, FakeReach>()
+  /** Classes the checks map routes to, as `MOUSSE_NET_TEST_CLASS_MAP` does for the debug helper. */
+  classMap?: Record<string, RouteClass>
+  /** What each identity's helper keeps for each peer (it survives the helper's restarts, as `peers.json` does). */
+  private readonly known = new Map<string, Map<string, Known>>()
+
+  /** @internal Every peer `self` keeps something for. */
+  knownPeers(self: string): Array<[string, Known]> {
+    return [...(this.known.get(self) ?? [])]
+  }
+
+  /** @internal What `self` keeps for `peer`. */
+  knownFor(self: string, peer: string): Known {
+    let mine = this.known.get(self)
+    if (!mine) this.known.set(self, (mine = new Map()))
+    let entry = mine.get(peer)
+    if (!entry) mine.set(peer, (entry = { hints: [], owner: [], approved: new Set(), ssh: [] }))
+    return entry
+  }
+
+  /** Whether a 1.1 helper dials `route` without approval: private literals, and loopback unless a class map is set. */
+  automatic(route: string): boolean {
+    return automaticRoute(route, !this.classMap)
+  }
+
+  /** The class `conn.up.route` reports for `route`. */
+  classOf(route: string): RouteClass {
+    const mapped = this.classMap?.[route]
+    if (mapped) return mapped
+    const parsed = parseRoute(route)
+    if (!parsed) return 'public'
+    if (parsed.literal && isLoopbackIp(parsed.host)) return 'lan'
+    const cls = routeClass(parsed)
+    return cls === 'forbidden' ? 'public' : cls
+  }
+
+  /** What `identity`'s helper answers on: what it advertises and what it listens on besides. */
+  listensOn(identity: string): string[] {
+    return [...(this.routes.get(identity) ?? []), ...(this.listening.get(identity) ?? [])]
+  }
+
+  /** @internal The routes `from` may dial `to` on, in order: the owner's addresses, then the hints it approved. */
+  candidates(from: string, to: string): string[] {
+    const known = this.knownFor(from, to)
+    const out: string[] = []
+    for (const route of [...known.owner, ...known.hints])
+      if (!out.includes(route) && (this.automatic(route) || known.approved.has(route))) out.push(route)
+    return out
+  }
 
   /**
    * `caller` holds a grant at `host` (a new grant number when none is given) and knows `host` as a peer; answers
@@ -201,20 +289,38 @@ export class FakeNetwork {
     return helper
   }
 
+  /**
+   * @internal The route a 1.1 dial from `from` to `identity` comes up on: the first of `candidates` (by default
+   * what `from` keeps for it) the other helper answers on. Undefined in 1.0; `unreachable` when none answers.
+   */
+  route(from: string, identity: string, candidates?: string[]): Conn['route'] {
+    if (this.minor < 1) return undefined
+    const listens = this.listensOn(identity)
+    const route = (candidates ?? this.candidates(from, identity)).find((candidate) =>
+      listens.includes(candidate)
+    )
+    if (!route) throw Object.assign(new Error('no route answered'), { code: 'unreachable' })
+    // `conn.up.route.kind` names the pipe: `wss` and `ws` are both `ws`.
+    const kind = parseRoute(route)?.kind ?? 'tcp'
+    return { kind: kind === 'wss' ? 'ws' : kind, class: this.classOf(route) }
+  }
+
   /** @internal */
-  dial(from: FakeHelper, identity: string): number {
+  dial(from: FakeHelper, identity: string, candidates?: string[]): number {
     if (!this.peers.get(from.identity)?.has(identity))
       throw Object.assign(new Error('not paired with that identity'), { code: 'no_peer' })
     const to = this.helpers.get(identity)
     if (!to || !to.alive) throw Object.assign(new Error('unreachable'), { code: 'unreachable' })
     const grant = this.grants.get(identity)?.get(from.identity)
     if (grant === undefined) throw Object.assign(new Error('not allowed'), { code: 'forbidden' })
+    const route = this.route(from.identity, identity, candidates)
     const conn: Conn = {
       id: { [from.identity]: this.next++, [identity]: this.next++ },
       a: from,
       b: to,
       ends: new Set(),
-      up: true
+      up: true,
+      ...(route ? { route } : {})
     }
     this.conns.add(conn)
     from.connUp(conn, conn.id[from.identity]!, identity, 'out')
@@ -307,7 +413,7 @@ export class FakeNetwork {
  * A ticket as the helper writes one: base64url of the CBOR map {1: 1, 2: 1, 3: host identity, 4: invitation id,
  * 5: secret, 6: expires_at, 7: [routes]}. An identity that is not hex goes in as its UTF-8 bytes.
  */
-function ticketOf(host: string, invitation: string): string {
+function ticketOf(host: string, invitation: string, routes: readonly string[] = []): string {
   const head = (major: number, value: number): Buffer => {
     if (value < 24) return Buffer.from([(major << 5) | value])
     if (value < 256) return Buffer.from([(major << 5) | 24, value])
@@ -318,6 +424,8 @@ function ticketOf(host: string, invitation: string): string {
     return out
   }
   const bytes = (value: Buffer): Buffer => Buffer.concat([head(2, value.byteLength), value])
+  const text = (value: string): Buffer =>
+    Buffer.concat([head(3, Buffer.byteLength(value)), Buffer.from(value)])
   const identity = /^(?:[0-9a-f]{2})+$/i.test(host) ? Buffer.from(host, 'hex') : Buffer.from(host)
   return Buffer.concat([
     head(5, 7),
@@ -334,7 +442,8 @@ function ticketOf(host: string, invitation: string): string {
     head(0, 6),
     head(0, Math.floor(Date.now() / 1000) + 600),
     head(0, 7),
-    head(4, 0)
+    head(4, routes.length),
+    ...routes.map(text)
   ]).toString('base64url')
 }
 
@@ -396,8 +505,6 @@ export class FakeHelper {
   ignoreShutdown = false
   /** The addresses the app set for each peer (`peer.addresses.set`), by identity. */
   readonly addresses = new Map<string, string[]>()
-  /** The protocol minor it speaks (1: Send link). */
-  minor = 1
   /** The next Send link `PAIRED` is lost: the confirmation is sent and this helper exits before answering. */
   losePaired = false
   /** @internal Flow records under `joiner-records-in-memory`. */
@@ -412,8 +519,27 @@ export class FakeHelper {
       /** The app passed `pinned` (a Send link join never should). */
       pinned: boolean
       changed: boolean
+      /** The routes a 1.1 join dials. */
+      candidates?: string[]
     }
   >()
+  /** The routes of each `peer.add` the app sent, in order. */
+  readonly peerAdds: string[][] = []
+
+  /** Its routes config now (`routes.config`), LAN on by default as in 1a. */
+  private reachNow(): FakeReach {
+    return (
+      this.network.reach.get(this.identity) ?? {
+        lan: true,
+        tailnet: false,
+        public: [],
+        tunnels: [],
+        ...(this.network.ports.has(this.identity)
+          ? { port: this.network.ports.get(this.identity) }
+          : {})
+      }
+    )
+  }
 
   constructor(
     private readonly network: FakeNetwork,
@@ -484,7 +610,15 @@ export class FakeHelper {
     // An inbound connection carries its grant and that grant's role; an outbound one the role the peer gave here.
     const fields =
       dir === 'in' ? (grant !== undefined ? { grant, role: 'owner' } : {}) : { role: 'owner' }
-    this.event({ ev: 'conn.up', conn: id, identity, dir, ...fields, deadline: 0 })
+    this.event({
+      ev: 'conn.up',
+      conn: id,
+      identity,
+      dir,
+      ...fields,
+      deadline: 0,
+      ...(conn.route ? { route: conn.route } : {})
+    })
   }
   /** @internal */
   connDown(conn: Conn, id: number, reason: string): void {
@@ -653,9 +787,26 @@ export class FakeHelper {
       reply({ error: 'no_route', reason: 'no address answers as that key' })
       return false
     }
+    // As a 1.1 helper: the ticket's private hints, and those in both the ticket and `approved` (§1.3).
+    let candidates: string[] | undefined
+    if (this.network.minor >= 1) {
+      const approved = new Set((Array.isArray(message.approved) ? message.approved : []).map(String))
+      candidates = fields.routes.filter(
+        (route) => this.network.automatic(route) || approved.has(route)
+      )
+      try {
+        this.network.route(this.identity, host.identity, candidates)
+      } catch {
+        reply({ error: 'unreachable', reason: 'no route answered' })
+        return false
+      }
+      const known = this.network.knownFor(this.identity, host.identity)
+      for (const route of fields.routes) if (!known.hints.includes(route)) known.hints.push(route)
+      for (const route of candidates) known.approved.add(route)
+    }
     // The confirmation was sent before a crash: the outcome is learnt now, even after expiry.
     if (flow?.pending) {
-      this.linkDone(host, flow, reply)
+      this.linkDone(host, flow, reply, candidates)
       return false
     }
     // Existing access: the host lets this computer in already, whatever the proof (AUTHORIZED live).
@@ -677,7 +828,7 @@ export class FakeHelper {
     }
     if (this.network.defects.has('host-attempts-reset-on-reconnect')) invite.attemptsLeft = 3
     if (this.network.defects.has('skip-code-confirm')) {
-      this.linkPaired(host, invite, record, reply)
+      this.linkPaired(host, invite, record, reply, candidates)
       return false
     }
     this.codeWaits.set(invite.invitation, {
@@ -685,6 +836,7 @@ export class FakeHelper {
       invite,
       hash,
       pinned: message.pinned === true,
+      ...(candidates ? { candidates } : {}),
       // A route hint or expires_at changed: the hash differs, so key confirmation fails whatever code is typed.
       changed: invite.hash !== hash
     })
@@ -711,7 +863,7 @@ export class FakeHelper {
     this.codeWaits.delete(invitation)
     if (!host?.alive) return waiting.reply({ error: 'no_route', reason: 'the host went away' })
     if (code === waiting.invite.code && !waiting.changed)
-      return this.linkPaired(host, waiting.invite, record, waiting.reply)
+      return this.linkPaired(host, waiting.invite, record, waiting.reply, waiting.candidates)
     // A pinned join trusted as journaled (the defect): a failed key confirmation ends as "already paired".
     if (waiting.pinned && this.network.defects.has('journal-pins-link'))
       return waiting.reply({ identity: host.identity, name: host.identity, role: 'owner', already: true })
@@ -749,7 +901,8 @@ export class FakeHelper {
     host: FakeHelper,
     invite: FakeLinkInvite,
     record: FakeFlow,
-    reply: (fields: Record<string, unknown>) => void
+    reply: (fields: Record<string, unknown>) => void,
+    candidates?: string[]
   ): void {
     const { grant } = this.network.grant(host.identity, this.identity)
     invite.ended = 'used'
@@ -768,19 +921,20 @@ export class FakeHelper {
       setImmediate(() => this.kill())
       return
     }
-    this.linkDone(host, record, reply)
+    this.linkDone(host, record, reply, candidates)
   }
 
   private linkDone(
     host: FakeHelper,
     record: FakeFlow,
-    reply: (fields: Record<string, unknown>) => void
+    reply: (fields: Record<string, unknown>) => void,
+    candidates?: string[]
   ): void {
     const name = host.hello?.name ?? host.identity
     record.pending = false
     record.done = { identity: host.identity, name, role: 'owner' }
     this.network.peer(this.identity, host.identity)
-    const conn = this.network.dial(this, host.identity)
+    const conn = this.network.dial(this, host.identity, candidates)
     reply({ identity: host.identity, name, role: 'owner', already: false, conn })
   }
 
@@ -806,11 +960,21 @@ export class FakeHelper {
             })
           this.helloed = true
           this.hello = { name: message.name, profile: message.profile }
+          const minor = Math.min(this.network.minor, Number(proto[1]) || 0)
+          const reach = this.reachNow()
+          const port = this.network.ports.get(this.identity)
           return reply({
-            proto: [1, Math.min(Number(proto[1]) || 0, this.minor)],
+            proto: [1, minor],
             identity: this.identity,
             routes: this.network.routes.get(this.identity) ?? [],
-            paused: this.paused ?? null
+            paused: this.paused ?? null,
+            ...(port !== undefined ? { port } : {}),
+            ...(minor >= 1
+              ? {
+                  routes_config: reach,
+                  ...(reach.tunnels.length ? { ws_port: (port ?? 47000) + 1 } : {})
+                }
+              : {})
           })
         }
         case 'config.set':
@@ -824,11 +988,62 @@ export class FakeHelper {
         case 'dial':
           if (this.paused) return reply({ error: 'paused', reason: this.paused })
           return reply({ conn: this.network.dial(this, String(message.identity)), already: false })
+        case 'routes.config': {
+          if (this.network.minor < 1) return reply({ error: 'unknown_op', reason: 'routes.config' })
+          const before = this.reachNow()
+          const after: FakeReach = {
+            ...before,
+            ...(typeof message.lan === 'boolean' ? { lan: message.lan } : {}),
+            ...(typeof message.tailnet === 'boolean' ? { tailnet: message.tailnet } : {}),
+            ...(Array.isArray(message.public) ? { public: message.public.map(String) } : {}),
+            ...(Array.isArray(message.tunnels) ? { tunnels: message.tunnels.map(String) } : {}),
+            ...(typeof message.port === 'number' ? { port: message.port } : {}),
+            ...('forward_to' in message ? { forward_to: message.forward_to ?? null } : {})
+          }
+          for (const route of [...after.public, ...after.tunnels])
+            if (!parseRoute(route)) return reply({ error: 'bad_route', reason: route })
+          this.network.reach.set(this.identity, after)
+          // What it advertises follows the forwards and tunnels as saved.
+          const gone = new Set([...before.public, ...before.tunnels])
+          const advertised = (this.network.routes.get(this.identity) ?? []).filter(
+            (route) => !gone.has(route)
+          )
+          for (const route of [...after.public, ...after.tunnels])
+            if (!advertised.includes(route)) advertised.push(route)
+          this.network.routes.set(this.identity, advertised)
+          if (after.port !== undefined) this.network.ports.set(this.identity, after.port)
+          const restart =
+            after.lan !== before.lan ||
+            after.tailnet !== before.tailnet ||
+            after.port !== before.port ||
+            !after.public.length !== !before.public.length ||
+            (after.forward_to ?? null) !== (before.forward_to ?? null) ||
+            !after.tunnels.length !== !before.tunnels.length
+          return reply({ routes: after, restart_needed: restart })
+        }
+        case 'routes.test': {
+          if (this.network.minor < 1) return reply({ error: 'unknown_op', reason: 'routes.test' })
+          return this.network.listensOn(this.identity).includes(String(message.route))
+            ? reply({ ok: true, ms: 1 })
+            : reply({ ok: false, reason: 'unreachable' })
+        }
+        case 'approvals.list': {
+          const entries: Array<Record<string, unknown>> = []
+          for (const [peer, known] of this.network.knownPeers(this.identity))
+            for (const destination of known.approved)
+              entries.push({
+                identity: peer,
+                destination,
+                source: known.owner.includes(destination) ? 'owner' : 'ticket'
+              })
+          return reply({ approvals: entries })
+        }
         case 'invite.create': {
           if (message.kind === 'link') return this.linkInvite(reply)
           const invitation = randomBytes(16).toString('hex')
-          const uri = ticketOf(this.identity, invitation)
-          this.network.invitations.set(uri, { host: this.identity, invitation })
+          const routes = this.network.routes.get(this.identity) ?? []
+          const uri = ticketOf(this.identity, invitation, routes)
+          this.network.invitations.set(uri, { host: this.identity, invitation, routes })
           return reply({
             invitation,
             uri,
@@ -870,6 +1085,24 @@ export class FakeHelper {
           const host = open && this.network.helperOf(open.host)
           if (!open || !host?.alive)
             return reply({ error: 'bad_ticket', reason: 'no such invitation' })
+          // As a 1.1 helper: the ticket's private hints, and those in both the ticket and `approved` (§1.3).
+          let candidates: string[] | undefined
+          if (this.network.minor >= 1) {
+            const approved = new Set(
+              (Array.isArray(message.approved) ? message.approved : []).map(String)
+            )
+            candidates = open.routes.filter(
+              (route) => this.network.automatic(route) || approved.has(route)
+            )
+            try {
+              this.network.route(this.identity, open.host, candidates)
+            } catch {
+              return reply({ error: 'unreachable', reason: 'no route answered' })
+            }
+            const known = this.network.knownFor(this.identity, open.host)
+            for (const route of open.routes) if (!known.hints.includes(route)) known.hints.push(route)
+            for (const route of candidates) known.approved.add(route)
+          }
           this.event({
             ev: 'join.progress',
             invitation: open.invitation,
@@ -879,7 +1112,7 @@ export class FakeHelper {
           host.askApproval(open.invitation, this, this.hello?.name ?? this.identity, (fields) => {
             if (fields.error) return reply(fields)
             // As the helper: the connection comes up before the join's reply.
-            const conn = this.network.dial(this, open.host)
+            const conn = this.network.dial(this, open.host, candidates)
             reply({
               identity: open.host,
               name: host.hello?.name ?? open.host,
@@ -933,12 +1166,21 @@ export class FakeHelper {
           return
         }
         case 'peer.add': {
+          const routes = ((message.routes as unknown[] | undefined) ?? []).map(String)
+          if (this.network.minor >= 1) {
+            // As a 1.1 helper: every route is kept; only the automatic ones are dialled without approval.
+            if (routes.some((route) => !parseRoute(route)))
+              return reply({ error: 'bad_route', reason: 'not a route' })
+            const known = this.network.knownFor(this.identity, String(message.identity))
+            for (const route of routes) if (!known.hints.includes(route)) known.hints.push(route)
+            this.peerAdds.push(routes)
+            return reply({ already: this.network.peer(this.identity, String(message.identity)) })
+          }
           // As the helper: the whole list is refused for one address outside a private range.
-          const bad = ((message.routes as unknown[] | undefined) ?? [])
-            .map(String)
-            .find((route) => !fakePrivate(route))
+          const bad = routes.find((route) => !fakePrivate(route))
           if (bad)
             return reply({ error: 'bad_route', reason: `${bad} is not a private-range address` })
+          this.peerAdds.push(routes)
           return reply({ already: this.network.peer(this.identity, String(message.identity)) })
         }
         case 'peer.forget':
@@ -950,6 +1192,28 @@ export class FakeHelper {
           return reply()
         }
         case 'peer.addresses.set': {
+          if (this.network.minor >= 1) {
+            // As a 1.1 helper: every owner kind, each an `owner` approval; those no longer listed lose theirs.
+            const entries = message.routes as unknown[]
+            const routes = entries.filter((entry): entry is string => typeof entry === 'string')
+            const ssh = entries.filter(
+              (entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object'
+            )
+            for (const route of routes) {
+              const parsed = parseRoute(route)
+              const loopback = parsed?.literal && isLoopbackIp(parsed.host)
+              if (!parsed || parsed.kind === 'ssh' || (routeClass(parsed) === 'forbidden' && !loopback))
+                return reply({ error: 'bad_route', reason: `${route} cannot be dialled` })
+            }
+            const identity = String(message.identity)
+            const known = this.network.knownFor(this.identity, identity)
+            for (const route of known.owner) if (!routes.includes(route)) known.approved.delete(route)
+            known.owner = routes
+            known.ssh = ssh
+            for (const route of routes) known.approved.add(route)
+            this.addresses.set(identity, routes)
+            return reply({ routes })
+          }
           // As the helper: private ranges only (RFC 1918, link-local, ULA).
           const routes = (message.routes as unknown[]).map(String)
           const bad = routes.find((route) => !fakePrivate(route))

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { AlertTriangle, Laptop, Network, Plus } from '../../lib/icons'
+import { AlertTriangle, Laptop, Network, Plus, X } from '../../lib/icons'
 import type { NetEngineDevice, NetEngineStatus } from '../../../shared/netEngine/local'
+import { routeText } from '../../../shared/netEngine/routes'
 import type { PlatformRequestMethod } from '../../../shared/platform'
 import { refreshComputers, useComputers } from '../../lib/computers'
 import { useAppStore } from '../../stores/appStore'
@@ -13,6 +14,7 @@ import { AddEngineDeviceDialog } from './AddEngineDeviceDialog'
 import { engineRow, engineWhere, SHARED_ACCOUNT_DETAIL, SHARED_ACCOUNT_LINE } from './engineRows'
 import { takeOfferedPairLink, useOfferedPairLink } from './PairLinkHost'
 import { CodeEntry } from './SendLinkParts'
+import { ReachSection } from './ReachSection'
 import './engine.css'
 
 /** Reads `netEngine.status` for this window's profile, again whenever the daemon says it changed. */
@@ -150,11 +152,7 @@ export function EngineDevicesSection() {
               {view.line}
             </span>
             {' · '}
-            <span
-              title={device.addresses
-                ?.map((address) => address.replace(/^tcp:\/\//, ''))
-                .join(', ')}
-            >
+            <span title={device.addresses?.map(routeText).join(', ')}>
               {engineWhere(device)}
             </span>
           </span>
@@ -165,6 +163,28 @@ export function EngineDevicesSection() {
           ) : undefined
         }
       />,
+      !!device.offered?.length && (
+        <SettingsRow
+          key={`${device.node}-offered`}
+          indent
+          title={`Addresses ${device.name} offered`}
+          description={
+            <span title="Not dialled until you tap Use.">
+              {device.offered.map(routeText).join(', ')}
+            </span>
+          }
+          control={
+            <button
+              type="button"
+              className="settings-btn"
+              disabled={busy}
+              onClick={() => void action('netEngine.address.use', { node: device.node })}
+            >
+              Use
+            </button>
+          }
+        />
+      ),
       open && node && (
         <DevicePresetRow
           key={`${device.node}-access`}
@@ -227,6 +247,8 @@ export function EngineDevicesSection() {
         )}
       </SettingsGroup>
 
+      {status.on && status.reach && <ReachSection status={status} onChanged={read} />}
+
       {adding && <AddEngineDeviceDialog status={status} onClose={() => setAdding(false)} />}
 
       {linkToEnter && !adding && (
@@ -254,8 +276,9 @@ export function EngineDevicesSection() {
 
       {addressFor && (
         <AddAddressDialog
-          device={addressFor}
+          device={status.devices.find((device) => device.node === addressFor.node) ?? addressFor}
           ownRoutes={status.routes ?? []}
+          anyKind={!!status.reach}
           onClose={() => setAddressFor(undefined)}
           onAdded={read}
         />
@@ -297,43 +320,67 @@ export function EngineDevicesSection() {
 function AddAddressDialog({
   device,
   ownRoutes,
+  anyKind,
   onClose,
   onAdded
 }: {
   device: NetEngineDevice
   ownRoutes: string[]
+  /** The helper takes every owner kind (protocol 1.1): tailnet, internet, a name, a tunnel URL. */
+  anyKind: boolean
   onClose: () => void
   onAdded: () => void
 }) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const own = ownRoutes.map((route) => route.replace(/^tcp:\/\//, '')).join(', ')
-  const submit = async (event: FormEvent) => {
-    event.preventDefault()
+  const own = ownRoutes.map(routeText).join(', ')
+  const run = async (method: PlatformRequestMethod, params: unknown): Promise<boolean> => {
     setBusy(true)
     setError('')
     try {
-      await window.mousse.platformRequest.request('netEngine.address.add', {
-        node: device.node,
-        address: text
-      })
+      await window.mousse.platformRequest.request(method, params)
       onAdded()
-      onClose()
+      return true
     } catch (cause) {
       setError(errorText(cause))
+      return false
     } finally {
       setBusy(false)
     }
   }
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    if (await run('netEngine.address.add', { node: device.node, address: text })) onClose()
+  }
   return (
     <Modal open title={`Add address for ${device.name}`} onClose={onClose}>
       <form className="devices-dialog" onSubmit={(event) => void submit(event)}>
+        {!!device.addresses?.length && (
+          <ul className="engine-address-list" aria-label="Addresses">
+            {device.addresses.map((address) => (
+              <li key={address}>
+                <span title={address}>{routeText(address)}</span>
+                <button
+                  type="button"
+                  className="settings-icon-btn"
+                  aria-label={`Remove ${routeText(address)}`}
+                  disabled={busy}
+                  onClick={() =>
+                    void run('netEngine.address.remove', { node: device.node, address })
+                  }
+                >
+                  <X size={14} aria-hidden="true" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         <input
           className="settings-input"
           value={text}
           autoFocus
-          placeholder="192.168.1.20:47100"
+          placeholder={anyKind ? '100.101.7.2:47100 or https://…' : '192.168.1.20:47100'}
           aria-label="Address and port"
           title={own ? `This computer's own address: ${own}` : undefined}
           onChange={(event) => setText(event.target.value)}

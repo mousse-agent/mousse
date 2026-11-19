@@ -1,86 +1,97 @@
-import { isIPv4, isIPv6 } from 'node:net'
-import type { NetEngineRouteClass } from '../../shared/netEngine/local'
+import {
+  automaticRoute,
+  isLoopbackIp,
+  parseRoute,
+  routeClass,
+  ticketDestinations
+} from '../../shared/netEngine/routes'
+import { engineControl, packagedBuild } from './limits'
+
+/** 1a's limit on the routes a pairback carries, and on each one's length (1b §1.3 keeps it). */
+export const PAIRBACK_MAX_ROUTES = 8
+export const PAIRBACK_MAX_ROUTE_BYTES = 255
 
 /**
- * Whether a `tcp://` route is an address in a private range, as the helper reads one (design §5.3): 10/8,
- * 172.16/12, 192.168/16, 169.254/16 or fc00::/7, an IPv4-mapped address as its IPv4. Loopback, CGNAT and tailnet
- * (100.64/10) and public addresses are not; nor is a name.
+ * Whether a `tcp://` route is an address in a private range, as the helper reads one (design §5.3, 1b §1.2): 10/8,
+ * 172.16/12, 192.168/16, 169.254/16 or fc00::/7 outside the tailnet range, an IPv4-mapped address as its IPv4.
+ * Loopback, tailnet (100.64/10) and public addresses are not; nor is a name.
  */
 export function privateRoute(route: string): boolean {
-  const match = /^tcp:\/\/(?:\[([0-9A-Fa-f:.]+)\]|([0-9.]+)):[0-9]{1,5}$/.exec(route.trim())
-  if (!match) return false
-  return match[1] !== undefined ? privateIpv6(match[1]) : privateIpv4(match[2]!)
+  return automaticRoute(route)
 }
-
-function privateIpv4(ip: string): boolean {
-  if (!isIPv4(ip)) return false
-  const [a, b] = ip.split('.').map(Number) as [number, number]
-  return (
-    a === 10 ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 169 && b === 254)
-  )
-}
-
-function privateIpv6(ip: string): boolean {
-  if (!isIPv6(ip)) return false
-  const mapped = /^::ffff:([0-9.]+)$/i.exec(ip)
-  if (mapped) return privateIpv4(mapped[1]!)
-  const first = ip.startsWith(':') ? 0 : parseInt(ip.split(':')[0]!, 16)
-  return (first & 0xfe00) === 0xfc00
-}
-
-/** Where a destination is, as the join dialog labels it (design 1b §1.2, §1.3). */
-export type DestinationClass = NetEngineRouteClass
 
 /**
- * The class of a route a ticket names, or undefined for one the helper skips (plain `ws`, `ssh`, a reserved kind)
- * or never dials (a forbidden address: loopback, multicast, documentation ranges...). `tcp` to a name is `public`:
- * the helper classifies what it resolves to and drops forbidden addresses then.
+ * Whether this build's helper dials loopback without approval: an unpackaged build's debug helper does, so checks
+ * run on one computer, unless the checks map loopback to another class (`MOUSSE_NET_TEST_CLASS_MAP`, which the
+ * debug helper reads too).
  */
-export function destinationClass(route: string): DestinationClass | undefined {
-  const text = route.trim()
-  if (/^wss:\/\/[A-Za-z0-9.-]+(?::[0-9]{1,5})?\/[A-Za-z0-9._~/-]*\/mousse-net\/1$/.test(text))
-    return 'tunnel'
-  const match = /^tcp:\/\/(?:\[([0-9A-Fa-f:.]+)\]|([^:/\s]+)):([0-9]{1,5})$/.exec(text)
-  if (!match) return undefined
-  if (match[1] !== undefined) return ipv6Class(match[1])
-  const host = match[2]!
-  if (isIPv4(host)) return ipv4Class(host)
-  return /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*$/.test(
-    host
-  )
-    ? 'public'
-    : undefined
+function loopbackAutomatic(): boolean {
+  return !packagedBuild() && !process.env.MOUSSE_NET_TEST_CLASS_MAP?.trim()
 }
 
-function ipv4Class(ip: string): DestinationClass | undefined {
-  const [a, b, c] = ip.split('.').map(Number) as [number, number, number]
-  if (privateIpv4(ip)) return 'lan'
-  if (a === 100 && b >= 64 && b <= 127) return 'tailnet'
-  const forbidden =
-    a === 0 ||
-    a === 127 ||
-    a >= 224 ||
-    (a === 192 && b === 0 && (c === 0 || c === 2)) ||
-    (a === 198 && (b === 18 || b === 19)) ||
-    (a === 198 && b === 51 && c === 100) ||
-    (a === 203 && b === 0 && c === 113) ||
-    (a === 192 && b === 88 && c === 99)
-  return forbidden ? undefined : 'public'
+/**
+ * 1a's automatic rule as this build's helper applies it (1b §1.3): private-range `tcp` literals, and loopback too
+ * in an unpackaged build.
+ */
+export function automatic(route: string): boolean {
+  return automaticRoute(route, loopbackAutomatic())
 }
 
-function ipv6Class(ip: string): DestinationClass | undefined {
-  if (!isIPv6(ip)) return undefined
-  const mapped = /^::ffff:([0-9.]+)$/i.exec(ip)
-  if (mapped) return isIPv4(mapped[1]!) ? ipv4Class(mapped[1]!) : undefined
-  const lower = ip.toLowerCase()
-  if (lower.startsWith('fd7a:115c:a1e0:')) return 'tailnet'
-  if (privateIpv6(ip)) return 'lan'
-  const first = lower.startsWith(':') ? 0 : parseInt(lower.split(':')[0]!, 16)
-  if ((first & 0xe000) !== 0x2000) return undefined
-  // Documentation, 6to4 and NAT64 ranges inside 2000::/3.
-  if (lower.startsWith('2001:db8:') || lower.startsWith('2002:') || first === 0x64) return undefined
-  return 'public'
+/**
+ * What Connect approves (§1.3): every dialable hint of the ticket outside the private ranges, as the join's
+ * `approved`. Loopback hints of an unpackaged build count too, whatever class the checks map them to; approving an
+ * automatic hint changes nothing. Under the `lan-only-candidates` control, none.
+ */
+export function approvedHints(hints: readonly string[]): string[] {
+  if (engineControl('lan-only-candidates')) return []
+  return ticketDestinations(hints, !packagedBuild())
+    .filter((hint) => !privateRoute(hint.route))
+    .map((hint) => hint.route)
+}
+
+/**
+ * The routes a joiner's pairback carries (§1.3): its advertised routes under the automatic rule, then those the
+ * owner ticked under "Also share", within 1a's limits. Under the `route-leak` control, its loopback listener first.
+ */
+export function pairbackRoutes(info: Record<string, unknown>, share: readonly string[]): string[] {
+  const advertised = Array.isArray(info.routes)
+    ? info.routes.filter((route): route is string => typeof route === 'string')
+    : []
+  const out: string[] = []
+  const push = (route: string) => {
+    if (!out.includes(route) && route.length <= PAIRBACK_MAX_ROUTE_BYTES) out.push(route)
+  }
+  if (engineControl('route-leak') && typeof info.port === 'number')
+    push(`tcp://127.0.0.1:${info.port}`)
+  for (const route of advertised) if (automatic(route)) push(route)
+  for (const route of share) {
+    const parsed = parseRoute(route)
+    if (parsed && (parsed.kind === 'tcp' || parsed.kind === 'wss')) push(route)
+  }
+  return out.slice(0, PAIRBACK_MAX_ROUTES)
+}
+
+/**
+ * The host's reading of a pairback's routes (§1.3): those under the automatic rule go to `peer.add`; other `tcp`
+ * and `wss` routes are held as suggestions ("Addresses <B> offered") until the owner taps Use; forbidden literals
+ * are dropped. Plain `ws` and `ssh` are refused (undefined).
+ */
+export function splitPairback(
+  routes: readonly string[]
+): { automatic: string[]; offered: string[] } | undefined {
+  const out = { automatic: [] as string[], offered: [] as string[] }
+  for (const route of routes.slice(0, PAIRBACK_MAX_ROUTES)) {
+    if (route.length > PAIRBACK_MAX_ROUTE_BYTES) continue
+    const parsed = parseRoute(route)
+    if (!parsed) continue
+    if (parsed.kind === 'ws' || parsed.kind === 'ssh') return undefined
+    if (automatic(route)) {
+      out.automatic.push(route)
+      continue
+    }
+    const loopback = parsed.literal && isLoopbackIp(parsed.host) && !packagedBuild()
+    if (routeClass(parsed) === 'forbidden' && !loopback) continue
+    out.offered.push(route)
+  }
+  return out
 }

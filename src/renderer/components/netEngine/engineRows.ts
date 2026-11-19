@@ -1,4 +1,5 @@
 import type { NetEngineDevice } from '../../../shared/netEngine/local'
+import { ROUTE_CLASS_LABEL, routeText } from '../../../shared/netEngine/routes'
 
 /** What a device's row offers (design §5.2): Access opens the preset control under it. */
 export type EngineRowAction = 'access' | 'address' | 'retry' | 'remove'
@@ -94,11 +95,15 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
   return { line: 'Connected', actions: ['access', 'address', 'remove'] }
 }
 
-/** Where a device is found: "LAN", or the address added for it. */
+/**
+ * Where a device is found: the class of the route it is connected on (1b §7 `conn.up.route`), else "LAN" or the
+ * address added for it.
+ */
 export function engineWhere(device: NetEngineDevice): string {
+  if (device.route) return ROUTE_CLASS_LABEL[device.route]
   const first = device.addresses?.[0]
   if (!first) return 'LAN'
-  const address = first.replace(/^tcp:\/\//, '')
+  const address = routeText(first)
   return device.addresses!.length > 1 ? `${address} +${device.addresses!.length - 1}` : address
 }
 

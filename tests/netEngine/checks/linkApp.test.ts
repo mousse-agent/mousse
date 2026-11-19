@@ -54,7 +54,7 @@ const running = (joiner: Computer, invitation: string) =>
 function connect(
   joiner: Computer,
   link: string,
-  fields: { approved?: string[]; share?: string[] } = {}
+  fields: { share?: string[] } = {}
 ): Promise<{ node?: NodeId; error?: unknown }> {
   return joiner.dispatch('netEngine.join', { ticket: link, arrival: 'link', ...fields }, true).then(
     (answer: { node: NodeId }) => ({ node: answer.node }),
@@ -139,15 +139,16 @@ describe('phase1b.link-app', () => {
       return taken as string
     })
 
+    // What Connect shows and approves: the link's destinations; those outside the LAN need the approval.
     const facts = await step('damaged', () =>
-      joiner.dispatch('netEngine.link.read', { link: opened }, true)
+      joiner.dispatch('netEngine.join.preview', { ticket: opened }, true)
     )
-    const approved = (facts.destinations as Array<{ route: string; class: string }>)
-      .filter((destination) => destination.class !== 'lan')
+    const approved = (facts.destinations as Array<{ route: string; automatic: boolean }>)
+      .filter((destination) => !destination.automatic)
       .map((destination) => destination.route)
     if (!REAL_HELPER) await step('approval_lost', () => expect(approved).toEqual([TAILNET]))
 
-    const joined = connect(joiner, opened, { approved })
+    const joined = connect(joiner, opened)
     let askedCode = false
     const watch = setInterval(() => {
       if (running(joiner, link.invitation)?.needsCode) askedCode = true
@@ -527,7 +528,7 @@ describe('phase1b.link-app', () => {
       const joiner2 = await fabric.computer('lost-joiner')
       link = await sendLink(host2)
       joiner2.fake!.losePaired = true
-      joined = connect(joiner2, link.uri, { approved: [TAILNET] })
+      joined = connect(joiner2, link.uri)
       await codeNeeded(joiner2, link.invitation)
       const sentBefore = fabric.network.approvedSent.length
       await typeCode(joiner2, link.invitation, shown(host2, link.invitation)!.code).catch(
