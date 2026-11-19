@@ -1016,6 +1016,18 @@ export class NetEngineService implements EngineDirectoryPort {
     // What aborted handlers wrote under a removed pairing's id goes, then its tombstone (§5.4 step 4).
     peers.sweep()
     const revocations = new Map<NodeId, AbortController>()
+    /**
+     * A pairing's row while this run of the engine is on. A helper's pipe can close after the profile's database
+     * did (the app stopping): then there is none.
+     */
+    const liveRow = (node: NodeId): EnginePeerRow | undefined => {
+      if (this.started?.peers !== peers) return undefined
+      try {
+        return peers.get(node)
+      } catch {
+        return undefined
+      }
+    }
     const sessions: EngineSessions = new EngineSessions({
       name: () => this.selfName(),
       host: {
@@ -1053,7 +1065,7 @@ export class NetEngineService implements EngineDirectoryPort {
           pairing.clientReady(node)
           // A: its first live connection to B confirms an SSH add (1b §3.4 step 6).
           // Stopping: the store is closed, and nothing is written.
-          const row = this.started?.peers === peers ? peers.get(node) : undefined
+          const row = liveRow(node)
           if (row?.source === 'ssh' && row.state === 'ssh_granted') this.sshAdd().connected(row)
           this.changed()
         },
@@ -1063,7 +1075,7 @@ export class NetEngineService implements EngineDirectoryPort {
         },
         onServingChanged: (node) => {
           // B: A's first live inbound with the row's grant connects it ("Added over SSH from <A>").
-          const row = this.started?.peers === peers ? peers.get(node) : undefined
+          const row = liveRow(node)
           if (
             row?.source === 'ssh' &&
             row.state === 'ssh_granted' &&

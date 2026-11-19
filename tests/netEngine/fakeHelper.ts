@@ -702,7 +702,11 @@ export class FakeHelper {
       const op = String(message.op)
       if (this.helloed && (op.startsWith('relay.') || op.startsWith('peer.relay.') || op === 'peers.list')) {
         if (!this.relays) return reply({ error: 'unknown_op', reason: op })
-        return reply(relayAnswer(message, this.relays))
+        const answer = relayAnswer(message, this.relays)
+        // As the network does once a computer has a relay: every dial to it goes through that relay.
+        const added = answer.relay as { destination?: string } | undefined
+        if (op === 'relay.enroll' && added?.destination) this.network.relayed.set(this.identity, added.destination)
+        return reply(answer)
       }
       if (!this.helloed && message.op !== 'hello')
         return reply({ error: 'no_hello', reason: 'hello first' })
