@@ -1,0 +1,86 @@
+/*
+ * The frameless shell. The rail, the title bar and the threads sidebar keep the theme's own colours and draw no lines
+ * (the dividers stay as drag handles that light up on hover). The chat pane in the middle (a thread, a bot's thread or a
+ * bot's chat) is one rounded surface a step brighter than them, lit at its edges by a dim sheen instead of a border.
+ * Everything inside it that paints the pane's colour (the transcript's fades, bubbles, the composer)
+ * takes it from `--pane-surface`, which a user theme can set in its colours.
+ *
+ * Loaded last (main.tsx); rules that meet theme or lazily loaded rules carry `html[data-theme]` to stay ahead of them.
+ */
+
+:root {
+  --pane-radius: 12px;
+  /* Mousse Dark's black canvas gives #121212; other dark themes lift their own canvas by the same step. */
+  --pane-surface: color-mix(in srgb, #fff 7%, var(--surface-base));
+  /* The shared specular ring (polish.css) along the pane's edge: light on the edge, not a line. */
+  --pane-sheen: var(--specular-ring);
+  --pane-shadow: none;
+}
+
+html[data-theme='light'] {
+  --pane-surface: color-mix(in srgb, #fff 72%, var(--surface-base));
+  --pane-shadow: 0 1px 2px rgb(20 16 30 / 0.05), 0 8px 24px rgb(20 16 30 / 0.04);
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] {
+    --pane-surface: color-mix(in srgb, #fff 72%, var(--surface-base));
+    --pane-shadow: 0 1px 2px rgb(20 16 30 / 0.05), 0 8px 24px rgb(20 16 30 / 0.04);
+  }
+}
+
+/* High contrast has no specular; it keeps a plain, visible edge. */
+html[data-theme='high-contrast'] {
+  --pane-sheen: linear-gradient(rgb(255 255 255 / 0.4), rgb(255 255 255 / 0.4));
+}
+
+/* In a see-through window the pane is a faint lift of the glass. */
+html[data-acrylic='true'] {
+  --pane-surface: color-mix(in srgb, var(--text-primary) 5%, transparent);
+}
+
+/* ---------- The pane ---------- */
+html[data-theme] .app :is(.sidebar, .chat-workspace) {
+  position: relative;
+  margin: 0 8px 8px 0;
+  border-radius: var(--pane-radius);
+  overflow: clip;
+  min-width: 0;
+  min-height: 0;
+  --pane-backdrop: var(--pane-surface);
+  background: var(--pane-backdrop);
+  box-shadow: var(--pane-shadow);
+  /* What sits on the pane is a step above it, never below it. */
+  --an-user-message-bg: color-mix(in srgb, var(--text-primary) 8%, var(--pane-surface));
+}
+
+/* The composer stays a step above the pane (its fill is --ui-raised, which in dark themes is close to the pane). */
+html[data-theme]:not([data-theme='light']) .app :is(.sidebar, .chat-workspace) [data-mousse='composer'] {
+  --ui-raised: color-mix(in srgb, #fff 4.5%, var(--pane-surface));
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-theme='system'] .app :is(.sidebar, .chat-workspace) [data-mousse='composer'] {
+    --ui-raised: #ffffff;
+  }
+}
+
+/* The edge light: a 1px ring painted over the pane's content, shaped by the pane's corners. */
+html[data-theme] .app :is(.sidebar, .chat-workspace)::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  padding: 1px;
+  border-radius: inherit;
+  background: var(--pane-sheen);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  pointer-events: none;
+}
+
+/* A bot's chat paints its bubbles and the ring around its face from --bg-primary (bots.css): the pane, here. */
+html[data-theme] .app .bot-conversation {
+  --bg-primary: var(--pane-surface);
+}

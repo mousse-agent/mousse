@@ -106,22 +106,20 @@ describe('Home in the navigation rail', () => {
   it('is active while no rail page is open, and a click there changes nothing', async () => {
     render()
     expect(home().title).toBe('Home')
-    expect(home().classList.contains('active')).toBe(true)
     expect(home().getAttribute('aria-current')).toBe('page')
     await click('Home')
     expect(useAppStore.getState()).toMatchObject(closed)
-    expect(home().classList.contains('active')).toBe(true)
+    expect(home().getAttribute('aria-current')).toBe('page')
   })
 
   it('leaves Automations or Usage and becomes the active item', async () => {
     for (const page of ['scheduledOpen', 'usageOpen'] as const) {
       useAppStore.setState({ ...closed, [page]: true })
       render()
-      expect(home().classList.contains('active')).toBe(false)
       expect(home().hasAttribute('aria-current')).toBe(false)
       await click('Home')
       expect(useAppStore.getState()).toMatchObject({ scheduledOpen: false, usageOpen: false })
-      expect(home().classList.contains('active')).toBe(true)
+      expect(home().getAttribute('aria-current')).toBe('page')
     }
   })
 })

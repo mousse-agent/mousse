@@ -260,7 +260,7 @@ const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botNa
       {/* As in a messaging app: the pictures first, the words under them, then any other files. */}
       <div className="bot-you-content">
         {!!message.attachments?.length && <BotImageFiles files={message.attachments} />}
-        {message.text && <div className="bot-you-bubble">
+        {message.text && <div data-mousse="user-message" className="bot-you-bubble">
           <div className="bot-find-text" data-find-text data-message-id={message.id} data-part-index="0">
             <WithSentQuotes text={message.text} render={(part) => <Markdown content={part} className="bot-markdown" images={BOT_IMAGES} />} />
           </div>
@@ -408,7 +408,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
   // Another bot's message shows its words alone: who sent it is its name and face, not a header.
   const words = from ? from.message : media.text
   const line = <div className="bot-message-line">
-    <div ref={bubble} tabIndex={-1} className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !words && !lostChips.length && !cards ? ' is-media-only' : ''}`}>
+    <div ref={bubble} tabIndex={-1} data-mousse="assistant-message" className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !words && !lostChips.length && !cards ? ' is-media-only' : ''}`}>
       {from && <span className="bot-from-name">{senderName(from, sender)}</span>}
       {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
       <BotReplyMedia images={shownImages} onMenuOpen={setMenuOpen} />
@@ -701,7 +701,7 @@ export const BOT_AFTER_REPLY_MS = 700
 function BotCutReply({ text, starts }: { text: string; starts: boolean }) {
   return <article className={`chat-participant-message from-agent bot-message bot-cut-reply${starts ? ' is-group-start' : ''}`}>
     <div className="bot-message-line">
-      <div className="bot-bubble">
+      <div data-mousse="assistant-message" className="bot-bubble">
         <BotMarkdown text={text} className="bot-markdown" />
         <div className="bot-bubble-foot"><span className="bot-cut-mark" title="This reply stopped before it was finished, and was not sent.">Stopped</span></div>
       </div>
@@ -1073,8 +1073,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
 
   return <BotFilesProvider botId={bot.id} open={openFile} failed={fileFailed}><ImageGalleryProvider images={chatImages} actions={pictureActions}>
     {/* The bot's colour tints the quotes of its messages. */}
-    <section className={`chat-conversation bot-conversation${typing ? ' is-typing' : ''}${fullScreen ? ' is-behind-browser' : ''}`} data-applet-conversation style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
-      <header className="chat-conversation-header">
+    <section data-mousse="chat" className={`chat-conversation bot-conversation${typing ? ' is-typing' : ''}${fullScreen ? ' is-behind-browser' : ''}`} data-applet-conversation style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
+      <header data-mousse="chat-header" className="chat-conversation-header">
         <button type="button" className="bot-header-about" aria-label={`About ${bot.name}`} onClick={toggleAbout}>
           <BotFace look={bot.look} state={botFaceState(bot, happy)} size={32} view="head" />
           <BotActivitySticker bot={bot} typing={typing} offline={offline} />
@@ -1088,7 +1088,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         <BotMenu bot={bot} {...(find.openFind ? { onFind: () => { composerField()?.focus({ preventScroll: true }); find.openFind!() } } : {})} />
       </header>
       {find.barProps && <div className="bot-find-anchor"><FindInThreadBar {...find.barProps} /></div>}
-      <div className="chat-transcript" data-applet-scroller ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
+      <div data-mousse="transcript" className="chat-transcript" data-applet-scroller ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
         const element = event.currentTarget
         const down = element.scrollTop >= (anchor.current.top ?? 0)
         anchor.current.atEnd = element.scrollHeight - element.scrollTop - element.clientHeight < 40

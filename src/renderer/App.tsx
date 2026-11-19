@@ -668,7 +668,7 @@ export default function App() {
         )}
 
         {/* Keep terminal PTYs and browser guests mounted when the pane is collapsed. */}
-        <KeepMounted as="main" active={panelShown} preserveLayout className={`main-area${panelClosing ? ' is-closing' : ''}`}
+        <KeepMounted as="main" data-mousse="panel" active={panelShown} preserveLayout className={`main-area${panelClosing ? ' is-closing' : ''}`}
           // Beside it: the threads sidebar and its divider when open (the Runs list sits outside the workspace), and the 1px divider before it.
           style={mainAreaStyle(mainAreaWidth, (threadsSidebarOpen && !inboxThread ? threadsSidebarWidth + 1 : 0) + 1)}>
           <MainViewTabs />

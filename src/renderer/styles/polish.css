@@ -62,10 +62,15 @@
   --ui-line-strong: color-mix(in srgb, var(--text-primary) 14%, transparent);
   --ui-faint: color-mix(in srgb, var(--text-primary) 48%, transparent);
   --ui-raised: var(--surface-soft);
-  /* Specular lighting: a light from directly above. The top inset sits inside
-     the border (a background line there is covered by it), the bottom inset
-     is the dark lip, and the sheen falls off before the corners. */
-  --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.16), inset 0 -1px 0 rgba(0, 0, 0, 0.38);
+  /* Specular lighting: a light from directly above, one look for every raised surface (the composer, menus and
+     popovers, selected tabs and rows, the profile button, avatars, the chat pane's edge). It is a 1px ring drawn by
+     specular.css, brightest at the top and gone by the bottom, in place of borders and inset lines. A theme sets its
+     three stops on the page root. --ui-specular is kept for the rules that still list it and adds nothing. */
+  --specular-top: rgba(255, 255, 255, 0.2);
+  --specular-mid: rgba(255, 255, 255, 0.04);
+  --specular-end: rgba(255, 255, 255, 0);
+  --specular-ring: linear-gradient(180deg, var(--specular-top), var(--specular-mid) 55%, var(--specular-end) 100%);
+  --ui-specular: 0 0 #0000;
   --ui-specular-accent: inset 0 1px 0 rgba(255, 255, 255, 0.5), inset 0 -1px 0 rgba(0, 0, 0, 0.32);
   --ui-glint: rgba(255, 255, 255, 0.42);
   --ui-sheen: radial-gradient(125% 78% at 50% -8%, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.035) 34%, transparent 64%);
@@ -125,7 +130,6 @@ html[data-theme='light'] {
   --ui-raised: #ffffff;
   /* White barely differs from the light page, so selection shades it instead. */
   --ui-selected-fill: color-mix(in srgb, var(--accent) 14%, color-mix(in srgb, var(--text-primary) 9%, var(--surface-base)));
-  --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 -1px 0 rgba(20, 16, 30, 0.06);
   --ui-specular-accent: inset 0 1px 0 rgba(255, 255, 255, 0.45), inset 0 -1px 0 rgba(0, 0, 0, 0.16);
   --ui-glint: transparent;
   --ui-sheen: none;
@@ -156,7 +160,6 @@ html[data-theme='light'] {
   html[data-theme='system'] {
     --ui-raised: #ffffff;
     --ui-selected-fill: color-mix(in srgb, var(--accent) 14%, color-mix(in srgb, var(--text-primary) 9%, var(--surface-base)));
-    --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 -1px 0 rgba(20, 16, 30, 0.06);
     --ui-specular-accent: inset 0 1px 0 rgba(255, 255, 255, 0.45), inset 0 -1px 0 rgba(0, 0, 0, 0.16);
     --ui-glint: transparent;
     --ui-sheen: none;
@@ -196,7 +199,6 @@ html[data-theme='blacksphere-plus'] {
   --ui-hover: color-mix(in srgb, var(--ui-lift) 6%, transparent);
   --ui-pressed: color-mix(in srgb, var(--ui-lift) 10%, transparent);
   --main-tab-selected: color-mix(in srgb, var(--ui-lift) 9%, transparent);
-  --ui-specular: inset 0 1px 0 color-mix(in srgb, var(--ui-lift) 22%, transparent), inset 0 -1px 0 rgba(0, 0, 0, 0.72);
   --ui-glint: color-mix(in srgb, var(--ui-lift) 55%, transparent);
   --ui-sheen: radial-gradient(125% 80% at 50% -10%, color-mix(in srgb, var(--ui-lift) 16%, transparent) 0%, color-mix(in srgb, var(--ui-lift) 4%, transparent) 36%, transparent 66%);
   --ui-line: rgba(255, 255, 255, 0.075);
@@ -216,7 +218,9 @@ html[data-theme='high-contrast'] {
   --ui-aura-strength: 0;
   --ui-selected: rgba(var(--accent-rgb), 0.3);
   --ui-selected-fill: var(--ui-selected);
-  --ui-specular: inset 0 0 0 0 transparent;
+  --specular-top: transparent;
+  --specular-mid: transparent;
+  --specular-end: transparent;
   --ui-specular-accent: inset 0 0 0 0 transparent;
   --ui-glint: transparent;
   --ui-sheen: none;
@@ -228,39 +232,13 @@ html[data-theme='high-contrast'] {
 }
 
 /* ---------- Shell ---------- */
-.app .titlebar {
-  border-bottom-color: var(--ui-line);
-}
-
 .app .navigation-rail {
   gap: 4px;
   padding: 8px 0;
-  border-right-color: var(--ui-line);
-}
-
-.app .navigation-rail-button {
-  width: 36px;
-  height: 36px;
-  border-radius: 9px;
-  transition: background 0.15s, color 0.15s, transform var(--ui-dur);
-}
-
-.app .navigation-rail-button:hover:not(:disabled) {
-  background: var(--ui-hover);
-}
-
-.app .navigation-rail-button:active:not(:disabled) {
-  transform: scale(0.95);
-}
-
-.app .navigation-rail-button.active {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised));
-  box-shadow: var(--ui-specular);
 }
 
 .app .resizer {
-  background: var(--ui-line);
+  background: transparent;
 }
 
 /* ---------- Sidebar ---------- */
@@ -284,7 +262,7 @@ html[data-theme='high-contrast'] {
 .app .threads-sidebar-tabs {
   gap: 2px;
   padding: 2px;
-  border: 1px solid var(--ui-line);
+  border: 0;
   border-radius: 10px;
   background: color-mix(in srgb, var(--text-primary) 3%, transparent);
 }
@@ -293,16 +271,22 @@ html[data-theme='high-contrast'] {
   height: 28px;
   min-height: 28px;
   border-radius: var(--ui-row-radius);
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.15s, color 0.15s, opacity 0.15s;
+}
+
+/* The tabs not chosen recede: half strength, most of it back on hover. */
+.app .threads-sidebar-tab:not(.active) {
+  opacity: 0.5;
 }
 
 .app .threads-sidebar-tab:hover:not(.active) {
   color: var(--text-primary);
+  opacity: 0.85;
 }
 
 .app .threads-sidebar-tab.active {
   background: var(--ui-raised);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  box-shadow: none;
 }
 
 .app .threads-sidebar-tab.active svg {
@@ -423,7 +407,7 @@ html[data-theme='high-contrast'] {
 
 .app .threads-sidebar-thread.active {
   background: color-mix(in srgb, var(--accent) 9%, var(--ui-raised));
-  box-shadow: var(--ui-specular);
+  box-shadow: none;
   color: var(--text-primary);
   font-weight: 500;
 }
@@ -654,15 +638,12 @@ html .chat-avatar.group[class*='chat-color-'] {
   background: var(--ui-raised);
   box-shadow: var(--ui-raised-shadow);
   transition: border-color 0.18s, box-shadow 0.18s, background-position calc(450ms * var(--ui-motion-scale)) ease;
-  /* Quieter than the shared specular, only on the main chat bar. */
-  --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.11), inset 0 -1px 0 rgba(0, 0, 0, 0.27);
   --ui-glint: rgba(255, 255, 255, 0.28);
   --ui-sheen: radial-gradient(125% 78% at 50% -8%, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 34%, transparent 64%);
 }
 
 html[data-theme='blacksphere-plus'] .app .chat-input-area .composer,
 html[data-theme='blacksphere-plus'] .app .agent-chat-composer {
-  --ui-specular: inset 0 1px 0 color-mix(in srgb, var(--ui-lift) 14%, transparent), inset 0 -1px 0 rgba(0, 0, 0, 0.48);
   --ui-glint: color-mix(in srgb, var(--ui-lift) 36%, transparent);
   --ui-sheen: radial-gradient(125% 80% at 50% -10%, color-mix(in srgb, var(--ui-lift) 10%, transparent) 0%, color-mix(in srgb, var(--ui-lift) 2.5%, transparent) 36%, transparent 66%);
 }
@@ -671,10 +652,6 @@ html[data-theme='light'] .app .chat-input-area .composer,
 html[data-theme='high-contrast'] .app .chat-input-area .composer {
   --ui-glint: transparent;
   --ui-sheen: none;
-}
-
-html[data-theme='high-contrast'] .app .chat-input-area .composer {
-  --ui-specular: inset 0 0 0 0 transparent;
 }
 
 @media (prefers-color-scheme: light) {
@@ -688,27 +665,26 @@ html[data-theme='high-contrast'] .app .chat-input-area .composer {
    the accent. --ui-raised-shadow is restated so it resolves with this specular,
    and keeps two insets so leaving the empty state still transitions. */
 .app .chat--empty .chat-input-area .composer {
-  --ui-specular: inset 0 1px 0 color-mix(in srgb, rgba(var(--accent-rgb), 0.5) 75%, rgba(255, 255, 255, 0.12)), inset 0 -1px 0 rgba(0, 0, 0, 0.27);
+  --ui-specular: inset 0 1px 0 color-mix(in srgb, rgba(var(--accent-rgb), 0.55) 75%, var(--specular-top));
   --ui-glint: color-mix(in srgb, rgba(var(--accent-rgb), 0.85) 75%, rgba(255, 255, 255, 0.3));
   --ui-sheen: radial-gradient(125% 78% at 50% -8%, rgba(var(--accent-rgb), 0.13) 0%, rgba(var(--accent-rgb), 0.035) 34%, transparent 64%);
   --ui-raised-shadow: var(--ui-specular), 0 10px 32px rgba(0, 0, 0, 0.32);
 }
 
 html[data-theme='blacksphere-plus'] .app .chat--empty .chat-input-area .composer {
-  --ui-specular: inset 0 1px 0 color-mix(in srgb, rgba(var(--accent-rgb), 0.6) 75%, rgba(255, 255, 255, 0.14)), inset 0 -1px 0 rgba(0, 0, 0, 0.48);
   --ui-glint: color-mix(in srgb, rgba(var(--accent-rgb), 0.95) 75%, rgba(255, 255, 255, 0.36));
   --ui-sheen: radial-gradient(125% 80% at 50% -10%, rgba(var(--accent-rgb), 0.16) 0%, rgba(var(--accent-rgb), 0.04) 36%, transparent 66%);
 }
 
 /* Light and high contrast keep their usual composer on the start page. */
 html[data-theme='light'] .app .chat--empty .chat-input-area .composer {
-  --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.11), inset 0 -1px 0 rgba(0, 0, 0, 0.27);
+  --ui-specular: 0 0 #0000;
   --ui-raised-shadow: inherit;
 }
 
 @media (prefers-color-scheme: light) {
   html[data-theme='system'] .app .chat--empty .chat-input-area .composer {
-    --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.11), inset 0 -1px 0 rgba(0, 0, 0, 0.27);
+    --ui-specular: 0 0 #0000;
     --ui-raised-shadow: inherit;
   }
 }
@@ -961,19 +937,11 @@ html .composer-workspace-menu {
   box-shadow: var(--ui-specular), var(--ui-menu-drop);
 }
 
-.app .threads-sidebar-tab.active {
-  box-shadow: var(--ui-specular), 0 1px 3px rgba(0, 0, 0, 0.2);
-}
-
-.app .navigation-rail-button.active {
-  box-shadow: var(--ui-specular);
-}
 
 /* Selected rows share the raised material. A hairline on the top edge runs
    once when the selection lands, then the resting specular stays put. */
 .app .threads-sidebar-thread.active,
 .app .chat-list-row.active,
-.app .navigation-rail-button.active,
 .app .threads-sidebar-tab.active,
 .app .header-toggle-active,
 .app .header-actions .icon-btn-ghost.header-toggle-active,
@@ -982,9 +950,6 @@ html .composer-command-suggestion.selected {
   position: relative;
 }
 
-.app .threads-sidebar-thread.active::before,
-.app .chat-list-row.active::before,
-.app .navigation-rail-button.active::before,
 .app .threads-sidebar-tab.active::before,
 .app .header-toggle-active::before,
 .app .header-actions .icon-btn-ghost.header-toggle-active::before,
@@ -1020,7 +985,6 @@ html .composer-command-suggestion.selected {
 
 html[data-theme='high-contrast'] .app .threads-sidebar-thread.active,
 html[data-theme='high-contrast'] .app .chat-list-row.active,
-html[data-theme='high-contrast'] .app .navigation-rail-button.active,
 html[data-theme='high-contrast'] .app .main-view-tab.active,
 html[data-theme='high-contrast'] .app .header-toggle-active,
 html[data-theme='high-contrast'] .app .header-actions .icon-btn-ghost.header-toggle-active,
@@ -1032,7 +996,6 @@ html[data-theme='high-contrast'] .composer-command-suggestion.selected {
 
 html[data-theme='high-contrast'] .app .threads-sidebar-thread.active::before,
 html[data-theme='high-contrast'] .app .chat-list-row.active::before,
-html[data-theme='high-contrast'] .app .navigation-rail-button.active::before,
 html[data-theme='high-contrast'] .app .main-view-tab.active::before,
 html[data-theme='high-contrast'] .app .threads-sidebar-tab.active::before,
 html[data-theme='high-contrast'] .app .header-toggle-active::before,
@@ -1114,7 +1077,7 @@ html :is(
 }
 
 html .chat-avatar[class*='chat-color-']:not(.group) {
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.38), inset 0 -1px 0 rgba(0, 0, 0, 0.18);
+  box-shadow: none;
 }
 
 /* Fade the transcript itself to transparency at its visible edges. */

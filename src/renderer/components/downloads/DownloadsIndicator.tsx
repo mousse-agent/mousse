@@ -89,7 +89,9 @@ export function DownloadsIndicator({ variant }: { variant: DownloadsIndicatorVar
         <button
           ref={buttonRef}
           type="button"
-          className={rail ? `navigation-rail-button downloads-rail${open ? ' active' : ''}` : `downloads-nav${open ? ' active' : ''}`}
+          className={rail ? 'navigation-rail-button downloads-rail' : `downloads-nav${open ? ' active' : ''}`}
+          data-mousse={rail ? 'rail-item' : undefined}
+          data-mousse-item={rail ? 'downloads' : undefined}
           data-status={summary.status}
           aria-label={label}
           title={label}

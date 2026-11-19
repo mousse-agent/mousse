@@ -179,8 +179,10 @@
 /* The number, checks and actions sit under the title, lined up with it (past the icon). */
 .side-card-git-pr-meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   min-height: 26px;
   padding-left: 28px;
   font-size: 11px;
@@ -382,9 +384,13 @@
 }
 
 .side-card-git-pr-suffix {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   color: var(--ui-faint);
   font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .side-card-git-pr-hint,

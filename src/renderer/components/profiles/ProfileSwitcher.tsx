@@ -368,7 +368,7 @@ export function ProfileSwitcher({ onSwitched, variant = 'sidebar' }: ProfileSwit
   </div>
 
   const trigger = rail
-    ? <button ref={triggerRef} className="navigation-rail-button profile-rail-trigger" type="button"
+    ? <button ref={triggerRef} className="navigation-rail-button profile-rail-trigger" type="button" data-mousse="rail-item" data-mousse-item="profile"
       aria-label={`Mousse profile: ${selected.displayName}`} title={selected.displayName}
       aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
       {avatar(selected)}
