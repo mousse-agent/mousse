@@ -328,6 +328,7 @@ interface AppState {
   /** The active profile's animation preferences from Labs. */
   sidebarAnimations: boolean
   newChatAnimations: boolean
+  shimmerAnimations: boolean
   /** The workspace beside the sidebar: the thread workspace, or `ChatWorkspace` under the Chats tab. */
   sidebarMode: WorkspaceMode
   setSidebarMode: (sidebarMode: WorkspaceMode) => void
@@ -835,6 +836,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   setThreadFeedOrder: (threadFeedOrder) => set({ threadFeedOrder }),
   sidebarAnimations: true,
   newChatAnimations: true,
+  shimmerAnimations: true,
   composerWorkspaceDrafts: {},
   lastNewThreadProjectId: null,
   setLastNewThreadProjectId: (lastNewThreadProjectId) => set({ lastNewThreadProjectId }),
@@ -1235,6 +1237,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       threadFeedOrder: [] as string[],
       sidebarAnimations: true,
       newChatAnimations: true,
+      shimmerAnimations: true,
       composerWorkspaceDrafts: {},
       lastNewThreadProjectId: null as string | null,
       composerDrafts: {},

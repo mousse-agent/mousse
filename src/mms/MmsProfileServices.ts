@@ -1367,7 +1367,7 @@ export class MmsProfileServices {
       profileDir: this.homeDir,
       editorSsh: { home: homedir(), mousseHome: this.installationHome, profile: this.profileId },
       hosted: mousseIdNetModule,
-      // Settings → Labs → Mousse Plus (legacy); a later change applies at once (below).
+      // Settings → Labs → Mousse ID (legacy); a later change applies at once (below).
       plusLegacyOff: !normalizeExperimentalSettings(this.settings.get().experimental).plusLegacy,
       onChanged: (status) => this.events.emit({ channel: 'net:updated', data: status }),
       composeRuntime: (runtime) => {
@@ -1425,7 +1425,7 @@ export class MmsProfileServices {
       onSettingsSaved(() => {
         const on = normalizeExperimentalSettings(this.settings.get().experimental).plusLegacy
         void this.net.setPlusLegacy(on).catch((error) => {
-          console.warn('Mousse Plus (legacy) could not be switched', { error: error instanceof Error ? error.message : String(error) })
+          console.warn('Mousse ID (legacy) could not be switched', { error: error instanceof Error ? error.message : String(error) })
         })
       })
     )

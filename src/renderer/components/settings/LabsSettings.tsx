@@ -10,7 +10,7 @@ import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './Settings
 export const HEAP_SNAPSHOT_WARNING = 'Holds thread text, prompts, paths and tokens. Stays on this computer; never share it.'
 
 /**
- * Settings → Labs. Mousse Plus (legacy): one switch, on by default; off, this profile's networking leaves Mousse Plus
+ * Settings → Labs. Mousse ID (legacy): one switch, on by default; off, this profile's networking leaves Mousse Plus
  * alone (no sign-in, hosted relay or phone requests through it). The profiler: one switch, off by default; everything else shows only while it is on. The
  * Memory row stays in view; notices, heap snapshot, agent access and the tools fold under Advanced, the tools only
  * while agent access is on.
@@ -21,20 +21,20 @@ export function LabsSettings({ settings, onUpdate }: { settings: MousseSettings;
     onUpdate({ experimental: { profiler: { ...profiler, ...next, tools: { ...profiler.tools, ...next.tools } } } })
   return (
     <section id="labs" className="settings-section">
-      <SettingsGroup title="Mousse Plus" icon={Cloud}>
+      <SettingsGroup title="Mousse ID" icon={Cloud}>
         <SettingsRow
-          title="Mousse Plus (legacy)"
+          title="Mousse ID (legacy)"
           anchor="labs-plus-legacy"
           htmlFor="labs-plus-legacy"
           description={
-            <span title="On: Mousse ID sign-in, the hosted relay and phone requests go through today's Mousse Plus. Off: none of them run, and nothing is sent to Mousse Plus; this computer still reaches your devices over the local network, SSH, tunnels and your own relay. Your sign-in is kept for when you turn it back on.">
-              Sign-in, hosted relay and phones through today's Mousse Plus.
+            <span title="When off, this computer can still reach your devices over the local network, SSH, tunnels and your own relay. Your sign-in is kept for when you turn it back on.">
+              Sign-in, hosted relay and phone access through the legacy service.
             </span>
           }
           control={
             <Switch
               id="labs-plus-legacy"
-              label="Mousse Plus (legacy)"
+              label="Mousse ID (legacy)"
               checked={settings.experimental.plusLegacy !== false}
               onChange={(plusLegacy) => void onUpdate({ experimental: { plusLegacy } })}
             />
@@ -85,6 +85,20 @@ export function LabsSettings({ settings, onUpdate }: { settings: MousseSettings;
               label="New chat animations"
               checked={settings.experimental.newChatAnimations}
               onChange={(newChatAnimations) => void onUpdate({ experimental: { newChatAnimations } })}
+            />
+          }
+        />
+        <SettingsRow
+          title="Shimmer animations"
+          anchor="labs-shimmer-animations"
+          htmlFor="labs-shimmer-animations"
+          description="Animate activity labels and highlights in the sidebar."
+          control={
+            <Switch
+              id="labs-shimmer-animations"
+              label="Shimmer animations"
+              checked={settings.experimental.shimmerAnimations}
+              onChange={(shimmerAnimations) => void onUpdate({ experimental: { shimmerAnimations } })}
             />
           }
         />

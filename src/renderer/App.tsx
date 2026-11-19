@@ -130,6 +130,7 @@ export default function App() {
   // The workspace beside the sidebar swaps with the sidebar's tabs (Projects/Threads or Chats): the new one shows
   // at once and settles in, in step with the sidebar lists (sidebar-view-motion.css).
   const sidebarAnimations = useAppStore((s) => s.sidebarAnimations)
+  const shimmerAnimations = useAppStore((s) => s.shimmerAnimations)
   const { shown: workspaceMode, phase: workspaceSwap } = useViewSwap(sidebarMode, sidebarAnimations)
   // A run's thread from the Automations page always shows as a conversation, whatever Chats was showing.
   const layoutMode = inboxThread ? 'projects' : workspaceMode
@@ -254,7 +255,8 @@ export default function App() {
     const applyAnimationSettings = (settings: Awaited<ReturnType<typeof window.mousse.settings.get>>) => {
       useAppStore.setState({
         sidebarAnimations: settings?.experimental?.sidebarAnimations !== false,
-        newChatAnimations: settings?.experimental?.newChatAnimations !== false
+        newChatAnimations: settings?.experimental?.newChatAnimations !== false,
+        shimmerAnimations: settings?.experimental?.shimmerAnimations !== false
       })
     }
     const finishHydration = (): void => {
@@ -574,7 +576,7 @@ export default function App() {
 
   return (
 
-    <div className="app" data-sidebar-motion={sidebarAnimations ? undefined : 'off'} data-overlay-active={overlayOpen} inert={overlayOpen} aria-hidden={overlayOpen}>
+    <div className="app" data-sidebar-motion={sidebarAnimations ? undefined : 'off'} data-shimmer-motion={shimmerAnimations ? undefined : 'off'} data-overlay-active={overlayOpen} inert={overlayOpen} aria-hidden={overlayOpen}>
 
       <TitleBar />
       <LinuxWindowResizeHandles />

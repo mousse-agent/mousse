@@ -462,11 +462,11 @@ export class NetService {
   /** Loopback listeners that exist only while a remote machine joins; never persisted. */
   private readonly enrollmentListeners = new Set<DirectTransport>()
   /**
-   * The optional Mousse ID module; absent in builds and tests that leave it out, and while Mousse Plus (legacy) is
+   * The optional Mousse ID module; absent in builds and tests that leave it out, and while Mousse ID (legacy) is
    * off for this profile (`setPlusLegacy`).
    */
   private hosted?: HostedNet
-  /** Stops the running Mousse ID module's own work when Mousse Plus (legacy) is turned off. */
+  /** Stops the running Mousse ID module's own work when Mousse ID (legacy) is turned off. */
   private hostedStop?: AbortController
   constructor(
     private readonly options: {
@@ -475,7 +475,7 @@ export class NetService {
       onChanged?(status: NetStatus): void
       composeRuntime?(runtime: NetRuntime): NetDomainComposition | void
       hosted?: HostedNetModule
-      /** Mousse Plus (legacy) is off for this profile at start: the module above is not run (`setPlusLegacy`). */
+      /** Mousse ID (legacy) is off for this profile at start: the module above is not run (`setPlusLegacy`). */
       plusLegacyOff?: boolean
       /** Tests replace the `ssh` executable, the user's known_hosts file and the setup's inputs. */
       ssh?: { binary?: string; userKnownHosts?: string } & Partial<
@@ -522,7 +522,7 @@ export class NetService {
     return this.options.hosted.create(this.hostedHost(AbortSignal.any([this.shutdownSignal.signal, stop.signal])))
   }
   /**
-   * Mousse Plus (legacy), in Settings → Labs, on by default. Off: this profile's Net runs as a build without the
+   * Mousse ID (legacy), in Settings → Labs, on by default. Off: this profile's Net runs as a build without the
    * Mousse ID module, so it signs in to nothing, runs no hosted relay and sends no request to Mousse Plus. The saved
    * sign-in and hosted relay row stay on disk for when it is turned on again. LAN, SSH, Tailscale, tunnels and
    * self-hosted relays keep working either way. Applied at once, running transports restarted.
@@ -1530,15 +1530,15 @@ export class NetService {
   hostedSpaceMembershipChanged(): void {
     this.hosted?.membershipChanged()
   }
-  /** Mousse ID is left out of this build, or Mousse Plus (legacy) is off for this profile. */
+  /** Mousse ID is left out of this build, or Mousse ID (legacy) is off for this profile. */
   private plusUnavailable(): NetError {
     return this.options.hosted
-      ? new NetError('profile_unsupported', 'Mousse Plus (legacy) is off in Settings → Labs.')
+      ? new NetError('profile_unsupported', 'Mousse ID (legacy) is off in Settings → Labs.')
       : hostedUnavailable()
   }
   /**
    * What the Mousse ID module may use. Each entry keeps NetService's own gates and queue. `signal` also ends when
-   * Mousse Plus (legacy) is turned off; a module stopped that way no longer restarts the transports.
+   * Mousse ID (legacy) is turned off; a module stopped that way no longer restarts the transports.
    */
   private hostedHost(signal: AbortSignal): HostedNetHost {
     return {

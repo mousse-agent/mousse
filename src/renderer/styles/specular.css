@@ -216,12 +216,12 @@ html:not([data-theme='high-contrast']) .app :is(.threads-sidebar-thread.active, 
   }
 }
 
-html[data-motion='off']:not([data-theme='high-contrast']) .app :is(.threads-sidebar-thread.active, .chat-list-row.active, .bot-row[aria-current='true']) {
+html:not([data-theme='high-contrast']) :is(.app[data-shimmer-motion='off'], [data-motion='off'] .app) :is(.threads-sidebar-thread.active, .chat-list-row.active, .bot-row[aria-current='true']) {
   animation: none;
   background-position: 50% 0;
 }
 
-html[data-motion='off']:not([data-theme='high-contrast']) .app :is(.threads-sidebar-thread.active, .chat-list-row.active, .bot-row[aria-current='true'])::after {
+html:not([data-theme='high-contrast']) :is(.app[data-shimmer-motion='off'], [data-motion='off'] .app) :is(.threads-sidebar-thread.active, .chat-list-row.active, .bot-row[aria-current='true'])::after {
   animation: none;
   background-position: 0 0, 50% 0;
 }

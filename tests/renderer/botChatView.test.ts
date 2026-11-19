@@ -1017,6 +1017,12 @@ describe('while it works', () => {
       act(() => setAnimationSpeed('normal'))
       expect(onDots()).toHaveLength(3)
       expect(shimmer()).toHaveLength(2)
+      act(() => useAppStore.setState({ shimmerAnimations: false }))
+      expect(onDots()).toHaveLength(3)
+      expect(shimmer()).toHaveLength(0)
+      expect(words().textContent).toBe('Looking at your inbox')
+      act(() => useAppStore.setState({ shimmerAnimations: true }))
+      expect(shimmer()).toHaveLength(2)
       // The bot's own line takes its place and shimmers the same way; nothing restarts as it comes.
       const before = running()
       await act(async () => fake.emit.activity('inbox', null, 'act1', 'Checking prices at Indian stores now'))
@@ -1029,6 +1035,7 @@ describe('while it works', () => {
     } finally {
       delete (HTMLElement.prototype as { animate?: unknown }).animate
       setAnimationSpeed('normal')
+      useAppStore.setState({ shimmerAnimations: true })
     }
   })
 

@@ -142,10 +142,11 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: STORAGE_RULE_COPY.merged.title, section: 'storage', anchor: 'storage-merged', keywords: ['cleanup'] },
   { title: STORAGE_RULE_COPY.captures.title, section: 'storage', anchor: 'storage-captures', keywords: ['browser data', 'screenshots'] },
 
-  { title: 'Mousse Plus (legacy)', section: 'labs', anchor: 'labs-plus-legacy', keywords: ['mousse id', 'account', 'relay', 'hosted relay', 'phone', 'networking', 'experimental'] },
+  { title: 'Mousse ID (legacy)', section: 'labs', anchor: 'labs-plus-legacy', keywords: ['mousse id', 'mousse plus', 'account', 'relay', 'hosted relay', 'phone', 'networking', 'experimental'] },
   { title: 'Performance', section: 'labs', anchor: 'labs-hybrid-bot-faces', keywords: ['bots', 'bot faces', 'gpu', '2d', 'hybrid', 'rendering', 'experimental'] },
   { title: 'Sidebar animations', section: 'labs', anchor: 'labs-sidebar-animations', keywords: ['performance', 'gpu', 'motion', 'threads'] },
   { title: 'New chat animations', section: 'labs', anchor: 'labs-new-chat-animations', keywords: ['performance', 'gpu', 'motion', 'logo', 'wave'] },
+  { title: 'Shimmer animations', section: 'labs', anchor: 'labs-shimmer-animations', keywords: ['performance', 'gpu', 'motion', 'loading', 'activity'] },
   { title: 'Profiler', section: 'labs', anchor: 'labs-profiler', keywords: ['memory', 'ram', 'cpu', 'diagnostics', 'leak', 'performance', 'experimental'] },
   { title: 'Memory', section: 'labs', anchor: 'labs-profiler-memory', keywords: ['ram', 'diagnostics', 'report', 'leak', 'processes'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
   { title: 'Memory notices', section: 'labs', anchor: 'labs-memory-notices', keywords: ['ram', 'diagnostics', 'notification'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
