@@ -5,7 +5,7 @@ import { lstatSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from 'no
 import { join } from 'node:path'
 import { isKeyName } from '../../shared/automationKeys'
 import { pastedSecretShape } from '../../shared/secretShapes'
-import { publicFetch } from '../net-public/publicFetch'
+import { pageFailureReason, publicFetch } from '../net-public/publicFetch'
 import type { SecretVault } from './SecretVault'
 import type { ToolOutcome } from '../run/mcp/appTools/types'
 
@@ -59,7 +59,7 @@ export function prepareSecretFetch(vault: SecretVault, input: SecretFetchInput):
     const seen = new Set<string>()
     for (const [k,v] of Object.entries(args.headers)) {
       const key = k.toLowerCase()
-      if (!allowed.has(key) || fixed.has(key) || seen.has(key) || /[\r\n\x00]/.test(v) || !safe(k) || !safe(v) || !validHeader(k,v)) return reject('That request header is not allowed.')
+      if (!allowed.has(key) || fixed.has(key) || seen.has(key) || /[\r\n\x00]/.test(v) || !safe(k) || !safe(v) || !validHeader(k,v)) return reject('Only Accept, Accept-Language, If-None-Match and If-Modified-Since may be set; use valid, non-secret values.')
       seen.add(key); headers[key] = v
     }
   }
@@ -99,7 +99,7 @@ export function prepareSecretFetch(vault: SecretVault, input: SecretFetchInput):
     }).sort((a,b) => b.modified - a.modified)
     for (const entry of older.slice(19)) unlinkSync(entry.path)
     return {text:`${prefix}\nThis file lasts only for this work; save any needed result before the work ends.\nFile: ${file}`}
-  } catch { return refuse('The service read could not finish. Check the service or try again later.') }
+  } catch (error) { return refuse(mask(serviceReadFailure(error))) }
   }}
 }
 
@@ -107,4 +107,28 @@ export function prepareSecretFetch(vault: SecretVault, input: SecretFetchInput):
 export async function fetchWithSecret(vault: SecretVault, input: SecretFetchInput): Promise<ToolOutcome> {
   const prepared = prepareSecretFetch(vault, input)
   return prepared.refusal ?? prepared.send!()
+}
+
+/** Return fixed guidance only; a transport diagnostic may contain the authentication value. */
+function serviceReadFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : ''
+  if (message === 'The page must resolve only to public addresses.') {
+    return 'The service must resolve only to public addresses. Retrying this address will not help; ask your owner for another service.'
+  }
+  if (message === 'The response exceeds 5 MiB.') {
+    return 'The response exceeds 5 MiB. Ask for a smaller response before retrying.'
+  }
+  if (message === 'The request took more than 30 seconds.') {
+    return 'The service took more than 30 seconds. Try again later.'
+  }
+  if (message === 'The request stopped.') {
+    return 'The service read stopped. Retry only if the result is still needed.'
+  }
+  if (message === 'The page response was interrupted.') {
+    return 'The service response was interrupted. Try again.'
+  }
+  if (pageFailureReason(error) === "its certificate isn't valid") {
+    return "The service's certificate is not valid. Ask your owner to fix it before retrying."
+  }
+  return 'The service could not be reached. Try again later.'
 }
