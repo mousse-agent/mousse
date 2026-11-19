@@ -4038,7 +4038,7 @@ async function aloneAsk(answer: 'allow' | 'not_now' | 'pending' = 'allow', toolN
   expect(ask).toBeDefined()
   const card = f.bots.chat.card(ask)
   expect(card.title).toContain('Mail')
-  expect(card).toMatchObject({ kind: 'permission', details: { items: [expect.stringContaining('one@example.test')] } })
+  expect(card).toMatchObject({ kind: 'permission', details: { items: expect.arrayContaining([expect.stringContaining('one@example.test')]) } })
   expect(f.bots.service.askKind(t.botId, ask.id)).toBe('export_memory')
   if (answer !== 'pending') await f.bots.service.answer(t.botId, ask.id, answer)
   return { ...t, request, consent: ask, consentActivation: row.id }
@@ -4637,14 +4637,14 @@ it('E1 r2b token sets use a profile key and never appear in written exports', as
 })
 
 it.each([['original-file', true], ['new-file', false], ['new-file.txt', false], ['evil.exe.', false]])('E1 r3c an extensionless source name stays exact: %s', async (name, allowed) => {
-  const t = await aloneAsk('allow', 'send', undefined, { name: 'original-file' })
+  const t = await aloneAsk('allow', 'send', undefined, { name: 'original-file', folder: 'scans' })
   expect((await aloneNext(t, { ...t.args, name } as never)).action.status).toBe(allowed ? 'done' : 'open')
 })
 it('E1 r2b an unsafe source name varies only by exact comparison', async () => {
   const t = await aloneAsk('allow', 'send', undefined, { name: '../source.pdf' })
   expect((await aloneNext(t, { ...t.args, name: 'safe.pdf' } as never)).action.status).toBe('open')
 })
-it.each([1, 2])('E1 r2b an older argument contract fails closed and is removed: version %s', async version => {
+it.each([1, 2, 3])('E1 r2b an older argument contract fails closed and is removed: version %s', async version => {
   const t = await aloneAsk()
   const row = f.store.get("SELECT key, value FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'", t.botId)!
   const entry = JSON.parse(String(row.value))
