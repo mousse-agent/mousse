@@ -26,6 +26,7 @@ import { addProjectAndStartThread, archiveThread, setThreadArchived, createAndSe
 import { draftedThreadIds, draftedThreadsKey, unsentChatTitle, withUnsentChats } from '../lib/sidebarDrafts'
 import { dropPendingThreadRows, isPendingRowId, pruneRowKeys, servedPendingRows, usePendingThreadRows, withPendingRows } from '../lib/pendingThreadRows'
 import { runWithToast } from '../lib/actionToast'
+import { copyThreadReference } from '../lib/threadReference'
 import { Modal } from './ui/Modal'
 import { PillTabs, type PillTab } from './ui/PillTabs'
 import { ChatsSidebar } from './chats/ChatsSidebar'
@@ -1112,6 +1113,12 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     closeContextMenu()
     void runWithToast('copy the path', () => navigator.clipboard.writeText(path))
   }
+  const handleCopyReference = () => {
+    if (contextMenu?.target.type !== 'thread') return
+    const { id, node } = contextMenu.target
+    closeContextMenu()
+    void runWithToast('copy the reference', () => copyThreadReference(id, node))
+  }
   const projectIconActions = (target: ThreadsContextMenuTarget) =>
     projectIconMenuActions(target.type === 'project' ? projects.find((project) => project.id === target.id) : undefined, closeContextMenu)
 
@@ -2118,6 +2125,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           onNewThreadFromPullRequest={handleNewThreadFromPullRequest}
           {...projectOpeners(contextMenu.target)}
           onCopyPath={contextMenu.target.path ? handleCopyPath : undefined}
+          onCopyReference={contextMenu.target.type === 'thread' ? handleCopyReference : undefined}
 
           onSetExpiry={(ms) => void handleSetExpiry(ms)}
           onDeleteAllArchived={localArchivedCount > 0 ? handleDeleteAllArchived : undefined}

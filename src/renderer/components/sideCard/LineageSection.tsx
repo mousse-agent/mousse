@@ -8,6 +8,7 @@ import { openThread } from '../../lib/openThread'
 import { useProviderSnapshotsStore } from '../../lib/providerSnapshots'
 import { revealSubagent } from '../../stores/chatNavigationStore'
 import { ComputerBadgeView } from '../ComputerBadge'
+import { useThreadRefMenu } from '../ThreadRefMenu'
 import { Collapse } from '../ui/Collapse'
 import { SubagentAvatar, useThreadProviderId } from '../SubagentAvatar'
 import { subagentBadgeTone, subagentIconId } from '../subagentStatus'
@@ -81,12 +82,16 @@ function LineageRow({ subagent, now, inheritedProvider, onOpen, onReveal, onStop
   // A native subagent runs inside the thread's own process: only the thread's Stop ends it.
   const stoppable = running && !subagent.native
   const model = subagent.native ? (subagent.nativeLabel ?? null) : lineageModelLabel(subagent)
+  // A subagent with a thread of its own: right-click copies its reference. A native one has none.
+  const refMenu = useThreadRefMenu(subagent.native ? undefined : subagent.computer?.ref ?? subagent.childThreadId)
   return (
     <li className="lineage-item">
+      {refMenu.menu}
       <button
         type="button"
         className={`lineage-row${running ? ' is-working' : ''}`}
         title={name}
+        {...refMenu.bind}
         // A remote subagent opens on its computer, where its turns run and its questions are answered.
         onClick={() => (subagent.native ? onReveal?.(subagent.childThreadId) : onOpen(subagent.computer?.ref ?? subagent.childThreadId))}
       >

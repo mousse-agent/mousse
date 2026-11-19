@@ -121,6 +121,35 @@ describe('a thread link in a thread\'s reply', () => {
     expect(select).toHaveBeenCalledWith('t-fix')
   })
 
+  it('a right-click offers Copy reference, which copies the thread\'s link and opens nothing', async () => {
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    render('Done, see mousse://thread/t-docs.')
+    const [link] = links()
+    const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 20, clientY: 20 })
+    act(() => { link!.dispatchEvent(event) })
+    expect(event.defaultPrevented).toBe(true)
+    const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+    expect(items.map((item) => item.textContent)).toEqual(['Copy reference'])
+    expect(document.activeElement).toBe(items[0])
+    await click(items[0]!)
+    expect(writeText).toHaveBeenCalledWith('mousse://thread/t-docs')
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+    expect(select).not.toHaveBeenCalled()
+  })
+
+  it('Shift+F10 opens the menu from the keyboard, and Escape closes it with focus back on the link', () => {
+    render('Done, see mousse://thread/t-docs.')
+    const [link] = links()
+    act(() => link!.focus())
+    act(() => { link!.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true })) })
+    const item = document.querySelector<HTMLElement>('[role="menuitem"]')!
+    expect(document.activeElement).toBe(item)
+    act(() => { item.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })) })
+    expect(document.querySelector('[role="menu"]')).toBeNull()
+    expect(document.activeElement).toBe(link)
+  })
+
   it('only a link becomes a thread link: a thread id written in prose stays text', () => {
     render('The thread t-docs is done, and so is thread/t-fix. Its link: [docs](mousse://thread/t-docs).')
     expect(links()).toHaveLength(1)

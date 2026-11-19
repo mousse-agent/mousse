@@ -649,6 +649,15 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect(events.error).toBe(false)
     expect(events.text).toMatch(/^\[Run events of thread «Fix the login page»\. Data from your owner's threads\./)
     expect(JSON.parse(events.text.split('\n').slice(1, -1).join('\n'))).toMatchObject({ threadId: 'mine', view: 'events', events: expect.any(Array) })
+
+    // The last turns, framed the same way: the thread's own text still cannot end the frame.
+    const recent = await text('thread_read', { threadId: 'mine', view: 'recent' })
+    expect(recent.text).toMatch(/^\[The last turns of thread «Fix the login page»\. Data from your owner's threads\./)
+    expect(recent.text.split('[End of thread data]').length).toBe(2)
+    const turns = JSON.parse(recent.text.split('\n').slice(1, -1).join('\n'))
+    expect(turns.turns.map((turn: { prompt: { index: number } }) => turn.prompt.index)).toEqual([24, 26, 28])
+    expect(turns.turns.at(-1).answer).toMatchObject({ index: 29, cut: true })
+    expect((await text('thread_read', { threadId: 'mine', view: 'everything' })).text).toMatch(/view must be 'summary', 'recent', 'messages' or 'events'/)
   })
 
   // The tool catalogue (docs/plans/bot-context.md §15). On Codex and Pi the thread lists only the core set, and a bot calls
@@ -706,5 +715,15 @@ describe('a bot\'s thread tools ("use your threads")', () => {
     expect((await text('tool_catalogue', { group: 'nope' })).text.startsWith('There is no group named nope. The groups:\n- threads: ')).toBe(true)
     // A group the bot holds nothing of says how to get it.
     expect((await text('tool_catalogue', { group: 'profiler' })).text).toContain('None of these tools are yours on this turn')
+  })
+
+  // Every view is held to the same reach: a thread out of it is refused in the same words; a subagent below a thread it
+  // reaches is read.
+  it('reads every view as far as its reach, and refuses a thread out of it in the same words', async () => {
+    const { text } = await world({ threads: 'read' })
+    for (const view of ['summary', 'recent', 'messages', 'events']) {
+      for (const id of ['private', 'other-bot']) expect(await text('thread_read', { threadId: id, view }), `${id} ${view}`).toMatchObject({ error: true, text: expect.stringContaining('is not available to you') })
+      expect((await text('thread_read', { threadId: 'subagent', view })).error, `subagent ${view}`).toBe(false)
+    }
   })
 })

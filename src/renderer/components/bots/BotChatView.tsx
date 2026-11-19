@@ -36,6 +36,8 @@ import { BotMemoryDialog } from './BotMemoryDialog'
 import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
 import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
 import { ChatComposer, type AttachedFile, type VoiceMessage } from '../ChatComposer'
+import type { ChatReference } from '../../../shared/chatReferences'
+import { botThreadReferenceRefusal } from '../../lib/threadReference'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../ComposerNotice'
 import { botGroupTime, placeMessages } from './messageGroups'
 import { botDoingLine, chatRows, withNotes, type BotChatRow, type OwnerMarks } from './botChatShape'
@@ -58,6 +60,18 @@ import { FindInThreadBar } from '../../chat/components/agent-elements/find/FindI
 const EMPTY: BotChatMessage[] = []
 const NO_FILES: AttachedFile[] = []
 const NO_VOICE: VoiceMessage[] = []
+const NO_REFERENCES: ChatReference[] = []
+
+/**
+ * A pill in a bot's composer (a pasted or dropped thread): one of the owner's threads the bot may read, never a private
+ * thread or a subagent. It is sent as the thread's link.
+ */
+function addBotReference(botId: string, reference: ChatReference): void {
+  if (reference.kind !== 'thread' || !reference.threadId) throw new Error('A bot chat takes threads, not other references.')
+  const refused = botThreadReferenceRefusal(reference.threadId)
+  if (refused) throw new Error(refused)
+  useBotsStore.getState().addReference(botId, reference)
+}
 const NO_SKILLS: never[] = []
 const NO_MARKS = new Map<string, OwnerMarks>()
 const NO_NOTES: BotLocalNote[] = []
@@ -836,6 +850,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const storedDraft = useBotsStore((s) => s.drafts[bot.id] ?? '')
   const pasted = usePastedBotSecret(bot, storedDraft)
   const draft = pasted.draft
+  const references = useBotsStore((s) => s.references[bot.id]) ?? NO_REFERENCES
   const attachments = useBotsStore((s) => s.attachments[bot.id])
   const replying = useBotsStore((s) => s.replyingTo[bot.id])
   const aboutOpen = useBotsStore((s) => s.aboutOpen)
@@ -1169,6 +1184,10 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             onInputChange={pasted.change}
             attachedFiles={files}
             onAttachedFilesChange={(next) => store().setAttachments(bot.id, next)}
+            references={references}
+            onAddReference={(reference) => addBotReference(bot.id, reference)}
+            onRemoveReference={(id) => store().removeReference(bot.id, id)}
+            onReferenceError={(message) => useBotsStore.setState({ error: message, errorBotId: bot.id })}
             messageLimit={MAX_BOT_CHAT_TEXT}
             voiceMessages={NO_VOICE}
             onVoiceMessagesChange={ignore}

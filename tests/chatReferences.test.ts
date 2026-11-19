@@ -13,6 +13,7 @@ import {
   parseChatReference,
   parseMousseFileLink,
   sameReviewFile,
+  THREAD_REFERENCE_NOTE,
   turnIdOfScope
 } from '../src/shared/chatReferences'
 import { ChatReferencePill } from '../src/renderer/components/ReferencePill'
@@ -39,7 +40,10 @@ describe('chat references', () => {
       id: 'thread:t1', kind: 'thread', title: 'Fix parser', threadId: 't1',
       projectId: 'p1', metadataPath: 'C:\\profiles\\alice\\thread-data\\repositories\\p1\\t1\\meta.json'
     }])
-    expect(block).toContain('Path: C:\\profiles\\alice')
+    // A thread is a pointer the agent reads with its thread tools: its link and how to read it, never a file path.
+    expect(block).toContain('Link: mousse://thread/t1')
+    expect(block).toContain(THREAD_REFERENCE_NOTE)
+    expect(block).not.toContain('Path:')
     const parsed = extractChatReferences(`Please inspect this\n\n${block}`)
     expect(parsed.text).toBe('Please inspect this')
     expect(parsed.references).toEqual([expect.objectContaining({ kind: 'thread', threadId: 't1', title: 'Fix parser' })])

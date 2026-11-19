@@ -4,6 +4,7 @@ import { UNKNOWN_COMPUTER_NAME, threadComputerState, useComputers, type Computer
 import { useAppStore } from '../stores/appStore'
 import { openLinkedThread } from '../utils/chatLinks'
 import { showToast } from './ui/Toast'
+import { useThreadRefMenu } from './ThreadRefMenu'
 import { threadStatus, type ThreadStatus } from '../../shared/threadAttention'
 import { threadLink } from '../../shared/threadLink'
 import { parseQualifiedId } from '../../shared/threadRef'
@@ -106,7 +107,9 @@ export function ThreadChip({ threadId, label }: { threadId: string; label?: Reac
     if (openable) openLinkedThread(threadId)
     else showToast({ key: 'thread-link-missing', message: unreachableText(state) })
   }
-  return (
+  // Right-click: Copy reference, to point another chat's agent at this thread.
+  const refMenu = useThreadRefMenu(threadId)
+  return (<>
     <a
       href={threadLink(threadId)}
       className="thread-chip"
@@ -116,9 +119,11 @@ export function ThreadChip({ threadId, label }: { threadId: string; label?: Reac
       {...(openable ? {} : { 'aria-disabled': true })}
       title={openable ? [words, `Open ${title ?? 'thread'}`].filter(Boolean).join(' · ') : unreachableText(state)}
       onClick={onClick}
+      {...refMenu.bind}
     >
       <MessageSquare size={12} strokeWidth={2} aria-hidden="true" className="thread-chip-icon" />
       <span className="thread-chip-title">{shown}</span>
     </a>
-  )
+    {refMenu.menu}
+  </>)
 }

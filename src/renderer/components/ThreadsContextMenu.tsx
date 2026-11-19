@@ -76,6 +76,8 @@ interface ThreadsContextMenuProps {
   reveal?: ProjectOpener
   /** Projects only: copy the folder's path. */
   onCopyPath?: () => void
+  /** Threads only: copy the thread's reference (its link), which a chat it is pasted into turns into a thread pill. */
+  onCopyReference?: () => void
   /** Threads only: delete the thread `ms` from now, or null to keep it. */
   onSetExpiry?: (ms: number | null) => void
   /** Archived threads only: delete every archived thread of this computer, after a confirmation. */
@@ -185,6 +187,7 @@ export function ThreadsContextMenu({
   openInEditor,
   reveal,
   onCopyPath,
+  onCopyReference,
   onSetExpiry,
   onDeleteAllArchived,
   onChangeIcon,
@@ -259,6 +262,12 @@ export function ThreadsContextMenu({
         <EditRegular />
         <span>Rename</span>
       </button>
+      {target.type === 'thread' && onCopyReference && (
+        <button type="button" className="threads-context-menu-item" role="menuitem" title="Paste it into a chat to point its agent at this thread" onClick={onCopyReference}>
+          <Copy />
+          <span>Copy reference</span>
+        </button>
+      )}
       {target.type === 'project' && onChangeIcon && (
         <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onChangeIcon}>
           <Image />
