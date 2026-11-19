@@ -4423,15 +4423,15 @@ it('E1 replay does not park or fence the next automatic call in a live turn', as
 })
 
 it.each([
-  ['https://safe.example/path', 'Plain changed text'],
+  ['https://safe.example/path', 'https://changed.example/path'],
   ['first@example.test', 'second@example.test'],
   ['A note from @owner', 'A note from @stranger'],
-  ['A note from @所有者', 'Plain changed text'],
-  ['Read example.рф', 'Plain changed text'],
+  ['A note from @所有者', 'A note from @別人'],
+  ['Read example.рф', 'Read changed.рф'],
   ['Read safe.example', 'Read evil.example'],
   [{ options: [{ path: '/sent' }], text: 'original' }, { options: [{ path: '/sent' }], text: 'changed' }],
   ['Plain sent text', { options: [{ path: '/new' }] }]
-])('E1 content containing an address or nested destination stays exact: %j', async (before, after) => {
+])('E1 new address tokens and changed nested destinations ask: %j', async (before, after) => {
   const t = await aloneAsk('allow', 'send', before)
   expect((await aloneNext(t, { ...t.args, body: after as string })).action.status).toBe('open')
   expect(t.calls).toHaveLength(1)
@@ -4601,6 +4601,7 @@ it.each([
 })
 it.each([
   ['New message -- owner@example.test', true],
+  ['New message without a signature', true],
   ['New message -- owner@example.test https://new.example.test', false],
   ['New message -- other@example.test', false],
   ['New message -- owner@example.test Node.js', false],
