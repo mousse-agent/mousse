@@ -6,7 +6,6 @@ import { groupProjects } from '../lib/projectGroups'
 import { projectHues } from '../lib/projectHues'
 import { useReplyPreviews } from '../lib/replyPreviewSetting'
 import { useThreadProjectColors } from '../lib/threadProjectColorsSetting'
-import { worktreeMark } from '../lib/worktreeMark'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 import { useAppStore } from '../stores/appStore'
 import { openLinkedThread } from '../utils/chatLinks'
@@ -146,7 +145,6 @@ function ThreadLinkCard({ id, thread, note, anchorRef }: { id: string; thread: T
           isRenaming={false}
           renamingName=""
           isGeneratingTitle={false}
-          worktree={worktreeMark(thread, projects)}
           fullTitle={thread.name}
           onRename={() => {}}
           onCancelRename={() => {}}
