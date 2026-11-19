@@ -49,6 +49,7 @@ const { default: App } = await import('../../src/renderer/App')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { useChatsStore } = await import('../../src/renderer/stores/chatsStore')
 const { runCommand } = await import('../../src/renderer/commands/commandRegistry')
+const { setAnimationSpeed } = await import('../../src/renderer/lib/motion')
 
 let host: HTMLDivElement
 let root: Root
@@ -71,6 +72,7 @@ afterEach(() => {
   act(() => root.unmount())
   host.remove()
   useChatsStore.setState({ activeBotId: null })
+  setAnimationSpeed('normal')
   vi.unstubAllGlobals()
 })
 
@@ -83,6 +85,8 @@ describe('the title bar panel button', () => {
     await settle()
     expect(panelOpen()).toBe(true)
     expect(panelButton()!.getAttribute('aria-label')).toBe('Hide panel')
+    // Closing, the panel stays laid out while it slides out; with motion off it goes at once.
+    setAnimationSpeed('off')
     act(() => panelButton()!.click())
     await settle()
     expect(panelOpen()).toBe(false)
