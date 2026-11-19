@@ -7,8 +7,8 @@ import { useAppStore } from '../../stores/appStore'
  */
 export const SIDE_CARD_MIN_THREAD_WIDTH = 1000
 
-/** The docked card's width plus a 12px gutter on each side. */
-const SIDE_CARD_SPACE = 272 + 2 * 12
+/** The docked card's width (sideCard.css) plus the 12px gutter on its left; it sits flush with the pane's right edge. */
+const SIDE_CARD_SPACE = 296 + 12
 
 /** The conversation column at the default Chat width (736px of text plus its gutters). */
 const NORMAL_COLUMN_WIDTH = 784

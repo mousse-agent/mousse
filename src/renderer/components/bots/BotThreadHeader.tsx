@@ -23,7 +23,7 @@ export function BotThreadHeader({ botId, threadId }: { botId: string; threadId: 
   const title = listed?.trim() || launched?.title || 'Untitled thread'
   const meta = [launched?.project, launched ? launchedLook(launched.status).label : undefined].filter(Boolean).join(' · ')
   const typing = Boolean(bot.chat) && !bot.chat?.offline
-  return <header className="chat-conversation-header bot-thread-header" style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
+  return <header data-mousse="chat-header" className="chat-conversation-header bot-thread-header" style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
     <button type="button" className="icon-btn bot-thread-back" aria-label={`Back to ${bot.name}'s chat`} title={`Back to ${bot.name}`} onClick={closeBotThread}>
       <ChevronLeft size={16} aria-hidden />
     </button>

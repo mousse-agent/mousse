@@ -22,6 +22,8 @@ import './styles/polish.css'
 import './styles/ambient-glow.css'
 import './styles/wallpaper.css'
 import './styles/geist-fonts.css'
+import './styles/frameless-shell.css'
+import './styles/specular.css'
 
 // Uncaught errors and rejected promises outside React go to main's log, from here on.
 installWindowErrorReporting()

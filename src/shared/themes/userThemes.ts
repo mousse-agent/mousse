@@ -256,27 +256,37 @@ function fileWallpaper(raw: unknown): UserThemeFileWallpaper | undefined {
 export const THEME_TOKENS: ReadonlyArray<{ name: string; use: string }> = [
   { name: '--surface-base', use: 'window background' },
   { name: '--surface-strong', use: 'sidebar and raised panels' },
+  { name: '--pane-surface', use: 'the rounded chat pane in the middle (a thread or a bot\'s chat); its fades, bubbles and composer follow it' },
   { name: '--surface-soft', use: 'hovered rows, inputs' },
   { name: '--surface-elevated', use: 'menus and popovers' },
   { name: '--text-primary', use: 'main text' },
   { name: '--text-secondary', use: 'secondary text' },
   { name: '--border', use: 'borders and dividers' },
+  { name: '--specular-top', use: 'the edge light on every raised surface (composer, popovers, selected tabs and rows, the profile button, avatars, the chat pane\'s edge): a 1px ring at its brightest along the top' },
+  { name: '--specular-mid', use: 'that ring halfway down the sides' },
+  { name: '--specular-end', use: 'that ring at the bottom edge' },
+  { name: '--selected-row-fill-edge', use: 'the selected sidebar row\'s fill (a thread, a bot or a chat): a horizontal band, this at its ends' },
+  { name: '--selected-row-fill-mid', use: 'that band at its middle, which drifts slowly left and right' },
+  { name: '--selected-row-ring-edge', use: 'the selected sidebar row\'s 1px edge at its ends (its lower half fades into the sidebar)' },
+  { name: '--selected-row-ring-mid', use: 'that edge at the band\'s middle' },
   { name: '--accent', use: 'accent (prefer the theme\'s accent field, which also sets its shades)' }
 ]
 
 /** Stable selectors theme CSS may rely on. `tests/themeSelectors.test.ts` fails when one disappears from the app. */
 export const THEME_SELECTORS: ReadonlyArray<{ selector: string; part: string }> = [
   { selector: '[data-mousse="rail"]', part: 'navigation rail (far left)' },
+  { selector: '[data-mousse="rail-item"]', part: 'every item on the rail, one look; data-mousse-item names it (home, search, automations, downloads, usage, settings, profile); the open page\'s item has aria-current="page", one whose menu is open aria-expanded="true"' },
   { selector: '[data-mousse="sidebar"]', part: 'threads and projects sidebar' },
   { selector: '[data-mousse="titlebar"]', part: 'title bar' },
-  { selector: '[data-mousse="chat-header"]', part: 'the open thread\'s path and back/forward in the title bar; a chat\'s header in Chats' },
-  { selector: '[data-mousse="chat"]', part: 'an open thread\'s chat pane' },
+  { selector: '[data-mousse="chat-header"]', part: 'the open thread\'s path and back/forward in the title bar; a chat\'s or a bot\'s header in Chats and on a bot\'s thread' },
+  { selector: '[data-mousse="chat"]', part: 'an open thread\'s chat pane, or a bot\'s chat' },
   { selector: '[data-mousse="transcript"]', part: 'the scrolling list of messages' },
-  { selector: '[data-mousse="user-message"]', part: 'one message bubble the person sent' },
-  { selector: '[data-mousse="assistant-message"]', part: 'one reply from the agent' },
+  { selector: '[data-mousse="user-message"]', part: 'one message bubble the person sent (in a thread or to a bot), or one a bot or agent sent into a thread' },
+  { selector: '[data-mousse="assistant-message"]', part: 'one reply from the agent, or one message of a bot in its chat' },
   { selector: '[data-mousse="composer"]', part: 'the message box' },
   { selector: '[data-mousse="project-icon"]', part: 'a project\'s icon (an image, or a wrapper around its folder glyph or initials)' },
   { selector: '[data-mousse="side-card"]', part: 'the thread details card' },
+  { selector: '[data-mousse="panel"]', part: 'the panel area on the right (browser, terminal, files, changes)' },
   { selector: '[data-mousse="settings"]', part: 'the Settings page (themed on Appearance only)' },
   { selector: '[data-mousse="wallpaper"]', part: 'the theme\'s wallpaper layer behind the chat (present only while a wallpaper shows)' }
 ]

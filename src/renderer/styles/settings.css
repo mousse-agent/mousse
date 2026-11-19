@@ -127,12 +127,11 @@
 .settings-page,
 .settings-scope {
   --settings-surface: color-mix(in srgb, var(--text-primary) 4.5%, transparent);
-  --settings-surface-edge: inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+  --settings-surface-edge: 0 0 #0000;
 }
 
 html[data-theme='blacksphere-plus'] :is(.settings-page, .settings-scope) {
   --settings-surface: color-mix(in srgb, var(--ui-lift) 5%, transparent);
-  --settings-surface-edge: inset 0 1px 0 rgba(255, 255, 255, 0.07), inset 0 -1px 0 rgba(0, 0, 0, 0.5);
 }
 
 html[data-theme='light'] :is(.settings-page, .settings-scope) {
@@ -804,7 +803,7 @@ html[data-theme='high-contrast'] .settings-icon-btn.primary {
   gap: 2px;
   height: var(--settings-control-h);
   padding: 2px;
-  border: 1px solid var(--ui-line);
+  border: 0;
   border-radius: var(--ui-control-radius);
   background: var(--ui-hover);
 }
@@ -816,17 +815,23 @@ html[data-theme='high-contrast'] .settings-icon-btn.primary {
   font-size: var(--settings-fs-small);
   color: var(--text-secondary);
   white-space: nowrap;
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.15s, color 0.15s, opacity 0.15s;
+}
+
+/* The options not chosen recede: half strength, most of it back on hover. */
+.settings-seg button:not(.on) {
+  opacity: 0.5;
 }
 
 .settings-seg button:hover:not(.on):not(:disabled) {
   color: var(--text-primary);
+  opacity: 0.85;
 }
 
 .settings-seg button.on {
   color: var(--text-primary);
   background: var(--ui-raised);
-  box-shadow: var(--ui-specular);
+  box-shadow: none;
 }
 
 .settings-seg button:disabled {

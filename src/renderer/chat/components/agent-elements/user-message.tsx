@@ -1,4 +1,4 @@
-import { memo, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { flushSync } from "react-dom";
 import type { UIMessage } from "ai";
 import { FIND_REVEAL_EVENT } from "./find/reveal";
@@ -22,6 +22,7 @@ import { useChatsStore } from "../../../stores/chatsStore";
 import { BotFace } from "../../../components/bots/face/BotFace";
 import type { AgentOrigin } from "../../../../shared/types";
 import type { BotSummary } from "../../../../shared/bots/personal/chat";
+import { BOT_COLOUR_HEX, normalizeBotLook } from "../../../../shared/bots/personal/look";
 
 export type UserMessageProps = {
   message: UIMessage;
@@ -246,6 +247,9 @@ export const UserMessage = memo(function UserMessage({
   const textParts = message.parts?.filter(isTextPart) ?? [];
   const text = textParts.map((p) => p.text).join("");
   const agent = agentOriginOfMessage(message);
+  // A bot's message is filled with a soft tint of its own colour (global.css: .chat-user-bubble.is-bot).
+  const botLook = useBotsStore((state) => (agent ? botOfOrigin(agent, state.bots)?.look : undefined));
+  const botColour = botLook ? BOT_COLOUR_HEX[normalizeBotLook(botLook).colour] : undefined;
   const foldable = useTallEnoughToFold(textRef, text, agent ? AGENT_FOLD_HEIGHT : PROMPT_FOLD_HEIGHT);
   const folded = foldable && !expanded;
   // Find landing on a match in the folded part opens the prompt, so the match is not hidden under the fold.
@@ -286,7 +290,9 @@ export const UserMessage = memo(function UserMessage({
         className={cn(
           "chat-user-bubble max-w-[80%] p-3 rounded-an-message",
           agent ? "is-agent" : "bg-an-user-message-bg text-an-user-message-text",
+          botColour && "is-bot",
         )}
+        style={botColour ? ({ "--from-colour": botColour } as CSSProperties) : undefined}
       >
       {agent && <SenderHeader origin={agent} />}
       {images.length > 0 && <div className="chat-user-image-carousel" role="region" aria-label="Attached images" tabIndex={0}>

@@ -8,10 +8,12 @@ interface KeepMountedProps {
   preserveLayout?: boolean
   as?: 'div' | 'main'
   style?: CSSProperties
+  /** A stable selector for user themes (`data-mousse`, shared/themes/userThemes.ts). */
+  'data-mousse'?: string
 }
 
 /** Renders children always but hides inactive panes to avoid mount/unmount flicker. */
-export function KeepMounted({ active, children, className, preserveLayout = false, as: Tag = 'div', style }: KeepMountedProps) {
+export function KeepMounted({ active, children, className, preserveLayout = false, as: Tag = 'div', style, 'data-mousse': mousse }: KeepMountedProps) {
   const ref = useRef<HTMLDivElement & HTMLElement>(null)
   useLayoutEffect(() => {
     const element = ref.current
@@ -34,7 +36,7 @@ export function KeepMounted({ active, children, className, preserveLayout = fals
     return () => observer.disconnect()
   }, [active, preserveLayout])
   return (
-    <Tag ref={ref} className={[className, preserveLayout && !active ? 'keep-mounted-layout-inactive' : ''].filter(Boolean).join(' ')}
+    <Tag ref={ref} data-mousse={mousse} className={[className, preserveLayout && !active ? 'keep-mounted-layout-inactive' : ''].filter(Boolean).join(' ')}
       style={style} hidden={!preserveLayout && !active} inert={!active} aria-hidden={!active}>
       {children}
     </Tag>

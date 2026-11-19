@@ -137,15 +137,15 @@ describe('reserved width beside the docked card', () => {
     expect(sideCardReservedWidth(1600)).toBe(0)
   })
 
-  it('grows as the area narrows, up to the card and its gutters at the docking limit', () => {
-    expect(sideCardReservedWidth(1300)).toBe(76)
-    expect(sideCardReservedWidth(SIDE_CARD_MIN_THREAD_WIDTH)).toBe(296)
+  it('grows as the area narrows, up to the card and its gutter at the docking limit', () => {
+    expect(sideCardReservedWidth(1300)).toBe(100)
+    expect(sideCardReservedWidth(SIDE_CARD_MIN_THREAD_WIDTH)).toBe(308)
   })
 
   it('follows the chat width: a wide column makes room sooner, a full one always gives up the card', () => {
-    expect(sideCardReservedWidth(1600, 1200)).toBe(192)
+    expect(sideCardReservedWidth(1600, 1200)).toBe(216)
     expect(sideCardReservedWidth(2000, 1200)).toBe(0)
-    expect(sideCardReservedWidth(2400, Infinity)).toBe(296)
+    expect(sideCardReservedWidth(2400, Infinity)).toBe(308)
   })
 })
 
