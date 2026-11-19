@@ -4016,9 +4016,10 @@ it('sleep cannot keep an old listing fresh when the monotonic clock pauses', asy
 })
 
 // E1: owner message, unattended schedule, exact destination, changed binding, rollback and caps.
-async function aloneAsk(answer: 'allow' | 'not_now' | 'pending' = 'allow', toolName = 'send', body?: unknown) {
+async function aloneAsk(answer: 'allow' | 'not_now' | 'pending' = 'allow', toolName = 'send', body?: unknown, extra: Record<string, unknown> = {}) {
   const t = await scheduledCall(true, 1, undefined, toolName)
   if (body !== undefined) t.args.body = body as string
+  Object.assign(t.args, extra)
   t.descriptor.inputSchema.properties.to = { type: 'array' } as never
   await t.call(); await finish(f, t.run.payload)
   const first = f.bots.actions.forWork(t.id)!
@@ -4590,15 +4591,10 @@ it.each([
   ['scan-2.pdf', true], ['scan-2.PDF', true], ['scan-2.exe', false], ['../x.pdf', false],
   ['a/b.pdf', false], ['a\\b.pdf', false], ['hidden..pdf', false], ['.hidden.pdf', false],
   ['x:scan.pdf', false], ['x@scan.pdf', false], ['x\u0000.pdf', false], ['x\n.pdf', false],
-  ['x'.repeat(252) + '.pdf', false], ['ｓｃａｎ-２.ｐｄｆ', true]
+  ['x'.repeat(252) + '.pdf', false], ['x'.repeat(251) + '.pdf', true], ['ｓｃａｎ-２.ｐｄｆ', true]
 ])('E1 r2b a filename stays within the sent extension: %j', async (name, allowed) => {
-  const t = await aloneAsk()
-  const source = f.bots.actions.forWork(t.id)!
+  const t = await aloneAsk('allow', 'send', undefined, { name: 'scan-1.pdf' })
   const args = { ...t.args, name: 'scan-1.pdf' }
-  f.store.run('UPDATE bot_actions SET args_json = ?, args_digest = ? WHERE id = ?', JSON.stringify(args), actionDigest(args), source.id)
-  f.bots.alone.clear(t.botId)
-  expect(f.bots.alone.prepare(t.botId, 'file-consent', t.request as never)).toBeUndefined()
-  expect(f.bots.alone.answer(t.botId, 'file-consent', true, t.request as never)).toBe(true)
   const next = await aloneNext(t, { ...args, name } as never)
   expect(next.action.status).toBe(allowed ? 'done' : 'open')
   expect(t.calls).toHaveLength(allowed ? 2 : 1)
@@ -4615,13 +4611,8 @@ it.each([
   expect(t.calls).toHaveLength(allowed ? 2 : 1)
 })
 it('E1 r2b source tokens never give authority to another text field', async () => {
-  const t = await aloneAsk('allow', 'send', 'Old message -- owner@example.test')
-  const first = f.bots.actions.forWork(t.id)!
+  const t = await aloneAsk('allow', 'send', 'Old message -- owner@example.test', { subject: 'A plain subject' })
   const args = { ...t.args, subject: 'A plain subject' }
-  f.store.run('UPDATE bot_actions SET args_json = ?, args_digest = ? WHERE id = ?', JSON.stringify(args), actionDigest(args), first.id)
-  f.bots.alone.clear(t.botId)
-  expect(f.bots.alone.prepare(t.botId, 'fields', t.request as never)).toBeUndefined()
-  f.bots.alone.answer(t.botId, 'fields', true, t.request as never)
   expect((await aloneNext(t, { ...args, subject: 'owner@example.test' } as never)).action.status).toBe('open')
 })
 it('E1 r2b token sets use a profile key and never appear in written exports', async () => {
