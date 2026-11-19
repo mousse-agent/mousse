@@ -18,7 +18,7 @@ export async function secretFetchAction(store: BotStore, input: SecretFetchActio
       `SELECT count(*) AS n FROM bot_actions WHERE kind = 'secret_fetch' AND ran_at > ? AND ${secret === undefined ? 'bot_id = ?' : "json_extract(binding_json, '$.secretDigest') = ?"}`,
       new Date(since).toISOString(), secret === undefined ? botId : createHash('sha256').update(secret).digest('hex')
     )?.n ?? 0)
-    const refusal = input.refusal ?? (count(at - 3600000, input.secret) >= BOT_ALONE_HOURLY_CALLS ? `You've read from ${input.service} ${BOT_ALONE_HOURLY_CALLS} times this hour; try again later or tell your owner.` : count(at - 86400000) >= BOT_ALONE_DAILY_CALLS ? `You've made ${BOT_ALONE_DAILY_CALLS} service reads today; try again later or tell your owner.` : undefined)
+    const refusal = input.refusal ?? (count(at - 3600000, input.secret) >= BOT_ALONE_HOURLY_CALLS ? `You've read from ${input.service} ${BOT_ALONE_HOURLY_CALLS} times this hour; try again later or tell your owner.` : count(at - 86400000) >= BOT_ALONE_DAILY_CALLS ? `You've made ${BOT_ALONE_DAILY_CALLS} service reads in the last day; try again later or tell your owner.` : undefined)
     // Header values are never needed in the action history, including rejected foreign credentials.
     const historyArgs = {...input.args}
     if (historyArgs.headers && typeof historyArgs.headers === 'object') historyArgs.headers = Object.keys(historyArgs.headers)
