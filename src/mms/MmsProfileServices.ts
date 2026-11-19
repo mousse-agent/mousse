@@ -973,7 +973,8 @@ export class MmsProfileServices {
     chat?.setReplyParts({ published: (threadId) => publishedApplets(this.threads.loadThreadData(threadId).messages) })
     if (chat) botBrowsers.setNotice((botId, text) => {
       try {
-        chat.post({ botId, author: 'bot', kind: 'notice', text })
+        // Once in a row: a hold that ends while the chat still shows the same line (another window gone, the app restarted) adds none.
+        chat.post({ botId, author: 'bot', kind: 'notice', text, unlessLatest: true })
       } catch (error) {
         console.warn('a bot browser notice could not be posted', { botId, error: error instanceof Error ? error.message : String(error) })
       }
