@@ -263,7 +263,14 @@ export function mousseEyesWhite(hex: string): boolean {
   return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2] < 0.3
 }
 
+/**
+ * The `eyes` value of a look drawn with no eyes: the body picture of a hybrid face (`HybridFace.tsx`), whose eyes are
+ * flat shapes over it. The shader has no switch for it; the eyes are moved far out of the picture instead.
+ */
+export const EYELESS = 'none'
+
 export function faceUniforms(look: KnownBotLook, pose: FacePose, view: FaceView): FaceUniforms {
+  const eyeless = (look.eyes as string | undefined) === EYELESS
   const head = view.view === 'head'
   const lean = head ? rollPast(pose.hroll) : 0
   const accessory = BOT_ACCESSORY_HEX[look.accessory]
@@ -275,11 +282,11 @@ export function faceUniforms(look: KnownBotLook, pose: FacePose, view: FaceView)
     uH: [pose.yaw, pose.pitch, pose.hroll, pose.earL],
     uH2: [pose.earR, pose.armL, pose.armR, pose.laptop],
     uE: [pose.open, pose.closed, pose.arc, pose.worried],
-    uE2: [pose.lookX, pose.lookY, pose.es, pose.sweat],
+    uE2: [pose.lookX, eyeless ? 40 : pose.lookY, pose.es, pose.sweat],
     uV: [head ? 0.8 : 0.32, head ? HEAD_FOV * (1 + HEAD_ROLL_ROOM * Math.abs(lean)) : 2.1, view.samples, view.size < WHISKER_MIN_SIZE ? 1 : 0],
     uK: [
       BOT_KINDS.indexOf(botKindOf(look)),
-      BOT_EYES.indexOf(botEyesOf(look)),
+      eyeless ? 0 : BOT_EYES.indexOf(botEyesOf(look)),
       mousseEyesWhite(BOT_COLOUR_HEX[look.colour]) ? 1 : 0
     ],
     pan: [HEAD_ROLL_PAN * lean, 0]
