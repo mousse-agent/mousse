@@ -37,7 +37,8 @@ import {
   type Computer
 } from './harness'
 
-describe('phase1b.routes-app', () => {
+// Over ssh nothing is advertised or shared: 1a's cases cover that route, each side holding the other's SSH route.
+describe.skipIf(CHECK_ROUTE === 'ssh')('phase1b.routes-app', () => {
   const fabric = new Fabric()
   // This check taps Use itself.
   fabric.autoUse = false

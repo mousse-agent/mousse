@@ -637,6 +637,9 @@ export class EnginePairing {
     }
     this.at('grant-removed')
     if (row.endpoint) await helper.request('peer.forget', { identity: row.endpoint })
+    // A: the SSH route it kept for the other computer goes too (its config and pin).
+    if (row.ssh?.routeId)
+      await helper.request('ssh.forget', { route_id: row.ssh.routeId }).catch(() => undefined)
     await this.port.removed?.(row)
     this.alive()
     this.port.peers.prune(row.localId)
@@ -696,7 +699,16 @@ export class EnginePairing {
   }
 }
 
-const SERVING = ['consented', 'joined', 'granted', 'awaiting_pairback', 'connected'] as const
+const SERVING = [
+  'consented',
+  'joined',
+  'granted',
+  'awaiting_pairback',
+  'connected',
+  'ssh_requested',
+  'ssh_granting',
+  'ssh_granted'
+] as const
 
 /** The other computer refuses this one (it removed it, or never let it in). */
 function isRefusal(error: unknown): boolean {

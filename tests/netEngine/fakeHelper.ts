@@ -851,7 +851,13 @@ export class FakeHelper {
             try {
               this.network.route(this.identity, open.host, candidates)
             } catch {
-              return reply({ error: 'unreachable', reason: 'no route answered' })
+              // The owner's own routes for that host, its SSH route last (§1.4).
+              try {
+                this.network.route(this.identity, open.host)
+                candidates = undefined
+              } catch {
+                return reply({ error: 'unreachable', reason: 'no route answered' })
+              }
             }
             const known = this.network.knownFor(this.identity, open.host)
             for (const route of open.routes) if (!known.hints.includes(route)) known.hints.push(route)

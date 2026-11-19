@@ -31,7 +31,6 @@ import { dispatchMethod } from '../../../src/mms/protocol/handlers'
 import type { EngineHelper } from '../../../src/mms/netEngine/helper/connections'
 import type { NodeId } from '../../../src/shared/net'
 import { NET_LOCAL_CAPABILITY } from '../../../src/shared/net/local'
-import { OUTBOUND } from '../../../src/shared/privacy/outbound'
 import { qualifyId } from '../../../src/shared/threadRef'
 import { fakeShells, type Spawned } from '../../net/bridge/routed/terminalFixture'
 import { FakeNetwork, type FakeHelper } from '../fakeHelper'
@@ -156,6 +155,8 @@ export class Fabric {
   private readonly cleanups: Array<() => unknown> = []
   /** In a routes run, each computer taps Use on offered addresses by itself; a check of Use itself turns it off. */
   autoUse = true
+  /** In a routes run over ssh, each fake computer's SSH route id, by its identity. */
+  private readonly sshRouteOf = new Map<string, string>()
   /** The computers made so far (each fake one gets its own route in a routes run). */
   private made = 0
   /** Every `conn.up` route a helper reported in a routes run, by the app it went to. */
@@ -163,20 +164,22 @@ export class Fabric {
 
   constructor() {
     const expected = expectedRoute()
+    // Every connection a helper reports goes to <out>/conn-up.jsonl, one JSON object per line: the kit judges the
+    // route case from it (1b §14).
+    const out = process.env.MOUSSE_NET_ENGINE_CHECK_OUT
+    this.tap.watch = (message, to) => {
+      if (message.ev !== 'conn.up') return
+      if (out) appendFileSync(join(out, 'conn-up.jsonl'), `${JSON.stringify({ ...message, to })}\n`)
+      if (!expected) return
+      this.routesSeen.push({ to, route: message.route })
+      const route = message.route as { kind?: unknown; class?: unknown } | undefined
+      if (route?.kind !== expected.kind || route?.class !== expected.class) record('route_mismatch')
+    }
     if (!expected) return
     if (!REAL_HELPER) {
       // A 1.1 fake: routes with approvals, and the class map the debug helper reads.
       this.network.minor = 1
       this.network.classMap = {}
-      process.env.MOUSSE_NET_TEST_CLASS_MAP ||= 'fake'
-    }
-    // Every connection must come up on the route under test (1b §14).
-    this.tap.watch = (message, to) => {
-      if (message.ev !== 'conn.up') return
-      this.routesSeen.push({ to, route: message.route })
-      const route = message.route as { kind?: unknown; class?: unknown } | undefined
-      if (route?.kind !== expected.kind || route?.class !== expected.class)
-        record('route_mismatch')
     }
   }
 
@@ -195,6 +198,12 @@ export class Fabric {
           : undefined
     this.network.ports.set(identity, port)
     this.network.listening.set(identity, [`tcp://127.0.0.1:${port}`])
+    if (CHECK_ROUTE === 'ssh') {
+      // Its own SSH test server, reached by the route `ssh-<n>` (1b §14: one SSH route per direction).
+      this.network.sshServers.set(`host-${n}`, { owns: (id) => id === identity, serve: async () => ({}) })
+      this.network.sshRoutes.set(`ssh-${n}`, { hostname: `host-${n}`, user: 'me', pinned: true })
+      this.sshRouteOf.set(identity, `ssh-${n}`)
+    }
     if (!route) return
     this.network.routes.set(identity, [route])
     if (CHECK_ROUTE === 'tcp') this.network.classMap![route] = CHECK_CLASS
@@ -243,6 +252,17 @@ export class Fabric {
     const computer = {} as Computer
     if (REAL_HELPER) {
       process.env.MOUSSE_NET_ENGINE_INSECURE_FILE_KEY = '1'
+      // Over tcp on one computer, each helper's loopback port stands for the class under test: the debug helper
+      // and the app read the same map (`<port>=<class>`, 1b §14).
+      if (CHECK_ROUTE === 'tcp' && !process.env.MOUSSE_NET_ENGINE_CHECK_ROLE) {
+        computer.port = 47300 + ++this.made
+        process.env.MOUSSE_NET_TEST_CLASS_MAP = [
+          process.env.MOUSSE_NET_TEST_CLASS_MAP,
+          `${computer.port}=${CHECK_CLASS}`
+        ]
+          .filter(Boolean)
+          .join(',')
+      }
       // A cross-machine cell's computers listen on every interface; the others only on loopback.
       process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP ||= process.env.MOUSSE_NET_ENGINE_CHECK_ROLE
         ? '0.0.0.0'
@@ -335,6 +355,16 @@ export class Fabric {
     owner: Computer,
     caller: Computer
   ): Promise<{ callerOnOwner: NodeId; ownerOnCaller: NodeId; grant: string }> {
+    // Over ssh, each side has the other's SSH route as its owner address, set as the kit sets it (1b §14).
+    if (CHECK_ROUTE === 'ssh' && !REAL_HELPER)
+      for (const [from, to] of [
+        [caller, owner],
+        [owner, caller]
+      ] as const)
+        await from.engine.request('peer.addresses.set', {
+          identity: to.endpoint,
+          routes: [{ route_id: this.sshRouteOf.get(to.endpoint), selector: 'a'.repeat(26), shell: 'sh' }]
+        })
     const invite = await owner.dispatch('netEngine.invite', {}, true)
     const stopApproving = approveAll(owner)
     let joined: { node: NodeId }
@@ -457,18 +487,10 @@ function routedParams(mms: MousseMainService, method: string, params: unknown): 
   return share.length ? { ...params, share } : params
 }
 
-/** Hosts the app contacts for its other features, as its outbound inventory lists them. */
-const PRODUCT_HOSTS = new Set(
-  OUTBOUND.filter((entry) => entry.kind === 'contacted').flatMap((entry) => entry.hosts)
-)
-
 let guarded = false
 
 /** An attempt outside the cell: recorded, and where it went kept beside the reason (`egress`). */
 function denied(where: string): void {
-  // What the app contacts for other features (its outbound inventory, such as the daily agent version check) is
-  // not route setup: the kit judges that traffic on its own.
-  if (PRODUCT_HOSTS.has(where.replace(/:\d+$/, ''))) return
   record('egress_attempted')
   const out = process.env.MOUSSE_NET_ENGINE_CHECK_OUT
   if (out) appendFileSync(join(out, 'egress'), `${where}\n`)
@@ -482,6 +504,8 @@ function denied(where: string): void {
 export function guardEgress(): void {
   if (guarded) return
   guarded = true
+  // As under the kit: the app skips its background lookups (the daily agent version check, model lists).
+  process.env.MOUSSE_CHECK_EGRESS_GUARD ||= 'in-process'
   process.env.MOUSSE_ID_ORIGIN ||= 'https://plus.check.invalid'
   const plus = new URL(process.env.MOUSSE_ID_ORIGIN).host
   const realFetch = globalThis.fetch

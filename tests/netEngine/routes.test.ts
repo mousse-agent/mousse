@@ -156,3 +156,21 @@ describe('pairback', () => {
     expect(splitPairback([long])!.offered).toEqual([])
   })
 })
+
+describe('loopback in a debug build (MOUSSE_NET_TEST_CLASS_MAP)', () => {
+  it('is automatic except on a port the checks map to tailnet or public', async () => {
+    const { automatic } = await import('../../src/mms/netEngine/routes')
+    const before = process.env.MOUSSE_NET_TEST_CLASS_MAP
+    try {
+      process.env.MOUSSE_NET_TEST_CLASS_MAP = '47301=tailnet, 47302=public,47303=lan'
+      expect(automatic('tcp://127.0.0.1:47300')).toBe(true)
+      expect(automatic('tcp://127.0.0.1:47301')).toBe(false)
+      expect(automatic('tcp://127.0.0.1:47302')).toBe(false)
+      expect(automatic('tcp://127.0.0.1:47303')).toBe(true)
+      expect(automatic('tcp://192.168.1.2:47301')).toBe(true)
+    } finally {
+      if (before === undefined) delete process.env.MOUSSE_NET_TEST_CLASS_MAP
+      else process.env.MOUSSE_NET_TEST_CLASS_MAP = before
+    }
+  })
+})

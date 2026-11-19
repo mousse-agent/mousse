@@ -51,7 +51,9 @@ const CHECKS = {
     'tests/netEngine/checks/reconnect.test.ts',
     'tests/netEngine/checks/pathSwitch.test.ts',
     'tests/netEngine/checks/sharedComputer.test.ts'
-  ]
+  ],
+  // Add over SSH (1b §3.4–§3.6).
+  'phase1b.ssh-add-app': 'tests/netEngine/checks/sshAddApp.test.ts'
 }
 /** The checks that run over one route (`--route`), and the routes each takes. */
 const ROUTED = { 'phase1b.routes-app': ['tcp', 'ws', 'ssh'] }

@@ -198,7 +198,7 @@ export class SshRemote {
       ...(text('selector') ? { selector: text('selector') } : {}),
       ...(text('new_label') ? { newLabel: text('new_label')!.slice(0, 80) } : {})
     }
-    if (!Number.isSafeInteger(request.issuedAt) || !/^[0-9a-f]{64,}$/.test(request.joiner)) throw bad()
+    if (!Number.isSafeInteger(request.issuedAt) || !/^(?:[0-9a-f]{2}){1,256}$/.test(request.joiner)) throw bad()
     const limits = engineLimits()
     const reply = await prepare(
       {

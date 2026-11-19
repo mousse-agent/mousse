@@ -25,6 +25,8 @@ import type { PrepareStep } from '../../../src/mms/netEngine/ssh/prepare'
 import { deviceState, eventually, Fabric, REAL_HELPER, rowFor, step, type Computer } from './harness'
 
 const HOST = 'b.test'
+/** Why the last Connect did not go through, for a failed step's message. */
+let lastError = ''
 
 describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
   const fabric = new Fabric()
@@ -32,8 +34,14 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
   let b: Computer
   let served: Array<Record<string, unknown>>
   let made = 0
+  let lan = 0
+  /** A computer on the test LAN: 1a pairings between them go over it; the SSH adds go over SSH. */
+  const make = (name: string) => {
+    fabric.network.routes.set(Buffer.from('endpoint-' + name).toString('hex'), ['tcp://192.168.70.' + ++lan + ':47100'])
+    return fabric.computer(name)
+  }
   beforeAll(async () => {
-    b = await fabric.computer('b')
+    b = await make('b')
     served = fabric.sshServer(HOST, b)
   }, 120_000)
   afterAll(() => fabric.close(), 180_000)
@@ -59,7 +67,10 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
       .dispatch('netEngine.ssh.connect', { routeId, target: `me@${HOST}`, host: HOST, user: 'me', ...choice }, true)
       .then(
         () => true,
-        () => false
+        (error) => {
+          lastError = String(error?.message ?? error) + ' ' + JSON.stringify(error?.details ?? {})
+          return false
+        }
       )
   }
 
@@ -86,11 +97,11 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
   }
 
   it('adds an existing profile one way; B connects on A’s first inbound; B gets no way back', async () => {
-    const a = await fabric.computer(`a${++made}`)
+    const a = await make(`a${++made}`)
     const { resolved, list } = await begin(a)
     expect(list.profiles.map((profile) => profile.selector)).toContain(bSelector())
     const from = fabric.crossed.length
-    expect(await connect(a, resolved.routeId, { selector: bSelector() })).toBe(true)
+    expect(await connect(a, resolved.routeId, { selector: bSelector() }), lastError).toBe(true)
     await step('unreachable', () =>
       eventually(() => {
         const row = sshRow(a)!
@@ -108,9 +119,9 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
   }, 120_000)
 
   it('lists a profile paired elsewhere, and makes a new one', async () => {
-    const c = await fabric.computer('c')
+    const c = await make('c')
     await fabric.pair(b, c)
-    const a = await fabric.computer(`a${++made}`)
+    const a = await make(`a${++made}`)
     const { resolved, list } = await begin(a)
     await step('refused_paired_profile', () =>
       expect(list.profiles.map((profile) => profile.selector)).toContain(bSelector())
@@ -124,7 +135,7 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
   it.each(['journaled', 'profile', 'networking', 'row', 'grant-saved', 'grant-stored'] as PrepareStep[])(
     'resumes after a crash at %s with one profile and one grant',
     async (at) => {
-      const a = await fabric.computer(`a${++made}`)
+      const a = await make(`a${++made}`)
       const { resolved } = await begin(a)
       const label = `New ${at}`
       crashOnce(at)
@@ -145,7 +156,7 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
   )
 
   it('keeps a removal on B through A’s retries, and a connected row never repeats prepare', async () => {
-    const a = await fabric.computer(`a${++made}`)
+    const a = await make(`a${++made}`)
     const { resolved } = await begin(a)
     loseOnce()
     expect(await connect(a, resolved.routeId, { selector: bSelector() })).toBe(false)
@@ -159,7 +170,7 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
     })
 
     // Connected, then removed on B: A's restart must not send prepare again.
-    const a2 = await fabric.computer(`a${++made}`)
+    const a2 = await make(`a${++made}`)
     const second = await begin(a2)
     expect(await connect(a2, second.resolved.routeId, { selector: bSelector() })).toBe(true)
     await eventually(() => expect(sshRow(a2)!.state).toBe('connected'), 30_000)
@@ -174,7 +185,7 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
   }, 180_000)
 
   it('keeps an existing 1a row and answers a lost existing reply again', async () => {
-    const a = await fabric.computer(`a${++made}`)
+    const a = await make(`a${++made}`)
     const { ownerOnCaller } = await fabric.pair(b, a)
     // A drops its side; B's row for A stays, with A's grant.
     await a.dispatch('netEngine.remove', { node: ownerOnCaller }, true)
@@ -195,7 +206,7 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
   }, 180_000)
 
   it('leaves no grant and no row after a crash past the grant, a removal and a restart with no retry', async () => {
-    const a = await fabric.computer(`a${++made}`)
+    const a = await make(`a${++made}`)
     const { resolved } = await begin(a)
     crashOnce('grant-saved')
     expect(await connect(a, resolved.routeId, { selector: bSelector() })).toBe(false)
@@ -211,7 +222,7 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
   }, 180_000)
 
   it('answers a done request again only while its grant still serves', async () => {
-    const a = await fabric.computer(`a${++made}`)
+    const a = await make(`a${++made}`)
     const { resolved } = await begin(a)
     loseOnce()
     expect(await connect(a, resolved.routeId, { selector: bSelector() })).toBe(false)
