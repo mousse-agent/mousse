@@ -1108,6 +1108,11 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   animation: threads-sidebar-skeleton-shimmer 1.2s ease-in-out infinite;
 }
 
+[data-shimmer-motion='off'] .threads-sidebar-skeleton {
+  background: rgba(var(--accent-rgb), 0.14);
+  animation: none;
+}
+
 @keyframes threads-sidebar-skeleton-shimmer {
   0% {
     background-position: 100% 0;

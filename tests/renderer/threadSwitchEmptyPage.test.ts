@@ -127,7 +127,7 @@ beforeEach(async () => {
   frames = []
   const useAppStore = await store()
   useAppStore.setState({
-    profileId: 'prf_test', profileReady: true, workspaceReady: true, loading: false,
+    profileId: 'prf_test', profileReady: true, workspaceReady: true, loading: false, newChatAnimations: true,
     activeThreadId: 'thread-a',
     transcriptPending: false,
     threads: [
@@ -258,6 +258,23 @@ describe('switching threads', () => {
     expect((await store()).getState().transcriptPending).toBe(false)
     expect(host.querySelector('.chat--empty')).not.toBeNull()
     expect(host.querySelector('.chat-empty-logo')).not.toBeNull()
+  })
+
+  it('switches the new chat between the moving logo and wave and a still logo', async () => {
+    await mount()
+    await switchTo('thread-draft')
+    const useAppStore = await store()
+    expect(host.querySelector('.ambient-glow')).not.toBeNull()
+    expect(host.querySelector('.empty-logo-liquid')).not.toBeNull()
+
+    act(() => useAppStore.setState({ newChatAnimations: false }))
+    expect(host.querySelector('[role="img"][aria-label="Mousse"] svg')).not.toBeNull()
+    expect(host.querySelector('.ambient-glow')).toBeNull()
+    expect(host.querySelector('.empty-logo-liquid')).toBeNull()
+
+    act(() => useAppStore.setState({ newChatAnimations: true }))
+    expect(host.querySelector('.ambient-glow')).not.toBeNull()
+    expect(host.querySelector('.empty-logo-liquid')).not.toBeNull()
   })
 
   it('stops waiting when the select fails', async () => {

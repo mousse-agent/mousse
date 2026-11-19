@@ -61,6 +61,11 @@
   100% { transform: translateX(290px); }
 }
 
+[data-new-chat-motion='off'] .chat-empty-logo .incognito-glasses {
+  transition: none;
+}
+
+[data-new-chat-motion='off'] .incognito-glasses[data-on] .incognito-glasses-shine,
 [data-motion='off'] .incognito-glasses[data-on] .incognito-glasses-shine {
   animation: none;
 }

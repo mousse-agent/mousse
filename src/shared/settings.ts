@@ -441,7 +441,7 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
 }
 
 /**
- * Features that are still being tried out, each off until turned on (Mousse Plus (legacy) is the exception: on until
+ * Features that are still being tried out, each off until turned on (Mousse ID (legacy) is the exception: on until
  * turned off).
  *
  * `subagentWorktrees`: Mousse gives every subagent it starts a worktree of its own, made when the subagent starts from the
@@ -452,7 +452,7 @@ export interface ExperimentalSettings {
   botAsksFirstOff: boolean
   subagentWorktrees: boolean
   /**
-   * Mousse Plus (legacy), on unless turned off: today's Mousse ID sign-in, hosted relay and phone requests through
+   * Mousse ID (legacy), on unless turned off: today's Mousse ID sign-in, hosted relay and phone requests through
    * Mousse Plus. Off, this profile's networking sends nothing to Mousse Plus and runs on LAN, SSH, tunnels and
    * self-hosted relays only, as while the new networking engine and Plus are built and tried.
    */
@@ -462,6 +462,9 @@ export interface ExperimentalSettings {
    * flat 2D eyes animated over it, instead of the whole face drawn in 3D every frame.
    */
   hybridBotFaces: boolean
+  sidebarAnimations: boolean
+  newChatAnimations: boolean
+  shimmerAnimations: boolean
   /** The profiler (Settings → Labs). */
   profiler: ProfilerSettings
 }
@@ -472,6 +475,9 @@ export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings
     subagentWorktrees: raw?.subagentWorktrees === true,
     plusLegacy: raw?.plusLegacy !== false,
     hybridBotFaces: raw?.hybridBotFaces === true,
+    sidebarAnimations: raw?.sidebarAnimations !== false,
+    newChatAnimations: raw?.newChatAnimations !== false,
+    shimmerAnimations: raw?.shimmerAnimations !== false,
     profiler: normalizeProfilerSettings(raw?.profiler)
   }
 }
@@ -580,7 +586,8 @@ export type DeepPartial<T> = {
       : T[K]
 }
 
-export type MousseSettingsUpdate = Omit<DeepPartial<MousseSettings>, 'notifications'> & {
+export type MousseSettingsUpdate = Omit<DeepPartial<MousseSettings>, 'notifications' | 'experimental'> & {
+  experimental?: Partial<ExperimentalSettings>
   notifications?: Omit<DeepPartial<NotificationSettings>, 'quietHours'> & { quietHours?: QuietHours | null }
 }
 

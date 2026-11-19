@@ -442,7 +442,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // Tab switch motion (sidebar-view-motion.css). The content follows the tabs at once: the new view shows in
   // the click's own update and settles in with a short lift as its panel unhides. With motion off (the setting,
   // the OS, or no renderer) it does not move.
-  const instantViews = useMotionScale() === 0 || !motionAllowed()
+  const sidebarAnimations = useAppStore((s) => s.sidebarAnimations)
+  const instantViews = useMotionScale() === 0 || !sidebarAnimations || !motionAllowed()
   const contentView = sidebarView
 
   // The Archived footer is not under Chats: it is hidden as Chats shows and unfolds as another view comes in,
@@ -543,7 +544,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // A thread archived or unarchived, by any means, leaves its list and arrives in its new place with motion: for a
   // moment its old row stays in the old list (`threadsForList`) while it fades and closes (archiveMotion.ts).
   const asideRef = useRef<HTMLElement>(null)
-  const { moves: archiveMoves, motionOf: archiveMotionOfRow } = useArchiveMotionRows(asideRef, listedThreads)
+  const { moves: archiveMoves, motionOf: archiveMotionOfRow } = useArchiveMotionRows(asideRef, listedThreads, sidebarAnimations)
   const unarchivedListThreads = useMemo(() => threadsForList(listedThreads, archiveMoves, false).filter(inFilter), [listedThreads, archiveMoves, inFilter])
   const archivedListThreads = useMemo(() => threadsForList(listedThreads, archiveMoves, true).filter(inFilter), [listedThreads, archiveMoves, inFilter])
   // A parent row shows what its subagents are doing, however deep they are nested.
@@ -1711,7 +1712,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
         </div>
         <Collapse
           open={expanded}
-          animate={toggledProjectRef.current === OTHER_THREADS_ID}
+          animate={sidebarAnimations && toggledProjectRef.current === OTHER_THREADS_ID}
           id={childrenId}
           role="group"
           className="threads-sidebar-children"
@@ -1977,7 +1978,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
                   <Collapse
                     open={expanded}
-                    animate={toggledProjectRef.current === project.id}
+                    animate={sidebarAnimations && toggledProjectRef.current === project.id}
                     id={childrenId}
                     role="group"
                     className="threads-sidebar-children"
@@ -2075,7 +2076,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           {/* Built only while open, and only the cards in view (ArchivedList). A long list opens at once: its height
               motion would lay out the footer on every frame. */}
-          <Collapse open={archivedExpanded} itemCount={archivedThreads.length} animate={archivedThreads.length <= COLLAPSE_LONG_LIST}>
+          <Collapse open={archivedExpanded} itemCount={archivedThreads.length} animate={sidebarAnimations && archivedThreads.length <= COLLAPSE_LONG_LIST}>
             {archivedThreads.length === 0 ? (
               <div className="threads-sidebar-tree threads-sidebar-thread-feed threads-sidebar-settled-list">
                 <div className="threads-sidebar-empty">No archived threads</div>

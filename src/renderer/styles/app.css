@@ -3308,6 +3308,12 @@ html[data-chat-width='full'] .chat {
   animation: shimmer-sweep 1.8s steps(27, jump-none) infinite !important;
 }
 
+[data-shimmer-motion='off'] .shimmer-text {
+  color: var(--text-secondary);
+  background: none;
+  animation: none !important;
+}
+
 @keyframes shimmer-sweep {
   0% {
     background-position: 120% 0;

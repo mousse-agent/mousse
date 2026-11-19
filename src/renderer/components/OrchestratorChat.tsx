@@ -1880,6 +1880,7 @@ export function OrchestratorChat() {
   }
 
   // A thread whose transcript is still loading is not empty: it shows the plain chat (no headline, logo or glow) until it lands.
+  const newChatAnimations = useAppStore((s) => s.newChatAnimations)
   const emptyThread = shownMessages.length === 0 && !transcriptPending && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
   // A new thread's settings (project above the composer, where it runs and Private / Archive after below) leave once the first send starts.
   const newThreadSettings = newChat && !turnActive && !loading && !firstSendShown
@@ -1897,9 +1898,9 @@ export function OrchestratorChat() {
   }
 
   return (
-    <div data-mousse="chat" className={`chat${emptyThread ? ' chat--empty' : ''}`} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+    <div data-mousse="chat" className={`chat${emptyThread ? ' chat--empty' : ''}`} data-new-chat-motion={emptyThread && !newChatAnimations ? 'off' : undefined} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <ChatWallpaper />
-      {emptyThread && <AmbientGlow />}
+      {emptyThread && newChatAnimations && <AmbientGlow />}
       <SubagentParentBar />
       <ThreadComputerBar />
       <ThreadStartedByBar />
@@ -1926,7 +1927,7 @@ export function OrchestratorChat() {
         className={`chat-input-area${showQuestions ? ' has-questions' : ''}`}
       >
         {activeThreadId && !activeThread?.node && <ChatBrowserAccess key={`${profileId}:${activeThreadId}`} threadId={activeThreadId} requireSelectedThread />}
-        {emptyThread && <EmptyThreadHeading headline={emptyHeadline} />}
+        {emptyThread && <EmptyThreadHeading headline={emptyHeadline} animate={newChatAnimations} />}
         <ComposerNoticeProvider>
         {sendError && (sendChanges?.line === sendError && activeThreadId
           ? <PendingChangesNotice threadId={activeThreadId} message={sendChanges.message} details={sendChanges.details}
