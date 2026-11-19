@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * A bot's checklist in its chat header: a count beside the bot menu while the bot keeps tasks, the list in a
+ * A bot's checklist in its chat header: a count beside the side-panel button while the bot keeps tasks, the list in a
  * popover on click, updated when the service says the bot changed, and gone when it keeps none.
  */
 import { act, createElement } from 'react'
@@ -76,13 +76,13 @@ afterEach(() => {
   setAnimationSpeed('normal')
 })
 
-it('shows how far the checklist is beside the bot menu, and the list on click', async () => {
+it('shows how far the checklist is beside the side-panel button, and the list on click', async () => {
   await open()
   const control = checklistButton()!
   expect(control.textContent).toBe('1/3')
   expect(control.getAttribute('aria-label')).toBe('Checklist, 1 of 3 done')
-  // It sits just before the bot menu.
-  expect(control.closest('.bot-tasks-root')?.nextElementSibling?.classList.contains('bot-menu-root')).toBe(true)
+  // It sits just before the side-panel button.
+  expect(control.closest('.bot-tasks-root')?.nextElementSibling?.getAttribute('aria-label')).toMatch(/side panel/)
   expect(popover()).toBeNull()
 
   await act(async () => control.click())
