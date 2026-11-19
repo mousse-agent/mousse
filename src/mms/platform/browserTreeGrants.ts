@@ -44,7 +44,7 @@ export interface BrowserTreeGrant {
   readonly id: string
   /** The thread of the person's run that rooted the grant. */
   readonly rootThreadId: string
-  /** How that run was started: `gui` gives the tree the in-app browser, `cli` the profile's managed browser. */
+  /** How the tree's person's runs were started: any `gui` run gives it the in-app browser, `cli` alone the profile's managed one. */
   readonly rootSource: 'gui' | 'cli'
   /** The runs it covers. */
   readonly runs: ReadonlySet<string>
@@ -53,6 +53,7 @@ export interface BrowserTreeGrant {
 }
 
 interface MutableGrant extends BrowserTreeGrant {
+  rootSource: 'gui' | 'cli'
   runs: Set<string>
   threads: Set<string>
 }
@@ -94,6 +95,10 @@ export class BrowserTreeGrants {
       grant = { id: randomUUID(), rootThreadId: threadId, rootSource: source, runs: new Set(), threads: new Set([threadId]) }
       this.grants.set(threadId, grant)
     }
+    // A person's run at the window gives the tree the in-app browser, even when it joins a tree a command-line run
+    // rooted (a command-line run on the same thread, or one that just ended and still counts as live because
+    // this run keeps the thread busy).
+    if (source === 'gui') grant.rootSource = 'gui'
     if (runId) grant.runs.add(runId)
     return grant
   }
