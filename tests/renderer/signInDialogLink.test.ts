@@ -81,3 +81,28 @@ it('a failed sign-in says why and offers Try again only where it can start one',
   await act(async () => { button('Try again')!.click() })
   expect(document.body.querySelector('[role="alert"]')?.textContent).toBe('The provider service is not running.')
 })
+
+it('a sign-in whose link arrives late shows starting, then opens the link once however often it is shown again', async () => {
+  const link = 'https://accounts.google.com/o/oauth2/v2/auth?response_type=code&state=s&redirect_uri=http%3A%2F%2F127.0.0.1%3A41414%2F'
+  const openLoginUrl = (window as unknown as { mousse: { providers: { openLoginUrl: ReturnType<typeof vi.fn> } } }).mousse.providers.openLoginUrl
+  const base = { operationId: 'op-link', instanceId: 'antigravity', kind: 'sign_in' } as const
+  const prompt = (promptId: string, extra: Record<string, unknown> = {}) =>
+    act(() => applyOperationEvent({ ...base, phase: 'prompt', prompt: { promptId, type: 'auth_url', url: link, usesCallbackServer: true, ...extra } }))
+  const button = (label: string) => [...document.body.querySelectorAll('button')].find((item) => item.textContent?.trim() === label)
+  act(() => applyOperationEvent({ ...base, phase: 'progress', message: 'Starting Google sign-in…' }))
+  act(() => root.render(createElement(SignInDialog, { operationId: 'op-link', name: 'Google Antigravity', onClose: () => {} })))
+  expect(document.body.textContent).toContain('Starting Google sign-in…')
+  expect(document.body.querySelector('input')).toBeNull()
+  expect(openLoginUrl).not.toHaveBeenCalled()
+
+  prompt('op-link:1')
+  prompt('op-link:2', { acceptsRedirectPaste: true })
+  // A refused redirect shows the same link again with the reason.
+  prompt('op-link:3', { instructions: 'Redirect URL does not match this Google sign-in flow' })
+  prompt('op-link:4', { instructions: 'Redirect URL does not match this Google sign-in flow', acceptsRedirectPaste: true })
+  expect(openLoginUrl).toHaveBeenCalledExactlyOnceWith(link)
+  expect(document.body.textContent).toContain('Redirect URL does not match this Google sign-in flow')
+  expect(button('Open sign-in page again')).toBeTruthy()
+  expect(button('Copy link')).toBeTruthy()
+  expect(button("Browser didn't return here?")).toBeTruthy()
+})
