@@ -96,7 +96,7 @@ describe('BotLookPicker', () => {
       .filter((look) => !(look.colour === 'green' && look.accessory === 'crown'))
     const onChange = renderPicker(current, existing)
     act(() => [...host.querySelectorAll('button')].find((button) => button.textContent === 'Shuffle')!.click())
-    expect(onChange).toHaveBeenCalledWith({ colour: 'green', accessory: 'crown' })
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ colour: 'green', accessory: 'crown' }))
   })
 
   it('picks a character and eye shape, each shown on the look, and keeps the rest', () => {
@@ -135,10 +135,10 @@ describe('shuffleLook', () => {
     for (const r of [0, 0.25, 0.5, 0.999]) expect(shuffleLook({ colour: 'coral', accessory: 'none' }, [], () => r)).not.toEqual({ colour: 'coral', accessory: 'none' })
   })
 
-  it('keeps the character and eyes', () => {
-    const picked = shuffleLook({ colour: 'coral', accessory: 'none', kind: 'mousse', eyes: 'heart' }, [], () => 0.5)
-    expect(picked.kind).toBe('mousse')
-    expect(picked.eyes).toBe('heart')
+  it('picks the character and eyes too', () => {
+    const looks = [0, 0.999].map((r) => shuffleLook({ colour: 'coral', accessory: 'none' }, [], () => r))
+    expect(new Set(looks.map((look) => look.kind ?? BOT_KINDS[0])).size).toBe(2)
+    expect(new Set(looks.map((look) => look.eyes ?? BOT_EYES[0])).size).toBe(2)
   })
 
   it('falls back to any other look when all are worn', () => {
