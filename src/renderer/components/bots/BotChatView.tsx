@@ -209,11 +209,12 @@ export interface BotPinned { kind: 'ask' | 'error'; id?: string; text: string }
  * (its summary's, which Resume or a good run clears). Each points at its full message: the ask's own, and the newest
  * message with that error (or any error).
  */
-export function pinnedOf(messages: readonly BotChatMessage[], bot: Pick<BotSummary, 'name' | 'error'>): BotPinned[] {
+export function pinnedOf(messages: readonly BotChatMessage[], bot: Pick<BotSummary, 'name' | 'error' | 'state'>): BotPinned[] {
   const pinned: BotPinned[] = []
   const ask = messages.filter((message) => message.ask?.status === 'open').at(-1)
   if (ask) pinned.push({ kind: 'ask', id: ask.id, text: `${bot.name} wants to ${ask.ask!.title}` })
-  if (bot.error) {
+  // A usage pause that holds is already said on the paused line above the composer.
+  if (bot.error && !(bot.state === 'paused' && bot.error.action?.kind === 'resume')) {
     const errors = messages.filter((message) => message.error)
     const shown = errors.filter((message) => message.error!.text === bot.error!.text).at(-1) ?? errors.at(-1)
     pinned.push({ kind: 'error', ...(shown ? { id: shown.id } : {}), text: bot.error.text })
@@ -880,11 +881,15 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // the words of replies whose turn stopped before they were finished (botLiveReplies.ts).
   const notes = useBotsStore((s) => s.notes[bot.id] ?? NO_NOTES)
   const cuts = useBotCutReplies(bot.id)
+  // A usage pause that still holds is said once, on the paused line above the composer (with its Resume); its chat line
+  // shows only once the pause is over, quietly, as what happened.
+  const resumeOn = useMemo(() => liveResumeLine(messages, { state: bot.state }), [messages, bot.state])
+  const pauseLine = resumeOn ? messages.find((message) => message.id === resumeOn)?.error?.text : undefined
   const { rows, marks } = useMemo(() => {
-    const shaped = chatRows(messages, bot.name, (message) => (message.ask ? askAnswerLine(message.ask, message.kind === 'notice') : undefined))
+    const shaped = chatRows(resumeOn ? messages.filter((message) => message.id !== resumeOn) : messages, bot.name, (message) => (message.ask ? askAnswerLine(message.ask, message.kind === 'notice') : undefined))
     const lines = cuts.length ? [...notes, ...cuts.map((cut) => ({ id: cut.id, at: cut.at, text: cut.text, cut: true as const }))].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)) : notes
     return { rows: withNotes(shaped.rows, lines), marks: shaped.marks }
-  }, [messages, bot.name, notes, cuts])
+  }, [messages, resumeOn, bot.name, notes, cuts])
   // The sent rows and the messages on their way, in one run of groups (a quiet line ends a group), with the day lines.
   const shown = useMemo<BotChatRow[]>(() => (pending.length ? [...rows, ...pending.map((message) => ({ kind: 'message' as const, message }))] : rows), [rows, pending])
   const places = useMemo(() => placeMessages(shown.map((row, index) => (row.kind === 'message' ? { author: senderOf(row.message), at: row.message.at, sending: index >= rows.length } : { author: row.cut ? 'bot' : 'system', at: row.at }))), [shown, rows.length])
@@ -998,7 +1003,6 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }
   // A pinned line hides while its full message is on screen, so it never shows twice.
   const pinned = useMemo(() => pinnedOf(messages, bot), [messages, bot])
-  const resumeOn = useMemo(() => liveResumeLine(messages, bot), [messages, bot])
   const [onScreen, setOnScreen] = useState('')
   const measure = useCallback(() => {
     const element = transcript.current
@@ -1166,7 +1170,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         }).concat(liveShown ? [<Fragment key={replyKeys.live}>{null}<BotMessage bot={bot} message={liveMessage} onAction={act} quote={false} starts={typingStarts} time={false} onReply={reply} onApplet={openApplet} live={live} follow={followEnd} /></Fragment>] : [])}
         {/* A run still working before its reply: the preview follows it here. */}
         {preview && !previewOn && <div className="bot-browser-live">{preview}</div>}
-        {bot.state === 'paused' && <p className="bot-paused-line" role="status">{bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused'}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
+        {bot.state === 'paused' && <p className="bot-paused-line" role="status">{(pauseLine ?? (bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused')).replace(/\.$/, '')}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
       </div>
       <div className="chat-input-area bot-input-area" data-applet-composer>
         {(unseen || away) && <button type="button" className="bot-jump" onClick={toEnd}><ArrowDown size={14} aria-hidden />{unseen ? 'New message' : 'Go to latest'}</button>}
