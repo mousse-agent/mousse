@@ -19,7 +19,7 @@ import {
   digestPrompt, firstLine, foldChatSummary, packText, parseDigest, replaceDigest, speaker, summaryHead, withinBudget
 } from './chatSummary'
 import { agoLabel, cut, dayLabel, renderMemoryBlocks, timeLabel } from './render'
-import { BOT_CHANGELOG, BOT_CHANGELOG_PACK_ENTRIES, changelogBlock } from '../changelog'
+import { BOT_CHANGELOG, BOT_CHANGELOG_PACK_ENTRIES, changelogBlock, type BotChangelogEntry } from '../changelog'
 import { createHash } from 'node:crypto'
 import { BOT_CHAT_EPOCH_MARKS, type BotChatDigestState, type BotChatEpoch, type BotChatEpochEnd, type BotChatEpochVerdict } from './contextBudget'
 import { BOT_PACK_JOB_CHANGES, BOT_PACK_JOBS, LEDGER_CHANGES_HEADING, LEDGER_HEADING, capReport, ledgerLine, type BotJob } from '../../../shared/bots/personal/jobs'
@@ -68,6 +68,8 @@ export function customSlotsLine(slots: ReadonlyArray<{ name: string; description
 export interface BotContextPackOptions {
   store: BotMemoryStore
   asksFirstEnabled?: () => boolean
+  /** Alternate changelog for context-pack fixtures; production uses BOT_CHANGELOG. */
+  changelog?: readonly BotChangelogEntry[]
   /** Persistent files folder; names and dates only are listed in the volatile situation. */
   filesFolder?: (botId: string) => string
   journal: Pick<BotJournal, 'syncThread'>
@@ -324,8 +326,13 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
    * What Mousse changed that the bot has not been told, after its memory: it wins over what memory and history say. A
    * bot with no history yet has nothing to correct, so it is marked as having seen everything and told nothing.
    */
-  const visibleChanges = () => BOT_CHANGELOG.filter(entry => !entry.asksFirst || options.asksFirstEnabled?.() !== false)
-  const latestChange = () => visibleChanges().at(-1)?.id ?? 0
+  const changelog = options.changelog ?? BOT_CHANGELOG
+  const visibleChanges = () => changelog.filter(entry => !entry.asksFirst || options.asksFirstEnabled?.() !== false)
+  // A cursor below hidden advice must wait; bots that already saw it can advance through later entries.
+  const latestChange = (seen?: number) => {
+    const hidden = options.asksFirstEnabled?.() === false ? changelog.find(entry => entry.asksFirst && entry.id > (seen ?? 0)) : undefined
+    return hidden ? hidden.id - 1 : changelog.at(-1)?.id ?? 0
+  }
   const changes = (botId: string, chat: boolean, fresh = false): string => {
     const seen = store.getState<number>(botId, CHANGELOG_SEEN_KEY)
     if (seen === undefined && fresh) {
@@ -376,7 +383,7 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     const told = changes(botId, true, fresh)
     if (told) {
       store.write(() => {
-        store.setState(botId, `${CHANGELOG_CARRIED_KEY}${activationId}`, latestChange())
+        store.setState(botId, `${CHANGELOG_CARRIED_KEY}${activationId}`, latestChange(store.getState<number>(botId, CHANGELOG_SEEN_KEY)))
         store.pruneState(botId, CHANGELOG_CARRIED_KEY, 16)
       })
     }

@@ -466,3 +466,7 @@ export interface BotPermissionLine {
   kind: 'tool' | 'app_tool' | 'mcp' | 'skill' | 'workspace' | 'budget'
   text: string
 }
+
+/** Calls that run alone return to asking when these rolling limits are reached. */
+export const BOT_ALONE_HOURLY_CALLS = 20
+export const BOT_ALONE_DAILY_CALLS = 100

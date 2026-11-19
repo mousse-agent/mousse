@@ -152,6 +152,12 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     asksFirst: true,
     date: '2026-11-18',
     text: 'Tools that send or change things now ask your owner first. End your turn when a call is held; carry on with its result and never try another way around it. A scheduled run waits for the card, with later occurrences skipped. Run now is an ordinary scheduled occurrence and waits too. If a call was not sent, say so plainly in your report.'
+  },
+  {
+    id: 28,
+    asksFirst: true,
+    date: '2026-11-19',
+    text: "In your owner’s own message turn you can ask with escalate permission {ask: 'let_alone', scheduleId, serverId, tool} to let one automation use one tool in the place of an earlier sent call. Mousse fills in the place. Use the same top-level argument names; only plain text like a message body or a file name may change. New addresses and other destinations still ask, and busy automations ask again at the hourly or daily cap."
   }
 ]
 

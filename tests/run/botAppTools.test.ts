@@ -518,3 +518,22 @@ it('page-check schedules reject say and invalid URLs before saving, and keep the
   expect(result.isError).toBeFalsy()
   expect(bots.schedules[0]).toMatchObject({onlyIfChanged:{url:'https://example.com',contains:'tickets'}})
 })
+
+it('accepts the exact flattened let-alone request Codex sent in the live trial', async () => {
+  const tools = botTools()
+  const tool = tools.find(t => t.name === 'escalate')!
+  let permission: unknown
+  const ctx = fakeBots().ctx()
+  ctx.turn.bot!.escalate = request => { permission = request.permission; return 'Asked' }
+  const result = await tool.handler({ ask: 'let_alone', scheduleId: 's-67020d90', serverId: 'trial-drive.9be4eb770a', tool: 'upload_file', reason: 'Let it do that without asking.' }, ctx)
+  expect(result.text).toBe('Asked')
+  expect(permission).toEqual({ ask: 'let_alone', scheduleId: 's-67020d90', serverId: 'trial-drive.9be4eb770a', tool: 'upload_file' })
+})
+it.each([true, false])('the escalate definition describes the wrapped ask only with asks first on: %s', on => {
+  const tool = botTools().find(t => t.name === 'escalate')!
+  const ctx = fakeBots().ctx()
+  if (on) ctx.turn.bot!.holdMcp = () => ({ text: 'Held' })
+  const definition = tool.definition!(ctx.turn)
+  expect(definition.description.includes("permission: {ask:'let_alone', scheduleId, serverId, tool}")).toBe(on)
+  expect(JSON.stringify(definition.parameters).includes('let_alone')).toBe(on)
+})

@@ -1920,13 +1920,13 @@ export class BotStore {
 
   /** The answered escalation whose continuation has not been applied yet. */
   pendingAnswer(activationId: string): BotEscalationRow | undefined {
-    const row = this.get("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1", activationId)
+    const row = this.get("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND (status IN ('allowed_bot', 'allowed_once', 'denied') OR (status = 'withdrawn' AND json_extract(permission_json, '$.ask') = 'let_alone')) AND applied_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1", activationId)
     return row ? escalationOf(row) : undefined
   }
 
   /** Every answered wall of an activation whose continuation has not been applied yet, oldest first. */
   pendingAnswers(activationId: string): BotEscalationRow[] {
-    return this.all("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND status IN ('allowed_bot', 'allowed_once', 'denied') AND applied_at IS NULL ORDER BY created_at, rowid", activationId).map(escalationOf)
+    return this.all("SELECT * FROM bot_escalations WHERE activation_id = ? AND mode = 'wall' AND (status IN ('allowed_bot', 'allowed_once', 'denied') OR (status = 'withdrawn' AND json_extract(permission_json, '$.ask') = 'let_alone')) AND applied_at IS NULL ORDER BY created_at, rowid", activationId).map(escalationOf)
   }
 
   markApplied(id: string): void {
