@@ -253,7 +253,7 @@ describe('resets available', () => {
       { id: 'c', label: 'c@example.com', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 90 }] }
     ]
     expect(totalResets(accounts)).toBe(3)
-    const html = view({ now, usage: response([{ id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [], accounts }]) })
+    const html = view({ now, usage: response([{ id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [], proxy: { address: '127.0.0.1:8317', key: 'saved' }, accounts }]) })
     expect(text(html)).toContain('3 resets across accounts')
     expect(text(html)).toContain('a@example.com 2 resets')
     expect(html.match(/data-testid="usage-resets"/g)).toHaveLength(2)
@@ -291,7 +291,7 @@ describe('what the next reset gives back', () => {
   it('the summary says "+24% in 44m", or "no change soon"', () => {
     const one = (left: number, minutes: number) => ({ id: 'x', label: 'x@example.com', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: left, resetsAt: new Date(Date.now() + minutes * 60_000 + 30_000).toISOString() }] })
     const pair = (lefts: [number, number]) => [{ ...one(lefts[0], 44), id: 'a' }, { ...one(lefts[1], 300), id: 'b' }]
-    const card = (accounts: ProviderUsage['accounts']) => view({ now: Date.now(), usage: response([{ id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [], accounts }]) })
+    const card = (accounts: ProviderUsage['accounts']) => view({ now: Date.now(), usage: response([{ id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [], proxy: { address: '127.0.0.1:8317', key: 'saved' }, accounts }]) })
     expect(text(card(pair([52, 70])))).toContain('+24% in 44m')
     expect(text(card(pair([100, 100])))).toContain('no change soon')
   })
@@ -378,12 +378,12 @@ describe('limits a provider reported earlier, or read through a proxy', () => {
     expect(usageReadAtLabel('bad', NOW)).toBeUndefined()
   })
 
-  it('names the source beside the provider, and an unavailable proxy is one line, not an error', () => {
-    const proxy: ProviderUsage = { id: 'claude-subscription', label: 'Claude Subscription', status: 'unavailable', windows: [], source: 'via local proxy', message: 'Limits unavailable (proxy)' }
-    const html = view({ usage: response([proxy]) })
-    expect(text(html)).toContain('Claude Subscription · via local proxy')
-    expect(text(html)).toContain('Limits unavailable (proxy)')
-    expect(html).not.toContain('settings-status-bad')
+  it('Claude shows only with the numbers its CLI API proxy read: without the proxy, or with a proxy that read none, it has no card or row', () => {
+    const claude: ProviderUsage = { id: 'claude-subscription', label: 'Claude Subscription', status: 'available', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 40 }] }
+    const unread: ProviderUsage = { id: 'claude-subscription', label: 'Claude Subscription', status: 'unavailable', windows: [], source: 'via local proxy', proxy: { address: '127.0.0.1:8317', key: 'saved' }, message: 'Limits unavailable (proxy)' }
+    expect(text(view({ usage: response([claude]) }))).not.toContain('Claude Subscription')
+    expect(text(view({ usage: response([unread]) }))).not.toContain('Claude Subscription')
+    expect(windows(view({ usage: response([{ ...claude, proxy: { address: '127.0.0.1:8317', key: 'saved' } }]) }))).toEqual(['40'])
   })
 })
 

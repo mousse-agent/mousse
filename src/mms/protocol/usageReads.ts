@@ -122,6 +122,8 @@ export function usageSlotList(mms: MmsProfileServices): Array<Omit<UsageSlot, 'c
 
 /** Keeps a reading's 5-hour and weekly limits for their trends; one that cannot be kept never fails the read. */
 export function recordLimitReading(mms: MmsProfileServices, usage: ProviderUsage): void {
+  // Claude's limits count only as the CLI API proxy reads them (its sign-ins are the proxy's too).
+  if (usage.id === CLAUDE_USAGE_ID && !usage.proxy && !usage.accounts?.length) return
   try {
     void limitReadings(mms.getProfileHomeDir()).record(usage).catch(() => undefined)
   } catch {

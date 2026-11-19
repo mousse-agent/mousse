@@ -158,6 +158,15 @@ const UsageProviderCard = memo(function UsageProviderCard({ provider, computerNa
   </SettingsGroup>
 })
 
+/**
+ * Claude's usage is shown only as its CLI API proxy reads it: without the proxy's numbers it has no row or card,
+ * except the card that asks for the proxy's key, which is how those numbers start.
+ */
+export function hiddenClaude(provider: ProviderUsage): boolean {
+  if (provider.id !== 'claude-subscription' || needsProxyKey(provider)) return false
+  return !provider.proxy || (provider.windows.length === 0 && !provider.accounts?.length)
+}
+
 export interface SubscriptionUsageViewProps {
   /** The last reading, kept after a failed refresh. Null before the first one arrives. */
   usage: ProvidersUsageResponse | null
@@ -238,7 +247,8 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
   const readAt = usage ? usageReadingTime(usage.fetchedAt) : undefined
   const picked = computers ? usageSelection(selected ?? ALL_COMPUTERS, [THIS_COMPUTER, ...computers.others.map((other) => other.id)]) : THIS_COMPUTER
   const readings: ComputerUsage[] = usage ? [{ id: THIS_COMPUTER, name: computers?.selfName ?? '', providers: usage.providers }, ...(computers ? remote ?? [] : [])] : []
-  const rows = usage ? usageRows(readings, picked) : []
+  // A provider still on its way keeps its placeholder: whether Claude has the proxy's numbers is known only once read.
+  const rows = usage ? usageRows(readings, picked).filter((row) => !hiddenClaude(row.provider) || !!loadingIds?.has(row.provider.id)) : []
   const pickedOther = picked !== ALL_COMPUTERS && picked !== THIS_COMPUTER
   // Three sections: working plans as cards; credit balances, API keys, no-data and no-subscription rows in
   // Other usage; signed out and failing rows in Needs attention. A provider still on its way waits
@@ -396,7 +406,8 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
   const mounted = useRef(true)
   // The limits' trends, this computer's own readings: read when Limits shows, after each read of the usage.
   const [trendRange, setTrendRange] = useState<LimitTrendRange>('7d')
-  const [trends, setTrends] = useState<LimitTrend[]>([])
+  // Null until the first answer, so an empty chart is never shown before the readings are known.
+  const [trends, setTrends] = useState<LimitTrend[] | null>(null)
   useEffect(() => {
     if (tab !== 'limits' || loading) return
     let current = true
@@ -512,7 +523,7 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
       {...(linked ? { devices: { selfName, others }, device: effective, onDevice: pickComputer } : {})}
     />}
     // Another computer's limits have no trends here: the readings stay on each computer.
-    limitTrends={trends.length > 0 && (effective === THIS_COMPUTER || effective === ALL_COMPUTERS)
+    limitTrends={trends && (effective === THIS_COMPUTER || effective === ALL_COMPUTERS)
       ? <UsageLimitTrends trends={trends} range={trendRange} onRange={setTrendRange} localOnly={linked && effective === ALL_COMPUTERS} />
       : null}
     tab={tab}

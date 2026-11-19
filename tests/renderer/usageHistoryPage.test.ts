@@ -16,7 +16,7 @@ const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { useComputersStore, NO_COMPUTERS } = await import('../../src/renderer/lib/computers')
 
 const providers: ProviderUsage[] = [
-  { id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [{ id: 'seven_day', label: 'Weekly limit', remainingPercent: 58 }] },
+  { id: 'claude-subscription', label: 'Claude subscription', status: 'available', proxy: { address: '127.0.0.1:8317', key: 'saved' }, windows: [{ id: 'seven_day', label: 'Weekly limit', remainingPercent: 58 }] },
   { id: 'xai', label: 'Grok (xAI)', authType: 'oauth', status: 'error', windows: [], problem: 'session_expired', message: 'Grok session expired.' }
 ]
 
@@ -129,7 +129,7 @@ describe('the Usage page tabs', () => {
     expect(tab('Limits').getAttribute('aria-selected')).toBe('true')
   })
 
-  it('Limits shows the trends kept on this computer, read again for another range; none without readings', async () => {
+  it('Limits shows the trends kept on this computer, read again for another range; an empty state without readings', async () => {
     await render()
     expect(limitTrends).not.toHaveBeenCalled()
     await click(tab('Limits'))
@@ -145,7 +145,7 @@ describe('the Usage page tabs', () => {
     limitTrends.mockResolvedValue({ trends: [] })
     await render()
     expect(limitTrends).toHaveBeenCalled()
-    expect(q('[data-testid="usage-limit-trends"]')).toBeNull()
+    expect(q('[data-testid="usage-limit-trends-empty"]')?.textContent).toBe('No limit readings yet')
     expect(visible(q('[data-testid="usage-window"]'))).toBe(true)
   })
 

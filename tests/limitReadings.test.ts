@@ -85,25 +85,35 @@ describe('a limit over time', () => {
     expect(trend!.windows[0]).toEqual({ id: 'seven_day', label: 'Weekly', points: [[T0 - 3 * DAY, 70], [T0 - DAY, 0], [T0, 10]], resets: [T0 - DAY], nextReset: T0 + 6 * DAY })
   })
 
-  it('drops just before a reading that fell by 10 points or more, when the provider gives no reset time', async () => {
+  it('a fall in use without a new reset time is no reset: the line falls, with no mark', async () => {
     const readings = store()
     now = T0 - HOUR
     await readings.record(usage([window('rolling', 80)]))
     now = T0
     await readings.record(usage([window('rolling', 5)]))
     const [trend] = await readings.trends('24h')
-    expect(trend!.windows[0]).toMatchObject({ id: 'five_hour', points: [[T0 - HOUR, 80], [T0 - MINUTE, 0], [T0, 5]], resets: [T0 - MINUTE] })
+    expect(trend!.windows[0]).toMatchObject({ id: 'five_hour', points: [[T0 - HOUR, 80], [T0, 5]], resets: [] })
   })
 
-  it('drops at a reset due since the last reading, and starts the range where the line stood before it', async () => {
+  it('a reset due since the last reading is not drawn until a reading shows it, and the range starts where the line stood', async () => {
     const readings = store()
     now = T0 - 2 * DAY
     await readings.record(usage([window('five_hour', 60, T0 + HOUR)]))
     now = T0 + 3 * HOUR
     const [trend] = await readings.trends('24h')
     const from = now - DAY
-    expect(trend!.windows[0]).toMatchObject({ points: [[from, 60], [T0 + HOUR, 0]], resets: [T0 + HOUR] })
+    expect(trend!.windows[0]).toMatchObject({ points: [[from, 60]], resets: [] })
     expect(trend!.windows[0]!.nextReset).toBeUndefined()
+  })
+
+  it('only the windows the provider reports now: one it stopped reporting has no line', async () => {
+    const readings = store()
+    now = T0 - HOUR
+    await readings.record(usage([window('five_hour', 40, T0 + HOUR), window('seven_day', 20, T0 + DAY)]))
+    now = T0
+    await readings.record(usage([window('seven_day', 21, T0 + DAY)]))
+    const [trend] = await readings.trends('24h')
+    expect(trend!.windows.map((entry) => entry.id)).toEqual(['seven_day'])
   })
 })
 

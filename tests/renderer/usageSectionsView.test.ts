@@ -13,7 +13,7 @@ import type { ProviderUsage } from '../../src/shared/providerAuth'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const providers: ProviderUsage[] = [
-  { id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [{ id: 'seven_day', label: 'Weekly limit', remainingPercent: 58 }] },
+  { id: 'claude-subscription', label: 'Claude subscription', status: 'available', proxy: { address: '127.0.0.1:8317', key: 'saved' }, windows: [{ id: 'seven_day', label: 'Weekly limit', remainingPercent: 58 }] },
   { id: 'vercel-ai-gateway', label: 'Vercel AI Gateway', authType: 'api_key', status: 'available', windows: [], credit: { balanceUsd: 12.4, usedUsd: 37.6 } },
   { id: 'codex:chatgpt-subscription', label: 'ChatGPT subscription', status: 'unavailable', windows: [], signedOut: true, message: 'Signed out' },
   { id: 'xai', label: 'Grok (xAI)', instanceId: 'pi:xai', authType: 'oauth', status: 'error', windows: [], problem: 'session_expired', message: 'Grok session expired.' },
@@ -121,7 +121,7 @@ describe('providers still on their way', () => {
   })
 
   it('sign-ins still being read show skeleton cells under the usual columns', () => {
-    const claude: ProviderUsage = { id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [], accounts: [
+    const claude: ProviderUsage = { id: 'claude-subscription', label: 'Claude subscription', status: 'available', windows: [], proxy: { address: '127.0.0.1:8317', key: 'saved' }, accounts: [
       { id: 'a', label: 'a@example.com', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 50 }] },
       { id: 'b', label: 'b@example.com', windows: [], pending: true }
     ] }

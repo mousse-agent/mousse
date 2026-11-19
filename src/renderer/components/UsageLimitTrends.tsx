@@ -93,7 +93,9 @@ export function UsageLimitTrends({ trends, range, onRange, localOnly, now = Date
         <Segmented value={range} options={RANGES} onChange={onRange} ariaLabel="Trend range" />
       </div>
     </div>
-    <div className="usage-history-card">
+    {!trend
+      ? <p className="settings-muted usage-empty" data-testid="usage-limit-trends-empty">No limit readings yet</p>
+      : <div className="usage-history-card">
       <UsageAreaChart
         count={starts.length}
         series={series}
@@ -118,6 +120,6 @@ export function UsageLimitTrends({ trends, range, onRange, localOnly, now = Date
           {marked.length > 0 && <span className="usage-limit-legend-item"><span className="usage-limit-legend-reset" aria-hidden="true" />Reset</span>}
         </span>}
       />
-    </div>
+    </div>}
   </section>
 }

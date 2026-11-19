@@ -7,8 +7,6 @@ import { LIMIT_TREND_SPAN_MS, LIMIT_WINDOW_MS, type LimitTrend, type LimitTrendR
 export const LIMIT_READINGS_KEEP_MS = 31 * 86_400_000
 /** A reading that says the same as the last one is kept only once this long has passed since it. */
 export const LIMIT_READING_STEP_MS = 15 * 60_000
-/** A use of the window that falls by this many points without a new reset time is read as a reset. */
-const RESET_DROP = 10
 
 const WINDOWS: ReadonlyArray<[LimitTrendWindowId, string, readonly string[]]> = [
   ['five_hour', '5-hour', ['five_hour', 'rolling']],
@@ -99,7 +97,9 @@ export class LimitReadingStore {
     const trends: LimitTrend[] = []
     for (const [id, list] of byProvider) {
       if (list[list.length - 1]!.t < Math.min(from, now - LIMIT_WINDOW_MS.seven_day)) continue
-      const windows = WINDOWS.map(([windowId, label]) => trendWindow(windowId, label, list, from, now)).filter((window): window is LimitTrendWindow => !!window)
+      // Only the windows the provider reports now: one it stopped reporting is not its limit any more.
+      const latest = list[list.length - 1]!.w
+      const windows = WINDOWS.filter(([windowId]) => latest[windowId]).map(([windowId, label]) => trendWindow(windowId, label, list, from, now)).filter((window): window is LimitTrendWindow => !!window)
       if (windows.length) trends.push({ id, label: list[list.length - 1]!.l, windows })
     }
     return trends.sort((a, b) => a.label.localeCompare(b.label))
@@ -147,39 +147,30 @@ function trendWindow(id: LimitTrendWindowId, label: string, readings: readonly R
   const points: Array<[number, number]> = []
   const resets: number[] = []
   let before: WindowReading | undefined
-  let beforeAt = 0
   // The last reading before the range, so the line starts where it stood.
   let lead: [number, number] | undefined
   for (const reading of readings) {
     const window = reading.w[id]
     if (!window) continue
     if (before) {
-      const [used, resetsAt] = window
-      const [usedBefore, resetBefore] = before
-      // The window reset in between: at the time it was due to, or, without one, just before this reading. From
-      // then until this reading nothing of it was used.
-      let reset: number | undefined
-      if (resetBefore !== null && resetsAt !== null && resetsAt - resetBefore > 60_000 && resetBefore <= reading.t) reset = resetBefore
-      else if (usedBefore - used >= RESET_DROP && (resetBefore === null || resetsAt === null)) reset = Math.max(beforeAt, reading.t - 60_000)
+      // The window reset in between only when the provider moved its reset time on: then at the time it was due.
+      // A fall in use alone is not a reset. From then until this reading nothing of it was used.
+      const [, resetsAt] = window
+      const [, resetBefore] = before
+      const reset = resetBefore !== null && resetsAt !== null && resetsAt - resetBefore > 60_000 && resetBefore <= reading.t ? resetBefore : undefined
       if (reset !== undefined) {
         resets.push(reset)
         if (reset >= from) points.push([reset, 0])
       }
     }
     before = window
-    beforeAt = reading.t
     if (reading.t < from) lead = [from, window[0]]
     else points.push([reading.t, window[0]])
   }
   if (!points.length && !lead) return null
   if (lead && (!points.length || points[0]![0] > from)) points.unshift(lead)
-  const due = before?.[1] ?? undefined
-  // A reset due since the last reading (Mousse was not running, or nothing read it): the line drops there.
-  if (due !== undefined && due > beforeAt && due <= now) {
-    resets.push(due)
-    if (due >= from) points.push([due, 0])
-  }
-  const nextReset = due
+  // A reset due since the last reading is not drawn until a reading shows it happened.
+  const nextReset = before?.[1] ?? undefined
   return {
     id,
     label,
