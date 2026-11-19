@@ -7,7 +7,7 @@ import { unattendedChatTurn } from '../activation/unattended'
 import { replyPreviewText } from '../../../shared/threadPreview'
 import { randomUUID } from 'node:crypto'
 import { askText } from '../../../shared/bots/personal/askText'
-import { launchedActive, withAppletNames, type BotAskCard, type BotAskStatus, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotLaunchedThread, type BotWatcherItem, type BotWorkItem, type BotChip, type BotDetail, type BotError, type BotMessageKind, type BotPermissionItem, type BotReminderItem, type BotRunItem, type BotSummary } from '../../../shared/bots/personal/chat'
+import { launchedActive, withAppletNames, type BotAskCard, type BotAskStatus, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotLaunchedThread, type BotTaskItem, type BotWatcherItem, type BotWorkItem, type BotChip, type BotDetail, type BotError, type BotMessageKind, type BotPermissionItem, type BotReminderItem, type BotRunItem, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
 import { askFingerprint, BOT_BUDGET_WALL_KEYS, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
@@ -249,6 +249,8 @@ export class BotChatProjection {
     launched?(botId: string): BotLaunchedThread[]
     /** The bot's background commands running now. */
     watchers?(botId: string): BotWatcherItem[]
+    /** The checklist kept on these threads (its chat's, then its work's), in that order; never throws. */
+    tasks?(threadIds: string[]): BotTaskItem[]
   }) {}
 
   private get store(): BotStore {
@@ -603,9 +605,10 @@ export class BotChatProjection {
     // The chat and its work are apart: the chat's turn has the status line and Stop, work its own line.
     const chatTurn = liveRows.find((row) => row.lane === 'chat' && row.status === 'running')
     // Work that waits to go on keeps its line (with Stop): held while it waits, waiting its turn once allowed.
-    const work: BotWorkItem[] = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant', 'paused', 'blocked'])
+    const workRows = this.store.activationsIn(definition.id, ['queued', 'running', 'waiting_grant', 'paused', 'blocked'])
       .filter((row) => row.lane === 'run' && (row.status !== 'blocked' || workWaits(row)))
       .sort((a, b) => (a.status === 'queued' ? 1 : 0) - (b.status === 'queued' ? 1 : 0) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+    const work: BotWorkItem[] = workRows
       .map((row) => ({
         id: row.id,
         title: row.trigger.kind === 'work' ? row.trigger.title : oneLine(row.trigger.input, 60),
@@ -633,6 +636,9 @@ export class BotChatProjection {
     // Threads it started that still work keep it busy: it manages them. Those that ended are listed, never counted.
     const threads = this.launchedOf(definition.id)
     const watchers = this.options.watchers?.(definition.id) ?? []
+    // Its checklist: what its chat keeps, then what its work keeps while that work goes on.
+    const taskThreads = [registry?.homeThreadId, ...workRows.map((row) => row.threadId)].filter((id): id is string => Boolean(id))
+    const tasks = taskThreads.length ? this.options.tasks?.(taskThreads) ?? [] : []
     const managing = threads.filter(launchedActive)
     const state = botState({ paused, ...(error ? { error } : {}), openAsks: asks.length + waitingOn.length + Number(Boolean(approval)) + (live + managing.length === 0 ? chatQuestions.length : 0), liveActivations: live + managing.length })
     // Working, but every running activation waits for the internet.
@@ -671,7 +677,8 @@ export class BotChatProjection {
       ...(chatTurn ? { chat: { activationId: chatTurn.id, ...(chatTurn.offline ? { offline: true as const } : {}) } } : {}),
       ...(work.length ? { work } : {}),
       ...(threads.length ? { threads } : {}),
-      ...(watchers.length ? { watchers } : {})
+      ...(watchers.length ? { watchers } : {}),
+      ...(tasks.length ? { tasks } : {})
     }
   }
 

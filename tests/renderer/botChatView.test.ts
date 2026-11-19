@@ -56,7 +56,7 @@ const { ChatsSidebar } = await import('../../src/renderer/components/chats/Chats
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { useThreadFilterStore } = await import('../../src/renderer/stores/threadFilterStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
-const { botMessageScroller, DOING_HOLD_MS } = await import('../../src/renderer/components/bots/BotChatView')
+const { botMessageScroller, DOING_HOLD_MS, BOT_HANDOFF_MS } = await import('../../src/renderer/components/bots/BotChatView')
 const { SETTLE_MS, clearBotLiveReplies } = await import('../../src/renderer/stores/botLiveReplies')
 const { FLOW_CATCH_UP_MS } = await import('../../src/renderer/chat/components/agent-elements/reply-flow')
 
@@ -908,15 +908,15 @@ describe('while it works', () => {
   const presence = () => host.querySelector('.chat-conversation-header .bot-presence')
   const sticker = () => host.querySelector('.bot-header-about .bot-sticker')
 
-  it('types as a messenger does: dots in a bubble with what it is doing now in words, "typing…" and a pen in the header, no spinner or chip; Stop and the mic stay', async () => {
+  it('types as a messenger does: dots in a bubble, "typing…" and a pen in the header, no spinner or chip; Stop and the mic stay', async () => {
     fake.chats.inbox = [message(1, { id: 'o1', author: 'owner', text: 'again' })]
     fake.live.inbox = { activationId: 'act1', chip: { icon: 'search', text: 'searching the web' } }
     await open({ ...inbox, state: 'working', stateText: 'Working…' })
     const typing = transcript().querySelector('.bot-typing')!
-    // A chat opened mid-turn says the step the turn is on, from the page it loaded.
-    expect(typing.getAttribute('aria-label')).toBe('Inbox helper: Searching the web')
-    expect(typing.querySelector('.bot-typing-status')?.firstChild?.textContent).toBe('Searching the web')
-    expect(typing.querySelectorAll('.bot-typing-bubble i')).toHaveLength(3)
+    // A chat opened mid-turn shows the dots alone: Mousse never names the step itself.
+    expect(typing.getAttribute('aria-label')).toBe('Inbox helper is typing')
+    expect(typing.querySelector('.bot-typing-status')).toBeNull()
+    expect(typing.querySelectorAll('.bot-typing-row i')).toHaveLength(3)
     expect(transcript().querySelector('.chat-spin, .bot-chip, .chat-run-status')).toBeNull()
     expect(transcript().textContent).not.toContain('is working')
     expect(presence()?.textContent).toBe('typing…')
@@ -942,7 +942,9 @@ describe('while it works', () => {
     }
     try {
       await open({ ...inbox, state: 'working', stateText: 'Working…' })
-      const dots = [...transcript().querySelectorAll('.bot-typing-bubble i')]
+      // Words beside the dots only when the bot writes its own line.
+      await act(async () => fake.emit.activity('inbox', null, 'act1', 'Looking at your inbox'))
+      const dots = [...transcript().querySelectorAll('.bot-typing-row i')]
       const words = () => transcript().querySelector('.bot-typing-status')!
       const running = () => started.filter((record) => !record.cancelled)
       const onDots = () => running().filter((record) => dots.includes(record.element))
@@ -995,6 +997,7 @@ describe('while it works', () => {
     })
     try {
       await open({ ...inbox, state: 'working', stateText: 'Working…' })
+      await act(async () => fake.emit.activity('inbox', null, 'act1', 'Looking at your inbox'))
       expect(started).toHaveLength(5)
       const last = () => started.map((record) => record.calls.at(-1))
       windowShown(false)
@@ -1011,7 +1014,7 @@ describe('while it works', () => {
   it('says Waiting for internet where it would type, with nothing moving, and still offers Stop', async () => {
     await open({ ...inbox, state: 'working', stateText: 'Waiting for internet', waiting: 'internet' })
     expect(transcript().querySelector('.bot-typing')?.textContent).toBe('Waiting for internet')
-    expect(transcript().querySelector('.bot-typing-bubble, .chat-spin')).toBeNull()
+    expect(transcript().querySelector('.bot-typing-row, .chat-spin')).toBeNull()
     expect(presence()?.textContent).toBe('waiting for internet')
     expect(sticker()).toBeNull()
     await click(button('Stop run'))
@@ -1040,7 +1043,8 @@ describe('a reply as it is written', () => {
     await act(async () => { for (const cb of thread.updated) cb({ threadId: 'home1', message: { id: 'r1', role: 'assistant', content, timestamp: AT, streaming: true, ...over } }) })
     await frame()
   }
-  const live = () => transcript().querySelector('.bot-live-reply')
+  // The reply's words; the typing row it took over from stays in its bubble, unseen.
+  const live = () => transcript().querySelector('.bot-live-reply .bot-turn-reply')
   const stopped = () => transcript().querySelector('.bot-cut-reply')
   // With Animation speed Off (as with reduced motion) the reply's whole words show as they come, with no flow: the tests
   // about what shows and when it goes read it at once. The flow itself has its own test, at normal speed.
@@ -1111,6 +1115,8 @@ describe('a reply as it is written', () => {
     act(() => setAnimationSpeed('normal'))
     await openWriting()
     expect(transcript().querySelector('.bot-typing')).not.toBeNull()
+    const bubble = transcript().querySelector('.bot-typing')?.closest('.bot-bubble')
+    expect(bubble).toBeTruthy()
     // A word still being written is not shown: the dots stay until one is whole.
     await write('The')
     expect(live()).toBeNull()
@@ -1119,6 +1125,13 @@ describe('a reply as it is written', () => {
     // Its first whole word at once, the rest a step at a time.
     expect(live()?.textContent).toBe('The')
     expect(transcript().querySelector('.bot-typing')).toBeNull()
+    // The same bubble takes the words: the typing row fades out over them, then stays unseen, holding the bubble's size.
+    expect(live()?.closest('.bot-bubble')).toBe(bubble)
+    expect(transcript().querySelector('.bot-turn-typing.is-leaving')?.getAttribute('aria-hidden')).toBe('true')
+    expect(live()?.classList.contains('is-arriving')).toBe(true)
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, BOT_HANDOFF_MS + 20)) })
+    expect(transcript().querySelector('.bot-turn-typing.is-held')).not.toBeNull()
+    expect(live()?.classList.contains('is-arriving')).toBe(false)
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, FLOW_CATCH_UP_MS)) })
     expect(live()?.textContent).toBe('The first')
     const first = live()!.querySelector('.an-word')
@@ -1137,6 +1150,8 @@ describe('a reply as it is written', () => {
     await act(async () => fake.emit.message('inbox', message(2, { text: 'The first drive is faster.\n\nThe second one is cheaper.', activationId: 'act_c1' })))
     expect(live()).toBeNull()
     expect(transcript().querySelectorAll('.bot-message:not(.bot-typing)')).toHaveLength(1)
+    // It is drawn in the bubble that was typing and writing it: nothing new mounts.
+    expect(transcript().querySelector('.bot-message .bot-bubble')).toBe(bubble)
     expect(stopped()).toBeNull()
   })
 
@@ -1163,42 +1178,33 @@ describe('a reply as it is written', () => {
     expect(live()?.textContent).toBe('One more thing.')
   })
 
-  it('says beside the dots what the turn is doing from its start; calls quicker than the hold never show; the bot’s own words win', async () => {
+  it('shows the dots alone until the bot says what it does; Mousse adds no words of its own; the bot’s words then stay', async () => {
     await openWriting()
-    const words = () => transcript().querySelector('.bot-typing .bot-typing-status')?.firstChild?.textContent
-    const step = (chip: Parameters<typeof fake.emit.activity>[1], status?: string) => act(async () => fake.emit.activity('inbox', chip, 'act_c1', status))
+    const status = () => transcript().querySelector('.bot-typing .bot-typing-status')
+    const step = (chip: Parameters<typeof fake.emit.activity>[1], line?: string) => act(async () => fake.emit.activity('inbox', chip, 'act_c1', line))
     const pass = (ms: number) => act(async () => { vi.advanceTimersByTime(ms) })
-    // Nothing of the turn yet, and the owner's message is the newest row.
-    expect(words()).toBe('Reading your message')
+    // Nothing of the turn yet: the dots, with no words beside them.
+    expect(transcript().querySelector('.bot-typing .bot-typing-dots')).not.toBeNull()
+    expect(status()).toBeNull()
+    expect(transcript().querySelector('.bot-typing')?.getAttribute('aria-label')).toBe('Inbox helper is typing')
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'requestAnimationFrame', 'cancelAnimationFrame'] })
     try {
-      await step({ icon: 'memory', text: 'looking back', live: true })
-      await pass(DOING_HOLD_MS)
-      expect(words()).toBe('Looking back')
-      // Two calls inside the hold: the line stays, then takes the newest. The one between is never shown.
-      await step({ icon: 'web', text: 'reading a page', highlight: 'example.com', live: true })
-      await pass(DOING_HOLD_MS / 2)
+      // A call of its own with no line from the bot: still no words.
       await step({ icon: 'search', text: 'searching the web', highlight: 'ssd prices', live: true })
-      expect(words()).toBe('Looking back')
-      await pass(DOING_HOLD_MS / 2)
-      expect(words()).toBe('Searching the web · ssd prices')
-      // Its step ended and nothing new came: the words stay.
-      await step(null)
       await pass(DOING_HOLD_MS)
-      expect(words()).toBe('Searching the web · ssd prices')
-      // Its words stream, none of them whole yet, so none shown.
+      expect(status()).toBeNull()
+      // Its words stream, none whole yet: still none.
       await act(async () => { for (const cb of thread.updated) cb({ threadId: 'home1', message: { id: 'r1', role: 'assistant', content: 'The', timestamp: AT, streaming: true } }) })
       await pass(DOING_HOLD_MS)
       expect(live()).toBeNull()
-      expect(words()).toBe('Writing a reply')
-      // A step follows those words, which makes them the bot's own line: it shows at once, over the call that came with
-      // it and the ones after.
+      expect(status()).toBeNull()
+      // A step after those words makes them the bot's own line: it shows at once, and stays after the step ends.
       await act(async () => { for (const cb of thread.added) cb({ threadId: 'home1', message: { id: 't1', role: 'assistant', kind: 'tool_call', content: '', timestamp: AT } }) })
       await step({ icon: 'web', text: 'reading a page', live: true }, 'Comparing the two drives now')
-      expect(words()).toBe('Comparing the two drives now')
-      await step({ icon: 'search', text: 'searching the web', live: true }, 'Comparing the two drives now')
+      expect(status()?.firstChild?.textContent).toBe('Comparing the two drives now')
+      await step(null)
       await pass(DOING_HOLD_MS)
-      expect(words()).toBe('Comparing the two drives now')
+      expect(status()?.firstChild?.textContent).toBe('Comparing the two drives now')
     } finally {
       vi.useRealTimers()
     }
@@ -1722,6 +1728,16 @@ describe('the store behind the chats', () => {
     await act(async () => { await useBotsStore.getState().loadOlder('inbox') })
     expect(useBotsStore.getState().chats.inbox!.messages.map((row) => row.seq)).toEqual(Array.from({ length: 80 }, (_, index) => index + 1))
   })
+
+  it('loading older messages of a turn draws the messages already shown in the same elements', async () => {
+    fake.chats.inbox = Array.from({ length: 80 }, (_, index) => message(index + 1, { activationId: 'act_long' }))
+    await open()
+    const shownFirst = transcript().querySelector<HTMLElement>('article[data-message-id]')!
+    const id = shownFirst.getAttribute('data-message-id')!
+    await act(async () => { await useBotsStore.getState().loadOlder('inbox') })
+    expect(transcript().querySelectorAll('article[data-message-id]').length).toBeGreaterThan(50)
+    expect(transcript().querySelector(`article[data-message-id="${id}"]`)).toBe(shownFirst)
+  })
 })
 
 describe('free while it works (docs/plans/bot-always-free.md)', () => {
@@ -1822,7 +1838,7 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     expect(words()?.textContent).toBe('Looking at your files')
     await act(async () => fake.emit.activity('inbox', null, 'act_c1', 'Checking your shopping list now'))
     expect(words()?.textContent).toBe('Checking your shopping list now')
-    expect(typing().querySelectorAll('.bot-typing-bubble i')).toHaveLength(3)
+    expect(typing().querySelectorAll('.bot-typing-row i')).toHaveLength(3)
     expect(typing().getAttribute('aria-label')).toBe('Inbox helper: Checking your shopping list now')
     // A newer line replaces it, and a long one shows whole.
     const long = 'Reading the three store pages you sent and checking which of them still have the 2 TB drive in stock, with delivery to Pune before Friday'

@@ -59,6 +59,14 @@ function SideChatList({ parentId }: { parentId: string }) {
   const threads = useAppStore((state) => state.threads)
   const chats = useMemo(() => sideChatsOf(parentId, threads), [parentId, threads])
   const [creating, setCreating] = useState(false)
+  // A side chat forks a finished run: until the thread's first one ends there is nothing to fork, so New waits.
+  const forkable = useAppStore((state) => {
+    if (state.activeThreadId !== parentId) return true
+    const asked = state.messages.filter((message) => message.role === 'user').length
+    const phase = state.turnStates[parentId]?.phase
+    return asked > 1 || (asked === 1 && !(phase && isTurnActivePhase(phase)))
+  })
+  const newTitle = forkable ? 'Fork this thread into a side chat' : 'Send this thread a message first'
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -85,7 +93,7 @@ function SideChatList({ parentId }: { parentId: string }) {
     return (
       <div className="side-chats-empty">
         <p>Ask on the side. Nothing here joins this thread.</p>
-        <button type="button" className="side-chats-new" title="Fork this thread into a side chat" disabled={creating} onClick={() => void create()}>
+        <button type="button" className="side-chats-new" title={newTitle} disabled={creating || !forkable} onClick={() => void create()}>
           <Plus size={14} aria-hidden />
           <span>New side chat</span>
         </button>
@@ -97,7 +105,7 @@ function SideChatList({ parentId }: { parentId: string }) {
     <>
       <ul className="lineage-list side-chats-list" aria-label="Side chats">
         <li className="lineage-item">
-          <button type="button" className="lineage-row side-chats-new-row" title="Fork this thread into a side chat" disabled={creating} onClick={() => void create()}>
+          <button type="button" className="lineage-row side-chats-new-row" title={newTitle} disabled={creating || !forkable} onClick={() => void create()}>
             <span className="side-chats-icon"><Plus size={14} aria-hidden /></span>
             <span className="lineage-text"><span className="lineage-name">New side chat</span></span>
           </button>

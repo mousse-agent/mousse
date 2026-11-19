@@ -129,6 +129,18 @@ describe('the Agents pane', () => {
     act(() => useBotsStore.setState({ bots: [summary('b1')] }))
     show(ChatWorkspace, [])
     expect(text('.chat-workspace-empty h1')).toEqual(['Talk to your bots and agents'])
+    // The mascot stands above the title; a click makes it cheer for a moment.
+    const face = () => button('Mousse mascot')?.querySelector('.bot-face')?.getAttribute('data-state')
+    expect(face()).toBe('idle')
+    vi.useFakeTimers()
+    try {
+      click(button('Mousse mascot'))
+      expect(face()).toBe('happy')
+      act(() => { vi.advanceTimersByTime(2000) })
+      expect(face()).toBe('idle')
+    } finally {
+      vi.useRealTimers()
+    }
     expect(button('New bot')).toBeDefined()
     expect(button('New chat')).toBeUndefined()
     show(ChatWorkspace, [agent])

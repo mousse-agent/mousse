@@ -88,11 +88,11 @@ describe('useFlowingText', () => {
   let container: HTMLDivElement
   let root: Root
   let shown = ''
-  function Probe({ text, flowing }: { text: string; flowing: boolean }) {
-    shown = useFlowingText(text, flowing)
+  function Probe({ text, flowing, flowKey }: { text: string; flowing: boolean; flowKey?: string }) {
+    shown = useFlowingText(text, flowing, flowKey)
     return null
   }
-  const render = (text: string, flowing = true) => act(() => root.render(createElement(Probe, { text, flowing })))
+  const render = (text: string, flowing = true, flowKey?: string) => act(() => root.render(createElement(Probe, { text, flowing, flowKey })))
   const wait = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
 
   beforeEach(() => {
@@ -128,6 +128,17 @@ describe('useFlowingText', () => {
     act(() => setAnimationSpeed('off'))
     await render('Checked the build and the te')
     expect(shown).toBe('Checked the build and the ')
+  })
+
+  it('a new key starts the next reply from nothing, and shows its first word even when it is as long as the last step', async () => {
+    await render('Hi ', true, 'first')
+    await wait(FLOW_CATCH_UP_MS)
+    expect(shown).toBe('Hi ')
+    await render('Yo there ', true, 'second')
+    expect(shown).toBe('')
+    // Its first step comes at once.
+    await wait(1)
+    expect(shown).toBe('Yo ')
   })
 
   it('shows all of a reply that is no longer streaming', async () => {
