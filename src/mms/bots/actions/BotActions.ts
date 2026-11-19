@@ -367,7 +367,7 @@ export class BotActions {
     if (exact.length > ACTION_MAX_ARGUMENT_CHARS)
       return { text: 'These arguments exceed the 256,000-character limit for a complete review. Nothing was held or sent. Send less.', isError: true }
     const place = actionPlace(this.host.schema(tool), args)
-    const uncertain = history.some(a => a.activation_id === row.id && a.status === 'uncertain' && a.card_json === null && a.args_digest === digest)
+    const uncertain = history.some(a => a.activation_id === row.id && a.status === 'uncertain')
     const exception = !uncertain && this.host.alone?.(row, tool, place, args, dispatch)
     const now = Date.parse(this.host.store.now())
     const counts = exception ? this.host.store.get(`SELECT
