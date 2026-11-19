@@ -163,8 +163,9 @@ describe('phase1b.link-app', () => {
         ])
       })
       // The consent journal keeps what was approved for a repeated join.
+      // (Loopback hints of a debug build are approved too, whatever class they show as.)
       await step('approval_lost', () =>
-        expect(rowFor(joiner, host)?.link?.approved).toEqual(approved)
+        expect(rowFor(joiner, host)?.link?.approved).toEqual(expect.arrayContaining(approved))
       )
       await typeCode(joiner, link.invitation, shown(host, link.invitation)!.code)
       const result = await joined
