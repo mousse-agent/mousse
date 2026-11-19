@@ -171,21 +171,6 @@
       ],
       "claimedAt": "2026-11-18T19:20:29.806Z",
       "expiresAt": "2026-11-18T21:20:29.806Z"
-    },
-    {
-      "task": "worktree-setup-failure-retry",
-      "session": "Animatrix-de8155",
-      "machine": "Animatrix",
-      "branch": "mousse/implement-the-fix-from-this",
-      "paths": [
-        "src/mms/worktree/worktreeLayout.ts",
-        "src/mms/workspace",
-        "src/mms/orchestrator/OrchestratorService.ts",
-        "src/renderer/chat/components/SetupFailureNotice.tsx",
-        "src/shared/setupFailure.ts"
-      ],
-      "claimedAt": "2026-11-19T11:35:11.916Z",
-      "expiresAt": "2026-11-19T13:35:11.916Z"
     }
   ]
 }
