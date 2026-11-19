@@ -63,3 +63,10 @@ it.each(['folder', 'folder_id', 'PARENT-ID', 'parent', 'path', 'dir', 'directory
 it.each([undefined, { repo: 'r' }, { database: 'd' }])('E1 r3c non-file places never make names variable: %j', place => {
   expect(argumentContract({ name: 'scan-1.pdf' }, 'test-key', place).varying).not.toContain('name')
 })
+
+it('E1 r3c address scan bounds NFKC-expanding content', () => {
+  const body = '㌖'.repeat(255000)
+  const start = performance.now()
+  expect(argumentContract({ body }, 'test-key').tokens.body).toEqual([])
+  expect(performance.now() - start).toBeLessThan(200)
+})
