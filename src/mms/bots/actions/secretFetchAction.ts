@@ -21,7 +21,10 @@ export async function secretFetchAction(store: BotStore, input: SecretFetchActio
     const refusal = input.refusal ?? (count(at - 3600000, input.secret) >= BOT_ALONE_HOURLY_CALLS ? `You've read from ${input.service} ${BOT_ALONE_HOURLY_CALLS} times this hour; try again later or tell your owner.` : count(at - 86400000) >= BOT_ALONE_DAILY_CALLS ? `You've made ${BOT_ALONE_DAILY_CALLS} service reads in the last day; try again later or tell your owner.` : undefined)
     // Header values are never needed in the action history, including rejected foreign credentials.
     const historyArgs = {...input.args}
-    if (historyArgs.headers && typeof historyArgs.headers === 'object') historyArgs.headers = Object.keys(historyArgs.headers)
+    if (Object.hasOwn(historyArgs, 'headers')) {
+      const headers = historyArgs.headers
+      historyArgs.headers = headers && typeof headers === 'object' && !Array.isArray(headers) ? Object.keys(headers) : []
+    }
     const id = randomUUID(), args = mask(JSON.stringify(historyArgs))
     store.run(`INSERT INTO bot_actions(id,call_key,bot_id,activation_id,lane,kind,target_json,args_json,args_digest,binding_json,status,created_at,answered_at) VALUES(?,?,?,?,'run','secret_fetch',?,?,?,?,'approved',?,?)`, id, callKey, botId, activationId, mask(JSON.stringify({service:input.service})), args, createHash('sha256').update(args).digest('hex'), JSON.stringify({secretDigest:createHash('sha256').update(input.secret).digest('hex')}), now, now)
     if (!refusal) store.run("UPDATE bot_actions SET status = 'running', ran_at = ? WHERE id = ?", now, id)
