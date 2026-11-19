@@ -1,6 +1,7 @@
 import { NetError } from '../../../shared/net/errors'
 import type { NodeId } from '../../../shared/net'
 import { ROUTED_LARGE_READS, routedNetMethod } from '../../../shared/bridge/routed'
+import { parseRelayDestination } from '../../../shared/netEngine/routes'
 import { engineLimits } from '../limits'
 import {
   ENGINE_LABELS,
@@ -488,12 +489,29 @@ export class EngineHelper {
 
 const ROUTE_KINDS = new Set(['tcp', 'ws', 'ssh'])
 const ROUTE_CLASSES = new Set(['lan', 'tailnet', 'public', 'tunnel', 'ssh'])
+const RELAY_CLASSES = new Set(['relay', 'relay_bulk'])
 
 /** `conn.up.route` as the app keeps it; anything else is no route. */
-function readRoute(value: unknown): EngineRoute | undefined {
+export function readRoute(value: unknown): EngineRoute | undefined {
   if (!value || typeof value !== 'object') return undefined
-  const { kind, class: cls } = value as { kind?: unknown; class?: unknown }
-  return typeof kind === 'string' && ROUTE_KINDS.has(kind) && typeof cls === 'string' && ROUTE_CLASSES.has(cls)
+  const { kind, class: cls, destination } = value as {
+    kind?: unknown
+    class?: unknown
+    destination?: unknown
+  }
+  if (typeof kind !== 'string' || typeof cls !== 'string') return undefined
+  // A relay connection (Phase 3): its class and the relay it runs through.
+  if (kind === 'relay')
+    return RELAY_CLASSES.has(cls)
+      ? {
+          kind,
+          class: cls as EngineRoute['class'],
+          ...(typeof destination === 'string' && parseRelayDestination(destination)
+            ? { destination }
+            : {})
+        }
+      : undefined
+  return ROUTE_KINDS.has(kind) && ROUTE_CLASSES.has(cls)
     ? { kind: kind as EngineRoute['kind'], class: cls as EngineRoute['class'] }
     : undefined
 }

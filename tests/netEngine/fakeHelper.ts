@@ -89,8 +89,8 @@ interface Conn {
   b: FakeHelper
   ends: Set<End>
   up: boolean
-  /** The route it came up on (1.1). */
-  route?: { kind: string; class: RouteClass }
+  /** The route it came up on (1.1); a relay's (Phase 3) names its destination. */
+  route?: { kind: string; class: string; destination?: string }
 }
 
 export class FakeNetwork {
@@ -124,6 +124,10 @@ export class FakeNetwork {
   classMap?: Record<string, RouteClass>
   /** What each identity's helper keeps for each peer (it survives the helper's restarts, as `peers.json` does). */
   private readonly known = new Map<string, Map<string, Known>>()
+  /** Identities reached only through a relay (Phase 3): dials to one come up on that relay's destination. */
+  readonly relayed = new Map<string, string>()
+  /** Each identity's relays (Phase 3), kept across its helper's restarts; none means its helper has no relays. */
+  readonly relays = new Map<string, FakeRelays>()
 
   /** @internal Every peer `self` keeps something for. */
   knownPeers(self: string): Array<[string, Known]> {
@@ -241,6 +245,8 @@ export class FakeNetwork {
    * what `from` keeps for it) the other helper answers on. Undefined in 1.0; `unreachable` when none answers.
    */
   route(from: string, identity: string, candidates?: string[]): Conn['route'] {
+    const relay = this.relayed.get(identity)
+    if (relay) return { kind: 'relay', class: 'relay', destination: relay }
     if (this.minor < 1) return undefined
     const listens = this.listensOn(identity)
     const route = (candidates ?? this.candidates(from, identity)).find((candidate) =>
@@ -426,8 +432,26 @@ function pipePair(): { app: AppPipe; helper: AppPipe } {
   return { app: end(toApp, toHelper), helper: end(toHelper, toApp) }
 }
 
+/**
+ * A helper's relays (Phase 3 §B.9, §B.11), when it has them: its own relays as `relay.list` answers, each peer's
+ * `peers.list[].relay`, each caller's `grants.list[].relay`, and the refusal `relay.enroll` answers next.
+ */
+export interface FakeRelays {
+  available: boolean
+  relays: Array<Record<string, any>>
+  peers: Map<string, Record<string, any>>
+  grants: Map<string, string>
+  enrollError?: string
+}
+
 export class FakeHelper {
   alive = true
+  /** Every request its app sent, in order. */
+  readonly requests: Array<Record<string, any>> = []
+  /** Its relays; a helper without them answers `unknown_op` to every relay request, as a 1b helper does. */
+  get relays(): FakeRelays | undefined {
+    return this.network.relays.get(this.identity)
+  }
   /** The app's end of the channel. */
   readonly pipe: AppPipe
   private readonly own: AppPipe
@@ -525,6 +549,10 @@ export class FakeHelper {
   }
   private event(event: Record<string, unknown>): void {
     this.send(jsonFrame(event))
+  }
+  /** Sends its app an event, as the helper does on its own (`relay.state`, `peer.manifest`, …). */
+  emit(event: Record<string, unknown>): void {
+    this.event(event)
   }
 
   /** @internal */
@@ -649,7 +677,13 @@ export class FakeHelper {
   private request(message: Record<string, any>): void {
     const re = message.id
     const reply = (fields: Record<string, unknown> = {}) => this.send(jsonFrame({ re, ...fields }))
+    this.requests.push(message)
     try {
+      const op = String(message.op)
+      if (this.helloed && (op.startsWith('relay.') || op.startsWith('peer.relay.') || op === 'peers.list')) {
+        if (!this.relays) return reply({ error: 'unknown_op', reason: op })
+        return reply(relayAnswer(message, this.relays))
+      }
       if (!this.helloed && message.op !== 'hello')
         return reply({ error: 'no_hello', reason: 'hello first' })
       switch (message.op) {
@@ -838,7 +872,8 @@ export class FakeHelper {
               name: '',
               role: 'owner',
               expires_at: null,
-              receipt: null
+              receipt: null,
+              ...(this.relays ? { relay: this.relays.grants.get(caller) ?? 'no_key' } : {})
             }))
           })
         case 'grant.remove': {
@@ -926,6 +961,66 @@ export class FakeHelper {
     } catch (error) {
       reply({ error: (error as { code?: string }).code ?? 'internal' })
     }
+  }
+}
+
+/** The helper's answers to relay requests (Phase 3), over what a test set in `relays`. */
+function relayAnswer(message: Record<string, any>, relays: FakeRelays): Record<string, unknown> {
+  const find = (id: unknown) => relays.relays.find((relay) => relay.id === id)
+  switch (message.op) {
+    case 'relay.list':
+      return { relays: relays.relays, available: relays.available }
+    case 'relay.enroll': {
+      if (relays.enrollError) return { error: relays.enrollError, reason: 'refused' }
+      const match = /^mousse-relay:\/\/([^/#]+)\/#([A-Za-z0-9_-]+)\./.exec(String(message.link))
+      if (!match) return { error: 'bad_link', reason: "That isn't a relay link" }
+      const id = Buffer.from(match[2]!, 'base64url').toString('hex')
+      if (find(id)) return { error: 'already', reason: 'This relay is already set up' }
+      const relay = {
+        id,
+        endpoint: match[1],
+        destination: `relay://${match[1]}`,
+        state: 'registered',
+        reason: null,
+        retry_ms: null,
+        callers: relays.grants.size,
+        callers_max: 256,
+        added_at: Math.floor(Date.now() / 1000),
+        rotated_at: null,
+        rotating_until: null
+      }
+      relays.relays.push(relay)
+      return { relay }
+    }
+    case 'relay.remove': {
+      if (!find(message.relay)) return { error: 'no_relay', reason: 'No such relay' }
+      relays.relays = relays.relays.filter((relay) => relay.id !== message.relay)
+      return { removed: true }
+    }
+    case 'relay.rotate': {
+      const relay = find(message.relay)
+      if (!relay) return { error: 'no_relay', reason: 'No such relay' }
+      if (relay.state !== 'registered') return { error: 'not_registered', reason: 'not connected' }
+      const now = Math.floor(Date.now() / 1000)
+      Object.assign(relay, { rotated_at: now, rotating_until: now + 3600 })
+      return { relay }
+    }
+    case 'peer.relay.allow':
+    case 'peer.relay.disallow': {
+      const allow = message.op === 'peer.relay.allow'
+      const route = (relays.peers.get(String(message.identity))?.routes ?? []).find(
+        (item: Record<string, unknown>) => item.destination === message.destination
+      )
+      const changed = !!route && route.approved !== allow
+      if (route) Object.assign(route, { approved: allow, source: allow ? 'manifest' : null })
+      return { changed }
+    }
+    case 'peers.list':
+      return {
+        peers: [...relays.peers].map(([identity, relay]) => ({ identity, name: '', relay }))
+      }
+    default:
+      return { error: 'unknown_op', reason: String(message.op) }
   }
 }
 

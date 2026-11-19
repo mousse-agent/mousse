@@ -5,7 +5,7 @@ import {
   type NetEngineJoinPreview,
   type NetEngineStatus
 } from '../../../shared/netEngine/local'
-import { ROUTE_CLASS_LABEL } from '../../../shared/netEngine/routes'
+import { destinationText, ROUTE_CLASS_LABEL } from '../../../shared/netEngine/routes'
 import { qrSvgPath } from '../../lib/plusQr'
 import { CopyButton } from '../settings/IconButtons'
 import { Modal } from '../ui/Modal'
@@ -261,9 +261,7 @@ function JoinRoutes({
           className="settings-muted engine-destinations"
           title="Connect lets this computer dial these addresses."
         >
-          {preview.destinations
-            .map((item) => `${item.label} (${ROUTE_CLASS_LABEL[item.cls]})`)
-            .join(', ')}
+          {preview.destinations.map(destinationText).join(', ')}
         </p>
       )}
       {!!preview.shareable?.length && (

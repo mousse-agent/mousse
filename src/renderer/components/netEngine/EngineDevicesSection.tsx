@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { AlertTriangle, Laptop, Network, Plus, X } from '../../lib/icons'
 import type { NetEngineDevice, NetEngineStatus } from '../../../shared/netEngine/local'
-import { routeText } from '../../../shared/netEngine/routes'
+import { relayText, routeText } from '../../../shared/netEngine/routes'
 import type { PlatformRequestMethod } from '../../../shared/platform'
 import { refreshComputers, useComputers } from '../../lib/computers'
 import { useAppStore } from '../../stores/appStore'
@@ -11,7 +11,18 @@ import { RowMenu, type RowMenuItem } from '../integrations/RowMenu'
 import { SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
 import { Modal } from '../ui/Modal'
 import { AddEngineDeviceDialog } from './AddEngineDeviceDialog'
-import { engineRow, engineWhere, SHARED_ACCOUNT_DETAIL, SHARED_ACCOUNT_LINE } from './engineRows'
+import {
+  engineRow,
+  engineWhere,
+  relayOfferLine,
+  RELAY_LIMIT_DETAIL,
+  RELAY_LIMIT_LINE,
+  RELAY_STALE_DETAIL,
+  RELAY_STALE_LINE,
+  SHARED_ACCOUNT_DETAIL,
+  SHARED_ACCOUNT_LINE,
+  type EngineRowAction
+} from './engineRows'
 import { ReachSection } from './ReachSection'
 import './engine.css'
 
@@ -91,7 +102,19 @@ export function EngineDevicesSection() {
     const view = engineRow(device)
     const open = selected === device.node
     const node = nodes.find((item) => item.node === device.node)
-    const items: RowMenuItem[] = view.actions.map((kind) =>
+    const relay = device.relay
+    // An allowed relay route can be taken back from the row (Phase 3 §B.11), before Remove.
+    const relayItems: RowMenuItem[] =
+      device.state === 'removing'
+        ? []
+        : (relay?.allowed ?? []).map((destination) => ({
+            label: `Stop using relay ${relayText(destination)}`,
+            action: 'engine-relay-disallow',
+            title: `${device.name} is no longer dialled through this relay.`,
+            onSelect: () =>
+              void action('netEngine.relay.disallow', { node: device.node, destination })
+          }))
+    const menuItem = (kind: EngineRowAction): RowMenuItem =>
       kind === 'access'
         ? {
             label: open ? 'Hide access' : 'Access',
@@ -116,7 +139,10 @@ export function EngineDevicesSection() {
                 action: 'engine-remove',
                 onSelect: () => setRemoving(device)
               }
+    const items: RowMenuItem[] = view.actions.flatMap((kind) =>
+      kind === 'remove' ? [...relayItems, menuItem(kind)] : [menuItem(kind)]
     )
+    if (!view.actions.includes('remove')) items.push(...relayItems)
     return [
       <SettingsRow
         key={device.node}
@@ -145,6 +171,22 @@ export function EngineDevicesSection() {
             <span title={device.addresses?.map(routeText).join(', ')}>
               {engineWhere(device)}
             </span>
+            {relay?.stale && (
+              <>
+                {' · '}
+                <span className="settings-muted" title={RELAY_STALE_DETAIL(device.name)}>
+                  {RELAY_STALE_LINE}
+                </span>
+              </>
+            )}
+            {relay?.limit && (
+              <>
+                {' · '}
+                <span className="settings-muted" title={RELAY_LIMIT_DETAIL}>
+                  {RELAY_LIMIT_LINE}
+                </span>
+              </>
+            )}
           </span>
         }
         control={
@@ -175,6 +217,26 @@ export function EngineDevicesSection() {
           }
         />
       ),
+      ...(relay?.offered ?? []).map((destination) => (
+        <SettingsRow
+          key={`${device.node}-relay-${destination}`}
+          indent
+          title={relayOfferLine(device.name, destination)}
+          control={
+            <button
+              type="button"
+              className="settings-btn"
+              disabled={busy}
+              title="Not dialled until you allow it."
+              onClick={() =>
+                void action('netEngine.relay.allow', { node: device.node, destination })
+              }
+            >
+              Allow
+            </button>
+          }
+        />
+      )),
       open && node && (
         <DevicePresetRow
           key={`${device.node}-access`}
@@ -237,7 +299,9 @@ export function EngineDevicesSection() {
         )}
       </SettingsGroup>
 
-      {status.on && status.reach && <ReachSection status={status} onChanged={read} />}
+      {status.on && (status.reach || status.relays) && (
+        <ReachSection status={status} onChanged={read} />
+      )}
 
       {adding && <AddEngineDeviceDialog status={status} onClose={() => setAdding(false)} />}
 

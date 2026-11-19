@@ -16,7 +16,12 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.address.remove': ['node', 'address'],
   'netEngine.address.use': ['node'],
   'netEngine.join.preview': ['ticket'],
-  'netEngine.routes.test': ['route']
+  'netEngine.routes.test': ['route'],
+  'netEngine.relay.enroll': ['link'],
+  'netEngine.relay.remove': ['relay'],
+  'netEngine.relay.rotate': ['relay'],
+  'netEngine.relay.allow': ['node', 'destination'],
+  'netEngine.relay.disallow': ['node', 'destination']
 }
 
 const strings = (value: unknown): value is string[] =>
@@ -125,6 +130,19 @@ export function registerNetEngineMethods(
             }
             case 'netEngine.routes.test':
               return engine.testRoute(p.route)
+            case 'netEngine.relay.enroll':
+              await engine.enrollRelay(p.link)
+              return engine.status()
+            case 'netEngine.relay.remove':
+              await engine.removeRelay(p.relay)
+              return engine.status()
+            case 'netEngine.relay.rotate':
+              await engine.rotateRelay(p.relay)
+              return engine.status()
+            case 'netEngine.relay.allow':
+            case 'netEngine.relay.disallow':
+              await engine.allowRelay(p.node, p.destination, method === 'netEngine.relay.allow')
+              return engine.status()
           }
         } catch (error) {
           if (error instanceof NetError) {

@@ -20,7 +20,9 @@ import type {
 } from '../../shared/netEngine/local'
 import {
   ownerRoute,
+  parseRelayDestination,
   parseRoute,
+  relayText,
   routeClass,
   routeText,
   ticketDestinations
@@ -60,6 +62,18 @@ import {
 } from './helper/supervisor'
 import { EnginePairing, type PairingStep } from './pairing'
 import { routeSetupProbes } from './probes'
+import {
+  deviceRelay,
+  nextStale,
+  readGrantRelays,
+  readPeerRelays,
+  readRelayInfo,
+  readRelayList,
+  relayError,
+  relayLink,
+  relaysStatus,
+  type RelayView
+} from './relays'
 import { automatic } from './routes'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 import { readTicket } from './ticket'
@@ -118,6 +132,14 @@ export class NetEngineService implements EngineDirectoryPort {
   private readonly since = new Map<string, number>()
   /** Wakes the windows when a condition is due to show (`rowStuckMs` after it began). */
   private stuckTimer?: ReturnType<typeof setTimeout>
+  /**
+   * What the helper running now said of relays (Phase 3): undefined until it answered, null when it has none (it
+   * refused `relay.list`).
+   */
+  private relayView?: RelayView | null
+  /** A read of the relay lists is running; `relayAgain` asks for one more after it. */
+  private relayReading?: Promise<void>
+  private relayAgain = false
   constructor(
     private readonly options: {
       profileDir: string
@@ -233,8 +255,173 @@ export class NetEngineService implements EngineDirectoryPort {
       ...(this.routes().length ? { routes: this.routes() } : {}),
       ...(this.sharedAccount() ? { sharedAccount: true } : {}),
       scanIntervalMs: engineLimits().scanIntervalMs,
-      ...(this.reach() ? { reach: this.reach() } : {})
+      ...(this.reach() ? { reach: this.reach() } : {}),
+      ...(this.relayView ? { relays: relaysStatus(this.relayView) } : {})
     }
+  }
+
+  // ---------------------------------------------------------------- relays (Phase 3 §B.5, §B.9, §B.11)
+
+  /**
+   * Settings → Reach → Your own relay: the owner pastes the link `mousse-relay init` or `enroll` printed. The helper
+   * dials the relay pinned to the link's id and registers; pasting is also the owner's approval of that relay.
+   */
+  async enrollRelay(link: string): Promise<void> {
+    const helper = this.relayHelper()
+    const value = relayLink(link)
+    if (!value)
+      throw new NetError('bad_request', "That isn't a relay link.", { details: { reason: 'bad_link' } })
+    let answer: Record<string, unknown>
+    try {
+      answer = await helper.request(
+        'relay.enroll',
+        { link: value },
+        engineLimits().relayEnrollDeadlineMs
+      )
+    } catch (error) {
+      throw relayError(error)
+    }
+    this.relayInfo(helper, answer.relay)
+    this.rereadRelays()
+  }
+
+  /** Remove on one of this computer's relays: it stops registering there, and leaves the next invitations. */
+  async removeRelay(relay: string): Promise<void> {
+    const helper = this.relayHelper()
+    try {
+      await helper.request('relay.remove', { relay })
+    } catch (error) {
+      throw relayError(error)
+    }
+    if (this.helper === helper) this.relayView?.relays.delete(relay)
+    this.changed()
+    this.rereadRelays()
+  }
+
+  /** New relay key: a new registration key takes over, the old one kept until the overlap ends (§B.4, §B.11). */
+  async rotateRelay(relay: string): Promise<void> {
+    const helper = this.relayHelper()
+    let answer: Record<string, unknown>
+    try {
+      answer = await helper.request('relay.rotate', { relay })
+    } catch (error) {
+      throw relayError(error)
+    }
+    this.relayInfo(helper, answer.relay)
+  }
+
+  /**
+   * Allow on "<host> can be reached through relay <host:port>. Allow?" (§B.11), or its removal from the row: the
+   * pairing's relay route to `destination` is dialled from now on, or no longer.
+   */
+  async allowRelay(node: NodeId, destination: string, allow: boolean): Promise<void> {
+    const started = this.require()
+    const row = started.peers.serving(node)
+    if (!row) throw new NetError('bad_request', 'Unknown device.')
+    const parsed = parseRelayDestination(destination)
+    if (!parsed)
+      throw new NetError('bad_request', "That isn't a relay.", { details: { reason: 'bad_destination' } })
+    const helper = this.relayHelper()
+    try {
+      await helper.request(allow ? 'peer.relay.allow' : 'peer.relay.disallow', {
+        identity: row.endpoint,
+        destination: parsed.destination
+      })
+    } catch (error) {
+      throw relayError(error)
+    }
+    // The row changes at once; the read after it confirms.
+    const peer = this.relayView?.peers.get(row.endpoint.toLowerCase())
+    const route = peer?.routes.find((item) => item.destination === parsed.destination)
+    if (route) {
+      route.approved = allow
+      if (allow) route.source = 'manifest'
+      else delete route.source
+    }
+    this.changed()
+    this.rereadRelays()
+  }
+
+  /** The helper running now, when it has relays. */
+  private relayHelper(): EngineHelper {
+    this.require()
+    const helper = this.helper
+    if (!helper) throw new NetError('peer_offline', 'Turn networking on first.')
+    if (this.relayView === null)
+      throw new NetError('bad_request', 'Update Mousse to use relays.', {
+        details: { reason: 'no_relays' }
+      })
+    return helper
+  }
+
+  /** One own relay as the helper said it (`relay.enroll`, `relay.rotate`, `relay.state`). */
+  private relayInfo(helper: EngineHelper, value: unknown): void {
+    const relay = readRelayInfo(value, Date.now())
+    if (!relay || this.helper !== helper) return
+    this.relayView ??= { available: true, relays: new Map(), peers: new Map(), grants: new Map() }
+    this.relayView.relays.set(relay.id, relay)
+    this.changed()
+  }
+
+  /** The helper's relay events: an own relay's state is applied; the rest are read again. */
+  private relayEvent(helper: EngineHelper, event: Record<string, unknown>): void {
+    if (this.helper !== helper || this.relayView === null) return
+    switch (event.ev) {
+      case 'relay.state':
+        return this.relayInfo(helper, event.relay)
+      case 'peer.manifest':
+      case 'peer.relay.offered':
+      case 'peer.keys':
+      // A pairing made or removed here moves which callers fit within the relay limit.
+      case 'enrolled':
+      case 'grant.closed':
+        return this.rereadRelays()
+    }
+  }
+
+  /** Reads the relay lists again (one read at a time; one more after it when asked meanwhile). */
+  private rereadRelays(): void {
+    const helper = this.helper
+    if (!helper || this.relayView === null) return
+    if (this.relayReading) {
+      this.relayAgain = true
+      return
+    }
+    this.relayReading = this.readRelays(helper)
+      .catch(() => undefined)
+      .finally(() => {
+        this.relayReading = undefined
+        if (!this.relayAgain) return
+        this.relayAgain = false
+        this.rereadRelays()
+      })
+  }
+
+  /** `relay.list`, `peers.list` and `grants.list`; a helper that refuses `relay.list` has no relays. */
+  private async readRelays(helper: EngineHelper): Promise<void> {
+    let list: Record<string, unknown>
+    try {
+      list = await helper.request('relay.list')
+    } catch (error) {
+      if (this.helper === helper && helperCode(error) === 'unknown_op') {
+        this.relayView = null
+        this.changed()
+      }
+      return
+    }
+    const [peers, grants] = await Promise.all([
+      helper.request('peers.list').catch(() => undefined),
+      helper.request('grants.list').catch(() => undefined)
+    ])
+    if (this.helper !== helper) return
+    const before = this.relayView
+    this.relayView = {
+      available: list.available !== false,
+      relays: readRelayList(list, Date.now()),
+      peers: peers ? readPeerRelays(peers) : (before?.peers ?? new Map()),
+      grants: grants ? readGrantRelays(grants) : (before?.grants ?? new Map())
+    }
+    this.changed()
   }
 
   // ---------------------------------------------------------------- this computer's routes (Phase 1b §1.5)
@@ -537,8 +724,12 @@ export class NetEngineService implements EngineDirectoryPort {
         const outDown = held(`${node} out`, paired && !online) >= stuckMs
         const inDown = held(`${node} in`, paired && !serving) >= stuckMs
         const unreachable = outDown && serving ? 'out' : inDown && online ? 'in' : undefined
-        // The class of the route its connection came up on (§7 `conn.up.route`), this computer's dial first.
-        const route = started.sessions.route(node)?.class
+        // The class of the route its connection came up on (§7 `conn.up.route`), this computer's dial first; a
+        // relay connection names its relay.
+        const up = started.sessions.route(node)
+        const route = up?.kind === 'relay' ? 'relay' : (up?.class as NetEngineDevice['route'])
+        const via = up?.kind === 'relay' && up.destination ? relayText(up.destination) : undefined
+        const relay = this.relayView ? deviceRelay(this.relayView, row.endpoint, now) : undefined
         return {
           node,
           name: row.name,
@@ -551,18 +742,26 @@ export class NetEngineService implements EngineDirectoryPort {
           ...(started.pairing.certificateWindow(node) ? { certificateWindow: true } : {}),
           ...(row.addresses?.length ? { addresses: row.addresses } : {}),
           ...(route ? { route } : {}),
+          ...(via ? { via } : {}),
           ...(row.offered?.length ? { offered: row.offered } : {}),
-          ...(row.source ? { source: row.source } : {})
+          ...(row.source ? { source: row.source } : {}),
+          ...(relay ? { relay } : {})
         }
       })
     for (const key of [...this.since.keys()]) if (!seen.has(key)) this.since.delete(key)
-    this.wakeWhenStuck(now, stuckMs)
+    // A pairing's relay info going stale shows then too.
+    const stale = this.relayView ? nextStale(this.relayView, now) : undefined
+    this.wakeWhenStuck(now, stuckMs, stale)
     return devices
   }
 
-  /** A condition that has not shown yet shows once it has held for the bound: the windows read again then. */
-  private wakeWhenStuck(now: number, stuckMs: number): void {
+  /**
+   * A condition that has not shown yet shows once it has held for the bound, and relay info once it goes stale
+   * (`also`): the windows read again then.
+   */
+  private wakeWhenStuck(now: number, stuckMs: number, also?: number): void {
     const due = [...this.since.values()].map((at) => at + stuckMs).filter((at) => at > now)
+    if (also !== undefined && also > now) due.push(also)
     if (this.stuckTimer) clearTimeout(this.stuckTimer)
     this.stuckTimer = undefined
     if (!due.length || !this.started) return
@@ -571,7 +770,8 @@ export class NetEngineService implements EngineDirectoryPort {
         this.stuckTimer = undefined
         this.changed()
       },
-      Math.min(...due) - now + 50
+      // A timer's longest wait is about 24 days; one due later is set again when it fires.
+      Math.min(Math.min(...due) - now + 50, 2 ** 31 - 1)
     )
     this.stuckTimer.unref?.()
   }
@@ -834,6 +1034,7 @@ export class NetEngineService implements EngineDirectoryPort {
     this.since.clear()
     this.helper?.close()
     this.helper = undefined
+    this.relayView = undefined
     clearInterval(started.timer)
     this.options.net.setEngineAuthorizer(undefined)
     started.sessions.closeAll('stopped')
@@ -904,15 +1105,21 @@ export class NetEngineService implements EngineDirectoryPort {
       }
     })
     this.helper = helper
+    this.relayView = undefined
     helper.onEvent((event) => started.pairing.event(event))
+    helper.onEvent((event) => this.relayEvent(helper, event))
     helper.onPaused(() => this.changed())
     helper.channel.onClose(() => {
-      if (this.helper === helper) this.helper = undefined
+      if (this.helper !== helper) return
+      this.helper = undefined
+      this.relayView = undefined
     })
     const told = this.selfName()
     await helper.hello()
     this.toldName = told
     this.changed()
+    // Its relays, and what each pairing's relays need (Phase 3); a helper without them says so once.
+    if (this.helper === helper) this.rereadRelays()
     // Removals finish, ceremonies resume, owed rows are written and every pairing is dialled again.
     if (this.helper === helper) void started.pairing.recover().catch(() => undefined)
     return helper

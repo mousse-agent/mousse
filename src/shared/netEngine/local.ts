@@ -1,4 +1,4 @@
-import type { RouteClass } from './routes'
+import type { RouteClass, TicketDestination } from './routes'
 
 /**
  * The daemon methods a Mousse window calls for the new networking (Phase 1a): the switch, the devices and their
@@ -21,7 +21,13 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.address.use',
   'netEngine.join.preview',
   'netEngine.routes.config',
-  'netEngine.routes.test'
+  'netEngine.routes.test',
+  // Phase 3: relays (§B.9, §B.11)
+  'netEngine.relay.enroll',
+  'netEngine.relay.remove',
+  'netEngine.relay.rotate',
+  'netEngine.relay.allow',
+  'netEngine.relay.disallow'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
 
@@ -69,12 +75,75 @@ export interface NetEngineDevice {
   certificateWindow?: boolean
   /** Addresses added for it by hand (routes of any owner kind); none means it is found on the local network. */
   addresses?: string[]
-  /** The class of the route its connection runs over now (`conn.up.route`), while one is up. */
-  route?: RouteClass
+  /** The class of the route its connection runs over now (`conn.up.route`), while one is up; `relay` through one. */
+  route?: RouteClass | 'relay'
+  /** While connected through a relay: the relay's `host:port`. */
+  via?: string
   /** Routes it offered in pairback that need the owner's Use before they are dialled (§1.3 suggestions). */
   offered?: string[]
   /** It was added over SSH (§3.4): one way only, until a Send link adds the other direction. */
   source?: 'ssh'
+  /** Its relays (Phase 3), when anything about them needs showing. */
+  relay?: NetEngineDeviceRelay
+}
+
+/** What a device's row shows about relays (Phase 3 §B.5, §B.11). */
+export interface NetEngineDeviceRelay {
+  /** Relay destinations (`relay://host:port`) it can be reached through that wait for Allow. */
+  offered?: string[]
+  /** Relay destinations allowed for it (by a ticket, the owner or Allow) that can be taken back. */
+  allowed?: string[]
+  /** The relay info it sent (its manifest) has expired: its routes are tried last until it sends new info. */
+  stale?: boolean
+  /** It is past this computer's relay limit (the first 256 callers): it can't reach this computer through one. */
+  limit?: boolean
+}
+
+/** One of this computer's own relays (Phase 3 §B.9), as Settings → Reach lists it. */
+export interface NetEngineRelay {
+  /** The relay's id, hex. */
+  id: string
+  /** `host:port`. */
+  endpoint: string
+  state: 'registered' | 'connecting' | 'retrying' | 'refused'
+  /** Why the last registration ended, while retrying or refused (`relay_unreachable`, …). */
+  reason?: string
+  /** When the next registration starts, ms since 1970, while retrying. */
+  retryAt?: number
+  /** Callers listed with the relay, and the most it lists. */
+  callers: number
+  callersMax: number
+  /** While a new relay key is taking over: when the old one stops, ms since 1970. */
+  rotatingUntil?: number
+}
+
+/** What a relay error word (`relay.enroll`'s refusal, a registration's end) means, as Settings says it. */
+export const RELAY_REASON_TEXT: Readonly<Record<string, string>> = Object.freeze({
+  bad_link: "That isn't a relay link.",
+  already: 'This relay is already added.',
+  unavailable: "Relays can't run on this computer.",
+  relay_unreachable: "Couldn't reach the relay.",
+  relay_refused: "Couldn't reach the relay.",
+  relay_key: "The relay's key doesn't match the link.",
+  relay_tls: "Couldn't connect securely to the relay.",
+  relay_timeout: "The relay didn't answer.",
+  relay_protocol: 'The relay answered something unexpected.',
+  relay_not_authorized: 'This link was used already, or has expired.',
+  relay_removed: 'The relay no longer lists this computer.',
+  relay_replaced: 'Another registration took this one’s place.',
+  relay_stopping: 'The relay is restarting.',
+  relay_limit: 'The relay is full.',
+  relay_closed: 'The relay closed the connection.',
+  store_failed: "Couldn't save the relay.",
+  no_relay: 'That relay was removed.',
+  not_registered: "The relay isn't connected; try again once it is."
+})
+
+/** This computer's own relays, when its helper has relays. */
+export interface NetEngineRelays {
+  /** False when relays can't run here (no keystore). */
+  available: boolean
+  list: NetEngineRelay[]
 }
 
 /** A computer asking to join this one, waiting for this computer's window to answer (§5.1 step 3). */
@@ -114,7 +183,7 @@ export interface NetEngineJoinPreview {
   /** The ticket has expired by this computer's clock. */
   expired?: boolean
   /** Every hint this computer would dial, with its class; the non-automatic ones are what Connect approves. */
-  destinations: Array<{ route: string; label: string; cls: RouteClass; automatic: boolean }>
+  destinations: TicketDestination[]
   /** This computer's tailnet and public routes and tunnels: pairback sends one only when ticked. */
   shareable: Array<{ route: string; label: string; cls: RouteClass }>
 }
@@ -141,4 +210,6 @@ export interface NetEngineStatus {
   scanIntervalMs?: number
   /** This computer's own routes, when its helper speaks protocol 1.1. */
   reach?: NetEngineReach
+  /** This computer's own relays, when its helper has relays (Phase 3). */
+  relays?: NetEngineRelays
 }

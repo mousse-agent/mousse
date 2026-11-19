@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   classifyIp,
+  destinationText,
   ownerRoute,
   parseRoute,
   routeText,
@@ -86,6 +87,9 @@ describe('ownerRoute (what Add address takes)', () => {
   })
 })
 
+const ID = 'A'.repeat(43),
+  HANDLE = 'B'.repeat(43)
+
 describe('the join dialog and Connect', () => {
   const hints = [
     'tcp://192.168.1.20:47100',
@@ -96,7 +100,15 @@ describe('the join dialog and Connect', () => {
     'ssh://me@box.example',
     'tcp://203.0.113.7:47100',
     'tcp://127.0.0.1:47100',
-    'garbage'
+    'garbage',
+    // Relay hints (Phase 3 §B.11): a name, a tailnet literal, a LAN literal, a forbidden literal, a broken one, and
+    // a second hint for a relay already listed.
+    `relay://Relay.Example.net:443/${ID}/${HANDLE}`,
+    `relay://100.101.7.3:7443/${ID}/${HANDLE}`,
+    `relay://192.168.1.9:443/${ID}/${HANDLE}`,
+    `relay://203.0.113.5:443/${ID}/${HANDLE}`,
+    `relay://relay.example.net:443/${ID}`,
+    `relay://relay.example.net:443/${HANDLE}/${ID}`
   ]
 
   it('lists each dialable hint with its class; ws, ssh, broken and forbidden hints are skipped', () => {
@@ -106,8 +118,16 @@ describe('the join dialog and Connect', () => {
       ['192.168.1.20:47100', 'lan', true],
       ['100.101.7.2:47100', 'tailnet', false],
       ['x.example', 'tunnel', false],
-      ['8.8.4.4:47100', 'public', false]
+      ['8.8.4.4:47100', 'public', false],
+      ['relay.example.net:443', 'relay', false],
+      ['100.101.7.3:7443', 'relay', false]
     ])
+  })
+
+  it('says a relay hint as the relay it goes through', () => {
+    const relay = ticketDestinations(hints).find((item) => item.cls === 'relay')!
+    expect(destinationText(relay)).toBe('Through relay relay.example.net:443')
+    expect(destinationText({ label: '100.101.7.2:47100', cls: 'tailnet' })).toBe('100.101.7.2:47100 (Tailnet)')
   })
 
   it('approves every listed hint outside the private ranges, loopback too in a debug build', () => {
@@ -115,7 +135,9 @@ describe('the join dialog and Connect', () => {
       'tcp://100.101.7.2:47100',
       'wss://x.example/mousse-net/1',
       'tcp://8.8.4.4:47100',
-      'tcp://127.0.0.1:47100'
+      'tcp://127.0.0.1:47100',
+      'relay://relay.example.net:443',
+      'relay://100.101.7.3:7443'
     ])
   })
 })

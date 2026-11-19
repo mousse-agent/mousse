@@ -98,6 +98,8 @@ export interface EngineLimits {
   maxManualAddresses: number
   /** How long Test on one of this computer's routes waits for its helper to reach itself (`routes.test`). */
   routeTestDeadlineMs: number
+  /** How long adding this computer's own relay (pasting its link, `relay.enroll`) may take: the helper resolves and dials it. */
+  relayEnrollDeadlineMs: number
 }
 
 /** The helper's `APP_READ_AHEAD_BYTES`: a stream's credit must cover it before the helper reads that stream. */
@@ -144,7 +146,8 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   pathDrainMs: 25 * 60_000,
   rowStuckMs: 2 * 60_000,
   maxManualAddresses: 8,
-  routeTestDeadlineMs: 20_000
+  routeTestDeadlineMs: 20_000,
+  relayEnrollDeadlineMs: 60_000
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -188,7 +191,8 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   pathDrainMs: 'MOUSSE_NET_ENGINE_PATH_DRAIN_MS',
   rowStuckMs: 'MOUSSE_NET_ENGINE_ROW_STUCK_MS',
   maxManualAddresses: 'MOUSSE_NET_ENGINE_MAX_MANUAL_ADDRESSES',
-  routeTestDeadlineMs: 'MOUSSE_NET_ENGINE_ROUTE_TEST_DEADLINE_MS'
+  routeTestDeadlineMs: 'MOUSSE_NET_ENGINE_ROUTE_TEST_DEADLINE_MS',
+  relayEnrollDeadlineMs: 'MOUSSE_NET_ENGINE_RELAY_ENROLL_DEADLINE_MS'
 })
 
 /** Reads the limits from `env`; each problem names the variable, the value and the default kept. */

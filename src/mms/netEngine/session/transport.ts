@@ -37,10 +37,15 @@ export interface EngineStream {
  * One connection with one pairing. Inbound connections carry its calls to this computer (serving); outbound ones
  * carry this computer's calls to it (client). `peer` is this computer's local id for the pairing.
  */
-/** A connection's route (Phase 1b §7): its pipe kind and the class of the address it reached. */
+/**
+ * A connection's route (Phase 1b §7): its pipe kind and the class of the address it reached. A relay connection
+ * (Phase 3) has kind `relay`, class `relay` or `relay_bulk`, and the relay's `relay://host:port`.
+ */
 export interface EngineRoute {
-  kind: 'tcp' | 'ws' | 'ssh'
-  class: 'lan' | 'tailnet' | 'public' | 'tunnel' | 'ssh'
+  kind: 'tcp' | 'ws' | 'ssh' | 'relay'
+  class: 'lan' | 'tailnet' | 'public' | 'tunnel' | 'ssh' | 'relay' | 'relay_bulk'
+  /** A relay connection's destination, `relay://host:port`. */
+  destination?: string
 }
 
 export interface EngineConnection {

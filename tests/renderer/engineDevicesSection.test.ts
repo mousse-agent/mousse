@@ -7,7 +7,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { NetEngineDevice, NetEngineStatus } from '../../src/shared/netEngine/local'
+import type { NetEngineDevice, NetEngineRelay, NetEngineStatus } from '../../src/shared/netEngine/local'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -364,5 +364,136 @@ describe('routes (1b §1.3, §1.5)', () => {
     expect(d.called('netEngine.routes.test')).toEqual([{ route: 'wss://x.example/mousse-net/1' }])
     const failed = [...host.querySelectorAll<HTMLElement>('[role="status"]')].find((item) => item.textContent === "Couldn't confirm from this network")
     expect(failed?.title).toMatch(/Saving still works/)
+  })
+})
+
+describe('relays (Phase 3 §B.5, §B.9, §B.11)', () => {
+  const DESTINATION = 'relay://relay.example.net:443'
+  const relay = (fields: Partial<NetEngineRelay> = {}): NetEngineRelay => ({
+    id: 'aa11',
+    endpoint: 'relay.example.net:443',
+    state: 'registered',
+    callers: 3,
+    callersMax: 256,
+    ...fields
+  })
+  const relayRow = (endpoint: string) =>
+    [...host.querySelectorAll<HTMLElement>('.settings-item')].find(
+      (item) => item.querySelector('.settings-item-title')?.textContent === endpoint
+    )
+
+  it('adds your own relay from a pasted link, with Reach shown for relays alone', async () => {
+    const d = daemon({ relays: { available: true, list: [] } })
+    await mount()
+    expect(host.textContent).toContain('Your own relay')
+    const link = `mousse-relay://relay.example.net:443/#${'A'.repeat(43)}.${'C'.repeat(22)}`
+    await type(host.querySelector<HTMLInputElement>('input[aria-label="Relay link"]')!, link)
+    await click(button('Add'))
+    expect(d.called('netEngine.relay.enroll')).toEqual([{ link }])
+  })
+
+  it('says why a link was refused', async () => {
+    daemon(
+      { relays: { available: true, list: [] } },
+      {
+        'netEngine.relay.enroll': () => {
+          throw new Error('This link was used already, or has expired.')
+        }
+      }
+    )
+    await mount()
+    await type(host.querySelector<HTMLInputElement>('input[aria-label="Relay link"]')!, 'mousse-relay://x:1/#a.b')
+    await click(button('Add'))
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe('This link was used already, or has expired.')
+  })
+
+  it('lists each relay with its state, live, and offers New relay key and Remove', async () => {
+    const d = daemon({ relays: { available: true, list: [relay()] } })
+    await mount()
+    expect(relayRow('relay.example.net:443')?.textContent).toContain('Connected · 3 of 256 devices')
+
+    await click(button('New relay key'))
+    expect(d.called('netEngine.relay.rotate')).toEqual([{ relay: 'aa11' }])
+    await d.change({ relays: { available: true, list: [relay({ rotatingUntil: Date.now() + 3_600_000 })] } })
+    expect(relayRow('relay.example.net:443')?.textContent).toContain('Rotating until')
+
+    // The helper's relay.state reaches the window as a status change.
+    await d.change({
+      relays: {
+        available: true,
+        list: [relay({ state: 'retrying', reason: 'relay_unreachable', retryAt: Date.now() + 30_000 })]
+      }
+    })
+    const line = [...relayRow('relay.example.net:443')!.querySelectorAll<HTMLElement>('[title]')].find((item) =>
+      item.textContent?.startsWith('Retrying at ')
+    )
+    expect(line?.title).toBe("Couldn't reach the relay.")
+    expect(relayRow('relay.example.net:443')?.textContent).not.toContain('of 256 devices')
+    expect(button('New relay key')?.disabled).toBe(true)
+
+    await click(button('Remove relay relay.example.net:443'))
+    await click(button('Remove'))
+    expect(d.called('netEngine.relay.remove')).toEqual([{ relay: 'aa11' }])
+  })
+
+  it('says a relay that refused this computer is refused', async () => {
+    daemon({ relays: { available: true, list: [relay({ state: 'refused', reason: 'relay_removed' })] } })
+    await mount()
+    expect(relayRow('relay.example.net:443')?.textContent).toContain('The relay refused this computer')
+  })
+
+  it('labels a connection through a relay with the relay', async () => {
+    daemon({ devices: [device({ node: 'n1', route: 'relay', via: 'relay.example.net:443' })] })
+    await mount()
+    expect(rowText('n1')).toContain('a1b2c3d4 · Connected · Through relay relay.example.net:443')
+  })
+
+  it('asks once on the row before dialling an offered relay, and Allow goes to the daemon', async () => {
+    const d = daemon({ devices: [device({ node: 'n1', relay: { offered: [DESTINATION] } })] })
+    await mount()
+    expect(host.textContent).toContain('Studio can be reached through relay relay.example.net:443. Allow?')
+    await click(button('Allow'))
+    expect(d.called('netEngine.relay.allow')).toEqual([{ node: 'n1', destination: DESTINATION }])
+  })
+
+  it('takes an allowed relay back from the row menu', async () => {
+    const d = daemon({ devices: [device({ node: 'n1', relay: { allowed: [DESTINATION] } })] })
+    await mount()
+    expect(host.textContent).not.toContain('Allow?')
+    expect(await menuItems('Studio')).toContain('Stop using relay relay.example.net:443')
+    await click(button('Stop using relay relay.example.net:443'))
+    expect(d.called('netEngine.relay.disallow')).toEqual([{ node: 'n1', destination: DESTINATION }])
+  })
+
+  it('says only when relay info is out of date, with why as its tooltip', async () => {
+    const d = daemon({ devices: [device({ node: 'n1' })] })
+    await mount()
+    expect(rowText('n1')).not.toContain('Relay info')
+    await d.change({ devices: [device({ node: 'n1', relay: { stale: true } })] })
+    const note = [...rowOf('n1')!.querySelectorAll<HTMLElement>('[title]')].find(
+      (item) => item.textContent === 'Relay info out of date'
+    )
+    expect(note?.title).toMatch(/tried last/)
+  })
+
+  it('says a device past the limit is not reachable through the relay', async () => {
+    daemon({ devices: [device({ node: 'n1', relay: { limit: true } }), device({ node: 'n2', name: 'Laptop' })] })
+    await mount()
+    expect(rowText('n1')).toContain('Not reachable through the relay (limit 256)')
+    expect(rowText('n2')).not.toContain('limit 256')
+  })
+
+  it('lists a ticket’s relay among the destinations as the relay it goes through', async () => {
+    const d = daemon({}, {
+      'netEngine.join.preview': () => ({
+        kind: 1,
+        destinations: [{ route: `relay://relay.example.net:443/${'A'.repeat(43)}/${'B'.repeat(43)}`, label: 'relay.example.net:443', cls: 'relay', automatic: false, destination: DESTINATION }],
+        shareable: []
+      })
+    })
+    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined, initial: 'scan', camera: async () => undefined }))
+    await type(document.querySelector<HTMLInputElement>('input[aria-label="Pairing link"]')!, 'mousse://pair?n=Studio#AAAAAAAAAAAAAAAAAAAAAAAA')
+    await click(button('Continue'))
+    expect(document.body.textContent).toContain('Through relay relay.example.net:443')
   })
 })
