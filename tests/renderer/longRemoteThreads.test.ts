@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { forgetMessageImageRequests, hydrateMessageImages, missingImages, resetMessageImageRequests, type MessageImageDeps } from '../../src/renderer/lib/messageImages'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
@@ -75,6 +75,34 @@ describe('fetching them as the thread is shown', () => {
     }))
     expect(messages[0].images?.[0].data).toBeUndefined()
     expect(messages[1].images?.map((one) => one.data)).toEqual(['data-2-0', 'data-2-1'])
+  })
+
+  it('asks again a few times, with growing waits, for an image that could not be fetched, then leaves it a name', async () => {
+    vi.useFakeTimers()
+    try {
+      let failures = 2
+      await hydrateMessageImages('nod_a:t', deps(async (_thread, id, index) => {
+        asked.push(`${id}:${index}`)
+        if (id === '1' && failures-- > 0) throw new Error('Studio is reconnecting.')
+        return { name: 'x', mimeType: 'image/png', data: `data-${id}-${index}` }
+      }))
+      expect(messages[0].images?.[0].data).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(messages[0].images?.[0].data).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(messages[0].images?.[0].data).toBe('data-1-0')
+      expect(asked.filter((key) => key === '1:0')).toHaveLength(3)
+
+      resetMessageImageRequests()
+      asked.length = 0
+      messages = [message('1', { images: [image('a.png')] })]
+      await hydrateMessageImages('nod_a:t', deps(async (_thread, id, index) => { asked.push(`${id}:${index}`); throw new Error('Studio is offline.') }))
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(asked).toHaveLength(4)
+      expect(messages[0].images?.[0].data).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('puts nothing into a thread that is no longer shown', async () => {
