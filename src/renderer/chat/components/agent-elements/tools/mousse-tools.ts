@@ -86,6 +86,8 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   memory_read: ["read", "memory"],
   memory_list: ["list", "memories"],
   memory_forget: ["forget", "a memory"],
+  item_save: ["update", "the open items"],
+  item_list: ["check", "the open items"],
   // Reminders and wake-ups
   remind: ["set", "a reminder"],
   wake: ["set", "a wake-up"],

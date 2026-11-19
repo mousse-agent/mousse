@@ -165,6 +165,11 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     date: '2026-11-19',
     text: 'secret_fetch is now available. This replaces the earlier advice to keep working without a bound key. To read from a service your owner gave you a key for, use secret_fetch with the key\'s name in work or a scheduled run. You never see the key. GET and HEAD only, with masked responses and limits of 20 reads per key per hour and 100 per bot per day; hand service reads from chat to work.'
   },
+  {
+    id: 31,
+    date: '2026-11-19',
+    text: 'You now keep a list of open items: everything your owner asked for and everything you promised, until they have it as asked or it is dropped (item_save, item_list). It comes with your memory in every chat turn, so what is pending no longer depends on the chat summary. In your next chat turn with your owner, start it: go through your chat summary and its digests\' open threads, "Threads you handed work to" and your recent chat, and add an item for each ask or promise still open, with source set to the j ref of the message it came from and its thread or pull request as a link. If you keep a daily cleanup schedule, add to its prompt that it reads the day\'s chat and adds an item for each ask or promise that has none.'
+  },
 ]
 
 /** The newest entry's id: what a bot has seen once it is told everything. */

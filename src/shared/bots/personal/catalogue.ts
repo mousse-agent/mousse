@@ -26,6 +26,9 @@ export const BOT_USE_TOOL = 'use_tool'
  */
 export const BOT_CORE_TOOLS: readonly string[] = [
   'memory_save', 'memory_search', 'memory_read',
+  // The open items: an ask is listed in the turn it is made and a status answer reads the list first, so neither tool
+  // is a lookup away.
+  'item_save', 'item_list',
   'work_start', 'work_note', 'work_list',
   'remind', 'wake',
   'escalate', 'ask_owner',

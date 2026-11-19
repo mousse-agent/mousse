@@ -999,6 +999,16 @@ export class BotMemoryStore {
           }
         }
       }
+      // An open item that came from a redacted row, or says what was forgotten, goes with it, and so do the rows that
+      // repeat its words (the call that listed it).
+      for (const row of this.all("SELECT key, value FROM bot_memory_state WHERE bot_id = ? AND key >= 'item:' AND key < 'item;'", botId)) {
+        const item = parseJson(row.value) as { text?: string; note?: string; links?: string[]; source?: number } | undefined
+        if (!item) continue
+        const words = [item.text, item.note, ...(Array.isArray(item.links) ? item.links : [])].filter((part): part is string => typeof part === 'string' && Boolean(part))
+        if (!(typeof item.source === 'number' && redactedSeqs.has(item.source)) && !matches(words.join('\n'))) continue
+        this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, row.key as string)
+        if (item.text) copiesOf(item.text).forEach(redact)
+      }
       this.dropForgotten(botId, redactedSeqs, { holds: matches, redact })
       const memIds = [...ids].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
       const removed = [...memIds, ...redacted]
