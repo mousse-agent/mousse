@@ -1,3 +1,4 @@
+import { normalizeErrorReportSettings, type ErrorReportSettings } from './bugReports'
 import { normalizeProfilerSettings, type ProfilerSettings } from './diagnostics/profiler'
 import { normalizeDriverPath } from './computerUse'
 import type { MousseIntegrationsSettings, SkillModelSettings } from './integrations'
@@ -527,6 +528,8 @@ export interface MousseSettings {
   runs: RunSettings
   experimental: ExperimentalSettings
   storage: StorageSettings
+  /** Settings → General → Error reports: the Report button and `report_bug`, and whose account files them. */
+  errorReports: ErrorReportSettings
   provider: {
     llmProvider: LlmProviderId
     /** The model as its agent lists it; the reasoning level is `effort` (absent = the model's default). */
@@ -945,6 +948,7 @@ export function getDefaultSettings(): MousseSettings {
     runs: normalizeRunSettings(),
     experimental: normalizeExperimentalSettings(),
     storage: normalizeStorageSettings(),
+    errorReports: normalizeErrorReportSettings(),
     provider: {
       llmProvider: '',
       model: ''

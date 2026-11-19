@@ -1,4 +1,5 @@
 import { profilerService } from '../diagnostics/profilerService'
+import type { BugReportService } from '../bugReports/BugReportService'
 import { turnTimingMark } from '../diagnostics/turnTiming'
 import { describeQuestionAnswers } from './questionAnswers'
 import type { OpenQuestionCloseReason } from '../run/OpenQuestions'
@@ -1301,6 +1302,11 @@ export class OrchestratorService extends EventEmitter {
    * output holds never leaves the run's memory.
    */
   private secretTools?: SecretToolHost
+  /** Bug reports (`report_bug`); absent: the tool is not offered. */
+  private bugReports?: BugReportService
+  setBugReports(service: BugReportService | undefined): void {
+    this.bugReports = service
+  }
   private secretMaskerFor?: (threadId: string) => SecretMasker | undefined
   /**
    * Masks every secret in the profile's store (a terminal's output, which may show any of them), and the values the
@@ -4630,6 +4636,8 @@ export class OrchestratorService extends EventEmitter {
       withdrawQuestion: (threadId, requestId) => this.questions.withdraw(requestId, threadId),
       dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
       secrets: () => this.secretTools,
+      bugReports: () => this.bugReports,
+      threadName: (threadId) => this.threadStore?.getThread(threadId)?.name ?? undefined,
       // The thread's terminals, read from memory: no lease, nothing written to them (`terminal_read`).
       terminals: () => ({
         list: (threadId) => this.ptyManager.terminalsOf(threadId),

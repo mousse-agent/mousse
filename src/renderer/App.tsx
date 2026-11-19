@@ -25,6 +25,8 @@ import { TitleBar } from './components/TitleBar'
 import { CommandPalette } from './components/CommandPalette'
 import { SelectionReplyButton } from './components/SelectionReplyButton'
 import { ToastHost } from './components/ui/Toast'
+import { BugReportDialogHost } from './components/bugReports/BugReportDialog'
+import { useBugReportStore } from './stores/bugReportStore'
 import { ThreadRenameDialog } from './components/ThreadRenameDialog'
 import { showThreadToast, watchOpenedThreadToasts } from './lib/threadToasts'
 import { watchDeletedShownThread } from './lib/leaveDeletedThread'
@@ -303,6 +305,7 @@ export default function App() {
       setShortcuts(settings.shortcuts ?? {})
       useAppStore.getState().setNotifyBotThreads(settings.notifications?.botThreads === true)
       useAppStore.getState().setRunDefaults(normalizeRunSettings(settings.runs))
+      useBugReportStore.getState().setSettings(settings.errorReports)
       applyPlusLegacy(settings)
     })).catch(() => {})
     void window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
@@ -395,6 +398,7 @@ export default function App() {
         setShortcuts(settings?.shortcuts ?? {})
         useAppStore.getState().setNotifyBotThreads(settings?.notifications?.botThreads === true)
         useAppStore.getState().setRunDefaults(normalizeRunSettings(settings?.runs))
+        useBugReportStore.getState().setSettings(settings?.errorReports)
         applyPlusLegacy(settings)
       })),
       // A turn that ends shows with its last text, never a frame before it.
@@ -686,6 +690,7 @@ export default function App() {
       {profileReady && newBotOpen && <Suspense fallback={null}><NewBotDialogHost /></Suspense>}
 
       <ToastHost />
+      <BugReportDialogHost />
 
     </div>
 

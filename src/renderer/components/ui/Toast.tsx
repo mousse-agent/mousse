@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProp
 import { create } from 'zustand'
 import { Check, Copy, X } from '../../lib/icons'
 import { FloatingPortal } from '../../lib/floatingLayer'
+import { reportError, useBugReportStore } from '../../stores/bugReportStore'
 import '../../styles/toast.css'
 
 /** How long a toast stays on screen. Its timer stops while the stack is hovered or focused, or the window is in the background. */
@@ -580,6 +581,17 @@ function StackedToast({
   }
   const { action } = toast
   const open = toast.onOpen
+  // An error toast offers Report (Settings → General → Report button), which opens the report dialog with its draft.
+  const reportable = useBugReportStore((state) => state.settings.enabled) && toast.tone === 'error'
+  const actions: ToastAction[] = [
+    ...(action ? [{ label: action.label, dataAction: action.label.toLowerCase(), onClick: () => { dismissToast(toast.id); action.run() } }] : []),
+    ...(reportable ? [{
+      label: 'Report',
+      dataAction: 'report',
+      ariaLabel: 'Report this error',
+      onClick: () => { dismissToast(toast.id); reportError({ title: toast.title ?? '', message: toast.detail ? `${toast.message}\n${toast.detail}` : toast.message, surface: 'toast' }) }
+    }] : [])
+  ]
   return (
     <li
       className={`ui-toast-item${front ? ' ui-toast-item-front' : ''}${muted ? ' is-muted' : ''}`}
@@ -603,11 +615,7 @@ function StackedToast({
           openLabel={toast.openLabel}
           detail={toast.detail}
           onOpen={open ? () => { dismissToast(toast.id); open() } : undefined}
-          actions={action ? [{
-            label: action.label,
-            dataAction: action.label.toLowerCase(),
-            onClick: () => { dismissToast(toast.id); action.run() }
-          }] : []}
+          actions={actions}
           onDismiss={() => dismissToast(toast.id)}
           time={toast.title ? toastAge(toast.shownAt, now) : undefined}
           onPinnedChange={setPinned}

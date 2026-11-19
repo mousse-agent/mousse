@@ -1,6 +1,7 @@
 import { memo } from "react";
 import { CircleX } from "../../../lib/icons";
 import { cn } from "./utils/cn";
+import { ReportButton } from "../../../components/bugReports/ReportButton";
 
 export type ErrorMessageProps = {
   title?: string;
@@ -46,6 +47,10 @@ export const ErrorMessage = memo(function ErrorMessage({
       Retry
     </button>
   ) : null;
+  // Report (Settings → General → Report button): the report dialog with this error's draft.
+  const report = (
+    <ReportButton className="ml-1 -my-1 align-middle" error={{ title, message, ...(reference ? { reference } : {}), surface: "transcript" }} />
+  );
   return (
     <div className={cn("flex items-start gap-2 text-base", className)}>
       <CircleX size={16} className="mt-[3px] shrink-0 text-[var(--danger)]" />
@@ -54,11 +59,13 @@ export const ErrorMessage = memo(function ErrorMessage({
         <div className="an-error-text mt-0.5 text-an-foreground/80 whitespace-pre-wrap [overflow-wrap:anywhere]">
           {text}
           {!reference && retry}
+          {!reference && report}
         </div>
         {reference && (
           <div className="an-error-meta mt-1 text-[12px] leading-5 text-an-foreground-muted">
             <span className="select-text">Reference {reference}</span>
             {retry}
+            {report}
           </div>
         )}
       </div>

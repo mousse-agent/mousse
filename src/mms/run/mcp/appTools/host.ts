@@ -1,4 +1,5 @@
 import type { BrowserRuntimePort } from '../../../../shared/browser/runtime'
+import type { BugReportService } from '../../../bugReports/BugReportService'
 import type { AgentJobLimits } from '../../../../shared/agentJobLimits'
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import type { ModelOverride } from '../../../../shared/providerInstances'
@@ -348,6 +349,10 @@ export interface AppToolHost extends DelegationToolsHost {
   withdrawQuestion?(threadId: string, requestId: string): boolean
   /** Secret requests and commands that use them (`secret_request`, `secret_run`); absent: those tools refuse. */
   secrets?(): SecretToolHost | undefined
+  /** Bug reports (`report_bug`); absent: the tool is not offered. */
+  bugReports?(): BugReportService | undefined
+  /** A thread's name, for the person to see who asked. */
+  threadName?(threadId: string): string | undefined
   /** The threads' terminals as `terminal_read` reads them (never writes); absent: the tool is not listed. */
   terminals?(): TerminalReadHost | undefined
   /** The thread's task queue; null when the owner keeps none (no task tools). */

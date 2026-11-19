@@ -1,7 +1,8 @@
 import { isTurnActivePhase } from '../../../shared/types'
 import type { UpdateState } from '../../../shared/updates'
 import { useAppStore } from '../../stores/appStore'
-import { updateActions } from '../../stores/updateStore'
+import { updateActions, useUpdateStore } from '../../stores/updateStore'
+import { FixedReports } from '../bugReports/FiledReports'
 import { Modal } from '../ui/Modal'
 import '../../styles/updates.css'
 
@@ -12,11 +13,13 @@ const OTHER_PROCESSES_DETAIL =
 /** Confirms the restart that installs a downloaded update. Used by the downloads popover and Settings, General. */
 export function InstallConfirm({ open, version, onClose }: { open: boolean; version: string; onClose: () => void }) {
   const running = useAppStore((s) => Object.values(s.turnStates).filter((turn) => isTurnActivePhase(turn.phase)).length)
+  const notes = useUpdateStore((s) => s.releaseNotes)
   return (
     <Modal open={open} title={`Restart to install ${version}?`} onClose={onClose} footer={<>
       <button type="button" className="btn btn-ghost" onClick={onClose}>Cancel</button>
       <button type="button" className="btn btn-primary" onClick={() => { onClose(); void updateActions.install() }}>Restart and update</button>
     </>}>
+      {open && <FixedReports notes={notes} />}
       <p>Mousse will close, stop its background service, install the update and open again.</p>
       <p>{running > 0
         ? `${running} agent turn${running === 1 ? ' is' : 's are'} running. ${running === 1 ? 'It' : 'They'} will be stopped and marked interrupted; you can continue after the update.`
@@ -32,6 +35,7 @@ export function ReleaseNotes({ state }: { state: Pick<UpdateState, 'releaseNotes
   if (groups.length === 0) return null
   return (
     <section className="update-notes" aria-label="What's changed">
+      <FixedReports notes={groups} />
       {groups.map((group) => {
         const more = group.totalItems - group.items.length
         return (

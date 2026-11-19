@@ -7,6 +7,7 @@ import { botCatalogueTools } from './botCatalogue'
 import { botTools, type BotAppToolDeps } from './bots'
 import { browserTools } from './browser'
 import { computerTools } from './computer'
+import { bugReportTools } from './bugReports'
 import { delegationTools } from './delegation'
 import { familyRelation, threadFamily } from './family'
 import { goalTools } from './goal'
@@ -117,7 +118,7 @@ export function createAppToolRegistry(input: {
     for (const tool of tools) registry.register(tool)
   }
   add('delegation', delegationTools(host))
-  add('questions', [...askUserTools(host), ...secretTools(host)])
+  add('questions', [...askUserTools(host), ...secretTools(host), ...bugReportTools(host)])
   add('tasks', [...taskTools(host), ...goalTools(host)])
   add('thread', engine ? threadTools(host, engine, input.bots) : [])
   add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])

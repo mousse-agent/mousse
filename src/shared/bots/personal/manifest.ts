@@ -109,6 +109,13 @@ export const BOT_QUESTION_ANSWER_TOOL = 'question_answer'
 export const BOT_CARD_TOOL = 'show_card'
 
 /**
+ * Drafting a Mousse bug report (`report_bug`): the owner sees the draft in the report dialog and files it or not, so it
+ * grants nothing and is always on, like cards, on a bot's main turns; never a consult or a subagent. Settings → General's
+ * Report button switch turns it off for bots and threads alike.
+ */
+export const BOT_REPORT_BUG_TOOL = 'report_bug'
+
+/**
  * Messages to the owner's other bots (`bot_list`, `bot_send`, `botMessages.ts`): the message is information to the bot
  * that gets it and gives it no permission, so like memory the tools are always on and never grantable. A chat turn and
  * work the owner asked for get them; a scheduled run, a consult and a subagent never do.
@@ -312,6 +319,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   BOT_QUESTION_TOOL,
   BOT_QUESTION_ANSWER_TOOL,
   BOT_CARD_TOOL,
+  BOT_REPORT_BUG_TOOL,
   ...BOT_MESSAGE_TOOLS,
   'list_skills', 'load_skill', 'escalate', 'consult',
   // The tool catalogue (docs/plans/bot-context.md §15): looking up a group, and calling its tools on Codex and Pi.

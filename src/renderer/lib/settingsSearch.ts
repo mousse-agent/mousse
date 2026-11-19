@@ -60,6 +60,10 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'All threads on my other devices', section: 'general', anchor: 'general-remote-notifications', keywords: ['notifications', 'remote', 'computers'] },
   { title: 'Notify for bot threads', section: 'general', anchor: 'general-bot-thread-notifications', keywords: ['notifications', 'bots', 'hidden', 'sidebar'] },
   { title: 'Updates', section: 'general', anchor: 'general-updates', keywords: ['version', 'check for updates', 'about', 'upgrade'] },
+  { title: 'Error reports', section: 'general', anchor: 'general-error-reports', keywords: ['bug report', 'report an error', 'feedback'] },
+  { title: 'Report button', section: 'general', anchor: 'general-report-button', keywords: ['error reports', 'bug report', 'feedback', 'github issue'] },
+  { title: 'File with gh', section: 'general', anchor: 'general-report-with-gh', keywords: ['error reports', 'bug report', 'github account', 'anonymous'] },
+  { title: 'Your reports', section: 'general', anchor: 'general-your-reports', keywords: ['error reports', 'bug reports', 'revoke', 'filed issues'] },
 
   { title: 'Mousse ID', section: 'connections', anchor: 'account-mousse-id', keywords: ['sign in', 'login'] },
   { title: 'Add a phone', section: 'connections', anchor: 'account-phones', keywords: ['phones', 'mobile', 'pair'] },
