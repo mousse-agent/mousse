@@ -2,9 +2,9 @@ import { useRef } from 'react'
 import { Globe, Maximize } from '../../lib/icons'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_BROWSER_PREVIEW_WATCH, type BotBrowserView } from '../../../shared/bots/personal/browser'
-import { botBrowserKit, canOpenBotBrowserWindow, useBotBrowserStore, useBotBrowserStream, useBotBrowserWatch, type BotBrowserStream } from '../../stores/botBrowserStore'
+import { botBrowserKit, useBotBrowserStore, useBotBrowserStream, useBotBrowserWatch, type BotBrowserStream } from '../../stores/botBrowserStore'
 import { WatchedBrowserFrame } from '../browser/WatchedBrowserFrame'
-import { WatchedBrowserPane, sinceText, useNow, watchedBrowserStatus, type WatchedBrowserStatus } from '../browser/WatchedBrowserPane'
+import { WatchedBrowserPane, sinceText, useNow, watchedBrowserStatus, type WatchedBrowserFullScreen, type WatchedBrowserStatus } from '../browser/WatchedBrowserPane'
 import './botBrowser.css'
 
 export { filesAskText } from '../browser/WatchedBrowserPane'
@@ -63,28 +63,23 @@ export function BotBrowserPreview({ bot, view }: { bot: BotSummary; view: BotBro
 }
 
 /**
- * The split view: the bot's browser beside its chat (the general `WatchedBrowserPane`). The owner
- * watches; Take over hands the browser to this window (the bot's actions wait), and everything they do
- * then reaches the page in order, each input answered; Give back returns it. A closed browser can be
- * opened again here, under the owner's control. On the computer the browser runs on, Open in a window shows it as a
- * real window instead, held the same way, until Close window (or the window's own close) gives it back.
+ * The split view: the bot's browser beside its chat (the general `WatchedBrowserPane`), or full screen over the centre pane. The
+ * owner watches; the switch beside the address takes it over for this window (the bot's actions wait), and everything
+ * they do then reaches the page in order, each input answered; pressed again, it gives it back. A closed browser can be
+ * opened again here, under the owner's control.
  */
-export function BotBrowserPane({ bot, view }: { bot: BotSummary; view: BotBrowserView }) {
+export function BotBrowserPane({ bot, view, fullScreen }: { bot: BotSummary; view: BotBrowserView; fullScreen?: WatchedBrowserFullScreen }) {
   const busy = useBotBrowserStore((state) => state.busy)
   const open = (url: string | undefined) => void useBotBrowserStore.getState().open(bot.id, url)
-  const inWindow = {
-    offered: Boolean(view.windowable) && canOpenBotBrowserWindow(),
-    open: () => void useBotBrowserStore.getState().inWindow(bot.id, 'open'),
-    close: () => void useBotBrowserStore.getState().inWindow(bot.id, 'close')
-  }
-  return <WatchedBrowserPane kit={botBrowserKit} browserKey={bot.id} label={`${bot.name}'s browser`} user={bot.name} view={view} open={open} inWindow={inWindow}
+  return <WatchedBrowserPane kit={botBrowserKit} browserKey={bot.id} label={`${bot.name}'s browser`} user={bot.name} view={view} open={open}
+    {...(fullScreen ? { fullScreen } : {})}
     closed={(typed) => <>
       <p>{view.stopped ? 'The browser stopped.' : `${bot.name}'s browser is closed.`}</p>
       <button type="button" disabled={busy} onClick={() => open(/^https?:\/\//i.test(typed) ? typed : undefined)}>Open it</button>
     </>}
-    line={(holding) => holding === 'window' ? `${bot.name} waits until you close the window.`
-      : holding === 'this-window' ? `You're using ${bot.name}'s browser. Sites you sign in to stay signed in for it. Give it back when you're done.`
+    line={(holding) => holding === 'window' ? `${bot.name} waits until you give it back.`
+      : holding === 'this-window' ? ''
       : holding === 'another-window' ? 'Held in another window. Take over to use it here.'
-      : holding === 'agent' ? `${bot.name} is using its own browser, apart from your tabs. Take over to click or type in it.`
+      : holding === 'agent' ? ''
       : `Only ${bot.name} uses this browser. Open it to sign in to a site for it.`} />
 }

@@ -920,6 +920,10 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // Each watches the browser's pictures only while it is on screen.
   const browser = useBotBrowser(bot.id)
   const paneOpen = useBotBrowserStore((s) => s.pane === bot.id)
+  // Full screen: the split view takes the chat's place in the centre pane while it is open (the chat stays mounted behind it).
+  const [browserFull, setBrowserFull] = useState(false)
+  const fullScreen = browserFull && paneOpen && Boolean(browser)
+  useEffect(() => { if (browserFull && !fullScreen) setBrowserFull(false) }, [browserFull, fullScreen])
   const browserRun = browser?.activationId ?? browser?.activations.at(-1)
   const previewOn = browserRun ? messages.filter((message) => message.author === 'bot' && message.activationId === browserRun).at(-1)?.id : undefined
   const preview = browser && browserRun ? <BotBrowserPreview bot={bot} view={browser} /> : null
@@ -1069,7 +1073,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
 
   return <BotFilesProvider botId={bot.id} open={openFile} failed={fileFailed}><ImageGalleryProvider images={chatImages} actions={pictureActions}>
     {/* The bot's colour tints the quotes of its messages. */}
-    <section className={`chat-conversation bot-conversation${typing ? ' is-typing' : ''}`} data-applet-conversation style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
+    <section className={`chat-conversation bot-conversation${typing ? ' is-typing' : ''}${fullScreen ? ' is-behind-browser' : ''}`} data-applet-conversation style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
       <header className="chat-conversation-header">
         <button type="button" className="bot-header-about" aria-label={`About ${bot.name}`} onClick={toggleAbout}>
           <BotFace look={bot.look} state={botFaceState(bot, happy)} size={32} view="head" />
@@ -1181,7 +1185,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
       </div>
     </section>
     {file && <BotFilePane botId={bot.id} path={file} onClose={() => setFile(null)} />}
-    {paneOpen && browser && <BotBrowserPane bot={bot} view={browser} />}
+    {paneOpen && browser && <BotBrowserPane bot={bot} view={browser} fullScreen={{ on: fullScreen, toggle: () => setBrowserFull(!fullScreen) }} />}
     {appletOpen && <BotAppletPane botId={bot.id} applet={appletOpen} onClose={() => setAppletOpen(null)} />}
     {aboutOpen && <BotAboutPanel bot={bot} />}
     {memoryOpen && <BotMemoryDialog bot={bot} {...(memoryOpen.focus ? { focus: memoryOpen.focus } : {})} />}

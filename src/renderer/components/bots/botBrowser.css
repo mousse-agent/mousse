@@ -32,3 +32,5 @@
 /* While the split view shows the browser, the reply carries one line in place of a second picture. */
 .bot-browser-beside { display: flex; align-items: center; gap: 6px; margin: 10px 0 0; font-size: 11px; color: var(--text-secondary); min-width: 0; }
 .bot-browser-beside > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The split view full screen: it takes the chat's place in the centre pane, until it leaves full screen. */
+.chat-conversation.bot-conversation.is-behind-browser { display: none; }
