@@ -157,19 +157,6 @@
       "expiresAt": "2026-11-19T00:01:23.773Z"
     },
     {
-      "task": "sidebar-cards-name-thread-branch",
-      "session": "Animatrix-99a3f5",
-      "machine": "Animatrix",
-      "branch": "sidebar-cards-name-thread-branch",
-      "paths": [
-        "src/renderer/components/ThreadsSidebar.tsx",
-        "src/renderer/components/ThreadChip.tsx",
-        "src/renderer/hooks/useThreadBranch.ts"
-      ],
-      "claimedAt": "2026-11-19T17:17:40.053Z",
-      "expiresAt": "2026-11-19T19:17:40.053Z"
-    },
-    {
       "task": "update-fixes-closing-prs",
       "session": "Animatrix-52c0a2",
       "machine": "Animatrix",
