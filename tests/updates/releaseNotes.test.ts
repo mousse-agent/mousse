@@ -38,6 +38,19 @@ describe('release notes', () => {
     expect(releaseNotes[0]!.items).toHaveLength(8)
   })
 
+  it('names every pull request of the repository the notes link, past the items and releases shown', () => {
+    const release = (index: number) => ({
+      version: `0.1.2-nightly.2026102${index}.${index}`,
+      note: `<ul>${Array.from({ length: 11 }, (_, item) => `<li>change in <a href="${REPO}/pull/${index * 100 + item}">#${index * 100 + item}</a></li>`).join('')}` +
+        `<li>tool bump in https://github.com/other/mousse-tools/pull/9999</li></ul>`
+    })
+    const { pullRequests } = normalizeReleaseNotes(Array.from({ length: 8 }, (_, index) => release(index)), '0.1.2', REPO)
+    expect(pullRequests).toHaveLength(88)
+    expect(pullRequests).toContain(10) // the 11th item of the newest release, not listed
+    expect(pullRequests).toContain(710) // a release that is not listed
+    expect(pullRequests).not.toContain(9999)
+  })
+
   it('treats a single note as the latest version and truncates long items', () => {
     const { releaseNotes } = normalizeReleaseNotes(`<ul><li>${'x'.repeat(400)}</li></ul>`, '0.1.3', REPO)
     expect(releaseNotes[0]!.version).toBe('0.1.3')

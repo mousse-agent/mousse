@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import type { MousseSettingsUpdate } from '../../shared/settings'
+import { botThreadShownNow } from '../lib/botThread'
 import { applySideCardToggle, deriveSideCardState, nextSideCardToggleState } from '../components/sideCard/sideCardLogic'
 import { openThreadRenameDialog } from '../components/ThreadRenameDialog'
 import { showToast } from '../components/ui/Toast'
@@ -60,7 +61,7 @@ export function useAppCommands(): void {
   useCommand('project.open', () => void addProjectAndStartThread().catch(logFailure('Adding the project')))
   useCommand('sideCard.toggle', () => {
     const state = useAppStore.getState()
-    const { visible, mode } = deriveSideCardState(state)
+    const { visible, mode } = deriveSideCardState({ ...state, botThreadShown: botThreadShownNow() })
     // In a narrow window the card is an overlay: the command opens or closes it, and leaves the switch alone.
     if (mode === 'overlay') applySideCardToggle(nextSideCardToggleState(visible, state, mode))
     else state.setSideCardOn(!state.sideCardOn)

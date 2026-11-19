@@ -418,6 +418,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     owned: { runId: 'run' }
   }),
   'orchestrator.retry': chat('thread', ['threadId']),
+  // Retry on a thread whose worktree could not be set up: sends the message it kept again.
+  'orchestrator.retrySetup': chat('thread', ['threadId']),
   'threads.clearContext': chat('thread', ['threadId']),
   'threads.compact': chat('thread', ['threadId', 'focus']),
   'threads.stopCompaction': chat('thread', ['threadId']),
@@ -1060,6 +1062,7 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'A workflow starts from a /workflow command in a routed send, and reconciling an uncertain effect is decided on the computer that ran it.'
   },
   {
+    methods: ['usage.history'],
     prefixes: ['settings.', 'stats.', 'storage.', 'scheduled.', 'mcp.', 'webTools.'],
     reason: 'Settings and services of the computer, not thread features.'
   },
@@ -1070,6 +1073,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
   {
     methods: ['secrets.requests.list', 'secrets.requests.answer', 'secrets.requests.useSaved', 'secrets.requests.decline', 'secrets.list', 'secrets.delete', 'secrets.keepPasted'],
     reason: 'A secret is typed and kept on the computer that runs the thread; it never travels to another computer.'
+  },
+  {
+    methods: ['bugReports.draft','bugReports.file', 'bugReports.list', 'bugReports.revoke', 'bugReports.pending', 'bugReports.answer'],
+    reason: 'A bug report is drafted, filed and kept on the computer whose window shows it, with that computer’s logs and GitHub login.'
   },
   {
     methods: ['automations.request.resend', 'automations.keys.list', 'automations.keys.set'],

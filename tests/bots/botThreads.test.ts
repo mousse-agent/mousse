@@ -134,7 +134,15 @@ describe('"use your threads" in the bot engine', () => {
     ['a thread outcome notice', { lane: 'chat', idempotencyKey: 'job:j1:a1' }, true, ''],
     ['a scheduled run', { lane: 'run', idempotencyKey: 'sched:b1:s1:2026-11-13T09:00:00.000Z' }, true, ''],
     ['the bot\'s first message', { lane: 'chat', idempotencyKey: 'create:req-1' }, true, ''],
-    ['another bot\'s message', { lane: 'chat', idempotencyKey: 'botmsg:m1' }, false, BOT_THREADS_NOT_OWNER_TEXT]
+    ['another bot\'s message', { lane: 'chat', idempotencyKey: 'botmsg:m1' }, false, BOT_THREADS_NOT_OWNER_TEXT],
+    // Resume's retry of a turn a usage limit stopped acts as its original could.
+    ['the owner\'s message Resume retried', { lane: 'chat', idempotencyKey: 'chat:resume:a1' }, true, ''],
+    ['a wake Resume retried', { lane: 'chat', idempotencyKey: 'resume:wake:a1' }, true, ''],
+    ['a question no one answered, Resume retried', { lane: 'chat', idempotencyKey: 'resume:question:a1' }, true, ''],
+    ['a thread outcome notice Resume retried', { lane: 'chat', idempotencyKey: 'resume:job:a1' }, true, ''],
+    ['a thread\'s message Resume retried', { lane: 'chat', idempotencyKey: 'resume:threadmsg:a1' }, true, ''],
+    ['the bot\'s first message Resume retried', { lane: 'chat', idempotencyKey: 'resume:create:a1' }, true, ''],
+    ['another bot\'s message Resume retried', { lane: 'chat', idempotencyKey: 'resume:a1' }, false, BOT_THREADS_NOT_OWNER_TEXT]
   ]
   it.each(turns)('%s', (_name, row, all, refusal) => {
     expect(threadsActOf(row)).toBe(all)

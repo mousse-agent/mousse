@@ -96,6 +96,14 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     sources: ['src/mms/harness/acp/presets/antigravity/installation.ts']
   },
   {
+    label: 'Antigravity CLI download and update feed (Google)',
+    kind: 'contacted',
+    hosts: ['antigravity-cli-auto-updater-974169037036.us-central1.run.app', 'storage.googleapis.com'],
+    when: 'Only on computers where Mousse runs Google\'s Antigravity CLI: when you install or update it, and at most every six hours to learn whether its release was withdrawn.',
+    sends: 'a request for the release entry of this computer\'s system, and the download.',
+    sources: ['src/mms/harness/acp/presets/antigravity/nativeRelease.ts', 'src/mms/harness/acp/presets/antigravity/AntigravityProviderService.ts']
+  },
+  {
     label: 'Voice models (Hugging Face)',
     kind: 'contacted',
     hosts: ['huggingface.co'],

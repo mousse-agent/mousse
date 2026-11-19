@@ -1,7 +1,7 @@
 import { isNeutralTool } from '../../harness/tools'
 import { stableStringify } from '../../workflows/canonical'
 import type { BotManifest } from './definition'
-import { BOT_BROWSER_PERMISSION, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from './manifest'
+import { BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from './manifest'
 
 /**
  * Walls and escalations of personal bots (PR 6 §5). A wall ends the dispatch and asks the owner:
@@ -164,6 +164,7 @@ export function grantRequestOf<T extends BotAskRequest>(request: T): T {
 /** A permission request in plain words. */
 export function permissionText(permission: BotPermissionRequest): string {
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_BROWSER_PERMISSION) return 'Use the browser'
+  if ('tool' in permission && botGrantTool(permission.tool) === BOT_COMPUTER_PERMISSION) return 'Use the computer'
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_THREADS_PERMISSION) return 'Use your threads'
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_PROFILER_PERMISSION) return 'Use the profiler'
   if ('tool' in permission && botGrantTool(permission.tool) === BOT_THEMES_PERMISSION) return 'Change how Mousse looks'

@@ -17,6 +17,9 @@
    automatic content detection skips (gitignored). Register it explicitly or
    sibling rhythm, code padding, and dark code colors silently never compile. */
 @source "../../../node_modules/streamdown/dist/*.js";
+/* No element uses the `container` utility; the word is only found in code. Its width breakpoints
+   (640 to 1536 px) restyled the whole window each time a resize crossed one, about 100 ms each. */
+@source not inline("{,!}container{,!}");
 @import './themes/index.css';
 @import './layout-tokens.css';
 @import './vscode-compat.css';
@@ -792,11 +795,14 @@ html.platform-darwin .overlay-titlebar {
 .chat-user-bubble .chat-user-image-carousel {
   margin-left: 0;
 }
-/* A message another thread's agent sent: on the soft surface, not the person's colour, with a header naming the agent. */
+/* A message another thread's agent sent: a soft neutral fill on the pane, not the person's colour, with a header naming
+   the agent. A bot's takes a soft tint of its own colour (user-message.tsx sets --from-colour). Fills, no outline. */
 .chat-user-bubble.is-agent {
-  background: var(--surface-soft);
+  background: color-mix(in srgb, var(--text-primary) 6%, var(--pane-surface, var(--surface-soft)));
   color: var(--text-primary);
-  border: 1px solid var(--ui-line, var(--border));
+}
+.chat-user-bubble.is-agent.is-bot {
+  background: color-mix(in srgb, var(--from-colour) 13%, var(--pane-surface, var(--surface-soft)));
 }
 /* It folds sooner than a person's prompt (AGENT_FOLD_HEIGHT in user-message.tsx). */
 .chat-user-bubble.is-agent .chat-user-text.is-folded {

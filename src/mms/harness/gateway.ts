@@ -39,6 +39,7 @@ import type { AdapterHost, TurnBridge, TurnControl, TurnInput, TurnResult, TurnS
 import { mcpAttachable, type ChildPreflightContext, type SubagentRefusal } from '../run/policy/featureGates'
 import type { McpAttachmentProvider } from '../run/mcp/MousseMcpServer'
 import type { TurnSettlement } from '../run/mcp/McpCredentials'
+import { ownerOnlyAuth, ownerOnlyMessage, ownerTurnRefusal, type OwnerOnlyAuth, type OwnerTurnRefusal, type ProvenanceReader } from './ownerOnly'
 import type { ModeCeiling, ProviderRef } from '../run/types'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
@@ -296,6 +297,13 @@ export interface HarnessGateway {
   setLiveHost(host: LiveProcessHost | null): void
   /** The profile's Mousse MCP server, which turn bridges attach (null: none). */
   setMcpAttachment(provider: McpAttachmentProvider | null): void
+  /**
+   * Where turn admission reads a run's provenance (the run store). Without it, an instance that runs only turns its
+   * owner drives (`ownerOnly.ts`) runs none.
+   */
+  setRunProvenance?(reader: ProvenanceReader | null): void
+  /** Whether the instance runs only turns its owner drives (`ownerOnly.ts`); false for an unknown one. */
+  ownerOnly?(instanceId: string): boolean
   /** The turn a thread's live process started itself and is running now, from whichever instance holds it. */
   inFlightContinuation(threadId: string): { id: string; discarded: boolean } | undefined
   /** A thread's live process still holds that turn of its own. */
@@ -637,6 +645,8 @@ export const MODEL_REFRESH_INTERVAL_MS = 3 * 60 * 60_000
 export const MODEL_REFRESH_STARTUP_DELAY_MS = 2 * 60_000
 /** Model refreshes running at once (Claude Code and Codex start a CLI each). */
 const MODEL_REFRESH_CONCURRENCY = 2
+/** Owner-only runs remembered as admitted: far more than a person sends while a retry could still follow. */
+const OWNER_ADMITTED_MAX = 4_096
 /** Coalesce nearby desktop opens, including retries of an unsuccessful refresh. */
 const DESKTOP_MODEL_REFRESH_INTERVAL_MS = 5 * 60_000
 /** Test-only: replaces `MODEL_REFRESH_INTERVAL_MS`, in milliseconds. */
@@ -896,6 +906,13 @@ export class Harness implements HarnessGateway {
   private readonly records = new Map<string, InstanceRecord>()
   private liveHost: LiveProcessHost | null = null
   private mcp: McpAttachmentProvider | null = null
+  /** Where admission reads a run's provenance (`setRunProvenance`); without it an owner-only instance runs nothing. */
+  private runProvenance: ProvenanceReader | undefined
+  /**
+   * Runs an owner-only instance has admitted in this process (the most recent `OWNER_ADMITTED_MAX`): a run's prompt
+   * is sent once, and a later attempt of it is refused (`refuseNotOwnerDriven`).
+   */
+  private readonly ownerAdmitted = new Set<string>()
   private readonly retired = new Set<InstanceRecord>()
   /**
    * The stops of a removal or disable still running, per instance (each settles, never rejects). They
@@ -1241,6 +1258,14 @@ export class Harness implements HarnessGateway {
     // Nothing is admitted on an instance signed out in Mousse or on a version with a known problem:
     // no account check, no runtime start.
     if (record) this.admissionGate(record)
+    // A personal sign-in binds only a person's chat that chose it: no work started for anyone else (an origin given
+    // and a person's), and never a selection that moved to it from another entry. The run itself is checked at
+    // admission.
+    const ownerOnly = record ? this.ownerOnlyAuthOf(record) : undefined
+    if (record && ownerOnly) {
+      if (input.origin !== 'interactive') this.refuseOwnerOnly(record, ownerOnly, 'not_interactive')
+      if (resolved.movedFrom) this.refuseOwnerOnly(record, ownerOnly, 'moved')
+    }
     const accountId = record ? await this.currentAccount(record) : undefined
     const counters = this.counters.get(resolved.instanceId)
     // The attempt runs on the caps of this moment, whatever the runtime reports meanwhile.
@@ -1624,6 +1649,9 @@ export class Harness implements HarnessGateway {
     if (!runtime.oneShot) harnessFail('unsupported', `${this.displayName(record)} cannot run a single request.`, record.instanceId)
     if (record.stopped) throw this.stopError(record, record.stopped.reason)
     this.admissionGate(record)
+    // Mousse's own requests (titles, digests, drafts) are never the owner's message.
+    const personal = this.ownerOnlyAuthOf(record)
+    if (personal) this.refuseOwnerOnly(record, personal, 'one_shot')
     // The gateway's inactivity bound: every provider event restarts it; past it the request is aborted.
     const idle = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -1676,6 +1704,8 @@ export class Harness implements HarnessGateway {
     if (record.stopped) throw this.stopError(record, record.stopped.reason)
     this.refuseRetired(record)
     this.admissionGate(record)
+    const personal = this.ownerOnlyAuthOf(record)
+    if (personal) this.refuseOwnerOnly(record, personal, 'one_shot')
     return runtime.generateImage({ model: request.model, prompt: request.prompt, ...(request.shape ? { shape: request.shape } : {}) }, request.signal ?? new AbortController().signal)
   }
 
@@ -1699,6 +1729,8 @@ export class Harness implements HarnessGateway {
     // again would not help.
     this.refuseRetired(record)
     this.admissionGate(record)
+    // A personal sign-in runs only what its owner sent: checked on every attempt, before anything else is decided.
+    this.refuseNotOwnerDriven(record, spec)
     if (input.instanceId !== binding.instanceId || input.model !== binding.model)
       harnessFail('protocol', `The turn names ${input.instanceId ?? 'no instance'}/${input.model} but its binding is ${binding.instanceId}/${binding.model}.`, binding.instanceId)
     // The runtime takes its permissions from the input's mode: it must be the binding's policy.
@@ -1964,6 +1996,9 @@ export class Harness implements HarnessGateway {
 
   async childPreflight(instanceId: string, context: ChildPreflightContext): Promise<SubagentRefusal | null> {
     const record = this.record(instanceId, { allowDisabled: true })
+    // A personal sign-in runs no subagent: refused before a child thread is made.
+    const personal = this.ownerOnlyAuthOf(record)
+    if (personal) return { code: 'owner_only_provider', message: ownerOnlyMessage(this.displayName(record), personal, 'not_interactive') }
     return (await record.runtime.adapter.childPreflight?.(context)) ?? null
   }
 
@@ -2013,7 +2048,10 @@ export class Harness implements HarnessGateway {
   }
 
   async compactConversation(request: NativeCompactRequest): Promise<boolean> {
-    const runtime = this.recordOrUndefined(request.instanceId)?.runtime
+    const record = this.recordOrUndefined(request.instanceId)
+    // A personal sign-in never compacts with a model: Mousse's own compaction, which asks no model, runs instead.
+    if (record && this.ownerOnlyAuthOf(record)) return false
+    const runtime = record?.runtime
     return runtime?.compactConversation ? runtime.compactConversation(request) : false
   }
 
@@ -2028,6 +2066,47 @@ export class Harness implements HarnessGateway {
 
   setMcpAttachment(provider: McpAttachmentProvider | null): void {
     this.mcp = provider
+  }
+
+  setRunProvenance(reader: ProvenanceReader | null): void {
+    this.runProvenance = reader ?? undefined
+  }
+
+  ownerOnly(instanceId: string): boolean {
+    const record = this.recordOrUndefined(instanceId)
+    return Boolean(record && this.ownerOnlyAuthOf(record))
+  }
+
+  /** Whether the instance runs only turns its owner drives, and why (`ownerOnly.ts`), from its config now. */
+  private ownerOnlyAuthOf(record: InstanceRecord): OwnerOnlyAuth | undefined {
+    return ownerOnlyAuth(record.driver.kind, record.config)
+  }
+
+  /**
+   * The one owner check for an instance that runs only turns its owner drives (Antigravity's personal Google sign-in):
+   * read on every attempt in `admitTurn` from the binding's origin and the run as stored, before anything reaches the
+   * provider. Only a run's first attempt runs: a later one (an automatic retry, a recovery, a steer restart, by its
+   * ordinal or because this process already admitted the run) may repeat a prompt the provider already has, and the
+   * proof says only that the owner sent it once. Every other instance is not affected.
+   */
+  private refuseNotOwnerDriven(record: InstanceRecord, spec: TurnSpec): void {
+    const auth = this.ownerOnlyAuthOf(record)
+    if (!auth) return
+    const runId = spec.input.runId
+    const refusal = ownerTurnRefusal(spec.binding.policy.origin, runId, this.runProvenance)
+      ?? ((spec.attemptOrdinal ?? 1) > 1 || this.ownerAdmitted.has(runId) ? 'replay' : undefined)
+    if (refusal) this.refuseOwnerOnly(record, auth, refusal)
+    this.ownerAdmitted.add(runId)
+    if (this.ownerAdmitted.size > OWNER_ADMITTED_MAX) this.ownerAdmitted.delete(this.ownerAdmitted.values().next().value as string)
+  }
+
+  private refuseOwnerOnly(record: InstanceRecord, auth: OwnerOnlyAuth, refusal: OwnerTurnRefusal | 'one_shot' | 'moved'): never {
+    throw harnessAppError({
+      code: 'not_eligible',
+      message: ownerOnlyMessage(this.displayName(record), auth, refusal),
+      reason: `owner_only:${refusal}`,
+      instanceId: record.instanceId
+    })
   }
 
   /**

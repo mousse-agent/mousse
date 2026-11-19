@@ -4,7 +4,9 @@ import type { UpdateState } from '../../../shared/updates'
 import { subscribeToUpdates, updateActions, useUpdateStore } from '../../stores/updateStore'
 import { InstallConfirm } from '../updates/InstallConfirm'
 import { UpdateErrorNotice } from '../updates/UpdateErrorNotice'
-import { Download, Info, Loader2, RefreshCw, RotateCcw, ShieldCheck } from '../../lib/icons'
+import { AlertTriangle, Download, Info, Loader2, RefreshCw, RotateCcw, ShieldCheck } from '../../lib/icons'
+import { normalizeErrorReportSettings } from '../../../shared/bugReports'
+import { FiledReportsList } from '../bugReports/FiledReports'
 import { describePermissionMode, PERMISSION_MODES } from '../../../shared/permissionMode'
 import { PermissionModeLabel } from '../../lib/permissionModeIcon'
 import { Select } from '../ui/Select'
@@ -48,7 +50,43 @@ export function GeneralSettings({ settings, onUpdate }: GeneralSettingsProps) {
       <SettingsGroup title="About" icon={Info}>
         <AboutRow />
       </SettingsGroup>
+
+      <ErrorReportsGroup settings={settings} onUpdate={onUpdate} />
     </section>
+  )
+}
+
+/** Error reports: the Report button on errors (and agents' `report_bug`), who files them, and the reports filed here. */
+function ErrorReportsGroup({ settings, onUpdate }: GeneralSettingsProps) {
+  const reports = normalizeErrorReportSettings(settings.errorReports)
+  const [listOpen, setListOpen] = useState(false)
+  return (
+    <SettingsGroup title="Error reports" icon={AlertTriangle} anchor="general-error-reports">
+      <SettingsRow
+        title="Report button"
+        anchor="general-report-button"
+        description={<span title="Errors show Report, which drafts a public GitHub issue you see first. It is filed from your GitHub account. Agents may ask to file bugs the same way.">Errors offer a public GitHub issue you see first.</span>}
+        control={<Switch checked={reports.enabled} label="Report button" onChange={(enabled) => void onUpdate({ errorReports: { ...reports, enabled } })} />}
+      />
+      {/* The stored `anonymous` flag picks a Mousse relay account that is not running yet; until it does, on means the
+          report opens on GitHub, so the switch shows its opposite: filing straight away with gh. */}
+      <SettingsRow
+        indent
+        disabled={!reports.enabled}
+        title="File with gh"
+        anchor="general-report-with-gh"
+        description={<span title="Off: the report opens on GitHub and you submit it there. On: Mousse files it with your gh sign-in. Either way it is a public issue under your GitHub account.">{reports.anonymous ? 'Opens GitHub. Filed from your account (public).' : 'Filed from your GitHub account (public).'}</span>}
+        control={<Switch checked={!reports.anonymous} disabled={!reports.enabled} label="File with gh" onChange={(withGh) => void onUpdate({ errorReports: { ...reports, anonymous: !withGh } })} />}
+      />
+      <SettingsRow
+        title="Your reports"
+        anchor="general-your-reports"
+        description="Reports sent from this computer. Revoke closes the issue."
+        control={<button type="button" className="settings-btn" aria-expanded={listOpen} onClick={() => setListOpen((open) => !open)}>{listOpen ? 'Hide' : 'Show'}</button>}
+      >
+        {listOpen && <FiledReportsList />}
+      </SettingsRow>
+    </SettingsGroup>
   )
 }
 

@@ -104,6 +104,7 @@ import { PendingChangesNotice } from './PendingChangesNotice'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from './ComposerNotice'
 import { ServiceLostNotice } from './ServiceLostNotice'
 import { PausedRunNotice } from '../chat/components/PausedRunNotice'
+import { SetupFailureNotice } from '../chat/components/SetupFailureNotice'
 import { CommandInfoNotice, GoalNotice } from '../chat/components/GoalNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { addPendingThreadRow, afterNextPaint, claimPendingThreadRow, dropPendingThreadRows, holdNewChat, isPendingRowId, pendingThreadRow, typedAfterSend, type PendingThreadRow } from '../lib/pendingThreadRows'
@@ -112,6 +113,8 @@ import { ComposerProjectPicker, ComposerThreadSettings, type ComposerDeviceProps
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
 import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
+import { threadReferenceRefusal } from '../lib/threadReference'
+import { isLocalOnlyThread } from '../../shared/threadLineage'
 import { pickedSelection, pickerModelId } from '../../shared/modelSelection'
 import '../styles/compact-composer.css'
 import { CHAT_TOOL_RENDERERS } from './automations/inbox/ChatDraftCard'
@@ -445,6 +448,12 @@ export function OrchestratorChat() {
   const addResolvedReference = useCallback(async (reference: ChatReference) => {
     const expectedProfile = useAppStore.getState().profileId
     const expectedThread = useAppStore.getState().activeThreadId
+    if (reference.kind === 'thread' && reference.threadId) {
+      const { threads } = useAppStore.getState()
+      const here = threads.find((thread) => thread.id === expectedThread)
+      const refused = threadReferenceRefusal(reference.threadId, { privateThread: Boolean(here && isLocalOnlyThread(here, threads)) })
+      if (refused) throw new Error(refused)
+    }
     const resolved = await resolveChatReference(reference)
     const state = useAppStore.getState()
     if (state.profileId !== expectedProfile || state.activeThreadId !== expectedThread) return
@@ -1926,6 +1935,7 @@ export function OrchestratorChat() {
           : <ComputerNotice message={sendError} onDismiss={() => setSendError(null)} />)}
         <PromptUndoNotice />
         <PausedRunNotice threadId={activeThreadId} />
+        <SetupFailureNotice threadId={activeThreadId} />
         {/* A goal is the computer's that runs the thread (`threads.goal` is not routed): none for another computer's thread. */}
         <GoalNotice threadId={newChat || remoteNode ? null : activeThreadId} />
         {commandInfo && <CommandInfoNotice message={commandInfo} onDismiss={() => setCommandInfo(null)} />}

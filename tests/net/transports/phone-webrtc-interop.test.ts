@@ -80,7 +80,8 @@ describe.skipIf(!usable)('WebRTC direct path with the real native stack', () => 
   it('discovers, offers, connects and opens a full session over the DataChannel', async () => {
     const { computer, phone, computerNode, mousseId } = await fixture()
     const relayed = await relayedSession(phone.net, computer.net, mousseId)
-    expect(await rpc(relayed, PHONE_ENDPOINTS_METHOD, {})).toEqual({
+    // `lan` depends on this machine's addresses; phone-lan-path.test.ts covers it.
+    expect(await rpc(relayed, PHONE_ENDPOINTS_METHOD, {})).toMatchObject({
       endpoints: [],
       webrtc: { v: 1 }
     })
@@ -122,7 +123,7 @@ describe.skipIf(!usable)('WebRTC direct path with the real native stack', () => 
     await vi.waitFor(() =>
       expect(computer.net.phoneWebRtcCounts()).toEqual({ pending: 0, live: 1 })
     )
-    expect(await rpc(direct, PHONE_ENDPOINTS_METHOD, {})).toEqual({
+    expect(await rpc(direct, PHONE_ENDPOINTS_METHOD, {})).toMatchObject({
       endpoints: [],
       webrtc: { v: 1 }
     })

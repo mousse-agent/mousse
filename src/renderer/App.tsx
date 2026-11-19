@@ -26,6 +26,8 @@ import { CommandPalette } from './components/CommandPalette'
 import { SelectionReplyButton } from './components/SelectionReplyButton'
 import { ToastHost } from './components/ui/Toast'
 import { PairLinkHost } from './components/netEngine/PairLinkHost'
+import { BugReportDialogHost } from './components/bugReports/BugReportDialog'
+import { useBugReportStore } from './stores/bugReportStore'
 import { ThreadRenameDialog } from './components/ThreadRenameDialog'
 import { showThreadToast, watchOpenedThreadToasts } from './lib/threadToasts'
 import { watchDeletedShownThread } from './lib/leaveDeletedThread'
@@ -304,6 +306,7 @@ export default function App() {
       setShortcuts(settings.shortcuts ?? {})
       useAppStore.getState().setNotifyBotThreads(settings.notifications?.botThreads === true)
       useAppStore.getState().setRunDefaults(normalizeRunSettings(settings.runs))
+      useBugReportStore.getState().setSettings(settings.errorReports)
       applyPlusLegacy(settings)
     })).catch(() => {})
     void window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
@@ -396,6 +399,7 @@ export default function App() {
         setShortcuts(settings?.shortcuts ?? {})
         useAppStore.getState().setNotifyBotThreads(settings?.notifications?.botThreads === true)
         useAppStore.getState().setRunDefaults(normalizeRunSettings(settings?.runs))
+        useBugReportStore.getState().setSettings(settings?.errorReports)
         applyPlusLegacy(settings)
       })),
       // A turn that ends shows with its last text, never a frame before it.
@@ -669,7 +673,7 @@ export default function App() {
         )}
 
         {/* Keep terminal PTYs and browser guests mounted when the pane is collapsed. */}
-        <KeepMounted as="main" active={panelShown} preserveLayout className={`main-area${panelClosing ? ' is-closing' : ''}`}
+        <KeepMounted as="main" data-mousse="panel" active={panelShown} preserveLayout className={`main-area${panelClosing ? ' is-closing' : ''}`}
           // Beside it: the threads sidebar and its divider when open (the Runs list sits outside the workspace), and the 1px divider before it.
           style={mainAreaStyle(mainAreaWidth, (threadsSidebarOpen && !inboxThread ? threadsSidebarWidth + 1 : 0) + 1)}>
           <MainViewTabs />
@@ -689,6 +693,7 @@ export default function App() {
       {/* A `mousse://pair` link that opened Mousse: the profile that joins, then Enter link. */}
       {profileReady && <PairLinkHost />}
       <ToastHost />
+      <BugReportDialogHost />
 
     </div>
 

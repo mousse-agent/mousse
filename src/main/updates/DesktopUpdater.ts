@@ -175,7 +175,7 @@ export class DesktopUpdater {
       this.failures = 0
       const info = result?.isUpdateAvailable ? result.updateInfo : undefined
       if (!info) {
-        this.update({ phase: 'up-to-date', lastCheckedAt: this.now(), releaseNotes: [], omittedReleaseCount: 0 }, ['availableVersion', 'error'])
+        this.update({ phase: 'up-to-date', lastCheckedAt: this.now(), releaseNotes: [], omittedReleaseCount: 0 }, ['availableVersion', 'error', 'pullRequests'])
       } else {
         // A single note belongs to the release the feed matched; drop it when that is another release.
         const matched = typeof info.releaseNotes !== 'string' || !info.releaseName || info.releaseName.includes(info.version)

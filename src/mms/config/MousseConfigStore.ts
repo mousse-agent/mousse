@@ -102,6 +102,7 @@ function splitSettings(full: MousseSettings): {
       runs: full.runs,
       experimental: full.experimental,
       storage: full.storage,
+      errorReports: full.errorReports,
       integrations: full.integrations,
       title: full.title,
       botModel: full.botModel
@@ -136,7 +137,7 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     selection: job.selection,
     ...(job.agent?.definitionId ? { agent: { definitionId: job.agent.definitionId } } : {}),
     // An automation's model by hand keeps its entry beside its name (#673); a build that writes only the name drops it.
-    ...(job.bot ? { bot: { botId: job.bot.botId, scheduleId: job.bot.scheduleId, createdBy: job.bot.createdBy, ...(job.bot.canWakeMe !== undefined ? { canWakeMe: job.bot.canWakeMe } : {}), ...(job.bot.ownerAsked !== undefined ? { ownerAsked: job.bot.ownerAsked } : {}), ...(job.bot.say !== undefined ? { say: job.bot.say } : {}), ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick ? { pick: job.bot.pick } : {}) } } : {}),
+    ...(job.bot ? { bot: { botId: job.bot.botId, scheduleId: job.bot.scheduleId, createdBy: job.bot.createdBy, ...(job.bot.ownerAsked !== undefined ? { ownerAsked: job.bot.ownerAsked } : {}), ...(job.bot.say !== undefined ? { say: job.bot.say } : {}), ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick ? { pick: job.bot.pick } : {}) } } : {}),
     mode: job.mode,
     workspace: job.workspace,
     permissionMode: job.permissionMode,
@@ -612,6 +613,7 @@ export class MousseConfigStore {
       partial.runs ||
       partial.experimental ||
       partial.storage ||
+      partial.errorReports ||
       partial.integrations ||
       partial.title ||
       partial.botModel
@@ -622,6 +624,7 @@ export class MousseConfigStore {
         ...(partial.runs ? { runs: partial.runs as MousseSettingsSection['runs'] } : {}),
         ...(partial.experimental ? { experimental: partial.experimental as MousseSettingsSection['experimental'] } : {}),
         ...(partial.storage ? { storage: partial.storage as MousseSettingsSection['storage'] } : {}),
+        ...(partial.errorReports ? { errorReports: partial.errorReports as MousseSettingsSection['errorReports'] } : {}),
         ...(partial.profile ? { profile: partial.profile as MousseSettingsSection['profile'] } : {}),
         ...(partial.appearance
           ? { appearance: partial.appearance as MousseSettingsSection['appearance'] }

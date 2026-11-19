@@ -11,16 +11,18 @@ import { THEME_SELECTORS, themeStylingGuide } from '../src/shared/themes/userThe
 /** Where each part's attribute lives. A part may be drawn by more than one component (the settings page's two states). */
 const OWNERS: Record<string, string[]> = {
   rail: ['src/renderer/components/NavigationRail.tsx'],
+  'rail-item': ['src/renderer/components/NavigationRail.tsx', 'src/renderer/components/profiles/ProfileSwitcher.tsx'],
   sidebar: ['src/renderer/components/ThreadsSidebar.tsx'],
   titlebar: ['src/renderer/components/TitleBar.tsx'],
-  'chat-header': ['src/renderer/components/TitleBarNav.tsx', 'src/renderer/components/chats/ChatWorkspace.tsx'],
-  chat: ['src/renderer/components/OrchestratorChat.tsx'],
-  transcript: ['src/renderer/chat/components/agent-elements/message-list.tsx'],
-  'user-message': ['src/renderer/chat/components/agent-elements/user-message.tsx'],
-  'assistant-message': ['src/renderer/chat/components/agent-elements/message-list.tsx'],
+  'chat-header': ['src/renderer/components/TitleBarNav.tsx', 'src/renderer/components/chats/ChatWorkspace.tsx', 'src/renderer/components/bots/BotChatView.tsx', 'src/renderer/components/bots/BotThreadHeader.tsx'],
+  chat: ['src/renderer/components/OrchestratorChat.tsx', 'src/renderer/components/bots/BotChatView.tsx'],
+  transcript: ['src/renderer/chat/components/agent-elements/message-list.tsx', 'src/renderer/components/bots/BotChatView.tsx'],
+  'user-message': ['src/renderer/chat/components/agent-elements/user-message.tsx', 'src/renderer/components/bots/BotChatView.tsx'],
+  'assistant-message': ['src/renderer/chat/components/agent-elements/message-list.tsx', 'src/renderer/components/bots/BotChatView.tsx'],
   composer: ['src/renderer/components/ChatComposer.tsx'],
   'project-icon': ['src/renderer/components/ProjectIcon.tsx'],
   'side-card': ['src/renderer/components/sideCard/ThreadSideCard.tsx'],
+  panel: ['src/renderer/App.tsx'],
   settings: ['src/renderer/components/SettingsPage.tsx'],
   wallpaper: ['src/renderer/components/ChatWallpaper.tsx']
 }
@@ -68,7 +70,7 @@ const DECISIONS: Record<string, string> = {
   'a bot\'s ask in its chat': 'src/renderer/components/bots/BotAskReplies.tsx',
   'a bot owner\'s permission decision': 'src/renderer/components/chats/BotPermissionDecision.tsx',
   'browser access for agents (chat)': 'src/renderer/components/chats/ChatBrowserAccess.tsx',
-  'browser access for agents (browser panel)': 'src/renderer/components/BrowserPanel.tsx',
+  'browser access for agents (browser panel)': 'src/renderer/components/browser/BrowserToolbarParts.tsx',
   'a device enrollment request': 'src/renderer/components/EnrollmentRequestPrompt.tsx',
   'a phone enrollment left in Settings': 'src/renderer/components/MousseIdSection.tsx',
   'an editor access request': 'src/renderer/components/EditorAskPrompt.tsx',

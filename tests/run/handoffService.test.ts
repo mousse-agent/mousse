@@ -21,14 +21,18 @@ describe('HandoffService strategies (SPEC §16.1)', () => {
     fx = undefined
   })
 
-  /** A finished run on `threadId` whose attempt ran on `provider`. */
-  const ranOn = async (threadId: string, provider: string) => {
+  /**
+   * A finished run on `threadId` whose attempt ran on `provider`: by default in a session of its own that completed;
+   * `session: null` for one refused before its session opened (a runtime records no session id then).
+   */
+  const ranOn = async (threadId: string, provider: string, options: { session?: string | null; status?: 'completed' | 'failed' } = {}) => {
     const sent = await fx!.engine.dispatch({ kind: 'send', threadId, clientRequestId: `send:${threadId}:${Math.random()}`, source: 'gui' })
     if (sent.status !== 'accepted') throw new Error('send rejected')
     fx!.engine.markStarting(sent.runId)
-    fx!.engine.recordProviderRef(sent.runId, { provider, model: 'm' })
+    const session = options.session === undefined ? `session:${provider}:${sent.runId}` : options.session
+    fx!.engine.recordProviderRef(sent.runId, { provider, model: 'm', ...(session ? { sessionId: session } : {}) })
     fx!.engine.markRunning(sent.runId)
-    return fx!.engine.markTerminal(sent.runId, 'completed')
+    return fx!.engine.markTerminal(sent.runId, options.status ?? 'completed', options.status === 'failed' ? { error: 'refused' } : undefined)
   }
   const target = async (threadId: string) => {
     const sent = await fx!.engine.dispatch({ kind: 'send', threadId, clientRequestId: `target:${Math.random()}`, source: 'gui' })
@@ -82,6 +86,42 @@ describe('HandoffService strategies (SPEC §16.1)', () => {
     expect(plan.delivery).toBe('prompt_preamble')
     expect(plan.history.map((item) => item.text)).toEqual(['u2', 'a2'])
     expect(plan.record).toMatchObject({ coveredFromOrdinal: 2, coveredToOrdinal: 2 })
+  })
+
+  it('passes over a failed attempt on the target provider that never opened a session: full_summary when none did', async () => {
+    fx = delegationFixture()
+    await ranOn('t', 'openai')
+    // The target was tried and refused before any session opened (a bot's Codex on an unchecked version).
+    await ranOn('t', 'claude-subscription', { session: null, status: 'failed' })
+    const run = await target('t')
+    transcript([...items, { runOrdinal: 2, role: 'user', text: 'u2b' }])
+    const plan = fx.engine.handoffs.plan({ threadId: 't', targetRunId: run.runId, from: { provider: 'openai' }, to, caps: CLAUDE_SUBSCRIPTION_CAPABILITIES })
+    expect(plan.strategy).toBe('full_summary')
+    expect(plan.history.map((item) => item.text)).toEqual(['u1', 'a1', 'u2', 'a2', 'u2b'])
+  })
+
+  it("a delta resumes from the target's last session even after a later attempt that never opened one", async () => {
+    fx = delegationFixture()
+    await ranOn('t', 'claude-subscription')
+    await ranOn('t', 'openai')
+    await ranOn('t', 'claude-subscription', { session: null, status: 'failed' })
+    const run = await target('t')
+    transcript([...items, { runOrdinal: 3, role: 'user', text: 'u3' }])
+    const plan = fx.engine.handoffs.plan({ threadId: 't', targetRunId: run.runId, from: { provider: 'openai' }, to, caps: CLAUDE_SUBSCRIPTION_CAPABILITIES })
+    expect(plan.strategy).toBe('delta')
+    expect(plan.history.map((item) => item.text)).toEqual(['u2', 'a2', 'u3'])
+  })
+
+  it("full_summary when the target's newest session ended failed: nothing is left to resume", async () => {
+    fx = delegationFixture()
+    await ranOn('t', 'claude-subscription')
+    await ranOn('t', 'openai')
+    await ranOn('t', 'claude-subscription', { status: 'failed' })
+    const run = await target('t')
+    transcript(items)
+    const plan = fx.engine.handoffs.plan({ threadId: 't', targetRunId: run.runId, from: { provider: 'openai' }, to, caps: CLAUDE_SUBSCRIPTION_CAPABILITIES })
+    expect(plan.strategy).toBe('full_summary')
+    expect(plan.history.map((item) => item.text)).toEqual(['u1', 'a1', 'u2', 'a2'])
   })
 
   it('native_resume (nothing sent) for the same provider with a live native session', async () => {
@@ -143,7 +183,8 @@ describe('provider switch through the orchestrator (SPEC §16.1)', () => {
     home = mkdtempSync(join(tmpdir(), 'mousse-handoff-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
-    const pi = piAdapter((input) => `pi answered: ${input.prompt}`)
+    // Pi names its session, as the real runtime does: a later switch back to it resumes there with a delta.
+    const pi = piAdapter((input) => `pi answered: ${input.prompt}`, {}, 'pi-session')
     const claude = claudeAdapter(claudeScript)
     daemon = phase6Daemon(home, [pi, claude])
     return { pi, claude, d: daemon }

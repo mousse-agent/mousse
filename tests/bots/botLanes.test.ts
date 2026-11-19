@@ -4,7 +4,8 @@
  * threads of their own, each with the run pack of its schedule, and posts a run report.
  */
 import { BotEngine, UNANSWERED_REPLY } from '../../src/mms/bots/activation/BotEngine'
-import { existsSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
 
@@ -39,6 +40,42 @@ describe('two lanes', () => {
     await finish(f, b.payload, 'completed', { text: 'Halfway.' })
     await finish(f, a.payload, 'completed', { text: 'Notes tidied.' })
     expect(chatOf(f, botId).slice(-2)).toMatchObject([{ kind: 'text', text: 'Halfway.' }, { kind: 'run_report', text: 'Notes tidied.', activationId: run.id }])
+  })
+
+  // The chat's turns start their runtime with the same scratch, and the `TMPDIR` in it on macOS and Linux, so the
+  // process kept warm for the chat is reused; nothing a turn left there reaches the next one.
+  it("a bot's chat turns share one scratch folder, emptied between them; a run has its own", async () => {
+    await send('one', 'm1')
+    const [first] = lane('chat', ['running'])
+    const one = await runDispatch(f, first!.id, 1, { text: 'One.', during: (prepared) => writeFileSync(join(prepared.scratch, 'left.txt'), 'x') })
+    expect(existsSync(one.scratch)).toBe(false)
+    await send('two', 'm2')
+    const [second] = lane('chat', ['running'])
+    const { payload, prepared: two } = await start(f, second!.id)
+    expect(two.scratch).toBe(one.scratch)
+    expect(two.authority.workspace?.scratch).toBe(one.authority.workspace?.scratch)
+    expect(existsSync(join(two.scratch, 'tmp'))).toBe(true)
+    expect(existsSync(join(two.scratch, 'left.txt'))).toBe(false)
+    const run = await f.bots.activate({ botId, input: 'go', clientRequestId: 'r1' })
+    const { prepared: ran } = await start(f, run.id)
+    expect(ran.scratch).not.toBe(two.scratch)
+    await finish(f, payload, 'completed', { text: 'Two.' })
+  })
+
+  it('a chat turn that starts while an earlier one holds the chat folder gets its own, and its end leaves the held one', async () => {
+    await send('one', 'm1')
+    const [first] = lane('chat', ['running'])
+    const { payload, prepared: one } = await start(f, first!.id)
+    // Paused (its calls' outcome unknown): its run stopped, it keeps its folder, and the lane is free.
+    f.runs.markTerminal(payload.runId, 'interrupted')
+    expect(f.store.moveActivation(first!.id, ['running'], 'paused', { endReason: 'unknown_calls' })).toBe(true)
+    await send('two', 'm2')
+    const [second] = lane('chat', ['running'])
+    expect(second!.id).not.toBe(first!.id)
+    const two = await runDispatch(f, second!.id, 1, { text: 'Two.' })
+    expect(two.scratch).not.toBe(one.scratch)
+    expect(existsSync(two.scratch)).toBe(false)
+    expect(existsSync(one.scratch)).toBe(true)
   })
 
 })

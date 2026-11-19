@@ -86,6 +86,8 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   memory_read: ["read", "memory"],
   memory_list: ["list", "memories"],
   memory_forget: ["forget", "a memory"],
+  item_save: ["update", "the open items"],
+  item_list: ["check", "the open items"],
   // Reminders and wake-ups
   remind: ["set", "a reminder"],
   wake: ["set", "a wake-up"],
@@ -142,7 +144,6 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   secret_run: ["run", "a command with a secret"],
   // A bot's settings
   consult: ["ask", "a context thread"],
-  telling_set: ["set", "how you're told"],
   use_model: ["change", "the model"],
   set_depth: ["change", "how deeply it thinks"],
   set_profile: ["update", "its profile"],

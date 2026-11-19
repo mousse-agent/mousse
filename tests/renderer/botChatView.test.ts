@@ -291,6 +291,63 @@ describe('the transcript', () => {
     expect(host.querySelector('aside.bot-file-pane')).toBeNull()
   })
 
+  it('the side panel docks outside the chat pane and opens on the picker: each pick is a tab, + opens the picker again', async () => {
+    const folder = 'C:\\Users\\me\\.mousse\\profiles\\d9d018ad-5de0\\bots\\files\\inbox'
+    fake.chats.inbox = [message(1, { id: 'b1', text: `Saved \`${folder}\\plan.md\`.` })]
+    const listDir = vi.fn(async () => [{ name: 'plan.md', path: 'plan.md', kind: 'file' as const }])
+    const readFile = vi.fn(async () => '# Plan')
+    installPreload(fake, { app: { setViewedBot }, fs: { listDir, readFile, readAsset: vi.fn(async () => { throw new Error('none') }) }, localFiles: { open: vi.fn(async () => 'file' as const) } })
+    await open()
+    const panel = () => host.querySelector<HTMLElement>('aside.bot-side')
+    const tabs = () => [...panel()!.querySelectorAll<HTMLButtonElement>('.main-view-tab-select')].map((element) => element.textContent)
+    const tab = (label: string) => [...panel()!.querySelectorAll<HTMLButtonElement>('.main-view-tab-select')].find((element) => element.textContent === label)
+    const pick = (label: string) => [...panel()!.querySelectorAll<HTMLButtonElement>('.surface-picker .surface-menu-row')].find((element) => element.textContent === label)
+    expect(panel()).toBeNull()
+    await click(button('Show side panel'))
+    await settle()
+    // Not inside the chat pane; nothing open in it yet, only the picker, with no tab.
+    expect(host.querySelector('.bot-chat-pane')!.contains(panel())).toBe(false)
+    expect(panel()!.getAttribute('data-view')).toBe('picker')
+    expect([...panel()!.querySelectorAll('.surface-picker .surface-menu-row')].map((row) => row.textContent)).toEqual(['Browser', 'Files', 'Agent settings'])
+    expect(tabs()).toEqual([])
+    expect(useBotsStore.getState().aboutOpen).toBe(false)
+    await click(pick('Files'))
+    await settle()
+    expect(panel()!.getAttribute('data-view')).toBe('files')
+    expect(tabs()).toEqual(['Files'])
+    // Its files folder, read from the paths its chat named; a file there opens in the view.
+    expect(listDir).toHaveBeenCalledWith('', undefined, null, folder)
+    await click([...panel()!.querySelectorAll<HTMLElement>('.file-tree-row')].find((row) => row.textContent?.includes('plan.md')))
+    await settle()
+    expect(readFile).toHaveBeenCalledWith('plan.md', undefined, null, folder)
+    expect(panel()!.querySelector('.bot-file-name')?.textContent).toBe('plan.md')
+    // + opens the picker as a new tab; Agent settings is the About content.
+    await click(button('New tab', panel()!))
+    expect(panel()!.getAttribute('data-view')).toBe('picker')
+    expect(tabs()).toEqual(['Files', 'New tab'])
+    await click(pick('Agent settings'))
+    expect(tabs()).toEqual(['Files', 'Agent settings'])
+    expect(panel()!.querySelector('aside.bot-about')?.getAttribute('aria-label')).toBe('About Inbox helper')
+    expect(useBotsStore.getState().aboutOpen).toBe(true)
+    await click(button('New tab', panel()!))
+    await click(pick('Browser'))
+    expect(tabs()).toEqual(['Files', 'Agent settings', 'Browser'])
+    expect(panel()!.querySelector('.bot-about')).toBeNull()
+    expect(useBotsStore.getState().aboutOpen).toBe(false)
+    expect(panel()!.textContent).toContain('Inbox helper hasn’t used its browser yet.')
+    // A view already open is brought to the front, not opened twice.
+    await click(button('New tab', panel()!))
+    await click(pick('Files'))
+    expect(tabs()).toEqual(['Files', 'Agent settings', 'Browser', 'New tab'])
+    expect(panel()!.getAttribute('data-view')).toBe('files')
+    await click(tab('Agent settings'))
+    await click(button('Close Agent settings', panel()!))
+    expect(tabs()).toEqual(['Files', 'Browser', 'New tab'])
+    expect(useBotsStore.getState().aboutOpen).toBe(false)
+    await click(button('Close side panel'))
+    expect(button('Show side panel')?.getAttribute('aria-expanded')).toBe('false')
+  })
+
   it('a folder’s chip opens the folder in the file manager, not the Files pane; a path with nothing at it is said', async () => {
     const net = 'C:\\Users\\me\\.mousse\\net'
     fake.chats.inbox = [message(1, { id: 'b1', text: `Rename this folder: ${net}\\\n\nOld copy: C:\\Users\\me\\old-net` })]
@@ -1582,6 +1639,56 @@ describe('the composer', () => {
     expect(await file.text()).toBe(log)
   })
 
+  it('a pasted thread reference is a pill, sent as the thread\'s link after the words; a private thread is refused, a subagent is not', async () => {
+    const pasteText = (text: string) => fire(box(), 'paste', 'clipboardData', { items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }], files: [], getData: () => text })
+    const pills = () => [...composer().querySelectorAll('.composer-reference-pill')].map((pill) => pill.textContent?.trim())
+    const at = AT
+    useAppStore.setState({ threads: [
+      { id: 'thread-b', name: 'Design notes', createdAt: at, updatedAt: at, startedAt: at, order: 0 },
+      { id: 'thread-p', name: 'Secret plans', localOnly: true, createdAt: at, updatedAt: at, startedAt: at, order: 1 },
+      { id: 'thread-s', name: 'Reviewer', lineage: { relationship: 'subagent', parentThreadId: 'thread-b', rootThreadId: 'thread-b' }, createdAt: at, updatedAt: at, startedAt: at, order: 2 }
+    ] as never })
+    await open()
+    await pasteText('mousse://thread/thread-p')
+    await settle()
+    expect(composerError()?.textContent).toContain('“Secret plans” is private')
+    expect(pills()).toEqual([])
+
+    // A subagent is read through the thread that started it, as far as the bot reaches that one.
+    await pasteText('mousse://thread/thread-b mousse://thread/thread-s')
+    await settle()
+    expect(box().value).toBe('')
+    expect(pills()).toEqual(['Design notes', 'Reviewer'])
+    await type(box(), 'What is left on this?')
+    await click(button('Send message'))
+    await settle()
+    expect(fake.calls.find(([name]) => name === 'send')?.[2]).toBe('What is left on this?\n\nmousse://thread/thread-b\nmousse://thread/thread-s')
+    expect(pills()).toEqual([])
+  })
+
+  it('a send that fails gives its thread pills back, beside one pasted while it was sending', async () => {
+    const pasteText = (text: string) => fire(box(), 'paste', 'clipboardData', { items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }], files: [], getData: () => text })
+    const pills = () => [...composer().querySelectorAll('.composer-reference-pill')].map((pill) => pill.textContent?.trim())
+    useAppStore.setState({ threads: [
+      { id: 'thread-a', name: 'Design notes', createdAt: AT, updatedAt: AT, startedAt: AT, order: 0 },
+      { id: 'thread-b', name: 'Release plan', createdAt: AT, updatedAt: AT, startedAt: AT, order: 1 }
+    ] as never })
+    let fail: (cause: Error) => void = () => undefined
+    vi.mocked(fake.client.send).mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject }))
+    await open()
+    await type(box(), 'Review these')
+    await pasteText('mousse://thread/thread-a')
+    await settle()
+    await click(button('Send message'))
+    expect(pills()).toEqual([])
+    await pasteText('mousse://thread/thread-b')
+    await settle()
+    await act(async () => fail(new Error('The bot is offline.')))
+    await settle()
+    expect(box().value).toBe('Review these')
+    expect(pills()).toEqual(['Design notes', 'Release plan'])
+  })
+
   it('sends files alone, and refuses a file over the limit before sending anything', async () => {
     await open()
     const huge = new File(['x'], 'film.mov', { type: 'video/quicktime' })
@@ -1604,29 +1711,32 @@ describe('the composer', () => {
     expect(fake.calls).toContainEqual(['resume', 'inbox'])
   })
 
-  it('offers Resume on the newest usage-limit line only while paused; once the bot runs again every such line settles', async () => {
+  it('says a usage pause once, above the composer, while it holds; once the bot runs again its chat line shows settled', async () => {
     const limit = (seq: number, id: string, text: string) => message(seq, { id, kind: 'error', text: '', error: { text, action: { kind: 'resume', label: 'Resume' } } })
     fake.chats.inbox = [limit(1, 'l1', 'Paused until 03:27 (your Claude usage limit)'), message(2, { id: 'o2', author: 'owner', text: 'hi' }), limit(3, 'l3', 'Paused until 03:28 (your Claude usage limit)')]
-    await open({ ...inbox, state: 'paused', stateText: 'Paused until 03:28' })
-    const line = (id: string) => transcript().querySelector(`[data-message-id="${id}"] .bot-error`)!
-    expect(button('Resume', line('l1'))).toBeUndefined()
-    expect(line('l1').classList.contains('is-settled')).toBe(true)
-    expect(line('l3').classList.contains('is-settled')).toBe(false)
-    await click(button('Resume', line('l3')))
+    const error = { text: 'Paused until 03:28 (your Claude usage limit)', action: { kind: 'resume' as const, label: 'Resume' } }
+    await open({ ...inbox, state: 'paused', stateText: 'Paused until 03:28', error })
+    const line = (id: string) => transcript().querySelector(`[data-message-id="${id}"] .bot-error`)
+    expect(button('Resume', line('l1')!)).toBeUndefined()
+    expect(line('l1')!.classList.contains('is-settled')).toBe(true)
+    expect(line('l3')).toBeNull()
+    expect(document.querySelector('.bot-pinned[data-kind="error"]')).toBeNull()
+    expect(transcript().querySelector('.bot-paused-line')?.textContent).toBe('Paused until 03:28 (your Claude usage limit). Resume')
+    await click(button('Resume', transcript().querySelector('.bot-paused-line')!))
     expect(fake.calls).toContainEqual(['resume', 'inbox'])
     // The bot is no longer paused: no line offers a Resume that would do nothing.
     await settle()
     expect(transcript().querySelectorAll('.bot-error button')).toHaveLength(0)
-    expect(line('l3').classList.contains('is-settled')).toBe(true)
-    expect(line('l3').textContent).toBe('Paused until 03:28 (your Claude usage limit)')
+    expect(line('l3')!.classList.contains('is-settled')).toBe(true)
+    expect(line('l3')!.textContent).toBe('Paused until 03:28 (your Claude usage limit)')
   })
 })
 
 describe('the menu', () => {
-  it('offers About, Find in chat, Rename, Change look, Pause and Delete bot', async () => {
+  it('offers About, Find in chat, Hide checklist, Rename, Change look, Pause and Delete bot', async () => {
     await open()
     await click(button('Bot menu'))
-    expect([...host.querySelectorAll('[role="menuitem"]')].map((element) => element.textContent)).toEqual(['About this bot', 'Find in chat', 'Rename', 'Change look', 'Pause', 'Delete bot'])
+    expect([...host.querySelectorAll('[role="menuitem"]')].map((element) => element.textContent)).toEqual(['About this bot', 'Find in chat', 'Hide checklist', 'Rename', 'Change look', 'Pause', 'Delete bot'])
     await click(button('About this bot'))
     expect(host.querySelector('.bot-about')).not.toBeNull()
     expect(host.querySelector('[role="menu"]')).toBeNull()
@@ -1639,6 +1749,29 @@ describe('the menu', () => {
     expect(host.querySelector('.chat-conversation-header')?.textContent).not.toContain('Tells me which emails need a reply.')
     await click(button('About Inbox helper'))
     expect(host.querySelector('aside.bot-about')?.getAttribute('aria-label')).toBe('About Inbox helper')
+  })
+
+  it('the face opens Agent settings in the side panel and closes it; the panel button hides the panel and brings it back as it was', async () => {
+    act(() => setAnimationSpeed('off'))
+    try {
+      await open()
+      const panel = () => host.querySelector<HTMLElement>('aside.bot-side')
+      expect(button('Show side panel')?.getAttribute('aria-expanded')).toBe('false')
+      await click(button('About Inbox helper'))
+      expect(panel()?.getAttribute('data-view')).toBe('settings')
+      expect(panel()!.querySelector('aside.bot-about')?.getAttribute('aria-label')).toBe('About Inbox helper')
+      expect(button('Hide side panel')?.getAttribute('aria-expanded')).toBe('true')
+      await click(button('Hide side panel'))
+      expect(panel()).toBeNull()
+      expect(useBotsStore.getState().aboutOpen).toBe(false)
+      await click(button('Show side panel'))
+      expect(panel()?.getAttribute('data-view')).toBe('settings')
+      await click(button('About Inbox helper'))
+      expect(panel()).toBeNull()
+      expect(button('Show side panel')?.getAttribute('aria-expanded')).toBe('false')
+    } finally {
+      act(() => setAnimationSpeed('normal'))
+    }
   })
 
   it('renames the bot', async () => {
@@ -1879,6 +2012,29 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       expect(rows().slice(2)).toEqual([['Never ran', 'idle', 'idle'], ['Broken', 'failed', 'failed'], ['Halted', 'stopped', 'failed'], ['Old run', 'done', 'done']])
     })
 
+    it('while something runs, Recent opens folded: Show more unfolds it, Show less folds it, and every opening starts folded', async () => {
+      await open({ ...inbox, state: 'working', stateText: 'Managing 2 threads', threads })
+      const fold = () => host.querySelector('.bot-work-fold')!
+      const more = () => host.querySelector<HTMLButtonElement>('.bot-work-more')!
+      await click(presence())
+      expect(fold().hasAttribute('inert')).toBe(true)
+      expect(more().textContent).toBe('Show more4')
+      await click(more())
+      expect(fold().hasAttribute('inert')).toBe(false)
+      expect([more().textContent, more().getAttribute('aria-expanded')]).toEqual(['Show less', 'true'])
+      await click(more())
+      expect(fold().hasAttribute('inert')).toBe(true)
+      // Unfolded, closed by a click away and opened again: folded.
+      await click(more())
+      await act(async () => { document.body.dispatchEvent(new Event('pointerdown', { bubbles: true })) })
+      await click(presence())
+      expect(fold().hasAttribute('inert')).toBe(true)
+      // The arrow keys pass over the folded rows: from the last working row to Show more.
+      await act(async () => host.querySelector<HTMLElement>('.bot-thread-line[data-tone="waiting"]')!.focus())
+      await keydown('ArrowDown')
+      expect(document.activeElement).toBe(more())
+    })
+
     it('a thread on hold for the owner is listed as waiting on you while the bot reads free, and the rest under Recent', async () => {
       await open({ ...inbox, state: 'idle', stateText: 'Done.', threads: [thread('t8', 'Fix login', 'on_hold', 20), thread('t3', 'Old run', 'done', 90)] })
       expect(presence().textContent).toBe('free')
@@ -1913,6 +2069,26 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       expect(host.querySelector('.bot-work')).toBeNull()
     })
 
+    it('a right-click on a row copies the thread\'s reference; the list stays open through the menu, and Escape closes only the menu', async () => {
+      opened.ids.length = 0
+      const writeText = vi.fn(async () => undefined)
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+      await open({ ...inbox, state: 'working', stateText: 'Managing 2 threads', threads })
+      await click(presence())
+      const row = host.querySelector('.bot-thread-line[data-tone="working"]')!
+      await act(async () => { row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })) })
+      const item = () => document.querySelector<HTMLElement>('.thread-ref-menu [role="menuitem"]')
+      await act(async () => { document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })) })
+      expect(item()).toBeNull()
+      expect(host.querySelector('.bot-work')).not.toBeNull()
+      await act(async () => { row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })) })
+      // A press on the menu, as a pointer makes it, then the click.
+      await act(async () => { item()!.dispatchEvent(new Event('pointerdown', { bubbles: true })) })
+      await click(item())
+      expect(writeText).toHaveBeenCalledWith('mousse://thread/t1')
+      expect(opened.ids).toEqual([])
+    })
+
     it('a thread it keeps out of the sidebar says Hidden, still opens from its row, and Show in sidebar brings it back', async () => {
       opened.ids.length = 0
       const request = vi.fn(async () => ({ thread: { id: 't7', name: 'Quick check', createdAt: ago(2), updatedAt: ago(2) } }))
@@ -1935,6 +2111,9 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       expect(presence().textContent).toBe('free')
       await click(presence())
       expect(rows().map(([title]) => title)).toEqual(['Broken', 'Old run'])
+      // Nothing runs, so Recent shows unfolded with no Show more.
+      expect(host.querySelector('.bot-work-fold')!.hasAttribute('inert')).toBe(false)
+      expect(host.querySelector('.bot-work-more')).toBeNull()
     })
 
     it('Recent lists only threads updated in the last six hours, counts just those, and one drops off while the list is open', async () => {

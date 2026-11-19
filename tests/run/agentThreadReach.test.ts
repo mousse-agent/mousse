@@ -17,6 +17,7 @@ import { MCP_ERROR_CODES, MousseMcpServer } from '../../src/mms/run/mcp/MousseMc
 import { ThreadDataStore } from '../../src/mms/data/ThreadDataStore'
 import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
+import { THREAD_REFERENCE_NOTE, extractChatReferences, formatChatReferences } from '../../src/shared/chatReferences'
 
 type Script = (input: TurnInput, host: AdapterHost) => Promise<string>
 
@@ -260,5 +261,51 @@ describe('other threads over the Mousse MCP server', () => {
     expect(seen.readError).toBeUndefined()
     expect(seen.read).toContain('the plan for other work')
     expect(credentials.listForThread(parent.id).map((row) => row.accessLevel)).toEqual(['manage'])
+  }, 60_000)
+
+  // A thread reference copied from the app and pasted into a message: the agent gets a pointer, then catches up on the
+  // thread with thread_read, from what it is to its last turns to the full transcript.
+  it('a pasted thread reference reaches the agent as a pointer it reads by summary, recent and messages', async () => {
+    const seen: { prompt?: string; summary?: Record<string, any>; recent?: Record<string, any>; messages?: Record<string, any> } = {}
+    const read = async (mcp: Mcp, args: Record<string, unknown>, id: number) => {
+      const response = await call(mcp, 'thread_read', args, id)
+      expect(response.error).toBeUndefined()
+      expect(response.result?.isError).toBeFalsy()
+      return JSON.parse(response.result!.content![0]!.text) as Record<string, any>
+    }
+    const { d, parent, other, attach } = world(async (input, mcp) => {
+      seen.prompt = input.prompt
+      const target = extractChatReferences(input.prompt).references[0]!.threadId!
+      seen.summary = await read(mcp, { threadId: target, view: 'summary' }, 2)
+      seen.recent = await read(mcp, { threadId: target, view: 'recent', turns: 1 }, 3)
+      seen.messages = await read(mcp, { threadId: target, view: 'messages', afterIndex: seen.recent.fromIndex }, 4)
+      return 'Caught up.'
+    })
+    await attach()
+    const transcript = [
+      ['user', 'Draft the login page'], ['assistant', 'Drafted the login page.'],
+      ['user', 'Now add a password reset'], ['assistant', 'Looking at the mailer'], ['assistant', `Added the reset flow. ${'detail '.repeat(800)}`]
+    ] as const
+    d.store.saveThreadData(other.id, { ...d.store.loadThreadData(other.id), messages: transcript.map(([role, content], index) => ({ id: `m${index}`, role, content, timestamp: NOW }) as never) })
+
+    const reference = formatChatReferences([{ id: `thread:${other.id}`, kind: 'thread', title: 'Other work', threadId: other.id }])
+    await d.orch.send(`What is left on this?\n\n${reference}`, false, { threadId: parent.id, clientRequestId: 'ref' })
+
+    // The message points at the thread and holds none of its transcript.
+    expect(seen.prompt).toContain(`Link: mousse://thread/${other.id}`)
+    expect(seen.prompt).toContain(THREAD_REFERENCE_NOTE)
+    expect(seen.prompt).not.toMatch(/login page|password reset|meta\.json/)
+    // Metadata: what the thread is, none of its content.
+    expect(seen.summary).toMatchObject({ threadId: other.id, title: 'Other work', status: 'idle', messages: transcript.length })
+    expect(JSON.stringify(seen.summary)).not.toMatch(/login page|password reset/)
+    // Short: the last turn, its step as one line and its answer trimmed.
+    expect(seen.recent!.turns).toEqual([{
+      prompt: expect.objectContaining({ index: 2, text: 'Now add a password reset' }),
+      steps: ['Looking at the mailer'],
+      answer: expect.objectContaining({ index: 4, cut: true, totalChars: transcript[4][1].length })
+    }])
+    // Full: the transcript from that turn on, paged.
+    expect(seen.messages!.messages.map((row: { index: number }) => row.index)).toEqual([2, 3, 4])
+    expect(seen.messages!.messages[2].text).toContain('Added the reset flow.')
   }, 60_000)
 })

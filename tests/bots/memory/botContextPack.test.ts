@@ -29,7 +29,8 @@ function provider(fx: MemoryFixture, extra: Partial<BotContextPackOptions> = {})
 }
 
 /** Everything before the situation block: what a prompt cache can reuse. */
-const prefix = (pack: string) => pack.slice(0, pack.indexOf('\n\nSituation:'))
+// The open items and the situation change between turns: they come after the part that only grows.
+const prefix = (pack: string) => pack.slice(0, pack.indexOf('\n\nOpen items:'))
 
 /** A chat exchange of about `tokens` tokens on each side. */
 function chat(fx: MemoryFixture, n: number, tokens = 100, activationId = `act-${n}`) {

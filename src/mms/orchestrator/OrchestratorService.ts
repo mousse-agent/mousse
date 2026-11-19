@@ -1,4 +1,5 @@
 import { profilerService } from '../diagnostics/profilerService'
+import type { BugReportService } from '../bugReports/BugReportService'
 import { turnTimingMark } from '../diagnostics/turnTiming'
 import { describeQuestionAnswers } from './questionAnswers'
 import type { OpenQuestionCloseReason } from '../run/OpenQuestions'
@@ -24,7 +25,9 @@ import { join, resolve } from 'node:path'
 import { projectKeptFilesOwner, registerProjectKeptFilesFolder } from '../actions/keptCopies'
 import { getMousseHomeDir } from '../data/paths'
 import { tmpdir } from 'node:os'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { atomicWriteJsonSync as writeSetupRetry } from '../data/AtomicFs'
+import { setupFailureDetail, setupFailureReason } from '../../shared/setupFailure'
 import {
   normalizeAgentAccessSettings,
   normalizeContextSettings,
@@ -130,6 +133,8 @@ import { ACTIVITY_DESCRIPTION_CHARS, BACKGROUND_SUMMARY, taskEndSummary, type Ag
 import { createHarnessGateway, type AdapterHost, type BindInput, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type ToolHost, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
+import type { RunProvenance } from '../harness/ownerOnly'
+import type { OwnerProof } from '../run/ownerProof'
 import type { BotThreads } from '../../shared/bots/personal/authority'
 import { BOT_COMPACTION_HOLD_MS, isBotRoomAbort, isBotWallAbort, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from '../bots/activation/dispatcher'
 import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type HarnessDriverKind, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
@@ -204,6 +209,8 @@ import {
   type QueuedMessage,
   type Thread,
   type ThreadTitleSource,
+  type ThreadSetupFailure,
+  type OrchestratorSendRequest,
   type TurnEnd,
   type TurnPhase,
   type TurnStep,
@@ -400,6 +407,8 @@ import {
 } from './nativeContext'
 import { isLocalOnlyThread, sideChatsOf, subagentDescendants } from '../../shared/threadLineage'
 import { isThreadExpired } from '../../shared/threadExpiry'
+import { ComputerUseDriver } from '../computerUse/ComputerUseDriver'
+import { computerUseAllowed } from '../run/mcp/appTools/computer'
 
 /** What an agent in a private thread is told when it asks for work on another computer. */
 const PRIVATE_THREAD_REMOTE_REFUSAL = 'This is a private thread: it stays on this computer, so it cannot start or continue subagents on other computers.'
@@ -592,6 +601,11 @@ export interface OrchestratorSendOptions {
   source?: string
   forceQueue?: boolean
   clientRequestId?: string
+  /**
+   * The owner sent it from a Mousse window (`RunRecord.ownerProof`): given only by the `orchestrator.send` protocol
+   * handler, from the connection the send came in on, and written once with the run. Nothing else passes one.
+   */
+  ownerProof?: OwnerProof
   /**
    * `turn` (default) resolves with the turn's result; `ack` resolves once the send is committed
    * and its `turn.start` effect recorded (SPEC §12.7). Only the engine path honours `ack`.
@@ -1189,6 +1203,16 @@ function durableSendInput(input: OrchestratorSendInput): OrchestratorSendInput {
 }
 
 
+/** The thread folder's copy of a message whose worktree could not be set up, for Retry (`OrchestratorService.retrySetup`). */
+const SETUP_RETRY_FILE = 'setup-retry.json'
+/** How long a bot's or agent's `thread_create` / `thread_send` waits for the thread's worktree to be set up. */
+const SETUP_WAIT_MS = 45_000
+/** How long a setup's outcome is kept for a waiter that asks after it ended. */
+const SETUP_OUTCOME_KEEP_MS = 5 * 60_000
+
+/** What `OrchestratorService.waitForSetup` found. */
+export interface SetupWaitResult { status: 'ready' | 'failed' | 'pending'; failure?: ThreadSetupFailure; error?: string }
+
 export class OrchestratorService extends EventEmitter {
   private appletStore?: AppletStore
   setAppletStore(store: AppletStore): void { this.appletStore = store }
@@ -1247,6 +1271,7 @@ export class OrchestratorService extends EventEmitter {
     this.runTimeLimits?.close()
     this.remoteLaunches?.close()
     this.remoteThreads?.close()
+    void this.computerDriver?.close()
     await this.lifecycle.waitForIdle(timeoutMs)
     for (const timer of this.persistTimers.values()) clearTimeout(timer)
     this.persistTimers.clear()
@@ -1284,6 +1309,11 @@ export class OrchestratorService extends EventEmitter {
    * output holds never leaves the run's memory.
    */
   private secretTools?: SecretToolHost
+  /** Bug reports (`report_bug`); absent: the tool is not offered. */
+  private bugReports?: BugReportService
+  setBugReports(service: BugReportService | undefined): void {
+    this.bugReports = service
+  }
   private secretMaskerFor?: (threadId: string) => SecretMasker | undefined
   /**
    * Masks every secret in the profile's store (a terminal's output, which may show any of them), and the values the
@@ -1970,6 +2000,39 @@ export class OrchestratorService extends EventEmitter {
     this.botSupervision = supervision
   }
 
+  /** Whether a personal bot holds "use the computer" now; null: no bots. A bot that can't be read holds nothing. */
+  private botComputer: ((botId: string) => boolean) | null = null
+
+  setBotComputer(holds: ((botId: string) => boolean) | null): void {
+    this.botComputer = holds
+  }
+
+  private computerDriver?: ComputerUseDriver
+
+  /** This profile's Cua Driver (Settings → Computer use), made on first use. */
+  computerUse(): ComputerUseDriver {
+    this.computerDriver ??= new ComputerUseDriver({
+      settings: () => {
+        const access = this.settingsStore.get().agentAccess
+        return { enabled: access.computerUse !== false, ...(access.computerDriver ? { driverPath: access.computerDriver } : {}) }
+      }
+    })
+    return this.computerDriver
+  }
+
+  /**
+   * Whether `threadId`'s agents may use the computer: every thread, except one a personal bot started (or a thread
+   * below one: a subagent, or a thread its agent started) while that bot lacks "use the computer". A thread the store
+   * doesn't hold was started by no bot; a store that fails to read, or a lineage that loops, allows nothing.
+   */
+  computerUseFor(threadId: string): boolean {
+    try {
+      return computerUseAllowed(threadId, (id) => this.threadStore?.getThread(id) ?? undefined, (botId) => this.botComputer?.(botId) === true)
+    } catch {
+      return false
+    }
+  }
+
   /** A command an agent's tool call runs, noted for the running list: its process may outlive the call. */
   private noteRunningCommand(session: ThreadSession, message: ChatMessage): void {
     const activity = message.activity
@@ -2022,9 +2085,25 @@ export class OrchestratorService extends EventEmitter {
   setHarness(harness: HarnessGateway): void {
     this.harness.setLiveHost(null)
     this.harness.setMcpAttachment(null)
+    this.harness.setRunProvenance?.(null)
     this.harness = harness
     this.attachLiveHost()
     this.harness.setMcpAttachment(this.mcpAttachment)
+    // Turn admission reads a run's provenance from the run store as it is now (`ownerOnly.ts`).
+    this.harness.setRunProvenance?.((runId) => this.runProvenance(runId))
+  }
+
+  /** What the gateway's owner check reads of a run, from the run store; undefined without a run engine or run. */
+  private runProvenance(runId: string): RunProvenance | undefined {
+    const run = this.runEngine?.getRun(runId)
+    if (!run) return undefined
+    return {
+      source: run.source,
+      clientRequestId: run.clientRequestId,
+      ...(run.ownerProof ? { ownerProof: run.ownerProof } : {}),
+      ...(run.outcome?.continuationOf ? { continuationOf: run.outcome.continuationOf } : {}),
+      ...(run.outcome?.sentByAgent ? { sentByAgent: true } : {})
+    }
   }
   /** Runtimes that keep a live process per thread report their background work and the turns they start themselves here. */
   private attachLiveHost(): void {
@@ -2606,6 +2685,10 @@ export class OrchestratorService extends EventEmitter {
     // A thread's sidebar row shows its latest reply, kept in its metadata when each turn ends (`Thread.lastReply`).
     for (const event of ['turn-completed', 'turn-failed', 'turn-interrupted', 'turn-paused'] as const)
       this.on(event, (payload: { threadId?: string }) => { if (payload?.threadId) this.recordLastReply(payload.threadId) })
+    // Its links show how its latest run ended once it is quiet, after a restart too (`Thread.lastRun`).
+    const runEnds = { 'turn-completed': 'done', 'turn-failed': 'failed', 'turn-interrupted': undefined } as const
+    for (const [event, lastRun] of Object.entries(runEnds))
+      this.on(event, (payload: { threadId?: string }) => { if (payload?.threadId) this.recordLastRun(payload.threadId, lastRun) })
     // A thread's goal decides after each of its turns whether the next goal turn is queued.
     const outcomes = { 'turn-completed': 'completed', 'turn-failed': 'failed', 'turn-interrupted': 'interrupted', 'turn-paused': 'paused' } as const
     for (const [event, outcome] of Object.entries(outcomes) as Array<[keyof typeof outcomes, GoalTurnOutcome]>)
@@ -4580,6 +4663,8 @@ export class OrchestratorService extends EventEmitter {
       withdrawQuestion: (threadId, requestId) => this.questions.withdraw(requestId, threadId),
       dismissQuestions: (threadId) => this.questions.dismissAllForThread(threadId),
       secrets: () => this.secretTools,
+      bugReports: () => this.bugReports,
+      threadName: (threadId) => this.threadStore?.getThread(threadId)?.name ?? undefined,
       // The thread's terminals, read from memory: no lease, nothing written to them (`terminal_read`).
       terminals: () => ({
         list: (threadId) => this.ptyManager.terminalsOf(threadId),
@@ -4626,6 +4711,17 @@ export class OrchestratorService extends EventEmitter {
       awaitLiveRun: (threadId) => this.continuationGate(threadId),
       permissionModeFor: (runId) => this.runPermissionMode(runId),
       askApproval: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
+      // Settings → Computer use, read at every listing and call.
+      computerUse: () => {
+        const driver = this.computerUse()
+        return {
+          enabled: () => this.settingsStore.get().agentAccess.computerUse !== false,
+          known: () => driver.known(),
+          allowedFor: (threadId) => this.computerUseFor(threadId),
+          listTools: () => driver.listTools(),
+          call: (name, args, signal) => driver.call(name, args, signal)
+        }
+      },
       // Settings → Labs → Profiler, read at every listing and call; the service's profiler is installation-wide.
       profiler: () => ({
         settings: this.settingsStore.get().experimental.profiler,
@@ -4634,6 +4730,7 @@ export class OrchestratorService extends EventEmitter {
         turnActive: (threadId) => this.isTurnActive(threadId)
       }),
       threadMeta: (threadId) => this.threadStore?.getThread(threadId),
+      waitForSetup: (threadId, runId) => this.waitForSetup(threadId, runId),
       listThreads: () => this.threadStore?.listAllThreads() ?? [],
       listProjects: () => (this.threadStore?.listProjects() ?? []).map(({ id, name }) => ({ id, name })),
       // What the composer's picker lists on this computer: each entry's models, by the entry's id and name.
@@ -5530,6 +5627,7 @@ export class OrchestratorService extends EventEmitter {
       search: (target, query, limit) => service.search(target, query, limit),
       events: (target, page) => service.events(target, page),
       messages: (target, page) => service.messages(target, page),
+      summary: (target) => service.summary(target),
       wait: (target, request) => {
         const denied = this.remoteThreadDenial(target.node, target.computer)
         if (denied) return Promise.reject(new RemoteThreadRefusal(denied.code, denied.message, target.computer))
@@ -6825,9 +6923,10 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** `runs.resumeNow`: continue the paused run `runId` now. Refused `conflict` when it is not paused. */
-  async resumePausedRun(runId: string): Promise<{ runId: string; effectId: string }> {
+  async resumePausedRun(runId: string, ownerProof?: OwnerProof): Promise<{ runId: string; effectId: string }> {
     const engine = this.requireRunEngine()
-    const effect = engine.requestResume(runId, true)
+    // The owner's own press (a Mousse window's) is kept on the pause: the continue turn carries it.
+    const effect = engine.requestResume(runId, true, ownerProof)
     if (this.effectsEnabled()) this.effectWorker?.notify()
     else await this.executeResumeEffect(effect)
     return { runId, effectId: effect.effectId }
@@ -9305,6 +9404,131 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /** How a turn's worktree setup ended, by run, for `waitForSetup` callers that ask after it ended. Kept briefly. */
+  private readonly setupOutcomes = new Map<string, { ok: boolean; failure?: ThreadSetupFailure }>()
+
+  /** A turn got past setting up its folder (`ok`), or setting up its worktree failed. */
+  private noteSetupOutcome(threadId: string, runId: string | undefined, ok: boolean, failure?: ThreadSetupFailure): void {
+    if (runId) {
+      this.setupOutcomes.set(runId, { ok, ...(failure ? { failure } : {}) })
+      setTimeout(() => this.setupOutcomes.delete(runId), SETUP_OUTCOME_KEEP_MS).unref?.()
+    }
+    this.emit('workspace-setup', { threadId, runId, ok, ...(failure ? { failure } : {}) })
+  }
+
+  /**
+   * Setting up the thread's worktree failed before its agent ran: the thread says why in its chat and sidebar row
+   * (`Thread.setupFailure`), and keeps the message (`SETUP_RETRY_FILE`) so Retry sends it again, once. Best effort: a
+   * failure to record it never hides the setup's own error.
+   */
+  private recordSetupFailure(threadId: string, threadDir: string, request: OrchestratorSendRequest, error: unknown, options: { runId?: string; retryable: boolean }): void {
+    try {
+      const message = error instanceof Error ? error.message : String(error)
+      const at = new Date().toISOString()
+      let retryable = options.retryable
+      if (retryable) {
+        try {
+          writeSetupRetry(join(threadDir, SETUP_RETRY_FILE), {
+            schemaVersion: 1,
+            at,
+            ...(options.runId ? { runId: options.runId } : {}),
+            content: request.content,
+            ...(request.mode ? { mode: request.mode } : {}),
+            ...(request.images?.length ? { images: request.images } : {})
+          })
+        } catch {
+          retryable = false
+        }
+      }
+      const detail = setupFailureDetail(message)
+      const failure: ThreadSetupFailure = { reason: setupFailureReason(message), ...(detail ? { detail } : {}), at, ...(options.runId ? { runId: options.runId } : {}), retryable }
+      this.threadStore?.setThreadSetupFailure(threadId, failure)
+      this.setTurnPhase(threadId, 'failed', { error: failure.reason })
+      this.noteSetupOutcome(threadId, options.runId, false, failure)
+    } catch (recordError) {
+      console.warn("a thread's setup failure could not be recorded", { threadId, error: recordError instanceof Error ? recordError.message : String(recordError) })
+    }
+  }
+
+  /** The thread's worktree is set up: whatever an earlier message's failure said, and the message kept for Retry, go. */
+  private clearSetupFailure(threadId: string, threadDir: string): void {
+    if (!this.threadStore?.getThread(threadId)?.setupFailure) return
+    try {
+      this.threadStore.setThreadSetupFailure(threadId, undefined)
+      rmSync(join(threadDir, SETUP_RETRY_FILE), { force: true })
+    } catch (error) {
+      console.warn("a thread's setup failure could not be cleared", { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * Retry on a thread whose worktree could not be set up: the message it kept is sent again on this thread, as it was
+   * sent, exactly once (the kept message is taken by a rename, so a second click finds nothing). Setting up starts over;
+   * a turn never runs in the project's own folder instead.
+   */
+  async retrySetup(threadId: string): Promise<OrchestratorResponse> {
+    const threadDir = this.resolveThreadDir(threadId)
+    if (!threadDir || !this.threadStore?.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
+    const file = join(threadDir, SETUP_RETRY_FILE)
+    const claimed = `${file}.${randomUUID()}.taken`
+    try {
+      renameSync(file, claimed)
+    } catch {
+      throw new DomainRpcError('nothing_to_retry', 'This message was already sent again.', { threadId })
+    }
+    let kept: { content?: unknown; mode?: unknown; images?: unknown }
+    try {
+      kept = JSON.parse(readFileSync(claimed, 'utf8')) as typeof kept
+    } finally {
+      rmSync(claimed, { force: true })
+    }
+    if (typeof kept.content !== 'string' || !kept.content) throw new DomainRpcError('nothing_to_retry', 'The message to send again could not be read.', { threadId })
+    this.threadStore.setThreadSetupFailure(threadId, undefined)
+    const input: OrchestratorSendRequest = {
+      content: kept.content,
+      ...(typeof kept.mode === 'string' ? { mode: kept.mode as OrchestratorSendRequest['mode'] } : {}),
+      ...(Array.isArray(kept.images) && kept.images.length ? { images: kept.images as OrchestratorSendRequest['images'] } : {})
+    }
+    // Pressed by the person: their message now. Answered once the send is committed, not when the reply ends.
+    return await this.send(input, false, { threadId, source: 'setup-retry', awaitMode: 'ack' })
+  }
+
+  /**
+   * Waits until the run `runId` of the thread got past setting up its folder (`ready`), setting up its worktree failed
+   * (`failed`, with why), or `timeoutMs` passed (`pending`): what a bot or agent that started the work is told, instead
+   * of a thread that silently never started. Never waits for the model's reply.
+   */
+  waitForSetup(threadId: string, runId: string, timeoutMs = SETUP_WAIT_MS): Promise<SetupWaitResult> {
+    return new Promise((settle) => {
+      let done = false
+      const finish = (value: SetupWaitResult): void => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        clearInterval(poll)
+        this.off('workspace-setup', onSetup)
+        settle(value)
+      }
+      const fromOutcome = (outcome: { ok: boolean; failure?: ThreadSetupFailure }): void => finish(outcome.ok ? { status: 'ready' } : { status: 'failed', ...(outcome.failure ? { failure: outcome.failure } : {}) })
+      const onSetup = (event: { threadId: string; runId?: string; ok: boolean; failure?: ThreadSetupFailure }): void => {
+        if (event.threadId === threadId && event.runId === runId) fromOutcome(event)
+      }
+      const check = (): void => {
+        const outcome = this.setupOutcomes.get(runId)
+        if (outcome) return fromOutcome(outcome)
+        const run = this.runEngine?.getRun(runId)
+        if (!run || !TERMINAL_RUN_STATUSES.has(run.status)) return
+        const failure = this.threadStore?.getThread(threadId)?.setupFailure
+        if (failure?.runId === runId) return finish({ status: 'failed', failure })
+        finish(run.status === 'completed' ? { status: 'ready' } : { status: 'failed', ...(run.outcome?.error ? { error: run.outcome.error } : {}) })
+      }
+      this.on('workspace-setup', onSetup)
+      const poll = setInterval(check, 500)
+      const timer = setTimeout(() => finish({ status: 'pending' }), timeoutMs)
+      check()
+    })
+  }
+
   /**
    * Safety net after a legacy turn returns or throws: a run handed to the turn must end terminal
    * unless the turn put it back on the queue (lease race / released claim keep the runId).
@@ -11375,6 +11599,16 @@ export class OrchestratorService extends EventEmitter {
     })
   }
 
+  /** Keeps how the thread's latest run ended (`Thread.lastRun`) in its metadata, for its links. Never fails the turn. */
+  private recordLastRun(threadId: string, lastRun: Thread['lastRun']): void {
+    if (!this.threadStore || threadId === '__unbound__') return
+    try {
+      this.threadStore.setThreadLastRun(threadId, lastRun)
+    } catch (error) {
+      console.warn('how the run ended could not be kept', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
   /**
    * Keeps the preview of the thread's latest reply in its metadata, from the transcript the turn just wrote (in memory,
    * secrets masked). A turn that left no reply keeps the one before; an Undo or Redo (`rewound`) shows what the
@@ -12832,7 +13066,8 @@ export class OrchestratorService extends EventEmitter {
           : {}),
         ...(opts?.bindDelivery ? { bindDelivery: opts.bindDelivery } : {}),
         ...(queueBehindPause ? { queueBehindPause: true } : {}),
-        ...(opts?.refuseWhilePaused ? { refuseWhilePaused: true } : {})
+        ...(opts?.refuseWhilePaused ? { refuseWhilePaused: true } : {}),
+        ...(opts?.ownerProof && !opts.agent ? { ownerProof: opts.ownerProof } : {})
       }, { admit })
       if (result.status === 'rejected' && CONTINUATION_REFUSALS.has(result.reason))
         throw new DomainRpcError(result.reason, `Cannot continue run ${opts?.continuationOfRunId}: ${result.reason}.`)
@@ -13679,12 +13914,19 @@ export class OrchestratorService extends EventEmitter {
         )
         const threadDir = this.resolveThreadDir(session.threadId)
         if (projectPath && threadDir) {
-          await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease)
-          const pending = opts?.agent ? agentMessageWords(request.content, agentOriginOf(opts.agent)) : request.content
-          await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, pending))
-          session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.placementOf(session.threadId), this.restoreNotifier(session.threadId))
-            .resolve(request.mode, 'main', setupSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, pending))
+          try {
+            await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease)
+            const pending = opts?.agent ? agentMessageWords(request.content, agentOriginOf(opts.agent)) : request.content
+            await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, pending))
+            session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.placementOf(session.threadId), this.restoreNotifier(session.threadId))
+              .resolve(request.mode, 'main', setupSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, pending))
+          } catch (error) {
+            // Never a silent blank thread: the chat, the sidebar row and whoever sent it are told why (`Thread.setupFailure`).
+            if (!setupSignal.aborted && !this.lifecycle.signal.aborted) this.recordSetupFailure(session.threadId, threadDir, request, error, { runId: opts?.runId, retryable: !reuseLastUser && !request.workflowInvocationId && !(typeof input !== 'string' && input.continuationOfRunId) })
+            throw error
+          }
           session.projectCwd = session.workspace.projectPath
+          this.clearSetupFailure(session.threadId, threadDir)
         } else {
           session.workspace = null
           session.projectCwd = projectPath ? resolveProjectWorkingDirectory(projectPath) : this.automationManagerCwd(session.threadId)
@@ -13698,6 +13940,7 @@ export class OrchestratorService extends EventEmitter {
     }
 
     turnTimingMark(session.threadId, 'workspace')
+    this.noteSetupOutcome(session.threadId, opts?.runId, true)
     // Pull any messages peers enqueued before we started.
     this.refreshSessionQueueFromDisk(session)
     session.drainedExternalSteerIds.clear()
@@ -14748,7 +14991,8 @@ export class OrchestratorService extends EventEmitter {
             toolStarted: conversationToolsUsed,
             steered: drains > 0 || acceptedDrains.size > 0 || takenDrains.size > 0,
             runtimeRetried,
-            bot: Boolean(opts?.bot)
+            bot: Boolean(opts?.bot),
+            ownerOnly: Boolean(this.harness.ownerOnly?.(binding.instanceId))
           })
           if (delay === undefined) throw error
           logDebug('OrchestratorService', 'provider request failed before it was answered; trying again', error, { threadId: session.threadId, retry: retries + 1, delayMs: delay })
@@ -15192,7 +15436,12 @@ export class OrchestratorService extends EventEmitter {
     // (it rejects them to read it). Nothing an agent caused (its own steer, a message it promoted) may do that: it waits in
     // the turn's steer buffer until the user has answered.
     const asking = this.questions.listPendingForThread(session.threadId).length > 0
-    const held = asking ? turn.pendingSteer.filter((entry) => entry.origin || entry.byAgent) : []
+    // A turn on a personal sign-in (`ownerOnly.ts`) reads only what its owner wrote: an agent's steer, or a message an
+    // agent promoted, waits and then runs as a turn of its own, which that provider refuses.
+    const binding = turn.runId ? this.runEngine?.bindingForRun(turn.runId) : undefined
+    const ownerOnly = Boolean(binding && this.harness.ownerOnly?.(binding.instanceId))
+    const holdsAgents = asking || ownerOnly
+    const held = holdsAgents ? turn.pendingSteer.filter((entry) => entry.origin || entry.byAgent) : []
     const taking = held.length ? turn.pendingSteer.filter((entry) => !held.includes(entry)) : turn.pendingSteer
     if (taking.length > 0) {
       entries.push(...taking)
@@ -15214,7 +15463,7 @@ export class OrchestratorService extends EventEmitter {
         (item.state === 'pending' || item.state === 'steering') &&
         !session.drainedExternalSteerIds.has(item.id) &&
         !held.some((entry) => entry.itemId === item.id) &&
-        !(asking && item.origin?.kind === 'agent')
+        !(holdsAgents && item.origin?.kind === 'agent')
     )
     const revert: string[] = []
     for (const item of externalSteers) {

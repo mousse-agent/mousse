@@ -239,6 +239,8 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.permissionMode !== right.permissionMode ||
       left.settingsRevision !== right.settingsRevision ||
       left.firstSendPending !== right.firstSendPending ||
+      // Why its last message did not start: saved without touching `updatedAt`; each failure has its own time.
+      left.setupFailure?.at !== right.setupFailure?.at ||
       // A thread of another computer going offline (or coming back) changes its row.
       left.node !== right.node ||
       left.offline !== right.offline ||
@@ -255,6 +257,8 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.hidden !== right.hidden ||
       // So are the reply preview and the pull requests a row shows (`Thread.lastReply`, `Thread.pullRequests`).
       left.lastReply !== right.lastReply ||
+      // And how its latest run ended, which its links show (`Thread.lastRun`).
+      left.lastRun !== right.lastRun ||
       !samePullRequestRows(left, right)
     ) {
       return false
@@ -1512,9 +1516,12 @@ useAppStore.subscribe((state, previous) => {
  * The side card overlay is temporary: it closes when the thread area widens
  * enough to dock the card (the card's switch stays on), when the thread changes,
  * when the app panel opens, and when a view without a thread replaces the
- * conversation. A narrow window therefore never opens it by itself.
+ * conversation (Chats counts as one unless a bot's thread shows in its pane,
+ * `botThreadShown`, the same test the card's visibility uses). A narrow window
+ * therefore never opens it by itself. The store subscriptions that apply this
+ * live in sideCardLogic.ts, which can read the bot's pane.
  */
-export function shouldCloseSideCardOverlay(state: AppState, previous: AppState): boolean {
+export function shouldCloseSideCardOverlay(state: AppState, previous: AppState, botThreadShown = false): boolean {
   if (!state.sideCardOverlayOpen) return false
   return state.sideCardFits !== false
     || state.mainAreaOpen
@@ -1522,9 +1529,5 @@ export function shouldCloseSideCardOverlay(state: AppState, previous: AppState):
     || state.settingsOpen
     || state.usageOpen
     || state.scheduledOpen
-    || state.sidebarMode === 'chats'
+    || (state.sidebarMode === 'chats' && !botThreadShown)
 }
-
-useAppStore.subscribe((state, previous) => {
-  if (shouldCloseSideCardOverlay(state, previous)) state.setSideCardOverlayOpen(false)
-})

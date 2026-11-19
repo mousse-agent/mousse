@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { closeSync, mkdirSync, openSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { closeSync, lstatSync, mkdirSync, openSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve, win32 } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
 import { CdpConnection } from './connection'
 import { processRecordPath } from '../lifecycle/paths'
@@ -58,6 +59,48 @@ export function windowedChromeUserAgent(browserVersion: string | undefined, plat
   return `Mozilla/5.0 (${system}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`
 }
 
+/**
+ * Past about 240 characters, Chrome on Windows exits as it starts on a profile folder (the paths it makes inside go past
+ * Windows' 260), and a deep home (a worktree's dev home) puts a bot's profile there. Longer than this, Chrome is given
+ * a short junction to the folder instead; the folder itself stays where it is.
+ */
+const WINDOWS_PROFILE_PATH_MAX = 160
+
+/** The short name Chrome is given for a long profile folder on Windows (under LOCALAPPDATA), or undefined when it needs none. */
+export function profileAliasPath(userDataDir: string, platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (platform !== 'win32' || userDataDir.length <= WINDOWS_PROFILE_PATH_MAX || !env.LOCALAPPDATA) return undefined
+  const name = createHash('sha256').update(win32.resolve(userDataDir).toLowerCase()).digest('hex').slice(0, 12)
+  const alias = win32.join(env.LOCALAPPDATA, 'mousse-chrome', name)
+  return alias.length < userDataDir.length ? alias : undefined
+}
+
+const samePath = (a: string, b: string) => resolve(a.replace(/^\\\\\?\\/, '')).toLowerCase() === resolve(b).toLowerCase()
+
+/** Links the short name to the profile folder; undefined (Chrome gets the folder itself) when it needs none or it cannot be made. */
+function linkProfileAlias(userDataDir: string): string | undefined {
+  const alias = profileAliasPath(userDataDir)
+  if (!alias) return undefined
+  try {
+    let current: string | undefined
+    try { current = readlinkSync(alias) } catch (error) {
+      // Something that is no link holds the name: it is left alone.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return undefined
+    }
+    if (current !== undefined && samePath(current, userDataDir)) return alias
+    if (current !== undefined) unlinkSync(alias)
+    mkdirSync(dirname(alias), { recursive: true })
+    symlinkSync(userDataDir, alias, 'junction')
+    return alias
+  } catch {
+    return undefined
+  }
+}
+
+/** Removes the junction alone (never what it points at), once Chrome has exited. */
+function dropProfileAlias(alias: string): void {
+  try { if (lstatSync(alias).isSymbolicLink()) unlinkSync(alias) } catch { /* gone already */ }
+}
+
 export function chromeLaunchArgs(options: LaunchChromeOptions): string[] {
   const size = options.windowSize ?? { width: 1280, height: 720 }
   const args = [
@@ -110,7 +153,8 @@ export function chromeLaunchArgs(options: LaunchChromeOptions): string[] {
 export async function launchManagedChrome(options: LaunchChromeOptions): Promise<LaunchedChrome> {
   if (options.signal?.aborted) fail('cancelled', 'Chromium launch cancelled before spawn')
   mkdirSync(options.userDataDir, { recursive: true })
-  const args = chromeLaunchArgs(options)
+  const alias = linkProfileAlias(options.userDataDir)
+  const args = chromeLaunchArgs(alias ? { ...options, userDataDir: alias } : options)
   const logDir = join(options.userDataDir, 'mousse-logs')
   mkdirSync(logDir, { recursive: true })
   // Chrome helpers can inherit stdout/stderr beyond the browser parent's exit.
@@ -174,6 +218,7 @@ export async function launchManagedChrome(options: LaunchChromeOptions): Promise
     ])
   } catch (error) {
     try { await stopChildTree(child, tree) } catch { /* retain original launch error */ }
+    if (alias) dropProfileAlias(alias)
     throw error
   }
   if (options.signal?.aborted) await abortLaunch()
@@ -216,6 +261,7 @@ export async function launchManagedChrome(options: LaunchChromeOptions): Promise
           throw new Error(`Chromium child handle did not publish exit (pid ${pid})`)
         }
         await cdp.close()
+        if (alias) dropProfileAlias(alias)
         stopped = true
       })().finally(() => {
         if (!stopped) stopWork = null

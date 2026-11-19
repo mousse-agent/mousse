@@ -1,7 +1,6 @@
 import type { BotBudget } from './definition'
 import { isSpecialAsk, type BotAskRequest } from './escalation'
 import { botGrantTool } from './manifest'
-import { tellingChangeText } from './tellingSettings'
 
 /**
  * An ask in plain words for its card and for About → Can use (Bot Phase 1 §5.4): the card reads
@@ -38,6 +37,11 @@ const TOOL_TEXT: Record<string, AskText> = {
   web_search: { title: 'search the web', note: 'It sees search results, not your files.' },
   web_fetch: { title: 'read web pages', note: 'It sees the pages, not your files.' },
   browser: { title: 'use the browser', note: 'Its own browser, apart from your tabs. It can open pages, click and type. Sites you sign in to there stay signed in for it.' },
+  computer: {
+    title: 'use the computer',
+    note: 'Sees and operates apps on this computer: windows, clicks and typing.',
+    tip: "It can read app windows, click, type and run steps in apps on this computer through Cua Driver, as a thread's agent can, in its work (never in the chat itself). Threads it starts get it too. Settings → Computer use can still turn it off for everyone."
+  },
   threads: THREADS_TEXT,
   profiler: {
     title: 'use the profiler',
@@ -65,7 +69,6 @@ const TOOL_TEXT: Record<string, AskText> = {
     tip: 'It can add a quick action: a button in your Actions list that sends a message or runs a shell command when you press it. Nothing runs until you press it.'
   },
   // The bot's own tools: a bot made before one of them existed has none of it in its grant, so its first use asks.
-  telling_set: { title: 'change when it tells you', note: 'How often it tells you, its quiet hours, and whether it can wake you.' },
   bot_schedule_add: { title: 'run on a schedule', note: '' },
   bot_schedule_remove: { title: 'remove its schedules', note: '' },
   bot_schedule_list: { title: 'see its schedules', note: '' },
@@ -79,6 +82,8 @@ const TOOL_TEXT: Record<string, AskText> = {
   memory_list: { title: 'list its memory', note: '' },
   memory_save: { title: 'save to its memory', note: '' },
   memory_forget: { title: 'forget things in its memory', note: '' },
+  item_save: { title: 'keep its list of what you asked for', note: '' },
+  item_list: { title: 'read its list of what you asked for', note: '' },
   automation_draft_save: { title: 'draft automations', note: 'You turn each one on yourself.' },
   automation_ask: { title: 'ask you about its automation drafts', note: '' },
   automation_list: { title: 'see your automations', note: '' },
@@ -86,16 +91,8 @@ const TOOL_TEXT: Record<string, AskText> = {
   automation_pause: { title: 'pause your automations', note: '' }
 }
 
-/** Any other tool: the card never shows a tool's name ("use the telling set tool"); the tooltip does. */
+/** Any other tool: the card never shows a tool's name; the tooltip does. */
 const otherToolText = (tool: string): AskText => ({ title: 'use another of Mousse\'s tools', note: '', tip: `Mousse's tool ${tool}.` })
-
-/**
- * What one refused call would have done, for its ask's note: "It would set: tell you when something is worth a look." Only
- * for tools whose arguments say it plainly; undefined for every other call, whose card keeps its usual note.
- */
-export function askCallNote(tool: string, args: unknown): string | undefined {
-  return tool === 'telling_set' ? tellingChangeText(args) : undefined
-}
 
 /**
  * What an MCP ask's card says of what the tools can do, only as the tools' own annotations tell it (their read-only

@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { botEyesOf, botKindOf, type BotEyes, type KnownBotLook } from '../../../../shared/bots/personal/look'
+import { botEyeColourOf, botEyesOf, botKindOf, type BotEyes, type KnownBotLook } from '../../../../shared/bots/personal/look'
 import type { BotFaceState } from './BotFace'
-import { EYELESS, hop } from './facePoses'
+import { EYELESS, FEATURES_ONLY, FRONT_ONLY, hop } from './facePoses'
 import { sharedFaceRenderer, type FaceSpec } from './faceRenderer'
-import { EYE_BOX, eyeColour, eyeGeometry, eyeShapeOf, lidClip, pointerLook, type EyeGeometry } from './hybridEyes'
+import { EYE_BOX, eyeColour, eyeGeometry, eyeShapeOf, lidClip, mouseArcPath, mouseEyePath, pointerLook, type EyeGeometry } from './hybridEyes'
 import './hybridFace.css'
 
 /**
@@ -36,6 +36,19 @@ interface Layer {
   id: number
   key: string
   spec: FaceSpec
+  /** The accessory's parts in front of the eyes, drawn over them; none when it never covers them. */
+  front?: FaceSpec
+  /** The mouse's nose and whiskers, apart from its body so they turn with the eyes. */
+  features?: FaceSpec
+}
+
+/**
+ * Whether the accessory can cover the eyes: on the mouse everything at its head (a brim, goggles, a hood, glasses'
+ * frames, headphones); on the Mousse only glasses, the one thing in front of its glass.
+ */
+function coversEyes(look: KnownBotLook): boolean {
+  if (botKindOf(look) === 'mousse') return look.accessory === 'glasses'
+  return look.accessory !== 'none' && look.accessory !== 'bow_tie' && look.accessory !== 'scarf'
 }
 
 /** How long an old body stays under the new one before it is dropped (its fade is in the CSS). */
@@ -46,7 +59,9 @@ let nextLayer = 1
 function layerOf(key: string, look: KnownBotLook, state: BotFaceState, size: number, view: 'head' | 'full'): Layer {
   // One eyeless body serves every eye shape.
   const body = { ...look, eyes: EYELESS as unknown as BotEyes }
-  return { id: nextLayer++, key, spec: { look: body, state, size, view, still: true } }
+  const front = coversEyes(look) ? { look: { ...look, eyes: FRONT_ONLY as unknown as BotEyes }, state, size, view, still: true } : undefined
+  const features = botKindOf(look) === 'mousse' ? undefined : { look: { ...look, eyes: FEATURES_ONLY as unknown as BotEyes }, state, size, view, still: true }
+  return { id: nextLayer++, key, spec: { look: body, state, size, view, still: true }, ...(front ? { front } : {}), ...(features ? { features } : {}) }
 }
 
 export function HybridFace({ look, state, size, view, className, label, resting, followPointer }: HybridFaceProps) {
@@ -68,17 +83,18 @@ export function HybridFace({ look, state, size, view, className, label, resting,
     return () => clearTimeout(timer)
   }, [ready, drawn, layers.length])
 
-  const geometry = useMemo(() => eyeGeometry(look, state, view, size), [look.colour, look.accessory, look.kind, state, view, size]) // eslint-disable-line react-hooks/exhaustive-deps
+  const geometry = useMemo(() => eyeGeometry(look, state, view, size), [look.colour, look.accessory, look.kind, look.eyes, state, view, size]) // eslint-disable-line react-hooks/exhaustive-deps
   const shape = eyeShapeOf(look)
   const colour = eyeColour(look)
   const closed = geometry.closed > 0.5
   const stage = useRef<HTMLSpanElement>(null)
   const looks = useRef<(HTMLSpanElement | null)[]>([null, null])
   const blinks = useRef<(HTMLSpanElement | null)[]>([null, null])
+  const halves = useRef<(HTMLSpanElement | null)[]>([null, null])
   const live = useRef(geometry)
   live.current = geometry
 
-  useEffect(() => direct(state, () => live.current, stage, looks, blinks, followPointer === true), [state, followPointer])
+  useEffect(() => direct(state, () => live.current, stage, looks, blinks, halves, followPointer === true), [state, followPointer])
 
   // Following the pointer: one listener, read once a frame, moving only the eyes' transforms. The eyes ease
   // towards it and drift back to the middle when it stops or leaves the window.
@@ -91,10 +107,10 @@ export function HybridFace({ look, state, size, view, className, label, resting,
       const g = live.current
       looks.current.forEach((element, index) => {
         if (!element) return
-        const place = g.eyes[index]!
         element.style.transition = `transform ${ms}ms cubic-bezier(0.25, 0.6, 0.3, 1)`
-        element.style.transform = `translate(${(x * g.lookX * place.sx).toFixed(2)}px, ${(-y * g.lookY * place.sy).toFixed(2)}px)`
+        element.style.transform = g.move(index, x, y)
       })
+      turnFeatures(halves.current, g, x, y, `${ms}ms cubic-bezier(0.25, 0.6, 0.3, 1)`)
     }
     const centre = (): void => {
       at = null
@@ -126,8 +142,9 @@ export function HybridFace({ look, state, size, view, className, label, resting,
     }
   }, [followPointer])
 
-  // A soft shadow under each eye where there are pixels to show it.
-  const shadow = size >= 56 ? `drop-shadow(0 ${(size * 0.011).toFixed(2)}px ${(size * 0.012).toFixed(2)}px rgba(0, 0, 0, ${colour === '#ffffff' ? 0.28 : 0.38}))` : undefined
+  const mouse = botKindOf(look) !== 'mousse'
+  // A soft shadow under each of the Mousse's eyes where there are pixels to show it. The mouse's 3D eyes have none.
+  const shadow = !mouse && size >= 56 ? `drop-shadow(0 ${(size * 0.011).toFixed(2)}px ${(size * 0.012).toFixed(2)}px rgba(0, 0, 0, ${colour === '#ffffff' ? 0.28 : 0.38}))` : undefined
 
   return (
     <span
@@ -152,11 +169,37 @@ export function HybridFace({ look, state, size, view, className, label, resting,
             onDrawn={() => setDrawn((id) => Math.max(id, layer.id))}
           />
         ))}
+        {mouse && (
+          // The nose and whiskers, in two halves split at the nose so each side turns round the head on its own.
+          <span className="hf-features">
+            {[0, 1].map((half) => (
+              <span
+                key={half}
+                className="hf-half"
+                ref={(element) => { halves.current[half] = element }}
+                style={{ clipPath: half === 0 ? `inset(0 ${(size - geometry.seam - 0.5).toFixed(2)}px 0 0)` : `inset(0 0 0 ${(geometry.seam - 0.5).toFixed(2)}px)` }}
+              >
+                {layers.map((layer) =>
+                  layer.features ? (
+                    <Body
+                      key={`features${layer.id}`}
+                      spec={layer.features}
+                      shown={layer.id === current.id ? ready : !ready && layer.id === drawn}
+                      old={ready && layer.id !== current.id}
+                      onDrawn={() => {}}
+                    />
+                  ) : null
+                )}
+              </span>
+            ))}
+          </span>
+        )}
         <span className="hf-eyes" data-shown={drawn ? '' : undefined}>
           {geometry.eyes.map((place, index) => {
             const side = index === 0 ? -1 : 1
             const width = 2 * EYE_BOX * place.sx
             const height = 2 * EYE_BOX * place.sy
+            const arcCut = closed ? mouseArcPath(look, side, geometry.es, geometry.arc) : mouse ? '' : undefined
             return (
               <span
                 key={index}
@@ -174,18 +217,36 @@ export function HybridFace({ look, state, size, view, className, label, resting,
                   <span className="hf-lid" style={{ clipPath: lidClip(shape, side, geometry.open, geometry.worried) }}>
                     <span className="hf-open" style={{ transform: `scaleY(${closed ? 0.08 : geometry.open})`, opacity: closed ? 0 : 1 }}>
                       <span className="hf-blink" ref={(element) => { blinks.current[index] = element }}>
-                        <EyeShape shape={shape} side={side} colour={colour} />
+                        <EyeShape shape={shape} side={side} colour={colour} cut={mouseEyePath(look, side, geometry.es)} />
                       </span>
                     </span>
                   </span>
-                  <svg className="hf-arc" viewBox={VIEW_BOX} style={{ opacity: closed ? 1 : 0, transform: geometry.arc > 0 ? undefined : 'scaleY(-1)' }} aria-hidden>
-                    <path d="M -0.1515 0.0529 A 0.17 0.17 0 0 1 0.1515 0.0529" fill="none" stroke={colour} strokeWidth={0.09} strokeLinecap="round" />
-                  </svg>
+                  {arcCut !== undefined ? (
+                    // A mouse's arc is drawn as the part of it the head leaves showing (`mouseArcPath`).
+                    <svg className="hf-arc" viewBox={VIEW_BOX} style={{ opacity: closed ? 1 : 0 }} aria-hidden>
+                      <path d={arcCut} fill={botEyeColourOf(look) === 'white' ? colour : '#19191b'} />
+                    </svg>
+                  ) : (
+                    <svg className="hf-arc" viewBox={VIEW_BOX} style={{ opacity: closed ? 1 : 0, transform: geometry.arc > 0 ? undefined : 'scaleY(-1)' }} aria-hidden>
+                      <path d="M -0.1515 0.0529 A 0.17 0.17 0 0 1 0.1515 0.0529" fill="none" stroke={colour} strokeWidth={0.09} strokeLinecap="round" />
+                    </svg>
+                  )}
                 </span>
               </span>
             )
           })}
         </span>
+        {layers.map((layer) =>
+          layer.front ? (
+            <Body
+              key={`front${layer.id}`}
+              spec={layer.front}
+              shown={layer.id === current.id ? ready : !ready && layer.id === drawn}
+              old={ready && layer.id !== current.id}
+              onDrawn={() => {}}
+            />
+          ) : null
+        )}
       </span>
       {state === 'paused' && (
         <span className="bot-face-z" style={{ fontSize: Math.max(8, Math.round(size * 0.18)) }} aria-hidden>
@@ -224,9 +285,19 @@ const STAR = Array.from({ length: 10 }, (_, index) => {
 }).join(' ')
 
 /** The open eye of each shape, as the shader's `eye2` draws it (y down here). */
-function EyeShape({ shape, side, colour }: { shape: BotEyes; side: number; colour: string }) {
+function EyeShape({ shape, side, colour, cut }: { shape: BotEyes; side: number; colour: string; cut?: string }) {
   let drawing
-  if (shape === 'round') drawing = <circle r={0.2} fill={colour} />
+  // A mouse's eye is drawn as the part of it the head leaves showing (`mouseEyePath`).
+  if (cut !== undefined) {
+    drawing = (
+      <>
+        <path d={cut} fill={colour} />
+        {/* The pill is a rounded bead in 3D, with the light's glint on its upper left. */}
+        {shape === 'pill' && <ellipse cx={-0.05} cy={-0.07} rx={0.035} ry={0.085} fill="#ffffff" opacity={0.22} />}
+      </>
+    )
+  }
+  else if (shape === 'round') drawing = <circle r={0.2} fill={colour} />
   else if (shape === 'dot') drawing = <circle r={0.105} fill={colour} />
   else if (shape === 'tall') drawing = <ellipse rx={0.115} ry={0.3} fill={colour} />
   else if (shape === 'square') drawing = <rect x={-0.175} y={-0.175} width={0.35} height={0.35} rx={0.06} fill={colour} />
@@ -253,11 +324,21 @@ function EyeShape({ shape, side, colour }: { shape: BotEyes; side: number; colou
 
 type Elements = { current: (HTMLSpanElement | null)[] }
 
+/** Turns the halves of the mouse's nose and whiskers with the eyes (`EyeGeometry.features`), over the same `transition`. */
+function turnFeatures(halves: (HTMLElement | null)[], g: EyeGeometry, x: number, y: number, transition: string): void {
+  const moves = g.features(x, y)
+  halves.forEach((element, index) => {
+    if (!element) return
+    element.style.transition = `transform ${transition}`
+    element.style.transform = moves[index]!
+  })
+}
+
 /**
  * Plays a state's moves until the state changes: each is one short transition or animation started by a
  * timer, so nothing runs between them. Returns the stop function.
  */
-function direct(state: BotFaceState, geometry: () => EyeGeometry, stage: { current: HTMLSpanElement | null }, looks: Elements, blinks: Elements, follows = false): () => void {
+function direct(state: BotFaceState, geometry: () => EyeGeometry, stage: { current: HTMLSpanElement | null }, looks: Elements, blinks: Elements, halves: Elements, follows = false): () => void {
   const timers = new Set<ReturnType<typeof setTimeout>>()
   let stopped = false
   const later = (ms: number, run: () => void): void => {
@@ -278,10 +359,10 @@ function direct(state: BotFaceState, geometry: () => EyeGeometry, stage: { curre
     const g = geometry()
     looks.current.forEach((element, index) => {
       if (!element) return
-      const place = g.eyes[index]!
       element.style.transition = `transform ${ms}ms cubic-bezier(0.3, 0.7, 0.3, 1)`
-      element.style.transform = `translate(${(x * g.lookX * place.sx).toFixed(2)}px, ${(-y * g.lookY * place.sy).toFixed(2)}px)`
+      element.style.transform = g.move(index, x, y)
     })
+    turnFeatures(halves.current, g, x, y, `${ms}ms cubic-bezier(0.3, 0.7, 0.3, 1)`)
   }
   const blink = (): void => {
     for (const element of blinks.current) play(element, [{ transform: 'scaleY(1)' }, { transform: 'scaleY(0.06)', offset: 0.45 }, { transform: 'scaleY(1)' }], 170)
@@ -309,7 +390,7 @@ function direct(state: BotFaceState, geometry: () => EyeGeometry, stage: { curre
     if (!follows) glance(0, 0, 240)
     const wander = (): void =>
       later(between(1600, 3600), () => {
-        if (!unseen()) glance(Math.random() < 0.35 ? 0 : between(-0.5, 0.5), between(-0.03, 0.04), 260)
+        if (!unseen()) glance(Math.random() < 0.3 ? 0 : between(-0.7, 0.7), between(-0.1, 0.12), 260)
         wander()
       })
     if (!follows) wander()

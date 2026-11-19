@@ -148,6 +148,19 @@ describe('which runs a browser grant covers', () => {
     const child = await fx.delegate(root.runId, 'call-1')
     expect(mainBrowserBinding(services, { threadId: child.childThreadId, turnId: 't-child', runId: child.childRunId, source: 'delegation', mode: 'agent' })?.execution.source).toBe('cli')
   })
+
+  it('a person\'s run at the window right after a command-line run on the same thread drives the in-app browser', async () => {
+    fx = delegationFixture()
+    const services = profileServices(fx)
+    const bind = (runId: string, source: string) => mainBrowserBinding(services, { threadId: 'root', turnId: `turn:${runId}`, runId, source, mode: 'agent' })
+    const cli = await sendRun(fx, 'root', 'cli')
+    expect(bind(cli.runId, 'cli')?.execution.source).toBe('cli')
+    fx.finish(cli.runId)
+    const gui = await sendRun(fx, 'root', 'gui')
+    expect(bind(gui.runId, 'gui')?.execution.source).toBe('gui')
+    const child = await fx.delegate(gui.runId, 'call-1')
+    expect(mainBrowserBinding(services, { threadId: child.childThreadId, turnId: 't-child', runId: child.childRunId, source: 'delegation', mode: 'agent' })?.execution.source).toBe('gui')
+  })
 })
 
 describe('in-app tabs under a grant', () => {

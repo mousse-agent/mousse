@@ -65,7 +65,7 @@ describe('Settings > Agents > Access', () => {
 
   it('an older profile that stored a level and projects reads as the switches alone', () => {
     show({ level: 'read', projectIds: ['p2'], answerApprovals: true } as Partial<AccessSetting>)
-    expect(savedByDaemon()).toEqual({ answerApprovals: true, remoteSubagents: false, computers: [] })
+    expect(savedByDaemon()).toEqual({ answerApprovals: true, remoteSubagents: false, computerUse: true, computers: [] })
   })
 
   describe('answering approvals on other threads', () => {
@@ -88,9 +88,9 @@ describe('Settings > Agents > Access', () => {
       const { updates } = show({ computers: ['node-a'] })
       click(answerSwitch()!)
       expect(updates).toHaveBeenCalledTimes(1)
-      expect(updates).toHaveBeenCalledWith({ agentAccess: { answerApprovals: true, remoteSubagents: false, computers: ['node-a'] } })
+      expect(updates).toHaveBeenCalledWith({ agentAccess: { answerApprovals: true, remoteSubagents: false, computerUse: true, computers: ['node-a'] } })
       expect(on()).toBe(true)
-      expect(savedByDaemon()).toEqual({ answerApprovals: true, remoteSubagents: false, computers: ['node-a'] })
+      expect(savedByDaemon()).toEqual({ answerApprovals: true, remoteSubagents: false, computerUse: true, computers: ['node-a'] })
       click(answerSwitch()!)
       expect(savedByDaemon().answerApprovals).toBe(false)
     })
@@ -114,7 +114,7 @@ describe('Settings > Agents > Access', () => {
     it('saves the whole setting when switched, under the key it always had, and says to pair computers when none are connected', () => {
       const { updates } = show({ answerApprovals: true })
       click(remoteSwitch()!)
-      expect(updates).toHaveBeenCalledWith({ agentAccess: { answerApprovals: true, remoteSubagents: true, computers: [] } })
+      expect(updates).toHaveBeenCalledWith({ agentAccess: { answerApprovals: true, remoteSubagents: true, computerUse: true, computers: [] } })
       expect(savedByDaemon().remoteSubagents).toBe(true)
       expect(text()).toContain('Pair them in Settings → Devices')
     })

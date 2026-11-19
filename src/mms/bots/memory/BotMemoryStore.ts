@@ -37,7 +37,7 @@ import type { BotJournalInput, BotStoreTx } from '../seams'
 import { CHAT_DIGEST_KEY, type ChatDigest, type ChatSummaryState, chatFingerprint, foldChatSummary, staleDigests } from './chatSummary'
 import { shortChipText } from '../../../shared/bots/personal/chips'
 import { classifyMemorySearchText, guardMemoryText, maskMemoryCredentials, relativeDateRefusal } from './guard'
-import { agoLabel, coreGauge, cut, dayLabel, runNotesGauge, usedTokens } from './render'
+import { agoLabel, coreGauge, cut, dayLabel, runNotesGauge, usedTokens, zonedDayBound } from './render'
 
 /**
  * The bot memory store (docs/plans/bot-context.md §3, §6–§8) over `bots.db`: the journal (append,
@@ -448,7 +448,7 @@ export class BotMemoryStore {
     const owner = this.all("SELECT * FROM bot_journal WHERE bot_id = ? AND activation_id = ? AND kind = 'owner_msg' AND seq > ? AND redacted_at IS NULL ORDER BY seq LIMIT 20",
       botId, activationId, afterSeq).map(journalRowOf)
     const saved = this.get(`SELECT 1 FROM bot_journal WHERE bot_id = ? AND activation_id = ? AND seq > ? AND (
-      (kind = 'tool_call' AND json_extract(json, '$.tool') IN ('memory_save', 'telling_set')) OR (kind = 'memory_op' AND json_extract(json, '$.op') = 'save')) LIMIT 1`,
+      (kind = 'tool_call' AND json_extract(json, '$.tool') = 'memory_save') OR (kind = 'memory_op' AND json_extract(json, '$.op') = 'save')) LIMIT 1`,
     botId, activationId, afterSeq) !== undefined
     return { owner, saved }
   }
@@ -481,9 +481,9 @@ export class BotMemoryStore {
     this.expireMemories(botId)
     const limit = Math.min(Math.max(1, Math.floor(input.limit ?? BOT_MEMORY_SEARCH_LIMIT)), MAX_BOT_MEMORY_SEARCH_LIMIT)
     const kinds = new Set<BotMemorySearchKind>(input.kinds?.length ? input.kinds : ['chat', 'run', 'tool', 'memory'])
-    const since = isoOrUndefined(input.since) ?? ''
-    // A bare date as `until` includes that day.
-    const until = isoOrUndefined(input.until && /^\d{4}-\d{2}-\d{2}$/.test(input.until.trim()) ? `${input.until.trim()}T23:59:59.999Z` : input.until) ?? '9999'
+    // A bare date is the owner's day, in their zone (the times the bot reads are in it too); as `until` it includes that day.
+    const since = (input.since && zonedDayBound(input.since, this.zone())) ?? isoOrUndefined(input.since) ?? ''
+    const until = (input.until && zonedDayBound(input.until, this.zone(), true)) ?? isoOrUndefined(input.until) ?? '9999'
     const terms = ftsTerms(input.query ?? '')
     const journalKinds = (['chat', 'run', 'tool'] as const).filter((kind) => kinds.has(kind)).map((kind) => SEARCH_KIND_SQL[kind])
     const hits: BotMemoryHit[] = []
@@ -998,6 +998,16 @@ export class BotMemoryStore {
             if (source) redact(source)
           }
         }
+      }
+      // An open item that came from a redacted row, or says what was forgotten, goes with it, and so do the rows that
+      // repeat its words (the call that listed it).
+      for (const row of this.all("SELECT key, value FROM bot_memory_state WHERE bot_id = ? AND key >= 'item:' AND key < 'item;'", botId)) {
+        const item = parseJson(row.value) as { text?: string; note?: string; links?: string[]; source?: number } | undefined
+        if (!item) continue
+        const words = [item.text, item.note, ...(Array.isArray(item.links) ? item.links : [])].filter((part): part is string => typeof part === 'string' && Boolean(part))
+        if (!(typeof item.source === 'number' && redactedSeqs.has(item.source)) && !matches(words.join('\n'))) continue
+        this.run('DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, row.key as string)
+        if (item.text) copiesOf(item.text).forEach(redact)
       }
       this.dropForgotten(botId, redactedSeqs, { holds: matches, redact })
       const memIds = [...ids].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))

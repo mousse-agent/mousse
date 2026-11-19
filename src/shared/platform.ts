@@ -19,12 +19,16 @@ import type { AutomationsMethod } from './automations'
 import type { SpaceArchiveMethod } from './spaces/archive'
 import type { SpeechHostMethod } from './speechRelay'
 import type { SecretMethod } from './secretRequests'
+import type { ComputerUseMethod } from './computerUse'
+import type { BugReportMethod } from './bugReports'
 
 export type PlatformRequestMethod = ChatMethod | ChatResourceMethod | WorkflowRunMethod | BrowserGuiMethod | BrowserSetupMethod | BrowserAccessMethod
   | ChatNetworkMethod | NetLocalMethod | NetEngineLocalMethod | BridgeHubLocalMethod | BridgeActivityMethod | SpacesLocalMethod | BotsLocalMethod | SpaceArchiveMethod | SpeechHostMethod
   | BotsPersonalV2Method | BotDeviceMethod | BotsBrowserMethod | BrowserViewMethod
   | AutomationsMethod
   | SecretMethod
+  | ComputerUseMethod
+  | BugReportMethod
   | 'workflows.list' | 'workflows.get' | 'workflows.getRevision' | 'workflows.create'
   | 'workflows.saveDraft' | 'workflows.publish' | 'workflows.archive'
   | 'workflows.duplicate' | 'workflows.importBundle' | 'workflows.exportBundle'

@@ -77,6 +77,8 @@ interface Options {
   hasMore: boolean
   /** A match is about to be shown: the chat stops following its end. */
   onNavigate(): void
+  /** The landing that `onNavigate` began is over (shown, replaced by none, or cancelled). */
+  onLanded?(): void
   /**
    * Brings a message's row into the transcript and near its top; resolves false when it can't. By default a message
    * not loaded yet is loaded first, then its drawn row is scrolled to. A transcript that draws only some of its rows
@@ -90,21 +92,25 @@ interface Options {
  * the chat's older history is loaded too, so every message is searched, and a match in a message that is not drawn is
  * scrolled to through `scrollToMessage`. Ctrl/Cmd+F opens it while the chat shows (the focused transcript wins).
  */
-export function useBotChatFind({ botId, rows, transcript, hasMore, onNavigate, scrollToMessage }: Options): ThreadFind {
+export function useBotChatFind({ botId, rows, transcript, hasMore, onNavigate, onLanded, scrollToMessage }: Options): ThreadFind {
   const turns = useMemo(() => botFindTurns(rows), [rows])
   const [loadingHistory, setLoadingHistory] = useState(false)
   const navigation = useRef(0)
-  const latest = useRef({ botId, onNavigate, scrollToMessage })
-  latest.current = { botId, onNavigate, scrollToMessage }
+  const latest = useRef({ botId, onNavigate, onLanded, scrollToMessage })
+  latest.current = { botId, onNavigate, onLanded, scrollToMessage }
 
   const virtualization = useMemo(() => {
     const begin = (): RevealNavigation & { token: number } => {
       const token = ++navigation.current
-      return { token, isCurrent: () => navigation.current === token, end: () => undefined }
+      // Only the newest landing's end counts: one replaced by the next match is not over.
+      return { token, isCurrent: () => navigation.current === token, end: () => { if (navigation.current === token) latest.current.onLanded?.() } }
     }
     return {
       beginNavigation: begin,
-      cancelNavigation: () => { navigation.current += 1 },
+      cancelNavigation: () => {
+        navigation.current += 1
+        latest.current.onLanded?.()
+      },
       scrollToKey: (id: string, _target: unknown, handle?: RevealNavigation) => {
         const token = handle ?? begin()
         const own = latest.current.scrollToMessage

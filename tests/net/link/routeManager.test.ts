@@ -324,3 +324,75 @@ describe('RouteManager bounded phases and cancellation', () => {
     expect(manager.localRoutes().version).toBe(9)
   })
 })
+
+describe('RouteManager local head start', () => {
+  // A LAN hint and the relay. The LAN dial answers after `lanMs`, or fails after it when `lanFails`.
+  const race = (lanMs: number, lanFails = false) => {
+    const clock = new FakeClock(),
+      key = Buffer.from(credentials.publicKeySpki).toString('base64url'),
+      dialled: string[] = []
+    const transport = fakeTransport(
+      (route) =>
+        new Promise((resolve, reject) => {
+          dialled.push(route.address)
+          const answer = () =>
+            resolve(new Duplex({ read() {}, write(_chunk, _encoding, done) { done() } }))
+          if (route.address === 'relay') answer()
+          else
+            clock.setTimeout(
+              () => (lanFails ? reject(new NetError('route_unreachable')) : answer()),
+              lanMs
+            )
+        })
+    )
+    const openChannel: OpenSecureChannel = async (raw) => fakeChannel(raw as Duplex, key)
+    const manager = new RouteManagerImpl({ node, transports: [transport], credentials, clock, staggerMs: 250, openChannel })
+    const connected = manager.connect(
+      {
+        ...peer(key),
+        routes: [
+          { transport: 'memory', address: 'relay', priority: 20 },
+          { transport: 'memory', address: 'lan', priority: -10 }
+        ]
+      },
+      new AbortController().signal
+    )
+    return { clock, dialled, connected }
+  }
+
+  it('a LAN dial slower than the stagger wins without the relay ever being dialled', async () => {
+    const { clock, dialled, connected } = race(1_000)
+    await tick()
+    clock.advance(250)
+    await tick()
+    expect(dialled).toEqual(['lan'])
+    clock.advance(750)
+    const opened = await connected
+    cleanup.push(() => opened.channel.close())
+    expect(opened.route.address).toBe('lan')
+    clock.advance(5_000)
+    expect(dialled).toEqual(['lan'])
+  })
+
+  it('the relay is dialled as soon as every LAN route has failed', async () => {
+    const { clock, dialled, connected } = race(100, true)
+    await tick()
+    clock.advance(100)
+    const opened = await connected
+    cleanup.push(() => opened.channel.close())
+    expect(opened.route.address).toBe('relay')
+    expect(dialled).toEqual(['lan', 'relay'])
+  })
+
+  it('the relay still starts after the head start when the LAN dial hangs', async () => {
+    const { clock, dialled, connected } = race(60_000)
+    await tick()
+    clock.advance(1_499)
+    await tick()
+    expect(dialled).toEqual(['lan'])
+    clock.advance(1)
+    const opened = await connected
+    cleanup.push(() => opened.channel.close())
+    expect(opened.route.address).toBe('relay')
+  })
+})
