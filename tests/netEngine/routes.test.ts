@@ -100,14 +100,14 @@ describe('the join dialog and Connect', () => {
   ]
 
   it('lists each dialable hint with its class; ws, ssh, broken and forbidden hints are skipped', () => {
-    expect(
-      ticketDestinations(hints).map((item) => [item.label, item.cls, item.automatic])
-    ).toEqual([
-      ['192.168.1.20:47100', 'lan', true],
-      ['100.101.7.2:47100', 'tailnet', false],
-      ['x.example', 'tunnel', false],
-      ['8.8.4.4:47100', 'public', false]
-    ])
+    expect(ticketDestinations(hints).map((item) => [item.label, item.cls, item.automatic])).toEqual(
+      [
+        ['192.168.1.20:47100', 'lan', true],
+        ['100.101.7.2:47100', 'tailnet', false],
+        ['x.example', 'tunnel', false],
+        ['8.8.4.4:47100', 'public', false]
+      ]
+    )
   })
 
   it('approves every listed hint outside the private ranges, loopback too in a debug build', () => {
@@ -124,7 +124,11 @@ describe('pairback', () => {
   it('a joiner sends its LAN routes and only the ticked others', () => {
     const info = {
       port: 47100,
-      routes: ['tcp://192.168.1.20:47100', 'tcp://100.101.7.2:47100', 'wss://x.example/mousse-net/1']
+      routes: [
+        'tcp://192.168.1.20:47100',
+        'tcp://100.101.7.2:47100',
+        'wss://x.example/mousse-net/1'
+      ]
     }
     expect(pairbackRoutes(info, [])).toEqual(['tcp://192.168.1.20:47100'])
     expect(pairbackRoutes(info, ['wss://x.example/mousse-net/1'])).toEqual([
@@ -168,6 +172,10 @@ describe('loopback in a debug build (MOUSSE_NET_TEST_CLASS_MAP)', () => {
       expect(automatic('tcp://127.0.0.1:47302')).toBe(false)
       expect(automatic('tcp://127.0.0.1:47303')).toBe(true)
       expect(automatic('tcp://192.168.1.2:47301')).toBe(true)
+      // `*=<class>`: every port the map leaves out.
+      process.env.MOUSSE_NET_TEST_CLASS_MAP = '47303=lan,*=public'
+      expect(automatic('tcp://127.0.0.1:47300')).toBe(false)
+      expect(automatic('tcp://127.0.0.1:47303')).toBe(true)
     } finally {
       if (before === undefined) delete process.env.MOUSSE_NET_TEST_CLASS_MAP
       else process.env.MOUSSE_NET_TEST_CLASS_MAP = before

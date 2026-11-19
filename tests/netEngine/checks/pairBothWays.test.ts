@@ -17,6 +17,7 @@ import {
   deviceState,
   Fabric,
   CHECK_ROUTE,
+  ONE_WAY,
   REAL_HELPER,
   rowFor,
   step,
@@ -56,11 +57,19 @@ describe('phase1a.pair-both-ways', () => {
       clearInterval(watch)
     }
     await step('false_connected', () => expect(sawConnected).toEqual([]))
-    await step('one_way_stuck', async () => {
-      expect(await grantHeld(owner, caller)).toBe(true)
-      expect(await grantHeld(caller, owner)).toBe(true)
-    })
+    await bothGrants(owner, caller)
   }, 120_000)
+
+  /**
+   * The owner lets the caller in, and the caller the owner; over ssh with the real helper the pairing is Add over
+   * SSH, one way (1b §3.6), and the caller holds no grant for the owner.
+   */
+  async function bothGrants(owner: Computer, caller: Computer): Promise<void> {
+    await step('one_way_stuck', async () => expect(await grantHeld(owner, caller)).toBe(true))
+    await step(ONE_WAY ? 'two_way' : 'one_way_stuck', async () =>
+      expect(await grantHeld(caller, owner)).toBe(!ONE_WAY)
+    )
+  }
 
   // A real helper lists the addresses of the computer it runs on; this one has a tailnet's too.
   // A routes run gives each computer only the route under test, never this one's own addresses.
@@ -86,11 +95,9 @@ describe('phase1a.pair-both-ways', () => {
     // The caller keeps its row of the first pairing; joining again replays its grant and its pairback on it.
     const again = await step('one_way_stuck', () => fabric.pair(owner, caller))
     expect(again.callerOnOwner).not.toBe(first.callerOnOwner)
-    expect(again.ownerOnCaller).toBe(first.ownerOnCaller)
-    await step('one_way_stuck', async () => {
-      expect(await grantHeld(owner, caller)).toBe(true)
-      expect(await grantHeld(caller, owner)).toBe(true)
-    })
+    // Over Add over SSH the new add's row takes the place of the one the owner removed.
+    if (!ONE_WAY) expect(again.ownerOnCaller).toBe(first.ownerOnCaller)
+    await bothGrants(owner, caller)
   }, 180_000)
 
   const stops: Array<{ at: PairingStep; on: 'owner' | 'caller' }> = [
@@ -101,51 +108,59 @@ describe('phase1a.pair-both-ways', () => {
     { at: 'enrolled', on: 'owner' },
     { at: 'pairback', on: 'owner' }
   ]
+  // The window ceremony never runs over ssh (a ticket carries no ssh route): Add over SSH's own stops are
+  // ssh-add-app's.
   for (const { at, on } of stops)
-    it(`finishes after the ${on} stops at ${at}`, async () => {
-      const owner = await fabric.computer(`owner-${at}`),
-        caller = await fabric.computer(`caller-${at}`)
-      const stopped = on === 'owner' ? owner : caller,
-        other = on === 'owner' ? caller : owner
-      let hit = false
-      stopped.mms.netEngine.pairingCrash = (step) => {
-        if (step !== at || hit) return false
-        hit = true
-        return true
-      }
-      const invite = await owner.dispatch('netEngine.invite', {}, true)
-      const stopApproving = approveAll(owner)
-      try {
-        // The join itself may end with the stop.
-        await caller.dispatch('netEngine.join', { ticket: invite.uri }, true).catch(() => undefined)
-        await step(undefined, () =>
-          expect.poll(() => hit, { timeout: 60_000, interval: 50 }).toBe(true)
-        )
-        // While the stopped computer is down, the half that is done stays, and neither row reads Connected.
-        await new Promise((resolve) => setTimeout(resolve, 1_500))
-        await step('false_connected', () => {
-          for (const [a, b] of [
-            [owner, caller],
-            [caller, owner]
-          ] as const) {
-            const row = rowFor(a, b)
-            if (row) expect(deviceState(a, row.localId)).not.toBe('connected')
-          }
+    it.skipIf(ONE_WAY)(
+      `finishes after the ${on} stops at ${at}`,
+      async () => {
+        const owner = await fabric.computer(`owner-${at}`),
+          caller = await fabric.computer(`caller-${at}`)
+        const stopped = on === 'owner' ? owner : caller,
+          other = on === 'owner' ? caller : owner
+        let hit = false
+        stopped.mms.netEngine.pairingCrash = (step) => {
+          if (step !== at || hit) return false
+          hit = true
+          return true
+        }
+        const invite = await owner.dispatch('netEngine.invite', {}, true)
+        const stopApproving = approveAll(owner)
+        try {
+          // The join itself may end with the stop.
+          await caller
+            .dispatch('netEngine.join', { ticket: invite.uri }, true)
+            .catch(() => undefined)
+          await step(undefined, () =>
+            expect.poll(() => hit, { timeout: 60_000, interval: 50 }).toBe(true)
+          )
+          // While the stopped computer is down, the half that is done stays, and neither row reads Connected.
+          await new Promise((resolve) => setTimeout(resolve, 1_500))
+          await step('false_connected', () => {
+            for (const [a, b] of [
+              [owner, caller],
+              [caller, owner]
+            ] as const) {
+              const row = rowFor(a, b)
+              if (row) expect(deviceState(a, row.localId)).not.toBe('connected')
+            }
+          })
+          await step('auto_removed', async () => {
+            const row = rowFor(other, stopped)
+            if (row) expect(row.state).not.toMatch(/^remov/)
+            if (other === owner && row) expect(await grantHeld(owner, caller)).toBe(true)
+          })
+          stopped.mms.netEngine.pairingCrash = undefined
+          await step(undefined, () => fabric.restartEngine(stopped))
+          await step('one_way_stuck', () => connectedBothWays(owner, caller, 60_000))
+        } finally {
+          stopApproving()
+        }
+        await step('one_way_stuck', async () => {
+          expect(await grantHeld(owner, caller)).toBe(true)
+          expect(await grantHeld(caller, owner)).toBe(true)
         })
-        await step('auto_removed', async () => {
-          const row = rowFor(other, stopped)
-          if (row) expect(row.state).not.toMatch(/^remov/)
-          if (other === owner && row) expect(await grantHeld(owner, caller)).toBe(true)
-        })
-        stopped.mms.netEngine.pairingCrash = undefined
-        await step(undefined, () => fabric.restartEngine(stopped))
-        await step('one_way_stuck', () => connectedBothWays(owner, caller, 60_000))
-      } finally {
-        stopApproving()
-      }
-      await step('one_way_stuck', async () => {
-        expect(await grantHeld(owner, caller)).toBe(true)
-        expect(await grantHeld(caller, owner)).toBe(true)
-      })
-    }, 180_000)
+      },
+      180_000
+    )
 })

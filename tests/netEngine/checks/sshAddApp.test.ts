@@ -1,6 +1,8 @@
 /**
  * Owner check `phase1b.ssh-add-app` (1b §3.4–§3.6): A adds B over SSH through its window, B answering at an SSH
  * test server in process (`Fabric.sshServer`: B's `mousse-cli net-engine ssh` is its daemon's `netEngine.ssh.serve`).
+ * With the real helper (`MOUSSE_NET_HELPER`), B answers on the kit's test SSH server, its `mousse-cli` a stand-in
+ * that carries the session to B's app in this process, and 1a pairings go over loopback.
  *
  * - an existing profile, one way only: A's row reads "Uses B", B's row connects on A's first inbound, and B holds
  *   no way back; a profile paired elsewhere is listed; a new one is made;
@@ -22,13 +24,13 @@ import { PassThrough } from 'node:stream'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { runNetEngineCommand } from '../../../src/cli/commands/netEngineSsh'
 import type { PrepareStep } from '../../../src/mms/netEngine/ssh/prepare'
-import { deviceState, eventually, Fabric, REAL_HELPER, rowFor, step, type Computer } from './harness'
+import { deviceState, eventually, Fabric, rowFor, step, type Computer } from './harness'
 
 const HOST = 'b.test'
 /** Why the last Connect did not go through, for a failed step's message. */
 let lastError = ''
 
-describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
+describe('phase1b.ssh-add-app', () => {
   const fabric = new Fabric()
   fabric.network.minor = 1
   let b: Computer
@@ -37,34 +39,54 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
   let lan = 0
   /** A computer on the test LAN: 1a pairings between them go over it; the SSH adds go over SSH. */
   const make = (name: string) => {
-    fabric.network.routes.set(Buffer.from('endpoint-' + name).toString('hex'), ['tcp://192.168.70.' + ++lan + ':47100'])
+    fabric.network.routes.set(Buffer.from('endpoint-' + name).toString('hex'), [
+      'tcp://192.168.70.' + ++lan + ':47100'
+    ])
     return fabric.computer(name)
   }
   beforeAll(async () => {
     b = await make('b')
-    served = fabric.sshServer(HOST, b)
+    served = await fabric.sshServer(HOST, b)
   }, 120_000)
   afterAll(() => fabric.close(), 180_000)
 
   /** A's window: resolve, trust the key, list B's profiles. */
   async function begin(a: Computer) {
-    const resolved = await step(undefined, () => a.dispatch('netEngine.ssh.resolve', { target: `me@${HOST}` }, true))
+    const resolved = await step(undefined, () =>
+      a.dispatch('netEngine.ssh.resolve', { target: `me@${HOST}` }, true)
+    )
     const probe = await step(undefined, () =>
       a.dispatch('netEngine.ssh.probe', { routeId: resolved.routeId, host: HOST }, true)
     )
     await step(undefined, () =>
-      a.dispatch('netEngine.ssh.trust', { routeId: resolved.routeId, sha256: probe.sha256, host: HOST }, true)
+      a.dispatch(
+        'netEngine.ssh.trust',
+        { routeId: resolved.routeId, sha256: probe.sha256, host: HOST },
+        true
+      )
     )
     const list = await step(undefined, () =>
-      a.dispatch('netEngine.ssh.profiles', { routeId: resolved.routeId, host: HOST, user: 'me' }, true)
+      a.dispatch(
+        'netEngine.ssh.profiles',
+        { routeId: resolved.routeId, host: HOST, user: 'me' },
+        true
+      )
     )
     return { resolved, list: list as { profiles: Array<{ selector: string; label: string }> } }
   }
 
   /** Connect with `choice`; answers whether it went through (a crash or a lost reply does not). */
-  async function connect(a: Computer, routeId: string, choice: { selector?: string; newLabel?: string }) {
+  async function connect(
+    a: Computer,
+    routeId: string,
+    choice: { selector?: string; newLabel?: string }
+  ) {
     return a
-      .dispatch('netEngine.ssh.connect', { routeId, target: `me@${HOST}`, host: HOST, user: 'me', ...choice }, true)
+      .dispatch(
+        'netEngine.ssh.connect',
+        { routeId, target: `me@${HOST}`, host: HOST, user: 'me', ...choice },
+        true
+      )
       .then(
         () => true,
         (error) => {
@@ -80,7 +102,7 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
   /** A repeats prepare, as its recovery does after a restart. */
   const repeat = (a: Computer) => a.mms.netEngine.sshAdd().prepare(sshRow(a)!)
   const grantsAt = (identity: string, of: string) =>
-    fabric.network.grantsAt(identity).filter((grant) => grant.caller === of)
+    fabric.grantsAt(identity).then((grants) => grants.filter((grant) => grant.caller === of))
   const crashOnce = (at: PrepareStep) => {
     b.mms.sshRemote()!.crashAt = (step) => {
       if (step !== at) return false
@@ -108,10 +130,12 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
         expect(deviceState(a, row.localId)).toBe('connected')
         const onB = rowFor(b, a)!
         expect(onB.state).toBe('connected')
-        expect(b.mms.netEngine.status().devices.find((device) => device.node === onB.localId)?.direction).toBe('in')
+        expect(
+          b.mms.netEngine.status().devices.find((device) => device.node === onB.localId)?.direction
+        ).toBe('in')
       }, 30_000)
     )
-    await step('two_way', () => expect(grantsAt(a.endpoint, b.endpoint)).toEqual([]))
+    await step('two_way', async () => expect(await grantsAt(a.endpoint, b.endpoint)).toEqual([]))
     await step('ssh_row_pairback', async () => {
       await new Promise((resolve) => setTimeout(resolve, 1_000))
       expect(fabric.crossed.slice(from).filter((row) => row.header.t === 'pairback')).toEqual([])
@@ -127,12 +151,23 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
       expect(list.profiles.map((profile) => profile.selector)).toContain(bSelector())
     )
     expect(await connect(a, resolved.routeId, { newLabel: 'Fresh' })).toBe(true)
-    await step('unreachable', () => eventually(() => expect(sshRow(a)!.state).toBe('connected'), 30_000))
+    await step('unreachable', () =>
+      eventually(() => expect(sshRow(a)!.state).toBe('connected'), 30_000)
+    )
     const labels = (await begin(a)).list.profiles.map((profile) => profile.label)
-    await step('duplicate_after_crash', () => expect(labels.filter((label) => label === 'Fresh')).toHaveLength(1))
+    await step('duplicate_after_crash', () =>
+      expect(labels.filter((label) => label === 'Fresh')).toHaveLength(1)
+    )
   }, 180_000)
 
-  it.each(['journaled', 'profile', 'networking', 'row', 'grant-saved', 'grant-stored'] as PrepareStep[])(
+  it.each([
+    'journaled',
+    'profile',
+    'networking',
+    'row',
+    'grant-saved',
+    'grant-stored'
+  ] as PrepareStep[])(
     'resumes after a crash at %s with one profile and one grant',
     async (at) => {
       const a = await make(`a${++made}`)
@@ -150,7 +185,9 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
         }, 30_000)
       )
       const identity = sshRow(a)!.endpoint
-      await step('duplicate_grant', () => expect(grantsAt(identity, a.endpoint)).toHaveLength(1))
+      await step('duplicate_grant', async () =>
+        expect(await grantsAt(identity, a.endpoint)).toHaveLength(1)
+      )
     },
     120_000
   )
@@ -166,7 +203,7 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
       await expect(repeat(a)).rejects.toMatchObject({ details: { reason: 'removed' } })
       expect(sshRow(a)!.ssh?.removed).toBe(true)
       expect(rowFor(b, a)).toBeUndefined()
-      expect(grantsAt(b.endpoint, a.endpoint)).toEqual([])
+      expect(await grantsAt(b.endpoint, a.endpoint)).toEqual([])
     })
 
     // Connected, then removed on B: A's restart must not send prepare again.
@@ -215,8 +252,8 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
     await b.dispatch('netEngine.remove', { node: onB.localId }, true)
     await fabric.restartEngine(b)
     await new Promise((resolve) => setTimeout(resolve, 1_000))
-    await step('grant_survived_removal', () => {
-      expect(grantsAt(b.endpoint, a.endpoint)).toEqual([])
+    await step('grant_survived_removal', async () => {
+      expect(await grantsAt(b.endpoint, a.endpoint)).toEqual([])
       expect(rowFor(b, a)).toBeUndefined()
     })
   }, 180_000)
@@ -227,7 +264,7 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
     loseOnce()
     expect(await connect(a, resolved.routeId, { selector: bSelector() })).toBe(false)
     await eventually(() => expect(rowFor(b, a)?.state).toBe('ssh_granted'))
-    const [grant] = grantsAt(b.endpoint, a.endpoint)
+    const [grant] = await grantsAt(b.endpoint, a.endpoint)
     // The grant goes without the request hearing of it.
     await b.engine.request('grant.remove', { grant: grant!.grant })
     await step('removed_grant_reported_live', () =>
@@ -249,7 +286,9 @@ describe.skipIf(REAL_HELPER)('phase1b.ssh-add-app', () => {
     )
     stdin.end('{"op":"profiles"}\n')
     await done
-    await step('daemon_started', () => expect(asked.map((options) => options.disableAutoStart)).toEqual([true]))
+    await step('daemon_started', () =>
+      expect(asked.map((options) => options.disableAutoStart)).toEqual([true])
+    )
     expect(out).toContain('"remote_not_running"')
   })
 })

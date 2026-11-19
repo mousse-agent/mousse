@@ -21,23 +21,30 @@ export function privateRoute(route: string): boolean {
 }
 
 /**
- * The classes checks give loopback ports (`MOUSSE_NET_TEST_CLASS_MAP`: `<port>=<class>` entries separated by
- * commas, which the debug helper reads too). Unmapped loopback counts as `lan`.
+ * The classes checks give loopback ports (`MOUSSE_NET_TEST_CLASS_MAP`, which the debug helper reads too):
+ * `<port>=<class>` entries separated by commas, plus an optional `*=<class>` for every port the map leaves out.
+ * Unmapped loopback counts as `lan`.
  */
-export function testClassMap(env: NodeJS.ProcessEnv = process.env): Map<number, string> {
-  const map = new Map<number, string>()
+export function testClassMap(env: NodeJS.ProcessEnv = process.env): Map<number | '*', string> {
+  const map = new Map<number | '*', string>()
   for (const entry of (env.MOUSSE_NET_TEST_CLASS_MAP ?? '').split(',')) {
-    const match = /^\s*(\d{1,5})\s*=\s*(lan|tailnet|public)\s*$/.exec(entry)
-    if (match) map.set(Number(match[1]), match[2]!)
+    const match = /^\s*(\d{1,5}|\*)\s*=\s*(lan|tailnet|public)\s*$/.exec(entry)
+    if (match) map.set(match[1] === '*' ? '*' : Number(match[1]), match[2]!)
   }
   return map
+}
+
+/** The class the check's map gives loopback `port`, if any. */
+function mappedClass(port: number | undefined): string | undefined {
+  if (port === undefined) return undefined
+  const map = testClassMap()
+  return map.get(port) ?? map.get('*')
 }
 
 /** The class a check maps a loopback route's port to, in an unpackaged build (`tailnet` or `public`). */
 export function loopbackClass(route: string): 'tailnet' | 'public' | undefined {
   if (packagedBuild() || automaticRoute(route) || !automaticRoute(route, true)) return undefined
-  const port = parseRoute(route)?.port
-  const cls = port === undefined ? undefined : testClassMap().get(port)
+  const cls = mappedClass(parseRoute(route)?.port)
   return cls === 'tailnet' || cls === 'public' ? cls : undefined
 }
 
@@ -49,8 +56,7 @@ export function loopbackClass(route: string): 'tailnet' | 'public' | undefined {
 export function automatic(route: string): boolean {
   if (automaticRoute(route)) return true
   if (packagedBuild() || !automaticRoute(route, true)) return false
-  const port = parseRoute(route)?.port
-  const cls = port === undefined ? undefined : testClassMap().get(port)
+  const cls = mappedClass(parseRoute(route)?.port)
   return cls === undefined || cls === 'lan'
 }
 

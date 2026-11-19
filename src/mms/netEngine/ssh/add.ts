@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { NetError } from '../../../shared/net/errors'
 import { helperCode } from '../helper/appChannel'
 import type { EngineHelper } from '../helper/connections'
-import { engineControl } from '../limits'
+import { engineControl, engineLimits } from '../limits'
 import type { EnginePeerRow, EnginePeerStore, EngineSshJournal } from '../store'
 
 /** `ssh.resolve`'s answer. */
@@ -149,7 +149,9 @@ export class SshAdd {
       os: String(reply.os ?? ''),
       startsAtLogin: reply.starts_at_login === true,
       profiles: list
-        .filter((item: unknown): item is Record<string, unknown> => !!item && typeof item === 'object')
+        .filter(
+          (item: unknown): item is Record<string, unknown> => !!item && typeof item === 'object'
+        )
         .map((item: Record<string, unknown>) => ({
           selector: String(item.selector ?? ''),
           label: String(item.label ?? ''),
@@ -271,6 +273,14 @@ export class SshAdd {
       ...(selector ? { selector } : {}),
       startsAtLogin: reply.starts_at_login === true
     }
+    // A row of an earlier add of this profile (one B removed, say) gives way to this one: one row per computer.
+    for (const earlier of this.port.peers.all())
+      if (
+        earlier.localId !== row.localId &&
+        earlier.source === 'ssh' &&
+        earlier.endpoint === identity
+      )
+        this.port.peers.prune(earlier.localId)
     // Step 5: B pinned with no routes, then its SSH route as the owner's address.
     const helper = this.helper()
     await helper.request('peer.add', { identity, name, routes: [] })
@@ -289,8 +299,24 @@ export class SshAdd {
     })!
     this.port.changed()
     helper.claim(identity)
-    void helper.dial(identity).catch(() => undefined)
+    this.dialUntilConnected(saved.localId, identity)
     return saved
+  }
+
+  /**
+   * A's first dial to B. One that fails (B's helper may not take the new grant yet, as right after B removed an
+   * earlier pairing) is tried again every `pairingRetryMs` while the row waits for it and networking runs.
+   */
+  private dialUntilConnected(node: EnginePeerRow['localId'], identity: string): void {
+    const attempt = (): void => {
+      const helper = this.port.helper()
+      if (!helper || this.port.peers.get(node)?.state !== 'ssh_granted') return
+      void helper.dial(identity).catch(() => {
+        const timer = setTimeout(attempt, engineLimits().pairingRetryMs)
+        timer.unref?.()
+      })
+    }
+    attempt()
   }
 
   /** A's first live connection to B: the row is connected, and `prepare` is never repeated. */
@@ -305,4 +331,5 @@ export class SshAdd {
 }
 
 /** The §3.5 reason a NetError carries. */
-const reasonOf = (error: NetError): unknown => (error.details as { reason?: unknown } | undefined)?.reason
+const reasonOf = (error: NetError): unknown =>
+  (error.details as { reason?: unknown } | undefined)?.reason

@@ -80,7 +80,9 @@ export function findNetHelper(
  */
 export function packagedHelperCommit(binary: string): string | undefined {
   try {
-    const commit = readFileSync(join(dirname(binary), 'ENGINE_COMMIT'), 'utf8').trim().toLowerCase()
+    const commit = readFileSync(join(dirname(binary), 'ENGINE_COMMIT'), 'utf8')
+      .trim()
+      .toLowerCase()
     return /^[0-9a-f]{7,64}$/.test(commit) ? commit : undefined
   } catch {
     return undefined
@@ -276,9 +278,16 @@ export function launchHelper(
       })
       child.on('exit', (code, signal) => {
         closeOnce()
-        // What the helper wrote last on its way out arrives before its streams close.
-        child.stderr.once('close', () => resolvePromise({ code, signal, stderr }))
-        if (child.stderr.closed) resolvePromise({ code, signal, stderr })
+        // What the helper wrote last on its way out arrives before its streams close. A process it started (an ssh
+        // client) may hold stderr open past its exit, so that wait is bounded.
+        const done = () => {
+          clearTimeout(drain)
+          resolvePromise({ code, signal, stderr })
+        }
+        const drain = setTimeout(done, engineLimits().helperStderrDrainMs)
+        drain.unref?.()
+        child.stderr.once('close', done)
+        if (child.stderr.closed) done()
       })
     }
   )

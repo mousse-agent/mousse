@@ -75,6 +75,11 @@ export interface EngineLimits {
   helperShutdownGraceMs: number
   /** How much of what the helper (or its first-run `init`) wrote on stderr is kept, from the end, for the status. */
   helperStderrMaxBytes: number
+  /**
+   * After the helper exits, how long its stderr may stay open: a process it started (an ssh client) can hold it past
+   * its exit, and the stop must not wait on that.
+   */
+  helperStderrDrainMs: number
   /** How often Add device reads a camera frame for a pairing code. */
   scanIntervalMs: number
   /** How long a start keeps trying while another helper still holds the endpoint. */
@@ -159,6 +164,7 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   helperFastExits: 3,
   helperShutdownGraceMs: 3_000,
   helperStderrMaxBytes: 4096,
+  helperStderrDrainMs: 500,
   scanIntervalMs: DEFAULT_SCAN_INTERVAL_MS,
   helperLockWaitMs: 5_000,
   helperInitDeadlineMs: 60_000,
@@ -212,6 +218,7 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   helperFastExits: 'MOUSSE_NET_ENGINE_HELPER_FAST_EXITS',
   helperShutdownGraceMs: 'MOUSSE_NET_ENGINE_HELPER_SHUTDOWN_GRACE_MS',
   helperStderrMaxBytes: 'MOUSSE_NET_ENGINE_HELPER_STDERR_MAX_BYTES',
+  helperStderrDrainMs: 'MOUSSE_NET_ENGINE_HELPER_STDERR_DRAIN_MS',
   scanIntervalMs: 'MOUSSE_NET_ENGINE_SCAN_INTERVAL_MS',
   helperLockWaitMs: 'MOUSSE_NET_ENGINE_HELPER_LOCK_WAIT_MS',
   helperInitDeadlineMs: 'MOUSSE_NET_ENGINE_HELPER_INIT_DEADLINE_MS',
@@ -234,7 +241,10 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
 })
 
 /** Limits that guard this computer against another: a value above the default is refused, so they only tighten. */
-const TIGHTEN_ONLY: ReadonlySet<keyof EngineLimits> = new Set(['sshRemoteRequestMaxBytes', 'sshRemoteReadMs'])
+const TIGHTEN_ONLY: ReadonlySet<keyof EngineLimits> = new Set([
+  'sshRemoteRequestMaxBytes',
+  'sshRemoteReadMs'
+])
 
 /** Reads the limits from `env`; each problem names the variable, the value and the default kept. */
 export function readEngineLimits(env: NodeJS.ProcessEnv): {
@@ -293,7 +303,10 @@ export function readEngineLimits(env: NodeJS.ProcessEnv): {
   // at least twice the maximum age, so a request id is never seen as new a second time.
   if (limits.sshRequestDeadlineMs < 1000 || limits.sshRequestDeadlineMs > 600_000)
     keep('sshRequestDeadlineMs', 'is outside 1000 to 600000')
-  if (limits.sshRequestMaxAgeSecs < 60 || limits.sshRequestMaxAgeSecs > ENGINE_LIMIT_DEFAULTS.sshRequestMaxAgeSecs)
+  if (
+    limits.sshRequestMaxAgeSecs < 60 ||
+    limits.sshRequestMaxAgeSecs > ENGINE_LIMIT_DEFAULTS.sshRequestMaxAgeSecs
+  )
     keep('sshRequestMaxAgeSecs', 'is outside 60 to 86400 (it may only be lowered)')
   if (limits.sshRequestKeepSecs < 2 * limits.sshRequestMaxAgeSecs)
     keep('sshRequestKeepSecs', 'is less than twice the maximum request age')

@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { NodeId } from '../../../src/shared/net'
-import { eventually, Fabric, REAL_HELPER, step, type Computer } from './harness'
+import { eventually, Fabric, ONE_WAY, REAL_HELPER, step, type Computer } from './harness'
 
 const browseFile = join(mkdtempSync(join(tmpdir(), 'engine-browse-')), 'hosts')
 writeFileSync(browseFile, '')
@@ -42,19 +42,20 @@ describe.runIf(REAL_HELPER)('phase1a.reconnect', () => {
   }, 120_000)
   afterAll(() => fabric.close(), 120_000)
 
-  /** Both directions are up again. */
+  /** Each direction the pairing has (one, the caller's, over Add over SSH) is up again. */
   const bothOnline = (reason: string, timeout = 60_000) =>
     step(reason, () =>
       eventually(() => {
-        expect(owner.mms.netEngine.online(callerOnOwner)).toBe(true)
+        if (!ONE_WAY) expect(owner.mms.netEngine.online(callerOnOwner)).toBe(true)
         expect(caller.mms.netEngine.online(ownerOnCaller)).toBe(true)
       }, timeout)
     )
-  /** Both directions went down (the restart was seen) before they come back. */
+  /** Its directions went down (the restart was seen) before they come back. */
   const wentDown = () =>
     eventually(() => {
       expect(
-        owner.mms.netEngine.online(callerOnOwner) && caller.mms.netEngine.online(ownerOnCaller)
+        (ONE_WAY || owner.mms.netEngine.online(callerOnOwner)) &&
+          caller.mms.netEngine.online(ownerOnCaller)
       ).toBe(false)
     }, 10_000).catch(() => undefined)
 

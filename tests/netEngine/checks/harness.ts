@@ -13,6 +13,7 @@
  * (`netEngine.join`), the owner's window says Yes, and the apps finish both directions themselves.
  */
 import { execFileSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import {
   appendFileSync,
   existsSync,
@@ -23,11 +24,13 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { connect as netConnect, Socket } from 'node:net'
+import { connect as netConnect, createServer as createNetServer, Socket } from 'node:net'
+import { PassThrough } from 'node:stream'
 import { createServer as createTlsServer } from 'node:tls'
-import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { vi } from 'vitest'
+import { runNetEngineSsh } from '../../../src/cli/commands/netEngineSsh'
 import { MousseMainService } from '../../../src/mms/MousseMainService'
 import type { DomainConnectionContext } from '../../../src/mms/protocol/domainRegistry'
 import { dispatchMethod } from '../../../src/mms/protocol/handlers'
@@ -49,6 +52,11 @@ export const REAL_HELPER = !!process.env.MOUSSE_NET_HELPER?.trim()
  * connection must come up on it (`conn.up.route`), else the run fails with `route_mismatch`. Unset: 1a's checks.
  */
 export const CHECK_ROUTE = readCheckRoute()
+/**
+ * Over ssh with the real helper, computers pair through Add over SSH (1b §3.4), the real flow: one way, the caller
+ * uses the owner and the owner gets no way back (§3.6).
+ */
+export const ONE_WAY = REAL_HELPER && CHECK_ROUTE === 'ssh'
 /** The class `tcp` is mapped to for this run (`MOUSSE_NET_ENGINE_CHECK_CLASS`): tailnet, then public. */
 export const CHECK_CLASS: 'tailnet' | 'public' =
   process.env.MOUSSE_NET_ENGINE_CHECK_CLASS === 'public' ? 'public' : 'tailnet'
@@ -148,6 +156,14 @@ export interface Computer {
   events: ProtocolEvent[]
   /** A window's daemon call on this computer (`local`: the Settings window, with the local capability). */
   dispatch(method: string, params: unknown, local?: boolean): Promise<any>
+  /** Its Mousse folder (`MOUSSE_HOME`). */
+  home: string
+}
+
+/** A computer's SSH test server in a real-helper run: its host alias and its default profile's selector. */
+interface SshHost {
+  alias: string
+  selector: string
 }
 
 /** The computers of one check, their helpers and the fake network between them. */
@@ -160,6 +176,8 @@ export class Fabric {
   autoUse = true
   /** In a routes run over ssh, the computers made so far. */
   private readonly computers: Computer[] = []
+  /** Every computer made so far. */
+  private readonly all: Computer[] = []
   /** In a routes run over ssh, each fake computer's SSH route id, by its identity. */
   private readonly sshRouteOf = new Map<string, string>()
   /** The computers made so far (each fake one gets its own route in a routes run). */
@@ -178,10 +196,9 @@ export class Fabric {
       if (!expected) return
       this.routesSeen.push({ to, route: message.route })
       const route = message.route as { kind?: unknown; class?: unknown } | undefined
-      // As the kit judges it: every connection of the route's kind. The fake helper is exact about the class too;
-      // a real one reports an inbound connection's class from the caller's address, which no map covers.
-      if (route?.kind !== expected.kind || (!REAL_HELPER && route?.class !== expected.class))
-        record('route_mismatch')
+      // Every connection of the route's kind (as the kit judges it), and of its class: an inbound loopback
+      // connection takes the class the map gives the listener port it arrived on.
+      if (route?.kind !== expected.kind || route?.class !== expected.class) record('route_mismatch')
     }
     if (!expected) return
     if (!REAL_HELPER) {
@@ -264,18 +281,17 @@ export class Fabric {
     const computer = {} as Computer
     if (REAL_HELPER) {
       process.env.MOUSSE_NET_ENGINE_INSECURE_FILE_KEY = '1'
-      // Over ssh, every helper of the run reads the one SSH config the test servers' entries go in.
-      if (CHECK_ROUTE === 'ssh') process.env.MOUSSE_NET_TEST_SSH_CONFIG ||= sshConfig()
+      // Every helper of the run reads the one SSH config the test servers' entries go in.
+      process.env.MOUSSE_NET_TEST_SSH_CONFIG ||= sshConfig()
       // Over tcp on one computer, each helper's loopback port stands for the class under test: the debug helper
-      // and the app read the same map (`<port>=<class>`, 1b §14).
+      // and the app read the same map (`<port>=<class>`, 1b §14). `*=<class>` covers the ports of computers made
+      // after a helper started, whose map it read then.
       if (CHECK_ROUTE === 'tcp' && !process.env.MOUSSE_NET_ENGINE_CHECK_ROLE) {
         computer.port = 47300 + ++this.made
         process.env.MOUSSE_NET_TEST_CLASS_MAP = [
-          process.env.MOUSSE_NET_TEST_CLASS_MAP,
+          process.env.MOUSSE_NET_TEST_CLASS_MAP || `*=${CHECK_CLASS}`,
           `${computer.port}=${CHECK_CLASS}`
-        ]
-          .filter(Boolean)
-          .join(',')
+        ].join(',')
       }
       // A cross-machine cell's computers listen on every interface; the others only on loopback.
       process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP ||= process.env.MOUSSE_NET_ENGINE_CHECK_ROLE
@@ -337,13 +353,12 @@ export class Fabric {
       if (restarted) engine = await running(mms, before)
     }
     // Over ssh with the real helper: this computer advertises no route, and answers SSH on its own test server.
-    let ssh: { alias: string; selector: string; stop: () => Promise<void> } | undefined
+    let ssh: SshHost | undefined
     if (REAL_HELPER && CHECK_ROUTE === 'ssh') {
       const before = engine
       const { restarted } = await mms.netEngine.setReach({ lan: false, tailnet: false, public: [] })
       if (restarted) engine = await running(mms, before)
-      ssh = await this.realSshServer(name, mms, home)
-      this.cleanups.push(ssh.stop)
+      ssh = await this.sshHost(`mousse-check-${name}`, mms, home)
     }
     endpoint = String(engine.info.identity)
     const events: ProtocolEvent[] = []
@@ -367,6 +382,7 @@ export class Fabric {
       kill: () => kill(),
       hadNetDb,
       events,
+      home,
       dispatch: (method: string, params: unknown, local = false) =>
         dispatchMethod(
           { mms, connection: window(local), globalSequence: () => mms.protocolSequence() },
@@ -376,54 +392,52 @@ export class Fabric {
     })
     // A routes run: each owner taps Use on what its pairings offer, as its window would (unless a check says no).
     if (CHECK_ROUTE && this.autoUse) this.cleanups.push(useOffered(computer))
-    // Over ssh, each computer holds every other's SSH route as its owner address, as the kit sets it (1b §14).
-    if (CHECK_ROUTE === 'ssh') {
-      if (ssh) this.sshOf.set(computer, ssh)
+    this.all.push(computer)
+    // Over ssh, each fake computer holds every other's SSH route as its owner address, as the kit sets it (1b §14).
+    // A real helper takes owner addresses only for a peer it is paired with (a join dials only the ticket's hints,
+    // where ssh is reserved), so real computers pair through Add over SSH instead (`pair`).
+    if (ssh) this.sshOf.set(computer, ssh)
+    if (CHECK_ROUTE === 'ssh' && !REAL_HELPER) {
       for (const other of this.computers)
         for (const [from, to] of [
           [computer, other],
           [other, computer]
         ] as const)
-          // A real helper takes owner addresses only for a peer it is paired with, and a join dials only the
-          // ticket's hints (where ssh is reserved): no window pairing reaches it over ssh before it is paired.
-          await step(REAL_HELPER ? 'ssh_owner_address_refused' : undefined, async () =>
-            from.engine.request('peer.addresses.set', {
-              identity: to.endpoint,
-              routes: [
-                REAL_HELPER
-                  ? await this.pinnedSshRoute(from, this.sshOf.get(to)!)
-                  : {
-                      route_id: this.sshRouteOf.get(to.endpoint),
-                      selector: 'a'.repeat(26),
-                      shell: 'sh'
-                    }
-              ]
-            })
-          )
+          await from.engine.request('peer.addresses.set', {
+            identity: to.endpoint,
+            routes: [
+              { route_id: this.sshRouteOf.get(to.endpoint), selector: 'a'.repeat(26), shell: 'sh' }
+            ]
+          })
       this.computers.push(computer)
     }
     return computer
   }
 
   /** In a real-helper run over ssh, each computer's test SSH server. */
-  private readonly sshOf = new Map<Computer, { alias: string; selector: string }>()
+  private readonly sshOf = new Map<Computer, SshHost>()
 
   /**
-   * The kit's test SSH server for `name` (`MOUSSE_CHECK_TEST_SSHD`, started by `MOUSSE_CHECK_SSH_ROUTES`, 1b §14):
-   * on loopback, into this computer's Mousse folder, its `mousse-helper` launcher this run's helper. Its host
-   * entry goes in the one SSH config every debug helper of the run reads (`MOUSSE_NET_TEST_SSH_CONFIG`), as
-   * `mousse-check-<name>`; its selector is this computer's default profile's.
+   * `mms` answers SSH at `alias` on the kit's test SSH server (`MOUSSE_CHECK_TEST_SSHD`, started through
+   * `MOUSSE_CHECK_SSH_ROUTES`, 1b §14): on loopback, into its Mousse folder `home`. Its `mousse-helper` is this
+   * run's helper and its `mousse-cli` the stand-in that carries `net-engine ssh` to this app (`cliStandIn`). The
+   * server's entry goes in the run's one SSH config as `alias`. Every request B answers goes in `served`.
    */
-  private async realSshServer(
-    name: string,
+  private async sshHost(
+    alias: string,
     mms: MousseMainService,
-    home: string
-  ): Promise<{ alias: string; selector: string; stop: () => Promise<void> }> {
+    home: string,
+    served: Array<Record<string, unknown>> = []
+  ): Promise<SshHost> {
     const routes = process.env.MOUSSE_CHECK_SSH_ROUTES?.trim()
     if (!routes || !process.env.MOUSSE_CHECK_TEST_SSHD?.trim())
       throw new Error(
         'a real-helper ssh run needs MOUSSE_CHECK_TEST_SSHD and MOUSSE_CHECK_SSH_ROUTES (run.mjs)'
       )
+    const cli = await this.cliStandIn(mms, served)
+    // On Unix the launchers the app writes in <home>/bin run what MOUSSE_NET_ENGINE_CLI names; Windows is not an
+    // SSH remote in 1b, so there test-sshd's `--launcher` stands in for them.
+    if (process.platform !== 'win32') process.env.MOUSSE_NET_ENGINE_CLI = cli.command.join(' ')
     // endpoints.json names this computer's profiles by selector, as `mousse-helper pipe` reads it.
     const remote = mms.sshRemote()!
     await remote.afterReady()
@@ -435,34 +449,123 @@ export class Fabric {
       }>
     }
     const server = await startSshRoute({
-      keys: join(home, 'ssh-server'),
+      keys: join(home, `ssh-server-${alias}`),
       mousseHome: home,
-      launchers: { 'mousse-helper': process.env.MOUSSE_NET_HELPER!.trim() }
+      launchers:
+        process.platform === 'win32'
+          ? { 'mousse-helper': process.env.MOUSSE_NET_HELPER!.trim(), 'mousse-cli': cli.launcher }
+          : {}
     })
-    const alias = `mousse-check-${name}`
+    this.cleanups.push(server.stop)
     const entry = readFileSync(server.config, 'utf8').replace(
       /^Host mousse-test-sshd$/m,
       `Host ${alias}`
     )
-    appendFileSync(
-      sshConfig(),
-      `
-${entry}
-`
-    )
-    return { alias, selector, stop: server.stop }
+    appendFileSync(sshConfig(), `\n${entry}\n`)
+    return { alias, selector }
   }
 
-  /** `from`'s SSH route to `to`'s server, its host key pinned as the owner pins it (resolve, probe, trust). */
-  private async pinnedSshRoute(
-    from: Computer,
-    to: { alias: string; selector: string }
-  ): Promise<{ route_id: string; selector: string; shell: string }> {
-    const resolved = await from.engine.request('ssh.resolve', { target: to.alias })
-    const routeId = String(resolved.route_id)
-    const probe = await from.engine.request('ssh.probe', { route_id: routeId })
-    await from.engine.request('ssh.trust', { route_id: routeId, sha256: probe.sha256 })
-    return { route_id: routeId, selector: to.selector, shell: 'sh' }
+  /**
+   * Test only: `mousse-cli net-engine ssh` for `mms` as the SSH test server runs it. Its launcher
+   * (`sshCliStandIn.mjs`) connects to a loopback server here, sends the token and carries the session; the session
+   * is answered with the command's own code, asking this app's `sshRemote` as its daemon would. A reply
+   * `network.sshLose` picks is lost after B served it, as a dropped session loses it.
+   */
+  private async cliStandIn(
+    mms: MousseMainService,
+    served: Array<Record<string, unknown>>
+  ): Promise<{ launcher: string; command: string[] }> {
+    const token = randomBytes(16).toString('hex')
+    const server = createNetServer({ allowHalfOpen: true }, (socket) => {
+      socket.on('error', () => undefined)
+      let head = Buffer.alloc(0)
+      const first = (chunk: Buffer) => {
+        head = Buffer.concat([head, chunk])
+        const end = head.indexOf(10)
+        if (end < 0) {
+          if (head.length > 256) socket.destroy()
+          return
+        }
+        socket.off('data', first)
+        if (head.subarray(0, end).toString() !== token) return void socket.destroy()
+        const body = new PassThrough()
+        body.write(head.subarray(end + 1))
+        socket.pipe(body)
+        let lost = false
+        void runNetEngineSsh({
+          stdin: body,
+          stdout: { write: (text: string) => lost || socket.write(text) },
+          serve: async (request) => {
+            served.push(request as Record<string, unknown>)
+            const reply = await mms.sshRemote()!.serve(request)
+            if (this.network.sshLose?.(request as Record<string, unknown>)) lost = true
+            return reply
+          }
+        }).finally(() => (lost ? socket.destroy() : socket.end()))
+      }
+      socket.on('data', first)
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    this.cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())))
+    const port = (server.address() as { port: number }).port
+    const script = join(dirname(fileURLToPath(import.meta.url)), 'sshCliStandIn.mjs')
+    const command = [process.execPath, script, String(port), token]
+    let launcher = ''
+    if (process.platform === 'win32') {
+      const folder = realpathSync(mkdtempSync(join(tmpdir(), 'engine-check-cli-')))
+      this.cleanups.push(() => rmSync(folder, { recursive: true, force: true }))
+      launcher = join(folder, 'mousse-cli.cmd')
+      writeFileSync(launcher, `@"${process.execPath}" "${script}" ${port} ${token} %*\r\n`)
+    }
+    return { launcher, command }
+  }
+
+  /**
+   * Over ssh with the real helper, pairing is Add over SSH (1b §3.4), the real flow: the caller's window resolves
+   * the owner's SSH route, trusts its key and connects to the owner's default profile; the owner's row connects on
+   * the caller's first inbound. One way: the owner gets no way back (§3.6).
+   */
+  private async sshPair(
+    owner: Computer,
+    caller: Computer
+  ): Promise<{ callerOnOwner: NodeId; ownerOnCaller: NodeId; grant: string }> {
+    const { alias, selector } = this.sshOf.get(owner)!
+    const resolved = await caller.dispatch('netEngine.ssh.resolve', { target: alias }, true)
+    const host = { routeId: resolved.routeId, host: alias }
+    const probe = await caller.dispatch('netEngine.ssh.probe', host, true)
+    await caller.dispatch('netEngine.ssh.trust', { ...host, sha256: probe.sha256 }, true)
+    await caller.dispatch(
+      'netEngine.ssh.connect',
+      { ...host, target: alias, user: resolved.user, selector },
+      true
+    )
+    const callerOnOwner = await connectedBothWays(owner, caller)
+    const grant = owner.mms.netEngine.peerRows().find((row) => row.localId === callerOnOwner)!.grant
+    return { callerOnOwner, ownerOnCaller: rowFor(caller, owner)!.localId, grant }
+  }
+
+  /**
+   * The grants the helper of `identity` holds, as the fake network lists them: a computer's default profile or a
+   * profile an SSH add made there.
+   */
+  async grantsAt(identity: string): Promise<Array<{ caller: string; grant: number | string }>> {
+    if (!REAL_HELPER) return this.network.grantsAt(identity)
+    for (const computer of this.all) {
+      const host = computer.mms.getInstallationHost()
+      const ids = host ? host.manager.list().map((record) => record.id) : [computer.mms.profileId]
+      for (const id of ids) {
+        const helper = (await computer.mms.getProfileServices(id)).netEngine.currentHelper()
+        if (String(helper?.info.identity ?? '') !== identity) continue
+        const answer = await helper!.request('grants.list')
+        return (answer.grants as Array<{ identity: string; grant: number | string }>).map(
+          (one) => ({
+            caller: one.identity,
+            grant: one.grant
+          })
+        )
+      }
+    }
+    throw new Error(`no helper is ${identity}`)
   }
 
   /**
@@ -473,6 +576,7 @@ ${entry}
     owner: Computer,
     caller: Computer
   ): Promise<{ callerOnOwner: NodeId; ownerOnCaller: NodeId; grant: string }> {
+    if (ONE_WAY) return this.sshPair(owner, caller)
     const invite = await owner.dispatch('netEngine.invite', {}, true)
     const stopApproving = approveAll(owner)
     let joined: { node: NodeId }
@@ -514,12 +618,17 @@ ${entry}
   }
 
   /**
-   * `computer` answers SSH at `hostname` (1b §3.7's test server, in process): its `mousse-cli net-engine ssh` is
-   * its daemon's `netEngine.ssh.serve`, and a pipe over that route reaches its default profile's helper. Every
-   * request it answers is kept.
+   * `computer` answers SSH at `hostname` (1b §3.7's test server, in process; with the real helper, the kit's test
+   * SSH server and the `mousse-cli` stand-in): its `mousse-cli net-engine ssh` is its daemon's
+   * `netEngine.ssh.serve`, and a pipe over that route reaches the chosen profile's helper. Every request it answers
+   * is kept.
    */
-  sshServer(hostname: string, computer: Computer): Array<Record<string, unknown>> {
+  async sshServer(hostname: string, computer: Computer): Promise<Array<Record<string, unknown>>> {
     const served: Array<Record<string, unknown>> = []
+    if (REAL_HELPER) {
+      await this.sshHost(hostname, computer.mms, computer.home, served)
+      return served
+    }
     this.network.sshServers.set(hostname, {
       // Its default profile, and every profile an SSH add made there.
       owns: (identity) =>
