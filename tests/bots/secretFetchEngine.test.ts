@@ -1,11 +1,13 @@
 import { afterEach, expect, it } from 'vitest'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
+import { botInstructions } from '../../src/mms/bots/instructions'
 import { createBotActivitySink } from '../../src/mms/bots/activity/BotActivitySink'
 import { botFixture, createBot, start, type BotFixture } from './botFixture'
 let f: BotFixture
 afterEach(() => f?.close())
 it('supplies the ledger only for work, and service reads never become held calls', async () => {
   f = botFixture()
+  f.host.instructions = botInstructions
   const activity = createBotActivitySink({ emit: () => {} })
   f.host.activity = activity
   const { botId } = await createBot(f, { name: 'Reader', reply: 'Hello.' })
@@ -18,7 +20,9 @@ it('supplies the ledger only for work, and service reads never become held calls
     brief: 'Read models',
     key: 'work'
   })
+  f.store.putOverlay(work.workId, 'secrets', { tool: 'secrets' })
   const started = await start(f, work.workId)
+  expect(started.prepared.instructions).toContain("use secret_fetch with the key's name")
   expect(started.prepared.authority.secretFetch).toBeTypeOf('function')
   await started.prepared.authority.secretFetch!(
     {
@@ -55,12 +59,15 @@ async function newWork() {
   f.store.putOverlay(work.workId, 'secrets', { tool: 'secrets' })
   return { botId, workId: work.workId }
 }
-it('withholds the service ledger from a hand-started run', async () => {
+it('withholds the service ledger and its instruction from a hand-started run', async () => {
   f = botFixture()
+  f.host.instructions = botInstructions
   const { botId } = await createBot(f, { reply: 'Hello.' })
   const manual = await f.bots.activate({ botId, input: 'Read models', clientRequestId: 'manual' })
   f.store.putOverlay(manual.id, 'secrets', { tool: 'secrets' })
-  expect((await start(f, manual.id)).prepared.authority.secretFetch).toBeUndefined()
+  const { prepared } = await start(f, manual.id)
+  expect(prepared.authority.secretFetch).toBeUndefined()
+  expect(prepared.instructions).not.toContain("use secret_fetch with the key's name")
 })
 it('withholds the service ledger from a subagent of work', async () => {
   const { workId } = await newWork()
@@ -76,8 +83,9 @@ it('checks the run lane independently of the work trigger', async () => {
   f.store.run("UPDATE bot_activations SET lane = 'chat' WHERE id = ?", workId)
   expect((await start(f, workId)).prepared.authority.secretFetch).toBeUndefined()
 })
-it('supplies the ledger to a scheduled run', async () => {
+it('supplies the ledger and its instruction to a scheduled run', async () => {
   f = botFixture()
+  f.host.instructions = botInstructions
   const { botId } = await createBot(f, { reply: 'Hello.' })
   f.bots.addSchedule(
     botId,
@@ -88,7 +96,9 @@ it('supplies the ledger to a scheduled run', async () => {
   const { inserted } = await f.tickSchedules(new Date(f.clock.now + 5 * 60000))
   expect(inserted).toHaveLength(1)
   f.store.putOverlay(inserted[0]!, 'secrets', { tool: 'secrets' })
-  expect((await start(f, inserted[0]!)).prepared.authority.secretFetch).toBeTypeOf('function')
+  const { prepared } = await start(f, inserted[0]!)
+  expect(prepared.authority.secretFetch).toBeTypeOf('function')
+  expect(prepared.instructions).toContain("use secret_fetch with the key's name")
 })
 it.each(['approved', 'running'])(
   'fails an interrupted %s service read at startup without replay',
