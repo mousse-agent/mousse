@@ -1,21 +1,19 @@
 const PLACE_NAMES = new Set('folder folderid parent parentid path dir directory channel channelid repo repository owner project projectid calendar calendarid list listid board to recipient recipients email space spaceid database databaseid drive driveid cc bcc from sender replyto url uri link webhook endpoint host domain account accountid address destination target remote branch'.split(' '))
 const normalizedKey = (key: string): string => key.toLowerCase().replace(/[_-]/g, '')
-const FREE_CONTENT = new Set(['body', 'name', 'subject', 'text', 'content'])
-export interface ArgumentContract { keys: string[]; digests: Record<string, string>; varying: string[] }
-/** Addresses and nested destinations cannot gain authority through a content field. */
-function restricted(value: unknown, depth = 0): boolean {
-  if (depth > 64) return true
-  if (typeof value === 'string') return /[a-z][a-z0-9+.-]*:\/\/|(?:[\p{L}\p{N}_-]+\.)+[\p{L}]{2,}|@/iu.test(value)
-  if (Array.isArray(value)) return value.some(v => restricted(v, depth + 1))
-  return !!value && typeof value === 'object' && Object.entries(value).some(([k, v]) => PLACE_NAMES.has(normalizedKey(k)) || restricted(v, depth + 1))
+const FREE_CONTENT = new Set(['body', 'subject', 'text', 'content'])
+export interface ArgumentContract { version: 2; keys: string[]; digests: Record<string, string>; varying: string[] }
+/** Each match has bounded runs, including content with no punctuation. Normalisation fails closed. */
+function restricted(value: string): boolean {
+  const text = value.normalize('NFKC').replace(/\p{Cf}/gu, '').replace(/[。｡]/g, '.').replace(/\s+/gu, '')
+  return /@|\\|::|[a-z][a-z0-9+.-]{0,31}:|[\p{L}\p{N}_-]{1,63}\.[\p{L}\p{N}_-]{1,63}|(?:[a-f0-9]{1,4}:){2}[a-f0-9:]{1,39}/iu.test(text)
 }
 export function argumentContract(args: Record<string, unknown>): ArgumentContract {
   const keys = Object.keys(args).sort()
-  return { keys, digests: Object.fromEntries(keys.map(k => [k, actionDigest(args[k])])), varying: keys.filter(k => FREE_CONTENT.has(normalizedKey(k)) && !restricted(args[k])) }
+  return { version: 2, keys, digests: Object.fromEntries(keys.map(k => [k, actionDigest(args[k])])), varying: keys.filter(k => FREE_CONTENT.has(normalizedKey(k)) && typeof args[k] === 'string' && !restricted(args[k] as string)) }
 }
 function argumentsMatch(contract: ArgumentContract | undefined, args: Record<string, unknown>): boolean {
-  return !!contract && actionDigest(Object.keys(args).sort()) === actionDigest(contract.keys)
-    && contract.keys.every(k => contract.varying.includes(k) && !restricted(args[k]) || actionDigest(args[k]) === contract.digests[k])
+  return contract?.version === 2 && actionDigest(Object.keys(args).sort()) === actionDigest(contract.keys)
+    && contract.keys.every(k => contract.varying.includes(k) && FREE_CONTENT.has(normalizedKey(k)) && typeof args[k] === 'string' && !restricted(args[k] as string) || actionDigest(args[k]) === contract.digests[k])
 }
 /** Exact top-level destinations declared by the tool; content never supplies authority. */
 export function actionPlace(schema: unknown, args: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -66,13 +64,15 @@ export class BotAlone {
     if (!schedule || !this.host.schema(request.serverId, request.tool)) return 'I could not find that automation or MCP tool. Get scheduleId from bot_schedule_list, serverId (id) from mcp_servers, and use the bare tool name.'
     if (!binding) return 'This automation or tool changed. Let it ask once first.'
     if (!actionPlace(this.host.schema(request.serverId, request.tool), Object.fromEntries(Object.keys((this.host.schema(request.serverId, request.tool) as { properties?: object })?.properties ?? {}).map(k => [k, null])))) return "This tool doesn't say where it acts, so it always asks."
-    const previous = this.host.store.get(`SELECT a.place_json, a.result_json, a.bot_note FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id
+    const previous = this.host.store.get(`SELECT a.place_json, a.result_json, a.args_json, a.args_digest FROM bot_actions a JOIN bot_activations w ON w.id = a.activation_id
       WHERE a.bot_id = ? AND a.kind = 'mcp' AND a.status = 'done' AND a.place_json IS NOT NULL
       AND json_extract(w.trigger_json, '$.kind') = 'schedule' AND json_extract(w.trigger_json, '$.scheduleId') = ?
       AND json_extract(a.target_json, '$.server') = ? AND json_extract(a.target_json, '$.tool') = ? ORDER BY a.rowid DESC LIMIT 1`, botId, request.scheduleId, request.serverId, request.tool)
     if (!previous) return 'Let it ask once first. After you send one of these, I can ask to do it alone.'
-    if (!previous.bot_note) return 'Let it ask once first. After you send one of these, I can ask to do it alone.'
-    const contract = JSON.parse(String(previous.bot_note)) as ArgumentContract
+    const source = JSON.parse(String(previous.args_json)) as Record<string, unknown>
+    // The masked review can supply the source only when it is still exactly what was sent.
+    if (actionDigest(source) !== previous.args_digest) return 'This sent call has hidden arguments, so it always asks.'
+    const contract = argumentContract(source)
     const place = JSON.parse(String(previous.place_json)) as Record<string, unknown>
     const result = JSON.parse(String(previous.result_json ?? '{}')).text ?? ''
     const values = Object.values(maskedActionData(place) as object).map(v => placeLabel(v, result)).join(' and ')

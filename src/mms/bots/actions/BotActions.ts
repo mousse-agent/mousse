@@ -1,4 +1,4 @@
-import { actionPlace, argumentContract } from './BotAlone'
+import { actionPlace } from './BotAlone'
 import { BOT_ALONE_HOURLY_CALLS, BOT_ALONE_DAILY_CALLS } from '../../../shared/bots/personal/definition'
 import { unmistakableCredential } from '../../../shared/secretShapes'
 import { botActionRefusalText, isBotActionRefusalCode, type BotActionRefusalCode } from '../../../shared/bots/personal/actionRefusal'
@@ -384,7 +384,7 @@ export class BotActions {
       this.host.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args,
         args_json, args_digest, binding_json, place_json, bot_note, card_json, status, message_id, expires_at, created_at, answered_at, answered_device)
         VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), place ? JSON.stringify(place) : null, JSON.stringify(argumentContract(args)), alone ? null : JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: capNote ?? readableActionTitle(tool.tool), actionTitle: readableActionTitle(tool.tool), serverName: tool.serverName }), alone ? 'approved' : 'open', messageId,
+      id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), place ? JSON.stringify(place) : null, null, alone ? null : JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: capNote ?? readableActionTitle(tool.tool), actionTitle: readableActionTitle(tool.tool), serverName: tool.serverName }), alone ? 'approved' : 'open', messageId,
       // expires_at is retained for older settled rows; open rows have no deadline.
       '9999-12-31T23:59:59.999Z', this.host.store.now(), alone ? this.host.store.now() : null, alone ? exception : null)
       if (alone) return
