@@ -116,6 +116,11 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
       case 'net':
         await runNet(args)
         break
+      case 'net-engine': {
+        const { runNetEngineCommand } = await import('./commands/netEngineSsh')
+        await runNetEngineCommand(args)
+        break
+      }
       case 'bridge':
         if (isBridgeHubCommand(args)) {
           await runBridgeHubCommand(args)

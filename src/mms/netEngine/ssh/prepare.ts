@@ -150,7 +150,9 @@ export async function prepare(port: PreparePort, request: PrepareRequest): Promi
       const row = engine.rowFor(request.joiner)
       if (row?.state === 'removing')
         throw new NetError('conflict', 'Busy; try again.', { details: { reason: 'busy' } })
-      if (row && row.requestId !== request.requestId && !engineControl('overwrite-1a-row')) {
+      // The own-row control takes the request's own row, left by a crash, for another pairing's.
+      const other = row && (row.requestId !== request.requestId || engineControl('own-row-not-resumed'))
+      if (other && !engineControl('overwrite-1a-row')) {
         // Any other live row is never overwritten: it is kept, with its grant.
         record = port.requests.update(request.requestId, {
           row: 'existing',
@@ -159,8 +161,7 @@ export async function prepare(port: PreparePort, request: PrepareRequest): Promi
         })
         return done(port, engine, record, selector, true)
       }
-      if (row && row.requestId === request.requestId && !engineControl('own-row-not-resumed'))
-        key = row.key
+      if (row && row.requestId === request.requestId) key = row.key
       else key = engine.writeOwnRow(request)
       record = port.requests.update(request.requestId, { row: 'own', rowKey: key })
     }
