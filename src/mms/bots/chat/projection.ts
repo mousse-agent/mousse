@@ -133,6 +133,8 @@ export interface PostInput {
   cards?: BotCard[]
   /** A service notice that stays in chat without its own notification. */
   quiet?: true
+  /** A notice the chat shows once in a row: the same text as the chat's latest message is not posted again. */
+  unlessLatest?: true
   /**
    * For the owner's eyes only (#673: a picked model that can't run, by name): journaled as a hidden kind, which no
    * pack, search or read gives the bot, so it never learns a model's or an entry's name from its own chat.
@@ -296,6 +298,10 @@ export class BotChatProjection {
     const { row, inserted } = this.store.db.transaction(() => {
       const existing = this.store.message(id) ?? (input.clientRequestId ? this.store.messageByRequest(input.clientRequestId) : undefined)
       if (existing) return { row: existing, inserted: false }
+      if (input.unlessLatest) {
+        const latest = this.store.lastMessage(input.botId)
+        if (latest && latest.author === input.author && latest.kind === input.kind && latest.text === input.text) return { row: latest, inserted: false }
+      }
       const at = this.store.now()
       // A question's bubble is journaled with its card and its answers as text, so the chat pack, search and Forget see
       // them. A nudge of it (a later row carrying it) is journaled as its own fixed line: a copy would outlive a forget.
