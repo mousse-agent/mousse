@@ -32,6 +32,7 @@ function addressTokens(value: string): string[] {
     const token = word.slice(start, end)
     // Inspect before removing opening quotes so a code fragment such as ".com" is also frozen.
     if (!ordinaryNumber(token) && /[:@\\]|\/\/|\S\.\S/u.test(word.slice(0, end))) tokens.add(token)
+    if (tokens.size > 256) break
   }
   return [...tokens]
 }
@@ -50,13 +51,16 @@ function filenameExtension(value: unknown): string | undefined {
   const dot = name.lastIndexOf('.')
   return dot < 0 ? '' : name.slice(dot + 1).toLowerCase()
 }
+class TooManyAddresses extends Error {}
 const tokenDigest = (key: string, field: string, token: string): string => createHmac('sha256', key).update(JSON.stringify([field, token])).digest('hex')
 export function argumentContract(args: Record<string, unknown>, tokenKey: string, place?: Record<string, unknown>): ArgumentContract {
   const keys = Object.keys(args).sort()
   const varying = keys.filter(k => FREE_CONTENT.has(normalizedKey(k)) && typeof args[k] === 'string')
   const extensions = Object.fromEntries(keys.filter(k => normalizedKey(k) === 'name' && Object.keys(place ?? {}).some(key => FILE_PLACES.has(normalizedKey(key))) && !!filenameExtension(args[k])).map(k => [k, filenameExtension(args[k])!]))
+  const tokens = Object.fromEntries(varying.map(k => [k, addressTokens(args[k] as string)]))
+  if (new Set(Object.values(tokens).flat()).size > 256) throw new TooManyAddresses('This sent call has too many addresses to let alone.')
   return { version: 4, keys, digests: Object.fromEntries(keys.map(k => [k, actionDigest(args[k])])), varying: [...varying, ...Object.keys(extensions)], extensions,
-    tokens: Object.fromEntries(varying.map(k => [k, addressTokens(args[k] as string).map(token => tokenDigest(tokenKey, k, token))])) }
+    tokens: Object.fromEntries(varying.map(k => [k, tokens[k]!.map(token => tokenDigest(tokenKey, k, token))])) }
 }
 function argumentsMatch(contract: ArgumentContract | undefined, args: Record<string, unknown>, tokenKey: string): boolean {
   return contract?.version === 4 && actionDigest(Object.keys(args).sort()) === actionDigest(contract.keys)
@@ -138,7 +142,11 @@ export class BotAlone {
     // The masked review can supply the source only when it is still exactly what was sent.
     if (actionDigest(source) !== previous.args_digest) return 'This sent call has hidden arguments, so it always asks.'
     const place = JSON.parse(String(previous.place_json)) as Record<string, unknown>
-    const contract = argumentContract(source, this.tokenKey(), place)
+    let contract: ArgumentContract
+    try { contract = argumentContract(source, this.tokenKey(), place) } catch (error) {
+      if (error instanceof TooManyAddresses) return error.message
+      throw error
+    }
     const result = JSON.parse(String(previous.result_json ?? '{}')).text ?? ''
     const values = Object.values(maskedActionData(place) as object).map(v => placeLabel(v, result)).join(' and ')
     const name = shortAutomationName(schedule.name)
