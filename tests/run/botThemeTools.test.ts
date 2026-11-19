@@ -1,8 +1,8 @@
 /**
- * "Change how Mousse looks" through the app tools, as a bot's turn reaches them: the grant compiled for the turn, the
- * bot's authority, the registry's listing and per-call check, and the theme tools over a real settings store and a real
- * wallpaper store. Allowing it is the bot's Full access for the theme tools: CSS and a new wallpaper run without asking
- * anyone, with the checks a thread's agent has. The ask and About are in tests/bots/botThemes.test.ts.
+ * Mousse's look through the app tools, as a bot's turn reaches them: every bot's main turn has the theme tools without a
+ * grant; the grant compiled for the turn, the bot's authority, the registry's listing and per-call check, and the theme
+ * tools over a real settings store and a real wallpaper store. A bot has Full access for the theme tools: CSS and a new
+ * wallpaper run without asking anyone, with the checks a thread's agent has.
  */
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -23,7 +23,7 @@ import { delegationFixture, type DelegationFixture } from './delegationFixture'
 
 const themeNames = (names: readonly string[]) => names.filter((name) => name.startsWith('theme_')).sort()
 
-describe('a bot\'s theme tools ("change how Mousse looks")', () => {
+describe('a bot\'s theme tools', () => {
   let fx: DelegationFixture | undefined
   let base: string | undefined
   afterEach(() => {
@@ -46,7 +46,7 @@ describe('a bot\'s theme tools ("change how Mousse looks")', () => {
     mkdirSync(scratch, { recursive: true })
     mkdirSync(files, { recursive: true })
     const starter = botStarterManifest()
-    const grant = { ...starter, appTools: [...starter.appTools, ...(options.grant ?? [BOT_THEMES_PERMISSION])] }
+    const grant = { ...starter, appTools: [...starter.appTools, ...(options.grant ?? [])] }
     const compiled = compileBotThread({
       grant, digest: botManifestDigest(grant), thread: {}, scratch, profileHome: profile, filesFolder: files,
       nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 600_000 },
@@ -100,11 +100,12 @@ describe('a bot\'s theme tools ("change how Mousse looks")', () => {
     return { compiled, call, listed, settings, saves, asked, picture, base: base! }
   }
 
-  // What each kind of turn is offered and listed: a main turn of a bot that holds the permission, chat or work, has both.
+  // What each kind of turn is offered and listed: a main turn of any bot, chat or work, has both.
   const lanes: Array<[string, Parameters<typeof world>[0], readonly string[]]> = [
     ['work (a run\'s main turn)', {}, BOT_THEME_TOOLS],
     ['a chat turn', { botTools: { frontDesk: true } }, BOT_THEME_TOOLS],
-    ['a bot without the permission (a new bot\'s grant)', { grant: [] }, []],
+    // A grant an older build approved with "change how Mousse looks" gives nothing more.
+    ['a grant that still names the old permission', { grant: [BOT_THEMES_PERMISSION] }, BOT_THEME_TOOLS],
     ['a consult', { botTools: { themes: undefined }, role: 'context' }, []],
     ['a subagent of its work', { botTools: { subagent: true }, role: 'subagent' }, []]
   ]
@@ -115,14 +116,14 @@ describe('a bot\'s theme tools ("change how Mousse looks")', () => {
     expect(listed()).toEqual([...shown].sort())
   })
 
-  it('without the permission, theme_read and theme_set are refused and nothing is saved', async () => {
-    const { call, saves } = await world({ grant: [] })
+  it('a consult is refused theme_read and theme_set, and nothing is saved', async () => {
+    const { call, saves } = await world({ botTools: { themes: undefined }, role: 'context' })
     expect(await call('theme_read')).toMatchObject({ error: true, text: expect.stringMatching(/not allowed to use theme_read/) })
-    expect(await call('theme_set', { theme: 'dark' })).toMatchObject({ error: true, text: expect.stringMatching(/not allowed to use theme_set/) })
+    expect(await call('theme_set', { theme: 'dark' })).toMatchObject({ error: true })
     expect(saves).toEqual([])
   })
 
-  it('once allowed, it reads the themes and switches to a built-in one, asking nobody, in a run nobody answers', async () => {
+  it('with no grant for it, it reads the themes and switches to a built-in one, asking nobody, in a run nobody answers', async () => {
     const { call, settings, asked } = await world()
     const read = await call('theme_read')
     expect(read.error).toBe(false)

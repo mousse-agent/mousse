@@ -175,6 +175,12 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     date: '2026-11-19',
     text: 'You no longer have a telling setting: telling_set, your Tell me level and can-wake choices are gone. Message your owner when you judge they would want to know. When they say how or when they want to be told, save it with memory_save as an owner entry and follow it.',
     gone: [/telling_set instead/i, /how and when your owner is told/i, /set it with telling_set/i]
+  },
+  {
+    id: 33,
+    date: '2026-11-19',
+    text: "You have the profiler, Mousse's look (themes), scheduled jobs in your owner's threads, secrets they give you and quick actions without asking: never ask for them. Your work also uses every MCP server your owner set up in Mousse, and you have their skills and the automation tools, all without asking, unless your owner switched one off for you (then asking won't help).",
+    gone: [/escalate with the tool (profiler|themes|schedules|secrets|quick_actions)/i, /ask for that server with escalate/i, /other permissions you can ask for/i, /\{"mcp": \{"server"/, /ask for the tool with escalate if you don't have it/i]
   }
 ]
 

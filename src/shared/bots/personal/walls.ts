@@ -69,7 +69,7 @@ export function botTurnOffers(bot: Pick<BotAuthority, 'appTools'> | undefined, n
  * Why a bot may not run the Mousse app tool `name` with `args` (its wall in plain words), or
  * undefined when its grant holds the call. The registry checks this on every call of a bot turn.
  */
-export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills' | 'escalate'> & Partial<Pick<BotAuthority, 'appTools' | 'threadsReadOnly'>>, name: string, args: Record<string, unknown>): string | undefined {
+export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills' | 'escalate'> & Partial<Pick<BotAuthority, 'appTools' | 'threadsReadOnly' | 'allSkills'>>, name: string, args: Record<string, unknown>): string | undefined {
   // Starting, messaging and stopping threads belong to a turn the owner started or asked for: a turn that holds the
   // owner's threads to read only (a chat turn no message of the owner's started) is told why, and nothing is
   // asked. A turn of a bot without the permission falls through to the check below, which asks for it.
@@ -79,9 +79,9 @@ export function botAppToolRefusal(bot: Pick<BotAuthority, 'check' | 'skills' | '
   if (SCHEDULE_ACT.has(name) && ((bot.threadsReadOnly && bot.appTools?.has(name)) || (bot.appTools && !bot.appTools.has(name) && bot.appTools.has('schedule_list'))))
     return BOT_SCHEDULES_NOT_OWNER_TEXT
   if (SKILL_TOOLS.has(name)) {
-    // The skill tools come with granted skills. Which skill loads is held by the turn itself: a
-    // bot turn's skills are only its granted ones (by id), whether `load_skill` names one by id or name.
-    if (!bot.skills.size) return wallMessage({ kind: 'tool', tool: name })
+    // The skill tools come with skills. Which skill loads is held by the turn itself: a bot turn's skills are every skill
+    // unless switched off, else only its granted ones (by id), whether `load_skill` names one by id or name.
+    if (!bot.skills.size && !bot.allSkills) return wallMessage({ kind: 'tool', tool: name })
     const decided = bot.check({ kind: 'app', tool: name, args })
     if (!decided.ok && ('refused' in decided || decided.wall.kind !== 'tool')) return checkMessage(decided)
     return undefined

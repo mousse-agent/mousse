@@ -86,7 +86,7 @@ describe('every phase states what the owner allows now', () => {
   it('an Allow shows at the next turn, in the chat and in the work, with the matching tools', async () => {
     await allow({ tool: 'browser' }, 'a1')
     await allow({ tool: 'shell' }, 'a2')
-    expect(f.bots.service.get(botId).permissions.map((permission) => permission.title).sort()).toEqual(['run commands', 'use the browser'])
+    expect(f.bots.service.get(botId).permissions.filter((permission) => !permission.builtIn).map((permission) => permission.title).sort()).toEqual(['run commands', 'use the browser'])
 
     const turn = await chat('Open example.com and tell me its title', 'm2')
     for (const what of ['Run commands', 'Use the browser']) expect(line(turn.prepared.instructions, what)).toMatch(/: yes$/)
@@ -138,7 +138,7 @@ describe('the stated permissions match the tools a run is given', () => {
     it(`${name}: each yes is a tool the run holds, each no is one it lacks`, () => {
       const compiled = compileBotThread({
         grant, digest: botManifestDigest(grant), thread: {}, scratch: '/tmp/bp-scratch', profileHome: '/tmp/bp-profile',
-        nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 60_000 },
+        nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 60_000 }, allSkills: true,
         botTools: { escalate: true, consult: false, memory: true }
       })
       if (!compiled.ok) throw new Error(compiled.error.message)
@@ -147,14 +147,15 @@ describe('the stated permissions match the tools a run is given', () => {
       expect(said.shell).toBe(allow.has('shell'))
       expect(said.browser).toBe(BOT_BROWSER_TOOLS.every((tool) => allow.has(tool)))
       expect(said.web).toBe(allow.has('web_fetch') || allow.has('web_search'))
-      expect(said.skills).toEqual(compiled.permissions.skills)
+      // Every skill, as the text says.
+      expect(allow.has('load_skill')).toBe(true)
       expect(said.automation).toEqual(BOT_AUTOMATION_APP_TOOLS.filter((tool) => allow.has(tool)))
       // Every Mousse tool the run is offered is one a bot's thread lists.
       for (const tool of compiled.permissions.appTools) expect(botMayBeOffered(tool), tool).toBe(true)
     })
 
   it('the text says yes or no for each permission, in plain words', () => {
-    const text = botAllowedText({ shell: true, browser: true, threads: false, profiler: false, themes: false, web: true, skills: [], automation: [] }, 'run', true)
+    const text = botAllowedText({ shell: true, browser: true, threads: false, web: true, automation: [] }, 'run', true)
     expect(text.split('\n')).toEqual([
       'What your owner allows now (current; it replaces anything said earlier in this chat)',
       '- Search the web and read pages: yes',
@@ -162,18 +163,16 @@ describe('the stated permissions match the tools a run is given', () => {
       "- Use the browser (your own): yes, but it can't open on this run",
       "- Use your owner's threads: no",
       '- Use apps on this computer: no',
-      "- Read Mousse's profiler: no",
-      '- Change how Mousse looks: no',
-      "- Schedule work in your owner's threads: no",
-      '- Use secrets your owner gives you: no',
-      '- Add quick actions: no',
-      '- Skills: none',
+      '- Skills: yes, every skill your owner has (list_skills)',
       '- Automation tools: none',
-      "- Your owner's MCP servers: none yet (mcp_servers lists the ones you can ask for)",
+      "- Your owner's MCP servers: none set up",
       'Use what is allowed without asking. Ask with escalate only for something marked no.'
     ])
+    // What the owner switched off of what every bot has is said so.
+    const off = botAllowedText({ shell: false, browser: false, threads: false, web: true, automation: [], off: { mcp: true, skills: true, automation: true } }, 'run')
+    for (const what of ['Skills', 'Automation tools', "Your owner's MCP servers"]) expect(off).toContain(`- ${what}: switched off by your owner for now, so asking won't help`)
     // The servers it holds tools of, by name; the chat is told they are its work's.
-    const chat = botAllowedText({ shell: false, browser: false, threads: false, profiler: false, web: true, skills: [], automation: [], mcp: ['GitHub', 'Notes'] }, 'chat')
+    const chat = botAllowedText({ shell: false, browser: false, threads: false, web: true, automation: [], mcp: ['GitHub', 'Notes'] }, 'chat')
     expect(chat).toContain("- Your owner's MCP servers: GitHub, Notes")
     expect(chat).toContain('In the chat, the web, the browser, commands and MCP tools are for your work: hand jobs that need them to work_start.')
   })
@@ -259,8 +258,8 @@ describe("a bot's thread lists only tools a bot can hold", () => {
   })
 })
 
-it('tells granted work and scheduled runs how to use a bound key without seeing it', () => {
-  const allowed = { ...botAllowedOf(botStarterManifest()), secrets: true }
+it('tells work and scheduled runs how to use a bound key without seeing it', () => {
+  const allowed = botAllowedOf(botStarterManifest())
   const text = botInstructions({ name: 'Reader', description: 'Read models', lane: 'run', allowed, secretFetchOffered: true })
   expect(text).toContain(
     "To read from a service your owner gave you a key for, use secret_fetch with the key's name. You never see the key."
@@ -271,7 +270,7 @@ it('tells granted work and scheduled runs how to use a bound key without seeing 
 })
 
 it('keeps service-read guidance out of subagents and consults where the tool is absent', () => {
-  const allowed = { ...botAllowedOf(botStarterManifest()), secrets: true }
+  const allowed = botAllowedOf(botStarterManifest())
   for (const scope of [
     { subagent: true as const },
     { allowed: { ...allowed, mcpNotHere: true } }

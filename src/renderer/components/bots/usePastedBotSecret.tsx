@@ -24,7 +24,7 @@ export function usePastedBotSecret(bot: BotSummary, storedDraft: string) {
       const message=typeof error?.message==='string'?error.message:''
       const safe=message && !message.includes(pastedSecretValue(value)) && !pastedSecretShape(message)
       updatePrivateBotDraft(bot.id,{error:error?.code==='forbidden'
-        ? `${bot.name} can't keep secrets; remove it before sending, or allow Use secrets in About.`
+        ? `${bot.name} can't keep secrets yet; remove it before sending.`
         : safe ? message : "Couldn't keep it. Nothing was saved."})
     }
     finally { updatePrivateBotDraft(bot.id,{busy:false}) }

@@ -380,8 +380,6 @@ export class MmsProfileServices {
   readonly mcpRegistry: McpRegistry
   readonly mcpManager: McpManager
   readonly skillsRegistry: SkillsRegistry
-  /** Skill ids a bot's ask may name; refreshed when bots open. Unknown until the first discovery. */
-  private botKnownSkills: Set<string> | undefined
   readonly fileService: FileService
   readonly gitService: GitService
   readonly lineEditStats: LineEditStatsStore
@@ -883,8 +881,6 @@ export class MmsProfileServices {
       otherComputers: () => this.remoteAutomations?.computers() ?? [],
       // Which devices reach each bot: a new bot's choice is saved before the bot is published.
       deviceAccess: this.botDeviceAccess,
-      // A run may only ask for a skill this profile has. MCP asks are made from the owner's servers set up now (`mcp`).
-      knownAsk: (permission) => 'skill' in permission && (this.botKnownSkills?.has(permission.skill) ?? true),
       browser: botBrowsers,
       // "Use your threads" removed: what the bot sent that has not started leaves its owner's threads.
       threadsWithdrawn: (bot) => { this.orchestrator.withdrawBotThreadMessages(bot) },
@@ -987,9 +983,8 @@ export class MmsProfileServices {
       }
     })
     if (this.personalBots) {
-      void this.skillsRegistry.discover()
-        .then((snapshot) => { this.botKnownSkills = new Set(snapshot.skills.map((skill) => skill.id)) })
-        .catch(() => undefined)
+      // The scan of the Skills folders a bot's first turn starts on (`prepareSkills` with `stale`).
+      void this.skillsRegistry.discover().catch(() => undefined)
     }
     const personalBots = this.personalBots
     if (personalBots) this.orchestrator.setBotThreads(personalBots)

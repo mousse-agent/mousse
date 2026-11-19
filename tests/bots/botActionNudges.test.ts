@@ -24,11 +24,6 @@ async function held(on = true, options: { quietFor?: number } = {}) {
     const end = f.clock.now + options.quietFor
     f.host.quietHoursFor = (_botId, at) => at < end ? { end } as never : undefined
   }
-  const permission = await f.bots.activate({ botId, input: 'Allow mail', clientRequestId: 'permission' })
-  const asking = await start(f, permission.id)
-  asking.prepared.authority.escalate!({ permission: { mcp: { server: 'Mail' } } as never, reason: 'To send mail' })
-  await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
-  await finish(f, asking.payload)
   const grant = f.store.activeGrant(botId)!
   const manifest = { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send', ...(on ? { level: 'asks_first' as const } : {}) }] }
   f.store.approve(botId, botManifestDigest(manifest), manifest)

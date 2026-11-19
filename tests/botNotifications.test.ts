@@ -127,11 +127,6 @@ it('keeps an owner MCP review readable in its sidebar summary, card and notifica
     f.host.mcp = mcp
     await f.bots.reconcileOnStartup()
     const { botId } = await createBot(f, { reply: 'Ready' })
-    const permission = await f.bots.activate({ botId, input: 'Allow Mail', clientRequestId: 'mail-permission' })
-    const asking = await start(f, permission.id)
-    asking.prepared.authority.escalate!({ permission: { mcp: { server: 'Mail' } } as never, reason: 'To send mail' })
-    await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
-    await finish(f, asking.payload)
     const grant = f.store.activeGrant(botId)!
     f.store.approve(botId, botManifestDigest({ ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send_email', level: 'asks_first' }] }), { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send_email', level: 'asks_first' }] })
     await f.bots.service.chatSend({ botId, text: 'Send an email', clientRequestId: 'owner-mail' })

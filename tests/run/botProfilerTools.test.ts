@@ -1,7 +1,7 @@
 /**
- * "Use the profiler" through the app tools, as a bot's turn reaches them: the grant compiled for the turn's lane, the
- * bot's authority, the registry's listing and per-call check, and the profiler tools' own handlers over a real monitor.
- * The ask, the card and About are in tests/bots/botProfiler.test.ts.
+ * The profiler through the app tools, as a bot's turn reaches them: every bot has it without a grant, held to Labs; the
+ * grant compiled for the turn's lane, the bot's authority, the registry's listing and per-call check, and the profiler
+ * tools' own handlers over a real monitor. The engine side is in tests/bots/botProfiler.test.ts.
  */
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -29,7 +29,7 @@ const ON: ProfilerSettings = (() => {
 })()
 const profilerNames = (names: readonly string[]) => names.filter((name) => name.startsWith('profiler_')).sort()
 
-describe('a bot\'s profiler tools ("use the profiler")', () => {
+describe('a bot\'s profiler tools', () => {
   let fx: DelegationFixture | undefined
   let base: string | undefined
   afterEach(() => {
@@ -41,7 +41,8 @@ describe('a bot\'s profiler tools ("use the profiler")', () => {
 
   /**
    * A bot whose chat thread is `home`, holding a live run. `botTools` is what its turn is compiled with (a chat turn has
-   * `frontDesk`); `grant` adds permissions to the starter grant. `settings` is Labs → Profiler, read at every call.
+   * `frontDesk`); `grant` adds permissions to the starter grant (none by default: the profiler needs none). `settings` is
+   * Labs → Profiler, read at every call.
    */
   const world = async (options: { grant?: string[]; botTools?: Partial<NonNullable<CompileInput['botTools']>>; role?: 'activation' | 'context'; settings?: () => ProfilerSettings } = {}) => {
     fx = delegationFixture()
@@ -50,7 +51,7 @@ describe('a bot\'s profiler tools ("use the profiler")', () => {
     const scratch = join(profile, 'bots', 'scratch', 'act-1')
     mkdirSync(scratch, { recursive: true })
     const starter = botStarterManifest()
-    const grant = { ...starter, appTools: [...starter.appTools, ...(options.grant ?? [BOT_PROFILER_PERMISSION])] }
+    const grant = { ...starter, appTools: [...starter.appTools, ...(options.grant ?? [])] }
     const compiled = compileBotThread({
       grant, digest: botManifestDigest(grant), thread: {}, scratch, profileHome: profile,
       nativeNames: (tools) => ({ ok: true, names: [...tools] }), remaining: { deadlineMs: 600_000 },
@@ -116,7 +117,8 @@ describe('a bot\'s profiler tools ("use the profiler")', () => {
   const lanes: Array<[string, Parameters<typeof world>[0], readonly string[]]> = [
     ['work (a run\'s main turn)', {}, BOT_PROFILER_TOOLS],
     ['a chat turn: all but the minutes-long watch', { botTools: { frontDesk: true } }, BOT_PROFILER_CHAT_TOOLS],
-    ['a bot without the permission', { grant: [] }, []],
+    // A grant an older build approved with "use the profiler" gives nothing more.
+    ['a grant that still names the old permission', { grant: [BOT_PROFILER_PERMISSION] }, BOT_PROFILER_TOOLS],
     ['a consult', { botTools: { profiler: undefined } }, []],
     // A thread's subagent may read the profiler, so a bot's work's subagent may too, within the grant.
     ['a subagent of its work', { botTools: { subagent: true } }, BOT_PROFILER_TOOLS],
@@ -129,7 +131,7 @@ describe('a bot\'s profiler tools ("use the profiler")', () => {
     expect(listed()).toEqual([...shown].sort())
   })
 
-  it('the work runs a profiler tool once allowed; without the permission it is refused; the heap summary never runs, even with its switch on', async () => {
+  it('the work runs a profiler tool with no grant for it; the heap summary never runs, even with its switch on', async () => {
     const allowed = await world()
     expect(BOT_PROFILER_TOOLS).not.toContain('profiler_heap_summary')
     expect(allowed.listed()).not.toContain('profiler_heap_summary')
@@ -137,14 +139,9 @@ describe('a bot\'s profiler tools ("use the profiler")', () => {
     expect(overview.error).toBe(false)
     expect(JSON.parse(overview.text)).toMatchObject({ profiler: 'on' })
     expect(await allowed.call('profiler_heap_summary')).toMatchObject({ error: true, text: expect.stringMatching(/not allowed to use profiler_heap_summary/) })
-    fx?.dispose()
-    fx = undefined
-
-    const without = await world({ grant: [] })
-    expect(await without.call('profiler_overview')).toMatchObject({ error: true, text: expect.stringMatching(/not allowed to use profiler_overview/) })
   })
 
-  it('with Labs off, or agent access off, a bot that holds the permission gets the plain refusal', async () => {
+  it('with Labs off, or agent access off, a bot gets the plain refusal', async () => {
     let settings = ON
     const { call, listed } = await world({ settings: () => settings })
     settings = { ...ON, enabled: false }
@@ -158,8 +155,8 @@ describe('a bot\'s profiler tools ("use the profiler")', () => {
 
   // Which threads the breakdown names for a bot: what thread_list would list it, and nothing without "use your threads".
   const named: Array<[string, string[], string[]]> = [
-    ['without "use your threads", none: every thread counts only in the total', [BOT_PROFILER_PERMISSION], []],
-    ['with it, only the owner\'s ordinary threads; never private, bot, subagent or Automation manager threads', [BOT_PROFILER_PERMISSION, BOT_THREADS_PERMISSION], ['elsewhere', 'mine']]
+    ['without "use your threads", none: every thread counts only in the total', [], []],
+    ['with it, only the owner\'s ordinary threads; never private, bot, subagent or Automation manager threads', [BOT_THREADS_PERMISSION], ['elsewhere', 'mine']]
   ]
   it.each(named)('profiler_service_breakdown for a bot %s', async (_name, grant, ids) => {
     const { call } = await world({ grant, botTools: { threads: 'read' } })

@@ -78,11 +78,12 @@ describe('the bot changelog in the pack', () => {
     expect(pack).not.toContain(BOT_CHANGELOG[0]!.text)
   })
 
-  it('tells a bot that saw the old watcher advice that every chat turn can start commands', async () => {
+  it('never repeats the old watcher advice to a bot that saw it', async () => {
     existingBot()
     memory.write(() => memory.setState('ada', 'changelog_seen', 9))
     const pack = await packs().chatPreamble({ botId: 'ada', activationId: 'act-watch-rule' })
-    expect(pack).toMatch(/any chat turn can start a background command with watch_start/i)
+    // The newest entries only (`BOT_CHANGELOG_PACK_ENTRIES`).
+    expect(pack).toContain(BOT_CHANGELOG.at(-1)!.text)
     expect(pack).not.toMatch(/only.*chat turn.*owner.*own message/i)
     expect(pack).not.toMatch(/tell your owner what to start/i)
   })

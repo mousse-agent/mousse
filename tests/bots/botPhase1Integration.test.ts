@@ -252,7 +252,7 @@ describe('Bot Phase 1, composed', () => {
     const d1 = w.store.dispatch(w.store.listActivations(botId)[0]!.id, 1)!
     expect(w.store.get('SELECT child_pid, exit_at FROM bot_dispatches WHERE client_request_id = ?', d1.clientRequestId)).toMatchObject({ child_pid: expect.any(Number), exit_at: expect.any(Number) })
     // About never lists the bot's own tools.
-    expect(w.engine.service.get(botId).permissions).toEqual([])
+    expect(w.engine.service.get(botId).permissions.filter((item) => !item.builtIn)).toEqual([])
 
     // The owner's chat: the message row belongs to the activation it starts, so its pack leaves it out.
     w.clock.now += 60_000
@@ -317,7 +317,7 @@ describe('Bot Phase 1, composed', () => {
     expect(lastBot(botId)).toMatchObject({ kind: 'run_report', text: 'Tonight: risotto. I could not run the command.' })
     // Allow: the next run may run commands, and About lists it.
     await w.engine.service.answer(botId, cards[0]!.ask!.askId, 'allow')
-    expect(w.engine.service.get(botId).permissions.map((item) => item.title)).toEqual(['run commands'])
+    expect(w.engine.service.get(botId).permissions.filter((item) => !item.builtIn).map((item) => item.title)).toEqual(['run commands'])
   })
 
   it('forgetting in the chat leaves no forgotten text in the chip that is stored', async () => {

@@ -10,6 +10,7 @@ import type { BotBrowserHost } from '../../src/mms/bots/activation/dispatcher'
 import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { botInstructions } from '../../src/mms/bots/instructions'
+import { BOT_AUTOMATION_APP_TOOLS, BOT_AUTOMATIONS_SWITCH, BOT_SKILLS_SWITCH } from '../../src/shared/bots/personal/manifest'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { delegationFixture } from '../run/delegationFixture'
@@ -59,7 +60,7 @@ describe('a bot\'s permission switches', () => {
       work.prepared.authority.escalate!({ permission, reason: 'The owner asked.' })
     await finish(f, work.payload, 'completed', { text: 'Asked.' })
     for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
-    expect(f.bots.service.get(botId).permissions.map((item) => item.title).sort()).toEqual(['run commands', 'use the browser'])
+    expect(f.bots.service.get(botId).permissions.filter((item) => !item.builtIn).map((item) => item.title).sort()).toEqual(['run commands', 'use the browser'])
   }
 
   it('a bot switch stops commands, continues without them, and restores without a card; old builds see no power', async () => {
@@ -179,12 +180,7 @@ describe('a bot\'s permission switches', () => {
     await finish(f, turn.payload, 'completed', { text: 'Skipped.' })
   })
 
-  it('a skill switched off is neither listed nor loaded from a running turn, even by its name', async () => {
-    const initial = await run('skill-grant')
-    initial.prepared.authority.escalate!({ permission: { skill: 'review' }, reason: 'Review' })
-    await finish(f, initial.payload, 'completed', { text: 'Asked.' })
-    for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
-    const permission = f.bots.service.get(botId).permissions.find((item) => item.id.includes('review'))!
+  it('every skill is on with nothing granted; skills switched off are neither listed nor loaded from a running turn, even by name, nor offered later', async () => {
     const work = await run('skill-work')
     const fx = delegationFixture()
     try {
@@ -194,19 +190,47 @@ describe('a bot\'s permission switches', () => {
       const { registry, turns, request } = appToolRegistry(fx.engine, fakeAppToolHost({ skills: () => ({ readSkill }) as never }).host)
       turns.register(appTurn({ threadId: 'bot-skill', runId: running.runId, bot: work.prepared.authority, enabledSkills: [descriptor] }))
       const call = (name: string, args = {}) => registry.call(name, args, request({ threadId: 'bot-skill', runId: running.runId }))
+      expect(f.store.activeGrant(botId)!.manifest.skills).toEqual([])
       expect(await call('load_skill', { skill: 'Review changes' })).toMatchObject({ text: 'Review instructions' })
-      f.bots.service.setPermission(botId, permission.id, false)
+      f.bots.service.setPermission(botId, BOT_SKILLS_SWITCH, false)
       expect(await call('list_skills')).toMatchObject({ text: '[]' })
       expect(await call('load_skill', { skill: 'Review changes' })).toMatchObject({ isError: true })
       expect(readSkill).toHaveBeenCalledTimes(1)
       expect(f.store.openAsks(botId)).toHaveLength(0)
     } finally { fx.dispose() }
     await finish(f, work.payload, 'completed', { text: 'Skipped the skill.' })
-    f.bots.service.setPermission(botId, permission.id, true)
+    const off = await run('skill-off')
+    expect(off.prepared.policy.tools!.allow).not.toContain('load_skill')
+    expect(off.prepared.authority.check({ kind: 'skill', skill: 'review' }).ok).toBe(false)
+    expect(off.prepared.authority.escalate!({ permission: { skill: 'review' }, reason: 'Review' })).toMatch(SWITCHED_OFF)
+    expect(line(off.prepared.instructions, 'Skills')).toMatch(SWITCHED_OFF)
+    await finish(f, off.payload, 'completed', { text: 'Skipped.' })
+    f.bots.service.setPermission(botId, BOT_SKILLS_SWITCH, true)
     const again = await run('skill-restored')
+    expect(again.prepared.policy.tools!.allow).toContain('load_skill')
     expect(again.prepared.authority.check({ kind: 'skill', skill: 'review' }).ok).toBe(true)
     expect(f.store.openAsks(botId)).toHaveLength(0)
     await finish(f, again.payload, 'completed', { text: 'Reviewed.' })
+  })
+
+  it('the automation tools are on with nothing granted; switched off, a running turn\'s next call is refused and later turns are not offered them', async () => {
+    const work = await run('automation-work')
+    expect(work.prepared.policy.tools!.allow).toEqual(expect.arrayContaining([...BOT_AUTOMATION_APP_TOOLS]))
+    expect(work.prepared.authority.check(app('automation_list')).ok).toBe(true)
+    f.bots.service.setPermission(botId, BOT_AUTOMATIONS_SWITCH, false)
+    expect(work.prepared.authority.check(app('automation_list'))).toMatchObject({ ok: false, refused: { text: expect.stringMatching(SWITCHED_OFF) } })
+    expect(work.prepared.authority.escalate!({ permission: { tool: 'automation_draft_save' }, reason: 'Draft it' })).toMatch(SWITCHED_OFF)
+    await finish(f, work.payload, 'completed', { text: 'Skipped.' })
+    const off = await run('automation-off')
+    for (const tool of BOT_AUTOMATION_APP_TOOLS) expect(off.prepared.policy.tools!.allow).not.toContain(tool)
+    expect(line(off.prepared.instructions, 'Automation tools')).toMatch(SWITCHED_OFF)
+    expect(f.bots.service.get(botId).permissions.find((item) => item.id === BOT_AUTOMATIONS_SWITCH)).toMatchObject({ enabled: false, builtIn: true })
+    await finish(f, off.payload, 'completed', { text: 'Skipped.' })
+    f.bots.service.setPermission(botId, BOT_AUTOMATIONS_SWITCH, true)
+    const on = await run('automation-on')
+    expect(on.prepared.policy.tools!.allow).toEqual(expect.arrayContaining([...BOT_AUTOMATION_APP_TOOLS]))
+    expect(cards()).toHaveLength(0)
+    await finish(f, on.payload, 'completed', { text: 'Done.' })
   })
 
   it.each(['web_search', 'web_fetch'] as const)('the %s row restores both the native and app tool with no ask', async (tool) => {
@@ -314,7 +338,7 @@ describe('a bot\'s permission switches', () => {
     expect(text).toContain('You can ask for "run commands"')
     // An ask written wrongly is answered with what can be asked for, which is never file access.
     const answer = turn.prepared.authority.escalate!({ permission: { nonsense: true } as never, reason: 'x' })
-    expect(answer).toMatch(/Ask for a tool, a skill/)
+    expect(answer).toMatch(/Ask for a tool, a limit/)
     expect(answer).not.toMatch(/file access|folder path/)
     await finish(f, turn.payload, 'completed', { text: 'Hi.' })
     // The control: with the browser on again, it is offered.
