@@ -157,21 +157,6 @@
       "expiresAt": "2026-11-19T00:01:23.773Z"
     },
     {
-      "task": "update-fixes-closing-prs",
-      "session": "Animatrix-52c0a2",
-      "machine": "Animatrix",
-      "branch": "update-fixes-closing-prs",
-      "paths": [
-        "src/shared/bugReports.ts",
-        "src/shared/updates.ts",
-        "src/main/updates/releaseNotes.ts",
-        "src/mms/bugReports/BugReportService.ts",
-        "src/renderer/components/bugReports/FiledReports.tsx"
-      ],
-      "claimedAt": "2026-11-19T17:23:09.244Z",
-      "expiresAt": "2026-11-19T19:23:09.244Z"
-    },
-    {
       "task": "usage-history",
       "session": "Animatrix-20d61e",
       "machine": "Animatrix",
