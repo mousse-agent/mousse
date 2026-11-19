@@ -4950,3 +4950,18 @@ it.each([
  expect((await aloneNext(t,{...t.args,body})).action.status).toBe('open')
  expect(t.calls).toHaveLength(1)
 })
+
+it.each([
+ 'A &mdash; new note &ndash; done &hellip;',
+ '&lsquo;Hello&rsquo; &ldquo;friend&rdquo;',
+ '&copy; &reg; &trade; &bull; &middot;',
+ '&euro;12 &pound;5 &minus;$5.00 -&dollar;6.00 &nbsp; done'
+])('E1 r6 ordinary typography entities can vary: %s', async body => {
+ const t=await aloneAsk('allow','send','A plain report')
+ expect((await aloneNext(t,{...t.args,body})).action.status).toBe('done')
+})
+it.each([['3:1','16:9',true],['3:1','2130706433:80',false],['16:9','167772161:80',false]] as const)(
+ 'E1 r6 ratios keep large numeric hosts asking: %s to %s',async (source,body,allowed)=>{
+ const t=await aloneAsk('allow','send',source)
+ expect((await aloneNext(t,{...t.args,body})).action.status).toBe(allowed?'done':'open')
+})
