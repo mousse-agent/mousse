@@ -26,6 +26,7 @@ import {
   BUG_REPORT_TITLE_MAX,
   buildBugReportDraft,
   cleanReportText,
+  closesIssue,
   prefilledIssueUrl,
   type BugReportDiagnostics,
   type BugReportDraft,
@@ -175,8 +176,8 @@ export class BugReportService {
     const views = await Promise.all(reports.map(async (report): Promise<FiledBugReportView> => {
       try {
         const issue = await this.api<{ state: string; state_reason?: string | null }>(`/repos/${BUG_REPORT_REPOSITORY}/issues/${report.number}`, { token: credential?.via === 'relay' ? undefined : credential?.token })
-        const pullRequests = issue.state === 'closed' ? await this.mentioningPullRequests(report.number, credential).catch(() => []) : []
-        return { ...report, state: issue.state === 'closed' ? 'closed' : 'open', ...(issue.state_reason ? { stateReason: issue.state_reason } : {}), ...(pullRequests.length ? { pullRequests } : {}) }
+        const closedBy = issue.state === 'closed' ? await this.closingPullRequests(report.number, credential).catch(() => []) : []
+        return { ...report, state: issue.state === 'closed' ? 'closed' : 'open', ...(issue.state_reason ? { stateReason: issue.state_reason } : {}), ...(closedBy.length ? { closedBy } : {}) }
       } catch {
         return { ...report, state: 'unknown' }
       }
@@ -303,10 +304,20 @@ export class BugReportService {
     return hit ? { number: hit.number, url: hit.html_url, state: hit.state } : undefined
   }
 
-  private async mentioningPullRequests(number: number, credential?: Credential): Promise<number[]> {
-    const events = await this.api<Array<{ event?: string; source?: { issue?: { number?: number; pull_request?: unknown } } }>>(
+  /**
+   * The merged pull requests that close an issue, as GitHub links them: its timeline's cross-references from this
+   * repository's pull requests whose description closes it. Works without a sign-in.
+   */
+  private async closingPullRequests(number: number, credential?: Credential): Promise<number[]> {
+    type Source = { number?: number; body?: string | null; pull_request?: { merged_at?: string | null }; repository?: { full_name?: string } }
+    const events = await this.api<Array<{ event?: string; source?: { issue?: Source } }>>(
       `/repos/${BUG_REPORT_REPOSITORY}/issues/${number}/timeline?per_page=100`, { token: credential?.via === 'relay' ? undefined : credential?.token })
-    return [...new Set(events.filter((event) => event.event === 'cross-referenced' && event.source?.issue?.pull_request && typeof event.source.issue.number === 'number').map((event) => event.source!.issue!.number!))]
+    const closing = events.flatMap((event) => {
+      const source = event.event === 'cross-referenced' ? event.source?.issue : undefined
+      return source && typeof source.number === 'number' && source.pull_request?.merged_at &&
+        source.repository?.full_name === BUG_REPORT_REPOSITORY && closesIssue(source.body ?? '', number) ? [source.number] : []
+    })
+    return [...new Set(closing)]
   }
 
   private async unreact(number: number, token: string): Promise<void> {

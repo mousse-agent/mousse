@@ -35,6 +35,8 @@ export interface UpdateState {
   releaseNotes: UpdateReleaseNote[]
   /** Releases between the current and the available version that are not listed. */
   omittedReleaseCount: number
+  /** Every pull request the offered releases' notes link, listed or not: what the update brings. */
+  pullRequests?: number[]
   /** 0–100 while downloading. */
   downloadPercent?: number
   error?: { message: string; during: 'check' | 'download' | 'install' }
