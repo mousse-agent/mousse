@@ -136,7 +136,8 @@ export class Fabric {
     this.tap.hold = hold
   }
 
-  async computer(name: string): Promise<Computer> {
+  /** A fresh profile with its engine on; `prepare` runs on its service before the engine starts (test hooks). */
+  async computer(name: string, prepare?: (mms: MousseMainService) => void): Promise<Computer> {
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'engine-check-')))
     const mms = await MousseMainService.create({
       homeDir: home,
@@ -188,6 +189,7 @@ export class Fabric {
       }
     }
     mms.netEngine.displayName = `${name} computer`
+    prepare?.(mms)
     await mms.netEngine.enable()
     await mms.netEngine.startHelper()
     const engine = await running(mms)

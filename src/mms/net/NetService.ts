@@ -1365,6 +1365,13 @@ export class NetService {
               this.endPrivateServing(this.domain?.privateStreams?.release() ?? [])
               // ...and the editor tunnels, which are shell access on this computer.
               this.tunnels?.reconcile()
+              for (const listener of this.workOffListeners) {
+                try {
+                  listener()
+                } catch {
+                  // The engine's own reconcile cannot stop v1's.
+                }
+              }
             }
             this.emit()
           }
@@ -1659,6 +1666,46 @@ export class NetService {
   /** The engine service's policy for its callers on this runtime's dispatcher; unset, engine callers are refused. */
   setEngineAuthorizer(authorize: NetService['engineAuthorizer']): void {
     this.engineAuthorizer = authorize
+  }
+  /**
+   * The engine's editor tunnels (Phase 1b §9.2), while its service runs: an editor connection to one of its pairings
+   * opens there, through the same local methods (`mousse-cli net ssh-proxy`) and the same host-key pinning.
+   */
+  private engineEditor?: {
+    owns(node: NodeId): boolean
+    /** Its paired computers, for the editor aliases. */
+    computers(): LiveComputer[]
+    /** The engine's tunnels and the link to `node`; throws `TunnelError('offline')` when it is not connected. */
+    link(node: NodeId): { tunnels: EditorTunnels; link: TunnelLink }
+  }
+  setEngineEditor(editor: NetService['engineEditor']): void {
+    this.engineEditor = editor
+    // Its pairings get their aliases; a service that is stopping writes nothing more.
+    if (editor && !this.stopped) this.syncEditorSsh()
+  }
+  /** The engine's pairings changed (one added, renamed or removed): the editor aliases follow. */
+  engineComputersChanged(): void {
+    if (!this.stopped) this.syncEditorSsh()
+  }
+  /** Turning "Work on threads" off is heard by the engine too, which ends its editor tunnels. */
+  onWorkOnThreadsOff(listener: () => void): () => void {
+    this.workOffListeners.add(listener)
+    return () => this.workOffListeners.delete(listener)
+  }
+  private readonly workOffListeners = new Set<() => void>()
+  /** "Use this computer's SSH server": the engine's tunnels end at the system's SSH server too, not the endpoint. */
+  editorUsesSystemSsh(): boolean {
+    return this.config.editorSystemSsh === true
+  }
+  /** The engine's first tunnel from a device: the same notice as v1's. */
+  editorFirstOpened(node: NodeId): void {
+    for (const listener of this.editorFirstOpen) {
+      try {
+        listener(node)
+      } catch {
+        // A notice that cannot be shown never stops a tunnel.
+      }
+    }
   }
   /** "Work on threads from other devices" (on unless this computer turned it off), read by `checkNodePolicy`. */
   nodePolicyConfig(): { workOnThreads?: boolean } {
@@ -3092,8 +3139,18 @@ export class NetService {
   private async editorLink(node: NodeId): Promise<{
     tunnels: EditorTunnels
     editor: EditorSshConfig | undefined
-    link: NetSyncSession
+    link: TunnelLink
   }> {
+    // An engine pairing: its own tunnels, with v1 on or off. The alias and the pinning are the same as v1's.
+    if (this.engineEditor?.owns(node)) {
+      const editor = this.editorSsh()
+      if (editor && !(await editor.aliasOf(node)))
+        throw new EditorSshError(
+          'unknown_computer',
+          'This computer has no editor alias for that computer yet.'
+        )
+      return { ...this.engineEditor.link(node), editor }
+    }
     this.assertFeature('netBridge')
     const rt = this.requireEnrolled(),
       tunnels = this.tunnels
@@ -4478,7 +4535,10 @@ export class NetService {
   }
   /** The other computers of this user, for the aliases an editor opens. Phones have no folders to open. */
   private liveComputers(): LiveComputer[] {
-    const view = this.nodes() as {
+    // The engine's pairings have aliases too. With v1 off, or not enrolled there, they are the only computers.
+    const engine = this.engineEditor?.computers() ?? []
+    if (this.engineEditor && (!this.config.enabled || this.disabled)) return engine
+    let view: {
       nodes: Array<{
         node: NodeId
         name: string
@@ -4488,19 +4548,28 @@ export class NetService {
         revoked: boolean
       }>
     }
+    try {
+      view = this.nodes() as typeof view
+    } catch (error) {
+      if (this.engineEditor) return engine
+      throw error
+    }
     // The same rule as the lists of threads. Only the authority records which devices are computers, so on any
     // other computer the rest are of unknown kind, and a computer is told by the grant only computers hold.
-    return view.nodes
-      .filter(
-        (entry) =>
-          !entry.self &&
-          !entry.revoked &&
-          isListedComputer(
-            entry.kind === 'computer' || entry.kind === 'phone' ? entry.kind : undefined,
-            entry.caps
-          )
-      )
-      .map((entry) => ({ node: entry.node, name: entry.name }))
+    return [
+      ...view.nodes
+        .filter(
+          (entry) =>
+            !entry.self &&
+            !entry.revoked &&
+            isListedComputer(
+              entry.kind === 'computer' || entry.kind === 'phone' ? entry.kind : undefined,
+              entry.caps
+            )
+        )
+        .map((entry) => ({ node: entry.node, name: entry.name })),
+      ...engine
+    ]
   }
   /**
    * Mousse's ssh settings for editors. Reading, undoing and acknowledging the notice work while
@@ -4513,7 +4582,8 @@ export class NetService {
       method === 'net.editor.alias'
     if (setup) {
       if (this.disabled) throw new NetError('disabled')
-      this.assertEnabled()
+      // The engine's pairings get aliases with v1 networking off.
+      if (!this.engineEditor) this.assertEnabled()
     }
     const editor = this.editorSsh()
     if (!editor) {

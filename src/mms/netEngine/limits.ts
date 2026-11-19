@@ -303,7 +303,11 @@ export const ENGINE_CONTROLS = [
   // phase1a.path-switch
   'abort-on-path-replaced',
   // phase1b.ssh-add-app: `mousse-cli net-engine ssh` starts the service
-  'remote-autostart'
+  'remote-autostart',
+  // phase1b.editor-app, phase1b.no-rpc-without-grant: the engine editor refusal skips the editor switch
+  'tunnel-ignores-editor',
+  // phase1b.editor-app: engine rights changes do not run reconcile
+  'no-reconcile'
 ] as const
 export type EngineControl = (typeof ENGINE_CONTROLS)[number]
 

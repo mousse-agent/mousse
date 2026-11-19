@@ -26,9 +26,8 @@ describe('the engine allow-lists', () => {
 
   it('lets a paired computer call the routed rows, three transport calls, staging and net.info, and nothing else', () => {
     const expected = new Set([
-      ...Object.keys(ROUTED_METHODS)
-        .filter((row) => !row.startsWith('editor.'))
-        .map(routedNetMethod),
+      // The editor rows included (Phase 1b §9.1).
+      ...Object.keys(ROUTED_METHODS).map(routedNetMethod),
       routedNetMethod('stream.open'),
       routedNetMethod('stream.close'),
       routedNetMethod('page'),
@@ -37,10 +36,11 @@ describe('the engine allow-lists', () => {
       'net.info'
     ])
     expect([...ENGINE_OWNER_METHODS].sort()).toEqual([...expected].sort())
-    // The transport calls it takes are routed ones; the editor, tunnel and Spaces methods are not on it.
+    // The transport calls it takes are routed ones; the local tunnel methods and Spaces are not on it.
     for (const method of ['stream.open', 'stream.close', 'page'])
       expect(Object.keys(ROUTED_TRANSPORT_METHODS)).toContain(method)
+    expect(ENGINE_OWNER_METHODS.has(routedNetMethod('editor.folder'))).toBe(true)
     for (const method of ENGINE_OWNER_METHODS)
-      expect(method).not.toMatch(/editor|tunnel|spaces|^net\.(?!info$)/)
+      expect(method).not.toMatch(/tunnel|spaces|^net\.(?!info$)/)
   })
 })
