@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process'
 
-/** Node has no portable openat. Startup uses the daemon-owned bots folder, then A short-lived child pins the checked directory as its cwd;
+/** Node has no portable openat. The child starts in the daemon-owned bots folder,
+ * then pins the checked response directory as its cwd;
  * every create/unlink is relative to that kernel-held directory, never the bot's mutable path.
  * It runs fixed daemon code, receives only masked bytes on stdin, and returns only an exit status.
  */
