@@ -792,4 +792,13 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
 .bot-pasted-secret-actions { display: flex; gap: 8px; }
 
 /* Mousse Dark: the New bot dialog sits near the true-dark canvas, a plain fill without the dialogs' top sheen. */
-html[data-theme='blacksphere-plus'] .chat-dialog.bot-dialog:has(> .bot-new-form) { background-color: #111113; background-image: none; }
+html[data-theme='blacksphere-plus'] .chat-dialog.bot-dialog:has(> .bot-new-form) { background-color: color-mix(in srgb, var(--ui-lift) 7%, var(--surface-base)); background-image: none; }
+/* Mousse Dark: the bot composer's light, and row and menu hovers, take the shared accent tint (--ui-lift, polish.css). */
+html[data-theme='blacksphere-plus'] .bot-conversation .chat-input-area.bot-input-area .composer {
+  --bot-glint: color-mix(in srgb, var(--ui-lift) 16%, transparent);
+  --bot-sheen: radial-gradient(125% 90% at 50% -20%, color-mix(in srgb, var(--ui-lift) 6%, transparent) 0%, transparent 60%);
+}
+html[data-theme='blacksphere-plus'] .bot-row:not([aria-current='true']):hover,
+html[data-theme='blacksphere-plus'] .bot-hover-anchor[data-open] > .bot-row:not([aria-current='true']),
+html[data-theme='blacksphere-plus'] .bot-menu button:is(:hover, :focus-visible),
+html[data-theme='blacksphere-plus'] .chat-list-row:not(.active):hover { background: color-mix(in srgb, var(--ui-lift) 7.5%, transparent); }
