@@ -423,3 +423,32 @@ it('masks a key that also occurs in fixed failure wording', async () => {
   expect(result.text).not.toContain(value)
   expect(result.text).toContain('[secret KEY hidden]')
 })
+
+
+it.each([65536, 65537])('returns a plain body of %s bytes at the correct inline boundary', async size => {
+  const { run } = fixture()
+  vi.mocked(publicFetch).mockResolvedValue({ status: 200, headers: { 'content-type': 'text/plain' }, body: Buffer.alloc(size, 'x') })
+  const result = await run()
+  expect(result.isError).not.toBe(true)
+  expect(result.text.includes('File: ')).toBe(size > 65536)
+  if (size === 65536) expect(result.text.split('\n\n')[1]).toHaveLength(size)
+  else expect(readFileSync(result.text.split('File: ')[1]!)).toHaveLength(size)
+})
+it.each([65536, 65537])('pretty-prints JSON only through %s bytes', async size => {
+  const { run } = fixture()
+  const padding = 'x'.repeat(size - Buffer.byteLength(JSON.stringify({ padding: '' }, null, 2)))
+  const raw = JSON.stringify({ padding })
+  vi.mocked(publicFetch).mockResolvedValue({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from(raw) })
+  const result = await run()
+  expect(result.isError).not.toBe(true)
+  const body = result.text.split('\n\n')[1]!
+  expect(body).toBe(size === 65536 ? JSON.stringify({ padding }, null, 2) : raw)
+})
+
+it.each(['／', '＼', '﹨', '∕', '⁄', '⧸', '⧵', '℀', '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff', '\u202e'])('refuses slash lookalikes and format characters: %s', async char => {
+  const { run } = fixture()
+  vi.mocked(publicFetch).mockClear()
+  const result = await run({ path: `/v1/models/a${char}b` })
+  expect(result.isError).toBe(true)
+  expect(publicFetch).not.toHaveBeenCalled()
+})

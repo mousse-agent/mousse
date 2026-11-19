@@ -77,3 +77,33 @@ it.each([0,1,2])('keeps literal surrogate pairs covered through %s enclosing JSO
  expect(mask(form)).toBe('[secret UNICODE_KEY hidden]')
  expect(maskedCopy({content:form},mask).content).toBe('[secret UNICODE_KEY hidden]')
 })
+
+
+const URL_KEY = 'tok~>?>~>?_abcdefghijklmnop0123456789x'
+it.each([true, false])('masks URL-safe base64, padded=%s', padded => {
+  const base64 = Buffer.from(URL_KEY).toString('base64')
+  expect(base64).toContain('+')
+  expect(base64).toContain('/')
+  expect(base64).toContain('=')
+  let echo = base64.replaceAll('+', '-').replaceAll('/', '_')
+  if (!padded) echo = echo.replace(/=+$/, '')
+  expect(secretMasker([{ name: 'KEY', value: URL_KEY }])!(`echo ${echo}`)).toBe('echo [secret KEY hidden]')
+})
+
+const php = (text: string) => JSON.stringify(text).slice(1, -1).replaceAll('/', '\\/')
+it.each([1, 2])('masks PHP slash escaping at %s enclosing JSON layers in plain text', depth => {
+  const value = 'token/a+B0123456789'
+  let echo = php(value)
+  for (let i = 0; i < depth; i++) echo = php(echo)
+  expect(secretMasker([{ name: 'KEY', value }])!(`echo ${echo}\n{}`)).toBe('echo [secret KEY hidden]\n{}')
+})
+
+it.each(['optional escapes', 'all bytes'])('masks percent encoding with %s', shape => {
+  const value = 'token~abc/a+B0123456789'
+  const bytes = Buffer.from(value)
+  const echo = [...bytes].map((byte, i) => shape === 'all bytes' || i % 2 === 0 || byte === 126 || byte === 47 || byte === 43
+    ? '%' + byte.toString(16).padStart(2, '0').toUpperCase()
+    : String.fromCharCode(byte)).join('')
+  expect(echo).toContain('%7E')
+  expect(secretMasker([{ name: 'KEY', value }])!(`echo ${echo}`)).toBe('echo [secret KEY hidden]')
+})
