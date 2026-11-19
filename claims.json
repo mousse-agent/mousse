@@ -12,7 +12,7 @@
         "tests/bots/botActions.test.ts"
       ],
       "claimedAt": "2026-11-18T20:43:07.500Z",
-      "expiresAt": "2026-11-19T02:57:59.892Z"
+      "expiresAt": "2026-11-19T04:57:44.724Z"
     },
     {
       "task": "bot-done-list-drops-archived-and-old",
