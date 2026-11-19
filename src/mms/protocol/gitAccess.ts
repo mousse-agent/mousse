@@ -70,6 +70,7 @@ export const GIT_ACCESS = {
   'orchestrator.steer': 'owned',
   'orchestrator.steerNow': 'owned',
   'orchestrator.retry': 'owned',
+  'orchestrator.retrySetup': 'owned',
   'orchestrator.isTurnActive': 'none',
   'orchestrator.contextUsage': 'none',
   'runs.list': 'none',

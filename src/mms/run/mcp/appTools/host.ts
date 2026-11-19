@@ -6,7 +6,7 @@ import type { ApprovalTag } from '../../../orchestrator/UserQuestionService'
 import type { RemoteComputerReach, RemoteListedThread, RemoteReach, RemoteSearchResult, RemoteTarget, RemoteUncertain, RemoteWaitResult } from '../../../orchestrator/RemoteLaunchedThreads'
 import type { MessageRow } from './messageRows'
 import type { ThreadEvent } from '../../types'
-import type { ChatMessage, ThreadActivityState, CreateScheduledJobInput, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, UserQuestion, UserQuestionAnswers, UserQuestionAttachments } from '../../../../shared/types'
+import type { ChatMessage, ThreadActivityState, CreateScheduledJobInput, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, ThreadSetupFailure, UserQuestion, UserQuestionAnswers, UserQuestionAttachments } from '../../../../shared/types'
 import type { ScheduledJobOptionsInput } from '../../../scheduled/validateJobOptions'
 import type { DevGuiTools } from '../../../devgui/DevGuiTools'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
@@ -411,6 +411,11 @@ export interface AppToolHost extends DelegationToolsHost {
   // "not available in this host".
   /** The thread's metadata, or undefined when it does not exist. */
   threadMeta?(threadId: string): Thread | undefined
+  /**
+   * Waits until the run got past setting up its thread's folder (`ready`), setting up its worktree failed (`failed`,
+   * with why), or a short while passed (`pending`). Never waits for the model's reply.
+   */
+  waitForSetup?(threadId: string, runId: string): Promise<{ status: 'ready' | 'failed' | 'pending'; failure?: ThreadSetupFailure; error?: string }>
   /** Every thread of the profile, subagents included, unfiltered. */
   listThreads?(): Thread[]
   /** The profile's projects. */

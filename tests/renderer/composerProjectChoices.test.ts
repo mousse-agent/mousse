@@ -144,6 +144,14 @@ describe('the thread list in the store', () => {
     expect(sameThreadSnapshot([thread], [{ ...thread }])).toBe(true)
     expect(sameThreadSnapshot([thread], [{ ...thread, permissionMode: 'full' }])).toBe(false)
   })
+  it('takes a list where only why a thread did not start changed, so its row and chat show it', async () => {
+    const { sameThreadSnapshot } = await import('../../src/renderer/stores/appStore')
+    const thread = { id: 't1', name: 'Fix it', projectId: 'p', createdAt: '', updatedAt: '2026-11-10T00:00:00Z' } as Thread
+    const failed = { ...thread, setupFailure: { reason: "Couldn't set up this thread's worktree.", at: '2026-11-19T00:00:00Z', retryable: true } }
+    expect(sameThreadSnapshot([thread], [failed])).toBe(false)
+    expect(sameThreadSnapshot([failed], [thread])).toBe(false)
+    expect(sameThreadSnapshot([failed], [{ ...failed, setupFailure: { ...failed.setupFailure, at: '2026-11-19T00:01:00Z' } }])).toBe(false)
+  })
 })
 
 /** Types into the composer and presses Enter. */

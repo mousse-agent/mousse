@@ -42,6 +42,9 @@ export function createIsolatedMousseHome(environment: NodeJS.ProcessEnv) {
   // The app's Electron user data (the in-app browser's cookies, the key of Mousse's stored secrets): a test that lists
   // what bots may not open (`botClosedPlaces`) names the test home's, never the installed app's.
   environment.MOUSSE_ELECTRON_USER_DATA = join(home, 'electron-user-data')
+  // Worktrees stay in the test home's own folder: on Windows they would otherwise go to a short folder in the OS
+  // user's home (`shortWorktreeRoot`). A test of that folder names its own base.
+  environment.MOUSSE_WORKTREE_ROOT = 'off'
   // A CLI started by a test would otherwise sign in with a token or key inherited from whatever
   // launched the test run, whatever its empty home says.
   for (const name of Object.keys(environment)) {

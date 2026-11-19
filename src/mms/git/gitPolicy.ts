@@ -333,6 +333,8 @@ const ALLOWED_SETTINGS: ReadonlyArray<readonly [RegExp, (value: string) => boole
   [/^filter\..+\.(clean|smudge|process)$/, (value) => value === ''],
   [/^filter\..+\.required$/, () => true],
   [/^core\.(quotepath|autocrlf|eol|safecrlf|symlinks)$/, () => true],
+  // Windows: a worktree's files may be checked out past the 260-character path limit (Git for Windows only; elsewhere ignored).
+  [/^core\.longpaths$/, (value) => value === 'true'],
   // A snapshot's first exact index streams its new blobs into one pack instead of thousands of loose files, on Git 2.37 and later (`snapshots.ts`).
   [/^core\.bigfilethreshold$/, (value) => value === '1'],
   // Only restrictive values: `always` would open a protocol Git keeps closed by default.

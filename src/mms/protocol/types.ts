@@ -292,6 +292,7 @@ export const PROTOCOL_METHODS = [
   'orchestrator.steer',
   'orchestrator.steerNow',
   'orchestrator.retry',
+  'orchestrator.retrySetup',
   'orchestrator.isTurnActive',
   'orchestrator.contextUsage',
   'runs.list',

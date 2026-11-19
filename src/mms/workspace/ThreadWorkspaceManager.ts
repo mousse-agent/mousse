@@ -54,6 +54,12 @@ async function git(cwd: string, args: string[], userRequested?: UserAction): Pro
   return ran.stdout.trim()
 }
 
+/**
+ * For this one command only, on Windows: Git may check out files past the 260-character path limit. The person's own Git
+ * settings are never changed.
+ */
+const LONG_PATHS: readonly string[] = process.platform === 'win32' ? ['-c', 'core.longpaths=true'] : []
+
 /** `Thread.worktreeStartSha` from the thread folder's meta.json, when it holds a full commit id. */
 function threadFolderWorktreeStart(location: string): string | undefined {
   try {
@@ -170,7 +176,7 @@ async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: s
   if (enableWorktreeConfig && await enablePerWorktreeConfig(primaryCheckoutPath, userRequested)) enableWorktreeConfig()
   // Refused before anything is checked out, not after: the worktree must never exist without its safety settings.
   await assertPerWorktreeConfig(primaryCheckoutPath)
-  const argv = [...safety, 'worktree', 'add', ...addArguments]
+  const argv = [...safety, ...LONG_PATHS, 'worktree', 'add', ...addArguments]
   await waitForFolderAccess([resolve(primaryCheckoutPath)])
   await assertGitAllowedAsync({ cwd: primaryCheckoutPath, args: argv })
   const ran = await runGitProcess(argv, { cwd: primaryCheckoutPath, env: repoProgramEnv({ ...process.env, ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' }) })
@@ -457,7 +463,7 @@ export class ThreadWorkspaceManager {
         ...(options.untrusted ? { untrusted: true as const } : {})
       } satisfies ThreadWorkspaceMetadata)
       if (options.untrusted) await addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, options.enableWorktreeConfig, options.userRequested)
-      else await git(repository.primaryCheckoutPath, ['worktree', 'add', '-b', branch, worktreePath, head])
+      else await git(repository.primaryCheckoutPath, [...LONG_PATHS, 'worktree', 'add', '-b', branch, worktreePath, head])
       if (options.snapshot) {
         // A fresh checkout holds Git's form of every file, so nothing is kept here unless something wrote into it meanwhile.
         const moved = await moveFilesToSnapshotAsync(worktreePath, await git(worktreePath, ['rev-parse', 'HEAD^{tree}']), options.snapshot, { owner: this.threadDirectory, action: 'Starting the worktree' })
@@ -508,6 +514,45 @@ export class ThreadWorkspaceManager {
     } finally {
       repositoryLease?.release()
       if (threadLease && !heldThreadLease) releaseExecutionLeaseHandle(threadLease)
+    }
+  }
+
+  /**
+   * A provision whose `git worktree add` failed (a path too long, a full disk) leaves its record `provisioning` and no
+   * worktree. Only when that is verified (the last provision is `failed` for this very path and branch, nothing is at
+   * the path, and Git registers no worktree there) the record is cleared, so the thread's next message makes the
+   * worktree again instead of waiting for recovery. The branch the failed add made goes too, but only while it is still
+   * at the commit the add started from and nothing has it checked out. Returns whether the record was cleared; anything
+   * else stays as it is, for recovery. Called with the thread's lease held (`WorkspaceResolver.resolve`).
+   */
+  async reconcileFailedProvision(projectPath: string, signal?: AbortSignal): Promise<boolean> {
+    const metadata = this.load()
+    if (!metadata || metadata.lifecycle !== 'provisioning' || isProjectFolderWorkspace(metadata)) return false
+    const last = [...this.journal.latestByOperation().values()]
+      .filter((entry) => entry.operationType === 'workspace-provision')
+      .sort((a, b) => b.sequence - a.sequence)[0]
+    if (last?.state !== 'failed') return false
+    const intent = this.journal.list().find((entry) => entry.operationId === last.operationId && entry.expectedPreState)
+    const expected = intent?.expectedPreState as { worktreePath?: string; branch?: string; head?: string } | undefined
+    const fold = (value: string): string => process.platform === 'win32' || process.platform === 'darwin' ? resolve(value).toLowerCase() : resolve(value)
+    if (!expected?.worktreePath || fold(expected.worktreePath) !== fold(metadata.worktreePath) || expected.branch !== metadata.branch) return false
+    if (await pathExists(metadata.worktreePath)) return false
+    const repository = await this.resolveRepositoryAsync(projectPath)
+    const repositoryLease = await acquireWorkspaceRepositoryLease(await resolveRepositoryIdentityAsync(repository.gitTopLevel, { requireMutationCapability: true }), signal)
+    try {
+      const listed = (await tryGit(repository.primaryCheckoutPath, ['worktree', 'list', '--porcelain'])).stdout.split(/\r?\n/)
+      if (listed.some((line) => line.startsWith('worktree ') && fold(line.slice('worktree '.length)) === fold(metadata.worktreePath))) return false
+      const ref = `refs/heads/${metadata.branch}`
+      const tip = (await tryGit(repository.primaryCheckoutPath, ['rev-parse', '--verify', '--quiet', ref])).stdout
+      if (tip && expected.head && tip === expected.head && !listed.includes(`branch ${ref}`)) {
+        // Left behind is harmless (the next worktree takes another name), so a refusal here changes nothing.
+        try { await git(repository.primaryCheckoutPath, ['update-ref', '-d', ref, tip]) } catch { /* The branch stays. */ }
+      }
+      await rm(this.workspacePath, { force: true })
+      this.journal.append({ operationId: last.operationId, operationType: 'workspace-provision', state: 'cancelled', details: { reconciled: 'worktree add failed; nothing was made' } })
+      return true
+    } finally {
+      repositoryLease.release()
     }
   }
 
@@ -598,7 +643,7 @@ export class ThreadWorkspaceManager {
       await mkdir(dirname(metadata.worktreePath), { recursive: true })
       const add = async (target: string[]): Promise<void> => {
         if (metadata.untrusted) await addUntrustedWorktree(repository.gitTopLevel, target, metadata.worktreePath)
-        else await git(repository.gitTopLevel, ['worktree', 'add', ...target])
+        else await git(repository.gitTopLevel, [...LONG_PATHS, 'worktree', 'add', ...target])
       }
       // A branch that another worktree has checked out cannot be added again; the commit can.
       if (branch) { try { await add([metadata.worktreePath, branch]) } catch { await add(['--detach', metadata.worktreePath, head]) } }

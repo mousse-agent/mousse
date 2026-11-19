@@ -104,6 +104,7 @@ import { PendingChangesNotice } from './PendingChangesNotice'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from './ComposerNotice'
 import { ServiceLostNotice } from './ServiceLostNotice'
 import { PausedRunNotice } from '../chat/components/PausedRunNotice'
+import { SetupFailureNotice } from '../chat/components/SetupFailureNotice'
 import { CommandInfoNotice, GoalNotice } from '../chat/components/GoalNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { addPendingThreadRow, afterNextPaint, claimPendingThreadRow, dropPendingThreadRows, holdNewChat, isPendingRowId, pendingThreadRow, typedAfterSend, type PendingThreadRow } from '../lib/pendingThreadRows'
@@ -1926,6 +1927,7 @@ export function OrchestratorChat() {
           : <ComputerNotice message={sendError} onDismiss={() => setSendError(null)} />)}
         <PromptUndoNotice />
         <PausedRunNotice threadId={activeThreadId} />
+        <SetupFailureNotice threadId={activeThreadId} />
         {/* A goal is the computer's that runs the thread (`threads.goal` is not routed): none for another computer's thread. */}
         <GoalNotice threadId={newChat || remoteNode ? null : activeThreadId} />
         {commandInfo && <CommandInfoNotice message={commandInfo} onDismiss={() => setCommandInfo(null)} />}

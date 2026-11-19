@@ -1964,6 +1964,10 @@ export function registerGuiIpc(
     return res.ok
   })
 
+  registerHandler('orchestrator:retrySetup', async (_e, threadId: string) => {
+    return await guiMms.request<{ ok: boolean; queued: boolean }>('orchestrator.retrySetup', { threadId })
+  })
+
   registerHandler('queue:list', async (_e, threadId: string) => {
     const res = await guiMms.request<{ items: unknown[] }>('queue.list', { threadId })
     return res.items
