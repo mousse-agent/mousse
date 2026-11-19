@@ -48,19 +48,6 @@
       "expiresAt": "2026-11-18T13:57:31.437Z"
     },
     {
-      "task": "bot-image-overwrite-refresh",
-      "session": "Animatrix-1a866b",
-      "machine": "Animatrix",
-      "branch": "mousse/bug-in-bot-chats-an-image-whose-file-was",
-      "paths": [
-        "src/renderer/components/bots/BotImages.tsx",
-        "src/main/ipc/assetPieces.ts",
-        "src/mms/files/FileService.ts"
-      ],
-      "claimedAt": "2026-11-19T12:08:19.388Z",
-      "expiresAt": "2026-11-19T14:08:19.388Z"
-    },
-    {
       "task": "bot-live-trial-fixes",
       "session": "agibook-f42da1",
       "machine": "agibook",
@@ -134,21 +121,6 @@
       ],
       "claimedAt": "2026-11-18T20:02:57.857Z",
       "expiresAt": "2026-11-19T08:39:35.504Z"
-    },
-    {
-      "task": "bot-threads-hidden-by-default",
-      "session": "Animatrix-7d7f46",
-      "machine": "Animatrix",
-      "branch": "bot-threads-hidden-by-default",
-      "paths": [
-        "src/renderer/components/ThreadsSidebar.tsx",
-        "src/renderer/components/ThreadsContextMenu.tsx",
-        "src/renderer/lib/hiddenThreadsShown.ts",
-        "src/mms/protocol/handlers.ts",
-        "src/mms/run/mcp/appTools/thread.ts"
-      ],
-      "claimedAt": "2026-11-18T09:35:24.569Z",
-      "expiresAt": "2026-11-18T12:35:24.569Z"
     },
     {
       "task": "bots-ask-first-default",
