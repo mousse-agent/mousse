@@ -127,6 +127,8 @@ describe('the Bots section', () => {
 
   it('shows an idle bot\'s latest reply in place of Idle, a busy bot what it does, and Idle again with reply previews off', async () => {
     const { setReplyPreviews } = await import('../../src/renderer/lib/replyPreviewSetting')
+    // Reply previews are off by default (#1512): turn them on as Settings → Appearance does.
+    setReplyPreviews(true)
     await show([
       summary('a', { name: 'Inbox helper', lastReply: 'Sorted 12 emails into Later.' }),
       summary('b', { name: 'Garden', state: 'working', stateText: 'Working…', lastReply: 'Watered the tomatoes.' })
@@ -136,7 +138,7 @@ describe('the Bots section', () => {
       act(() => setReplyPreviews(false))
       expect(stateLine('Inbox helper').textContent).toBe('Idle')
     } finally {
-      act(() => setReplyPreviews(true))
+      act(() => setReplyPreviews(false))
     }
   })
 
