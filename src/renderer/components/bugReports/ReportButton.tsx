@@ -18,7 +18,7 @@ export function ReportButton({ error, className = '' }: { error: ErrorReportInpu
     )
   }
   return (
-    <button type="button" className={`bug-report-action ${className}`.trim()} title="Send this error to the Mousse team. You see the report first." onClick={(event) => { event.stopPropagation(); reportError(error) }}>
+    <button type="button" className={`bug-report-action ${className}`.trim()} title="Report this error as a public GitHub issue, filed from your GitHub account. You see the draft first." onClick={(event) => { event.stopPropagation(); reportError(error) }}>
       Report
     </button>
   )

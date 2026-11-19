@@ -23,7 +23,9 @@ export function BugReportDialogHost() {
 }
 
 function BugReportDialog({ open }: { open: OpenBugReport }) {
-  const anonymous = useBugReportStore((state) => state.settings.anonymous)
+  // The `anonymous` setting's account (a Mousse relay) is not running yet, so with it on the report opens on GitHub
+  // for the person to submit from their own account.
+  const byBrowser = useBugReportStore((state) => state.settings.anonymous)
   const [phase, setPhase] = useState<Phase>(() => open.kind === 'agent'
     ? { at: 'editing', draft: open.pending.draft, diagnostics: open.pending.diagnostics }
     : { at: 'loading' })
@@ -101,18 +103,20 @@ function BugReportDialog({ open }: { open: OpenBugReport }) {
   return (
     <Modal open title={heading} onClose={close} closeDisabled={phase.at === 'sending'} className="bug-report-overlay"
       footer={<>
-        <span className="bug-report-who" title={anonymous ? 'Filed by Mousse’s report account. Change in Settings → General.' : 'Filed with your own GitHub account (gh). Change in Settings → General.'}>
-          {anonymous ? 'Sent anonymously' : 'Sent as you on GitHub'}
+        <span className="bug-report-who" title={byBrowser
+          ? 'Opens a prefilled issue on GitHub. You submit it there from your GitHub account, and anyone can see it. Change in Settings → General.'
+          : 'Filed straight away from your GitHub account with gh, and anyone can see it. Change in Settings → General.'}>
+          {byBrowser ? 'Opens GitHub · filed from your account (public)' : 'Filed from your GitHub account (public)'}
         </span>
         <button type="button" className="btn btn-ghost" disabled={phase.at === 'sending'} onClick={() => void decline()}>{open.kind === 'agent' ? 'Don’t file' : 'Cancel'}</button>
         <button type="button" className="btn btn-primary" disabled={!editing || phase.at === 'sending' || !title.trim()} onClick={() => void send()}>
-          {phase.at === 'sending' ? 'Sending…' : 'Send report'}
+          {phase.at === 'sending' ? 'Sending…' : byBrowser ? 'Open on GitHub' : 'File on GitHub'}
         </button>
       </>}>
       {phase.at === 'loading' && <p className="bug-report-muted">Preparing the draft…</p>}
       {phase.at === 'failed' && <p role="alert" className="bug-report-error">{phase.message}</p>}
       {editing && <>
-        <p className="bug-report-lede">This is exactly what goes to GitHub. Nothing else is attached.</p>
+        <p className="bug-report-lede">This is exactly what goes to GitHub as a public issue. Nothing else is attached.</p>
         <label className="bug-report-field" htmlFor={titleId}>
           <span>Title</span>
           <input id={titleId} className="bug-report-input" value={title} maxLength={200} disabled={phase.at === 'sending'} onChange={(event) => setTitle(event.target.value)} />

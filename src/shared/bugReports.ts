@@ -21,7 +21,7 @@ const PREFILLED_URL_MAX = 7_500
 export interface ErrorReportSettings {
   /** Errors show a Report button, and agents may ask to file bugs (`report_bug`). On by default. */
   enabled: boolean
-  /** Files through Mousse's own account; off, through the person's own GitHub sign-in (`gh`). On by default. */
+  /** Files through Mousse's own relay account once it runs; until then the report opens on GitHub for the person to submit. Off: their own `gh` sign-in. On by default. */
   anonymous: boolean
 }
 

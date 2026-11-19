@@ -65,16 +65,18 @@ function ErrorReportsGroup({ settings, onUpdate }: GeneralSettingsProps) {
       <SettingsRow
         title="Report button"
         anchor="general-report-button"
-        description={<span title="Errors show Report, which drafts a GitHub issue you see before it is sent. Agents may ask to file bugs the same way.">Errors offer to send a report you see first.</span>}
+        description={<span title="Errors show Report, which drafts a public GitHub issue you see first. It is filed from your GitHub account. Agents may ask to file bugs the same way.">Errors offer a public GitHub issue you see first.</span>}
         control={<Switch checked={reports.enabled} label="Report button" onChange={(enabled) => void onUpdate({ errorReports: { ...reports, enabled } })} />}
       />
+      {/* The stored `anonymous` flag picks a Mousse relay account that is not running yet; until it does, on means the
+          report opens on GitHub, so the switch shows its opposite: filing straight away with gh. */}
       <SettingsRow
         indent
         disabled={!reports.enabled}
-        title="Report anonymously"
-        anchor="general-report-anonymously"
-        description={<span title="On: filed by Mousse’s report account. Off: filed with your own GitHub account (gh).">{reports.anonymous ? 'Filed by Mousse, not your GitHub account.' : 'Filed with your GitHub account.'}</span>}
-        control={<Switch checked={reports.anonymous} disabled={!reports.enabled} label="Report anonymously" onChange={(anonymous) => void onUpdate({ errorReports: { ...reports, anonymous } })} />}
+        title="File with gh"
+        anchor="general-report-with-gh"
+        description={<span title="Off: the report opens on GitHub and you submit it there. On: Mousse files it with your gh sign-in. Either way it is a public issue under your GitHub account.">{reports.anonymous ? 'Opens GitHub. Filed from your account (public).' : 'Filed from your GitHub account (public).'}</span>}
+        control={<Switch checked={!reports.anonymous} disabled={!reports.enabled} label="File with gh" onChange={(withGh) => void onUpdate({ errorReports: { ...reports, anonymous: !withGh } })} />}
       />
       <SettingsRow
         title="Your reports"

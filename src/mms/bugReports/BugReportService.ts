@@ -2,8 +2,8 @@
  * Files bug reports on GitHub: from an error's Report button, and from an agent's `report_bug` once the person
  * approved its draft. Nothing is sent that the person did not see in the draft.
  *
- * Who files it (Settings → General → Error reports → Report anonymously):
- * - anonymous (default): Mousse's own account. A relay (`MOUSSE_BUG_RELAY_URL`) holds the credential, so no token
+ * Who files it (Settings → General → Error reports → File with gh, which shows the `anonymous` flag's opposite):
+ * - anonymous (default): Mousse's own account, through a relay (`MOUSSE_BUG_RELAY_URL`) that is not running yet, so no token
  *   ships in the app. Until it runs, a `mousse-bug` token can be given for testing: the secret
  *   `MOUSSE_BUG_GITHUB_TOKEN` (Settings → Secrets) or the same environment variable.
  * - not anonymous: the person's own GitHub sign-in (`gh auth token`).
@@ -276,8 +276,8 @@ export class BugReportService {
     const credential = await this.credential(anonymous).catch(() => undefined)
     if (!credential) {
       return browser(anonymous
-        ? 'Mousse’s report account is not set up on this computer yet, so the report opens on GitHub for you to submit.'
-        : 'You are not signed in with gh, so the report opens on GitHub for you to submit.')
+        ? 'The report opens on GitHub. Submit it there from your GitHub account; the issue is public.'
+        : 'You are not signed in with gh, so the report opens on GitHub. Submit it there from your GitHub account; the issue is public.')
     }
     try {
       if (credential.via === 'relay') return await this.relay({ action: 'file', ...draft }) as BugReportOutcome
