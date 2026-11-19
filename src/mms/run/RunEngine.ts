@@ -22,6 +22,7 @@ import type { Answerer } from './approvalRights'
 import { DEFAULT_HEARTBEAT_MS } from './Reconciler'
 import type { RestartNote } from './restartNote'
 import type { RunStore } from './RunStore'
+import { decodeOwnerProof, type OwnerProof } from './ownerProof'
 import { bumpStopGenerations, currentStopGeneration, isRunAdmissionStale } from './stopGeneration'
 import { strandedQueuedRuns } from './strandedRuns'
 import { writeTerminalRun, type RunTerminalStatus, type TerminalNotice } from './terminal'
@@ -114,6 +115,12 @@ export type RunCommand =
        * pause or waiting behind it.
        */
       refuseWhilePaused?: boolean
+      /**
+       * The owner sent it from a Mousse window (`RunRecord.ownerProof`); only the `orchestrator.send` protocol handler
+       * gives one, from its connection. Ignored on a continue turn of a pause: a Resume now takes the press recorded
+       * on the pause (`RunPause.resumeOwner`), an automatic resume has none.
+       */
+      ownerProof?: OwnerProof
     }
   | { kind: 'stop'; threadId: string; clientRequestId: string; runId: string; actor?: AgentActor }
   | {
@@ -706,10 +713,13 @@ export class RunEngine extends EventEmitter {
    * behind it (the resume lane is first-in, first-out); if the running one hands the run over, the
    * manual one finds the pause ended and does nothing. Returns the effect.
    */
-  requestResume(runId: string, manual: boolean): EffectRecord {
+  requestResume(runId: string, manual: boolean, ownerProof?: OwnerProof): EffectRecord {
     return this.store.db.transaction(() => {
-      const run = this.store.getRun(runId)
+      let run = this.store.getRun(runId)
       if (!run || run.status !== 'paused') reject('conflict', `Run ${runId} is not paused.`)
+      // The owner's own press is kept on the pause, so the continue turn it sends carries it (`commitSend`).
+      const proof = manual ? decodeOwnerProof(ownerProof) : undefined
+      if (proof && run.outcome?.pause) run = this.updatePause(runId, { resumeOwner: proof })
       const effects = this.outbox.listForRun(runId).filter((effect) => effect.kind === 'run.resume')
       const running = effects.find((effect) => effect.status === 'running')
       if (running && (!manual || (running.payload as RunResumePayload).manual === true)) return running
@@ -2037,12 +2047,19 @@ export class RunEngine extends EventEmitter {
         ...(command.actor ? { sentByAgent: true as const, agentHops: command.actor.hops ?? 1 } : command.agentOrigin ? { sentByAgent: true as const, agentHops: command.agentOrigin.hops } : {}),
         ...(carriedHops !== undefined ? { agentHops: carriedHops } : {})
       }
+      // An agent's message is never the owner's, whatever the caller passed.
+      const ownerProof = command.actor || command.agentOrigin
+        ? undefined
+        : resuming
+          ? (command.source === 'resume_now' ? decodeOwnerProof(paused?.outcome?.pause?.resumeOwner) : undefined)
+          : decodeOwnerProof(command.ownerProof)
       const run = store.createRun({
         threadId: command.threadId,
         source: command.source,
         clientRequestId: command.clientRequestId,
         userMessageId: command.userMessageId,
-        ...(Object.keys(outcome).length ? { outcome } : {})
+        ...(Object.keys(outcome).length ? { outcome } : {}),
+        ...(ownerProof ? { ownerProof } : {})
       })
       if (tracked) {
         // Whatever the caller recorded, the row is never wider than any earlier task of this thread.

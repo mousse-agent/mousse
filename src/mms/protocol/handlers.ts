@@ -37,6 +37,7 @@ import type { MmsProfileServices } from '../MmsProfileServices'
 import { LocalActionGated, type CommandResult } from '../run/RunEngine'
 import { canUndoNatively } from '../run/policy/featureGates'
 import type { RunOutcome } from '../run/types'
+import type { OwnerProof } from '../run/ownerProof'
 import { CommandRejection } from '../run/db/RunStoreError'
 import { EFFECT_PAGE_MAX } from '../run/EffectOutbox'
 import { evaluateRestore, restoreDiff, restoreDiffSha, worktreeClaims, type WorkspaceClaim } from '../run/workspace/restoreSafety'
@@ -370,6 +371,19 @@ function showWrittenThread(ctx: HandlerContext, threadId: string): void {
   if (!isPerson(ctx.connection) || !ctx.mms.threads.getThread(threadId)?.hidden) return
   ctx.mms.threads.setThreadHidden(threadId, false)
   ctx.emitEvent?.('threads.updated', { threads: ctx.mms.threads.listAllThreadsVersioned().threads })
+}
+
+/**
+ * Proof that the owner wrote a send themselves (`OwnerProof`), from the connection it came in on and nothing the caller
+ * says: a Mousse window on this computer, or a window on another of the owner's computers through a routed call (whose
+ * RPC layer admits only the owner's own devices, and which an agent's call never reaches as a person's). The CLI, a
+ * phone's remote bridge and every internal caller get none.
+ */
+function ownerProofOf(ctx: HandlerContext): OwnerProof | undefined {
+  const connection = ctx.connection
+  if (connection?.clientType === 'gui' && !connection.bridgeCaller) return { via: 'gui' }
+  if (connection?.clientType === 'bridge' && connection.bridgeCaller) return { via: 'bridge', node: connection.bridgeCaller.node }
+  return undefined
 }
 
 /** Browser authority uses the authenticated ingress, never a caller's source label. */
@@ -2717,9 +2731,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const bound = p.expect === undefined ? undefined : boundTurnSettings(ctx, threadId, p.expect, limit)
       // Before the send: a send may answer only once its turn has run, and the thread shows in the sidebar from the click.
       showWrittenThread(ctx, threadId)
+      const ownerProof = source === 'gui' ? ownerProofOf(ctx) : undefined
       return await ctx.mms.orchestrator.send(input, false, {
         threadId,
         source,
+        ...(ownerProof ? { ownerProof } : {}),
         forceQueue,
         clientRequestId,
         awaitMode,
@@ -2887,7 +2903,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['runId', 'threadId'])
       const runId = asString(p.runId, 'runId', 256)
-      return asRpcRejection(() => ctx.mms.orchestrator.resumePausedRun(runId))
+      return asRpcRejection(() => ctx.mms.orchestrator.resumePausedRun(runId, ownerProofOf(ctx)))
     }
     case 'threads.goal': {
       // The thread's goal (`/goal`, issue #1207): show it, set it (and queue its first turn), adopt it for the first message
