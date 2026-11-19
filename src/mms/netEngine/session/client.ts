@@ -260,21 +260,30 @@ export class EngineClient implements BridgeClient {
   /**
    * The path switch (§3.6) onto `next`, a renewed connection of this pairing that answered hello: every live
    * subscription subscribes again there from this computer's cursor, and once each has its head they all move
-   * over and new calls use `next`. If any fails first, nothing moves and the old path stays (it rejects). Calls
+   * over and new calls use `next`; one subscribed meanwhile moves with them. If any fails first, nothing moves and
+   * the old path stays (it rejects). Calls
    * already running stay on the old connection; `drained` waits for them.
    */
   async switchTo(next: EngineConnection, deadlineMs: number): Promise<EngineConnection> {
     if (this.state() !== 'open' || !next.isOpen()) throw new NetError('peer_offline')
     const old = this.current
     const prepared: Prepared[] = []
+    const moving = new Set<LiveSubscription>()
     try {
-      await Promise.all(
-        [...this.subscriptions].map(async (subscription) => {
-          const ready = await subscription.prepare(next, deadlineMs)
-          if (ready) prepared.push(ready)
-        })
-      )
-      if (this.state() !== 'open' || !next.isOpen()) throw new NetError('peer_offline')
+      // A subscription opened while these prepare (it starts on the old path) is prepared too, until none is
+      // left: from the last check to the move nothing waits, so none can open in between.
+      for (;;) {
+        const fresh = [...this.subscriptions].filter((subscription) => !moving.has(subscription))
+        if (!fresh.length) break
+        for (const subscription of fresh) moving.add(subscription)
+        await Promise.all(
+          fresh.map(async (subscription) => {
+            const ready = await subscription.prepare(next, deadlineMs)
+            if (ready) prepared.push(ready)
+          })
+        )
+        if (this.state() !== 'open' || !next.isOpen()) throw new NetError('peer_offline')
+      }
     } catch (error) {
       for (const ready of prepared) ready.abort()
       throw error
