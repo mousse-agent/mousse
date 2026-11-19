@@ -39,6 +39,7 @@ import { useAppStore, withNewerTimes } from './stores/appStore'
 import { createMessageUpdateBatcher } from './stores/messageUpdateBatcher'
 import { applyStreamedUpdates, landMessage } from './stores/liveTextStore'
 import { useViewSwap } from './lib/motion'
+import { usePanelClosing } from './lib/panelPresence'
 import { useMemoryNotices } from './hooks/useMemoryNotices'
 import { useWindowCounters } from './lib/windowCounters'
 import { normalizeRunSettings } from '../shared/settings'
@@ -164,6 +165,10 @@ export default function App() {
   const mainView = useAppStore((s) => s.mainView)
 
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
+  // The app panel stays laid out while it slides out (app.css: .main-area.is-closing).
+  const panelOpen = mainAreaOpen && layoutMode === 'projects'
+  const panelClosing = usePanelClosing(panelOpen) && layoutMode === 'projects'
+  const panelShown = panelOpen || panelClosing
 
   const setMainAreaOpen = useAppStore((s) => s.setMainAreaOpen)
 
@@ -625,7 +630,7 @@ export default function App() {
 
         <aside
           ref={sidebarRef}
-          className={`sidebar${!mainAreaOpen || botThread ? ' sidebar-full' : ''}`}
+          className={`sidebar${!(mainAreaOpen || panelClosing) || botThread ? ' sidebar-full' : ''}`}
           style={layoutMode === 'chats' && !botThread ? { display: 'none' } : undefined}
         >
           {inboxThread && <RunStrip />}
@@ -647,7 +652,7 @@ export default function App() {
             : <Suspense fallback={null}><ChatWorkspace key={profileId} /></Suspense>}
         </KeepMounted>}
 
-        {mainAreaOpen && layoutMode === 'projects' && (
+        {panelShown && (
           <div
             className={`resizer ${resizing === 'main' ? 'active' : ''}`}
             onPointerDown={(event) => startResize('main', event)}
@@ -663,11 +668,11 @@ export default function App() {
         )}
 
         {/* Keep terminal PTYs and browser guests mounted when the pane is collapsed. */}
-        <KeepMounted as="main" active={mainAreaOpen && layoutMode === 'projects'} preserveLayout className="main-area"
+        <KeepMounted as="main" active={panelShown} preserveLayout className={`main-area${panelClosing ? ' is-closing' : ''}`}
           // Beside it: the threads sidebar and its divider when open (the Runs list sits outside the workspace), and the 1px divider before it.
           style={mainAreaStyle(mainAreaWidth, (threadsSidebarOpen && !inboxThread ? threadsSidebarWidth + 1 : 0) + 1)}>
           <MainViewTabs />
-          <MainViewPanel open={mainAreaOpen && layoutMode === 'projects'} />
+          <MainViewPanel open={panelShown} />
         </KeepMounted>
         </>}
         </div>
