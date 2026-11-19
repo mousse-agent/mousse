@@ -25,8 +25,10 @@ function ordinaryNumber(token: string): boolean {
 }
 function filenameExtension(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
-  const name = normalizedText(value)
-  if (!name || name.length > 255 || name.startsWith('.') || name.includes('..') || /[/\\:@\p{Cc}]/u.test(name)) return undefined
+  const name = value
+  if (!name || name.length > 255 || normalizedText(name) !== name || name.includes('..') || /[ .]$/u.test(name)
+    || !/^[\p{L}\p{N}][\p{L}\p{N} ._()+,-]*$/u.test(name)
+    || /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/iu.test(name.split('.')[0]!.trimEnd())) return undefined
   const dot = name.lastIndexOf('.')
   return dot < 0 ? '' : name.slice(dot + 1).toLowerCase()
 }
