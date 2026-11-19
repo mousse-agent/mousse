@@ -1,20 +1,44 @@
+import { createHmac, randomBytes } from 'node:crypto'
 const PLACE_NAMES = new Set('folder folderid parent parentid path dir directory channel channelid repo repository owner project projectid calendar calendarid list listid board to recipient recipients email space spaceid database databaseid drive driveid cc bcc from sender replyto url uri link webhook endpoint host domain account accountid address destination target remote branch'.split(' '))
 const normalizedKey = (key: string): string => key.toLowerCase().replace(/[_-]/g, '')
 const FREE_CONTENT = new Set(['body', 'subject', 'text', 'content'])
-export interface ArgumentContract { version: 2; keys: string[]; digests: Record<string, string>; varying: string[] }
-/** Each match has bounded runs, including content with no punctuation. Normalisation fails closed. */
-function restricted(value: string): boolean {
-  const text = value.normalize('NFKC').replace(/\p{Cf}/gu, '').replace(/[。｡]/g, '.').replace(/\s+/gu, '')
-  // A colon covers every scheme, IPv6 and host:port without scanning for a scheme name.
-  return /[:@\\]|[\p{L}\p{N}_-]{1,63}\.[\p{L}\p{N}_-]{1,63}/iu.test(text)
+export interface ArgumentContract {
+  version: 3; keys: string[]; digests: Record<string, string>; varying: string[]
+  tokens: Record<string, string[]>; extensions: Record<string, string>
 }
-export function argumentContract(args: Record<string, unknown>): ArgumentContract {
+const normalizedText = (value: string): string => value.normalize('NFKC').replace(/\p{Cf}/gu, '')
+/** Bounded labels keep long punctuation-free attachments linear. Keep URL punctuation inside its token. */
+function addressTokens(value: string): string[] {
+  const text = normalizedText(value).replace(/[。｡]/g, '.').replace(/\s+/gu, ' ').replace(/ ?([.@:/\]) ?/gu, '$1')
+  return [...new Set(text.split(' ').filter(token => /[:@\]|[\p{L}\p{N}_-]{1,63}\.[\p{L}\p{N}_-]{1,63}/iu.test(token)))]
+}
+function filenameExtension(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const name = normalizedText(value)
+  if (!name || name.length > 255 || name.startsWith('.') || name.includes('..') || /[/\:@\p{Cc}]/u.test(name)) return undefined
+  const dot = name.lastIndexOf('.')
+  return dot < 0 ? '' : name.slice(dot + 1).toLowerCase()
+}
+const tokenDigest = (key: string, field: string, token: string): string => createHmac('sha256', key).update(JSON.stringify([field, token])).digest('hex')
+export function argumentContract(args: Record<string, unknown>, tokenKey: string): ArgumentContract {
   const keys = Object.keys(args).sort()
-  return { version: 2, keys, digests: Object.fromEntries(keys.map(k => [k, actionDigest(args[k])])), varying: keys.filter(k => FREE_CONTENT.has(normalizedKey(k)) && typeof args[k] === 'string' && !restricted(args[k] as string)) }
+  const varying = keys.filter(k => FREE_CONTENT.has(normalizedKey(k)) && typeof args[k] === 'string')
+  const extensions = Object.fromEntries(keys.filter(k => normalizedKey(k) === 'name' && filenameExtension(args[k]) !== undefined).map(k => [k, filenameExtension(args[k])!]))
+  return { version: 3, keys, digests: Object.fromEntries(keys.map(k => [k, actionDigest(args[k])])), varying: [...varying, ...Object.keys(extensions)], extensions,
+    tokens: Object.fromEntries(varying.map(k => [k, addressTokens(args[k] as string).map(token => tokenDigest(tokenKey, k, token))])) }
 }
-function argumentsMatch(contract: ArgumentContract | undefined, args: Record<string, unknown>): boolean {
-  return contract?.version === 2 && actionDigest(Object.keys(args).sort()) === actionDigest(contract.keys)
-    && contract.keys.every(k => contract.varying.includes(k) && FREE_CONTENT.has(normalizedKey(k)) && typeof args[k] === 'string' && !restricted(args[k] as string) || actionDigest(args[k]) === contract.digests[k])
+function argumentsMatch(contract: ArgumentContract | undefined, args: Record<string, unknown>, tokenKey: string): boolean {
+  return contract?.version === 3 && actionDigest(Object.keys(args).sort()) === actionDigest(contract.keys)
+    && contract.keys.every(k => {
+      if (actionDigest(args[k]) === contract.digests[k]) return true
+      if (Object.hasOwn(contract.extensions, k)) {
+        const extension = filenameExtension(args[k])
+        return extension !== undefined && extension === contract.extensions[k]
+      }
+      if (!contract.varying.includes(k) || !FREE_CONTENT.has(normalizedKey(k)) || typeof args[k] !== 'string') return false
+      const allowed = new Set(contract.tokens[k])
+      return addressTokens(args[k] as string).every(token => allowed.has(tokenDigest(tokenKey, k, token)))
+    })
 }
 /** Exact top-level destinations declared by the tool; content never supplies authority. */
 export function actionPlace(schema: unknown, args: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -52,10 +76,17 @@ export class BotAlone {
   private put(botId: string, key: string, value: Exception): void {
     this.host.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?) ON CONFLICT(bot_id, key) DO UPDATE SET value = excluded.value', botId, key, JSON.stringify(value))
   }
+  /** One profile-local key; authority state and this key are never included in memory exports. */
+  private tokenKey(): string {
+    const saved = this.host.store.get("SELECT value FROM bot_memory_state WHERE bot_id = '' AND key = 'alone-token-key'")?.value
+    if (typeof saved === 'string') return saved
+    this.host.store.run("INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES('', 'alone-token-key', ?)", randomBytes(32).toString('hex'))
+    return String(this.host.store.get("SELECT value FROM bot_memory_state WHERE bot_id = '' AND key = 'alone-token-key'")!.value)
+  }
   private holds(botId: string, entry: Exception): boolean {
     const schedule = this.host.schedule(botId, entry.scheduleId)
     const binding = this.host.binding(botId, entry.serverId, entry.tool)
-    const intact = entry.arguments?.version === 2 && !!binding && !!schedule && actionDigest(schedule.prompt) === entry.promptDigest && actionDigest(binding) === actionDigest(entry.binding) && actionDigest(entry.place) === entry.placeDigest
+    const intact = entry.arguments?.version === 3 && !!binding && !!schedule && actionDigest(schedule.prompt) === entry.promptDigest && actionDigest(binding) === actionDigest(entry.binding) && actionDigest(entry.place) === entry.placeDigest
     if (!intact) this.remove(botId, aloneKey(entry))
     return this.host.enabled() && intact
   }
@@ -75,7 +106,7 @@ export class BotAlone {
     const source = JSON.parse(String(previous.args_json)) as Record<string, unknown>
     // The masked review can supply the source only when it is still exactly what was sent.
     if (actionDigest(source) !== previous.args_digest) return 'This sent call has hidden arguments, so it always asks.'
-    const contract = argumentContract(source)
+    const contract = argumentContract(source, this.tokenKey())
     const place = JSON.parse(String(previous.place_json)) as Record<string, unknown>
     const result = JSON.parse(String(previous.result_json ?? '{}')).text ?? ''
     const values = Object.values(maskedActionData(place) as object).map(v => placeLabel(v, result)).join(' and ')
@@ -98,7 +129,7 @@ export class BotAlone {
   match(botId: string, scheduleId: string, serverId: string, tool: string, place: Record<string, unknown> | undefined, args: Record<string, unknown>): string | undefined {
     const key = aloneKey({ scheduleId, serverId, tool })
     const entry = this.read(botId, key)
-    return entry && place && this.holds(botId, entry) && argumentsMatch(entry.arguments, args) && actionDigest(place) === entry.placeDigest ? key : undefined
+    return entry && place && this.holds(botId, entry) && argumentsMatch(entry.arguments, args, this.tokenKey()) && actionDigest(place) === entry.placeDigest ? key : undefined
   }
   items(botId: string): BotPermissionItem[] {
     return this.host.store.all("SELECT key FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'", botId).flatMap(row => {

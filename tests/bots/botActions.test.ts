@@ -4484,7 +4484,7 @@ it('E1 r2 source calls preserve the bot note and export no argument contract or 
   const first = f.bots.actions.forWork(t.id)!
   expect(f.store.get('SELECT bot_note FROM bot_actions WHERE id = ?', first.id)?.bot_note).toBeNull()
   // Existing rows from the earlier build must not export their old per-argument hashes either.
-  const contract = alone.argumentContract(t.args)
+  const contract = alone.argumentContract(t.args, 'legacy-test-key')
   f.store.run('UPDATE bot_actions SET bot_note = ? WHERE id = ?', JSON.stringify(contract), first.id)
   const memory = new BotMemoryStore({ db: f.store.db })
   expect(JSON.stringify(memory.actions(t.botId))).not.toContain(contract.digests.to)
