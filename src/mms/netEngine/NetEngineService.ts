@@ -60,7 +60,7 @@ import {
   HelperSupervisor,
   type HelperStatus
 } from './helper/supervisor'
-import { EnginePairing, type PairingStep } from './pairing'
+import { EnginePairing, fingerprintOf, type PairingStep } from './pairing'
 import { routeSetupProbes } from './probes'
 import {
   deviceRelay,
@@ -77,6 +77,9 @@ import {
 import { automatic } from './routes'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 import { readTicket } from './ticket'
+import { SshAdd } from './ssh/add'
+import { removeRequestsOf, type PrepareEngine } from './ssh/prepare'
+import type { SshRequestStore } from './ssh/requests'
 
 export const NON_KEEPER_MESSAGE =
   "This profile's network is managed by another computer. Turn its networking on, or Start over."
@@ -155,6 +158,10 @@ export class NetEngineService implements EngineDirectoryPort {
     options.net.onSetAside((suffix) => this.setAside(suffix))
   }
 
+  /** This profile's folder. */
+  get profileDir(): string {
+    return this.options.profileDir
+  }
   private get directory(): string {
     return join(this.options.profileDir, 'net-engine')
   }
@@ -538,6 +545,186 @@ export class NetEngineService implements EngineDirectoryPort {
     return started.pairing.join(ticket, { share: [...share] })
   }
 
+  // ---------------------------------------------------------------- Add over SSH (Phase 1b §3.4)
+
+  /** Set by the daemon: B's SSH request journal and this profile's selector. */
+  sshHost?: { requests: SshRequestStore; selector(): string }
+  private sshFlow?: SshAdd
+
+  /** A's side of Add over SSH. */
+  sshAdd(): SshAdd {
+    this.sshFlow ??= new SshAdd({
+      peers: this.require().peers,
+      helper: () => this.helper,
+      identity: () => String(this.helper?.info.identity ?? ''),
+      name: () => this.selfName(),
+      limits: () => {
+        const limits = engineLimits()
+        return { deadlineMs: limits.sshRequestDeadlineMs, maxAgeSecs: limits.sshRequestMaxAgeSecs }
+      },
+      changed: () => this.changed(),
+      now: () => Date.now() / 1000
+    })
+    return this.sshFlow
+  }
+
+  /**
+   * Connect in Add over SSH (§3.4 step 3). A computer this one already pairs with only gets the SSH route: it holds
+   * B's pin and is granted already (§3.4, "SSH connections per add").
+   */
+  async sshConnect(choice: Parameters<SshAdd['connect']>[0]): Promise<EnginePeerRow> {
+    const started = this.require()
+    const profile = choice.selector
+      ? (await this.sshAdd().profiles(choice.routeId, choice.host, choice.user)).profiles.find(
+          (item) => item.selector === choice.selector
+        )
+      : undefined
+    const known = profile?.identity ? started.peers.serving(profile.identity as NodeId) : undefined
+    const paired = profile?.identity ? started.peers.byEndpoint(profile.identity) : known
+    if (paired && paired.state === 'connected' && paired.source !== 'ssh') {
+      const ssh = {
+        requestId: paired.receipt ?? '',
+        routeId: choice.routeId,
+        selector: choice.selector,
+        target: choice.target,
+        host: choice.host,
+        user: choice.user,
+        shell: choice.shell ?? 'sh'
+      }
+      started.peers.update(paired.localId, { ssh })
+      await this.setAddresses({ ...paired, ssh }, paired.addresses ?? [])
+      return started.peers.get(paired.localId)!
+    }
+    routeSetupProbes()
+    return this.sshAdd().connect(choice)
+  }
+
+  /**
+   * B's engine as `prepare` uses it (§3.4 step 4): its row for A, the row it writes, the grant it saves.
+   */
+  prepareEngine(): PrepareEngine {
+    const started = this.require()
+    const helper = () => {
+      if (!this.helper) throw new NetError('peer_offline', 'Networking is starting.')
+      return this.helper
+    }
+    return {
+      identity: String(this.helper?.info.identity ?? ''),
+      name: this.selfName(),
+      rowFor: (joiner) => {
+        // A row being removed counts too: the request waits for it (busy).
+        const row = started.peers.all().find((item) => item.endpoint === joiner && item.state !== 'removed')
+        if (!row) return undefined
+        return {
+          key: row.localId,
+          state: row.state,
+          ...(row.source === 'ssh' && row.ssh?.requestId ? { requestId: row.ssh.requestId } : {}),
+          ...(row.grant ? { grant: row.grant } : {})
+        }
+      },
+      writeOwnRow: (request) => {
+        // Only the overwrite control reaches here with a row for A: it is lost, as an overwrite would lose it.
+        const earlier = started.peers.byEndpoint(request.joiner)
+        if (earlier) started.peers.prune(earlier.localId)
+        const row = started.peers.add({
+          endpoint: request.joiner,
+          fingerprint: fingerprintOf(request.joiner),
+          grant: '',
+          name: request.joinerName,
+          state: 'ssh_granting',
+          source: 'ssh',
+          receipt: request.requestId,
+          ssh: { requestId: request.requestId, issuedAt: request.issuedAt },
+          pairedAt: Date.now()
+        })
+        this.helper?.claim(request.joiner)
+        this.changed()
+        return row.localId
+      },
+      grantAdd: async (request) => {
+        const answer = await helper().request('grant.add', {
+          identity: request.joiner,
+          name: request.joinerName,
+          receipt: request.requestId
+        })
+        if (typeof answer.grant !== 'number' && typeof answer.grant !== 'string')
+          throw new NetError('internal', 'The helper named no grant.')
+        return String(answer.grant)
+      },
+      setRowGrant: (key, grant) => {
+        started.peers.update(key as NodeId, { grant })
+        this.changed()
+      },
+      granted: (key) => {
+        started.peers.advance(key as NodeId, ['ssh_granting'], { state: 'ssh_granted' })
+        this.changed()
+      },
+      grantLive: async (grantId) => {
+        const listed = await helper().request('grants.list')
+        return (Array.isArray(listed.grants) ? listed.grants : []).some(
+          (grant: Record<string, unknown>) => String(grant.grant) === grantId
+        )
+      },
+      rowGrant: (key) => {
+        const row = started.peers.serving(key as NodeId)
+        return row?.grant || undefined
+      }
+    }
+  }
+
+  /**
+   * §3.4 step 3: networking on if it was off, with nothing advertised (loopback only, no LAN, no tailnet), and its
+   * helper running, within `timeoutMs`.
+   */
+  async quietNetworking(timeoutMs: number): Promise<void> {
+    const wasOn = !!this.settings()?.enabled
+    if (!wasOn) await this.switchOn()
+    const until = Date.now() + timeoutMs
+    const running = async () => {
+      while (!this.helper || this.helperStatus().state !== 'running') {
+        if (Date.now() > until)
+          throw new NetError('deadline_exceeded', 'Networking did not start in time.', {
+            details: { reason: 'remote_failed' }
+          })
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+    }
+    await running()
+    if (!wasOn && this.helper?.speaks(1)) {
+      await this.setReach({ lan: false, tailnet: false, public: [], tunnels: [] })
+      await running()
+    }
+  }
+
+  /** After each hello: A repeats `prepare` for its unconfirmed SSH rows; B settles its `ssh_granting` rows. */
+  private recoverSsh(): void {
+    const started = this.started
+    if (!started) return
+    const now = Date.now() / 1000
+    const maxAge = engineLimits().sshRequestMaxAgeSecs
+    for (const row of started.peers.all()) {
+      if (row.source !== 'ssh') continue
+      // The control repeats `prepare` also for a row that was connected (after B removed this computer, say).
+      const again = engineControl('retry-after-connected')
+      if (
+        (row.state === 'ssh_requested' || (again && row.state === 'connected')) &&
+        row.ssh?.routeId &&
+        !row.ssh.removed &&
+        (!row.ssh.everConnected || again)
+      )
+        void this.sshAdd()
+          .prepare(row)
+          .catch(() => undefined)
+      if (row.state !== 'ssh_granting' || !this.sshHost) continue
+      const request = row.ssh?.requestId ? this.sshHost.requests.get(row.ssh.requestId) : undefined
+      if (request?.grantId) {
+        started.peers.update(row.localId, { grant: request.grantId })
+        started.peers.advance(row.localId, ['ssh_granting'], { state: 'ssh_granted' })
+      } else if (!request || now - request.issuedAt > maxAge) started.peers.prune(row.localId)
+    }
+    this.changed()
+  }
+
   /** What a ticket would do before Connect (§1.3): its destinations by class, and what this computer may share. */
   joinPreview(ticket: string): NetEngineJoinPreview {
     const facts = readTicket(ticket)
@@ -707,20 +894,26 @@ export class NetEngineService implements EngineDirectoryPort {
         const node = row.localId
         const online = started.sessions.online(node)
         const serving = started.sessions.serving(node)
+        // A row added over SSH runs one way only (1b §3.6): A uses B, so A's direction is its client and B's is
+        // A's client here.
+        const direction = row.source === 'ssh' ? (row.ssh?.routeId ? 'out' : 'in') : undefined
+        const up = direction === 'out' ? online : direction === 'in' ? serving : online && serving
         // Connected only with both directions up: this computer's client to it, and its client here.
         const state =
           row.state === 'removing'
             ? 'removing'
-            : row.state !== 'connected'
-              ? 'finishing'
-              : online && serving
-                ? 'connected'
-                : online || serving
-                  ? 'connecting'
-                  : 'offline'
+            : direction && row.state !== 'connected' && row.state !== 'removed'
+              ? 'connecting'
+              : row.state !== 'connected'
+                ? 'finishing'
+                : up
+                  ? 'connected'
+                  : online || serving
+                    ? 'connecting'
+                    : 'offline'
         const stuck = held(`${node} finishing`, state === 'finishing') >= stuckMs
         // One direction down for the bound while the other works.
-        const paired = row.state === 'connected'
+        const paired = row.state === 'connected' && !direction
         const outDown = held(`${node} out`, paired && !online) >= stuckMs
         const inDown = held(`${node} in`, paired && !serving) >= stuckMs
         const unreachable = outDown && serving ? 'out' : inDown && online ? 'in' : undefined
@@ -734,7 +927,8 @@ export class NetEngineService implements EngineDirectoryPort {
           node,
           name: row.name,
           shortId: row.endpoint.slice(0, 8),
-          ...(started.pairing.accepted(node) ? {} : { notAccepted: true }),
+          ...(started.pairing.accepted(node) && !row.ssh?.removed ? {} : { notAccepted: true }),
+          ...(direction ? { direction } : {}),
           state,
           online,
           ...(stuck ? { stuck: true } : {}),
@@ -857,13 +1051,28 @@ export class NetEngineService implements EngineDirectoryPort {
         onClientReady: (node) => {
           this.options.bridge()?.peerOnline(node)
           pairing.clientReady(node)
+          // A: its first live connection to B confirms an SSH add (1b §3.4 step 6).
+          // Stopping: the store is closed, and nothing is written.
+          const row = this.started?.peers === peers ? peers.get(node) : undefined
+          if (row?.source === 'ssh' && row.state === 'ssh_granted') this.sshAdd().connected(row)
           this.changed()
         },
         onClientClosed: (node) => {
           this.options.bridge()?.peerOffline(node)
           this.changed()
         },
-        onServingChanged: () => this.changed(),
+        onServingChanged: (node) => {
+          // B: A's first live inbound with the row's grant connects it ("Added over SSH from <A>").
+          const row = this.started?.peers === peers ? peers.get(node) : undefined
+          if (
+            row?.source === 'ssh' &&
+            row.state === 'ssh_granted' &&
+            !row.ssh?.routeId &&
+            sessions.serving(node)
+          )
+            peers.advance(node, ['ssh_granted'], { state: 'connected' })
+          this.changed()
+        },
         // The helper keeps a newer outbound path (renewed, or dialled while one was up) waiting until told.
         onPathInUse: (connection) => {
           const conn = Number(connection.id)
@@ -885,7 +1094,28 @@ export class NetEngineService implements EngineDirectoryPort {
       helper: () => this.helper,
       teardown: (node) => this.teardown(node),
       changed: () => this.changed(),
-      crashAt: (step) => !!this.pairingCrash?.(step)
+      crashAt: (step) => !!this.pairingCrash?.(step),
+      sshRequest: (receipt) => this.sshHost?.requests.get(receipt)?.state,
+      removed: async (row) => {
+        const host = this.sshHost
+        const helper = this.helper
+        if (!host || !helper || !row.endpoint) return
+        await removeRequestsOf(host.requests, row.endpoint, host.selector(), {
+          list: async () => {
+            const listed = await helper.request('grants.list')
+            return (Array.isArray(listed.grants) ? listed.grants : []).map(
+              (grant: Record<string, unknown>) => ({
+                grant: String(grant.grant),
+                identity: String(grant.identity),
+                ...(typeof grant.receipt === 'string' ? { receipt: grant.receipt } : {})
+              })
+            )
+          },
+          remove: async (grant) => {
+            await helper.request('grant.remove', { grant: Number(grant) })
+          }
+        })
+      }
     })
     const timer = setInterval(() => {
       try {
@@ -1121,7 +1351,10 @@ export class NetEngineService implements EngineDirectoryPort {
     // Its relays, and what each pairing's relays need (Phase 3); a helper without them says so once.
     if (this.helper === helper) this.rereadRelays()
     // Removals finish, ceremonies resume, owed rows are written and every pairing is dialled again.
-    if (this.helper === helper) void started.pairing.recover().catch(() => undefined)
+    if (this.helper === helper) {
+      void started.pairing.recover().catch(() => undefined)
+      this.recoverSsh()
+    }
     return helper
   }
 

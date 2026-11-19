@@ -271,6 +271,23 @@ export class Fabric {
           kill: () => fake.kill()
         }
       }
+      // A profile an SSH add makes on this computer gets its own fake helper.
+      let made = 0
+      mms.netEngineLauncher = (engine) => {
+        if (engine === mms.netEngine || engine.launcher) return
+        const own = Buffer.from(`endpoint-${name}-profile-${++made}`).toString('hex')
+        engine.displayName = `${name} computer`
+        engine.launcher = async () => {
+          const fake = this.network.helper(own)
+          return {
+            pipe: tapPipe(fake.pipe, () => own, this.tap),
+            exited: new Promise((resolve) =>
+              fake.pipe.onClose(() => resolve({ code: 0, signal: null, stderr: '' }))
+            ),
+            kill: () => fake.kill()
+          }
+        }
+      }
     }
     mms.netEngine.displayName = `${name} computer`
     await mms.netEngine.enable()
@@ -356,6 +373,26 @@ export class Fabric {
     const before = computer.engine
     computer.kill()
     computer.engine = await running(computer.mms, before)
+  }
+
+  /**
+   * `computer` answers SSH at `hostname` (1b §3.7's test server, in process): its `mousse-cli net-engine ssh` is
+   * its daemon's `netEngine.ssh.serve`, and a pipe over that route reaches its default profile's helper. Every
+   * request it answers is kept.
+   */
+  sshServer(hostname: string, computer: Computer): Array<Record<string, unknown>> {
+    const served: Array<Record<string, unknown>> = []
+    this.network.sshServers.set(hostname, {
+      // Its default profile, and every profile an SSH add made there.
+      owns: (identity) =>
+        identity === computer.endpoint ||
+        identity.startsWith(Buffer.from(`endpoint-${computer.name}-profile-`).toString('hex')),
+      serve: async (request) => {
+        served.push(request)
+        return computer.mms.sshRemote()!.serve(request)
+      }
+    })
+    return served
   }
 
   shells(owner: Computer, onSpawn?: (shell: Spawned) => void): Spawned[] {

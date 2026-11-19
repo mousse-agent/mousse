@@ -91,6 +91,15 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
       detail: `Mousse is closed on ${name}, or it is on another network.`,
       actions: ['access', 'address', 'retry', 'remove']
     }
+  // Added over SSH: one way only (1b §3.6).
+  if (device.direction === 'out')
+    return { line: 'Uses ' + name, detail: 'Added over SSH', actions: ['address', 'remove'] }
+  if (device.direction === 'in')
+    return {
+      line: name + ' uses this computer',
+      detail: 'Added over SSH from ' + name,
+      actions: ['access', 'remove']
+    }
   return { line: 'Connected', actions: ['access', 'address', 'remove'] }
 }
 

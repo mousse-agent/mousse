@@ -22,6 +22,12 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.join.preview',
   'netEngine.routes.config',
   'netEngine.routes.test',
+  // Phase 1b: Add over SSH (§3.4)
+  'netEngine.ssh.resolve',
+  'netEngine.ssh.probe',
+  'netEngine.ssh.trust',
+  'netEngine.ssh.profiles',
+  'netEngine.ssh.connect',
   // Phase 3: relays (§B.9, §B.11)
   'netEngine.relay.enroll',
   'netEngine.relay.remove',
@@ -83,6 +89,8 @@ export interface NetEngineDevice {
   offered?: string[]
   /** It was added over SSH (§3.4): one way only, until a Send link adds the other direction. */
   source?: 'ssh'
+  /** Added over SSH, one way: `out`, this computer uses it; `in`, it uses this computer (§3.6). */
+  direction?: 'out' | 'in'
   /** Its relays (Phase 3), when anything about them needs showing. */
   relay?: NetEngineDeviceRelay
 }
