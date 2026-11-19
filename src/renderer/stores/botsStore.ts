@@ -15,6 +15,8 @@ import { keepEqualById } from '../lib/keepEqual'
 import { expandComposerQuotes, insertQuoteToken, registerQuote } from '../lib/composerQuotes'
 import { clearBotLiveReplies, noteBots, noteBotStopAsked, noteThreadMessage, setBotLiveReplySources } from './botLiveReplies'
 import { adoptFilePreview } from '../components/bots/fileImageCache'
+import type { ChatReference } from '../../shared/chatReferences'
+import { threadLink } from '../../shared/threadLink'
 
 /**
  * The owner's bots in the Chats tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
@@ -117,6 +119,8 @@ interface BotsState {
   drafts: Record<string, string>
   /** The files in each bot's composer: picked, dropped or pasted. */
   attachments: Record<string, AttachedFile[]>
+  /** The thread pills in each bot's composer (Copy reference, pasted): sent as their links, which the bot reads by reference. */
+  references: Record<string, ChatReference[]>
   /** The message each bot's composer replies to (Reply on a message), shown above the box until sent or dismissed. */
   replyingTo: Record<string, BotChatQuote>
   /** The service has no `bots.chat.react` (an older one): messages show no reaction bar. */
@@ -159,6 +163,8 @@ interface BotsState {
   markRead(botId: string): void
   setDraft(botId: string, text: string): void
   setAttachments(botId: string, attachments: AttachedFile[]): void
+  addReference(botId: string, reference: ChatReference): void
+  removeReference(botId: string, referenceId: string): void
   /** Reply to a message (null: not any more). */
   setReplyingTo(botId: string, quote: BotChatQuote | null): void
   send(botId: string): Promise<void>
@@ -388,7 +394,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
   }
 
   return {
-    profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
+    profileId: null, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, references: {}, replyingTo: {},
     reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, aboutFocus: null, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {},
 
@@ -406,7 +412,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       removed.clear()
       reactions.clear()
       clearBotLiveReplies()
-      set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, replyingTo: {},
+      set({ profileId, bots: [], loaded: false, chats: {}, chatLoad: {}, live: {}, activity: {}, statuses: {}, pending: {}, details: {}, happy: {}, drafts: {}, attachments: {}, references: {}, replyingTo: {},
         reactionsMissing: false, snoozeMissing: false, questionsMissing: false, error: null, errorBotId: null, busy: false, newBotOpen: false, newBotDraft: EMPTY_NEW_BOT, aboutOpen: false, aboutFocus: null, dialog: null,
     memory: {}, memoryError: {}, memoryOpen: null, memoryEditMissing: false, notes: {}, modelInfo: {} })
       subscribe()
@@ -545,6 +551,16 @@ export const useBotsStore = create<BotsState>((set, get) => {
 
     setDraft(botId, text) { set((state) => ({ drafts: { ...state.drafts, [botId]: text } })) },
     setAttachments(botId, attachments) { set((state) => ({ attachments: { ...state.attachments, [botId]: attachments } })) },
+    addReference(botId, reference) {
+      set((state) => {
+        const current = state.references[botId] ?? []
+        if (current.some((entry) => entry.id === reference.id)) return {}
+        return { references: { ...state.references, [botId]: [...current, reference] } }
+      })
+    },
+    removeReference(botId, referenceId) {
+      set((state) => ({ references: { ...state.references, [botId]: (state.references[botId] ?? []).filter((entry) => entry.id !== referenceId) } }))
+    },
     setReplyingTo(botId, quote) {
       set((state) => {
         const replyingTo = { ...state.replyingTo }
@@ -555,9 +571,13 @@ export const useBotsStore = create<BotsState>((set, get) => {
     },
 
     async send(botId) {
-      const text = expandComposerQuotes(get().drafts[botId] ?? '').trim()
+      const typed = expandComposerQuotes(get().drafts[botId] ?? '').trim()
       const attachments = get().attachments[botId] ?? []
+      const references = get().references[botId] ?? []
       const replyTo = get().replyingTo[botId]
+      // Each thread pill goes as its link on a line of its own: the chat shows it as the thread's chip, and the bot reads
+      // the thread by reference.
+      const text = [typed, references.flatMap((reference) => (reference.threadId ? [threadLink(reference.threadId)] : [])).join('\n')].filter(Boolean).join('\n\n')
       if (!text && !attachments.length) return
       const refusal = attachmentsRefusal(attachments)
       if (refusal) {
@@ -579,6 +599,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
         error: null,
         drafts: { ...state.drafts, [botId]: '' },
         attachments: { ...state.attachments, [botId]: [] },
+        references: { ...state.references, [botId]: [] },
         replyingTo: withoutKey(state.replyingTo, botId),
         pending: { ...state.pending, [botId]: [...(state.pending[botId] ?? []), shown] }
       }))
@@ -601,7 +622,9 @@ export const useBotsStore = create<BotsState>((set, get) => {
         set((state) => ({
           error: errorText(cause),
           errorBotId: botId,
-          drafts: { ...state.drafts, [botId]: state.drafts[botId] || text },
+          drafts: { ...state.drafts, [botId]: state.drafts[botId] || typed },
+          // The unsent threads come back, before any pasted while it was sending.
+          references: { ...state.references, [botId]: [...references, ...(state.references[botId] ?? []).filter((entry) => !references.some((sent) => sent.id === entry.id))] },
           attachments: { ...state.attachments, [botId]: state.attachments[botId]?.length ? state.attachments[botId]! : attachments },
           replyingTo: replyTo && !state.replyingTo[botId] ? { ...state.replyingTo, [botId]: replyTo } : state.replyingTo,
           pending: { ...state.pending, [botId]: (state.pending[botId] ?? []).filter((entry) => entry.id !== shown.id) }

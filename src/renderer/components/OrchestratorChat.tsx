@@ -113,6 +113,8 @@ import { ComposerProjectPicker, ComposerThreadSettings, type ComposerDeviceProps
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
 import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
+import { threadReferenceRefusal } from '../lib/threadReference'
+import { isLocalOnlyThread } from '../../shared/threadLineage'
 import { pickedSelection, pickerModelId } from '../../shared/modelSelection'
 import '../styles/compact-composer.css'
 import { CHAT_TOOL_RENDERERS } from './automations/inbox/ChatDraftCard'
@@ -446,6 +448,12 @@ export function OrchestratorChat() {
   const addResolvedReference = useCallback(async (reference: ChatReference) => {
     const expectedProfile = useAppStore.getState().profileId
     const expectedThread = useAppStore.getState().activeThreadId
+    if (reference.kind === 'thread' && reference.threadId) {
+      const { threads } = useAppStore.getState()
+      const here = threads.find((thread) => thread.id === expectedThread)
+      const refused = threadReferenceRefusal(reference.threadId, { privateThread: Boolean(here && isLocalOnlyThread(here, threads)) })
+      if (refused) throw new Error(refused)
+    }
     const resolved = await resolveChatReference(reference)
     const state = useAppStore.getState()
     if (state.profileId !== expectedProfile || state.activeThreadId !== expectedThread) return

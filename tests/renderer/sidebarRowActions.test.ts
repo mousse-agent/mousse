@@ -207,7 +207,7 @@ describe('the row menu', () => {
     click(more)
     expect(menuLabels()).toEqual(fromRightClick)
     // A thread in use is archived first: no Delete.
-    expect(menuLabels()).toEqual(['Pin', 'Archive', 'Regenerate title', 'Rename', 'Archive after'])
+    expect(menuLabels()).toEqual(['Pin', 'Archive', 'Regenerate title', 'Rename', 'Copy reference', 'Archive after'])
     expect(more.getAttribute('aria-expanded')).toBe('true')
     expect(document.activeElement).toBe(menuItem('Pin'))
   })
@@ -235,6 +235,19 @@ describe('the row menu', () => {
     click(host.querySelector('[aria-label="More actions for Mousse"]')!)
     expect(menuLabels()).toEqual(['New thread', 'New thread from a pull request', 'Copy path', 'Pin', 'Rename', 'Change icon…', 'Git', 'Remove project…'])
   })
+
+  it('Copy reference puts the thread\'s link on the clipboard and closes the menu', async () => {
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    show([thread('a', 'Fix tests')])
+    openProject()
+    click(host.querySelector('[aria-label="More actions for Fix tests"]')!)
+    click(menuItem('Copy reference'))
+    await flush()
+    expect(writeText).toHaveBeenCalledWith('mousse://thread/a')
+    expect(menu()).toBeNull()
+    expect(toast()).toBeNull()
+  })
 })
 
 describe('archive and delete', () => {
@@ -252,7 +265,7 @@ describe('archive and delete', () => {
     show([thread('a', 'Old work', { settledAt: at }), thread('b', 'Other')], 'threads')
     click(host.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading-toggle')!)
     click(host.querySelector('[aria-label="More actions for Old work"]')!)
-    expect(menuLabels()).toEqual(['Unarchive', 'Regenerate title', 'Rename', 'Delete…', 'Delete all archived…'])
+    expect(menuLabels()).toEqual(['Unarchive', 'Regenerate title', 'Rename', 'Copy reference', 'Delete…', 'Delete all archived…'])
     click(menuItem('Delete…'))
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
     expect(dialog.textContent).toContain('Delete “Old work”?')

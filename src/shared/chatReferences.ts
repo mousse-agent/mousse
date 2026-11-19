@@ -1,3 +1,5 @@
+import { threadLink } from './threadLink'
+
 export const MOUSSE_REFERENCE_MIME = 'application/x-mousse-reference'
 export const MOUSSE_FILE_SCHEME = 'mousse-file:'
 
@@ -168,6 +170,9 @@ export function setReferenceDragData(dataTransfer: Pick<DataTransfer, 'setData' 
   dataTransfer.setData('text/plain', parsed.title)
 }
 
+/** The line under referenced threads: each is a pointer to read with the thread tools, not its content. */
+export const THREAD_REFERENCE_NOTE = 'A thread above is a pointer, not its content: read it with thread_read (its Thread ID), view "summary" first, then "recent", and "messages" only as far as this request needs.'
+
 const BLOCK_RE = /\n?\[Mousse references data="([^"]+)"\]\n[\s\S]*?\n\[\/Mousse references\]\s*/g
 
 function contextPath(reference: ChatReference): string | undefined {
@@ -210,9 +215,12 @@ export function formatChatReferences(references: ChatReference[]): string {
   const data = encodeURIComponent(JSON.stringify(valid))
   const lines = valid.flatMap((reference) => {
     if (reference.kind === 'review-comment') return reviewCommentLines(reference)
+    // A thread is named, never pointed at by a file: the agent reads it with its thread tools, as far as it may.
+    const thread = reference.kind === 'thread' ? reference.threadId : undefined
     const details = [
       `- ${reference.kind}: ${JSON.stringify(reference.title)}`,
-      contextPath(reference) ? `  Path: ${contextPath(reference)}` : '',
+      !thread && contextPath(reference) ? `  Path: ${contextPath(reference)}` : '',
+      thread ? `  Link: ${threadLink(thread)}` : '',
       reference.url ? `  URL: ${reference.url}` : '',
       reference.threadId ? `  Thread ID: ${reference.threadId}` : '',
       reference.projectId ? `  Project ID: ${reference.projectId}` : '',
@@ -222,6 +230,7 @@ export function formatChatReferences(references: ChatReference[]): string {
     ]
     return details.filter(Boolean)
   })
+  if (valid.some((reference) => reference.kind === 'thread' && reference.threadId)) lines.push(THREAD_REFERENCE_NOTE)
   return `[Mousse references data="${data}"]\n${lines.join('\n')}\n[/Mousse references]`
 }
 

@@ -1639,6 +1639,56 @@ describe('the composer', () => {
     expect(await file.text()).toBe(log)
   })
 
+  it('a pasted thread reference is a pill, sent as the thread\'s link after the words; a private thread is refused, a subagent is not', async () => {
+    const pasteText = (text: string) => fire(box(), 'paste', 'clipboardData', { items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }], files: [], getData: () => text })
+    const pills = () => [...composer().querySelectorAll('.composer-reference-pill')].map((pill) => pill.textContent?.trim())
+    const at = AT
+    useAppStore.setState({ threads: [
+      { id: 'thread-b', name: 'Design notes', createdAt: at, updatedAt: at, startedAt: at, order: 0 },
+      { id: 'thread-p', name: 'Secret plans', localOnly: true, createdAt: at, updatedAt: at, startedAt: at, order: 1 },
+      { id: 'thread-s', name: 'Reviewer', lineage: { relationship: 'subagent', parentThreadId: 'thread-b', rootThreadId: 'thread-b' }, createdAt: at, updatedAt: at, startedAt: at, order: 2 }
+    ] as never })
+    await open()
+    await pasteText('mousse://thread/thread-p')
+    await settle()
+    expect(composerError()?.textContent).toContain('“Secret plans” is private')
+    expect(pills()).toEqual([])
+
+    // A subagent is read through the thread that started it, as far as the bot reaches that one.
+    await pasteText('mousse://thread/thread-b mousse://thread/thread-s')
+    await settle()
+    expect(box().value).toBe('')
+    expect(pills()).toEqual(['Design notes', 'Reviewer'])
+    await type(box(), 'What is left on this?')
+    await click(button('Send message'))
+    await settle()
+    expect(fake.calls.find(([name]) => name === 'send')?.[2]).toBe('What is left on this?\n\nmousse://thread/thread-b\nmousse://thread/thread-s')
+    expect(pills()).toEqual([])
+  })
+
+  it('a send that fails gives its thread pills back, beside one pasted while it was sending', async () => {
+    const pasteText = (text: string) => fire(box(), 'paste', 'clipboardData', { items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }], files: [], getData: () => text })
+    const pills = () => [...composer().querySelectorAll('.composer-reference-pill')].map((pill) => pill.textContent?.trim())
+    useAppStore.setState({ threads: [
+      { id: 'thread-a', name: 'Design notes', createdAt: AT, updatedAt: AT, startedAt: AT, order: 0 },
+      { id: 'thread-b', name: 'Release plan', createdAt: AT, updatedAt: AT, startedAt: AT, order: 1 }
+    ] as never })
+    let fail: (cause: Error) => void = () => undefined
+    vi.mocked(fake.client.send).mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject }))
+    await open()
+    await type(box(), 'Review these')
+    await pasteText('mousse://thread/thread-a')
+    await settle()
+    await click(button('Send message'))
+    expect(pills()).toEqual([])
+    await pasteText('mousse://thread/thread-b')
+    await settle()
+    await act(async () => fail(new Error('The bot is offline.')))
+    await settle()
+    expect(box().value).toBe('Review these')
+    expect(pills()).toEqual(['Design notes', 'Release plan'])
+  })
+
   it('sends files alone, and refuses a file over the limit before sending anything', async () => {
     await open()
     const huge = new File(['x'], 'film.mov', { type: 'video/quicktime' })
@@ -2014,6 +2064,26 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
       expect(useChatsStore.getState().botThread).toEqual({ botId: inbox.id, threadId: 't2' })
       expect(useAppStore.getState().sidebarMode).toBe('chats')
       expect(host.querySelector('.bot-work')).toBeNull()
+    })
+
+    it('a right-click on a row copies the thread\'s reference; the list stays open through the menu, and Escape closes only the menu', async () => {
+      opened.ids.length = 0
+      const writeText = vi.fn(async () => undefined)
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+      await open({ ...inbox, state: 'working', stateText: 'Managing 2 threads', threads })
+      await click(presence())
+      const row = host.querySelector('.bot-thread-line[data-tone="working"]')!
+      await act(async () => { row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })) })
+      const item = () => document.querySelector<HTMLElement>('.thread-ref-menu [role="menuitem"]')
+      await act(async () => { document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })) })
+      expect(item()).toBeNull()
+      expect(host.querySelector('.bot-work')).not.toBeNull()
+      await act(async () => { row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })) })
+      // A press on the menu, as a pointer makes it, then the click.
+      await act(async () => { item()!.dispatchEvent(new Event('pointerdown', { bubbles: true })) })
+      await click(item())
+      expect(writeText).toHaveBeenCalledWith('mousse://thread/t1')
+      expect(opened.ids).toEqual([])
     })
 
     it('a thread it keeps out of the sidebar says Hidden, still opens from its row, and Show in sidebar brings it back', async () => {

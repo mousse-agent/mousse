@@ -5600,6 +5600,7 @@ export class OrchestratorService extends EventEmitter {
       search: (target, query, limit) => service.search(target, query, limit),
       events: (target, page) => service.events(target, page),
       messages: (target, page) => service.messages(target, page),
+      summary: (target) => service.summary(target),
       wait: (target, request) => {
         const denied = this.remoteThreadDenial(target.node, target.computer)
         if (denied) return Promise.reject(new RemoteThreadRefusal(denied.code, denied.message, target.computer))

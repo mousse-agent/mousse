@@ -41,6 +41,7 @@ import type { ChatReference } from '../../shared/chatReferences'
 import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseChatReference, parseReferenceDragData } from '../../shared/chatReferences'
 import { ownFileDrop, startDragOut } from '../lib/fileDragOut'
 import { ChatReferencePill } from './ReferencePill'
+import { threadIdsOfPaste, threadReferenceOf } from '../lib/threadReference'
 import { insertTranscript } from '../dictation/insertTranscript'
 import { useDictation } from '../dictation/useDictation'
 import { useCommand } from '../commands/commandRegistry'
@@ -567,6 +568,13 @@ export function ChatComposer({
     const files = collectFilesFromDataTransfer(event.clipboardData)
     if (files.length === 0) {
       const text = event.clipboardData?.getData('text/plain') ?? ''
+      // A paste of nothing but thread links (Copy reference) becomes thread pills, for the agent to read by reference.
+      const linked = onAddReference ? threadIdsOfPaste(text) : null
+      if (linked) {
+        event.preventDefault()
+        for (const threadId of linked) takeReference(threadReferenceOf(threadId))
+        return
+      }
       const selected = event.currentTarget.selectionEnd - event.currentTarget.selectionStart
       if (!isLongPaste(text, messageLimit - ATTACHMENT_LINES_ROOM - (input.length - selected))) return
       event.preventDefault()

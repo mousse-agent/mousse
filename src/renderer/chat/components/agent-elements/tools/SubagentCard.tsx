@@ -15,6 +15,7 @@ import { toolRegistry } from "./tool-registry";
 import { useInheritedProvider, useSubagentCard, useSubagentCards } from "./subagent-cards-context";
 import { useSubagentRevealSeq } from "../../../../stores/chatNavigationStore";
 import { nativeSubagentLabel } from "../../../../components/sideCard/lineageLogic";
+import { useThreadRefMenu } from "../../../../components/ThreadRefMenu";
 import {
   cardElapsedLabel,
   cardGroupElapsedLabel,
@@ -83,7 +84,9 @@ export function SubagentCardView({ card, now, result, inheritedProvider, onOpen 
   const elapsed = cardElapsedLabel(card, now);
   const status = cardStatusLabel(card);
   const childThreadId = card.childThreadId;
-  return (
+  // Right-click: Copy reference, to point another chat's agent at the subagent's thread.
+  const refMenu = useThreadRefMenu(childThreadId ?? undefined);
+  return (<>
     <button
       type="button"
       className="subagent-card"
@@ -94,12 +97,14 @@ export function SubagentCardView({ card, now, result, inheritedProvider, onOpen 
       onClick={() => {
         if (childThreadId) onOpen(childThreadId);
       }}
+      {...refMenu.bind}
     >
       <SubagentRowBody card={card} result={result} label={cardModelLabel(card)} inheritedProvider={inheritedProvider} />
       {elapsed && <span className="subagent-card-elapsed">{elapsed}</span>}
       {childThreadId && <IconChevronRight className="subagent-card-chevron" aria-hidden="true" />}
     </button>
-  );
+    {refMenu.menu}
+  </>);
 }
 
 /** Replies already read from subagent threads, so reopening a thread does not read them again. */

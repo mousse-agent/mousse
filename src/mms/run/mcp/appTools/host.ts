@@ -138,6 +138,8 @@ export interface RemoteThreadsHost {
   search(target: { node: string; computer: string; online: boolean }, query: string, limit: number): Promise<RemoteSearchResult>
   events(target: RemoteTarget, page: { afterSeq: number; limit: number }): Promise<{ events: ThreadEvent[]; maxSeq: number }>
   messages(target: RemoteTarget, page: { afterIndex: number; limit: number; textOffset: number; textMax: number }): Promise<{ messages: MessageRow[]; total: number }>
+  /** `thread_read` view `summary`: the thread record there and its newest runs (newest first), as that computer answers them. */
+  summary(target: RemoteTarget): Promise<{ thread: Record<string, unknown>; runs: Array<Record<string, unknown>> }>
   wait(target: RemoteTarget, request: { runId?: string; timeoutMs: number; signal?: AbortSignal }): Promise<RemoteWaitResult>
   send(target: RemoteTarget, input: { content: string; mode: 'agent' | 'plan' }, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'sent'; runId?: string; queued: boolean; replayed: boolean; mode?: string } | RemoteUncertain>
   steer(target: RemoteTarget, runId: string, text: string, options: { clientRequestId: string; actor: AgentActor }): Promise<{ status: 'accepted'; runId: string } | { status: 'ignored'; reason: string; runId?: string } | RemoteUncertain>
