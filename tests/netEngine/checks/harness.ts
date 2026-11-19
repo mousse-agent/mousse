@@ -175,7 +175,10 @@ export class Fabric {
       if (!expected) return
       this.routesSeen.push({ to, route: message.route })
       const route = message.route as { kind?: unknown; class?: unknown } | undefined
-      if (route?.kind !== expected.kind || route?.class !== expected.class) record('route_mismatch')
+      // As the kit judges it: every connection of the route's kind. The fake helper is exact about the class too;
+      // a real one reports an inbound connection's class from the caller's address, which no map covers.
+      if (route?.kind !== expected.kind || (!REAL_HELPER && route?.class !== expected.class))
+        record('route_mismatch')
     }
     if (!expected) return
     if (!REAL_HELPER) {
