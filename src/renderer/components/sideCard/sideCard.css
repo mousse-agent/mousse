@@ -223,11 +223,13 @@
   min-width: 0;
 }
 
+/* Its -4px side margins widen its hit area past the heading's text; the cap adds them back, else a heading sized to
+   the button's content holds it 8px short and cuts a collapsed note ("0 of 2 d…") with room to spare. */
 .side-card-section-toggle {
   display: flex;
   align-items: center;
   gap: 6px;
-  max-width: 100%;
+  max-width: calc(100% + 8px);
   margin: -2px -4px;
   padding: 2px 4px;
   border: 0;

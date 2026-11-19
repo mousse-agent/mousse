@@ -1,21 +1,6 @@
 import { Circle, CircleCheck, CircleDotDashed, CircleX } from '../../lib/icons'
+import type { TodoEntry, TodoStatus } from '../../lib/todoList'
 import './todoChecklist.css'
-
-export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled'
-
-/** One line of a to-do list. */
-export interface TodoEntry {
-  id: string
-  text: string
-  status: TodoStatus
-  /** A short note on it, shown in the tooltip. */
-  note?: string
-}
-
-/** How far a list is, in words: "2 of 5 done". */
-export function todoProgress(entries: readonly TodoEntry[]): string {
-  return `${entries.filter((entry) => entry.status === 'completed').length} of ${entries.length} done`
-}
 
 const STATUS_LABEL: Record<TodoStatus, string> = {
   pending: 'To do',

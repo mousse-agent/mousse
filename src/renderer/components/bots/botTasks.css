@@ -40,8 +40,7 @@
   z-index: 20;
   box-sizing: border-box;
   width: min(300px, calc(100vw - 32px));
-  max-height: min(420px, calc(100vh - 140px));
-  overflow-y: auto;
+  /* The list scrolls itself past about seven rows (todoChecklist.css). */
   padding: 10px 12px 10px;
   border-radius: var(--ui-menu-radius, 10px);
   background: var(--floating-surface, rgb(var(--surface-elevated-rgb)));
