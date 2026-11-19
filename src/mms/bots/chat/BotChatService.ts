@@ -615,6 +615,8 @@ export class BotChatService {
   private async send(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode; node?: string } }, tap?: { questionId: string; choice: string }): Promise<{ message: BotChatMessage }> {
     turnTimingBegin(input.botId)
     const definition = this.engine.definitionOf(input.botId)
+    // The turn's internet check starts beside the work below, so it is ready when the turn is sent.
+    if (!tap) this.engine.prefetchChatChecks(input.botId)
     const text = input.text.trim()
     if (!text && !input.attachments?.length) throw new BotEngineError('invalid_params', 'The message is empty.')
     const existing = this.store.messageByRequest(input.clientRequestId)

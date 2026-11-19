@@ -4361,6 +4361,11 @@ export class OrchestratorService extends EventEmitter {
     registered: AppToolTurn,
     input: { browser?: AppToolTurn['browser']; onPublishApplet?: AppToolTurn['onPublishApplet']; userContent: string; instanceId: string; model: string; approvals: RunPolicy['approvals']; botInstructions?: string; botPreamble?: string; grants?: EffectiveAgentGrants }
   ): Promise<TurnAppContext> {
+    // The relay's listing and the running note read nothing the skills change: they are read side by side with them.
+    // Only a profile with an MCP manager can relay; the others start the turn without waiting.
+    const relayRead = this.mcpManager ? this.relayForTurn(registered) : Promise.resolve(undefined)
+    // What already runs for the turn's folder, read now: the agent reuses a running server instead of starting another.
+    const runningRead = this.runningNoteFor(registered).finally(() => turnTimingMark(registered.threadId, 'running'))
     let skills: Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'> = { enabledSkills: [], loadedSkills: [] }
     try {
       skills = await prepareSkills({
@@ -4403,11 +4408,7 @@ export class OrchestratorService extends EventEmitter {
     // settings, plugins or servers; a compaction keeps it. The text is the same on every turn of the activation (no
     // time or per-turn value in it), so the prompt cache holds across them.
     const appletCatalogue = this.appletStore && !turn.bot ? this.appletCatalogue() : undefined
-    // Only a profile with an MCP manager can relay; the others start the turn without waiting.
-    const relay = this.mcpManager ? await this.relayForTurn(turn) : undefined
-    // What already runs for the turn's folder, read now: the agent reuses a running server instead of starting another.
-    const running = await this.runningNoteFor(turn)
-    turnTimingMark(turn.threadId, 'running')
+    const [relay, running] = await Promise.all([relayRead, runningRead])
     // The list the thread holds now; a definition's list is its turn's, and a bot's follows its grant.
     const capabilityRevision = turn.definition || turn.bot ? undefined : this.capabilityRevisionOf(turn.threadId)
     return {

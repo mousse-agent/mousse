@@ -463,6 +463,8 @@ const REPLY_WAIT_MS = 5_000
  * reaches the bot as one input.
  */
 export const NOTICE_SETTLE_MS = 4_000
+/** How long an internet check started as the owner wrote (`prefetchChatChecks`) answers their turn's own: as long as a check's round is kept (`PROBE_CACHE_MS`). */
+export const CHAT_CHECK_KEPT_MS = 5_000
 /** The longest the oldest notice waits while more keep arriving. */
 export const NOTICE_SETTLE_MAX_MS = 30_000
 /** Most characters of notices one turn takes in, whole notices oldest first; the rest start the next turn at once. */
@@ -860,6 +862,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly wrapUps = new Set<string>()
   /** Each bot's next look at notices that wait to settle (`nextChat`). */
   private readonly settleTimers = new Map<string, { clear(): void }>()
+  /** Per bot, the internet check started as its owner wrote (`prefetchChatChecks`), until a chat turn's first check takes it. */
+  private readonly chatChecks = new Map<string, { instanceId: string; at: number; online: Promise<boolean> }>()
   /**
    * Notice classes of a bot (`<botId>:<class>`) whose last batch was cut at `NOTICE_BATCH_MAX_CHARS`: what stayed queued
    * starts at once. In memory only: after a restart it settles from when it was queued.
@@ -1581,6 +1585,25 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (running) this.store.db.afterCommit(() => this.wrapUps.add(running.id))
     }
     return undefined
+  }
+
+  /**
+   * The owner wrote: the internet check their turn makes before it is sent (`onlineBeforeSend`) starts now, on the entry
+   * Talk last ran on, beside saving the message, resolving the model and reading the context. The turn's first check
+   * takes this round when it is on that entry and under `CHAT_CHECK_KEPT_MS` old, as it would take a round the check
+   * kept; anything else checks as before, and an offline answer is still confirmed by a fresh round.
+   */
+  prefetchChatChecks(botId: string): void {
+    const connectivity = this.host.connectivity
+    if (!connectivity) return
+    try {
+      const model = this.store.registry(botId)?.model
+      const { slot } = turnModelOf(this.published(botId).main, { lane: 'chat', trigger: { kind: 'manual', input: '' } })
+      const instanceId = model?.rows?.[slot]?.instanceId ?? model?.selection.instanceId
+      if (instanceId) this.chatChecks.set(botId, { instanceId, at: this.monotonic(), online: connectivity.online({ instanceId }).catch(() => false) })
+    } catch {
+      // Only a head start: the turn checks as it always does.
+    }
   }
 
   /** After `queueChatInTx`'s commit: the chat lane starts what waits. */
@@ -2921,13 +2944,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const current = this.store.activation(payload.activationId)
     if (current) timingMark(current, 'refreshStart')
     const selection = current?.selection
-    if (selection) await this.refreshInstance(selection.instanceId)
-    if (current) timingMark(current, 'providerRefresh')
     // A turn of a bot that holds MCP tools reads the owner's servers first when the listing is cold, old or changed
     // (bounded, at most `BOT_MCP_WARM_MS`; a warm one returns at once), so work is offered the granted tools. A bot with
-    // no MCP permission starts and lists nothing: it reads the servers only when it calls `mcp_servers`.
-    if (this.host.mcp && current && (this.store.activeGrant(current.botId)?.manifest.mcp.length ?? 0) > 0) await this.host.mcp.warm()
-    if (current) timingMark(current, 'mcpWarm')
+    // no MCP permission starts and lists nothing: it reads the servers only when it calls `mcp_servers`. The two reads
+    // are independent, so they run side by side.
+    const mcp = this.host.mcp && current && (this.store.activeGrant(current.botId)?.manifest.mcp.length ?? 0) > 0 ? this.host.mcp : undefined
+    await Promise.all([
+      selection ? this.refreshInstance(selection.instanceId).then(() => { if (current) timingMark(current, 'providerRefresh') }) : undefined,
+      mcp ? mcp.warm().then(() => { if (current) timingMark(current, 'mcpWarm') }) : undefined
+    ])
   }
 
   prepare(payload: BotTurnPayload): PreparedBotTurn | { refused: string; code: string } {
@@ -4087,6 +4112,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private async online(row: BotActivationRow, options: { fresh?: boolean } = {}): Promise<boolean> {
     const connectivity = this.host.connectivity
     if (!connectivity) return true
+    const early = row.lane === 'chat' && !options.fresh ? this.chatChecks.get(row.botId) : undefined
+    if (early) {
+      this.chatChecks.delete(row.botId)
+      if (early.instanceId === row.selection?.instanceId && this.monotonic() - early.at < CHAT_CHECK_KEPT_MS) return early.online
+    }
     try {
       return await connectivity.online({ ...(row.selection ? { instanceId: row.selection.instanceId } : {}), ...(options.fresh ? { fresh: true } : {}) })
     } catch {
