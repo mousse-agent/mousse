@@ -15,20 +15,6 @@
       "expiresAt": "2026-11-19T08:18:05.846Z"
     },
     {
-      "task": "bot-browser-sharp",
-      "session": "Animatrix-a00dee",
-      "machine": "Animatrix",
-      "branch": "bot-browser-sharp",
-      "paths": [
-        "src/browser-worker/session/Session.ts",
-        "src/browser-worker/observation/screencast.ts",
-        "src/shared/browser/watched.ts",
-        "src/shared/bots/personal/browser.ts"
-      ],
-      "claimedAt": "2026-11-19T11:27:31.343Z",
-      "expiresAt": "2026-11-19T13:27:31.343Z"
-    },
-    {
       "task": "bot-done-list-drops-archived-and-old",
       "session": "Animatrix-5ccb01",
       "machine": "Animatrix",
