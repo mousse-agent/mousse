@@ -34,7 +34,7 @@ vi.mock('node:child_process', () => ({
     hooks.afterCwd?.()
     const relative = (path: string) =>
       isAbsolute(path) ? path : `/proc/self/fd/${directory}/${path}`
-    const child = { argv: ['node', ...args.slice(2)], exitCode: 0 }
+    const child = { argv: ['node', ...args.slice(2)], exitCode: 0, platform: process.platform }
     try {
       runInNewContext(args[1], {
         process: child,
