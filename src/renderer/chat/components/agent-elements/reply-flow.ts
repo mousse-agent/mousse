@@ -116,13 +116,19 @@ export function nextFlowStep(text: string, shown: number, target: number, size: 
  * words every `FLOW_TICK_MS`, catching up within about `FLOW_CATCH_UP_MS`; with no new text for
  * `FLOW_IDLE_MS`, a last word that ends a sentence shows too (`quietEnd`). With Animation speed Off
  * or reduced motion the words show as they come, with no flow. Not flowing, it is the whole text.
+ * A new `key` (another reply in the same place) starts the flow again from nothing, without remounting the caller.
  */
-export function useFlowingText(text: string, flowing: boolean): string {
+export function useFlowingText(text: string, flowing: boolean, key = ''): string {
   const still = useMotionScale() === 0;
   const [, setStep] = useState(0);
-  const state = useRef<{ shown: number; text: string; tick: number; idle: number; size: number; quiet: boolean } | null>(null);
-  state.current ??= { shown: 0, text, tick: 0, idle: 0, size: 0, quiet: false };
+  const state = useRef<{ key: string; shown: number; text: string; tick: number; idle: number; size: number; quiet: boolean } | null>(null);
+  state.current ??= { key, shown: 0, text, tick: 0, idle: 0, size: 0, quiet: false };
   const s = state.current;
+  if (s.key !== key) {
+    window.clearTimeout(s.tick);
+    window.clearTimeout(s.idle);
+    Object.assign(s, { key, shown: 0, tick: 0, idle: 0, size: 0, quiet: false });
+  }
   // New text: the reply is being written again.
   if (s.text !== text) s.quiet = false;
   s.text = text;
@@ -167,7 +173,7 @@ export function useFlowingText(text: string, flowing: boolean): string {
     }
     // `target` reads the state, which lives as long as the component.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [text, flowing, still, s]);
+  }, [text, flowing, still, s, key]);
 
   useEffect(
     () => () => {

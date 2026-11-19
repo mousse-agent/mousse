@@ -56,7 +56,7 @@ const { ChatsSidebar } = await import('../../src/renderer/components/chats/Chats
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { useThreadFilterStore } = await import('../../src/renderer/stores/threadFilterStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
-const { botMessageScroller, DOING_HOLD_MS } = await import('../../src/renderer/components/bots/BotChatView')
+const { botMessageScroller, DOING_HOLD_MS, BOT_HANDOFF_MS } = await import('../../src/renderer/components/bots/BotChatView')
 const { SETTLE_MS, clearBotLiveReplies } = await import('../../src/renderer/stores/botLiveReplies')
 const { FLOW_CATCH_UP_MS } = await import('../../src/renderer/chat/components/agent-elements/reply-flow')
 
@@ -916,7 +916,7 @@ describe('while it works', () => {
     // A chat opened mid-turn says the step the turn is on, from the page it loaded.
     expect(typing.getAttribute('aria-label')).toBe('Inbox helper: Searching the web')
     expect(typing.querySelector('.bot-typing-status')?.firstChild?.textContent).toBe('Searching the web')
-    expect(typing.querySelectorAll('.bot-typing-bubble i')).toHaveLength(3)
+    expect(typing.querySelectorAll('.bot-typing-row i')).toHaveLength(3)
     expect(transcript().querySelector('.chat-spin, .bot-chip, .chat-run-status')).toBeNull()
     expect(transcript().textContent).not.toContain('is working')
     expect(presence()?.textContent).toBe('typing…')
@@ -942,7 +942,7 @@ describe('while it works', () => {
     }
     try {
       await open({ ...inbox, state: 'working', stateText: 'Working…' })
-      const dots = [...transcript().querySelectorAll('.bot-typing-bubble i')]
+      const dots = [...transcript().querySelectorAll('.bot-typing-row i')]
       const words = () => transcript().querySelector('.bot-typing-status')!
       const running = () => started.filter((record) => !record.cancelled)
       const onDots = () => running().filter((record) => dots.includes(record.element))
@@ -1011,7 +1011,7 @@ describe('while it works', () => {
   it('says Waiting for internet where it would type, with nothing moving, and still offers Stop', async () => {
     await open({ ...inbox, state: 'working', stateText: 'Waiting for internet', waiting: 'internet' })
     expect(transcript().querySelector('.bot-typing')?.textContent).toBe('Waiting for internet')
-    expect(transcript().querySelector('.bot-typing-bubble, .chat-spin')).toBeNull()
+    expect(transcript().querySelector('.bot-typing-row, .chat-spin')).toBeNull()
     expect(presence()?.textContent).toBe('waiting for internet')
     expect(sticker()).toBeNull()
     await click(button('Stop run'))
@@ -1040,7 +1040,8 @@ describe('a reply as it is written', () => {
     await act(async () => { for (const cb of thread.updated) cb({ threadId: 'home1', message: { id: 'r1', role: 'assistant', content, timestamp: AT, streaming: true, ...over } }) })
     await frame()
   }
-  const live = () => transcript().querySelector('.bot-live-reply')
+  // The reply's words; the typing row it took over from stays in its bubble, unseen.
+  const live = () => transcript().querySelector('.bot-live-reply .bot-turn-reply')
   const stopped = () => transcript().querySelector('.bot-cut-reply')
   // With Animation speed Off (as with reduced motion) the reply's whole words show as they come, with no flow: the tests
   // about what shows and when it goes read it at once. The flow itself has its own test, at normal speed.
@@ -1111,6 +1112,7 @@ describe('a reply as it is written', () => {
     act(() => setAnimationSpeed('normal'))
     await openWriting()
     expect(transcript().querySelector('.bot-typing')).not.toBeNull()
+    const bubble = transcript().querySelector('.bot-turn-bubble')
     // A word still being written is not shown: the dots stay until one is whole.
     await write('The')
     expect(live()).toBeNull()
@@ -1119,6 +1121,13 @@ describe('a reply as it is written', () => {
     // Its first whole word at once, the rest a step at a time.
     expect(live()?.textContent).toBe('The')
     expect(transcript().querySelector('.bot-typing')).toBeNull()
+    // The same bubble takes the words: the typing row fades out over them, then stays unseen, holding the bubble's size.
+    expect(transcript().querySelector('.bot-turn-bubble')).toBe(bubble)
+    expect(transcript().querySelector('.bot-turn-typing.is-leaving')?.getAttribute('aria-hidden')).toBe('true')
+    expect(live()?.classList.contains('is-arriving')).toBe(true)
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, BOT_HANDOFF_MS + 20)) })
+    expect(transcript().querySelector('.bot-turn-typing.is-held')).not.toBeNull()
+    expect(live()?.classList.contains('is-arriving')).toBe(false)
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, FLOW_CATCH_UP_MS)) })
     expect(live()?.textContent).toBe('The first')
     const first = live()!.querySelector('.an-word')
@@ -1822,7 +1831,7 @@ describe('free while it works (docs/plans/bot-always-free.md)', () => {
     expect(words()?.textContent).toBe('Looking at your files')
     await act(async () => fake.emit.activity('inbox', null, 'act_c1', 'Checking your shopping list now'))
     expect(words()?.textContent).toBe('Checking your shopping list now')
-    expect(typing().querySelectorAll('.bot-typing-bubble i')).toHaveLength(3)
+    expect(typing().querySelectorAll('.bot-typing-row i')).toHaveLength(3)
     expect(typing().getAttribute('aria-label')).toBe('Inbox helper: Checking your shopping list now')
     // A newer line replaces it, and a long one shows whole.
     const long = 'Reading the three store pages you sent and checking which of them still have the 2 TB drive in stock, with delivery to Pune before Friday'

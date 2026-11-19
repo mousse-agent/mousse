@@ -153,16 +153,29 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
    it is doing now, in full (it wraps; "Working…" until it says), with a light band that runs on from the dots' wave through the words: a bright
    copy of them, seen through a band as wide as they are whose mask is bright only in its middle third. TypingDots moves
    the band across and the copy against it, so the copy's letters stay on the words. Still, the words are plain. */
-.bot-typing-bubble { display: inline-flex; align-items: flex-start; gap: 8px; padding: 7px 13px; }
+/* The turn's one bubble (BotTurn): the typing row and the reply share its single grid cell, so the cell is as large as
+   the larger of them. The row sits in a paragraph's line box (.an-md-p, as the reply's first line), so the bubble is as
+   tall typing as with one line of reply. At the handoff the row fades out as the words fade in, then stays unseen. */
+.bot-turn-bubble { display: grid; }
+.bot-turn-bubble > * { grid-area: 1 / 1; min-width: 0; }
+.bot-turn-place { user-select: none; -webkit-user-select: none; }
+.bot-turn-place > .bot-turn-typing.an-md-p { display: flex; align-items: center; min-height: 1lh; margin: 0; white-space: normal; }
+.bot-turn-typing.is-held { visibility: hidden; }
+.bot-turn-typing.is-leaving { animation: bot-turn-out calc(180ms * var(--ui-motion-scale, 1)) ease-out both; }
+.bot-turn-reply.is-arriving { animation: bot-turn-in calc(180ms * var(--ui-motion-scale, 1)) ease-out both; }
+@keyframes bot-turn-out { to { opacity: 0; } }
+@keyframes bot-turn-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .bot-turn-typing.is-leaving, .bot-turn-reply.is-arriving { animation: none; } }
+.bot-typing-row { display: inline-flex; align-items: flex-start; gap: 8px; }
 .bot-typing-dots { display: inline-flex; flex: none; align-items: center; gap: 4px; height: 18px; }
 .bot-typing-dots > i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); opacity: .35; }
-.bot-typing-bubble.is-still .bot-typing-dots > i { opacity: .6; }
+.bot-typing-row.is-still .bot-typing-dots > i { opacity: .6; }
 .bot-typing-status { position: relative; min-width: 0; font-size: var(--bot-meta); line-height: 18px; color: var(--text-secondary); overflow-wrap: anywhere; }
 .bot-typing-glint { position: absolute; inset: 0; pointer-events: none; user-select: none; transform: translateX(-100%);
   -webkit-mask-image: linear-gradient(90deg, transparent 32%, #000 50%, transparent 68%); mask-image: linear-gradient(90deg, transparent 32%, #000 50%, transparent 68%); }
 .bot-typing-glint > span { position: absolute; inset: 0; color: var(--text-primary); transform: translateX(100%); }
 @media (forced-colors: active) { .bot-typing-glint { display: none; } }
-.bot-status-line { margin: 0; padding: 7px 13px; font-size: var(--bot-meta); color: var(--text-secondary); }
+.bot-status-line { margin: 0; font-size: var(--bot-meta); line-height: 18px; color: var(--text-secondary); }
 @media (prefers-reduced-motion: reduce) { .bot-worked, .bot-worked-chevron { transition: none; } }
 /* An open ask: quick replies under the bubble, the details on demand. */
 .bot-ask-replies { display: flex; flex-direction: column; gap: 6px; max-width: 520px; }

@@ -460,39 +460,57 @@ function SystemLine({ row }: { row: Extract<BotChatRow, { kind: 'system' }> }) {
   return <p className={className} role={row.note === 'error' ? 'alert' : 'note'} {...(row.title ? { title: row.title } : {})} {...(row.of ? { 'data-message-id': row.of } : {})}><span>{row.text}</span></p>
 }
 
-/**
- * While the chat's turn runs: the bot's next message, typing, as a messaging app shows it: three dots in a small bubble
- * in the bot's column, the only thing in the chat that moves, and beside them what it is doing now (`useDoingLine`),
- * in full. Waiting for the internet, it says so instead, still.
- */
-function BotTyping({ bot, starts, offline, doing }: { bot: BotSummary; starts: boolean; offline: boolean; doing: string }) {
-  return <article className={`chat-participant-message from-agent bot-message bot-typing${starts ? ' is-group-start' : ''}`} role="status" aria-label={offline ? OFFLINE_TEXT : `${bot.name}: ${doing}`}>
-    <div className="bot-message-line">
-      {offline
-        ? <p className="bot-bubble bot-status-line">{OFFLINE_TEXT}</p>
-        : <TypingDots status={doing} />}
-    </div>
-  </article>
-}
+/** How long the typing row and the first words of the reply cross, before the speed scale. */
+export const BOT_HANDOFF_MS = 180
 
 /**
- * The reply the chat's turn is writing, in the bubble its message will have: whole words at an even pace, each fading in
- * as it shows (`useFlowingText`), so it reads as a steady flow and lines already shown never re-wrap. Until its first
- * word is whole, the typing bubble stays. Only this renders as the reply grows; its message, once posted, takes its place.
+ * While the chat's turn runs: the bot's next message, as a messaging app shows it. One bubble, mounted from the first
+ * typing dots to the reply's last word, so nothing in the chat moves when the reply starts:
+ * - Typing: three dots and beside them what it is doing now (`useDoingLine`), in full, the only thing that moves.
+ *   Waiting for the internet, it says so instead, still.
+ * - Writing: the reply in whole words at an even pace, each fading in (`useFlowingText`), so lines already shown never
+ *   re-wrap. Until its first word is whole the dots stay.
+ * - The handoff: the reply's words and the typing row share one place in the bubble. The row fades out as the words
+ *   fade in (`BOT_HANDOFF_MS`; at once with motion off), then stays there unseen and still, keeping the bubble at least
+ *   as tall and as wide as it was, so the bubble never shrinks under the reader. The reply's first line is as tall as
+ *   the typing row (a paragraph's line, `.bot-turn-typing`), so it does not grow either.
+ * Its message, once posted, takes its place; a next reply of the same turn starts from the dots again.
  */
-function BotLiveReply(props: { bot: BotSummary; starts: boolean; offline: boolean; doing: string; onGrow: () => void }) {
-  const reply = useBotLiveReply(props.bot.id)
+function BotTurn({ bot, starts, offline, doing, onGrow }: { bot: BotSummary; starts: boolean; offline: boolean; doing: string; onGrow: () => void }) {
+  const reply = useBotLiveReply(bot.id)
   // Each reply of the turn is paced from its own start.
-  return <FlowingLiveReply key={reply?.messageId ?? ''} text={reply?.text ?? ''} {...props} />
-}
-
-function FlowingLiveReply({ bot, starts, offline, doing, onGrow, text }: { bot: BotSummary; starts: boolean; offline: boolean; doing: string; onGrow: () => void; text: string }) {
-  const shown = useFlowingText(text, true)
+  const shown = useFlowingText(reply?.text ?? '', true, reply?.messageId ?? '')
+  const writing = shown !== ''
+  const scale = useMotionScale()
   useLayoutEffect(onGrow, [shown, onGrow])
-  if (!shown) return <BotTyping bot={bot} starts={starts} offline={offline} doing={doing} />
-  return <article className={`chat-participant-message from-agent bot-message bot-live-reply${starts ? ' is-group-start' : ''}`} aria-busy="true">
+  // The words beside the dots as the reply took over: the unseen row keeps them, so its size holds still.
+  const held = useRef(doing)
+  if (!writing) held.current = doing
+  // `leaving`: the typing row fading out over the first words.
+  const [leaving, setLeaving] = useState(false)
+  const wasWriting = useRef(writing)
+  useLayoutEffect(() => {
+    const was = wasWriting.current
+    wasWriting.current = writing
+    if (!writing || was || scale === 0) return
+    setLeaving(true)
+    const timer = setTimeout(() => setLeaving(false), BOT_HANDOFF_MS * scale)
+    return () => {
+      clearTimeout(timer)
+      setLeaving(false)
+    }
+  }, [writing, scale])
+  const typing = <span className={`an-md-p bot-turn-typing${writing ? leaving ? ' is-leaving' : ' is-held' : ''}`} aria-hidden={writing || undefined}>
+    {offline && !writing ? <span className="bot-status-line">{OFFLINE_TEXT}</span> : <TypingDots status={writing ? held.current : doing} still={writing && !leaving} />}
+  </span>
+  return <article className={`chat-participant-message from-agent bot-message bot-turn ${writing ? 'bot-live-reply' : 'bot-typing'}${starts ? ' is-group-start' : ''}`}
+    {...(writing ? { 'aria-busy': true } : { role: 'status', 'aria-label': offline ? OFFLINE_TEXT : `${bot.name}: ${doing}` })}>
     <div className="bot-message-line">
-      <div className="bot-bubble"><BotMarkdown text={shown} className="bot-markdown" streaming /></div>
+      <div className="bot-bubble bot-turn-bubble">
+        {/* A paragraph's line box, as the reply's own first line has: the typing row is as tall as one line of it. */}
+        <div className="an-markdown bot-markdown bot-turn-place">{typing}</div>
+        {writing && <BotMarkdown text={shown} className={`bot-markdown bot-turn-reply${leaving ? ' is-arriving' : ''}`} streaming />}
+      </div>
     </div>
   </article>
 }
@@ -577,13 +595,14 @@ const TYPING_SHIMMER_DELAY_MS = 2 * TYPING_DOT_STEP_MS + 0.3 * TYPING_CYCLE_MS +
  * The typing dots move smoothly, every frame, on the compositor (opacity and transform only). They are Web Animations
  * rather than a CSS loop for the reason Turning gives (lib/turning.tsx): a repeating CSS animation wakes the main thread
  * at every iteration because React listens for `animationiteration`. The status's shimmer is transforms too. With
- * Animation speed Off or reduced motion all of it stays still, and the words are plain.
+ * Animation speed Off or reduced motion all of it stays still, and the words are plain; so is a row held unseen under
+ * a reply (`hold`).
  */
-function TypingDots({ status }: { status: string }) {
+function TypingDots({ status, still: hold = false }: { status: string; still?: boolean }) {
   const dotsRef = useRef<HTMLSpanElement>(null)
   const glintRef = useRef<HTMLSpanElement>(null)
   const bubbleRef = useRef<HTMLSpanElement>(null)
-  const still = useMotionScale() === 0
+  const still = useMotionScale() === 0 || hold
   useLayoutEffect(() => {
     if (still) return
     const dots = Array.from(dotsRef.current?.children ?? [])
@@ -615,7 +634,7 @@ function TypingDots({ status }: { status: string }) {
       }
     })
   }, [still])
-  return <span ref={bubbleRef} className={`bot-bubble bot-typing-bubble${still ? ' is-still' : ''}`}>
+  return <span ref={bubbleRef} className={`bot-typing-row${still ? ' is-still' : ''}`}>
     <span ref={dotsRef} className="bot-typing-dots" aria-hidden><i /><i /><i /></span>
     <span className="bot-typing-status">
       {status}
@@ -929,9 +948,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
                 asked={message.replyTo ? byId.get(message.replyTo.id) : undefined} />}
           </Fragment>
         })}
-        {writing
-          ? <BotLiveReply bot={bot} starts={typingStarts} offline={offline} doing={doing} onGrow={followEnd} />
-          : (working || offline) && <BotTyping bot={bot} starts={typingStarts} offline={offline} doing={doing} />}
+        {(writing || working || offline) && <BotTurn bot={bot} starts={typingStarts} offline={offline} doing={doing} onGrow={followEnd} />}
         {/* A run still working before its reply: the preview follows it here. */}
         {preview && !previewOn && <div className="bot-browser-live">{preview}</div>}
         {bot.state === 'paused' && <p className="bot-paused-line" role="status">{bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused'}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
