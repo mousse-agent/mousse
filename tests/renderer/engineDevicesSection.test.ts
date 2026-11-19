@@ -176,6 +176,22 @@ describe('Settings → Devices, new networking', () => {
     expect(d.called('netEngine.enable')).toHaveLength(1)
   })
 
+  it.each([
+    ['Start at login', true],
+    ['Not now', false]
+  ])('asks once about starting at login, and "%s" answers it', async (name, start) => {
+    const question = 'Start Mousse at login so your other computers can reach this one?'
+    const d = daemon({ loginStart: 'ask' })
+    await mount()
+    expect(host.textContent).toContain(question)
+    expect(button('Start at login')).toBeTruthy()
+    expect(button('Not now')).toBeTruthy()
+    await click(button(name))
+    expect(d.called('netEngine.loginStart')).toEqual([{ start }])
+    await d.change({ loginStart: undefined })
+    expect(host.textContent).not.toContain(question)
+  })
+
   it('shows nothing in a build without the helper while the switch is off', async () => {
     daemon({ enabled: false, on: false, helper: { state: 'not_in_build' } })
     await mount()

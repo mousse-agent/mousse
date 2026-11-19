@@ -13,7 +13,8 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.join',
   'netEngine.retry',
   'netEngine.remove',
-  'netEngine.address.add'
+  'netEngine.address.add',
+  'netEngine.loginStart'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
 
@@ -97,6 +98,11 @@ export interface NetEngineStatus {
   invites?: NetEngineInviteState[]
   /** Joins of a Send link waiting for their code (Phase 1b). */
   joins?: NetEngineJoinState[]
+  /**
+   * `ask`: the start-at-login question waits for this window (design §10). Answered with `netEngine.loginStart
+   * {start}`; asked once per installation, while the switch is on.
+   */
+  loginStart?: 'ask'
 }
 
 /** An invitation this computer made, while it is open (Phase 1b §5). */

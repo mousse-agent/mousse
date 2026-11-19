@@ -19,7 +19,13 @@ import { checkNodePolicy } from '../net/checkNodePolicy'
 import type { EngineCaller, RpcMethod } from '../net/contracts'
 import type { NetRuntime, NetService } from '../net/NetService'
 import type { NodePolicy, NodePolicyChange } from '../net/store/nodePolicy'
-import { engineControl, engineControlProblems, engineLimitProblems, engineLimits } from './limits'
+import {
+  engineControl,
+  engineControlProblems,
+  engineLimitProblems,
+  engineLimits,
+  packagedBuild
+} from './limits'
 import { EngineSessions } from './sessions'
 import type { BridgeClient, EngineClient } from './session/client'
 import type { EngineConnection } from './session/transport'
@@ -32,6 +38,7 @@ import {
   insecureFileKey,
   insecureFileKeyProblems,
   launchHelper,
+  packagedHelperCommit,
   type LaunchedHelper
 } from './helper/process'
 import {
@@ -40,6 +47,7 @@ import {
   HelperSupervisor,
   type HelperStatus
 } from './helper/supervisor'
+import type { LoginStartQuestion } from './loginStart'
 import { EnginePairing, type PairingStep } from './pairing'
 import { EngineEditor, engineEditorRefusal, type EngineEditorRights, type EngineEditorTestOptions } from './editor'
 import { TunnelError } from '../net/editor/tunnel'
@@ -96,6 +104,8 @@ export class NetEngineService implements EngineDirectoryPort {
   private supervisor?: HelperSupervisor
   /** Why this profile's networking could not start, or turned itself off, until it starts again. */
   private problem?: string
+  /** The engine commit an installed app's helper must be built from, read at its launch. */
+  private packagedCommit?: string
   /** Starts a helper; tests put a fake one here. By default, the binary of this build (design §1). */
   launcher?: () => Promise<LaunchedHelper>
   /** Tests stop this computer at a pairing step, as a crash would (until the engine starts again). */
@@ -125,6 +135,8 @@ export class NetEngineService implements EngineDirectoryPort {
       name?: () => string
       /** Something a window shows changed: the switch, the helper, a device's row or whether it is online. */
       onChanged?: () => void
+      /** The installation's start-at-login question (§10), asked when the switch is turned on in a window. */
+      loginStart?: LoginStartQuestion
     }
   ) {
     options.net.onSetAside((suffix) => this.setAside(suffix))
@@ -199,10 +211,24 @@ export class NetEngineService implements EngineDirectoryPort {
     await this.start()
   }
 
-  /** The switch in Settings: on, and the helper runs. */
+  /**
+   * The switch in Settings: on, and the helper runs. The start-at-login question is settled beside the helper's
+   * start (it reads the startup entry), so the reply carries it.
+   */
   async switchOn(): Promise<void> {
     await this.enable()
-    await this.startHelper()
+    const question = this.options.loginStart?.turnedOn().catch(() => false)
+    try {
+      await this.startHelper()
+    } finally {
+      await question
+    }
+  }
+
+  /** The window's answer to the start-at-login question: `start` installs the existing startup entry. */
+  async answerLoginStart(start: boolean): Promise<void> {
+    await this.options.loginStart?.answer(start)
+    this.changed()
   }
 
   /** Turns the switch off: the helper gets `shutdown` and the engine stops. Pairings stay for the next time. */
@@ -231,6 +257,7 @@ export class NetEngineService implements EngineDirectoryPort {
       approvals: this.started?.pairing.pendingApprovals() ?? [],
       ...(this.routes().length ? { routes: this.routes() } : {}),
       ...(this.sharedAccount() ? { sharedAccount: true } : {}),
+      ...(this.settings()?.enabled && this.options.loginStart?.asking() ? { loginStart: 'ask' as const } : {}),
       scanIntervalMs: engineLimits().scanIntervalMs
     }
   }
@@ -621,6 +648,8 @@ export class NetEngineService implements EngineDirectoryPort {
     this.supervisor ??= new HelperSupervisor({
       launch: () => (this.launcher ?? (() => this.launchBuilt()))(),
       use: (pipe) => this.useHelper(pipe),
+      // An installed app runs only the helper it was packaged with (`launchBuilt` reads which).
+      expectedBuild: () => (this.launcher ? undefined : this.packagedCommit),
       mismatch: () => {
         this.writeSettings(false)
         this.problem = HELPER_TEXT.mismatch
@@ -650,6 +679,7 @@ export class NetEngineService implements EngineDirectoryPort {
   async launchBuilt(options: { port?: number } = {}): Promise<LaunchedHelper> {
     const binary = findNetHelper()
     if (!binary) throw new HelperNotInBuild()
+    this.packagedCommit = packagedBuild() ? packagedHelperCommit(binary) : undefined
     // A profile folder copied from another profile carries that profile's endpoint: it is set aside.
     const settings = this.settings()
     if (settings && settings.profile !== this.options.profileId) {
