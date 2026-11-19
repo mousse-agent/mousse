@@ -97,13 +97,15 @@ describe.runIf(REAL_HELPER)('phase1a.path-switch', () => {
         )
         await step(undefined, () => eventually(() => expect(runs).toBe(1), 30_000))
 
-        // Both clocks go to the moment the caller's path is due for renewal.
+        // Both clocks go to the moment the caller's path is due for renewal. The owner's goes first: the caller
+        // renews within a second of its own move, and an owner still on the old time refuses the renewed path's
+        // certificate as not yet valid. The manual clock then never reaches the retry, so the switch never comes.
         const up = upsOf(pair.callerComputer.engine).get(oldConn)
         expect(up?.dir).toBe('out')
         const deadline = Number(up!.deadline)
         const now = Number((await pair.callerComputer.engine.request('test.clock', {})).now)
         const advance = deadline - SKEW_SECS - LEAD_SECS - now
-        for (const computer of [pair.callerComputer, pair.ownerComputer])
+        for (const computer of [pair.ownerComputer, pair.callerComputer])
           await computer.engine.request('test.clock', { advance_secs: advance })
 
         // The renewed path is in use, and the old one closed as replaced once the app said so.
