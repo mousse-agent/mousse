@@ -65,9 +65,19 @@ export function SelectionReplyButton() {
 
   useEffect(() => {
     let frame = 0
+    // Whether text was selected when last read. Reading the selection lays the page out, so a scroll or
+    // a window resize reads it only while something is selected (every change of selection reads it).
+    let selected = false
     const update = () => {
       cancelAnimationFrame(frame)
-      frame = requestAnimationFrame(() => setSpot(dragging.current ? null : readSpot()))
+      frame = requestAnimationFrame(() => {
+        const selection = window.getSelection()
+        selected = !!selection && !selection.isCollapsed
+        setSpot(dragging.current || !selected ? null : readSpot())
+      })
+    }
+    const follow = () => {
+      if (selected) update()
     }
     // The button waits until the mouse lets go, so it never jumps about while the selection is being made.
     const down = (event: PointerEvent) => {
@@ -82,15 +92,15 @@ export function SelectionReplyButton() {
     document.addEventListener('selectionchange', update)
     document.addEventListener('pointerdown', down, true)
     document.addEventListener('pointerup', up, true)
-    window.addEventListener('scroll', update, true)
-    window.addEventListener('resize', update)
+    window.addEventListener('scroll', follow, true)
+    window.addEventListener('resize', follow)
     return () => {
       cancelAnimationFrame(frame)
       document.removeEventListener('selectionchange', update)
       document.removeEventListener('pointerdown', down, true)
       document.removeEventListener('pointerup', up, true)
-      window.removeEventListener('scroll', update, true)
-      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', follow, true)
+      window.removeEventListener('resize', follow)
     }
   }, [])
 
