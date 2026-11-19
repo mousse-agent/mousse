@@ -163,6 +163,7 @@ describe('explicit profile store roots', () => {
       scheduledWebhookServer: { stop: async () => { calls.push('webhooks') } },
       scheduled: { shutdown: () => { calls.push('scheduled'); if (failed === 'scheduled') throw new Error('scheduled failed') } },
       orchestrator: { holdApprovals: () => undefined, shutdown: async () => { calls.push('orchestrator') } },
+      netEngine: { stop: async () => { calls.push('netEngine') } },
       net: { shutdown: async () => { calls.push('net') } },
       requests: { waitForIdle: async () => { calls.push('requests') } },
       antigravity: { stop: () => { calls.push('antigravity') } },
@@ -178,7 +179,7 @@ describe('explicit profile store roots', () => {
       message: 'Failed to drain profile services',
       errors: [expect.objectContaining({ message: `${failed} failed` })]
     })
-    expect(calls).toEqual(['begin', 'undoRetention', 'pullRequestWatch', 'storageCleanup', 'storageUsage', 'lifecycle', 'platform', 'webhooks', 'scheduled', 'orchestrator', 'net', 'requests', 'antigravity', 'claudeSubscription', 'codex', 'pty', 'mcp'])
+    expect(calls).toEqual(['begin', 'undoRetention', 'pullRequestWatch', 'storageCleanup', 'storageUsage', 'lifecycle', 'platform', 'webhooks', 'scheduled', 'orchestrator', 'netEngine', 'net', 'requests', 'antigravity', 'claudeSubscription', 'codex', 'pty', 'mcp'])
     expect(service.started).toBe(true)
   })
 
@@ -201,6 +202,7 @@ describe('explicit profile store roots', () => {
       // The scheduler and requests settle late: the clean epoch end must still come after them.
       scheduled: { shutdown: async () => { await new Promise((resolve) => setTimeout(resolve, 20)); calls.push('scheduled done'); if (failing === 'scheduled') throw new Error('scheduled failed') } },
       orchestrator: { holdApprovals: () => undefined, shutdown: async () => { calls.push('orchestrator') }, setRunEngine: () => { calls.push('detach') }, setBotDispatcher: () => undefined, setBotThreads: () => undefined, setBotAppTools: () => undefined },
+      netEngine: { stop: async () => { calls.push('netEngine') } },
       net: { shutdown: async () => { calls.push('net') } },
       requests: { waitForIdle: async () => { await new Promise((resolve) => setTimeout(resolve, 10)); calls.push('requests idle') } },
       antigravity: { stop: () => { calls.push('antigravity') } },
@@ -259,6 +261,8 @@ describe('profile start order (H4)', () => {
           calls.push('net')
         }
       },
+      // The engine starts after v1 (a profile that joined another computer's network finds v1 on).
+      netEngine: { start: async () => { calls.push('netEngine') } },
       orchestrator: {
         recoverRunEngineOnBoot: () => { engine.reconcileOnBoot(); calls.push('recover') },
         scheduleStartupQueueRecovery: () => undefined
@@ -280,7 +284,7 @@ describe('profile start order (H4)', () => {
     try {
       const startOwned = (MmsProfileServices.prototype as unknown as { startOwned: (this: typeof service) => Promise<void> }).startOwned
       await startOwned.call(service)
-      expect(calls).toEqual(['recover', 'workers', 'scheduled', 'net'])
+      expect(calls).toEqual(['recover', 'workers', 'scheduled', 'net', 'netEngine'])
       // Boot recovery ran first, so the remote send's live run was not interrupted as a leftover.
       expect(engine.getRun(netRunId)!.status).toBe('running')
     } finally {
