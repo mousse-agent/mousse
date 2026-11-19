@@ -66,8 +66,8 @@
      popovers, selected tabs and rows, the profile button, avatars, the chat pane's edge). It is a 1px ring drawn by
      specular.css, brightest at the top and gone by the bottom, in place of borders and inset lines. A theme sets its
      three stops on the page root. --ui-specular is kept for the rules that still list it and adds nothing. */
-  --specular-top: rgba(255, 255, 255, 0.2);
-  --specular-mid: rgba(255, 255, 255, 0.04);
+  --specular-top: rgba(255, 255, 255, 0.14);
+  --specular-mid: rgba(255, 255, 255, 0.03);
   --specular-end: rgba(255, 255, 255, 0);
   --specular-ring: linear-gradient(180deg, var(--specular-top), var(--specular-mid) 55%, var(--specular-end) 100%);
   --ui-specular: 0 0 #0000;

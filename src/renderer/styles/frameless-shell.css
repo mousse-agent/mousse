@@ -10,8 +10,8 @@
 
 :root {
   --pane-radius: 12px;
-  /* Mousse Dark's black canvas gives #121212; other dark themes lift their own canvas by the same step. */
-  --pane-surface: color-mix(in srgb, #fff 7%, var(--surface-base));
+  /* Mousse Dark's black canvas gives #090909, a touch above the sidebar; other dark themes lift their own canvas by the same step. */
+  --pane-surface: color-mix(in srgb, #fff 3.5%, var(--surface-base));
   /* The shared specular ring (polish.css) along the pane's edge: light on the edge, not a line. */
   --pane-sheen: var(--specular-ring);
   --pane-shadow: none;
