@@ -1,5 +1,5 @@
 import { ensureWindowsBrowserSandboxAccess } from '../../../shared/browser/windowsSandboxPermissions.mjs'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { access, mkdir, open, readFile, readdir, writeFile, rename, lstat } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -86,7 +86,9 @@ export class ManagedBrowserInstallerService implements ManagedBrowserInstaller {
     const fetcher = options.fetch ?? globalThis.fetch
     const release = await acquireInstallLock(root, options.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS, options.signal)
     this.installing.add(root)
-    const staging = join(stagingRoot(root), `mousse-${randomUUID()}`)
+    // A short name: Windows starts Chrome only while its folder plus the manifest it looks up there stays under
+    // 260 characters, and a deep home (a worktree's dev home) leaves little room. The install lock keeps names apart.
+    const staging = join(stagingRoot(root), `mousse-${randomBytes(4).toString('hex')}`)
     let versionPath: string | undefined
     let backupPath: string | undefined
     let placed = false
