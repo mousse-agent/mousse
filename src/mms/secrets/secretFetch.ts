@@ -239,5 +239,5 @@ function serviceReadFailure(error: unknown): string {
   if (pageFailureReason(error) === "its certificate isn't valid") {
     return "The service's certificate is not valid. Ask your owner to fix it before retrying."
   }
-  return 'The service could not be reached. Try again later.'
+  return 'The service read failed. The request may have reached the service and counts toward your limit. Try again later.'
 }
