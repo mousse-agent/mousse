@@ -5,7 +5,8 @@
  *
  * It needs the real helper (`MOUSSE_NET_HELPER`, a debug build: loopback routes and the browse file are debug-only);
  * without it, a check run fails with `no_helper` and a plain test run skips it. Its control, a helper built with
- * `no-rediscovery` (only the last working route is tried), fails it with `unreachable`.
+ * `no-rediscovery` (once a pairing has a last working route, only that route is tried), fails it with `unreachable`,
+ * which only the address change gives: the pairing and the restarts before it must work under the control too.
  * `scripts/net-engine-check.mjs phase1a.reconnect` runs it and prints the marker.
  */
 import { mkdtempSync, writeFileSync } from 'node:fs'
@@ -36,10 +37,8 @@ describe.runIf(REAL_HELPER)('phase1a.reconnect', () => {
   beforeAll(async () => {
     owner = await fabric.computer('owner')
     caller = await fabric.computer('caller')
-    // Pairing dials back to the addresses the joiner gave: a computer that cannot reach them is unreachable here too.
-    ;({ callerOnOwner, ownerOnCaller } = await step('unreachable', () =>
-      fabric.pair(owner, caller)
-    ))
+    // A working pairing first, both ways, with its own reason: `unreachable` is the address change's alone.
+    ;({ callerOnOwner, ownerOnCaller } = await step('not_paired', () => fabric.pair(owner, caller)))
   }, 120_000)
   afterAll(() => fabric.close(), 120_000)
 
