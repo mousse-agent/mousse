@@ -5506,8 +5506,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const marked = quietTurn ? withoutSilentMarker(said) : undefined
     const skippedCall = report && this.scheduledCallNotSent(row)
     const uncertainCall = report && !!this.store.get("SELECT id FROM bot_actions WHERE activation_id = ? AND kind = 'mcp' AND status = 'uncertain' LIMIT 1", row.id)
-    const lastCall = report ? this.actions.forWork(row.id) : undefined
-    const declinedRetry = lastCall?.status === 'declined'
+    const lastCall = uncertainCall ? this.actions.forWork(row.id) : undefined
+    const declinedRetry = lastCall?.status === 'declined' && !!this.store.get("SELECT id FROM bot_actions WHERE activation_id = ? AND kind = 'mcp' AND status = 'uncertain' AND target_json = ? LIMIT 1", row.id, lastCall.target_json)
     const reported = skippedCall && isSilentOutput(said) ? 'A scheduled call was not sent this run.' : marked?.text ?? said
     const uncertainty = 'The first attempt may already have gone through. Check before trying again.'
     const plain = isSilentOutput(reported) ? '' : reported
