@@ -1514,9 +1514,12 @@ useAppStore.subscribe((state, previous) => {
  * The side card overlay is temporary: it closes when the thread area widens
  * enough to dock the card (the card's switch stays on), when the thread changes,
  * when the app panel opens, and when a view without a thread replaces the
- * conversation. A narrow window therefore never opens it by itself.
+ * conversation (Chats counts as one unless a bot's thread shows in its pane,
+ * `botThreadShown`, the same test the card's visibility uses). A narrow window
+ * therefore never opens it by itself. The store subscriptions that apply this
+ * live in sideCardLogic.ts, which can read the bot's pane.
  */
-export function shouldCloseSideCardOverlay(state: AppState, previous: AppState): boolean {
+export function shouldCloseSideCardOverlay(state: AppState, previous: AppState, botThreadShown = false): boolean {
   if (!state.sideCardOverlayOpen) return false
   return state.sideCardFits !== false
     || state.mainAreaOpen
@@ -1524,9 +1527,5 @@ export function shouldCloseSideCardOverlay(state: AppState, previous: AppState):
     || state.settingsOpen
     || state.usageOpen
     || state.scheduledOpen
-    || state.sidebarMode === 'chats'
+    || (state.sidebarMode === 'chats' && !botThreadShown)
 }
-
-useAppStore.subscribe((state, previous) => {
-  if (shouldCloseSideCardOverlay(state, previous)) state.setSideCardOverlayOpen(false)
-})
