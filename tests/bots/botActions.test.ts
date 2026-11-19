@@ -4651,3 +4651,16 @@ it.each([1, 2])('E1 r2b an older argument contract fails closed and is removed: 
   expect((await aloneNext(t)).action.status).toBe('open')
   expect(f.store.get('SELECT key FROM bot_memory_state WHERE bot_id = ? AND key = ?', t.botId, row.key)).toBeUndefined()
 })
+
+// Round 3: ordinary sentences and the unchanged signature are free content.
+it.each([
+  'Thanks. See you soon.',
+  'Hope your day is going smoothly and you get a moment to enjoy a nice cup of tea.',
+  'Hope your day is off to a lovely start. Write to penny.helper@example.org anytime you like!'
+])('E1 r3 sentence boundaries do not invent addresses: %s', async prose => {
+  const signature = '\n\n-- Penny for Lucky\npenny.helper@example.org\nhttps://example.org/lucky'
+  const t = await aloneAsk('allow', 'send', 'Hope your day is off to a bright and easy start!' + signature)
+  const next = await aloneNext(t, { ...t.args, body: prose + signature })
+  expect(next.action).toMatchObject({ status: 'done', card_json: null })
+  expect(t.calls).toHaveLength(2)
+})

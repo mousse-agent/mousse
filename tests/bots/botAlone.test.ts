@@ -26,7 +26,7 @@ import { argumentContract } from '../../src/mms/bots/actions/BotAlone'
 it.each([
   '192.168.1.20', '2001:db8::1', '2001:0:0:0:0:0:0:1', '127.0.0.1:8080',
   'owner＠example.test', 'evil．com', 'evil。com', '\\\\evil\\share', 'tel:+12025550123',
-  'sms:+12025550123', 'http:/localhost', '123:8080', 'evil:8080/x', 'evil.c0m', 'ev\u200bil.com', 'evil\u200b.com', 'evil . com'
+  'sms:+12025550123', 'http:/localhost', '123:8080', 'evil:8080/x', 'evil.c0m', 'ev\u200bil.com', 'evil\u200b.com'
 ])('E1 r2 address-like content stays exact: %s', body => {
   expect(argumentContract({ body }, 'test-key').tokens.body).toHaveLength(1)
 })
@@ -48,3 +48,9 @@ it('E1 r2 object-valued places show scalar leaves and associated names in words'
   const result = '{"parent":{"id":"db-one","name":"Projects"}}'
   expect(placeLabel({ database_id: 'db-one', child: ['archive', { number: 2 }] }, result)).toBe('Projects and archive and 2')
 })
+
+it.each(['a. b', 'a .b', 'a . b', 'tea.\n\n-- Penny', 'Thanks. See you soon.'])(
+  'E1 r3 a dotted token requires adjacent labels: %s', body => {
+    expect(argumentContract({ body }, 'test-key').tokens.body).toEqual([])
+  }
+)
