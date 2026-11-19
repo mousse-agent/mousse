@@ -16,5 +16,8 @@ export const ENGINE_OWNER_METHODS: ReadonlySet<string> = new Set([
   routedNetMethod('page'),
   routedNetMethod('stage'),
   'bridge.artifacts.open',
-  'net.info'
+  'net.info',
+  // What this computer lets the pairing do here (its Devices summary), and a dispatched agent task (§9.1).
+  'bridge.access.mine',
+  'bridge.dispatch'
 ])

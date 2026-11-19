@@ -29,6 +29,11 @@ export interface EngineLimits {
   appendDeadlineMs: number
   /** The least time a result lookup is given, however little of the call's own deadline is left. */
   resultWaitFloorMs: number
+  /**
+   * How long the Hub waits for an engine pairing to open a thread's private stream (`bridge.hub.attach`), and for
+   * each page of a large answer it fetches.
+   */
+  hubRoutedDeadlineMs: number
   /** How often this profile's own delegation is checked for renewal while the engine is on. */
   renewIntervalMs: number
   /** The own delegation is renewed once it is due within this long. */
@@ -126,6 +131,7 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   blobDeadlineMs: 120_000,
   appendDeadlineMs: 60_000,
   resultWaitFloorMs: 15_000,
+  hubRoutedDeadlineMs: 30_000,
   renewIntervalMs: 60 * 60_000,
   renewDueWithinMs: 24 * 60 * 60_000,
   clockSkewMs: 600_000,
@@ -174,6 +180,7 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   blobDeadlineMs: 'MOUSSE_NET_ENGINE_BLOB_DEADLINE_MS',
   appendDeadlineMs: 'MOUSSE_NET_ENGINE_APPEND_DEADLINE_MS',
   resultWaitFloorMs: 'MOUSSE_NET_ENGINE_RESULT_WAIT_FLOOR_MS',
+  hubRoutedDeadlineMs: 'MOUSSE_NET_ENGINE_HUB_ROUTED_DEADLINE_MS',
   renewIntervalMs: 'MOUSSE_NET_ENGINE_RENEW_INTERVAL_MS',
   renewDueWithinMs: 'MOUSSE_NET_ENGINE_RENEW_DUE_WITHIN_MS',
   clockSkewMs: 'MOUSSE_NET_ENGINE_CLOCK_SKEW_MS',

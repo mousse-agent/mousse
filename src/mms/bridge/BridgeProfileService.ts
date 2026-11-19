@@ -531,7 +531,9 @@ export class BridgeProfileService {
       engine: {
         isEngine: (node) => this.peers.isEngine(node),
         bind: (stream, node) => this.peers.bind(stream, node),
-        verifyStream: (stream) => this.peers.verifyStream(stream)
+        verifyStream: (stream) => this.peers.verifyStream(stream),
+        resolveResult: (value, client, target, rpc, method, signal) =>
+          this.artifacts.resolveRouted(value, client, target, rpc, method, signal, this.peers)
       },
       resolveResult: (...args) => this.artifacts.resolveResult(...args)
     })
