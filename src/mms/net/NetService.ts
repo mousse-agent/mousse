@@ -150,11 +150,14 @@ import { isJoinVia } from '../../shared/net/via'
 import { isListedComputer } from '../../shared/net/listedComputer'
 import {
   PHONE_ENDPOINTS_METHOD,
+  PHONE_LAN_CARRIER,
   PHONE_WEBRTC_OFFER_METHOD,
   PHONE_WEBRTC_TRANSPORT,
   PhoneWebRtcAcceptor,
   classifyAddress,
+  directHostAddresses,
   nodeDataChannelFactory,
+  phoneLanAddresses,
   normalizeAddress,
   type AcceptedWebRtc,
   type PeerConnectionFactory
@@ -741,7 +744,7 @@ export class NetService {
         authorize: (_params, context) => {
           if (policy.isBlocked(context.caller.node)) throw new NetError('forbidden')
         },
-        handle: async (_params, context) => this.phoneEndpoints(context.carrier)
+        handle: async (_params, context) => this.phoneEndpoints(context.carrier, context.caller)
       })
       rpc.register({
         method: PHONE_WEBRTC_OFFER_METHOD,
@@ -2124,16 +2127,49 @@ export class NetService {
     return this.webrtc?.counts() ?? { pending: 0, live: 0 }
   }
   /**
-   * What a phone learns about direct paths, only over a session that came through Mousse ID
-   * (the hosted relay, or the WebRTC path itself). Everyone else learns nothing.
+   * What a phone learns about direct paths, only over a session that came through Mousse ID (the
+   * hosted relay, or the WebRTC path itself) or the automatic LAN listener. Everyone else learns
+   * nothing. The LAN addresses go only to another device of this account, so it can open its next
+   * session on the local network with no relay; WebRTC is offered only where the relay carried the
+   * session or its signalling.
    */
-  private phoneEndpoints(carrier: string | undefined): {
+  private phoneEndpoints(
+    carrier: string | undefined,
+    caller: SyncSession['peer']
+  ): {
     endpoints: []
     webrtc?: { v: 1 }
+    lan?: { v: 1; addresses: string[] }
   } {
-    if (carrier !== HOSTED_RELAY_TRANSPORT && carrier !== PHONE_WEBRTC_TRANSPORT)
-      return { endpoints: [] }
-    return this.webrtcWanted() ? { endpoints: [], webrtc: { v: 1 } } : { endpoints: [] }
+    const relayed = carrier === HOSTED_RELAY_TRANSPORT || carrier === PHONE_WEBRTC_TRANSPORT
+    if (!relayed && carrier !== PHONE_LAN_CARRIER) return { endpoints: [] }
+    const lan = this.phoneLan(caller)
+    return {
+      endpoints: [],
+      ...(relayed && this.webrtcWanted() ? { webrtc: { v: 1 as const } } : {}),
+      ...(lan.length ? { lan: { v: 1 as const, addresses: lan } } : {})
+    }
+  }
+  /** The LAN listener's private IPv4 URLs, for a device of this account other than this one. */
+  private phoneLan(caller: SyncSession['peer']): string[] {
+    try {
+      const self = this.state?.identity.self(),
+        port = this.transport?.lanPort()
+      if (!self || !port || caller.user !== self.user || caller.node === self.node) return []
+      if (
+        this.stopped ||
+        this.disabled ||
+        !this.config.enabled ||
+        !this.featureEnabled('netBridge')
+      )
+        return []
+      return phoneLanAddresses(
+        port,
+        this.options.phoneWebRtc?.hostAddresses?.() ?? directHostAddresses()
+      )
+    } catch {
+      return []
+    }
   }
   private async phoneWebRtcOffer(
     sdp: string,
@@ -2428,7 +2464,12 @@ export class NetService {
       admitPeer: (peer) => {
         if (!this.admitted(peer)) throw notConnected()
       },
-      ...(inbound?.carrier ? { carrier: inbound.carrier } : {}),
+      // RPC handlers tell a session on the automatic LAN listener from one on a configured listener.
+      ...(inbound?.lanRemote
+        ? { carrier: PHONE_LAN_CARRIER }
+        : inbound?.carrier
+          ? { carrier: inbound.carrier }
+          : {}),
       onAuthenticated: () => {
         if (inbound?.sameUserOnly && session.peer.user !== rt.identity.self()?.user)
           throw new NetError('forbidden')
