@@ -34,7 +34,9 @@ describe('a device row (§5.2)', () => {
     ['it no longer accepts this one', { notAccepted: true, online: false }, 'Studio no longer accepts this computer', ['remove']],
     ['certificate outside its window', { certificateWindow: true, online: false }, CLOCK_MESSAGE, ['retry', 'remove']],
     ['removing', { state: 'removing', online: false }, 'Removing…', []],
-    ['offline', { state: 'offline', online: false }, 'Offline', ['access', 'address', 'retry', 'remove']]
+    ['offline', { state: 'offline', online: false }, 'Offline', ['access', 'address', 'retry', 'remove']],
+    ['one direction up, within the bound', { state: 'connecting' }, 'Connecting…', ['access', 'address', 'retry', 'remove']],
+    ['one direction up, past the bound', { state: 'connecting', unreachable: 'in' }, "Studio can't reach this computer", ['retry', 'remove']]
   ]
   it.each(rows)('%s', (_name, fields, line, actions) => {
     const view = engineRow(device({ node: 'n1', ...fields }))

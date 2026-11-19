@@ -37,6 +37,11 @@ describeFake('engine device rows', () => {
     fabric.network.cutFrom(owner.endpoint, caller.endpoint)
     await eventually(async () => expect((await device(owner, callerOnOwner)).online).toBe(false))
     expect((await device(owner, callerOnOwner)).unreachable).toBeUndefined()
+    // Neither side reads "Connected" with one direction down, before the bound too.
+    expect((await device(owner, callerOnOwner)).state).toBe('connecting')
+    await eventually(async () =>
+      expect((await device(caller, ownerOnCaller)).state).toBe('connecting')
+    )
 
     later(engineLimits().rowStuckMs + 1)
     expect((await device(owner, callerOnOwner)).unreachable).toBe('out')
@@ -70,7 +75,9 @@ describeFake('engine device rows', () => {
     const invite = await owner.dispatch('netEngine.invite', {}, true)
     expect(invite.uri).toMatch(/^mousse:\/\/pair\?n=named-owner%20computer#/)
     void caller.dispatch('netEngine.join', { ticket: invite.uri }, true).catch(() => undefined)
-    await eventually(async () => expect((await status(caller)).devices[0]?.name).toBe('named-owner computer'))
+    await eventually(async () =>
+      expect((await status(caller)).devices[0]?.name).toBe('named-owner computer')
+    )
   }, 60_000)
 
   it('asks with the name the joiner has now, not the one its helper started with', async () => {
@@ -80,7 +87,9 @@ describeFake('engine device rows', () => {
     caller.mms.netEngine.displayName = 'Studio Mac'
     const invite = await owner.dispatch('netEngine.invite', {}, true)
     void caller.dispatch('netEngine.join', { ticket: invite.uri }, true).catch(() => undefined)
-    await eventually(async () => expect((await status(owner)).approvals[0]?.name).toBe('Studio Mac'))
+    await eventually(async () =>
+      expect((await status(owner)).approvals[0]?.name).toBe('Studio Mac')
+    )
   }, 60_000)
 
   it('ends the invitation a window showed once that window closes or switches profile', async () => {
@@ -112,7 +121,11 @@ describeFake('engine device rows', () => {
     const owner = await fabric.computer('address-owner'),
       caller = await fabric.computer('address-caller')
     const { callerOnOwner } = await fabric.pair(owner, caller)
-    await owner.dispatch('netEngine.address.add', { node: callerOnOwner, address: ' 192.168.1.20:47100 ' }, true)
+    await owner.dispatch(
+      'netEngine.address.add',
+      { node: callerOnOwner, address: ' 192.168.1.20:47100 ' },
+      true
+    )
     expect((await device(owner, callerOnOwner)).addresses).toEqual(['tcp://192.168.1.20:47100'])
     expect(owner.fake!.addresses.get(caller.endpoint)).toEqual(['tcp://192.168.1.20:47100'])
 

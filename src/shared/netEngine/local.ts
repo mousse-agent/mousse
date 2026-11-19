@@ -23,6 +23,11 @@ export type NetEngineDeviceState =
   | 'connected'
   /** The ceremony has not finished (`consented`, `joined`, `granted`, `awaiting_pairback`). */
   | 'finishing'
+  /**
+   * Paired, and one direction is up while the other is not, yet or again. Once that has held for `rowStuckMs`,
+   * `unreachable` names the direction that is down.
+   */
+  | 'connecting'
   /** Paired, and no connection is up just now. */
   | 'offline'
   /** Removal is under way. */

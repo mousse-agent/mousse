@@ -64,6 +64,12 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
       warn: true,
       actions: ['retry', 'remove']
     }
+  if (device.state === 'connecting')
+    return {
+      line: 'Connecting…',
+      detail: `One direction to ${name} is up; the other is still connecting.`,
+      actions: ['access', 'address', 'retry', 'remove']
+    }
   if (device.state === 'offline')
     return {
       line: 'Offline',

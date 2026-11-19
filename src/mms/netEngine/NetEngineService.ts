@@ -1,4 +1,11 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync
+} from 'node:fs'
 import { hostname } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { NetError } from '../../shared/net/errors'
@@ -197,7 +204,9 @@ export class NetEngineService implements EngineDirectoryPort {
       on: this.on(),
       helper: { state: helper.state, ...(text ? { text } : {}) },
       ...(this.helper?.paused ? { paused: this.helper.paused } : {}),
-      ...(typeof this.helper?.info.identity === 'string' ? { identity: this.helper.info.identity } : {}),
+      ...(typeof this.helper?.info.identity === 'string'
+        ? { identity: this.helper.info.identity }
+        : {}),
       devices: this.devices(),
       approvals: this.started?.pairing.pendingApprovals() ?? [],
       ...(this.routes().length ? { routes: this.routes() } : {}),
@@ -308,18 +317,21 @@ export class NetEngineService implements EngineDirectoryPort {
       .map((row): NetEngineDevice => {
         const node = row.localId
         const online = started.sessions.online(node)
+        const serving = started.sessions.serving(node)
+        // Connected only with both directions up: this computer's client to it, and its client here.
         const state =
           row.state === 'removing'
             ? 'removing'
             : row.state !== 'connected'
               ? 'finishing'
-              : online
+              : online && serving
                 ? 'connected'
-                : 'offline'
+                : online || serving
+                  ? 'connecting'
+                  : 'offline'
         const stuck = held(`${node} finishing`, state === 'finishing') >= stuckMs
         // One direction down for the bound while the other works.
         const paired = row.state === 'connected'
-        const serving = started.sessions.serving(node)
         const outDown = held(`${node} out`, paired && !online) >= stuckMs
         const inDown = held(`${node} in`, paired && !serving) >= stuckMs
         const unreachable = outDown && serving ? 'out' : inDown && online ? 'in' : undefined
