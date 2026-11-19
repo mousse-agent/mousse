@@ -4664,3 +4664,12 @@ it.each([
   expect(next.action).toMatchObject({ status: 'done', card_json: null })
   expect(t.calls).toHaveLength(2)
 })
+
+it.each([['evil. com', true], ['evil . com', false], ['evil .com', false], ['evil.com.', false]])(
+  'E1 r3b distinguishes sentence spacing from an obfuscated host: %s', async (body, allowed) => {
+    const t = await aloneAsk('allow', 'send', 'Old plain message')
+    const next = await aloneNext(t, { ...t.args, body })
+    expect(next.action.status).toBe(allowed ? 'done' : 'open')
+    expect(t.calls).toHaveLength(allowed ? 2 : 1)
+  }
+)
