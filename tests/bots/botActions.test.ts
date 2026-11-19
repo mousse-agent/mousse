@@ -4601,6 +4601,8 @@ it.each([
 })
 it.each([
   ['New message -- owner@example.test', true],
+  ['New message -- owner@\u200bexample.test', true],
+  ['New message -- owner＠example．test', true],
   ['New message without a signature', true],
   ['New message -- owner@example.test https://new.example.test', false],
   ['New message -- other@example.test', false],
