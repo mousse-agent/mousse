@@ -51,8 +51,8 @@ export const BOT_COLOUR_LABELS: Record<(typeof BOT_COLOURS)[number], string> = {
 }
 
 /**
- * A random colour and accessory other than `current`'s, among the looks `existing` doesn't wear
- * while any is free. The character and eyes stay as picked.
+ * A random look: a colour and accessory other than `current`'s, among the looks `existing` doesn't
+ * wear while any is free, with a random character and eyes.
  */
 export function shuffleLook(current: BotLook, existing: readonly BotLook[] = [], random: () => number = Math.random): KnownBotLook {
   const now = normalizeBotLook(current)
@@ -62,7 +62,8 @@ export function shuffleLook(current: BotLook, existing: readonly BotLook[] = [],
   const free = others.filter((look) => !worn.has(`${look.colour}/${look.accessory}`))
   const pool = free.length > 0 ? free : others
   const pick = pool[Math.min(pool.length - 1, Math.floor(random() * pool.length))]!
-  return withKindAndEyes(pick, botKindOf(now), botEyesOf(now))
+  const any = <T,>(list: readonly T[]): T => list[Math.min(list.length - 1, Math.floor(random() * list.length))]!
+  return withKindAndEyes(pick, any(BOT_KINDS), any(BOT_EYES))
 }
 
 /** The look in words, for the preview's accessible name: "Purple Mousse with heart eyes and glasses". */
