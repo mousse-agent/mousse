@@ -9,7 +9,7 @@ export interface ArgumentContract {
 const normalizedText = (value: string): string => value.normalize('NFKC').replace(/\p{Cf}/gu, '')
 /** Bounded labels keep long punctuation-free attachments linear. Keep URL punctuation inside its token. */
 function addressTokens(value: string): string[] {
-  const text = normalizedText(value).replace(/[。｡]/g, '.').replace(/\s+/gu, ' ').replace(/ ?([.@:/\\]) ?/gu, '$1')
+  const text = normalizedText(value).replace(/[。｡]/g, '.').replace(/\s+/gu, ' ').replace(/ +\. +/gu, '.').replace(/ +([.:])/gu, '$1').replace(/ ?([@/\\]) ?/gu, '$1')
   return [...new Set(text.split(' ').filter(token => /[:@\\]|[\p{L}\p{N}_-]{1,63}\.[\p{L}\p{N}_-]{1,63}/iu.test(token)))]
 }
 function filenameExtension(value: unknown): string | undefined {
