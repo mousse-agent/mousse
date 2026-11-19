@@ -11,14 +11,18 @@ export interface ArgumentContract {
 const normalizedText = (value: string): string => value.normalize('NFKC').replace(/\p{Cf}/gu, '')
 /** Decode each representation once for inspection; callers still send the original argument. */
 function scanText(value: string): string {
-  const decoded = value.replace(/(?:%[\da-f]{2})+/giu, encoded => {
+  const normalized = value.normalize('NFKC')
+  if (normalized.length > 64000) throw new AloneTextTooLong('This sent call is too long to let alone.')
+  const decoded = normalized.replace(/(?:%[\da-f]{2})+/giu, encoded => {
     try { return decodeURIComponent(encoded) } catch { return encoded.replace(/%([\da-f]{2})/giu, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16))) }
   }).replace(/&#(?:x0*([\da-f]{1,6})|0*(\d{1,7}));?/giu, (entity, hex, decimal) => {
     const code = Number.parseInt(hex ?? decimal, hex ? 16 : 10)
     return code <= 0x10ffff ? String.fromCodePoint(code) : entity
   })
   const named: Record<string, string> = { period: '.', colon: ':', sol: '/', bsol: '\\', commat: '@', Tab: '\t', NewLine: '\n', nbsp: ' ', lpar: '(', rpar: ')', lsqb: '[', rsqb: ']', lt: '<', gt: '>', quot: '"', apos: "'", amp: '&', excl: '!', quest: '?', num: '#', percnt: '%', equals: '=' }
-  return decoded.replace(/&([A-Za-z][A-Za-z0-9]{1,31});/g, (entity, name: string) => named[name] ?? entity).normalize('NFKC').replace(/[\p{M}\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '').replace(/[。｡‧]/g, '.')
+  const expanded = decoded.replace(/&([A-Za-z][A-Za-z0-9]{1,31});/g, (entity, name: string) => named[name] ?? entity).normalize('NFKC')
+  if (expanded.length > 64000) throw new AloneTextTooLong('This sent call is too long to let alone.')
+  return expanded.replace(/[\p{M}\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '').replace(/[。｡‧]/g, '.')
 }
 /** Every scan and edge trim is linear, including text expanded by NFKC. */
 function addressTokens(value: string): string[] {
@@ -61,6 +65,7 @@ function filenameExtension(value: unknown): string | undefined {
   return new Set('com net org io dev app co ai info biz gov edu me us uk de'.split(' ')).has(extension) ? undefined : extension
 }
 class TooManyAddresses extends Error {}
+class AloneTextTooLong extends Error {}
 const tokenDigest = (key: string, field: string, token: string): string => createHmac('sha256', key).update(JSON.stringify([field, token])).digest('hex')
 export function argumentContract(args: Record<string, unknown>, tokenKey: string, place?: Record<string, unknown>): ArgumentContract {
   const keys = Object.keys(args).sort()
@@ -72,8 +77,9 @@ export function argumentContract(args: Record<string, unknown>, tokenKey: string
     tokens: Object.fromEntries(varying.map(k => [k, tokens[k]!.map(token => tokenDigest(tokenKey, k, token))])) }
 }
 function argumentsMatch(contract: ArgumentContract | undefined, args: Record<string, unknown>, tokenKey: string): boolean {
-  return contract?.version === 4 && actionDigest(Object.keys(args).sort()) === actionDigest(contract.keys)
+  try { return contract?.version === 4 && actionDigest(Object.keys(args).sort()) === actionDigest(contract.keys)
     && contract.keys.every(k => {
+      if (FREE_CONTENT.has(normalizedKey(k)) && typeof args[k] === 'string' && (args[k] as string).normalize('NFKC').length > 64000) return false
       if (actionDigest(args[k]) === contract.digests[k]) return true
       if (Object.hasOwn(contract.extensions, k)) {
         const extension = filenameExtension(args[k])
@@ -83,6 +89,10 @@ function argumentsMatch(contract: ArgumentContract | undefined, args: Record<str
       const allowed = new Set(contract.tokens[k])
       return addressTokens(args[k] as string).every(token => allowed.has(tokenDigest(tokenKey, k, token)))
     })
+  } catch (error) {
+    if (error instanceof AloneTextTooLong) return false
+    throw error
+  }
 }
 /** Exact top-level destinations declared by the tool; content never supplies authority. */
 export function actionPlace(schema: unknown, args: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -153,7 +163,7 @@ export class BotAlone {
     const place = JSON.parse(String(previous.place_json)) as Record<string, unknown>
     let contract: ArgumentContract
     try { contract = argumentContract(source, this.tokenKey(), place) } catch (error) {
-      if (error instanceof TooManyAddresses) return error.message
+      if (error instanceof TooManyAddresses || error instanceof AloneTextTooLong) return error.message
       throw error
     }
     const result = JSON.parse(String(previous.result_json ?? '{}')).text ?? ''
