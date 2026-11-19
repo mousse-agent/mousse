@@ -131,4 +131,14 @@ describe('browser tabs kept in every thread', () => {
     const items = surfaceTabItems({ opened: ['browser'], terminals: [], browsers: [tab('a', 'thread-1'), tab('b', null)], documents: [] })
     expect(items.map((item) => [item.resourceId, item.everyThread ?? false])).toEqual([['a', false], ['b', true]])
   })
+
+  it('names a tab by its page title, else its host, else its position', () => {
+    const page = (id: string, url: string, title: string): BrowserTabState => ({ ...tab(id, null), url, title })
+    const items = surfaceTabItems({ opened: ['browser'], terminals: [], documents: [], browsers: [
+      page('a', 'https://example.test/docs', 'Docs home'),
+      page('b', 'https://www.example.test/plain.txt', 'https://www.example.test/plain.txt'),
+      page('c', 'about:blank', 'New tab')
+    ] })
+    expect(items.map((item) => item.label)).toEqual(['Docs home', 'example.test', 'Browser 3'])
+  })
 })

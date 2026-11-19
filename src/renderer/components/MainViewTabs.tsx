@@ -205,7 +205,7 @@ export function MainViewTabs() {
         return (
           <div
             key={item.key}
-            className={`main-view-tab${selected ? ' active' : ''}${item.back ? ' is-side-chat' : ''}`}
+            className={`main-view-tab${selected ? ' active' : ''}${item.back ? ' is-side-chat' : ''}${item.view === 'browser' ? ' is-browser' : ''}`}
             onKeyDown={(event) => {
               if (item.view === 'files' && item.resourceId && event.key === 'Delete') {
                 event.preventDefault()

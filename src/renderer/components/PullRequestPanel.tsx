@@ -6,7 +6,7 @@ import { useProjectComputerName } from '../hooks/useProjectComputerName'
 import { useTransientError } from '../hooks/useTransientError'
 import { gitScopeFor } from '../lib/activeProject'
 import { GITHUB_SIGN_IN_COMMAND } from '../lib/githubSignIn'
-import { Check, ChevronDown, ChevronRight, Copy, ExternalLink, GitMerge, GitPullRequest, RefreshCw } from '../lib/icons'
+import { Check, ChevronDown, ChevronRight, CircleAlert, Cloud, Copy, ExternalLink, GitBranch, GitMerge, GitPullRequest, RefreshCw, Terminal } from '../lib/icons'
 import { useAppStore } from '../stores/appStore'
 import {
   createPullRequestForBranch,
@@ -411,11 +411,25 @@ function PanelHeader({
   )
 }
 
-function Notice({ role, children, action }: { role: 'status' | 'alert'; children: ReactNode; action?: ReactNode }) {
+/**
+ * Why there is no pull request to show, calmly: a neutral icon, one short line, what it means, and a next step when
+ * there is one. An unexpected failure is said the same way, with the host's own words under Details.
+ */
+function EmptyState({ icon: Glyph, title, children, action, details, role = 'status' }: {
+  icon: typeof GitPullRequest
+  title: string
+  children?: ReactNode
+  action?: ReactNode
+  details?: string
+  role?: 'status' | 'alert'
+}) {
   return (
-    <div className="pr-panel-notice" role={role}>
-      <p>{children}</p>
+    <div className="pr-panel-notice pr-panel-empty-state" role={role}>
+      <span className="pr-panel-empty-icon" aria-hidden="true"><Glyph size={18} strokeWidth={1.8} /></span>
+      <p className="pr-panel-empty-title">{title}</p>
+      {children ? <p className="pr-panel-empty-line">{children}</p> : null}
       {action}
+      {details ? <details className="pr-panel-details"><summary>Details</summary><pre>{details}</pre></details> : null}
     </div>
   )
 }
@@ -441,8 +455,10 @@ export function SignedOutNotice({ message, computerName, onRetry }: { message: s
       .then(() => setCopy('copied'), () => setCopy('failed'))
   }
   return (
-    <div className="pr-panel-notice pr-panel-signin" role="status">
-      <p className="pr-panel-signin-title">{computerName ? `Sign in to GitHub CLI on ${computerName}` : 'Sign in to GitHub CLI'}</p>
+    <div className="pr-panel-notice pr-panel-empty-state pr-panel-signin" role="status">
+      <span className="pr-panel-empty-icon" aria-hidden="true"><GitPullRequest size={18} strokeWidth={1.8} /></span>
+      <p className="pr-panel-empty-title pr-panel-signin-title">{computerName ? `Sign in to GitHub CLI on ${computerName}` : 'Sign in to GitHub CLI'}</p>
+      <p className="pr-panel-empty-line">Pull requests are read with GitHub CLI.</p>
       <div className="pr-panel-signin-row">
         <code className="pr-panel-signin-command" title={where}>{GITHUB_SIGN_IN_COMMAND}</code>
         <button type="button" className="pr-panel-action" title={where} onClick={copyCommand}>
@@ -519,17 +535,27 @@ export function PullRequestPanelView({
       ) : state.kind === 'loading' ? (
         <div className="pr-panel-notice"><DelayedLoader label="Loading the pull request" /></div>
       ) : state.kind === 'no-branch' ? (
-        <Notice role="status">Open a project on a Git branch to see its pull request.</Notice>
+        <EmptyState icon={GitBranch} title="No branch">Open a project on a Git branch to see its pull request.</EmptyState>
       ) : state.kind === 'none' ? (
-        <Notice role="status" action={createAction}>
+        <EmptyState icon={GitPullRequest} title="No pull request yet" action={createAction}>
           {state.branch ? `${state.branch} has no pull request yet.` : 'This branch has no pull request yet.'}
-        </Notice>
+        </EmptyState>
+      ) : state.kind === 'no-remote' ? (
+        <EmptyState icon={Cloud} title="No remote yet" action={<button type="button" className="pr-panel-action" onClick={onRefresh}>Try again</button>}>
+          This project isn’t on GitHub yet. Add a remote and push a branch to open pull requests.
+        </EmptyState>
+      ) : state.kind === 'not-github' ? (
+        <EmptyState icon={Cloud} title="Not on GitHub">This project’s remote isn’t a GitHub repository, so its pull requests aren’t shown here.</EmptyState>
+      ) : state.kind === 'gh-missing' ? (
+        <EmptyState icon={Terminal} title="GitHub CLI isn’t installed" action={<button type="button" className="pr-panel-action" onClick={onRefresh}>Try again</button>}>
+          Pull requests are read with GitHub CLI (gh). Install it, then try again.
+        </EmptyState>
       ) : state.kind === 'signed-out' ? (
         <SignedOutNotice message={state.message} computerName={computerName} onRetry={onRefresh} />
       ) : (
-        <Notice role="alert" action={<button type="button" className="pr-panel-action" onClick={onRefresh}>Try again</button>}>
-          {state.message}
-        </Notice>
+        <EmptyState icon={CircleAlert} title="Couldn’t read pull requests" role="alert" details={state.message} action={<button type="button" className="pr-panel-action" onClick={onRefresh}>Try again</button>}>
+          It may be a network or GitHub problem.
+        </EmptyState>
       )}
     </div>
   )
