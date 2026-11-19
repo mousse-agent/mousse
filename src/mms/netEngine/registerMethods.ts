@@ -11,6 +11,7 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.invite.cancel': ['invitation'],
   'netEngine.approve': ['request'],
   'netEngine.join': ['ticket'],
+  'netEngine.join.code': ['invitation', 'code'],
   'netEngine.retry': ['node'],
   'netEngine.remove': ['node'],
   'netEngine.address.add': ['node', 'address'],
@@ -57,8 +58,17 @@ function validate(method: NetEngineLocalMethod, params: unknown): Record<string,
     throw new DomainRpcError('bad_request', `${method} needs yes`)
   if (method === 'netEngine.loginStart' && typeof fields.start !== 'boolean')
     throw new DomainRpcError('bad_request', `${method} needs start`)
+  if (method === 'netEngine.invite' && fields.kind !== undefined && fields.kind !== 'link')
+    throw new DomainRpcError('bad_request', `${method} takes kind "link" or none`)
   if (method === 'netEngine.join' && fields.share !== undefined && !strings(fields.share))
     throw new DomainRpcError('bad_request', `${method} takes share as a list of addresses`)
+  if (
+    method === 'netEngine.join' &&
+    fields.arrival !== undefined &&
+    fields.arrival !== 'scan' &&
+    fields.arrival !== 'link'
+  )
+    throw new DomainRpcError('bad_request', `${method} takes arrival "scan" or "link"`)
   if (method === 'netEngine.routes.config') reach(fields)
   return fields
 }
@@ -93,7 +103,9 @@ export function registerNetEngineMethods(
               return engine.status()
             case 'netEngine.invite': {
               await engine.tellName()
-              const invite = await engine.pairing().invite(engine.ownName())
+              const invite = await engine
+                .pairing()
+                .invite(engine.ownName(), p.kind === 'link' ? 'link' : undefined)
               // The window that showed the code closed, or switched profile: its invitation ends (§8).
               context.connection?.lifetime?.addEventListener(
                 'abort',
@@ -110,9 +122,16 @@ export function registerNetEngineMethods(
               await engine.pairing().approve(p.request, p.yes)
               return engine.status()
             case 'netEngine.join': {
-              const row = await engine.join(p.ticket, p.share ?? [])
+              const row = await engine.join(
+                p.ticket,
+                p.share ?? [],
+                p.arrival === 'link' ? 'link' : undefined
+              )
               return { node: row.localId, status: engine.status() }
             }
+            case 'netEngine.join.code':
+              await engine.pairing().submitCode(p.invitation, p.code)
+              return engine.status()
             case 'netEngine.retry':
               await engine.retry(p.node)
               return engine.status()

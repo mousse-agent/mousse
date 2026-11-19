@@ -1449,7 +1449,15 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, change: { profileId?: string }) => cb(change)
       ipcRenderer.on('netEngine:changed', handler)
       return () => ipcRenderer.removeListener('netEngine:changed', handler)
-    }
+    },
+    /** A `mousse://pair` link reached Mousse: take it with `takePairLink`. */
+    onPairLink: (cb: () => void): (() => void) => {
+      const handler = () => cb()
+      ipcRenderer.on('netEngine:pairLink', handler)
+      return () => ipcRenderer.removeListener('netEngine:pairLink', handler)
+    },
+    /** The `mousse://pair` link waiting for a window, once (null when none). */
+    takePairLink: (): Promise<string | null> => ipcRenderer.invoke('netEngine:takePairLink')
   },
   /** In-app updates from GitHub Releases (src/main/updates). */
   updates: {

@@ -43,6 +43,8 @@ export interface EngineHostPort {
   pairback?(caller: EngineCaller, request: { routes: string[]; receipt?: string }): Promise<void>
   /** A `mousse.tunnel` stream from a caller this connection serves: one editor tunnel (Phase 1b §9.2). */
   tunnel?(connection: EngineConnection, stream: EngineStream): void
+  /** The caller said its name in `hello` (`<computer> (<profile>)`). */
+  calledBy?(caller: EngineCaller, name: string): void
 }
 
 /**
@@ -155,7 +157,10 @@ export class EngineHost {
     const h = message.header
     switch (label) {
       case 'mousse.hello':
-        if (h.t === 'hello') channel.send({ t: 'hello', proto: 1, name: this.port.name() })
+        if (h.t === 'hello') {
+          if (typeof h.name === 'string') this.port.calledBy?.(caller, h.name)
+          channel.send({ t: 'hello', proto: 1, name: this.port.name() })
+        }
         else if (h.t === 'pairback') {
           if (!this.port.pairback) throw new NetError('bad_request')
           const routes = Array.isArray(h.routes)

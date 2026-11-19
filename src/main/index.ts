@@ -1,5 +1,5 @@
 import { attachLinuxWindowShape } from './linuxWindowShape'
-import { app, BrowserWindow, dialog, nativeTheme, session, shell, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, session, shell, type WebContents } from 'electron'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
 
@@ -64,6 +64,7 @@ import { configureLinuxGraphics, configureLinuxVsync, configureLinuxWindowing, l
 import { addToSwitchList, KEEP_GPU_PROGRAMS_FEATURE } from '../shared/chromiumSwitches'
 import { watchKeepAwake } from './keepAwake'
 import { createServiceTray, usesServiceTray } from './serviceTray'
+import { attachPairLinks, PAIR_LINK_IPC } from './pairLink'
 
 function configureBrowserPopupPolicy(contents: WebContents, parent: BrowserWindow): void {
   contents.setWindowOpenHandler(({ url }) => {
@@ -182,9 +183,28 @@ function startGuiApp(): void {
     return
   }
 
-  app.on('second-instance', () => {
+  // `mousse://pair` links (design 1b §5.2): the launch argv, a second instance's argv, and macOS `open-url`.
+  const pairLinks = attachPairLinks({
+    app,
+    ipc: ipcMain,
+    argv: process.argv,
+    env: process.env,
+    notify: () => {
+      if (isQuitting || quitAndStopService.closing) return
+      for (const window of BrowserWindow.getAllWindows())
+        if (!window.isDestroyed()) window.webContents.send(PAIR_LINK_IPC.arrived)
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (mainWindow.isMinimized()) mainWindow.restore()
+        mainWindow.show()
+        mainWindow.focus()
+      } else if (app.isReady()) openWindowFromBackground()
+    }
+  })
+
+  app.on('second-instance', (_event, argv) => {
     // Quitting: nothing comes back on screen.
     if (isQuitting || quitAndStopService.closing) return
+    if (pairLinks.fromArgv(argv)) return
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.show()

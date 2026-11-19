@@ -5,12 +5,12 @@ import {
   type NetEngineJoinPreview,
   type NetEngineStatus
 } from '../../../shared/netEngine/local'
-import { ROUTE_CLASS_LABEL } from '../../../shared/netEngine/routes'
 import { qrSvgPath } from '../../lib/plusQr'
 import { CopyButton } from '../settings/IconButtons'
 import { Modal } from '../ui/Modal'
 import { useDaemonCall } from '../devices/useDaemonCall'
 import { readPairingLink } from './engineRows'
+import { EnterLinkPanel, JoinRoutes, SendLinkPanel } from './SendLinkParts'
 import { SshAddSteps } from './SshAddSteps'
 
 type Step =
@@ -20,6 +20,8 @@ type Step =
   | { kind: 'ssh' }
   | { kind: 'confirm'; ticket: string; host: string }
   | { kind: 'joining'; host: string }
+  | { kind: 'link' }
+  | { kind: 'enter' }
 
 /** The other computer, before it says its own name. */
 const UNNAMED_HOST = 'the other computer'
@@ -33,11 +35,14 @@ export function AddEngineDeviceDialog({
   status,
   onClose,
   initial = 'choose',
+  initialLink,
   camera = defaultCamera
 }: {
   status: NetEngineStatus | undefined
   onClose: () => void
-  initial?: 'choose' | 'show' | 'scan' | 'ssh'
+  initial?: 'choose' | 'show' | 'scan' | 'link' | 'enter' | 'ssh'
+  /** A `mousse://pair` link that opened Mousse: Enter link reads it at once. */
+  initialLink?: string
   /** Opens a camera stream; tests and computers without one answer undefined. */
   camera?: () => Promise<MediaStream | undefined>
 }) {
@@ -120,9 +125,13 @@ export function AddEngineDeviceDialog({
       ? 'Show QR'
       : step.kind === 'scan'
         ? 'Scan'
-        : step.kind === 'ssh'
-          ? 'Add over SSH'
-          : 'Add device'
+        : step.kind === 'link'
+          ? 'Send link'
+          : step.kind === 'enter'
+            ? 'Enter link'
+            : step.kind === 'ssh'
+              ? 'Add over SSH'
+              : 'Add device'
   return (
     <Modal open title={title} onClose={onClose}>
       <div className="engine-dialog" data-step={step.kind}>
@@ -142,6 +151,25 @@ export function AddEngineDeviceDialog({
             >
               Scan
             </button>
+            {status?.sendLink && (
+              <>
+                <button
+                  type="button"
+                  className="settings-btn"
+                  title="For a computer that is not next to you"
+                  onClick={() => setStep({ kind: 'link' })}
+                >
+                  Send link
+                </button>
+                <button
+                  type="button"
+                  className="settings-btn"
+                  onClick={() => setStep({ kind: 'enter' })}
+                >
+                  Enter link
+                </button>
+              </>
+            )}
             {status?.reach && (
               <button
                 type="button"
@@ -153,6 +181,20 @@ export function AddEngineDeviceDialog({
               </button>
             )}
           </div>
+        )}
+
+        {step.kind === 'link' && (
+          <SendLinkPanel
+            status={status}
+            onInvitation={(invitation) => {
+              // Closing the dialog ends the link's invitation while it is open.
+              inviteRef.current = invitation
+            }}
+          />
+        )}
+
+        {step.kind === 'enter' && (
+          <EnterLinkPanel status={status} initialLink={initialLink} onJoined={onClose} />
         )}
 
         {step.kind === 'ssh' && <SshAddSteps onDone={onClose} />}
@@ -261,50 +303,6 @@ export function AddEngineDeviceDialog({
 }
 
 const capitalize = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1)
-
-/**
- * The Connect dialog's routes (1b §1.3): every destination the ticket names, with its class (Connect approves
- * them), and this computer's tailnet, internet and tunnel routes as unticked boxes under "Also share".
- */
-function JoinRoutes({
-  preview,
-  share,
-  onShare
-}: {
-  preview: NetEngineJoinPreview
-  share: string[]
-  onShare: (route: string, on: boolean) => void
-}) {
-  return (
-    <>
-      {!!preview.destinations?.length && (
-        <p
-          className="settings-muted engine-destinations"
-          title="Connect lets this computer dial these addresses."
-        >
-          {preview.destinations
-            .map((item) => `${item.label} (${ROUTE_CLASS_LABEL[item.cls]})`)
-            .join(', ')}
-        </p>
-      )}
-      {!!preview.shareable?.length && (
-        <fieldset className="engine-share">
-          <legend title="It can reach this computer at the ticked addresses too.">Also share</legend>
-          {preview.shareable.map((item) => (
-            <label key={item.route} className="engine-share-item">
-              <input
-                type="checkbox"
-                checked={share.includes(item.route)}
-                onChange={(event) => onShare(item.route, event.target.checked)}
-              />
-              {ROUTE_CLASS_LABEL[item.cls]} {item.label}
-            </label>
-          ))}
-        </fieldset>
-      )}
-    </>
-  )
-}
 
 function QrCode({ text }: { text: string }) {
   const { size, path } = useMemo(() => qrSvgPath(text), [text])

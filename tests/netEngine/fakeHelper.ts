@@ -26,6 +26,7 @@ import {
   MessageReader,
   type EngineMessage
 } from '../../src/mms/netEngine/session/frame'
+import { decodeTicket, encodeTicket, ticketHash, type TicketFields } from './ticketCbor'
 import {
   automaticRoute,
   isLoopbackIp,
@@ -55,6 +56,28 @@ export interface FakeReach {
 }
 
 const STREAM_CREDIT = 256 * 1024
+
+/** A Send link invitation at its host (kind 2): the code it shows and the tries left (design 1b §5.1). */
+export interface FakeLinkInvite extends TicketFields {
+  ticket: string
+  hash: string
+  code: string
+  attemptsLeft: number
+  ended?: string
+}
+
+/** A joiner's flow record for one ticket, as the helper keeps it on disk (§5.4). */
+export interface FakeFlow {
+  attemptsLeft: number
+  /** The confirmation was sent and the outcome is not known yet. */
+  pending?: boolean
+  /** The ticket's `PAIRED`, until `join.ack`. */
+  done?: { identity: string; name: string; role: string }
+  exhausted?: boolean
+}
+
+/** A six-digit code. */
+const newCode = (): string => String(randomBytes(4).readUInt32BE(0) % 1_000_000).padStart(6, '0')
 
 export interface Crossed {
   /** The identity of the helper the message left from. */
@@ -107,6 +130,18 @@ export class FakeNetwork {
   private readonly conns = new Set<Conn>()
   private next = 1
   readonly crossed: Crossed[] = []
+  /** Send link invitations by id, with their host. */
+  readonly links = new Map<string, FakeLinkInvite>()
+  /** Each joiner's flow records by ticket hash, kept across its helper's restarts. */
+  private readonly flows = new Map<string, Map<string, FakeFlow>>()
+  /** The `approved` list each Send link join carried, by joiner identity, in order. */
+  readonly approvedSent: Array<{ joiner: string; approved: string[] }> = []
+  /**
+   * Helper defects a check's controls build in (the real helper's `mousse_control` cfgs): `journal-pins-link`,
+   * `link-accepts-kind1`, `invitation-survives-exhaustion`, `skip-code-confirm`, `joiner-records-in-memory`,
+   * `host-attempts-reset-on-reconnect`.
+   */
+  readonly defects = new Set<string>()
   /** Decides each message that crosses; `drop` loses it on the way. */
   tap?: (message: Crossed) => 'drop' | void
   /**
@@ -198,6 +233,24 @@ export class FakeNetwork {
     held.set(caller, given)
     this.peer(caller, host)
     return { grant: given, already: false }
+  }
+
+  /** Whether `caller` holds a live grant at `host`. */
+  holds(host: string, caller: string): boolean {
+    return this.grants.get(host)?.has(caller) ?? false
+  }
+
+  /** The identities `from` may dial (its pins). */
+  peersOf(from: string): string[] {
+    return [...(this.peers.get(from) ?? [])]
+  }
+
+  /** @internal A joiner's flow records (in its helper's memory only under `joiner-records-in-memory`). */
+  flowsOf(helper: FakeHelper): Map<string, FakeFlow> {
+    if (this.defects.has('joiner-records-in-memory')) return helper.memoryFlows
+    let held = this.flows.get(helper.identity)
+    if (!held) this.flows.set(helper.identity, (held = new Map()))
+    return held
   }
 
   /** The grants callers hold at `host`, as `grants.list` answers. */
@@ -472,6 +525,24 @@ export class FakeHelper {
   ignoreShutdown = false
   /** The addresses the app set for each peer (`peer.addresses.set`), by identity. */
   readonly addresses = new Map<string, string[]>()
+  /** The next Send link `PAIRED` is lost: the confirmation is sent and this helper exits before answering. */
+  losePaired = false
+  /** @internal Flow records under `joiner-records-in-memory`. */
+  readonly memoryFlows = new Map<string, FakeFlow>()
+  /** Send link joins waiting for the code, by invitation. */
+  private readonly codeWaits = new Map<
+    string,
+    {
+      reply: (fields: Record<string, unknown>) => void
+      invite: FakeLinkInvite
+      hash: string
+      /** The app passed `pinned` (a Send link join never should). */
+      pinned: boolean
+      changed: boolean
+      /** The routes a 1.1 join dials. */
+      candidates?: string[]
+    }
+  >()
   /** The routes of each `peer.add` the app sent, in order. */
   readonly peerAdds: string[][] = []
 
@@ -666,6 +737,227 @@ export class FakeHelper {
     }
   }
 
+  /** `invite.create {kind: "link"}`: a kind-2 ticket, its code and three tries. */
+  private linkInvite(reply: (fields: Record<string, unknown>) => void): void {
+    const fields: TicketFields = {
+      version: 1,
+      kind: 2,
+      host: this.identity,
+      invitation: randomBytes(16).toString('hex'),
+      secret: randomBytes(32).toString('hex'),
+      expiresAt: Math.floor(Date.now() / 1000) + 600,
+      routes: this.network.routes.get(this.identity) ?? []
+    }
+    const ticket = encodeTicket(fields)
+    const invite: FakeLinkInvite = {
+      ...fields,
+      ticket,
+      hash: ticketHash(ticket),
+      code: newCode(),
+      attemptsLeft: 3
+    }
+    this.network.links.set(invite.invitation, invite)
+    reply({
+      invitation: invite.invitation,
+      uri: ticket,
+      code: invite.code,
+      attempts_left: invite.attemptsLeft,
+      routes: fields.routes,
+      expires_at: fields.expiresAt
+    })
+  }
+
+  /**
+   * `join` of a ticket that came by link (§5.3, §5.5); answers false once it has answered or waits for the code.
+   */
+  private joinLink(
+    message: Record<string, any>,
+    reply: (fields: Record<string, unknown>) => void
+  ): boolean {
+    const ticket = String(message.ticket)
+    let fields: TicketFields
+    try {
+      fields = decodeTicket(ticket)
+    } catch (error) {
+      reply({ error: 'bad_ticket', reason: (error as Error).message })
+      return false
+    }
+    // A kind-1 ticket needs an in-app scan; the defect lets it go on as a link.
+    if (fields.kind !== 2 && !this.network.defects.has('link-accepts-kind1')) {
+      reply({ error: 'pairing_failed', reason: 'kind 1 needs an in-app scan' })
+      return false
+    }
+    const hash = ticketHash(ticket)
+    const flows = this.network.flowsOf(this)
+    const flow = flows.get(hash)
+    if (flow?.exhausted) {
+      reply({ error: 'attempts_exhausted', reason: 'no tries left' })
+      return false
+    }
+    if (fields.expiresAt * 1000 <= Date.now() && !flow?.pending) {
+      reply({ error: 'expired', reason: 'the ticket expired' })
+      return false
+    }
+    this.network.approvedSent.push({
+      joiner: this.identity,
+      approved: Array.isArray(message.approved) ? message.approved.map(String) : []
+    })
+    const host = this.network.helperOf(fields.host)
+    if (!host?.alive) {
+      reply({ error: 'no_route', reason: 'no address answers as that key' })
+      return false
+    }
+    // As a 1.1 helper: the ticket's private hints, and those in both the ticket and `approved` (§1.3).
+    let candidates: string[] | undefined
+    if (this.network.minor >= 1) {
+      const approved = new Set((Array.isArray(message.approved) ? message.approved : []).map(String))
+      candidates = fields.routes.filter(
+        (route) => this.network.automatic(route) || approved.has(route)
+      )
+      try {
+        this.network.route(this.identity, host.identity, candidates)
+      } catch {
+        reply({ error: 'unreachable', reason: 'no route answered' })
+        return false
+      }
+      const known = this.network.knownFor(this.identity, host.identity)
+      for (const route of fields.routes) if (!known.hints.includes(route)) known.hints.push(route)
+      for (const route of candidates) known.approved.add(route)
+    }
+    // The confirmation was sent before a crash: the outcome is learnt now, even after expiry.
+    if (flow?.pending) {
+      this.linkDone(host, flow, reply, candidates)
+      return false
+    }
+    // Existing access: the host lets this computer in already, whatever the proof (AUTHORIZED live).
+    if (this.network.holds(host.identity, this.identity)) {
+      reply({
+        identity: host.identity,
+        name: host.hello?.name ?? host.identity,
+        role: 'owner',
+        already: true
+      })
+      return false
+    }
+    const record = flow ?? { attemptsLeft: 3 }
+    flows.set(hash, record)
+    const invite = this.network.links.get(fields.invitation)
+    if (!invite || invite.host !== fields.host || invite.secret !== fields.secret || invite.ended) {
+      reply({ error: 'invitation_invalid', reason: 'no such invitation' })
+      return false
+    }
+    if (this.network.defects.has('host-attempts-reset-on-reconnect')) invite.attemptsLeft = 3
+    if (this.network.defects.has('skip-code-confirm')) {
+      this.linkPaired(host, invite, record, reply, candidates)
+      return false
+    }
+    this.codeWaits.set(invite.invitation, {
+      reply,
+      invite,
+      hash,
+      pinned: message.pinned === true,
+      ...(candidates ? { candidates } : {}),
+      // A route hint or expires_at changed: the hash differs, so key confirmation fails whatever code is typed.
+      changed: invite.hash !== hash
+    })
+    this.event({
+      ev: 'join.code_needed',
+      invitation: invite.invitation,
+      attempts_left: record.attemptsLeft
+    })
+    return false
+  }
+
+  /** `join.code`: the right code pairs; a wrong one spends a try on each side, and the third ends both. */
+  private joinCode(
+    invitation: string,
+    code: string,
+    reply: (fields: Record<string, unknown>) => void
+  ): void {
+    if (!/^[0-9]{6}$/.test(code)) return reply({ error: 'bad_code', reason: 'six digits' })
+    const waiting = this.codeWaits.get(invitation)
+    if (!waiting) return reply({ error: 'no_join', reason: 'no join waits for a code' })
+    reply()
+    const host = this.network.helperOf(waiting.invite.host)
+    const record = this.network.flowsOf(this).get(waiting.hash)!
+    this.codeWaits.delete(invitation)
+    if (!host?.alive) return waiting.reply({ error: 'no_route', reason: 'the host went away' })
+    if (code === waiting.invite.code && !waiting.changed)
+      return this.linkPaired(host, waiting.invite, record, waiting.reply, waiting.candidates)
+    // A pinned join trusted as journaled (the defect): a failed key confirmation ends as "already paired".
+    if (waiting.pinned && this.network.defects.has('journal-pins-link'))
+      return waiting.reply({ identity: host.identity, name: host.identity, role: 'owner', already: true })
+    if (this.spend(host, waiting.invite, record))
+      return waiting.reply({ error: 'attempts_exhausted', reason: 'no tries left' })
+    this.codeWaits.set(invitation, waiting)
+    this.event({ ev: 'join.attempt_failed', invitation, attempts_left: record.attemptsLeft })
+  }
+
+  /** One try spent on each side; answers whether that was the last (the invitation ends). */
+  private spend(host: FakeHelper, invite: FakeLinkInvite, record: FakeFlow): boolean {
+    invite.attemptsLeft -= 1
+    record.attemptsLeft -= 1
+    if (invite.attemptsLeft > 0 && record.attemptsLeft > 0) {
+      invite.code = newCode()
+      host.event({
+        ev: 'invite.code',
+        invitation: invite.invitation,
+        code: invite.code,
+        attempts_left: invite.attemptsLeft
+      })
+      return false
+    }
+    record.exhausted = true
+    if (!this.network.defects.has('invitation-survives-exhaustion')) {
+      invite.ended = 'attempts_exhausted'
+      this.network.links.delete(invite.invitation)
+    }
+    host.event({ ev: 'invite.ended', invitation: invite.invitation, reason: 'attempts_exhausted' })
+    return true
+  }
+
+  /** The code matched: the host enrolls this computer (no approval for links), and the join answers `PAIRED`. */
+  private linkPaired(
+    host: FakeHelper,
+    invite: FakeLinkInvite,
+    record: FakeFlow,
+    reply: (fields: Record<string, unknown>) => void,
+    candidates?: string[]
+  ): void {
+    const { grant } = this.network.grant(host.identity, this.identity)
+    invite.ended = 'used'
+    this.network.links.delete(invite.invitation)
+    host.event({
+      ev: 'enrolled',
+      invitation: invite.invitation,
+      grant,
+      identity: this.identity,
+      name: this.hello?.name ?? this.identity
+    })
+    host.event({ ev: 'invite.ended', invitation: invite.invitation, reason: 'used' })
+    record.pending = true
+    if (this.losePaired) {
+      this.losePaired = false
+      setImmediate(() => this.kill())
+      return
+    }
+    this.linkDone(host, record, reply, candidates)
+  }
+
+  private linkDone(
+    host: FakeHelper,
+    record: FakeFlow,
+    reply: (fields: Record<string, unknown>) => void,
+    candidates?: string[]
+  ): void {
+    const name = host.hello?.name ?? host.identity
+    record.pending = false
+    record.done = { identity: host.identity, name, role: 'owner' }
+    this.network.peer(this.identity, host.identity)
+    const conn = this.network.dial(this, host.identity, candidates)
+    reply({ identity: host.identity, name, role: 'owner', already: false, conn })
+  }
+
   private request(message: Record<string, any>): void {
     const re = message.id
     const reply = (fields: Record<string, unknown> = {}) => this.send(jsonFrame({ re, ...fields }))
@@ -818,6 +1110,7 @@ export class FakeHelper {
           return reply({ approvals: entries })
         }
         case 'invite.create': {
+          if (message.kind === 'link') return this.linkInvite(reply)
           const invitation = randomBytes(16).toString('hex')
           const routes = this.network.routes.get(this.identity) ?? []
           const uri = ticketOf(this.identity, invitation, routes)
@@ -832,9 +1125,33 @@ export class FakeHelper {
         case 'invite.cancel':
           for (const [uri, open] of this.network.invitations)
             if (open.invitation === message.invitation) this.network.invitations.delete(uri)
+          this.network.links.delete(String(message.invitation))
           return reply()
+        case 'join.code':
+          return this.joinCode(String(message.invitation), String(message.code), reply)
+        case 'join.status': {
+          const flow = this.network.flowsOf(this).get(String(message.ticket_hash))
+          return reply({
+            done: flow?.done ?? null,
+            pending: !!flow?.pending && !flow.done,
+            attempts_left: flow?.attemptsLeft ?? null
+          })
+        }
+        case 'join.ack': {
+          const flow = this.network.flowsOf(this).get(String(message.ticket_hash))
+          if (flow) delete flow.done
+          return reply()
+        }
+        case 'peers.list':
+          return reply({
+            peers: this.network
+              .peersOf(this.identity)
+              .map((identity) => ({ identity, name: '', role: 'owner' }))
+          })
         case 'join': {
           if (this.paused) return reply({ error: 'paused', reason: this.paused })
+          if (message.arrival === 'link' || linkKind(String(message.ticket)))
+            if (!this.joinLink(message, reply)) return
           const open = this.network.invitations.get(String(message.ticket))
           const host = open && this.network.helperOf(open.host)
           if (!open || !host?.alive)
@@ -861,7 +1178,7 @@ export class FakeHelper {
             }
             const known = this.network.knownFor(this.identity, open.host)
             for (const route of open.routes) if (!known.hints.includes(route)) known.hints.push(route)
-            for (const route of candidates) known.approved.add(route)
+            for (const route of candidates ?? []) known.approved.add(route)
           }
           this.event({
             ev: 'join.progress',
@@ -945,8 +1262,12 @@ export class FakeHelper {
         }
         case 'peer.forget':
           return reply({ forgotten: this.network.forget(this.identity, String(message.identity)) })
-        case 'join.cancel':
+        case 'join.cancel': {
+          const waiting = this.codeWaits.get(String(message.invitation))
+          this.codeWaits.delete(String(message.invitation))
+          waiting?.reply({ error: 'cancelled', reason: 'cancelled' })
           return reply()
+        }
         case 'peer.addresses.set': {
           if (this.network.minor >= 1) {
             // As a 1.1 helper: every owner kind, each an `owner` approval; those no longer listed lose theirs.
@@ -1003,6 +1324,15 @@ export class FakeHelper {
     } catch (error) {
       reply({ error: (error as { code?: string }).code ?? 'internal' })
     }
+  }
+}
+
+/** Whether a ticket decodes as kind 2. */
+function linkKind(ticket: string): boolean {
+  try {
+    return decodeTicket(ticket).kind === 2
+  } catch {
+    return false
   }
 }
 

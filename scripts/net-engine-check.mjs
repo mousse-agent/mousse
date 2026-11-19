@@ -54,6 +54,7 @@ const CHECKS = {
     'tests/netEngine/checks/pathSwitch.test.ts',
     'tests/netEngine/checks/sharedComputer.test.ts'
   ],
+  'phase1b.link-app': 'tests/netEngine/checks/linkApp.test.ts',
   // Add over SSH (1b §3.4–§3.6).
   'phase1b.ssh-add-app': 'tests/netEngine/checks/sshAddApp.test.ts'
 }

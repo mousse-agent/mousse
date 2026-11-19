@@ -16,6 +16,7 @@ import {
   connectedBothWays,
   deviceState,
   Fabric,
+  CHECK_ROUTE,
   REAL_HELPER,
   rowFor,
   step,
@@ -62,7 +63,8 @@ describe('phase1a.pair-both-ways', () => {
   }, 120_000)
 
   // A real helper lists the addresses of the computer it runs on; this one has a tailnet's too.
-  it.skipIf(REAL_HELPER)(
+  // A routes run gives each computer only the route under test, never this one's own addresses.
+  it.skipIf(REAL_HELPER || !!CHECK_ROUTE)(
     'pairs both ways when the caller also listens on an address outside a private range',
     async () => {
       fabric.network.routes.set(Buffer.from('endpoint-tailnet-caller').toString('hex'), [

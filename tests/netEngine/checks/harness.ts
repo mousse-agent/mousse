@@ -149,12 +149,14 @@ export interface Computer {
 
 /** The computers of one check, their helpers and the fake network between them. */
 export class Fabric {
-  readonly network = new FakeNetwork()
+  readonly network = fakeNetwork()
   /** Every engine message each app sent its helper; `decide` may drop one. */
   private readonly tap: Tap = { crossed: [] }
   private readonly cleanups: Array<() => unknown> = []
   /** In a routes run, each computer taps Use on offered addresses by itself; a check of Use itself turns it off. */
   autoUse = true
+  /** In a routes run over ssh, the computers made so far. */
+  private readonly computers: Computer[] = []
   /** In a routes run over ssh, each fake computer's SSH route id, by its identity. */
   private readonly sshRouteOf = new Map<string, string>()
   /** The computers made so far (each fake one gets its own route in a routes run). */
@@ -346,6 +348,19 @@ export class Fabric {
     })
     // A routes run: each owner taps Use on what its pairings offer, as its window would (unless a check says no).
     if (CHECK_ROUTE && this.autoUse) this.cleanups.push(useOffered(computer))
+    // Over ssh, each computer holds every other's SSH route as its owner address, as the kit sets it (1b §14).
+    if (CHECK_ROUTE === 'ssh' && !REAL_HELPER) {
+      for (const other of this.computers)
+        for (const [from, to] of [
+          [computer, other],
+          [other, computer]
+        ] as const)
+          await from.engine.request('peer.addresses.set', {
+            identity: to.endpoint,
+            routes: [{ route_id: this.sshRouteOf.get(to.endpoint), selector: 'a'.repeat(26), shell: 'sh' }]
+          })
+      this.computers.push(computer)
+    }
     return computer
   }
 
@@ -357,16 +372,6 @@ export class Fabric {
     owner: Computer,
     caller: Computer
   ): Promise<{ callerOnOwner: NodeId; ownerOnCaller: NodeId; grant: string }> {
-    // Over ssh, each side has the other's SSH route as its owner address, set as the kit sets it (1b §14).
-    if (CHECK_ROUTE === 'ssh' && !REAL_HELPER)
-      for (const [from, to] of [
-        [caller, owner],
-        [owner, caller]
-      ] as const)
-        await from.engine.request('peer.addresses.set', {
-          identity: to.endpoint,
-          routes: [{ route_id: this.sshRouteOf.get(to.endpoint), selector: 'a'.repeat(26), shell: 'sh' }]
-        })
     const invite = await owner.dispatch('netEngine.invite', {}, true)
     const stopApproving = approveAll(owner)
     let joined: { node: NodeId }
@@ -455,6 +460,17 @@ export class Fabric {
     vi.useRealTimers()
     for (const close of this.cleanups.splice(0).reverse()) await close()
   }
+}
+
+/**
+ * A fake network whose helpers carry the defects the kit's helper controls build into a real one (each
+ * `--cfg mousse_control="<name>"` in `RUSTFLAGS`), so a control fails the same way with the fake helper.
+ */
+function fakeNetwork(): FakeNetwork {
+  const network = new FakeNetwork()
+  for (const match of (process.env.RUSTFLAGS ?? '').matchAll(/mousse_control="([a-z0-9-]+)"/g))
+    network.defects.add(match[1]!)
+  return network
 }
 
 /** Says Yes to every computer asking to join `owner`, as its window would, until stopped. */
