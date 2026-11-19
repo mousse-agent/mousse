@@ -26,7 +26,7 @@ import { argumentContract } from '../../src/mms/bots/actions/BotAlone'
 it.each([
   '192.168.1.20', '2001:db8::1', '2001:0:0:0:0:0:0:1', '127.0.0.1:8080',
   'owner＠example.test', 'evil．com', 'evil。com', '\\\\evil\\share', 'tel:+12025550123',
-  'sms:+12025550123', 'http:/localhost', 'evil:8080/x', 'evil.c0m', 'ev\u200bil.com', 'evil . com'
+  'sms:+12025550123', 'http:/localhost', '123:8080', 'evil:8080/x', 'evil.c0m', 'ev\u200bil.com', 'evil . com'
 ])('E1 r2 address-like content stays exact: %s', body => {
   expect(argumentContract({ body }).varying).toEqual([])
 })
