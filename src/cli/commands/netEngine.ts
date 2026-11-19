@@ -5,14 +5,15 @@ import { flagString } from '../parseArgs'
 import { connectDaemonClient, type DaemonClient } from '../daemonClient'
 import { formatTable, writeOutput } from '../output'
 import { netCliFailure } from './net'
-import { engineControl, engineLimits } from '../../mms/netEngine/limits'
-import { privateRoute } from '../../mms/netEngine/routes'
+import { runNetEngineCommand } from './netEngineSsh'
+import { engineLimits } from '../../mms/netEngine/limits'
 import { readTicket } from '../../mms/netEngine/ticket'
-import {
-  NET_ENGINE_SSH_MARKER,
-  type NetEngineDevice,
-  type NetEngineInviteState,
-  type NetEngineStatus
+import type {
+  NetEngineDevice,
+  NetEngineLinkInvite,
+  NetEngineJoinPreview,
+  NetEngineReach,
+  NetEngineStatus
 } from '../../shared/netEngine/local'
 
 export const NET_ENGINE_HELP = `Usage:
@@ -242,27 +243,29 @@ export interface NetEngineCliClient {
   request<T = unknown>(method: string, params?: unknown, timeoutMs?: number): Promise<T>
 }
 
-/** The local methods the commands use: 1a's, and 1b's (`routes`, `addresses`, the link and SSH steps). */
+/** The service's local methods the commands use: the same ones Settings → Devices calls. */
 export const NET_ENGINE_CLI_METHODS = {
   status: 'netEngine.status',
   invite: 'netEngine.invite',
   inviteCancel: 'netEngine.invite.cancel',
   approve: 'netEngine.approve',
   join: 'netEngine.join',
+  joinPreview: 'netEngine.join.preview',
+  /** The code a Send link's join waits for (Phase 1b M9). */
   joinCode: 'netEngine.join.code',
   remove: 'netEngine.remove',
-  addresses: 'netEngine.addresses.set',
+  addressAdd: 'netEngine.address.add',
+  addressRemove: 'netEngine.address.remove',
   routes: 'netEngine.routes.config',
   routesTest: 'netEngine.routes.test',
   sshResolve: 'netEngine.ssh.resolve',
   sshProbe: 'netEngine.ssh.probe',
   sshTrust: 'netEngine.ssh.trust',
   sshProfiles: 'netEngine.ssh.profiles',
-  sshAdd: 'netEngine.ssh.add',
-  sshRemote: 'netEngine.ssh.remote'
+  sshConnect: 'netEngine.ssh.connect'
 } as const
 
-const STATE_TEXT: Record<NetEngineDevice['state'], string> = {
+const STATE_TEXT: Record<string, string> = {
   connected: 'Connected',
   finishing: 'Finishing pairing',
   connecting: 'Connecting',
@@ -277,7 +280,7 @@ function deviceLine(device: NetEngineDevice): string[] {
       ? "Can't reach this computer"
       : device.unreachable === 'out'
         ? "This computer can't reach it"
-        : STATE_TEXT[device.state]
+        : (STATE_TEXT[device.state] ?? device.state)
   return [device.name, device.shortId, state, (device.addresses ?? []).join(' ')]
 }
 
@@ -291,7 +294,7 @@ export function statusText(status: NetEngineStatus): string {
   lines.push(`Devices: ${status.devices.length}`)
   if (status.approvals.length) lines.push(`Waiting for you: ${status.approvals.map((a) => a.name).join(', ')}`)
   if (status.sharedAccount)
-    lines.push('Another profile of this account has networking on; it can read this one\'s keys.')
+    lines.push("Another profile of this account has networking on; it can read this one's keys.")
   return lines.join('\n')
 }
 
@@ -312,44 +315,6 @@ export function findDevice(devices: NetEngineDevice[], name: string): NetEngineD
   if (named.length > 1 || short.length > 1)
     invalid(`More than one device is called ${name}; use its id from net-engine devices.`)
   return invalid(`No device is called ${name}; net-engine devices lists them.`)
-}
-
-/** The UI label of a route's class (§1.2), for lists a person reads; the helper classifies for itself. */
-export function routeLabel(route: string): string {
-  if (route.startsWith('wss://') || route.startsWith('ws://')) return 'Tunnel'
-  if (route.startsWith('ssh://')) return 'SSH'
-  const match = /^tcp:\/\/(?:\[([0-9A-Fa-f:.]+)\]|([^:/]+)):[0-9]{1,5}$/.exec(route)
-  if (!match) return 'Unknown'
-  if (privateRoute(route)) return 'LAN'
-  const v4 = match[2] && /^[0-9.]+$/.test(match[2]) ? match[2].split('.').map(Number) : undefined
-  if (v4 && v4[0] === 100 && v4[1]! >= 64 && v4[1]! <= 127) return 'Tailnet'
-  if (match[1] && /^fd7a:115c:a1e0:/i.test(match[1])) return 'Tailnet'
-  return 'Internet'
-}
-
-/**
- * The ticket's destinations as the join dialog lists them (§1.3): private `tcp` literals are dialled on their own,
- * other `tcp` and `wss` only once approved, plain `ws` and `ssh` never.
- */
-export function joinDestinations(ticket: string): {
-  automatic: string[]
-  approve: string[]
-  skipped: string[]
-} {
-  const automatic: string[] = []
-  const approve: string[] = []
-  const skipped: string[] = []
-  for (const route of readTicket(ticket).routes) {
-    if (route.startsWith('tcp://') && privateRoute(route)) automatic.push(route)
-    else if (route.startsWith('tcp://') || route.startsWith('wss://')) approve.push(route)
-    else skipped.push(route)
-  }
-  return { automatic, approve, skipped }
-}
-
-const describe = (route: string): string => {
-  const host = route.replace(/^[a-z]+:\/\//, '').replace(/\/.*$/, '')
-  return `${host} (${routeLabel(route)})`
 }
 
 /** A QR code drawn with half blocks, two rows a line, inside a quiet zone, for a camera to read off a terminal. */
@@ -405,21 +370,8 @@ export async function executeNetEngineCommand(
       io.emit({ removed: device.node }, `Removed ${device.name}.`)
       return 0
     }
-    case 'addresses': {
-      const device = findDevice((await status(client)).devices, request.device)
-      const value = await client.request<NetEngineStatus>(NET_ENGINE_CLI_METHODS.addresses, {
-        node: device.node,
-        routes: request.routes
-      })
-      const now = value.devices?.find((row) => row.node === device.node)
-      io.emit(
-        { node: device.node, addresses: now?.addresses ?? request.routes },
-        request.routes.length
-          ? `${device.name} is dialled at ${(now?.addresses ?? request.routes).join(', ')}.`
-          : `${device.name} is found on the local network only.`
-      )
-      return 0
-    }
+    case 'addresses':
+      return addresses(request, client, io)
     case 'routes':
       return routes(request, client, io)
     case 'invite':
@@ -429,15 +381,51 @@ export async function executeNetEngineCommand(
     case 'ssh-add':
       return sshAdd(request, client, io)
     case 'ssh-remote':
-      // Run by runNetEngine itself: it owns stdout and the connection.
+      // Run by runNetEngine itself: it owns stdout and never starts the service.
       return invalid('net-engine ssh is run by ssh add on the other computer.')
   }
 }
 
-interface RoutesAnswer {
-  routes?: unknown
-  restart_needed?: boolean
-  restartNeeded?: boolean
+/** Sets the addresses this computer dials a device at to exactly `routes`: the others go, the new ones are added. */
+async function addresses(
+  request: Extract<NetEngineCliRequest, { kind: 'addresses' }>,
+  client: NetEngineCliClient,
+  io: NetEngineCliIO
+): Promise<number> {
+  const device = findDevice((await status(client)).devices, request.device)
+  const had = device.addresses ?? []
+  for (const address of had)
+    if (!request.routes.includes(address))
+      await client.request(NET_ENGINE_CLI_METHODS.addressRemove, { node: device.node, address })
+  let value: NetEngineStatus | undefined
+  for (const address of request.routes)
+    if (!had.includes(address))
+      value = await client.request<NetEngineStatus>(NET_ENGINE_CLI_METHODS.addressAdd, {
+        node: device.node,
+        address
+      })
+  value ??= await status(client)
+  const now = value.devices.find((row) => row.node === device.node)?.addresses ?? []
+  io.emit(
+    { node: device.node, addresses: now },
+    now.length
+      ? `${device.name} is dialled at ${now.join(', ')}.`
+      : `${device.name} is found on the local network only.`
+  )
+  return 0
+}
+
+function reachText(reach: NetEngineReach | undefined, routes: readonly string[]): string {
+  const lines: string[] = []
+  if (reach) {
+    lines.push(`Local network: ${reach.lan ? 'on' : 'off'}`, `Tailnet: ${reach.tailnet ? 'on' : 'off'}`)
+    if (reach.public.length) lines.push(`Port forward: ${reach.public.join(', ')}`)
+    if (reach.tunnels.length) lines.push(`Tunnels: ${reach.tunnels.join(', ')}`)
+    if (reach.port !== undefined) lines.push(`Port: ${reach.port}`)
+    if (reach.unbound?.length) lines.push(`Not bound yet: ${reach.unbound.join(', ')}`)
+  }
+  lines.push(routes.length ? `Reachable at: ${routes.join(', ')}` : 'Not reachable from other computers except over SSH.')
+  return lines.join('\n')
 }
 
 async function routes(
@@ -445,14 +433,23 @@ async function routes(
   client: NetEngineCliClient,
   io: NetEngineCliIO
 ): Promise<number> {
-  let answer: RoutesAnswer | undefined
-  if (Object.keys(request.config).length)
-    answer = await client.request<RoutesAnswer>(NET_ENGINE_CLI_METHODS.routes, request.config)
-  const current = answer ?? (await client.request<RoutesAnswer>(NET_ENGINE_CLI_METHODS.routes, {}))
-  const list = Array.isArray(current.routes)
-    ? current.routes.filter((route): route is string => typeof route === 'string')
-    : []
-  const restarted = !!(answer?.restart_needed ?? answer?.restartNeeded)
+  let restarted = false
+  let value: NetEngineStatus
+  if (Object.keys(request.config).length) {
+    const answer = await client.request<{ restarted: boolean; status: NetEngineStatus }>(
+      NET_ENGINE_CLI_METHODS.routes,
+      request.config
+    )
+    restarted = answer.restarted
+    value = answer.status
+    // The helper restarted for the change: its routes show once it is running again.
+    const until = Date.now() + engineLimits().helperInitDeadlineMs
+    while (restarted && !value.reach && Date.now() < until && !io.interrupted.aborted) {
+      await io.changed(io.interrupted)
+      value = await status(client)
+    }
+  } else value = await status(client)
+  const list = value.routes ?? []
   const tests: Array<{ route: string; ok: boolean; ms?: number; reason?: string }> = []
   if (request.test)
     for (const route of list) {
@@ -462,9 +459,7 @@ async function routes(
       )
       tests.push({ route, ...result })
     }
-  const lines = [
-    list.length ? `Reachable at:\n${list.map((route) => `  ${describe(route)}  ${route}`).join('\n')}` : 'Not reachable from other computers except over SSH.'
-  ]
+  const lines = [reachText(value.reach, list)]
   if (restarted) lines.push('Networking restarted to use the change.')
   for (const test of tests)
     lines.push(
@@ -472,13 +467,21 @@ async function routes(
         ? `${test.route}: works${test.ms !== undefined ? ` (${test.ms} ms)` : ''}`
         : `${test.route}: Couldn't confirm from this network`
     )
-  io.emit({ routes: list, ...(restarted ? { restarted } : {}), ...(request.test ? { tests } : {}) }, lines.join('\n'))
+  io.emit(
+    {
+      ...(value.reach ? { reach: value.reach } : {}),
+      routes: list,
+      ...(restarted ? { restarted } : {}),
+      ...(request.test ? { tests } : {})
+    },
+    lines.join('\n')
+  )
   return 0
 }
 
 /** The invitation as the service reports it now, or undefined once it ended. */
-const inviteOf = (value: NetEngineStatus, invitation: string): NetEngineInviteState | undefined =>
-  value.invites?.find((open) => open.invitation === invitation)
+const inviteOf = (value: NetEngineStatus, invitation: string): NetEngineLinkInvite | undefined =>
+  value.links?.find((open) => open.invitation === invitation)
 
 async function invite(
   request: Extract<NetEngineCliRequest, { kind: 'invite' }>,
@@ -496,13 +499,17 @@ async function invite(
   const shown = (code?: string, left?: number): string =>
     code ? `Code: ${spaced(code)}${left !== undefined ? ` (${left} ${left === 1 ? 'try' : 'tries'} left)` : ''}` : ''
   io.emit(
-    { invitation: created.invitation, uri: created.uri, ...(created.code ? { code: created.code } : {}), ...(created.attemptsLeft !== undefined ? { attemptsLeft: created.attemptsLeft } : {}), ...(created.expiresAt !== undefined ? { expiresAt: created.expiresAt } : {}) },
+    {
+      invitation: created.invitation,
+      uri: created.uri,
+      ...(created.code ? { code: created.code } : {}),
+      ...(created.attemptsLeft !== undefined ? { attemptsLeft: created.attemptsLeft } : {}),
+      ...(created.expiresAt !== undefined ? { expiresAt: created.expiresAt } : {})
+    },
     request.link
-      ? [
-          created.uri,
-          shown(created.code, created.attemptsLeft),
-          'Send the link in a chat. Read the code to them another way.'
-        ].filter(Boolean).join('\n')
+      ? [created.uri, shown(created.code, created.attemptsLeft), 'Send the link in a chat. Read the code to them another way.']
+          .filter(Boolean)
+          .join('\n')
       : [terminalQr(created.uri), 'Scan this with Add device on the other computer.'].join('\n')
   )
   let code = created.code
@@ -524,27 +531,19 @@ async function invite(
     for (const approval of now.approvals) {
       if (approval.invitation !== created.invitation || answered.has(approval.request)) continue
       answered.add(approval.request)
-      const answer = io.tty
-        ? await io.ask(`Is ${approval.name} (${approval.device}) next to you? [y/N] `)
-        : undefined
+      const answer = io.tty ? await io.ask(`Is ${approval.name} (${approval.device}) next to you? [y/N] `) : undefined
       const yes = /^y(es)?$/i.test(answer?.trim() ?? '')
       await client.request(NET_ENGINE_CLI_METHODS.approve, { request: approval.request, yes })
       if (!yes) io.say(`${approval.name} was not let in.`)
     }
     const open = inviteOf(now, created.invitation)
-    if (request.link && open) {
-      if (open.code && (open.code !== code || open.attemptsLeft !== left)) {
-        code = open.code
-        left = open.attemptsLeft
-        io.say(`That code didn't work there. ${shown(code, left)}`)
-      }
+    if (request.link && open?.code && (open.code !== code || open.attemptsLeft !== left)) {
+      code = open.code
+      left = open.attemptsLeft
+      io.say(`That code didn't work there. ${shown(code, left)}`)
     }
-    if (open?.ended || (now.invites && !open)) {
-      io.say(
-        open?.ended === 'attempts_exhausted'
-          ? 'Three wrong codes. This link no longer works.'
-          : 'The invitation ended.'
-      )
+    if (open?.ended && open.ended !== 'used') {
+      io.say(open?.ended === 'attempts_exhausted' ? 'Three wrong codes. This link no longer works.' : 'The invitation ended.')
       return 1
     }
     await io.changed(io.interrupted)
@@ -564,12 +563,18 @@ async function join(
         : 'net-engine join needs a terminal to type the code in (no_tty).'
     )
   const facts = readTicket(request.ticket)
-  const { automatic, approve, skipped } = joinDestinations(request.ticket)
+  // Where the link would dial, by class, as the join dialog lists it: the service decides, not this command.
+  const preview = await client.request<NetEngineJoinPreview>(NET_ENGINE_CLI_METHODS.joinPreview, {
+    ticket: request.ticket
+  })
+  if (preview.kind === 1)
+    invalid('This is an in-person pairing code: scan it with Add device in Mousse.')
+  if (preview.expired) invalid('This link has expired. Ask for a new one.')
+  const destination = (entry: NetEngineJoinPreview['destinations'][number]): string => `${entry.label} (${entry.cls})`
   io.say(
     [
-      `Connect to ${facts.name ?? 'the computer in this link'}? It will also be able to use this computer.`,
-      `It will contact: ${[...automatic, ...approve].map(describe).join(', ') || 'nothing (no address it can use)'}`,
-      ...(skipped.length ? [`Skipped: ${skipped.map(describe).join(', ')}`] : [])
+      `Connect to ${preview.name ?? facts.name ?? 'the computer in this link'}? It will also be able to use this computer.`,
+      `It will contact: ${preview.destinations.map(destination).join(', ') || 'nothing (no address it can use)'}`
     ].join('\n')
   )
   if (!request.yes) {
@@ -585,43 +590,39 @@ async function join(
     const tried = new Set<string>()
     while (!ended.signal.aborted) {
       const now = await status(client).catch(() => undefined)
-      const pending = now?.joins?.find(
-        (entry) => entry.invitation === facts.invitation && entry.codeNeeded
-      )
-      if (pending) {
-        const key = `${pending.attemptsLeft ?? ''}`
-        if (!tried.has(key)) {
-          tried.add(key)
-          if (pending.failed)
-            io.say(
-              "That code didn't work. If you typed it exactly, the link may have been swapped; get a new one another way."
-            )
-          let code: string | undefined
-          for (;;) {
-            const typed = await io.ask(
-              `Type the code shown on the other computer${pending.attemptsLeft !== undefined ? ` (${pending.attemptsLeft} ${pending.attemptsLeft === 1 ? 'try' : 'tries'} left)` : ''}: `
-            )
-            if (typed === undefined) return
-            code = typed.replace(/\s+/g, '')
-            if (/^[0-9]{6}$/.test(code)) break
-            io.say('The code is six digits.')
-          }
-          await client
-            .request(NET_ENGINE_CLI_METHODS.joinCode, { invitation: facts.invitation, code })
-            .catch(() => undefined)
+      const pending = now?.joins?.find((entry) => entry.invitation === facts.invitation && entry.needsCode)
+      const key = pending ? `${pending.attemptsLeft ?? ''}:${pending.wrong === true}` : ''
+      if (pending && !tried.has(key)) {
+        tried.add(key)
+        if (pending.wrong)
+          io.say("That code didn't work. If you typed it exactly, the link may have been swapped; get a new one another way.")
+        let code: string | undefined
+        for (;;) {
+          const typed = await io.ask(
+            `Type the code shown on the other computer${pending.attemptsLeft !== undefined ? ` (${pending.attemptsLeft} ${pending.attemptsLeft === 1 ? 'try' : 'tries'} left)` : ''}: `
+          )
+          if (typed === undefined) return
+          code = typed.replace(/\s+/g, '')
+          if (/^[0-9]{6}$/.test(code)) break
+          io.say('The code is six digits.')
         }
+        await client.request(NET_ENGINE_CLI_METHODS.joinCode, { invitation: facts.invitation, code }).catch(() => undefined)
       }
       await io.changed(ended.signal)
     }
   })()
   try {
-    const answer = await client.request<{ node: string; status: NetEngineStatus }>(NET_ENGINE_CLI_METHODS.join, {
-      ticket: request.ticket,
-      arrival: 'link',
-      approved: approve
-    }, engineLimits().cliJoinWaitMs)
+    // Connect approves the destinations listed above (§1.3); nothing of this computer's is shared beyond the LAN.
+    const answer = await client.request<{ node: string; status: NetEngineStatus }>(
+      NET_ENGINE_CLI_METHODS.join,
+      { ticket: request.ticket, arrival: 'link' },
+      engineLimits().cliJoinWaitMs
+    )
     const row = answer.status?.devices?.find((device) => device.node === answer.node)
-    io.emit({ node: answer.node }, `Paired with ${row?.name ?? facts.name ?? 'the other computer'}. The other direction finishes on its own.`)
+    io.emit(
+      { node: answer.node },
+      `Paired with ${row?.name ?? preview.name ?? 'the other computer'}. The other direction finishes on its own.`
+    )
     return 0
   } finally {
     ended.abort()
@@ -629,11 +630,11 @@ async function join(
   }
 }
 
-interface SshProfile {
-  selector: string
-  label: string
-  networking?: boolean
-  identity?: string
+interface SshProfiles {
+  computer: string
+  os: string
+  startsAtLogin: boolean
+  profiles: Array<{ selector: string; label: string; networking: boolean; identity?: string }>
 }
 
 async function sshAdd(
@@ -642,27 +643,20 @@ async function sshAdd(
   io: NetEngineCliIO
 ): Promise<number> {
   const wait = engineLimits().sshRequestDeadlineMs
-  const resolved = await client.request<{
-    route_id?: string
-    routeId?: string
-    user: string
-    hostname: string
-    port: number
-    pinned?: boolean
-  }>(NET_ENGINE_CLI_METHODS.sshResolve, { target: request.target }, wait)
-  const routeId = resolved.routeId ?? resolved.route_id
-  const host = resolved.hostname
+  const resolved = await client.request<{ routeId: string; user: string; hostname: string; port: number; pinned: boolean }>(
+    NET_ENGINE_CLI_METHODS.sshResolve,
+    { target: request.target },
+    wait
+  )
+  const { routeId, hostname: host, user } = resolved
   if (!resolved.pinned) {
-    const key = await client.request<{
-      key_type?: string
-      keyType?: string
-      sha256: string
-      in_user_known_hosts?: boolean
-      inUserKnownHosts?: boolean
-    }>(NET_ENGINE_CLI_METHODS.sshProbe, { routeId }, wait)
-    const known = key.inUserKnownHosts ?? key.in_user_known_hosts
+    const key = await client.request<{ keyType: string; sha256: string; inUserKnownHosts: boolean }>(
+      NET_ENGINE_CLI_METHODS.sshProbe,
+      { routeId, host },
+      wait
+    )
     io.say(
-      `${host}'s SSH key is ${key.keyType ?? key.key_type} SHA256:${key.sha256}${known ? ' (the same key your ~/.ssh/known_hosts has)' : ''}`
+      `${host}'s SSH key is ${key.keyType} SHA256:${key.sha256}${key.inUserKnownHosts ? ' (the same key your ~/.ssh/known_hosts has)' : ''}`
     )
     if (!io.tty) invalid('ssh add needs a terminal to confirm the key the first time (no_tty).')
     const answer = await io.ask('Trust this key? [y/N] ')
@@ -670,138 +664,46 @@ async function sshAdd(
       io.say('Nothing was added.')
       return 1
     }
-    await client.request(NET_ENGINE_CLI_METHODS.sshTrust, { routeId, sha256: key.sha256 }, wait)
+    await client.request(NET_ENGINE_CLI_METHODS.sshTrust, { routeId, sha256: key.sha256, host }, wait)
   }
+  // The other computer's profiles: every one of that account's, paired elsewhere or not (§3.4).
+  const listed = await client.request<SshProfiles>(NET_ENGINE_CLI_METHODS.sshProfiles, { routeId, host, user }, wait)
   let selector = request.selector
   let newLabel = request.newLabel
+  if (selector && !listed.profiles.some((profile) => profile.selector === selector))
+    invalid(`${listed.computer || host} has no profile ${selector}; net-engine ssh add ${request.target} lists them.`)
   if (!selector && !newLabel) {
-    const listed = await client.request<{ profiles: SshProfile[]; computer?: string }>(
-      NET_ENGINE_CLI_METHODS.sshProfiles,
-      { routeId },
-      wait
-    )
-    const profiles = listed.profiles ?? []
     io.say(
       [
-        `Profiles of ${resolved.user} on ${listed.computer ?? host}:`,
-        ...profiles.map((profile, i) => `  ${i + 1}. ${profile.label}${profile.networking ? '' : ' (networking off)'}  ${profile.selector}`),
-        `  ${profiles.length + 1}. New profile`
+        `Profiles of ${user} on ${listed.computer || host}:`,
+        ...listed.profiles.map(
+          (profile, i) => `  ${i + 1}. ${profile.label}${profile.networking ? '' : ' (networking off)'}  ${profile.selector}`
+        ),
+        `  ${listed.profiles.length + 1}. New profile`
       ].join('\n')
     )
     if (!io.tty) invalid('Name the profile with --profile <selector> or --new <label> (no_tty).')
     const pick = Number((await io.ask('Which one? ')) ?? '')
-    if (Number.isInteger(pick) && pick >= 1 && pick <= profiles.length) selector = profiles[pick - 1]!.selector
-    else if (pick === profiles.length + 1) {
+    if (Number.isInteger(pick) && pick >= 1 && pick <= listed.profiles.length) selector = listed.profiles[pick - 1]!.selector
+    else if (pick === listed.profiles.length + 1) {
       newLabel = (await io.ask('Label for the new profile: '))?.trim()
       if (!newLabel) invalid('A new profile needs a label.')
     } else invalid('Pick one of the numbers listed.')
   }
-  const added = await client.request<{
-    node?: string
-    name?: string
-    startsAtLogin?: boolean
-    starts_at_login?: boolean
-  }>(NET_ENGINE_CLI_METHODS.sshAdd, {
-    routeId,
-    ...(selector ? { selector } : { newLabel })
-  }, wait)
-  const starts = added.startsAtLogin ?? added.starts_at_login
+  const added = await client.request<{ node: string; status: NetEngineStatus }>(
+    NET_ENGINE_CLI_METHODS.sshConnect,
+    { routeId, target: request.target, host, user, ...(selector ? { selector } : { newLabel }) },
+    wait
+  )
+  const row = added.status?.devices?.find((device) => device.node === added.node)
   io.emit(
-    added,
+    { node: added.node, startsAtLogin: listed.startsAtLogin },
     [
-      `Added ${added.name ?? host} over SSH. This computer uses it; it doesn't use this one.`,
-      ...(starts === false ? [`Mousse on ${host} won't start after a restart.`] : [])
+      `Added ${row?.name ?? host} over SSH. This computer uses it; it doesn't use this one.`,
+      ...(listed.startsAtLogin ? [] : [`Mousse on ${host} won't start after a restart.`])
     ].join('\n')
   )
   return 0
-}
-
-// ------------------------------------------------------------------------------------------------ net-engine ssh
-
-/**
- * `mousse-cli net-engine ssh`, what `ssh.run` starts on the other computer (§3.4): one request on stdin, the marker
- * line, then one reply line on stdout. It never starts the service: a computer where Mousse is not running answers
- * `remote_not_running`. stdout carries only the marker and the reply.
- */
-export async function runNetEngineSshRemote(
-  args: ParsedArgs,
-  stdin: NodeJS.ReadableStream = process.stdin,
-  stdout: NodeJS.WritableStream = process.stdout,
-  connect: typeof connectDaemonClient = connectDaemonClient
-): Promise<number> {
-  // Anything a login shell printed went before this line; the caller skips up to it (§3.3).
-  stdout.write(`${NET_ENGINE_SSH_MARKER}\n`)
-  const reply = (value: unknown): number => {
-    stdout.write(`${JSON.stringify(value)}\n`)
-    return 0
-  }
-  const limits = engineLimits()
-  let request: unknown
-  try {
-    const line = await readRequestLine(stdin, limits.sshRemoteRequestMaxBytes, limits.sshRemoteReadMs)
-    request = JSON.parse(line)
-  } catch {
-    return reply({ error: 'bad_request' })
-  }
-  if (!request || typeof request !== 'object' || Array.isArray(request)) return reply({ error: 'bad_request' })
-  let client: DaemonClient | undefined
-  try {
-    client = await connect({
-      homeDir: args.globals.homeDir || undefined,
-      // The owner check's control starts the service here, which ssh add must never do.
-      disableAutoStart: !engineControl('remote-autostart'),
-      requestTimeoutMs: limits.sshRequestDeadlineMs
-    })
-  } catch {
-    return reply({ error: 'remote_not_running' })
-  }
-  try {
-    const profiles = await client.request<{ defaultProfileId: string }>('profiles.status')
-    await client.request('profiles.bind', { profile: profiles.defaultProfileId })
-    return reply(await client.request(NET_ENGINE_CLI_METHODS.sshRemote, { request }))
-  } catch (error) {
-    const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
-    const reason =
-      error && typeof error === 'object'
-        ? (error as { details?: { reason?: unknown } }).details?.reason
-        : undefined
-    return reply({ error: typeof reason === 'string' ? reason : typeof code === 'string' ? code : 'remote_failed' })
-  } finally {
-    await client?.close().catch(() => undefined)
-  }
-}
-
-/** One line from `input`, at most `maxBytes`, within `waitMs`; the input may end instead of a newline. */
-export function readRequestLine(input: NodeJS.ReadableStream, maxBytes: number, waitMs: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const parts: Buffer[] = []
-    let size = 0
-    const done = (error?: Error): void => {
-      clearTimeout(timer)
-      input.removeListener('data', data)
-      input.removeListener('end', end)
-      input.removeListener('error', done)
-      input.pause?.()
-      if (error) reject(error)
-      else resolve(Buffer.concat(parts).toString('utf8'))
-    }
-    const data = (chunk: Buffer | string): void => {
-      const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk
-      const newline = bytes.indexOf(10)
-      const take = newline >= 0 ? bytes.subarray(0, newline) : bytes
-      size += take.byteLength
-      if (size > maxBytes) return done(new Error('too_large'))
-      parts.push(take)
-      if (newline >= 0) done()
-    }
-    const end = (): void => done()
-    const timer = setTimeout(() => done(new Error('timeout')), waitMs)
-    timer.unref?.()
-    input.on('data', data)
-    input.once('end', end)
-    input.once('error', done)
-    input.resume?.()
-  })
 }
 
 // ------------------------------------------------------------------------------------------------ entry
@@ -865,9 +767,9 @@ export async function runNetEngine(args: ParsedArgs): Promise<void> {
     process.stdout.write(NET_ENGINE_HELP)
     return
   }
-  // What ssh add runs on the other computer: its stdout is read by a program, not a person.
+  // What ssh add runs on the other computer: its stdout is read by a program, and the service is never started.
   if (args.subcommand === 'ssh' && !args.positional.length) {
-    process.exitCode = await runNetEngineSshRemote(args)
+    await runNetEngineCommand(args)
     return
   }
   let client: DaemonClient | undefined
@@ -898,6 +800,7 @@ export async function runNetEngine(args: ParsedArgs): Promise<void> {
 /** The service's refusal in plain words: its own message when it gave one, else the error code's. */
 export function netEngineFailure(error: unknown): { code: string; error: string; exitCode: number } {
   const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+  // What the service answers for a method it does not have (`validateRequest`).
   if (code === 'method_not_allowed')
     return { code: 'not_supported', error: 'This Mousse service does not have that command yet.', exitCode: 1 }
   const message = error instanceof Error ? error.message : ''

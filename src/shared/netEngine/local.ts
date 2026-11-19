@@ -1,3 +1,5 @@
+import type { RouteClass } from './routes'
+
 /**
  * The daemon methods a Mousse window calls for the new networking (Phase 1a): the switch, the devices and their
  * pairing. They are local only: a window of this computer calls them, and no paired computer can (they are not on
@@ -14,7 +16,19 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.retry',
   'netEngine.remove',
   'netEngine.address.add',
-  'netEngine.loginStart'
+  'netEngine.loginStart',
+  // Phase 1b: routes (§1.3, §1.5, §4.3)
+  'netEngine.address.remove',
+  'netEngine.address.use',
+  'netEngine.join.preview',
+  'netEngine.routes.config',
+  'netEngine.routes.test',
+  // Phase 1b: Add over SSH (§3.4)
+  'netEngine.ssh.resolve',
+  'netEngine.ssh.probe',
+  'netEngine.ssh.trust',
+  'netEngine.ssh.profiles',
+  'netEngine.ssh.connect'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
 
@@ -60,8 +74,16 @@ export interface NetEngineDevice {
   unreachable?: 'in' | 'out'
   /** Its last connection attempt failed on a certificate outside its validity window (either clock may be wrong). */
   certificateWindow?: boolean
-  /** Addresses added for it by hand (`tcp://host:port`); none means it is found on the local network. */
+  /** Addresses added for it by hand (routes of any owner kind); none means it is found on the local network. */
   addresses?: string[]
+  /** The class of the route its connection runs over now (`conn.up.route`), while one is up. */
+  route?: RouteClass
+  /** Routes it offered in pairback that need the owner's Use before they are dialled (§1.3 suggestions). */
+  offered?: string[]
+  /** It was added over SSH (§3.4): one way only, until a Send link adds the other direction. */
+  source?: 'ssh'
+  /** Added over SSH, one way: `out`, this computer uses it; `in`, it uses this computer (§3.6). */
+  direction?: 'out' | 'in'
 }
 
 /** A computer asking to join this one, waiting for this computer's window to answer (§5.1 step 3). */
@@ -72,6 +94,38 @@ export interface NetEngineApproval {
   name: string
   /** The start of its endpoint id. */
   device: string
+}
+
+/** This computer's own routes (§1.5): what its helper listens on and advertises. */
+export interface NetEngineReach {
+  lan: boolean
+  tailnet: boolean
+  /** Port forwards, as `tcp://<public host>:<port>` routes. */
+  public: string[]
+  /** The LAN address the router forwards to, when port forwarding without LAN. */
+  forwardTo?: string
+  /** Tunnel URLs, as `wss://…/mousse-net/1` routes. */
+  tunnels: string[]
+  /** The kept TCP port. */
+  port?: number
+  /** The loopback port a tunnel client forwards to, while a tunnel is set. */
+  wsPort?: number
+  /** Addresses the helper could not bind yet (it retries them). */
+  unbound?: string[]
+}
+
+/** What a ticket asks before Connect (§1.3): where it will dial, and what this computer may also share. */
+export interface NetEngineJoinPreview {
+  /** The name the link gives the other computer, if any. */
+  name?: string
+  /** 1: shown in person (QR); 2: sent as a link. */
+  kind: number
+  /** The ticket has expired by this computer's clock. */
+  expired?: boolean
+  /** Every hint this computer would dial, with its class; the non-automatic ones are what Connect approves. */
+  destinations: Array<{ route: string; label: string; cls: RouteClass; automatic: boolean }>
+  /** This computer's tailnet and public routes and tunnels: pairback sends one only when ticked. */
+  shareable: Array<{ route: string; label: string; cls: RouteClass }>
 }
 
 export interface NetEngineStatus {
@@ -94,39 +148,38 @@ export interface NetEngineStatus {
   sharedAccount?: boolean
   /** How often Add device reads a camera frame for a pairing code (the engine limit `scanIntervalMs`). */
   scanIntervalMs?: number
-  /** This computer's open invitations (Phase 1b: a Send link's code and tries left). */
-  invites?: NetEngineInviteState[]
-  /** Joins of a Send link waiting for their code (Phase 1b). */
-  joins?: NetEngineJoinState[]
+  /** Send links this computer made (Phase 1b M9), with their codes. */
+  links?: NetEngineLinkInvite[]
+  /** Send link joins running here. */
+  joins?: NetEngineLinkJoin[]
   /**
    * `ask`: the start-at-login question waits for this window (design §10). Answered with `netEngine.loginStart
    * {start}`; asked once per installation, while the switch is on.
    */
   loginStart?: 'ask'
+  /** This computer's own routes, when its helper speaks protocol 1.1. */
+  reach?: NetEngineReach
 }
 
-/** An invitation this computer made, while it is open (Phase 1b §5). */
-export interface NetEngineInviteState {
+/** A Send link this computer made (§5.3), as the M9 slice reports it: its code and the tries left. */
+export interface NetEngineLinkInvite {
   invitation: string
-  kind: 'in_person' | 'link'
-  /** A Send link's six-digit code, read to the other person another way. */
-  code?: string
-  attemptsLeft?: number
-  /** Why it ended (`attempts_exhausted`, `expired`, `cancelled`), shown once before it leaves the list. */
+  code: string
+  attemptsLeft: number
+  expiresAt?: number
+  /** Why it ended: `used`, `attempts_exhausted`, `expired`, `cancelled`. */
   ended?: string
+  /** The pairing it made, once the other computer was let in. */
+  node?: string
 }
 
-/** A join of a Send link this computer runs, while it waits for the code typed here (Phase 1b §5). */
-export interface NetEngineJoinState {
+/** A Send link join running here (§5.3): whether it waits for the code, and the tries left. */
+export interface NetEngineLinkJoin {
   invitation: string
-  codeNeeded: boolean
+  node?: string
+  needsCode: boolean
   attemptsLeft?: number
   /** The last code typed did not work. */
-  failed?: boolean
+  wrong?: boolean
 }
 
-/**
- * The line `mousse-cli net-engine ssh` writes to stdout before anything else (Phase 1b §3.3): the computer that ran
- * it over SSH skips whatever a login shell printed up to it. Fixed on purpose.
- */
-export const NET_ENGINE_SSH_MARKER = 'mousse-ssh/1'

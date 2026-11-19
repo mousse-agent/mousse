@@ -47,7 +47,8 @@ import { createManagedBrowserInstaller } from './browser/install'
 import { bundledBrowserWorkerModule } from './browser/workerModulePath'
 import { registerBrowserSetupMethods, type BrowserSetupDomainRegistration } from './browser/registerBrowserSetupMethods'
 import { registerSpeechHostMethods } from './speech/registerSpeechHostMethods'
-import { registerNetEngineMethods } from './netEngine/registerMethods'
+import { registerNetEngineMethods, registerNetEngineSshServe } from './netEngine/registerMethods'
+import { SshRemote } from './netEngine/ssh/remote'
 
 export type { MmsOptions } from './MmsOptions'
 
@@ -62,6 +63,10 @@ export class MousseMainService extends MmsProfileServices {
   private installationStopped = false
   private installationStopOperation?: Promise<void>
   private profileHost: ProfileHost | null = null
+  /** Checks give the engines of profiles an SSH add reaches their helper (a fake one, or a test build). */
+  netEngineLauncher?: (engine: import('./netEngine/NetEngineService').NetEngineService) => void
+  /** B's side of Add over SSH for this installation (1b §3.4). */
+  private sshRemoteNow?: SshRemote
   private integrationDomains: IntegrationDomainRegistration | null = null
   private readonly domainCleanupSubscriptions: Array<() => void> = []
 
@@ -189,6 +194,45 @@ export class MousseMainService extends MmsProfileServices {
    */
   afterReady(): void {
     void this.profileHost?.startNetworkedProfiles()
+    void this.sshRemote()
+      ?.afterReady()
+      .catch((error) => console.warn('SSH add setup did not finish', error instanceof Error ? error.message : String(error)))
+  }
+
+  /** B's side of Add over SSH: profiles, their engines and the request journal of this installation. */
+  sshRemote(): SshRemote | undefined {
+    const host = this.profileHost
+    if (!host) return undefined
+    // Profiles an SSH add made start here; the others started with the daemon.
+    const made = new Set<string>()
+    this.sshRemoteNow ??= new SshRemote({
+      home: host.manager.getInstallationPaths().homeDir,
+      profiles: () =>
+        host.manager.list().map((record) => ({
+          id: record.id,
+          label: record.displayName,
+          root: host.manager.getPaths(record.id).root,
+          active: record.status === 'active'
+        })),
+      engine: async (id) => {
+        const services = await this.getProfileServices(id)
+        if (made.delete(id)) await services.start()
+        this.netEngineLauncher?.(services.netEngine)
+        return services.netEngine
+      },
+      createProfile: async (label) => {
+        // A label another profile has gets a slug of its own (the label stays as the other computer typed it).
+        const taken = new Set(host.manager.list().map((record) => record.slug))
+        const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 56) || 'profile'
+        let slug = base
+        for (let n = 2; taken.has(slug); n++) slug = base + '-' + n
+        const id = host.manager.create({ displayName: label, slug }).id
+        made.add(id)
+        return id
+      },
+      startsAtLogin: () => false
+    })
+    return this.sshRemoteNow
   }
 
   override stop(options: { timeoutMs?: number } = {}): Promise<void> {
@@ -197,6 +241,7 @@ export class MousseMainService extends MmsProfileServices {
     if (this.installationStopped) return Promise.resolve()
     if (this.installationStopOperation) return this.installationStopOperation
     const operation = (async () => {
+      this.sshRemoteNow?.close()
       const results = await Promise.allSettled([this.profileHost?.stopAll(), super.stop(options), this.browserSetup.shutdown(options)])
       const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)
       // An unsuccessful drain still owns the installation. Releasing the lease
@@ -241,6 +286,7 @@ export class MousseMainService extends MmsProfileServices {
     )
     registerEditorTunnelMethods(this.domains, async profileId => (await profile(profileId)).net)
     registerNetEngineMethods(this.domains, async profileId => (await profile(profileId)).netEngine)
+    registerNetEngineSshServe(this.domains, () => this.sshRemote())
     registerBridgeMethods(this.domains, async profileId => (await profile(profileId)).bridge)
     this.domainCleanupSubscriptions.push(
       registerSpeechHostMethods(this.domains, async profileId => (await profile(profileId)).speechRelay)

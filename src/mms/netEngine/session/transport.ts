@@ -39,6 +39,12 @@ export interface EngineStream {
  * One connection with one pairing. Inbound connections carry its calls to this computer (serving); outbound ones
  * carry this computer's calls to it (client). `peer` is this computer's local id for the pairing.
  */
+/** A connection's route (Phase 1b §7): its pipe kind and the class of the address it reached. */
+export interface EngineRoute {
+  kind: 'tcp' | 'ws' | 'ssh'
+  class: 'lan' | 'tailnet' | 'public' | 'tunnel' | 'ssh'
+}
+
 export interface EngineConnection {
   readonly id: string
   readonly peer: NodeId
@@ -47,6 +53,8 @@ export interface EngineConnection {
   readonly grant?: string
   /** On an inbound connection, the endpoint of the caller. */
   readonly endpoint?: string
+  /** The route the connection runs over (protocol 1.1 `conn.up.route`), when the helper said. */
+  readonly route?: EngineRoute
   /** Opens a stream; `method` names the call a `mousse.rpc` stream carries, which decides its class. */
   open(label: EngineLabel, method?: string): EngineStream
   onStream(listener: (stream: EngineStream) => void): void
