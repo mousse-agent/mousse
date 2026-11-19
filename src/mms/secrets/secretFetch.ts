@@ -87,6 +87,16 @@ export function prepareSecretFetch(
     return reject('The service binding is unavailable. Ask for the secret again.')
   const method = args.method ?? 'GET'
   if (method !== 'GET' && method !== 'HEAD') return reject('Only GET and HEAD reads are allowed.')
+  if (typeof args.path === 'string' && /^(?:[a-z][a-z0-9+.-]*:\/\/|\/\/)/i.test(args.path)) {
+    try {
+      if (new URL(args.path, binding.origin).origin !== binding.origin)
+        return reject(
+          `This secret is bound to ${new URL(binding.origin).host}. Other hosts need their own saved secret and binding.`
+        )
+    } catch {
+      // Malformed URLs still receive the path validation below; never echo their contents.
+    }
+  }
   const allowedPaths = binding.paths ? ` Allowed path prefixes: ${binding.paths.join(', ')}.` : ''
   const unbounded = boundReadPath(args.path)
   if (!unbounded)
