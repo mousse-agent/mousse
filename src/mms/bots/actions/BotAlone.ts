@@ -37,8 +37,11 @@ function addressTokens(value: string): string[] {
       end--
     }
     const token = word.slice(start, end)
+    // A capitalised report label keeps its word bound to this field; new label/host words still ask.
+    const label = /^\p{Lu}[\p{L}\p{N}_-]+:\d+$/u.test(token) && !/^(?:https?|ftp|file|mailto|tel|sms|sip|data|urn|ssh|ws|wss):/iu.test(token)
+    if (label) tokens.add(token.slice(0, token.lastIndexOf(':') + 1))
     // Inspect before removing opening quotes so a code fragment such as ".com" is also frozen.
-    if (!ordinaryNumber(token) && (/[:@\\]|\/\/|\S\.\S/u.test(word.slice(0, end)) || /&[A-Za-z][A-Za-z0-9]{1,31};/u.test(word))) tokens.add(token)
+    if (!label && !ordinaryNumber(token) && (/[:@\\]|\/\/|\S\.\S/u.test(word.slice(0, end)) || /&[A-Za-z][A-Za-z0-9]{1,31};/u.test(word))) tokens.add(token)
     if (tokens.size > 256) break
   }
   return [...tokens]
@@ -51,7 +54,6 @@ function ordinaryNumber(token: string): boolean {
     || /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?$/u.test(token)
     || /^\d+:\d{1,2}$/u.test(token)
     || /^\d{1,2}:\d{2}-\d{1,2}:\d{2}$/u.test(token)
-    || (/^[\p{L}_][\p{L}\p{N}_-]+:\d+$/u.test(token) && !/^(?:https?|ftp|file|mailto|tel|sms|sip|data|urn|ssh|ws|wss):/iu.test(token))
     || /^(?:\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2})$/u.test(token)
 }
 function filenameExtension(value: unknown): string | undefined {
