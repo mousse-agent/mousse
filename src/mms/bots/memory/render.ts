@@ -32,6 +32,71 @@ export function timeLabel(at: number | string, timeZone?: string): string {
   return `${part('weekday')} ${part('day')} ${part('month')} ${part('year')}, ${part('hour')}:${part('minute')}`
 }
 
+const offsetFormats = new Map<string, Intl.DateTimeFormat>()
+
+/** How far `timeZone`'s clock is ahead of UTC at `ms`, in whole minutes (330 in India). Throws on an unknown zone. */
+function zoneOffsetMinutes(ms: number, timeZone?: string): number {
+  const key = timeZone ?? ''
+  let formatter = offsetFormats.get(key)
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-US', {
+      year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', hourCycle: 'h23', ...(timeZone ? { timeZone } : {})
+    })
+    if (offsetFormats.size >= 16) offsetFormats.clear()
+    offsetFormats.set(key, formatter)
+  }
+  const part = (parts: Intl.DateTimeFormatPart[], type: Intl.DateTimeFormatPartTypes) => Number(parts.find((p) => p.type === type)?.value)
+  const parts = formatter.formatToParts(new Date(ms))
+  const wall = Date.UTC(part(parts, 'year'), part(parts, 'month') - 1, part(parts, 'day'), part(parts, 'hour'), part(parts, 'minute'))
+  return Math.round((wall - Math.floor(ms / 60_000) * 60_000) / 60_000)
+}
+
+const UTC_ISO = /\b(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})((?::\d{2}(?:\.\d+)?)?)Z\b/g
+const pad = (n: number) => String(n).padStart(2, '0')
+
+/**
+ * `text` with every UTC ISO time ("2026-11-19T10:33:43.120Z") written in `timeZone` with its offset
+ * ("2026-11-19T16:03:43.120+05:30"): the same instant, read as the owner's clock. Seconds and fractions stay as written.
+ * A zone at UTC, or one Intl does not know, leaves the text as it is.
+ */
+export function localizeIsoTimes(text: string, timeZone?: string): string {
+  if (!text.includes('Z')) return text
+  try {
+    return text.replace(UTC_ISO, (match, year: string, month: string, day: string, hour: string, minute: string, rest: string) => {
+      const ms = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute))
+      if (!Number.isFinite(ms) || Number(year) < 1000 || !Number.isFinite(Date.parse(match))) return match
+      const offset = zoneOffsetMinutes(ms, timeZone)
+      if (offset === 0) return match
+      const wall = new Date(ms + offset * 60_000)
+      const sign = offset < 0 ? '-' : '+'
+      const abs = Math.abs(offset)
+      return `${wall.getUTCFullYear()}-${pad(wall.getUTCMonth() + 1)}-${pad(wall.getUTCDate())}T${pad(wall.getUTCHours())}:${pad(wall.getUTCMinutes())}${rest}${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`
+    })
+  } catch {
+    return text
+  }
+}
+
+/**
+ * The instant a calendar day ("2026-11-19") starts in `timeZone`, or the last millisecond of it with `end`, as UTC
+ * ISO; undefined for anything that is not such a day.
+ */
+export function zonedDayBound(day: string, timeZone: string | undefined, end = false): string | undefined {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day.trim())
+  if (!match) return undefined
+  const [year, month, date] = match.slice(1).map(Number) as [number, number, number]
+  const wall = Date.UTC(year, month - 1, date + (end ? 1 : 0))
+  if (!Number.isFinite(wall) || new Date(Date.UTC(year, month - 1, date)).getUTCDate() !== date) return undefined
+  try {
+    // Twice: the offset at the guess can differ from the offset at the answer across a clock change.
+    let at = wall - zoneOffsetMinutes(wall, timeZone) * 60_000
+    at = wall - zoneOffsetMinutes(at, timeZone) * 60_000
+    return new Date(end ? at - 1 : at).toISOString()
+  } catch {
+    return undefined
+  }
+}
+
 /** "just now", "5 minutes ago", "3 days ago". */
 export function agoLabel(at: number | string, now: number): string {
   const ms = Math.max(0, now - new Date(at).getTime())

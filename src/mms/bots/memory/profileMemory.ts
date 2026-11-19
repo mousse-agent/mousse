@@ -8,7 +8,8 @@ export function createProfileBotMemory(options: {
   journal: Omit<BotJournalCaptureOptions, 'store'>
   context?: Omit<BotContextPackOptions, 'store' | 'journal' | 'timeZone'>
 }) {
-  const memory = new BotMemoryStore(options.memory)
+  // Named, not left unset: a bot's tool results are written in its zone only when one is known (`localizeIsoTimes`).
+  const memory = new BotMemoryStore({ ...options.memory, timeZone: () => Intl.DateTimeFormat().resolvedOptions().timeZone })
   const journal = createBotJournal({ ...options.journal, store: memory })
   const pack = createBotContextProvider({ ...options.context, store: memory, journal })
   return { memory, journal, pack }
