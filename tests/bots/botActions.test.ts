@@ -4022,10 +4022,10 @@ async function aloneAsk(answer: 'allow' | 'not_now' | 'pending' = 'allow', toolN
   if (body !== undefined) t.args.body = body as string
   Object.assign(t.args, extra)
   t.descriptor.inputSchema.properties.to = { type: 'array' } as never
-  if ('folder' in extra) Object.assign(t.descriptor.inputSchema.properties, { folder: { type: 'string' } })
+  for (const key of ['folder','path','drive_id']) if (key in extra) Object.assign(t.descriptor.inputSchema.properties, { [key]: { type: 'string' } })
   await t.call(); await finish(f, t.run.payload)
   const first = f.bots.actions.forWork(t.id)!
-  expect(JSON.parse(String(f.store.get('SELECT place_json FROM bot_actions WHERE id = ?', first.id)?.place_json))).toEqual({ to: t.args.to, ...('folder' in extra ? { folder: extra.folder } : {}) })
+  expect(JSON.parse(String(f.store.get('SELECT place_json FROM bot_actions WHERE id = ?', first.id)?.place_json))).toEqual({ to: t.args.to, ...Object.fromEntries(['folder','path','drive_id'].filter(k=>k in extra).map(k=>[k,extra[k]])) })
   await f.bots.actions.answer({ actionId: first.id, digest: first.args_digest, answer: 'send' }); await flush()
   const sent = await start(f, t.id, 2); await finish(f, sent.payload)
   await f.bots.service.chatSend({ botId: t.botId, text: 'Let this automation send there without asking', clientRequestId: 'alone-owner' })
@@ -4827,6 +4827,7 @@ it.each(['declined', 'failed', 'quiet'] as const)(
     expect(reports).toHaveLength(1)
     expect(reports[0]!.text).toContain('The first attempt may already have gone through. Check before trying again.')
     expect(reports[0]!.text).not.toContain('[SILENT]')
+    if (outcome !== 'failed') expect(reports[0]!.text).toMatch(/^The retry didn't go out\./)
     expect(f.store.activation(next.id)?.status).toBe('done')
   }
 )
@@ -4859,7 +4860,7 @@ it.each([
   f.close()
  }
 })
-it.each(['https://3.5', '@3.5', '3.5/path', '1.2.3.4', 'v1.2.3', 'Tickets:evil.com'])(
+it.each(['https://3.5', '@3.5', '3.5/path', '1.2.3.4', 'v1.2.3', 'Tickets:evil.com', 'tel:123', 'x:12', 'mailto:12'])(
  'E1 r4 numeric exceptions do not admit destinations: %s', async body => {
  const t = await aloneAsk('allow', 'send', 'A plain message')
  expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('open')
@@ -4877,7 +4878,7 @@ it('E1 r4 a valid exception is inert with asks first disabled', async () => {
  expect(f.bots.alone.items(t.botId)).toEqual([])
 })
 it.each(['a.com','www.ex.com'])('E1 r4 host-shaped names stay exact: %s', async name => {
- const t = await aloneAsk('allow','upload_file',undefined,{folder:'scans',name})
+ const t = await aloneAsk('allow','upload_file',undefined,{[name==='a.com'?'drive_id':'path']:'scans',name})
  expect((await aloneNext(t,{...t.args,name:name==='a.com'?'evil.com':'mail.ex.com'} as never)).action.status).toBe('open')
 })
 it('E1 r4 expanded text above 64k asks without scanning', async () => {
