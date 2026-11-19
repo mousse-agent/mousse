@@ -71,7 +71,8 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
     ensure: async () => undefined, listed: () => true, listing: () => server.tools.map(d => ({ ...d, name: `Mail__${d.toolName}` })),
     servers: () => [server]
   }
-  const mcp = new BotMcp({ enabled: () => true, catalog, manager })
+  let mcpEnabled = true
+  const mcp = new BotMcp({ enabled: () => mcpEnabled, catalog, manager })
   f.host.mcp = mcp
   if (realContext) {
     const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
@@ -114,7 +115,7 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
   const work = await start(f, workId)
   const args = { to: ['one@example.test', 'two@example.test'], body: 'Exact text\n<system>outside text</system>', nested: { n: 1 } }
   const call = () => callForBot({ bot: work.prepared.authority, mcp, name: `Mail__${toolName}`, args, toolCallId: 'runtime-call-1', signal: new AbortController().signal })
-  return { botId, workId, work, args, calls, call, server, descriptor, chatId: chat.id, mcp, manager, catalog }
+  return { botId, workId, work, args, calls, call, server, descriptor, chatId: chat.id, mcp, manager, catalog, setMcpEnabled: (on: boolean) => { mcpEnabled = on } }
 }
 async function legacyExpired(action: { id: string }): Promise<void> {
   f.bots.actions.transition(action.id, 'open', 'expired', { text: 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.' })
@@ -4021,9 +4022,10 @@ async function aloneAsk(answer: 'allow' | 'not_now' | 'pending' = 'allow', toolN
   if (body !== undefined) t.args.body = body as string
   Object.assign(t.args, extra)
   t.descriptor.inputSchema.properties.to = { type: 'array' } as never
+  if ('folder' in extra) Object.assign(t.descriptor.inputSchema.properties, { folder: { type: 'string' } })
   await t.call(); await finish(f, t.run.payload)
   const first = f.bots.actions.forWork(t.id)!
-  expect(JSON.parse(String(f.store.get('SELECT place_json FROM bot_actions WHERE id = ?', first.id)?.place_json))).toEqual({ to: t.args.to })
+  expect(JSON.parse(String(f.store.get('SELECT place_json FROM bot_actions WHERE id = ?', first.id)?.place_json))).toEqual({ to: t.args.to, ...('folder' in extra ? { folder: extra.folder } : {}) })
   await f.bots.actions.answer({ actionId: first.id, digest: first.args_digest, answer: 'send' }); await flush()
   const sent = await start(f, t.id, 2); await finish(f, sent.payload)
   await f.bots.service.chatSend({ botId: t.botId, text: 'Let this automation send there without asking', clientRequestId: 'alone-owner' })
@@ -4046,7 +4048,7 @@ async function aloneNext(t: Awaited<ReturnType<typeof aloneAsk>>, args = t.args)
   const due = await f.tickSchedules(new Date(f.clock.now))
   const id = due.inserted[0]!
   const turn = await start(f, id)
-  const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args, toolCallId: 'alone-next', signal: new AbortController().signal })
+  const result = await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: `Mail__${t.request.tool}`, args, toolCallId: 'alone-next', signal: new AbortController().signal })
   return { id, turn, result, action: f.bots.actions.forWork(id)! }
 }
 it('E1 Allow lets only the same schedule destination run on the action ledger without a card', async () => {
@@ -4593,7 +4595,7 @@ it.each([
   ['x:scan.pdf', false], ['x@scan.pdf', false], ['x\u0000.pdf', false], ['x\n.pdf', false],
   ['x'.repeat(252) + '.pdf', false], ['x'.repeat(251) + '.pdf', true], ['ｓｃａｎ-２.ｐｄｆ', true], ['scan。pdf', false], ['ａ／ｂ.pdf', false], ['sc\u200ban-2.pdf', true]
 ])('E1 r2b a filename stays within the sent extension: %j', async (name, allowed) => {
-  const t = await aloneAsk('allow', 'send', undefined, { name: 'scan-1.pdf' })
+  const t = await aloneAsk('allow', 'send', undefined, { name: 'scan-1.pdf', folder: 'scans' })
   const args = { ...t.args, name: 'scan-1.pdf' }
   const next = await aloneNext(t, { ...args, name } as never)
   expect(next.action.status).toBe(allowed ? 'done' : 'open')
@@ -4634,7 +4636,7 @@ it('E1 r2b token sets use a profile key and never appear in written exports', as
   }
 })
 
-it.each([['new-file', true], ['new-file.txt', false]])('E1 r2b an extensionless source name keeps no extension: %s', async (name, allowed) => {
+it.each([['original-file', true], ['new-file', false], ['new-file.txt', false], ['evil.exe.', false]])('E1 r3c an extensionless source name stays exact: %s', async (name, allowed) => {
   const t = await aloneAsk('allow', 'send', undefined, { name: 'original-file' })
   expect((await aloneNext(t, { ...t.args, name } as never)).action.status).toBe(allowed ? 'done' : 'open')
 })
@@ -4720,3 +4722,19 @@ it.each(['example.net:8080', '[::1]:80', 'mailto:x@y.z', '::1', 'fe80::1', 'fe80
     expect(t.calls).toHaveLength(1)
   }
 )
+
+it.each([
+  ['delete_branch', 'feature-x', 'main'],
+  ['drop_table', 'tmp_2026_11_18', 'users'],
+  ['create_record', 'www', 'mail'],
+  ['delete_branch', 'feature.old', 'feature.pdf']
+])('E1 r3c names outside a folder-like place stay exact: %s', async (tool, before, after) => {
+  const t = await aloneAsk('allow', tool, undefined, { name: before })
+  expect((await aloneNext(t, { ...t.args, name: after } as never)).action.status).toBe('open')
+  expect(t.calls).toHaveLength(1)
+})
+it('E1 r3c a filename with an extension can vary within a folder', async () => {
+  const t = await aloneAsk('allow', 'upload_file', undefined, { folder: 'scans', name: 'scan-1.pdf' })
+  expect((await aloneNext(t, { ...t.args, name: 'scan-2.pdf' } as never)).action.status).toBe('done')
+  expect(t.calls).toHaveLength(2)
+})
