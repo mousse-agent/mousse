@@ -111,8 +111,12 @@ export class BotAlone {
     const result = JSON.parse(String(previous.result_json ?? '{}')).text ?? ''
     const values = Object.values(maskedActionData(place) as object).map(v => placeLabel(v, result)).join(' and ')
     const name = shortAutomationName(schedule.name)
-    const verb = readableActionTitle(request.tool).toLowerCase().split(' ')[0]!
-    this.put(botId, pendingKey(activationId, request), { ...request, arguments: contract, place, placeDigest: actionDigest(place), binding, promptDigest: actionDigest(schedule.prompt), grantedAt: this.host.store.now(), title: `‘${name}’ ${thirdPerson(verb)} to ${values} in ${this.host.serverName(request.serverId, request.tool)} without asking`, askTitle: `let ‘${name}’ ${verb} to ${values} in ${this.host.serverName(request.serverId, request.tool)} without asking` })
+    const toolTitle = readableActionTitle(request.tool)
+    const verb = toolTitle.toLowerCase().split(' ')[0]!
+    const direct = verb === 'upload' || verb === 'send'
+    const action = direct ? `${verb} to` : `use ${toolTitle} in`
+    const ongoing = direct ? `${thirdPerson(verb)} to` : `uses ${toolTitle} in`
+    this.put(botId, pendingKey(activationId, request), { ...request, arguments: contract, place, placeDigest: actionDigest(place), binding, promptDigest: actionDigest(schedule.prompt), grantedAt: this.host.store.now(), title: `‘${name}’ ${ongoing} ${values} in ${this.host.serverName(request.serverId, request.tool)} without asking`, askTitle: `let ‘${name}’ ${action} ${values} in ${this.host.serverName(request.serverId, request.tool)} without asking` })
   }
   pending(botId: string, activationId: string, request: AloneRequest): { title: string; details: { summary: string; items: string[] } } | undefined {
     const entry = this.read(botId, pendingKey(activationId, request))
@@ -174,8 +178,9 @@ function thirdPerson(verb: string): string {
 }
 
 /** A result may supply a display name, never a different comparison value. */
-export function placeLabel(value: unknown, result: string): string {
-  if (Array.isArray(value)) return value.map(v => placeLabel(v, result)).join(' and ')
+export function placeLabel(value: unknown, result: string, depth = 0): string {
+  if (depth > 16) return '…'
+  if (value && typeof value === 'object') return Object.values(value).map(v => placeLabel(v, result, depth + 1)).join(' and ')
   let parsed: unknown
   const text = result.startsWith('[What ') ? result.slice(result.indexOf('\n') + 1) : result
   try { parsed = JSON.parse(text) } catch { /* A prose result cannot reliably associate a name with an id. */ }
