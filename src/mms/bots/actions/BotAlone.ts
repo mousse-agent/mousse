@@ -52,7 +52,7 @@ function ordinaryNumber(token: string): boolean {
   return /^\d{1,2}:\d{2}(?::\d{2})?(?:am|pm)?$/iu.test(token)
     || /^[+-]?\d+(?:,\d{3})*(?:\.\d+)?(?:%|k|M|B|ms|s|h|d|x)?$/u.test(amount)
     || /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?$/u.test(token)
-    || /^\d+:\d{1,2}$/u.test(token)
+    || /^\d{1,3}:\d{1,2}$/u.test(token)
     || /^\d{1,2}:\d{2}-\d{1,2}:\d{2}$/u.test(token)
     || /^(?:\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2})$/u.test(token)
 }
