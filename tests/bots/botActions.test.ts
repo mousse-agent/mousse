@@ -1,3 +1,4 @@
+import * as alone from '../../src/mms/bots/actions/BotAlone'
 import { BOT_CHAT_INSTRUCTIONS, botInstructions } from '../../src/mms/bots/instructions'
 import { askProblem } from '../../src/shared/bots/personal/escalation'
 import masterGrant from './fixtures/asksFirstMasterGrant.json'
@@ -4468,4 +4469,33 @@ it.each(['restart', 'same-run', 'sent-card'] as const)('E1 r2 uncertain target r
   await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'Reworded friendly sentence' }, toolCallId: 'r2-retry', signal: new AbortController().signal })
   expect(f.bots.actions.forWork(id)).toMatchObject({ status: 'open', card_json: expect.any(String) })
   expect(t.manager.callTool).toHaveBeenCalledTimes(calls)
+})
+
+it.each([{}, [], 1, null])('E1 r2 a string body cannot become another type: %j', body => {
+  return aloneAsk().then(async t => {
+    expect((await aloneNext(t, { ...t.args, body: body as never })).action.status).toBe('open')
+    expect(t.calls).toHaveLength(1)
+  })
+})
+it('E1 r2 source calls preserve the bot note and export no argument contract or digest', async () => {
+  const t = await aloneAsk()
+  const first = f.bots.actions.forWork(t.id)!
+  expect(f.store.get('SELECT bot_note FROM bot_actions WHERE id = ?', first.id)?.bot_note).toBeNull()
+  // Existing rows from the earlier build must not export their old per-argument hashes either.
+  const contract = alone.argumentContract(t.args)
+  f.store.run('UPDATE bot_actions SET bot_note = ? WHERE id = ?', JSON.stringify(contract), first.id)
+  const memory = new BotMemoryStore({ db: f.store.db })
+  expect(JSON.stringify(memory.actions(t.botId))).not.toContain(contract.digests.to)
+  expect(memory.actions(t.botId).every(a => a.args_digest == null)).toBe(true)
+  f.store.run('UPDATE bot_actions SET bot_note = ? WHERE id = ?', 'The bot’s own card note', first.id)
+  expect(memory.actions(t.botId).find(a => a.id === first.id)?.bot_note).toBe('The bot’s own card note')
+})
+
+it('E1 r2 ordinary held and sent calls do not compute a contract', async () => {
+  const classify = vi.spyOn(alone, 'argumentContract')
+  const t = await scheduledCall(true, 1)
+  await t.call(); await finish(f, t.run.payload)
+  const first = f.bots.actions.forWork(t.id)!
+  await f.bots.actions.answer({ actionId: first.id, digest: first.args_digest, answer: 'send' })
+  expect(classify).not.toHaveBeenCalled()
 })

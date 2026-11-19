@@ -21,3 +21,25 @@ it('reads the JSON after the stored BotMcp frame and joins array places in words
   expect(placeLabel('f-scans', framed)).toBe('Scans')
   expect(placeLabel(['f-scans', 'f-receipts'], framed)).toBe('Scans and f-receipts')
 })
+
+import { argumentContract } from '../../src/mms/bots/actions/BotAlone'
+it.each([
+  '192.168.1.20', '2001:db8::1', '2001:0:0:0:0:0:0:1', '127.0.0.1:8080',
+  'owner＠example.test', 'evil．com', 'evil。com', '\\\\evil\\share', 'tel:+12025550123',
+  'sms:+12025550123', 'http:/localhost', 'evil:8080/x', 'evil.c0m', 'ev\u200bil.com', 'evil . com'
+])('E1 r2 address-like content stays exact: %s', body => {
+  expect(argumentContract({ body }).varying).toEqual([])
+})
+it.each([{}, [], 1, null])('E1 r2 only sent strings can be varying content: %j', body => {
+  expect(argumentContract({ body }).varying).toEqual([])
+})
+it('E1 r2 object names are fixed, while plain string content can vary', () => {
+  expect(argumentContract({ name: 'branch', body: 'A plain sentence' }).varying).toEqual(['body'])
+})
+it.each(['hex', 'base64url'])('E1 r2 address scan bounds 256000 characters of %s', kind => {
+  const body = (kind === 'hex' ? '0123456789abcdef' : 'aZ09_-bX47').repeat(25600).slice(0, 256000)
+  const start = performance.now()
+  const result = argumentContract({ body })
+  expect(performance.now() - start).toBeLessThan(200)
+  expect(result.varying).toEqual(['body'])
+})
