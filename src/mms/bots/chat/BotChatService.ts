@@ -24,7 +24,7 @@ import type { BotDeviceAccessStore } from '../definitions/BotDeviceAccessStore'
 import { botDeviceAccessProblem, type BotDeviceAccess } from '../../../shared/bots/personal/deviceAccess'
 import { lateAnsweringLine, plainChoices, type BotQuestionLateAnswer, type BotQuestionSpec } from '../../../shared/bots/personal/questions'
 import { grantedPermissions, permissionId, starterManifest, withoutPermission } from './projection'
-import { turnTimingBegin, turnTimingForget } from '../../diagnostics/turnTiming'
+import { turnTimingBegin, turnTimingBotMark, turnTimingForget } from '../../diagnostics/turnTiming'
 
 /**
  * The Bot UI's daemon side (Bot Phase 1 §5.3, §5.11): create a bot from a look and a sentence,
@@ -707,6 +707,7 @@ export class BotChatService {
       this.engine.journalFailedFor(input.botId)
       throw new BotEngineError('bot_journal_failed', 'I can\'t save my work. Free some disk space.')
     }
+    turnTimingBotMark(input.botId, 'saved')
     // The bubbles of the questions it answered or moved past show it, in every window.
     for (const question of touched) for (const row of this.store.messagesForQuestion(question.id)) if (row.author === 'bot') this.engine.chat.republish(row.id)
     const message = this.engine.chat.toMessage(this.store.message(messageId)!)

@@ -22,7 +22,7 @@ import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
 import { startTurnMeter } from './turnUsage'
-import { turnTimingBind } from '../../diagnostics/turnTiming'
+import { turnTimingBind, turnTimingBotMark } from '../../diagnostics/turnTiming'
 import { chatEpochEnd, contextBudget, type BotChatDigestState, type BotChatEpoch, type BotChatEpochVerdict } from '../memory/contextBudget'
 import { grantedPermissions, permissionId, restorePermission, withoutPermission } from '../chat/projection'
 import { createHash, randomUUID } from 'node:crypto'
@@ -2270,6 +2270,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         rmSync(scratch, { recursive: true, force: true })
         return
       }
+      timingMark(row, 'written')
       await this.sendDispatch(this.store.activation(row.id)!, this.store.dispatch(row.id, 1)!)
     } catch (error) {
       const reason = error instanceof BotEngineError ? error.code : 'bot_start_failed'
@@ -2369,6 +2370,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         return true
       })
       if (!saved) return false
+      timingMark(row, 'model')
     }
     // Read at each main dispatch: the provider freezes the pack per activation, and a memory save or forget drops it.
     if (this.host.context) {
@@ -2403,6 +2405,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         else this.failActivation(row, 'bot_context_failed')
         return false
       }
+      timingMark(row, 'context')
     }
     return true
   }
@@ -2916,12 +2919,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // A dispatch resent after a restart: its model and pack are made again before it is prepared.
     if (row && dispatch && row.status === 'running' && dispatch.startedAt === null) await this.ready(row, dispatch).catch(() => false)
     const current = this.store.activation(payload.activationId)
+    if (current) timingMark(current, 'refreshStart')
     const selection = current?.selection
     if (selection) await this.refreshInstance(selection.instanceId)
+    if (current) timingMark(current, 'providerRefresh')
     // A turn of a bot that holds MCP tools reads the owner's servers first when the listing is cold, old or changed
     // (bounded, at most `BOT_MCP_WARM_MS`; a warm one returns at once), so work is offered the granted tools. A bot with
     // no MCP permission starts and lists nothing: it reads the servers only when it calls `mcp_servers`.
     if (this.host.mcp && current && (this.store.activeGrant(current.botId)?.manifest.mcp.length ?? 0) > 0) await this.host.mcp.warm()
+    if (current) timingMark(current, 'mcpWarm')
   }
 
   prepare(payload: BotTurnPayload): PreparedBotTurn | { refused: string; code: string } {
@@ -6037,6 +6043,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const online = await this.onlineBeforeSend(current)
         current = this.store.activation(row.id) ?? current
         if (current.status !== 'running') return
+        timingMark(row, 'online')
         if (!online) return this.awaitInternet(current)
         if (current.offline) {
           this.clearInternetCheck(row.id)
@@ -6064,6 +6071,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (sent.status !== 'accepted') throw new BotEngineError('bot_dispatch_refused', `The bot's run was refused (${sent.reason}).`)
       this.store.setDispatchRun(row.id, dispatch.n, sent.runId)
       this.host.notifyEffects()
+      timingMark(row, 'sent')
     }
   }
 
@@ -10788,4 +10796,9 @@ function scheduledDueTime(at: string, now: number): string {
   const due = new Date(at)
   const day = due.toDateString() === new Date(now).toDateString() ? '' : `${due.toLocaleDateString('en-US', { weekday: 'short' })} `
   return `${day}${clockTime(at)}`
+}
+
+/** A step of a chat turn before its dispatch knows its thread (`turnTiming`): a run's steps are not the chat's. */
+function timingMark(row: Pick<BotActivationRow, 'lane' | 'botId'>, label: string): void {
+  if (row.lane === 'chat') turnTimingBotMark(row.botId, label)
 }

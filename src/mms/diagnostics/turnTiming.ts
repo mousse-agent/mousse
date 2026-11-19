@@ -42,7 +42,15 @@ export function turnTimingBind(botId: string, threadId: string): void {
 
 /** A step of the turn on `threadId` was reached. The first of each label counts. */
 export function turnTimingMark(threadId: string, label: string): void {
-  const turn = turns.get(threadId)
+  markOn(turns.get(threadId), label)
+}
+
+/** A step of `botId`'s turn before its dispatch knows its thread (its model, its context, the internet check). */
+export function turnTimingBotMark(botId: string, label: string): void {
+  markOn(turns.get(botKey(botId)), label)
+}
+
+function markOn(turn: Turn | undefined, label: string): void {
   if (!turn || turn.marks.some(([seen]) => seen === label)) return
   turn.marks.push([label, performance.now() - turn.start])
 }

@@ -4377,6 +4377,7 @@ export class OrchestratorService extends EventEmitter {
       // Skills are optional: a broken registry cannot block the turn.
       console.warn('skills unavailable for the turn', { threadId: registered.threadId, error: error instanceof Error ? error.message : String(error) })
     }
+    turnTimingMark(registered.threadId, 'skills')
     // The runtime runs the selected model natively: its vision decides whether a browser screenshot
     // can reach the model.
     const browser = input.browser
@@ -4406,6 +4407,7 @@ export class OrchestratorService extends EventEmitter {
     const relay = this.mcpManager ? await this.relayForTurn(turn) : undefined
     // What already runs for the turn's folder, read now: the agent reuses a running server instead of starting another.
     const running = await this.runningNoteFor(turn)
+    turnTimingMark(turn.threadId, 'running')
     // The list the thread holds now; a definition's list is its turn's, and a bot's follows its grant.
     const capabilityRevision = turn.definition || turn.bot ? undefined : this.capabilityRevisionOf(turn.threadId)
     return {
@@ -13583,6 +13585,7 @@ export class OrchestratorService extends EventEmitter {
       }
     }
 
+    turnTimingMark(session.threadId, 'folders')
     // Load recovery identity before acquiring the writer. Reconcile interrupted
     // operations below under that lease, before workspace verification/dispatch.
     const recoveryDirectory = session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
@@ -13643,6 +13646,7 @@ export class OrchestratorService extends EventEmitter {
         this.replaceConversationState(session.threadId, saved.messages, saved.nativeContext)
       }, heldLease, setupSignal)
     }
+    turnTimingMark(session.threadId, 'recovery')
     const request = normalizeSendRequest(input)
     // The folder a turn is recorded in when it has no worktree: a project without Git, or a thread with no project.
     let snapshotFolder: SnapshotFolder | undefined
@@ -13690,6 +13694,7 @@ export class OrchestratorService extends EventEmitter {
         }
     }
 
+    turnTimingMark(session.threadId, 'workspace')
     // Pull any messages peers enqueued before we started.
     this.refreshSessionQueueFromDisk(session)
     session.drainedExternalSteerIds.clear()
@@ -13862,6 +13867,7 @@ export class OrchestratorService extends EventEmitter {
       throw err
     }
     this.transcript.reset()
+    turnTimingMark(session.threadId, 'accepted')
 
     const turnId = opts?.runId ?? uuidv4()
     // Run Engine bridge (SPEC §5): the run id is the turn id; each mark is one CAS write.
@@ -14175,6 +14181,7 @@ export class OrchestratorService extends EventEmitter {
         cwd: opts?.bot ? opts.bot.scratch : session.projectCwd,
         ...this.turnApprovals(session.threadId, engineRunId, opts)
       }, opts?.bot?.policy)
+      turnTimingMark(session.threadId, 'bind')
       // Every runtime owns its loop, context and tools and receives prior turns as a prompt preamble.
       const modelOverride = opts?.modelOverride ?? session.modelOverride
       const contextSettings = normalizeContextSettings(this.settingsStore.get().context)
@@ -14198,6 +14205,7 @@ export class OrchestratorService extends EventEmitter {
         content: userContent, images, mode, modelOverride, planning
       })
       if (handoffs) this.recordHandoffMarkers(session, handoffs, switchMarker, turnId, selectedModel)
+      turnTimingMark(session.threadId, 'handoffs')
       // The first turn on a different model: the agent is told which model it is and which wrote the earlier replies.
       const modelNote = displayUserMessage ? this.modelChangeNoteFor(session.messages, turnPresentationStart, turnId, reuseLastUser) : undefined
       // A thread with a working goal: every turn tells the agent the goal and how to report on it (`goal_status`).
