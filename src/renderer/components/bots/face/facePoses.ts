@@ -1,4 +1,4 @@
-import { BOT_ACCESSORIES, BOT_ACCESSORY_HEX, BOT_COLOUR_HEX, BOT_EYES, BOT_KINDS, botEyesOf, botKindOf, type KnownBotLook } from '../../../../shared/bots/personal/look'
+import { BOT_ACCESSORIES, BOT_ACCESSORY_HEX, BOT_COLOUR_HEX, BOT_EYES, BOT_KINDS, botEyesOf, botKindOf, type BotEyes, type KnownBotLook } from '../../../../shared/bots/personal/look'
 import type { BotFaceState } from './BotFace'
 
 /**
@@ -20,6 +20,12 @@ export const REST_POSE: Readonly<FacePose> = {
   hop: 0, sq: 1, roll: 0, tail: 0, yaw: 0, pitch: 0, hroll: 0, earL: 0, earR: 0, armL: 0, armR: 0, laptop: 0,
   open: 1, closed: 0, arc: 1, worried: 0, lookX: 0, lookY: 0, es: 1, sweat: 0
 }
+
+/**
+ * Every eye is drawn this much bigger than the reference's: bold cartoon eyes. The shader gets the pose's `es`
+ * times this, and the hybrid face's flat eyes (`hybridEyes.ts`) the same.
+ */
+export const EYE_SCALE = 1.18
 
 /** One hop: a crouch, a stretched flight and a landing squash. Returns [height 0..1, vertical scale]. */
 export function hop(u: number): [number, number] {
@@ -78,8 +84,8 @@ export class FaceMotion {
     const tt = t + this.t0
     if (s === 'idle') {
       if (!still && t > this.nextGaze) {
-        this.gaze = this.random() < 0.35 ? 0 : this.rnd(-0.5, 0.5)
-        this.gazeY = this.rnd(-0.03, 0.04)
+        this.gaze = this.random() < 0.3 ? 0 : this.rnd(-0.7, 0.7)
+        this.gazeY = this.rnd(-0.1, 0.12)
         this.nextGaze = t + this.rnd(1.6, 3.6)
       }
       const gaze = still ? 0 : this.gaze
@@ -237,8 +243,8 @@ export interface FaceUniforms {
   uE: [number, number, number, number]
   uE2: [number, number, number, number]
   uV: [number, number, number, number]
-  /** Kind (`BOT_KINDS` index), eye shape (`BOT_EYES` index), and 1 when the Mousse's eyes are white. */
-  uK: [number, number, number]
+  /** Kind (`BOT_KINDS` index), eye shape (`BOT_EYES` index), 1 when the Mousse's eyes are white, and the eyes' spread (`EYE_SPREAD`). */
+  uK: [number, number, number, number]
   /** How far the picture moves in its square, as a share of the side (x right, y up): the view following a leaning head. */
   pan: [number, number]
 }
@@ -269,6 +275,28 @@ export function mousseEyesWhite(hex: string): boolean {
  */
 export const EYELESS = 'none'
 
+/** The look's eye shape, with the default for the hybrid face's body (`EYELESS`). */
+export function eyeShapeOf(look: KnownBotLook): BotEyes {
+  const eyes = botEyesOf(look)
+  return BOT_EYES.includes(eyes) ? eyes : 'pill'
+}
+
+/**
+ * How far each eye shape sits from the middle, so the two eyes never touch even at their biggest (needs you, eye
+ * scale 1.2 times `EYE_SCALE`): the mouse's eye x in its head, and the angle (radians) of the Mousse's eye round its
+ * glass. The shader gets the look's own as `uK.w`, and the hybrid face's flat eyes the same.
+ */
+export const EYE_SPREAD: Record<BotEyes, { mouse: number; mousse: number }> = {
+  pill: { mouse: 0.37, mousse: 0.255 },
+  round: { mouse: 0.4, mousse: 0.335 },
+  dot: { mouse: 0.37, mousse: 0.255 },
+  tall: { mouse: 0.37, mousse: 0.255 },
+  square: { mouse: 0.4, mousse: 0.315 },
+  heart: { mouse: 0.4, mousse: 0.335 },
+  star: { mouse: 0.46, mousse: 0.43 },
+  code: { mouse: 0.37, mousse: 0.255 }
+}
+
 export function faceUniforms(look: KnownBotLook, pose: FacePose, view: FaceView): FaceUniforms {
   const eyeless = (look.eyes as string | undefined) === EYELESS
   const head = view.view === 'head'
@@ -282,12 +310,13 @@ export function faceUniforms(look: KnownBotLook, pose: FacePose, view: FaceView)
     uH: [pose.yaw, pose.pitch, pose.hroll, pose.earL],
     uH2: [pose.earR, pose.armL, pose.armR, pose.laptop],
     uE: [pose.open, pose.closed, pose.arc, pose.worried],
-    uE2: [pose.lookX, eyeless ? 40 : pose.lookY, pose.es, pose.sweat],
+    uE2: [pose.lookX, eyeless ? 40 : pose.lookY, pose.es * EYE_SCALE, pose.sweat],
     uV: [head ? 0.8 : 0.32, head ? HEAD_FOV * (1 + HEAD_ROLL_ROOM * Math.abs(lean)) : 2.1, view.samples, view.size < WHISKER_MIN_SIZE ? 1 : 0],
     uK: [
       BOT_KINDS.indexOf(botKindOf(look)),
       eyeless ? 0 : BOT_EYES.indexOf(botEyesOf(look)),
-      mousseEyesWhite(BOT_COLOUR_HEX[look.colour]) ? 1 : 0
+      mousseEyesWhite(BOT_COLOUR_HEX[look.colour]) ? 1 : 0,
+      EYE_SPREAD[eyeShapeOf(look)][botKindOf(look)]
     ],
     pan: [HEAD_ROLL_PAN * lean, 0]
   }

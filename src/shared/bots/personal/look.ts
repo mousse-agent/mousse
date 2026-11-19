@@ -37,16 +37,16 @@ export interface KnownBotLook {
 
 export const DEFAULT_BOT_LOOK: KnownBotLook = { colour: 'coral', accessory: 'none' }
 
-/** Body colours, as the shader draws them. */
+/** Body colours, as the shader draws them: bold, saturated colours that stay bright on a true-dark page. */
 export const BOT_COLOUR_HEX: Record<BotColour, string> = {
-  coral: '#f0645a',
-  orange: '#f28a3c',
-  yellow: '#f2c230',
-  green: '#4fc283',
-  teal: '#22a99b',
-  blue: '#4378e3',
-  purple: '#9a6ae0',
-  pink: '#ee86b6'
+  coral: '#ff5245',
+  orange: '#ff7414',
+  yellow: '#ffc414',
+  green: '#22d36f',
+  teal: '#00b8a3',
+  blue: '#2b74ff',
+  purple: '#9150ff',
+  pink: '#ff3d9e'
 }
 
 /** Each accessory's own colour (none has none). */

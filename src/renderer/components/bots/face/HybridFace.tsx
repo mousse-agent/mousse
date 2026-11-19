@@ -93,7 +93,8 @@ export function HybridFace({ look, state, size, view, className, label, resting,
         if (!element) return
         const place = g.eyes[index]!
         element.style.transition = `transform ${ms}ms cubic-bezier(0.25, 0.6, 0.3, 1)`
-        element.style.transform = `translate(${(x * g.lookX * place.sx).toFixed(2)}px, ${(-y * g.lookY * place.sy).toFixed(2)}px)`
+        // Inside the eye's box, which is scaled by `es`: the step is undone so the eyes travel as far at any size.
+      element.style.transform = `translate(${((x * g.lookX * place.sx) / g.es).toFixed(2)}px, ${((-y * g.lookY * place.sy) / g.es).toFixed(2)}px)`
       })
     }
     const centre = (): void => {
@@ -299,7 +300,8 @@ function direct(state: BotFaceState, geometry: () => EyeGeometry, stage: { curre
       if (!element) return
       const place = g.eyes[index]!
       element.style.transition = `transform ${ms}ms cubic-bezier(0.3, 0.7, 0.3, 1)`
-      element.style.transform = `translate(${(x * g.lookX * place.sx).toFixed(2)}px, ${(-y * g.lookY * place.sy).toFixed(2)}px)`
+      // Inside the eye's box, which is scaled by `es`: the step is undone so the eyes travel as far at any size.
+      element.style.transform = `translate(${((x * g.lookX * place.sx) / g.es).toFixed(2)}px, ${((-y * g.lookY * place.sy) / g.es).toFixed(2)}px)`
     })
   }
   const blink = (): void => {
@@ -328,7 +330,7 @@ function direct(state: BotFaceState, geometry: () => EyeGeometry, stage: { curre
     if (!follows) glance(0, 0, 240)
     const wander = (): void =>
       later(between(1600, 3600), () => {
-        if (!unseen()) glance(Math.random() < 0.35 ? 0 : between(-0.5, 0.5), between(-0.03, 0.04), 260)
+        if (!unseen()) glance(Math.random() < 0.3 ? 0 : between(-0.7, 0.7), between(-0.1, 0.12), 260)
         wander()
       })
     if (!follows) wander()
