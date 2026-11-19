@@ -4456,7 +4456,8 @@ it.each(['restart', 'same-run', 'sent-card'] as const)('E1 r2 uncertain target r
     turn = await start(f, id, 2)
   } else {
     vi.mocked(t.manager.callTool).mockRejectedValueOnce(new Error('Connection closed after dispatch'))
-    const next = await aloneNext(t, kind === 'sent-card' ? { ...t.args, to: ['other@example.test'] } : t.args)
+    if (kind === 'sent-card') vi.spyOn(f.bots.alone, 'match').mockReturnValueOnce(undefined)
+    const next = await aloneNext(t)
     id = next.id; turn = next.turn
     if (kind === 'sent-card') {
       await finish(f, turn.payload)
@@ -4466,7 +4467,7 @@ it.each(['restart', 'same-run', 'sent-card'] as const)('E1 r2 uncertain target r
   }
   expect(f.bots.actions.forWork(id)?.status).toBe('uncertain')
   const calls = vi.mocked(t.manager.callTool).mock.calls.length
-  await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'Reworded friendly sentence' }, toolCallId: 'r2-retry', signal: new AbortController().signal })
+  await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: kind === 'sent-card' ? t.args : { ...t.args, body: 'Reworded friendly sentence' }, toolCallId: 'r2-retry', signal: new AbortController().signal })
   expect(f.bots.actions.forWork(id)).toMatchObject({ status: 'open', card_json: expect.any(String) })
   expect(t.manager.callTool).toHaveBeenCalledTimes(calls)
 })
