@@ -14976,7 +14976,8 @@ export class OrchestratorService extends EventEmitter {
             toolStarted: conversationToolsUsed,
             steered: drains > 0 || acceptedDrains.size > 0 || takenDrains.size > 0,
             runtimeRetried,
-            bot: Boolean(opts?.bot)
+            bot: Boolean(opts?.bot),
+            ownerOnly: Boolean(this.harness.ownerOnly?.(binding.instanceId))
           })
           if (delay === undefined) throw error
           logDebug('OrchestratorService', 'provider request failed before it was answered; trying again', error, { threadId: session.threadId, retry: retries + 1, delayMs: delay })

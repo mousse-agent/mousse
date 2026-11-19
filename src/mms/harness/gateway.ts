@@ -645,6 +645,8 @@ export const MODEL_REFRESH_INTERVAL_MS = 3 * 60 * 60_000
 export const MODEL_REFRESH_STARTUP_DELAY_MS = 2 * 60_000
 /** Model refreshes running at once (Claude Code and Codex start a CLI each). */
 const MODEL_REFRESH_CONCURRENCY = 2
+/** Owner-only runs remembered as admitted: far more than a person sends while a retry could still follow. */
+const OWNER_ADMITTED_MAX = 4_096
 /** Coalesce nearby desktop opens, including retries of an unsuccessful refresh. */
 const DESKTOP_MODEL_REFRESH_INTERVAL_MS = 5 * 60_000
 /** Test-only: replaces `MODEL_REFRESH_INTERVAL_MS`, in milliseconds. */
@@ -906,6 +908,11 @@ export class Harness implements HarnessGateway {
   private mcp: McpAttachmentProvider | null = null
   /** Where admission reads a run's provenance (`setRunProvenance`); without it an owner-only instance runs nothing. */
   private runProvenance: ProvenanceReader | undefined
+  /**
+   * Runs an owner-only instance has admitted in this process (the most recent `OWNER_ADMITTED_MAX`): a run's prompt
+   * is sent once, and a later attempt of it is refused (`refuseNotOwnerDriven`).
+   */
+  private readonly ownerAdmitted = new Set<string>()
   private readonly retired = new Set<InstanceRecord>()
   /**
    * The stops of a removal or disable still running, per instance (each settles, never rejects). They
@@ -1723,7 +1730,7 @@ export class Harness implements HarnessGateway {
     this.refuseRetired(record)
     this.admissionGate(record)
     // A personal sign-in runs only what its owner sent: checked on every attempt, before anything else is decided.
-    this.refuseNotOwnerDriven(record, binding, input.runId)
+    this.refuseNotOwnerDriven(record, spec)
     if (input.instanceId !== binding.instanceId || input.model !== binding.model)
       harnessFail('protocol', `The turn names ${input.instanceId ?? 'no instance'}/${input.model} but its binding is ${binding.instanceId}/${binding.model}.`, binding.instanceId)
     // The runtime takes its permissions from the input's mode: it must be the binding's policy.
@@ -2078,13 +2085,19 @@ export class Harness implements HarnessGateway {
   /**
    * The one owner check for an instance that runs only turns its owner drives (Antigravity's personal Google sign-in):
    * read on every attempt in `admitTurn` from the binding's origin and the run as stored, before anything reaches the
-   * provider. Every other instance is not affected.
+   * provider. Only a run's first attempt runs: a later one (an automatic retry, a recovery, a steer restart, by its
+   * ordinal or because this process already admitted the run) may repeat a prompt the provider already has, and the
+   * proof says only that the owner sent it once. Every other instance is not affected.
    */
-  private refuseNotOwnerDriven(record: InstanceRecord, binding: ExecutionBinding, runId: string): void {
+  private refuseNotOwnerDriven(record: InstanceRecord, spec: TurnSpec): void {
     const auth = this.ownerOnlyAuthOf(record)
     if (!auth) return
-    const refusal = ownerTurnRefusal(binding.policy.origin, runId, this.runProvenance)
+    const runId = spec.input.runId
+    const refusal = ownerTurnRefusal(spec.binding.policy.origin, runId, this.runProvenance)
+      ?? ((spec.attemptOrdinal ?? 1) > 1 || this.ownerAdmitted.has(runId) ? 'replay' : undefined)
     if (refusal) this.refuseOwnerOnly(record, auth, refusal)
+    this.ownerAdmitted.add(runId)
+    if (this.ownerAdmitted.size > OWNER_ADMITTED_MAX) this.ownerAdmitted.delete(this.ownerAdmitted.values().next().value as string)
   }
 
   private refuseOwnerOnly(record: InstanceRecord, auth: OwnerOnlyAuth, refusal: OwnerTurnRefusal | 'one_shot' | 'moved'): never {

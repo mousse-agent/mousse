@@ -14,13 +14,16 @@ import type { InstanceConfig } from './driver'
  * - `personal_oauth`: the built-in Antigravity entry, installed by Mousse or run from a manual
  *   executable; its only sign-in is Google's personal OAuth.
  * - `unknown_auth`: an ACP agent Mousse recognises as Antigravity (its registry entry, or the
- *   Antigravity agent's own executable as the command). Mousse cannot tell how it signs in, so it
- *   is held to the same rule. Any other command is opaque and outside this detection.
+ *   Antigravity agent's own executable as the command, or Antigravity's `agy` CLI run as `agy acp`).
+ *   Mousse cannot tell how it signs in, so it is held to the same rule. Any other command is opaque
+ *   and outside this detection.
  */
 export type OwnerOnlyAuth = 'personal_oauth' | 'unknown_auth'
 
 /** The Antigravity ACP agent's executable, as Mousse installs it (`agy_acp_server.exe` / `.par`). */
 const ANTIGRAVITY_EXECUTABLE = /^agy_acp_server(\.(exe|par|cmd|bat|sh))?$/i
+/** Antigravity's CLI, which serves ACP as `agy acp`. */
+const ANTIGRAVITY_CLI = /^agy(\.(exe|cmd|bat|ps1|sh))?$/i
 
 /** A registry id that names Antigravity. */
 function antigravityRegistryId(agentId: string): boolean {
@@ -28,13 +31,18 @@ function antigravityRegistryId(agentId: string): boolean {
 }
 
 /** Whether an instance may run only turns its owner drives, and why; undefined for every other instance. */
-export function ownerOnlyAuth(driver: HarnessDriverKind, config: Pick<InstanceConfig, 'source' | 'binaryPath'>): OwnerOnlyAuth | undefined {
+export function ownerOnlyAuth(driver: HarnessDriverKind, config: Pick<InstanceConfig, 'source' | 'binaryPath' | 'args'>): OwnerOnlyAuth | undefined {
   if (driver === 'antigravity') return 'personal_oauth'
   if (driver !== 'acp') return undefined
   const source = config.source
   if (source?.kind === 'registry') return antigravityRegistryId(source.agentId) ? 'unknown_auth' : undefined
+  // A local command: `config.source`, else the executable and arguments it is derived from (`acpSourceOf`).
   const command = source?.kind === 'local' ? source.command : config.binaryPath
-  return command && ANTIGRAVITY_EXECUTABLE.test(basename(command.replace(/\\/g, '/'))) ? 'unknown_auth' : undefined
+  const args = source?.kind === 'local' ? source.args : config.args ?? []
+  if (!command) return undefined
+  const name = basename(command.trim().replace(/\\/g, '/'))
+  if (ANTIGRAVITY_EXECUTABLE.test(name)) return 'unknown_auth'
+  return ANTIGRAVITY_CLI.test(name) && args[0] === 'acp' ? 'unknown_auth' : undefined
 }
 
 /** What the gate reads of a run (`RunRecord`), straight from the run store. */
@@ -63,6 +71,11 @@ export type OwnerTurnRefusal =
   | 'agent'
   /** A continue turn whose earlier turns the owner cannot be shown to have written. */
   | 'continuation_unproven'
+  /**
+   * A later attempt of a run that already started (a retry, a recovery after a crash, a steer restart): its prompt
+   * may have reached the provider, and only the owner sends it again.
+   */
+  | 'replay'
 
 /** Continuations followed back at most this far; a longer chain is not proven. */
 const CHAIN_MAX = 32
@@ -112,6 +125,8 @@ export function ownerOnlyMessage(label: string, auth: OwnerOnlyAuth, refusal: Ow
   switch (refusal) {
     case 'continuation_unproven':
       return `${signIn} continues only messages Mousse knows you wrote. Send the message again yourself.`
+    case 'replay':
+      return `${signIn} does not send a message again on its own. Send it again yourself.`
     case 'unknown_run':
       return `${signIn} runs only messages you send yourself, and Mousse could not confirm this one. Send it again.`
     case 'moved':

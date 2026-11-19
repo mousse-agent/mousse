@@ -99,16 +99,19 @@ const withOrigin = (binding: ExecutionBinding, origin: string | undefined): Exec
 }
 
 describe('Antigravity runs only turns its owner drives', () => {
-  it('runs a message the owner sent from a window or another of their computers, on every attempt', async () => {
+  it('runs a message the owner sent from a window or another of their computers, once', async () => {
     const fake = setup('antigravity')
     fake.runs.set('gui', OWNER)
     fake.runs.set('bridge', { source: 'gui', ownerProof: { via: 'bridge', node: 'laptop' }, clientRequestId: 'm2' })
+    fake.runs.set('later', { ...OWNER, clientRequestId: 'm3' })
     const binding = await fake.bind()
     expect(await reasonOf(fake.harness.startTurn(turnSpec(binding, 'gui', 'a1')).result)).toBe('ran')
-    expect(await reasonOf(fake.harness.startTurn(turnSpec(binding, 'gui', 'retry', { attemptOrdinal: 2 })).result)).toBe('ran')
-    expect(await reasonOf(fake.harness.startTurn(turnSpec(binding, 'gui', 'recovery', { previous: binding })).result)).toBe('ran')
-    expect(await reasonOf(fake.harness.startTurn(turnSpec(binding, 'bridge', 'b1')).result)).toBe('ran')
-    expect(fake.started).toEqual(['agent:a1', 'agent:retry', 'agent:recovery', 'agent:b1'])
+    expect(await reasonOf(fake.harness.startTurn(turnSpec(binding, 'bridge', 'b1', { previous: binding })).result)).toBe('ran')
+    // The proof says the owner sent the message once: an automatic retry in this process, or a later attempt of a
+    // run (a recovery after a restart, whose ordinal comes from the run store), would send it again on its own.
+    expect(await reasonOf(fake.harness.startTurn(turnSpec(binding, 'gui', 'retry')).result)).toBe('owner_only:replay')
+    expect(await reasonOf(fake.harness.startTurn(turnSpec(binding, 'later', 'recovery', { attemptOrdinal: 2 })).result)).toBe('owner_only:replay')
+    expect(fake.started).toEqual(['agent:a1', 'agent:b1'])
   })
 
   it('sends no prompt for any turn the owner did not drive', async () => {
@@ -194,8 +197,18 @@ describe('Antigravity runs only turns its owner drives', () => {
     const registry = setup('acp', { source: { kind: 'registry', agentId: 'antigravity', version: '1.0.0', distribution: 'binary' } })
     expect(registry.harness.ownerOnly!('agent')).toBe(true)
     expect(await reasonOf(registry.harness.startTurn(turnSpec(await registry.bind(), 'cli', 'r1')).result)).toBe('owner_only:unknown_run')
-    const command = setup('acp', { source: { kind: 'local', command: 'C:\\Tools\\agy_acp_server.exe', args: [] } })
-    expect(command.harness.ownerOnly!('agent')).toBe(true)
+    // Local commands, as `source` or as the executable and arguments it is derived from. Only Antigravity's own
+    // executable, or its CLI serving ACP (`agy acp`), is recognised.
+    const commands: Array<[Record<string, unknown>, boolean]> = [
+      [{ source: { kind: 'local', command: 'C:\\Tools\\agy_acp_server.exe', args: [] } }, true],
+      [{ source: { kind: 'local', command: 'agy', args: ['acp'] } }, true],
+      [{ source: { kind: 'local', command: '/opt/antigravity/bin/agy', args: ['acp', '--verbose'] } }, true],
+      [{ binaryPath: 'C:\\Users\\me\\AppData\\Local\\Programs\\Antigravity\\bin\\agy.exe', args: ['acp'] }, true],
+      [{ source: { kind: 'local', command: 'agy', args: ['chat'] } }, false],
+      [{ source: { kind: 'local', command: 'my-agent', args: ['acp'] } }, false],
+      [{ source: { kind: 'local', command: 'npx', args: ['agy', 'acp'] } }, false]
+    ]
+    for (const [config, covered] of commands) expect([config, setup('acp', config).harness.ownerOnly!('agent')]).toEqual([config, covered])
     const other = setup('acp', { source: { kind: 'registry', agentId: 'gemini', version: '1.0.0', distribution: 'npx' } })
     expect(other.harness.ownerOnly!('agent')).toBe(false)
     expect(await reasonOf(other.harness.startTurn(turnSpec(await other.bind(null), 'cli', 'o1')).result)).toBe('ran')

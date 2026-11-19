@@ -6,6 +6,10 @@
  * admits only devices of the owner's own Mousse ID). A Resume now press records one on the pause it
  * resumes (`RunPause.resumeOwner`), and the continue turn takes it from there.
  *
+ * What it proves: the connection passed the daemon's owner-token check and introduced itself as a window. The token
+ * is the local trust boundary, so any program running as the owner that can read it is trusted as their window, as
+ * for every other window command. It does not prove that a person pressed anything.
+ *
  * Read by the gate for providers that may only run turns the owner drives (`harness/ownerOnly.ts`).
  */
 export interface OwnerProof {

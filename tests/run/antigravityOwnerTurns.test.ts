@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
+import { providerStatusError, usageLimitError } from '../../src/mms/orchestrator/providerErrors'
 import type { RunRecord } from '../../src/mms/run/types'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import { ScriptedAdapter, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
@@ -167,6 +167,20 @@ describe('Antigravity runs only turns its owner drives', () => {
       expect(continuation.outcome?.error).toMatch(REFUSED)
       expect(adapter.turns).toHaveLength(1)
     })
+  })
+
+  it('does not send the owner’s message again on its own after a passing failure, and shows the provider’s error', async () => {
+    const adapter = agy()
+    const d = boot(newHome(), [adapter])
+    const chat = thread(d)
+    adapter.failNext = providerStatusError(undefined, 'Connection refused (ECONNREFUSED)', { code: 'provider_unavailable', errorInfo: { category: 'unavailable', retryable: true } })
+    const sent = await d.orch.send('Once', false, { threadId: chat.id, clientRequestId: 'once', source: 'gui', ownerProof: GUI })
+    await waitFor(() => settled(d, chat.id), 'the failed run to settle')
+    const run = d.engine.getRun(sent.runId!)!
+    expect(run.status).toBe('failed')
+    // Mousse's own retry would have waited and then been refused by the gate: the provider's error is what shows.
+    expect(run.outcome?.error).toMatch(/ECONNREFUSED/)
+    expect(adapter.turns.map((turn) => turn.prompt)).toEqual(['Once'])
   })
 
   it('leaves other providers as they were: a send without a proof runs', async () => {
