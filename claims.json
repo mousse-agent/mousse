@@ -105,6 +105,19 @@
       "expiresAt": "2026-11-19T08:39:35.504Z"
     },
     {
+      "task": "bot-turn-cap-chips-roll-up",
+      "session": "Animatrix-2e0ffc",
+      "machine": "Animatrix",
+      "branch": "bot-turn-cap-chips-roll-up",
+      "paths": [
+        "src/mms/bots/activation/BotEngine.ts",
+        "src/mms/bots/activity/BotActivitySink.ts",
+        "src/mms/bots/seams.ts"
+      ],
+      "claimedAt": "2026-11-19T18:27:22.013Z",
+      "expiresAt": "2026-11-19T20:27:22.013Z"
+    },
+    {
       "task": "bots-ask-first-default",
       "session": "agibook-80ed0e",
       "machine": "agibook",
