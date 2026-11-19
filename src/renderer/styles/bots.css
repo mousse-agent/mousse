@@ -812,3 +812,11 @@ html[data-theme='blacksphere-plus'] .bot-row:not([aria-current='true']):hover,
 html[data-theme='blacksphere-plus'] .bot-hover-anchor[data-open] > .bot-row:not([aria-current='true']),
 html[data-theme='blacksphere-plus'] .bot-menu button:is(:hover, :focus-visible),
 html[data-theme='blacksphere-plus'] .chat-list-row:not(.active):hover { background: color-mix(in srgb, var(--ui-lift) 7.5%, transparent); }
+
+/* Pictures sit in a thin frame of their message's bubble colour, as in a messaging app, so they never melt into the
+   dark pane: the owner's in the accent tint of their bubbles, a bot's in its bubble's. 3px of bubble shows around them. */
+.bot-you-content > .bot-images { padding: 3px; border-radius: 16px; background: rgba(var(--accent-rgb), .2); }
+.bot-you-content > .bot-images > .bot-image { border-radius: 13px; }
+.bot-bubble.has-media > .bot-reply-media { margin-inline: -9px; }
+.bot-bubble.has-media > .bot-reply-media:first-child { margin-top: -6px; }
+.bot-bubble.has-media > .bot-reply-media .bot-picture { border-radius: 13px; }
