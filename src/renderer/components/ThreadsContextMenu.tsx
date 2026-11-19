@@ -9,6 +9,7 @@ import {
   Copy,
   DeleteRegular,
   EditRegular,
+  Eye,
   EyeOff,
   Folder,
   FolderSearch,
@@ -363,6 +364,18 @@ export function ThreadsTabMenu({ x, y, onClose, onHideAllBotThreads }: { x: numb
       <button type="button" className="threads-context-menu-item" role="menuitem" title={BOT_THREADS_HIDE_HINT} onClick={onHideAllBotThreads}>
         <EyeOff />
         <span>Hide all bot threads</span>
+      </button>
+    </MenuFrame>
+  )
+}
+
+/** A bot's menu in the Bots list: hide or show its checklist in its chat. */
+export function BotRowMenu({ x, y, botName, checklistHidden, onClose, onToggleChecklist }: { x: number; y: number; botName: string; checklistHidden: boolean; onClose: () => void; onToggleChecklist: () => void }) {
+  return (
+    <MenuFrame x={x} y={y} label={`${botName} menu`} onClose={onClose}>
+      <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onToggleChecklist}>
+        {checklistHidden ? <Eye /> : <EyeOff />}
+        <span>{checklistHidden ? 'Show checklist' : 'Hide checklist'}</span>
       </button>
     </MenuFrame>
   )

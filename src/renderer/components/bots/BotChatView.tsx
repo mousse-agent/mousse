@@ -1081,7 +1081,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           <button type="button" className="bot-header-name" tabIndex={-1} aria-hidden onClick={toggleAbout}><h1>{bot.name}</h1></button>
           <BotPresenceLine bot={bot} typing={typing} offline={offline} />
         </div>
-        <BotTasksButton tasks={bot.tasks} />
+        <BotTasksButton botId={bot.id} tasks={bot.tasks} />
         <button type="button" className={`bot-header-panel${side.open ? ' is-open' : ''}`} aria-label={side.open ? 'Hide side panel' : 'Show side panel'} title={side.open ? 'Hide side panel' : 'Show side panel'} aria-expanded={side.open} onClick={side.toggle}>
           {side.open ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
         </button>

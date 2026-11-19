@@ -33,6 +33,7 @@ const NewBotDialogHost = ((await import('../../src/renderer/components/bots/NewB
 const { useChatsStore } = await import('../../src/renderer/stores/chatsStore')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
+const { setBotChecklistHidden } = await import('../../src/renderer/components/bots/botChecklistSetting')
 
 let root: Root
 let host: HTMLElement
@@ -181,6 +182,23 @@ describe('the Bots section', () => {
     expect(lock('Notes')?.getAttribute('title')).toBe('Only the devices picked in About reach this bot.')
     expect(lock('Shopping')).toBeNull()
     expect(lock('Flights')).toBeNull()
+  })
+
+  it('a right-click on a bot opens its menu, which hides its checklist and shows it again', async () => {
+    await show([summary('a', { name: 'Inbox helper' })], [], false)
+    const menuItems = () => [...document.querySelectorAll('[role="menu"][aria-label="Inbox helper menu"] [role="menuitem"]')].map((item) => item.textContent)
+    const rightClick = async () => { await act(async () => { button('Message Inbox helper')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 60 })) }) }
+    try {
+      await rightClick()
+      expect(menuItems()).toEqual(['Hide checklist'])
+      await click([...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent === 'Hide checklist'))
+      expect(menuItems()).toEqual([])
+      expect(JSON.parse(localStorage.getItem('mousse-bot-checklist-hidden')!)).toEqual(['a'])
+      await rightClick()
+      expect(menuItems()).toEqual(['Show checklist'])
+    } finally {
+      setBotChecklistHidden('a', false)
+    }
   })
 
   it('opens a bot’s chat from its face', async () => {
