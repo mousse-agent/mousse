@@ -96,6 +96,11 @@ function argumentsMatch(contract: ArgumentContract | undefined, args: Record<str
     throw error
   }
 }
+/** Older masked reviews cut strings at 32,000 characters and cannot prove the sent arguments. */
+function hasCutReviewValue(value: unknown): boolean {
+  if (typeof value === 'string') return value.length === 32_000
+  return !!value && typeof value === 'object' && Object.values(value).some(hasCutReviewValue)
+}
 /** Exact top-level destinations declared by the tool; content never supplies authority. */
 export function actionPlace(schema: unknown, args: Record<string, unknown>): Record<string, unknown> | undefined {
   const names = PLACE_NAMES
@@ -161,7 +166,9 @@ export class BotAlone {
     if (!previous) return 'Let it ask once first. After you send one of these, I can ask to do it alone.'
     const source = JSON.parse(String(previous.args_json)) as Record<string, unknown>
     // The masked review can supply the source only when it is still exactly what was sent.
-    if (actionDigest(source) !== previous.args_digest) return 'This sent call has hidden arguments, so it always asks.'
+    if (actionDigest(source) !== previous.args_digest) return hasCutReviewValue(source)
+      ? 'This sent call’s content was too long to check, so it asks each time.'
+      : 'This sent call has hidden arguments, so it always asks.'
     const place = JSON.parse(String(previous.place_json)) as Record<string, unknown>
     let contract: ArgumentContract
     try { contract = argumentContract(source, this.tokenKey(), place) } catch (error) {
