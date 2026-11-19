@@ -76,11 +76,12 @@ export function surfaceTabItems(input: {
       })
     } else if (kind === 'browser') {
       input.browsers.forEach((tab, index) => {
-        const named = tab.title && tab.title !== 'New tab' && tab.title !== 'about:blank'
+        // The page's title; a page without one (its title is then its address) shows its host.
+        const named = tab.title && tab.title !== 'New tab' && tab.title !== 'about:blank' && tab.title !== tab.url ? tab.title : browserHost(tab.url)
         items.push({
           key: `browser:${tab.id}`,
           view: 'browser',
-          label: named ? tab.title : input.browsers.length > 1 ? `Browser ${index + 1}` : 'Browser',
+          label: named || (input.browsers.length > 1 ? `Browser ${index + 1}` : 'Browser'),
           resourceId: tab.id,
           closable: true,
           ...(tab.ownerThreadId === null ? { everyThread: true } : {})
@@ -131,4 +132,10 @@ export function openSurface(kind: MainView, another = false): void {
     if (another || visible.length === 0) store.addBrowserTab(threadId)
   }
   store.openSurfaceKind(kind)
+}
+
+/** A web page's host without www., for a browser tab with no title; nothing for a blank tab or an address that is not one. */
+function browserHost(url: string): string {
+  if (!/^https?:/i.test(url)) return ''
+  try { return new URL(url).hostname.replace(/^www\./, '') } catch { return '' }
 }
