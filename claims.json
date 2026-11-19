@@ -163,6 +163,20 @@
       "expiresAt": "2026-11-19T15:05:18.193Z"
     },
     {
+      "task": "mousse/problem-personal-bots-lose-track-of-what",
+      "session": "Animatrix-6a5f42",
+      "machine": "Animatrix",
+      "branch": "mousse/problem-personal-bots-lose-track-of-what",
+      "paths": [
+        "src/mms/bots/memory",
+        "src/shared/bots/personal/items.ts",
+        "src/mms/run/mcp/appTools/botItems.ts",
+        "src/mms/bots/instructions.ts"
+      ],
+      "claimedAt": "2026-11-19T13:55:22.287Z",
+      "expiresAt": "2026-11-19T15:55:22.287Z"
+    },
+    {
       "task": "net-engine-1a",
       "session": "Animatrix-880838",
       "machine": "Animatrix",
