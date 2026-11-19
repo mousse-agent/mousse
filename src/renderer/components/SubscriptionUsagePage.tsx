@@ -18,6 +18,7 @@ import { Select } from './ui/Select'
 import { needsProxyKey, ProxyKeyNote, UsageSettingsButton, type SaveProxyKey } from './UsageProxyControls'
 import type { ProvidersUsageResponse, ProviderUsage, ProviderUsageWindow, UseLimitResetResponse } from '../../shared/providerAuth'
 import { UsageBar } from './UsageBar'
+import { providerLogo, usageProviderTitle } from '../lib/usageProviderName'
 import { activeAccountsLabel, UsageAccountsView } from './UsageAccountsView'
 import { UsageResetsChip } from './UsageResetsChip'
 import { soonestCredit, UsageResetButton, UsageResetConfirm, type ResetFlow } from './UsageResetAction'
@@ -113,7 +114,8 @@ const UsageProviderCard = memo(function UsageProviderCard({ provider, computerNa
   const multi = provider.accounts && provider.accounts.length > 1 ? provider.accounts : undefined
   return <SettingsGroup
     // A proxy is named in the gear's tooltip, not in the title.
-    title={provider.source && !provider.proxy ? `${provider.label} · ${provider.source}` : provider.label}
+    title={provider.source && !provider.proxy ? `${usageProviderTitle(provider)} · ${provider.source}` : usageProviderTitle(provider)}
+    icon={providerLogo(provider.id)}
     titleAction={provider.plan || multi || resetsLabel(provider.resets) || (provider.proxy && onSaveProxyKey && onClearProxyKey && local)
       ? <>
           {provider.plan && <span className="usage-provider-plan settings-muted" data-testid="usage-provider-plan">{provider.plan}</span>}

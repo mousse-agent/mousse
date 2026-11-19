@@ -702,6 +702,36 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
   white-space: nowrap;
 }
 
+/* A provider's logo before its name, bare and the size of the text, in cards and rows alike. */
+.usage-provider-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 100%;
+  vertical-align: bottom;
+}
+
+.usage-provider-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.usage-provider-logo {
+  flex: none;
+}
+
+.usage-provider .settings-group-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.usage-provider .settings-group-icon {
+  color: var(--text-primary);
+}
+
 .usage-slim-figure {
   display: inline-flex;
   flex: none;
