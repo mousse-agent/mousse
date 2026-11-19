@@ -446,6 +446,11 @@ export interface ExperimentalSettings {
    * self-hosted relays only, as while the new networking engine and Plus are built and tried.
    */
   plusLegacy: boolean
+  /**
+   * Performance (Settings → Labs), off unless turned on: moving bot faces are a body picture drawn once per state with
+   * flat 2D eyes animated over it, instead of the whole face drawn in 3D every frame.
+   */
+  hybridBotFaces: boolean
   /** The profiler (Settings → Labs). */
   profiler: ProfilerSettings
 }
@@ -455,6 +460,7 @@ export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings
     botAsksFirstOff: raw?.botAsksFirstOff === true,
     subagentWorktrees: raw?.subagentWorktrees === true,
     plusLegacy: raw?.plusLegacy !== false,
+    hybridBotFaces: raw?.hybridBotFaces === true,
     profiler: normalizeProfilerSettings(raw?.profiler)
   }
 }

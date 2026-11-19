@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { eyeGeometry, FOLLOW_X, FOLLOW_Y, pointerLook } from '../../src/renderer/components/bots/face/hybridEyes'
+import { BOT_EYES } from '../../src/shared/bots/personal/look'
+import { eyeGeometry, FOLLOW_X, FOLLOW_Y, mouseArcPath, mouseEyePath, pointerLook } from '../../src/renderer/components/bots/face/hybridEyes'
 
 /** A 96 px face whose middle is at (500, 400). */
 const box = { left: 452, top: 352, width: 96, height: 96 }
@@ -27,6 +28,41 @@ describe('eyes that follow the pointer', () => {
 
   it('stay in the middle for a face with no size yet', () => {
     expect(pointerLook({ left: 0, top: 0, width: 0, height: 0 }, 300, 300)).toEqual({ x: 0, y: 0 })
+  })
+})
+
+/** The left and right ends of a path of rows (`M x y h w ...`), in eye units. */
+function ends(path: string): { left: number; right: number } {
+  const spans = [...path.matchAll(/M(-?[\d.]+) -?[\d.]+h(-?[\d.]+)/g)].map((match) => [Number(match[1]), Number(match[1]) + Number(match[2])])
+  return { left: Math.min(...spans.map(([from]) => from!)), right: Math.max(...spans.map(([, to]) => to!)) }
+}
+
+describe("a mouse's flat eye, drawn as the part the head leaves showing", () => {
+  it.each(BOT_EYES)('%s eyes are drawn for both sides, each the mirror of the other', (eyes) => {
+    const look = { colour: 'teal', accessory: 'none', eyes } as const
+    const left = ends(mouseEyePath(look, -1, 1)!)
+    const right = ends(mouseEyePath(look, 1, 1)!)
+    expect(left.right).toBeGreaterThan(left.left)
+    expect(right.left).toBeCloseTo(-left.right, 2)
+    expect(right.right).toBeCloseTo(-left.left, 2)
+  })
+
+  it('a round eye loses its inner side to the head and keeps its outer side', () => {
+    const left = ends(mouseEyePath({ colour: 'teal', accessory: 'none', eyes: 'round' }, -1, 1)!)
+    // A whole round eye would reach 0.2 each way; the left eye's inner side is its right.
+    expect(left.left).toBeCloseTo(-0.2, 1)
+    expect(left.right).toBeLessThan(0.17)
+  })
+
+  it('a closed arc is cut the same way', () => {
+    const left = ends(mouseArcPath({ colour: 'teal', accessory: 'none' }, -1, 1, 1)!)
+    expect(left.left).toBeLessThan(-0.15)
+    expect(left.right).toBeLessThan(0.13)
+  })
+
+  it("the Mousse's eyes are painted whole, so it has no cut shape", () => {
+    expect(mouseEyePath({ colour: 'coral', accessory: 'none', kind: 'mousse' }, -1, 1)).toBeUndefined()
+    expect(mouseArcPath({ colour: 'coral', accessory: 'none', kind: 'mousse' }, -1, 1, 1)).toBeUndefined()
   })
 })
 

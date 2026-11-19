@@ -173,11 +173,135 @@ export function lidClip(eyes: BotEyes, side: -1 | 1, open: number, worried: numb
 }
 
 export function eyeColour(look: KnownBotLook): string {
-  if (botKindOf(look) !== 'mousse') return '#0c0c0e'
+  // The mouse's eyes are lit clay: near-black that shows as dark grey under the shader's light.
+  if (botKindOf(look) !== 'mousse') return '#2c2c2e'
   return mousseEyesWhite(BOT_COLOUR_HEX[look.colour]) ? '#ffffff' : '#050505'
 }
 
 export function eyeShapeOf(look: KnownBotLook): BotEyes {
   const eyes = botEyesOf(look)
   return BOT_EYES.includes(eyes) ? eyes : 'pill'
+}
+
+/** The shader's `heart2`: negative inside. */
+function heart(px: number, py: number): number {
+  const x = Math.abs(px)
+  const y = py + 0.55
+  if (x + y > 1) return Math.hypot(x - 0.25, y - 0.75) - 0.3536
+  const m = 0.5 * Math.max(x + y, 0)
+  return Math.sqrt(Math.min(x * x + (y - 1) * (y - 1), (x - m) * (x - m) + (y - m) * (y - m))) * Math.sign(x - y)
+}
+
+const STAR_POINTS: [number, number][] = Array.from({ length: 10 }, (_, index) => {
+  const radius = index % 2 === 0 ? 0.26 : 0.117
+  const angle = Math.PI / 2 + (index * Math.PI) / 5
+  return [Math.cos(angle) * radius, Math.sin(angle) * radius]
+})
+
+function segment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  const t = Math.max(0, Math.min(1, ((px - ax) * (bx - ax) + (py - ay) * (by - ay)) / ((bx - ax) ** 2 + (by - ay) ** 2)))
+  return Math.hypot(px - ax - (bx - ax) * t, py - ay - (by - ay) * t)
+}
+
+/** Whether (x, y), in eye units with y up and the eye fully open at scale 1, is inside the shape: the shader's `eye2`. */
+function inShape(shape: BotEyes, side: -1 | 1, x: number, y: number): boolean {
+  switch (shape) {
+    case 'pill': return (x / 0.155) ** 2 + (y / 0.225) ** 2 < 1
+    case 'round': return x * x + y * y < 0.04
+    case 'dot': return x * x + y * y < 0.105 * 0.105
+    case 'tall': return (x / 0.115) ** 2 + (y / 0.3) ** 2 < 1
+    case 'square': return Math.hypot(Math.max(Math.abs(x) - 0.115, 0), Math.max(Math.abs(y) - 0.115, 0)) < 0.06
+    case 'heart': return heart(x / 0.33, y / 0.33) < 0
+    case 'star': {
+      let inside = false
+      let near = Infinity
+      for (let i = 0, j = STAR_POINTS.length - 1; i < STAR_POINTS.length; j = i++) {
+        const [ax, ay] = STAR_POINTS[i]!
+        const [bx, by] = STAR_POINTS[j]!
+        if (ay > y !== by > y && x < ((bx - ax) * (y - ay)) / (by - ay) + ax) inside = !inside
+        near = Math.min(near, segment(x, y, ax, ay, bx, by))
+      }
+      return inside || near < 0.025
+    }
+    case 'code': return segment(x, Math.abs(y), side * 0.11, 0, -side * 0.09, 0.15) < 0.048
+  }
+}
+
+const OUTLINE_ROWS = 80
+const OUTLINE_COLUMNS = 160
+const outlines = new Map<string, string>()
+
+/**
+ * A mouse's open eye as the 3D face shows it, as one SVG path over the eye's square (y down, before its scale
+ * `es`). The shader's eye is set a little into the head, so the head's curve covers its inner side: a round eye
+ * shows as a crescent, narrower and further out than its shape. The path is that visible part itself, in thin
+ * rows, so nothing of the eye is drawn where the head would hide it. The Mousse's eyes are painted whole, so it
+ * has none.
+ */
+export function mouseEyePath(look: KnownBotLook, side: -1 | 1, es: number): string | undefined {
+  if (botKindOf(look) === 'mousse' || !(es > 0)) return undefined
+  const shape = eyeShapeOf(look)
+  const key = `${shape}|${side}|${es.toFixed(3)}`
+  const known = outlines.get(key)
+  if (known !== undefined) return known
+  const x0 = side * 0.37
+  const centre = headDepth(x0, HEAD_Y) - 0.035
+  /** Whether the eye's front at (x, y), in head units from the eye's middle, is in front of the head. */
+  const seen = (x: number, y: number): boolean => {
+    // The pill is an ellipsoid; the rest are their flat shape, 0.06 thick each way.
+    const front = shape === 'pill' ? centre + 0.075 * es * Math.sqrt(Math.max(0, 1 - (x / (0.155 * es)) ** 2 - (y / (0.225 * es)) ** 2)) : centre + 0.06 * es
+    return front >= headDepth(x0 + x, HEAD_Y + y)
+  }
+  // Local units: the box is scaled by `es` afterwards, so a local point is `es` times as far in head units.
+  const path = rows((x, y) => inShape(shape, side, x, y) && seen(x * es, y * es))
+  outlines.set(key, path)
+  return path
+}
+
+/**
+ * A mouse's closed eye (the arc of a happy or sleeping face) as the 3D face shows it: the same kind of path as
+ * `mouseEyePath`, cut where the head covers its inner end. `up` is the pose's `arc`: which way the arc bends.
+ */
+export function mouseArcPath(look: KnownBotLook, side: -1 | 1, es: number, up: number): string | undefined {
+  if (botKindOf(look) === 'mousse' || !(es > 0)) return undefined
+  const key = `arc|${side}|${es.toFixed(3)}|${up > 0 ? 1 : -1}`
+  const known = outlines.get(key)
+  if (known !== undefined) return known
+  const x0 = side * 0.37
+  const front = headDepth(x0, HEAD_Y) - 0.035 + 0.05
+  const [sin, cos] = [Math.sin(1.1), Math.cos(1.1)]
+  const path = rows((lx, ly) => {
+    const x = lx * es
+    const y = ly * es
+    // The shader's `arc(vec2(x, py + .13), 1.1, .17) - .045 * es`.
+    const px = Math.abs(x)
+    const py = (up > 0 ? y : -y) + 0.13
+    const far = cos * px > sin * py ? Math.hypot(px - sin * 0.17, py - cos * 0.17) : Math.abs(Math.hypot(px, py) - 0.17)
+    // A little thicker than the shader's 0.045: the 3D arc is a raised ridge, and its sides show too.
+    return far < 0.056 * es && front >= headDepth(x0 + x, HEAD_Y + y)
+  })
+  outlines.set(key, path)
+  return path
+}
+
+/** The points of the eye's square (eye units, y up) that `inside` accepts, as an SVG path of thin rows (y down). */
+function rows(inside: (x: number, y: number) => boolean): string {
+  const row = (2 * EYE_BOX) / OUTLINE_ROWS
+  const column = (2 * EYE_BOX) / OUTLINE_COLUMNS
+  const n = (value: number): string => value.toFixed(4)
+  let path = ''
+  for (let r = 0; r < OUTLINE_ROWS; r++) {
+    const y = EYE_BOX - (r + 0.5) * row
+    let from = -1
+    for (let c = 0; c <= OUTLINE_COLUMNS; c++) {
+      const is = c < OUTLINE_COLUMNS && inside(-EYE_BOX + (c + 0.5) * column, y)
+      if (is && from < 0) from = c
+      else if (!is && from >= 0) {
+        // Rows overlap a little so no line shows between them.
+        path += `M${n(-EYE_BOX + from * column)} ${n(-y - row * 0.6)}h${n((c - from) * column)}v${n(row * 1.2)}h${n(-(c - from) * column)}z`
+        from = -1
+      }
+    }
+  }
+  return path
 }

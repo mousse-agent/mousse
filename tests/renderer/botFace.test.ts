@@ -27,6 +27,7 @@ import {
   type FaceGpu,
   type FaceRendererEnv
 } from '../../src/renderer/components/bots/face/faceRenderer'
+import { applyFaceMode } from '../../src/renderer/components/bots/face/faceMode'
 import { SavedFaceFrames, type FaceFrameBackend, type FaceFrameCodec, type SavedFrameImage, type SavedFrameRecord } from '../../src/renderer/components/bots/face/faceFrameStore'
 import { setAnimationSpeed } from '../../src/renderer/lib/motion'
 
@@ -515,6 +516,26 @@ const face = (overrides: Partial<Parameters<typeof BotFace>[0]> = {}) =>
   createElement(BotFace, { look: coral, state: 'idle', size: 40, view: 'head', ...overrides })
 const flat = () => host.querySelector('svg.bot-face-still')
 const faceCanvas = () => host.querySelector<HTMLCanvasElement>('canvas.bot-face-canvas')
+
+describe('Settings → Labs → Performance', () => {
+  afterEach(() => act(() => applyFaceMode(null)))
+
+  it('turns every moving face into the 2D hybrid as the setting changes, and back; a still face stays as it was', () => {
+    const fake = fakeEnv({ status: () => 'ready' })
+    resetSharedFaceRenderer(() => fake.env)
+    warmFaceRenderer()
+    fake.tick(READY_POLL_MS)
+    render(createElement('div', null, face(), face({ state: 'working' }), face({ still: true })))
+    const hybrids = () => host.querySelectorAll('.bot-face-hybrid').length
+    expect(host.querySelectorAll('.bot-face')).toHaveLength(3)
+    expect(hybrids()).toBe(0)
+    act(() => applyFaceMode({ experimental: { hybridBotFaces: true } }))
+    expect(hybrids()).toBe(2)
+    expect(host.querySelectorAll('.bot-face')).toHaveLength(3)
+    act(() => applyFaceMode({ experimental: { hybridBotFaces: false } }))
+    expect(hybrids()).toBe(0)
+  })
+})
 
 describe('ready from launch', () => {
   it('starts the renderer only once the first frame has painted', () => {
