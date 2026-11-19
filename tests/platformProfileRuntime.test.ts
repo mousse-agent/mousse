@@ -314,3 +314,28 @@ describe('production profile runtime composition', () => {
     expect(readFileSync(join(pendingRoot, `${destinationName}.json`), 'utf8')).toContain(bob.id)
   })
 })
+
+it.each(['old delete','failed write'] as const)('automation keys clear leftover authority after %s but refuse an existing bound value', async cause=>{
+  const {resolveSecretBinding}=await import('../src/mms/secrets/secretBinding')
+  const {OldMetaReader}=await import('./secrets/oldMetaReader')
+  const root=mkdtempSync(join(tmpdir(),'mousse-leftover-key-')); roots.push(root)
+  const main=await MousseMainService.create({homeDir:root,repoRoot:root,headless:true,requireOwnership:false})
+  try {
+    const vault=main.secretVault, home=main.getProfileHomeDir()
+    const binding=resolveSecretBinding({service:'github'})
+    if(cause==='old delete') {
+      vault.store('KEY','old-private-fixture',{threadId:'bot',keep:'saved',binding})
+      expect(()=>main.automationKeys.set('KEY','new-private-fixture')).toThrow(/bound/)
+      new OldMetaReader({profileRoot:home,threadAlive:()=>true}).delete('KEY')
+    } else {
+      mkdirSync(join(home,'secrets'),{recursive:true})
+      writeFileSync(join(home,'secrets/refs.json'),'{')
+      expect(()=>vault.store('KEY','old-private-fixture',{threadId:'bot',keep:'saved',binding})).toThrow()
+      writeFileSync(join(home,'secrets/refs.json'),'{}')
+    }
+    main.automationKeys.set('KEY','new-private-fixture')
+    expect(vault.bindingFor('KEY')).toBeUndefined()
+    expect(main.automationKeys.list()).toContain('KEY')
+    expect(main.integrationContext.secrets.resolveEnv('${secret:KEY}')).toBe('new-private-fixture')
+  } finally {await main.stop()}
+})

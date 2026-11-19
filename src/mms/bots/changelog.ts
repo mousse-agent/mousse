@@ -158,7 +158,8 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     asksFirst: true,
     date: '2026-11-19',
     text: "In your owner’s own message turn you can ask with escalate permission {ask: 'let_alone', scheduleId, serverId, tool} to let one automation use one tool in the place of an earlier sent call. Mousse fills in the place. Use the same top-level argument names; only plain text like a message body or a file name may change. New addresses and other destinations still ask, and busy automations ask again at the hourly or daily cap."
-  }
+  },
+  { id: 29, date: '2026-11-19', text: 'You can ask for a secret bound to one service with secret_request for: {service} or {origin}. These secrets are read only: Mousse keeps the value, gives no file, and refuses secret_run and MCP settings for them. secret_fetch comes later; until it is available, keep working without using a bound key.' },
 ]
 
 /** The newest entry's id: what a bot has seen once it is told everything. */

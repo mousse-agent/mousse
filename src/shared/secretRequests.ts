@@ -1,3 +1,4 @@
+import type { SecretBindingView } from './secretServices'
 /**
  * Secrets an agent asks for in a thread (#595, the chat part). The agent calls `secret_request`; the person types the
  * value into a private card in the thread; Mousse keeps it in the profile's secret store (the one saved keys use) and
@@ -28,6 +29,7 @@ export const SECRET_REQUEST_TIMEOUT_MS = 60 * 60 * 1000
 
 /** One pending request, as a card shows it. Never holds a value. */
 export interface SecretRequestView {
+  binding?: SecretBindingView
   requestId: string
   threadId: string
   /** What the agent asks for, e.g. "Hugging Face write token". */
@@ -47,6 +49,7 @@ export interface SecretRequestView {
 
 /** One secret in the store, as Settings lists it. Never holds a value. */
 export interface SecretEntryView {
+  binding?: SecretBindingView
   name: string
   label?: string
   /** `key`: saved from an automation's key field, kept until removed. */
@@ -118,14 +121,15 @@ export function secretNameInResult(text: string): string | undefined {
 }
 
 /** The card's one line on where the value is kept and for how long. */
-export function secretKeepLine(keep: SecretKeep): string {
+export function secretKeepLine(keep: SecretKeep, options: { bound?: string } = {}): string {
+  const access = options.bound ? `${options.bound} never sees it.` : 'The agent can use it but never shows it in the chat.'
   switch (keep) {
     case 'thread':
-      return "Kept in Mousse's secret store on this computer for this thread only, and deleted with the thread. The agent can use it but never shows it in the chat."
+      return `Kept in Mousse's secret store on this computer for this thread only, and deleted with the thread. ${access}`
     case 'day':
-      return "Kept in Mousse's secret store on this computer for 24 hours, then deleted. The agent can use it but never shows it in the chat."
+      return `Kept in Mousse's secret store on this computer for 24 hours, then deleted. ${access}`
     case 'saved':
-      return "Kept in Mousse's secret store on this computer until you remove it in Settings → Agents → Secrets. The agent can use it but never shows it in the chat."
+      return `Kept in Mousse's secret store on this computer until you remove it in Settings → Agents → Secrets. ${access}`
   }
 }
 

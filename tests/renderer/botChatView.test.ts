@@ -3376,6 +3376,39 @@ it('forgets the kept value after its day expires',async()=>{
  } finally {clock.mockRestore()}
 })
 
+it.each([
+  [{ service: 'OpenAI', host: 'api.openai.com', readOnly: true }, 'OpenAI', false],
+  [{ host: 'api.example.com', readOnly: true }, 'api.example.com', true]
+] as const)('names the service on a private bound card above the bot composer: %s', async (binding, name, warning) => {
+  const calls: string[] = []
+  installPreload(fake, { platformRequest: { request: async (method: string) => {
+    calls.push(method)
+    if (method === 'secrets.requests.list') return { requests: [{ requestId: 'bound', threadId: 'home-key', label: 'API key', reason: 'Read updates', name: 'KEY', binding, savedExists: false }] }
+    return {}
+  } } })
+  await open(summary('inbox', { name: 'Kai', homeThreadId: 'home-key' }))
+  await settle()
+  const card = host.querySelector('.bot-secret-requests .secret-request-card')!
+  expect(card?.textContent).toContain(`For ${name}, read only. Kai can't see it or send it anywhere else.`)
+  expect(card.textContent?.includes("Mousse can't tell what this service's reads do.")).toBe(warning)
+  expect(card.textContent).toContain('Kai never sees it.')
+  expect(card.textContent).not.toContain('The agent')
+  expect(calls).toContain('secrets.requests.list')
+})
+
+it.each([
+  ['thread', 'for this thread only, and deleted with the thread.'],
+  ['day', 'for 24 hours, then deleted.'],
+  ['saved', 'until you remove it in Settings → Agents → Secrets.']
+] as const)('builds the bound keep sentence for %s without changing the ordinary agent line', async (keep, duration) => {
+  const {secretKeepLine}=await import('../../src/shared/secretRequests')
+  const bound=secretKeepLine(keep,{bound:'Kai'})
+  expect(bound).toContain(duration)
+  expect(bound).toContain('Kai never sees it.')
+  expect(bound).not.toContain('The agent')
+  expect(secretKeepLine(keep)).toContain('The agent can use it but never shows it in the chat.')
+})
+
 it('draws a let-alone consent and a natural answered line in the bot chat', async () => {
   const title = 'let ‘Sort new scans’ upload to Scans in Trial drive without asking'
   fake.chats.inbox = [

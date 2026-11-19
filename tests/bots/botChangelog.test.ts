@@ -146,6 +146,7 @@ it('C6 support rollback omits the switch-on advice and still delivers it after r
   const off = await provider.chatPreamble({ botId: 'ada', activationId: 'c6-off' })
   expect(off).not.toContain('Tools that send or change things now ask your owner first')
   expect(off).not.toContain(BOT_CHANGELOG.find(entry => entry.id === 28)!.text)
+  expect(off).toContain(BOT_CHANGELOG.find(entry => entry.id === 29)!.text)
   await settled(provider, 'c6-off')
   on = true
   // A later non-switch entry must not make the withheld switch entry count as delivered, including across restart.
@@ -156,23 +157,32 @@ it('C6 support rollback omits the switch-on advice and still delivers it after r
   expect(next).not.toContain('Tools that send or change things now ask your owner first')
 })
 
-it('C6 support rollback keeps E1 entry 28 pending after entry 27 was seen', async () => {
+it('C6 support rollback shows entry 29 while E1 entry 28 stays pending, then delivers 28 once', async () => {
   existingBot()
   memory.write(() => memory.setState('ada', 'changelog_seen', 27))
   const e1 = BOT_CHANGELOG.find(entry => entry.id === 28)!
-  const later = { id: BOT_CHANGELOG_LATEST + 1, date: '2026-11-19', text: 'Later independent advice.' }
-  const changelog = [...BOT_CHANGELOG, later]
-  const provider = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => false, changelog })
-  const off = await provider.chatPreamble({ botId: 'ada', activationId: 'c6-seen-off' })
-  expect(off).toContain(later.text)
-  expect(off).not.toContain(e1.text)
-  await settled(provider, 'c6-seen-off')
-  expect(memory.getState<number>('ada', 'changelog_seen')).toBe(27)
-  const on = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => true, changelog })
-  expect(await on.chatPreamble({ botId: 'ada', activationId: 'c6-seen-on' })).toContain(e1.text)
+  const bindingAdvice = BOT_CHANGELOG.find(entry => entry.id === 29)!
+  // The experimental support switch withholds E1. The contiguous cursor must wait at 27.
+  const provider = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => false })
+  for (let turn = 0; turn < 3; turn++) {
+    const activationId = `c6-seen-off-${turn}`
+    const off = await provider.chatPreamble({ botId: 'ada', activationId })
+    expect(off).toContain(bindingAdvice.text)
+    expect(off).not.toContain(e1.text)
+    await settled(provider, activationId)
+    expect(memory.getState<number>('ada', 'changelog_seen')).toBe(27)
+  }
+  const on = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => true })
+  const enabled = await on.chatPreamble({ botId: 'ada', activationId: 'c6-seen-on' })
+  expect(enabled).toContain(e1.text)
+  expect(enabled).toContain(bindingAdvice.text)
   await settled(on, 'c6-seen-on')
-  expect(memory.getState<number>('ada', 'changelog_seen')).toBe(later.id)
-  expect(await on.chatPreamble({ botId: 'ada', activationId: 'c6-seen-after' })).not.toContain(HEADER)
+  expect(memory.getState<number>('ada', 'changelog_seen')).toBe(29)
+  for (let turn = 0; turn < 3; turn++) {
+    const after = await on.chatPreamble({ botId: 'ada', activationId: `c6-seen-after-${turn}` })
+    expect(after).not.toContain(e1.text)
+    expect(after).not.toContain(bindingAdvice.text)
+  }
 })
 
 it('tells existing bots that a pasted secret arrives by name', async () => {

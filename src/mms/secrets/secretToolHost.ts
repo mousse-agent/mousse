@@ -18,6 +18,8 @@ export function createSecretToolHost(input: { vault: SecretVault; requests: Secr
     run: async (run) => {
       const secrets = run.secrets.map((entry) => {
         if (!vault.usableIn(entry.name, run.threadId)) throw new Error(`This thread has no secret named ${entry.name}.`)
+        const binding = vault.bindingFor(entry.name)
+        if (binding) throw new Error(`${entry.name} is bound to ${binding.service ?? new URL(binding.origin).host}; use secret_fetch.`)
         const value = vault.value(entry.name)
         if (value === undefined) throw new Error(`The secret ${entry.name} is gone (it expired or was removed).`)
         return { ...entry, value }
