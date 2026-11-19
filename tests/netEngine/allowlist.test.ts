@@ -24,7 +24,7 @@ describe('the engine allow-lists', () => {
       expect(ENGINE_OWNER_METHODS.has(method), method).toBe(false)
   })
 
-  it('lets a paired computer call the routed rows, three transport calls, staging and net.info, and nothing else', () => {
+  it('lets a paired computer call the routed rows, three transport calls, staging, net.info, its access and dispatch, and nothing else', () => {
     const expected = new Set([
       // The editor rows included (Phase 1b §9.1).
       ...Object.keys(ROUTED_METHODS).map(routedNetMethod),
@@ -33,7 +33,9 @@ describe('the engine allow-lists', () => {
       routedNetMethod('page'),
       routedNetMethod('stage'),
       'bridge.artifacts.open',
-      'net.info'
+      'net.info',
+      'bridge.access.mine',
+      'bridge.dispatch'
     ])
     expect([...ENGINE_OWNER_METHODS].sort()).toEqual([...expected].sort())
     // The transport calls it takes are routed ones; the local tunnel methods and Spaces are not on it.

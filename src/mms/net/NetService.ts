@@ -94,7 +94,7 @@ import type {
   PeerRef,
   TunnelLink
 } from './contracts'
-import { v1Caller } from './contracts'
+import { isEngineCaller, v1Caller, type RpcCaller } from './contracts'
 import { checkNodePolicy } from './checkNodePolicy'
 import type { SpaceJoinAdmissionPort } from './enrollment/quarantine'
 import { systemClock } from './clock'
@@ -827,7 +827,8 @@ export class NetService {
             throw new NetError('bad_request')
           return params
         },
-        handle: async (_params, context) => this.accessMine(v1Caller(context.caller))
+        // An engine pairing reaches it only through `authorizeEngine` (a live owner grant, the allowlist, the policy).
+        handle: async (_params, context) => this.accessMine(context.caller)
       })
       this.state = {
         db,
@@ -3007,7 +3008,7 @@ export class NetService {
    * per-device switches) without running anything, plus the checks a method makes in its handler: an editor
    * connection's (`deviceRefusal`) and the bots' (Share bots and the device's Bots switch).
    */
-  private accessMine(caller: SyncSession['peer']): BridgeAccessMine {
+  private accessMine(caller: RpcCaller): BridgeAccessMine {
     const rt = this.requireEnrolled(),
       policy = rt.policy.get(caller.node)
     const passes = (method: string): boolean => {
@@ -3025,7 +3026,11 @@ export class NetService {
       threads,
       work: threads && passes('routed.orchestrator.send'),
       terminal: threads && passes('routed.pty.create'),
-      editor: threads && passes('routed.editor.folder') && this.deviceRefusal(caller.node) === undefined,
+      // An engine pairing is not on v1's roster: its editor refusal is part of the engine's own authorization.
+      editor:
+        threads &&
+        passes('routed.editor.folder') &&
+        (isEngineCaller(caller) || this.deviceRefusal(caller.node) === undefined),
       bots: passes('bots.chat.list') && this.sharesBots() && policy.bots,
       maxPermissionMode: policy.maxPermissionMode,
       agentReach: policy.agentReach
