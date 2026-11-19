@@ -4,7 +4,9 @@ import type { UpdateState } from '../../../shared/updates'
 import { subscribeToUpdates, updateActions, useUpdateStore } from '../../stores/updateStore'
 import { InstallConfirm } from '../updates/InstallConfirm'
 import { UpdateErrorNotice } from '../updates/UpdateErrorNotice'
-import { Download, Info, Loader2, RefreshCw, RotateCcw, ShieldCheck } from '../../lib/icons'
+import { AlertTriangle, Download, Info, Loader2, RefreshCw, RotateCcw, ShieldCheck } from '../../lib/icons'
+import { normalizeErrorReportSettings } from '../../../shared/bugReports'
+import { FiledReportsList } from '../bugReports/FiledReports'
 import { describePermissionMode, PERMISSION_MODES } from '../../../shared/permissionMode'
 import { PermissionModeLabel } from '../../lib/permissionModeIcon'
 import { Select } from '../ui/Select'
@@ -48,7 +50,41 @@ export function GeneralSettings({ settings, onUpdate }: GeneralSettingsProps) {
       <SettingsGroup title="About" icon={Info}>
         <AboutRow />
       </SettingsGroup>
+
+      <ErrorReportsGroup settings={settings} onUpdate={onUpdate} />
     </section>
+  )
+}
+
+/** Error reports: the Report button on errors (and agents' `report_bug`), who files them, and the reports filed here. */
+function ErrorReportsGroup({ settings, onUpdate }: GeneralSettingsProps) {
+  const reports = normalizeErrorReportSettings(settings.errorReports)
+  const [listOpen, setListOpen] = useState(false)
+  return (
+    <SettingsGroup title="Error reports" icon={AlertTriangle} anchor="general-error-reports">
+      <SettingsRow
+        title="Report button"
+        anchor="general-report-button"
+        description={<span title="Errors show Report, which drafts a GitHub issue you see before it is sent. Agents may ask to file bugs the same way.">Errors offer to send a report you see first.</span>}
+        control={<Switch checked={reports.enabled} label="Report button" onChange={(enabled) => void onUpdate({ errorReports: { ...reports, enabled } })} />}
+      />
+      <SettingsRow
+        indent
+        disabled={!reports.enabled}
+        title="Report anonymously"
+        anchor="general-report-anonymously"
+        description={<span title="On: filed by Mousse’s report account. Off: filed with your own GitHub account (gh).">{reports.anonymous ? 'Filed by Mousse, not your GitHub account.' : 'Filed with your GitHub account.'}</span>}
+        control={<Switch checked={reports.anonymous} disabled={!reports.enabled} label="Report anonymously" onChange={(anonymous) => void onUpdate({ errorReports: { ...reports, anonymous } })} />}
+      />
+      <SettingsRow
+        title="Your reports"
+        anchor="general-your-reports"
+        description="Reports sent from this computer. Revoke closes the issue."
+        control={<button type="button" className="settings-btn" aria-expanded={listOpen} onClick={() => setListOpen((open) => !open)}>{listOpen ? 'Hide' : 'Show'}</button>}
+      >
+        {listOpen && <FiledReportsList />}
+      </SettingsRow>
+    </SettingsGroup>
   )
 }
 

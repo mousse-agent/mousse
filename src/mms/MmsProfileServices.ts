@@ -4,6 +4,9 @@ import { OwnerQuietHours } from './notifications/OwnerQuietHours'
 import { onSettingsSaved } from './settings/SettingsStore'
 import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
 import { SecretVault, secretThreadBusy } from './secrets/SecretVault'
+import { BugReportService } from './bugReports/BugReportService'
+import { createGhFallbackRunner, execRunner } from './git/ghRunner'
+import { userAction } from './git/gitPolicy'
 import { SecretRequests } from './secrets/SecretRequests'
 import { createSecretToolHost } from './secrets/secretToolHost'
 import { forgetWorktreeFolders, refreshWorktreeFolders, setWorktreeFolders } from './worktree/worktreeLayout'
@@ -15,6 +18,7 @@ import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
 import { SettingsStore } from './settings/SettingsStore'
 import { normalizeExperimentalSettings, type MousseSettingsUpdate } from '../shared/settings'
+import { normalizeErrorReportSettings } from '../shared/bugReports'
 import { rewriteMovedDefaults } from './settings/movedDefaults'
 import { ProviderAuthService } from './providers/ProviderAuthService'
 import { AppletStore } from './applets/AppletStore'
@@ -1298,6 +1302,23 @@ export class MmsProfileServices {
     })
     this.secretRequests = new SecretRequests(this.secretVault)
     const vault = this.secretVault
+    // Bug reports (Settings → General → Error reports): the Report button's and report_bug's filing.
+    const gh = createGhFallbackRunner(execRunner)
+    this.bugReports = new BugReportService({
+      installationHome: this.installationHome,
+      profileHome: homeDir,
+      settings: () => normalizeErrorReportSettings(this.settings.get().errorReports),
+      secret: (name) => (vault.has(name) ? vault.value(name) : undefined),
+      ghToken: async () => {
+        try {
+          const token = (await gh('gh', ['auth', 'token'], { timeoutMs: 10_000, userRequested: userAction('button', 'File a bug report') })).stdout.trim()
+          return token || undefined
+        } catch {
+          return undefined
+        }
+      }
+    })
+    this.orchestrator.setBugReports(this.bugReports)
     this.orchestrator.setSecrets({
       masker: (threadId) => vault.maskerFor(threadId),
       storeMasker: (threadId) => vault.maskerForStore(threadId),
@@ -2060,6 +2081,8 @@ export class MmsProfileServices {
   secretRequests!: SecretRequests
   /** Emits `changed` when a secret is added, used, removed or expires (Settings → Secrets refreshes). */
   readonly secretsChanged = new EventEmitter()
+  /** Bug reports: filing, the reports filed from here, and agents' drafts waiting for the person. */
+  bugReports!: BugReportService
   private secretSweepTimer: ReturnType<typeof setInterval> | null = null
   automationDrafts!: AutomationDrafts
 
@@ -2341,6 +2364,7 @@ export class MmsProfileServices {
     if (this.secretSweepTimer) clearInterval(this.secretSweepTimer)
     this.secretSweepTimer = null
     this.secretRequests?.dispose()
+    this.bugReports?.dispose()
     this.webhooksClosed = true
     if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
     this.webhookRetryTimer = null

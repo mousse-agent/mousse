@@ -22,6 +22,7 @@ import type { BotChatMessage } from '../../shared/bots/personal/chat'
 import { AUTOMATIONS_METHODS, type ScheduledRunEnded } from '../../shared/automations'
 import { SECRET_METHODS } from '../../shared/secretRequests'
 import { COMPUTER_USE_METHODS } from '../../shared/computerUse'
+import { BUG_REPORT_METHODS } from '../../shared/bugReports'
 import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
@@ -252,6 +253,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...AUTOMATIONS_METHODS,
   ...SECRET_METHODS,
   ...COMPUTER_USE_METHODS,
+  ...BUG_REPORT_METHODS,
   ...SPACE_ARCHIVE_METHODS,
   ...SPEECH_HOST_METHODS,
   ...BROWSER_ACCESS_METHODS,

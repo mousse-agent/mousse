@@ -985,6 +985,7 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
     'botModel',
     'bots',
     'experimental',
+    'errorReports',
     'agents',
     'integrations'
   ])
@@ -1019,7 +1020,17 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
   if (walked.agentAccess !== undefined) assertAgentAccessPatch(walked.agentAccess)
   if (walked.permissions !== undefined) assertPermissionsPatch(walked.permissions)
   if (walked.runs !== undefined) assertRunsPatch(walked.runs)
+  if (walked.errorReports !== undefined) assertErrorReportsPatch(walked.errorReports)
   return walked
+}
+
+/** Error reports: two switches. */
+function assertErrorReportsPatch(value: unknown): void {
+  const patch = asPlainObject(value, 'partial.errorReports')
+  for (const [key, item] of Object.entries(patch)) {
+    if (key !== 'enabled' && key !== 'anonymous') throw new Error(`partial.errorReports.${key} is not allowed`)
+    if (typeof item !== 'boolean') throw new Error(`partial.errorReports.${key} must be a boolean`)
+  }
 }
 
 /** The default permission mode decides what new threads may do without asking, so an unknown mode is refused. */

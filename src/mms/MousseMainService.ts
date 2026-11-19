@@ -34,6 +34,7 @@ import { registerBotBrowserMethods } from './bots/browser/registerBotBrowserMeth
 import { registerAutomationMethods } from './automations/registerMethods'
 import { registerComputerUseMethods } from './computerUse/registerMethods'
 import { registerSecretMethods } from './secrets/registerMethods'
+import { registerBugReportMethods } from './bugReports/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
 import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
@@ -316,6 +317,7 @@ export class MousseMainService extends MmsProfileServices {
         delete: (name) => services.secretVault.delete(name)
       }
     })
+    registerBugReportMethods(this.domains, async (profileId) => (await profile(profileId)).bugReports)
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
       (await profile(profileId)).platform.agentDomain(request.method, request.params))
     registerWorkflowDefinitionMethods(this.domains, async (profileId) =>
