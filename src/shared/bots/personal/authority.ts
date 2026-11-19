@@ -137,8 +137,20 @@ export interface BotFileReadResult {
  * run policy, which carries only `RunPolicy.authority`'s kind and digest).
  */
 export interface BotAuthority {
-  /** Local service-read ledger. Present on main work and scheduled turns only; never serialized. */
-  secretFetch?(input: { callKey: string; secret: string; service: string; args: Record<string, unknown>; refusal?: string; mask(text: string): string }, run: (refuseWithoutCounting: () => void) => Promise<{text: string; isError?: boolean}>): Promise<{text: string; isError?: boolean}>
+  /** Local service-read ledger, never serialized. Only main work and scheduled turns receive it.
+   * The callback releases a reserved slot when a changed response folder makes the save unsafe.
+   */
+  secretFetch?(
+    input: {
+      callKey: string
+      secret: string
+      service: string
+      args: Record<string, unknown>
+      refusal?: string
+      mask(text: string): string
+    },
+    run: (refuseWithoutCounting: () => void) => Promise<{ text: string; isError?: boolean }>
+  ): Promise<{ text: string; isError?: boolean }>
 
   activationId: string
   role: BotThreadRole

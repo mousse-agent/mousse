@@ -84,7 +84,11 @@ export async function secretFetchAction(
   let counted = true
   let result: ToolOutcome
   try {
-    result = admission.refusal ? { text: admission.refusal, isError: true } : await run(() => { counted = false })
+    result = admission.refusal
+      ? { text: admission.refusal, isError: true }
+      : await run(() => {
+          counted = false
+        })
   } catch {
     result = { text: 'The service read could not finish.', isError: true }
   }

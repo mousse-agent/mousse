@@ -228,16 +228,33 @@ it('describes the daily allowance as the last day', async () => {
   expect((await run(100)).text).toContain('100 service reads in the last day')
 })
 
-
 it('keeps the daily allowance across 23 hours and releases it after a full day', async () => {
-  const store = setup(), start = Date.parse('2026-11-19T00:00:00Z')
+  const store = setup(),
+    start = Date.parse('2026-11-19T00:00:00Z')
   let calls = 0
-  const run = (i: number, now: number) => secretFetchAction(store, {
-    botId: 'b', activationId: 'a', callKey: String(i), secret: String(i), service: 'OpenAI',
-    args: {}, mask: text => text, now
-  }, async () => { calls++; return { text: 'ok' } })
-  for (let i = 0; i < 100; i++) expect((await run(i, start + i * 23 * 3600000 / 99)).isError).not.toBe(true)
-  expect((await run(100, start + 23 * 3600000 + 60000)).text).toContain('100 service reads in the last day')
+  const run = (i: number, now: number) =>
+    secretFetchAction(
+      store,
+      {
+        botId: 'b',
+        activationId: 'a',
+        callKey: String(i),
+        secret: String(i),
+        service: 'OpenAI',
+        args: {},
+        mask: (text) => text,
+        now
+      },
+      async () => {
+        calls++
+        return { text: 'ok' }
+      }
+    )
+  for (let i = 0; i < 100; i++)
+    expect((await run(i, start + (i * 23 * 3600000) / 99)).isError).not.toBe(true)
+  expect((await run(100, start + 23 * 3600000 + 60000)).text).toContain(
+    '100 service reads in the last day'
+  )
   expect(calls).toBe(100)
   expect((await run(101, start + 24 * 3600000 + 60000)).isError).not.toBe(true)
   expect(calls).toBe(101)

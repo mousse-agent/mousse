@@ -1,17 +1,31 @@
 import { saveSecretFetchAtCwd } from './secretFetchFileWorker'
 import { randomUUID } from 'node:crypto'
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, realpathSync, unlinkSync, writeFileSync, type Stats } from 'node:fs'
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
+  type Stats
+} from 'node:fs'
 import { join } from 'node:path'
 
 /** Only these daemon-created names may be pruned; directory contents are never trusted. */
 const responses = new Map<string, { dev: number; ino: number; names: string[] }>()
-const same = (a: Pick<Stats, 'dev' | 'ino'>, b: Pick<Stats, 'dev' | 'ino'>): boolean => a.dev === b.dev && a.ino === b.ino
+const same = (a: Pick<Stats, 'dev' | 'ino'>, b: Pick<Stats, 'dev' | 'ino'>): boolean =>
+  a.dev === b.dev && a.ino === b.ino
 
 export class SecretFetchFileError extends Error {
   constructor(readonly unsafe = false) {
-    super(unsafe
-      ? 'The fetch folder changed or is unavailable. The response was not saved; try again after restoring your work folder.'
-      : 'The response could not be saved on this computer. Check the available space and folder permissions before retrying.')
+    super(
+      unsafe
+        ? 'The fetch folder changed or is unavailable. The response was not saved; try again after restoring your work folder.'
+        : 'The response could not be saved on this computer. Check the available space and folder permissions before retrying.'
+    )
   }
 }
 
@@ -19,7 +33,8 @@ export class SecretFetchFileError extends Error {
 export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string {
   const folder = join(scratch, 'fetches')
   let directoryFd: number | undefined, fileFd: number | undefined
-  let created: string | undefined, finished = false
+  let created: string | undefined,
+    finished = false
   let failure: SecretFetchFileError | undefined
   try {
     mkdirSync(folder, { recursive: true, mode: 0o700 })
@@ -30,17 +45,28 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
     // merely comparing the bot-controlled path before/after open would leave another race.
     if (process.platform !== 'linux') {
       let record = responses.get(folder)
-      if (!record || !same(record, checked)) record = { dev: checked.dev, ino: checked.ino, names: [] }
+      if (!record || !same(record, checked))
+        record = { dev: checked.dev, ino: checked.ino, names: [] }
       const name = randomUUID()
       const prune = record.names.slice(0, Math.max(0, record.names.length - 19))
-      const result = saveSecretFetchAtCwd({ folder, dev: checked.dev, ino: checked.ino, name, prune, bytes })
+      const result = saveSecretFetchAtCwd({
+        folder,
+        dev: checked.dev,
+        ino: checked.ino,
+        name,
+        prune,
+        bytes
+      })
       if (result !== 'saved') throw new SecretFetchFileError(result === 'unsafe')
       record.names = [...record.names.slice(prune.length), name]
       responses.set(folder, record)
       return join(folder, name)
     }
     try {
-      directoryFd = openSync(folder, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+      directoryFd = openSync(
+        folder,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW
+      )
     } catch {
       throw new SecretFetchFileError(true)
     }
@@ -49,19 +75,30 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
     const unchanged = (): boolean => {
       try {
         const current = lstatSync(folder)
-        return current.isDirectory() && !current.isSymbolicLink() && same(current, checked)
-          && same(fstatSync(directoryFd!), checked)
-          && realpathSync(pinned) === expected
-      } catch { return false }
+        return (
+          current.isDirectory() &&
+          !current.isSymbolicLink() &&
+          same(current, checked) &&
+          same(fstatSync(directoryFd!), checked) &&
+          realpathSync(pinned) === expected
+        )
+      } catch {
+        return false
+      }
     }
     if (!unchanged()) throw new SecretFetchFileError(true)
     const name = randomUUID()
     const file = join(folder, name)
     created = join(pinned, name)
-    fileFd = openSync(created, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
+    fileFd = openSync(
+      created,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
+      0o600
+    )
     const opened = fstatSync(fileFd)
     const entry = lstatSync(created)
-    const inCheckedFolder = same(opened, entry) && realpathSync(`/proc/self/fd/${fileFd}`) === join(expected, name)
+    const inCheckedFolder =
+      same(opened, entry) && realpathSync(`/proc/self/fd/${fileFd}`) === join(expected, name)
     if (!opened.isFile() || !inCheckedFolder || !unchanged()) throw new SecretFetchFileError(true)
     // No pathname resolution after this point can redirect the bytes to another inode.
     writeFileSync(fileFd, bytes)
@@ -69,8 +106,11 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
 
     // Drop records for ended runs. Nothing is removed from disk while forgetting their names.
     for (const [path, record] of responses) {
-      try { if (!same(lstatSync(path), record)) responses.delete(path) }
-      catch { responses.delete(path) }
+      try {
+        if (!same(lstatSync(path), record)) responses.delete(path)
+      } catch {
+        responses.delete(path)
+      }
     }
     let record = responses.get(folder)
     if (!record || !same(record, checked)) {
@@ -91,25 +131,42 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
     }
     return file
   } catch (error) {
-    failure = error instanceof SecretFetchFileError ? error : new SecretFetchFileError(
-      ['ENOENT', 'ENOTDIR', 'ELOOP'].includes((error as NodeJS.ErrnoException).code ?? '')
-    )
+    failure =
+      error instanceof SecretFetchFileError
+        ? error
+        : new SecretFetchFileError(
+            ['ENOENT', 'ENOTDIR', 'ELOOP'].includes((error as NodeJS.ErrnoException).code ?? '')
+          )
     throw failure
   } finally {
     let closeFailed = false
     if (fileFd !== undefined) {
       let opened: Stats | undefined
-      try { opened = fstatSync(fileFd) } catch { closeFailed = true }
-      try { closeSync(fileFd) } catch { closeFailed = true }
+      try {
+        opened = fstatSync(fileFd)
+      } catch {
+        closeFailed = true
+      }
+      try {
+        closeSync(fileFd)
+      } catch {
+        closeFailed = true
+      }
       if (!finished && created && opened?.size === 0) {
         try {
           const entry = lstatSync(created)
           if (entry.isFile() && entry.size === 0 && same(entry, opened)) unlinkSync(created)
-        } catch { /* Only our still-empty file is eligible for cleanup. */ }
+        } catch {
+          /* Only our still-empty file is eligible for cleanup. */
+        }
       }
     }
     if (directoryFd !== undefined) {
-      try { closeSync(directoryFd) } catch { closeFailed = true }
+      try {
+        closeSync(directoryFd)
+      } catch {
+        closeFailed = true
+      }
     }
     if (closeFailed && !failure) throw new SecretFetchFileError()
   }

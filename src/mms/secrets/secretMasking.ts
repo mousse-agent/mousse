@@ -63,10 +63,12 @@ function jsonEchoPatterns(value: string): RegExp[] {
             if (char === '/') forms.add('\\/')
             let layers = forms
             for (let n = 0; n < depth; n++) {
-              layers = new Set([...layers].flatMap(form => {
-                const outer = jsonEscaped(form)
-                return [outer, outer.replaceAll('/', '\\/')]
-              }))
+              layers = new Set(
+                [...layers].flatMap((form) => {
+                  const outer = jsonEscaped(form)
+                  return [outer, outer.replaceAll('/', '\\/')]
+                })
+              )
             }
             const alternatives = [...layers].map(literal)
             alternatives.push(
@@ -93,10 +95,24 @@ function jsonEchoPatterns(value: string): RegExp[] {
 /** Percent escapes may cover any subset of bytes, including unreserved characters such as ~. */
 function percentEchoPattern(value: string): RegExp {
   const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(Array.from(value).map(char => {
-    const encoded = [...Buffer.from(char)].map(byte => '%' + byte.toString(16).padStart(2, '0').replace(/[a-f]/g, h => `[${h}${h.toUpperCase()}]`)).join('')
-    return `(?:${literal(char)}|${encoded})`
-  }).join(''), 'g')
+  return new RegExp(
+    Array.from(value)
+      .map((char) => {
+        const encoded = [...Buffer.from(char)]
+          .map(
+            (byte) =>
+              '%' +
+              byte
+                .toString(16)
+                .padStart(2, '0')
+                .replace(/[a-f]/g, (h) => `[${h}${h.toUpperCase()}]`)
+          )
+          .join('')
+        return `(?:${literal(char)}|${encoded})`
+      })
+      .join(''),
+    'g'
+  )
 }
 
 /** A function that replaces every form of the given secrets in a text with `[secret NAME hidden]`; undefined when there is none. */
@@ -112,7 +128,10 @@ export function secretMasker(
     [value, ...secretLines(value)]
       .filter((form) => form.length >= MIN_SECRET_VALUE_LENGTH)
       .flatMap((form) =>
-        [...jsonEchoPatterns(form), percentEchoPattern(form)].map((pattern) => ({ pattern, mask: secretMask(name) }))
+        [...jsonEchoPatterns(form), percentEchoPattern(form)].map((pattern) => ({
+          pattern,
+          mask: secretMask(name)
+        }))
       )
   )
   return (text) => {

@@ -43,7 +43,8 @@ export function boundReadPath(raw: unknown, paths?: readonly string[]): string |
   if (/[\p{Cf}\u034f\u180b-\u180f\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/u.test(decoded)) return
   if (/[\u2044\u2215\u2216\u29f5\u29f8\ufe68\uff0f\uff3c]/u.test(decoded)) return
   const normalized = decoded.normalize('NFKC')
-  if (normalized.split('/').length !== decoded.split('/').length || normalized.includes('\\')) return
+  if (normalized.split('/').length !== decoded.split('/').length || normalized.includes('\\'))
+    return
   if (paths && !paths.some((p) => decoded === p || decoded.startsWith(p + '/'))) return
   // Encoding each checked segment also escapes colons (for example GitHub compare refs);
   // the listed services decode them as segment data, never as a new URL authority.
@@ -52,7 +53,11 @@ export function boundReadPath(raw: unknown, paths?: readonly string[]): string |
 /** A local closure keeps the checked request and value inside the vault, before a ledger slot is reserved. */
 export type PreparedSecretFetch =
   | { refusal: ToolOutcome; service?: never; send?: never }
-  | { refusal?: never; service: string; send(refuseWithoutCounting?: () => void): Promise<ToolOutcome> }
+  | {
+      refusal?: never
+      service: string
+      send(refuseWithoutCounting?: () => void): Promise<ToolOutcome>
+    }
 export function prepareSecretFetch(
   vault: SecretVault,
   input: SecretFetchInput
