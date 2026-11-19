@@ -385,6 +385,9 @@ const api = {
     getTurnSnapshot: (): Promise<TurnStateSnapshot> => ipcRenderer.invoke('turn:getSnapshot'),
     retryConnection: (threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:retryConnection', threadId),
+    /** Retry on a thread whose worktree could not be set up: sends the message it kept again, once. */
+    retrySetup: (threadId: string): Promise<{ ok: boolean; queued: boolean }> =>
+      ipcRenderer.invoke('orchestrator:retrySetup', threadId),
     onConnectionFailed: (cb: () => void): (() => void) => {
       const handler = () => cb()
       ipcRenderer.on('orchestrator:connection-failed', handler)

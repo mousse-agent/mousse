@@ -664,6 +664,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 .threads-sidebar-card-status-waiting { color: var(--status-waiting); }
 .threads-sidebar-card-status-done { color: var(--status-done); }
 .threads-sidebar-card-status-paused { color: var(--warning); }
+.threads-sidebar-card-status-failed { color: var(--danger); }
 
 .threads-sidebar-card-title {
   display: block;
@@ -785,6 +786,12 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 
 .threads-sidebar-status-icon--paused {
   color: var(--warning);
+}
+
+/* A thread whose message did not start (its worktree could not be set up). */
+.threads-sidebar-status-icon--failed {
+  display: inline-flex;
+  color: var(--danger);
 }
 
 .threads-sidebar-thread-trailing {

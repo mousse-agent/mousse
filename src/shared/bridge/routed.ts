@@ -418,6 +418,8 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     owned: { runId: 'run' }
   }),
   'orchestrator.retry': chat('thread', ['threadId']),
+  // Retry on a thread whose worktree could not be set up: sends the message it kept again.
+  'orchestrator.retrySetup': chat('thread', ['threadId']),
   'threads.clearContext': chat('thread', ['threadId']),
   'threads.compact': chat('thread', ['threadId', 'focus']),
   'threads.stopCompaction': chat('thread', ['threadId']),

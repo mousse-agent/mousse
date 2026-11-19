@@ -93,7 +93,9 @@ export class WorkspaceResolver {
   ): Promise<WorkspaceExecutionContext> {
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
     const mutating = modeMutatesFiles(mode)
-    const existing = manager.load()
+    let existing = manager.load()
+    // A worktree add that failed and made nothing (`reconcileFailedProvision`): this message makes the worktree again.
+    if (existing?.lifecycle === 'provisioning' && await manager.reconcileFailedProvision(this.projectPath, signal)) existing = manager.load()
     if (existing) {
       if (existing.lifecycle !== 'ready') throw workspaceErrors.create('workspace_recovery_required', undefined, { state: existing.lifecycle })
       // On a drive that is not connected: the turn waits for it (`DriveNotConnectedError`), and nothing is marked or rebuilt.
