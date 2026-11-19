@@ -159,16 +159,20 @@ it('C6 support rollback omits the switch-on advice and still delivers it after r
 it('C6 support rollback keeps E1 entry 28 pending after entry 27 was seen', async () => {
   existingBot()
   memory.write(() => memory.setState('ada', 'changelog_seen', 27))
-  const later = { id: 29, date: '2026-11-19', text: 'Later independent advice.' }
+  const e1 = BOT_CHANGELOG.find(entry => entry.id === 28)!
+  const later = { id: BOT_CHANGELOG_LATEST + 1, date: '2026-11-19', text: 'Later independent advice.' }
   const changelog = [...BOT_CHANGELOG, later]
   const provider = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => false, changelog })
-  expect(await provider.chatPreamble({ botId: 'ada', activationId: 'c6-seen-off' })).toContain(later.text)
+  const off = await provider.chatPreamble({ botId: 'ada', activationId: 'c6-seen-off' })
+  expect(off).toContain(later.text)
+  expect(off).not.toContain(e1.text)
   await settled(provider, 'c6-seen-off')
   expect(memory.getState<number>('ada', 'changelog_seen')).toBe(27)
   const on = createBotContextProvider({ store: memory, journal: { syncThread: async () => {} }, asksFirstEnabled: () => true, changelog })
-  expect(await on.chatPreamble({ botId: 'ada', activationId: 'c6-seen-on' })).toContain(BOT_CHANGELOG.find(e => e.id === 28)!.text)
+  expect(await on.chatPreamble({ botId: 'ada', activationId: 'c6-seen-on' })).toContain(e1.text)
   await settled(on, 'c6-seen-on')
-  expect(memory.getState<number>('ada', 'changelog_seen')).toBe(29)
+  expect(memory.getState<number>('ada', 'changelog_seen')).toBe(later.id)
+  expect(await on.chatPreamble({ botId: 'ada', activationId: 'c6-seen-after' })).not.toContain(HEADER)
 })
 
 it('tells existing bots that a pasted secret arrives by name', async () => {
