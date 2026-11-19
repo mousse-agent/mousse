@@ -32,7 +32,7 @@ export function accountState(plus: PlusStatus | undefined, lapsed: boolean): 'co
 
 /**
  * The account row at the top of Settings → Devices: who is signed in to Mousse ID and one plain status
- * (Connected, Reconnecting or not signed in), with Sign in or a quiet Sign out. Shown only when this build has
+ * (Connected, Reconnecting or not signed in), with Sign in or a quiet Sign out; a disconnected account offers both. Shown only when this build has
  * the service. `lapsed` is this computer's expired device pass; `onSetUp` brings the step this device needs into
  * view. `children` (the reconnecting note) sits under the row on the same surface.
  */
@@ -67,6 +67,12 @@ export function MousseIdAccount({ onSetUp, lapsed = false, children }: { onSetUp
   // A step asked for by Sign in goes once this device is ready or signed in.
   const setupNote = (!signedIn && mousseIdPreparation(net) !== 'ready' ? needsSetup : '') || setupStep
   const locked = !!net?.self && net.keystore !== 'unlocked'
+  const signOut = (
+    <button type="button" className="settings-btn" disabled={busy || !net?.enabled} onClick={() => void state.signOut()}>
+      <Logout size={14} />Sign out
+    </button>
+  )
+  const signIn = <button type="button" className="settings-btn devices-dialog-btn primary" disabled={busy} onClick={() => void start()}>Sign in</button>
 
   return (
     <SettingsGroup anchor="account-mousse-id" className="account-group">
@@ -75,13 +81,9 @@ export function MousseIdAccount({ onSetUp, lapsed = false, children }: { onSetUp
         title={title}
         description={description}
         control={
-          signedIn || status === 'reconnecting' ? (
-            <button type="button" className="settings-btn" disabled={busy || !net?.enabled} onClick={() => void state.signOut()}>
-              <Logout size={14} />Sign out
-            </button>
-          ) : !pending && (
-            <button type="button" className="settings-btn devices-dialog-btn primary" disabled={busy} onClick={() => void start()}>Sign in</button>
-          )
+          signedIn || status === 'reconnecting' ? signOut
+            // Disconnected still holds the old account, and signing in to a different one needs it gone first.
+            : !pending && (status === 'disconnected' ? <span className="settings-icon-actions">{signOut}{signIn}</span> : signIn)
         }
       />
       {pending && (
