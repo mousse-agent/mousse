@@ -4564,3 +4564,22 @@ it('E1 r2 a masked source review cannot supply an argument contract', async () =
   f.store.run('UPDATE bot_actions SET args_json = ? WHERE id = ?', JSON.stringify({ ...t.args, body: '[hidden]' }), source.id)
   expect(f.bots.alone.prepare(t.botId, 'hidden-review', t.request as never)).toBe('This sent call has hidden arguments, so it always asks.')
 })
+
+
+it('E1 r2 a changed consent through legacy respond withdraws and continues cleanly', async () => {
+  const t = await aloneAsk('pending')
+  t.server.configDigest = 'changed'
+  const response = await f.bots.respond({ escalationId: t.consent.id, answer: 'allow_bot' })
+  expect(response.escalation.status).toBe('withdrawn')
+  const continued = await start(f, t.consentActivation, 2)
+  expect(f.store.lastMainDispatch(t.consentActivation)?.prompt.text).toContain('Nothing was allowed')
+  await finish(f, continued.payload)
+  expect(f.store.activation(t.consentActivation)?.status).toBe('done')
+  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*' OR key GLOB 'alone-ask:*'")).toEqual([])
+})
+it('E1 r2 consent for creating a page uses the whole tool title naturally', async () => {
+  const t = await aloneAsk('pending', 'create_page')
+  expect(f.bots.chat.card(t.consent).title).toBe('let ‘Send the email’ use Create page in one@example.test and two@example.test in Mail without asking')
+  await f.bots.service.answer(t.botId, t.consent.id, 'allow')
+  expect(f.bots.alone.items(t.botId)[0]?.title).toBe('‘Send the email’ uses Create page in one@example.test and two@example.test in Mail without asking')
+})

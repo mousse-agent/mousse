@@ -43,3 +43,8 @@ it.each(['hex', 'base64url'])('E1 r2 address scan bounds 256000 characters of %s
   expect(performance.now() - start).toBeLessThan(200)
   expect(result.varying).toEqual(['body'])
 })
+
+it('E1 r2 object-valued places show scalar leaves and associated names in words', () => {
+  const result = '{"parent":{"id":"db-one","name":"Projects"}}'
+  expect(placeLabel({ database_id: 'db-one', child: ['archive', { number: 2 }] }, result)).toBe('Projects and archive and 2')
+})

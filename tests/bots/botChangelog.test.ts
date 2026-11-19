@@ -224,3 +224,12 @@ it('C6 support rollback stops before the next unseen hidden entry when there are
   expect(memory.getState<number>('ada','changelog_seen')).toBe(30)
   expect(await restarted.chatPreamble({botId:'ada',activationId:'two-hidden-after'})).not.toContain(HEADER)
 })
+
+it('E1 r2 existing bots learn the argument rule with entry 28', async () => {
+  existingBot()
+  memory.write(() => memory.setState('ada', 'changelog_seen', 27))
+  const pack = await packs().chatPreamble({ botId: 'ada', activationId: 'act-argument-rule' })
+  expect(pack).toContain('same top-level argument names')
+  expect(pack).toContain('only plain string body, subject, text and content may change')
+  expect(pack).toContain('Names and address-like content stay exact')
+})
