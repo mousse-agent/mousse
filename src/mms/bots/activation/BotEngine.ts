@@ -8131,13 +8131,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /**
    * The chat turn Resume answers again: the newest one, when a usage limit ended it and nothing in the chat lane runs
    * or waits. None when the bot can't run now (its approval, its thread in the trash): Resume still clears the pause.
+   * Its key keeps the owner's start (`chat:`, `answer:`), as `chat:after:` does, so the retry still holds the owner's
+   * threads and memory (`threadsActOf`, `memoryLaneOf`); any other start stays `resume:`, which acts on nothing.
    */
   private chatToRetry(botId: string): { row: BotActivationRow; key: string; admitted: ReturnType<BotEngine['admissible']> } | undefined {
     if (this.store.laneActivations(botId, 'chat', ['queued', 'running', 'waiting_grant']).length) return undefined
     const row = this.store.newestActivation(botId, 'chat')
     if (!row || row.status !== 'failed' || row.endReason !== 'usage_limit' || row.trigger.kind !== 'manual') return undefined
+    const owner = ['chat:', 'answer:'].find((start) => row.idempotencyKey.startsWith(start)) ?? ''
     try {
-      return { row, key: `resume:${row.id}`, admitted: this.admissible(botId) }
+      return { row, key: `${owner}resume:${row.id}`, admitted: this.admissible(botId) }
     } catch {
       return undefined
     }
