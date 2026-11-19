@@ -1,12 +1,28 @@
-/* A bot's checklist in its chat header: a count beside the bot menu, the list in a small popover. */
+/* A bot's checklist in its chat header: a count beside the side-panel button, the list in a small popover. */
 
 .bot-tasks-root {
   position: relative;
+  display: grid;
+  grid-template-columns: 1fr;
   margin-left: auto;
+  /* Hiding or showing the checklist folds it in or out: 200ms at Normal speed, REVEAL_MS in BotTasksButton.tsx. */
+  transition: grid-template-columns calc(200ms * var(--ui-motion-scale)) ease, opacity calc(200ms * var(--ui-motion-scale)) ease;
 }
 
-/* The checklist takes the header's free space; the menu sits right after it. */
-.bot-tasks-root + .bot-menu-root {
+.bot-tasks-root[data-revealed='false'] {
+  grid-template-columns: 0fr;
+  opacity: 0;
+}
+
+/* Clips the count while it folds; the popover sits outside it. */
+.bot-tasks-reveal {
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* The checklist takes the header's free space; the panel button sits right after it. */
+.bot-tasks-root + .bot-header-panel {
   margin-left: 0;
 }
 

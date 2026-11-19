@@ -1680,10 +1680,10 @@ describe('the composer', () => {
 })
 
 describe('the menu', () => {
-  it('offers About, Find in chat, Rename, Change look, Pause and Delete bot', async () => {
+  it('offers About, Find in chat, Hide checklist, Rename, Change look, Pause and Delete bot', async () => {
     await open()
     await click(button('Bot menu'))
-    expect([...host.querySelectorAll('[role="menuitem"]')].map((element) => element.textContent)).toEqual(['About this bot', 'Find in chat', 'Rename', 'Change look', 'Pause', 'Delete bot'])
+    expect([...host.querySelectorAll('[role="menuitem"]')].map((element) => element.textContent)).toEqual(['About this bot', 'Find in chat', 'Hide checklist', 'Rename', 'Change look', 'Pause', 'Delete bot'])
     await click(button('About this bot'))
     expect(host.querySelector('.bot-about')).not.toBeNull()
     expect(host.querySelector('[role="menu"]')).toBeNull()
