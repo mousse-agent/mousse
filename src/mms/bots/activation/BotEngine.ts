@@ -3822,9 +3822,23 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const authority: BotAuthority = {
       ...base,
       ...(input.role === 'activation' && row.lane === 'run' && (row.trigger.kind === 'work' || row.trigger.kind === 'schedule') ? {
-        secretFetch: (request: Parameters<NonNullable<BotAuthority['secretFetch']>>[0], run: Parameters<NonNullable<BotAuthority['secretFetch']>>[1]) => secretFetchAction(this.store, { ...request, botId: row.botId, activationId: row.id, callKey: JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, request.callKey]), now: this.now() }, () => {
+        secretFetch: (
+          request: Parameters<NonNullable<BotAuthority['secretFetch']>>[0],
+          run: Parameters<NonNullable<BotAuthority['secretFetch']>>[1]
+        ) => secretFetchAction(this.store, {
+          ...request,
+          botId: row.botId,
+          activationId: row.id,
+          callKey: JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, request.callKey]),
+          now: this.now()
+        }, () => {
           // The same activity sink as MCP calls; only the checked service label, never request arguments.
-          try { this.host.activity?.onAllowed(activity, {tool:'service_read',input:{service:request.mask(request.service)}}) } catch { /* Activity never stops a read. */ }
+          try {
+            this.host.activity?.onAllowed(activity, {
+              tool: 'service_read',
+              input: { service: request.mask(request.service) }
+            })
+          } catch { /* Activity never stops a read. */ }
           return run()
         })
       } : {}),

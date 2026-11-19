@@ -8,10 +8,12 @@ export function secretForms(value: string): string[] {
   forms.add(base64)
   forms.add(base64.replace(/=+$/, ''))
   forms.add(encodeURIComponent(value))
-  forms.add(encodeURIComponent(value).replace(/%[0-9A-F]{2}/g, hex => hex.toLowerCase()))
+  forms.add(encodeURIComponent(value).replace(/%[0-9A-F]{2}/g, (hex) => hex.toLowerCase()))
   forms.add(Buffer.from(value, 'utf8').toString('hex'))
   forms.add(Buffer.from(value, 'utf8').toString('hex').toUpperCase())
-  return [...forms].filter((form) => form.length >= MIN_SECRET_VALUE_LENGTH).sort((a, b) => b.length - a.length)
+  return [...forms]
+    .filter((form) => form.length >= MIN_SECRET_VALUE_LENGTH)
+    .sort((a, b) => b.length - a.length)
 }
 
 export type SecretMasker = (text: string) => string
@@ -46,32 +48,57 @@ function secretLines(value: string): string[] {
  */
 function jsonEchoPatterns(value: string): RegExp[] {
   const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return [0, 1, 2, 3].map(depth => new RegExp(Array.from(value).map(char => {
-    // Each JSON layer is consistent across the value. Tokens have distinct prefixes, including for
-    // backslashes, so near-matching responses cannot trigger exponential regex backtracking.
-    const forms = new Set([jsonEscaped(char)])
-    if (!/[\"\\\x00-\x1f]/.test(char)) forms.add(char)
-    if (char === '/') forms.add('\\/')
-    const alternatives = [...forms].map(form => {
-      for (let n = 0; n < depth; n++) form = jsonEscaped(form)
-      return literal(form)
-    })
-    alternatives.push(char.split('').map(unit => {
-      const hex = unit.charCodeAt(0).toString(16).padStart(4, '0').replace(/[a-f]/g, h => `[${h}${h.toUpperCase()}]`)
-      return literal('\\'.repeat(2 ** depth) + 'u') + hex
-    }).join(''))
-    return `(?:${alternatives.join('|')})`
-  }).join(''), 'g'))
+  return [0, 1, 2, 3].map(
+    (depth) =>
+      new RegExp(
+        Array.from(value)
+          .map((char) => {
+            // Each JSON layer is consistent across the value. Tokens have distinct prefixes, including for
+            // backslashes, so near-matching responses cannot trigger exponential regex backtracking.
+            const forms = new Set([jsonEscaped(char)])
+            if (!/[\"\\\x00-\x1f]/.test(char)) forms.add(char)
+            if (char === '/') forms.add('\\/')
+            const alternatives = [...forms].map((form) => {
+              for (let n = 0; n < depth; n++) form = jsonEscaped(form)
+              return literal(form)
+            })
+            alternatives.push(
+              char
+                .split('')
+                .map((unit) => {
+                  const hex = unit
+                    .charCodeAt(0)
+                    .toString(16)
+                    .padStart(4, '0')
+                    .replace(/[a-f]/g, (h) => `[${h}${h.toUpperCase()}]`)
+                  return literal('\\'.repeat(2 ** depth) + 'u') + hex
+                })
+                .join('')
+            )
+            return `(?:${alternatives.join('|')})`
+          })
+          .join(''),
+        'g'
+      )
+  )
 }
 
 /** A function that replaces every form of the given secrets in a text with `[secret NAME hidden]`; undefined when there is none. */
-export function secretMasker(secrets: ReadonlyArray<{ name: string; value: string }>): SecretMasker | undefined {
-  const pairs = secrets.flatMap(({ name, value }) => [...secretForms(value), ...secretLines(value)].map((form) => ({ form, mask: secretMask(name) })))
+export function secretMasker(
+  secrets: ReadonlyArray<{ name: string; value: string }>
+): SecretMasker | undefined {
+  const pairs = secrets.flatMap(({ name, value }) =>
+    [...secretForms(value), ...secretLines(value)].map((form) => ({ form, mask: secretMask(name) }))
+  )
   if (pairs.length === 0) return undefined
   pairs.sort((a, b) => b.form.length - a.form.length)
-  const echoes = secrets.flatMap(({ name, value }) => [value, ...secretLines(value)]
-    .filter(form => form.length >= MIN_SECRET_VALUE_LENGTH)
-    .flatMap(form => jsonEchoPatterns(form).map(pattern => ({ pattern, mask: secretMask(name) }))))
+  const echoes = secrets.flatMap(({ name, value }) =>
+    [value, ...secretLines(value)]
+      .filter((form) => form.length >= MIN_SECRET_VALUE_LENGTH)
+      .flatMap((form) =>
+        jsonEchoPatterns(form).map((pattern) => ({ pattern, mask: secretMask(name) }))
+      )
+  )
   return (text) => {
     let out = text
     for (const { pattern, mask } of echoes) out = out.replace(pattern, () => mask)
@@ -136,6 +163,8 @@ export function maskedCopy<T>(value: T, mask: SecretMasker): T {
  * field, which can hold a secret in a form no list of encodings covers (HTTP Basic is base64 of `user:password`).
  */
 export function maskCommandOutput(text: string, mask: SecretMasker): string {
-  return mask(text)
-    .replace(/((?:^|[\s"'{,])(?:proxy-)?authorization["']?\s*[:=]\s*["']?)((?:basic|bearer|token|digest)\s+)?[^"'\r\n,}]+/gim, (_match, head: string, scheme?: string) => `${head}${scheme ?? ''}[hidden]`)
+  return mask(text).replace(
+    /((?:^|[\s"'{,])(?:proxy-)?authorization["']?\s*[:=]\s*["']?)((?:basic|bearer|token|digest)\s+)?[^"'\r\n,}]+/gim,
+    (_match, head: string, scheme?: string) => `${head}${scheme ?? ''}[hidden]`
+  )
 }

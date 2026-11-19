@@ -237,20 +237,39 @@ export function secretTools(host: AppToolHost): MousseTool[] {
       handler: (args, ctx) => runCommand(args, ctx)
     },
     {
-      name: 'secret_fetch', description: fetchDefinition.description, botDescription: fetchDefinition.description,
-      inputSchema: plainSchema(fetchDefinition), definition: () => fetchDefinition,
-      access: 'actsAsCaller', class: 'read',
-      listed: listing => Boolean(listing.botTurnTools?.has('secret_fetch') && secrets()?.prepareFetch), offered: turn => fetchAvailable(turn) === true,
-      available: fetchAvailable, describe: () => 'Read from a bound service',
+      name: 'secret_fetch',
+      description: fetchDefinition.description,
+      botDescription: fetchDefinition.description,
+      inputSchema: plainSchema(fetchDefinition),
+      definition: () => fetchDefinition,
+      access: 'actsAsCaller',
+      class: 'read',
+      listed: listing => Boolean(listing.botTurnTools?.has('secret_fetch') && secrets()?.prepareFetch),
+      offered: turn => fetchAvailable(turn) === true,
+      available: fetchAvailable,
+      describe: () => 'Read from a bound service',
       handler: async (args, ctx) => {
         const allowed = fetchAvailable(ctx.turn)
         if (allowed !== true) return {text:allowed,isError:true}
-        const service = secrets()!, bot = ctx.turn.bot!
+        const service = secrets()!
+        const bot = ctx.turn.bot!
         const threadId = secretThreadOf(ctx, ctx.transport === 'mcp' ? ctx.caller.threadId : ctx.turn.threadId)!
         const mask = service.masker(threadId) ?? ((s: string) => s)
         const name = isKeyName(args.secret) ? args.secret : ''
-        const prepared = service.prepareFetch!({threadId,folder:bot.workspace!.scratch,args,signal:ctx.signal})
-        return bot.secretFetch!({callKey:ctx.toolCallId,secret:name,service:prepared.service ?? 'the service',args,mask,...(prepared.refusal ? {refusal:prepared.refusal.text} : {})}, () => prepared.send!())
+        const prepared = service.prepareFetch!({
+          threadId,
+          folder: bot.workspace!.scratch,
+          args,
+          signal: ctx.signal
+        })
+        return bot.secretFetch!({
+          callKey: ctx.toolCallId,
+          secret: name,
+          service: prepared.service ?? 'the service',
+          args,
+          mask,
+          ...(prepared.refusal ? { refusal: prepared.refusal.text } : {})
+        }, () => prepared.send!())
       }
     }
   ]
