@@ -5,8 +5,8 @@
  * pause never counts as a failed run. The first tick after the reset ends the pause.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { botFixture, chatOf, createBot, flush, PI, runDispatch, type BotFixture } from './botFixture'
-import { BotEngine, USAGE_RECHECK_MS } from '../../src/mms/bots/activation/BotEngine'
+import { botFixture, chatOf, createBot, flush, PI, runDispatch, start, type BotFixture } from './botFixture'
+import { BotEngine, memoryLaneOf, ownerChatTurn, USAGE_RECHECK_MS } from '../../src/mms/bots/activation/BotEngine'
 import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
 
 let f: BotFixture
@@ -141,6 +141,47 @@ describe('usage limits', () => {
     expect(errors).toHaveLength(2)
     expect(errors[1]).toMatchObject({ activationId: retry.id, error: { text: `Paused until ${hhmm(until)} (your Claude usage limit)`, action: { kind: 'resume' } } })
     expect(f.bots.service.get(botId).summary.state).toBe('paused')
+  })
+
+  it('the turn Resume starts is still the owner\'s: it may act on their threads, after a second Resume too', async () => {
+    const until = new Date(f.clock.now + 2 * HOUR).toISOString()
+    await chatLimited(until)
+    // The limit still holds at the first Resume: its turn meets it again, and the next Resume answers that turn.
+    await f.bots.service.resume(botId)
+    await flush()
+    const first = f.store.newestActivation(botId, 'chat')!
+    expect(first).toMatchObject({ status: 'failed', endReason: 'usage_limit' })
+    expect(f.bots.ownerTurn(first.id)).toEqual({})
+    f.limited.clear()
+    await f.bots.service.resume(botId)
+    const retry = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    expect(retry.id).not.toBe(first.id)
+    expect(f.bots.ownerTurn(retry.id)).toEqual({})
+    const prepared = await runDispatch(f, retry.id, 1, { text: 'Not yet.' })
+    expect(prepared.authority.threadsReadOnly).toBeUndefined()
+    expect(memoryLaneOf(retry)).toBe('chat')
+  })
+
+  it('a bot\'s message a limit stopped stays another bot\'s after Resume: it only reads the owner\'s threads', async () => {
+    const until = new Date(f.clock.now + 2 * HOUR).toISOString()
+    const alpha = (await createBot(f, { name: 'Alpha', reply: 'Hello.' })).botId
+    await f.bots.service.chatSend({ botId: alpha, text: 'Tell Penny.', clientRequestId: 'a1' })
+    const sender = f.store.laneActivations(alpha, 'chat', ['running'])[0]!
+    await start(f, sender.id)
+    await f.bots.tools.bots!.send(alpha, sender.id, { to: 'Penny', message: 'The login page returns a 500.' })
+    await flush()
+    const turn = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    expect(ownerChatTurn(turn)).toBe(false)
+    for (const n of [1, 2]) await runDispatch(f, turn.id, n, limited(until))
+    await flush()
+    expect(f.store.activation(turn.id)).toMatchObject({ status: 'failed', endReason: 'usage_limit' })
+    f.limited.clear()
+    await f.bots.service.resume(botId)
+    const retry = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    expect(retry.id).not.toBe(turn.id)
+    expect(retry.trigger).toMatchObject({ kind: 'manual', fromBot: { botId: alpha } })
+    expect(f.bots.ownerTurn(retry.id)).toBeUndefined()
+    expect((await runDispatch(f, retry.id, 1, { text: 'Logged.' })).authority.threadsReadOnly).toBe('not_owner')
   })
 
   it('Resume starts nothing when the newest chat turn was not stopped by a limit', async () => {
