@@ -3389,3 +3389,14 @@ it('draws a let-alone consent and a natural answered line in the bot chat', asyn
   expect(answered.nextElementSibling?.textContent).toBe('You let Inbox helper’s automation ‘Sort new scans’ upload to Scans in Trial drive without asking')
   expect(transcript().querySelector('[data-message-id="alone-changed"]')?.nextElementSibling?.textContent).toBe('This automation or tool changed. Nothing was allowed. Ask again.')
 })
+
+it('draws a non-upload automation consent and its answered line naturally', async () => {
+  const title = 'let ‘Organise notes’ use Create page in Projects in Notion without asking'
+  fake.chats.inbox = [
+    message(1, { id: 'page-open', text: 'May I?', ask: { askId: 'page', title, status: 'open' } }),
+    message(2, { id: 'page-answered', text: 'May I?', ask: { askId: 'page-done', title, status: 'allowed' } })
+  ]
+  await open()
+  expect(transcript().querySelector('[data-message-id="page-open"] .bot-bubble-ask')?.textContent).toBe('Wants to let ‘Organise notes’ use Create page in Projects in Notion without asking')
+  expect(transcript().querySelector('[data-message-id="page-answered"]')?.nextElementSibling?.textContent).toBe('You let Inbox helper’s automation ‘Organise notes’ use Create page in Projects in Notion without asking')
+})

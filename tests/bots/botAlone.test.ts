@@ -28,18 +28,18 @@ it.each([
   'owner＠example.test', 'evil．com', 'evil。com', '\\\\evil\\share', 'tel:+12025550123',
   'sms:+12025550123', 'http:/localhost', '123:8080', 'evil:8080/x', 'evil.c0m', 'ev\u200bil.com', 'evil . com'
 ])('E1 r2 address-like content stays exact: %s', body => {
-  expect(argumentContract({ body }).varying).toEqual([])
+  expect(argumentContract({ body }, 'test-key').tokens.body).toHaveLength(1)
 })
 it.each([{}, [], 1, null])('E1 r2 only sent strings can be varying content: %j', body => {
-  expect(argumentContract({ body }).varying).toEqual([])
+  expect(argumentContract({ body }, 'test-key').varying).toEqual([])
 })
 it('E1 r2 object names are fixed, while plain string content can vary', () => {
-  expect(argumentContract({ name: 'branch', body: 'A plain sentence' }).varying).toEqual(['body'])
+  expect(argumentContract({ name: {}, body: 'A plain sentence' }, 'test-key').varying).toEqual(['body'])
 })
 it.each(['hex', 'base64url'])('E1 r2 address scan bounds 256000 characters of %s', kind => {
   const body = (kind === 'hex' ? '0123456789abcdef' : 'aZ09_-bX47').repeat(25600).slice(0, 256000)
   const start = performance.now()
-  const result = argumentContract({ body })
+  const result = argumentContract({ body }, 'test-key')
   expect(performance.now() - start).toBeLessThan(200)
   expect(result.varying).toEqual(['body'])
 })

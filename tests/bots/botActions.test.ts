@@ -4584,3 +4584,58 @@ it('E1 r2 consent for creating a page uses the whole tool title naturally', asyn
   await f.bots.service.answer(t.botId, t.consent.id, 'allow')
   expect(f.bots.alone.items(t.botId)[0]?.title).toBe('‘Send the email’ uses Create page in one@example.test and two@example.test in Mail without asking')
 })
+
+// Round 2b: a filename can change only within its sent extension; tokens belong to their source field.
+it.each([
+  ['scan-2.pdf', true], ['scan-2.PDF', true], ['scan-2.exe', false], ['../x.pdf', false],
+  ['a/b.pdf', false], ['a\\b.pdf', false], ['hidden..pdf', false], ['.hidden.pdf', false],
+  ['x:scan.pdf', false], ['x@scan.pdf', false], ['x\u0000.pdf', false], ['x\n.pdf', false],
+  ['x'.repeat(252) + '.pdf', false], ['ｓｃａｎ-２.ｐｄｆ', true]
+])('E1 r2b a filename stays within the sent extension: %j', async (name, allowed) => {
+  const t = await aloneAsk()
+  const source = f.bots.actions.forWork(t.id)!
+  const args = { ...t.args, name: 'scan-1.pdf' }
+  f.store.run('UPDATE bot_actions SET args_json = ?, args_digest = ? WHERE id = ?', JSON.stringify(args), actionDigest(args), source.id)
+  f.bots.alone.clear(t.botId)
+  expect(f.bots.alone.prepare(t.botId, 'file-consent', t.request as never)).toBeUndefined()
+  expect(f.bots.alone.answer(t.botId, 'file-consent', true, t.request as never)).toBe(true)
+  const next = await aloneNext(t, { ...args, name } as never)
+  expect(next.action.status).toBe(allowed ? 'done' : 'open')
+  expect(t.calls).toHaveLength(allowed ? 2 : 1)
+})
+it.each([
+  ['New message -- owner@example.test', true],
+  ['New message -- owner@example.test https://new.example.test', false],
+  ['New message -- other@example.test', false],
+  ['New message -- owner@example.test Node.js', false],
+])('E1 r2b text reuses only source tokens in the same field: %j', async (body, allowed) => {
+  const t = await aloneAsk('allow', 'send', 'Old message -- owner@example.test')
+  const next = await aloneNext(t, { ...t.args, body })
+  expect(next.action.status).toBe(allowed ? 'done' : 'open')
+  expect(t.calls).toHaveLength(allowed ? 2 : 1)
+})
+it('E1 r2b source tokens never give authority to another text field', async () => {
+  const t = await aloneAsk('allow', 'send', 'Old message -- owner@example.test')
+  const first = f.bots.actions.forWork(t.id)!
+  const args = { ...t.args, subject: 'A plain subject' }
+  f.store.run('UPDATE bot_actions SET args_json = ?, args_digest = ? WHERE id = ?', JSON.stringify(args), actionDigest(args), first.id)
+  f.bots.alone.clear(t.botId)
+  expect(f.bots.alone.prepare(t.botId, 'fields', t.request as never)).toBeUndefined()
+  f.bots.alone.answer(t.botId, 'fields', true, t.request as never)
+  expect((await aloneNext(t, { ...args, subject: 'owner@example.test' } as never)).action.status).toBe('open')
+})
+it('E1 r2b token sets use a profile key and never appear in written exports', async () => {
+  const t = await aloneAsk('allow', 'send', 'Old message owner@example.test')
+  const row = f.store.get("SELECT value FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'", t.botId)!
+  const contract = JSON.parse(String(row.value)).arguments
+  expect(contract.tokens.body).toHaveLength(1)
+  expect(contract.tokens.body[0]).not.toBe(actionDigest('owner@example.test'))
+  const key = f.store.get("SELECT value FROM bot_memory_state WHERE bot_id = '' AND key = 'alone-token-key'")?.value
+  expect(key).toEqual(expect.any(String))
+  const exported = await createBotMemoryAdmin({ store: new BotMemoryStore({ db: f.store.db }) }).export(t.botId, f.base)
+  for (const file of exported.files) {
+    const text = readFileSync(file, 'utf8')
+    expect(text).not.toContain(contract.tokens.body[0])
+    expect(text).not.toContain(String(key))
+  }
+})
