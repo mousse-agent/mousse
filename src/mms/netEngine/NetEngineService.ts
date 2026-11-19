@@ -19,7 +19,13 @@ import { checkNodePolicy } from '../net/checkNodePolicy'
 import type { EngineCaller, RpcMethod } from '../net/contracts'
 import type { NetRuntime, NetService } from '../net/NetService'
 import type { NodePolicy, NodePolicyChange } from '../net/store/nodePolicy'
-import { engineControl, engineControlProblems, engineLimitProblems, engineLimits } from './limits'
+import {
+  engineControl,
+  engineControlProblems,
+  engineLimitProblems,
+  engineLimits,
+  packagedBuild
+} from './limits'
 import { EngineSessions } from './sessions'
 import type { BridgeClient, EngineClient } from './session/client'
 import type { EngineConnection } from './session/transport'
@@ -32,6 +38,7 @@ import {
   insecureFileKey,
   insecureFileKeyProblems,
   launchHelper,
+  packagedHelperCommit,
   type LaunchedHelper
 } from './helper/process'
 import {
@@ -89,6 +96,8 @@ export class NetEngineService implements EngineDirectoryPort {
   private supervisor?: HelperSupervisor
   /** Why this profile's networking could not start, or turned itself off, until it starts again. */
   private problem?: string
+  /** The engine commit an installed app's helper must be built from, read at its launch. */
+  private packagedCommit?: string
   /** Starts a helper; tests put a fake one here. By default, the binary of this build (design §1). */
   launcher?: () => Promise<LaunchedHelper>
   /** Tests stop this computer at a pairing step, as a crash would (until the engine starts again). */
@@ -569,6 +578,8 @@ export class NetEngineService implements EngineDirectoryPort {
     this.supervisor ??= new HelperSupervisor({
       launch: () => (this.launcher ?? (() => this.launchBuilt()))(),
       use: (pipe) => this.useHelper(pipe),
+      // An installed app runs only the helper it was packaged with (`launchBuilt` reads which).
+      expectedBuild: () => (this.launcher ? undefined : this.packagedCommit),
       mismatch: () => {
         this.writeSettings(false)
         this.problem = HELPER_TEXT.mismatch
@@ -598,6 +609,7 @@ export class NetEngineService implements EngineDirectoryPort {
   async launchBuilt(options: { port?: number } = {}): Promise<LaunchedHelper> {
     const binary = findNetHelper()
     if (!binary) throw new HelperNotInBuild()
+    this.packagedCommit = packagedBuild() ? packagedHelperCommit(binary) : undefined
     // A profile folder copied from another profile carries that profile's endpoint: it is set aside.
     const settings = this.settings()
     if (settings && settings.profile !== this.options.profileId) {
