@@ -2133,6 +2133,8 @@ export interface FileAsset {
   data: Uint8Array
   mimeType: string
   size: number
+  /** When the file was last written, as read; absent from an older daemon. */
+  mtimeMs?: number
 }
 
 export type GitChangeStatus =

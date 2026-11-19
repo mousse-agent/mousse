@@ -14,6 +14,7 @@ import { attachmentPath, createPersonalBotsClient, errorText, personalBotsEvents
 import { keepEqualById } from '../lib/keepEqual'
 import { expandComposerQuotes, insertQuoteToken, registerQuote } from '../lib/composerQuotes'
 import { clearBotLiveReplies, noteBots, noteBotStopAsked, noteThreadMessage, setBotLiveReplySources } from './botLiveReplies'
+import { adoptFilePreview } from '../components/bots/fileImageCache'
 
 /**
  * The owner's bots in the Chats tab (Bot Phase 1 §5.12): the list, each bot's chat as far as it
@@ -238,6 +239,26 @@ let unsubscribe: Array<() => void> = []
 const failedSends = new Map<string, { text: string; clientRequestId: string }>()
 /** The id of the bubble shown while the message sent with `clientRequestId` is on its way. */
 const pendingId = (clientRequestId: string) => `pending:${clientRequestId}`
+/** Composer pictures already handed over (or revoked) while their message was being sent; `send` settles the rest. */
+const handedOver = new Set<string>()
+
+/**
+ * The composer's pictures of a message being sent, handed to its confirmed copy's files, so a pasted image stays in
+ * place from sending to sent instead of waiting empty for the file to be read. A picture with no matching file goes.
+ */
+function handOverPreviews(pending: readonly BotChatMessage[], incoming: readonly BotChatMessage[]): void {
+  for (const message of incoming) {
+    if (message.author !== 'owner' || !message.clientRequestId) continue
+    const sent = pending.find((entry) => entry.id === pendingId(message.clientRequestId!))
+    sent?.attachments?.forEach((file, index) => {
+      if (!file.previewUrl || handedOver.has(file.previewUrl)) return
+      handedOver.add(file.previewUrl)
+      const copy = message.attachments?.[index]
+      if (copy?.path && copy.name === file.name) adoptFilePreview(copy.path, file.previewUrl)
+      else URL.revokeObjectURL(file.previewUrl)
+    })
+  }
+}
 /** Each bot's page of older messages on its way. */
 const olderLoads = new Map<string, Promise<void>>()
 let pendingCreate: { key: string; clientRequestId: string } | undefined
@@ -302,7 +323,11 @@ export function watchBotDetail(botId: string): () => void {
 export const useBotsStore = create<BotsState>((set, get) => {
   const fail = (owner: number, cause: unknown, botId: string | null = null) => { if (owner === epoch) set({ error: errorText(cause), errorBotId: botId, busy: false }) }
   const cacheOf = (botId: string): BotChatCache => get().chats[botId] ?? { messages: [], hasMore: false, loadingOlder: false }
-  const putMessages = (botId: string, incoming: BotChatMessage[]) => set((state) => {
+  const putMessages = (botId: string, incoming: BotChatMessage[]) => {
+    if (!removed.has(botId)) handOverPreviews(get().pending[botId] ?? [], incoming)
+    putConfirmed(botId, incoming)
+  }
+  const putConfirmed = (botId: string, incoming: BotChatMessage[]) => set((state) => {
     if (removed.has(botId)) return {}
     const cache = state.chats[botId] ?? { messages: [], hasMore: false, loadingOlder: false }
     // A confirmed message clears only the bubble sent with its request id, so two identical messages on their way stay two.
@@ -547,7 +572,7 @@ export const useBotsStore = create<BotsState>((set, get) => {
       failedSends.delete(botId)
       const shown: BotChatMessage = {
         seq: Number.MAX_SAFE_INTEGER, id: pendingId(admission.clientRequestId), at: new Date().toISOString(), author: 'owner', kind: 'text',
-        text, chips: [], ...(attachments.length ? { attachments: attachments.map((attached) => ({ name: attached.file.name, path: '' })) } : {}),
+        text, chips: [], ...(attachments.length ? { attachments: attachments.map((attached) => ({ name: attached.file.name, path: '', ...(attached.previewUrl ? { previewUrl: attached.previewUrl } : {}) })) } : {}),
         ...(replyTo ? { replyTo } : {})
       }
       set((state) => ({
@@ -560,10 +585,15 @@ export const useBotsStore = create<BotsState>((set, get) => {
       try {
         const files = await Promise.all(attachments.map(attachmentOf))
         const message = await bots().send(botId, text, admission.clientRequestId, files, replyTo?.id)
-        for (const attached of attachments) if (attached.previewUrl) URL.revokeObjectURL(attached.previewUrl)
+        // The pictures shown while sending go to the sent message's files (unless its copy came first and took them);
+        // any left over are no longer needed.
+        if (owner === epoch) handOverPreviews([shown], [message])
+        for (const attached of attachments) {
+          if (attached.previewUrl && !handedOver.delete(attached.previewUrl)) URL.revokeObjectURL(attached.previewUrl)
+        }
         if (owner !== epoch) return
         set((state) => ({ pending: { ...state.pending, [botId]: (state.pending[botId] ?? []).filter((entry) => entry.id !== shown.id) } }))
-        putMessages(botId, [message])
+        putConfirmed(botId, [message])
       } catch (cause) {
         if (owner !== epoch) return
         // Nothing was sent: the words and files go back into the composer.

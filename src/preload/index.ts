@@ -536,6 +536,9 @@ const api = {
       ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId, root),
     readAsset: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> =>
       ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId, root),
+    /** A preview's size and write time (`mtimeMs` absent from an older daemon), without reading it. */
+    assetStamp: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<{ size: number; mtimeMs?: number }> =>
+      ipcRenderer.invoke('fs:assetStamp', filePath, projectId, threadId, root),
     writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null, root?: string): Promise<void> =>
       ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId, root),
     /** This computer's drives (or root and volumes) and home folder, for the Files panel's path menu. */
