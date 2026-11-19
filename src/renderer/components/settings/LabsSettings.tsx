@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { PROFILER_TOOL_LABELS, PROFILER_TOOL_NAMES, type ProfilerSettings } from '../../../shared/diagnostics/profiler'
 import type { MousseSettings, MousseSettingsUpdate } from '../../../shared/settings'
-import { Cpu } from '../../lib/icons'
+import { Cloud, Cpu } from '../../lib/icons'
 import { showToast } from '../ui/Toast'
 import { MemoryRows } from './MemoryRows'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './SettingsRow'
@@ -10,7 +10,8 @@ import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './Settings
 export const HEAP_SNAPSHOT_WARNING = 'Holds thread text, prompts, paths and tokens. Stays on this computer; never share it.'
 
 /**
- * Settings → Labs. The profiler: one switch, off by default; everything else shows only while it is on. The
+ * Settings → Labs. Mousse Plus (legacy): one switch, on by default; off, this profile's networking leaves Mousse Plus
+ * alone (no sign-in, hosted relay or phone requests through it). The profiler: one switch, off by default; everything else shows only while it is on. The
  * Memory row stays in view; notices, heap snapshot, agent access and the tools fold under Advanced, the tools only
  * while agent access is on.
  */
@@ -20,6 +21,26 @@ export function LabsSettings({ settings, onUpdate }: { settings: MousseSettings;
     onUpdate({ experimental: { ...settings.experimental, profiler: { ...profiler, ...next, tools: { ...profiler.tools, ...next.tools } } } })
   return (
     <section id="labs" className="settings-section">
+      <SettingsGroup title="Mousse Plus" icon={Cloud}>
+        <SettingsRow
+          title="Mousse Plus (legacy)"
+          anchor="labs-plus-legacy"
+          htmlFor="labs-plus-legacy"
+          description={
+            <span title="On: Mousse ID sign-in, the hosted relay and phone requests go through today's Mousse Plus. Off: none of them run, and nothing is sent to Mousse Plus; this computer still reaches your devices over the local network, SSH, tunnels and your own relay. Your sign-in is kept for when you turn it back on.">
+              Sign-in, hosted relay and phones through today's Mousse Plus.
+            </span>
+          }
+          control={
+            <Switch
+              id="labs-plus-legacy"
+              label="Mousse Plus (legacy)"
+              checked={settings.experimental.plusLegacy !== false}
+              onChange={(plusLegacy) => void onUpdate({ experimental: { ...settings.experimental, plusLegacy } })}
+            />
+          }
+        />
+      </SettingsGroup>
       <SettingsGroup title="Profiler" icon={Cpu}>
         <SettingsRow
           title="Profiler"
