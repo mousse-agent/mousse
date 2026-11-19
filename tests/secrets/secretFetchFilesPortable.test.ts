@@ -18,7 +18,7 @@ vi.mock('node:fs', async importOriginal => {
 vi.mock('node:child_process', () => ({ spawnSync: (_exe: string, args: string[], options: { cwd: string; input: Buffer }) => {
   const directory = fs.openSync(options.cwd, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY)
   const relative = (path: string) => isAbsolute(path) ? path : `/proc/self/fd/${directory}/${path}`
-  const child = { argv: ['node', ...args.slice(1)], exitCode: 0 }
+  const child = { argv: ['node', ...args.slice(2)], exitCode: 0 }
   try {
     runInNewContext(args[1], { process: child, require: () => ({ ...fs,
       statSync: (path: string) => path === '.' ? fs.fstatSync(directory) : fs.statSync(relative(path)),

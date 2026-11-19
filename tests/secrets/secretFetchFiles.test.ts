@@ -13,13 +13,17 @@ import { secretTools } from '../../src/mms/run/mcp/appTools/secrets'
 import { appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import type { ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
 
-const hooks = vi.hoisted(() => ({ afterCheck: undefined as undefined | ((path: unknown) => void) }))
+const hooks = vi.hoisted(() => ({ afterCheck: undefined as undefined | ((path: unknown) => void), afterOpen: undefined as undefined | ((path: unknown) => void) }))
 vi.mock('node:fs', async importOriginal => {
   const original = await importOriginal<typeof import('node:fs')>()
   return { ...original, lstatSync: (...args: Parameters<typeof original.lstatSync>) => {
     const result = original.lstatSync(...args)
     hooks.afterCheck?.(args[0])
     return result
+  }, openSync: (...args: Parameters<typeof original.openSync>) => {
+    const fd = original.openSync(...args)
+    hooks.afterOpen?.(args[0])
+    return fd
   } }
 })
 vi.mock('../../src/mms/net-public/publicFetch', async importOriginal => ({
@@ -28,6 +32,7 @@ vi.mock('../../src/mms/net-public/publicFetch', async importOriginal => ({
 const cleanup: Array<() => void> = []
 afterEach(() => {
   hooks.afterCheck = undefined
+  hooks.afterOpen = undefined
   cleanup.splice(0).reverse().forEach(fn => fn())
   vi.restoreAllMocks()
 })
@@ -94,4 +99,20 @@ it('describes a local save failure without calling it a connection failure', asy
   expect(out.isError).toBe(true)
   expect(out.text).toContain('could not be saved on this computer')
   expect(out.text).not.toContain('could not be reached')
+})
+
+
+it('checks the opened file before writing and removes it while it is still empty on a folder move', async () => {
+  const f = fixture(), folder = join(f.scratch, 'fetches')
+  hooks.afterOpen = path => {
+    if (!String(path).startsWith('/proc/self/fd/')) return
+    hooks.afterOpen = undefined
+    renameSync(folder, folder + '-original')
+    symlinkSync(f.outside, folder, 'dir')
+  }
+  const result = await f.run()
+  expect(result.isError).toBe(true)
+  expect(result.text).toMatch(/folder.*(?:changed|unavailable)/i)
+  expect(readdirSync(f.outside)).toEqual([])
+  expect(readdirSync(folder + '-original')).toEqual([])
 })
