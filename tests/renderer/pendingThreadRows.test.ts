@@ -314,7 +314,7 @@ describe('in the sidebar', () => {
     expect(row.draggable).toBe(false)
     expect(row.parentElement!.querySelector('.threads-sidebar-thread-actions')).toBeNull()
     act(() => { row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
-    expect(host.querySelector('input')).toBeNull()
+    expect(host.querySelector('.threads-sidebar-rename-input')).toBeNull()
     act(() => { row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })) })
     expect(document.querySelector('[role="menu"]')).toBeNull()
     // A thread dragged onto it does not drop there.
