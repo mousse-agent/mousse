@@ -11,6 +11,7 @@ import { ThreadStorageLayout } from '../src/mms/data/ThreadStorageLayout'
 import { ScheduledJobStore, readTickerHeartbeat, recordTickerHeartbeat } from '../src/mms/scheduled/ScheduledJobStore'
 import { LineEditStatsStore } from '../src/mms/stats/LineEditStatsStore'
 import { MmsProfileServices } from '../src/mms/MmsProfileServices'
+import { ProfileHost } from '../src/mms/profiles/ProfileHost'
 import { ProfileDatabase } from '../src/mms/run/db/ProfileDatabase'
 import { RunEngine } from '../src/mms/run/RunEngine'
 import { RunStore } from '../src/mms/run/RunStore'
@@ -236,7 +237,7 @@ describe('explicit profile store roots', () => {
 })
 
 describe('profile start order (H4)', () => {
-  it('recovers the run engine before scheduled jobs or the network can send a turn', async () => {
+  it('recovers the run engine before scheduled jobs or the network can send a turn, and leaves the network engine for after readiness', async () => {
     const profileHome = home('start-order')
     const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome })) })
     const calls: string[] = []
@@ -261,8 +262,8 @@ describe('profile start order (H4)', () => {
           calls.push('net')
         }
       },
-      // The engine starts after v1 (a profile that joined another computer's network finds v1 on).
-      netEngine: { start: async () => { calls.push('netEngine') } },
+      // The network engine starts once the daemon is ready (ProfileHost.startNetworkedProfiles), not in the profile's start.
+      netEngine: { start: async () => { calls.push('netEngine') }, startHelper: async () => { calls.push('netEngine') } },
       orchestrator: {
         recoverRunEngineOnBoot: () => { engine.reconcileOnBoot(); calls.push('recover') },
         scheduleStartupQueueRecovery: () => undefined
@@ -284,11 +285,36 @@ describe('profile start order (H4)', () => {
     try {
       const startOwned = (MmsProfileServices.prototype as unknown as { startOwned: (this: typeof service) => Promise<void> }).startOwned
       await startOwned.call(service)
-      expect(calls).toEqual(['recover', 'workers', 'scheduled', 'net', 'netEngine'])
+      expect(calls).toEqual(['recover', 'workers', 'scheduled', 'net'])
       // Boot recovery ran first, so the remote send's live run was not interrupted as a leftover.
       expect(engine.getRun(netRunId)!.status).toBe('running')
     } finally {
       engine.store.db.close()
     }
+  })
+})
+
+describe('networking at startup', () => {
+  it('starts each networked profile once the daemon is ready, and a profile started later on its own', async () => {
+    const started: string[] = []
+    const profile = (id: string, enabled: boolean) => ({
+      netEngine: { settings: () => ({ enabled, profile: id }), startHelper: async () => { started.push(id) } }
+    })
+    const records = [{ id: 'a', status: 'active' }, { id: 'b', status: 'active' }, { id: 'off', status: 'active' }]
+    const host = Object.assign(Object.create(ProfileHost.prototype) as ProfileHost, {
+      stopping: false,
+      networkReady: false,
+      manager: { list: () => records },
+      live: new Map<string, unknown>([['a', profile('a', true)], ['off', profile('off', false)]])
+    })
+    // Before readiness a profile that starts does not start its networking.
+    await host.startNetworking('a')
+    expect(started).toEqual([])
+    await host.startNetworkedProfiles()
+    expect(started).toEqual(['a'])
+    // Restored after readiness: it starts its own.
+    ;(host as unknown as { live: Map<string, unknown> }).live.set('b', profile('b', true))
+    await host.startNetworking('b')
+    expect(started).toEqual(['a', 'b'])
   })
 })

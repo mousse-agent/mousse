@@ -2655,10 +2655,9 @@ export class MmsProfileServices {
       this.scheduled.start()
     }
     await this.net.start()
-    // The engine starts after v1, so a profile that joined another computer's network finds v1 on.
-    await this.netEngine.start().catch((error) => {
-      console.warn('the network engine did not start', { error: error instanceof Error ? error.message : String(error) })
-    })
+    // The network engine starts after the daemon is ready, with its helper (`ProfileHost.startNetworkedProfiles`):
+    // its database, identity bootstrap and tombstone sweep do not delay readiness. That is after v1 too, so a
+    // profile that joined another computer's network finds v1 on.
     // After the net service has loaded its ports, so the listener can refuse one of them.
     await this.listenScheduledWebhooksIfEnabled()
 

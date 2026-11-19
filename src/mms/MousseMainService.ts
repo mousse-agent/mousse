@@ -181,8 +181,14 @@ export class MousseMainService extends MmsProfileServices {
       const services = await host.getProfileServices(record.id)
       await services.start()
     }
-    // Networking helpers start after the daemon is ready, in the background: nothing waits for them.
-    void host.startNetworkedProfiles()
+  }
+
+  /**
+   * Called once the daemon published its readiness. The network engines and their helpers start now, in the
+   * background: nothing waits for them, and readiness never waited for them either.
+   */
+  afterReady(): void {
+    void this.profileHost?.startNetworkedProfiles()
   }
 
   override stop(options: { timeoutMs?: number } = {}): Promise<void> {
