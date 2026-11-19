@@ -187,8 +187,14 @@
   font-family: var(--font-mono);
 }
 
-.engine-profile-choice {
+.engine-profile-choice,
+.engine-ssh {
   display: flex;
   flex-direction: column;
   gap: var(--space-8);
+}
+
+.engine-fingerprint {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
 }

@@ -4,6 +4,7 @@ import { NET_ERRORS, NetError } from '../../shared/net'
 import { NET_ENGINE_LOCAL_METHODS, type NetEngineLocalMethod } from '../../shared/netEngine/local'
 import { DomainRpcError, type DomainHandlerRegistry } from '../protocol/domainRegistry'
 import type { NetEngineService } from './NetEngineService'
+import type { SshRemote } from './ssh/remote'
 
 /** The string fields each method needs. */
 const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
@@ -17,8 +18,16 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.address.remove': ['node', 'address'],
   'netEngine.address.use': ['node'],
   'netEngine.join.preview': ['ticket'],
-  'netEngine.routes.test': ['route']
+  'netEngine.routes.test': ['route'],
+  'netEngine.ssh.resolve': ['target'],
+  'netEngine.ssh.probe': ['routeId'],
+  'netEngine.ssh.trust': ['routeId', 'sha256'],
+  'netEngine.ssh.profiles': ['routeId'],
+  'netEngine.ssh.connect': ['routeId', 'target', 'host']
 }
+
+const text = (value: unknown): string | undefined =>
+  typeof value === 'string' && value ? value : undefined
 
 const strings = (value: unknown): value is string[] =>
   Array.isArray(value) && value.length <= 64 && value.every((item) => typeof item === 'string')
@@ -144,6 +153,27 @@ export function registerNetEngineMethods(
             }
             case 'netEngine.routes.test':
               return engine.testRoute(p.route)
+            case 'netEngine.ssh.resolve':
+              return engine.sshAdd().resolve(p.target)
+            case 'netEngine.ssh.probe':
+              return engine.sshAdd().probe(p.routeId, text(p.host))
+            case 'netEngine.ssh.trust':
+              await engine.sshAdd().trust(p.routeId, p.sha256, text(p.host))
+              return {}
+            case 'netEngine.ssh.profiles':
+              return engine.sshAdd().profiles(p.routeId, text(p.host), text(p.user))
+            case 'netEngine.ssh.connect': {
+              const row = await engine.sshConnect({
+                routeId: p.routeId,
+                target: p.target,
+                host: p.host,
+                user: text(p.user) ?? '',
+                ...(text(p.selector)
+                  ? { selector: p.selector }
+                  : { newLabel: text(p.newLabel) ?? 'Mousse' })
+              })
+              return { node: row.localId, status: engine.status() }
+            }
           }
         } catch (error) {
           if (error instanceof NetError) {
@@ -162,4 +192,32 @@ export function registerNetEngineMethods(
         }
       }
     })
+}
+
+/**
+ * `netEngine.ssh.serve`: one request of `mousse-cli net-engine ssh`, which an SSH session on this computer runs for
+ * another computer's Add over SSH (1b §3.4). Local only (the CLI, with the local capability); the trust is the SSH
+ * login the other computer made.
+ */
+export function registerNetEngineSshServe(
+  registry: DomainHandlerRegistry,
+  remote: () => SshRemote | undefined
+): void {
+  registry.register({
+    method: 'netEngine.ssh.serve',
+    scope: 'installation',
+    capability: NET_LOCAL_CAPABILITY,
+    requiredCapabilities: [NET_LOCAL_CAPABILITY],
+    validate: (params) => {
+      const value = params as { request?: unknown } | undefined
+      if (!value || typeof value !== 'object' || !value.request || typeof value.request !== 'object')
+        throw new DomainRpcError('bad_request', 'netEngine.ssh.serve needs request')
+      return value
+    },
+    async handle(_context, params) {
+      const service = remote()
+      if (!service) return { error: 'remote_not_running' }
+      return service.serve((params as { request: unknown }).request)
+    }
+  })
 }

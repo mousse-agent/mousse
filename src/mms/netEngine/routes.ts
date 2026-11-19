@@ -21,20 +21,29 @@ export function privateRoute(route: string): boolean {
 }
 
 /**
- * Whether this build's helper dials loopback without approval: an unpackaged build's debug helper does, so checks
- * run on one computer, unless the checks map loopback to another class (`MOUSSE_NET_TEST_CLASS_MAP`, which the
- * debug helper reads too).
+ * The classes checks give loopback ports (`MOUSSE_NET_TEST_CLASS_MAP`: `<port>=<class>` entries separated by
+ * commas, which the debug helper reads too). Unmapped loopback counts as `lan`.
  */
-function loopbackAutomatic(): boolean {
-  return !packagedBuild() && !process.env.MOUSSE_NET_TEST_CLASS_MAP?.trim()
+export function testClassMap(env: NodeJS.ProcessEnv = process.env): Map<number, string> {
+  const map = new Map<number, string>()
+  for (const entry of (env.MOUSSE_NET_TEST_CLASS_MAP ?? '').split(',')) {
+    const match = /^\s*(\d{1,5})\s*=\s*(lan|tailnet|public)\s*$/.exec(entry)
+    if (match) map.set(Number(match[1]), match[2]!)
+  }
+  return map
 }
 
 /**
  * 1a's automatic rule as this build's helper applies it (1b §1.3): private-range `tcp` literals, and loopback too
- * in an unpackaged build.
+ * in an unpackaged build, whose debug helper dials it so checks run on one computer, except on a port the checks
+ * map to another class.
  */
 export function automatic(route: string): boolean {
-  return automaticRoute(route, loopbackAutomatic())
+  if (automaticRoute(route)) return true
+  if (packagedBuild() || !automaticRoute(route, true)) return false
+  const port = parseRoute(route)?.port
+  const cls = port === undefined ? undefined : testClassMap().get(port)
+  return cls === undefined || cls === 'lan'
 }
 
 /**

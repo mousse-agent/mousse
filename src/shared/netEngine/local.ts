@@ -22,7 +22,13 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.address.use',
   'netEngine.join.preview',
   'netEngine.routes.config',
-  'netEngine.routes.test'
+  'netEngine.routes.test',
+  // Phase 1b: Add over SSH (§3.4)
+  'netEngine.ssh.resolve',
+  'netEngine.ssh.probe',
+  'netEngine.ssh.trust',
+  'netEngine.ssh.profiles',
+  'netEngine.ssh.connect'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
 
@@ -98,6 +104,8 @@ export interface NetEngineDevice {
   offered?: string[]
   /** It was added over SSH (§3.4): one way only, until a Send link adds the other direction. */
   source?: 'ssh'
+  /** Added over SSH, one way: `out`, this computer uses it; `in`, it uses this computer (§3.6). */
+  direction?: 'out' | 'in'
   /** A Send link it consented to did not finish (no code confirmed, or the outcome was lost): Retry or Remove. */
   unfinished?: boolean
   /** That link is still valid, so Retry may ask for the code again. */

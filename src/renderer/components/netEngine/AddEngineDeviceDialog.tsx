@@ -11,11 +11,13 @@ import { Modal } from '../ui/Modal'
 import { useDaemonCall } from '../devices/useDaemonCall'
 import { readPairingLink } from './engineRows'
 import { EnterLinkPanel, JoinRoutes, SendLinkPanel } from './SendLinkParts'
+import { SshAddSteps } from './SshAddSteps'
 
 type Step =
   | { kind: 'choose' }
   | { kind: 'show' }
   | { kind: 'scan' }
+  | { kind: 'ssh' }
   | { kind: 'confirm'; ticket: string; host: string }
   | { kind: 'joining'; host: string }
   | { kind: 'link' }
@@ -38,7 +40,7 @@ export function AddEngineDeviceDialog({
 }: {
   status: NetEngineStatus | undefined
   onClose: () => void
-  initial?: 'choose' | 'show' | 'scan' | 'link' | 'enter'
+  initial?: 'choose' | 'show' | 'scan' | 'link' | 'enter' | 'ssh'
   /** A `mousse://pair` link that opened Mousse: Enter link reads it at once. */
   initialLink?: string
   /** Opens a camera stream; tests and computers without one answer undefined. */
@@ -127,7 +129,9 @@ export function AddEngineDeviceDialog({
           ? 'Send link'
           : step.kind === 'enter'
             ? 'Enter link'
-            : 'Add device'
+            : step.kind === 'ssh'
+              ? 'Add over SSH'
+              : 'Add device'
   return (
     <Modal open title={title} onClose={onClose}>
       <div className="engine-dialog" data-step={step.kind}>
@@ -166,6 +170,16 @@ export function AddEngineDeviceDialog({
                 </button>
               </>
             )}
+            {status?.reach && (
+              <button
+                type="button"
+                className="settings-btn"
+                title="Use another computer you can reach over SSH. One way: this computer uses it."
+                onClick={() => setStep({ kind: 'ssh' })}
+              >
+                Over SSH
+              </button>
+            )}
           </div>
         )}
 
@@ -182,6 +196,8 @@ export function AddEngineDeviceDialog({
         {step.kind === 'enter' && (
           <EnterLinkPanel status={status} initialLink={initialLink} onJoined={onClose} />
         )}
+
+        {step.kind === 'ssh' && <SshAddSteps onDone={onClose} />}
 
         {step.kind === 'show' &&
           (joined ? (

@@ -366,3 +366,50 @@ describe('routes (1b §1.3, §1.5)', () => {
     expect(failed?.title).toMatch(/Saving still works/)
   })
 })
+
+describe('Add over SSH (1b §3.4)', () => {
+  const resolved = { routeId: 'r1', user: 'me', hostname: 'box.example', port: 22, pinned: false }
+
+  it('trusts the host key shown, lists every profile with New profile, and connects the one picked', async () => {
+    const d = daemon(
+      { reach: { lan: true, tailnet: false, public: [], tunnels: [] } },
+      {
+        'netEngine.ssh.resolve': () => resolved,
+        'netEngine.ssh.probe': () => ({ keyType: 'ssh-ed25519', sha256: 'SHA256:abc', inUserKnownHosts: true }),
+        'netEngine.ssh.trust': () => ({}),
+        'netEngine.ssh.profiles': () => ({
+          computer: 'Box',
+          os: 'macos',
+          profiles: [
+            { selector: 'a'.repeat(26), label: 'Main', networking: true },
+            { selector: 'b'.repeat(26), label: 'Work', networking: true, identity: 'ff' }
+          ]
+        }),
+        'netEngine.ssh.connect': () => ({ node: 'n9' })
+      }
+    )
+    const onClose = vi.fn()
+    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose }))
+    await click(button('Over SSH'))
+    await type(document.querySelector<HTMLInputElement>('input[aria-label="SSH address"]')!, 'me@box.example')
+    await click(button('Continue'))
+    expect(document.body.textContent).toContain('ssh-ed25519 SHA256:abc')
+    expect(d.called('netEngine.ssh.profiles')).toEqual([])
+    await click(button('Trust'))
+    expect(d.called('netEngine.ssh.trust')).toEqual([{ routeId: 'r1', sha256: 'SHA256:abc', host: 'box.example' }])
+    const labels = [...document.querySelectorAll('label')].map((item) => item.textContent)
+    expect(labels).toEqual(['Main', 'Work', 'New profile'])
+    await click([...document.querySelectorAll<HTMLInputElement>('input[type="radio"]')][1])
+    await click(button('Connect'))
+    expect(d.called('netEngine.ssh.connect')).toEqual([
+      { routeId: 'r1', target: 'me@box.example', host: 'box.example', user: 'me', selector: 'b'.repeat(26) }
+    ])
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('offers Over SSH only when the helper speaks protocol 1.1', async () => {
+    const d = daemon()
+    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined }))
+    expect(button('Over SSH')).toBeUndefined()
+  })
+})

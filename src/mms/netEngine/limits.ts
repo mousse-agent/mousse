@@ -98,6 +98,14 @@ export interface EngineLimits {
   maxManualAddresses: number
   /** How long Test on one of this computer's routes waits for its helper to reach itself (`routes.test`). */
   routeTestDeadlineMs: number
+  /** The deadline for each ssh.* request and one SSH add try (1b §13.3): 1000 to 600000. */
+  sshRequestDeadlineMs: number
+  /** How long A may repeat one request id, and B refuses older unknown ones (seconds; 60 to 86400, tighten only). */
+  sshRequestMaxAgeSecs: number
+  /** How long B keeps request records (seconds; at least twice the maximum age). */
+  sshRequestKeepSecs: number
+  /** How often B drops request records past their keep time. */
+  sshRequestPruneMs: number
 }
 
 /** The helper's `APP_READ_AHEAD_BYTES`: a stream's credit must cover it before the helper reads that stream. */
@@ -144,7 +152,11 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   pathDrainMs: 25 * 60_000,
   rowStuckMs: 2 * 60_000,
   maxManualAddresses: 8,
-  routeTestDeadlineMs: 20_000
+  routeTestDeadlineMs: 20_000,
+  sshRequestDeadlineMs: 120_000,
+  sshRequestMaxAgeSecs: 86_400,
+  sshRequestKeepSecs: 604_800,
+  sshRequestPruneMs: 60 * 60_000
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -188,7 +200,11 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   pathDrainMs: 'MOUSSE_NET_ENGINE_PATH_DRAIN_MS',
   rowStuckMs: 'MOUSSE_NET_ENGINE_ROW_STUCK_MS',
   maxManualAddresses: 'MOUSSE_NET_ENGINE_MAX_MANUAL_ADDRESSES',
-  routeTestDeadlineMs: 'MOUSSE_NET_ENGINE_ROUTE_TEST_DEADLINE_MS'
+  routeTestDeadlineMs: 'MOUSSE_NET_ENGINE_ROUTE_TEST_DEADLINE_MS',
+  sshRequestDeadlineMs: 'MOUSSE_NET_ENGINE_SSH_REQUEST_DEADLINE_MS',
+  sshRequestMaxAgeSecs: 'MOUSSE_NET_ENGINE_SSH_REQUEST_MAX_AGE_SECS',
+  sshRequestKeepSecs: 'MOUSSE_NET_ENGINE_SSH_REQUEST_KEEP_SECS',
+  sshRequestPruneMs: 'MOUSSE_NET_ENGINE_SSH_REQUEST_PRUNE_MS'
 })
 
 /** Reads the limits from `env`; each problem names the variable, the value and the default kept. */
@@ -242,6 +258,14 @@ export function readEngineLimits(env: NodeJS.ProcessEnv): {
   if (limits.helperRestartFirstMs > limits.helperRestartMaxMs)
     for (const key of ['helperRestartFirstMs', 'helperRestartMaxMs'] as const)
       keep(key, 'makes the first restart wait longer than the longest')
+  // 1b §13.3 bounds: the request deadline within 1 s to 10 min; the maximum age only tightens; records are kept
+  // at least twice the maximum age, so a request id is never seen as new a second time.
+  if (limits.sshRequestDeadlineMs < 1000 || limits.sshRequestDeadlineMs > 600_000)
+    keep('sshRequestDeadlineMs', 'is outside 1000 to 600000')
+  if (limits.sshRequestMaxAgeSecs < 60 || limits.sshRequestMaxAgeSecs > ENGINE_LIMIT_DEFAULTS.sshRequestMaxAgeSecs)
+    keep('sshRequestMaxAgeSecs', 'is outside 60 to 86400 (it may only be lowered)')
+  if (limits.sshRequestKeepSecs < 2 * limits.sshRequestMaxAgeSecs)
+    keep('sshRequestKeepSecs', 'is less than twice the maximum request age')
   return { limits, problems }
 }
 

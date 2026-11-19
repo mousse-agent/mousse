@@ -598,7 +598,8 @@ describe('phase1b.link-app', () => {
       })
       await typeCode(b, link.invitation, shown(a, link.invitation)!.code)
       await step('pairing_failed', async () => expect((await joined).error).toBeUndefined())
-      await step('one_way_stuck', () => connectedBothWays(a, b))
+      // A row that kept `source: "ssh"` (the `ssh-row-not-converted` control) never finishes pairing.
+      await step('stuck_finishing', () => connectedBothWays(a, b))
       await step('one_way_stuck', () => {
         expect(rowFor(a, b)?.source).toBeUndefined()
         expect(rowFor(b, a)?.source).toBeUndefined()

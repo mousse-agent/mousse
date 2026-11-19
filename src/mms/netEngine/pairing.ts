@@ -51,8 +51,13 @@ export interface PairingPort {
   changed(): void
   /** A test stops this computer at `step` when this answers true. */
   crashAt?(step: PairingStep): boolean
-  /** Whether a grant's receipt names an SSH add request this computer knows (1b §3.6): host recovery leaves it. */
-  sshRequest?(receipt: string): boolean
+  /**
+   * The state of the SSH add request a grant's receipt names, if this computer knows it (1b §3.6): host recovery
+   * leaves an open one's grant to its row and removes a removed one's.
+   */
+  sshRequest?(receipt: string): 'open' | 'done' | 'removed' | undefined
+  /** A removal finished (its grants gone, its peer forgotten): the SSH requests of that peer read `removed`. */
+  removed?(row: EnginePeerRow): Promise<void>
 }
 
 /** How Connect joins: the arrival the ticket came by and, for a Send link, what the owner approved and shares. */
@@ -336,16 +341,22 @@ export class EnginePairing {
     const { peers } = this.port
     for (;;) {
       this.alive()
-      const row = this.linkRow(node)
-      if (!row) return
-      if (row.link?.pending) {
-        await this.recoverLink(row)
+      const linked = this.linkRow(node)
+      if (!linked) return
+      if (linked.link?.pending) {
+        await this.recoverLink(linked)
         if (peers.get(node)?.link?.pending) return
         continue
       }
-      if (!isServingState(row.state) || skipsCeremony(row)) return
       // A Send link's row is never joined from a pin (§5.4): only its own outcome moves it.
-      if (row.state === 'consented' && row.link) return
+      if (linked.state === 'consented' && linked.link) return
+      const found = peers.serving(node)
+      if (!found || skipsCeremony(found)) return
+      // The control lets 1a's ceremony take an SSH row as one of its own: B pinned and granted reads as granted.
+      const row =
+        found.source === 'ssh' && found.state === 'ssh_granted'
+          ? { ...found, state: 'granted' as const }
+          : found
       if (row.state === 'consented') {
         await this.rejoin(row)
         if (peers.get(node)?.state === 'consented') return
@@ -731,8 +742,11 @@ export class EnginePairing {
     for (const grant of Array.isArray(answer.grants) ? answer.grants : []) {
       if (!grant || typeof grant.identity !== 'string') continue
       if (grant.role !== undefined && grant.role !== 'owner') continue
-      // A grant an SSH add made belongs to its request, never to an owed row.
-      if (typeof grant.receipt === 'string' && this.port.sshRequest?.(grant.receipt)) continue
+      // A grant an SSH add made belongs to its request, never to an owed row; a removed request's goes.
+      const request = typeof grant.receipt === 'string' ? this.port.sshRequest?.(grant.receipt) : undefined
+      if (request === 'removed' && !engineControl('removal-skips-unsaved-grant'))
+        await this.helper().request('grant.remove', { grant: grant.grant }).catch(() => undefined)
+      if (request) continue
       if (typeof grant.expires_at === 'number' && grant.expires_at <= now) continue
       this.owe(
         grant.identity,
@@ -827,7 +841,13 @@ export class EnginePairing {
     this.outsideWindow.delete(node)
     for (const wake of [...this.waiters]) wake()
     const row = this.port.peers.serving(node)
-    if (row && !skipsCeremony(row) && (row.state === 'granted' || row.state === 'joined'))
+    if (
+      row &&
+      !skipsCeremony(row) &&
+      (row.state === 'granted' ||
+        row.state === 'joined' ||
+        (row.source === 'ssh' && row.state === 'ssh_granted'))
+    )
       void this.advance(node)
   }
 
@@ -1000,7 +1020,10 @@ export class EnginePairing {
       // removal overtook): none may outlive the removal and bring the pairing back.
       const grants = new Set<number>()
       if (row.grant !== '' && Number.isSafeInteger(Number(row.grant))) grants.add(Number(row.grant))
-      const listed = await helper.request('grants.list')
+      // The control removes only a grant the row holds: one an SSH add saved before its id was stored stays.
+      const unsavedStays =
+        row.source === 'ssh' && row.grant === '' && engineControl('removal-skips-unsaved-grant')
+      const listed = unsavedStays ? { grants: [] } : await helper.request('grants.list')
       for (const grant of Array.isArray(listed.grants) ? listed.grants : [])
         if (grant && grant.identity === row.endpoint && Number.isSafeInteger(Number(grant.grant)))
           grants.add(Number(grant.grant))
@@ -1012,6 +1035,10 @@ export class EnginePairing {
     }
     this.at('grant-removed')
     if (row.endpoint) await helper.request('peer.forget', { identity: row.endpoint })
+    // A: the SSH route it kept for the other computer goes too (its config and pin).
+    if (row.ssh?.routeId)
+      await helper.request('ssh.forget', { route_id: row.ssh.routeId }).catch(() => undefined)
+    await this.port.removed?.(row)
     this.alive()
     this.port.peers.prune(row.localId)
     this.port.changed()
@@ -1070,7 +1097,16 @@ export class EnginePairing {
   }
 }
 
-const SERVING = ['consented', 'joined', 'granted', 'awaiting_pairback', 'connected'] as const
+const SERVING = [
+  'consented',
+  'joined',
+  'granted',
+  'awaiting_pairback',
+  'connected',
+  'ssh_requested',
+  'ssh_granting',
+  'ssh_granted'
+] as const
 
 /** A Send link join that ended, as the joiner's dialog says it; `already` is existing access (§3.6). */
 function linkError(reason: string): NetError {
