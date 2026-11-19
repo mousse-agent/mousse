@@ -222,6 +222,7 @@ export function permissionProblem(value: unknown): string | undefined {
 
 /** What a bot is told it may ask for, after an ask it wrote wrongly. */
 export const WHAT_TO_ASK_TEXT = "Ask for a tool, a skill, the tools of one of your owner's MCP servers, a limit, or to export your memory."
+export const WHAT_TO_ASK_ALONE_TEXT = " To let one automation act without asking, use permission: {ask:'let_alone', scheduleId, serverId, tool}."
 
 /** Why a value is not something `escalate` may ask for, or undefined when it is one. */
 export function askProblem(value: unknown): string | undefined {

@@ -37,6 +37,8 @@ import { json, plainSchema, truncateForModel, type MousseTool, type ToolCallCont
  * the owner's chat changes the bot for good.
  */
 
+const LET_ALONE_PERMISSION = Type.Object({ ask: Type.Literal('let_alone'), scheduleId: Type.String({ description: 'The automation id from bot_schedule_list.' }), serverId: Type.String({ description: 'The id from mcp_servers.' }), tool: Type.String({ description: 'The bare tool name, such as upload_file.' }) })
+
 const PERMISSION = Type.Union([
   // What a bot may ask for is in its instructions, which leave out what this computer has switched off (What bots may do
   // here): these words describe the fields and offer nothing themselves.
@@ -54,9 +56,12 @@ const PERMISSION = Type.Union([
       amount: Type.Optional(Type.Number({ description: 'How much more.' }))
     })
   }),
-  Type.Object({ ask: Type.Literal('let_alone'), scheduleId: Type.String({ description: 'The automation id from bot_schedule_list.' }), serverId: Type.String({ description: 'The id from mcp_servers.' }), tool: Type.String({ description: 'The bare tool name, such as upload_file.' }) }),
+  LET_ALONE_PERMISSION,
   Type.Object({ ask: Type.Literal('export_memory') }, { description: 'The owner asked you to export your memory: they pick a folder.' })
 ])
+
+const PERMISSION_WITHOUT_ALONE = Type.Union(PERMISSION.anyOf.filter(part => part !== LET_ALONE_PERMISSION))
+const LET_ALONE_DESCRIPTION = " In an owner message turn, permission: {ask:'let_alone', scheduleId, serverId, tool} asks to let that automation act alone in a place Mousse fills in."
 
 const WHEN = Type.Union([
   Type.Object({ kind: Type.Literal('interval'), minutes: Type.Integer({ description: 'Every this many minutes; at least 1.' }) }),
@@ -105,7 +110,7 @@ const card = (description?: string) => Type.Union([
 export const BOT_TOOLS: Tool[] = [
   {
     name: 'escalate',
-    description: 'Ask your owner for a permission you do not have, in one plain sentence. Ask as soon as you need it; never ask the owner whether to ask. In the chat, the owner answers after your message and you continue then. In a run, carry on without it and say in your report what you skipped. In an owner message turn, {ask:\'let_alone\',scheduleId,serverId,tool} asks to let that automation act alone in a place Mousse fills in.',
+    description: 'Ask your owner for a permission you do not have, in one plain sentence. Ask as soon as you need it; never ask the owner whether to ask. In the chat, the owner answers after your message and you continue then. In a run, carry on without it and say in your report what you skipped.',
     parameters: Type.Object({
       permission: PERMISSION,
       reason: Type.String({ description: 'Why you need it, in one or two sentences for the owner.' })
@@ -665,7 +670,11 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
       name: escalate.name,
       description: escalate.description,
       inputSchema: plainSchema(escalate),
-      definition: () => escalate,
+      definition: turn => ({ ...escalate,
+        description: escalate.description + (turn.bot?.holdMcp ? LET_ALONE_DESCRIPTION : ''),
+        parameters: Type.Object({ permission: turn.bot?.holdMcp ? PERMISSION : PERMISSION_WITHOUT_ALONE,
+          reason: Type.String({ description: 'Why you need it, in one or two sentences for the owner.' }) })
+      }),
       // It writes only bots.db, about the caller's own activation.
       access: 'actsAsCaller',
       class: 'read',
@@ -677,7 +686,9 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         const bot = ctx.turn.bot
         if (!bot?.escalate) return { text: 'Only a bot can ask its owner for permissions.', isError: true }
         const reason = typeof args.reason === 'string' ? args.reason.slice(0, 2000) : ''
-        return { text: bot.escalate({ permission: args.permission, reason, toolCallId: ctx.toolCallId }) }
+        const permission = args.permission === undefined && args.ask === 'let_alone'
+          ? { ask: args.ask, scheduleId: args.scheduleId, serverId: args.serverId, tool: args.tool } : args.permission
+        return { text: bot.escalate({ permission, reason, toolCallId: ctx.toolCallId }) }
       }
     },
     {

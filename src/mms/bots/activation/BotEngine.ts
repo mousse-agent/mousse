@@ -43,6 +43,7 @@ import {
   MAX_BOT_WALLS,
   askProblem,
   WHAT_TO_ASK_TEXT,
+  WHAT_TO_ASK_ALONE_TEXT,
   isSpecialAsk,
   mcpAskTools,
   permissionText,
@@ -3903,7 +3904,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         const stop = endTurn()
         if (stop) return stop
         const problem = askProblem(request.permission)
-        if (problem) return `${problem} ${WHAT_TO_ASK_TEXT}`
+        if (problem) return `${problem} ${WHAT_TO_ASK_TEXT}${botAsksFirst(this.host.settings?.get()) ? WHAT_TO_ASK_ALONE_TEXT : ''}`
         // A new bot's first message answers no request: it asks once the owner wants something that needs more.
         if (firstMessage) return BOT_ASK_NOT_YET_TEXT
         const live = base.check({ kind: 'app', tool: 'escalate', args: {} })
