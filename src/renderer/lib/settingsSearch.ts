@@ -4,7 +4,7 @@ import { shortcutAnchor, shortcutRowTitle } from '../commands/shortcutEditing'
 import { STORAGE_RULE_COPY } from './storageCopy'
 
 /** The Settings pages, in nav order. */
-export const SETTINGS_SECTION_IDS = ['general', 'appearance', 'chat', 'speech', 'shortcuts', 'providers', 'agents', 'integrations', 'connections', 'storage', 'activity', 'labs'] as const
+export const SETTINGS_SECTION_IDS = ['general', 'appearance', 'chat', 'speech', 'shortcuts', 'providers', 'agents', 'integrations', 'computer', 'connections', 'storage', 'activity', 'labs'] as const
 export type SettingsSectionId = (typeof SETTINGS_SECTION_IDS)[number]
 
 /**
@@ -91,6 +91,9 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Subagents', section: 'agents', anchor: 'agents-subagents', keywords: ['subagent'] },
   { title: 'Let agents work on your other devices', section: 'agents', anchor: 'agents-remote-subagents', keywords: ['computers', 'remote', 'subagents on other devices', 'let agents start subagents on your other devices'] },
   { title: 'Worktree per subagent', section: 'agents', anchor: 'agents-subagent-worktrees', keywords: ['experimental', 'branch', 'give each subagent its own worktree'] },
+  { title: 'Cua Driver', section: 'computer', anchor: 'computer-driver', keywords: ['computer use', 'cua', 'install', 'version', 'desktop', 'screen'] },
+  { title: 'Driver', section: 'computer', anchor: 'computer-driver-path', keywords: ['computer use', 'cua driver', 'path', 'choose', 'executable'] },
+  { title: 'Agents can use this computer', section: 'computer', anchor: 'computer-agents', keywords: ['computer use', 'desktop', 'apps', 'click', 'type', 'bots', 'permission'] },
   { title: 'Secrets', section: 'agents', anchor: 'agents-secrets', keywords: ['secret', 'secrets', 'api key', 'token', 'password', 'credential', 'saved keys', 'revoke'] },
   { title: 'Automations', section: 'agents', anchor: 'agents-automations', keywords: ['automations agents add', 'schedule', 'scheduled tasks', 'agent jobs', 'limits', 'allow', 'keep'] },
   { title: 'At most', section: 'agents', anchor: 'agents-automations-active', keywords: ['automations', 'limits', 'active', 'most active automations'] },

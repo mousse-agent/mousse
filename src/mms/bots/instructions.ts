@@ -1,5 +1,5 @@
 import type { BotLane, BotManifest } from '../../shared/bots/personal/definition'
-import { BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from '../../shared/bots/personal/manifest'
+import { BOT_AUTOMATION_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, botGrantTool } from '../../shared/bots/personal/manifest'
 import type { BotAskRequest } from '../../shared/bots/personal/escalation'
 import { botCatalogueIndex } from '../../shared/bots/personal/catalogue'
 
@@ -122,6 +122,8 @@ export interface BotAllowed {
   shell: boolean
   /** "Use the browser". */
   browser: boolean
+  /** "Use the computer": apps on this computer, through Cua Driver. */
+  computer?: boolean
   /** "Use your threads". */
   threads: boolean
   /** "Use the profiler". */
@@ -179,6 +181,7 @@ export function botAllowedOf(manifest: BotManifest, mcpNames?: (serverIds: strin
   return {
     shell: has('shell'),
     browser: manifest.appTools.includes(BOT_BROWSER_PERMISSION),
+    computer: manifest.appTools.includes(BOT_COMPUTER_PERMISSION),
     threads: manifest.appTools.includes(BOT_THREADS_PERMISSION),
     profiler: manifest.appTools.includes(BOT_PROFILER_PERMISSION),
     themes: manifest.appTools.includes(BOT_THEMES_PERMISSION),
@@ -206,6 +209,7 @@ export function botAllowedText(allowed: BotAllowed, lane?: BotLane, browserOffli
     `- Run commands: ${off('shell') ? BOT_SWITCHED_OFF_ANSWER : yes(allowed.shell)}`,
     `- Use the browser (your own): ${off('browser') ? BOT_SWITCHED_OFF_ANSWER : allowed.browser && browserOffline ? "yes, but it can't open on this run" : yes(allowed.browser)}`,
     `- Use your owner's threads: ${off('threads') ? BOT_SWITCHED_OFF_ANSWER : !allowed.threads ? 'no' : lane === 'chat' ? "yes: list, search, read and wait on them, and start, message, steer, stop, fork or archive one, or change its queue, when your owner's message asks for it" : "yes: list, search, read and wait on them, and start, message, steer, stop, fork or archive one, or change its queue, when the work your owner asked for needs it"}`,
+    `- Use apps on this computer: ${!allowed.computer ? 'no' : allowed.mcpNotHere ? 'not in this consult' : lane === 'chat' ? 'yes, in your work' : 'yes'}`,
     `- Read Mousse's profiler: ${!allowed.profiler ? 'no' : allowed.mcpNotHere ? 'not in this consult' : lane === 'chat' ? 'yes (a watch over minutes is for your work)' : 'yes'}`,
     `- Change how Mousse looks: ${!allowed.themes ? 'no' : allowed.mcpNotHere || subagent ? `not in this ${subagent ? 'part of the work' : 'consult'}` : 'yes'}`,
     `- Schedule work in your owner's threads: ${!allowed.schedules ? 'no' : allowed.mcpNotHere || subagent ? `not in this ${subagent ? 'part of the work' : 'consult'}` : 'yes'}`,

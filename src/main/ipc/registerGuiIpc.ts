@@ -21,6 +21,7 @@ import { BOTS_BROWSER_METHODS } from '../../shared/bots/personal/browser'
 import type { BotChatMessage } from '../../shared/bots/personal/chat'
 import { AUTOMATIONS_METHODS, type ScheduledRunEnded } from '../../shared/automations'
 import { SECRET_METHODS } from '../../shared/secretRequests'
+import { COMPUTER_USE_METHODS } from '../../shared/computerUse'
 import { SPACE_ARCHIVE_METHODS } from '../../shared/spaces/archive'
 /**
  * Phase 3 GUI IPC: protocol-backed agent-chat/project/thread/queue + Electron-local UI.
@@ -250,6 +251,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   ...BOTS_BROWSER_METHODS,
   ...AUTOMATIONS_METHODS,
   ...SECRET_METHODS,
+  ...COMPUTER_USE_METHODS,
   ...SPACE_ARCHIVE_METHODS,
   ...SPEECH_HOST_METHODS,
   ...BROWSER_ACCESS_METHODS,
@@ -2166,6 +2168,18 @@ export function registerGuiIpc(
     })
     broadcast('projects:updated', res.projects)
     return res.project
+  })
+  /** Settings → Computer use: the person picks a Cua Driver file; the page saves its path and the daemon checks it. */
+  registerHandler('computerUse:chooseDriver', async () => {
+    const win = getWindow()
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose Cua Driver',
+      buttonLabel: 'Use this driver',
+      properties: ['openFile'],
+      ...(process.platform === 'win32' ? { filters: [{ name: 'Programs', extensions: ['exe'] }] } : {})
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
   /** The icon file picker, starting in the project's folder. */
   registerHandler('projects:pickIcon', async (_e, defaultPath: unknown) => {

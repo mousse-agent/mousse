@@ -400,6 +400,8 @@ import {
 } from './nativeContext'
 import { isLocalOnlyThread, sideChatsOf, subagentDescendants } from '../../shared/threadLineage'
 import { isThreadExpired } from '../../shared/threadExpiry'
+import { ComputerUseDriver } from '../computerUse/ComputerUseDriver'
+import { computerUseAllowed } from '../run/mcp/appTools/computer'
 
 /** What an agent in a private thread is told when it asks for work on another computer. */
 const PRIVATE_THREAD_REMOTE_REFUSAL = 'This is a private thread: it stays on this computer, so it cannot start or continue subagents on other computers.'
@@ -1247,6 +1249,7 @@ export class OrchestratorService extends EventEmitter {
     this.runTimeLimits?.close()
     this.remoteLaunches?.close()
     this.remoteThreads?.close()
+    void this.computerDriver?.close()
     await this.lifecycle.waitForIdle(timeoutMs)
     for (const timer of this.persistTimers.values()) clearTimeout(timer)
     this.persistTimers.clear()
@@ -1968,6 +1971,39 @@ export class OrchestratorService extends EventEmitter {
 
   setBotSupervision(supervision: ((botId: string) => { name: string } | undefined) | null): void {
     this.botSupervision = supervision
+  }
+
+  /** Whether a personal bot holds "use the computer" now; null: no bots. A bot that can't be read holds nothing. */
+  private botComputer: ((botId: string) => boolean) | null = null
+
+  setBotComputer(holds: ((botId: string) => boolean) | null): void {
+    this.botComputer = holds
+  }
+
+  private computerDriver?: ComputerUseDriver
+
+  /** This profile's Cua Driver (Settings → Computer use), made on first use. */
+  computerUse(): ComputerUseDriver {
+    this.computerDriver ??= new ComputerUseDriver({
+      settings: () => {
+        const access = this.settingsStore.get().agentAccess
+        return { enabled: access.computerUse !== false, ...(access.computerDriver ? { driverPath: access.computerDriver } : {}) }
+      }
+    })
+    return this.computerDriver
+  }
+
+  /**
+   * Whether `threadId`'s agents may use the computer: every thread, except one a personal bot started (or a thread
+   * below one: a subagent, or a thread its agent started) while that bot lacks "use the computer". A thread the store
+   * doesn't hold was started by no bot; a store that fails to read, or a lineage that loops, allows nothing.
+   */
+  computerUseFor(threadId: string): boolean {
+    try {
+      return computerUseAllowed(threadId, (id) => this.threadStore?.getThread(id) ?? undefined, (botId) => this.botComputer?.(botId) === true)
+    } catch {
+      return false
+    }
   }
 
   /** A command an agent's tool call runs, noted for the running list: its process may outlive the call. */
@@ -4626,6 +4662,17 @@ export class OrchestratorService extends EventEmitter {
       awaitLiveRun: (threadId) => this.continuationGate(threadId),
       permissionModeFor: (runId) => this.runPermissionMode(runId),
       askApproval: (threadId, questions, options) => this.questions.requestAnswers(questions, threadId, options),
+      // Settings → Computer use, read at every listing and call.
+      computerUse: () => {
+        const driver = this.computerUse()
+        return {
+          enabled: () => this.settingsStore.get().agentAccess.computerUse !== false,
+          known: () => driver.known(),
+          allowedFor: (threadId) => this.computerUseFor(threadId),
+          listTools: () => driver.listTools(),
+          call: (name, args, signal) => driver.call(name, args, signal)
+        }
+      },
       // Settings → Labs → Profiler, read at every listing and call; the service's profiler is installation-wide.
       profiler: () => ({
         settings: this.settingsStore.get().experimental.profiler,

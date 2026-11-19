@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ComponentType, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react'
 import {
   Activity, Automations, Bell, BookOpen, BrainMemory, BrowserTab, ChevronRight, CircleGauge, Clock, Coins, Cpu, ExternalLink, FileText, Folder,
-  FolderSearch, GitPullRequest, Globe, Lock, MessagesSquare, Palette, Pause, Pencil, Play, Plug, Search, ShieldCheck, Sparkles, Terminal, Trash2, X, Zap
+  FolderSearch, GitPullRequest, Globe, Lock, MessagesSquare, Monitor, Palette, Pause, Pencil, Play, Plug, Search, ShieldCheck, Sparkles, Terminal, Trash2, X, Zap
 } from '../../lib/icons'
 import type { BotContextSummary, BotDetail, BotPermissionItem, BotReminderItem, BotRunItem, BotSummary, BotTurnUsageSummary } from '../../../shared/bots/personal/chat'
 import type { BotModelPick } from '../../../shared/bots/personal/definition'
@@ -92,6 +92,7 @@ export function permissionIcon(item: Pick<BotPermissionItem, 'title'>): Icon {
   if (/search the web/.test(title)) return Search
   if (/web pages/.test(title)) return Globe
   if (/browser/.test(title)) return BrowserTab
+  if (/the computer/.test(title)) return Monitor
   if (/run commands/.test(title)) return Terminal
   if (/threads/.test(title)) return MessagesSquare
   if (/search in files|look through folders/.test(title)) return FolderSearch

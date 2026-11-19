@@ -2,7 +2,7 @@ import { findListedModel } from '../../shared/modelChoice'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { applyAcrylicIntensity, persistLinuxAcrylicIntensity } from '../lib/acrylicIntensity'
 import { applyFrostedComposer, createFrostedComposerSaver } from '../lib/frostedComposer'
-import { Activity, ArrowLeft, Bot, FlaskConical, Keyboard, Laptop, MessagesSquare, Palette, Plug, Server, Settings, Sparkles, VolumeHigh } from '../lib/icons'
+import { Activity, ArrowLeft, Bot, FlaskConical, Keyboard, Laptop, MessagesSquare, Monitor, Palette, Plug, Server, Settings, Sparkles, VolumeHigh } from '../lib/icons'
 import { SettingsPageTitle } from './settings/SettingsRow'
 import { SettingsSearch } from './settings/SettingsSearch'
 import { DelayedLoader } from './ui/DelayedLoader'
@@ -25,6 +25,7 @@ import { accountSection, takePendingSettingsAnchor, takePendingSettingsSection }
 import { mousseIdAvailable, useMousseIdAvailable, useMousseIdStore } from '../stores/mousseIdStore'
 import { StorageSettings } from './StorageSettings'
 import { AgentsSettings } from './settings/AgentsSettings'
+import { ComputerUseSettings } from './settings/ComputerUseSettings'
 import { GeneralSettings } from './settings/GeneralSettings'
 import { LabsSettings } from './settings/LabsSettings'
 import { AppearanceSettings } from './settings/AppearanceSettings'
@@ -47,6 +48,7 @@ const SETTINGS_SECTIONS = [
   { id: 'providers', label: 'Providers', icon: Plug, hue: 4, group: 'Agents', keywords: ['api key', 'subscription', 'claude', 'codex', 'openai', 'login', 'sign in', 'account', 'cache', 'update', 'telemetry'] },
   { id: 'agents', label: 'Agents', icon: Bot, hue: 1, group: 'Agents', keywords: ['main agent', 'orchestrator', 'model', 'title', 'subagent', 'cli', 'headless', 'claude code', 'codex', 'context', 'compaction', 'tokens', 'agent access', 'answer approvals', 'bot', 'experimental', 'worktree', 'subagent worktree'] },
   { id: 'integrations', label: 'Skills & MCP', icon: Sparkles, hue: 6, group: 'Agents', keywords: ['skills', 'mcp', 'integrations', 'tools', 'web search', 'exa', 'parallel', 'servers', 'skill defaults'] },
+  { id: 'computer', label: 'Computer use', icon: Monitor, hue: 3, group: 'Agents', keywords: ['computer use', 'cua', 'cua driver', 'desktop', 'apps', 'screen', 'click', 'automation'] },
   { id: 'connections', label: 'Devices', icon: Laptop, hue: 2, group: 'This computer', keywords: ['devices', 'network', 'pair', 'remote', 'invitation', 'ssh'] },
   { id: 'storage', label: 'Storage', icon: Server, hue: 0, group: 'This computer', keywords: ['delete', 'retention', 'disk', 'worktree', 'usage', 'cleanup', 'browser', 'space'] },
   { id: 'activity', label: 'Activity', icon: Activity, hue: 5, group: 'This computer', keywords: ['heatmap', 'lines', 'tokens', 'history'] },
@@ -570,6 +572,8 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
           {activeSection === 'labs' && <LabsSettings settings={settings} onUpdate={updateSettings} />}
 
           {activeSection === 'agents' && <AgentsSettings settings={settings} options={options} updateSettings={updateSettings} />}
+
+          {activeSection === 'computer' && <ComputerUseSettings settings={settings} onUpdate={updateSettings} />}
 
           {activeSection === 'connections' && (
           <section id="connections" className="settings-section">
