@@ -4639,3 +4639,12 @@ it('E1 r2b an unsafe source name varies only by exact comparison', async () => {
   const t = await aloneAsk('allow', 'send', undefined, { name: '../source.pdf' })
   expect((await aloneNext(t, { ...t.args, name: 'safe.pdf' } as never)).action.status).toBe('open')
 })
+it.each([1, 2])('E1 r2b an older argument contract fails closed and is removed: version %s', async version => {
+  const t = await aloneAsk()
+  const row = f.store.get("SELECT key, value FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'", t.botId)!
+  const entry = JSON.parse(String(row.value))
+  entry.arguments.version = version
+  f.store.run('UPDATE bot_memory_state SET value = ? WHERE bot_id = ? AND key = ?', JSON.stringify(entry), t.botId, row.key)
+  expect((await aloneNext(t)).action.status).toBe('open')
+  expect(f.store.get('SELECT key FROM bot_memory_state WHERE bot_id = ? AND key = ?', t.botId, row.key)).toBeUndefined()
+})
