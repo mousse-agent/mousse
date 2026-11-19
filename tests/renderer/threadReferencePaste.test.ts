@@ -6,7 +6,7 @@
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { THREAD_REFERENCE_NOTE, extractChatReferences } from '../../src/shared/chatReferences'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -95,6 +95,9 @@ async function send(): Promise<string> {
   await settle()
   return (sendToThread.mock.calls.at(-1)?.[1] as { content: string }).content
 }
+
+// The chat's module graph is large: load it once, outside the tests' time limit, so a busy machine can't time out the first test.
+beforeAll(async () => { await import('../../src/renderer/components/OrchestratorChat') }, 120_000)
 
 beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
