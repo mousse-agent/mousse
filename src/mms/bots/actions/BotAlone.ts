@@ -19,13 +19,21 @@ function scanText(value: string): string {
   })
   return decoded.normalize('NFKC').replace(/[\p{M}\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '').replace(/[。｡‧]/g, '.')
 }
-/** Bounded labels keep long punctuation-free attachments linear. Keep URL punctuation inside its token. */
+/** Every scan and edge trim is linear, including text expanded by NFKC. */
 function addressTokens(value: string): string[] {
   const text = scanText(value).replace(/\s+/gu, ' ').replace(/ +([.@:/\\]) */gu, '$1')
-  return [...new Set(text.split(' ').map(token => {
-    const unwrapped = token.replace(/^[([{'"<]+/u, '').replace(/[.,!?;)\]}'">]+$/u, '')
-    return unwrapped.endsWith(':') && isIP(unwrapped) === 6 ? unwrapped : unwrapped.replace(/:+$/u, '')
-  }).filter(token => !ordinaryNumber(token) && /[:@\\]|[\p{L}\p{N}_-]{1,63}\.[\p{L}\p{N}_-]{1,63}/iu.test(token)))]
+  const tokens = new Set<string>()
+  for (const word of text.split(' ')) {
+    let start = 0, end = word.length
+    while (end > 0 && ".,!?;)]}'\">".includes(word[end - 1]!)) end--
+    while (start < end && "([{'\"<".includes(word[start]!)) start++
+    // A trailing colon is prose punctuation, except at the end of an IPv6 address.
+    if (word[end - 1] === ':' && isIP(word.slice(start, end)) !== 6) while (end > start && word[end - 1] === ':') end--
+    const token = word.slice(start, end)
+    // Inspect before removing opening quotes so a code fragment such as ".com" is also frozen.
+    if (!ordinaryNumber(token) && /[:@\\]|\/\/|\S\.\S/u.test(word.slice(0, end))) tokens.add(token)
+  }
+  return [...tokens]
 }
 /** Bare report numbers are not destinations; four-part dotted IPv4 never matches these forms. */
 function ordinaryNumber(token: string): boolean {
