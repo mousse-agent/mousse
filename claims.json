@@ -48,18 +48,16 @@
       "expiresAt": "2026-11-19T08:18:05.846Z"
     },
     {
-      "task": "bot-done-list-drops-archived-and-old",
-      "session": "Animatrix-5ccb01",
+      "task": "bot-faces-livelier",
+      "session": "Animatrix-080e24",
       "machine": "Animatrix",
-      "branch": "bot-done-list-drops-archived-and-old",
+      "branch": "bot-faces-livelier",
       "paths": [
-        "src/mms/bots/launchedThreads.ts",
-        "src/renderer/components/bots/BotPresence.tsx",
-        "src/renderer/components/bots/botChatShape.ts",
-        "src/shared/bots/personal/chat.ts"
+        "src/renderer/components/bots/face",
+        "src/shared/bots/personal/look.ts"
       ],
-      "claimedAt": "2026-11-18T11:57:31.437Z",
-      "expiresAt": "2026-11-18T13:57:31.437Z"
+      "claimedAt": "2026-11-19T14:16:59.063Z",
+      "expiresAt": "2026-11-19T16:16:59.063Z"
     },
     {
       "task": "bot-live-trial-fixes",
