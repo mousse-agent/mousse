@@ -15,6 +15,22 @@
       "expiresAt": "2026-11-19T08:18:05.846Z"
     },
     {
+      "task": "bot-browser-thread-bar",
+      "session": "Animatrix-c1a411",
+      "machine": "Animatrix",
+      "branch": "bot-browser-thread-bar",
+      "paths": [
+        "src/renderer/components/browser/WatchedBrowserPane.tsx",
+        "src/renderer/components/browser/watchedBrowser.css",
+        "src/renderer/components/bots/BotBrowser.tsx",
+        "src/renderer/components/bots/BotChatView.tsx",
+        "src/renderer/components/bots/botBrowser.css",
+        "src/renderer/stores/botBrowserStore.ts"
+      ],
+      "claimedAt": "2026-11-19T11:03:43.783Z",
+      "expiresAt": "2026-11-19T13:03:43.783Z"
+    },
+    {
       "task": "bot-done-list-drops-archived-and-old",
       "session": "Animatrix-5ccb01",
       "machine": "Animatrix",
