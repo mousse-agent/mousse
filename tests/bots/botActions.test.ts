@@ -4852,7 +4852,7 @@ it.each([
  ['$1,234.56', '$2,234.56'], ['€12.50', '€13.50'], ['12.50€', '13.50€'], ['3.5%', '3.6%'],
  ['Up 3.5%.', 'Up 3.6%.'], ['12.5k users', '13.5k users'], ['p95 1.2s', 'p95 1.3s'],
  ['1.2M', '2.3B'], ['1.2ms', '2.3ms'], ['1.2h', '2.3d'], ['1.2x', '2.3x'],
- ['2026-11-18T10:30', '2026-11-19T11:31:02Z'], ['3:1', '12:2'], ['07:00-08:00', '08:00-09:00'], ['Tickets:4','Tickets:5']
+ ['2026-11-18T10:30', '2026-11-19T11:31:02Z'], ['3:1', '12:2'], ['07:00-08:00', '08:00-09:00'], ['Tickets:4','Tickets:5'], ['1,234.56','2,345.67'], ['USD 12.50','USD 13.50'], ['+3.5','-3.6'], ['(3.5)','(3.6)'], ['4/5','3/4'], ['10:30 UTC','10:31 UTC'], ['2026/11/18','2026/11/19'], ['19.11.2026','20.11.2026']
 ])('E1 r4 report numbers vary both ways: %s', async (before, after) => {
  for (const [source, body] of [[before,after],[after,before]]) {
   const t = await aloneAsk('allow', 'send', source)
@@ -4885,4 +4885,12 @@ it('E1 r4 expanded text above 64k asks without scanning', async () => {
  const t=await aloneAsk('allow','send','A small message')
  expect((await aloneNext(t,{...t.args,body:'ﷺ'.repeat(255000)})).action.status).toBe('open')
  expect(t.calls).toHaveLength(1)
+})
+
+it('E1 r4 dotted versions remain address-like in both directions', async () => {
+ for(const [source, body] of [['v1.2.3','v1.2.4'],['v1.2.4','v1.2.3']]) {
+  const t=await aloneAsk('allow','send',source)
+  expect((await aloneNext(t,{...t.args,body})).action.status).toBe('open')
+  f.close()
+ }
 })

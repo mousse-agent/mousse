@@ -75,3 +75,8 @@ it.each(['ﷺ', '㌖'])('E1 r4 refuses expanded text before scanning: %s', char 
  expect(()=>argumentContract({body:char.repeat(255000)},'test-key')).toThrow(/too long/)
  expect(performance.now()-start).toBeLessThan(200)
 })
+
+it('E1 r4 the expanded-text boundary is 64000 characters', () => {
+ expect(argumentContract({body:'a'.repeat(64000)},'test-key').tokens.body).toEqual([])
+ expect(()=>argumentContract({body:'a'.repeat(64001)},'test-key')).toThrow(/too long/)
+})
