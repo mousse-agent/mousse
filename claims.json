@@ -164,19 +164,7 @@
         "src/mms/netEngine"
       ],
       "claimedAt": "2026-11-18T12:37:39.165Z",
-      "expiresAt": "2026-11-19T11:21:56.716Z"
-    },
-    {
-      "task": "net-engine-phase0",
-      "session": "Animatrix-f290b5",
-      "machine": "Animatrix",
-      "branch": "net-engine-phase0",
-      "paths": [
-        "native/net",
-        "docs/net/engine"
-      ],
-      "claimedAt": "2026-11-18T06:04:59.558Z",
-      "expiresAt": "2026-11-18T08:04:59.558Z"
+      "expiresAt": "2026-11-19T12:07:12.196Z"
     },
     {
       "task": "plus-legacy-toggle",
