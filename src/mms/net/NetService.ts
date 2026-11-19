@@ -94,7 +94,7 @@ import type {
   PeerRef,
   TunnelLink
 } from './contracts'
-import { v1Caller } from './contracts'
+import { isEngineCaller, v1Caller } from './contracts'
 import { checkNodePolicy } from './checkNodePolicy'
 import type { SpaceJoinAdmissionPort } from './enrollment/quarantine'
 import { systemClock } from './clock'
@@ -727,7 +727,9 @@ export class NetService {
         authorize: (_params, context) => {
           if (policy.isBlocked(context.caller.node)) throw new NetError('forbidden')
         },
-        handle: async (_params, context) => this.phoneEndpoints(context.carrier, context.caller)
+        // Phone routes are for v1 phones only: an engine pairing is told of none.
+        handle: async (_params, context) =>
+          isEngineCaller(context.caller) ? { endpoints: [] } : this.phoneEndpoints(context.carrier, context.caller)
       })
       rpc.register({
         method: PHONE_WEBRTC_OFFER_METHOD,
