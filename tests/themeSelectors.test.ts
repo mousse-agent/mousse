@@ -70,7 +70,7 @@ const DECISIONS: Record<string, string> = {
   'a bot\'s ask in its chat': 'src/renderer/components/bots/BotAskReplies.tsx',
   'a bot owner\'s permission decision': 'src/renderer/components/chats/BotPermissionDecision.tsx',
   'browser access for agents (chat)': 'src/renderer/components/chats/ChatBrowserAccess.tsx',
-  'browser access for agents (browser panel)': 'src/renderer/components/BrowserPanel.tsx',
+  'browser access for agents (browser panel)': 'src/renderer/components/browser/BrowserToolbarParts.tsx',
   'a device enrollment request': 'src/renderer/components/EnrollmentRequestPrompt.tsx',
   'a phone enrollment left in Settings': 'src/renderer/components/MousseIdSection.tsx',
   'an editor access request': 'src/renderer/components/EditorAskPrompt.tsx',
