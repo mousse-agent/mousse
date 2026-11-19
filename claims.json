@@ -15,6 +15,22 @@
       "expiresAt": "2026-11-19T08:18:05.846Z"
     },
     {
+      "task": "bot-chat-faster-start",
+      "session": "Animatrix-917c6d",
+      "machine": "Animatrix",
+      "branch": "bot-chat-faster-start",
+      "paths": [
+        "src/mms/diagnostics/turnTiming.ts",
+        "src/mms/bots/activation/BotEngine.ts",
+        "src/mms/bots/chat/BotChatService.ts",
+        "src/mms/orchestrator/OrchestratorService.ts",
+        "src/mms/integrations/skills/SkillsRegistry.ts",
+        "src/mms/run/mcp/appTools/assemble.ts"
+      ],
+      "claimedAt": "2026-11-19T10:01:59.998Z",
+      "expiresAt": "2026-11-19T12:01:59.998Z"
+    },
+    {
       "task": "bot-done-list-drops-archived-and-old",
       "session": "Animatrix-5ccb01",
       "machine": "Animatrix",
@@ -72,19 +88,6 @@
       ],
       "claimedAt": "2026-11-18T15:50:24.692Z",
       "expiresAt": "2026-11-18T20:51:30.348Z"
-    },
-    {
-      "task": "bot-phase-two-followups",
-      "session": "agibook-f42da1",
-      "machine": "agibook",
-      "branch": "bot-phase-two-followups",
-      "paths": [
-        "tests/bots",
-        "docs/bots.md",
-        "docs/plans/bot-always-on.md"
-      ],
-      "claimedAt": "2026-11-18T07:11:07.367Z",
-      "expiresAt": "2026-11-18T09:11:07.367Z"
     },
     {
       "task": "bot-secret-fetch",
@@ -145,17 +148,6 @@
       "expiresAt": "2026-11-18T22:19:26.984Z"
     },
     {
-      "task": "mousse/owner-request-in-a-personal-bot-chat",
-      "session": "Animatrix-71802f",
-      "machine": "Animatrix",
-      "branch": "mousse/owner-request-in-a-personal-bot-chat",
-      "paths": [
-        "src/renderer/components/bots/BotChatView.tsx"
-      ],
-      "claimedAt": "2026-11-18T07:10:27.155Z",
-      "expiresAt": "2026-11-18T09:10:27.155Z"
-    },
-    {
       "task": "net-engine-1a",
       "session": "Animatrix-880838",
       "machine": "Animatrix",
@@ -180,17 +172,6 @@
       ],
       "claimedAt": "2026-11-18T22:01:23.773Z",
       "expiresAt": "2026-11-19T00:01:23.773Z"
-    },
-    {
-      "task": "thread-journal-latest-index",
-      "session": "Animatrix-abde56",
-      "machine": "Animatrix",
-      "branch": "thread-journal-latest-index",
-      "paths": [
-        "src/mms/data/ThreadJournal.ts"
-      ],
-      "claimedAt": "2026-11-18T07:21:34.144Z",
-      "expiresAt": "2026-11-18T09:21:34.144Z"
     },
     {
       "task": "usage-history",
