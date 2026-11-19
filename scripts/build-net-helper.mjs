@@ -7,7 +7,9 @@
 //   node scripts/build-net-helper.mjs --require  the same, but fail when it cannot be built here (packaging)
 //
 // The source is a checkout of exactly that commit in `native/net-helper/source`, fetched from MOUSSE_NET_REPO (a
-// URL or a local repository; mousse-net on GitHub by default), never a working tree. It is built with `--locked`;
+// URL or a local repository; mousse-net on GitHub by default), never a working tree. A source checkout with changes
+// or untracked files is left alone and the build stops: moving it to the pinned commit would lose that work. Its
+// remotes and ignored files are not touched. It is built with `--locked`;
 // CARGO_TARGET_DIR is honoured. On Windows the C runtime is linked in, so the helper runs on a computer without the
 // Visual C++ redistributable.
 import { spawnSync } from 'node:child_process'
@@ -49,29 +51,38 @@ const run = (command, args, options = {}) =>
 const git = (...args) => run('git', ['-C', source, ...args])
 
 if (run('git', ['--version']).status !== 0) stop('git was not found')
+
+// The pinned commit, checked out alone: fetched by id, or with every branch when the repository does not serve ids.
+// A checkout someone works in (changes, untracked files such as signed check results) stops the build instead.
+const fresh = !existsSync(join(source, '.git'))
+if (fresh) {
+  mkdirSync(source, { recursive: true })
+  if (run('git', ['init', '-q', source]).status !== 0) stop(`could not create ${source}`)
+} else {
+  const status = git('status', '--porcelain', '--untracked-files=all')
+  if (status.status !== 0) stop(`${source} is not a readable git checkout`)
+  const changed = status.stdout.split(/\r?\n/).filter(Boolean)
+  if (changed.length > 0)
+    stop(
+      `${source} has ${changed.length} changed or untracked file(s) (${changed.slice(0, 3).map((line) => line.slice(3)).join(', ')}${changed.length > 3 ? ', ...' : ''}); ` +
+        'commit or move them, or point the build at another folder, before it checks out the pinned commit'
+    )
+}
+if (git('cat-file', '-e', `${commit}^{commit}`).status !== 0) {
+  const byId = git('fetch', '-q', ...(fresh ? ['--depth', '1'] : []), repo, commit)
+  if (byId.status !== 0 && git('fetch', '-q', repo, '+refs/heads/*:refs/net-helper-build/*').status !== 0)
+    stop(`could not fetch ${repo}`)
+  if (git('cat-file', '-e', `${commit}^{commit}`).status !== 0) stop(`${repo} has no commit ${commit}`)
+}
+if (git('checkout', '-q', '--detach', commit).status !== 0) stop(`could not check out ${commit}`)
+if (git('rev-parse', 'HEAD').stdout.trim() !== commit) stop(`the source is not at ${commit}`)
+
 if (run('cargo', ['--version']).status !== 0) stop('Rust was not found (install it from https://rustup.rs)')
 if (process.platform === 'win32') {
   const host = /^host: (.+)$/m.exec(run('rustc', ['-vV']).stdout ?? '')?.[1]?.trim() ?? ''
   if (!host.endsWith('-msvc'))
     stop(`the Rust toolchain targets ${host || 'an unknown host'}; build with an MSVC one (RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc)`)
 }
-
-// The pinned commit, checked out alone: fetched by id, or with every branch when the repository does not serve ids.
-if (!existsSync(join(source, '.git'))) {
-  mkdirSync(source, { recursive: true })
-  if (run('git', ['init', '-q', source]).status !== 0) stop(`could not create ${source}`)
-}
-git('remote', 'remove', 'origin')
-git('remote', 'add', 'origin', repo)
-if (git('cat-file', '-e', `${commit}^{commit}`).status !== 0) {
-  const byId = git('fetch', '-q', '--depth', '1', 'origin', commit)
-  if (byId.status !== 0 && git('fetch', '-q', 'origin', '+refs/heads/*:refs/remotes/origin/*').status !== 0)
-    stop(`could not fetch ${repo}`)
-  if (git('cat-file', '-e', `${commit}^{commit}`).status !== 0) stop(`${repo} has no commit ${commit}`)
-}
-if (git('checkout', '-q', '--force', '--detach', commit).status !== 0) stop(`could not check out ${commit}`)
-git('clean', '-q', '-fdx')
-if (git('rev-parse', 'HEAD').stdout.trim() !== commit) stop(`the source is not at ${commit}`)
 
 const env = { ...process.env, CARGO_TARGET_DIR: targetDir }
 if (process.platform === 'win32') {
