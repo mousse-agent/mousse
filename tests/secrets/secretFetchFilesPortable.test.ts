@@ -51,12 +51,11 @@ vi.mock('node:child_process', async (importOriginal) => {
       const child = { argv: ['node', ...args.slice(2)], exitCode: 0, platform: process.platform }
       try {
         runInNewContext(args[1], {
-          process: {
-            ...child,
+          process: Object.assign(child, {
             chdir: (path: string) => {
               heldDirectory = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY)
             }
-          },
+          }),
           require: () => ({
             ...fs,
             statSync: (path: string, options: any) =>
