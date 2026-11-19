@@ -4918,7 +4918,7 @@ it('E1 r5 a declined retry prepends its outcome and preserves every report line'
  expect(reports[0]!.text).toBe("The retry didn't go out.\n\n"+report)
 })
 
-it('E1 r5 long inline content cannot supply consent and explains why', async () => {
+it('E1 r5 a cut stored review of long inline content cannot supply consent and explains why', async () => {
  const t=await scheduledCall(true,1)
  Object.assign(t.args,{content:'A'.repeat(32001)})
  t.descriptor.inputSchema.properties.to={type:'array'} as never
@@ -4926,6 +4926,8 @@ it('E1 r5 long inline content cannot supply consent and explains why', async () 
  const source=f.bots.actions.forWork(t.id)!
  await f.bots.actions.answer({actionId:source.id,digest:source.args_digest,answer:'send'}); await flush()
  expect(t.calls).toHaveLength(1)
+ const {maskedActionData}=await import('../../src/mms/bots/actions/BotActions')
+ f.store.run('UPDATE bot_actions SET args_json = ? WHERE id = ?',JSON.stringify(maskedActionData(t.args)),source.id)
  expect(f.bots.alone.prepare(t.botId,'long-content',{ask:'let_alone',scheduleId:t.schedule.scheduleId,serverId:'mail',tool:'send'})).toBe('This sent call’s content was too long to check, so it asks each time.')
  expect(f.store.all("SELECT key FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone-ask:*'",t.botId)).toEqual([])
 })
