@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { inCheckRun } from '../../shared/privacy/checkRun'
 import { join } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 
@@ -43,9 +44,11 @@ export interface LatestVersionCacheOptions {
 
 const VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/
 
-/** Tests never reach the network; they inject `fetchImpl`. */
+/** Tests and owner checks never reach the network; tests inject `fetchImpl`. */
 const defaultFetch: typeof fetch = (...args) =>
-  process.env.NODE_ENV === 'test' ? Promise.reject(new Error('The registry is not reachable from tests.')) : globalThis.fetch(...args)
+  process.env.NODE_ENV === 'test' || inCheckRun()
+    ? Promise.reject(new Error('The registry is not reachable from tests or checks.'))
+    : globalThis.fetch(...args)
 
 const defaultBrewInfo: BrewInfo = (brew, name, signal) =>
   process.env.NODE_ENV === 'test'

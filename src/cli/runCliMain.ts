@@ -118,7 +118,12 @@ export async function runCliMain(argv: string[] = process.argv.slice(2)): Promis
         await runNet(args)
         break
       case 'net-engine':
-        await runNetEngine(args)
+        // `net-engine ssh` with nothing after it is what Add over SSH runs on this computer (1b M10, served by
+        // `netEngine.ssh.serve`); every other `net-engine` command is the M12 command line.
+        if (args.subcommand === 'ssh' && !args.positional.length) {
+          const { runNetEngineCommand } = await import('./commands/netEngineSsh')
+          await runNetEngineCommand(args)
+        } else await runNetEngine(args)
         break
       case 'bridge':
         if (isBridgeHubCommand(args)) {

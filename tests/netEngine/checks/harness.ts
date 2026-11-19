@@ -13,8 +13,16 @@
  * (`netEngine.join`), the owner's window says Yes, and the apps finish both directions themselves.
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  existsSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
+import { Socket } from 'node:net'
 import { join } from 'node:path'
 import { vi } from 'vitest'
 import { MousseMainService } from '../../../src/mms/MousseMainService'
@@ -32,6 +40,28 @@ export type { Crossed } from './tap'
 
 /** Whether the checks run the real helper (`MOUSSE_NET_HELPER`) instead of the fake one. */
 export const REAL_HELPER = !!process.env.MOUSSE_NET_HELPER?.trim()
+
+/**
+ * The route a 1b routes check runs over (`--route`, 1b §14): each computer is given only that route, and every
+ * connection must come up on it (`conn.up.route`), else the run fails with `route_mismatch`. Unset: 1a's checks.
+ */
+export const CHECK_ROUTE = readCheckRoute()
+/** The class `tcp` is mapped to for this run (`MOUSSE_NET_ENGINE_CHECK_CLASS`): tailnet, then public. */
+export const CHECK_CLASS: 'tailnet' | 'public' =
+  process.env.MOUSSE_NET_ENGINE_CHECK_CLASS === 'public' ? 'public' : 'tailnet'
+
+function readCheckRoute(): 'tcp' | 'ws' | 'ssh' | undefined {
+  const value = process.env.MOUSSE_NET_ENGINE_CHECK_ROUTE?.trim()
+  return value === 'tcp' || value === 'ws' || value === 'ssh' ? value : undefined
+}
+
+/** The route kind and class every connection of a routes run must report. */
+export function expectedRoute(): { kind: string; class: string } | undefined {
+  if (CHECK_ROUTE === 'tcp') return { kind: 'tcp', class: CHECK_CLASS }
+  if (CHECK_ROUTE === 'ws') return { kind: 'ws', class: 'tunnel' }
+  if (CHECK_ROUTE === 'ssh') return { kind: 'ssh', class: 'ssh' }
+  return undefined
+}
 
 export const DAY = 24 * 60 * 60_000
 export const eventually = (check: () => unknown, timeout = 15_000) => vi.waitFor(check, { timeout })
@@ -123,6 +153,68 @@ export class Fabric {
   /** Every engine message each app sent its helper; `decide` may drop one. */
   private readonly tap: Tap = { crossed: [] }
   private readonly cleanups: Array<() => unknown> = []
+  /** In a routes run, each computer taps Use on offered addresses by itself; a check of Use itself turns it off. */
+  autoUse = true
+  /** In a routes run over ssh, each fake computer's SSH route id, by its identity. */
+  private readonly sshRouteOf = new Map<string, string>()
+  /** The computers made so far (each fake one gets its own route in a routes run). */
+  private made = 0
+  /** Every `conn.up` route a helper reported in a routes run, by the app it went to. */
+  readonly routesSeen: Array<{ to: string; route: unknown }> = []
+
+  constructor() {
+    const expected = expectedRoute()
+    // Every connection a helper reports goes to <out>/conn-up.jsonl, one JSON object per line: the kit judges the
+    // route case from it (1b §14).
+    const out = process.env.MOUSSE_NET_ENGINE_CHECK_OUT
+    this.tap.watch = (message, to) => {
+      if (message.ev !== 'conn.up') return
+      if (out) appendFileSync(join(out, 'conn-up.jsonl'), `${JSON.stringify({ ...message, to })}\n`)
+      if (!expected) return
+      this.routesSeen.push({ to, route: message.route })
+      const route = message.route as { kind?: unknown; class?: unknown } | undefined
+      if (route?.kind !== expected.kind || route?.class !== expected.class) record('route_mismatch')
+    }
+    if (!expected) return
+    if (!REAL_HELPER) {
+      // A 1.1 fake: routes with approvals, and the class map the debug helper reads.
+      this.network.minor = 1
+      this.network.classMap = {}
+    }
+  }
+
+  /**
+   * In a routes run, the fake helper of computer `n` advertises only the route under test, and listens on its
+   * loopback port besides (as a 1.1 helper with nothing selected does, 1b §1.5).
+   */
+  private routeFor(identity: string, n: number): void {
+    if (!CHECK_ROUTE || REAL_HELPER) return
+    const port = 47100 + n
+    const route =
+      CHECK_ROUTE === 'tcp'
+        ? `tcp://100.101.0.${n}:${port}`
+        : CHECK_ROUTE === 'ws'
+          ? `wss://tunnel-${n}.check.invalid/mousse-net/1`
+          : undefined
+    this.network.ports.set(identity, port)
+    this.network.listening.set(identity, [`tcp://127.0.0.1:${port}`])
+    if (CHECK_ROUTE === 'ssh') {
+      // Its own SSH test server, reached by the route `ssh-<n>` (1b §14: one SSH route per direction).
+      this.network.sshServers.set(`host-${n}`, { owns: (id) => id === identity, serve: async () => ({}) })
+      this.network.sshRoutes.set(`ssh-${n}`, { hostname: `host-${n}`, user: 'me', pinned: true })
+      this.sshRouteOf.set(identity, `ssh-${n}`)
+    }
+    if (!route) return
+    this.network.routes.set(identity, [route])
+    if (CHECK_ROUTE === 'tcp') this.network.classMap![route] = CHECK_CLASS
+    this.network.reach.set(identity, {
+      lan: false,
+      tailnet: CHECK_ROUTE === 'tcp',
+      public: [],
+      tunnels: CHECK_ROUTE === 'ws' ? [route] : [],
+      port
+    })
+  }
 
   get crossed(): Crossed[] {
     return this.tap.crossed
@@ -160,6 +252,17 @@ export class Fabric {
     const computer = {} as Computer
     if (REAL_HELPER) {
       process.env.MOUSSE_NET_ENGINE_INSECURE_FILE_KEY = '1'
+      // Over tcp on one computer, each helper's loopback port stands for the class under test: the debug helper
+      // and the app read the same map (`<port>=<class>`, 1b §14).
+      if (CHECK_ROUTE === 'tcp' && !process.env.MOUSSE_NET_ENGINE_CHECK_ROLE) {
+        computer.port = 47300 + ++this.made
+        process.env.MOUSSE_NET_TEST_CLASS_MAP = [
+          process.env.MOUSSE_NET_TEST_CLASS_MAP,
+          `${computer.port}=${CHECK_CLASS}`
+        ]
+          .filter(Boolean)
+          .join(',')
+      }
       // A cross-machine cell's computers listen on every interface; the others only on loopback.
       process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP ||= process.env.MOUSSE_NET_ENGINE_CHECK_ROLE
         ? '0.0.0.0'
@@ -172,9 +275,11 @@ export class Fabric {
         return { ...launched, pipe: tapPipe(launched.pipe, () => endpoint, this.tap) }
       }
     } else {
+      const identity = Buffer.from(`endpoint-${name}`).toString('hex')
+      this.routeFor(identity, ++this.made)
       mms.netEngine.launcher = async () => {
         // Hex, as a real identity is: tickets carry it as bytes.
-        const fake = this.network.helper(Buffer.from(`endpoint-${name}`).toString('hex'))
+        const fake = this.network.helper(identity)
         computer.fake = fake
         kill = () => fake.kill()
         const exited = new Promise<{ code: number; signal: null; stderr: string }>((resolve) =>
@@ -184,6 +289,23 @@ export class Fabric {
           pipe: tapPipe(fake.pipe, () => endpoint, this.tap),
           exited,
           kill: () => fake.kill()
+        }
+      }
+      // A profile an SSH add makes on this computer gets its own fake helper.
+      let made = 0
+      mms.netEngineLauncher = (engine) => {
+        if (engine === mms.netEngine || engine.launcher) return
+        const own = Buffer.from(`endpoint-${name}-profile-${++made}`).toString('hex')
+        engine.displayName = `${name} computer`
+        engine.launcher = async () => {
+          const fake = this.network.helper(own)
+          return {
+            pipe: tapPipe(fake.pipe, () => own, this.tap),
+            exited: new Promise((resolve) =>
+              fake.pipe.onClose(() => resolve({ code: 0, signal: null, stderr: '' }))
+            ),
+            kill: () => fake.kill()
+          }
         }
       }
     }
@@ -205,7 +327,7 @@ export class Fabric {
       capabilities: new Set(local ? [NET_LOCAL_CAPABILITY] : []),
       binding: { profileId: mms.profileId, epoch: 1 }
     })
-    return Object.assign(computer, {
+    Object.assign(computer, {
       name,
       mms,
       endpoint,
@@ -217,9 +339,12 @@ export class Fabric {
         dispatchMethod(
           { mms, connection: window(local), globalSequence: () => mms.protocolSequence() },
           method,
-          params
+          routedParams(mms, method, params)
         )
     })
+    // A routes run: each owner taps Use on what its pairings offer, as its window would (unless a check says no).
+    if (CHECK_ROUTE && this.autoUse) this.cleanups.push(useOffered(computer))
+    return computer
   }
 
   /**
@@ -230,6 +355,16 @@ export class Fabric {
     owner: Computer,
     caller: Computer
   ): Promise<{ callerOnOwner: NodeId; ownerOnCaller: NodeId; grant: string }> {
+    // Over ssh, each side has the other's SSH route as its owner address, set as the kit sets it (1b §14).
+    if (CHECK_ROUTE === 'ssh' && !REAL_HELPER)
+      for (const [from, to] of [
+        [caller, owner],
+        [owner, caller]
+      ] as const)
+        await from.engine.request('peer.addresses.set', {
+          identity: to.endpoint,
+          routes: [{ route_id: this.sshRouteOf.get(to.endpoint), selector: 'a'.repeat(26), shell: 'sh' }]
+        })
     const invite = await owner.dispatch('netEngine.invite', {}, true)
     const stopApproving = approveAll(owner)
     let joined: { node: NodeId }
@@ -268,6 +403,26 @@ export class Fabric {
     const before = computer.engine
     computer.kill()
     computer.engine = await running(computer.mms, before)
+  }
+
+  /**
+   * `computer` answers SSH at `hostname` (1b §3.7's test server, in process): its `mousse-cli net-engine ssh` is
+   * its daemon's `netEngine.ssh.serve`, and a pipe over that route reaches its default profile's helper. Every
+   * request it answers is kept.
+   */
+  sshServer(hostname: string, computer: Computer): Array<Record<string, unknown>> {
+    const served: Array<Record<string, unknown>> = []
+    this.network.sshServers.set(hostname, {
+      // Its default profile, and every profile an SSH add made there.
+      owns: (identity) =>
+        identity === computer.endpoint ||
+        identity.startsWith(Buffer.from(`endpoint-${computer.name}-profile-`).toString('hex')),
+      serve: async (request) => {
+        served.push(request)
+        return computer.mms.sshRemote()!.serve(request)
+      }
+    })
+    return served
   }
 
   shells(owner: Computer, onSpawn?: (shell: Spawned) => void): Spawned[] {
@@ -317,6 +472,92 @@ export function approveAll(owner: Computer): () => void {
           .dispatch('netEngine.approve', { request: approval.request, yes: true }, true)
           .catch(() => undefined)
       }
+  }, 25)
+  return () => clearInterval(timer)
+}
+
+/**
+ * A window's join in a routes run: unless the check chose what to share, the joiner ticks every route it may share,
+ * so the reverse direction runs over the route under test too (1b §14).
+ */
+function routedParams(mms: MousseMainService, method: string, params: unknown): unknown {
+  if (!CHECK_ROUTE || method !== 'netEngine.join' || !params || typeof params !== 'object') return params
+  if ('share' in params) return params
+  const share = mms.netEngine.shareable()
+  return share.length ? { ...params, share } : params
+}
+
+let guarded = false
+
+/** An attempt outside the cell: recorded, and where it went kept beside the reason (`egress`). */
+function denied(where: string): void {
+  record('egress_attempted')
+  const out = process.env.MOUSSE_NET_ENGINE_CHECK_OUT
+  if (out) appendFileSync(join(out, 'egress'), `${where}\n`)
+}
+
+/**
+ * The routes checks' egress guard in this process (1b §14, as the kit's preload does for the app): a request to
+ * Plus (`MOUSSE_ID_ORIGIN`, pointed at a name that never resolves when unset) records `plus_contacted`; a connection
+ * to any address but loopback records `egress_attempted` and fails before a packet leaves.
+ */
+export function guardEgress(): void {
+  if (guarded) return
+  guarded = true
+  // As under the kit: the app skips its background lookups (the daily agent version check, model lists).
+  process.env.MOUSSE_CHECK_EGRESS_GUARD ||= 'in-process'
+  process.env.MOUSSE_ID_ORIGIN ||= 'https://plus.check.invalid'
+  const plus = new URL(process.env.MOUSSE_ID_ORIGIN).host
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url)
+    if (url.host === plus) record('plus_contacted')
+    else if (!/^(localhost|127\.|\[::1\])/.test(url.host)) denied(url.host)
+    else return realFetch(input, init)
+    throw new Error('egress denied by the check')
+  }) as typeof fetch
+  const connect = Socket.prototype.connect as (...args: unknown[]) => Socket
+  Socket.prototype.connect = function (this: Socket, ...args: unknown[]) {
+    const first = args[0] as { host?: unknown; path?: unknown } | unknown[] | number | string
+    const options = (Array.isArray(first) ? first[0] : first) as
+      | { host?: unknown; path?: unknown }
+      | number
+      | string
+    const host =
+      typeof options === 'object' && options
+        ? options.path
+          ? 'pipe'
+          : String(options.host ?? 'localhost')
+        : typeof options === 'number'
+          ? String(args[1] ?? 'localhost')
+          : 'pipe'
+    if (!['pipe', 'localhost', '::1'].includes(host) && !host.startsWith('127.')) {
+      denied(host)
+      process.nextTick(() => this.destroy(new Error('egress denied by the check')))
+      return this
+    }
+    return connect.apply(this, args)
+  } as typeof Socket.prototype.connect
+}
+
+/** Taps Use on every "Addresses <B> offered" on `owner`, as its window would, until stopped. */
+export function useOffered(owner: Pick<Computer, 'mms' | 'dispatch'>): () => void {
+  const used = new Set<string>()
+  const timer = setInterval(() => {
+    let devices: Array<{ node: string; offered?: string[] }> = []
+    try {
+      devices = owner.mms.netEngine.status().devices
+    } catch {
+      return
+    }
+    for (const device of devices) {
+      const key = `${device.node} ${device.offered?.join(' ')}`
+      if (!device.offered?.length || used.has(key)) continue
+      used.add(key)
+      void owner
+        .dispatch('netEngine.address.use', { node: device.node }, true)
+        .catch(() => used.delete(key))
+    }
   }, 25)
   return () => clearInterval(timer)
 }

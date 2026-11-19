@@ -12,14 +12,32 @@ import { NetError } from '../../shared/net/errors'
 import type { BlobId, NodeCapability, NodeId, StoredRecord, StreamId } from '../../shared/net'
 import type { BridgeNodePolicy } from '../../shared/net/local'
 import { ENGINE_OWNER_METHODS } from '../../shared/netEngine/allowlist'
-import type { NetEngineDevice, NetEngineStatus } from '../../shared/netEngine/local'
+import type {
+  NetEngineDevice,
+  NetEngineJoinPreview,
+  NetEngineReach,
+  NetEngineStatus
+} from '../../shared/netEngine/local'
+import {
+  ownerRoute,
+  parseRoute,
+  routeClass,
+  routeText,
+  ticketDestinations
+} from '../../shared/netEngine/routes'
 import type { BridgeProfileService } from '../bridge/BridgeProfileService'
 import type { EngineDirectoryPort, PeerRow } from '../bridge/peers'
 import { checkNodePolicy } from '../net/checkNodePolicy'
 import type { EngineCaller, RpcMethod } from '../net/contracts'
 import type { NetRuntime, NetService } from '../net/NetService'
 import type { NodePolicy, NodePolicyChange } from '../net/store/nodePolicy'
-import { engineControl, engineControlProblems, engineLimitProblems, engineLimits } from './limits'
+import {
+  engineControl,
+  engineControlProblems,
+  engineLimitProblems,
+  engineLimits,
+  packagedBuild
+} from './limits'
 import { EngineSessions } from './sessions'
 import type { BridgeClient, EngineClient } from './session/client'
 import type { EngineConnection } from './session/transport'
@@ -40,8 +58,14 @@ import {
   HelperSupervisor,
   type HelperStatus
 } from './helper/supervisor'
-import { EnginePairing, type PairingStep } from './pairing'
+import { EnginePairing, fingerprintOf, type PairingStep } from './pairing'
+import { routeSetupProbes } from './probes'
+import { automatic } from './routes'
 import { EnginePeerStore, type EnginePeerRow } from './store'
+import { readTicket } from './ticket'
+import { SshAdd } from './ssh/add'
+import { removeRequestsOf, type PrepareEngine } from './ssh/prepare'
+import type { SshRequestStore } from './ssh/requests'
 
 export const NON_KEEPER_MESSAGE =
   "This profile's network is managed by another computer. Turn its networking on, or Start over."
@@ -112,6 +136,10 @@ export class NetEngineService implements EngineDirectoryPort {
     options.net.onSetAside((suffix) => this.setAside(suffix))
   }
 
+  /** This profile's folder. */
+  get profileDir(): string {
+    return this.options.profileDir
+  }
   private get directory(): string {
     return join(this.options.profileDir, 'net-engine')
   }
@@ -211,7 +239,314 @@ export class NetEngineService implements EngineDirectoryPort {
       approvals: this.started?.pairing.pendingApprovals() ?? [],
       ...(this.routes().length ? { routes: this.routes() } : {}),
       ...(this.sharedAccount() ? { sharedAccount: true } : {}),
-      scanIntervalMs: engineLimits().scanIntervalMs
+      scanIntervalMs: engineLimits().scanIntervalMs,
+      ...(this.reach() ? { reach: this.reach() } : {})
+    }
+  }
+
+  // ---------------------------------------------------------------- this computer's routes (Phase 1b §1.5)
+
+  /** This computer's own routes as its helper keeps them (`hello.routes_config`), when it speaks protocol 1.1. */
+  reach(): NetEngineReach | undefined {
+    const helper = this.helper
+    if (!helper?.speaks(1)) return undefined
+    return readReach(helper.info.routes_config, helper.info)
+  }
+
+  /**
+   * Settings → Reach: saves this computer's routes (`routes.config`). A change that needs new listeners
+   * (`restart_needed`: LAN, tailnet, port, the first or last port forward or tunnel) restarts this profile's
+   * helper, about a second offline (§1.5's one rule); any other change shows in the next invitation.
+   */
+  async setReach(change: Partial<NetEngineReach>): Promise<{ restarted: boolean }> {
+    this.require()
+    const helper = this.helper
+    if (!helper) throw new NetError('peer_offline', 'Turn networking on first.')
+    if (!helper.speaks(1))
+      throw new NetError('bad_request', 'Update Mousse to set this up.', {
+        details: { reason: 'proto_1_0' }
+      })
+    const fields = reachRequest(change)
+    routeSetupProbes()
+    let answer: Record<string, unknown>
+    try {
+      answer = await helper.request('routes.config', fields)
+    } catch (error) {
+      throw reachError(error)
+    }
+    // The reply carries the saved config and what this computer advertises with it: a change that needs no restart
+    // shows in the next invitation, and what this computer may share follows it now.
+    const saved = answer.config && typeof answer.config === 'object' ? answer.config : undefined
+    if (saved) helper.info.routes_config = saved
+    if (Array.isArray(answer.routes)) helper.info.routes = strings(answer.routes)
+    this.changed()
+    if (answer.restart_needed !== true) return { restarted: false }
+    await this.restartHelper()
+    return { restarted: true }
+  }
+
+  /**
+   * Test on one of this computer's routes (`routes.test`): the helper dials its own route, pinned to itself, and
+   * closes after step 1. Saving never waits for it (§1.5).
+   */
+  async testRoute(route: string): Promise<{ ok: boolean; ms?: number; reason?: string }> {
+    const helper = this.helper
+    if (!helper?.speaks(1)) throw new NetError('peer_offline', 'Turn networking on first.')
+    const typed = ownerRoute(route)
+    const parsed = typed ? parseRoute(typed) : undefined
+    if (!parsed || parsed.kind === 'ssh')
+      throw new NetError('bad_request', "That isn't an address this computer listens on.", {
+        details: { reason: 'bad_route' }
+      })
+    try {
+      const answer = await helper.request(
+        'routes.test',
+        { route: typed },
+        engineLimits().routeTestDeadlineMs
+      )
+      return answer.ok === true
+        ? { ok: true, ...(typeof answer.ms === 'number' ? { ms: answer.ms } : {}) }
+        : {
+            ok: false,
+            reason: typeof answer.reason === 'string' ? answer.reason : 'unreachable'
+          }
+    } catch (error) {
+      return { ok: false, reason: helperCode(error) ?? 'unreachable' }
+    }
+  }
+
+  /** This profile's helper stops and starts again (a routes change that needs new listeners). */
+  async restartHelper(): Promise<void> {
+    const supervisor = this.supervisor
+    if (!supervisor) return
+    await supervisor.stop()
+    if (this.supervisor === supervisor && this.started) supervisor.start()
+  }
+
+  /**
+   * This computer's routes a joiner may also share in pairback (§1.3): what it advertises outside the automatic
+   * rule (tailnet and public addresses, tunnels). None is sent unless ticked.
+   */
+  shareable(): string[] {
+    return this.routes().filter((route) => {
+      const parsed = parseRoute(route)
+      return !!parsed && (parsed.kind === 'tcp' || parsed.kind === 'wss') && !automatic(route)
+    })
+  }
+
+  /**
+   * Connect on a ticket (§1.3): its destinations are approved, and `share` (some of `shareable()`, ticked under
+   * "Also share") goes in pairback beside this computer's LAN routes.
+   */
+  async join(ticket: string, share: readonly string[] = []): Promise<EnginePeerRow> {
+    const started = this.require()
+    const allowed = this.shareable()
+    const unknown = share.find((route) => !allowed.includes(route))
+    if (unknown !== undefined)
+      throw new NetError('bad_request', "That isn't one of this computer's addresses.", {
+        details: { reason: 'bad_share' }
+      })
+    await this.tellName()
+    routeSetupProbes()
+    return started.pairing.join(ticket, { share: [...share] })
+  }
+
+  // ---------------------------------------------------------------- Add over SSH (Phase 1b §3.4)
+
+  /** Set by the daemon: B's SSH request journal and this profile's selector. */
+  sshHost?: { requests: SshRequestStore; selector(): string }
+  private sshFlow?: SshAdd
+
+  /** A's side of Add over SSH. */
+  sshAdd(): SshAdd {
+    this.sshFlow ??= new SshAdd({
+      peers: this.require().peers,
+      helper: () => this.helper,
+      identity: () => String(this.helper?.info.identity ?? ''),
+      name: () => this.selfName(),
+      limits: () => {
+        const limits = engineLimits()
+        return { deadlineMs: limits.sshRequestDeadlineMs, maxAgeSecs: limits.sshRequestMaxAgeSecs }
+      },
+      changed: () => this.changed(),
+      now: () => Date.now() / 1000
+    })
+    return this.sshFlow
+  }
+
+  /**
+   * Connect in Add over SSH (§3.4 step 3). A computer this one already pairs with only gets the SSH route: it holds
+   * B's pin and is granted already (§3.4, "SSH connections per add").
+   */
+  async sshConnect(choice: Parameters<SshAdd['connect']>[0]): Promise<EnginePeerRow> {
+    const started = this.require()
+    const profile = choice.selector
+      ? (await this.sshAdd().profiles(choice.routeId, choice.host, choice.user)).profiles.find(
+          (item) => item.selector === choice.selector
+        )
+      : undefined
+    const known = profile?.identity ? started.peers.serving(profile.identity as NodeId) : undefined
+    const paired = profile?.identity ? started.peers.byEndpoint(profile.identity) : known
+    if (paired && paired.state === 'connected' && paired.source !== 'ssh') {
+      const ssh = {
+        requestId: paired.receipt ?? '',
+        routeId: choice.routeId,
+        selector: choice.selector,
+        target: choice.target,
+        host: choice.host,
+        user: choice.user,
+        shell: choice.shell ?? 'sh'
+      }
+      started.peers.update(paired.localId, { ssh })
+      await this.setAddresses({ ...paired, ssh }, paired.addresses ?? [])
+      return started.peers.get(paired.localId)!
+    }
+    routeSetupProbes()
+    return this.sshAdd().connect(choice)
+  }
+
+  /**
+   * B's engine as `prepare` uses it (§3.4 step 4): its row for A, the row it writes, the grant it saves.
+   */
+  prepareEngine(): PrepareEngine {
+    const started = this.require()
+    const helper = () => {
+      if (!this.helper) throw new NetError('peer_offline', 'Networking is starting.')
+      return this.helper
+    }
+    return {
+      identity: String(this.helper?.info.identity ?? ''),
+      name: this.selfName(),
+      rowFor: (joiner) => {
+        // A row being removed counts too: the request waits for it (busy).
+        const row = started.peers.all().find((item) => item.endpoint === joiner && item.state !== 'removed')
+        if (!row) return undefined
+        return {
+          key: row.localId,
+          state: row.state,
+          ...(row.source === 'ssh' && row.ssh?.requestId ? { requestId: row.ssh.requestId } : {}),
+          ...(row.grant ? { grant: row.grant } : {})
+        }
+      },
+      writeOwnRow: (request) => {
+        // Only the overwrite control reaches here with a row for A: it is lost, as an overwrite would lose it.
+        const earlier = started.peers.byEndpoint(request.joiner)
+        if (earlier) started.peers.prune(earlier.localId)
+        const row = started.peers.add({
+          endpoint: request.joiner,
+          fingerprint: fingerprintOf(request.joiner),
+          grant: '',
+          name: request.joinerName,
+          state: 'ssh_granting',
+          source: 'ssh',
+          receipt: request.requestId,
+          ssh: { requestId: request.requestId, issuedAt: request.issuedAt },
+          pairedAt: Date.now()
+        })
+        this.helper?.claim(request.joiner)
+        this.changed()
+        return row.localId
+      },
+      grantAdd: async (request) => {
+        const answer = await helper().request('grant.add', {
+          identity: request.joiner,
+          name: request.joinerName,
+          receipt: request.requestId
+        })
+        if (typeof answer.grant !== 'number' && typeof answer.grant !== 'string')
+          throw new NetError('internal', 'The helper named no grant.')
+        return String(answer.grant)
+      },
+      setRowGrant: (key, grant) => {
+        started.peers.update(key as NodeId, { grant })
+        this.changed()
+      },
+      granted: (key) => {
+        started.peers.advance(key as NodeId, ['ssh_granting'], { state: 'ssh_granted' })
+        this.changed()
+      },
+      grantLive: async (grantId) => {
+        const listed = await helper().request('grants.list')
+        return (Array.isArray(listed.grants) ? listed.grants : []).some(
+          (grant: Record<string, unknown>) => String(grant.grant) === grantId
+        )
+      },
+      rowGrant: (key) => {
+        const row = started.peers.serving(key as NodeId)
+        return row?.grant || undefined
+      }
+    }
+  }
+
+  /**
+   * §3.4 step 3: networking on if it was off, with nothing advertised (loopback only, no LAN, no tailnet), and its
+   * helper running, within `timeoutMs`.
+   */
+  async quietNetworking(timeoutMs: number): Promise<void> {
+    const wasOn = !!this.settings()?.enabled
+    if (!wasOn) await this.switchOn()
+    const until = Date.now() + timeoutMs
+    const running = async () => {
+      while (!this.helper || this.helperStatus().state !== 'running') {
+        if (Date.now() > until)
+          throw new NetError('deadline_exceeded', 'Networking did not start in time.', {
+            details: { reason: 'remote_failed' }
+          })
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+    }
+    await running()
+    if (!wasOn && this.helper?.speaks(1)) {
+      await this.setReach({ lan: false, tailnet: false, public: [], tunnels: [] })
+      await running()
+    }
+  }
+
+  /** After each hello: A repeats `prepare` for its unconfirmed SSH rows; B settles its `ssh_granting` rows. */
+  private recoverSsh(): void {
+    const started = this.started
+    if (!started) return
+    const now = Date.now() / 1000
+    const maxAge = engineLimits().sshRequestMaxAgeSecs
+    for (const row of started.peers.all()) {
+      if (row.source !== 'ssh') continue
+      // The control repeats `prepare` also for a row that was connected (after B removed this computer, say).
+      const again = engineControl('retry-after-connected')
+      if (
+        (row.state === 'ssh_requested' || (again && row.state === 'connected')) &&
+        row.ssh?.routeId &&
+        !row.ssh.removed &&
+        (!row.ssh.everConnected || again)
+      )
+        void this.sshAdd()
+          .prepare(row)
+          .catch(() => undefined)
+      if (row.state !== 'ssh_granting' || !this.sshHost) continue
+      const request = row.ssh?.requestId ? this.sshHost.requests.get(row.ssh.requestId) : undefined
+      if (request?.grantId) {
+        started.peers.update(row.localId, { grant: request.grantId })
+        started.peers.advance(row.localId, ['ssh_granting'], { state: 'ssh_granted' })
+      } else if (!request || now - request.issuedAt > maxAge) started.peers.prune(row.localId)
+    }
+    this.changed()
+  }
+
+  /** What a ticket would do before Connect (§1.3): its destinations by class, and what this computer may share. */
+  joinPreview(ticket: string): NetEngineJoinPreview {
+    const facts = readTicket(ticket)
+    const loopback = !packagedBuild()
+    return {
+      ...(facts.name ? { name: facts.name } : {}),
+      kind: facts.kind ?? 1,
+      ...(facts.expiresAt !== undefined && facts.expiresAt * 1000 <= Date.now()
+        ? { expired: true }
+        : {}),
+      destinations: ticketDestinations(facts.routes, loopback),
+      shareable: this.shareable().flatMap((route) => {
+        const parsed = parseRoute(route)
+        const cls = parsed ? routeClass(parsed) : 'forbidden'
+        return cls === 'forbidden' ? [] : [{ route, label: routeText(route), cls }]
+      })
     }
   }
 
@@ -243,35 +578,81 @@ export class NetEngineService implements EngineDirectoryPort {
   }
 
   /**
-   * Add address on a device's row: the other computer is dialled at `address` too (`host:port`, or a
-   * `tcp://` route), beside what the local network finds. Private-range addresses only (§5.3).
+   * Add address on a device's row: the other computer is dialled at `address` too, beside what the local network
+   * finds. Every owner kind of §1.3 but `ssh` (Add over SSH sets that up): `host:port` or `tcp://` (LAN, tailnet,
+   * internet or a name), a tunnel's `https://` or `wss://` URL, or a tunnel client's loopback `ws://`. The owner's
+   * entry is its approval. A 1.0 helper takes private-range addresses only (1a §5.3).
    */
   async addAddress(node: NodeId, address: string): Promise<void> {
     const started = this.require()
     const row = started.peers.serving(node)
     if (!row) throw new NetError('bad_request', 'Unknown device.')
-    const route = toRoute(address)
+    const route = this.helper?.speaks(1) ? ownerRoute(address) : toRoute(address)
     if (!route)
-      throw new NetError('bad_request', 'Use an address and port, like 192.168.1.20:47100.', {
-        details: { reason: 'bad_address' }
-      })
+      throw new NetError(
+        'bad_request',
+        /^ssh:|@/.test(address.trim())
+          ? 'Use Add over SSH for an SSH address.'
+          : 'Use an address and port, like 192.168.1.20:47100, or a tunnel URL.',
+        { details: { reason: 'bad_address' } }
+      )
     const addresses = [...(row.addresses ?? []).filter((known) => known !== route), route]
+    await this.setAddresses(row, addresses)
+  }
+
+  /** Remove on one of a device's addresses: it is no longer dialled, and its approval goes (§1.3). */
+  async removeAddress(node: NodeId, address: string): Promise<void> {
+    const started = this.require()
+    const row = started.peers.serving(node)
+    if (!row) throw new NetError('bad_request', 'Unknown device.')
+    if (!(row.addresses ?? []).includes(address)) return
+    await this.setAddresses(
+      row,
+      (row.addresses ?? []).filter((known) => known !== address)
+    )
+  }
+
+  /**
+   * Use on "Addresses <B> offered" (§1.3): the routes the other computer offered in pairback become owner
+   * addresses, approved by this tap, and are dialled from now on.
+   */
+  async useOffered(node: NodeId): Promise<void> {
+    const started = this.require()
+    const row = started.peers.serving(node)
+    if (!row) throw new NetError('bad_request', 'Unknown device.')
+    const offered = row.offered ?? []
+    if (!offered.length) return
+    const addresses = [...(row.addresses ?? [])]
+    for (const route of offered) if (!addresses.includes(route)) addresses.push(route)
+    await this.setAddresses(row, addresses)
+    started.peers.update(node, { offered: null })
+    this.changed()
+    // A pairback waiting on this computer's dial back goes on now.
+    if (!started.sessions.online(node))
+      void this.helper?.dial(row.endpoint).catch(() => undefined)
+  }
+
+  /**
+   * The owner's addresses for a pairing, whole (`peer.addresses.set`): the helper stores them, adds an `owner`
+   * approval for each and drops the approvals of those no longer listed. A row added over SSH keeps its SSH route.
+   */
+  private async setAddresses(row: EnginePeerRow, addresses: string[]): Promise<void> {
+    const started = this.require()
     if (addresses.length > engineLimits().maxManualAddresses)
       throw new NetError('bad_request', 'Remove an address first.', {
         details: { reason: 'too_many' }
       })
-    if (!this.helper) throw new NetError('peer_offline', 'Turn networking on first.')
+    const helper = this.helper
+    if (!helper) throw new NetError('peer_offline', 'Turn networking on first.')
     try {
-      await this.helper.request('peer.addresses.set', { identity: row.endpoint, routes: addresses })
+      await helper.request('peer.addresses.set', {
+        identity: row.endpoint,
+        routes: ownerRoutes(row, addresses)
+      })
     } catch (error) {
-      // The helper allows private ranges only (§5.3).
-      if (helperCode(error) === 'bad_route')
-        throw new NetError('bad_request', 'Only local network addresses can be added for now.', {
-          details: { reason: 'not_private' }
-        })
-      throw error
+      throw addressError(error, helper.speaks(1))
     }
-    started.peers.setAddresses(node, addresses)
+    started.peers.setAddresses(row.localId, addresses)
     this.changed()
   }
 
@@ -319,34 +700,46 @@ export class NetEngineService implements EngineDirectoryPort {
         const node = row.localId
         const online = started.sessions.online(node)
         const serving = started.sessions.serving(node)
+        // A row added over SSH runs one way only (1b §3.6): A uses B, so A's direction is its client and B's is
+        // A's client here.
+        const direction = row.source === 'ssh' ? (row.ssh?.routeId ? 'out' : 'in') : undefined
+        const up = direction === 'out' ? online : direction === 'in' ? serving : online && serving
         // Connected only with both directions up: this computer's client to it, and its client here.
         const state =
           row.state === 'removing'
             ? 'removing'
-            : row.state !== 'connected'
-              ? 'finishing'
-              : online && serving
-                ? 'connected'
-                : online || serving
-                  ? 'connecting'
-                  : 'offline'
+            : direction && row.state !== 'connected' && row.state !== 'removed'
+              ? 'connecting'
+              : row.state !== 'connected'
+                ? 'finishing'
+                : up
+                  ? 'connected'
+                  : online || serving
+                    ? 'connecting'
+                    : 'offline'
         const stuck = held(`${node} finishing`, state === 'finishing') >= stuckMs
         // One direction down for the bound while the other works.
-        const paired = row.state === 'connected'
+        const paired = row.state === 'connected' && !direction
         const outDown = held(`${node} out`, paired && !online) >= stuckMs
         const inDown = held(`${node} in`, paired && !serving) >= stuckMs
         const unreachable = outDown && serving ? 'out' : inDown && online ? 'in' : undefined
+        // The class of the route its connection came up on (§7 `conn.up.route`), this computer's dial first.
+        const route = started.sessions.route(node)?.class
         return {
           node,
           name: row.name,
           shortId: row.endpoint.slice(0, 8),
-          ...(started.pairing.accepted(node) ? {} : { notAccepted: true }),
+          ...(started.pairing.accepted(node) && !row.ssh?.removed ? {} : { notAccepted: true }),
+          ...(direction ? { direction } : {}),
           state,
           online,
           ...(stuck ? { stuck: true } : {}),
           ...(unreachable ? { unreachable } : {}),
           ...(started.pairing.certificateWindow(node) ? { certificateWindow: true } : {}),
-          ...(row.addresses?.length ? { addresses: row.addresses } : {})
+          ...(row.addresses?.length ? { addresses: row.addresses } : {}),
+          ...(route ? { route } : {}),
+          ...(row.offered?.length ? { offered: row.offered } : {}),
+          ...(row.source ? { source: row.source } : {})
         }
       })
     for (const key of [...this.since.keys()]) if (!seen.has(key)) this.since.delete(key)
@@ -451,13 +844,28 @@ export class NetEngineService implements EngineDirectoryPort {
         onClientReady: (node) => {
           this.options.bridge()?.peerOnline(node)
           pairing.clientReady(node)
+          // A: its first live connection to B confirms an SSH add (1b §3.4 step 6).
+          // Stopping: the store is closed, and nothing is written.
+          const row = this.started?.peers === peers ? peers.get(node) : undefined
+          if (row?.source === 'ssh' && row.state === 'ssh_granted') this.sshAdd().connected(row)
           this.changed()
         },
         onClientClosed: (node) => {
           this.options.bridge()?.peerOffline(node)
           this.changed()
         },
-        onServingChanged: () => this.changed(),
+        onServingChanged: (node) => {
+          // B: A's first live inbound with the row's grant connects it ("Added over SSH from <A>").
+          const row = this.started?.peers === peers ? peers.get(node) : undefined
+          if (
+            row?.source === 'ssh' &&
+            row.state === 'ssh_granted' &&
+            !row.ssh?.routeId &&
+            sessions.serving(node)
+          )
+            peers.advance(node, ['ssh_granted'], { state: 'connected' })
+          this.changed()
+        },
         // The helper keeps a newer outbound path (renewed, or dialled while one was up) waiting until told.
         onPathInUse: (connection) => {
           const conn = Number(connection.id)
@@ -479,7 +887,28 @@ export class NetEngineService implements EngineDirectoryPort {
       helper: () => this.helper,
       teardown: (node) => this.teardown(node),
       changed: () => this.changed(),
-      crashAt: (step) => !!this.pairingCrash?.(step)
+      crashAt: (step) => !!this.pairingCrash?.(step),
+      sshRequest: (receipt) => this.sshHost?.requests.get(receipt)?.state,
+      removed: async (row) => {
+        const host = this.sshHost
+        const helper = this.helper
+        if (!host || !helper || !row.endpoint) return
+        await removeRequestsOf(host.requests, row.endpoint, host.selector(), {
+          list: async () => {
+            const listed = await helper.request('grants.list')
+            return (Array.isArray(listed.grants) ? listed.grants : []).map(
+              (grant: Record<string, unknown>) => ({
+                grant: String(grant.grant),
+                identity: String(grant.identity),
+                ...(typeof grant.receipt === 'string' ? { receipt: grant.receipt } : {})
+              })
+            )
+          },
+          remove: async (grant) => {
+            await helper.request('grant.remove', { grant: Number(grant) })
+          }
+        })
+      }
     })
     const timer = setInterval(() => {
       try {
@@ -708,7 +1137,10 @@ export class NetEngineService implements EngineDirectoryPort {
     this.toldName = told
     this.changed()
     // Removals finish, ceremonies resume, owed rows are written and every pairing is dialled again.
-    if (this.helper === helper) void started.pairing.recover().catch(() => undefined)
+    if (this.helper === helper) {
+      void started.pairing.recover().catch(() => undefined)
+      this.recoverSsh()
+    }
     return helper
   }
 
@@ -908,3 +1340,126 @@ export function toRoute(address: string): string | undefined {
   if (!match || Number(match[2]) > 65535) return undefined
   return `tcp://${match[1]!.toLowerCase()}:${match[2]}`
 }
+
+/** An SSH route entry as `peer.addresses.set` takes it (§3.4 step 5). */
+export interface SshRouteEntry {
+  route_id: string
+  selector: string
+  shell: string
+}
+
+/**
+ * The owner's routes as `peer.addresses.set` takes them: the addresses as text, then the row's SSH route as
+ * `{route_id, selector, shell}` when it was added over SSH.
+ */
+export function ownerRoutes(
+  row: Pick<EnginePeerRow, 'ssh'>,
+  addresses: readonly string[]
+): Array<string | SshRouteEntry> {
+  const ssh = row.ssh
+  return [
+    ...addresses,
+    ...(ssh?.routeId && ssh.selector
+      ? [{ route_id: ssh.routeId, selector: ssh.selector, shell: ssh.shell ?? 'sh' }]
+      : [])
+  ]
+}
+
+/** A helper's refusal of the owner's addresses, as the row's dialog says it. */
+function addressError(error: unknown, speaks11: boolean): unknown {
+  const code = helperCode(error)
+  if (code === 'bad_route' || code === 'forbidden_address')
+    return speaks11
+      ? new NetError('bad_request', "That address can't be dialled.", {
+          details: { reason: code }
+        })
+      : new NetError('bad_request', 'Only local network addresses can be added for now.', {
+          details: { reason: 'not_private' }
+        })
+  return error
+}
+
+const strings = (list: unknown): string[] =>
+  Array.isArray(list) ? list.filter((item): item is string => typeof item === 'string') : []
+
+/** `hello.routes_config` (or a `routes.config` reply's `routes`) as the status shows it. */
+function readReach(value: unknown, info: Record<string, unknown>): NetEngineReach {
+  const config = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>
+  const unbound = strings(info.unbound)
+  const port =
+    typeof config.port === 'number'
+      ? config.port
+      : typeof info.port === 'number'
+        ? info.port
+        : undefined
+  return {
+    lan: config.lan !== false,
+    tailnet: config.tailnet === true,
+    public: strings(config.public),
+    ...(typeof config.forward_to === 'string' && config.forward_to
+      ? { forwardTo: config.forward_to }
+      : {}),
+    tunnels: strings(config.tunnels),
+    ...(port !== undefined ? { port } : {}),
+    ...(typeof info.ws_port === 'number' ? { wsPort: info.ws_port } : {}),
+    ...(unbound.length ? { unbound } : {})
+  }
+}
+
+/** A Reach change as `routes.config` takes it: only the fields given, each checked first. */
+export function reachRequest(change: Partial<NetEngineReach>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  if (typeof change.lan === 'boolean') out.lan = change.lan
+  if (typeof change.tailnet === 'boolean') out.tailnet = change.tailnet
+  if (change.public !== undefined)
+    out.public = change.public.map((entry) => {
+      const route = ownerRoute(entry)
+      const parsed = route ? parseRoute(route) : undefined
+      const cls = parsed ? routeClass(parsed) : 'forbidden'
+      if (!parsed || parsed.kind !== 'tcp' || cls === 'forbidden' || cls === 'lan')
+        throw new NetError('bad_request', 'Use the public address and port, like 203.0.113.7:47100.', {
+          details: { reason: 'bad_public' }
+        })
+      return parsed.canonical
+    })
+  if (change.forwardTo !== undefined) {
+    const value = change.forwardTo.trim()
+    if (value && !automatic(`tcp://${value}:1`))
+      throw new NetError('bad_request', "Use this computer's LAN address, like 192.168.1.20.", {
+        details: { reason: 'bad_forward_to' }
+      })
+    out.forward_to = value || null
+  }
+  if (change.tunnels !== undefined)
+    out.tunnels = change.tunnels.map((entry) => {
+      const route = ownerRoute(entry)
+      if (!route || parseRoute(route)?.kind !== 'wss')
+        throw new NetError('bad_request', "Use the tunnel's https:// address.", {
+          details: { reason: 'bad_tunnel' }
+        })
+      return route
+    })
+  if (change.port !== undefined) {
+    if (!Number.isSafeInteger(change.port) || change.port < 1 || change.port > 65535)
+      throw new NetError('bad_request', 'Use a port from 1 to 65535.', {
+        details: { reason: 'bad_port' }
+      })
+    out.port = change.port
+  }
+  return out
+}
+
+/** A refused `routes.config`, as Settings says it. */
+function reachError(error: unknown): unknown {
+  const code = helperCode(error)
+  if (code === 'bad_forward_to' || code === 'not_local')
+    return new NetError('bad_request', "That address isn't on this computer.", {
+      details: { reason: code }
+    })
+  if (code === 'bad_route' || code === 'forbidden_address')
+    return new NetError('bad_request', "That address can't be used.", { details: { reason: code } })
+  if (code === 'port_in_use')
+    return new NetError('conflict', 'Another app uses that port.', { details: { reason: code } })
+  return error
+}
+
