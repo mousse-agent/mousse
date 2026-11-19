@@ -1,5 +1,5 @@
 import { AppError, type AppErrorShape } from '../../shared/errors'
-import { isRetriesExhausted } from '../../shared/harness/types'
+import { isPromptTaken, isRetriesExhausted } from '../../shared/harness/types'
 import { retriesOf, retryCause, type ProviderRetries } from '../../shared/providerRetry'
 import { usageLimitOf } from '../run/pausePolicy'
 
@@ -41,7 +41,7 @@ export function isTransientFailure(error: unknown): boolean {
   if (!(error instanceof AppError)) return false
   if (!error.errorInfo.retryable) return false
   if (error.errorInfo.category !== 'unavailable' && error.errorInfo.category !== 'timeout') return false
-  if (isRetriesExhausted(error) || usageLimitOf(error)) return false
+  if (isRetriesExhausted(error) || isPromptTaken(error) || usageLimitOf(error)) return false
   return true
 }
 
