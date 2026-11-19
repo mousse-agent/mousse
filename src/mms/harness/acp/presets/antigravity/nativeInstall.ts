@@ -31,6 +31,8 @@ export interface NativeRuntime { binary: string; version: string; id: string }
 
 /** How long the `initialize` check may take: the CLI unpacks its bundled files on a first start. */
 const VERIFY_TIMEOUT_MS = 90_000
+/** How long the check waits for the ended agent to exit before giving up on it. */
+const EXIT_WAIT_MS = 10_000
 /** Free space kept beyond the download and the executable while installing. */
 const SPACE_MARGIN_BYTES = 256 * 1024 * 1024
 
@@ -81,14 +83,24 @@ export const verifyNativeHandshake: NativeVerifier = (binary, scratch, signal) =
   const child = spawn(binary, ['acp', '--gemini-dir', profile, '--app-data-dir', 'antigravity-acp'], { cwd: scratch, env, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, detached: process.platform !== 'win32' })
   let settled = false
   let buffered = ''
+  const exited = new Promise<void>((resolveExit) => {
+    if (child.exitCode !== null || child.signalCode !== null) resolveExit()
+    else {
+      child.once('exit', () => resolveExit())
+      // A process that never started has nothing to wait for.
+      child.once('error', () => resolveExit())
+    }
+  })
   const finish = (error: Error | undefined, info?: { name?: string; version?: string }) => {
     if (settled) return
     settled = true
     clearTimeout(timer)
     signal.removeEventListener('abort', onAbort)
     if (child.pid) killProcessTree(child.pid)
-    if (error) reject(error)
-    else resolve(info ?? {})
+    // Windows locks a running executable: the release can be moved into place only once it exited.
+    const gone = AbortSignal.timeout(EXIT_WAIT_MS)
+    void Promise.race([exited, new Promise<void>((resolveWait) => gone.addEventListener('abort', () => resolveWait(), { once: true }))])
+      .then(() => { if (error) reject(error); else resolve(info ?? {}) })
   }
   const onAbort = () => finish(signal.reason instanceof Error ? signal.reason : new Error('Antigravity install cancelled'))
   const timer = setTimeout(() => finish(new Error('The Antigravity CLI did not answer its start-up check in time.')), VERIFY_TIMEOUT_MS)

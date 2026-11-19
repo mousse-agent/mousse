@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { create as createTar } from 'tar'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  activeNativeRuntime, installNativeAntigravity, nativeRoot, type NativeInstallOptions, type NativeVerifier
+  activeNativeRuntime, installNativeAntigravity, nativeRoot, verifyNativeHandshake, type NativeInstallOptions, type NativeVerifier
 } from '../src/mms/harness/acp/presets/antigravity/nativeInstall'
 import {
   NATIVE_AGENT_NAME, NATIVE_RELEASES, classifyVendorFeed, isNativeAssetUrl, nativeTarget, type NativeRelease, type NativeTarget
@@ -88,6 +88,30 @@ describe('Google\'s update feed', () => {
     ['not an object', ['1.5.12'], { kind: 'invalid' }]
   ])('%s', (_case, raw, expected) => {
     expect(classifyVendorFeed(raw, 'windows_amd64', reviewed)).toEqual(expected)
+  })
+})
+
+describe('the start-up check of a downloaded CLI', () => {
+  // Node stands in for `agy`: started as `node acp --gemini-dir …` in the scratch folder, it runs the
+  // `acp` script written there, which answers like the CLI. The check itself runs as shipped.
+  const agent = (home: string, reply: string) => {
+    const scratch = join(home, 'check')
+    mkdirSync(scratch, { recursive: true })
+    writeFileSync(join(scratch, 'acp'), `process.stdin.once('data', (line) => { const { id } = JSON.parse(String(line)); process.stdout.write('not json\\n' + JSON.stringify({ jsonrpc: '2.0', id, ${reply} }) + '\\n') }); setInterval(() => {}, 1000)`)
+    return scratch
+  }
+
+  it('reads the name and version the agent answers `initialize` with, on a private profile', async () => {
+    const home = newHome()
+    const scratch = agent(home, `result: { agentInfo: { name: '${NATIVE_AGENT_NAME}', version: '1.5.12' } }`)
+    await expect(verifyNativeHandshake(process.execPath, scratch, new AbortController().signal)).resolves.toEqual({ name: NATIVE_AGENT_NAME, version: '1.5.12' })
+    expect(existsSync(join(scratch, 'profile'))).toBe(true)
+  })
+
+  it('fails when the agent refuses `initialize`', async () => {
+    const home = newHome()
+    const scratch = agent(home, `error: { code: -32603, message: 'no' }`)
+    await expect(verifyNativeHandshake(process.execPath, scratch, new AbortController().signal)).rejects.toThrow(/refused/)
   })
 })
 
