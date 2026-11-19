@@ -157,7 +157,7 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     id: 28,
     asksFirst: true,
     date: '2026-11-19',
-    text: "In your owner’s own message turn you can ask with escalate permission {ask: 'let_alone', scheduleId, serverId, tool} to let one automation use one tool in the place of an earlier sent call. Mousse fills in the place; other places still ask, and busy automations ask again at the hourly or daily cap."
+    text: "In your owner’s own message turn you can ask with escalate permission {ask: 'let_alone', scheduleId, serverId, tool} to let one automation use one tool in the place of an earlier sent call. Mousse fills in the place. Use the same top-level argument names; only plain text like a message body or a file name may change. New addresses and other destinations still ask, and busy automations ask again at the hourly or daily cap."
   }
 ]
 
