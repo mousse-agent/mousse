@@ -285,9 +285,10 @@ describe('a list taller than the sidebar', () => {
     expect(scroller.hasAttribute('data-more-below')).toBe(false)
   })
 
-  it('scrolls a project the person opens under a tall "Needs me" until its first rows show', () => {
+  it('scrolls a project the person opens under a tall "Needs me" until its first rows show', async () => {
     show(tall(), { projects: [project('p1', 'Mousse'), project('p2', 'Payments')] })
-    act(() => useAppStore.setState({ threadActivity: waiting }))
+    // A thread that starts waiting joins Needs me once the read of who answers its wait comes back (#1558).
+    await act(async () => { useAppStore.setState({ threadActivity: waiting }) })
     expect(host.querySelector('.threads-sidebar-needs-me')?.textContent).toContain('Needs me · 2')
     const scroller = host.querySelector<HTMLElement>('.threads-sidebar-scroll')!
     layOut(scroller, { height: 200, content: 700 })
