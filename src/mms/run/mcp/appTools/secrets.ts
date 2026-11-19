@@ -269,7 +269,7 @@ export function secretTools(host: AppToolHost): MousseTool[] {
           args,
           mask,
           ...(prepared.refusal ? { refusal: prepared.refusal.text } : {})
-        }, () => prepared.send!())
+        }, refuseWithoutCounting => prepared.send!(refuseWithoutCounting))
       }
     }
   ]

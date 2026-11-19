@@ -21,7 +21,7 @@ export interface SecretFetchActionInput {
 export async function secretFetchAction(
   store: BotStore,
   input: SecretFetchActionInput,
-  run: () => Promise<ToolOutcome>
+  run: (refuseWithoutCounting: () => void) => Promise<ToolOutcome>
 ): Promise<ToolOutcome> {
   const { botId, activationId, callKey, mask } = input
   const at = input.now ?? Date.now(),
@@ -81,17 +81,19 @@ export async function secretFetchAction(
     return { id, refusal }
   })
   if ('previous' in admission) return admission.previous!
+  let counted = true
   let result: ToolOutcome
   try {
-    result = admission.refusal ? { text: admission.refusal, isError: true } : await run()
+    result = admission.refusal ? { text: admission.refusal, isError: true } : await run(() => { counted = false })
   } catch {
     result = { text: 'The service read could not finish.', isError: true }
   }
   result = { text: mask(result.text), ...(result.isError ? { isError: true } : {}) }
   store.run(
-    'UPDATE bot_actions SET status = ?, result_json = ? WHERE id = ?',
+    'UPDATE bot_actions SET status = ?, result_json = ?, ran_at = CASE WHEN ? THEN ran_at ELSE NULL END WHERE id = ?',
     result.isError ? 'failed' : 'done',
     JSON.stringify(result),
+    counted ? 1 : 0,
     admission.id!
   )
   return result

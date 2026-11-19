@@ -138,7 +138,7 @@ export interface BotFileReadResult {
  */
 export interface BotAuthority {
   /** Local service-read ledger. Present on main work and scheduled turns only; never serialized. */
-  secretFetch?(input: { callKey: string; secret: string; service: string; args: Record<string, unknown>; refusal?: string; mask(text: string): string }, run: () => Promise<{text: string; isError?: boolean}>): Promise<{text: string; isError?: boolean}>
+  secretFetch?(input: { callKey: string; secret: string; service: string; args: Record<string, unknown>; refusal?: string; mask(text: string): string }, run: (refuseWithoutCounting: () => void) => Promise<{text: string; isError?: boolean}>): Promise<{text: string; isError?: boolean}>
 
   activationId: string
   role: BotThreadRole
