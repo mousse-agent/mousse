@@ -861,7 +861,7 @@ export class FakeHelper {
             }
             const known = this.network.knownFor(this.identity, open.host)
             for (const route of open.routes) if (!known.hints.includes(route)) known.hints.push(route)
-            for (const route of candidates) known.approved.add(route)
+            for (const route of candidates ?? []) known.approved.add(route)
           }
           this.event({
             ev: 'join.progress',
