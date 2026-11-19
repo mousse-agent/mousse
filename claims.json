@@ -2,6 +2,20 @@
   "version": 1,
   "claims": [
     {
+      "task": "antigravity-native-cli-runtime",
+      "session": "Animatrix-28412c",
+      "machine": "Animatrix",
+      "branch": "antigravity-native-cli-runtime",
+      "paths": [
+        "src/mms/harness/acp/presets/antigravity",
+        "src/mms/harness/acp/presets/antigravity.ts",
+        "src/mms/harness/drivers/antigravity.ts",
+        "docs/providers/antigravity-runtime.md"
+      ],
+      "claimedAt": "2026-11-19T13:02:10.909Z",
+      "expiresAt": "2026-11-19T15:02:10.909Z"
+    },
+    {
       "task": "antigravity-owner-only-turns",
       "session": "Animatrix-4789ec",
       "machine": "Animatrix",
