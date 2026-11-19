@@ -2,18 +2,6 @@
   "version": 1,
   "claims": [
     {
-      "task": "antigravity-login-auth-url-first",
-      "session": "Animatrix-ea4cf1",
-      "machine": "Animatrix",
-      "branch": "antigravity-login-auth-url-first",
-      "paths": [
-        "src/mms/harness/acp/presets/antigravity/AntigravityProviderService.ts",
-        "src/mms/providers/LoginSession.ts"
-      ],
-      "claimedAt": "2026-11-19T11:45:18.045Z",
-      "expiresAt": "2026-11-19T13:45:18.045Z"
-    },
-    {
       "task": "bot-automation-let-alone",
       "session": "agibook-66458b",
       "machine": "agibook",
