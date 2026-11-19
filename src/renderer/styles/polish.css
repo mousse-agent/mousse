@@ -186,12 +186,19 @@ html[data-theme='solarized-dark'] {
   --btn-primary-fg: oklch(from var(--accent) max(l, 0.8) c h);
 }
 
-/* Mousse dark keeps its true-black canvas; depth comes from raised greys. */
+/* Mousse dark keeps its true-black canvas; depth comes from raised greys.
+   The one accent tint: --ui-lift is the light every gray is lifted with, the accent taken most of the way to white.
+   Raised fills, hovers, selected tabs, sheens, glints and the specular edge all mix it in place of white, so each
+   leans to the accent by the same mild amount (about #111113 for a #111111 gray) at the brightness it had. */
 html[data-theme='blacksphere-plus'] {
-  --ui-raised: #111113;
-  --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(0, 0, 0, 0.72);
-  --ui-glint: rgba(255, 255, 255, 0.55);
-  --ui-sheen: radial-gradient(125% 80% at 50% -10%, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0.04) 36%, transparent 66%);
+  --ui-lift: color-mix(in srgb, var(--accent) 25%, white);
+  --ui-raised: color-mix(in srgb, var(--ui-lift) 7%, var(--surface-base));
+  --ui-hover: color-mix(in srgb, var(--ui-lift) 6%, transparent);
+  --ui-pressed: color-mix(in srgb, var(--ui-lift) 10%, transparent);
+  --main-tab-selected: color-mix(in srgb, var(--ui-lift) 9%, transparent);
+  --ui-specular: inset 0 1px 0 color-mix(in srgb, var(--ui-lift) 22%, transparent), inset 0 -1px 0 rgba(0, 0, 0, 0.72);
+  --ui-glint: color-mix(in srgb, var(--ui-lift) 55%, transparent);
+  --ui-sheen: radial-gradient(125% 80% at 50% -10%, color-mix(in srgb, var(--ui-lift) 16%, transparent) 0%, color-mix(in srgb, var(--ui-lift) 4%, transparent) 36%, transparent 66%);
   --ui-line: rgba(255, 255, 255, 0.075);
   --ui-line-strong: rgba(255, 255, 255, 0.13);
   --ui-aura-strength: 0.16;
@@ -653,10 +660,11 @@ html .chat-avatar.group[class*='chat-color-'] {
   --ui-sheen: radial-gradient(125% 78% at 50% -8%, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 34%, transparent 64%);
 }
 
-html[data-theme='blacksphere-plus'] .app .chat-input-area .composer {
-  --ui-specular: inset 0 1px 0 rgba(255, 255, 255, 0.14), inset 0 -1px 0 rgba(0, 0, 0, 0.48);
-  --ui-glint: rgba(255, 255, 255, 0.36);
-  --ui-sheen: radial-gradient(125% 80% at 50% -10%, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.025) 36%, transparent 66%);
+html[data-theme='blacksphere-plus'] .app .chat-input-area .composer,
+html[data-theme='blacksphere-plus'] .app .agent-chat-composer {
+  --ui-specular: inset 0 1px 0 color-mix(in srgb, var(--ui-lift) 14%, transparent), inset 0 -1px 0 rgba(0, 0, 0, 0.48);
+  --ui-glint: color-mix(in srgb, var(--ui-lift) 36%, transparent);
+  --ui-sheen: radial-gradient(125% 80% at 50% -10%, color-mix(in srgb, var(--ui-lift) 10%, transparent) 0%, color-mix(in srgb, var(--ui-lift) 2.5%, transparent) 36%, transparent 66%);
 }
 
 html[data-theme='light'] .app .chat-input-area .composer,
@@ -990,7 +998,7 @@ html .composer-command-suggestion.selected::before {
   height: 1px;
   z-index: 1;
   pointer-events: none;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--ui-lift, #fff) 50%, transparent), transparent);
   background-size: 36% 100%;
   background-repeat: no-repeat;
   /* Hidden at rest, so the run ends where it started and nothing holds it: a fill-mode of forwards would keep the
