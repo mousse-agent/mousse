@@ -3831,7 +3831,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
           activationId: row.id,
           callKey: JSON.stringify([row.id, input.callDispatchId ?? input.dispatchId, request.callKey]),
           now: this.now()
-        }, () => {
+        }, refuseWithoutCounting => {
           // The same activity sink as MCP calls; only the checked service label, never request arguments.
           try {
             this.host.activity?.onAllowed(activity, {
@@ -3839,7 +3839,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
               input: { service: request.mask(request.service) }
             })
           } catch { /* Activity never stops a read. */ }
-          return run()
+          return run(refuseWithoutCounting)
         })
       } : {}),
       // The chat's own turns may run on a process kept warm between them, only while lane, turn kind and grant stay these.
