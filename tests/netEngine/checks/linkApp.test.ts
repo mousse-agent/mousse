@@ -157,8 +157,15 @@ describe('phase1b.link-app', () => {
       await step('paired_without_code', async () => {
         await Promise.race([
           codeNeeded(joiner, link.invitation, 3),
-          joined.then(() => {
-            if (!askedCode) throw new Error('joined without the code')
+          joined.then(async (result) => {
+            if (askedCode) return
+            // A real helper dials a hint outside the automatic rule only when Connect approved it (`join
+            // {approved}`): with the approval lost, the join reaches nothing and ends before the code.
+            if (REAL_HELPER && approved.length && result.error)
+              await step('approval_lost', () => {
+                throw new Error(`the join reached no route (${codeOf(result.error)})`)
+              })
+            throw new Error('joined without the code')
           })
         ])
       })
@@ -180,6 +187,15 @@ describe('phase1b.link-app', () => {
             ?.approved
         ).toEqual([TAILNET])
       )
+    // A real helper keeps what the join was approved for (`approvals.list`, source `ticket`).
+    else
+      await step('approval_lost', async () => {
+        const answer = await joiner.engine.request('approvals.list', { identity: host.endpoint })
+        const stored = answer.approvals as Array<{ destination: string; source: string }>
+        expect(
+          stored.filter((one) => one.source === 'ticket').map((one) => one.destination)
+        ).toEqual(expect.arrayContaining(approved))
+      })
     await step('one_way_stuck', () => connectedBothWays(host, joiner))
     await step('one_way_stuck', async () => {
       expect(await grants(host, joiner)).toBe(1)

@@ -17,13 +17,16 @@ import {
   appendFileSync,
   existsSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { Socket } from 'node:net'
+import { connect as netConnect, Socket } from 'node:net'
+import { createServer as createTlsServer } from 'node:tls'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { vi } from 'vitest'
 import { MousseMainService } from '../../../src/mms/MousseMainService'
 import type { DomainConnectionContext } from '../../../src/mms/protocol/domainRegistry'
@@ -205,7 +208,10 @@ export class Fabric {
     this.network.listening.set(identity, [`tcp://127.0.0.1:${port}`])
     if (CHECK_ROUTE === 'ssh') {
       // Its own SSH test server, reached by the route `ssh-<n>` (1b §14: one SSH route per direction).
-      this.network.sshServers.set(`host-${n}`, { owns: (id) => id === identity, serve: async () => ({}) })
+      this.network.sshServers.set(`host-${n}`, {
+        owns: (id) => id === identity,
+        serve: async () => ({})
+      })
       this.network.sshRoutes.set(`ssh-${n}`, { hostname: `host-${n}`, user: 'me', pinned: true })
       this.sshRouteOf.set(identity, `ssh-${n}`)
     }
@@ -257,6 +263,8 @@ export class Fabric {
     const computer = {} as Computer
     if (REAL_HELPER) {
       process.env.MOUSSE_NET_ENGINE_INSECURE_FILE_KEY = '1'
+      // Over ssh, every helper of the run reads the one SSH config the test servers' entries go in.
+      if (CHECK_ROUTE === 'ssh') process.env.MOUSSE_NET_TEST_SSH_CONFIG ||= sshConfig()
       // Over tcp on one computer, each helper's loopback port stands for the class under test: the debug helper
       // and the app read the same map (`<port>=<class>`, 1b §14).
       if (CHECK_ROUTE === 'tcp' && !process.env.MOUSSE_NET_ENGINE_CHECK_ROLE) {
@@ -317,7 +325,24 @@ export class Fabric {
     mms.netEngine.displayName = `${name} computer`
     await mms.netEngine.enable()
     await mms.netEngine.startHelper()
-    const engine = await running(mms)
+    let engine = await running(mms)
+    // Over ws with the real helper, this computer's only route is its tunnel: its own stand-in (1b §14).
+    if (REAL_HELPER && CHECK_ROUTE === 'ws') {
+      const tunnel = await tunnelStandIn(() => mms.netEngine.reach()?.wsPort)
+      this.cleanups.push(tunnel.close)
+      const before = engine
+      const { restarted } = await mms.netEngine.setReach({ lan: false, tunnels: [tunnel.route] })
+      if (restarted) engine = await running(mms, before)
+    }
+    // Over ssh with the real helper: this computer advertises no route, and answers SSH on its own test server.
+    let ssh: { alias: string; selector: string; stop: () => Promise<void> } | undefined
+    if (REAL_HELPER && CHECK_ROUTE === 'ssh') {
+      const before = engine
+      const { restarted } = await mms.netEngine.setReach({ lan: false, tailnet: false, public: [] })
+      if (restarted) engine = await running(mms, before)
+      ssh = await this.realSshServer(name, mms, home)
+      this.cleanups.push(ssh.stop)
+    }
     endpoint = String(engine.info.identity)
     const events: ProtocolEvent[] = []
     let sequence = 0
@@ -350,19 +375,92 @@ export class Fabric {
     // A routes run: each owner taps Use on what its pairings offer, as its window would (unless a check says no).
     if (CHECK_ROUTE && this.autoUse) this.cleanups.push(useOffered(computer))
     // Over ssh, each computer holds every other's SSH route as its owner address, as the kit sets it (1b §14).
-    if (CHECK_ROUTE === 'ssh' && !REAL_HELPER) {
+    if (CHECK_ROUTE === 'ssh') {
+      if (ssh) this.sshOf.set(computer, ssh)
       for (const other of this.computers)
         for (const [from, to] of [
           [computer, other],
           [other, computer]
         ] as const)
-          await from.engine.request('peer.addresses.set', {
-            identity: to.endpoint,
-            routes: [{ route_id: this.sshRouteOf.get(to.endpoint), selector: 'a'.repeat(26), shell: 'sh' }]
-          })
+          // A real helper takes owner addresses only for a peer it is paired with, and a join dials only the
+          // ticket's hints (where ssh is reserved): no window pairing reaches it over ssh before it is paired.
+          await step(REAL_HELPER ? 'ssh_owner_address_refused' : undefined, async () =>
+            from.engine.request('peer.addresses.set', {
+              identity: to.endpoint,
+              routes: [
+                REAL_HELPER
+                  ? await this.pinnedSshRoute(from, this.sshOf.get(to)!)
+                  : {
+                      route_id: this.sshRouteOf.get(to.endpoint),
+                      selector: 'a'.repeat(26),
+                      shell: 'sh'
+                    }
+              ]
+            })
+          )
       this.computers.push(computer)
     }
     return computer
+  }
+
+  /** In a real-helper run over ssh, each computer's test SSH server. */
+  private readonly sshOf = new Map<Computer, { alias: string; selector: string }>()
+
+  /**
+   * The kit's test SSH server for `name` (`MOUSSE_CHECK_TEST_SSHD`, started by `MOUSSE_CHECK_SSH_ROUTES`, 1b §14):
+   * on loopback, into this computer's Mousse folder, its `mousse-helper` launcher this run's helper. Its host
+   * entry goes in the one SSH config every debug helper of the run reads (`MOUSSE_NET_TEST_SSH_CONFIG`), as
+   * `mousse-check-<name>`; its selector is this computer's default profile's.
+   */
+  private async realSshServer(
+    name: string,
+    mms: MousseMainService,
+    home: string
+  ): Promise<{ alias: string; selector: string; stop: () => Promise<void> }> {
+    const routes = process.env.MOUSSE_CHECK_SSH_ROUTES?.trim()
+    if (!routes || !process.env.MOUSSE_CHECK_TEST_SSHD?.trim())
+      throw new Error(
+        'a real-helper ssh run needs MOUSSE_CHECK_TEST_SSHD and MOUSSE_CHECK_SSH_ROUTES (run.mjs)'
+      )
+    // endpoints.json names this computer's profiles by selector, as `mousse-helper pipe` reads it.
+    const remote = mms.sshRemote()!
+    await remote.afterReady()
+    const selector = remote.selectorOf(mms.netEngine.profileDir)
+    const { startSshRoute } = (await import(pathToFileURL(routes).href)) as {
+      startSshRoute: (options: Record<string, unknown>) => Promise<{
+        config: string
+        stop: () => Promise<void>
+      }>
+    }
+    const server = await startSshRoute({
+      keys: join(home, 'ssh-server'),
+      mousseHome: home,
+      launchers: { 'mousse-helper': process.env.MOUSSE_NET_HELPER!.trim() }
+    })
+    const alias = `mousse-check-${name}`
+    const entry = readFileSync(server.config, 'utf8').replace(
+      /^Host mousse-test-sshd$/m,
+      `Host ${alias}`
+    )
+    appendFileSync(
+      sshConfig(),
+      `
+${entry}
+`
+    )
+    return { alias, selector, stop: server.stop }
+  }
+
+  /** `from`'s SSH route to `to`'s server, its host key pinned as the owner pins it (resolve, probe, trust). */
+  private async pinnedSshRoute(
+    from: Computer,
+    to: { alias: string; selector: string }
+  ): Promise<{ route_id: string; selector: string; shell: string }> {
+    const resolved = await from.engine.request('ssh.resolve', { target: to.alias })
+    const routeId = String(resolved.route_id)
+    const probe = await from.engine.request('ssh.probe', { route_id: routeId })
+    await from.engine.request('ssh.trust', { route_id: routeId, sha256: probe.sha256 })
+    return { route_id: routeId, selector: to.selector, shell: 'sh' }
   }
 
   /**
@@ -500,7 +598,8 @@ export function approveAll(owner: Computer): () => void {
  * so the reverse direction runs over the route under test too (1b §14).
  */
 function routedParams(mms: MousseMainService, method: string, params: unknown): unknown {
-  if (!CHECK_ROUTE || method !== 'netEngine.join' || !params || typeof params !== 'object') return params
+  if (!CHECK_ROUTE || method !== 'netEngine.join' || !params || typeof params !== 'object')
+    return params
   if ('share' in params) return params
   const share = mms.netEngine.shareable()
   return share.length ? { ...params, share } : params
@@ -539,9 +638,7 @@ export function guardEgress(): void {
   Socket.prototype.connect = function (this: Socket, ...args: unknown[]) {
     const first = args[0] as { host?: unknown; path?: unknown } | unknown[] | number | string
     const options = (Array.isArray(first) ? first[0] : first) as
-      | { host?: unknown; path?: unknown }
-      | number
-      | string
+      { host?: unknown; path?: unknown } | number | string
     const host =
       typeof options === 'object' && options
         ? options.path
@@ -616,6 +713,112 @@ export async function connectedBothWays(
 }
 
 /** The helper `mms` runs once it said hello (another than `before`). */
+let runSshConfig: string | undefined
+
+/** The run's one SSH config (`MOUSSE_NET_TEST_SSH_CONFIG`, read by debug helpers): each test server's entry. */
+function sshConfig(): string {
+  if (runSshConfig) return runSshConfig
+  runSshConfig = join(realpathSync(mkdtempSync(join(tmpdir(), 'engine-check-ssh-'))), 'ssh_config')
+  writeFileSync(runSshConfig, '')
+  return runSshConfig
+}
+
+/** The test root and the stand-ins' certificate, made once per run (`openssl`, or MOUSSE_CHECK_OPENSSL). */
+let standInPki: { key: string; cert: string } | undefined
+
+/**
+ * A run's tunnel PKI (1b §4.2): a root the debug helper trusts through MOUSSE_NET_TEST_EXTRA_ROOT (nothing goes in
+ * an OS store) and a `localhost` certificate it signed.
+ */
+const GIT_OPENSSL = 'C:\\Program Files\\Git\\mingw64\\bin\\openssl.exe'
+
+function tunnelPki(): { key: string; cert: string } {
+  if (standInPki) return standInPki
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'engine-check-pki-')))
+  const openssl =
+    process.env.MOUSSE_CHECK_OPENSSL?.trim() ||
+    (process.platform === 'win32' && existsSync(GIT_OPENSSL) ? GIT_OPENSSL : 'openssl')
+  const run = (...args: string[]) => execFileSync(openssl, args, { cwd: dir, stdio: 'pipe' })
+  const ec = ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes']
+  run(
+    'req',
+    '-x509',
+    ...ec,
+    '-keyout',
+    'root.key',
+    '-out',
+    'root.pem',
+    '-days',
+    '2',
+    '-subj',
+    '/CN=mousse-net check root',
+    '-addext',
+    'basicConstraints=critical,CA:TRUE',
+    '-addext',
+    'keyUsage=critical,keyCertSign,cRLSign'
+  )
+  run('req', ...ec, '-keyout', 'leaf.key', '-out', 'leaf.csr', '-subj', '/CN=localhost')
+  writeFileSync(
+    join(dir, 'leaf.ext'),
+    [
+      'subjectAltName=DNS:localhost',
+      'extendedKeyUsage=serverAuth',
+      'keyUsage=critical,digitalSignature',
+      'basicConstraints=CA:FALSE',
+      ''
+    ].join('\n')
+  )
+  run(
+    'x509',
+    '-req',
+    '-in',
+    'leaf.csr',
+    '-CA',
+    'root.pem',
+    '-CAkey',
+    'root.key',
+    '-CAcreateserial',
+    '-out',
+    'leaf.pem',
+    '-days',
+    '2',
+    '-extfile',
+    'leaf.ext'
+  )
+  run('x509', '-in', 'root.pem', '-outform', 'DER', '-out', 'root.der')
+  process.env.MOUSSE_NET_TEST_EXTRA_ROOT = join(dir, 'root.der')
+  standInPki = {
+    key: readFileSync(join(dir, 'leaf.key'), 'utf8'),
+    cert: readFileSync(join(dir, 'leaf.pem'), 'utf8') + readFileSync(join(dir, 'root.pem'), 'utf8')
+  }
+  return standInPki
+}
+
+/**
+ * A TLS-terminating tunnel stand-in on loopback (1b §14 `ws`): the outer TLS ends here, with a certificate from
+ * the run's test root, and the plain bytes go on to the helper's ws listener (`wsPort()` at each connection, so a
+ * helper restart is followed). Its route is `wss://localhost:<port>/t/mousse-net/1`.
+ */
+async function tunnelStandIn(
+  wsPort: () => number | undefined
+): Promise<{ route: string; close: () => Promise<void> }> {
+  const { key, cert } = tunnelPki()
+  const server = createTlsServer({ key, cert, ALPNProtocols: ['http/1.1'] }, (socket) => {
+    const port = wsPort()
+    if (!port) return socket.destroy()
+    const plain = netConnect(port, '127.0.0.1')
+    socket.on('error', () => plain.destroy())
+    plain.on('error', () => socket.destroy())
+    socket.pipe(plain).pipe(socket)
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  return {
+    route: `wss://localhost:${port}/t/mousse-net/1`,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
 async function running(mms: MousseMainService, before?: EngineHelper): Promise<EngineHelper> {
   let engine: EngineHelper | undefined
   await eventually(() => {
