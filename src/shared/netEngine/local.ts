@@ -13,6 +13,7 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.invite.cancel',
   'netEngine.approve',
   'netEngine.join',
+  'netEngine.join.code',
   'netEngine.retry',
   'netEngine.remove',
   'netEngine.address.add',
@@ -30,6 +31,28 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.ssh.connect'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
+
+/** A Send link this computer shows (§5.1): the code to read out and the tries left, until it ends. */
+export interface NetEngineLinkInvite {
+  invitation: string
+  code: string
+  attemptsLeft: number
+  expiresAt?: number
+  /** Why it ended: `used`, `attempts_exhausted`, `expired`, `cancelled`. */
+  ended?: string
+  /** The pairing it made, once the other computer was let in. */
+  node?: string
+}
+
+/** A Send link join running here (§5.3): whether it waits for the code, and the tries left. */
+export interface NetEngineLinkJoin {
+  invitation: string
+  node?: string
+  needsCode: boolean
+  attemptsLeft?: number
+  /** The last code typed did not work. */
+  wrong?: boolean
+}
 
 /**
  * The default of the engine limit `scanIntervalMs` (`MOUSSE_NET_ENGINE_SCAN_INTERVAL_MS`). A window uses the value in
@@ -83,6 +106,10 @@ export interface NetEngineDevice {
   source?: 'ssh'
   /** Added over SSH, one way: `out`, this computer uses it; `in`, it uses this computer (§3.6). */
   direction?: 'out' | 'in'
+  /** A Send link it consented to did not finish (no code confirmed, or the outcome was lost): Retry or Remove. */
+  unfinished?: boolean
+  /** That link is still valid, so Retry may ask for the code again. */
+  linkValid?: boolean
 }
 
 /** A computer asking to join this one, waiting for this computer's window to answer (§5.1 step 3). */
@@ -119,6 +146,8 @@ export interface NetEngineJoinPreview {
   name?: string
   /** 1: shown in person (QR); 2: sent as a link. */
   kind: number
+  /** The invitation id (hex): a Send link join's code requests and status name it. */
+  invitation?: string
   /** The ticket has expired by this computer's clock. */
   expired?: boolean
   /** Every hint this computer would dial, with its class; the non-automatic ones are what Connect approves. */
@@ -149,4 +178,10 @@ export interface NetEngineStatus {
   scanIntervalMs?: number
   /** This computer's own routes, when its helper speaks protocol 1.1. */
   reach?: NetEngineReach
+  /** The helper speaks protocol 1.1, so Send link and Enter link work. */
+  sendLink?: boolean
+  /** Send links this computer shows. */
+  links?: NetEngineLinkInvite[]
+  /** Send link joins running here. */
+  joins?: NetEngineLinkJoin[]
 }

@@ -302,6 +302,12 @@ export const ENGINE_CONTROLS = [
   'teardown-on-event-only',
   // phase1a.path-switch
   'abort-on-path-replaced',
+  // phase1b.link-app
+  'link-pinned-journal',
+  'already-grants-back',
+  'pin-promotes-kind2',
+  'link-approvals-lost',
+  'link-scheme-registered',
   // phase1b.routes-app (and phase1b.ssh-add-app)
   'plus-probe',
   'egress-probe',

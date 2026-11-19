@@ -147,6 +147,8 @@ export interface ProfilePublicDto {
   status: ProfileStatus
   revision: number
   isDefault: boolean
+  /** The profile's new networking is on: a `mousse://` link may join with it (design 1b §5.2). */
+  networked?: boolean
 }
 
 export interface ProfileBindResult {

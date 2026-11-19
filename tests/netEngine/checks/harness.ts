@@ -149,7 +149,7 @@ export interface Computer {
 
 /** The computers of one check, their helpers and the fake network between them. */
 export class Fabric {
-  readonly network = new FakeNetwork()
+  readonly network = fakeNetwork()
   /** Every engine message each app sent its helper; `decide` may drop one. */
   private readonly tap: Tap = { crossed: [] }
   private readonly cleanups: Array<() => unknown> = []
@@ -461,6 +461,17 @@ export class Fabric {
     vi.useRealTimers()
     for (const close of this.cleanups.splice(0).reverse()) await close()
   }
+}
+
+/**
+ * A fake network whose helpers carry the defects the kit's helper controls build into a real one (each
+ * `--cfg mousse_control="<name>"` in `RUSTFLAGS`), so a control fails the same way with the fake helper.
+ */
+function fakeNetwork(): FakeNetwork {
+  const network = new FakeNetwork()
+  for (const match of (process.env.RUSTFLAGS ?? '').matchAll(/mousse_control="([a-z0-9-]+)"/g))
+    network.defects.add(match[1]!)
+  return network
 }
 
 /** Says Yes to every computer asking to join `owner`, as its window would, until stopped. */

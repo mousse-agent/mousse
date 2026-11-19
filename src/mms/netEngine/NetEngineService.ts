@@ -85,6 +85,8 @@ interface Started {
   pairing: EnginePairing
   /** The host's owed rows being written from `grants.list`, while they are. */
   reconciling?: Promise<void>
+  /** Set when `stop` begins: the store may close (the profile's Net shuts down alongside) before the helper has. */
+  ending?: boolean
 }
 
 const policyView = (policy: NodePolicy): BridgeNodePolicy => ({
@@ -240,6 +242,9 @@ export class NetEngineService implements EngineDirectoryPort {
       ...(this.routes().length ? { routes: this.routes() } : {}),
       ...(this.sharedAccount() ? { sharedAccount: true } : {}),
       scanIntervalMs: engineLimits().scanIntervalMs,
+      ...(this.helper?.speaks(1) ? { sendLink: true } : {}),
+      ...(this.started?.pairing.links().length ? { links: this.started.pairing.links() } : {}),
+      ...(this.started?.pairing.joins().length ? { joins: this.started.pairing.joins() } : {}),
       ...(this.reach() ? { reach: this.reach() } : {})
     }
   }
@@ -336,9 +341,14 @@ export class NetEngineService implements EngineDirectoryPort {
 
   /**
    * Connect on a ticket (§1.3): its destinations are approved, and `share` (some of `shareable()`, ticked under
-   * "Also share") goes in pairback beside this computer's LAN routes.
+   * "Also share") goes in pairback beside this computer's LAN routes. `arrival: 'link'`: it came as a Send link
+   * (§5.3), whatever its kind says.
    */
-  async join(ticket: string, share: readonly string[] = []): Promise<EnginePeerRow> {
+  async join(
+    ticket: string,
+    share: readonly string[] = [],
+    arrival?: 'link'
+  ): Promise<EnginePeerRow> {
     const started = this.require()
     const allowed = this.shareable()
     const unknown = share.find((route) => !allowed.includes(route))
@@ -348,7 +358,7 @@ export class NetEngineService implements EngineDirectoryPort {
       })
     await this.tellName()
     routeSetupProbes()
-    return started.pairing.join(ticket, { share: [...share] })
+    return started.pairing.join(ticket, { share: [...share], ...(arrival ? { arrival } : {}) })
   }
 
   // ---------------------------------------------------------------- Add over SSH (Phase 1b §3.4)
@@ -538,6 +548,7 @@ export class NetEngineService implements EngineDirectoryPort {
     return {
       ...(facts.name ? { name: facts.name } : {}),
       kind: facts.kind ?? 1,
+      invitation: facts.invitation,
       ...(facts.expiresAt !== undefined && facts.expiresAt * 1000 <= Date.now()
         ? { expired: true }
         : {}),
@@ -677,6 +688,10 @@ export class NetEngineService implements EngineDirectoryPort {
     const row = started.peers.get(node)
     if (!row || row.state === 'removed') throw new NetError('bad_request', 'Unknown device.')
     if (row.state === 'removing') return started.pairing.remove(node)
+    if (started.pairing.linkUnfinished(node)) {
+      await started.pairing.retryLink(node)
+      return
+    }
     if (row.state !== 'connected' && row.state !== 'awaiting_pairback')
       await started.pairing.advance(node)
     if (!started.sessions.online(node) && this.helper && row.state !== 'consented')
@@ -721,7 +736,10 @@ export class NetEngineService implements EngineDirectoryPort {
                   : online || serving
                     ? 'connecting'
                     : 'offline'
-        const stuck = held(`${node} finishing`, state === 'finishing') >= stuckMs
+        // A Send link join waiting for its code is a person's wait, not a stuck pairing.
+        const stuck =
+          held(`${node} finishing`, state === 'finishing' && !started.pairing.linkJoining(node)) >=
+          stuckMs
         // One direction down for the bound while the other works.
         const paired = row.state === 'connected' && !direction
         const outDown = held(`${node} out`, paired && !online) >= stuckMs
@@ -743,7 +761,15 @@ export class NetEngineService implements EngineDirectoryPort {
           ...(row.addresses?.length ? { addresses: row.addresses } : {}),
           ...(route ? { route } : {}),
           ...(row.offered?.length ? { offered: row.offered } : {}),
-          ...(row.source ? { source: row.source } : {})
+          ...(row.source ? { source: row.source } : {}),
+          ...(started.pairing.linkUnfinished(node)
+            ? {
+                unfinished: true,
+                ...(row.link?.expiresAt === undefined || row.link.expiresAt * 1000 > now
+                  ? { linkValid: true }
+                  : {})
+              }
+            : {})
         }
       })
     for (const key of [...this.since.keys()]) if (!seen.has(key)) this.since.delete(key)
@@ -836,7 +862,8 @@ export class NetEngineService implements EngineDirectoryPort {
           append: (...args) => bridge().artifacts.append(...args)
         },
         name: () => this.selfName(),
-        pairback: (caller, request) => pairing.pairback(caller, request)
+        pairback: (caller, request) => pairing.pairback(caller, request),
+        calledBy: (caller, name) => pairing.named(caller.node, name)
       },
       client: {
         get store() {
@@ -850,7 +877,7 @@ export class NetEngineService implements EngineDirectoryPort {
           pairing.clientReady(node)
           // A: its first live connection to B confirms an SSH add (1b §3.4 step 6).
           // Stopping: the store is closed, and nothing is written.
-          const row = this.started?.peers === peers ? peers.get(node) : undefined
+          const row = this.started?.peers === peers && !this.started.ending ? peers.get(node) : undefined
           if (row?.source === 'ssh' && row.state === 'ssh_granted') this.sshAdd().connected(row)
           this.changed()
         },
@@ -860,7 +887,7 @@ export class NetEngineService implements EngineDirectoryPort {
         },
         onServingChanged: (node) => {
           // B: A's first live inbound with the row's grant connects it ("Added over SSH from <A>").
-          const row = this.started?.peers === peers ? peers.get(node) : undefined
+          const row = this.started?.peers === peers && !this.started.ending ? peers.get(node) : undefined
           if (
             row?.source === 'ssh' &&
             row.state === 'ssh_granted' &&
@@ -1048,6 +1075,7 @@ export class NetEngineService implements EngineDirectoryPort {
 
   async stop(): Promise<void> {
     await this.starting?.catch(() => undefined)
+    if (this.started) this.started.ending = true
     const supervisor = this.supervisor
     this.supervisor = undefined
     await supervisor?.stop()
@@ -1325,7 +1353,7 @@ export class NetEngineService implements EngineDirectoryPort {
 }
 
 /** Whether the profile at `home` has the new networking's switch on. */
-function engineOn(home: string): boolean {
+export function engineOn(home: string): boolean {
   try {
     const value = JSON.parse(readFileSync(join(home, 'net-engine', 'settings.json'), 'utf8')) as {
       enabled?: unknown

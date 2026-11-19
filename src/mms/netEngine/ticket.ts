@@ -13,10 +13,20 @@ export interface TicketFacts {
   routes: string[]
   /** The name the host's link gives it (`?n=`), shown before the host says its own. */
   name?: string
-  /** 1: an in-person ticket (QR); 2: a send link (wire 10.1). */
+  /** The invitation's kind: 1 in person (a scanned code), 2 a link sent another way (design 1b §5). */
   kind?: number
-  /** SHA-256 of the ticket's CBOR bytes, hex (wire 10.2): the key of its flow and completion records. */
+  /** The ticket hash (SHA-256 of its bytes, hex): the key of the helper's flow and completion records. */
   hash: string
+  /** The ticket alone, without the link around it: what the helper and the journal take. */
+  fragment: string
+}
+
+/** The invitation kind of a link sent another way (`invite.create {kind: "link"}`). */
+export const LINK_KIND = 2
+
+/** The link "Send link" copies: the ticket after `#`, nothing else (a name outside the ticket is not checked). */
+export function sendLink(fragment: string): string {
+  return `mousse://pair#${fragment}`
 }
 
 /** The link a host's QR code holds: its name for the joiner's question, then the ticket after `#`. */
@@ -66,7 +76,8 @@ export function readTicket(ticket: string): TicketFacts {
       : [],
     ...(name ? { name } : {}),
     ...(typeof kind === 'number' ? { kind } : {}),
-    hash: createHash('sha256').update(bytes).digest('hex')
+    hash: createHash('sha256').update(bytes).digest('hex'),
+    fragment: encoded
   }
 }
 

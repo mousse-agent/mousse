@@ -41,6 +41,8 @@ export interface EngineHostPort {
    * Resolves once its own `hello` there was answered; the reply is `pairback.done`.
    */
   pairback?(caller: EngineCaller, request: { routes: string[]; receipt?: string }): Promise<void>
+  /** The caller said its name in `hello` (`<computer> (<profile>)`). */
+  calledBy?(caller: EngineCaller, name: string): void
 }
 
 /**
@@ -140,7 +142,10 @@ export class EngineHost {
     const h = message.header
     switch (label) {
       case 'mousse.hello':
-        if (h.t === 'hello') channel.send({ t: 'hello', proto: 1, name: this.port.name() })
+        if (h.t === 'hello') {
+          if (typeof h.name === 'string') this.port.calledBy?.(caller, h.name)
+          channel.send({ t: 'hello', proto: 1, name: this.port.name() })
+        }
         else if (h.t === 'pairback') {
           if (!this.port.pairback) throw new NetError('bad_request')
           const routes = Array.isArray(h.routes)
