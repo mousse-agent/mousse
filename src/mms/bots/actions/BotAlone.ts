@@ -13,11 +13,12 @@ const normalizedText = (value: string): string => value.normalize('NFKC').replac
 function scanText(value: string): string {
   const decoded = value.replace(/(?:%[\da-f]{2})+/giu, encoded => {
     try { return decodeURIComponent(encoded) } catch { return encoded.replace(/%([\da-f]{2})/giu, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16))) }
-  }).replace(/&#(?:x([\da-f]{1,6})|(\d{1,7}));?/giu, (entity, hex, decimal) => {
+  }).replace(/&#(?:x0*([\da-f]{1,6})|0*(\d{1,7}));?/giu, (entity, hex, decimal) => {
     const code = Number.parseInt(hex ?? decimal, hex ? 16 : 10)
     return code <= 0x10ffff ? String.fromCodePoint(code) : entity
   })
-  return decoded.normalize('NFKC').replace(/[\p{M}\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '').replace(/[。｡‧]/g, '.')
+  const named: Record<string, string> = { period: '.', colon: ':', sol: '/', bsol: '\\', commat: '@', Tab: '\t', NewLine: '\n', nbsp: ' ', lpar: '(', rpar: ')', lsqb: '[', rsqb: ']', lt: '<', gt: '>', quot: '"', apos: "'", amp: '&', excl: '!', quest: '?', num: '#', percnt: '%', equals: '=' }
+  return decoded.replace(/&([A-Za-z][A-Za-z0-9]{1,31});/g, (entity, name: string) => named[name] ?? entity).normalize('NFKC').replace(/[\p{M}\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '').replace(/[。｡‧]/g, '.')
 }
 /** Every scan and edge trim is linear, including text expanded by NFKC. */
 function addressTokens(value: string): string[] {
@@ -33,7 +34,7 @@ function addressTokens(value: string): string[] {
     }
     const token = word.slice(start, end)
     // Inspect before removing opening quotes so a code fragment such as ".com" is also frozen.
-    if (!ordinaryNumber(token) && /[:@\\]|\/\/|\S\.\S/u.test(word.slice(0, end))) tokens.add(token)
+    if (!ordinaryNumber(token) && (/[:@\\]|\/\/|\S\.\S/u.test(word.slice(0, end)) || /&[A-Za-z][A-Za-z0-9]{1,31};/u.test(word))) tokens.add(token)
     if (tokens.size > 256) break
   }
   return [...tokens]
