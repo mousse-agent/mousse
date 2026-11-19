@@ -15,7 +15,7 @@ import { useMotionScale } from '../../lib/motion'
 import { watchOffscreen } from '../../lib/offscreenMotion'
 import { BotFace } from './face/BotFace'
 import { BotSteps } from './BotSteps'
-import { BOT_IMAGES, BotFilePane, BotFilesProvider, BotMarkdown, BotPathChip, fileActions } from './BotFiles'
+import { BOT_IMAGES, BotFilesProvider, BotMarkdown, BotPathChip, fileActions } from './BotFiles'
 import { BotAppletPane, BotMessageApplets } from './BotApplets'
 import { BotPictureActions, BotReplyMedia } from './BotReplyMedia'
 import { BotReactionBadge, BotReactionBar } from './BotReactions'
@@ -30,11 +30,11 @@ import { BotCards, galleryPaths } from './BotCards'
 import { BotActivitySticker, BotPresenceLine } from './BotPresence'
 import { askAnswerLine } from '../asks/AskCard'
 import { BotMenu } from './BotMenu'
-import { BotAboutSlide } from './BotAboutPanel'
 import { BotTasksButton } from './BotTasksButton'
+import { BotSidePanel, botFilesFolder, useBotSidePanel } from './BotSidePanel'
 import { BotMemoryDialog } from './BotMemoryDialog'
-import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
-import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
+import { BotBrowserPreview } from './BotBrowser'
+import { useBotBrowser } from '../../stores/botBrowserStore'
 import { ChatComposer, type AttachedFile, type VoiceMessage } from '../ChatComposer'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../ComposerNotice'
 import { botGroupTime, placeMessages } from './messageGroups'
@@ -838,7 +838,6 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const draft = pasted.draft
   const attachments = useBotsStore((s) => s.attachments[bot.id])
   const replying = useBotsStore((s) => s.replyingTo[bot.id])
-  const aboutOpen = useBotsStore((s) => s.aboutOpen)
   const memoryOpen = useBotsStore((s) => (s.memoryOpen?.botId === bot.id ? s.memoryOpen : null))
   // Another bot's error stays with that bot's chat.
   const error = useBotsStore((s) => (s.errorBotId === bot.id ? s.error : null))
@@ -899,31 +898,27 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }, [bot.id])
   // The message each reply answers, for how long its work took.
   const byId = useMemo(() => new Map(messages.map((message) => [message.id, message])), [messages])
-  // A file a chip opened, in the Files pane beside the chat. Opening one closes About and the browser's split view.
+  // The bot's own browser: the reply of the run whose tab it shows has a live preview, and Expand opens it in the side
+  // panel. Each watches the browser's pictures only while it is on screen.
+  const browser = useBotBrowser(bot.id)
+  // The side panel docked beside the chat pane: the browser, the bot's files, Agent settings (BotSidePanel.tsx).
+  const side = useBotSidePanel(bot.id)
+  const filesFolder = useMemo(() => botFilesFolder(messages, bot.id), [messages, bot.id])
+  // A file a chip opened, in the side panel's Files view.
   const [file, setFile] = useState<string | null>(null)
   // An applet opened beside the chat, from its name.
   const [appletOpen, setAppletOpen] = useState<BotChatApplet | null>(null)
   useEffect(() => { setAppletOpen(null) }, [bot.id])
-  const openApplet = useCallback((applet: BotChatApplet) => {
-    setAppletOpen(applet)
-    setFile(null)
-  }, [])
+  const openApplet = useCallback((applet: BotChatApplet) => setAppletOpen(applet), [])
   // An action on a file that the computer refused ("Can't find notes.md…") is said above the composer.
   const fileFailed = useCallback((text: string) => useBotsStore.setState({ error: text, errorBotId: bot.id }), [bot.id])
-  // A chip's click: a file shows in the pane, a folder opens in the file manager, one that is gone is said.
+  // A chip's click: a file shows in the side panel's Files view, a folder opens in the file manager, one that is gone
+  // is said.
+  const showSide = side.show
   const openFile = useCallback((path: string) => fileActions.open(path, (shown) => {
     setFile(shown)
-    useBotsStore.setState({ aboutOpen: false })
-    useBotBrowserStore.getState().closePane()
-  }, fileFailed), [fileFailed])
-  // The bot's own browser: the reply of the run whose tab it shows has a live preview, and Expand opens the split view.
-  // Each watches the browser's pictures only while it is on screen.
-  const browser = useBotBrowser(bot.id)
-  const paneOpen = useBotBrowserStore((s) => s.pane === bot.id)
-  // Full screen: the split view takes the chat's place in the centre pane while it is open (the chat stays mounted behind it).
-  const [browserFull, setBrowserFull] = useState(false)
-  const fullScreen = browserFull && paneOpen && Boolean(browser)
-  useEffect(() => { if (browserFull && !fullScreen) setBrowserFull(false) }, [browserFull, fullScreen])
+    showSide('files')
+  }, fileFailed), [fileFailed, showSide])
   const browserRun = browser?.activationId ?? browser?.activations.at(-1)
   const previewOn = browserRun ? messages.filter((message) => message.author === 'bot' && message.activationId === browserRun).at(-1)?.id : undefined
   const preview = browser && browserRun ? <BotBrowserPreview bot={bot} view={browser} /> : null
@@ -1058,7 +1053,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     element.scrollTop = element.scrollHeight
     anchor.current.height = element.scrollHeight
   }, [])
-  const toggleAbout = () => useBotsStore.setState({ aboutOpen: !aboutOpen })
+  // The face and the name open Agent settings in the side panel, and close it there.
+  const toggleAbout = () => (side.open && side.view === 'settings' ? side.close() : side.show('settings'))
   const pictureActions = useCallback((image: LightboxImage) => <BotPictureActions image={image} />, [])
   // `/` commands: the list follows what is typed; after `/model` it offers the bot's slots and models, read once.
   const modelInfo = useBotsStore((s) => s.modelInfo[bot.id])
@@ -1072,8 +1068,10 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }), [modelInfo])
 
   return <BotFilesProvider botId={bot.id} open={openFile} failed={fileFailed}><ImageGalleryProvider images={chatImages} actions={pictureActions}>
+    {/* The chat pane: the conversation, and an applet beside it. The side panel docks outside it. */}
+    <div className="bot-chat-pane">
     {/* The bot's colour tints the quotes of its messages. */}
-    <section data-mousse="chat" className={`chat-conversation bot-conversation${typing ? ' is-typing' : ''}${fullScreen ? ' is-behind-browser' : ''}`} data-applet-conversation style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
+    <section data-mousse="chat" className={`chat-conversation bot-conversation${typing ? ' is-typing' : ''}`} data-applet-conversation style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
       <header data-mousse="chat-header" className="chat-conversation-header">
         <button type="button" className="bot-header-about" aria-label={`About ${bot.name}`} onClick={toggleAbout}>
           <BotFace look={bot.look} state={botFaceState(bot, happy)} size={32} view="head" />
@@ -1084,8 +1082,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           <BotPresenceLine bot={bot} typing={typing} offline={offline} />
         </div>
         <BotTasksButton tasks={bot.tasks} />
-        <button type="button" className={`bot-header-panel${aboutOpen ? ' is-open' : ''}`} aria-label={aboutOpen ? 'Hide About' : 'Show About'} title={aboutOpen ? 'Hide About' : 'Show About'} aria-expanded={aboutOpen} onClick={toggleAbout}>
-          {aboutOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
+        <button type="button" className={`bot-header-panel${side.open ? ' is-open' : ''}`} aria-label={side.open ? 'Hide side panel' : 'Show side panel'} title={side.open ? 'Hide side panel' : 'Show side panel'} aria-expanded={side.open} onClick={side.toggle}>
+          {side.open ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
         </button>
         {/* From the menu, whose item goes as it closes: Escape then gives the focus to the composer. */}
         <BotMenu bot={bot} {...(find.openFind ? { onFind: () => { composerField()?.focus({ preventScroll: true }); find.openFind!() } } : {})} />
@@ -1187,10 +1185,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         </ComposerNoticeProvider>
       </div>
     </section>
-    {file && <BotFilePane botId={bot.id} path={file} onClose={() => setFile(null)} />}
-    {paneOpen && browser && <BotBrowserPane bot={bot} view={browser} fullScreen={{ on: fullScreen, toggle: () => setBrowserFull(!fullScreen) }} />}
     {appletOpen && <BotAppletPane botId={bot.id} applet={appletOpen} onClose={() => setAppletOpen(null)} />}
-    <BotAboutSlide open={aboutOpen} bot={bot} />
+    </div>
+    <BotSidePanel bot={bot} state={side} browser={browser} folder={filesFolder} file={file} onFile={setFile} />
     {memoryOpen && <BotMemoryDialog bot={bot} {...(memoryOpen.focus ? { focus: memoryOpen.focus } : {})} />}
   </ImageGalleryProvider></BotFilesProvider>
 }

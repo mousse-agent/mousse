@@ -291,6 +291,63 @@ describe('the transcript', () => {
     expect(host.querySelector('aside.bot-file-pane')).toBeNull()
   })
 
+  it('the side panel docks outside the chat pane and opens on the picker: each pick is a tab, + opens the picker again', async () => {
+    const folder = 'C:\\Users\\me\\.mousse\\profiles\\d9d018ad-5de0\\bots\\files\\inbox'
+    fake.chats.inbox = [message(1, { id: 'b1', text: `Saved \`${folder}\\plan.md\`.` })]
+    const listDir = vi.fn(async () => [{ name: 'plan.md', path: 'plan.md', kind: 'file' as const }])
+    const readFile = vi.fn(async () => '# Plan')
+    installPreload(fake, { app: { setViewedBot }, fs: { listDir, readFile, readAsset: vi.fn(async () => { throw new Error('none') }) }, localFiles: { open: vi.fn(async () => 'file' as const) } })
+    await open()
+    const panel = () => host.querySelector<HTMLElement>('aside.bot-side')
+    const tabs = () => [...panel()!.querySelectorAll<HTMLButtonElement>('.main-view-tab-select')].map((element) => element.textContent)
+    const tab = (label: string) => [...panel()!.querySelectorAll<HTMLButtonElement>('.main-view-tab-select')].find((element) => element.textContent === label)
+    const pick = (label: string) => [...panel()!.querySelectorAll<HTMLButtonElement>('.surface-picker .surface-menu-row')].find((element) => element.textContent === label)
+    expect(panel()).toBeNull()
+    await click(button('Show side panel'))
+    await settle()
+    // Not inside the chat pane; nothing open in it yet, only the picker, with no tab.
+    expect(host.querySelector('.bot-chat-pane')!.contains(panel())).toBe(false)
+    expect(panel()!.getAttribute('data-view')).toBe('picker')
+    expect([...panel()!.querySelectorAll('.surface-picker .surface-menu-row')].map((row) => row.textContent)).toEqual(['Browser', 'Files', 'Agent settings'])
+    expect(tabs()).toEqual([])
+    expect(useBotsStore.getState().aboutOpen).toBe(false)
+    await click(pick('Files'))
+    await settle()
+    expect(panel()!.getAttribute('data-view')).toBe('files')
+    expect(tabs()).toEqual(['Files'])
+    // Its files folder, read from the paths its chat named; a file there opens in the view.
+    expect(listDir).toHaveBeenCalledWith('', undefined, null, folder)
+    await click([...panel()!.querySelectorAll<HTMLElement>('.file-tree-row')].find((row) => row.textContent?.includes('plan.md')))
+    await settle()
+    expect(readFile).toHaveBeenCalledWith('plan.md', undefined, null, folder)
+    expect(panel()!.querySelector('.bot-file-name')?.textContent).toBe('plan.md')
+    // + opens the picker as a new tab; Agent settings is the About content.
+    await click(button('New tab', panel()!))
+    expect(panel()!.getAttribute('data-view')).toBe('picker')
+    expect(tabs()).toEqual(['Files', 'New tab'])
+    await click(pick('Agent settings'))
+    expect(tabs()).toEqual(['Files', 'Agent settings'])
+    expect(panel()!.querySelector('aside.bot-about')?.getAttribute('aria-label')).toBe('About Inbox helper')
+    expect(useBotsStore.getState().aboutOpen).toBe(true)
+    await click(button('New tab', panel()!))
+    await click(pick('Browser'))
+    expect(tabs()).toEqual(['Files', 'Agent settings', 'Browser'])
+    expect(panel()!.querySelector('.bot-about')).toBeNull()
+    expect(useBotsStore.getState().aboutOpen).toBe(false)
+    expect(panel()!.textContent).toContain('Inbox helper hasn’t used its browser yet.')
+    // A view already open is brought to the front, not opened twice.
+    await click(button('New tab', panel()!))
+    await click(pick('Files'))
+    expect(tabs()).toEqual(['Files', 'Agent settings', 'Browser', 'New tab'])
+    expect(panel()!.getAttribute('data-view')).toBe('files')
+    await click(tab('Agent settings'))
+    await click(button('Close Agent settings', panel()!))
+    expect(tabs()).toEqual(['Files', 'Browser', 'New tab'])
+    expect(useBotsStore.getState().aboutOpen).toBe(false)
+    await click(button('Close side panel'))
+    expect(button('Show side panel')?.getAttribute('aria-expanded')).toBe('false')
+  })
+
   it('a folder’s chip opens the folder in the file manager, not the Files pane; a path with nothing at it is said', async () => {
     const net = 'C:\\Users\\me\\.mousse\\net'
     fake.chats.inbox = [message(1, { id: 'b1', text: `Rename this folder: ${net}\\\n\nOld copy: C:\\Users\\me\\old-net` })]
@@ -1641,17 +1698,24 @@ describe('the menu', () => {
     expect(host.querySelector('aside.bot-about')?.getAttribute('aria-label')).toBe('About Inbox helper')
   })
 
-  it("the header's panel button shows About and hides it again", async () => {
+  it('the face opens Agent settings in the side panel and closes it; the panel button hides the panel and brings it back as it was', async () => {
     act(() => setAnimationSpeed('off'))
     try {
       await open()
-      expect(button('Show About')?.getAttribute('aria-expanded')).toBe('false')
-      await click(button('Show About'))
-      expect(host.querySelector('aside.bot-about')?.getAttribute('aria-label')).toBe('About Inbox helper')
-      expect(button('Hide About')?.getAttribute('aria-expanded')).toBe('true')
-      await click(button('Hide About'))
-      expect(host.querySelector('aside.bot-about')).toBeNull()
-      expect(button('Show About')?.getAttribute('aria-expanded')).toBe('false')
+      const panel = () => host.querySelector<HTMLElement>('aside.bot-side')
+      expect(button('Show side panel')?.getAttribute('aria-expanded')).toBe('false')
+      await click(button('About Inbox helper'))
+      expect(panel()?.getAttribute('data-view')).toBe('settings')
+      expect(panel()!.querySelector('aside.bot-about')?.getAttribute('aria-label')).toBe('About Inbox helper')
+      expect(button('Hide side panel')?.getAttribute('aria-expanded')).toBe('true')
+      await click(button('Hide side panel'))
+      expect(panel()).toBeNull()
+      expect(useBotsStore.getState().aboutOpen).toBe(false)
+      await click(button('Show side panel'))
+      expect(panel()?.getAttribute('data-view')).toBe('settings')
+      await click(button('About Inbox helper'))
+      expect(panel()).toBeNull()
+      expect(button('Show side panel')?.getAttribute('aria-expanded')).toBe('false')
     } finally {
       act(() => setAnimationSpeed('normal'))
     }

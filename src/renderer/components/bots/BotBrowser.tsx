@@ -63,7 +63,7 @@ export function BotBrowserPreview({ bot, view }: { bot: BotSummary; view: BotBro
 }
 
 /**
- * The split view: the bot's browser beside its chat (the general `WatchedBrowserPane`), or full screen over the centre pane. The
+ * The bot's browser in its side panel (the general `WatchedBrowserPane`), or full screen over the centre pane. The
  * owner watches; the switch beside the address takes it over for this window (the bot's actions wait), and everything
  * they do then reaches the page in order, each input answered; pressed again, it gives it back. A closed browser can be
  * opened again here, under the owner's control.

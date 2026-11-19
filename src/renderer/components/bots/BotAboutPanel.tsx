@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ComponentType, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ComponentType, type ReactNode } from 'react'
 import {
   Activity, Automations, Bell, BookOpen, BrainMemory, BrowserTab, ChevronRight, CircleGauge, Clock, Coins, Cpu, ExternalLink, FileText, Folder,
   FolderSearch, GitPullRequest, Globe, Lock, MessagesSquare, Monitor, Palette, Pause, Pencil, Play, Plug, Search, ShieldCheck, Sparkles, Terminal, Trash2, X, Zap
@@ -21,7 +21,7 @@ import { BotPrompt } from './BotPrompt'
 import { promptCacheState, shortDuration, useMinuteClock } from '../../lib/promptCache'
 import { profilePreferenceKey } from '../../lib/profilePreferences'
 import { centerWithin } from '../../lib/shellScroll'
-import { motionOff, scaleMotionMs } from '../../lib/motion'
+import { motionOff } from '../../lib/motion'
 import { Collapse } from '../ui/Collapse'
 import { canonicalModelName, modelNameFromId, shortModelName } from '../../../shared/modelNames'
 
@@ -115,18 +115,9 @@ export function permissionIcon(item: Pick<BotPermissionItem, 'title'>): Icon {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-/** The width of the row About shares with the chat, which bounds its width (its slide frame sits between them). */
-const rowWidthOf = (handle: HTMLElement) => (handle.closest('.bot-about-slide') ?? handle.closest('.bot-about'))?.parentElement?.getBoundingClientRect().width
+// Folds, kept per profile. The panel's width is the side panel's (BotSidePanel).
 
-// Width and folds, kept per profile like the sidebars' widths.
-
-const WIDTH_KEY = 'mousse:bot-about-width'
 const OPEN_KEY = 'mousse:bot-about-open'
-const DEFAULT_WIDTH = 340
-const MIN_WIDTH = 300
-const MAX_WIDTH = 640
-/** The chat keeps at least this much beside the panel. */
-const MIN_CHAT_WIDTH = 420
 
 type FoldId = 'context' | 'prompt' | 'permissions' | 'automations' | 'reminders' | 'setup'
 /** What opens by default: what the bot is spending; everything else waits for a click. */
@@ -139,21 +130,6 @@ function readJson<T>(key: string, fallback: T): T {
   } catch {
     return fallback
   }
-}
-
-function usePanelWidth(profileId: string) {
-  const key = profileId ? profilePreferenceKey(profileId, WIDTH_KEY) : WIDTH_KEY
-  const [width, setWidth] = useState(() => {
-    const stored = Number.parseInt(window.localStorage.getItem(key) ?? '', 10)
-    return Number.isFinite(stored) ? Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, stored)) : DEFAULT_WIDTH
-  })
-  const update = useCallback((next: number, rowWidth?: number) => {
-    const max = Math.min(MAX_WIDTH, rowWidth ? Math.max(MIN_WIDTH, rowWidth - MIN_CHAT_WIDTH) : MAX_WIDTH)
-    const value = Math.round(Math.min(max, Math.max(MIN_WIDTH, next)))
-    setWidth(value)
-    window.localStorage.setItem(key, String(value))
-  }, [key])
-  return [width, update] as const
 }
 
 function useFolds(profileId: string) {
@@ -444,9 +420,10 @@ function automationsSummary(runs: BotRunItem[]): string {
  * About this bot (bot-ui §4.8), in the app's own language: the mouse beside a short header of what it does now, its model
  * and its context; then folds in Settings' pattern, of which only Context opens by default: context and cache,
  * instructions, what it can use (each with its own glyph, a switch and Remove), its automations by name and schedule,
- * reminders, memory, and what it runs on. The left edge drags the width, kept per profile.
+ * reminders, memory, and what it runs on. In the side panel (`inPanel`, its Agent settings view) the panel's strip
+ * closes it and the panel sets its width; on its own it has a Close.
  */
-export function BotAboutPanel({ bot }: { bot: BotSummary }) {
+export function BotAboutPanel({ bot, inPanel = false }: { bot: BotSummary; inPanel?: boolean }) {
   const detail = useBotsStore((s) => s.details[bot.id])
   const telling = detail?.tellingSettings ? tellingLine(detail.tellingSettings, detail.tellingSettings.quietHours, time => {
     const [hour, minute] = time.split(':').map(Number)
@@ -457,7 +434,6 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
   useEffect(() => { void useBotsStore.getState().loadDetail(bot.id) }, [bot.id])
   const store = useBotsStore.getState
   const paused = bot.state === 'paused'
-  const [width, setWidth] = usePanelWidth(profileId)
   const [open, toggle, unfold] = useFolds(profileId)
   // Pick a model opens Runs on, then brings the rows to the middle of the panel; only the panel scrolls
   // (scrollIntoView also moved every box around it, the app's own included).
@@ -484,43 +460,15 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
   const runs = detail?.runs ?? []
   const reminders = detail?.reminders ?? []
 
-  const startResize = (event: PointerEvent<HTMLDivElement>) => {
-    event.preventDefault()
-    const startX = event.clientX
-    const startWidth = width
-    const rowWidth = rowWidthOf(event.currentTarget)
-    event.currentTarget.setPointerCapture(event.pointerId)
-    const previous = [document.body.style.cursor, document.body.style.userSelect] as const
-    document.body.style.cursor = 'col-resize'
-    document.body.style.userSelect = 'none'
-    const move = (moveEvent: globalThis.PointerEvent) => setWidth(startWidth - (moveEvent.clientX - startX), rowWidth)
-    const stop = () => {
-      ;[document.body.style.cursor, document.body.style.userSelect] = previous
-      window.removeEventListener('pointermove', move)
-      window.removeEventListener('pointerup', stop)
-      window.removeEventListener('pointercancel', stop)
-    }
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', stop)
-    window.addEventListener('pointercancel', stop)
-  }
-  const resizeKey = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
-    event.preventDefault()
-    setWidth(width + (event.key === 'ArrowLeft' ? 16 : -16), rowWidthOf(event.currentTarget))
-  }
-
   // What the bot may use and which devices reach it are changed here: the panel pauses a theme while it is open.
-  return <aside className="bot-about settings-scope" style={{ width }} data-mousse-decision="" aria-label={`About ${bot.name}`}>
-    <div className="panel-sidebar-resize-handle bot-about-resize" role="separator" aria-orientation="vertical" aria-label="Resize About" tabIndex={0}
-      onPointerDown={startResize} onKeyDown={resizeKey} />
+  return <aside className={`bot-about settings-scope${inPanel ? ' is-in-panel' : ''}`} data-mousse-decision="" aria-label={`About ${bot.name}`}>
     <div className="bot-about-scroll" ref={scroller}>
       <header className="bot-about-head">
         <BotFace look={bot.look} state={botFaceState(bot, happy)} size={76} view="full" />
         <div className="bot-about-id">
           <div className="bot-about-name">
             <h2>{bot.name}</h2>
-            <button type="button" className="settings-icon-btn bot-about-close" aria-label="Close About" title="Close" onClick={() => useBotsStore.setState({ aboutOpen: false })}><X size={14} /></button>
+            {inPanel ? null : <button type="button" className="settings-icon-btn bot-about-close" aria-label="Close About" title="Close" onClick={() => useBotsStore.setState({ aboutOpen: false })}><X size={14} /></button>}
           </div>
           <p className="bot-about-doing" title={doingText(bot, now)}>{doingText(bot, now)}</p>
           <dl className="bot-about-facts">
@@ -607,40 +555,4 @@ export function BotAboutPanel({ bot }: { bot: BotSummary }) {
       </button>
     </div>
   </aside>
-}
-
-/**
- * About, sliding in from the right edge as it fades in, and back out as it fades out (`--ui-dur-slow`, so Settings'
- * Animation speed and reduced motion apply; with motion off it shows and goes at once). Open on arrival, it is there
- * at once. Its width is the panel's own, so a drag of its edge is never animated.
- */
-export function BotAboutSlide({ open, bot }: { open: boolean; bot: BotSummary }) {
-  const [mounted, setMounted] = useState(open)
-  const [shown, setShown] = useState(open)
-  const [settled, setSettled] = useState(open)
-  useEffect(() => {
-    if (open) {
-      setMounted(true)
-      if (motionOff()) { setShown(true); setSettled(true); return }
-      // Two frames: the closed state is laid out first, so the change to open is a transition.
-      let inner = 0
-      const outer = requestAnimationFrame(() => { inner = requestAnimationFrame(() => setShown(true)) })
-      return () => { cancelAnimationFrame(outer); cancelAnimationFrame(inner) }
-    }
-    setShown(false)
-    setSettled(false)
-    if (motionOff()) { setMounted(false); return }
-    // transitionend, or this backstop when it never comes (a tab hidden mid-slide).
-    const timer = window.setTimeout(() => setMounted(false), scaleMotionMs(200) + 80)
-    return () => window.clearTimeout(timer)
-  }, [open])
-  if (!mounted) return null
-  return <div className={`bot-about-slide${shown ? ' is-open' : ''}${settled ? ' is-settled' : ''}`} inert={!open || undefined}
-    onTransitionEnd={(event) => {
-      if (event.target !== event.currentTarget || event.propertyName !== 'width') return
-      if (open) setSettled(true)
-      else setMounted(false)
-    }}>
-    <BotAboutPanel bot={bot} />
-  </div>
 }

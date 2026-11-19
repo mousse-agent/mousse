@@ -345,8 +345,9 @@ describe('the split view', () => {
     await click(expand)
     const pane = host.querySelector<HTMLElement>('.watched-browser-pane')!
     expect(pane).not.toBeNull()
-    // Beside the chat, not inside it.
-    expect(pane.parentElement).toBe(host.querySelector('.chat-conversation')!.parentElement)
+    // Beside the chat, in its side panel's Browser view, outside the chat pane.
+    expect(pane.closest('.bot-side')?.getAttribute('data-view')).toBe('browser')
+    expect(host.querySelector('.bot-chat-pane')!.contains(pane)).toBe(false)
     expect(pane.querySelector<HTMLInputElement>('input')!.value).toBe('https://bank.example.com/statements')
     expect(pane.querySelector('[data-agent-cursor]')).not.toBeNull()
     // The thread browser's bar, and no line under the picture while the bot has it.
@@ -376,18 +377,17 @@ describe('the split view', () => {
     ])
     await click(button('Give back'))
     expect(calls).toContainEqual(['bots.browser.hold', { botId: 'noobesh', viewId: expect.any(String), request: { op: 'release', holdId: 'hold_1' } }])
-    // Full screen: the split view takes the chat's place (the chat stays mounted behind it); leaving it puts the chat back.
-    const chat = host.querySelector<HTMLElement>('.chat-conversation')!
+    // Full screen: the side panel takes the chat pane's place at no width of its own; leaving it puts the panel back.
+    const slide = host.querySelector<HTMLElement>('.bot-side-slide')!
+    const width = slide.querySelector<HTMLElement>('.bot-side')!.style.width
     await click(button('Full screen'))
-    expect(chat.classList.contains('is-behind-browser')).toBe(true)
-    expect(host.querySelector('.chat-conversation')).toBe(chat)
+    expect(slide.classList.contains('is-fullscreen')).toBe(true)
+    expect(slide.querySelector<HTMLElement>('.bot-side')!.style.width).toBe('')
     await click(button('Exit full screen'))
-    expect(chat.classList.contains('is-behind-browser')).toBe(false)
-    // Closing the browser view leaves full screen too.
-    await click(button('Full screen'))
+    expect(slide.classList.contains('is-fullscreen')).toBe(false)
+    expect(slide.querySelector<HTMLElement>('.bot-side')!.style.width).toBe(width)
     await click(button('Close the browser view'))
     expect(host.querySelector('.watched-browser-pane')).toBeNull()
-    expect(chat.classList.contains('is-behind-browser')).toBe(false)
     // Back to the preview's own size and rate.
     expect(watches().at(-1)).toMatchObject({ width: 480, fps: 5 })
   })
