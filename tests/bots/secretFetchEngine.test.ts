@@ -119,3 +119,22 @@ it.each(['approved', 'running'])(
     expect(f.allowed.filter((entry) => entry.tool === 'service_read')).toHaveLength(1)
   }
 )
+
+it('passes a security refusal through the real engine without retaining its reserved slot', async () => {
+  const { workId } = await newWork()
+  const started = await start(f, workId)
+  let received: unknown
+  const result = await started.prepared.authority.secretFetch!(
+    { callKey: 'unsafe-file', secret: 'KEY', service: 'OpenAI', args: {}, mask: (text) => text },
+    async (refuseWithoutCounting) => {
+      received = refuseWithoutCounting
+      if (typeof refuseWithoutCounting === 'function') refuseWithoutCounting()
+      return { text: 'The fetch folder changed or is unavailable.', isError: true }
+    }
+  )
+  expect(received).toBeTypeOf('function')
+  expect(result.isError).toBe(true)
+  expect(
+    f.store.get('SELECT status, ran_at FROM bot_actions WHERE activation_id = ?', workId)
+  ).toMatchObject({ status: 'failed', ran_at: null })
+})
