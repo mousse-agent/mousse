@@ -4822,12 +4822,14 @@ it.each(['declined', 'failed', 'quiet'] as const)(
     expect(f.bots.actions.get(retry.id)?.status).toBe(outcome === 'failed' ? 'failed' : 'declined')
     const resumed = await start(f, next.id, 2)
     if (outcome === 'quiet') f.automationRuns.report({ threadId: resumed.payload.threadId, activationId: next.id }, 'quiet', 'Nothing new.')
-    await finish(f, resumed.payload, 'completed', { text: outcome === 'quiet' ? '[SILENT]' : outcome === 'failed' ? 'The retry failed.' : "I didn't send the note, because you chose Not now." })
+    const report = outcome === 'quiet' ? '[SILENT]' : outcome === 'failed' ? 'The retry failed.' : "Filed 3 scans and emailed Ana the summary.\nI didn't resend because you chose Not now."
+    await finish(f, resumed.payload, 'completed', { text: report })
     const reports = f.bots.service.chatList(t.botId).messages.filter(m => m.activationId === next.id && m.kind === 'run_report')
     expect(reports).toHaveLength(1)
     expect(reports[0]!.text).toContain('The first attempt may already have gone through. Check before trying again.')
     expect(reports[0]!.text).not.toContain('[SILENT]')
     if (outcome !== 'failed') expect(reports[0]!.text).toMatch(/^The retry didn't go out\./)
+    if (outcome === 'declined') expect(reports[0]!.text).toBe("The retry didn't go out. The first attempt may already have gone through. Check before trying again.\n\n" + report)
     expect(f.store.activation(next.id)?.status).toBe('done')
   }
 )
@@ -4899,4 +4901,18 @@ it.each(['intranet:8080', 'localhost:443', 'Exfil:80'])('E1 r4 a numeric label n
  const t=await aloneAsk('allow','send','Tickets:4')
  expect((await aloneNext(t,{...t.args,body})).action.status).toBe('open')
  expect(t.calls).toHaveLength(1)
+})
+
+it('E1 r5 a declined retry prepends its outcome and preserves every report line', async () => {
+ const t=await aloneAsk()
+ const next=await aloneNext(t,{...t.args,to:['another@example.test']})
+ expect(next.action.status).toBe('open')
+ await finish(f,next.turn.payload)
+ await f.bots.actions.answer({actionId:next.action.id,digest:next.action.args_digest,answer:'not_now'}); await flush()
+ const resumed=await start(f,next.id,2)
+ const report="Filed 3 scans and emailed Ana the summary.\nI didn't resend because you chose Not now."
+ await finish(f,resumed.payload,'completed',{text:report})
+ const reports=f.bots.service.chatList(t.botId).messages.filter(m=>m.activationId===next.id&&m.kind==='run_report')
+ expect(reports).toHaveLength(1)
+ expect(reports[0]!.text).toBe("The retry didn't go out.\n\n"+report)
 })
