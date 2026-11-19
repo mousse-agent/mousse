@@ -48,19 +48,6 @@
       "expiresAt": "2026-11-19T08:18:05.846Z"
     },
     {
-      "task": "bot-pasted-secret",
-      "session": "agibook-8341f1",
-      "machine": "agibook",
-      "branch": "bot-pasted-secret",
-      "paths": [
-        "src/mms/secrets",
-        "src/shared/secretShapes.ts",
-        "src/renderer/components/bots/BotChatView.tsx"
-      ],
-      "claimedAt": "2026-11-18T15:50:24.692Z",
-      "expiresAt": "2026-11-18T20:51:30.348Z"
-    },
-    {
       "task": "bot-secret-fetch",
       "session": "agibook-d8ef9c",
       "machine": "agibook",
@@ -104,20 +91,6 @@
       "expiresAt": "2026-11-18T22:19:26.984Z"
     },
     {
-      "task": "labs-animation-toggles",
-      "session": "agibook-122a5c",
-      "machine": "agibook",
-      "branch": "labs-animation-toggles",
-      "paths": [
-        "src/shared/settings.ts",
-        "src/renderer/components/settings/LabsSettings.tsx",
-        "src/renderer/components/ThreadsSidebar.tsx",
-        "src/renderer/components/OrchestratorChat.tsx"
-      ],
-      "claimedAt": "2026-11-19T20:47:17.736Z",
-      "expiresAt": "2026-11-19T22:47:17.736Z"
-    },
-    {
       "task": "lan-direct-phone-path",
       "session": "agibook-3233ef",
       "machine": "agibook",
@@ -155,21 +128,6 @@
       ],
       "claimedAt": "2026-11-18T22:01:23.773Z",
       "expiresAt": "2026-11-19T00:01:23.773Z"
-    },
-    {
-      "task": "usage-history",
-      "session": "Animatrix-20d61e",
-      "machine": "Animatrix",
-      "branch": null,
-      "paths": [
-        "src/mms/usageHistory",
-        "src/renderer/components/UsageHistorySection.tsx",
-        "src/renderer/components/SubscriptionUsagePage.tsx",
-        "src/renderer/styles/usage.css",
-        "src/shared/usageHistory.ts"
-      ],
-      "claimedAt": "2026-11-18T19:20:29.806Z",
-      "expiresAt": "2026-11-18T21:20:29.806Z"
     }
   ]
 }
