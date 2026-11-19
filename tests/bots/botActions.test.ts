@@ -4770,3 +4770,23 @@ it('E1 r3c decoding is for matching only and preserves the sent text', async () 
   expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('done')
   expect(t.calls.at(-1)).toMatchObject({ body })
 })
+
+it.each(['MCP off', 'server down', 'permission off'] as const)(
+  'E1 r3c temporary unavailability keeps consent through About: %s', async state => {
+    const t = await aloneAsk()
+    const saved = f.store.all("SELECT key,value FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'", t.botId)
+    const permission = f.bots.service.get(t.botId).permissions.find(p => p.id.includes('"mcp"'))!
+    const tools = [...t.server.tools]
+    if (state === 'MCP off') t.setMcpEnabled(false)
+    if (state === 'server down') { t.server.tools.splice(0); t.server.failing = true }
+    if (state === 'permission off') f.bots.setPermission(t.botId, permission.id, false)
+    expect(f.bots.alone.match(t.botId, t.schedule.scheduleId, 'mail', 'send', { to: t.args.to }, t.args)).toBeUndefined()
+    expect(f.bots.service.get(t.botId).permissions.filter(p => p.id.startsWith('alone:'))).toEqual([])
+    expect(f.store.all("SELECT key,value FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'", t.botId)).toEqual(saved)
+    if (state === 'MCP off') t.setMcpEnabled(true)
+    if (state === 'server down') { t.server.tools.push(...tools); t.server.failing = false }
+    if (state === 'permission off') f.bots.setPermission(t.botId, permission.id, true)
+    expect(f.bots.alone.items(t.botId)).toHaveLength(1)
+    expect((await aloneNext(t)).action.status).toBe('done')
+  }
+)
