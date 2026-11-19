@@ -4806,3 +4806,27 @@ it.each([['body', 256, true], ['body', 257, false], ['split', 257, false], ['rep
     expect(f.store.all("SELECT key FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone-ask:*'", t.botId)).toHaveLength(allowed ? 1 : 0)
   }
 )
+
+it.each(['declined', 'failed', 'quiet'] as const)(
+  'E1 r3 the final report preserves uncertainty after a %s retry', async outcome => {
+    const t = await aloneAsk()
+    vi.mocked(t.manager.callTool).mockRejectedValueOnce(new Error('Connection closed after dispatch'))
+    const next = await aloneNext(t)
+    expect(next.action.status).toBe('uncertain')
+    await callForBot({ bot: next.turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'A reworded retry' }, toolCallId: 'r3-retry', signal: new AbortController().signal })
+    const retry = f.bots.actions.forWork(next.id)!
+    expect(retry.status).toBe('open')
+    await finish(f, next.turn.payload)
+    if (outcome === 'failed') vi.mocked(t.manager.callTool).mockResolvedValueOnce({ isError: true, content: [{ type: 'text', text: 'Could not archive the email' }] } as never)
+    await f.bots.actions.answer({ actionId: retry.id, digest: retry.args_digest, answer: outcome === 'failed' ? 'send' : 'not_now' }); await flush()
+    expect(f.bots.actions.get(retry.id)?.status).toBe(outcome === 'failed' ? 'failed' : 'declined')
+    const resumed = await start(f, next.id, 2)
+    if (outcome === 'quiet') f.automationRuns.report({ threadId: resumed.payload.threadId, activationId: next.id }, 'quiet', 'Nothing new.')
+    await finish(f, resumed.payload, 'completed', { text: outcome === 'quiet' ? '[SILENT]' : outcome === 'failed' ? 'The retry failed.' : "I didn't send the note, because you chose Not now." })
+    const reports = f.bots.service.chatList(t.botId).messages.filter(m => m.activationId === next.id && m.kind === 'run_report')
+    expect(reports).toHaveLength(1)
+    expect(reports[0]!.text).toContain('The first attempt may already have gone through. Check before trying again.')
+    expect(reports[0]!.text).not.toContain('[SILENT]')
+    expect(f.store.activation(next.id)?.status).toBe('done')
+  }
+)
