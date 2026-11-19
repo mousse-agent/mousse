@@ -323,3 +323,28 @@ it('pins the directory opened just before replacement by a link', async () => {
   expect((await f.run()).isError).toBe(true)
   expect(readdirSync(f.outside)).toEqual([])
 })
+
+it.each([
+  [
+    'reject after writing',
+    Object.assign(new Error('socket write completed'), { code: 'ECONNRESET' })
+  ],
+  ['timeout', new Error('The request took more than 30 seconds.')],
+  ['oversize response', new Error('The response exceeds 5 MiB.')]
+])('keeps sent %s failures counted through the hourly cap', async (_kind, error) => {
+  const f = fixture(),
+    store = new BotStore({ profileHome: f.home })
+  cleanup.push(() => store.close())
+  vi.mocked(publicFetch).mockRejectedValue(error)
+  for (let i = 0; i < 20; i++) {
+    expect((await countedRead(f, store, i)).isError).toBe(true)
+    expect(
+      store.get('SELECT ran_at FROM bot_actions WHERE call_key = ?', `cap-${i}`)?.ran_at
+    ).not.toBeNull()
+  }
+  const capped = await countedRead(f, store, 20)
+  expect(capped.text).toContain('20 times this hour')
+  expect(capped.text).toContain('try again later')
+  expect(publicFetch).toHaveBeenCalledTimes(20)
+  expect(store.get('SELECT count(*) AS n FROM bot_actions WHERE ran_at IS NOT NULL')?.n).toBe(20)
+})

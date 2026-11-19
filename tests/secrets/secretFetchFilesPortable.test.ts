@@ -79,6 +79,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 })
 const homes: string[] = []
 afterEach(() => {
+  hooks.childCwd = ''
   hooks.real = false
   hooks.missingProc = false
   vi.unstubAllEnvs()
@@ -231,8 +232,15 @@ it('does not inherit a parent NODE_OPTIONS preload in the real helper', () => {
   expect(hooks.childCwd).not.toBe(join(home, 'fetches'))
 })
 it('falls back to the portable helper on Linux without proc fd paths', () => {
+  hooks.childCwd = ''
   const home = fs.mkdtempSync(join(tmpdir(), 'fetch-no-proc-'))
   homes.push(home)
+  vi.stubGlobal(
+    'process',
+    new Proxy(process, {
+      get: (target, key) => (key === 'platform' ? 'linux' : Reflect.get(target, key))
+    })
+  )
   hooks.missingProc = true
   const file = saveSecretFetchResponse(home, Buffer.from('masked'))
   expect(fs.readFileSync(file, 'utf8')).toBe('masked')

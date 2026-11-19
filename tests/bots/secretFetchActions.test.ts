@@ -87,23 +87,21 @@ it('enforces the per-bot daily cap across secrets', async () => {
       },
       async () => ({ text: 'ok' })
     )
-  expect(
-    (
-      await secretFetchAction(
-        store,
-        {
-          botId: 'b',
-          activationId: 'a',
-          callKey: 'limit',
-          secret: 'new',
-          service: 'OpenAI',
-          args: {},
-          mask: (s) => s
-        },
-        async () => ({ text: 'should not run' })
-      )
-    ).isError
-  ).toBe(true)
+  const capped = await secretFetchAction(
+    store,
+    {
+      botId: 'b',
+      activationId: 'a',
+      callKey: 'limit',
+      secret: 'new',
+      service: 'OpenAI',
+      args: {},
+      mask: (s) => s
+    },
+    async () => ({ text: 'should not run' })
+  )
+  expect(capped.isError).toBe(true)
+  expect(capped.text).toContain('try again later')
 })
 it('shares the hourly allowance for one secret across bots', async () => {
   const store = setup()

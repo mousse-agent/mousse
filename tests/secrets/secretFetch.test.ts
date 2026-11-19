@@ -395,7 +395,14 @@ it.each([
     }),
     "The service's certificate is not valid. Ask your owner to fix it before retrying."
   ],
-  [new Error(VALUE), 'The service could not be reached. Try again later.']
+  ...[
+    new Error(VALUE),
+    Object.assign(new Error('write completed'), { code: 'ECONNRESET' }),
+    'unknown failure'
+  ].map((error) => [
+    error,
+    'The service read failed. The request may have reached the service and counts toward your limit. Try again later.'
+  ])
 ])('returns fixed retry guidance for a controlled service failure %#', async (error, expected) => {
   const { run } = fixture()
   vi.mocked(publicFetch).mockRejectedValue(error)
@@ -504,3 +511,18 @@ it.each([
   const { run } = fixture()
   expect((await run({ path: `/v1/models/${segment}` })).isError).toBe(true)
 })
+
+it.each(['https://another.example/v1/models', '//another.example/v1/models'])(
+  'explains the binding instead of ambiguous segments for a foreign URL %s',
+  async (path) => {
+    const { run } = fixture()
+    vi.mocked(publicFetch).mockClear()
+    const result = await run({ path })
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('bound to api.openai.com')
+    expect(result.text).toContain('own saved secret and binding')
+    expect(result.text).not.toContain('ambiguous')
+    expect(result.text).not.toContain('another.example')
+    expect(publicFetch).not.toHaveBeenCalled()
+  }
+)
