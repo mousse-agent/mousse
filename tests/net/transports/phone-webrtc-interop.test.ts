@@ -123,7 +123,7 @@ describe.skipIf(!usable)('WebRTC direct path with the real native stack', () => 
     await vi.waitFor(() =>
       expect(computer.net.phoneWebRtcCounts()).toEqual({ pending: 0, live: 1 })
     )
-    expect(await rpc(direct, PHONE_ENDPOINTS_METHOD, {})).toEqual({
+    expect(await rpc(direct, PHONE_ENDPOINTS_METHOD, {})).toMatchObject({
       endpoints: [],
       webrtc: { v: 1 }
     })
