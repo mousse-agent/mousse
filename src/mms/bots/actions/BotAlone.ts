@@ -19,7 +19,7 @@ function scanText(value: string): string {
     const code = Number.parseInt(hex ?? decimal, hex ? 16 : 10)
     return code <= 0x10ffff ? String.fromCodePoint(code) : entity
   })
-  const named: Record<string, string> = { period: '.', colon: ':', sol: '/', bsol: '\\', commat: '@', Tab: '\t', NewLine: '\n', nbsp: ' ', lpar: '(', rpar: ')', lsqb: '[', rsqb: ']', lt: '<', gt: '>', quot: '"', apos: "'", amp: '&', excl: '!', quest: '?', num: '#', percnt: '%', equals: '=' }
+  const named: Record<string, string> = { period: '.', colon: ':', sol: '/', bsol: '\\', commat: '@', Tab: '\t', NewLine: '\n', nbsp: ' ', lpar: '(', rpar: ')', lsqb: '[', rsqb: ']', lt: '<', gt: '>', quot: '"', apos: "'", amp: '&', excl: '!', quest: '?', num: '#', percnt: '%', equals: '=', mdash: '—', ndash: '–', hellip: '…', rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“', copy: '©', reg: '®', trade: '™', bull: '•', middot: '·', euro: '€', pound: '£', minus: '−', dollar: '$' }
   const expanded = decoded.replace(/&([A-Za-z][A-Za-z0-9]{1,31});/g, (entity, name: string) => named[name] ?? entity).normalize('NFKC')
   if (expanded.length > 64000) throw new AloneTextTooLong('This sent call is too long to let alone.')
   return expanded.replace(/[\p{M}\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, '').replace(/[。｡‧]/g, '.')
