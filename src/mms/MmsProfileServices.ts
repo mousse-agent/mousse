@@ -913,6 +913,7 @@ export class MmsProfileServices {
           situation: (botId) => this.botSituation(botId),
           scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt,
           jobs: (botId, limit, since) => store.recentJobs(botId, limit, since),
+          jobOn: (botId, threadId) => store.latestJobOn(botId, threadId),
           reactions: (botId, since) => store.reactionsSince(botId, since, BOT_PACK_REACTIONS)
             .map((row) => ({ messageId: row.id, emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') })),
           // The digest of a fold (docs/plans/bot-context.md §14): one call with no tools on the bot's chat model.

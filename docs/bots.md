@@ -790,7 +790,7 @@ Claude Code and Codex on the owner's entries report no process: Codex's app-serv
 
 ## Memory
 
-Mousse keeps an append-only **bot journal** in `bots.db` of everything it sees a bot do and be told. Capped, dated **bot memory** entries, the **chat summary** and FTS5 search sit on top of it. Every activation's first dispatch gets a context pack built from it: the chat pack in the chat lane, the run brief in the run lane. The bot has five tools that are always on and never grantable: `memory_search`, `memory_read`, `memory_list`, `memory_save` and `memory_forget`; runs may only save run notes and never forget. Details: [`bot-memory.md`](bot-memory.md).
+Mousse keeps an append-only **bot journal** in `bots.db` of everything it sees a bot do and be told. Capped, dated **bot memory** entries, the **chat summary** and FTS5 search sit on top of it. Every activation's first dispatch gets a context pack built from it: the chat pack in the chat lane, the run brief in the run lane. The bot has five tools that are always on and never grantable: `memory_search`, `memory_read`, `memory_list`, `memory_save` and `memory_forget`; runs may only save run notes and never forget. Beside them the bot keeps its **open items** (`item_save`, `item_list`): what its owner asked for and what it promised, listed in every chat turn until delivered or dropped, each with the chat row it came from. Details: [`bot-memory.md`](bot-memory.md).
 
 Corrections and edits keep a memory entry in its original pack position. When the standing-wish fallback cannot save because the owner entries are full, the next chat situation tells the bot how many wishes did not fit and asks it to explain and ask which notes to drop. The notice clears only after a chat turn carrying it settles.
 

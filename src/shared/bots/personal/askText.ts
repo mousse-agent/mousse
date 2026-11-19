@@ -84,6 +84,8 @@ const TOOL_TEXT: Record<string, AskText> = {
   memory_list: { title: 'list its memory', note: '' },
   memory_save: { title: 'save to its memory', note: '' },
   memory_forget: { title: 'forget things in its memory', note: '' },
+  item_save: { title: 'keep its list of what you asked for', note: '' },
+  item_list: { title: 'read its list of what you asked for', note: '' },
   automation_draft_save: { title: 'draft automations', note: 'You turn each one on yourself.' },
   automation_ask: { title: 'ask you about its automation drafts', note: '' },
   automation_list: { title: 'see your automations', note: '' },

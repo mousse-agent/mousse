@@ -177,7 +177,7 @@ it('C6 support rollback shows entries 29 and 30 while E1 entry 28 stays pending,
   expect(enabled).toContain(e1.text)
   expect(enabled).toContain(bindingAdvice.text)
   await settled(on, 'c6-seen-on')
-  expect(memory.getState<number>('ada', 'changelog_seen')).toBe(30)
+  expect(memory.getState<number>('ada', 'changelog_seen')).toBe(BOT_CHANGELOG.at(-1)!.id)
   for (let turn = 0; turn < 3; turn++) {
     const after = await on.chatPreamble({ botId: 'ada', activationId: `c6-seen-after-${turn}` })
     expect(after).not.toContain(e1.text)

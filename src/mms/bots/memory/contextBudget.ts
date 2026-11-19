@@ -75,6 +75,8 @@ export interface BotChatEpoch {
   addedTokens: number
   /** When the newest job (the ledger, `bot_jobs`) the conversation holds last changed: later turns list only jobs changed after it. */
   jobsAt?: string
+  /** The change counter of the open items (`items_rev`) the conversation holds: later turns list only items changed after it, outside it. */
+  itemsRev?: number
   /** Why it ended, once it did: the next turn starts a new epoch. */
   ended?: BotChatEpochEnd
 }

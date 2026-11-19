@@ -155,7 +155,7 @@ export const BOT_FILE_ASK_GONE_TEXT = 'A bot can no longer use files outside its
 
 // Unknown tools are deliberately effects: only these recorded calls can leave an unsent draft.
 const DRAFT_READ_ONLY_TOOLS = new Set([
-  'thread_list', 'thread_search', 'thread_read', 'thread_wait', 'terminal_read', 'memory_list', 'memory_search', 'memory_read',
+  'thread_list', 'thread_search', 'thread_read', 'thread_wait', 'terminal_read', 'memory_list', 'memory_search', 'memory_read', 'item_list',
   'read', 'list', 'search', 'ls', 'find', 'grep', 'Read', 'Glob', 'Grep',
   'bot_schedule_list', 'work_list', 'work_models', 'watch_list', 'reminder_list', 'bot_list', 'running_list',
   'mcp_servers', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'
