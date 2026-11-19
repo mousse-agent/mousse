@@ -2,7 +2,7 @@
  * Bot Phase 1 §5.4: an ask in plain words for its card ("<name> wants to <title>") and About.
  */
 import { describe, expect, it } from 'vitest'
-import { askCallNote, askText } from '../../src/shared/bots/personal/askText'
+import { askText } from '../../src/shared/bots/personal/askText'
 import { BOT_APP_TOOLS } from '../../src/shared/bots/personal/manifest'
 
 describe('askText', () => {
@@ -46,17 +46,5 @@ describe('askText', () => {
   it('every tool a bot can be asked for has words of its own', () => {
     const fallback = askText({ tool: 'some_tool' }).title
     for (const tool of BOT_APP_TOOLS) expect([tool, askText({ tool }).title]).not.toEqual([tool, fallback])
-    expect(askText({ tool: 'telling_set' }).title).toBe('change when it tells you')
-  })
-
-  it('a telling_set call says what it would set', () => {
-    expect(askCallNote('telling_set', { tellMe: 'needs_you', schedules: true, canWakeMe: true })).toBe('It would set: tell you when it needs you, its automations too, it can wake you.')
-    // One automation's exception: only that automation changes, never the bot's own.
-    expect(askCallNote('telling_set', { scheduleId: 's1', canWakeMe: true })).toBe('It would set: one of its automations can wake you.')
-    expect(askCallNote('telling_set', { scheduleId: 's1', canWakeMe: false })).toBe('It would set: one of its automations can’t wake you.')
-    expect(askCallNote('telling_set', { quietHours: 'off', canWakeMe: false })).toBe('It would set: no quiet hours, it can’t wake you.')
-    // What the model wrote wrongly is left out; nothing left, no note.
-    expect(askCallNote('telling_set', { tellMe: 'urgent', quietHours: { from: '25:00', to: '07:00' } })).toBeUndefined()
-    expect(askCallNote('set_depth', { depth: 'deep' })).toBeUndefined()
   })
 })

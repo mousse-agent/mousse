@@ -158,17 +158,17 @@ it('notifies an older bot own-tool permission in its plain card words, without t
   const f = botFixture()
   try {
     const { botId } = await createBot(f, { reply: 'Ready' })
-    f.bots.narrowGrant(botId, manifest => ({ ...manifest, appTools: manifest.appTools.filter(tool => tool !== 'telling_set') }))
-    await f.bots.service.chatSend({ botId, text: 'Notify me when all done.', clientRequestId: 'notify-preference' })
+    f.bots.narrowGrant(botId, manifest => ({ ...manifest, appTools: manifest.appTools.filter(tool => tool !== 'set_profile') }))
+    await f.bots.service.chatSend({ botId, text: 'Call yourself Scout.', clientRequestId: 'rename' })
     const chat = f.store.laneActivations(botId, 'chat', ['running'])[0]!
     const { prepared, payload } = await start(f, chat.id)
-    expect(prepared.authority.check({ kind: 'app', tool: 'telling_set', args: { tellMe: 'look', quietHours: { from: '22:00', to: '07:00' } } })).toMatchObject({ ok: false, wall: { kind: 'escalated' } })
+    expect(prepared.authority.check({ kind: 'app', tool: 'set_profile', args: { name: 'Scout' } })).toMatchObject({ ok: false, wall: { kind: 'escalated' } })
     await finish(f, payload, 'interrupted', { text: 'I need your OK first.', outcome: { interruptedBy: 'bot_wall' } })
     const message = f.bots.service.chatList(botId).messages.find(message => message.ask?.status === 'open')!
-    expect(message.ask?.title).toBe('change when it tells you')
+    expect(message.ask?.title).toBe('change its name or description')
     const banner = botNotificationContent('Helper', message)
     expect(botNotificationKind(message, f.clock.now)).toBe('question')
-    expect(banner).toEqual({ title: 'Helper', body: 'Wants to change when it tells you' })
-    for (const internal of ['telling_set', 'tellMe', 'quietHours', '22:00']) expect(banner.body).not.toContain(internal)
+    expect(banner).toEqual({ title: 'Helper', body: 'Wants to change its name or description' })
+    for (const internal of ['set_profile', 'Scout']) expect(banner.body).not.toContain(internal)
   } finally { f.close() }
 })

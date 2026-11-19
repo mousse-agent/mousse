@@ -50,7 +50,6 @@ describe('bots.db v9 → v10', () => {
     expect(store.get('SELECT tell_json FROM bot_registry')).toEqual({ tell_json: null })
     expect(store.reminder('r')).toMatchObject({ snoozedFrom: null, ownerSet: null, wake: true, chain: 2 })
     expect(store.message('m')).toMatchObject({ tell: null, tellAt: null, toldAt: null, ownerReaction: { emoji: '❤️', at: T } })
-    expect(store.registry('b')).toMatchObject({ tellJson: null })
     const rows = tables.map((table) => store!.all(`SELECT * FROM ${table}`))
     const copy = readFileSync(join(profile, 'bots', `bots.db.pre-v${BOTS_DB_VERSION}`))
     store.close()
@@ -89,10 +88,8 @@ describe('bots.db v9 → v10', () => {
   it('reads reserved fields but existing writers leave them at their defaults', () => {
     buildV9()
     store = new BotStore({ profileHome: profile })
-    store.run('UPDATE bot_registry SET tell_json = ?', '{"canWakeMe":true}')
     store.run('UPDATE bot_reminders SET snoozed_from = ?, owner_set = 1', 'original')
     store.run("UPDATE bot_messages SET tell = 'soon', tell_at = ?, told_at = ?", T, T)
-    expect(store.registry('b')).toMatchObject({ tellJson: '{"canWakeMe":true}' })
     expect(store.reminder('r')).toMatchObject({ snoozedFrom: 'original', ownerSet: true })
     expect(store.message('m')).toMatchObject({ tell: 'soon', tellAt: T, toldAt: T })
     store.insertMessage({

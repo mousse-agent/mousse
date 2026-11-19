@@ -15,8 +15,6 @@ import { BotComputerSelect, BotModelRows, BotModelSelect } from './BotRunsOn'
 import { BotFace } from './face/BotFace'
 import { BotDevicesRow } from './BotDevices'
 import { memorySplitText } from './BotMemoryDialog'
-import { tellingLine } from '../../../shared/bots/personal/tellingSettings'
-import { botGroupTime } from './messageGroups'
 import { BotPrompt } from './BotPrompt'
 import { promptCacheState, shortDuration, useMinuteClock } from '../../lib/promptCache'
 import { profilePreferenceKey } from '../../lib/profilePreferences'
@@ -109,7 +107,6 @@ export function permissionIcon(item: Pick<BotPermissionItem, 'title'>): Icon {
   if (/looks/.test(title)) return Palette
   if (/profiler/.test(title)) return CircleGauge
   if (/skill/.test(title)) return Sparkles
-  if (/tells you/.test(title)) return Bell
   if (/model|thinks/.test(title)) return Cpu
   return ShieldCheck
 }
@@ -430,10 +427,6 @@ function automationsSummary(runs: BotRunItem[]): string {
  */
 export function BotAboutPanel({ bot, inPanel = false }: { bot: BotSummary; inPanel?: boolean }) {
   const detail = useBotsStore((s) => s.details[bot.id])
-  const telling = detail?.tellingSettings ? tellingLine(detail.tellingSettings, detail.tellingSettings.quietHours, time => {
-    const [hour, minute] = time.split(':').map(Number)
-    return botGroupTime(new Date(2000, 0, 1, hour, minute).toISOString())
-  }) : detail?.telling
   const happy = useBotsStore((s) => s.happy[bot.id])
   const profileId = useAppStore((s) => s.profileId)
   useEffect(() => { void useBotsStore.getState().loadDetail(bot.id) }, [bot.id])
@@ -547,7 +540,6 @@ export function BotAboutPanel({ bot, inPanel = false }: { bot: BotSummary; inPan
             <RunsOn name={bot.name} state={runsOn} />
             <BotDevicesRow botId={bot.id} name={bot.name} reach={bot.reach} />
           </div>
-          {telling ? <Row icon={Bell} title="Tells you" desc={telling} /> : null}
         </div>
       </Fold>
     </div>

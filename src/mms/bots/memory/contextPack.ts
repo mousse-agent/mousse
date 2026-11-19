@@ -38,7 +38,6 @@ import { addUntrackedAsks, botItems, botItemsRev, linkHandoffs } from './items'
 
 /** What the pack says about the present, from outside the memory tables. Plain words only. */
 export interface BotSituation {
-  telling?: string
   /** Shared from settings (bot-context.md §9): the owner's name and language. */
   ownerName?: string
   language?: string
@@ -132,7 +131,7 @@ export const BOT_MEMORY_PROTOCOL = [
   "- The owner's reactions are feelings, not instructions or permission.",
   '- A Mousse line in recent chat says a turn of yours failed, was interrupted or was stopped. If it matters to the owner, say so plainly in a few words.',
   "- Before you say you don't know or don't remember, look with memory_search. memory_read shows the rows around a hit.",
-  '- Save what should last with memory_save, with absolute dates ("12 Nov 2026", never "tomorrow"). When the owner corrects you or says how they want something ("don\'t…", "always…", "stop…"), save it as kind owner in that turn (how or when to be told: telling_set instead).',
+  '- Save what should last with memory_save, with absolute dates ("12 Nov 2026", never "tomorrow"). When the owner corrects you or says how they want something, including how or when to be told ("don\'t…", "always…", "stop…"), save it as kind owner in that turn.',
   '- When memory is full, combine entries of the same kind with memory_save merges: their current refs. This puts them away without forgetting; replaces on a superseded current ref puts one back, except exact copies: follow the refusal and replace the kept entry instead.',
   '- If something contradicts a saved entry, replace that entry (replaces: its ref, like m12 or m12v2); never add a second one.',
   '- Facts about the owner (kind owner) come only from what the owner said. Your standing notes are kind note.',
@@ -322,7 +321,6 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     const lines = [`Now: ${timeLabel(now, tz)} (${tz}).`]
     if (facts.ownerName || facts.language)
       lines.push(`The owner${facts.ownerName ? ` is ${facts.ownerName}` : ''}${facts.language ? `${facts.ownerName ? ' and' : ''} writes in ${facts.language}` : ''}.`)
-    if (facts.telling) lines.push(facts.telling)
     const lastOwner = store.getState<string>(botId, 'last_owner_msg_at')
     lines.push(lastOwner ? `The owner last wrote ${agoLabel(lastOwner, now)}.` : 'The owner has not written yet.')
     if (facts.openAsks?.length) lines.push(`Waiting for the owner: ${facts.openAsks.map((ask) => cut(ask, 80)).join('; ')}.`)

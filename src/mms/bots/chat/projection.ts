@@ -11,7 +11,7 @@ import { launchedActive, withAppletNames, type BotAskCard, type BotAskStatus, ty
 import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
 import { askFingerprint, BOT_BUDGET_WALL_KEYS, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
-import { BOT_THREADS_PERMISSION, botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
+import { BOT_RETIRED_APP_TOOLS, BOT_THREADS_PERMISSION, botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
 import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
@@ -237,8 +237,6 @@ export class BotChatProjection {
     /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
     tellAt?(botId: string, tell: 'now' | 'soon' | 'later', at: string, messageId: string): string
     classify?(message: BotChatMessage, input: PostInput): 'now' | 'soon' | 'later' | null
-    tellingSettings?(botId: string): import('../../../shared/bots/personal/tellingSettings').BotTellingPreferences
-    telling?(botId: string): string | undefined
     schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean; name?: string; prompt?: string }>
     /**
      * Where a granted MCP server stands now (`BotMcp.where`), for About → Can use; undefined while the servers were not
@@ -730,8 +728,6 @@ export class BotChatProjection {
     ))
     return {
       summary: this.summary(definition, now),
-      ...(this.options.tellingSettings ? { tellingSettings: this.options.tellingSettings(definition.id) } : {}),
-      ...(this.options.telling?.(definition.id) ? { telling: this.options.telling(definition.id) } : {}),
       permissions: grant ? [
         ...(this.options.aloneItems?.(definition.id) ?? []),
         ...this.permissionItems(definition.id, grant.manifest, grant.approvedAt).filter((item) => !this.store.disabledPermissions(definition.id).some((off) => off.id === item.id)).map((item) => ({ ...item, enabled: true })),
@@ -796,8 +792,8 @@ export function grantedPermissions(manifest: BotManifest): BotPermissionRequest[
   const starter = starterManifest()
   const items: BotPermissionRequest[] = []
   for (const tool of manifest.tools) if (!starter.tools.includes(tool)) items.push({ tool })
-  // The bot's own tools are never permissions: About never lists them.
-  for (const tool of manifest.appTools) if (!starter.appTools.includes(tool) && !isOwnBotAppTool(tool)) items.push({ tool })
+  // The bot's own tools are never permissions, and a retired one gives nothing: About never lists them.
+  for (const tool of manifest.appTools) if (!starter.appTools.includes(tool) && !isOwnBotAppTool(tool) && !BOT_RETIRED_APP_TOOLS.has(tool)) items.push({ tool })
   for (const skill of manifest.skills) items.push({ skill })
   // The owner's MCP tools: one permission per server, whose tools the grant keeps one by one.
   const servers = new Map<string, string[]>()

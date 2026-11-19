@@ -130,9 +130,6 @@ function botRows(message: ChatMessage, ref: BotThreadRef, maskArguments = false,
       const kind = typeof type === 'string' && /^[a-z]{1,20}$/.test(type) ? type : undefined
       return [{ ...base, kind: 'tool_call', sourceKey: key, who: 'bot', text: ['show_card', ...(kind ? [kind] : [])].join(' '), json: { tool: 'show_card', ...(kind ? { card: kind } : {}) } }]
     }
-    if (/(?:^|__)telling_set$/.test(tool)) {
-      return [{ ...base, kind: 'tool_call', sourceKey: key, who: 'bot', text: 'telling_set', json: { tool: 'telling_set' } }]
-    }
     const held = maskArguments && input !== undefined && heldDigests.has(actionDigest(input))
     if (maskArguments) input = maskedActionData(input) as typeof input
     const inputText = input === undefined ? '' : safeJson(input)

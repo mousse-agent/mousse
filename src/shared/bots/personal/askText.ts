@@ -1,7 +1,6 @@
 import type { BotBudget } from './definition'
 import { isSpecialAsk, type BotAskRequest } from './escalation'
 import { botGrantTool } from './manifest'
-import { tellingChangeText } from './tellingSettings'
 
 /**
  * An ask in plain words for its card and for About → Can use (Bot Phase 1 §5.4): the card reads
@@ -70,7 +69,6 @@ const TOOL_TEXT: Record<string, AskText> = {
     tip: 'It can add a quick action: a button in your Actions list that sends a message or runs a shell command when you press it. Nothing runs until you press it.'
   },
   // The bot's own tools: a bot made before one of them existed has none of it in its grant, so its first use asks.
-  telling_set: { title: 'change when it tells you', note: 'How often it tells you, its quiet hours, and whether it can wake you.' },
   bot_schedule_add: { title: 'run on a schedule', note: '' },
   bot_schedule_remove: { title: 'remove its schedules', note: '' },
   bot_schedule_list: { title: 'see its schedules', note: '' },
@@ -93,16 +91,8 @@ const TOOL_TEXT: Record<string, AskText> = {
   automation_pause: { title: 'pause your automations', note: '' }
 }
 
-/** Any other tool: the card never shows a tool's name ("use the telling set tool"); the tooltip does. */
+/** Any other tool: the card never shows a tool's name; the tooltip does. */
 const otherToolText = (tool: string): AskText => ({ title: 'use another of Mousse\'s tools', note: '', tip: `Mousse's tool ${tool}.` })
-
-/**
- * What one refused call would have done, for its ask's note: "It would set: tell you when something is worth a look." Only
- * for tools whose arguments say it plainly; undefined for every other call, whose card keeps its usual note.
- */
-export function askCallNote(tool: string, args: unknown): string | undefined {
-  return tool === 'telling_set' ? tellingChangeText(args) : undefined
-}
 
 /**
  * What an MCP ask's card says of what the tools can do, only as the tools' own annotations tell it (their read-only
