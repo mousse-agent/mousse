@@ -1,3 +1,4 @@
+import { saveSecretFetchAtCwd } from './secretFetchFileWorker'
 import { randomUUID } from 'node:crypto'
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, realpathSync, unlinkSync, writeFileSync, type Stats } from 'node:fs'
 import { join } from 'node:path'
@@ -14,7 +15,7 @@ export class SecretFetchFileError extends Error {
   }
 }
 
-/** Pin the Linux parent and the new file before writing. Other systems compare the open file and checked directory identities. */
+/** Pin the parent and new file before writing; Linux uses directory fds, other systems a pinned child cwd. */
 export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string {
   const folder = join(scratch, 'fetches')
   let directoryFd: number | undefined, fileFd: number | undefined
@@ -24,23 +25,32 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
     const expected = join(realpathSync(scratch), 'fetches')
     const checked = lstatSync(folder)
     if (!checked.isDirectory() || checked.isSymbolicLink()) throw new SecretFetchFileError(true)
-    // On Windows opening a directory is unsupported. O_EXCL still refuses existing final components,
-    // and the newly opened file is compared to its entry inside the checked directory before writing.
-    if (process.platform !== 'win32') {
-      try {
-        directoryFd = openSync(folder, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
-      } catch {
-        throw new SecretFetchFileError(true)
-      }
-      if (!same(fstatSync(directoryFd), checked)) throw new SecretFetchFileError(true)
+    // Non-Linux Node cannot locate a file's parent through its fd. A child pins cwd instead;
+    // merely comparing the bot-controlled path before/after open would leave another race.
+    if (process.platform !== 'linux') {
+      let record = responses.get(folder)
+      if (!record || !same(record, checked)) record = { dev: checked.dev, ino: checked.ino, names: [] }
+      const name = randomUUID()
+      const prune = record.names.slice(0, Math.max(0, record.names.length - 19))
+      const result = saveSecretFetchAtCwd({ folder, dev: checked.dev, ino: checked.ino, name, prune, bytes })
+      if (result !== 'saved') throw new SecretFetchFileError(result === 'unsafe')
+      record.names = [...record.names.slice(prune.length), name]
+      responses.set(folder, record)
+      return join(folder, name)
     }
-    const pinned = process.platform === 'linux' ? `/proc/self/fd/${directoryFd}` : folder
+    try {
+      directoryFd = openSync(folder, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+    } catch {
+      throw new SecretFetchFileError(true)
+    }
+    if (!same(fstatSync(directoryFd), checked)) throw new SecretFetchFileError(true)
+    const pinned = `/proc/self/fd/${directoryFd}`
     const unchanged = (): boolean => {
       try {
         const current = lstatSync(folder)
         return current.isDirectory() && !current.isSymbolicLink() && same(current, checked)
-          && (directoryFd === undefined || same(fstatSync(directoryFd), checked))
-          && (process.platform !== 'linux' || realpathSync(pinned) === expected)
+          && same(fstatSync(directoryFd!), checked)
+          && realpathSync(pinned) === expected
       } catch { return false }
     }
     if (!unchanged()) throw new SecretFetchFileError(true)
@@ -50,9 +60,7 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
     fileFd = openSync(created, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
     const opened = fstatSync(fileFd)
     const entry = lstatSync(created)
-    const inCheckedFolder = process.platform === 'linux'
-      ? realpathSync(`/proc/self/fd/${fileFd}`) === join(expected, name)
-      : same(opened, entry)
+    const inCheckedFolder = same(opened, entry) && realpathSync(`/proc/self/fd/${fileFd}`) === join(expected, name)
     if (!opened.isFile() || !inCheckedFolder || !unchanged()) throw new SecretFetchFileError(true)
     // No pathname resolution after this point can redirect the bytes to another inode.
     writeFileSync(fileFd, bytes)
