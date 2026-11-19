@@ -4591,7 +4591,7 @@ it.each([
   ['scan-2.pdf', true], ['scan-2.PDF', true], ['scan-2.exe', false], ['../x.pdf', false],
   ['a/b.pdf', false], ['a\\b.pdf', false], ['hidden..pdf', false], ['.hidden.pdf', false],
   ['x:scan.pdf', false], ['x@scan.pdf', false], ['x\u0000.pdf', false], ['x\n.pdf', false],
-  ['x'.repeat(252) + '.pdf', false], ['x'.repeat(251) + '.pdf', true], ['ｓｃａｎ-２.ｐｄｆ', true]
+  ['x'.repeat(252) + '.pdf', false], ['x'.repeat(251) + '.pdf', true], ['ｓｃａｎ-２.ｐｄｆ', true], ['scan。pdf', false], ['ａ／ｂ.pdf', false], ['sc\u200ban-2.pdf', true]
 ])('E1 r2b a filename stays within the sent extension: %j', async (name, allowed) => {
   const t = await aloneAsk('allow', 'send', undefined, { name: 'scan-1.pdf' })
   const args = { ...t.args, name: 'scan-1.pdf' }
@@ -4629,4 +4629,13 @@ it('E1 r2b token sets use a profile key and never appear in written exports', as
     expect(text).not.toContain(contract.tokens.body[0])
     expect(text).not.toContain(String(key))
   }
+})
+
+it.each([['new-file', true], ['new-file.txt', false]])('E1 r2b an extensionless source name keeps no extension: %s', async (name, allowed) => {
+  const t = await aloneAsk('allow', 'send', undefined, { name: 'original-file' })
+  expect((await aloneNext(t, { ...t.args, name } as never)).action.status).toBe(allowed ? 'done' : 'open')
+})
+it('E1 r2b an unsafe source name varies only by exact comparison', async () => {
+  const t = await aloneAsk('allow', 'send', undefined, { name: '../source.pdf' })
+  expect((await aloneNext(t, { ...t.args, name: 'safe.pdf' } as never)).action.status).toBe('open')
 })
