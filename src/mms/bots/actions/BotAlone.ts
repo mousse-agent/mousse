@@ -14,7 +14,13 @@ function addressTokens(value: string): string[] {
   return [...new Set(text.split(' ').map(token => {
     const unwrapped = token.replace(/^[([{'"<]+/u, '').replace(/[.,!?;)\]}'">]+$/u, '')
     return unwrapped.endsWith(':') && isIP(unwrapped) === 6 ? unwrapped : unwrapped.replace(/:+$/u, '')
-  }).filter(token => /[:@\\]|[\p{L}\p{N}_-]{1,63}\.[\p{L}\p{N}_-]{1,63}/iu.test(token)))]
+  }).filter(token => !ordinaryNumber(token) && /[:@\\]|[\p{L}\p{N}_-]{1,63}\.[\p{L}\p{N}_-]{1,63}/iu.test(token)))]
+}
+/** Bare report numbers are not destinations; four-part dotted IPv4 never matches these forms. */
+function ordinaryNumber(token: string): boolean {
+  return /^\d{1,2}:\d{2}(?::\d{2})?(?:am|pm)?$/iu.test(token)
+    || /^[+-]?\d+(?:,\d{3})*(?:\.\d+)?$/u.test(token)
+    || /^(?:\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2})$/u.test(token)
 }
 function filenameExtension(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
