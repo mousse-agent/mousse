@@ -6,6 +6,9 @@ import { runInNewContext } from 'node:vm'
 import { saveSecretFetchResponse } from '../../src/mms/secrets/secretFetchFiles'
 
 const hooks = vi.hoisted(() => ({
+  real: false,
+  missingProc: false,
+  childCwd: '',
   unlink: undefined as undefined | ((path: unknown) => void),
   spawnError: undefined as undefined | string,
   afterCwd: undefined as undefined | (() => void),
@@ -15,6 +18,7 @@ vi.mock('node:fs', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs')>()
   return {
     ...original,
+    existsSync: (path: fs.PathLike) => hooks.missingProc && path === '/proc/self/fd' ? false : original.existsSync(path),
     unlinkSync: (path: fs.PathLike) => {
       hooks.unlink?.(path)
       return original.unlinkSync(path)
@@ -27,22 +31,29 @@ vi.mock('node:fs', async (importOriginal) => {
 })
 // Hand-authored child adapter: run the exact fixed helper source in-process. A held Linux
 // dirfd models the kernel-pinned child cwd, without adding a process-owning Vitest lane.
-vi.mock('node:child_process', () => ({
-  spawnSync: (_exe: string, args: string[], options: { cwd: string; input: Buffer }) => {
+vi.mock('node:child_process', async (importOriginal) => {
+ const actual = await importOriginal<typeof import('node:child_process')>()
+ return ({
+  spawnSync: (_exe: string, args: string[], options: { cwd: string; input: Buffer; env: NodeJS.ProcessEnv }) => {
+    hooks.childCwd = options.cwd
+    if (hooks.real) return actual.spawnSync(_exe, args, options)
     if (hooks.spawnError) return { status: null, error: { code: hooks.spawnError } }
     const directory = fs.openSync(options.cwd, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY)
     hooks.afterCwd?.()
+    let heldDirectory = directory
     const relative = (path: string) =>
-      isAbsolute(path) ? path : `/proc/self/fd/${directory}/${path}`
+      isAbsolute(path) ? path : `/proc/self/fd/${heldDirectory}/${path}`
     const child = { argv: ['node', ...args.slice(2)], exitCode: 0, platform: process.platform }
     try {
       runInNewContext(args[1], {
-        process: child,
+        process: { ...child, chdir: (path: string) => {
+          heldDirectory = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY)
+        } },
         require: () => ({
           ...fs,
-          statSync: (path: string) =>
-            path === '.' ? fs.fstatSync(directory) : fs.statSync(relative(path)),
-          lstatSync: (path: string) => fs.lstatSync(relative(path)),
+          statSync: (path: string, options: any) =>
+            path === '.' ? fs.fstatSync(heldDirectory, options) : fs.statSync(relative(path), options),
+          lstatSync: (path: string, options: any) => fs.lstatSync(relative(path), options),
           openSync: (path: string, flags: number, mode: number) =>
             fs.openSync(relative(path), flags, mode),
           readFileSync: () => options.input,
@@ -51,12 +62,16 @@ vi.mock('node:child_process', () => ({
       })
       return { status: child.exitCode }
     } finally {
+      if (heldDirectory !== directory) fs.closeSync(heldDirectory)
       fs.closeSync(directory)
     }
   }
-}))
+})})
 const homes: string[] = []
 afterEach(() => {
+  hooks.real = false
+  hooks.missingProc = false
+  vi.unstubAllEnvs()
   hooks.unlink = undefined
   hooks.spawnError = undefined
   hooks.afterCwd = undefined
@@ -182,3 +197,28 @@ it.each(['linux', 'darwin', 'win32'])(
     expect(fs.readdirSync(folder + '-original')).toEqual([])
   }
 )
+
+it('does not inherit a parent NODE_OPTIONS preload in the real helper', () => {
+  const home = fs.mkdtempSync(join(tmpdir(), 'fetch-preload-'))
+  homes.push(home)
+  const marker = join(home, 'executed')
+  const planted = join(home, 'preload.cjs')
+  fs.writeFileSync(planted, 'require("node:fs").writeFileSync(' + JSON.stringify(marker) + ', "ran")')
+  vi.stubEnv('NODE_OPTIONS', '--require ' + planted)
+  vi.stubGlobal('process', new Proxy(process, {
+    get: (target, key) => key === 'platform' ? 'darwin' : Reflect.get(target, key)
+  }))
+  hooks.real = true
+  const file = saveSecretFetchResponse(home, Buffer.from('masked'))
+  expect(fs.readFileSync(file, 'utf8')).toBe('masked')
+  expect(fs.existsSync(marker)).toBe(false)
+  expect(hooks.childCwd).not.toBe(join(home, 'fetches'))
+})
+it('falls back to the portable helper on Linux without proc fd paths', () => {
+  const home = fs.mkdtempSync(join(tmpdir(), 'fetch-no-proc-'))
+  homes.push(home)
+  hooks.missingProc = true
+  const file = saveSecretFetchResponse(home, Buffer.from('masked'))
+  expect(fs.readFileSync(file, 'utf8')).toBe('masked')
+  expect(hooks.childCwd).not.toBe('')
+})
