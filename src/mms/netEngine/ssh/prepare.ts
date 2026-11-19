@@ -66,6 +66,16 @@ export interface PreparePort {
   /** Runs `work` under the per-device lock 1a's removal takes for `joiner` on `selector`. */
   locked<T>(selector: string, joiner: string, work: () => Promise<T>): Promise<T>
   startsAtLogin(): boolean
+  /** A check stops B after a step, as a crash would (the step is recorded; nothing after it). */
+  crashAt?(step: PrepareStep): boolean
+}
+
+/** Where a check may stop B in prepare (§3.4's crash table). */
+export type PrepareStep = 'journaled' | 'profile' | 'networking' | 'row' | 'grant-saved' | 'grant-stored'
+
+function crash(port: PreparePort, step: PrepareStep): void {
+  if (port.crashAt?.(step))
+    throw new NetError('internal', 'Stopped for a check.', { details: { reason: 'remote_failed' } })
 }
 
 const removed = () =>
@@ -92,7 +102,7 @@ export async function prepare(port: PreparePort, request: PrepareRequest): Promi
   // The control makes the profile before the request is journaled: a crash between them leaves a profile no
   // repeat finds, so the repeat makes a second one.
   if (engineControl('profile-before-journal') && request.newLabel && !port.requests.get(request.requestId))
-    await port.createProfile(request.newLabel, request.requestId)
+    await port.createProfile(request.newLabel, '')
 
   // 1. Journal the request.
   let record = port.requests.get(request.requestId)
@@ -100,6 +110,7 @@ export async function prepare(port: PreparePort, request: PrepareRequest): Promi
     if (request.issuedAt < port.now() - port.maxAgeSecs)
       throw new NetError('clock_skew', 'That request expired.', { details: { reason: 'expired' } })
     record = port.requests.add(request, port.now())
+    crash(port, 'journaled')
   } else if (!same(record, request))
     throw new NetError('bad_request', 'That request id was used for something else.', {
       details: { reason: 'bad_request' }
@@ -120,6 +131,7 @@ export async function prepare(port: PreparePort, request: PrepareRequest): Promi
         port.profileTagged(request.requestId) ??
         (await port.createProfile(request.newLabel!, request.requestId))
     record = port.requests.update(request.requestId, { profile })
+    crash(port, 'profile')
   }
   const selector = profile
 
@@ -128,6 +140,7 @@ export async function prepare(port: PreparePort, request: PrepareRequest): Promi
     if (record.state === 'removed') throw removed()
     // 3. Networking.
     const engine = await port.engine(selector)
+    crash(port, 'networking')
 
     if (record.state === 'done') {
       const stored = record.reply as PrepareReply | undefined
@@ -164,6 +177,7 @@ export async function prepare(port: PreparePort, request: PrepareRequest): Promi
       if (row && row.requestId === request.requestId) key = row.key
       else key = engine.writeOwnRow(request)
       record = port.requests.update(request.requestId, { row: 'own', rowKey: key })
+      crash(port, 'row')
     }
     if (record.row === 'existing') return done(port, engine, record, selector, true)
 
@@ -171,7 +185,9 @@ export async function prepare(port: PreparePort, request: PrepareRequest): Promi
     let grant = record.grantId
     if (!grant) {
       grant = await engine.grantAdd(request)
+      crash(port, 'grant-saved')
       record = port.requests.update(request.requestId, { grantId: grant })
+      crash(port, 'grant-stored')
     }
     if (engine.rowGrant(key!) !== grant) engine.setRowGrant(key!, grant)
 

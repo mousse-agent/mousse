@@ -63,6 +63,8 @@ export class MousseMainService extends MmsProfileServices {
   private installationStopped = false
   private installationStopOperation?: Promise<void>
   private profileHost: ProfileHost | null = null
+  /** Checks give the engines of profiles an SSH add reaches their helper (a fake one, or a test build). */
+  netEngineLauncher?: (engine: import('./netEngine/NetEngineService').NetEngineService) => void
   /** B's side of Add over SSH for this installation (1b §3.4). */
   private sshRemoteNow?: SshRemote
   private integrationDomains: IntegrationDomainRegistration | null = null
@@ -215,6 +217,7 @@ export class MousseMainService extends MmsProfileServices {
       engine: async (id) => {
         const services = await this.getProfileServices(id)
         if (made.delete(id)) await services.start()
+        this.netEngineLauncher?.(services.netEngine)
         return services.netEngine
       },
       createProfile: async (label) => {

@@ -6,7 +6,7 @@ import { NetError } from '../../../shared/net/errors'
 import type { NetEngineService } from '../NetEngineService'
 import { findNetHelper } from '../helper/process'
 import { engineControl, engineLimits } from '../limits'
-import { prepare, type PrepareRequest } from './prepare'
+import { prepare, type PrepareRequest, type PrepareStep } from './prepare'
 import { SshRequestStore } from './requests'
 
 /** The line `mousse-cli net-engine ssh` and `mousse-helper pipe` write before anything else (1b §3.3). */
@@ -50,6 +50,8 @@ function writePrivate(path: string, text: string): void {
 export class SshRemote {
   private store?: SshRequestStore
   private timer?: ReturnType<typeof setInterval>
+  /** A check stops B after a step of `prepare`, as a crash would. */
+  crashAt?: (step: PrepareStep) => boolean
   /** Requests and removals of one joiner on one profile run one at a time. */
   private readonly locks = new Map<string, Promise<unknown>>()
 
@@ -214,7 +216,7 @@ export class SshRemote {
           const id = await this.host.createProfile(label)
           const root = this.host.profiles().find((profile) => profile.id === id)!.root
           mkdirSync(join(root, 'net-engine'), { recursive: true })
-          writePrivate(join(root, 'net-engine', 'ssh-request'), tag)
+          if (tag) writePrivate(join(root, 'net-engine', 'ssh-request'), tag)
           return this.selectorOf(root)
         },
         engine: async (selector) => {
@@ -227,7 +229,8 @@ export class SshRemote {
           return engine.prepareEngine()
         },
         locked: (selector, joiner, work) => this.locked(`${selector} ${joiner}`, work),
-        startsAtLogin: () => this.host.startsAtLogin()
+        startsAtLogin: () => this.host.startsAtLogin(),
+        crashAt: (step) => !!this.crashAt?.(step)
       },
       request
     )

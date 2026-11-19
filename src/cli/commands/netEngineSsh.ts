@@ -47,7 +47,11 @@ function readRequest(stdin: NodeJS.ReadableStream): Promise<string> {
 }
 
 /** The command line's entry: the real daemon, asked with `disableAutoStart` (the control lets it start one). */
-export async function runNetEngineCommand(args: ParsedArgs): Promise<void> {
+export async function runNetEngineCommand(
+  args: ParsedArgs,
+  connect: typeof connectDaemonClient = connectDaemonClient,
+  io: { stdin: NodeJS.ReadableStream; stdout: { write(text: string): unknown } } = process
+): Promise<void> {
   if (args.subcommand !== 'ssh') {
     process.stderr.write('usage: mousse-cli net-engine ssh\n')
     process.exitCode = 2
@@ -55,12 +59,12 @@ export async function runNetEngineCommand(args: ParsedArgs): Promise<void> {
   }
   const { engineControl } = await import('../../mms/netEngine/limits')
   await runNetEngineSsh({
-    stdin: process.stdin,
-    stdout: process.stdout,
+    stdin: io.stdin,
+    stdout: io.stdout,
     serve: async (request) => {
       let client
       try {
-        client = await connectDaemonClient({
+        client = await connect({
           homeDir: args.globals.homeDir || undefined,
           disableAutoStart: !engineControl('remote-autostart')
         })

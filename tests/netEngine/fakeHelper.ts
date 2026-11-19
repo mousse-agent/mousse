@@ -122,6 +122,18 @@ export class FakeNetwork {
   readonly reach = new Map<string, FakeReach>()
   /** Classes the checks map routes to, as `MOUSSE_NET_TEST_CLASS_MAP` does for the debug helper. */
   classMap?: Record<string, RouteClass>
+  /**
+   * SSH servers by hostname (1b §3.4): the computer whose `mousse-cli net-engine ssh` answers there, and its
+   * helper identity, which a pipe over that route reaches.
+   */
+  readonly sshServers = new Map<
+    string,
+    { owns(identity: string): boolean; serve(request: Record<string, unknown>): Promise<Record<string, unknown>> }
+  >()
+  /** SSH routes `ssh.resolve` made, by route id. */
+  readonly sshRoutes = new Map<string, { hostname: string; user: string; pinned: boolean }>()
+  /** A setup session whose reply is lost on the way back (the session dropped): answers true to lose it. */
+  sshLose?: (request: Record<string, unknown>) => boolean
   /** What each identity's helper keeps for each peer (it survives the helper's restarts, as `peers.json` does). */
   private readonly known = new Map<string, Map<string, Known>>()
 
@@ -246,7 +258,15 @@ export class FakeNetwork {
     const route = (candidates ?? this.candidates(from, identity)).find((candidate) =>
       listens.includes(candidate)
     )
-    if (!route) throw Object.assign(new Error('no route answered'), { code: 'unreachable' })
+    if (!route) {
+      // The SSH tier, last (§1.4): an owner SSH route whose server pipes to that identity's helper.
+      const viaSsh = this.knownFor(from, identity).ssh.some((entry) => {
+        const ssh = this.sshRoutes.get(String(entry.route_id))
+        return !!ssh && !!this.sshServers.get(ssh.hostname)?.owns(identity)
+      })
+      if (viaSsh && !candidates) return { kind: 'ssh', class: 'ssh' }
+      throw Object.assign(new Error('no route answered'), { code: 'unreachable' })
+    }
     // `conn.up.route.kind` names the pipe: `wss` and `ws` are both `ws`.
     const kind = parseRoute(route)?.kind ?? 'tcp'
     return { kind: kind === 'wss' ? 'ws' : kind, class: this.classOf(route) }
@@ -729,6 +749,57 @@ export class FakeHelper {
             !after.tunnels.length !== !before.tunnels.length
           return reply({ routes: after, restart_needed: restart })
         }
+        case 'ssh.resolve': {
+          const target = String(message.target ?? '')
+          const at = target.lastIndexOf('@')
+          const hostname = target.slice(at + 1)
+          if (!hostname) return reply({ error: 'bad_request', reason: 'no host' })
+          const routeId = randomBytes(8).toString('hex')
+          this.network.sshRoutes.set(routeId, {
+            hostname,
+            user: at > 0 ? target.slice(0, at) : 'me',
+            pinned: false
+          })
+          const route = this.network.sshRoutes.get(routeId)!
+          return reply({ route_id: routeId, user: route.user, hostname, port: 22, pinned: false })
+        }
+        case 'ssh.probe': {
+          const route = this.network.sshRoutes.get(String(message.route_id))
+          if (!route) return reply({ error: 'bad_request', reason: 'unknown route' })
+          if (!this.network.sshServers.has(route.hostname))
+            return reply({ error: 'unreachable', reason: 'no server' })
+          return reply({
+            key_type: 'ssh-ed25519',
+            sha256: `SHA256:fake-${route.hostname}`,
+            in_user_known_hosts: false
+          })
+        }
+        case 'ssh.trust': {
+          const route = this.network.sshRoutes.get(String(message.route_id))
+          if (!route) return reply({ error: 'probe_again', reason: 'no kept key' })
+          if (message.sha256 !== `SHA256:fake-${route.hostname}`)
+            return reply({ error: 'host_key_changed', reason: 'another key' })
+          route.pinned = true
+          return reply({ sha256: message.sha256, pinned: true })
+        }
+        case 'ssh.run': {
+          const route = this.network.sshRoutes.get(String(message.route_id))
+          if (!route?.pinned) return reply({ error: 'host_key_unknown', reason: 'no pin' })
+          const server = this.network.sshServers.get(route.hostname)
+          if (!server) return reply({ error: 'unreachable', reason: 'no server' })
+          const request = (message.request ?? {}) as Record<string, unknown>
+          void server.serve(request).then(
+            (answer) =>
+              this.network.sshLose?.(request)
+                ? reply({ error: 'remote_failed', reason: 'the session dropped' })
+                : reply({ reply: answer }),
+            () => reply({ error: 'remote_failed', reason: 'the remote failed' })
+          )
+          return
+        }
+        case 'ssh.forget':
+          this.network.sshRoutes.delete(String(message.route_id))
+          return reply()
         case 'routes.test': {
           if (this.network.minor < 1) return reply({ error: 'unknown_op', reason: 'routes.test' })
           return this.network.listensOn(this.identity).includes(String(message.route))

@@ -245,8 +245,13 @@ export class EnginePairing {
     const { peers } = this.port
     for (;;) {
       this.alive()
-      const row = peers.serving(node)
-      if (!row || skipsCeremony(row)) return
+      const found = peers.serving(node)
+      if (!found || skipsCeremony(found)) return
+      // The control lets 1a's ceremony take an SSH row as one of its own: B pinned and granted reads as granted.
+      const row =
+        found.source === 'ssh' && found.state === 'ssh_granted'
+          ? { ...found, state: 'granted' as const }
+          : found
       if (row.state === 'consented') {
         await this.rejoin(row)
         if (peers.get(node)?.state === 'consented') return
@@ -469,7 +474,13 @@ export class EnginePairing {
     this.outsideWindow.delete(node)
     for (const wake of [...this.waiters]) wake()
     const row = this.port.peers.serving(node)
-    if (row && !skipsCeremony(row) && (row.state === 'granted' || row.state === 'joined'))
+    if (
+      row &&
+      !skipsCeremony(row) &&
+      (row.state === 'granted' ||
+        row.state === 'joined' ||
+        (row.source === 'ssh' && row.state === 'ssh_granted'))
+    )
       void this.advance(node)
   }
 

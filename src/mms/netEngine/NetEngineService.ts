@@ -136,6 +136,10 @@ export class NetEngineService implements EngineDirectoryPort {
     options.net.onSetAside((suffix) => this.setAside(suffix))
   }
 
+  /** This profile's folder. */
+  get profileDir(): string {
+    return this.options.profileDir
+  }
   private get directory(): string {
     return join(this.options.profileDir, 'net-engine')
   }
@@ -513,7 +517,14 @@ export class NetEngineService implements EngineDirectoryPort {
     const maxAge = engineLimits().sshRequestMaxAgeSecs
     for (const row of started.peers.all()) {
       if (row.source !== 'ssh') continue
-      if (row.state === 'ssh_requested' && row.ssh?.routeId && !row.ssh.removed && !row.ssh.everConnected)
+      // The control repeats `prepare` also for a row that was connected (after B removed this computer, say).
+      const again = engineControl('retry-after-connected')
+      if (
+        (row.state === 'ssh_requested' || (again && row.state === 'connected')) &&
+        row.ssh?.routeId &&
+        !row.ssh.removed &&
+        (!row.ssh.everConnected || again)
+      )
         void this.sshAdd()
           .prepare(row)
           .catch(() => undefined)
