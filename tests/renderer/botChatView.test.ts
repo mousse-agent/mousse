@@ -1734,6 +1734,16 @@ describe('the store behind the chats', () => {
     await act(async () => { await useBotsStore.getState().loadOlder('inbox') })
     expect(useBotsStore.getState().chats.inbox!.messages.map((row) => row.seq)).toEqual(Array.from({ length: 80 }, (_, index) => index + 1))
   })
+
+  it('loading older messages of a turn draws the messages already shown in the same elements', async () => {
+    fake.chats.inbox = Array.from({ length: 80 }, (_, index) => message(index + 1, { activationId: 'act_long' }))
+    await open()
+    const shownFirst = transcript().querySelector<HTMLElement>('article[data-message-id]')!
+    const id = shownFirst.getAttribute('data-message-id')!
+    await act(async () => { await useBotsStore.getState().loadOlder('inbox') })
+    expect(transcript().querySelectorAll('article[data-message-id]').length).toBeGreaterThan(50)
+    expect(transcript().querySelector(`article[data-message-id="${id}"]`)).toBe(shownFirst)
+  })
 })
 
 describe('free while it works (docs/plans/bot-always-free.md)', () => {

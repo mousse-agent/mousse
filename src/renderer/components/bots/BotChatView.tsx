@@ -285,7 +285,7 @@ const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message ===
  * message this one answers (it is not the one right above). `starts`: the first of its group, with the group's space
  * above it. `time`: shows its time (the last of a run in one minute does). `asked`: the message it answers, when loaded (how long it took). `onApplet`: opens one of its applets beside
  * the chat. `live`: the chat's turn, not posted yet: its typing dots, then its reply as it is written (`BotTurnBody`); its
- * message, once posted, is drawn in this same bubble (`replyKeysOf`). `follow`: keeps the chat's end in view as the
+ * message, once posted, is drawn in this same bubble (`useReplyKeys`). `follow`: keeps the chat's end in view as the
  * bubble grows.
  */
 interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; settled?: boolean; browser?: ReactNode; quote: boolean; starts: boolean; time: boolean; onReply(message: BotChatMessage): void; asked?: BotChatMessage; onApplet(applet: BotChatApplet): void; live?: BotLive; follow?: () => void }
@@ -524,22 +524,27 @@ function naturalHeight(bubble: HTMLElement): number {
  */
 function useEasedHeight(ref: RefObject<HTMLElement | null>, on: boolean, follow?: () => void): () => void {
   const scale = useMotionScale()
+  // A spring already moving takes a new speed at once; with motion off it stops where its target is.
+  const scaleRef = useRef(scale)
+  scaleRef.current = scale
   const state = useRef<{ target?: number; spring?: Spring; frame: number }>({ frame: 0 })
   const followRef = useRef(follow)
   followRef.current = follow
-  useEffect(() => () => {
+  const stop = useCallback(() => {
     const s = state.current
     cancelAnimationFrame(s.frame)
+    s.frame = 0
     if (!s.spring) return
     s.spring = undefined
-    s.frame = 0
     ref.current?.style.removeProperty('height')
     ref.current?.classList.remove('is-easing')
   }, [ref])
+  useEffect(() => stop, [stop])
   return useCallback(() => {
     const element = ref.current
     const s = state.current
     if (!element || !on) return
+    if (scale === 0) stop()
     const height = naturalHeight(element)
     const shown = s.spring ? s.spring.x : s.target
     s.target = height
@@ -549,19 +554,15 @@ function useEasedHeight(ref: RefObject<HTMLElement | null>, on: boolean, follow?
     element.classList.add('is-easing')
     element.style.height = `${shown}px`
     const step = (now: number) => {
-      if (stepSpring(spring, s.target!, now, BOT_GROW_TAU_MS * scale)) {
-        s.spring = undefined
-        s.frame = 0
-        element.style.height = ''
-        element.classList.remove('is-easing')
-      } else {
+      if (stepSpring(spring, s.target!, now, BOT_GROW_TAU_MS * scaleRef.current)) stop()
+      else {
         element.style.height = `${spring.x}px`
         s.frame = requestAnimationFrame(step)
       }
       followRef.current?.()
     }
     s.frame = requestAnimationFrame(step)
-  }, [ref, on, scale])
+  }, [ref, on, scale, stop])
 }
 
 /**
@@ -670,20 +671,24 @@ function BotTurnBody({ botId, botName, live, onSize, follow }: { botId: string; 
 }
 
 /**
- * The keys of the bot's messages in the chat's rows: the `n`th message of a chat turn is `reply:<turn>:<n>`, and so is
- * that turn's live bubble before it is posted (`live`), so the posted message is drawn in the bubble that was typing
- * and writing it, not in a new one. A message with no turn keeps its id.
+ * The key of the chat's live bubble (`live`), and of the bot messages that took one over (`keys`): a bot message of the
+ * chat's turn (the latest `turn` named) that arrives after the chat first drew its rows, newer than every bot message
+ * before it, takes the live bubble's key, and the live bubble moves on to a new one. So a posted message is drawn in the
+ * bubble that was typing and writing it, not in a new one. Every other message keeps its id: loading older messages
+ * changes no key.
  */
-export function replyKeysOf(rows: readonly BotChatRow[], turn: string | undefined): { keys: Map<string, string>; live: string } {
-  const keys = new Map<string, string>()
-  const counts = new Map<string, number>()
+function useReplyKeys(rows: readonly BotChatRow[], turn: string | undefined): { keys: ReadonlyMap<string, string>; live: string } {
+  const state = useRef<{ keys: Map<string, string>; next: number; turn?: string; seq: number } | null>(null)
+  const botSeq = (row: BotChatRow) => (row.kind === 'message' && row.message.author === 'bot' ? row.message.seq : -Infinity)
+  state.current ??= { keys: new Map(), next: 0, seq: Math.max(-Infinity, ...rows.map(botSeq)) }
+  const s = state.current
+  if (turn) s.turn = turn
   for (const row of rows) {
-    if (row.kind !== 'message' || row.message.author !== 'bot' || !row.message.activationId) continue
-    const n = counts.get(row.message.activationId) ?? 0
-    counts.set(row.message.activationId, n + 1)
-    keys.set(row.message.id, `reply:${row.message.activationId}:${n}`)
+    if (row.kind !== 'message' || botSeq(row) <= s.seq) continue
+    s.seq = row.message.seq
+    if (s.turn && row.message.activationId === s.turn && !s.keys.has(row.message.id)) s.keys.set(row.message.id, `reply:${s.next++}`)
   }
-  return { keys, live: turn ? `reply:${turn}:${counts.get(turn) ?? 0}` : 'reply:live' }
+  return { keys: s.keys, live: `reply:${s.next}` }
 }
 
 /** After a reply of the turn is posted, how long the turn waits before it shows typing again: most turns end with it. */
@@ -1033,13 +1038,10 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const writing = useHasBotLiveReply(bot.id)
   // What the turn is doing now, beside its typing dots: the owner's message is unanswered while it is the newest row.
   const doing = useDoingLine(turn, botDoingLine({ status, writing, chip: step, unanswered: last?.kind === 'message' && last.message.author === 'owner' }))
-  // The turn's live bubble is drawn as the bot message it becomes, under the key its message will have.
-  // Only a service that names the turn from its start (`bot.chat`) keys it: an older one names it later, which would draw
-  // the bubble again.
-  const keyTurn = bot.chat?.activationId
-  const replyKeys = useMemo(() => replyKeysOf(shown, keyTurn), [shown, keyTurn])
+  // The turn's live bubble is drawn as the bot message it becomes, under the key its message takes over.
+  const replyKeys = useReplyKeys(shown, turn)
   const live = useMemo<BotLive>(() => ({ offline, doing }), [offline, doing])
-  const liveMessage = useMemo<BotChatMessage>(() => ({ id: replyKeys.live, seq: -1, at: '', author: 'bot', kind: 'text', text: '', chips: [], ...(keyTurn ? { activationId: keyTurn } : {}) }), [replyKeys.live, keyTurn])
+  const liveMessage = useMemo<BotChatMessage>(() => ({ id: replyKeys.live, seq: -1, at: '', author: 'bot', kind: 'text', text: '', chips: [], ...(turn ? { activationId: turn } : {}) }), [replyKeys.live, turn])
   // A reply of the turn just posted: typing shows again only if the turn still works a moment later.
   const posted = !writing && turn && last?.kind === 'message' && last.message.author === 'bot' && last.message.activationId === turn ? last.message.id : undefined
   const [quietDone, setQuietDone] = useState<string>()

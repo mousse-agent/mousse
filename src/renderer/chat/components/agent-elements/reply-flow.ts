@@ -147,7 +147,7 @@ export function useFlowingText(text: string, flowing: boolean, key = ''): string
       const next = nextFlowStep(s.text, s.shown, end, s.size);
       if (next > s.shown) {
         s.shown = next;
-        setStep(next);
+        setStep((n) => n + 1);
       }
       if (s.shown < end) s.tick = window.setTimeout(step, FLOW_TICK_MS);
       else s.size = 0;
@@ -157,7 +157,7 @@ export function useFlowingText(text: string, flowing: boolean, key = ''): string
         const end = target();
         if (end > s.shown) {
           s.shown = end;
-          setStep(end);
+          setStep((n) => n + 1);
         }
       } else if (!s.tick && target() > s.shown) s.tick = window.setTimeout(step, s.shown === 0 ? 0 : FLOW_TICK_MS);
     };
