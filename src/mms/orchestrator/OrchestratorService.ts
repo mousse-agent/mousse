@@ -133,6 +133,8 @@ import { ACTIVITY_DESCRIPTION_CHARS, BACKGROUND_SUMMARY, taskEndSummary, type Ag
 import { createHarnessGateway, type AdapterHost, type BindInput, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type ToolHost, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
+import type { RunProvenance } from '../harness/ownerOnly'
+import type { OwnerProof } from '../run/ownerProof'
 import type { BotThreads } from '../../shared/bots/personal/authority'
 import { BOT_COMPACTION_HOLD_MS, isBotRoomAbort, isBotWallAbort, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from '../bots/activation/dispatcher'
 import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type HarnessDriverKind, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
@@ -599,6 +601,11 @@ export interface OrchestratorSendOptions {
   source?: string
   forceQueue?: boolean
   clientRequestId?: string
+  /**
+   * The owner sent it from a Mousse window (`RunRecord.ownerProof`): given only by the `orchestrator.send` protocol
+   * handler, from the connection the send came in on, and written once with the run. Nothing else passes one.
+   */
+  ownerProof?: OwnerProof
   /**
    * `turn` (default) resolves with the turn's result; `ack` resolves once the send is committed
    * and its `turn.start` effect recorded (SPEC §12.7). Only the engine path honours `ack`.
@@ -2078,9 +2085,25 @@ export class OrchestratorService extends EventEmitter {
   setHarness(harness: HarnessGateway): void {
     this.harness.setLiveHost(null)
     this.harness.setMcpAttachment(null)
+    this.harness.setRunProvenance?.(null)
     this.harness = harness
     this.attachLiveHost()
     this.harness.setMcpAttachment(this.mcpAttachment)
+    // Turn admission reads a run's provenance from the run store as it is now (`ownerOnly.ts`).
+    this.harness.setRunProvenance?.((runId) => this.runProvenance(runId))
+  }
+
+  /** What the gateway's owner check reads of a run, from the run store; undefined without a run engine or run. */
+  private runProvenance(runId: string): RunProvenance | undefined {
+    const run = this.runEngine?.getRun(runId)
+    if (!run) return undefined
+    return {
+      source: run.source,
+      clientRequestId: run.clientRequestId,
+      ...(run.ownerProof ? { ownerProof: run.ownerProof } : {}),
+      ...(run.outcome?.continuationOf ? { continuationOf: run.outcome.continuationOf } : {}),
+      ...(run.outcome?.sentByAgent ? { sentByAgent: true } : {})
+    }
   }
   /** Runtimes that keep a live process per thread report their background work and the turns they start themselves here. */
   private attachLiveHost(): void {
@@ -2662,6 +2685,10 @@ export class OrchestratorService extends EventEmitter {
     // A thread's sidebar row shows its latest reply, kept in its metadata when each turn ends (`Thread.lastReply`).
     for (const event of ['turn-completed', 'turn-failed', 'turn-interrupted', 'turn-paused'] as const)
       this.on(event, (payload: { threadId?: string }) => { if (payload?.threadId) this.recordLastReply(payload.threadId) })
+    // Its links show how its latest run ended once it is quiet, after a restart too (`Thread.lastRun`).
+    const runEnds = { 'turn-completed': 'done', 'turn-failed': 'failed', 'turn-interrupted': undefined } as const
+    for (const [event, lastRun] of Object.entries(runEnds))
+      this.on(event, (payload: { threadId?: string }) => { if (payload?.threadId) this.recordLastRun(payload.threadId, lastRun) })
     // A thread's goal decides after each of its turns whether the next goal turn is queued.
     const outcomes = { 'turn-completed': 'completed', 'turn-failed': 'failed', 'turn-interrupted': 'interrupted', 'turn-paused': 'paused' } as const
     for (const [event, outcome] of Object.entries(outcomes) as Array<[keyof typeof outcomes, GoalTurnOutcome]>)
@@ -5600,6 +5627,7 @@ export class OrchestratorService extends EventEmitter {
       search: (target, query, limit) => service.search(target, query, limit),
       events: (target, page) => service.events(target, page),
       messages: (target, page) => service.messages(target, page),
+      summary: (target) => service.summary(target),
       wait: (target, request) => {
         const denied = this.remoteThreadDenial(target.node, target.computer)
         if (denied) return Promise.reject(new RemoteThreadRefusal(denied.code, denied.message, target.computer))
@@ -6895,9 +6923,10 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** `runs.resumeNow`: continue the paused run `runId` now. Refused `conflict` when it is not paused. */
-  async resumePausedRun(runId: string): Promise<{ runId: string; effectId: string }> {
+  async resumePausedRun(runId: string, ownerProof?: OwnerProof): Promise<{ runId: string; effectId: string }> {
     const engine = this.requireRunEngine()
-    const effect = engine.requestResume(runId, true)
+    // The owner's own press (a Mousse window's) is kept on the pause: the continue turn carries it.
+    const effect = engine.requestResume(runId, true, ownerProof)
     if (this.effectsEnabled()) this.effectWorker?.notify()
     else await this.executeResumeEffect(effect)
     return { runId, effectId: effect.effectId }
@@ -11570,6 +11599,16 @@ export class OrchestratorService extends EventEmitter {
     })
   }
 
+  /** Keeps how the thread's latest run ended (`Thread.lastRun`) in its metadata, for its links. Never fails the turn. */
+  private recordLastRun(threadId: string, lastRun: Thread['lastRun']): void {
+    if (!this.threadStore || threadId === '__unbound__') return
+    try {
+      this.threadStore.setThreadLastRun(threadId, lastRun)
+    } catch (error) {
+      console.warn('how the run ended could not be kept', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
   /**
    * Keeps the preview of the thread's latest reply in its metadata, from the transcript the turn just wrote (in memory,
    * secrets masked). A turn that left no reply keeps the one before; an Undo or Redo (`rewound`) shows what the
@@ -13027,7 +13066,8 @@ export class OrchestratorService extends EventEmitter {
           : {}),
         ...(opts?.bindDelivery ? { bindDelivery: opts.bindDelivery } : {}),
         ...(queueBehindPause ? { queueBehindPause: true } : {}),
-        ...(opts?.refuseWhilePaused ? { refuseWhilePaused: true } : {})
+        ...(opts?.refuseWhilePaused ? { refuseWhilePaused: true } : {}),
+        ...(opts?.ownerProof && !opts.agent ? { ownerProof: opts.ownerProof } : {})
       }, { admit })
       if (result.status === 'rejected' && CONTINUATION_REFUSALS.has(result.reason))
         throw new DomainRpcError(result.reason, `Cannot continue run ${opts?.continuationOfRunId}: ${result.reason}.`)
@@ -14951,7 +14991,8 @@ export class OrchestratorService extends EventEmitter {
             toolStarted: conversationToolsUsed,
             steered: drains > 0 || acceptedDrains.size > 0 || takenDrains.size > 0,
             runtimeRetried,
-            bot: Boolean(opts?.bot)
+            bot: Boolean(opts?.bot),
+            ownerOnly: Boolean(this.harness.ownerOnly?.(binding.instanceId))
           })
           if (delay === undefined) throw error
           logDebug('OrchestratorService', 'provider request failed before it was answered; trying again', error, { threadId: session.threadId, retry: retries + 1, delayMs: delay })
@@ -15395,7 +15436,12 @@ export class OrchestratorService extends EventEmitter {
     // (it rejects them to read it). Nothing an agent caused (its own steer, a message it promoted) may do that: it waits in
     // the turn's steer buffer until the user has answered.
     const asking = this.questions.listPendingForThread(session.threadId).length > 0
-    const held = asking ? turn.pendingSteer.filter((entry) => entry.origin || entry.byAgent) : []
+    // A turn on a personal sign-in (`ownerOnly.ts`) reads only what its owner wrote: an agent's steer, or a message an
+    // agent promoted, waits and then runs as a turn of its own, which that provider refuses.
+    const binding = turn.runId ? this.runEngine?.bindingForRun(turn.runId) : undefined
+    const ownerOnly = Boolean(binding && this.harness.ownerOnly?.(binding.instanceId))
+    const holdsAgents = asking || ownerOnly
+    const held = holdsAgents ? turn.pendingSteer.filter((entry) => entry.origin || entry.byAgent) : []
     const taking = held.length ? turn.pendingSteer.filter((entry) => !held.includes(entry)) : turn.pendingSteer
     if (taking.length > 0) {
       entries.push(...taking)
@@ -15417,7 +15463,7 @@ export class OrchestratorService extends EventEmitter {
         (item.state === 'pending' || item.state === 'steering') &&
         !session.drainedExternalSteerIds.has(item.id) &&
         !held.some((entry) => entry.itemId === item.id) &&
-        !(asking && item.origin?.kind === 'agent')
+        !(holdsAgents && item.origin?.kind === 'agent')
     )
     const revert: string[] = []
     for (const item of externalSteers) {

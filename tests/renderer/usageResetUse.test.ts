@@ -40,7 +40,7 @@ function render(provider: ProviderUsage, onUseReset?: (providerId: string, credi
   const onRefresh = vi.fn()
   act(() => root!.render(createElement(SubscriptionUsageView, {
     usage: { providers: [provider], fetchedAt: '2026-11-09T12:00:00Z' }, loading: false, failed: false, now: NOW,
-    onBack: () => {}, onRefresh, onManage: () => {}, ...(onUseReset ? { onUseReset } : {})
+    onRefresh, onManage: () => {}, ...(onUseReset ? { onUseReset } : {})
   })))
   return { onRefresh }
 }

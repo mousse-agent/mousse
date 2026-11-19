@@ -151,7 +151,7 @@ describe('Antigravity sign-in state', () => {
 
   function installedService(settings: Record<string, unknown> = signedIn) {
     const context = setup(settings)
-    vi.spyOn(context.service as unknown as { binary: () => string }, 'binary').mockReturnValue(join(context.home, 'agy_acp_server'))
+    vi.spyOn(context.service as unknown as { runtime: () => { kind: string; binary: string } }, 'runtime').mockReturnValue({ kind: 'legacy', binary: join(context.home, 'agy_acp_server') })
     const changed = vi.fn()
     context.service.hooks.changed = changed
     return { ...context, changed }

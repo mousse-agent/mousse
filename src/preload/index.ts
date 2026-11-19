@@ -122,7 +122,9 @@ import type {
   SkillReadResult,
   SkillsRegistrySnapshot
 } from '../shared/integrations'
-import type { CliInstallEvent, UsageForResponse, UsageProxyKeyResult, UsageSlotsResponse, UseLimitResetResponse } from '../shared/providerAuth'
+import type { UsageHistoryRequest, UsageHistoryResponse } from '../shared/usageHistory'
+import type { LimitTrendRange, LimitTrendsResponse } from '../shared/limitTrends'
+import type { CliInstallEvent, ProviderUsage, UsageForResponse, UsageProxyKeyResult, UsageSlotsResponse, UseLimitResetResponse } from '../shared/providerAuth'
 import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } from '../shared/harness/status'
 import type { SetVendorSettingInput, VendorSettingsView } from '../shared/harness/vendorSettings'
 import type { MoveResult } from '../shared/harness/move'
@@ -1184,6 +1186,18 @@ const api = {
     getUsage: () => ipcRenderer.invoke('providers:getUsage'),
     /** Every provider the usage page shows, with its last reading, before any is read. */
     usageSlots: (): Promise<UsageSlotsResponse> => ipcRenderer.invoke('providers:usageSlots'),
+    /** Keeps a provider read every 5 minutes for a few minutes (a bot header's usage ring); answers with its last reading. */
+    watchUsage: (providerId: string): Promise<{ watched: boolean; cached?: ProviderUsage }> => ipcRenderer.invoke('providers:watchUsage', providerId),
+    /** Each usage reading the service keeps, whichever read made it. */
+    onUsage: (cb: (event: { usage: ProviderUsage }) => void): (() => void) => {
+      const handler = (_: unknown, event: { usage: ProviderUsage }) => cb(event)
+      ipcRenderer.on('providers:usage', handler)
+      return () => ipcRenderer.removeListener('providers:usage', handler)
+    },
+    /** How the 5-hour and weekly limits moved over the range, from the readings kept of them. */
+    limitTrends: (range: LimitTrendRange): Promise<LimitTrendsResponse> => ipcRenderer.invoke('providers:limitTrends', range),
+    /** Tokens and cost over time, read from the coding agents' own logs on this computer. */
+    usageHistory: (request: UsageHistoryRequest): Promise<UsageHistoryResponse> => ipcRenderer.invoke('usage:history', request),
     /** Uses one of a provider's limit-reset credits (the one named, or the next); it asks nothing itself. */
     useLimitReset: (request: { providerId: string; creditId?: string }): Promise<UseLimitResetResponse> =>
       ipcRenderer.invoke('providers:useLimitReset', request),

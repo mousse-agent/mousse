@@ -1,5 +1,8 @@
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { describe, expect, it, vi } from 'vitest'
-import { cachedUsage, keepAccount, keepUsage, steadyAccount, steadyUsage, unreachableUsage, usageSlots, withUsageDeadline } from '../src/mms/protocol/usageReads'
+import { cachedUsage, keepAccount, keepUsage, onUsageKept, steadyAccount, steadyUsage, unreachableUsage, usageSlots, withUsageDeadline } from '../src/mms/protocol/usageReads'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
 import type { ProviderUsage } from '../src/shared/providerAuth'
 
@@ -120,11 +123,93 @@ describe('the protocol methods', () => {
     expect(useLimitReset).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps every limit the page reads for its trends, and answers them in the range asked', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'usage-reads-'))
+    try {
+      const mms = { ...services(), getProfileHomeDir: () => home }
+      await call(mms, 'providers.getUsageFor', { providerId: 'xai' })
+      await vi.waitFor(async () => {
+        const { trends } = await call(mms, 'providers.limitTrends', { range: '24h' }) as { trends: Array<{ id: string; windows: Array<{ id: string; points: unknown[] }> }> }
+        expect(trends.map((trend) => [trend.id, trend.windows.map((window) => [window.id, window.points.length])])).toEqual([['xai', [['five_hour', 1]]]])
+      })
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   it('answers only a window or the CLI on this computer', async () => {
     const mms = services()
     const remote = (method: string, params?: unknown) => dispatchMethod({ mms: mms as never, globalSequence: () => 0, connection: { clientType: 'bridge' } as never }, method, params)
     await expect(remote('providers.usageSlots')).rejects.toMatchObject({ code: 'forbidden' })
     await expect(remote('providers.getUsageFor', { providerId: 'xai' })).rejects.toMatchObject({ code: 'forbidden' })
+    await expect(remote('providers.limitTrends', { range: '7d' })).rejects.toMatchObject({ code: 'forbidden' })
+    await expect(remote('providers.watchUsage', { providerId: 'xai' })).rejects.toMatchObject({ code: 'forbidden' })
     expect(mms.providerAccess.usageFor).not.toHaveBeenCalled()
+  })
+
+  describe('the 5-minute refresh behind a bot header\'s usage ring', () => {
+    it('reads a watched provider at most once per 5 minutes however many windows ask, and stops once none asks', async () => {
+      vi.useFakeTimers()
+      try {
+        const mms = services()
+        const kept: string[] = []
+        onUsageKept(mms, (id) => kept.push(id))
+        // Two windows ask at once: one read, kept and heard.
+        await call(mms, 'providers.watchUsage', { providerId: 'xai' })
+        expect(await call(mms, 'providers.watchUsage', { providerId: 'xai' })).toEqual({ watched: true })
+        await vi.advanceTimersByTimeAsync(0)
+        expect(mms.providerAccess.usageFor).toHaveBeenCalledTimes(1)
+        expect(kept).toEqual(['xai'])
+        // A window that asks later gets the reading kept.
+        expect(await call(mms, 'providers.watchUsage', { providerId: 'xai' })).toMatchObject({ watched: true, cached: { id: 'xai' } })
+        // A window asks again within the lease: the next read comes 5 minutes after the last.
+        await vi.advanceTimersByTimeAsync(4 * 60_000)
+        await call(mms, 'providers.watchUsage', { providerId: 'xai' })
+        expect(mms.providerAccess.usageFor).toHaveBeenCalledTimes(1)
+        await vi.advanceTimersByTimeAsync(60_000)
+        expect(mms.providerAccess.usageFor).toHaveBeenCalledTimes(2)
+        // Nobody asks any more: one more read while the lease lasts, then none.
+        await vi.advanceTimersByTimeAsync(30 * 60_000)
+        expect(mms.providerAccess.usageFor).toHaveBeenCalledTimes(3)
+        expect(vi.getTimerCount()).toBe(0)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('reads nothing for a provider the page does not list', async () => {
+      const mms = services()
+      expect(await call(mms, 'providers.watchUsage', { providerId: 'made-up' })).toEqual({ watched: false })
+      expect(mms.providerAccess.usageFor).not.toHaveBeenCalled()
+    })
+
+    it('reads Claude as the page does: the proxy\'s sign-ins, each on its own', async () => {
+      const usageAccount = vi.fn(async (id: string) => ({ id, label: id, windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 30 }] }))
+      const getUsage = vi.fn(async () => reading('claude-subscription'))
+      const claudeSubscription = {
+        configured: () => true,
+        usageAccountsPreview: vi.fn(async () => reading('claude-subscription', { windows: [], accounts: [{ id: 'a', label: 'a', windows: [], pending: true }, { id: 'b', label: 'b', windows: [], pending: true }] })),
+        usageAccount,
+        getUsage
+      }
+      const mms = { ...services(), claudeSubscription }
+      await call(mms, 'providers.watchUsage', { providerId: 'claude-subscription' })
+      await vi.waitFor(() => expect(usageAccount).toHaveBeenCalledTimes(2))
+      expect(getUsage).not.toHaveBeenCalled()
+      await vi.waitFor(() => expect(cachedUsage(mms, 'claude-subscription')!.accounts!.every((account) => account.windows.length === 1)).toBe(true))
+    })
+  })
+})
+
+describe('kept readings are heard', () => {
+  it('each provider reading and each sign-in\'s reading tells the listeners which provider it was', () => {
+    const owner = {}
+    const heard: string[] = []
+    const stop = onUsageKept(owner, (id) => heard.push(id))
+    keepUsage(owner, reading('claude-subscription', { accounts: [{ id: 'a', label: 'a', windows: [] }] }))
+    keepAccount(owner, 'claude-subscription', { id: 'a', label: 'a', windows: [{ id: 'five_hour', label: '5-hour limit', remainingPercent: 10 }] })
+    stop()
+    keepUsage(owner, reading('xai'))
+    expect(heard).toEqual(['claude-subscription', 'claude-subscription'])
   })
 })

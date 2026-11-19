@@ -13,6 +13,7 @@ import type { BotAuthority } from '../../src/shared/bots/personal/authority'
 import type { BotLane, BotModelSlots, BotSchedule } from '../../src/shared/bots/personal/definition'
 import { MAX_BOT_SCHEDULES } from '../../src/shared/bots/personal/definition'
 import type { BotModelOption } from '../../src/shared/bots/personal/methods'
+import { BOT_ITEM_TOOLS } from '../../src/shared/bots/personal/items'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import { botScheduleLabel } from '../../src/shared/scheduleLabel'
 import { fakeAppToolHost } from './appToolsFixture'
@@ -394,11 +395,11 @@ describe('ask_owner (#1123)', () => {
 describe('registration', () => {
   it('lists the bot tools in the bots family, and WP6\'s memory tools beside them', () => {
     const { families } = createAppToolRegistry({ host: fakeAppToolHost().host, bots: () => undefined })
-    expect(families.bots).toEqual(['escalate', 'consult', 'telling_set', 'bot_schedule_add', 'schedule_done', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'work_wait', 'wake', 'watch_start', 'watch_list', 'watch_stop', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'show_card', 'bot_list', 'bot_send', 'question_answer', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'tool_catalogue', 'use_tool'])
-    // With `botMemory`, WP6's memory tools follow them in the same family.
+    expect(families.bots).toEqual(['escalate', 'consult', 'bot_schedule_add', 'schedule_done', 'bot_schedule_remove', 'bot_schedule_list', 'mcp_servers', 'set_profile', 'set_depth', 'work_start', 'work_models', 'work_list', 'work_stop', 'work_note', 'remind', 'work_wait', 'wake', 'watch_start', 'watch_list', 'watch_stop', 'reminder_list', 'reminder_cancel', 'make_image', 'ask_owner', 'show_card', 'bot_list', 'bot_send', 'question_answer', 'use_model', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'tool_catalogue', 'use_tool'])
+    // With `botMemory`, WP6's memory tools and the open items' tools follow them in the same family.
     const withMemory = createAppToolRegistry({ host: fakeAppToolHost().host, botMemory: { activationOf: () => undefined } })
     expect(withMemory.families.bots.slice(0, families.bots.length)).toEqual(families.bots)
-    for (const name of withMemory.families.bots.slice(families.bots.length)) expect(BOT_MEMORY_TOOLS as readonly string[]).toContain(name)
+    for (const name of withMemory.families.bots.slice(families.bots.length)) expect([...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS] as readonly string[]).toContain(name)
   })
 
   it('without the engine wired, the bot\'s own tools refuse', async () => {

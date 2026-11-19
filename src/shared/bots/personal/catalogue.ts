@@ -26,6 +26,9 @@ export const BOT_USE_TOOL = 'use_tool'
  */
 export const BOT_CORE_TOOLS: readonly string[] = [
   'memory_save', 'memory_search', 'memory_read',
+  // The open items: an ask is listed in the turn it is made and a status answer reads the list first, so neither tool
+  // is a lookup away.
+  'item_save', 'item_list',
   'work_start', 'work_note', 'work_list',
   'remind', 'wake',
   'escalate', 'ask_owner',
@@ -76,7 +79,6 @@ const WORK_GUIDANCE = [
 ].join('\n')
 
 const REMINDERS_GUIDANCE = [
-  'When the owner says how or when they want to be told, set it with telling_set and confirm in words; never save it as a memory.',
   "When the owner wants something done regularly, add it with bot_schedule_add and confirm it in words (\"I'll go through your inbox every weekday at 9:00\"). A line you only need to say needs no run: give say instead of prompt, only in a turn your owner's message or tap started. A schedule that should stop on a date takes until, a local date or date and time on this computer. Use bot_schedule_list and bot_schedule_remove to manage them. When a schedule has an end condition, state it in its prompt.",
   'reminder_list shows your one-off reminders and wakes; reminder_cancel cancels one.'
 ].join('\n')
@@ -149,8 +151,8 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   },
   {
     id: 'reminders',
-    line: 'how and when your owner is told, your own schedules, your reminders and wakes',
-    tools: ['telling_set', 'bot_schedule_add', 'bot_schedule_list', 'bot_schedule_remove', 'reminder_list', 'reminder_cancel'],
+    line: 'your own schedules, your reminders and wakes',
+    tools: ['bot_schedule_add', 'bot_schedule_list', 'bot_schedule_remove', 'reminder_list', 'reminder_cancel'],
     guidance: REMINDERS_GUIDANCE
   },
   {

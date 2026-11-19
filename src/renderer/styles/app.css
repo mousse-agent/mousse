@@ -617,10 +617,21 @@ html.platform-darwin .titlebar-left {
   color: var(--text-secondary);
 }
 
+/* A browser tab names its page (its title, else its host), cut short with an ellipsis, even where other tabs show
+   only their icons. */
+.main-view-tab.is-browser .main-view-tab-label {
+  max-width: 22ch;
+}
+
 @container main-area (max-width: 520px) {
   .main-view-tab-label,
   .main-view-tab-detail {
     display: none;
+  }
+
+  .main-view-tab.is-browser .main-view-tab-label {
+    display: block;
+    max-width: 12ch;
   }
 
   .main-view-tab {
@@ -3930,8 +3941,7 @@ html[data-theme='high-contrast'] {
 }
 
 .browser-access-icon { flex-shrink: 0; }
-.browser-access-off .browser-access-icon,
-.browser-access-off .browser-access-label { opacity: 0.6; }
+.browser-access-off .browser-access-icon { opacity: 0.6; }
 .browser-access-agent .browser-access-icon { color: var(--accent); }
 .browser-access-human .browser-access-icon { color: var(--text-primary); }
 
@@ -3963,12 +3973,12 @@ html[data-theme='high-contrast'] {
   border-radius: 6px;
   background: rgba(var(--surface-elevated-rgb), 0.55);
   min-width: 0;
+  transition: background-color 0.15s;
 }
 
-.browser-url-icon {
-  flex-shrink: 0;
-  color: var(--text-secondary);
-  opacity: 0.7;
+/* Focus shows on the address box alone; the field inside stays bare. */
+.browser-url-form:focus-within {
+  background: rgba(var(--surface-elevated-rgb), 0.8);
 }
 
 .browser-url-input {
@@ -3978,6 +3988,14 @@ html[data-theme='high-contrast'] {
   background: transparent;
   color: var(--text-primary);
   font-size: 13px;
+  outline: none;
+}
+
+.browser-url-input:focus,
+.browser-url-input:focus-visible {
+  background: transparent;
+  background-image: none;
+  box-shadow: none;
   outline: none;
 }
 
@@ -4006,11 +4024,42 @@ html[data-theme='high-contrast'] {
 
 .browser-manual-surface { position: relative; }
 
-.browser-agent-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 7px 12px; font-size: 12px; border-bottom: 1px solid var(--border); background: rgba(var(--surface-strong-rgb), .55); }
-.browser-agent-controls > span:first-child { flex: 1; }
-.browser-agent-controls button { padding: 5px 10px; border: 1px solid rgba(var(--accent-rgb), .35); border-radius: 6px; background: rgba(var(--accent-rgb), .12); color: var(--text-primary); cursor: pointer; }
-.browser-agent-controls button:disabled { opacity: .5; cursor: default; }
-.browser-agent-controls [role="alert"] { width: 100%; color: var(--text-secondary); }
+/* Asking for agent access: a panel at the pane's right edge, under the toolbar, sliding and fading like a bot's About. */
+.browser-manual-surface { anchor-scope: --browser-toolbar; }
+.browser-toolbar { anchor-name: --browser-toolbar; }
+.browser-access-panel {
+  position: absolute;
+  z-index: 4;
+  top: anchor(--browser-toolbar bottom, 0px);
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-8);
+  width: min(300px, 100%);
+  padding: var(--space-24) var(--space-16);
+  overflow-y: auto;
+  background: var(--pane-surface, var(--bg-primary));
+  border-left: 1px solid var(--ui-line);
+  box-shadow: -16px 0 32px rgb(0 0 0 / 0.18);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.45;
+  opacity: 0;
+  transform: translateX(24px);
+  transition: opacity var(--ui-dur-slow) ease, transform var(--ui-dur-slow) cubic-bezier(0.22, 1, 0.36, 1);
+}
+.browser-access-panel.is-open { opacity: 1; transform: none; }
+.browser-access-panel p { margin: 0; }
+.browser-access-panel-icon { display: grid; place-items: center; width: 36px; height: 36px; margin-bottom: var(--space-4); border-radius: 50%; background: var(--ui-hover); color: var(--text-secondary); }
+.browser-access-panel .browser-access-panel-title { color: var(--text-primary); font-size: 13px; font-weight: 500; }
+.browser-access-panel-actions { display: flex; gap: var(--space-8); margin-top: var(--space-8); }
+.browser-access-panel-actions button { padding: 5px 12px; border: 1px solid var(--ui-line); border-radius: 6px; background: transparent; color: var(--text-primary); cursor: pointer; }
+.browser-access-panel-actions button:hover:not(:disabled) { background: var(--ui-hover); }
+.browser-access-panel-actions .browser-access-panel-allow { border-color: transparent; background: var(--accent); color: var(--ui-on-accent); }
+.browser-access-panel-actions .browser-access-panel-allow:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 88%, #fff); }
+.browser-access-panel-actions button:disabled { opacity: .5; cursor: default; }
 .browser-agent-shield { position: absolute; inset: 0; z-index: 3; cursor: default; }
 
 /* The app-owned start page follows the app theme; visited sites keep the white default. */
@@ -4067,10 +4116,6 @@ html[data-theme='high-contrast'] {
 }
 
 @container browser-panel (max-width: 420px) {
-  .browser-url-icon {
-    display: none;
-  }
-
   .browser-url-form {
     padding-inline: 8px;
   }
@@ -4078,10 +4123,6 @@ html[data-theme='high-contrast'] {
   .browser-toolbar {
     padding: 6px;
     gap: 2px;
-  }
-
-  .browser-access-label {
-    display: none;
   }
 }
 

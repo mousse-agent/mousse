@@ -183,6 +183,8 @@ import { describeLinkError } from '../mms/guiConnectionLog'
 import { QuietTurnWatch } from '../mms/quietTurnWatch'
 import { createDevTurnEndDropper } from '../mms/devTurnEndDropper'
 import { isQualifiedId, parseQualifiedId, unqualifyId } from '../../shared/threadRef'
+import type { UsageHistoryRequest } from '../../shared/usageHistory'
+import type { LimitTrendRange } from '../../shared/limitTrends'
 import type {
   CreatePullRequestResult,
   PullRequestActionResult,
@@ -3550,6 +3552,9 @@ export function registerGuiIpc(
     guiMms.request('providers.getUsage')
   )
   registerHandler('providers:usageSlots', async () => guiMms.request('providers.usageSlots'))
+  registerHandler('providers:limitTrends', async (_e, range: LimitTrendRange) => guiMms.request('providers.limitTrends', { range }))
+  registerHandler('providers:watchUsage', async (_e, providerId: string) => guiMms.request('providers.watchUsage', { providerId }))
+  registerHandler('usage:history', async (_e, request: UsageHistoryRequest) => guiMms.request('usage.history', request))
   registerHandler('providers:useLimitReset', async (_e, request: { providerId: string; creditId?: string }) =>
     guiMms.request('providers.useLimitReset', request)
   )

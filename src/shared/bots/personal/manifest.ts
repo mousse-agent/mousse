@@ -5,6 +5,7 @@ import { isNeutralTool, type NeutralTool } from '../../harness/tools'
 import { foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
 import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 import { BOT_MEMORY_TOOLS } from './memory'
+import { BOT_ITEM_TOOLS } from './items'
 import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from './catalogue'
 
 /**
@@ -21,7 +22,7 @@ const BUDGET_KEYS = ['maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTok
  * so they are not permissions: every bot has them, they never raise an ask, and About never lists them.
  */
 export const BOT_OWN_APP_TOOLS: readonly string[] = [
-  'telling_set', 'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'set_profile', 'set_depth', 'use_model', 'escalate', ...BOT_MEMORY_TOOLS,
+  'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'set_profile', 'set_depth', 'use_model', 'escalate', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS,
   // An automation run's report on its own run (the Automations inbox); only a scheduled run has one to give.
   'run_report'
 ]
@@ -291,6 +292,12 @@ export const BOT_GROUP_PERMISSIONS: ReadonlySet<string> = new Set([
 export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, ...BOT_GROUP_PERMISSIONS])
 
 /**
+ * Tools bots no longer have (`telling_set`: the Tells you setting). A grant an older build approved may still list one:
+ * it reads as well formed and gives nothing, and its digest stays the same, so no bot is asked to approve again.
+ */
+export const BOT_RETIRED_APP_TOOLS: ReadonlySet<string> = new Set(['telling_set'])
+
+/**
  * Every Mousse app tool a bot's turn can ever be offered (what `compileBotThread` may add to a turn): the grantable
  * tools, each group permission's tools in place of the permission, the skill tools, consult, the front desk's work and reminder
  * tools, the task list, and `make_image` with an Images row. A bot's thread lists only these, so its runtime never shows the model a tool no bot can hold.
@@ -312,6 +319,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   'work_wait',
   ...BOT_SUBAGENT_TOOLS,
   ...BOT_MEMORY_TOOLS,
+  ...BOT_ITEM_TOOLS,
   BOT_MCP_LIST_TOOL,
   BOT_RUNNING_TOOL,
   BOT_IMAGE_TOOL,
@@ -435,7 +443,7 @@ export function manifestProblem(value: unknown): string | undefined {
   const strings = (list: unknown) => Array.isArray(list) && list.every((item) => typeof item === 'string' && item.length > 0 && item.length <= 256)
   if (!Array.isArray(manifest.tools) || !manifest.tools.every((tool) => typeof tool === 'string' && isNeutralTool(tool))) return 'A built-in tool is not one Mousse knows.'
   if (!strings(manifest.appTools)) return 'An app tool name is invalid.'
-  const refusedApp = (manifest.appTools as string[]).find((tool) => !BOT_APP_TOOLS.has(tool))
+  const refusedApp = (manifest.appTools as string[]).find((tool) => !BOT_APP_TOOLS.has(tool) && !BOT_RETIRED_APP_TOOLS.has(tool))
   if (refusedApp !== undefined) return `A bot can't be given the Mousse tool ${refusedApp}: it would reach other threads, act in your name or ask you, outside the bot's permissions.`
   if (!strings(manifest.skills)) return 'A skill id is invalid.'
   if (!Array.isArray(manifest.mcp) || !manifest.mcp.every((pair) => pair && typeof pair === 'object' && typeof pair.serverId === 'string' && typeof pair.tool === 'string' && MCP_PART.test(pair.serverId) && MCP_PART.test(pair.tool))) return 'An MCP tool is invalid.'

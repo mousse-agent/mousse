@@ -137,7 +137,7 @@ function jobToDefinition(job: ScheduledJob): ScheduledJobDefinition {
     selection: job.selection,
     ...(job.agent?.definitionId ? { agent: { definitionId: job.agent.definitionId } } : {}),
     // An automation's model by hand keeps its entry beside its name (#673); a build that writes only the name drops it.
-    ...(job.bot ? { bot: { botId: job.bot.botId, scheduleId: job.bot.scheduleId, createdBy: job.bot.createdBy, ...(job.bot.canWakeMe !== undefined ? { canWakeMe: job.bot.canWakeMe } : {}), ...(job.bot.ownerAsked !== undefined ? { ownerAsked: job.bot.ownerAsked } : {}), ...(job.bot.say !== undefined ? { say: job.bot.say } : {}), ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick ? { pick: job.bot.pick } : {}) } } : {}),
+    ...(job.bot ? { bot: { botId: job.bot.botId, scheduleId: job.bot.scheduleId, createdBy: job.bot.createdBy, ...(job.bot.ownerAsked !== undefined ? { ownerAsked: job.bot.ownerAsked } : {}), ...(job.bot.say !== undefined ? { say: job.bot.say } : {}), ...(job.bot.model ? { model: job.bot.model } : {}), ...(job.bot.model && job.bot.pick ? { pick: job.bot.pick } : {}) } } : {}),
     mode: job.mode,
     workspace: job.workspace,
     permissionMode: job.permissionMode,

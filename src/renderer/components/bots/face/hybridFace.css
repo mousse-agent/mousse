@@ -8,6 +8,10 @@
 .hf-layer[data-shown] { opacity: 1; }
 .hf-layer[data-old] { opacity: 0; transition: opacity 0.18s linear 0.14s; }
 
+/* The mouse's nose and whiskers: their own picture, in two halves turned with the eyes from the face's top-left corner. */
+.hf-features { position: absolute; inset: 0; display: block; pointer-events: none; }
+.hf-half { position: absolute; inset: 0; display: block; transform-origin: 0 0; }
+
 .hf-eyes { position: absolute; inset: 0; display: block; opacity: 0; transition: opacity 0.16s linear; pointer-events: none; }
 .hf-eyes[data-shown] { opacity: 1; }
 /* Paused: the body and its eyes fade as one picture, as the 3D face does (face.css fades its canvas). */

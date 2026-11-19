@@ -1,4 +1,4 @@
-import type { ThreadActivityState } from './types'
+import type { ThreadActivityState, TurnPhase } from './types'
 
 /**
  * How much a thread needs the person, worst first: it waits for an answer or an approval, it is
@@ -41,6 +41,32 @@ export function threadStatus(activity: ThreadActivityState | undefined, awaitsAp
     default:
       return 'quiet'
   }
+}
+
+/** What a link to a thread says of it: its live status, or how its latest run ended once nothing is going on. */
+export type ThreadLinkStatus = ThreadStatus | 'failed'
+
+/**
+ * The status a thread link and its card show: the live status while the thread works, waits or needs the person;
+ * once it is quiet, how its latest run ended, so Failed and Done stay after the thread was seen: the phase its latest
+ * turn ended in this session (`lastPhase`), else what its metadata kept (`lastRun`, `Thread.lastRun`), which outlives
+ * a restart. A stopped run is quiet. `setupFailed`: its last message did not start.
+ */
+export function threadLinkStatus(
+  activity: ThreadActivityState | undefined,
+  lastPhase: TurnPhase | undefined,
+  awaitsApproval = false,
+  setupFailed = false,
+  lastRun?: 'done' | 'failed'
+): ThreadLinkStatus {
+  const live = threadStatus(activity, awaitsApproval)
+  if (live !== 'quiet' && live !== 'done') return live
+  if (setupFailed) return 'failed'
+  if (live === 'done') return 'done'
+  if (lastPhase === 'failed') return 'failed'
+  if (lastPhase === 'completed') return 'done'
+  if (lastPhase === 'stopped') return 'quiet'
+  return lastRun ?? 'quiet'
 }
 
 /** The attention level of a thread with this activity. */

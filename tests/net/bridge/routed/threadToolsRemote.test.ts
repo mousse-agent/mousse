@@ -183,6 +183,16 @@ describe('the thread tools on a thread launched on another computer (issue #1160
     const on = await tool('thread_read', { threadId: id, view: 'messages', afterIndex: first.index, textOffset: first.nextTextOffset, limit: 1 })
     expect(on.body.messages[0]).toMatchObject({ index: first.index, textOffset: 4096 })
     expect(on.body.messages[0].text.startsWith('x')).toBe(true)
+
+    // The short views are read there too: what the thread is (its run going there), and its last turns, trimmed.
+    const summary = await tool('thread_read', { threadId: id, view: 'summary' })
+    expect(summary.isError, JSON.stringify(summary.body)).toBeUndefined()
+    expect(summary.body).toMatchObject({ threadId: id, computer: nameOf(), view: 'summary', status: 'active', activeRunId: expect.any(String), messages: messages.body.total, lastCompletedAt: null })
+    const recent = await tool('thread_read', { threadId: id, view: 'recent' })
+    expect(recent.isError, JSON.stringify(recent.body)).toBeUndefined()
+    expect(recent.body).toMatchObject({ threadId: id, view: 'recent', total: messages.body.total })
+    const step = recent.body.turns.flatMap((turn: Loose) => turn.steps ?? []).find((line: string) => line.startsWith('(system) Tests on Linux:'))
+    expect(step.length).toBeLessThanOrEqual(200)
   }, 120_000)
 
   it('waits until the run ends there, and says needsInput while it waits on a person there', async () => {
@@ -494,6 +504,50 @@ describe('thread_list, thread_search and any thread of an allowed computer (issu
     expect(read.isError, read.text).toBeUndefined()
     expect(read.body).toMatchObject({ threadId: t.qualified(theirs.id), computer: nameOf(), scope: 'computer' })
     expect(read.body.messages.some((message: Loose) => String(message.text).includes(`Notes of Person ${seq}`))).toBe(true)
+  }, 120_000)
+
+  // A page there stops at 64 KB counting from its oldest message: the last turns of a long thread still come back whole.
+  it('reads the last turns of a long thread there, its newest, with prompts and answers trimmed as here', async () => {
+    const { tool } = await launcher()
+    const theirs = t.owner.threads.createThread(`Long ${++seq}`, undefined, undefined, { started: true } as never)
+    const at = new Date().toISOString()
+    const transcript = Array.from({ length: 20 }, (_, turn) => [
+      { role: 'user', content: `Prompt ${turn}` },
+      { role: 'assistant', content: `Step ${turn} ${'s'.repeat(4_000)}` },
+      { role: 'assistant', content: `Answer ${turn} ${'a'.repeat(4_000)}` }
+    ]).flat().map((message, index) => ({ id: `m${index}`, timestamp: at, ...message }))
+    t.owner.threads.saveThreadData(theirs.id, { ...t.owner.threads.loadThreadData(theirs.id), messages: transcript as never })
+
+    const recent = await tool('thread_read', { threadId: t.qualified(theirs.id), view: 'recent', turns: 2 })
+    expect(recent.isError, recent.text.slice(0, 300)).toBeUndefined()
+    expect(recent.body).toMatchObject({ total: 60, fromIndex: 54 })
+    expect(recent.body.turns.map((turn: Loose) => [turn.prompt.text, turn.answer.index, turn.answer.cut, turn.answer.totalChars])).toEqual([
+      ['Prompt 18', 56, true, transcript[56]!.content.length],
+      ['Prompt 19', 59, true, transcript[59]!.content.length]
+    ])
+    // The answer as far as the view shows it, the step as one line marked cut.
+    expect(recent.body.turns[1].answer.text.length).toBeGreaterThan(2_900)
+    expect(recent.body.turns[1].steps).toEqual([expect.stringMatching(/^Step 19 s+…$/)])
+    expect(recent.body.turns[1].steps[0].length).toBeLessThanOrEqual(161)
+  }, 120_000)
+
+  it('reads a turn longer than the newest messages it reads back to its prompt, its older steps counted', async () => {
+    const { tool } = await launcher()
+    const theirs = t.owner.threads.createThread(`Marathon ${++seq}`, undefined, undefined, { started: true } as never)
+    const at = new Date().toISOString()
+    const transcript = [{ role: 'user', content: 'Port the whole parser' }, ...Array.from({ length: 130 }, (_, step) => ({ role: 'assistant', content: `Step ${step}` }))]
+      .map((message, index) => ({ id: `m${index}`, timestamp: at, ...message }))
+    t.owner.threads.saveThreadData(theirs.id, { ...t.owner.threads.loadThreadData(theirs.id), messages: transcript as never })
+
+    const recent = await tool('thread_read', { threadId: t.qualified(theirs.id), view: 'recent', turns: 1 })
+    expect(recent.isError, recent.text.slice(0, 300)).toBeUndefined()
+    expect(recent.body).toMatchObject({ total: 131, fromIndex: 0 })
+    expect(recent.body.turns).toEqual([expect.objectContaining({
+      prompt: expect.objectContaining({ index: 0, text: 'Port the whole parser' }),
+      steps: Array.from({ length: 8 }, (_, n) => `Step ${121 + n}`),
+      stepsLeftOut: 121,
+      answer: expect.objectContaining({ index: 130, text: 'Step 129' })
+    })])
   }, 120_000)
 
   it('with the default reach (threads they started), a send to a person\'s thread is refused by that computer, once, and says where it is changed', async () => {

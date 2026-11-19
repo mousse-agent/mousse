@@ -1,4 +1,6 @@
-import { useAppStore } from '../../stores/appStore'
+import { shouldCloseSideCardOverlay, useAppStore } from '../../stores/appStore'
+import { useChatsStore } from '../../stores/chatsStore'
+import { botThreadShownNow, useShownBotThread } from '../../lib/botThread'
 
 /**
  * Narrowest thread area (px) that still docks the side card beside the
@@ -31,6 +33,8 @@ export interface SideCardVisibilityInput {
   sideCardOverlayOpen: boolean
   /** The measured full-width thread area has room for the card. Null until the first measurement. */
   sideCardFits: boolean | null
+  /** A bot's thread shows in its chat pane: Chats is on screen, but it shows a thread, so the card may too. */
+  botThreadShown?: boolean
 }
 
 /** Why the card cannot appear right now, as opposed to merely being switched off. */
@@ -61,7 +65,7 @@ export function deriveSideCardState(input: SideCardVisibilityInput): SideCardSta
   const viewBlocked = input.settingsOpen
     || input.usageOpen
     || input.scheduledOpen
-    || input.sidebarMode === 'chats'
+    || (input.sidebarMode === 'chats' && !input.botThreadShown)
   if (viewBlocked) return { visible: false, mode, unavailable: 'view' }
   // Unmeasured never flashes the card; the first measurement lands before the first paint.
   if (input.sideCardFits === null) return { visible: false, mode, unavailable: null }
@@ -143,17 +147,31 @@ export function applySideCardToggle(next: SideCardToggleState): void {
   if (next.sideCardOverlayOpen !== state.sideCardOverlayOpen) state.setSideCardOverlayOpen(next.sideCardOverlayOpen)
 }
 
+// The overlay closes by `shouldCloseSideCardOverlay`, with the same bot-thread test the card's visibility uses: an app
+// change (width, panel, thread, page) is checked against the change, and a chats change (back from a bot's thread to
+// its chat) against the app as it is.
+useAppStore.subscribe((state, previous) => {
+  if (shouldCloseSideCardOverlay(state, previous, botThreadShownNow())) state.setSideCardOverlayOpen(false)
+})
+useChatsStore.subscribe(() => {
+  const state = useAppStore.getState()
+  if (shouldCloseSideCardOverlay(state, state, botThreadShownNow())) state.setSideCardOverlayOpen(false)
+})
+
 /** Store-backed visibility, shared by the card and its title-bar button. */
 export function useSideCardVisible(): boolean {
-  return useAppStore((state) => deriveSideCardState(state).visible)
+  const botThreadShown = Boolean(useShownBotThread())
+  return useAppStore((state) => deriveSideCardState({ ...state, botThreadShown }).visible)
 }
 
 /** Store-backed mode: docked beside the conversation, or an overlay in a narrow thread area. */
 export function useSideCardMode(): SideCardMode {
-  return useAppStore((state) => deriveSideCardState(state).mode)
+  const botThreadShown = Boolean(useShownBotThread())
+  return useAppStore((state) => deriveSideCardState({ ...state, botThreadShown }).mode)
 }
 
 /** Store-backed reason the title-bar button is disabled, or null while it works. */
 export function useSideCardUnavailable(): SideCardUnavailableReason | null {
-  return useAppStore((state) => deriveSideCardState(state).unavailable)
+  const botThreadShown = Boolean(useShownBotThread())
+  return useAppStore((state) => deriveSideCardState({ ...state, botThreadShown }).unavailable)
 }

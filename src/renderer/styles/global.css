@@ -17,6 +17,9 @@
    automatic content detection skips (gitignored). Register it explicitly or
    sibling rhythm, code padding, and dark code colors silently never compile. */
 @source "../../../node_modules/streamdown/dist/*.js";
+/* No element uses the `container` utility; the word is only found in code. Its width breakpoints
+   (640 to 1536 px) restyled the whole window each time a resize crossed one, about 100 ms each. */
+@source not inline("{,!}container{,!}");
 @import './themes/index.css';
 @import './layout-tokens.css';
 @import './vscode-compat.css';

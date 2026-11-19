@@ -81,7 +81,7 @@ describe('"use the profiler" in the bot engine', () => {
 describe('existing grants', () => {
   // Digests of grants an earlier build approved, computed on master before "use the profiler" existed (9fba70c9c): a new permission must not
   // change them, or every bot would be asked to approve again.
-  // Saved values from 9fba70c9c, not today's starter (which now includes telling_set).
+  // Saved values from 9fba70c9c, not today's starter.
   const starter: ReturnType<typeof botStarterManifest> = {
     tools: ['read', 'list', 'search', 'edit', 'write'],
     appTools: ['web_search', 'web_fetch', 'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list',

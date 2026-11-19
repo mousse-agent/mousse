@@ -24,6 +24,7 @@ import { isBotTurnPayload, type BotTurnPayload, type RunOutcome } from '../../sr
 import type { BotDefinition, BotManifest } from '../../src/shared/bots/personal/definition'
 import { type BotEscalationSummary, type BotPermissionRequest } from '../../src/shared/bots/personal/escalation'
 import type { BotAuthority } from '../../src/shared/bots/personal/authority'
+import { BOT_ITEM_TOOLS } from '../../src/shared/bots/personal/items'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import { BOT_TURN_WINDOW_MS } from '../../src/shared/bots/personal/definition'
 
@@ -403,7 +404,7 @@ describe('consults', () => {
     expect(context).toMatchObject({ history: 'thread', authority: { role: 'context' } })
     // Depth is 1: no consult from a context thread; it narrows to read.
     expect(context.authority.consult).toBeUndefined()
-    expect(context.policy.tools?.allow).toEqual(['escalate', ...BOT_MEMORY_TOOLS, 'mcp_servers', 'read', 'running_list'].sort())
+    expect(context.policy.tools?.allow).toEqual(['escalate', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, 'mcp_servers', 'read', 'running_list'].sort())
     expect(context.authority.counters).toBe(prepared.authority.counters)
     expect(context.authority.time.signal).toBe(prepared.authority.time.signal)
     start(payload.runId)

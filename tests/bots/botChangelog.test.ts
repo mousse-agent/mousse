@@ -1,4 +1,3 @@
-import { tellingLine } from '../../src/shared/bots/personal/tellingSettings'
 /**
  * What changed in Mousse for bots (src/mms/bots/changelog.ts): a bot with history is told the entries it has not seen,
  * after its memory, until a chat turn that carried them settles; a new bot is told nothing. And no bot prompt text or
@@ -129,12 +128,13 @@ it('quiet-hour advice agrees with settings and later entries', () => {
   expect(advice).not.toMatch(/there are no quiet hours|never tell your owner you hold anything/i)
   expect(BOT_CHANGELOG.find(entry => entry.id === 15)!.text).toMatch(/quiet hours now exist/i)
   for (const entry of BOT_CHANGELOG) for (const gone of entry.gone ?? []) {
-    for (const text of [tellingLine({}, { from: '22:00', to: '08:00' })!, ...BOT_CHANGELOG.filter(later => later.id > entry.id).map(later => later.text)]) expect(text).not.toMatch(gone)
+    for (const text of BOT_CHANGELOG.filter(later => later.id > entry.id).map(later => later.text)) expect(text).not.toMatch(gone)
   }
 })
-it('all memory wish instructions route telling wishes to settings', () => {
+it('all memory wish instructions save telling wishes as owner memory', () => {
   for (const text of [BOT_BASE_INSTRUCTIONS, BOT_MEMORY_PROTOCOL, BOT_MEMORY_TOOL_DEFINITIONS.memory_save.description]) {
-    expect(text).toContain('(how or when to be told: telling_set instead)')
+    expect(text).toContain('including how or when to be told')
+    expect(text).not.toContain('telling_set')
   }
 })
 
@@ -177,7 +177,7 @@ it('C6 support rollback shows entries 29 and 30 while E1 entry 28 stays pending,
   expect(enabled).toContain(e1.text)
   expect(enabled).toContain(bindingAdvice.text)
   await settled(on, 'c6-seen-on')
-  expect(memory.getState<number>('ada', 'changelog_seen')).toBe(30)
+  expect(memory.getState<number>('ada', 'changelog_seen')).toBe(BOT_CHANGELOG.at(-1)!.id)
   for (let turn = 0; turn < 3; turn++) {
     const after = await on.chatPreamble({ botId: 'ada', activationId: `c6-seen-after-${turn}` })
     expect(after).not.toContain(e1.text)

@@ -10,6 +10,7 @@ import { useAppStore } from '../../stores/appStore'
 import { botThreadCount, showBotThreads } from '../../lib/showBotThreads'
 import { launchedGroups, launchedLook, presenceOf, stickerOf, type BotStickerKind, type LaunchedTone } from './botChatShape'
 import { runningFor } from './BotStartedCards'
+import { useThreadRefMenu } from '../ThreadRefMenu'
 
 /** How long work has run, in plain words: "just now", "4 min", "1 h 20 min". */
 export function workElapsed(startedAt: string, now = Date.now()): string {
@@ -94,6 +95,7 @@ export const BotThreadLine = memo(function BotThreadLine({ botId, thread, now, o
   const Icon = TONE_ICONS[tone]
   const ago = formatAgo(Date.parse(thread.updatedAt), now)
   const [showing, setShowing] = useState(false)
+  const refMenu = useThreadRefMenu(thread.threadId)
   const meta: ReactNode[] = [
     ...(thread.hidden ? [<span className="bot-thread-hidden" title="Not in your sidebar"><EyeOff size={11} aria-hidden />Hidden</span>] : []),
     ...(thread.project ? [thread.project] : []),
@@ -101,7 +103,7 @@ export const BotThreadLine = memo(function BotThreadLine({ botId, thread, now, o
   ]
   return <li className="bot-thread-item">
     <button type="button" className="bot-thread-line" data-tone={tone} data-hidden={thread.hidden || undefined} data-nav title={tooltip ? `Open ${thread.title}` : undefined}
-      onClick={() => { onOpen(); void openBotThread(botId, thread.threadId) }}>
+      onClick={() => { onOpen(); void openBotThread(botId, thread.threadId) }} {...refMenu.bind}>
       <span className="bot-thread-top">
         <span className="bot-thread-title">{thread.title}</span>
         <span className="bot-thread-state"><Icon size={12} aria-hidden />{label}</span>
@@ -112,6 +114,7 @@ export const BotThreadLine = memo(function BotThreadLine({ botId, thread, now, o
       onClick={() => { setShowing(true); void setThreadHidden(thread.threadId, false).finally(() => setShowing(false)) }}>
       <Eye size={13} aria-hidden />
     </button>}
+    {refMenu.menu}
   </li>
 })
 

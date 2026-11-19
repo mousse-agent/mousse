@@ -1,6 +1,8 @@
-import { BOT_COLOUR_HEX, BOT_EYES, botEyesOf, botKindOf, type BotEyes, type KnownBotLook } from '../../../../shared/bots/personal/look'
+import { botEyeColourOf, botKindOf, type BotEyes, type KnownBotLook } from '../../../../shared/bots/personal/look'
 import type { BotFaceState } from './BotFace'
-import { faceUniforms, mousseEyesWhite, stillPose, type FacePose } from './facePoses'
+import { EYE_HALF_HEIGHT, EYE_RADIUS, EYE_SCALE, eyeFit, eyeShapeOf, eyeSpread, faceUniforms, LENS, stillPose, type FacePose } from './facePoses'
+
+export { eyeShapeOf, eyeSpread } from './facePoses'
 
 /**
  * Where the flat eyes of a hybrid face go (`HybridFace.tsx`): the shader's own eye positions, put
@@ -25,17 +27,30 @@ export interface EyePlace {
 
 export interface EyeGeometry {
   eyes: [EyePlace, EyePlace]
-  /** The pose's eye values: scale, how open, closed (0 or 1), the closed arc's way up, worried. */
+  /** The pose's eye values: scale (with the lens fit), how open, closed (0 or 1), the closed arc's way up, worried. */
   es: number
   open: number
   closed: number
   arc: number
   worried: number
-  /** Eye units the eyes move per unit of look, across and up. */
-  lookX: number
-  lookY: number
   /** CSS pixels per world unit at the body, for hops. */
   unit: number
+  /**
+   * The transform that moves eye `index` from its place to where it is when the face looks (x, y) (units of look,
+   * x right, y up): round the face's curve as the 3D eyes go, narrowing towards the edges, and never past the face's
+   * outline or, with glasses on, the lens.
+   */
+  move(index: number, x: number, y: number): string
+  /** CSS pixels from the face's left edge to its nose: the mouse's nose and whiskers picture is moved in two halves split here. */
+  seam: number
+  /**
+   * The transforms (from the face's top-left corner) of the left and right halves of the mouse's nose and whiskers
+   * picture when the face looks (x, y): turned round the head by the eyes' own turn, no further than keeps them well
+   * inside the face. Each half takes its whiskers' tip where turning puts it, so the near side's whiskers squeeze
+   * towards the edge as the far side's spread, and both keep the nose. `none` on the Mousse, and with glasses on,
+   * whose frames stay put.
+   */
+  features(x: number, y: number): [string, string]
 }
 
 type V3 = [number, number, number]
@@ -43,6 +58,11 @@ type V3 = [number, number, number]
 const HR: V3 = [1.05, 0.92, 0.88]
 const HEAD_Y = 0.55
 const MS = 0.7
+/** The Mousse's eyes lie on a cylinder this far round its glass's axis (the shader's `eyesM`), at height 2.2. */
+const GLASS_R = 1.465
+const EYE_Y = 2.2
+/** Eye units per logo unit on the Mousse (the mouse's eye units are head units). */
+const MOUSSE_EYE = 1.35
 
 /** The shader's `R(a) * (x, y)`. */
 function rot(a: number, x: number, y: number): [number, number] {
@@ -53,6 +73,13 @@ function rot(a: number, x: number, y: number): [number, number] {
 
 function headDepth(x: number, y: number): number {
   return HR[2] * Math.sqrt(Math.max(0, 1 - (x * x) / (HR[0] * HR[0]) - ((y - HEAD_Y) * (y - HEAD_Y)) / (HR[1] * HR[1])))
+}
+
+/** The glass bowl's radius at height y (the shader's `gR`). */
+function bowl(y: number): number {
+  if (y < 2.85) return 1.52 * Math.pow(Math.max(0, 1 - Math.pow(Math.max(0, (2.85 - y) / 1.49), 2.6)), 0.385)
+  const v = Math.sin(Math.min(1, Math.max(0, (y - 2.85) / 1.26)) * 1.5708)
+  return 1.52 - 0.16 * v * v
 }
 
 /** A point of the posed body frame, in the world: the shader's hop, squash and roll, undone. */
@@ -79,6 +106,36 @@ function mousseHeadToWorld(q: V3, pose: FacePose): V3 {
   return bodyToWorld([x * MS, (y + 2.6) * MS - 1.48, z * MS], pose)
 }
 
+/**
+ * How far the live face's head turns per unit of look in each state (`targets` in facePoses.ts). The Mousse's glass
+ * looks the same turned, so its eyes go round by the eye's own turn and the head's; the mouse's head picture stays
+ * put, nose and ears with it, so its eyes take half the head's turn.
+ */
+const HEAD_TURN: Partial<Record<BotFaceState, number>> = { idle: 0.5, working: 0.08, stuck: 0.2 }
+
+const inGlasses = (look: KnownBotLook): boolean => look.accessory === 'glasses'
+
+const clamp = (value: number, low: number, high: number): number => Math.min(high, Math.max(low, value))
+
+/**
+ * How far the mouse's nose and whiskers turn round its head at most (radians, across and up or down): the whiskers'
+ * tips start 1.07 round, so they stay on the face's front.
+ */
+const FEATURES_TURN = 0.33
+const FEATURES_TILT = 0.22
+
+/** The mouse's nose, in its head frame (the shader's `map`). */
+const NOSE: V3 = [0, 0.39, 0.855]
+
+/** A head point (mouse head frame) turned round the head's ellipsoid by `yaw` across and `tilt` up. */
+function roundHead(p: V3, yaw: number, tilt: number): V3 {
+  const s: V3 = [p[0] / HR[0], (p[1] - HEAD_Y) / HR[1], p[2] / HR[2]]
+  const r = Math.hypot(s[0], s[1], s[2])
+  const across = Math.atan2(s[0], s[2]) + yaw
+  const up = Math.asin(clamp(s[1] / r, -1, 1)) + tilt
+  return [HR[0] * r * Math.sin(across) * Math.cos(up), HEAD_Y + HR[1] * r * Math.sin(up), HR[2] * r * Math.cos(across) * Math.cos(up)]
+}
+
 export function eyeGeometry(look: KnownBotLook, state: BotFaceState, view: 'head' | 'full', size: number): EyeGeometry {
   const pose: FacePose = { ...stillPose(state), lookX: 0, lookY: 0 }
   const uniforms = faceUniforms(look, pose, { view, size, samples: 1 })
@@ -97,21 +154,55 @@ export function eyeGeometry(look: KnownBotLook, state: BotFaceState, view: 'head
     return [(ux * 0.5 + 0.5 + uniforms.pan[0]) * size, (0.5 - uy * 0.5 - uniforms.pan[1]) * size]
   }
   const toWorld = mousse ? mousseHeadToWorld : mouseHeadToWorld
-  const place = (side: -1 | 1): EyePlace => {
-    let centre: V3
-    let across: V3
-    let upward: V3
-    if (mousse) {
-      const a = side * 0.255
-      centre = [Math.sin(a) * 1.465, 2.2, Math.cos(a) * 1.465]
-      across = [Math.cos(a) * 1.35, 0, -Math.sin(a) * 1.35]
-      upward = [0, 1.35, 0]
-    } else {
-      const x = side * 0.37
-      centre = [x, HEAD_Y, headDepth(x, HEAD_Y) + 0.03]
-      across = [1, 0, 0]
-      upward = [0, 1, 0]
+  const es = pose.es * EYE_SCALE * eyeFit(look)
+  const shape = eyeShapeOf(look)
+  const spread = eyeSpread(look)
+  const glasses = inGlasses(look)
+  const unit = mousse ? MOUSSE_EYE : 1
+  /** The eye's radius and half height, in head (mouse) or logo (Mousse) units. */
+  const radius = (EYE_RADIUS[shape] * es) / unit
+  const halfHeight = (EYE_HALF_HEIGHT[shape] * es) / unit
+  const turn = (mousse ? 0.22 : 0.0916) + (HEAD_TURN[state] ?? 0) * (mousse ? 1 : 0.5)
+
+  /** The eye's middle and its across and up axes (one eye unit long), in the head frame, looking (lx, ly). */
+  const frame = (side: -1 | 1, lx: number, ly: number): [V3, V3, V3] => {
+    if (glasses) {
+      // In the lens: the shader's flat look, as far as the lens leaves room.
+      const lens = LENS[mousse ? 'mousse' : 'mouse']
+      let [ox, oy] = mousse ? [lx * 0.2387, ly * 0.8889] : [lx * 0.09, ly]
+      const reach = Math.hypot(ox, oy)
+      const room = Math.max(0, lens.room - EYE_RADIUS[shape] * es)
+      if (reach > room) [ox, oy] = [(ox * room) / reach, (oy * room) / reach]
+      if (mousse) {
+        const a = side * spread.mousse + ox * (MOUSSE_EYE / GLASS_R)
+        return [[Math.sin(a) * GLASS_R, EYE_Y + oy * MOUSSE_EYE, Math.cos(a) * GLASS_R], [Math.cos(a) * MOUSSE_EYE, 0, -Math.sin(a) * MOUSSE_EYE], [0, MOUSSE_EYE, 0]]
+      }
+      const x = side * spread.mouse + ox
+      return [[x, HEAD_Y + oy, headDepth(x, HEAD_Y + oy) + 0.03], [1, 0, 0], [0, 1, 0]]
     }
+    if (mousse) {
+      // Round the glass (the eye's turn and the head's), no further than keeps the eye on the bowl's front.
+      const y = clamp(EYE_Y + ly * 1.2, Math.min(EYE_Y, 1.85 + halfHeight), Math.max(EYE_Y, 3.4 - halfHeight))
+      const half = Math.asin(Math.min(1, radius / GLASS_R))
+      const edge = Math.min(1.2 - half, Math.asin(clamp((0.94 * bowl(y - halfHeight) - radius) / GLASS_R, 0, 1)))
+      const limit = Math.max(0, edge - spread.mousse)
+      const a = side * spread.mousse + clamp(lx * turn, -limit, limit)
+      return [[Math.sin(a) * GLASS_R, y, Math.cos(a) * GLASS_R], [Math.cos(a) * MOUSSE_EYE, 0, -Math.sin(a) * MOUSSE_EYE], [0, MOUSSE_EYE, 0]]
+    }
+    // Round the head: the eye's place on the head's ellipsoid as a point of the unit sphere, turned across by the
+    // look and tilted up or down, then put back on the ellipsoid. Its axes turn with it, so it narrows towards the edges.
+    const u = spread.mouse / HR[0]
+    const rest = Math.atan2(u, Math.sqrt(1 - u * u))
+    const limit = Math.max(0, 1.2 - radius / HR[0] - rest)
+    const yaw = clamp(lx * turn, -limit, limit)
+    const t = side * rest + yaw
+    const tilt = clamp(ly / HR[1], -0.6 + halfHeight / HR[1], 0.75 - halfHeight / HR[1])
+    const centre: V3 = [HR[0] * Math.sin(t) * Math.cos(tilt), HEAD_Y + HR[1] * Math.sin(tilt), HR[2] * Math.cos(t) * Math.cos(tilt) + 0.03]
+    return [centre, [Math.cos(yaw), 0, -Math.sin(yaw)], [-Math.sin(tilt) * Math.sin(yaw), Math.cos(tilt), -Math.sin(tilt) * Math.cos(yaw)]]
+  }
+
+  const place = (side: -1 | 1, lx = 0, ly = 0): EyePlace => {
+    const [centre, across, upward] = frame(side, lx, ly)
     const step = 0.1
     const at = (axis: V3): [number, number] =>
       project(toWorld([centre[0] + axis[0] * step, centre[1] + axis[1] * step, centre[2] + axis[2] * step], pose))
@@ -120,31 +211,74 @@ export function eyeGeometry(look: KnownBotLook, state: BotFaceState, view: 'head
     const [bx, by] = at(upward)
     return { x, y, angle: Math.atan2(ay - y, ax - x), sx: Math.hypot(ax - x, ay - y) / step, sy: Math.hypot(bx - x, by - y) / step }
   }
+  const eyes: [EyePlace, EyePlace] = [place(-1), place(1)]
   const [x0] = project(bodyToWorld([0, -0.66, 0], pose))
   const [x1] = project(bodyToWorld([1, -0.66, 0], pose))
   return {
-    eyes: [place(-1), place(1)],
-    es: pose.es,
+    eyes,
+    es,
     open: pose.open,
     closed: pose.closed,
     arc: pose.arc,
     worried: pose.worried,
-    // The mouse's eyes move 0.09 a unit of look and its head turns with them; the head stays put here, so the eyes go further.
-    lookX: mousse ? (1.465 * 0.22) / 1.35 : 0.145,
-    lookY: mousse ? 1.2 / 1.35 : 1,
-    unit: Math.abs(x1 - x0)
+    unit: Math.abs(x1 - x0),
+    seam: project(toWorld(NOSE, pose))[0],
+    features(lx, ly) {
+      if (mousse || glasses || (lx === 0 && ly === 0)) return ['none', 'none']
+      const yaw = clamp(lx * turn, -FEATURES_TURN, FEATURES_TURN)
+      const tilt = clamp(ly / HR[1], -FEATURES_TILT, FEATURES_TILT)
+      const head = (x: number, y: number): V3 => [x, y, headDepth(x, y)]
+      // The nose, a point above it, and each side's middle whisker tip.
+      const points: V3[] = [NOSE, head(0, 0.5), head(-0.9, 0.35), head(0.9, 0.35)]
+      const from = points.map((p) => project(toWorld(p, pose)))
+      const to = points.map((p) => project(toWorld(roundHead(p, yaw, tilt), pose)))
+      const half = (tip: number): string => {
+        // The flat transform taking the nose, the point above it and the tip where turning takes them.
+        const [[x1, y1], [x2, y2], [x3, y3]] = [from[0]!, from[1]!, from[tip]!]
+        const det = x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)
+        if (Math.abs(det) < 1e-6) return 'none'
+        /** The row (p, q, r) with p x + q y + r = each point's `value`. */
+        const solve = (axis: 0 | 1): [number, number, number] => {
+          const [v1, v2, v3] = [to[0]![axis], to[1]![axis], to[tip]![axis]]
+          return [
+            (v1 * (y2 - y3) + v2 * (y3 - y1) + v3 * (y1 - y2)) / det,
+            (x1 * (v2 - v3) + x2 * (v3 - v1) + x3 * (v1 - v2)) / det,
+            (x1 * (y2 * v3 - y3 * v2) + x2 * (y3 * v1 - y1 * v3) + x3 * (y1 * v2 - y2 * v1)) / det
+          ]
+        }
+        const [a, c, e] = solve(0)
+        const [b, d, f] = solve(1)
+        const n = (value: number): string => value.toFixed(4)
+        return `matrix(${n(a)}, ${n(b)}, ${n(c)}, ${n(d)}, ${e.toFixed(2)}, ${f.toFixed(2)})`
+      }
+      return [half(2), half(3)]
+    },
+    move(index, lx, ly) {
+      const from = eyes[index]!
+      if (lx === 0 && ly === 0) return 'none'
+      const to = place(index === 0 ? -1 : 1, lx, ly)
+      // The eye is already at its place, turned and scaled by `es`: this is the step from there, in its own frame.
+      const [dx, dy] = rot(-from.angle, to.x - from.x, to.y - from.y)
+      const n = (value: number, digits = 2): string => value.toFixed(digits)
+      return `translate(${n(dx / es)}px, ${n(dy / es)}px) rotate(${n(to.angle - from.angle, 4)}rad) scale(${n(to.sx / from.sx, 3)}, ${n(to.sy / from.sy, 3)})`
+    }
   }
 }
 
-/** How far eyes that follow the pointer go, in units of look (the idle glance reaches 0.5 across and 0.04 up). */
-export const FOLLOW_X = 0.6
-export const FOLLOW_Y = 0.07
+/**
+ * How far eyes that follow the pointer go, in units of look: cartoon-far across, and well up or down, still on
+ * the face (the idle glance reaches 0.7 across and 0.12 up or down).
+ */
+export const FOLLOW_X = 1.3
+export const FOLLOW_UP = 0.34
+export const FOLLOW_DOWN = 0.22
 /** The pointer's distance, in face sizes, at which the eyes are fully turned. */
-export const FOLLOW_REACH = 3
+export const FOLLOW_REACH = 1.8
 
 /**
  * Where eyes that follow the pointer look, in units of look (x right, y up), for a face in `box` and a pointer
- * at (x, y), all in window pixels. A near pointer turns the eyes a little; a far one no further than the limit.
+ * at (x, y), all in window pixels. The turn eases out with distance, so even a near pointer gets a clear look,
+ * and a far one goes no further than the limits.
  */
 export function pointerLook(box: { left: number; top: number; width: number; height: number }, x: number, y: number): { x: number; y: number } {
   if (!(box.width > 0)) return { x: 0, y: 0 }
@@ -152,13 +286,10 @@ export function pointerLook(box: { left: number; top: number; width: number; hei
   const dx = (x - (box.left + box.width / 2)) / reach
   const dy = (y - (box.top + box.height / 2)) / reach
   const far = Math.hypot(dx, dy)
-  const pull = far > 0 ? Math.min(1, far) / far : 0
+  const pull = far > 0 ? Math.pow(Math.min(1, far), 0.6) / far : 0
   // `+ 0` keeps a pointer straight above or beside the face from giving -0.
-  return { x: dx * pull * FOLLOW_X + 0, y: -dy * pull * FOLLOW_Y + 0 }
+  return { x: dx * pull * FOLLOW_X + 0, y: -dy * pull * (dy < 0 ? FOLLOW_UP : FOLLOW_DOWN) + 0 }
 }
-
-/** Half the height of each open eye shape (the shader's `eyeHH`), for the worried lid. */
-const EYE_HALF_HEIGHT: Record<BotEyes, number> = { pill: 0.225, round: 0.2, dot: 0.105, tall: 0.3, square: 0.175, heart: 0.3, star: 0.3, code: 0.2 }
 
 /**
  * The worried lid as a CSS polygon over the eye's square: it cuts the eye's top on a slope that is
@@ -173,14 +304,10 @@ export function lidClip(eyes: BotEyes, side: -1 | 1, open: number, worried: numb
 }
 
 export function eyeColour(look: KnownBotLook): string {
-  // The mouse's eyes are lit clay: near-black that shows as dark grey under the shader's light.
-  if (botKindOf(look) !== 'mousse') return '#2c2c2e'
-  return mousseEyesWhite(BOT_COLOUR_HEX[look.colour]) ? '#ffffff' : '#050505'
-}
-
-export function eyeShapeOf(look: KnownBotLook): BotEyes {
-  const eyes = botEyesOf(look)
-  return BOT_EYES.includes(eyes) ? eyes : 'pill'
+  const white = botEyeColourOf(look) === 'white'
+  // The mouse's eyes are lit clay: near-black that shows as dark grey under the shader's light, or white as light grey.
+  if (botKindOf(look) !== 'mousse') return white ? '#e4e4e2' : '#2c2c2e'
+  return white ? '#ffffff' : '#050505'
 }
 
 /** The shader's `heart2`: negative inside. */
@@ -241,10 +368,10 @@ const outlines = new Map<string, string>()
 export function mouseEyePath(look: KnownBotLook, side: -1 | 1, es: number): string | undefined {
   if (botKindOf(look) === 'mousse' || !(es > 0)) return undefined
   const shape = eyeShapeOf(look)
-  const key = `${shape}|${side}|${es.toFixed(3)}`
+  const x0 = side * eyeSpread(look).mouse
+  const key = `${shape}|${x0}|${es.toFixed(3)}`
   const known = outlines.get(key)
   if (known !== undefined) return known
-  const x0 = side * 0.37
   const centre = headDepth(x0, HEAD_Y) - 0.035
   /** Whether the eye's front at (x, y), in head units from the eye's middle, is in front of the head. */
   const seen = (x: number, y: number): boolean => {
@@ -264,10 +391,11 @@ export function mouseEyePath(look: KnownBotLook, side: -1 | 1, es: number): stri
  */
 export function mouseArcPath(look: KnownBotLook, side: -1 | 1, es: number, up: number): string | undefined {
   if (botKindOf(look) === 'mousse' || !(es > 0)) return undefined
-  const key = `arc|${side}|${es.toFixed(3)}|${up > 0 ? 1 : -1}`
+  const spread = eyeSpread(look).mouse
+  const key = `arc|${side}|${es.toFixed(3)}|${up > 0 ? 1 : -1}|${spread}`
   const known = outlines.get(key)
   if (known !== undefined) return known
-  const x0 = side * 0.37
+  const x0 = side * spread
   const front = headDepth(x0, HEAD_Y) - 0.035 + 0.05
   const [sin, cos] = [Math.sin(1.1), Math.cos(1.1)]
   const path = rows((lx, ly) => {

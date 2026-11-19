@@ -1720,6 +1720,25 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   /**
+   * Keeps how the thread's latest run ended (`Thread.lastRun`); undefined clears it. Not activity: `updatedAt` stays.
+   * Writes and announces the list only when it changed; a missing thread is left alone.
+   */
+  setThreadLastRun(id: string, lastRun: Thread['lastRun']): boolean {
+    const thread = this.getThread(id)
+    if (!thread || thread.lastRun === lastRun) return false
+    const updated = this.writeThreadMeta(thread, (base) => {
+      const next: Thread = { ...base }
+      if (lastRun) next.lastRun = lastRun
+      else delete next.lastRun
+      return next
+    })
+    if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+    this.patchListCache(updated)
+    this.emit('list-changed', { id })
+    return true
+  }
+
+  /**
    * What the host just said about pull requests, kept on every thread whose list holds one of them (matched by URL), so
    * the sidebar's count shows their state. Threads whose entries already say so are not written. Returns the threads written.
    */

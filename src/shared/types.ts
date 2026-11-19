@@ -110,7 +110,6 @@ export interface ScheduledRunAgent {
  * and its chat know the schedule by (`bot_schedule_list`), kept across the move from `bots.db`.
  */
 export interface ScheduledJobBot {
-  canWakeMe?: boolean
   /** A fixed reminder line, posted without a model run. */
   say?: string
   /** The owner's message or tapped answer started the turn that added this timer. */
@@ -1735,6 +1734,11 @@ export interface Thread {
    * Written when a turn ends; absent until the first turn that ends with this field known.
    */
   lastReply?: string
+  /**
+   * How the thread's latest run ended, for its links once it is quiet: `done` or `failed`. Written when a turn ends; a
+   * stopped run clears it. Kept in its metadata, so it outlives a restart.
+   */
+  lastRun?: 'done' | 'failed'
   /** The thread's goal (`/goal`): Mousse keeps starting turns while it is working. Set by the daemon. */
   goal?: import('./threadGoal').ThreadGoal
   /** Explicit sidebar position within this thread's project (or standalone group). */

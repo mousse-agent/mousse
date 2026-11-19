@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { reportsFixedBy, type FiledBugReportView } from '../../../shared/bugReports'
-import type { UpdateReleaseNote } from '../../../shared/updates'
 import { bugReportsClient } from '../../services/bugReportsClient'
+import { useUpdateStore } from '../../stores/updateStore'
 import { ArrowUpRight } from '../../lib/icons'
 import { Modal } from '../ui/Modal'
 import '../../styles/bugReports.css'
@@ -35,14 +35,16 @@ export function reportState(report: FiledBugReportView): { label: string; key: s
   return { label: 'Unknown', key: 'unknown' }
 }
 
+const NO_PULL_REQUESTS: number[] = []
+
 /**
- * "This update fixes your bugs:" at the top of an update's notes: one row per report this person filed that the
- * release fixes. Nothing shows when none apply.
+ * "This update fixes your bugs:" at the top of the offered update's notes: one row per report this person filed that a
+ * pull request in the update closes. Nothing shows when none apply.
  */
-export function FixedReports({ notes }: { notes: readonly UpdateReleaseNote[] }) {
-  const items = useMemo(() => notes.flatMap((note) => note.items), [notes])
-  const { reports } = useFiledReports(items.length > 0)
-  const fixed = useMemo(() => (reports ? reportsFixedBy(reports, items) : []), [reports, items])
+export function FixedReports() {
+  const pullRequests = useUpdateStore((s) => s.pullRequests ?? NO_PULL_REQUESTS)
+  const { reports } = useFiledReports(pullRequests.length > 0)
+  const fixed = useMemo(() => (reports ? reportsFixedBy(reports, pullRequests) : []), [reports, pullRequests])
   if (fixed.length === 0) return null
   return (
     <section className="bug-report-fixed" aria-label="This update fixes your bugs">

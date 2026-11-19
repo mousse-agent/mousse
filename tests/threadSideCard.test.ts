@@ -5,6 +5,7 @@ import { SideCardSections, ThreadSideCard } from '../src/renderer/components/sid
 import {
   SIDE_CARD_CLEARANCE_WIDTH,
   SIDE_CARD_MIN_THREAD_WIDTH,
+  applySideCardToggle,
   deriveSideCardState,
   nextSideCardToggleState,
   sideCardButtonTitle,
@@ -15,6 +16,9 @@ import {
   type SideCardVisibilityInput
 } from '../src/renderer/components/sideCard/sideCardLogic'
 import { shouldCloseSideCardOverlay, useAppStore } from '../src/renderer/stores/appStore'
+import { useBotsStore } from '../src/renderer/stores/botsStore'
+import { useChatsStore } from '../src/renderer/stores/chatsStore'
+import { closeBotThread } from '../src/renderer/lib/botThread'
 
 const open: SideCardVisibilityInput = {
   sideCardOn: true,
@@ -117,6 +121,27 @@ describe('overlay lifetime', () => {
     expect(closes({ sidebarMode: 'chats' })).toBe(true)
   })
 
+  it('stays open in Chats while a bot\'s thread shows in its pane', () => {
+    expect(shouldCloseSideCardOverlay({ ...base, sidebarMode: 'chats' }, base, true)).toBe(false)
+  })
+
+  it('opens from the button in a bot\'s thread and closes on the way back to the bot\'s chat', () => {
+    useBotsStore.setState({ chats: { ...useBotsStore.getState().chats, alpha: { messages: [], hasMore: false, loadingOlder: false } } })
+    useChatsStore.setState({ activeBotId: 'alpha', botThread: { botId: 'alpha', threadId: 'thread-1' } })
+    useAppStore.setState({ sidebarMode: 'chats', activeThreadId: 'thread-1', sideCardFits: false, sideCardOverlayOpen: false, mainAreaOpen: false })
+    try {
+      const { sideCardOn, mainAreaOpen, sideCardOverlayOpen } = useAppStore.getState()
+      applySideCardToggle(nextSideCardToggleState(false, { sideCardOn, mainAreaOpen, sideCardOverlayOpen }, 'overlay'))
+      expect(useAppStore.getState().sideCardOverlayOpen).toBe(true)
+      expect(deriveSideCardState({ ...useAppStore.getState(), botThreadShown: true }).visible).toBe(true)
+      closeBotThread()
+      expect(useAppStore.getState().sideCardOverlayOpen).toBe(false)
+    } finally {
+      useChatsStore.setState({ activeBotId: null, botThread: null })
+      useAppStore.setState({ sidebarMode: 'projects', activeThreadId: null, sideCardFits: null, sideCardOverlayOpen: false })
+    }
+  })
+
   it('is cleared in the live store, leaving the switch on so the card docks', () => {
     const store = useAppStore
     store.setState({ sideCardOn: true, sideCardFits: false, sideCardOverlayOpen: true, mainAreaOpen: false, activeThreadId: 'thread-1' })
@@ -196,6 +221,10 @@ describe('title-bar button availability', () => {
     ['Chats', { sidebarMode: 'chats' }]
   ])('is disabled over %s, even with the card switched on', (_name, patch) => {
     expect(deriveSideCardState({ ...open, ...patch })).toEqual({ visible: false, mode: 'docked', unavailable: 'view' })
+  })
+
+  it('shows in Chats while a bot\'s thread is open in its chat pane', () => {
+    expect(deriveSideCardState({ ...open, sidebarMode: 'chats', botThreadShown: true })).toEqual({ visible: true, mode: 'docked', unavailable: null })
   })
 
   it('is never disabled for width: a narrow window opens the overlay', () => {

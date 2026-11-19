@@ -39,10 +39,12 @@
  * - `uAcc`: the accessory index (`BOT_ACCESSORIES` order).
  * - `uB` (hop, squash, roll, tail), `uH` (yaw, pitch, head roll, left ear),
  *   `uH2` (right ear, left arm, right arm, laptop), `uE` (open, closed, arc, worried),
- *   `uE2` (look x, look y, eye scale, sweat): the pose.
+ *   `uE2` (look x, look y, eye scale, sweat): the pose. A look y of 40 draws a hybrid face's body: no eyes, and on the
+ *   mouse no nose or whiskers either; 60 draws only the mouse's nose and whiskers, on nothing (`FEATURES_ONLY`).
  * - `uV`: camera target height, field of view, samples per axis (1 or 2), and 1 to drop the whiskers.
- * - `uK`: the kind (0 mouse, 1 Mousse), the eye shape (`BOT_EYES` order), and 1 for white eyes (the
- *   Mousse picks black or white eyes to contrast with its colour).
+ * - `uK`: the kind (0 mouse, 1 Mousse), the eye shape (`BOT_EYES` order), 1 for white eyes (the look's eye
+ *   colour, `botEyeColourOf`), and how far each eye sits from the middle (`eyeSpread`: the mouse's eye x, the
+ *   Mousse's angle round its glass). With glasses on, `faceUniforms` has already fitted the eyes into the lenses.
  *
  * The Mousse (kind 1) is the app logo as a character, built in the logo's own units (100 logo units
  * = 1, the foot at 0) and scaled into the mouse's frame by `MS`. Its mousse is one round body whose
@@ -60,7 +62,7 @@ export const MICE_UNIFORMS = ['uRes', 'uOrg', 'uCol', 'uB', 'uH', 'uH2', 'uE', '
 export type MiceUniform = (typeof MICE_UNIFORMS)[number]
 
 export const MICE_FRAGMENT_SHADER = `precision highp float;
-uniform vec2 uRes,uOrg;uniform vec3 uCol,uK;uniform vec4 uB,uH,uH2,uE,uE2,uV,uAC;uniform float uAcc;
+uniform vec2 uRes,uOrg;uniform vec3 uCol;uniform vec4 uK,uB,uH,uH2,uE,uE2,uV,uAC;uniform float uAcc;
 const vec3 HC=vec3(0.,.55,0.),HR=vec3(1.05,.92,.88);
 mat2 R(float a){float c=cos(a),s=sin(a);return mat2(c,s,-s,c);}
 float sdE(vec3 p,vec3 r){float k0=length(p/r),k1=length(p/(r*r));return k0*(k0-1.)/max(k1,1e-5);}
@@ -194,7 +196,7 @@ float stemM(vec3 P){float d=sdE(P-vec3(0.,.04,0.),vec3(.87,.045,.87));
 // crosses their plane, over whatever the ray hit behind that plane (w <= .012, the old slab's front).
 float eyesM(vec3 Q){
  float blk=1e5,es=uE2.z,op=uE.x;
- for(int i=0;i<2;i++){float s=i==0?-1.:1.;float a=s*.255+uE2.x*.22,ey=2.2+uE2.y*1.2;vec3 n=vec3(sin(a),0.,cos(a)),tg=vec3(cos(a),0.,-sin(a)),e=n*1.465+vec3(0.,ey,0.);
+ for(int i=0;i<2;i++){float s=i==0?-1.:1.;float a=s*uK.w+uE2.x*.22,ey=2.2+uE2.y*1.2;vec3 n=vec3(sin(a),0.,cos(a)),tg=vec3(cos(a),0.,-sin(a)),e=n*1.465+vec3(0.,ey,0.);
   vec3 r=Q-e;float w=dot(r,n);r-=gRd*w/dot(gRd,n);vec2 f=vec2(dot(r,tg),r.y)/1.35;
   float d2=eye2(f,op,es,s,uK.y);float top=max(eyeHH(uK.y)*op,.012)*es*(1.-.3*uE.w)-uE.w*.6*(f.x*s);d2=-smin(-d2,-(f.y-top)*.7,.03);
   float py=uE.z>0.?f.y:-f.y;float dc=arc(vec2(f.x,py+.13),1.1,.17)-.045*es;d2=mix(d2,dc,uE.y)*1.35;
@@ -209,7 +211,7 @@ vec3 mousseCol(float y){vec3 B=uCol,W=vec3(1.),D=uCol*vec3(.3,.26,.38);float t=(
 // laptop and sweat drop sit in; then one copy of each of those serves both.
 vec2 map(vec3 p){
  bool mk=uK.x>.5;
- float clay,blk,gl=1e5,rim=1e5,ac0=1e5,a=uAcc,hat=0.,lap=1e5,logo=1e5,sw=1e5;vec3 aq,ab,lb,sq;
+ float clay,blk,ey=1e5,gl=1e5,rim=1e5,ac0=1e5,a=uAcc,hat=0.,lap=1e5,logo=1e5,sw=1e5;vec3 aq,ab,lb,sq;
  if(mk){
   vec3 P=toP(p),Q=toQ(P);
   clay=mousseD(Q);
@@ -238,17 +240,17 @@ vec2 map(vec3 p){
   bool hood=uAcc>10.5;
   clay=hood?min(head,dr):smin(smin(head,db,.14),dr,.06);
   blk=1e5;
-  float es=uE2.z,op=uE.x;
+  float es=uE2.z,op=uE.x;bool nf=abs(uE2.y-40.)>9.;
   for(int i=0;i<2;i++){float s=i==0?-1.:1.;
-   float x0=s*.37+uE2.x*.09,y0=.55+uE2.y;vec3 eq=q-vec3(x0,y0,zs(x0,y0)-.035);
+   float x0=s*uK.w+uE2.x*.09,y0=.55+uE2.y;vec3 eq=q-vec3(x0,y0,zs(x0,y0)-.035);
    float dp=eyeD(eq,op,es,s,uK.y);
    float top=max(eyeHH(uK.y)*op,.012)*es*(1.-.3*uE.w)-uE.w*.6*(eq.x*s);dp=-smin(-dp,-(eq.y-top)*.7,.03);
    float py=uE.z>0.?eq.y:-eq.y;float d2=arc(vec2(eq.x,py+.13),1.1,.17)-.045*es;
    vec2 w=vec2(d2,abs(eq.z)-.05);float da=min(max(w.x,w.y),0.)+length(max(w,0.));
-   blk=min(blk,mix(dp,da,uE.y));
-   if(uV.w<.5)blk=min(blk,whisk(q,s));
+   ey=min(ey,mix(dp,da,uE.y));
+   if(uV.w<.5&&nf)blk=min(blk,whisk(q,s));
   }
-  blk=min(blk,sdE(q-vec3(0.,.39,.855),vec3(.075,.055,.05)));
+  if(nf)blk=min(blk,sdE(q-vec3(0.,.39,.855),vec3(.075,.055,.05)));
   lb=b;sq=q;aq=q;ab=b;ac0=hood?db:1e5;
  }
  float ls=mk?1.4:1.;
@@ -259,8 +261,8 @@ vec2 map(vec3 p){
  // On the Mousse the accessory is scaled back from the mouse's frame it was built in.
  if(mk)ac=hat>.5?ac*.85:a>1.5&&a<2.5?ac/.95:a>7.5&&a<9.5?ac/1.4:ac/.78;
  // The mouse has no glass (gl and rim stay 1e5, far beyond any part), so one material chain serves both.
- float d=min(min(min(clay,blk),min(gl,rim)),min(min(sw,logo),min(ac,lap)));
- return vec2(mk?d*MS*.8:d*.8,d==clay?0.:d==blk?1.:d==sw?2.:d==ac?3.:d==lap?4.:d==gl?6.:d==rim?7.:5.);
+ float d=min(min(min(clay,blk),min(gl,rim)),min(min(sw,logo),min(min(ac,lap),ey)));
+ return vec2(mk?d*MS*.8:d*.8,d==clay?0.:d==blk?1.:d==sw?2.:d==ac?3.:d==lap?4.:d==gl?6.:d==rim?7.:d==ey?(uK.z>.5?8.:1.):5.);
 }
 vec4 shade(vec2 uv){
  float vx=uV.x;if(uK.x>.5&&vx>.5)vx=.6;vec3 tg=vec3(0.,vx,0.),ro=vec3(0.,vx+.9,9.);vec3 fw=normalize(tg-ro),rt=normalize(cross(fw,vec3(0.,1.,0.))),up=cross(rt,fw);
@@ -296,7 +298,7 @@ vec4 shade(vec2 uv){
    else{float v=gD(Q);
     if(k==0){float d=v*MS;gi++;if(d<.0008*tg)k=1;else{tg+=d*.9;if(tg>te||gi==64)break;}}
     else{ng+=ax*(v*sg);k++;if(k==7){ng=normalize(ng);ga=.07+.93*smoothstep(.72,.86,1.-abs(dot(ng,rd)));break;}}}}}
- if(!hit){if(ga>0.)return vec4(pow(gc,vec3(1./2.2))*ga,ga+bg.a*(1.-ga));return bg;}
+ if(!hit){if(uV.w>1.5||uE2.y>50.)return vec4(0.);if(ga>0.)return vec4(pow(gc,vec3(1./2.2))*ga,ga+bg.a*(1.-ga));return bg;}
  vec3 L=normalize(vec3(-.55,.75,.65)),F=normalize(vec3(.75,.15,.5));
  float nl=dot(n,L),dif=clamp(nl,0.,1.),wr=pow(nl*.5+.5,1.7),fil=clamp(dot(n,F),0.,1.),fr=pow(1.-clamp(dot(n,-rd),0.,1.),3.);
  float spc=pow(clamp(dot(n,normalize(L-rd)),0.,1.),m>.5?36.:12.);
@@ -305,12 +307,17 @@ vec4 shade(vec2 uv){
  if(mk&&m<1.5){col=pow(mousseCol(py),vec3(2.2))*(m>.5?1.:band);}
  else if(mk&&m>5.5){col=pow(m<6.5?uCol*.76:mix(uCol,vec3(1.),.35),vec3(2.2))*band;}
  else if(m<.5){vec3 a=pow(uCol,vec3(2.2));col=a*(.16+1.0*wr)*mix(.5,1.,o)+a*fil*.14+.05*spc*dif+a*fr*.3+a*a*.15*(1.-dif)*o;col+=vec3(.55,.7,1.)*a*uH2.w*.45*clamp(dot(n,normalize(vec3(0.,-.5,1.))),0.,1.)*smoothstep(-.4,.2,p.y-uB.x);}
- else if(m<1.5){col=vec3(.02)*(.5+wr)*mix(.6,1.,o)+.3*spc*dif*o+vec3(.07)*fr*o;}
+ // The mouse's black parts (1), and its eyes when they are white (8).
+ else if(m<1.5||m>7.5){col=(m>7.5?vec3(.82)*(.4+.7*wr):vec3(.02)*(.5+wr))*mix(.6,1.,o)+.3*spc*dif*o+vec3(.07)*fr*o;}
  else if(m<2.5){vec3 a=vec3(.5,.78,1.);col=a*(.3+.7*wr)+.5*spc;}
  else if(m<3.5){vec3 a=pow(uAC.rgb,vec3(2.2));float sp2=pow(clamp(dot(n,normalize(L-rd)),0.,1.),uAC.w>.5?50.:20.);
   col=a*(.14+.9*wr)*mix(.55,1.,o)+a*fil*.12+(uAC.w>.5?a*1.4*sp2+a*fr*.5:vec3(.12)*sp2*dif)+vec3(.05)*fr*o;}
  else if(m<4.5){vec3 a=vec3(.05,.052,.06);col=a*(.3+.9*wr)*mix(.6,1.,o)+.28*pow(clamp(dot(n,normalize(L-rd)),0.,1.),40.)+vec3(.12)*fr;}
  else{col=vec3(.8,.9,1.);}
+ // A hybrid face's accessory picture (uV.w 2): only the accessory where it is in front of the eyes (on the Mousse,
+ // outside its glass), drawn over the flat eyes so they never show over it. Its mouse's nose and whiskers picture
+ // (look y 60): only them, moved with the eyes.
+ if(uV.w>1.5||uE2.y>50.)return (uE2.y>50.?m>.5&&m<1.5:m>2.5&&m<3.5&&(!mk||length(qp.xz)>gR(clamp(qp.y,1.57,4.11))))?vec4(pow(col,vec3(1./2.2))*cov,cov):vec4(0.);
  if(ga>0.)col=mix(col,gc,ga);
  // The Mousse's eyes are painted where the view ray crosses them, over whatever lies behind them.
  if(mk)col=mix(col,uK.z>.5?vec3(1.):vec3(.004),clamp(.5-eyesM(qp)/(pxa*t/MS),0.,1.));

@@ -690,6 +690,53 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   transform: none;
 }
 
+/* On a card the actions take the status's place: the status (and age) fades out as they fade in, over the same
+   150ms, and back when the pointer leaves. Archived cards too, which light their status on hover. */
+.threads-sidebar-card-status,
+.threads-sidebar-card-age {
+  transition: opacity 150ms ease;
+}
+
+.app .threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions):is(:hover, :has(:focus-visible)) > .threads-sidebar-thread.threads-sidebar-card :is(.threads-sidebar-card-status, .threads-sidebar-card-age),
+.app .threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions [aria-expanded='true']) > .threads-sidebar-thread.threads-sidebar-card :is(.threads-sidebar-card-status, .threads-sidebar-card-age) {
+  opacity: 0;
+}
+
+.threads-sidebar-thread-container:has(> .threads-sidebar-card) > .threads-sidebar-thread-actions {
+  gap: 3px;
+  transition: opacity 150ms ease;
+}
+
+.threads-sidebar-thread-container:has(> .threads-sidebar-card) .threads-sidebar-thread-action {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
+
+/* The hover actions are bare icons on the row: no strip behind them and no fill on the buttons, at rest or under the
+   pointer. The icon brightens instead; keyboard focus keeps a thin ring. */
+.app .threads-sidebar .threads-sidebar-thread-container > .threads-sidebar-thread-actions {
+  background: none;
+}
+
+.app .threads-sidebar .threads-sidebar-thread-action,
+.app .threads-sidebar .threads-sidebar-thread-action:is(:hover, :focus-visible, [aria-expanded='true']) {
+  background: transparent;
+}
+
+.app .threads-sidebar .threads-sidebar-thread-action:not(.danger):is(:hover, [aria-expanded='true']) {
+  color: var(--text-primary);
+}
+
+.app .threads-sidebar .threads-sidebar-thread-action:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--text-primary) 35%, transparent);
+  outline-offset: -1px;
+}
+
+.app .threads-sidebar .threads-sidebar-thread-action:not(.danger):focus-visible {
+  color: var(--text-primary);
+}
+
 .threads-sidebar-thread-feed {
   display: flex;
   flex-direction: column;

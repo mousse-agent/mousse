@@ -6,7 +6,13 @@ import { usageLevel } from '../lib/subscriptionUsage'
  * `size` sets its height (the page's rows 8px, the summary 7px, table cells 5px). An unknown share
  * leaves it empty, on a neutral track.
  */
-export function UsageBar({ remaining, label, size = 'row' }: { remaining: number | undefined; label: string; size?: 'row' | 'summary' | 'cell' }) {
+export function UsageBar({ remaining, label, size = 'row', pace }: {
+  remaining: number | undefined
+  label: string
+  size?: 'row' | 'summary' | 'cell'
+  /** Where the share left would be now at an even pace: a thin tick on the bar. */
+  pace?: number
+}) {
   return <div
     className={`usage-bar${size === 'row' ? '' : ` is-${size}`}`}
     role="meter"
@@ -16,5 +22,6 @@ export function UsageBar({ remaining, label, size = 'row' }: { remaining: number
     {...(remaining === undefined ? {} : { 'aria-valuenow': remaining, 'data-usage-level': usageLevel(remaining) })}
   >
     {remaining !== undefined && remaining > 0 && <span className="usage-bar-fill" style={{ width: `${remaining}%` }} />}
+    {pace !== undefined && <span className="usage-bar-pace" data-testid="usage-pace" style={{ left: `${pace}%` }} />}
   </div>
 }

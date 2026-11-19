@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ownerChatTurn } from '../../src/mms/bots/activation/BotEngine'
 import { MAX_SAME_WAKES, wakeFiredLabel, type BotWakeEvent } from '../../src/shared/bots/personal/wakes'
 import { botInstructions } from '../../src/mms/bots/instructions'
-import { botFixture, chatOf, createBot, finish, flush, start, type BotFixture } from './botFixture'
+import { botFixture, chatOf, createBot, finish, flush, runDispatch, start, type BotFixture } from './botFixture'
 
 const MIN = 60_000
 const HOUR = 60 * MIN
@@ -85,6 +85,26 @@ describe('a wake at a time', () => {
     expect(prepared.prompt).toContain('Check whether the deploy finished and tell them.')
     expect(f.bots.tools.reminders.list(botId)).toEqual([])
     await f.bots.deliverDueReminders()
+    expect(f.store.listActivations(botId).filter((entry) => entry.idempotencyKey.startsWith('wake:'))).toHaveLength(1)
+  })
+
+  it('a usage limit stops its turn; Resume\'s retry may still act on the owner\'s threads, and is not taken for a new wake', async () => {
+    const turn = await chat('Check the deploy in 20 minutes', 'm1')
+    const set = await wake(turn.activation.id, { brief: 'Check whether the deploy finished.', dueAt: inMinutes(20) })
+    await finish(f, turn.payload, 'completed', { text: 'Will do.' })
+    f.clock.now += 20 * MIN
+    await fireDue()
+    const row = wakeTurn(set.wakeId)!
+    expect(f.bots.ownerTurn(row.id)).toEqual({})
+    await runDispatch(f, row.id, 1, { status: 'failed', outcome: { error: 'provider_usage_limit', usageLimitUntil: inMinutes(120) } })
+    await flush()
+    expect(f.store.activation(row.id)).toMatchObject({ status: 'failed', endReason: 'usage_limit' })
+    f.limited.clear()
+    await f.bots.service.resume(botId)
+    const retry = f.store.laneActivations(botId, 'chat', ['running'])[0]!
+    expect(retry.id).not.toBe(row.id)
+    expect(f.bots.ownerTurn(retry.id)).toEqual({})
+    expect((await runDispatch(f, retry.id, 1, { text: 'Deploy finished.' })).authority.threadsReadOnly).toBeUndefined()
     expect(f.store.listActivations(botId).filter((entry) => entry.idempotencyKey.startsWith('wake:'))).toHaveLength(1)
   })
 

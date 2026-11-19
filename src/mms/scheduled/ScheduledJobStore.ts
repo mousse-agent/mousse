@@ -567,7 +567,7 @@ export class ScheduledJobStore {
           droppedStaleSay = true
         }
         if (job.bot && fields.bot && job.bot.botId === fields.bot.botId && job.bot.scheduleId === fields.bot.scheduleId) {
-          const missing = Object.entries(fields.bot).filter(([key]) => (key === 'say' || key === 'ownerAsked' || key === 'canWakeMe') && !(key in job.bot!))
+          const missing = Object.entries(fields.bot).filter(([key]) => (key === 'say' || key === 'ownerAsked') && !(key in job.bot!))
           if (missing.length) {
             Object.assign(job.bot, Object.fromEntries(missing))
             restored.push(job.id)
@@ -622,7 +622,7 @@ export class ScheduledJobStore {
       createThread: input.createThread,
       selection: input.selection,
       ...(input.agent && !isWorkflowPrompt(input.prompt) ? { agent: { definitionId: input.agent.definitionId } } : {}),
-      ...(input.bot ? { bot: { botId: input.bot.botId, scheduleId: input.bot.scheduleId, createdBy: input.bot.createdBy, ...(input.bot.canWakeMe !== undefined ? { canWakeMe: input.bot.canWakeMe } : {}), ...(input.bot.ownerAsked !== undefined ? { ownerAsked: input.bot.ownerAsked } : {}), ...(input.bot.say !== undefined ? { say: input.bot.say } : {}), ...(input.bot.model ? { model: input.bot.model } : {}), ...(input.bot.model && input.bot.pick ? { pick: input.bot.pick } : {}) } } : {}),
+      ...(input.bot ? { bot: { botId: input.bot.botId, scheduleId: input.bot.scheduleId, createdBy: input.bot.createdBy, ...(input.bot.ownerAsked !== undefined ? { ownerAsked: input.bot.ownerAsked } : {}), ...(input.bot.say !== undefined ? { say: input.bot.say } : {}), ...(input.bot.model ? { model: input.bot.model } : {}), ...(input.bot.model && input.bot.pick ? { pick: input.bot.pick } : {}) } } : {}),
       mode: input.mode,
       workspace: input.workspace,
       permissionMode,

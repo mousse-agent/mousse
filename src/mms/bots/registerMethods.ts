@@ -79,15 +79,15 @@ export function isReaction(value: unknown): value is string {
 const text = (value: unknown, max: number): value is string => typeof value === 'string' && value.trim().length > 0 && value.length <= max
 const whole = (value: unknown, min: number): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= min
 
-const LOOK_KEYS = new Set(['colour', 'accessory', 'kind', 'eyes'])
+const LOOK_KEYS = new Set(['colour', 'accessory', 'kind', 'eyes', 'eyeColour'])
 
 function look(value: unknown): BotLook {
-  const given = value as { colour?: unknown; accessory?: unknown; kind?: unknown; eyes?: unknown } | null
+  const given = value as { colour?: unknown; accessory?: unknown; kind?: unknown; eyes?: unknown; eyeColour?: unknown } | null
   if (!given || typeof given !== 'object' || Array.isArray(given) || Object.keys(given).some((key) => !LOOK_KEYS.has(key)) ||
       !text(given.colour, 40) || !text(given.accessory, 40) ||
-      (given.kind !== undefined && !text(given.kind, 40)) || (given.eyes !== undefined && !text(given.eyes, 40)))
-    throw new DomainRpcError('invalid_params', 'A look is a colour and an accessory, with an optional kind and eye shape')
-  return { colour: given.colour, accessory: given.accessory, ...(given.kind !== undefined ? { kind: given.kind } : {}), ...(given.eyes !== undefined ? { eyes: given.eyes } : {}) }
+      (given.kind !== undefined && !text(given.kind, 40)) || (given.eyes !== undefined && !text(given.eyes, 40)) || (given.eyeColour !== undefined && !text(given.eyeColour, 40)))
+    throw new DomainRpcError('invalid_params', 'A look is a colour and an accessory, with an optional kind, eye shape and eye colour')
+  return { colour: given.colour, accessory: given.accessory, ...(given.kind !== undefined ? { kind: given.kind } : {}), ...(given.eyes !== undefined ? { eyes: given.eyes } : {}), ...(given.eyeColour !== undefined ? { eyeColour: given.eyeColour } : {}) }
 }
 
 /** A bot's rows (#673): some of Talk, Light, Medium and Hard work (all four with `all`), each a pick on an entry. */

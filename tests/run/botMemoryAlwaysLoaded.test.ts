@@ -38,7 +38,8 @@ describe('bot memory tools in tools/list', () => {
     const all = registry().list()
     const loaded = all.filter((tool) => tool.alwaysLoad).map((tool) => tool.name)
     // And the tool catalogue, which is how a bot on Claude Code finds the rest (docs/plans/bot-context.md §15).
-    expect(loaded.sort()).toEqual(['memory_forget', 'memory_save', 'tool_catalogue'])
+    // And the open items' tools: an ask is listed in the turn it is made, and a status answer reads the list first.
+    expect(loaded.sort()).toEqual(['item_list', 'item_save', 'memory_forget', 'memory_save', 'tool_catalogue'])
     for (const tool of all.filter((entry) => !entry.alwaysLoad))
       expect(listedTool(tool)).toEqual({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })
     expect(all.length).toBeGreaterThan(20)

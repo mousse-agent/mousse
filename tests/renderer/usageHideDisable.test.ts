@@ -32,6 +32,7 @@ let host: HTMLElement | undefined
 
 beforeEach(() => {
   localStorage.clear()
+  localStorage.setItem('mousse.usage.tab', 'limits')
   toasts.length = 0
   setEnabled.mockClear()
   // Both lists open, so their rows can be reached.
