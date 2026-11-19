@@ -58,6 +58,10 @@ try {
   }
   // The open fd and the pinned cwd have both been checked before the first byte.
   fs.writeFileSync(fd, fs.readFileSync(0))
+  if (!current()) {
+    unsafe = true
+    throw new Error()
+  }
   for (const previous of prune) {
     if (!current()) {
       unsafe = true

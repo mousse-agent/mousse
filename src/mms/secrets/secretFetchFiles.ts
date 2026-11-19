@@ -34,7 +34,8 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
   const folder = join(scratch, 'fetches')
   let directoryFd: number | undefined, fileFd: number | undefined
   let created: string | undefined,
-    finished = false
+    finished = false,
+    writing = false
   let failure: SecretFetchFileError | undefined
   try {
     mkdirSync(folder, { recursive: true, mode: 0o700 })
@@ -101,8 +102,9 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
       same(opened, entry) && realpathSync(`/proc/self/fd/${fileFd}`) === join(expected, name)
     if (!opened.isFile() || !inCheckedFolder || !unchanged()) throw new SecretFetchFileError(true)
     // No pathname resolution after this point can redirect the bytes to another inode.
+    writing = true
     writeFileSync(fileFd, bytes)
-    finished = true
+    if (!unchanged()) throw new SecretFetchFileError(true)
 
     // Drop records for ended runs. Nothing is removed from disk while forgetting their names.
     for (const [path, record] of responses) {
@@ -129,6 +131,7 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
       }
     }
+    finished = true
     return file
   } catch (error) {
     failure =
@@ -152,12 +155,13 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
       } catch {
         closeFailed = true
       }
-      if (!finished && created && opened?.size === 0) {
+      if (!finished && created && opened && (writing || opened.size === 0)) {
         try {
           const entry = lstatSync(created)
-          if (entry.isFile() && entry.size === 0 && same(entry, opened)) unlinkSync(created)
+          if (entry.isFile() && same(entry, opened) && (writing || entry.size === 0))
+            unlinkSync(created)
         } catch {
-          /* Only our still-empty file is eligible for cleanup. */
+          /* Only our exclusive inode is eligible; before writing, it must still be empty. */
         }
       }
     }
