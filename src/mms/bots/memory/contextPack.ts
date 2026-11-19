@@ -542,6 +542,7 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
       let parsed: { text: string; headline: string } | undefined
       try {
         parsed = parseDigest(await digest({ botId, selection, system: DIGEST_SYSTEM, prompt, signal: AbortSignal.timeout(BOT_CHAT_DIGEST.timeoutMs) }))
+        if (!parsed) console.warn("a bot's chat digest was not in the format asked, so it was not kept", { botId })
       } catch (error) {
         console.warn("a bot's chat digest could not be written", { botId, error: error instanceof Error ? error.message : String(error) })
       }

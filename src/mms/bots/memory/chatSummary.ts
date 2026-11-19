@@ -214,13 +214,13 @@ export function digestPrompt(input: { transcript: string; carried: readonly stri
     'Decisions:',
     '- what was decided.',
     'Open threads:',
-    `- questions, tasks and promises still open${input.tracked === undefined ? '' : ', one line each, citing first the message that asked or promised it. When one is an open item listed below, add that item\'s ref after the journal refs, like (j123, i4)'}.`,
+    `- questions, tasks and promises still open${input.tracked === undefined ? '' : ' (never a reply the bot owes to the newest message), one line each, citing first the message that asked or promised it. When one is an open item listed below, add that item\'s ref after the journal refs, like (j123, i4)'}.`,
     'Finished work:',
     '- what was done, with its artifacts: file names, links, ids.',
     'Key facts:',
     '- names, numbers, dates and ids worth keeping.',
     '',
-    `End every item with the journal refs it comes from, like (j123). Write "- none" under a heading with nothing. Use absolute dates. Keep it under ${Math.floor(BOT_CHAT_DIGEST.digest * 0.6)} words. Never copy a password, key or token.`,
+    `Plain text: no markdown, no bold. End every item with the journal refs it comes from, like (j123). Write "- none" under a heading with nothing. Use absolute dates. Keep it under ${Math.floor(BOT_CHAT_DIGEST.digest * 0.6)} words. Never copy a password, key or token.`,
     '',
     input.carried.length ? `Earlier standing constraints (from the last digest):\n${input.carried.join('\n')}` : 'Earlier standing constraints: none.',
     '',
@@ -279,11 +279,20 @@ export function digestConstraints(text: string | undefined): string[] {
  * fold then stays deterministic.
  */
 export function parseDigest(answer: string): { text: string; headline: string } | undefined {
-  const at = answer.search(/^[ \t]*Headline:/im)
+  // A model that writes its headings as markdown ("## Open threads", "**Headline:** …") still wrote a digest.
+  const plain = answer.replace(/\r\n?/g, '\n').split('\n').map((line) => {
+    const bare = line.replace(/^[ \t]*#{1,6}[ \t]*/, '').replace(/\*\*|__/g, '').trimEnd()
+    const section = DIGEST_SECTIONS.find((name) => isHeading(bare, name))
+    return section ? `${section}:` : bare
+  })
+  const at = plain.findIndex((line) => /^[ \t]*Headline\b[ \t]*:?/i.test(line))
   if (at < 0) return undefined
-  const lines = answer.slice(at).replace(/\r\n?/g, '\n').split('\n').map((line) => line.trimEnd())
-  const headline = cut(lines[0]!.replace(/^\s*Headline:\s*/i, '').trim(), 140)
-  const body = lines.slice(1).filter((line) => line.trim())
+  const lines = plain.slice(at)
+  // Its headline may stand on the line after the word.
+  const after = lines[0]!.replace(/^\s*Headline\b\s*:?\s*/i, '').trim()
+  const below = after ? -1 : lines.findIndex((line, index) => index > 0 && line.trim())
+  const headline = cut(after || (below > 0 && !DIGEST_SECTIONS.some((name) => isHeading(lines[below]!, name)) ? lines[below]!.trim() : ''), 140)
+  const body = lines.slice(below > 0 && headline ? below + 1 : 1).filter((line) => line.trim())
   if (!headline || !DIGEST_SECTIONS.every((section) => body.some((line) => isHeading(line, section)))) return undefined
   const text = guardPackText(body.join('\n'), 'bot', MEMORY_SECRET_MARKER)
   const title = guardPackText(headline, 'bot', MEMORY_SECRET_MARKER)

@@ -31,7 +31,7 @@ export const BOT_ITEM_TOOL_DEFINITIONS: Record<BotItemTool, Tool> = {
       state: Type.Optional(Type.Union(BOT_ITEM_STATES.map((state) => Type.Literal(state)), { description: 'Its stage: todo (default), investigating, building, in_dev (built, awaits review), approved, waiting (on your owner), done (merged or shipped), dropped.' })),
       note: Type.Optional(Type.String({ description: 'Where it is now, one line: "built, in the dev app, not shipped". Empty clears it.' })),
       links: Type.Optional(Type.Array(Type.String(), { description: 'Links to add: a thread, a pull request, a page, a file.' })),
-      source: Type.Optional(Type.String({ description: "The chat row it comes from (j123). Default: your owner's message that started this turn." }))
+      source: Type.Optional(Type.String({ description: "The chat row it comes from: j123 for an earlier message. Default: your owner's message of this turn." }))
     })
   },
   item_list: {
