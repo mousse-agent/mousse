@@ -462,6 +462,8 @@ export interface ExperimentalSettings {
    * flat 2D eyes animated over it, instead of the whole face drawn in 3D every frame.
    */
   hybridBotFaces: boolean
+  sidebarAnimations: boolean
+  newChatAnimations: boolean
   /** The profiler (Settings → Labs). */
   profiler: ProfilerSettings
 }
@@ -472,6 +474,8 @@ export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings
     subagentWorktrees: raw?.subagentWorktrees === true,
     plusLegacy: raw?.plusLegacy !== false,
     hybridBotFaces: raw?.hybridBotFaces === true,
+    sidebarAnimations: raw?.sidebarAnimations !== false,
+    newChatAnimations: raw?.newChatAnimations !== false,
     profiler: normalizeProfilerSettings(raw?.profiler)
   }
 }
@@ -580,7 +584,8 @@ export type DeepPartial<T> = {
       : T[K]
 }
 
-export type MousseSettingsUpdate = Omit<DeepPartial<MousseSettings>, 'notifications'> & {
+export type MousseSettingsUpdate = Omit<DeepPartial<MousseSettings>, 'notifications' | 'experimental'> & {
+  experimental?: Partial<ExperimentalSettings>
   notifications?: Omit<DeepPartial<NotificationSettings>, 'quietHours'> & { quietHours?: QuietHours | null }
 }
 

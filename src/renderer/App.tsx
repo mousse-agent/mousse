@@ -129,7 +129,8 @@ export default function App() {
   const threadsSidebarView = useAppStore((s) => s.threadsSidebarView)
   // The workspace beside the sidebar swaps with the sidebar's tabs (Projects/Threads or Chats): the new one shows
   // at once and settles in, in step with the sidebar lists (sidebar-view-motion.css).
-  const { shown: workspaceMode, phase: workspaceSwap } = useViewSwap(sidebarMode)
+  const sidebarAnimations = useAppStore((s) => s.sidebarAnimations)
+  const { shown: workspaceMode, phase: workspaceSwap } = useViewSwap(sidebarMode, sidebarAnimations)
   // A run's thread from the Automations page always shows as a conversation, whatever Chats was showing.
   const layoutMode = inboxThread ? 'projects' : workspaceMode
   // A bot's thread opened in its chat pane: Chats stays on screen, and the conversation pane shows the thread there,
@@ -249,6 +250,13 @@ export default function App() {
     const applyIfCurrent = <T,>(apply: (value: T) => void) => (value: T): void => {
       if (isCurrentProfile()) apply(value)
     }
+    let liveSettingsReceived = false
+    const applyAnimationSettings = (settings: Awaited<ReturnType<typeof window.mousse.settings.get>>) => {
+      useAppStore.setState({
+        sidebarAnimations: settings?.experimental?.sidebarAnimations !== false,
+        newChatAnimations: settings?.experimental?.newChatAnimations !== false
+      })
+    }
     const finishHydration = (): void => {
       if (isCurrentProfile() && hydrationFinished && hydrationReceived) {
         useAppStore.setState({ workspaceReady: true })
@@ -302,6 +310,7 @@ export default function App() {
 
     // The bound profile's shortcut overrides, bot-thread notifications and new-chat worktree default; later changes arrive through settings.onChanged below.
     window.mousse.settings.get().then(applyIfCurrent((settings) => {
+      if (!liveSettingsReceived) applyAnimationSettings(settings)
       setShortcuts(settings.shortcuts ?? {})
       useAppStore.getState().setNotifyBotThreads(settings.notifications?.botThreads === true)
       useAppStore.getState().setRunDefaults(normalizeRunSettings(settings.runs))
@@ -392,6 +401,8 @@ export default function App() {
       window.mousse.threads.onActivity(applyIfCurrent(setThreadActivity)),
       // Keep the default provider current; subagent rows of threads on the default draw its logo.
       window.mousse.settings.onChanged(applyIfCurrent((settings) => {
+        liveSettingsReceived = true
+        applyAnimationSettings(settings)
         const info = useAppStore.getState().appInfo
         const llmProvider = settings?.provider?.llmProvider ?? ''
         if (info && info.llmProvider !== llmProvider) setAppInfo({ ...info, llmProvider })
@@ -563,7 +574,7 @@ export default function App() {
 
   return (
 
-    <div className="app" data-overlay-active={overlayOpen} inert={overlayOpen} aria-hidden={overlayOpen}>
+    <div className="app" data-sidebar-motion={sidebarAnimations ? undefined : 'off'} data-overlay-active={overlayOpen} inert={overlayOpen} aria-hidden={overlayOpen}>
 
       <TitleBar />
       <LinuxWindowResizeHandles />

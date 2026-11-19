@@ -18,7 +18,7 @@ export const HEAP_SNAPSHOT_WARNING = 'Holds thread text, prompts, paths and toke
 export function LabsSettings({ settings, onUpdate }: { settings: MousseSettings; onUpdate: (partial: MousseSettingsUpdate) => Promise<void> }) {
   const profiler = settings.experimental.profiler
   const set = (next: Partial<ProfilerSettings>) =>
-    onUpdate({ experimental: { ...settings.experimental, profiler: { ...profiler, ...next, tools: { ...profiler.tools, ...next.tools } } } })
+    onUpdate({ experimental: { profiler: { ...profiler, ...next, tools: { ...profiler.tools, ...next.tools } } } })
   return (
     <section id="labs" className="settings-section">
       <SettingsGroup title="Mousse Plus" icon={Cloud}>
@@ -36,7 +36,7 @@ export function LabsSettings({ settings, onUpdate }: { settings: MousseSettings;
               id="labs-plus-legacy"
               label="Mousse Plus (legacy)"
               checked={settings.experimental.plusLegacy !== false}
-              onChange={(plusLegacy) => void onUpdate({ experimental: { ...settings.experimental, plusLegacy } })}
+              onChange={(plusLegacy) => void onUpdate({ experimental: { plusLegacy } })}
             />
           }
         />
@@ -56,7 +56,35 @@ export function LabsSettings({ settings, onUpdate }: { settings: MousseSettings;
               id="labs-hybrid-bot-faces"
               label="Performance"
               checked={settings.experimental.hybridBotFaces === true}
-              onChange={(hybridBotFaces) => void onUpdate({ experimental: { ...settings.experimental, hybridBotFaces } })}
+              onChange={(hybridBotFaces) => void onUpdate({ experimental: { hybridBotFaces } })}
+            />
+          }
+        />
+        <SettingsRow
+          title="Sidebar animations"
+          anchor="labs-sidebar-animations"
+          htmlFor="labs-sidebar-animations"
+          description="Slide the sidebar and animate changes to its lists."
+          control={
+            <Switch
+              id="labs-sidebar-animations"
+              label="Sidebar animations"
+              checked={settings.experimental.sidebarAnimations}
+              onChange={(sidebarAnimations) => void onUpdate({ experimental: { sidebarAnimations } })}
+            />
+          }
+        />
+        <SettingsRow
+          title="New chat animations"
+          anchor="labs-new-chat-animations"
+          htmlFor="labs-new-chat-animations"
+          description="Turn off for a still logo and no background wave."
+          control={
+            <Switch
+              id="labs-new-chat-animations"
+              label="New chat animations"
+              checked={settings.experimental.newChatAnimations}
+              onChange={(newChatAnimations) => void onUpdate({ experimental: { newChatAnimations } })}
             />
           }
         />

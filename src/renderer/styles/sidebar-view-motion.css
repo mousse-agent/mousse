@@ -88,3 +88,14 @@
     transition: none !important;
   }
 }
+
+/* Labs disables motion on the docked and peek sidebars, including status indicators and row effects. */
+.app[data-sidebar-motion='off'] :is(.sliding-threads-pane, .threads-sidebar),
+.app[data-sidebar-motion='off'] :is(.sliding-threads-pane, .threads-sidebar) *,
+.app[data-sidebar-motion='off'] :is(.sliding-threads-pane, .threads-sidebar)::before,
+.app[data-sidebar-motion='off'] :is(.sliding-threads-pane, .threads-sidebar)::after,
+.app[data-sidebar-motion='off'] :is(.sliding-threads-pane, .threads-sidebar) *::before,
+.app[data-sidebar-motion='off'] :is(.sliding-threads-pane, .threads-sidebar) *::after {
+  animation: none !important;
+  transition: none !important;
+}

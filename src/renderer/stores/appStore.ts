@@ -325,6 +325,9 @@ interface AppState {
   /** The order the Threads tab's rows were last dragged into (thread ids, top first); see `sortThreadFeed`. */
   threadFeedOrder: string[]
   setThreadFeedOrder: (ids: string[]) => void
+  /** The active profile's animation preferences from Labs. */
+  sidebarAnimations: boolean
+  newChatAnimations: boolean
   /** The workspace beside the sidebar: the thread workspace, or `ChatWorkspace` under the Chats tab. */
   sidebarMode: WorkspaceMode
   setSidebarMode: (sidebarMode: WorkspaceMode) => void
@@ -830,6 +833,8 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   lastThreadListView: 'projects',
   threadFeedOrder: [],
   setThreadFeedOrder: (threadFeedOrder) => set({ threadFeedOrder }),
+  sidebarAnimations: true,
+  newChatAnimations: true,
   composerWorkspaceDrafts: {},
   lastNewThreadProjectId: null,
   setLastNewThreadProjectId: (lastNewThreadProjectId) => set({ lastNewThreadProjectId }),
@@ -1228,6 +1233,8 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       threadsSidebarView: 'projects' as SidebarTab,
       lastThreadListView: 'projects' as ThreadListTab,
       threadFeedOrder: [] as string[],
+      sidebarAnimations: true,
+      newChatAnimations: true,
       composerWorkspaceDrafts: {},
       lastNewThreadProjectId: null as string | null,
       composerDrafts: {},
