@@ -26,6 +26,10 @@ import { MmsListsSource, type ListsServices } from '../../../../src/mms/bridge/r
 import type { BotChatMessage, BotSummary } from '../../../../src/shared/bots/personal/chat'
 import type { PermissionMode } from '../../../../src/shared/permissionMode'
 import { botFixture, chatOf, createBot, finish, start, type BotFixture } from '../../../bots/botFixture'
+import { actionDigest } from '../../../../src/mms/bots/actions/BotActions'
+import { aloneKey, argumentContract } from '../../../../src/mms/bots/actions/BotAlone'
+import { botManifestDigest } from '../../../../src/mms/bots/grants/compile'
+import { getDefaultSettings } from '../../../../src/shared/settings'
 
 const at = '2026-11-07T09:00:00.000Z'
 const BOT = 'bot-0123456789ab'
@@ -263,9 +267,21 @@ describe('bot methods on a real bot', () => {
   })
 
   it('a phone can remove one automation exception without widening a grant', async () => {
-    const key = 'alone:s:mail:send'
+    f.host.settings = { get: getDefaultSettings } as never
+    const binding = { identity: 'mail', configDigest: 'same', schemaDigest: 'same' }
+    f.host.mcp = { binding: () => binding, servers: () => [], offered: () => [] } as never
+    const schedule = f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send digest' }, 'owner')
+    const manifest = { ...f.store.activeGrant(botId)!.manifest, mcp: [{ serverId: 'mail', tool: 'send', level: 'asks_first' as const }] }
+    f.store.approve(botId, botManifestDigest(manifest), manifest)
+    const request = { scheduleId: schedule.scheduleId, serverId: 'mail', tool: 'send' }
+    const key = aloneKey(request)
+    const place = { to: 'inbox@example.test' }
+    const entry = { ...request, place, placeDigest: actionDigest(place), binding, promptDigest: actionDigest('Send digest'),
+      arguments: argumentContract({ ...place, body: 'A plain message' }, 'phone-test-key'), grantedAt: f.store.now(),
+      title: '‘Send digest’ sends to Inbox in Mail without asking', askTitle: 'let ‘Send digest’ send to Inbox in Mail without asking' }
+    f.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, key, JSON.stringify(entry))
+    expect(f.bots.service.get(botId).permissions.some(item => item.id === key)).toBe(true)
     const before = f.store.activeGrant(botId)!.digest
-    f.store.run('INSERT INTO bot_memory_state(bot_id, key, value) VALUES(?, ?, ?)', botId, key, '{}')
     await call(methods, 'bots.permissions.revoke', { botId, permissionId: key })
     expect(f.store.get('SELECT value FROM bot_memory_state WHERE bot_id = ? AND key = ?', botId, key)).toBeUndefined()
     expect(f.store.activeGrant(botId)!.digest).toBe(before)
