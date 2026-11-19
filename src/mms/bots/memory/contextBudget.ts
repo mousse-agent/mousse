@@ -8,19 +8,30 @@ import type { BotTurnUsageRow } from '../store/BotStore'
  * reported (`bot_turn_usage`), never from a character count, when it reported anything.
  */
 
-/** Starting values, in tokens (design: "Size before a fold"); the measurements of phase 0 are there to replace them. */
+/**
+ * In tokens, from the owner's real chat turns (November 2026, `scripts/bot-turn-usage.mjs`): a turn added 3.7k tokens
+ * on average (35k at most) to an epoch whose first prompt was about 28k, in about 2.8 requests. A fold writes that base
+ * to the cache again (1.25x); every request after it reads the conversation again (0.1x). The two balance at about 30k
+ * added: a longer epoch costs more and carries more old chat on every request.
+ */
 export const BOT_CHAT_EPOCH_MARKS = Object.freeze({
   /** The conversation (what the epoch's turns appended after its first one) folds at this size. */
-  high: 48_000,
+  high: 32_000,
+  /**
+   * From this size the digest of the coming fold is written in the background, so it is ready by the high mark: about
+   * three turns ahead at the usual pace, more than a digest call takes. Before, it was asked for only at the high mark,
+   * and epochs often ran on toward the hard mark waiting for it.
+   */
+  prepare: 20_000,
   /** A turn after the cache expired folds from this size: the rebuild costs nothing extra then (the cold fold). */
-  mid: 24_000,
+  mid: 16_000,
   /** The recent chat a new epoch's base carries verbatim; older rows are in the chat summary. */
-  tail: 6_000,
+  tail: 4_000,
   /**
    * Past the high mark the epoch waits for its digest (the model-written summary of the fold, prepared in the
    * background) up to this size; here it folds anyway, with the deterministic summary (the chat never waits).
    */
-  hard: 64_000
+  hard: 44_000
 })
 
 /** Never more than this share of the model's window: the rest is room for tools, results and the reply. */
@@ -32,6 +43,7 @@ export const BOT_CHAT_SHORT_CACHE_MS = 5 * 60_000
 
 export interface BotContextBudget {
   high: number
+  prepare: number
   mid: number
   tail: number
   hard: number
@@ -50,6 +62,7 @@ export function contextBudget(input: { contextWindow?: number | null; compactAt?
   const compaction = input.compactAt && input.compactAt > 0 ? input.compactAt * BOT_CHAT_COMPACTION_SHARE : Infinity
   return {
     high: BOT_CHAT_EPOCH_MARKS.high,
+    prepare: BOT_CHAT_EPOCH_MARKS.prepare,
     mid: BOT_CHAT_EPOCH_MARKS.mid,
     tail: BOT_CHAT_EPOCH_MARKS.tail,
     hard: BOT_CHAT_EPOCH_MARKS.hard,
@@ -95,17 +108,19 @@ export type BotChatEpochEnd = 'none' | 'failed' | 'stopped' | 'reload' | 'cleare
 export type BotChatDigestState = 'ready' | 'coming' | 'none'
 
 /**
- * Whether the epoch goes on: undefined (it does), why it ends, or `due`: the conversation is past the high mark and its
- * digest is coming, so it goes on until the digest is ready or the hard mark.
+ * Whether the epoch goes on: undefined (it does), why it ends, `prepare`: it goes on and the digest of its coming fold is
+ * asked for now, or `due`: the conversation is past the high mark and its digest is coming, so it goes on until the
+ * digest is ready or the hard mark.
  */
-export type BotChatEpochVerdict = BotChatEpochEnd | 'due' | undefined
+export type BotChatEpochVerdict = BotChatEpochEnd | 'due' | 'prepare' | undefined
 
 /**
  * Whether the bot chat's epoch goes on for the next turn: undefined, or why it ends. `turns` are the epoch's turns as
  * `bot_turn_usage` holds them, oldest first. The conversation's size is what the last turn's last request sent past what
  * the first turn's did (system text, tools, base and first message are the same for every turn of the epoch); with no
  * report, the estimate the pack kept. Past the high mark a coming digest keeps the epoch going (`due`) up to the hard
- * mark or the cap; a ready one, or none possible, folds it.
+ * mark or the cap; a ready one, or none possible, folds it. From the prepare mark (or as far below the cap) a coming
+ * digest is asked for (`prepare`), so it is usually ready when the epoch folds.
  */
 export function chatEpochEnd(input: {
   epoch: BotChatEpoch | undefined
@@ -131,5 +146,7 @@ export function chatEpochEnd(input: {
   if (size >= budget.high || capped) return input.digest === 'coming' && size < budget.hard && !capped ? 'due' : 'full'
   const lastAt = Math.max(0, ...input.turns.map((turn) => turn.lastRequestAt ?? 0))
   if (lastAt > 0 && input.now - lastAt > budget.cacheTtlMs && size >= budget.mid) return 'cold'
+  const nearCap = (last?.lastPrompt ?? 0) >= budget.cap - (budget.high - budget.prepare)
+  if ((size >= budget.prepare || nearCap) && input.digest === 'coming') return 'prepare'
   return undefined
 }

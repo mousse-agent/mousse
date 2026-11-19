@@ -394,7 +394,7 @@ the prompt sizes the runtime reports.
 **What it does.** A bot's chat is one resumed runtime conversation per *epoch* instead of a cleared context every turn:
 
 - The first turn of an epoch starts from a cleared context with the base pack: the memory protocol (plus one line saying
-  that later updates win), core memory, run notes, the chat summary and the recent chat, folded to its tail (6k tokens)
+  that later updates win), core memory, run notes, the chat summary and the recent chat, folded to its tail (4k tokens)
   in one step (`foldWindow`).
 - Every later turn resumes the thread's conversation (`history: 'thread'`) and its pack holds only what the conversation
   does not: rows new in the journal since the last turn that are not the chat's own (a work report, a wake), the memory
@@ -410,10 +410,10 @@ the prompt sizes the runtime reports.
 - a lost resume: the runtime ran the turn in a new conversation instead of the epoch's (Claude Code wrote under another
   session id, or Codex opened another thread or none). The turn reports `resumeLost`, and Codex puts the history in the
   prompt for that turn;
-- full: what the epoch's turns added reaches 48k tokens (the high mark) and a digest is ready or none is coming, it
-  reaches 64k (the hard mark) whatever the digest, or the whole prompt reaches the cap (40% of the model's window,
+- full: what the epoch's turns added reaches 32k tokens (the high mark) and a digest is ready or none is coming, it
+  reaches 44k (the hard mark) whatever the digest, or the whole prompt reaches the cap (40% of the model's window,
   never past 90% of the owner's compaction point);
-- cold: the cache expired (5 minutes when the runtime reported no lifetime) and what was added is past 24k, so the
+- cold: the cache expired (5 minutes when the runtime reported no lifetime) and what was added is past 16k, so the
   rebuild costs nothing extra.
 
 Sizes are what the runtime reported (`bot_turn_usage`: the last turn's prompt less the first's); a runtime that reports
@@ -427,13 +427,15 @@ not its update.
   headline and five sections, constraints first: standing constraints still in force, decisions, open threads, finished
   work with its artifacts, key facts. Each item cites its journal rows (`j123`); constraints of the last digest that
   still hold are carried over. An answer without every section is not used.
-- It is asked for when an epoch passes the high mark (the epoch goes on meanwhile), or after a fold that used none when
-  8k tokens of chat are in no digest yet. While it is written it is `chat_digest_pending` in `bot_memory_state`.
+- It is asked for when an epoch passes the prepare mark (20k added, or that far below the cap), so it is usually ready
+  by the high mark; past the high mark the epoch goes on until it is, up to the hard mark. Also after a fold that used
+  none when 8k tokens of chat are in no digest yet. While it is written it is `chat_digest_pending` in `bot_memory_state`.
 - Adoption: only when a new epoch starts, so an epoch's base never changes, and only when the rows it summarised are
   unchanged (a hash of their seqs and text) and still follow the last adopted digest. Otherwise it is dropped and asked
   for again. Chat never waits: at the hard mark the epoch folds with today's deterministic lines, and a digest that
   arrives later is used at the next fold.
-- Tiers: the summary keeps the newest three digests in full, older ones as one dated timeline line each (about 500
+- Tiers: the summary keeps the newest three digests in full (only the newest that lists standing constraints shows them:
+  each digest carries the earlier ones over, so older copies only repeat them), older ones as one dated timeline line each (about 500
   tokens, oldest lines fall off), then lines for chat folded since the last digest, about 3k tokens in all. Every
   adopted digest is a journal notice (`digest:<id>:<hash>`), so `memory_search` finds it as a `chat digest` hit.
 - Forget: a digest whose rows were redacted, or which holds the forgotten words, is redacted in the journal, kept as
@@ -450,7 +452,13 @@ cache on both Claude Code and Codex, also after 7 minutes idle on Codex.
 
 **What waits.**
 
-- The marks (48k, 64k, 24k, 6k) are starting values: the phase 0 numbers replace them. The "hello" ceiling is set in §15.
+- The marks (high 32k, prepare 20k, hard 44k, mid 16k, tail 4k) come from the owner's chat turns of 17–19 Nov 2026
+  (`scripts/bot-turn-usage.mjs`): a turn added 3.7k tokens on average (35k at most) to an epoch whose first prompt was
+  about 28k, in about 2.8 requests. A fold writes the base to the cache again (1.25x) and every later request reads the
+  conversation again (0.1x); the two balance at about 30k added. With the old marks (48k, 64k, 24k, 6k) epochs often ran
+  on toward 64k waiting for a digest asked for only at 48k, and a turn sent 170k input tokens on average (59k per
+  request); a replay of the same turns with the new marks and base gives about 128k (44k). The "hello" ceiling is set in
+  §15.
 - Digest quality on real chats: whether the five sections keep what later turns ask about.
 - Pi epochs, which need its session kept between bot turns.
 
