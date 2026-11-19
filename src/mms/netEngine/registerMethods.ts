@@ -15,7 +15,7 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.address.add': ['node', 'address']
 }
 
-/** Every method takes an object, with the string fields it needs (`approve` takes `yes` too). */
+/** Every method takes an object, with the string fields it needs (`approve` takes `yes`, `loginStart` `start`). */
 function validate(method: NetEngineLocalMethod, params: unknown): Record<string, unknown> {
   const value = params ?? {}
   if (typeof value !== 'object' || Array.isArray(value))
@@ -26,6 +26,8 @@ function validate(method: NetEngineLocalMethod, params: unknown): Record<string,
       throw new DomainRpcError('bad_request', `${method} needs ${field}`)
   if (method === 'netEngine.approve' && typeof fields.yes !== 'boolean')
     throw new DomainRpcError('bad_request', `${method} needs yes`)
+  if (method === 'netEngine.loginStart' && typeof fields.start !== 'boolean')
+    throw new DomainRpcError('bad_request', `${method} needs start`)
   return fields
 }
 
@@ -88,6 +90,9 @@ export function registerNetEngineMethods(
               return engine.status()
             case 'netEngine.address.add':
               await engine.addAddress(p.node, p.address)
+              return engine.status()
+            case 'netEngine.loginStart':
+              await engine.answerLoginStart(p.start)
               return engine.status()
           }
         } catch (error) {

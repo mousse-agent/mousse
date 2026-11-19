@@ -40,6 +40,7 @@ import {
   HelperSupervisor,
   type HelperStatus
 } from './helper/supervisor'
+import type { LoginStartQuestion } from './loginStart'
 import { EnginePairing, type PairingStep } from './pairing'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 
@@ -107,6 +108,8 @@ export class NetEngineService implements EngineDirectoryPort {
       name?: () => string
       /** Something a window shows changed: the switch, the helper, a device's row or whether it is online. */
       onChanged?: () => void
+      /** The installation's start-at-login question (§10), asked when the switch is turned on in a window. */
+      loginStart?: LoginStartQuestion
     }
   ) {
     options.net.onSetAside((suffix) => this.setAside(suffix))
@@ -181,10 +184,24 @@ export class NetEngineService implements EngineDirectoryPort {
     await this.start()
   }
 
-  /** The switch in Settings: on, and the helper runs. */
+  /**
+   * The switch in Settings: on, and the helper runs. The start-at-login question is settled beside the helper's
+   * start (it reads the startup entry), so the reply carries it.
+   */
   async switchOn(): Promise<void> {
     await this.enable()
-    await this.startHelper()
+    const question = this.options.loginStart?.turnedOn().catch(() => false)
+    try {
+      await this.startHelper()
+    } finally {
+      await question
+    }
+  }
+
+  /** The window's answer to the start-at-login question: `start` installs the existing startup entry. */
+  async answerLoginStart(start: boolean): Promise<void> {
+    await this.options.loginStart?.answer(start)
+    this.changed()
   }
 
   /** Turns the switch off: the helper gets `shutdown` and the engine stops. Pairings stay for the next time. */
@@ -211,6 +228,7 @@ export class NetEngineService implements EngineDirectoryPort {
       approvals: this.started?.pairing.pendingApprovals() ?? [],
       ...(this.routes().length ? { routes: this.routes() } : {}),
       ...(this.sharedAccount() ? { sharedAccount: true } : {}),
+      ...(this.settings()?.enabled && this.options.loginStart?.asking() ? { loginStart: 'ask' as const } : {}),
       scanIntervalMs: engineLimits().scanIntervalMs
     }
   }
