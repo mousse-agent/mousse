@@ -1,3 +1,4 @@
+import { botCatalogueGroup } from '../../src/shared/bots/personal/catalogue'
 /**
  * A bot is told what its owner allows now, on every turn of every lane, and the tools it gets match what it is told:
  * the chat (front desk) hears what its work holds, a run what it holds itself, and a change in About or an Allow shows
@@ -255,4 +256,39 @@ describe("a bot's thread lists only tools a bot can hold", () => {
     // A permission's name is no tool; delegation is the work's own subagents; the heap summary pauses the service; a bot has no goal.
     for (const name of ['delegate_task', 'continue_subagent', 'browser_request_human', ...BOT_GROUP_PERMISSIONS, 'profiler_heap_summary', 'goal_status']) expect(botMayBeOffered(name), name).toBe(false)
   })
+})
+
+it('tells granted work and scheduled runs how to use a bound key without seeing it', () => {
+  const allowed = { ...botAllowedOf(botStarterManifest()), secrets: true }
+  const text = botInstructions({ name: 'Reader', description: 'Read models', lane: 'run', allowed, secretFetchOffered: true })
+  expect(text).toContain(
+    "To read from a service your owner gave you a key for, use secret_fetch with the key's name. You never see the key."
+  )
+  expect(
+    botInstructions({ name: 'Reader', description: 'Read models', lane: 'chat', allowed, secretFetchOffered: true })
+  ).not.toContain("use secret_fetch with the key's name")
+})
+
+it('keeps service-read guidance out of subagents and consults where the tool is absent', () => {
+  const allowed = { ...botAllowedOf(botStarterManifest()), secrets: true }
+  for (const scope of [
+    { subagent: true as const },
+    { allowed: { ...allowed, mcpNotHere: true } }
+  ]) {
+    const text = botInstructions({
+      name: 'Reader',
+      description: 'Read models',
+      lane: 'run',
+      secretFetchOffered: true,
+      allowed,
+      ...scope
+    })
+    expect(text).not.toContain("use secret_fetch with the key's name")
+  }
+})
+
+it('keeps service-read catalogue guidance specific to work even when the chat reads it', () => {
+  expect(botCatalogueGroup('secrets')!.guidance).toContain(
+    "use secret_fetch with the key's name in your work"
+  )
 })

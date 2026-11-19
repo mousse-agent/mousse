@@ -157,7 +157,7 @@ it('C6 support rollback omits the switch-on advice and still delivers it after r
   expect(next).not.toContain('Tools that send or change things now ask your owner first')
 })
 
-it('C6 support rollback shows entry 29 while E1 entry 28 stays pending, then delivers 28 once', async () => {
+it('C6 support rollback shows entries 29 and 30 while E1 entry 28 stays pending, then delivers 28 once', async () => {
   existingBot()
   memory.write(() => memory.setState('ada', 'changelog_seen', 27))
   const e1 = BOT_CHANGELOG.find(entry => entry.id === 28)!
@@ -177,7 +177,7 @@ it('C6 support rollback shows entry 29 while E1 entry 28 stays pending, then del
   expect(enabled).toContain(e1.text)
   expect(enabled).toContain(bindingAdvice.text)
   await settled(on, 'c6-seen-on')
-  expect(memory.getState<number>('ada', 'changelog_seen')).toBe(29)
+  expect(memory.getState<number>('ada', 'changelog_seen')).toBe(30)
   for (let turn = 0; turn < 3; turn++) {
     const after = await on.chatPreamble({ botId: 'ada', activationId: `c6-seen-after-${turn}` })
     expect(after).not.toContain(e1.text)
@@ -246,4 +246,21 @@ it('E1 r2 existing bots learn the argument rule with entry 28', async () => {
   expect(pack).toContain('same top-level argument names')
   expect(pack).toContain('only plain text like a message body or a file name may change')
   expect(pack).toContain('New addresses and other destinations still ask')
+})
+
+it.each([28, 29])('entry 30 supersedes the binding-only advice after seen entry %s', async seen => {
+  existingBot()
+  memory.write(() => memory.setState('ada', 'changelog_seen', seen))
+  const pack = await packs().chatPreamble({ botId: 'ada', activationId: 'service-reads-30' })
+  const binding = BOT_CHANGELOG.find(entry => entry.id === 29)!
+  const reads = BOT_CHANGELOG.find(entry => entry.id === 30)!
+  expect(reads.text).toContain('secret_fetch is now available')
+  expect(reads.text).toContain('replaces the earlier advice to keep working without a bound key')
+  expect(pack).toContain(reads.text)
+  if (seen === 28) {
+    expect(pack).toContain(binding.text)
+    expect(pack.indexOf(binding.text)).toBeLessThan(pack.indexOf(reads.text))
+  } else {
+    expect(pack).not.toContain(binding.text)
+  }
 })

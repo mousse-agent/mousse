@@ -303,7 +303,7 @@ export class BotActions {
   }
   get(id: string): ActionRow | undefined { return this.host.store.get('SELECT * FROM bot_actions WHERE id = ?', id) as unknown as ActionRow | undefined }
   forWork(id: string): ActionRow | undefined {
-    return this.host.store.get("SELECT * FROM bot_actions WHERE activation_id = ? ORDER BY rowid DESC LIMIT 1", id) as unknown as ActionRow | undefined
+    return this.host.store.get("SELECT * FROM bot_actions WHERE kind = 'mcp' AND activation_id = ? ORDER BY rowid DESC LIMIT 1", id) as unknown as ActionRow | undefined
   }
   inTurn(activationId: string, mainN: number): ActionRow | undefined {
     const action = this.forWork(activationId)
@@ -562,6 +562,8 @@ export class BotActions {
       await this.runApproved(String(action.id))
   }
   async reconcile(): Promise<void> {
+    // Service reads have no held card or executable arguments to replay after a restart.
+    this.host.store.run(`UPDATE bot_actions SET status = 'failed', result_json = ? WHERE kind = 'secret_fetch' AND status IN ('running', 'approved')`, JSON.stringify({text:'The service read was interrupted.',isError:true}))
     this.withdrawDisabled()
     this.host.store.pruneWorkRefusals()
     this.withdrawChanged()

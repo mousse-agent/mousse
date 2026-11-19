@@ -32,7 +32,7 @@ export interface BotChipCall {
 
 /** What a call does, for its words and how it rolls up. */
 type ChipKind =
-  | 'search' | 'fetch' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'mcp' | 'schedules'
+  | 'search' | 'fetch' | 'service_read' | 'browse' | 'read' | 'change' | 'save' | 'draft' | 'lookback' | 'consult' | 'skill' | 'tool' | 'mcp' | 'schedules'
   | 'schedule' | 'unschedule' | 'remember' | 'forget' | 'depth' | 'profile' | 'model'
   | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look' | 'wake' | 'watch' | 'unwatch' | 'bot_send' | 'bot_look'
   | 'threads_look' | 'profiler' | 'themes_look' | 'theme' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'thread_archive' | 'thread_hide' | 'picture'
@@ -225,6 +225,8 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'schedule_delete': return { kind: 'jobs', icon: 'schedule', live: 'changing your scheduled jobs' }
     // Secrets ("use secrets you give it"): asking shows the card; a command with one is its own chip.
     case 'secret_request': return { kind: 'secret', icon: 'ask', live: 'asking you for a secret' }
+    // The vault supplies this activity only after validation and admission, like an MCP server label.
+    case 'service_read': return { kind: 'service_read', icon: 'read', live: 'reading from', detail: shortChipText(str(args.service) ?? 'a service', 40) }
     case 'secret_run': return { kind: 'secret_run', icon: 'think', live: 'running a command with a secret' }
     case 'create_quick_action': return { kind: 'quick_action', icon: 'edit', live: 'adding a quick action' }
     // Mousse's profiler ("use the profiler"): every read and sample rolls up into one chip.
@@ -416,6 +418,7 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
     case 'consult': return chip('looked into', listed(details))
     case 'skill': return chip(details.length ? 'used a skill' : 'looked at its skills', listed(details))
     case 'tool': return chip(details.length ? 'used a tool' : 'ran a command', listed(details))
+    case 'service_read': return chip('read from', listed(details))
     case 'mcp': return details.length ? chip('used', listed(details)) : chip('used a tool')
     case 'threads_look': return chip('read your threads')
     case 'profiler': return chip("checked Mousse's memory and CPU")

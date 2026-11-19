@@ -318,7 +318,7 @@ export function ownerWords(text: string): string {
  */
 export const BOT_PROMPT_CHANGED_NOTE = 'Your owner changed these words after some of your replies in this chat: follow them as they are now, not how those replies were written.'
 
-export function botInstructions(bot: { name: string; description: string; filesFolder?: string; homeFolder?: string; lane?: BotLane; allowed?: BotAllowed; browserOffline?: boolean; subagent?: true; withheld?: readonly string[]; promptChanged?: true }): string {
+export function botInstructions(bot: { name: string; description: string; filesFolder?: string; homeFolder?: string; lane?: BotLane; allowed?: BotAllowed; secretFetchOffered?: boolean; browserOffline?: boolean; subagent?: true; withheld?: readonly string[]; promptChanged?: true }): string {
   if (bot.subagent) {
     // A subagent of the bot's work: who it works for, its one part of the job, and what it may use, with nothing to ask.
     const who = [`You work for ${bot.name.trim()}, a personal bot in Mousse. Its owner's words on what it does:\n${ownerWords(bot.description)}`]
@@ -333,6 +333,7 @@ export function botInstructions(bot: { name: string; description: string; filesF
   if (bot.promptChanged) who.push(BOT_PROMPT_CHANGED_NOTE)
   if (bot.filesFolder) who.push(`Your files folder is ${bot.filesFolder}.`)
   if (bot.homeFolder) who.push(`Your owner's home folder is ${bot.homeFolder}. Always write paths in full, never with ~ or variables like $HOME.`)
+  if (bot.secretFetchOffered && bot.lane === 'run' && bot.allowed?.secrets && !bot.allowed.mcpNotHere) who.push("To read from a service your owner gave you a key for, use secret_fetch with the key's name. You never see the key.")
   const lane = bot.lane === 'run' ? BOT_RUN_INSTRUCTIONS : bot.lane === 'chat' ? chatInstructionsWithout(bot.allowed?.off) : undefined
   const allowed = bot.allowed ? botAllowedText(bot.allowed, bot.lane, bot.browserOffline) : undefined
   // A main turn's tool catalogue, one line a group (docs/plans/bot-context.md §15): each group's guidance, the applet

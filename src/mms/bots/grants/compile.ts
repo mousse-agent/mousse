@@ -251,7 +251,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(schedules ? BOT_SCHEDULE_READ_TOOLS : []),
     ...(schedules === 'all' ? BOT_SCHEDULE_ACT_TOOLS : []),
     // A secret's command is a command: only where the turn runs commands (work with "run commands"; never the chat).
-    ...(secrets ? BOT_SECRET_TOOLS.filter((tool) => tool !== 'secret_run' || manifest.tools.includes('shell')) : []),
+    ...(secrets ? BOT_SECRET_TOOLS.filter((tool) => (tool !== 'secret_run' || manifest.tools.includes('shell')) && (tool !== 'secret_fetch' || own?.frontDesk !== true)) : []),
     ...(quickActions ? BOT_QUICK_ACTION_TOOLS : []),
     ...(shared?.tasks ? BOT_TASK_TOOLS : []),
     ...(manifest.skills.length ? ['list_skills', 'load_skill'] : []),
