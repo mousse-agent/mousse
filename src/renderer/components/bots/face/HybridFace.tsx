@@ -3,7 +3,7 @@ import { botEyesOf, botKindOf, type BotEyes, type KnownBotLook } from '../../../
 import type { BotFaceState } from './BotFace'
 import { EYELESS, hop } from './facePoses'
 import { sharedFaceRenderer, type FaceSpec } from './faceRenderer'
-import { EYE_BOX, eyeColour, eyeGeometry, eyeShapeOf, lidClip, pointerLook, type EyeGeometry } from './hybridEyes'
+import { EYE_BOX, eyeColour, eyeGeometry, eyeShapeOf, lidClip, mouseArcPath, mouseEyePath, pointerLook, type EyeGeometry } from './hybridEyes'
 import './hybridFace.css'
 
 /**
@@ -126,8 +126,9 @@ export function HybridFace({ look, state, size, view, className, label, resting,
     }
   }, [followPointer])
 
-  // A soft shadow under each eye where there are pixels to show it.
-  const shadow = size >= 56 ? `drop-shadow(0 ${(size * 0.011).toFixed(2)}px ${(size * 0.012).toFixed(2)}px rgba(0, 0, 0, ${colour === '#ffffff' ? 0.28 : 0.38}))` : undefined
+  const mouse = botKindOf(look) !== 'mousse'
+  // A soft shadow under each of the Mousse's eyes where there are pixels to show it. The mouse's 3D eyes have none.
+  const shadow = !mouse && size >= 56 ? `drop-shadow(0 ${(size * 0.011).toFixed(2)}px ${(size * 0.012).toFixed(2)}px rgba(0, 0, 0, ${colour === '#ffffff' ? 0.28 : 0.38}))` : undefined
 
   return (
     <span
@@ -157,6 +158,7 @@ export function HybridFace({ look, state, size, view, className, label, resting,
             const side = index === 0 ? -1 : 1
             const width = 2 * EYE_BOX * place.sx
             const height = 2 * EYE_BOX * place.sy
+            const arcCut = closed ? mouseArcPath(look, side, geometry.es, geometry.arc) : mouse ? '' : undefined
             return (
               <span
                 key={index}
@@ -174,13 +176,20 @@ export function HybridFace({ look, state, size, view, className, label, resting,
                   <span className="hf-lid" style={{ clipPath: lidClip(shape, side, geometry.open, geometry.worried) }}>
                     <span className="hf-open" style={{ transform: `scaleY(${closed ? 0.08 : geometry.open})`, opacity: closed ? 0 : 1 }}>
                       <span className="hf-blink" ref={(element) => { blinks.current[index] = element }}>
-                        <EyeShape shape={shape} side={side} colour={colour} />
+                        <EyeShape shape={shape} side={side} colour={colour} cut={mouseEyePath(look, side, geometry.es)} />
                       </span>
                     </span>
                   </span>
-                  <svg className="hf-arc" viewBox={VIEW_BOX} style={{ opacity: closed ? 1 : 0, transform: geometry.arc > 0 ? undefined : 'scaleY(-1)' }} aria-hidden>
-                    <path d="M -0.1515 0.0529 A 0.17 0.17 0 0 1 0.1515 0.0529" fill="none" stroke={colour} strokeWidth={0.09} strokeLinecap="round" />
-                  </svg>
+                  {arcCut !== undefined ? (
+                    // A mouse's arc is drawn as the part of it the head leaves showing (`mouseArcPath`).
+                    <svg className="hf-arc" viewBox={VIEW_BOX} style={{ opacity: closed ? 1 : 0 }} aria-hidden>
+                      <path d={arcCut} fill="#19191b" />
+                    </svg>
+                  ) : (
+                    <svg className="hf-arc" viewBox={VIEW_BOX} style={{ opacity: closed ? 1 : 0, transform: geometry.arc > 0 ? undefined : 'scaleY(-1)' }} aria-hidden>
+                      <path d="M -0.1515 0.0529 A 0.17 0.17 0 0 1 0.1515 0.0529" fill="none" stroke={colour} strokeWidth={0.09} strokeLinecap="round" />
+                    </svg>
+                  )}
                 </span>
               </span>
             )
@@ -224,9 +233,19 @@ const STAR = Array.from({ length: 10 }, (_, index) => {
 }).join(' ')
 
 /** The open eye of each shape, as the shader's `eye2` draws it (y down here). */
-function EyeShape({ shape, side, colour }: { shape: BotEyes; side: number; colour: string }) {
+function EyeShape({ shape, side, colour, cut }: { shape: BotEyes; side: number; colour: string; cut?: string }) {
   let drawing
-  if (shape === 'round') drawing = <circle r={0.2} fill={colour} />
+  // A mouse's eye is drawn as the part of it the head leaves showing (`mouseEyePath`).
+  if (cut !== undefined) {
+    drawing = (
+      <>
+        <path d={cut} fill={colour} />
+        {/* The pill is a rounded bead in 3D, with the light's glint on its upper left. */}
+        {shape === 'pill' && <ellipse cx={-0.05} cy={-0.07} rx={0.035} ry={0.085} fill="#ffffff" opacity={0.22} />}
+      </>
+    )
+  }
+  else if (shape === 'round') drawing = <circle r={0.2} fill={colour} />
   else if (shape === 'dot') drawing = <circle r={0.105} fill={colour} />
   else if (shape === 'tall') drawing = <ellipse rx={0.115} ry={0.3} fill={colour} />
   else if (shape === 'square') drawing = <rect x={-0.175} y={-0.175} width={0.35} height={0.35} rx={0.06} fill={colour} />
