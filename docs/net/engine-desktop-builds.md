@@ -18,7 +18,8 @@ from the engine commit in `native/net-helper/ENGINE_COMMIT`. This is what the ow
 Each target packages on a computer of its own architecture, or under emulation (macos-x64 under Rosetta, with an
 x64 Node): the package carries the Electron and the native modules that npm installed there. The `dist:win`,
 `dist:linux` and `dist:mac` scripts all build the helper (`node scripts/build-net-helper.mjs --require`) for the
-computer's architecture; electron-builder's targets follow it too, or `--x64` / `--arm64`.
+computer's architecture; electron-builder's targets follow it too, or `--x64` / `--arm64`. Under Rosetta, run
+`npm ci` with `npm_config_arch=x64`: without it Electron's installer fetches the arm64 Electron even for an x64 Node.
 
 - `node scripts/build-net-helper.mjs [--require] [--arch x64|arm64 | --target <triple>]` builds the helper into
   `native/net-helper/target/package` with `cargo build --release --locked --target <triple>`, honouring
