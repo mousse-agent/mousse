@@ -4438,3 +4438,34 @@ it.each(['scheduleId', 'serverId', 'tool'] as const)('E1 wrong %s gives an id co
   const t = await aloneAsk()
   expect(f.bots.alone.prepare(t.botId, 'wrong-id', { ...t.request, ask: 'let_alone', [key]: 'not-an-id' })).toBe('I could not find that automation or MCP tool. Get scheduleId from bot_schedule_list, serverId (id) from mcp_servers, and use the bare tool name.')
 })
+
+it.each(['restart', 'same-run', 'sent-card'] as const)('E1 r2 uncertain target requires a card for every later call: %s', async kind => {
+  const t = await aloneAsk()
+  let id: string, turn: Awaited<ReturnType<typeof start>>
+  if (kind === 'restart') {
+    f.clock.now += 60_000
+    id = (await f.tickSchedules(new Date(f.clock.now))).inserted[0]!
+    turn = await start(f, id)
+    vi.mocked(t.manager.callTool).mockImplementationOnce(() => new Promise(() => {}))
+    void callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: t.args, toolCallId: 'r2-interrupted', signal: new AbortController().signal })
+    await flush()
+    f.runs.markTerminal(turn.payload.runId, 'interrupted', { interruptedBy: 'daemon_restart' })
+    f.bots.close(); f.bots = new BotEngine(f.host)
+    await f.bots.reconcileOnStartup(); await flush()
+    turn = await start(f, id, 2)
+  } else {
+    vi.mocked(t.manager.callTool).mockRejectedValueOnce(new Error('Connection closed after dispatch'))
+    const next = await aloneNext(t, kind === 'sent-card' ? { ...t.args, to: ['other@example.test'] } : t.args)
+    id = next.id; turn = next.turn
+    if (kind === 'sent-card') {
+      await finish(f, turn.payload)
+      await f.bots.actions.answer({ actionId: next.action.id, digest: next.action.args_digest, answer: 'send' })
+      turn = await start(f, id, 2)
+    }
+  }
+  expect(f.bots.actions.forWork(id)?.status).toBe('uncertain')
+  const calls = vi.mocked(t.manager.callTool).mock.calls.length
+  await callForBot({ bot: turn.prepared.authority, mcp: t.mcp, name: 'Mail__send', args: { ...t.args, body: 'Reworded friendly sentence' }, toolCallId: 'r2-retry', signal: new AbortController().signal })
+  expect(f.bots.actions.forWork(id)).toMatchObject({ status: 'open', card_json: expect.any(String) })
+  expect(t.manager.callTool).toHaveBeenCalledTimes(calls)
+})
