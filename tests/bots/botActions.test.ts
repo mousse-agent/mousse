@@ -4851,6 +4851,7 @@ it.each([
 })
 
 it.each([
+ ['-$5.00','-$6.00'], ['-€12,50','-€13,50'], ['−$5','−$6'],
  ['$1,234.56', '$2,234.56'], ['€12.50', '€13.50'], ['12.50€', '13.50€'], ['3.5%', '3.6%'],
  ['Up 3.5%.', 'Up 3.6%.'], ['12.5k users', '13.5k users'], ['p95 1.2s', 'p95 1.3s'],
  ['1.2M', '2.3B'], ['1.2ms', '2.3ms'], ['1.2h', '2.3d'], ['1.2x', '2.3x'],
@@ -4862,7 +4863,7 @@ it.each([
   f.close()
  }
 })
-it.each(['https://3.5', '@3.5', '3.5/path', '1.2.3.4', 'v1.2.3', 'Tickets:evil.com', 'tel:123', 'x:12', 'mailto:12'])(
+it.each(['-$evil.com', 'https://3.5', '@3.5', '3.5/path', '1.2.3.4', 'v1.2.3', 'Tickets:evil.com', 'tel:123', 'x:12', 'mailto:12'])(
  'E1 r4 numeric exceptions do not admit destinations: %s', async body => {
  const t = await aloneAsk('allow', 'send', 'A plain message')
  expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('open')
