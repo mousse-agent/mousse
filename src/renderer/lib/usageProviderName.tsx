@@ -42,14 +42,14 @@ const COMPANIES: Record<string, string> = {
 
 /**
  * A provider as the usage page names it: its company first, then the product ("OpenAI · ChatGPT Codex", whose plan
- * follows as "Plus"). A label that already starts with the company, or a provider without a known one, stays as is.
+ * follows as "Plus"). A label that already names the company ("Grok (xAI)"), or a provider without a known one, stays as is.
  */
 export function usageProviderTitle(provider: Pick<ProviderUsage, 'id' | 'label'>): string {
   const normalized = normalizeProviderId(provider.id)
   const company = COMPANIES[normalized]
   // Codex's limits are the ChatGPT plan's.
   const label = normalized === 'openai' && provider.label === 'Codex' ? 'ChatGPT Codex' : provider.label
-  if (!company || label.toLowerCase().startsWith(company.toLowerCase())) return label
+  if (!company || label.toLowerCase().includes(company.toLowerCase())) return label
   return `${company} · ${label}`
 }
 

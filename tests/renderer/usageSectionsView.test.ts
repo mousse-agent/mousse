@@ -49,7 +49,7 @@ const all = (selector: string) => [...document.querySelectorAll<HTMLElement>(sel
 describe('the three sections', () => {
   it('a subscription card, Other usage and Needs attention collapsed to their header rows, and the header chip counts', () => {
     render()
-    expect(all('.usage-provider').map((card) => card.querySelector('.settings-group-title')?.textContent)).toEqual(['Claude subscription'])
+    expect(all('.usage-provider').map((card) => card.querySelector('.settings-group-title')?.textContent)).toEqual(['Anthropic · Claude subscription'])
     expect(q('[data-testid="usage-section-usage-other"] .usage-section-head')?.textContent).toContain('Other usage· 2')
     expect(q('[data-testid="usage-section-usage-attention"] .usage-section-head')?.textContent).toContain('Needs attention· 2')
     expect(all('[data-testid="usage-other-row"]')).toHaveLength(0)
@@ -79,7 +79,7 @@ describe('the three sections', () => {
     // It scrolls on the next frame, once the Limits tab is showing.
     await act(async () => { await new Promise((resolve) => requestAnimationFrame(resolve)) })
     expect(all('[data-testid="usage-attention-row"]').map((row) => row.textContent)).toEqual([
-      'ChatGPT subscriptionSigned outReconnect',
+      'OpenAI · ChatGPT subscriptionSigned outReconnect',
       'Grok (xAI)Session expiredReconnect'
     ])
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled()
@@ -116,7 +116,7 @@ describe('providers still on their way', () => {
     ]
     render({ usage: { providers: waiting, fetchedAt: '2026-11-09T12:00:00Z' }, loading: true, loadingIds: new Set(waiting.map((provider) => provider.id)) })
     expect(all('[data-testid="usage-card-loading"]')).toHaveLength(1)
-    expect(all('[data-testid="usage-row-loading"]').map((row) => row.textContent)).toEqual(['Vercel AI Gateway', 'ChatGPT subscription'])
+    expect(all('[data-testid="usage-row-loading"]').map((row) => row.textContent)).toEqual(['Vercel AI Gateway', 'OpenAI · ChatGPT subscription'])
     expect(document.body.textContent).not.toContain('No usage reported')
   })
 
