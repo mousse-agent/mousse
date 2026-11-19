@@ -146,8 +146,8 @@ describe('Antigravity turn lifecycle', () => {
     expect(processes[0].connection.agent.request).toHaveBeenCalledWith(methods.agent.authenticate, { methodId: 'oauth-personal' })
     // A process that started before this sign-in can no longer sign the profile out.
     expect((service as unknown as { signInGeneration: number }).signInGeneration).toBe(1)
-    // Only the Google redirect-URL fallback may be offered; never a setup choice or a path prompt.
-    expect((events as Array<{ type: string }>).map((event) => event.type).filter((type) => type !== 'manual_code')).toEqual([])
+    // Only that it is starting: no setup choice or path prompt, and with no Google link printed, no paste field.
+    expect((events as Array<{ type: string }>).map((event) => event.type)).toEqual(['progress'])
   })
 
   it('fails sign-in fast, without a prompt or an agent, when Antigravity is not installed', async () => {
