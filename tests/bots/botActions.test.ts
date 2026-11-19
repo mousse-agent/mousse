@@ -4489,6 +4489,7 @@ it('E1 r2 source calls preserve the bot note and export no argument contract or 
   expect(memory.actions(t.botId).every(a => a.args_digest == null)).toBe(true)
   f.store.run('UPDATE bot_actions SET bot_note = ? WHERE id = ?', 'The bot’s own card note', first.id)
   expect(memory.actions(t.botId).find(a => a.id === first.id)?.bot_note).toBe('The bot’s own card note')
+  expect(f.bots.alone.prepare(t.botId, 'note-preserved', t.request as never)).toBeUndefined()
 })
 
 it('E1 r2 ordinary held and sent calls do not compute a contract', async () => {
@@ -4546,4 +4547,11 @@ it.each([true, false])('E1 r2 malformed asks mention let-alone only while asks f
   const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
   const turn = await start(f, row.id)
   expect(turn.prepared.authority.escalate!({ permission: undefined, reason: 'Ask' }).includes('let_alone')).toBe(on)
+})
+
+it('E1 r2 a masked source review cannot supply an argument contract', async () => {
+  const t = await aloneAsk()
+  const source = f.bots.actions.forWork(t.id)!
+  f.store.run('UPDATE bot_actions SET args_json = ? WHERE id = ?', JSON.stringify({ ...t.args, body: '[hidden]' }), source.id)
+  expect(f.bots.alone.prepare(t.botId, 'hidden-review', t.request as never)).toBe('This sent call has hidden arguments, so it always asks.')
 })
