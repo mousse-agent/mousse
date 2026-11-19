@@ -171,19 +171,6 @@
       "expiresAt": "2026-11-19T00:01:23.773Z"
     },
     {
-      "task": "resize-jank-breakpoints",
-      "session": "Animatrix-79d0c8",
-      "machine": "Animatrix",
-      "branch": "resize-jank-breakpoints",
-      "paths": [
-        "src/renderer/components/TitleBarNav.tsx",
-        "src/renderer/components/SelectionReplyButton.tsx",
-        "src/renderer/styles/global.css"
-      ],
-      "claimedAt": "2026-11-19T17:17:07.276Z",
-      "expiresAt": "2026-11-19T19:17:07.276Z"
-    },
-    {
       "task": "sidebar-cards-name-thread-branch",
       "session": "Animatrix-99a3f5",
       "machine": "Animatrix",
