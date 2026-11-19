@@ -29,7 +29,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { askCallNote, askNoticeText, askText } from '../../../shared/bots/personal/askText'
 import { lookFields } from '../../../shared/bots/personal/look'
 import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHold, type BotSubagentHold } from '../../../shared/bots/personal/subagentHold'
@@ -2264,7 +2264,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.putThread({ threadId: thread.id, botId: row.botId, role: 'activation', key: definition.main.key, activationId: row.id })
         threadId = thread.id
       }
-      const scratch = join(this.store.directory, 'scratch', row.id)
+      const own = join(this.store.directory, 'scratch', row.id)
+      let scratch = this.scratchFor(row)
+      // The chat's folder starts empty, whatever an earlier turn that could not empty it left there; one that can't be
+      // emptied now leaves this turn a folder of its own.
+      if (scratch !== own) {
+        try { rmSync(scratch, { recursive: true, force: true }) } catch { scratch = own }
+      }
       mkdirSync(join(scratch, 'tmp'), { recursive: true, mode: 0o700 })
       mkdirSync(this.filesFolder(row.botId), { recursive: true, mode: 0o700 })
       const clientRequestId = `${row.id}:d1`
@@ -7163,6 +7169,25 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const question of this.store.activationQuestions(row.id)) if (question.messageId) this.chat.republish(question.messageId)
   }
 
+  /**
+   * Where an activation's scratch folder goes. A chat turn takes the bot's one chat folder (`scratch/chat-<bot id,
+   * hashed>`), emptied between turns as any scratch is: what its runtime starts with then stays the same from turn to
+   * turn (on macOS and Linux its temporary folder, `TMPDIR`, is in there), so the process kept warm for the chat is
+   * reused. A run, and a chat turn that starts while an earlier one still holds that folder (paused or blocked), take one
+   * of their own.
+   */
+  private scratchFor(row: Pick<BotActivationRow, 'id' | 'botId' | 'lane'>): string {
+    const root = join(this.store.directory, 'scratch')
+    if (row.lane !== 'chat') return join(root, row.id)
+    const chat = join(root, `chat-${createHash('sha256').update(row.botId).digest('hex').slice(0, 16)}`)
+    return this.scratchHeld(chat, row.id) ? join(root, row.id) : chat
+  }
+
+  /** Whether an activation other than `except` that has not ended holds the scratch folder `path`. */
+  private scratchHeld(path: string, except: string): boolean {
+    return this.store.activationsWith(NOT_ENDED).some((other) => other.id !== except && other.scratch === path)
+  }
+
   /** The scratch folder goes when the activation has ended (it stays while it waits or is paused). */
   private cleanup(row: BotActivationRow): void {
     if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
@@ -7190,7 +7215,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     } catch (error) {
       console.warn('the bot browser could not let go of an activation', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
     }
-    if (!row.scratch) return
+    // The chat's folder (`scratchFor`) is left to the turn that holds it now; that turn's end empties it.
+    if (!row.scratch || this.scratchHeld(row.scratch, row.id)) return
     try {
       rmSync(row.scratch, { recursive: true, force: true })
     } catch (error) {
@@ -7516,7 +7542,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.known.delete(thread.threadId)
     }
     // P7: the scratch folders of ended activations.
-    for (const row of this.store.activationsWith(['done', 'failed', 'cancelled'])) if (row.scratch && existsSync(row.scratch)) this.cleanup(row)
+    // A bot's chat folder (`scratchFor`), which many ended turns name, is only emptied, once no turn holds it.
+    for (const row of this.store.activationsWith(['done', 'failed', 'cancelled'])) {
+      if (!row.scratch || !existsSync(row.scratch)) continue
+      if (basename(row.scratch) === row.id) this.cleanup(row)
+      else if (!this.scratchHeld(row.scratch, row.id)) {
+        try { rmSync(row.scratch, { recursive: true, force: true }) } catch { /* The next chat turn's start empties it. */ }
+      }
+    }
   }
 
   private async reconcileActivation(row: BotActivationRow, runs: RunEngine): Promise<void> {
