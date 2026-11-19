@@ -44,6 +44,8 @@ describe('remote usage.history', () => {
     const text = JSON.stringify(reply)
     expect(text).not.toContain('secret-project')
     expect(text).not.toContain(logs.replaceAll('\\', '\\\\'))
+    // Nor its projects or sessions: those stay on the computer.
+    expect(reply).toMatchObject({ projects: [], topSessions: [] })
   })
 
   it('refuses a computer without the read capability', async () => {

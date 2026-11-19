@@ -80,6 +80,34 @@ describe('usage history from the agents\' own logs', () => {
     expect(history.costByKind.output).toBeGreaterThan(0)
   })
 
+  it('splits the cost by speed where the log says it, and adds up each folder and the priciest sessions', async () => {
+    // A fast-mode Claude call and a Codex thread on the priority tier, both in /work/app.
+    write(join(home, '.claude', 'projects', 'app', 'b.jsonl'), [JSON.stringify({
+      type: 'assistant', sessionId: 's2', cwd: '/work/app', timestamp: at(1),
+      message: { id: 'msg_f', model: 'claude-opus-5-5', usage: { input_tokens: 1000, output_tokens: 1000, speed: 'fast' } }
+    })])
+    const [meta, context, ...counts] = codexLines(5)
+    write(join(home, '.codex', 'sessions', '2026', '11', 'r.jsonl'), [
+      JSON.stringify({ type: 'session_meta', payload: { id: 'cx1', cwd: '/work/app' } }), context!,
+      JSON.stringify({ type: 'event_msg', payload: { type: 'thread_settings_applied', thread_settings: { service_tier: 'priority' } } }), ...counts
+    ])
+    expect(meta).toContain('session_meta')
+    const history = await scanner().history({ range: '7d', timeZone: 'UTC' })
+    const fast = (agent: string) => history.agents.find((entry) => entry.id === agent)!.costUsd
+    // Fast calls are priced at list prices; the a.jsonl call, Grok and Pi don't say their speed.
+    expect(history.costBySpeed.fast).toBeCloseTo(history.topSessions.find((row) => row.session === 's2')!.costUsd + fast('codex'), 3)
+    expect(history.costBySpeed.standard).toBe(0)
+    expect(history.costBySpeed.fast + history.costBySpeed.unknown).toBeCloseTo(history.costUsd, 3)
+
+    const app = history.projects.find((row) => row.name === '/work/app')!
+    expect(app.sessions).toBe(2)
+    expect(app.tokens).toBe(2000 + 1500)
+    expect(history.projects.reduce((sum, row) => sum + row.tokens, 0)).toBe(history.agents.reduce((sum, row) => sum + tokensOf(history, row.id), 0))
+
+    expect(history.topSessions.map((row) => row.costUsd)).toEqual([...history.topSessions.map((row) => row.costUsd)].sort((a, b) => b - a))
+    expect(history.topSessions.find((row) => row.session === 's2')).toMatchObject({ agent: 'claude-code', project: '/work/app', model: 'claude-opus-5-5', tokens: 2000 })
+  })
+
   it('narrows to one provider and still lists every provider with usage', async () => {
     const history = await scanner().history({ range: '7d', timeZone: 'UTC', agent: 'codex' })
     expect(history.agents.map((agent) => agent.id)).toEqual(['codex'])

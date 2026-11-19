@@ -36,6 +36,8 @@ export function compactNumber(value: number): string {
   if (!unit) return String(Math.round(value))
   const scaled = value / unit[1]
   const digits = Math.abs(scaled) >= 100 ? 0 : Math.abs(scaled) >= 10 ? 1 : 2
+  // 999.6M rounds to 1000M: say 1B instead.
+  if (Math.abs(Number(scaled.toFixed(digits))) >= 1000 && unit[0] !== 'B') return compactNumber(Math.sign(value) * unit[1] * 1000)
   return `${Number(scaled.toFixed(digits))}${unit[0]}`
 }
 

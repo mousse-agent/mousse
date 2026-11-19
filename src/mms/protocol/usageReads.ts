@@ -1,4 +1,6 @@
 import type { ProviderUsage, UsageAccount, UsageSlot } from '../../shared/providerAuth'
+import type { MmsProfileServices } from '../MmsProfileServices'
+import { limitReadings } from '../usageHistory/limitReadings'
 
 /**
  * The usage page's progressive reads: a list of every provider it shows (with the last reading of
@@ -16,6 +18,11 @@ function kept(owner: object): Map<string, Kept> {
   let map = readings.get(owner)
   if (!map) readings.set(owner, (map = new Map()))
   return map
+}
+
+/** When a provider was last read for the page or in the background, in ms. */
+export function keptAt(owner: object, id: string): number | undefined {
+  return kept(owner).get(id)?.at
 }
 
 /** The last reading of a provider, dated when it was read (unless it already carries an older date). */
@@ -97,4 +104,69 @@ export async function withUsageDeadline<T extends ProviderUsage | UsageAccount |
 /** A provider that did not answer in time, or failed outright. */
 export function unreachableUsage(id: string, label: string): ProviderUsage {
   return { id, label, status: 'error', windows: [], problem: 'unavailable', message: 'Not reachable' }
+}
+
+export const CLAUDE_USAGE_ID = 'claude-subscription'
+
+/** Every provider the usage page shows, before any is read. */
+export function usageSlotList(mms: MmsProfileServices): Array<Omit<UsageSlot, 'cached'>> {
+  // Claude turned off in Settings is not shown either.
+  const claudeOn = !mms.providerInstances?.isDisabled?.('claude')
+  const claude = claudeOn && mms.claudeSubscription.configured() ? [{ id: CLAUDE_USAGE_ID, label: 'Claude subscription', instanceId: 'claude', previewAccounts: true as const }] : []
+  return [
+    ...mms.providerAccess.usageSlots(),
+    ...claude,
+    ...(mms.harness?.instances.usageSlots({ kind: 'device' }) ?? [])
+  ]
+}
+
+/** Keeps a reading's 5-hour and weekly limits for their trends; one that cannot be kept never fails the read. */
+export function recordLimitReading(mms: MmsProfileServices, usage: ProviderUsage): void {
+  try {
+    void limitReadings(mms.getProfileHomeDir()).record(usage).catch(() => undefined)
+  } catch {
+    // No profile folder (a test's services): nothing to keep it in.
+  }
+}
+
+/** Keeps a fresh reading for the page, and its limits for their trends. */
+export function keepReading(mms: MmsProfileServices, usage: ProviderUsage): void {
+  keepUsage(mms, usage)
+  recordLimitReading(mms, usage)
+}
+
+/** The same for one sign-in of a provider that reads several. */
+export function keepAccountReading(mms: MmsProfileServices, providerId: string, label: string, account: UsageAccount): void {
+  keepAccount(mms, providerId, account)
+  recordLimitReading(mms, { id: providerId, label, status: 'available', windows: [], accounts: [account] })
+}
+
+/**
+ * One provider's usage, read within its deadline and kept: the page's read, and the background one. It goes
+ * through each provider's own reader, so their caches, backoff and Retry-After waits apply to both.
+ */
+export async function readProviderUsage(mms: MmsProfileServices, providerId: string): Promise<ProviderUsage | undefined> {
+  if (providerId === CLAUDE_USAGE_ID) {
+    // Turned off in Settings: not on the page, so not read either.
+    if (mms.providerInstances?.isDisabled?.('claude')) return undefined
+    const claude = mms.claudeSubscription
+    const read = await withUsageDeadline(async () => {
+      await claude.status()
+      return claude.configured() ? claude.getUsage(mms.worktrees.getRepoRoot()) : undefined
+    }, () => unreachableUsage(providerId, 'Claude subscription'))
+    const provider = read && steadyUsage(mms, read)
+    if (provider) keepReading(mms, provider)
+    return provider
+  }
+  const slot = mms.harness?.instances.usageSlots({ kind: 'device' }).find((entry) => entry.id === providerId)
+  const listed = slot ?? mms.providerAccess.usageSlots().find((entry) => entry.id === providerId)
+  // Only a provider the page lists is read, so the kept readings never grow past that list.
+  if (!listed) return undefined
+  const label = listed.label
+  const provider = await withUsageDeadline(
+    async () => (slot ? mms.harness!.instances.usageFor({ kind: 'device' }, providerId) : mms.providerAccess.usageFor(providerId)),
+    () => unreachableUsage(providerId, label)
+  )
+  if (provider) keepReading(mms, provider)
+  return provider
 }

@@ -15,6 +15,10 @@ export interface LogRecord {
   key: string
   /** The cost the agent itself logged, when it logs one. */
   costUsd?: number
+  /** Fast or standard mode, when the log says which. */
+  speed?: 'fast' | 'standard'
+  /** The folder the agent worked in, when the log says. */
+  cwd?: string
 }
 
 /**
@@ -45,6 +49,7 @@ const tsOf = (value: unknown): number => {
   const parsed = Date.parse(str(value))
   return Number.isFinite(parsed) ? parsed : 0
 }
+const speedOf = (value: unknown): 'fast' | 'standard' | undefined => (value === 'fast' ? 'fast' : value === 'standard' ? 'standard' : undefined)
 const list = (value: string | undefined): string[] => (value ? value.split(',').map((part) => part.trim()).filter(Boolean) : [])
 /**
  * `MOUSSE_USAGE_LOG_HOME` reads the logs under another home folder only (a test or a sandbox);
@@ -75,29 +80,39 @@ const claudeParser: LineParser<Record<string, never>> = {
       cacheWrite: num(usage.cache_creation_input_tokens),
       output: num(usage.output_tokens),
       key: `c:${id}`,
-      ...(num(entry.costUSD) ? { costUsd: num(entry.costUSD) } : {})
+      ...(num(entry.costUSD) ? { costUsd: num(entry.costUSD) } : {}),
+      ...(speedOf(usage.speed) ? { speed: speedOf(usage.speed)! } : {}),
+      ...(str(entry.cwd) ? { cwd: str(entry.cwd) } : {})
     }
   }
 }
 
-interface CodexState { session: string; model: string; total: number }
+interface CodexState { session: string; model: string; total: number; tier?: string; cwd?: string }
 
 /**
  * Codex: `token_count` events carry the last request's usage and the session's running total. The
- * model comes from the latest `turn_context`. A repeated running total is the same event again.
+ * model comes from the latest `turn_context`, the speed from the latest applied thread settings (`priority` is
+ * fast mode). A repeated running total is the same event again.
  */
 const codexParser: LineParser<CodexState> = {
-  markers: ['"session_meta"', '"turn_context"', '"token_count"'],
+  markers: ['"session_meta"', '"turn_context"', '"token_count"', '"thread_settings_applied"'],
   initial: () => ({ session: '', model: '', total: -1 }),
   parse(line, state) {
     const entry = JSON.parse(line)
     const payload = entry?.payload
     if (entry?.type === 'session_meta') {
       if (!state.session) state.session = str(payload?.id) || str(payload?.session_id)
+      if (str(payload?.cwd)) state.cwd = str(payload.cwd)
       return null
     }
     if (entry?.type === 'turn_context') {
       if (str(payload?.model)) state.model = str(payload.model)
+      if (str(payload?.cwd)) state.cwd = str(payload.cwd)
+      return null
+    }
+    if (payload?.type === 'thread_settings_applied') {
+      const tier = str(payload.thread_settings?.service_tier)
+      if (tier) state.tier = tier
       return null
     }
     if (payload?.type !== 'token_count' || !payload.info) return null
@@ -114,7 +129,8 @@ const codexParser: LineParser<CodexState> = {
     const ts = tsOf(entry.timestamp)
     if (!ts) return null
     // A forked session copies its parent's events with their times: the time and counts match.
-    return { ts, model: state.model, session: state.session, input, cacheRead: cached, cacheWrite, output, key: `x:${ts}:${num(last.input_tokens)}:${output}` }
+    const speed = state.tier === 'priority' ? 'fast' as const : state.tier ? 'standard' as const : undefined
+    return { ts, model: state.model, session: state.session, input, cacheRead: cached, cacheWrite, output, key: `x:${ts}:${num(last.input_tokens)}:${output}`, ...(speed ? { speed } : {}), ...(state.cwd ? { cwd: state.cwd } : {}) }
   }
 }
 
@@ -146,12 +162,12 @@ const grokParser: LineParser<Record<string, never>> = {
 }
 
 /** Pi: a `session` header, then assistant `message` entries carrying usage and often a cost. */
-const piParser: LineParser<{ session: string }> = {
+const piParser: LineParser<{ session: string; cwd?: string }> = {
   markers: ['"usage"', '"type":"session"'],
   initial: () => ({ session: '' }),
   parse(line, state) {
     const entry = JSON.parse(line)
-    if (entry?.type === 'session') { state.session = str(entry.id); return null }
+    if (entry?.type === 'session') { state.session = str(entry.id); if (str(entry.cwd)) state.cwd = str(entry.cwd); return null }
     const message = entry?.message
     const usage = message?.usage
     if (entry?.type !== 'message' || message?.role !== 'assistant' || !usage) return null
@@ -162,6 +178,7 @@ const piParser: LineParser<{ session: string }> = {
       ts, model, session: state.session,
       input: num(usage.input), cacheRead: num(usage.cacheRead), cacheWrite: num(usage.cacheWrite), output: num(usage.output),
       key: `p:${str(entry.id)}:${ts}:${model}`,
+      ...(state.cwd ? { cwd: state.cwd } : {}),
       ...(num(usage.cost?.total) ? { costUsd: num(usage.cost.total) } : {})
     }
   }

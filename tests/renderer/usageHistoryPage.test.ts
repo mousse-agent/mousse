@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
- * The Usage page: Tokens, Cost and Limits tabs; the history's tiles and filters; and history added up across the
- * person's computers, each sending only its totals over the device link.
+ * The Usage page: History and Limits tabs; the history's tiles, filters, projects and priciest sessions; and history
+ * added up across the person's computers, each sending only its totals over the device link.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -37,12 +37,24 @@ function history(request: UsageHistoryRequest, tokens: Partial<Record<UsageAgent
     days: [{ day: dayKeys[days - 1]!, tokens: sum, costUsd: sum / 1e6, sessions: 2 * rows.length }],
     totals: { input: 0, cacheRead: sum * 0.9, cacheWrite: 0, output: sum * 0.1 },
     costUsd: sum / 1e6, costByKind: { input: 0, cacheRead: sum * 0.4 / 1e6, cacheWrite: 0, output: sum * 0.6 / 1e6 }, costUnsplitUsd: 0,
+    costBySpeed: { fast: 0, standard: sum / 1e6, unknown: 0 },
+    // Every computer sends its projects and sessions here; only this computer's may be shown.
+    projects: rows.length ? [{ name: `${rows[0]![0]}-project`, tokens: sum, costUsd: sum / 1e6, sessions: 2 }] : [],
+    topSessions: rows.map(([id, total], n) => ({
+      agent: id, session: `ses-${id}`, model: `${id}-model`, project: `${id}-project`, tokens: total, costUsd: total / 1e6,
+      firstAt: 1, lastAt: Date.UTC(2026, 10, 18), ...(n === 0 ? { threadId: 'thr_1', title: 'Fix the login page' } : {})
+    })),
     agentIds: Object.keys(tokens) as UsageAgentId[], cacheSavingsUsd: 1, sessions: 2 * rows.length,
     sources: [{ agent: 'claude-code', path: '/home/me/.claude/projects', status: 'read', files: 3, readFiles: 0 }], readAt: '2026-11-19T12:00:00Z', scanMs: 40
   }
 }
 
 const usageHistory = vi.fn(async (request: UsageHistoryRequest) => history(request, { 'claude-code': 1_500_000, codex: 500_000 }))
+const kept = (used: number) => [{ id: 'claude-subscription', label: 'Claude subscription', windows: [
+  { id: 'five_hour', label: '5-hour', points: [[Date.now() - 3_600_000, used]], resets: [] },
+  { id: 'seven_day', label: 'Weekly', points: [[Date.now() - 3_600_000, used / 2]], resets: [] }
+] }]
+const limitTrends = vi.fn(async (_range: string) => ({ trends: kept(30) }))
 const platformRequest = vi.fn(async (method: string, params: { target?: string } & UsageHistoryRequest): Promise<unknown> => {
   if (method !== 'bridge.hub.usageHistory') throw Object.assign(new Error('no'), { code: 'method_not_found' })
   if (params.target === 'nod_laptop') return history(params, { 'claude-code': 1_000_000, grok: 200_000 })
@@ -56,6 +68,7 @@ beforeEach(() => {
   localStorage.clear()
   sessionStorage.clear()
   usageHistory.mockClear()
+  limitTrends.mockClear()
   platformRequest.mockClear()
   useAppStore.setState({ profileId: 'prf_work' })
   useComputersStore.setState(NO_COMPUTERS)
@@ -64,6 +77,7 @@ beforeEach(() => {
       usageSlots: async () => ({ slots: providers.map((provider) => ({ id: provider.id, label: provider.label, instanceId: provider.id, ...(provider.authType ? { authType: provider.authType } : {}) })) }),
       getUsageFor: async ({ providerId, preview }: { providerId: string; preview?: boolean }) => (preview ? {} : { provider: providers.find((provider) => provider.id === providerId) }),
       usageHistory,
+      limitTrends,
       onSnapshots: () => () => {},
       openLoginUrl: vi.fn()
     },
@@ -95,25 +109,44 @@ const pick = async (testId: string, option: string) => {
 }
 
 describe('the Usage page tabs', () => {
-  it('opens on Tokens; Cost shows the same history in dollars; Limits shows the plans instead; the choice is kept', async () => {
+  it('opens on History with tokens and cost together; Limits shows the plans instead; the choice is kept', async () => {
     await render()
     expect(q('h1')).toBeNull()
     expect(q('[aria-label="Back"]')).toBeNull()
-    expect(tab('Tokens').getAttribute('aria-selected')).toBe('true')
+    expect([...document.querySelectorAll('[role="tab"]')].map((element) => element.textContent)).toEqual(['History', 'Limits'])
+    expect(tab('History').getAttribute('aria-selected')).toBe('true')
     expect(total()).toBe('2M')
+    expect(q('[data-testid="usage-history-cost"]')!.textContent).toBe('$2.00')
     expect(visible(q('[data-testid="usage-window"]'))).toBe(false)
 
-    await click(tab('Cost'))
-    expect(total()).toBe('$2.00')
-    expect(usageHistory).toHaveBeenCalledTimes(1)
-
     await click(tab('Limits'))
+    expect(usageHistory).toHaveBeenCalledTimes(1)
     expect(visible(q('[data-testid="usage-history"]'))).toBe(false)
     expect(visible(q('[data-testid="usage-window"]'))).toBe(true)
 
     act(() => root!.unmount())
     await render()
     expect(tab('Limits').getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('Limits shows the trends kept on this computer, read again for another range; none without readings', async () => {
+    await render()
+    expect(limitTrends).not.toHaveBeenCalled()
+    await click(tab('Limits'))
+    expect(limitTrends).toHaveBeenLastCalledWith('7d')
+    const trends = q('[data-testid="usage-limit-trends"]')!
+    expect(visible(trends)).toBe(true)
+    expect(trends.textContent).toContain('5-hour')
+    expect(trends.textContent).toContain('Weekly')
+    await click([...trends.querySelectorAll<HTMLElement>('[role="radio"]')].find((element) => element.textContent === '24h')!)
+    expect(limitTrends).toHaveBeenLastCalledWith('24h')
+
+    act(() => root!.unmount())
+    limitTrends.mockResolvedValue({ trends: [] })
+    await render()
+    expect(limitTrends).toHaveBeenCalled()
+    expect(q('[data-testid="usage-limit-trends"]')).toBeNull()
+    expect(visible(q('[data-testid="usage-window"]'))).toBe(true)
   })
 
   it('the needs-attention chip opens Limits at its section', async () => {
@@ -148,6 +181,16 @@ describe('the history', () => {
     expect([...document.querySelectorAll('[role="option"]')].map((option) => option.textContent)).toEqual(['All providers', 'Claude Code', 'Codex'])
   })
 
+  it('lists this computer\'s projects and priciest sessions, a session opening the thread that ran it', async () => {
+    await render()
+    expect(q('[data-testid="usage-history-projects"]')!.textContent).toContain('claude-code-project')
+    const sessions = q('[data-testid="usage-history-sessions"]')!
+    expect(q('[data-testid="usage-session-link"]')!.textContent).toBe('Fix the login page')
+    // A session no Mousse thread ran is named by its agent, with nothing to open.
+    expect(sessions.textContent).toContain('Codex session')
+    expect(sessions.querySelectorAll('[data-testid="usage-session-link"]')).toHaveLength(1)
+  })
+
   it('shows no computer filter on a computer with no others', async () => {
     await render()
     expect(q('[data-testid="usage-history-device"]')).toBeNull()
@@ -171,6 +214,11 @@ describe('history across computers', () => {
     expect(sources).toContain('2 computers')
     expect(sources).toContain('Old desktop: older version or no permission')
     expect(sources).toContain('Odd box: sent an unreadable reply')
+    // Project names stay on each computer: across them the lists are this computer's, and say so.
+    const projects = q('[data-testid="usage-history-projects"]')!.textContent!
+    expect(projects).toContain('This device only')
+    expect(projects).not.toContain('grok')
+    expect(q('[data-testid="usage-history-sessions"]')!.textContent).not.toContain('Grok session')
   })
 
   it('one computer picked: only its history, read over the device link', async () => {
@@ -180,5 +228,7 @@ describe('history across computers', () => {
     await pick('usage-history-device', 'Laptop')
     expect(usageHistory).not.toHaveBeenCalled()
     expect(total()).toBe('1.2M')
+    expect(q('[data-testid="usage-history-projects"]')!.textContent).toContain('Project names stay on each device')
+    expect(q('[data-testid="usage-history-sessions"]')).toBeNull()
   })
 })

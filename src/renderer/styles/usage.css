@@ -1016,6 +1016,21 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
   line-height: 1.05;
 }
 
+.usage-history-figure {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-8);
+}
+
+.usage-history-figure + .usage-history-figure {
+  margin-left: var(--space-24);
+}
+
+.usage-history-total.is-cost {
+  font-size: 26px;
+  color: color-mix(in srgb, var(--text-primary) 82%, transparent);
+}
+
 .usage-history-total-unit {
   font-size: var(--settings-fs-row);
   color: var(--text-secondary);
@@ -1037,6 +1052,20 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
 .usage-history-plot-row {
   display: grid;
   grid-template-columns: 56px 1fr;
+}
+
+.usage-history-plot-row:has(.usage-history-axis.is-cost) {
+  grid-template-columns: 56px 1fr 56px;
+}
+
+.usage-history-card:has(.usage-history-axis.is-cost) .usage-history-x,
+.usage-history-card:has(.usage-history-axis.is-cost) .usage-history-readout {
+  margin-right: 56px;
+}
+
+.usage-history-axis.is-cost span {
+  right: auto;
+  left: var(--space-12);
 }
 
 .usage-history-axis {
@@ -1081,6 +1110,47 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
   stroke-dasharray: 3 3;
 }
 
+/* Cost: a thin line over the token area, on the right-hand scale. */
+.usage-history-cost-line {
+  fill: none;
+  stroke: color-mix(in srgb, var(--text-primary) 70%, transparent);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.usage-history-cost-dot {
+  fill: var(--text-primary);
+  stroke: var(--bg-primary);
+  stroke-width: 1.5;
+}
+
+.usage-history-tip-cost {
+  margin-left: var(--space-8);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.usage-history-readout-key {
+  display: inline-block;
+  width: 12px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.usage-history-readout-key.is-area {
+  height: 8px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.usage-history-readout-key.is-line {
+  height: 2px;
+  margin-left: var(--space-16);
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--text-primary) 70%, transparent);
+}
+
 .usage-history-focus {
   fill: var(--text-primary);
   fill-opacity: 0.05;
@@ -1098,6 +1168,7 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
   background: var(--ui-raised, var(--bg-primary));
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.28);
   font-size: 12px;
+  white-space: nowrap;
   transform: translateX(var(--space-12));
   pointer-events: none;
 }
@@ -1252,6 +1323,19 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
   color: color-mix(in srgb, var(--agent) 45%, var(--text-primary));
 }
 
+.usage-agent-tile-figures {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-8);
+  width: 100%;
+}
+
+.usage-agent-tile-cost {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
 .usage-agent-tile[aria-pressed='false'] .usage-agent-tile-value {
   color: var(--text-secondary);
 }
@@ -1308,48 +1392,55 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
   gap: 6px;
 }
 
-/* Tokens (or cost) by kind: a soft ring with the total in its middle, the legend beside it. */
-.usage-history-kinds {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+/* Tokens and cost by kind and speed: three compact bars side by side, each with its plain-word legend. */
+.usage-history-splits {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: var(--space-24) var(--space-40, 40px);
 }
 
-.usage-history-donut {
-  position: relative;
-  flex: none;
-  width: 132px;
-  height: 132px;
+.usage-history-split {
+  min-width: 0;
 }
 
-.usage-history-donut svg {
-  display: block;
-}
-
-.usage-history-donut-centre {
-  position: absolute;
-  inset: 0;
+.usage-history-split-head {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 1px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-12);
+  margin-bottom: var(--space-12);
 }
 
-.usage-history-donut-value {
-  font-size: 19px;
+.usage-history-split-head h3 {
+  margin: 0;
+  font-size: var(--settings-fs-row);
   font-weight: 600;
-  letter-spacing: -0.015em;
 }
 
-.usage-history-donut-unit {
-  font-size: 11.5px;
+.usage-history-split-total {
+  font-size: var(--settings-fs-row);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+/* Filled segments with a little depth: a soft light along the top, a touch of shade below, rounded ends. */
+.usage-history-split-bar {
+  display: flex;
+  gap: 3px;
+  height: 12px;
+  margin-bottom: var(--space-16);
+}
+
+.usage-history-split-bar span {
+  height: 100%;
+  border-radius: 6px;
+  background-image: linear-gradient(to bottom, rgb(255 255 255 / 0.22), rgb(255 255 255 / 0.04) 55%, rgb(0 0 0 / 0.12));
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.16), 0 1px 2px rgb(0 0 0 / 0.18);
 }
 
 .usage-history-legend {
   display: grid;
-  grid-template-columns: 10px minmax(150px, auto) auto auto;
+  grid-template-columns: 10px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px var(--space-16);
   margin: 0;
@@ -1380,7 +1471,7 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
 }
 
 .usage-history-kinds-block .usage-history-note {
-  margin-top: var(--space-16);
+  margin-top: var(--space-24);
 }
 
 /* The breakdown across the whole column: roomy rows, a rank, and a thin share bar in the agent's colour under each name. */
@@ -1432,6 +1523,44 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
   font-weight: 500;
 }
 
+.usage-history-scope {
+  font-size: var(--settings-fs-small);
+}
+
+/* A priciest session's thread: plain text that opens it. */
+.usage-history-session-link {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.usage-history-session-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.usage-history-session-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.usage-history-session-meta {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .usage-history-share-bar {
   display: block;
   height: 3px;
@@ -1447,7 +1576,7 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
   border-radius: 2px;
 }
 
-/* Tokens / Cost / Limits, centred in the page header: plain words, the picked one on a soft fill. */
+/* History · Limits, centred in the page header. */
 .usage-heading.has-tabs {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
@@ -1469,42 +1598,10 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
   flex: 1;
 }
 
+/* The app's pill tab bar (PillTabs), at a fixed width so its two halves stay equal. */
 .usage-tabs {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-}
-
-.usage-tab {
-  height: 32px;
-  padding: 0 var(--space-16);
-  border: 0;
-  border-radius: 9px;
-  background: transparent;
-  color: var(--text-secondary);
-  font: inherit;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background-color var(--ui-dur-fast) ease, color var(--ui-dur-fast) ease;
-}
-
-.usage-tab:hover {
-  color: var(--text-primary);
-}
-
-.usage-tab[aria-selected='true'] {
-  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
-  color: var(--text-primary);
-}
-
-.usage-tab:focus {
-  outline: none;
-}
-
-.usage-tab:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  flex: none;
+  width: 220px;
 }
 
 /* Limits in the wide column: each plan in a light frame like the chart's, two to a row when there is room. */
@@ -1546,8 +1643,83 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
 
 @media (prefers-reduced-motion: reduce) {
   .usage-agent-tile,
-  .usage-tab,
   .usage-history-body {
     transition: none;
   }
+}
+
+/* Even pace on a limit's bar: a thin tick where the share left would be by now if use were spread evenly. */
+.usage-window-bar {
+  position: relative;
+}
+
+.usage-bar-pace {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--text-primary);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--bg-primary) 70%, transparent);
+  pointer-events: none;
+}
+
+/* Limit trends across the whole Limits page, in the history's chart. */
+.usage-limit-trends {
+  grid-column: 1 / -1;
+}
+
+.usage-limit-trends .settings-group-action {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+/* Resets and even pace stay faint: hairlines the eye finds when it looks for them. */
+.usage-limit-reset {
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+  stroke-opacity: 0.28;
+}
+
+.usage-limit-pace {
+  stroke-width: 1;
+  stroke-dasharray: 3 5;
+  stroke-opacity: 0.32;
+}
+
+/* A line's value at the hovered step. */
+.usage-history-dot {
+  stroke: var(--bg-primary);
+  stroke-width: 1.5;
+}
+
+.usage-limit-trends-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-16);
+}
+
+.usage-limit-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.usage-limit-legend-line {
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+.usage-limit-legend-pace {
+  width: 14px;
+  border-top: 1px dashed color-mix(in srgb, var(--text-secondary) 80%, transparent);
+}
+
+.usage-limit-legend-reset {
+  height: 12px;
+  border-left: 1px dashed color-mix(in srgb, var(--text-secondary) 80%, transparent);
 }

@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type RefObject } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { ProviderIcon } from '../lib/providerIcons'
+import { selectThread } from '../lib/threadActions'
 import {
-  AGENT_COLOR, AGENT_ICON, RANGE_WORDS, bucketLabel, compactNumber, dayLabel, measureValue, money, niceScale, percent, tokenSum,
+  AGENT_COLOR, AGENT_ICON, RANGE_WORDS, bucketLabel, compactMoney, compactNumber, dayLabel, measureValue, money, niceScale, percent, tokenSum,
   type UsageMeasure
 } from '../lib/usageHistory'
-import { USAGE_AGENT_LABELS, type UsageAgentId, type UsageHistoryRange, type UsageHistoryRequest, type UsageHistoryResponse, type UsageTokens } from '../../shared/usageHistory'
+import { UsageAreaChart } from './UsageAreaChart'
+import { USAGE_AGENT_LABELS, type UsageAgentId, type UsageCostBySpeed, type UsageHistoryRange, type UsageHistoryRequest, type UsageHistoryResponse, type UsageTokens } from '../../shared/usageHistory'
 import { ALL_COMPUTERS, THIS_COMPUTER } from '../lib/subscriptionUsage'
 import { machineStatusLabel } from '../lib/storageUsage'
 import { mergeHistories, parseUsageHistory, UsageHistoryReplyError } from '../lib/usageHistoryDevices'
@@ -45,174 +47,61 @@ const SPARE_HUES = ['var(--hue-3)', 'var(--hue-6)', 'color-mix(in srgb, var(--hu
 const colorOf = (id: string, index: number) => AGENT_COLOR[id as UsageAgentId] ?? SPARE_HUES[index % SPARE_HUES.length]
 const iconOf = (id: string) => AGENT_ICON[id as UsageAgentId] ?? id
 
-const PLOT_H = 236
-/** The thinnest a non-empty band or segment is drawn, so an agent with a sliver of the total stays visible. */
-const MIN_BAND = 2
-
-function useWidth<T extends HTMLElement>(ref: RefObject<T | null>): number {
-  const [width, setWidth] = useState(0)
-  useLayoutEffect(() => {
-    const element = ref.current
-    if (!element) return
-    setWidth(element.getBoundingClientRect().width)
-    if (typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(([entry]) => setWidth(entry.contentRect.width))
-    observer.observe(element)
-    return () => observer.disconnect()
-  }, [ref])
-  return width
-}
-
-/** A smooth curve through the points that never overshoots them (monotone cubic). */
-function smoothPath(points: ReadonlyArray<readonly [number, number]>, move = true): string {
-  const n = points.length
-  if (n === 0) return ''
-  const fmt = (value: number) => Math.round(value * 10) / 10
-  let path = `${move ? 'M' : 'L'}${fmt(points[0][0])},${fmt(points[0][1])}`
-  if (n === 1) return path
-  const dx: number[] = []
-  const slope: number[] = []
-  for (let i = 0; i < n - 1; i++) {
-    dx[i] = points[i + 1][0] - points[i][0]
-    slope[i] = (points[i + 1][1] - points[i][1]) / dx[i]
-  }
-  const tangent: number[] = [slope[0]]
-  for (let i = 1; i < n - 1; i++) {
-    tangent[i] = slope[i - 1] * slope[i] <= 0
-      ? 0
-      : (3 * (dx[i - 1] + dx[i])) / ((2 * dx[i] + dx[i - 1]) / slope[i - 1] + (dx[i] + 2 * dx[i - 1]) / slope[i])
-  }
-  tangent[n - 1] = slope[n - 2]
-  for (let i = 0; i < n - 1; i++) {
-    const [x0, y0] = points[i]
-    const [x1, y1] = points[i + 1]
-    const h = dx[i] / 3
-    path += ` C${fmt(x0 + h)},${fmt(y0 + tangent[i] * h)} ${fmt(x1 - h)},${fmt(y1 - tangent[i + 1] * h)} ${fmt(x1)},${fmt(y1)}`
-  }
-  return path
-}
-
-interface ChartAgent { id: UsageAgentId; label: string; color: string; values: number[] }
-
 /**
- * The history chart: a smooth stacked area, biggest agent at the bottom. Every agent with usage stays at
- * least a hairline thick. Hovering shows that hour or day's numbers in a small card.
+ * The history chart: tokens as a smooth stacked area, biggest agent at the bottom, and cost as one thin line on
+ * top, read on the right-hand scale. Hovering shows that hour or day's tokens and cost in a small card.
  */
-function HistoryChart({ history, measure, shown }: { history: UsageHistoryResponse; measure: UsageMeasure; shown: UsageAgentId[] }) {
-  const gradientId = useId().replace(/:/g, '')
-  const [hover, setHover] = useState<number | null>(null)
-  const plotRef = useRef<HTMLDivElement>(null)
-  const width = useWidth(plotRef)
+function HistoryChart({ history, shown }: { history: UsageHistoryResponse; shown: UsageAgentId[] }) {
   const count = history.buckets.length
-  const agents: ChartAgent[] = history.agents
-    .map((agent, index) => ({ id: agent.id, label: agent.label, color: colorOf(agent.id, index), values: (measure === 'cost' ? agent.costSeries : agent.series).slice(0, count) }))
+  const agents = history.agents
+    .map((agent, index) => ({ id: agent.id, label: agent.label, color: colorOf(agent.id, index), values: agent.series.slice(0, count), costs: agent.costSeries.slice(0, count) }))
     .filter((agent) => shown.includes(agent.id))
   const totals = history.buckets.map((_, i) => agents.reduce((sum, agent) => sum + (agent.values[i] ?? 0), 0))
-  const ticks = niceScale(Math.max(0, ...totals))
-  const top = ticks[ticks.length - 1] || 1
-  const slot = width / Math.max(count, 1)
-  const xAt = (i: number) => (i + 0.5) * slot
-  const yOf = (pixels: number) => PLOT_H - pixels
-  const labelAt = [0, Math.floor((count - 1) / 2), count - 1]
-  const onMove = (event: MouseEvent) => {
-    const box = plotRef.current?.getBoundingClientRect()
-    if (!box) return
-    const index = Math.floor(((event.clientX - box.left) / box.width) * count)
-    setHover(index >= 0 && index < count ? index : null)
-  }
-
-  // Stacked heights in pixels, each band at least MIN_BAND where it has usage; the stack is fitted back into the plot.
-  const stacks = history.buckets.map((_, i) => {
-    let base = 0
-    return agents.map((agent) => {
-      const value = agent.values[i] ?? 0
-      const height = value > 0 ? Math.max((value / top) * PLOT_H, MIN_BAND) : 0
-      const band = { from: base, to: base + height }
-      base += height
-      return band
-    })
-  })
-  const stackTop = Math.max(PLOT_H, ...stacks.map((bands) => bands[bands.length - 1]?.to ?? 0))
-  const fit = stackTop > PLOT_H ? PLOT_H / stackTop : 1
-  // Fills first, then each band's top edge, so a small agent reads as a thin coloured rim.
-  const layers = width > 0 ? agents.map((agent, a) => ({
-    agent,
-    upper: stacks.map((bands, i) => [xAt(i), yOf(bands[a]!.to * fit)] as const),
-    lower: stacks.map((bands, i) => [xAt(i), yOf(bands[a]!.from * fit)] as const).reverse()
-  })) : []
-
-  // The card sits beside the hovered hour or day, on the side with more room.
-  const tip = hover === null ? null : {
-    side: xAt(hover) > width / 2 ? 'left' as const : 'right' as const,
-    x: xAt(hover),
-    rows: agents.map((agent) => ({ agent, value: agent.values[hover] ?? 0 })).filter((row) => row.value > 0).sort((a, b) => b.value - a.value)
-  }
-  const tickY = (tick: number) => `${(1 - tick / top) * 100}%`
-  const caption = `${agents.length === history.agents.length ? 'All agents' : `${agents.length} of ${history.agents.length} agents`} · ${count} ${history.bucket === 'day' ? 'days' : 'hours'}`
-
-  return <div className="usage-history-chart">
-    <div className="usage-history-plot-row">
-      <div className="usage-history-axis" aria-hidden="true">
-        {[...ticks].reverse().map((tick) => <span key={tick} style={{ top: tickY(tick) }}>{measureValue(measure, tick)}</span>)}
-      </div>
-      <div className="usage-history-plot" ref={plotRef} onMouseMove={onMove} onMouseLeave={() => setHover(null)}
-        role="img" aria-label={`${measure === 'cost' ? 'Cost' : 'Tokens'} per ${history.bucket}, ${RANGE_WORDS[history.range]}`}>
-        {ticks.map((tick) => <span key={tick} className="usage-history-grid" style={{ top: tickY(tick) }} />)}
-        {width > 0 && <svg width={width} height={PLOT_H} viewBox={`0 0 ${width} ${PLOT_H}`}>
-          <defs>
-            {agents.map((agent) => <linearGradient key={agent.id} id={`${gradientId}-${agent.id}`} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" style={{ stopColor: agent.color, stopOpacity: 0.5 }} />
-              <stop offset="100%" style={{ stopColor: agent.color, stopOpacity: 0.14 }} />
-            </linearGradient>)}
-          </defs>
-          {hover !== null && <line className="usage-history-guide" x1={xAt(hover)} x2={xAt(hover)} y1={0} y2={PLOT_H} />}
-          {layers.map(({ agent, upper, lower }) => <path key={`f-${agent.id}`} d={`${smoothPath(upper)} ${smoothPath(lower, false)} Z`} fill={`url(#${gradientId}-${agent.id})`} />)}
-          {[...layers].reverse().map(({ agent, upper }, n) => <path key={`s-${agent.id}`} d={smoothPath(upper)} fill="none" stroke={agent.color}
-            strokeWidth={n === layers.length - 1 ? 1.5 : 2} strokeLinejoin="round" />)}
-        </svg>}
-        {tip && <div className="usage-history-tip" data-side={tip.side} style={{ left: tip.x }} aria-hidden="true">
-          <div className="usage-history-tip-head">
-            <span>{bucketLabel(history, hover!)}</span>
-            <span>{measureValue(measure, totals[hover!] ?? 0)}</span>
-          </div>
-          {tip.rows.length === 0 && <div className="usage-history-tip-row settings-muted">No usage</div>}
-          {tip.rows.map(({ agent, value }) => <div key={agent.id} className="usage-history-tip-row">
-            <span className="usage-history-tip-key" style={{ background: agent.color }} />
-            <span className="usage-history-tip-name">{agent.label}</span>
-            <span>{measureValue(measure, value)}</span>
-          </div>)}
-        </div>}
-      </div>
-    </div>
-    <div className="usage-history-x" aria-hidden="true">
-      {labelAt.map((index, n) => <span key={n} style={{ left: `${((index + 0.5) / count) * 100}%` }}>{bucketLabel(history, index)}</span>)}
-    </div>
-    <p className="usage-history-readout">{caption}</p>
-  </div>
+  const costs = history.buckets.map((_, i) => agents.reduce((sum, agent) => sum + (agent.costs[i] ?? 0), 0))
+  const who = agents.length === history.agents.length ? 'All agents' : `${agents.length} of ${history.agents.length} agents`
+  return <UsageAreaChart
+    count={count}
+    series={agents}
+    stacked
+    // Both scales have three steps, so their gridlines fall on the same heights.
+    scale={{ ticks: niceScale(Math.max(0, ...totals)), format: compactNumber }}
+    line={{ values: costs, scale: { ticks: niceScale(Math.max(0, ...costs)), format: compactMoney } }}
+    ariaLabel={`Tokens and cost per ${history.bucket}, ${RANGE_WORDS[history.range]}`}
+    xLabel={(index) => bucketLabel(history, index)}
+    tipAt={(index) => ({
+      head: <><span>{bucketLabel(history, index)}</span><span>{compactNumber(totals[index] ?? 0)}</span><span className="usage-history-tip-cost">{compactMoney(costs[index] ?? 0)}</span></>,
+      rows: agents
+        .map((agent) => ({ agent, value: agent.values[index] ?? 0, cost: agent.costs[index] ?? 0 }))
+        .filter((row) => row.value > 0 || row.cost > 0)
+        .sort((a, b) => b.value - a.value)
+        .map(({ agent, value, cost }) => ({ key: agent.id, color: agent.color, name: agent.label, cells: <><span>{compactNumber(value)}</span><span className="usage-history-tip-cost">{compactMoney(cost)}</span></> })),
+      empty: 'No usage'
+    })}
+    readout={<>
+      <span className="usage-history-readout-key is-area" aria-hidden="true" />Tokens, {who}
+      <span className="usage-history-readout-key is-line" aria-hidden="true" />Cost, right scale
+      <span className="usage-history-readout-span"> · {count} {history.bucket === 'day' ? 'days' : 'hours'}</span>
+    </>}
+  />
 }
 
-/** One small tinted tile per agent: its name, figure and share. A click takes it in or out of the chart. */
-function AgentTile({ agent, index, measure, total, hidden, onToggle }: {
+/** One small tinted tile per agent: its name, tokens and cost, and its share. A click takes it in or out of the chart. */
+function AgentTile({ agent, index, total, hidden, onToggle }: {
   agent: UsageHistoryResponse['agents'][number]
   index: number
-  measure: UsageMeasure
   total: number
   hidden: boolean
   onToggle: () => void
 }) {
   const tokens = tokenSum(agent.tokens)
-  const value = measure === 'cost' ? agent.costUsd : tokens
-  const detail = [
-    `${agent.sessions.toLocaleString('en-US')} session${agent.sessions === 1 ? '' : 's'}`,
-    measure === 'cost' ? `${compactNumber(tokens)} tokens` : money(agent.costUsd)
-  ].join(' · ')
+  const sessions = `${agent.sessions.toLocaleString('en-US')} session${agent.sessions === 1 ? '' : 's'}`
   return <button
     type="button"
     className="usage-agent-tile"
     data-testid="usage-agent-tile"
     data-agent={agent.id}
     aria-pressed={!hidden}
-    title={`${agent.label}: ${detail}\n${hidden ? 'Hidden from the chart. Click to show it.' : 'Click to hide it from the chart.'}`}
+    title={`${agent.label}: ${compactNumber(tokens)} tokens · ${money(agent.costUsd)} · ${sessions}\n${hidden ? 'Hidden from the chart. Click to show it.' : 'Click to hide it from the chart.'}`}
     style={{ '--agent': colorOf(agent.id, index) } as CSSProperties}
     onClick={onToggle}
   >
@@ -220,59 +109,56 @@ function AgentTile({ agent, index, measure, total, hidden, onToggle }: {
       <ProviderIcon providerId={iconOf(agent.id)} size={13} />
       <span className="usage-agent-tile-name">{agent.label}</span>
     </span>
-    <span className="usage-agent-tile-value">{measureValue(measure, value)}</span>
-    <span className="usage-agent-tile-line">{hidden ? 'hidden from chart' : `${percent(value, total)} of ${measure === 'cost' ? 'cost' : 'tokens'}`}</span>
+    <span className="usage-agent-tile-figures">
+      <span className="usage-agent-tile-value">{compactNumber(tokens)}</span>
+      <span className="usage-agent-tile-cost">{compactMoney(agent.costUsd)}</span>
+    </span>
+    <span className="usage-agent-tile-line">{hidden ? 'hidden from chart' : `${percent(tokens, total)} of tokens`}</span>
   </button>
 }
 
-interface KindSlice { key: string; label: string; value: number; color: string }
+interface KindSlice { key: string; label: string; value: number; color: string; title?: string }
 
-/** The four kinds of token, in plain words, each in its own tint of the accent. */
+/** The four kinds of token, in plain words, each in its own light tint of the accent. */
 const KIND_ROWS: ReadonlyArray<{ key: keyof UsageTokens; label: string; color: string }> = [
   { key: 'cacheRead', label: 'Reused from cache', color: 'color-mix(in srgb, var(--accent) 88%, transparent)' },
   { key: 'cacheWrite', label: 'Saved to cache', color: 'color-mix(in srgb, var(--accent) 58%, transparent)' },
   { key: 'input', label: 'New input', color: 'color-mix(in srgb, var(--accent) 34%, transparent)' },
   { key: 'output', label: 'Written by the model', color: 'color-mix(in srgb, var(--text-secondary) 55%, transparent)' }
 ]
-const DONUT = 132
-const RING = 14
+const UNSPLIT_COLOR = 'color-mix(in srgb, var(--text-secondary) 25%, transparent)'
+const SPEED_ROWS: ReadonlyArray<{ key: keyof UsageCostBySpeed; label: string; color: string; title?: string }> = [
+  { key: 'fast', label: 'Fast mode', color: 'color-mix(in srgb, var(--accent) 88%, transparent)' },
+  { key: 'standard', label: 'Standard', color: 'color-mix(in srgb, var(--accent) 42%, transparent)' },
+  { key: 'unknown', label: 'Unknown', color: UNSPLIT_COLOR, title: "The agent's logs don't say which speed it used" }
+]
 
-/** A soft ring of the token kinds (or their cost), the total in its middle and a legend beside it. */
-function KindsDonut({ history, measure }: { history: UsageHistoryResponse; measure: UsageMeasure }) {
-  const by = measure === 'cost' ? history.costByKind : history.totals
-  const slices: KindSlice[] = KIND_ROWS.map((row) => ({ key: row.key, label: row.label, value: by[row.key], color: row.color }))
-  if (measure === 'cost' && history.costUnsplitUsd > 0) {
-    slices.push({ key: 'unsplit', label: 'Not split by kind', value: history.costUnsplitUsd, color: 'color-mix(in srgb, var(--text-secondary) 25%, transparent)' })
-  }
+/** The three splits under the chart: tokens by kind, cost by kind and cost by speed. */
+function splits(history: UsageHistoryResponse): Array<{ id: string; title: string; measure: UsageMeasure; slices: KindSlice[] }> {
+  const costKinds: KindSlice[] = KIND_ROWS.map((row) => ({ key: row.key, label: row.label, value: history.costByKind[row.key], color: row.color }))
+  if (history.costUnsplitUsd > 0) costKinds.push({ key: 'unsplit', label: 'Not split by kind', value: history.costUnsplitUsd, color: UNSPLIT_COLOR })
+  return [
+    { id: 'tokens-kind', title: 'Tokens by kind', measure: 'tokens', slices: KIND_ROWS.map((row) => ({ key: row.key, label: row.label, value: history.totals[row.key], color: row.color })) },
+    { id: 'cost-kind', title: 'Cost by kind', measure: 'cost', slices: costKinds },
+    { id: 'cost-speed', title: 'Cost by speed', measure: 'cost', slices: SPEED_ROWS.map((row) => ({ ...row, value: history.costBySpeed[row.key] })) }
+  ]
+}
+
+/** One split as a single compact bar, with a plain-word legend under it: each part's value and share. */
+function SplitBar({ id, title, measure, slices }: { id: string; title: string; measure: UsageMeasure; slices: KindSlice[] }) {
   const total = slices.reduce((sum, slice) => sum + slice.value, 0)
-  const radius = (DONUT - RING) / 2
-  const circumference = 2 * Math.PI * radius
-  const drawn = slices.filter((slice) => slice.value > 0)
-  // A small gap between slices; a slice too thin for its gap still shows as a dot.
-  const gap = drawn.length > 1 ? 3 : 0
-  let offset = 0
-  const arcs = drawn.map((slice) => {
-    const length = (slice.value / total) * circumference
-    const arc = { slice, dash: Math.max(length - gap, 0.5), start: offset }
-    offset += length
-    return arc
-  })
-  return <div className="usage-history-kinds" data-testid="usage-history-kinds">
-    <div className="usage-history-donut">
-      <svg width={DONUT} height={DONUT} viewBox={`0 0 ${DONUT} ${DONUT}`} aria-hidden="true">
-        <circle cx={DONUT / 2} cy={DONUT / 2} r={radius} fill="none" stroke="color-mix(in srgb, var(--ui-line) 60%, transparent)" strokeWidth={RING} />
-        {arcs.map(({ slice, dash, start }) => <circle key={slice.key} cx={DONUT / 2} cy={DONUT / 2} r={radius} fill="none"
-          stroke={slice.color} strokeWidth={RING}
-          strokeDasharray={`${dash} ${circumference - dash}`} strokeDashoffset={-start}
-          transform={`rotate(-90 ${DONUT / 2} ${DONUT / 2})`} />)}
-      </svg>
-      <div className="usage-history-donut-centre">
-        <span className="usage-history-donut-value">{measureValue(measure, total)}</span>
-        <span className="usage-history-donut-unit settings-muted">{measure === 'cost' ? 'cost' : 'tokens'}</span>
-      </div>
+  return <div className="usage-history-split" data-testid={`usage-history-${id}`}>
+    <div className="usage-history-split-head">
+      <h3>{title}</h3>
+      <span className="usage-history-split-total">{measureValue(measure, total)}</span>
     </div>
-    <ul className="usage-history-legend" aria-label={measure === 'cost' ? 'Cost by kind of token' : 'Tokens by kind'}>
-      {slices.map((slice) => <li key={slice.key} className="usage-history-legend-row">
+    <div className="usage-history-split-bar" aria-hidden="true">
+      {/* A part with any value stays a sliver wide, so a small one is still seen. */}
+      {slices.filter((slice) => slice.value > 0).map((slice) => <span key={slice.key}
+        style={{ flexGrow: total > 0 ? slice.value / total : 0, flexBasis: 0, minWidth: 4, backgroundColor: slice.color }} />)}
+    </div>
+    <ul className="usage-history-legend" aria-label={title}>
+      {slices.map((slice) => <li key={slice.key} className="usage-history-legend-row" title={slice.title}>
         <span className="usage-history-legend-key" style={{ background: slice.color }} aria-hidden="true" />
         <span className="usage-history-legend-label">{slice.label}</span>
         <span className="usage-history-legend-value">{measureValue(measure, slice.value)}</span>
@@ -282,10 +168,10 @@ function KindsDonut({ history, measure }: { history: UsageHistoryResponse; measu
   </div>
 }
 
-function Breakdown({ history, measure }: { history: UsageHistoryResponse; measure: UsageMeasure }) {
+function Breakdown({ history }: { history: UsageHistoryResponse }) {
   const [by, setBy] = useState<'model' | 'day'>('model')
   const [all, setAll] = useState(false)
-  const total = measure === 'cost' ? history.costUsd : tokenSum(history.totals)
+  const total = tokenSum(history.totals)
   const rows = by === 'model' ? history.models : history.days
   const count = all ? rows.length : Math.min(rows.length, SHORT_LIST)
   const agentIndex = (id: UsageAgentId) => Math.max(0, history.agents.findIndex((agent) => agent.id === id))
@@ -305,13 +191,13 @@ function Breakdown({ history, measure }: { history: UsageHistoryResponse; measur
           <th scope="col">{by === 'model' ? 'Agent' : 'Sessions'}</th>
           <th scope="col" className="is-num">Tokens</th>
           <th scope="col" className="is-num">Cost</th>
-          <th scope="col" className="is-num">Share</th>
+          <th scope="col" className="is-num" title="Share of tokens">Share</th>
         </tr>
       </thead>
       <tbody>
         {by === 'model'
           ? history.models.slice(0, count).map((row, rank) => {
-              const value = measure === 'cost' ? row.costUsd : row.tokens
+              const value = row.tokens
               return <tr key={`${row.agent}:${row.model}`}>
                 <td className="usage-history-rank settings-muted">{rank + 1}</td>
                 <td className="usage-history-name">
@@ -325,7 +211,7 @@ function Breakdown({ history, measure }: { history: UsageHistoryResponse; measur
               </tr>
             })
           : history.days.slice(0, count).map((row) => {
-              const value = measure === 'cost' ? row.costUsd : row.tokens
+              const value = row.tokens
               return <tr key={row.day}>
                 <td className="usage-history-name">
                   <span className="usage-history-model">{dayLabel(row.day)}</span>
@@ -343,6 +229,99 @@ function Breakdown({ history, measure }: { history: UsageHistoryResponse; measur
       {all ? 'Show fewer' : `Show all ${rows.length}`}
     </button>}
     {count === 0 && <p className="settings-muted usage-history-note">Nothing in this range.</p>}
+  </section>
+}
+
+/** Whose projects and sessions the lists show: this computer's, this one's among others', or none (another computer picked). */
+export type UsageLocalScope = 'self' | 'mixed' | 'other'
+
+/** Cost by project, ranked like the breakdown. Worked out on this computer from the agents' folders. */
+function ProjectsList({ history, scope }: { history: UsageHistoryResponse; scope: UsageLocalScope }) {
+  const [all, setAll] = useState(false)
+  const rows = history.projects
+  const total = rows.reduce((sum, row) => sum + row.costUsd, 0)
+  const count = all ? rows.length : Math.min(rows.length, SHORT_LIST)
+  return <section className="usage-history-block" aria-labelledby="usage-projects-title" data-testid="usage-history-projects">
+    <div className="usage-history-block-head">
+      <h3 id="usage-projects-title">Cost by project</h3>
+      {scope === 'mixed' && <span className="usage-history-scope settings-muted" title="Project names stay on each device">This device only</span>}
+    </div>
+    {scope === 'other'
+      ? <p className="settings-muted usage-history-note">Project names stay on each device. Pick this device to see its projects.</p>
+      : <table className="usage-history-table">
+          <thead>
+            <tr>
+              <th scope="col" className="usage-history-rank">#</th>
+              <th scope="col">Project</th>
+              <th scope="col">Sessions</th>
+              <th scope="col" className="is-num">Tokens</th>
+              <th scope="col" className="is-num">Cost</th>
+              <th scope="col" className="is-num" title="Share of cost">Share</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.slice(0, count).map((row, rank) => <tr key={row.name}>
+              <td className="usage-history-rank settings-muted">{rank + 1}</td>
+              <td className="usage-history-name">
+                <span className="usage-history-model" title={row.name}>{row.name}</span>
+                <span className="usage-history-share-bar" aria-hidden="true">
+                  <span style={{ width: `${Math.max(total > 0 ? (row.costUsd / total) * 100 : 0, row.costUsd > 0 ? 0.8 : 0)}%`, background: 'color-mix(in srgb, var(--accent) 70%, transparent)' }} />
+                </span>
+              </td>
+              <td className="settings-muted">{row.sessions.toLocaleString('en-US')}</td>
+              <td className="is-num">{compactNumber(row.tokens)}</td>
+              <td className="is-num">{money(row.costUsd)}</td>
+              <td className="is-num settings-muted">{percent(row.costUsd, total)}</td>
+            </tr>)}
+          </tbody>
+        </table>}
+    {scope !== 'other' && rows.length > SHORT_LIST && <button type="button" className="usage-text-btn usage-history-more" onClick={() => setAll((value) => !value)}>
+      {all ? 'Show fewer' : `Show all ${rows.length}`}
+    </button>}
+    {scope !== 'other' && rows.length === 0 && <p className="settings-muted usage-history-note">Nothing in this range.</p>}
+  </section>
+}
+
+/** The five priciest sessions, each opening its thread where Mousse ran it. */
+function PriciestSessions({ history, scope }: { history: UsageHistoryResponse; scope: UsageLocalScope }) {
+  if (scope === 'other' || history.topSessions.length === 0) return null
+  return <section className="usage-history-block" aria-labelledby="usage-sessions-title" data-testid="usage-history-sessions">
+    <div className="usage-history-block-head">
+      <h3 id="usage-sessions-title">Priciest sessions</h3>
+      {scope === 'mixed' && <span className="usage-history-scope settings-muted">This device only</span>}
+    </div>
+    <table className="usage-history-table usage-history-sessions">
+      <thead>
+        <tr>
+          <th scope="col" className="usage-history-rank">#</th>
+          <th scope="col">Session</th>
+          <th scope="col">Last active</th>
+          <th scope="col" className="is-num">Tokens</th>
+          <th scope="col" className="is-num">Cost</th>
+        </tr>
+      </thead>
+      <tbody>
+        {history.topSessions.map((row, rank) => {
+          const name = row.threadId ? row.title || 'Untitled thread' : `${USAGE_AGENT_LABELS[row.agent]} session`
+          const last = new Date(row.lastAt)
+          return <tr key={`${row.agent}:${row.session}`}>
+            <td className="usage-history-rank settings-muted">{rank + 1}</td>
+            <td className="usage-history-name">
+              <span className="usage-history-model">
+                <ProviderIcon providerId={iconOf(row.agent)} size={14} />
+                {row.threadId
+                  ? <button type="button" className="usage-history-session-link" data-testid="usage-session-link" title="Open this thread" onClick={() => void selectThread(row.threadId!)}>{name}</button>
+                  : <span title={`Not run in Mousse · ${row.session}`}>{name}</span>}
+              </span>
+              <span className="usage-history-session-meta settings-muted">{row.project} · {row.model}</span>
+            </td>
+            <td className="settings-muted">{dayLabel(`${last.getFullYear()}-${last.getMonth() + 1}-${last.getDate()}`)}</td>
+            <td className="is-num">{compactNumber(row.tokens)}</td>
+            <td className="is-num">{money(row.costUsd)}</td>
+          </tr>
+        })}
+      </tbody>
+    </table>
   </section>
 }
 
@@ -374,7 +353,6 @@ export interface UsageHistoryViewProps {
   loading: boolean
   failed: boolean
   range: UsageHistoryRange
-  measure: UsageMeasure
   /** The one agent shown, or every agent. */
   agent: UsageAgentId | null
   hidden: readonly UsageAgentId[]
@@ -382,6 +360,8 @@ export interface UsageHistoryViewProps {
   devices?: UsageDevices
   device?: string
   onDevice?: (device: string) => void
+  /** Whose projects and priciest sessions show: they never leave their own computer. */
+  localScope?: UsageLocalScope
   /** How many computers the history adds up, which ones are still reading, and which ones couldn't send it. */
   deviceCount?: number
   waiting?: readonly string[]
@@ -393,9 +373,9 @@ export interface UsageHistoryViewProps {
 
 const ALL_AGENTS = 'all'
 
-export function UsageHistoryView({ history, loading, failed, range, measure, agent, hidden, devices, device, onDevice, deviceCount = 1, waiting = [], gaps = [], onRange, onAgent, onToggle }: UsageHistoryViewProps) {
+export function UsageHistoryView({ history, loading, failed, range, agent, hidden, devices, device, onDevice, localScope = 'self', deviceCount = 1, waiting = [], gaps = [], onRange, onAgent, onToggle }: UsageHistoryViewProps) {
   const shown = useMemo(() => (history?.agents ?? []).map((row) => row.id).filter((id) => !hidden.includes(id)), [history, hidden])
-  const total = history ? (measure === 'cost' ? history.costUsd : tokenSum(history.totals)) : 0
+  const total = history ? tokenSum(history.totals) : 0
   const agentIds = [...new Set([...(history?.agentIds ?? []), ...(agent ? [agent] : [])])]
   const agentOptions: ReadonlyArray<SelectOption<string>> = [
     { value: ALL_AGENTS, label: 'All providers' },
@@ -441,10 +421,16 @@ export function UsageHistoryView({ history, loading, failed, range, measure, age
     </p>}
     {history && <div className={`usage-history-body${loading ? ' is-refreshing' : ''}`}>
       <div className="usage-history-headline">
-        <span className="usage-history-total" data-testid="usage-history-total">{measureValue(measure, total)}</span>
-        <span className="usage-history-total-unit">{measure === 'cost' ? 'at list prices' : 'tokens'}</span>
+        <span className="usage-history-figure">
+          <span className="usage-history-total" data-testid="usage-history-total">{compactNumber(total)}</span>
+          <span className="usage-history-total-unit">tokens</span>
+        </span>
+        <span className="usage-history-figure">
+          <span className="usage-history-total is-cost" data-testid="usage-history-cost">{compactMoney(history.costUsd)}</span>
+          <span className="usage-history-total-unit">at list prices</span>
+        </span>
         <span className="usage-history-total-sub settings-muted">
-          {history.sessions.toLocaleString('en-US')} sessions · {measure === 'cost' ? `${compactNumber(tokenSum(history.totals))} tokens` : money(history.costUsd)} · {RANGE_WORDS[history.range]}
+          {history.sessions.toLocaleString('en-US')} sessions · {RANGE_WORDS[history.range]}
         </span>
       </div>
       {history.agents.length === 0
@@ -452,20 +438,23 @@ export function UsageHistoryView({ history, loading, failed, range, measure, age
         : <>
             <div className="usage-history-top">
               <div className="usage-history-card">
-                <HistoryChart history={history} measure={measure} shown={shown} />
+                <HistoryChart history={history} shown={shown} />
               </div>
               <div className="usage-agent-tiles" role="group" aria-label="Agents in the chart">
-                {history.agents.map((row, index) => <AgentTile key={row.id} agent={row} index={index} measure={measure} total={total} hidden={hidden.includes(row.id)} onToggle={() => onToggle(row.id)} />)}
+                {history.agents.map((row, index) => <AgentTile key={row.id} agent={row} index={index} total={total} hidden={hidden.includes(row.id)} onToggle={() => onToggle(row.id)} />)}
               </div>
             </div>
-            <section className="usage-history-block usage-history-kinds-block" aria-labelledby="usage-kinds-title">
-              <div className="usage-history-block-head"><h3 id="usage-kinds-title">{measure === 'cost' ? 'Cost by kind' : 'Tokens by kind'}</h3></div>
-              <KindsDonut history={history} measure={measure} />
+            <section className="usage-history-block usage-history-kinds-block" aria-label="Tokens and cost by kind and speed">
+              <div className="usage-history-splits">
+                {splits(history).map((split) => <SplitBar key={split.id} {...split} />)}
+              </div>
               {history.cacheSavingsUsd > 0 && <p className="usage-history-note settings-muted">
                 Reusing cached input saved about {money(history.cacheSavingsUsd)} against paying full input prices.
               </p>}
             </section>
-            <Breakdown history={history} measure={measure} />
+            <Breakdown history={history} />
+            <ProjectsList history={history} scope={localScope} />
+            <PriciestSessions history={history} scope={localScope} />
           </>}
       <SourcesLine history={history} devices={deviceCount} gaps={gaps} waiting={waiting} />
     </div>}
@@ -476,16 +465,15 @@ export function UsageHistoryView({ history, loading, failed, range, measure, age
 interface DeviceRead { name: string; history?: UsageHistoryResponse; reason?: string }
 
 /** Reads one computer's history; a reply that isn't one is unavailable, never drawn. */
-async function readDevice(name: string, read: () => Promise<unknown>): Promise<DeviceRead> {
+async function readDevice(name: string, read: () => Promise<unknown>, local: boolean): Promise<DeviceRead> {
   try {
-    return { name, history: parseUsageHistory(await read()) }
+    return { name, history: parseUsageHistory(await read(), { local }) }
   } catch (error) {
     return { name, reason: error instanceof UsageHistoryReplyError ? 'Sent an unreadable reply' : machineStatusLabel(error) }
   }
 }
 
 export interface UsageHistorySectionProps {
-  measure: UsageMeasure
   /** The person's other computers, when there are any, and the one picked (All devices by default). */
   devices?: UsageDevices
   device?: string
@@ -496,7 +484,7 @@ export interface UsageHistorySectionProps {
  * Reads the history for the picked range, provider and computer, and keeps the page's choices between visits.
  * Each computer reads its own logs and sends only the totals; with All devices they are added up as they arrive.
  */
-export function UsageHistorySection({ measure, devices, device = ALL_COMPUTERS, onDevice }: UsageHistorySectionProps) {
+export function UsageHistorySection({ devices, device = ALL_COMPUTERS, onDevice }: UsageHistorySectionProps) {
   const [view, setView] = useState<View>(readView)
   const [reads, setReads] = useState<DeviceRead[]>([])
   const [waiting, setWaiting] = useState<string[]>([])
@@ -515,8 +503,8 @@ export function UsageHistorySection({ measure, devices, device = ALL_COMPUTERS, 
     const run = ++generation.current
     const others = JSON.parse(othersKey) as UsageDevices['others']
     const request: UsageHistoryRequest = { range: view.range, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, ...(view.agent ? { agent: view.agent } : {}) }
-    const targets: Array<{ name: string; read: () => Promise<unknown> }> = []
-    if (picked === ALL_COMPUTERS || picked === THIS_COMPUTER) targets.push({ name: selfName, read: () => window.mousse.providers.usageHistory(request) })
+    const targets: Array<{ name: string; read: () => Promise<unknown>; local?: boolean }> = []
+    if (picked === ALL_COMPUTERS || picked === THIS_COMPUTER) targets.push({ name: selfName, read: () => window.mousse.providers.usageHistory(request), local: true })
     for (const other of others) {
       if (picked === ALL_COMPUTERS || picked === other.id) {
         targets.push({ name: other.name, read: () => window.mousse.platformRequest.request('bridge.hub.usageHistory', { target: other.id, ...request }) })
@@ -526,7 +514,7 @@ export function UsageHistorySection({ measure, devices, device = ALL_COMPUTERS, 
     // By position, since two computers may share a name.
     const arrived = new Map<number, DeviceRead>()
     targets.forEach((target, index) => {
-      void readDevice(target.name, target.read).then((result) => {
+      void readDevice(target.name, target.read, !!target.local).then((result) => {
         if (generation.current !== run) return
         arrived.set(index, result)
         // In the computers' own order, so the merged chart doesn't depend on which answered first.
@@ -546,10 +534,10 @@ export function UsageHistorySection({ measure, devices, device = ALL_COMPUTERS, 
     loading={waiting.length > 0}
     failed={waiting.length === 0 && !history}
     range={view.range}
-    measure={measure}
     agent={view.agent}
     hidden={view.hidden}
     {...(devices ? { devices, device: picked, ...(onDevice ? { onDevice } : {}) } : {})}
+    localScope={picked === THIS_COMPUTER ? 'self' : picked === ALL_COMPUTERS ? (devices?.others.length ? 'mixed' : 'self') : 'other'}
     deviceCount={answered}
     waiting={history ? waiting : []}
     gaps={devices ? gaps : []}

@@ -1,6 +1,6 @@
 import {
   USAGE_AGENT_LABELS, USAGE_HISTORY_RANGES,
-  type UsageAgentId, type UsageHistoryAgent, type UsageHistoryModelRow, type UsageHistoryResponse, type UsageTokens
+  type UsageAgentId, type UsageCostBySpeed, type UsageHistoryAgent, type UsageProjectRow, type UsageSessionRow, type UsageHistoryModelRow, type UsageHistoryResponse, type UsageTokens
 } from '../../shared/usageHistory'
 
 /** A reply from another computer that is not a usage history: it is shown as unavailable, never drawn. */
@@ -26,13 +26,33 @@ const tokens = (value: unknown): UsageTokens => {
   if (!isRecord(value)) throw new UsageHistoryReplyError('Bad tokens')
   return { input: amount(value.input), cacheRead: amount(value.cacheRead), cacheWrite: amount(value.cacheWrite), output: amount(value.output) }
 }
+const speeds = (value: unknown): UsageCostBySpeed => {
+  if (!isRecord(value)) throw new UsageHistoryReplyError('Bad speeds')
+  return { fast: amount(value.fast), standard: amount(value.standard), unknown: amount(value.unknown) }
+}
+const projectRows = (value: unknown): UsageProjectRow[] => list(value, 10_000).map((row) => {
+  if (!isRecord(row)) throw new UsageHistoryReplyError('Bad project')
+  return { name: text(row.name, 4096), tokens: amount(row.tokens), costUsd: amount(row.costUsd), sessions: amount(row.sessions) }
+})
+const sessionRows = (value: unknown): UsageSessionRow[] => list(value, 5).map((row) => {
+  if (!isRecord(row) || !isAgent(row.agent)) throw new UsageHistoryReplyError('Bad session')
+  return {
+    agent: row.agent, session: text(row.session), model: text(row.model), project: text(row.project, 4096),
+    tokens: amount(row.tokens), costUsd: amount(row.costUsd), firstAt: amount(row.firstAt), lastAt: amount(row.lastAt),
+    ...(typeof row.threadId === 'string' ? { threadId: text(row.threadId), title: typeof row.title === 'string' ? row.title : '' } : {})
+  }
+})
 const list = (value: unknown, max: number): unknown[] => {
   if (!Array.isArray(value) || value.length > max) throw new UsageHistoryReplyError('Bad list')
   return value
 }
 
 /** Checks another computer's reply field by field and keeps only what the page draws. */
-export function parseUsageHistory(value: unknown): UsageHistoryResponse {
+/**
+ * Checks a history field by field. Projects and sessions are read only from this computer's own reply (`local`);
+ * another computer never sends them, and anything it sends there is dropped.
+ */
+export function parseUsageHistory(value: unknown, { local = false }: { local?: boolean } = {}): UsageHistoryResponse {
   if (!isRecord(value)) throw new UsageHistoryReplyError('Not an object')
   const range = USAGE_HISTORY_RANGES.find((candidate) => candidate === value.range)
   if (!range || (value.bucket !== 'hour' && value.bucket !== 'day')) throw new UsageHistoryReplyError('Bad range')
@@ -62,7 +82,9 @@ export function parseUsageHistory(value: unknown): UsageHistoryResponse {
   return {
     range, bucket: value.bucket, buckets, dayKeys, agents, models, days, sources,
     totals: tokens(value.totals), costUsd: amount(value.costUsd), costByKind: tokens(value.costByKind),
-    costUnsplitUsd: amount(value.costUnsplitUsd), cacheSavingsUsd: amount(value.cacheSavingsUsd), sessions: amount(value.sessions),
+    costUnsplitUsd: amount(value.costUnsplitUsd), costBySpeed: speeds(value.costBySpeed),
+    projects: local ? projectRows(value.projects) : [], topSessions: local ? sessionRows(value.topSessions) : [],
+    cacheSavingsUsd: amount(value.cacheSavingsUsd), sessions: amount(value.sessions),
     agentIds: list(value.agentIds, 64).filter(isAgent),
     readAt: text(value.readAt, 64), scanMs: amount(value.scanMs)
   }
@@ -86,6 +108,7 @@ export function mergeHistories(parts: readonly UsageHistoryResponse[]): UsageHis
   const days = new Map<string, UsageHistoryResponse['days'][number]>()
   const totals: UsageTokens = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
   const costByKind: UsageTokens = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
+  const costBySpeed: UsageCostBySpeed = { fast: 0, standard: 0, unknown: 0 }
   let costUsd = 0, costUnsplitUsd = 0, cacheSavingsUsd = 0, sessions = 0, scanMs = 0
   for (const part of parts) {
     const keys = part.bucket === 'day' ? part.dayKeys : part.buckets
@@ -125,6 +148,9 @@ export function mergeHistories(parts: readonly UsageHistoryResponse[]): UsageHis
     addTokens(costByKind, part.costByKind)
     costUsd += part.costUsd
     costUnsplitUsd += part.costUnsplitUsd
+    costBySpeed.fast += part.costBySpeed.fast
+    costBySpeed.standard += part.costBySpeed.standard
+    costBySpeed.unknown += part.costBySpeed.unknown
     cacheSavingsUsd += part.cacheSavingsUsd
     sessions += part.sessions
     scanMs = Math.max(scanMs, part.scanMs)
@@ -135,7 +161,14 @@ export function mergeHistories(parts: readonly UsageHistoryResponse[]): UsageHis
     agents: [...agents.values()].sort((a, b) => sum(b.tokens) - sum(a.tokens) || a.label.localeCompare(b.label)),
     models: [...models.values()].sort((a, b) => b.tokens - a.tokens),
     days: [...days.values()].sort((a, b) => (a.day < b.day ? 1 : -1)),
-    totals, costUsd, costByKind, costUnsplitUsd, cacheSavingsUsd, sessions, scanMs,
+    totals, costUsd, costByKind, costUnsplitUsd, costBySpeed, cacheSavingsUsd, sessions, scanMs,
+    // Only this computer's part has them; summed by name all the same.
+    projects: [...parts.flatMap((part) => part.projects).reduce((rows, row) => {
+      const total = rows.get(row.name) ?? { name: row.name, tokens: 0, costUsd: 0, sessions: 0 }
+      rows.set(row.name, { name: row.name, tokens: total.tokens + row.tokens, costUsd: total.costUsd + row.costUsd, sessions: total.sessions + row.sessions })
+      return rows
+    }, new Map<string, UsageProjectRow>()).values()].sort((a, b) => b.costUsd - a.costUsd),
+    topSessions: parts.flatMap((part) => part.topSessions).sort((a, b) => b.costUsd - a.costUsd).slice(0, 5),
     agentIds: [...new Set(parts.flatMap((part) => part.agentIds))].sort((a, b) => label(a).localeCompare(label(b))),
     sources: parts.flatMap((part) => part.sources)
   }

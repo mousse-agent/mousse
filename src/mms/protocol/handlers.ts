@@ -142,6 +142,7 @@ import { discardPendingChangesAsync, gitAsync as workspaceGitAsync } from '../ac
 import { IndexLockedError, leftAsItIsText } from '../actions/provenDiscard'
 import { getMousseHomeDir } from '../data/paths'
 import { usageHistoryReader } from '../usageHistory/usageHistoryReader'
+import { nameUsageProjects } from '../usageHistory/usageProjects'
 import { USAGE_AGENT_LABELS, USAGE_HISTORY_RANGES, type UsageAgentId } from '../../shared/usageHistory'
 import { abortKeptNotice, keepCopy, keepExistingCommit, KeepCopyRefusedError, keptCopyNotice, keptCopyWindowMs, projectKeptFilesOwner, registerProjectKeptFilesFolder, type KeptCopy } from '../actions/keptCopies'
 import { takeSnapshotAsync } from '../actions/snapshots'
@@ -169,7 +170,9 @@ import { listFilesPlaces } from '../files/drives'
 import { browsedRootRefusal, browsedSaveRefusal, normalizedBrowsedRoot } from '../files/browsedRoot'
 import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
-import { keepAccount, keepUsage, steadyAccount, steadyUsage, unreachableUsage, usageSlots, withUsageDeadline } from './usageReads'
+import { CLAUDE_USAGE_ID, keepAccountReading, keepUsage, readProviderUsage, recordLimitReading, steadyAccount, usageSlotList, usageSlots, withUsageDeadline } from './usageReads'
+import { limitReadings } from '../usageHistory/limitReadings'
+import { LIMIT_TREND_RANGES } from '../../shared/limitTrends'
 import type { UsageAccount } from '../../shared/providerAuth'
 import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
 import { isInstallationMethod } from '../profiles/admission'
@@ -181,9 +184,6 @@ import { isGitRepository, listChangedFiles, readFileVersions, worktreeRange } fr
 import { locateTurnFile, threadWroteFile, turnFilePath } from '../git/turnFile'
 import { writtenFilePaths } from '../../shared/turnFiles'
 import { resolveReviewScope } from '../actions/reviewRange'
-
-/** The Claude subscription's id on the usage page. */
-const CLAUDE_USAGE_ID = 'claude-subscription'
 
 /** The writer holds of open terminals, one per thread and caller (`pty.create`). */
 const threadTerminalWriters = new ThreadTerminalWriters()
@@ -3833,26 +3833,24 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         // The usage page lists a signed-out agent too, so it can offer Reconnect (`signedOut`).
         ctx.mms.harness?.instances.usage({ kind: 'device' }, { includeSignedOut: true }) ?? Promise.resolve([])
       ])
-      return {
-        ...usage,
-        providers: [...usage.providers, ...(claude ? [claude] : []), ...agents],
-        fetchedAt: new Date().toISOString()
-      }
+      const providers = [...usage.providers, ...(claude ? [claude] : []), ...agents]
+      // Every limit reading counts toward the trends, whichever read made it.
+      for (const provider of providers) recordLimitReading(ctx.mms, provider)
+      return { ...usage, providers, fetchedAt: new Date().toISOString() }
     }
     // The usage page's progressive reads (`usageReads.ts`): every provider it shows first, with its
     // last reading; then one provider (or one proxy sign-in) at a time, each within its own deadline.
     // Both answer only a window or the CLI on this computer, like the proxy key methods below.
     case 'providers.usageSlots': {
       if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'Usage is read on its own computer')
-      // Claude turned off in Settings is not shown either.
-      const claudeOn = !ctx.mms.providerInstances?.isDisabled?.('claude')
-      const claude = claudeOn && ctx.mms.claudeSubscription.configured() ? [{ id: CLAUDE_USAGE_ID, label: 'Claude subscription', instanceId: 'claude', previewAccounts: true as const }] : []
-      const slots = [
-        ...ctx.mms.providerAccess.usageSlots(),
-        ...claude,
-        ...(ctx.mms.harness?.instances.usageSlots({ kind: 'device' }) ?? [])
-      ]
-      return { slots: usageSlots(ctx.mms, slots) }
+      return { slots: usageSlots(ctx.mms, usageSlotList(ctx.mms)) }
+    }
+    // How the 5-hour and weekly limits moved, from the readings kept of them (`limitReadings.ts`); this computer only.
+    case 'providers.limitTrends': {
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'Usage is read on its own computer')
+      const p = isObject(params) ? params : {}
+      const range = LIMIT_TREND_RANGES.find((value) => value === p.range) ?? '7d'
+      return { trends: await limitReadings(ctx.mms.getProfileHomeDir()).trends(range) }
     }
     // Usage history read from the coding agents' own logs on this computer (`usageHistory/`). Another of the
     // person's computers asks over the device link to show it beside its own; it gets the numbers, not the paths.
@@ -3862,7 +3860,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const timeZone = asOptionalString(p.timeZone, 64)
       const agent = typeof p.agent === 'string' && Object.hasOwn(USAGE_AGENT_LABELS, p.agent) ? p.agent as UsageAgentId : undefined
       const history = await usageHistoryReader(ctx.mms.getHomeDir()).history({ range, ...(timeZone ? { timeZone } : {}), ...(agent ? { agent } : {}) })
-      return connectionIsLocal(ctx.connection) ? history : { ...history, sources: history.sources.map((source) => ({ ...source, path: '' })) }
+      // Folders, projects and sessions stay on this computer: another one gets the totals only.
+      if (!connectionIsLocal(ctx.connection)) return { ...history, sources: history.sources.map((source) => ({ ...source, path: '' })), projects: [], topSessions: [] }
+      return nameUsageProjects(history, ctx.mms.projects.listProjects(), (ids) => ctx.mms.runEngine.store.threadsForSessions(ids), (id) => ctx.mms.threads.getThread(id)?.name)
     }
     case 'providers.getUsageFor': {
       if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'Usage is read on its own computer')
@@ -3870,39 +3870,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const providerId = asString(p.providerId, 'providerId', 128)
       const accountId = p.accountId === undefined ? undefined : asString(p.accountId, 'accountId', 256)
       const preview = p.preview === true
-      if (providerId === CLAUDE_USAGE_ID) {
+      if (providerId === CLAUDE_USAGE_ID && (accountId !== undefined || preview)) {
         // Turned off in Settings: not on the page, so not read either.
         if (ctx.mms.providerInstances?.isDisabled?.('claude')) return {}
         const claude = ctx.mms.claudeSubscription
         if (accountId !== undefined) {
           const read = await withUsageDeadline<UsageAccount | undefined>((signal) => claude.usageAccount(accountId, signal), () => ({ id: accountId, label: accountId, windows: [], problem: 'Not reachable' }))
           const account = read && steadyAccount(ctx.mms, providerId, read)
-          if (account) keepAccount(ctx.mms, providerId, account)
+          if (account) keepAccountReading(ctx.mms, providerId, 'Claude subscription', account)
           return { ...(account ? { account } : {}) }
         }
-        if (preview) {
-          const provider = await withUsageDeadline((signal) => claude.usageAccountsPreview(signal), () => undefined)
-          if (provider) keepUsage(ctx.mms, provider)
-          return { ...(provider ? { provider } : {}) }
-        }
-        const read = await withUsageDeadline(async () => {
-          await claude.status()
-          return claude.configured() ? claude.getUsage(ctx.mms.worktrees.getRepoRoot()) : undefined
-        }, () => unreachableUsage(providerId, 'Claude subscription'))
-        const provider = read && steadyUsage(ctx.mms, read)
+        const provider = await withUsageDeadline((signal) => claude.usageAccountsPreview(signal), () => undefined)
         if (provider) keepUsage(ctx.mms, provider)
         return { ...(provider ? { provider } : {}) }
       }
-      const slot = ctx.mms.harness?.instances.usageSlots({ kind: 'device' }).find((entry) => entry.id === providerId)
-      const listed = slot ?? ctx.mms.providerAccess.usageSlots().find((entry) => entry.id === providerId)
-      // Only a provider the page lists is read, so the kept readings never grow past that list.
-      if (!listed) return {}
-      const label = listed.label
-      const provider = await withUsageDeadline(
-        async () => (slot ? ctx.mms.harness!.instances.usageFor({ kind: 'device' }, providerId) : ctx.mms.providerAccess.usageFor(providerId)),
-        () => unreachableUsage(providerId, label)
-      )
-      if (provider) keepUsage(ctx.mms, provider)
+      const provider = await readProviderUsage(ctx.mms, providerId)
       return { ...(provider ? { provider } : {}) }
     }
     // Uses one of a provider's limit-reset credits (Codex), asked for by the usage page on this computer only.

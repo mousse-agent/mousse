@@ -47,6 +47,28 @@ export interface UsageHistoryModelRow {
   priced: boolean
 }
 
+/** One project's usage on this computer; `name` is the project's name, or its folder's when it isn't a project. */
+export interface UsageProjectRow {
+  name: string
+  tokens: number
+  costUsd: number
+  sessions: number
+}
+
+/** One agent session, for the priciest ones; `threadId` is the Mousse thread that ran it, where there is one. */
+export interface UsageSessionRow {
+  agent: UsageAgentId
+  session: string
+  model: string
+  project: string
+  tokens: number
+  costUsd: number
+  firstAt: number
+  lastAt: number
+  threadId?: string
+  title?: string
+}
+
 export interface UsageHistoryDayRow {
   /** `YYYY-MM-DD` in the requested time zone. */
   day: string
@@ -73,6 +95,8 @@ export interface UsageHistoryRequest {
   agent?: UsageAgentId
 }
 
+export interface UsageCostBySpeed { fast: number; standard: number; unknown: number }
+
 export interface UsageHistoryResponse {
   range: UsageHistoryRange
   bucket: 'hour' | 'day'
@@ -89,6 +113,12 @@ export interface UsageHistoryResponse {
   costByKind: UsageTokens
   /** Cost an agent reported for a model with no list price, so it can't be split by kind. */
   costUnsplitUsd: number
+  /** The cost by speed: fast or standard mode where the log says which, unknown where it doesn't. */
+  costBySpeed: UsageCostBySpeed
+  /** Usage by project, priciest first. Only for this computer: project names never cross the device link. */
+  projects: UsageProjectRow[]
+  /** The five priciest sessions. Only for this computer, like the projects. */
+  topSessions: UsageSessionRow[]
   /** Every agent with usage in the range, also when the response is for one agent only. */
   agentIds: UsageAgentId[]
   /** What cache reads saved against paying the full input price. */

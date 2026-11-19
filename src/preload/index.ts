@@ -123,6 +123,7 @@ import type {
   SkillsRegistrySnapshot
 } from '../shared/integrations'
 import type { UsageHistoryRequest, UsageHistoryResponse } from '../shared/usageHistory'
+import type { LimitTrendRange, LimitTrendsResponse } from '../shared/limitTrends'
 import type { CliInstallEvent, UsageForResponse, UsageProxyKeyResult, UsageSlotsResponse, UseLimitResetResponse } from '../shared/providerAuth'
 import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } from '../shared/harness/status'
 import type { SetVendorSettingInput, VendorSettingsView } from '../shared/harness/vendorSettings'
@@ -1185,6 +1186,8 @@ const api = {
     getUsage: () => ipcRenderer.invoke('providers:getUsage'),
     /** Every provider the usage page shows, with its last reading, before any is read. */
     usageSlots: (): Promise<UsageSlotsResponse> => ipcRenderer.invoke('providers:usageSlots'),
+    /** How the 5-hour and weekly limits moved over the range, from the readings kept of them. */
+    limitTrends: (range: LimitTrendRange): Promise<LimitTrendsResponse> => ipcRenderer.invoke('providers:limitTrends', range),
     /** Tokens and cost over time, read from the coding agents' own logs on this computer. */
     usageHistory: (request: UsageHistoryRequest): Promise<UsageHistoryResponse> => ipcRenderer.invoke('usage:history', request),
     /** Uses one of a provider's limit-reset credits (the one named, or the next); it asks nothing itself. */

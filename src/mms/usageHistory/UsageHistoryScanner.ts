@@ -6,7 +6,7 @@ import { dirname, join, resolve, sep } from 'path'
 import {
   USAGE_AGENT_LABELS,
   type UsageAgentId, type UsageHistoryAgent, type UsageHistoryModelRow, type UsageHistoryRequest,
-  type UsageHistoryResponse, type UsageHistorySource, type UsageTokens
+  type UsageHistoryResponse, type UsageHistorySource, type UsageProjectRow, type UsageSessionRow, type UsageTokens
 } from '../../shared/usageHistory'
 import { LOG_SOURCES, openCodeRoots, type LineParser, type LogRecord, type LogSource } from './logParsers'
 import { costOf, priceFor } from './pricing'
@@ -14,13 +14,17 @@ import { costOf, priceFor } from './pricing'
 const DAY = 86_400_000
 /** How far back logs are read and kept, whatever range is shown. */
 const KEEP_MS = 92 * DAY
-const CACHE_VERSION = 1
+const CACHE_VERSION = 2
 const CHUNK = 1 << 20
 const READ_CONCURRENCY = 4
 const STAT_CONCURRENCY = 32
 
-/** A record as the cache keeps it: [time, model index, session index, input, cache read, cache write, output, key, cost?]. */
-type Packed = [number, number, number, number, number, number, number, string, number?]
+/**
+ * A record as the cache keeps it: [time, model index, session index, input, cache read, cache write, output, key,
+ * cost?, speed?, folder index?], where speed is 1 for standard and 2 for fast mode. Unknown ones are null, and
+ * trailing unknown ones are left off.
+ */
+type Packed = [number, number, number, number, number, number, number, string, (number | null)?, (number | null)?, (number | null)?]
 
 interface FileEntry {
   agent: UsageAgentId
@@ -33,6 +37,8 @@ interface FileEntry {
   state: unknown
   models: string[]
   sessions: string[]
+  /** The folders the agent worked in, for the projects. */
+  cwds: string[]
   recs: Packed[]
 }
 
@@ -61,9 +67,14 @@ function pack(entry: FileEntry, record: LogRecord): Packed {
   if (model < 0) model = entry.models.push(record.model) - 1
   let session = entry.sessions.indexOf(record.session)
   if (session < 0) session = entry.sessions.push(record.session) - 1
-  const packed: Packed = [record.ts, model, session, record.input, record.cacheRead, record.cacheWrite, record.output, record.key]
-  if (record.costUsd !== undefined) packed.push(record.costUsd)
-  return packed
+  let cwd: number | null = null
+  if (record.cwd) {
+    cwd = entry.cwds.indexOf(record.cwd)
+    if (cwd < 0) cwd = entry.cwds.push(record.cwd) - 1
+  }
+  const tail = [record.costUsd ?? null, record.speed ? (record.speed === 'fast' ? 2 : 1) : null, cwd]
+  while (tail.length && tail[tail.length - 1] === null) tail.pop()
+  return [record.ts, model, session, record.input, record.cacheRead, record.cacheWrite, record.output, record.key, ...tail] as Packed
 }
 
 async function guardOf(path: string, offset: number): Promise<string> {
@@ -224,9 +235,9 @@ export class UsageHistoryScanner {
       try {
         let entry: FileEntry
         if (cached && size > cached.size && cached.offset > 0 && (await guardOf(path, cached.offset)) === cached.guard) {
-          entry = { ...cached, recs: [...cached.recs], models: [...cached.models], sessions: [...cached.sessions], state: structuredClone(cached.state) }
+          entry = { ...cached, recs: [...cached.recs], models: [...cached.models], sessions: [...cached.sessions], cwds: [...cached.cwds], state: structuredClone(cached.state) }
         } else {
-          entry = { agent: source.agent, size, mtimeMs, offset: 0, guard: '', state: source.parser.initial(), models: [], sessions: [], recs: [] }
+          entry = { agent: source.agent, size, mtimeMs, offset: 0, guard: '', state: source.parser.initial(), models: [], sessions: [], cwds: [], recs: [] }
         }
         await readLines(path, entry, source.parser, floor)
         entry.size = size
@@ -260,7 +271,7 @@ export class UsageHistoryScanner {
         const mtimeMs = Math.max(db.mtimeMs, wal?.mtimeMs ?? 0)
         const cached = cache.files[path]
         if (cached && cached.size === size && cached.mtimeMs === mtimeMs) continue
-        const entry: FileEntry = { agent: 'opencode', size, mtimeMs, offset: 0, guard: '', state: null, models: [], sessions: [], recs: [] }
+        const entry: FileEntry = { agent: 'opencode', size, mtimeMs, offset: 0, guard: '', state: null, models: [], sessions: [], cwds: [], recs: [] }
         const database = await openReadOnly(path)
         try {
           const rows = database.prepare("SELECT id, session_id, time_created, data FROM message WHERE time_created >= ? AND data LIKE '%\"assistant\"%'").all(floor) as Array<{ id: string; session_id: string; time_created: number; data: string }>
@@ -358,11 +369,15 @@ export function aggregate(result: ScanResult, request: UsageHistoryRequest, now:
   const totals = zero()
   const costByKind = zero()
   let costUnsplitUsd = 0
+  const costBySpeed = { fast: 0, standard: 0, unknown: 0 }
+  const projects = new Map<string, UsageProjectRow & { sessionSet: Set<string> }>()
+  const sessionRows = new Map<string, UsageSessionRow & { modelCost: Map<string, number> }>()
   let costUsd = 0
   let cacheSavingsUsd = 0
   const allSessions = new Set<string>()
   for (const { agent, entry, rec } of calls.values()) {
-    const [ts, modelIndex, sessionIndex, input, cacheRead, cacheWrite, output, , reported] = rec
+    const [ts, modelIndex, sessionIndex, input, cacheRead, cacheWrite, output, , logged, speed, cwdIndex] = rec
+    const reported = logged ?? undefined
     const day = dayKey(ts)
     const bucket = hourly ? Math.floor((ts - firstHour) / hourMs) : dayIndex.get(day)
     if (bucket === undefined || bucket < 0 || bucket >= buckets.length) continue
@@ -384,6 +399,7 @@ export function aggregate(result: ScanResult, request: UsageHistoryRequest, now:
     } else {
       costUnsplitUsd += cost
     }
+    costBySpeed[speed === 2 ? 'fast' : speed === 1 ? 'standard' : 'unknown'] += cost
     const tokens = input + cacheRead + cacheWrite + output
     let row = agents.get(agent)
     if (!row) {
@@ -405,6 +421,23 @@ export function aggregate(result: ScanResult, request: UsageHistoryRequest, now:
     modelRow.tokens += tokens
     modelRow.costUsd += cost
     models.set(modelKey, modelRow)
+    const cwd = cwdIndex == null ? '' : entry.cwds[cwdIndex] ?? ''
+    const projectRow = projects.get(cwd) ?? { name: cwd, tokens: 0, costUsd: 0, sessions: 0, sessionSet: new Set<string>() }
+    projectRow.tokens += tokens
+    projectRow.costUsd += cost
+    projectRow.sessionSet.add(session)
+    projects.set(cwd, projectRow)
+    const sessionId = entry.sessions[sessionIndex] ?? ''
+    if (sessionId) {
+      const sessionRow = sessionRows.get(session) ?? { agent, session: sessionId, model, project: cwd, tokens: 0, costUsd: 0, firstAt: ts, lastAt: ts, modelCost: new Map<string, number>() }
+      sessionRow.tokens += tokens
+      sessionRow.costUsd += cost
+      sessionRow.firstAt = Math.min(sessionRow.firstAt, ts)
+      sessionRow.lastAt = Math.max(sessionRow.lastAt, ts)
+      if (cwd && !sessionRow.project) sessionRow.project = cwd
+      sessionRow.modelCost.set(model, (sessionRow.modelCost.get(model) ?? 0) + cost)
+      sessionRows.set(session, sessionRow)
+    }
     const dayRow = days.get(day) ?? { tokens: 0, costUsd: 0, sessions: new Set<string>() }
     dayRow.tokens += tokens
     dayRow.costUsd += cost
@@ -426,6 +459,12 @@ export function aggregate(result: ScanResult, request: UsageHistoryRequest, now:
     costUsd: cents(costUsd),
     costByKind: { input: cents(costByKind.input), cacheRead: cents(costByKind.cacheRead), cacheWrite: cents(costByKind.cacheWrite), output: cents(costByKind.output) },
     costUnsplitUsd: cents(costUnsplitUsd),
+    costBySpeed: { fast: cents(costBySpeed.fast), standard: cents(costBySpeed.standard), unknown: cents(costBySpeed.unknown) },
+    projects: [...projects.values()].map(({ sessionSet, ...row }) => ({ ...row, costUsd: cents(row.costUsd), sessions: sessionSet.size }))
+      .sort((a, b) => b.costUsd - a.costUsd || b.tokens - a.tokens),
+    // The priciest five, each named by the model that cost it most.
+    topSessions: [...sessionRows.values()].sort((a, b) => b.costUsd - a.costUsd).slice(0, 5)
+      .map(({ modelCost, ...row }) => ({ ...row, model: [...modelCost].sort((a, b) => b[1] - a[1])[0]?.[0] ?? row.model, costUsd: cents(row.costUsd) })),
     agentIds: [...present].sort((a, b) => USAGE_AGENT_LABELS[a].localeCompare(USAGE_AGENT_LABELS[b])),
     cacheSavingsUsd: cents(cacheSavingsUsd),
     sessions: allSessions.size,

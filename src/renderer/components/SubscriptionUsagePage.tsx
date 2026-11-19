@@ -1,6 +1,9 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { UsageHistorySection } from './UsageHistorySection'
 import { UsageTabs, readUsageTab, rememberUsageTab, type UsageTab } from './UsageTabs'
+import { UsageLimitTrends } from './UsageLimitTrends'
+import { paceRemaining } from '../lib/usagePace'
+import type { LimitTrend, LimitTrendRange } from '../../shared/limitTrends'
 import { AlertTriangle, ExternalLink, RefreshCw } from '../lib/icons'
 import { useComputers } from '../lib/computers'
 import {
@@ -44,12 +47,15 @@ function UsageBarRow({ entry, now }: { entry: ProviderUsageWindow; now: number }
   const remaining = remainingNow(entry, now)
   const passed = remaining === 100 && entry.resetsAt !== undefined && Date.parse(entry.resetsAt) <= now
   const reset = passed ? undefined : formatResetLine(entry.resetsAt, now)
+  const pace = paceRemaining(entry, now)
   return <div className="usage-window" data-testid="usage-window" data-remaining={remaining ?? 'unknown'}>
     <div className="usage-window-head">
       <span className="usage-window-label">{entry.label}</span>
       <span className="usage-window-used usage-level-text" {...(remaining === undefined ? {} : { 'data-usage-level': usageLevel(remaining) })}>{remaining === undefined ? <span className="settings-muted">Unknown</span> : <>{remaining}% <span className="settings-muted">left</span></>}</span>
     </div>
-    <UsageBar remaining={remaining} label={entry.label} />
+    <div className="usage-window-bar" title={pace === undefined ? undefined : paceTitle(remaining, pace)}>
+      <UsageBar remaining={remaining} label={entry.label} {...(pace === undefined ? {} : { pace })} />
+    </div>
     {reset && <div className="usage-window-reset settings-muted" title={resetTooltip(entry.resetsAt, now)}>{reset}</div>}
   </div>
 }
@@ -59,6 +65,14 @@ function UsageNote({ provider }: { provider: ProviderUsage }) {
   const note = shortUsageNote(provider.message)
   if (!note) return provider.windows.length === 0 && !provider.credit ? <p className="usage-message settings-muted">No usage reported.</p> : null
   return <p className={`usage-message${provider.status === 'error' ? ' settings-status-bad' : ' settings-muted'}`} data-testid="usage-note" title={note.detail}>{note.text}</p>
+}
+
+/** The tick in words, for the bar's tooltip: ahead of pace is using it faster than evenly. */
+function paceTitle(remaining: number | undefined, pace: number): string {
+  const even = `Even pace: ${Math.round(pace)}% left by now`
+  if (remaining === undefined) return even
+  const gap = Math.round(pace - remaining)
+  return `${even} · ${gap === 0 ? 'on pace' : gap > 0 ? `${gap} points ahead of pace` : `${-gap} points behind pace`}`
 }
 
 /** "As of 14:05" in the header, only for windows reported earlier than this reading. */
@@ -175,13 +189,15 @@ export interface SubscriptionUsageViewProps {
   /** The provider Disable is asking about, and the answer. */
   disableAsk?: ProviderUsage | null
   onDisableAnswer?: (confirmed: boolean) => void
-  /** Usage history over time. With it the page has three tabs: Tokens and Cost show it, Limits the limits. */
+  /** Usage history over time. With it the page has two tabs: History shows it, Limits the limits. */
   history?: ReactNode
+  /** The 5-hour and weekly limits over time, at the top of the Limits tab. */
+  limitTrends?: ReactNode
   tab?: UsageTab
   onTab?: (tab: UsageTab) => void
 }
 
-export function SubscriptionUsageView({ usage, loading, failed, now, computers, selected, onSelect, remote, onRefresh, onManage, onSaveProxyKey, onClearProxyKey, loadingIds, onReconnect, hidden, rowActions, disableAsk, onDisableAnswer, onUseReset, history, tab = 'tokens', onTab }: SubscriptionUsageViewProps) {
+export function SubscriptionUsageView({ usage, loading, failed, now, computers, selected, onSelect, remote, onRefresh, onManage, onSaveProxyKey, onClearProxyKey, loadingIds, onReconnect, hidden, rowActions, disableAsk, onDisableAnswer, onUseReset, history, limitTrends, tab = 'history', onTab }: SubscriptionUsageViewProps) {
   const [showHidden, setShowHidden] = useState(false)
   // Using a limit reset, for one card at a time: asked from its header button, answered in its own row.
   const [resetFlow, setResetFlow] = useState<ResetFlow | null>(null)
@@ -290,8 +306,9 @@ export function SubscriptionUsageView({ usage, loading, failed, now, computers, 
     <div className="subscription-usage-page-body">
       <div className={`usage-content${history ? ' has-history' : ''}`}>
         {/* Kept while Limits shows, so coming back draws the last reading at once. */}
-        {history && <div id="usage-panel-history" role="tabpanel" aria-label={tab === 'cost' ? 'Cost' : 'Tokens'} hidden={tab === 'limits'}>{history}</div>}
-        {showLimits && <div id="usage-panel-limits" {...(history ? { role: 'tabpanel', 'aria-label': 'Limits', className: 'usage-limits' } : {})}>
+        {history && <div id="usage-history-panel" role="tabpanel" aria-labelledby="usage-history-tab" hidden={tab === 'limits'}>{history}</div>}
+        {showLimits && <div id="usage-limits-panel" {...(history ? { role: 'tabpanel', 'aria-labelledby': 'usage-limits-tab', className: 'usage-limits' } : {})}>
+          {history && limitTrends}
           {failed && <p className="usage-error" role="alert" data-testid="usage-error">
             <span>
               <span className="settings-status-bad">Couldn&apos;t refresh usage.</span>
@@ -377,6 +394,17 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
   const [failed, setFailed] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const mounted = useRef(true)
+  // The limits' trends, this computer's own readings: read when Limits shows, after each read of the usage.
+  const [trendRange, setTrendRange] = useState<LimitTrendRange>('7d')
+  const [trends, setTrends] = useState<LimitTrend[]>([])
+  useEffect(() => {
+    if (tab !== 'limits' || loading) return
+    let current = true
+    void window.mousse.providers.limitTrends?.(trendRange)
+      .then((reply) => { if (current) setTrends(Array.isArray(reply?.trends) ? reply.trends : []) })
+      .catch(() => undefined)
+    return () => { current = false }
+  }, [tab, trendRange, loading])
   const generation = useRef(0)
   const loadUsage = useCallback(async () => {
     setLoading(true)
@@ -481,9 +509,12 @@ export function SubscriptionUsagePage({ onClose }: { onClose: () => void }) {
     disableAsk={disableAsk}
     onDisableAnswer={(confirmed) => (confirmed && disableAsk ? void disable(disableAsk) : setDisableAsk(null))}
     history={<UsageHistorySection
-      measure={tab === 'cost' ? 'cost' : 'tokens'}
       {...(linked ? { devices: { selfName, others }, device: effective, onDevice: pickComputer } : {})}
     />}
+    // Another computer's limits have no trends here: the readings stay on each computer.
+    limitTrends={trends.length > 0 && (effective === THIS_COMPUTER || effective === ALL_COMPUTERS)
+      ? <UsageLimitTrends trends={trends} range={trendRange} onRange={setTrendRange} localOnly={linked && effective === ALL_COMPUTERS} />
+      : null}
     tab={tab}
     onTab={changeTab}
   />
