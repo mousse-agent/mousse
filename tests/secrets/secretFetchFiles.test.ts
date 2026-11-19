@@ -13,7 +13,7 @@ import { secretTools } from '../../src/mms/run/mcp/appTools/secrets'
 import { appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import type { ToolCallContext } from '../../src/mms/run/mcp/appTools/types'
 
-const hooks = vi.hoisted(() => ({ afterCheck: undefined as undefined | ((path: unknown) => void), afterOpen: undefined as undefined | ((path: unknown) => void) }))
+const hooks = vi.hoisted(() => ({ afterCheck: undefined as undefined | ((path: unknown) => void), afterOpen: undefined as undefined | ((path: unknown, fd: number) => void), afterClose: undefined as undefined | ((fd: number) => void) }))
 vi.mock('node:fs', async importOriginal => {
   const original = await importOriginal<typeof import('node:fs')>()
   return { ...original, lstatSync: (...args: Parameters<typeof original.lstatSync>) => {
@@ -22,8 +22,11 @@ vi.mock('node:fs', async importOriginal => {
     return result
   }, openSync: (...args: Parameters<typeof original.openSync>) => {
     const fd = original.openSync(...args)
-    hooks.afterOpen?.(args[0])
+    hooks.afterOpen?.(args[0], fd)
     return fd
+  }, closeSync: (fd: number) => {
+    original.closeSync(fd)
+    hooks.afterClose?.(fd)
   } }
 })
 vi.mock('../../src/mms/net-public/publicFetch', async importOriginal => ({
@@ -33,6 +36,7 @@ const cleanup: Array<() => void> = []
 afterEach(() => {
   hooks.afterCheck = undefined
   hooks.afterOpen = undefined
+  hooks.afterClose = undefined
   cleanup.splice(0).reverse().forEach(fn => fn())
   vi.restoreAllMocks()
 })
@@ -115,4 +119,25 @@ it('checks the opened file before writing and removes it while it is still empty
   expect(result.text).toMatch(/folder.*(?:changed|unavailable)/i)
   expect(readdirSync(f.outside)).toEqual([])
   expect(readdirSync(folder + '-original')).toEqual([])
+})
+
+
+it('keeps a close failure local and releases the parent handle', async () => {
+  const f = fixture(), opened = new Set<number>()
+  hooks.afterOpen = (_path, fd) => { opened.add(fd) }
+  hooks.afterClose = fd => {
+    opened.delete(fd)
+    hooks.afterClose = next => { opened.delete(next) }
+    throw new Error('private close diagnostic')
+  }
+  cleanup.push(() => {
+    for (const fd of opened) {
+      try { require('node:fs').closeSync(fd) } catch { /* The old implementation leaked this parent. */ }
+    }
+  })
+  const result = await f.run()
+  expect(result.isError).toBe(true)
+  expect(result.text).toContain('could not be saved on this computer')
+  expect(result.text).not.toContain('private close diagnostic')
+  expect(opened.size).toBe(0)
 })

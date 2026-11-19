@@ -36,7 +36,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
   homes.splice(0).forEach(path => fs.rmSync(path, { recursive: true, force: true }))
 })
-it.each(['darwin', 'win32'])('pins pruning even when the path changes at unlink on %s', platform => {
+it.each(['linux', 'darwin', 'win32'])('pins pruning even when the path changes at unlink on %s', platform => {
   const home = fs.mkdtempSync(join(tmpdir(), 'fetch-portable-'))
   homes.push(home)
   const scratch = join(home, 'scratch'), outside = join(home, 'outside')
