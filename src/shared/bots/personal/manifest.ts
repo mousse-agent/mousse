@@ -1,4 +1,5 @@
 import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool } from '../../browser/automation'
+import { COMPUTER_TOOL_NAMES } from '../../computerUse'
 import { PROFILER_TOOL_NAMES, type ProfilerToolName } from '../../diagnostics/profiler'
 import { isNeutralTool, type NeutralTool } from '../../harness/tools'
 import { foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
@@ -48,13 +49,13 @@ export const BOT_SUBAGENT_TOOLS: readonly string[] = ['subagent_start', 'subagen
  * and quick actions, each of which a thread's subagent is refused too (they ask the person or need a turn a person
  * started). The built-ins, the files folder, MCP tools and skills are the work's, unchanged.
  */
-export const BOT_SUBAGENT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', 'browser', 'threads', 'profiler']
+export const BOT_SUBAGENT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', 'browser', 'computer', 'threads', 'profiler']
 
 /**
  * What a chat turn never does itself, though the grant may hold it: it can take long (the web, the browser, running
- * commands), so the chat hands it to work and stays free to talk. Work runs with the whole grant.
+ * commands, using the computer), so the chat hands it to work and stays free to talk. Work runs with the whole grant.
  */
-export const BOT_WORK_ONLY_TOOLS: readonly string[] = ['shell', 'web_search', 'web_fetch']
+export const BOT_WORK_ONLY_TOOLS: readonly string[] = ['shell', 'web_search', 'web_fetch', 'computer']
 
 /**
  * The bot's listing of its owner's MCP servers (`mcp_servers`): each server set up for the whole profile, by name and a
@@ -129,6 +130,15 @@ export const BOT_BROWSER_PERMISSION = 'browser'
  * owner in its reply, and the owner takes over from the bot's browser view.
  */
 export const BOT_BROWSER_TOOLS: readonly BrowserAutomationTool[] = BROWSER_AUTOMATION_TOOLS.filter((tool) => tool !== 'browser_request_human')
+
+/**
+ * "Use the computer": see and operate apps on this computer through Cua Driver (`src/shared/computerUse.ts`), one
+ * permission for both computer tools. A thread the bot started gets them only while the bot holds it.
+ */
+export const BOT_COMPUTER_PERMISSION = 'computer'
+
+/** The computer tools a bot with "use the computer" gets. */
+export const BOT_COMPUTER_TOOLS: readonly string[] = COMPUTER_TOOL_NAMES
 
 /**
  * The automation tools (`automation_*`, v4): a bot granted them builds drafts the owner turns on, and lists, changes
@@ -261,7 +271,7 @@ export function isBotThreadTool(name: string): boolean {
  * `compileBotThread` turns it into the tools a turn may use. None is a tool's own name.
  */
 export const BOT_GROUP_PERMISSIONS: ReadonlySet<string> = new Set([
-  BOT_BROWSER_PERMISSION, BOT_THREADS_PERMISSION, BOT_PROFILER_PERMISSION, BOT_THEMES_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION
+  BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_THREADS_PERMISSION, BOT_PROFILER_PERMISSION, BOT_THEMES_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION
 ])
 
 /**
@@ -282,6 +292,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   'schedule_done',
   ...[...BOT_APP_TOOLS].filter((tool) => !BOT_GROUP_PERMISSIONS.has(tool)),
   ...BOT_BROWSER_TOOLS,
+  ...BOT_COMPUTER_TOOLS,
   ...BOT_THEME_TOOLS,
   ...BOT_THREAD_TOOLS,
   ...BOT_PROFILER_TOOLS,
@@ -319,7 +330,8 @@ const BROWSER_TOOLS: ReadonlySet<string> = new Set(BROWSER_AUTOMATION_TOOLS)
 const GROUPED_TOOLS: ReadonlyMap<string, string> = new Map([
   ...[...BOT_SCHEDULE_READ_TOOLS, ...BOT_SCHEDULE_ACT_TOOLS].map((tool) => [tool, BOT_SCHEDULES_PERMISSION] as const),
   ...BOT_SECRET_TOOLS.map((tool) => [tool, BOT_SECRETS_PERMISSION] as const),
-  ...BOT_QUICK_ACTION_TOOLS.map((tool) => [tool, BOT_QUICK_ACTIONS_PERMISSION] as const)
+  ...BOT_QUICK_ACTION_TOOLS.map((tool) => [tool, BOT_QUICK_ACTIONS_PERMISSION] as const),
+  ...BOT_COMPUTER_TOOLS.map((tool) => [tool, BOT_COMPUTER_PERMISSION] as const)
 ])
 
 const TASK_TOOL_SET: ReadonlySet<string> = new Set(BOT_TASK_TOOLS)
@@ -533,6 +545,7 @@ function toolLine(tool: NeutralTool): BotPermissionLine {
 /** An app tool in plain words: the browser, the owner's threads, the profiler and themes by what they are, any other tool by its name. */
 function appToolLine(tool: string): BotPermissionLine {
   if (tool === BOT_BROWSER_PERMISSION) return { kind: 'app_tool', text: 'Use the browser' }
+  if (tool === BOT_COMPUTER_PERMISSION) return { kind: 'app_tool', text: 'Use the computer' }
   if (tool === BOT_THREADS_PERMISSION) return { kind: 'app_tool', text: 'Use your threads' }
   if (tool === BOT_PROFILER_PERMISSION) return { kind: 'app_tool', text: 'Use the profiler' }
   if (tool === BOT_THEMES_PERMISSION) return { kind: 'app_tool', text: 'Change how Mousse looks' }

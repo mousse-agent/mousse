@@ -59,7 +59,7 @@ import {
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_IMAGE_TOOL, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -10572,6 +10572,7 @@ function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skill
     // profiler as its overview, Mousse's look as theme_read, scheduled jobs as their list, secrets as secret_request and
     // quick actions as create_quick_action (in both lanes).
     if (asked.tool === BOT_BROWSER_PERMISSION) return authority.appTools.has('browser_open')
+    if (asked.tool === BOT_COMPUTER_PERMISSION) return authority.appTools.has('computer_use')
     if (asked.tool === BOT_PROFILER_PERMISSION) return authority.appTools.has('profiler_overview')
     if (asked.tool === BOT_THEMES_PERMISSION) return authority.appTools.has('theme_read')
     if (asked.tool === BOT_SCHEDULES_PERMISSION) return authority.appTools.has('schedule_list')

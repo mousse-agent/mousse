@@ -1,4 +1,5 @@
 import { normalizeProfilerSettings, type ProfilerSettings } from './diagnostics/profiler'
+import { normalizeDriverPath } from './computerUse'
 import type { MousseIntegrationsSettings, SkillModelSettings } from './integrations'
 import { isExpiryPreset, type ExpiryPreset } from './threadExpiry'
 import { normalizeGoalTurnLimit } from './threadGoal'
@@ -343,6 +344,13 @@ export interface AgentAccessSettings {
    * chosen here.
    */
   computers: string[]
+  /**
+   * Computer use (Settings → Computer use): threads' agents may see and operate apps on this computer through Cua
+   * Driver. On unless turned off; a bot still needs "use the computer" (`src/shared/computerUse.ts`).
+   */
+  computerUse: boolean
+  /** The Cua Driver the person chose; absent: Mousse looks on the PATH and in the installer's folder. */
+  computerDriver?: string
 }
 
 const AGENT_ACCESS_LEVELS: readonly AgentAccessLevel[] = ['lineage', 'read', 'manage']
@@ -372,7 +380,9 @@ export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> 
   return {
     answerApprovals: raw?.answerApprovals === true,
     remoteSubagents: raw?.remoteSubagents === true,
-    computers
+    computers,
+    computerUse: raw?.computerUse !== false,
+    ...((driver) => (driver ? { computerDriver: driver } : {}))(normalizeDriverPath(raw?.computerDriver))
   }
 }
 

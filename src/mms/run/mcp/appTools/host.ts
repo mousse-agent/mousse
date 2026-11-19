@@ -523,6 +523,8 @@ export interface AppToolHost extends DelegationToolsHost {
   schedules?: AgentScheduleHost
   /** Automation drafts (`automation_*`), read at every call: the Automation manager's and granted bots' tools. */
   automations?(): import('./automations').AutomationToolHost | undefined
+  /** Computer use (Settings → Computer use), read at every listing and call; absent: its tools are never listed. */
+  computerUse?(): import('./computer').ComputerUseToolHost | undefined
   /** The profiler's tools (Settings → Labs), read at every call; absent: they are never listed. */
   profiler?(): import('./profiler').ProfilerToolHost | undefined
   /** The profile's appearance settings (`theme_read`, `theme_set`), read at every call; absent: the tools say themes are unavailable. */

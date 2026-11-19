@@ -1350,6 +1350,11 @@ const api = {
       return () => ipcRenderer.removeListener('dictation:localModelStatus', handler)
     }
   },
+  /** Settings → Computer use. */
+  computerUse: {
+    /** The system's file picker for a Cua Driver file; null when the person cancels. */
+    chooseDriver: (): Promise<string | null> => ipcRenderer.invoke('computerUse:chooseDriver')
+  },
   /** The profiler's memory monitor (Settings → Labs, and its notice). */
   diagnostics: {
     /** An error in this window's page, for main's `logs/renderer-errors.log`. Nothing is answered. */

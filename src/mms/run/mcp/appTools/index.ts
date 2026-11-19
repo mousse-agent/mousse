@@ -6,6 +6,7 @@ import { botMemoryTools, type BotMemoryToolHost } from './botMemory'
 import { botCatalogueTools } from './botCatalogue'
 import { botTools, type BotAppToolDeps } from './bots'
 import { browserTools } from './browser'
+import { computerTools } from './computer'
 import { delegationTools } from './delegation'
 import { familyRelation, threadFamily } from './family'
 import { goalTools } from './goal'
@@ -39,6 +40,7 @@ export type { BotMemoryToolHost } from './botMemory'
 export { TERMINAL_READ_TOOL } from './terminals'
 export { projectGitToolDefinitions, runProjectGitTool } from './projectGit'
 export type { ProfilerToolHost } from './profiler'
+export type { ComputerUseToolHost } from './computer'
 export {
   delegationToolDefinitions,
   dispatchDelegationTool,
@@ -53,7 +55,7 @@ export {
 } from './delegation'
 
 /** The tool families in the order runtimes are sent them, after the delegation tools. */
-export const APP_TOOL_FAMILIES = ['skills', 'questions', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit', 'profiler', 'appearance', 'terminals'] as const
+export const APP_TOOL_FAMILIES = ['skills', 'questions', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'computer', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit', 'profiler', 'appearance', 'terminals'] as const
 export type AppToolFamily = (typeof APP_TOOL_FAMILIES)[number]
 
 /** What the central check of `readsOthers` and `managesOthers` tools reads (SPEC §15.1), all of it at call time. */
@@ -124,6 +126,7 @@ export function createAppToolRegistry(input: {
   add('devGui', devGuiTools(host))
   add('web', webTools(host))
   add('browser', browserTools(host))
+  add('computer', computerTools(host))
   add('applets', appletTools())
   add('bots', [...botTools(input.bots), ...botCatalogueTools(() => registry), ...(input.botMemory ? botMemoryTools(input.botMemory) : [])])
   add('projectGit', projectGitTools(host))

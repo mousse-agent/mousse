@@ -80,7 +80,7 @@ import { botThreadsForCatchUp } from './bots/memory/capture'
 import { BOT_PACK_REACTIONS, type BotSituation } from './bots/memory/contextPack'
 import { BOT_CHAT_DIGEST } from '../shared/bots/personal/memory'
 import { BOT_LAUNCHED_RECENT_MS } from '../shared/bots/personal/chat'
-import { BOT_THREADS_PERMISSION } from '../shared/bots/personal/manifest'
+import { BOT_COMPUTER_PERMISSION, BOT_THREADS_PERMISSION } from '../shared/bots/personal/manifest'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
@@ -996,6 +996,11 @@ export class MmsProfileServices {
       if (!row || row.deletedAt || row.pausedReason) return undefined
       if (!botStore.activeGrant(botId)?.manifest.appTools.includes(BOT_THREADS_PERMISSION)) return undefined
       return { name: personalBots.botName(botId) ?? botId }
+    } : null)
+    // A thread a bot started uses the computer only while the bot exists, is not paused and holds "use the computer".
+    this.orchestrator.setBotComputer(personalBots && botStore ? (botId) => {
+      const row = botStore.registry(botId)
+      return Boolean(row && !row.deletedAt && !row.pausedReason && botStore.activeGrant(botId)?.manifest.appTools.includes(BOT_COMPUTER_PERMISSION))
     } : null)
     this.orchestrator.setRunning(new RunningRegistry({
       terminals: () => ptys.runningTerminals(),
@@ -2917,6 +2922,7 @@ export class MmsProfileServices {
         this.orchestrator.setBotDispatcher(null)
         this.orchestrator.setBotThreads(null)
         this.orchestrator.setBotSupervision(null)
+        this.orchestrator.setBotComputer(null)
         this.orchestrator.setBotAppTools(null)
       }],
       ['personal bots close', () => this.personalBots?.close()],

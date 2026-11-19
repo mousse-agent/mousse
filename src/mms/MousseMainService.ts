@@ -32,6 +32,7 @@ import { registerBotDeviceMethods } from './bots/deviceMethods'
 import { BotDefinitionError } from './bots/definitions/BotDefinitionStore'
 import { registerBotBrowserMethods } from './bots/browser/registerBotBrowserMethods'
 import { registerAutomationMethods } from './automations/registerMethods'
+import { registerComputerUseMethods } from './computerUse/registerMethods'
 import { registerSecretMethods } from './secrets/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
@@ -265,6 +266,8 @@ export class MousseMainService extends MmsProfileServices {
       const services = await profile(profileId)
       return services.personalBots ? services.botBrowsers : null
     })
+    // Settings → Computer use: whether Cua Driver is here, and its installer.
+    registerComputerUseMethods(this.domains, async (profileId) => (await profile(profileId)).orchestrator.computerUse())
     registerAutomationMethods(this.domains, async (profileId) => {
       const services = await profile(profileId)
       return {
