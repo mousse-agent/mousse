@@ -157,6 +157,20 @@
       "expiresAt": "2026-11-19T00:01:23.773Z"
     },
     {
+      "task": "remove-bot-tells-you-setting",
+      "session": "Animatrix-c48af6",
+      "machine": "Animatrix",
+      "branch": "remove-bot-tells-you-setting",
+      "paths": [
+        "src/mms/bots",
+        "src/shared/bots/personal",
+        "src/renderer/components/bots/BotAboutPanel.tsx",
+        "src/mms/scheduled"
+      ],
+      "claimedAt": "2026-11-19T17:42:25.458Z",
+      "expiresAt": "2026-11-19T19:42:25.458Z"
+    },
+    {
       "task": "usage-history",
       "session": "Animatrix-20d61e",
       "machine": "Animatrix",
