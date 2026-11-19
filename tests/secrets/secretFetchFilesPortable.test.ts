@@ -170,15 +170,15 @@ it.each(['linux', 'darwin', 'win32'])(
       fs.renameSync(folder, folder + '-original')
       fs.symlinkSync(outside, folder, 'dir')
     }
+    let refusal: unknown
     try {
       saveSecretFetchResponse(scratch, Buffer.from('response'))
-    } catch {
-      /* A safe refusal may discard the file. */
+    } catch (error) {
+      refusal = error
     }
     expect(swapped).toBe(true)
+    expect(refusal).toMatchObject({ unsafe: true })
     expect(fs.readdirSync(outside)).toEqual([])
-    for (const name of fs.readdirSync(folder + '-original')) {
-      expect(fs.readFileSync(join(folder + '-original', name), 'utf8')).toBe('response')
-    }
+    expect(fs.readdirSync(folder + '-original')).toEqual([])
   }
 )
