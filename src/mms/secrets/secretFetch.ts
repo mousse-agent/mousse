@@ -49,15 +49,7 @@ export function boundReadPath(raw: unknown, paths?: readonly string[]): string |
   const normalized = decoded.normalize('NFKC')
   if (normalized.split('/').length !== decoded.split('/').length || normalized.includes('\\'))
     return
-  if (
-    decoded
-      .split('/')
-      .some(
-        (segment) =>
-          !/^[A-Za-z0-9._~!$&'()*+,=:@-]*$/.test(segment) || /[%?#]/.test(segment.normalize('NFKC'))
-      )
-  )
-    return
+  if (decoded.split('/').some((segment) => !/^[A-Za-z0-9._~!$&'()*+,=:@-]*$/.test(segment))) return
   if (paths && !paths.some((p) => decoded === p || decoded.startsWith(p + '/'))) return
   // Encoding each checked segment also escapes colons (for example GitHub compare refs);
   // the listed services decode them as segment data, never as a new URL authority.
