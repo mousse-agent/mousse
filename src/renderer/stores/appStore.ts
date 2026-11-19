@@ -257,6 +257,8 @@ export function sameThreadSnapshot(a: Thread[], b: Thread[]): boolean {
       left.hidden !== right.hidden ||
       // So are the reply preview and the pull requests a row shows (`Thread.lastReply`, `Thread.pullRequests`).
       left.lastReply !== right.lastReply ||
+      // And how its latest run ended, which its links show (`Thread.lastRun`).
+      left.lastRun !== right.lastRun ||
       !samePullRequestRows(left, right)
     ) {
       return false

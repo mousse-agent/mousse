@@ -2,7 +2,7 @@ import { memo, useSyncExternalStore } from 'react'
 import { CircleAlert, CircleCheck, CircleDotDashed, Clock, Loader2, MessageQuestion, Pause, Shield } from '../lib/icons'
 import { expiresInLabel } from '../../shared/threadExpiry'
 import { isThreadActivityActive, type Thread, type ThreadActivitySnapshot, type ThreadActivityState, type TurnPause } from '../../shared/types'
-import { threadStatus } from '../../shared/threadAttention'
+import { threadStatus, type ThreadLinkStatus } from '../../shared/threadAttention'
 import { isSubagentThread } from '../../shared/threadLineage'
 import { pausedStatusLabel } from '../lib/pausedRun'
 import { useAppStore } from '../stores/appStore'
@@ -128,15 +128,20 @@ export const ThreadExpiryIcon = memo(function ThreadExpiryIcon({ expiresAt, size
   )
 })
 
-/** The status and age in a Threads tab card's top line: Working 5m, Waiting, Approval, Input, Paused, Done, or its age. */
-export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activity, live, awaitsApproval, updatedAt, setupFailed }: RowStatusProps & { updatedAt?: string }) {
+/**
+ * The status and age in a Threads tab card's top line: Working 5m, Waiting, Approval, Input, Paused, Done, or its age.
+ * `withAge` adds the age to Approval, Input, Done and Failed too (a thread link's card, which has no other time).
+ * `linkStatus`: the status a thread link shows (`threadLinkStatus`), which keeps Done and Failed once the thread is quiet.
+ */
+export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activity, live, awaitsApproval, updatedAt, withAge = false, setupFailed, linkStatus }: RowStatusProps & { updatedAt?: string; withAge?: boolean; linkStatus?: ThreadLinkStatus }) {
   countRender(`SidebarStatus:${threadId}`)
   useAgeClock(true)
   const shown = useRowActivity(threadId, activity, live)
   const startedAt = useAppStore((s) => s.turnStates[threadId]?.startedAt)
   const pause = useOwnPause(threadId)
   const age = threadAge(isThreadActivityActive(shown) ? startedAt ?? updatedAt : updatedAt)
-  const status = threadStatus(shown, awaitsApproval)
+  const status: ThreadLinkStatus = linkStatus ?? threadStatus(shown, awaitsApproval)
+  const settledAge = withAge && age && age !== 'now' ? ` ${age}` : ''
   if (status === 'working') {
     return (
       <span className="threads-sidebar-card-status threads-sidebar-card-status-working">
@@ -157,7 +162,7 @@ export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activ
     return (
       <span className="threads-sidebar-card-status threads-sidebar-card-status-input" title="Needs your approval">
         <Shield size={12} strokeWidth={2} aria-hidden="true" />
-        Approval
+        Approval{settledAge}
       </span>
     )
   }
@@ -165,7 +170,7 @@ export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activ
     return (
       <span className="threads-sidebar-card-status threads-sidebar-card-status-input">
         <MessageQuestion size={12} strokeWidth={2} aria-hidden="true" />
-        Input
+        Input{settledAge}
       </span>
     )
   }
@@ -177,7 +182,7 @@ export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activ
       </span>
     )
   }
-  if (setupFailed && (status === 'quiet' || status === 'done')) {
+  if (setupFailed && (status === 'quiet' || status === 'done' || status === 'failed')) {
     return (
       <span className="threads-sidebar-card-status threads-sidebar-card-status-failed" title={setupFailedTitle(setupFailed)}>
         <CircleAlert size={12} strokeWidth={2} aria-hidden="true" />
@@ -185,11 +190,19 @@ export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activ
       </span>
     )
   }
+  if (status === 'failed') {
+    return (
+      <span className="threads-sidebar-card-status threads-sidebar-card-status-failed">
+        <CircleAlert size={12} strokeWidth={2} aria-hidden="true" />
+        Failed{settledAge}
+      </span>
+    )
+  }
   if (status === 'done') {
     return (
       <span className="threads-sidebar-card-status threads-sidebar-card-status-done">
         <CircleCheck size={12} strokeWidth={2} aria-hidden="true" />
-        Done
+        Done{settledAge}
       </span>
     )
   }
