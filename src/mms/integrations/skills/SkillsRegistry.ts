@@ -30,6 +30,12 @@ export interface SkillsDiscoveryOptions {
   projectPath?: string
   refresh?: boolean
   includeDisabled?: boolean
+  /**
+   * The last snapshot may answer once it is past its time: it is returned at once and the folders are scanned again in
+   * the background, for the next caller. A change Mousse made itself (`invalidateDiscoveryCache`) is never answered
+   * from it.
+   */
+  stale?: boolean
 }
 
 interface ScannedSource {
@@ -50,6 +56,10 @@ export class SkillsRegistry {
   private sharedScanning = new Map<string, Promise<ScannedSource>>()
   /** Changes on invalidation, so a scan that started before it is not kept. */
   private sharedGeneration = 0
+  /** Per project, the last snapshot scanned, kept past its time for a `stale` caller; most recently used last. */
+  private lastSnapshots = new Map<string, SkillsRegistrySnapshot>()
+  /** Background scans of a project for a `stale` caller that got the last snapshot. */
+  private revalidating = new Map<string, Promise<unknown>>()
   private static readonly DISCOVERY_TTL_MS = 30_000
   static readonly MAX_DISCOVERY_ENTRIES = 16
   private readonly context: IntegrationRuntimeContext
@@ -60,6 +70,7 @@ export class SkillsRegistry {
 
   invalidateDiscoveryCache(): void {
     this.discoveryCache.clear()
+    this.lastSnapshots.clear()
     this.sharedScans.clear()
     this.sharedScanning.clear()
     this.sharedGeneration++
@@ -80,9 +91,24 @@ export class SkillsRegistry {
         this.discoveryCache.set(cacheKey, cached)
         return cached.snapshot
       }
+      const last = options.stale ? this.lastSnapshots.get(cacheKey) : undefined
+      if (last) {
+        if (!this.revalidating.has(cacheKey)) {
+          const scan = this.discover({ ...options, stale: false }).catch(() => undefined).finally(() => this.revalidating.delete(cacheKey))
+          this.revalidating.set(cacheKey, scan)
+        }
+        return last
+      }
     }
 
+    const generation = this.sharedGeneration
     const { snapshot, scannedAt } = await this.discoverUncached(options)
+    // A scan that started before a change Mousse made is not kept as the last snapshot.
+    if (generation === this.sharedGeneration) {
+      this.lastSnapshots.delete(cacheKey)
+      this.lastSnapshots.set(cacheKey, snapshot)
+      while (this.lastSnapshots.size > SkillsRegistry.MAX_DISCOVERY_ENTRIES) this.lastSnapshots.delete(this.lastSnapshots.keys().next().value!)
+    }
     this.discoveryCache.delete(cacheKey)
     // The snapshot is as old as the oldest scan in it, so it never outlives a shared scan it reused.
     this.discoveryCache.set(cacheKey, { snapshot, fetchedAt: scannedAt })

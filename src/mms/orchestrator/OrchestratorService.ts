@@ -4376,7 +4376,9 @@ export class OrchestratorService extends EventEmitter {
         userContent: input.userContent,
         actor: registered.actor,
         // A definition loads only the skills it was granted.
-        ...(input.grants ? { grants: input.grants } : {})
+        ...(input.grants ? { grants: input.grants } : {}),
+        // A bot's turn starts on the last scan of the Skills folders; they are scanned again beside it.
+        ...(registered.bot ? { stale: true } : {})
       })
     } catch (error) {
       // Skills are optional: a broken registry cannot block the turn.
