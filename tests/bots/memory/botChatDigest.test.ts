@@ -44,10 +44,13 @@ function setup() {
       calls.push({ prompt, answer: async (text) => { resolve(text); await packs.digestRunning('ada') } })
     })
   })
-  // What the engine's `chatEpochEnd` decides, by hand: the conversation is small, past the high mark, or past the hard mark.
-  const size = { now: 'small' as 'small' | 'high' | 'hard' }
+  // What the engine's `chatEpochEnd` decides, by hand: the conversation is small, past the prepare mark, past the high
+  // mark, or past the hard mark.
+  const size = { now: 'small' as 'small' | 'prepare' | 'high' | 'hard' }
   const verdict = (epoch: BotChatEpoch | undefined, digest: BotChatDigestState): BotChatEpochVerdict =>
-    !epoch ? 'none' : epoch.ended ? epoch.ended : size.now === 'small' ? undefined : size.now === 'high' && digest === 'coming' ? 'due' : 'full'
+    !epoch ? 'none' : epoch.ended ? epoch.ended : size.now === 'small' ? undefined
+      : size.now === 'prepare' ? (digest === 'coming' ? 'prepare' : undefined)
+      : size.now === 'high' && digest === 'coming' ? 'due' : 'full'
   const turn = (activationId: string, start = true) =>
     packs.chatContext({ botId: 'ada', activationId, start, selection: SEL, keep: verdict })
   const settle = (activationId: string) =>
@@ -114,6 +117,26 @@ describe('the digest of a fold', () => {
     expect(calls[1]!.prompt).not.toContain('blue door')
   })
 
+  it('is asked for from the prepare mark, so the epoch folds with it at the high mark instead of waiting', async () => {
+    const { fx, calls, size, turn, settle } = setup()
+    for (let n = 1; n <= 40; n++) exchange(fx, n)
+    await turn('a1')
+    await settle('a1')
+    size.now = 'prepare'
+    expect(await turn('a2')).toMatchObject({ fresh: false })
+    expect(calls).toHaveLength(1)
+    await calls[0]!.answer(answer('Early digest of the move'))
+    await settle('a2')
+    // Ready before the high mark: the epoch goes on, and no second call starts.
+    expect(await turn('a3')).toMatchObject({ fresh: false })
+    await settle('a3')
+    expect(calls).toHaveLength(1)
+    size.now = 'high'
+    const fold = await turn('a4')
+    expect(fold).toMatchObject({ fresh: true, reason: 'full', folded: { digest: true } })
+    expect(fold.text).toContain('Early digest of the move')
+  })
+
   it('never keeps the chat waiting: at the hard mark the epoch folds without it, and a late digest is used at the next fold', async () => {
     const { fx, calls, size, turn, settle } = setup()
     for (let n = 1; n <= 40; n++) exchange(fx, n)
@@ -167,8 +190,11 @@ describe('the digest of a fold', () => {
     expect(timeline).toMatch(/^- \d+ Nov 2026: Fold 1 headline \(j\d+–j\d+\)\n- \d+ Nov 2026: Fold 2 headline/m)
     expect(text).not.toContain('Fold 1 fact')
     expect(fx.store.search('ada', { query: 'Fold 1 fact' }).map((hit) => hit.ref)).toContain(`j${summary()!.digests![0]!.seq}`)
-    // Each digest carries over the standing constraints of the one before.
-    expect(text).toContain('Never book trains before 9am (j2).')
+    // Each digest carries over the standing constraints of the one before, so only the newest shows them: once.
+    expect(text.split('Never book trains before 9am (j2).')).toHaveLength(2)
+    expect(text.match(/^Standing constraints:/gm)).toHaveLength(1)
+    expect(text.lastIndexOf('Standing constraints:')).toBeGreaterThan(text.indexOf('Fold 5 headline'))
+    for (const fold of [3, 4]) expect(text).toContain(`Fold ${fold} fact`)
     expect(estimateTokens(text)).toBeLessThanOrEqual(BOT_CHAT_DIGEST.summary + 100)
   })
 

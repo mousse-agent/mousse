@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { BOT_CHAT_EPOCH_MARKS } from '../../src/mms/bots/memory/contextBudget'
 import { getDefaultSettings } from '../../src/shared/settings'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { createBotMemoryAdmin } from '../../src/mms/bots/memory/admin'
@@ -140,11 +141,11 @@ describe('a bot chat on epochs', () => {
     first.prepared.metrics!({ totalResponseTimeMs: 1, context: { input: 2_000, cacheRead: 8_000, cacheWrite: 0, contextWindow: 400_000 } })
     await finish(f, first.payload, 'completed', { text: 'Hi.' })
     const turn = await chatTurn('Go on', 'u2')
-    turn.prepared.metrics!({ totalResponseTimeMs: 1, context: { input: 2_000, cacheRead: 8_000 + 50_000, cacheWrite: 0, contextWindow: 400_000 } })
+    turn.prepared.metrics!({ totalResponseTimeMs: 1, context: { input: 2_000, cacheRead: 8_000 + BOT_CHAT_EPOCH_MARKS.high + 2_000, cacheWrite: 0, contextWindow: 400_000 } })
     await finish(f, turn.payload, 'completed', { text: 'OK.' })
     const due = await chatTurn('More', 'u3')
     expect(due.prepared.history).toBe('thread')
-    due.prepared.metrics!({ totalResponseTimeMs: 1, context: { input: 2_000, cacheRead: 8_000 + 66_000, cacheWrite: 0, contextWindow: 400_000 } })
+    due.prepared.metrics!({ totalResponseTimeMs: 1, context: { input: 2_000, cacheRead: 8_000 + BOT_CHAT_EPOCH_MARKS.hard + 2_000, cacheWrite: 0, contextWindow: 400_000 } })
     await finish(f, due.payload, 'completed', { text: 'Sure.' })
     expect(chatOf(f, botId).filter((message) => message.id.startsWith(BOT_FOLD_LINE_PREFIX))).toEqual([])
     const next = await chatTurn('And now?', 'u4')

@@ -191,6 +191,7 @@ describe('when the epoch ends (chatEpochEnd)', () => {
   const epoch: BotChatEpoch = { id: 'e:1', startedAt: '', instanceId: SEL.instanceId, model: SEL.model, deliveredSeq: 0, ran: [], outsideMemory: '', addedTokens: 0 }
   const usage = (lastPrompt: number | null, at = T, compactions = 0) => ({ lastPrompt, lastRequestAt: at, compactions, contextWindow: 200_000, cacheTtlMs: HOUR }) as unknown as BotTurnUsageRow
   const budget = () => contextBudget({ contextWindow: 200_000, cacheTtlMs: HOUR })
+  const M = BOT_CHAT_EPOCH_MARKS
   // Each input: the epoch, the turns it ran (first one 20k: system text, tools, base and first message), and when.
   const rows: Array<[string, { epoch?: BotChatEpoch; selection?: typeof SEL; turns?: BotTurnUsageRow[]; now?: number; digest?: BotChatDigestState }, BotChatEpochVerdict]> = [
     ['no epoch yet', { epoch: undefined }, 'none'],
@@ -198,18 +199,23 @@ describe('when the epoch ends (chatEpochEnd)', () => {
     ['another model', { selection: { ...SEL, model: 'claude-sonnet' } }, 'model'],
     ['another entry', { selection: { ...SEL, instanceId: 'codex' } }, 'model'],
     ['a runtime compaction', { turns: [usage(20_000), usage(30_000, T, 1)] }, 'compacted'],
-    ['small and warm', { turns: [usage(20_000), usage(40_000)], now: T + 60_000 }, undefined],
-    ['at the high mark', { turns: [usage(20_000), usage(20_000 + 48_000)] }, 'full'],
+    ['small and warm', { turns: [usage(20_000), usage(20_000 + M.prepare - 1)], now: T + 60_000, digest: 'coming' }, undefined],
+    ['at the high mark', { turns: [usage(20_000), usage(20_000 + M.high)] }, 'full'],
     ['past 40% of the window', { turns: [usage(79_000), usage(81_000)] }, 'full'],
-    ['past the mid mark, cache expired', { turns: [usage(20_000), usage(45_000)], now: T + HOUR + 1 }, 'cold'],
-    ['past the mid mark, cache warm', { turns: [usage(20_000), usage(45_000)], now: T + HOUR - 1 }, undefined],
-    ['below the mid mark, cache expired', { turns: [usage(20_000), usage(30_000)], now: T + 3 * HOUR }, undefined],
-    ['no sizes reported: the pack\'s estimate', { epoch: { ...epoch, addedTokens: 50_000 }, turns: [usage(null)] }, 'full'],
+    ['past the mid mark, cache expired', { turns: [usage(20_000), usage(20_000 + M.mid)], now: T + HOUR + 1 }, 'cold'],
+    ['past the mid mark, cache warm', { turns: [usage(20_000), usage(20_000 + M.mid)], now: T + HOUR - 1 }, undefined],
+    ['below the mid mark, cache expired', { turns: [usage(20_000), usage(20_000 + M.mid - 1)], now: T + 3 * HOUR }, undefined],
+    ['no sizes reported: the pack\'s estimate', { epoch: { ...epoch, addedTokens: M.high }, turns: [usage(null)] }, 'full'],
+    // From the prepare mark (or that far below the cap) the digest of the coming fold is asked for, so it is ready by the high mark.
+    ['at the prepare mark, digest coming', { turns: [usage(20_000), usage(20_000 + M.prepare)], digest: 'coming' }, 'prepare'],
+    ['at the prepare mark, digest ready', { turns: [usage(20_000), usage(20_000 + M.prepare)], digest: 'ready' }, undefined],
+    ['at the prepare mark, no digest', { turns: [usage(20_000), usage(20_000 + M.prepare)], digest: 'none' }, undefined],
+    ['near the cap, digest coming', { turns: [usage(80_000 - (M.high - M.prepare) - 1_000), usage(80_000 - (M.high - M.prepare))], digest: 'coming' }, 'prepare'],
     // Past the high mark the epoch waits for its digest, but never past the hard mark or the cap.
-    ['past the high mark, digest coming', { turns: [usage(20_000), usage(20_000 + 50_000)], digest: 'coming' }, 'due'],
-    ['past the high mark, digest ready', { turns: [usage(20_000), usage(20_000 + 50_000)], digest: 'ready' }, 'full'],
-    ['past the high mark, no digest', { turns: [usage(20_000), usage(20_000 + 50_000)], digest: 'none' }, 'full'],
-    ['at the hard mark, digest coming', { turns: [usage(10_000), usage(10_000 + 64_000)], digest: 'coming' }, 'full'],
+    ['past the high mark, digest coming', { turns: [usage(20_000), usage(20_000 + M.high + 1_000)], digest: 'coming' }, 'due'],
+    ['past the high mark, digest ready', { turns: [usage(20_000), usage(20_000 + M.high + 1_000)], digest: 'ready' }, 'full'],
+    ['past the high mark, no digest', { turns: [usage(20_000), usage(20_000 + M.high + 1_000)], digest: 'none' }, 'full'],
+    ['at the hard mark, digest coming', { turns: [usage(10_000), usage(10_000 + M.hard)], digest: 'coming' }, 'full'],
     ['past 40% of the window, digest coming', { turns: [usage(79_000), usage(81_000)], digest: 'coming' }, 'full']
   ]
   it.each(rows)('%s', (_name, input, expected) => {
