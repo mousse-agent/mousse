@@ -57,6 +57,8 @@ export const CHECK_ROUTE = readCheckRoute()
  * uses the owner and the owner gets no way back (§3.6).
  */
 export const ONE_WAY = REAL_HELPER && CHECK_ROUTE === 'ssh'
+/** In a real-helper tcp run, how many computers' loopback ports (from 47301) the class map names. */
+const CLASS_MAPPED_PORTS = 32
 /** The class `tcp` is mapped to for this run (`MOUSSE_NET_ENGINE_CHECK_CLASS`): tailnet, then public. */
 export const CHECK_CLASS: 'tailnet' | 'public' =
   process.env.MOUSSE_NET_ENGINE_CHECK_CLASS === 'public' ? 'public' : 'tailnet'
@@ -284,14 +286,17 @@ export class Fabric {
       // Every helper of the run reads the one SSH config the test servers' entries go in.
       process.env.MOUSSE_NET_TEST_SSH_CONFIG ||= sshConfig()
       // Over tcp on one computer, each helper's loopback port stands for the class under test: the debug helper
-      // and the app read the same map (`<port>=<class>`, 1b §14). `*=<class>` covers the ports of computers made
-      // after a helper started, whose map it read then.
+      // and the app read the same map (`<port>=<class>`, 1b §14). The whole range is mapped before the first helper
+      // starts, so each helper, which reads the map once, knows the computers made after it. Other loopback ports
+      // stay `lan` (a LAN address that changes, as in reconnect).
       if (CHECK_ROUTE === 'tcp' && !process.env.MOUSSE_NET_ENGINE_CHECK_ROLE) {
         computer.port = 47300 + ++this.made
-        process.env.MOUSSE_NET_TEST_CLASS_MAP = [
-          process.env.MOUSSE_NET_TEST_CLASS_MAP || `*=${CHECK_CLASS}`,
-          `${computer.port}=${CHECK_CLASS}`
-        ].join(',')
+        if (computer.port > 47300 + CLASS_MAPPED_PORTS)
+          throw new Error(`a routes run maps ${CLASS_MAPPED_PORTS} computers' ports`)
+        process.env.MOUSSE_NET_TEST_CLASS_MAP ||= Array.from(
+          { length: CLASS_MAPPED_PORTS },
+          (_, i) => `${47301 + i}=${CHECK_CLASS}`
+        ).join(',')
       }
       // A cross-machine cell's computers listen on every interface; the others only on loopback.
       process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP ||= process.env.MOUSSE_NET_ENGINE_CHECK_ROLE
@@ -476,7 +481,10 @@ export class Fabric {
     served: Array<Record<string, unknown>>
   ): Promise<{ launcher: string; command: string[] }> {
     const token = randomBytes(16).toString('hex')
+    const open = new Set<Socket>()
     const server = createNetServer({ allowHalfOpen: true }, (socket) => {
+      open.add(socket)
+      socket.on('close', () => open.delete(socket))
       socket.on('error', () => undefined)
       let head = Buffer.alloc(0)
       const first = (chunk: Buffer) => {
@@ -506,7 +514,7 @@ export class Fabric {
       socket.on('data', first)
     })
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    this.cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())))
+    this.cleanups.push(() => closeServer(server, open))
     const port = (server.address() as { port: number }).port
     const script = join(dirname(fileURLToPath(import.meta.url)), 'sshCliStandIn.mjs')
     const command = [process.execPath, script, String(port), token]
@@ -914,10 +922,15 @@ async function tunnelStandIn(
   wsPort: () => number | undefined
 ): Promise<{ route: string; close: () => Promise<void> }> {
   const { key, cert } = tunnelPki()
+  const open = new Set<Socket>()
   const server = createTlsServer({ key, cert, ALPNProtocols: ['http/1.1'] }, (socket) => {
     const port = wsPort()
     if (!port) return socket.destroy()
     const plain = netConnect(port, '127.0.0.1')
+    for (const one of [socket, plain]) {
+      open.add(one)
+      one.on('close', () => open.delete(one))
+    }
     socket.on('error', () => plain.destroy())
     plain.on('error', () => socket.destroy())
     socket.pipe(plain).pipe(socket)
@@ -926,8 +939,17 @@ async function tunnelStandIn(
   const port = (server.address() as { port: number }).port
   return {
     route: `wss://localhost:${port}/t/mousse-net/1`,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve()))
+    close: () => closeServer(server, open)
   }
+}
+
+/** Stops a test server: its open connections end at once (a close alone waits for every one to end). */
+function closeServer(
+  server: { close(done: () => void): unknown },
+  open: Set<Socket>
+): Promise<void> {
+  for (const socket of open) socket.destroy()
+  return new Promise<void>((resolve) => server.close(() => resolve()))
 }
 
 async function running(mms: MousseMainService, before?: EngineHelper): Promise<EngineHelper> {

@@ -15,7 +15,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { NodeId } from '../../../src/shared/net'
-import { eventually, Fabric, ONE_WAY, REAL_HELPER, step, type Computer } from './harness'
+import {
+  CHECK_ROUTE,
+  eventually,
+  Fabric,
+  ONE_WAY,
+  REAL_HELPER,
+  step,
+  type Computer
+} from './harness'
 
 const browseFile = join(mkdtempSync(join(tmpdir(), 'engine-browse-')), 'hosts')
 writeFileSync(browseFile, '')
@@ -77,15 +85,20 @@ describe.runIf(REAL_HELPER)('phase1a.reconnect', () => {
     await bothOnline('not_reconnected')
   }, 180_000)
 
-  it("reconnects after the owner's address changes", async () => {
-    const port = await freePort()
-    writeFileSync(browseFile, `127.0.0.1:${port}\n`)
-    owner.port = port
-    await fabric.restartHelper(owner)
-    expect(owner.engine.info.port).toBe(port)
-    await wentDown()
-    await bothOnline('unreachable', 90_000)
-  }, 180_000)
+  // The new address is a LAN one found by browsing: a tcp routes run gives the app only the class under test.
+  it.skipIf(CHECK_ROUTE === 'tcp')(
+    "reconnects after the owner's address changes",
+    async () => {
+      const port = await freePort()
+      writeFileSync(browseFile, `127.0.0.1:${port}\n`)
+      owner.port = port
+      await fabric.restartHelper(owner)
+      expect(owner.engine.info.port).toBe(port)
+      await wentDown()
+      await bothOnline('unreachable', 90_000)
+    },
+    180_000
+  )
 })
 
 describe.runIf(!REAL_HELPER && !!process.env.MOUSSE_NET_ENGINE_CHECK_OUT)(

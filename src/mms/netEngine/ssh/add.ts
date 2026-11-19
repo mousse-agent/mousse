@@ -310,7 +310,13 @@ export class SshAdd {
   private dialUntilConnected(node: EnginePeerRow['localId'], identity: string): void {
     const attempt = (): void => {
       const helper = this.port.helper()
-      if (!helper || this.port.peers.get(node)?.state !== 'ssh_granted') return
+      let waiting = false
+      try {
+        waiting = this.port.peers.get(node)?.state === 'ssh_granted'
+      } catch {
+        // Networking stopped and its store closed.
+      }
+      if (!helper || !waiting) return
       void helper.dial(identity).catch(() => {
         const timer = setTimeout(attempt, engineLimits().pairingRetryMs)
         timer.unref?.()
