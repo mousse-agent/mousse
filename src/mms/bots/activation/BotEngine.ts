@@ -124,7 +124,8 @@ import { shortModelName } from '../../../shared/modelNames'
 import { isCodexBotRefusal } from '../../../shared/harness/codexBotVersion'
 import { BOT_RUN_REPORT_LINE } from '../memory/contextPack'
 import { BOT_CHAT_TURN_END_KEY, BOT_FOLD_LINE_PREFIX, BOT_FOLD_LINE_TEXT } from '../../../shared/bots/personal/memory'
-import type { BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkModel, BotWorkStarted } from '../seams'
+import { rollUpChips, type BotChipCall } from '../../../shared/bots/personal/chips'
+import type { BotActivityCalls, BotActivityContext, BotActivitySink, BotContextProvider, BotDispatchEnd, BotJournal, BotJournalInput, BotMcpListing, BotMemoryAdmin, BotModelChange, BotModelProblem, BotModelResolution, BotModelResolver, BotProcessSupervision, BotToolHost, BotWorkList, BotWorkModel, BotWorkStarted } from '../seams'
 import { MERGED_END_REASON, workWaits, type BotActivationRow, type BotDispatchRow, type BotSubagentSpec, type BotEntryLimit, type BotEscalationRow, type BotMessageRow, type BotModelState, type BotQuestionRow, type BotReminderRow, type BotStore, type BotStoredError } from '../store/BotStore'
 import { BotCounterScope, BotSpendScope, type ActivationLimits } from '../store/scopes'
 import { isConnectionFailure, type BotConnectivity } from './connectivity'
@@ -620,9 +621,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private readonly liveRuns = new Map<string, string>()
   /**
    * What dispatches that reached their runtime's turn cap did, per activation, until its next message carries it: their
-   * chips, and their last words for a message that has none of its own (`continueAfterTurnCap`). Kept in memory.
+   * chips, and their last words for a message that has none of its own (`continueAfterTurnCap`). Kept in memory. Their
+   * calls, where the activity sink gives them (`drainCalls`), are kept instead of the chips they rolled up to, so the next
+   * message rolls up every carried turn's calls with its own as one (`withCarried`): with no count of continuations,
+   * a chip per capped turn would grow without end. `chips` holds only what has no calls (a stopped thread's chip).
    */
-  private readonly carried = new Map<string, { chips: BotChip[]; text?: string }>()
+  private readonly carried = new Map<string, { chips: BotChip[]; calls?: BotActivityCalls; text?: string }>()
   /**
    * Work that asked its owner a question (`ask_owner`), by activation: the main dispatch it asked in. Every later call of
    * that dispatch is refused so the turn ends (`QUESTION_END_TURN_TEXT`), and the answer continues the work. In memory
@@ -835,6 +839,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   private sweeping: Promise<string[]> | undefined
   /** The rolled-up chips of each settled main dispatch, until its message is posted. */
   private readonly drained = new Map<string, BotChip[]>()
+  /** The calls those chips came from, where the sink gives them (`drainCalls`), for a turn that carries on (`carried`). */
+  private readonly drainedCalls = new Map<string, BotActivityCalls>()
   private lastSweep = 0
   /** The owner's MCP servers this engine follows while an ask waits for a server's tools (`watchMcp`). */
   private mcpWatch?: { mcp: BotMcpHost; stop: () => void }
@@ -4301,6 +4307,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (online && !current.offline) return false
     // The ended dispatch's own message is not posted: its turn goes on in the continuation.
     this.drained.delete(`${row.id}:${main.n}`)
+    this.drainedCalls.delete(`${row.id}:${main.n}`)
     if (online) {
       this.clearInternetCheck(row.id)
       await this.continueWith(row.id, ['running'], { network: true })
@@ -4503,9 +4510,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     // A turn that reached the turn cap just before (its continuation ran out at once) gave its chips and words to this.
     const carried = this.carried.get(row.id)
     this.carried.delete(row.id)
+    const chips = carried ? carriedChips(carried) : []
     this.chat.post({
       id: `bm_${row.id}_room_d${dispatchN}`, botId: row.botId, author: 'bot', kind: 'notice', text: roomText(body || carried?.text || ''),
-      ...(carried?.chips.length ? { chips: carried.chips } : {}),
+      ...(chips.length ? { chips } : {}),
       ...(ask ? { askId: ask.id } : {}),
       ...(row.trigger.kind === 'work' && row.trigger.replyTo ? { replyTo: row.trigger.replyTo } : {}),
       activationId: row.id, lane: 'run', ...(row.threadId ? { threadId: row.threadId } : {})
@@ -5443,13 +5451,16 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       // Ended because its question was forgotten: its line says so, and the turn's last words are not posted.
       if (next.endReason === 'question_gone') {
         this.drained.delete(`${row.id}:${main.n}`)
+        this.drainedCalls.delete(`${row.id}:${main.n}`)
         this.lateTexts.delete(`${row.id}:${main.n}`)
         return this.afterEnd(next)
       }
       // What it has is posted first, so a continuation that fails or is stopped never loses it; then the notes continue
       // the same thread, and its report follows with the change.
-      if (heldDraft) this.drained.delete(`${row.id}:${main.n}`)
-      else this.postReply(next, main, text, options.expectText === true)
+      if (heldDraft) {
+        this.drained.delete(`${row.id}:${main.n}`)
+        this.drainedCalls.delete(`${row.id}:${main.n}`)
+      } else this.postReply(next, main, text, options.expectText === true)
       if (noted && next.status === 'running') {
         await this.continueWith(row.id, ['running'], { afterReport: true, ...(retryUnanswered ? { unanswered: true } : {}), ...(allowed.length ? { allowed } : {}) })
         return
@@ -5540,8 +5551,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.carried.delete(row.id)
     const stoppedChip = this.reportChips.get(key)
     this.reportChips.delete(key)
-    const chips = [...(carried?.chips ?? []), ...(this.chatDraft(row)?.chips ?? []), ...(this.drained.get(key) ?? []), ...(stoppedChip ? [stoppedChip] : [])]
+    const own = this.drained.get(key) ?? []
+    const draftChips = this.chatDraft(row)?.chips ?? []
+    // Carried calls roll up with this turn's: one chip per kind of call for the whole work.
+    const chips = carried?.calls
+      ? [...carriedChips(withCarried(carried, own, this.drainedCalls.get(key))), ...draftChips, ...(stoppedChip ? [stoppedChip] : [])]
+      : [...(carried?.chips ?? []), ...draftChips, ...own, ...(stoppedChip ? [stoppedChip] : [])]
     this.drained.delete(key)
+    this.drainedCalls.delete(key)
     if (!text?.trim() && carried?.text) text = carried.text
     // Its open walls, unless a card for them was posted in this activation already (a moved run ask keeps its old card too).
     const asks = this.store.escalations({ activationId: row.id }).filter((ask) => ask.mode === 'wall' && ask.dispatchN === dispatch.n && ask.status === 'open' &&
@@ -5652,10 +5669,12 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const key = `${row.id}:${main.n}`
       const before = this.carried.get(row.id)
       const stoppedChip = this.reportChips.get(key)
-      const chips = [...(before?.chips ?? []), ...(this.drained.get(key) ?? []), ...(stoppedChip ? [stoppedChip] : [])]
-      if (chips.length || before?.text) this.carried.set(row.id, { chips, ...(before?.text ? { text: before.text } : {}) })
+      const merged = withCarried(before, this.drained.get(key) ?? [], this.drainedCalls.get(key))
+      const chips = [...merged.chips, ...(stoppedChip ? [stoppedChip] : [])]
+      if (chips.length || merged.calls || before?.text) this.carried.set(row.id, { chips, ...(merged.calls ? { calls: merged.calls } : {}), ...(before?.text ? { text: before.text } : {}) })
       this.reportChips.delete(key)
       this.drained.delete(key)
+      this.drainedCalls.delete(key)
       this.lateTexts.delete(key)
     }
     this.askedIn.delete(row.id)
@@ -5675,8 +5694,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const key = `${row.id}:${main.n}`
     const before = this.carried.get(row.id)
     const words = text?.trim()
-    this.carried.set(row.id, { chips: [...(before?.chips ?? []), ...(this.drained.get(key) ?? [])], ...(words ? { text: words } : before?.text ? { text: before.text } : {}) })
+    // Its calls (where the sink gives them) roll up with the next turns' when the work's message is posted.
+    this.carried.set(row.id, { ...withCarried(before, this.drained.get(key) ?? [], this.drainedCalls.get(key)), ...(words ? { text: words } : before?.text ? { text: before.text } : {}) })
     this.drained.delete(key)
+    this.drainedCalls.delete(key)
     this.lateTexts.delete(key)
     const counters = this.store.counters(row.id)
     const maxTurns = counters.limits.maxTurns
@@ -7033,10 +7054,9 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const sink = this.host.activity
     if (sink) {
       try {
-        const chips = sink.drain(dispatchId)
-        // A chip of a thread the bot started, messaged or stopped keeps that thread, which its Open shows; a chip with
-        // details on hover (the job a note was for, the model of work on a model of its own) keeps them.
-        if (chips.length) this.drained.set(key, chips.map((chip) => ({ icon: chip.icon, text: chip.text, ...(chip.highlight ? { highlight: chip.highlight } : {}), ...(chip.thread ? { thread: chip.thread } : {}), ...(chip.said ? { said: chip.said } : {}), ...(chip.title ? { title: chip.title } : {}) })))
+        const { chips, calls } = sink.drainCalls ? sink.drainCalls(dispatchId) : { chips: sink.drain(dispatchId) }
+        if (chips.length) this.drained.set(key, chips.map(chipRow))
+        if (calls?.calls.length) this.drainedCalls.set(key, { calls: calls.calls.map(slimCall), context: calls.context })
       } catch {
         // No chips; the message still posts.
       }
@@ -7197,6 +7217,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const key of this.subagentEnds.keys()) if (key.startsWith(`${row.id}:`)) this.subagentEnds.delete(key)
     this.roomKeys.delete(row.id)
     this.carried.delete(row.id)
+    for (const key of this.drainedCalls.keys()) if (key.startsWith(`${row.id}:`)) this.drainedCalls.delete(key)
     this.offeredNotes.delete(row.id)
     this.askedIn.delete(row.id)
     // A question its work asked was withdrawn when the work ended (`moveActivation`): its bubble shows it in every window.
@@ -10396,6 +10417,44 @@ interface SubagentRecord {
 /** A model in plain words, as `work_models` names it: "Opus 5.5 on Claude Code, high reasoning". */
 function workModelText(model: { name: string; entry: string; effort?: string }): string {
   return `${model.name}${model.entry ? ` on ${model.entry}` : ''}${model.effort ? `, ${model.effort} reasoning` : ''}`
+}
+
+/**
+ * A chip as a message row keeps it. A chip of a thread the bot started, messaged or stopped keeps that thread, which its
+ * Open shows; a chip with details on hover (the job a note was for, the model of work on a model of its own) keeps them.
+ */
+function chipRow(chip: BotChip): BotChip {
+  return { icon: chip.icon, text: chip.text, ...(chip.highlight ? { highlight: chip.highlight } : {}), ...(chip.thread ? { thread: chip.thread } : {}), ...(chip.said ? { said: chip.said } : {}), ...(chip.title ? { title: chip.title } : {}) }
+}
+
+/**
+ * The chips of a dispatch (`chips`, rolled up from `calls` when the sink gave them) with what the turns before it carried
+ * (`carried`): their calls and this one's roll up together, so the same kind of call shows once with its whole count.
+ */
+function withCarried(carried: { chips: BotChip[]; calls?: BotActivityCalls } | undefined, chips: readonly BotChip[], calls: BotActivityCalls | undefined): { chips: BotChip[]; calls?: BotActivityCalls } {
+  if (!carried?.calls) return { chips: [...(carried?.chips ?? []), ...(calls ? [] : chips)], ...(calls ? { calls } : {}) }
+  // This dispatch's chips with no calls (an older sink, or none were made) follow the carried ones as they are.
+  return { chips: [...carried.chips, ...(calls ? [] : chips)], calls: { calls: [...carried.calls.calls, ...(calls?.calls ?? [])], context: calls?.context ?? carried.calls.context } }
+}
+
+/**
+ * A call as `carried` keeps it until the work's message: a file it wrote can be large, and chips read only short
+ * arguments and results (a path, an address, a query, a title), so longer text is cut and deep values dropped.
+ */
+function slimCall(call: BotChipCall): BotChipCall {
+  const slim = (value: unknown, depth: number): unknown => {
+    if (typeof value === 'string') return value.length > 4096 ? value.slice(0, 4096) : value
+    if (!value || typeof value !== 'object') return value
+    if (depth >= 4) return undefined
+    if (Array.isArray(value)) return value.slice(0, 50).map((entry) => slim(entry, depth + 1))
+    return Object.fromEntries(Object.entries(value).map(([name, entry]) => [name, slim(entry, depth + 1)]))
+  }
+  return { tool: call.tool, input: slim(call.input, 0), ...(call.result !== undefined ? { result: slim(call.result, 0) } : {}) }
+}
+
+/** What `withCarried` holds, as the chips of a message. */
+function carriedChips(carried: { chips: BotChip[]; calls?: BotActivityCalls }): BotChip[] {
+  return [...carried.chips, ...(carried.calls ? rollUpChips(carried.calls.calls, carried.calls.context).map(chipRow) : [])]
 }
 
 /**
