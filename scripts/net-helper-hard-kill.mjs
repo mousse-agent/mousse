@@ -4,14 +4,17 @@
  * from the package's own resources; the daemon is killed outright; the helper must exit within a second (its stdin
  * closes, it sends GOAWAY and exits).
  *
- *   node scripts/net-helper-hard-kill.mjs <Windows app folder | Mousse.app>
+ *   node scripts/net-helper-hard-kill.mjs <Windows app folder | Mousse.app> [--phase=init]
+ *
+ * `--phase=init` kills the daemon during its first start instead, while it runs `init` for the new endpoint (held
+ * there by `MOUSSE_NET_INIT_HOLD_MS`, as a slow keystore would hold it): `init` must exit within a second too.
  *
  * On macOS the daemon is Electron's main process, which only gets ready in a logged-in GUI session (not over ssh).
  *
  * It uses a fresh home in the temp folder and has the helper listen on loopback (no firewall prompt). An installed app
  * keeps its identity key in the OS keystore only, so the run makes one keystore entry, `endpoint-<id>` of service
  * `mousse-net`, and deletes it at the end. Prints `PASS net-helper-hard-kill helper_exit_ms=<n>` or
- * `FAIL net-helper-hard-kill reason=<word>`.
+ * `FAIL net-helper-hard-kill reason=<word>` (with `phase=init` after the name for that phase).
  */
 import { spawn, spawnSync } from 'node:child_process'
 import {
@@ -27,11 +30,16 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 const EXIT_WITHIN_MS = 1_000
+/** How long `init` is held in the init phase: longer than the wait for it to exit. */
+const INIT_HOLD_MS = 20_000
 const target = process.argv[2] && resolve(process.argv[2])
 /** `--keep` leaves the home (its logs) in place. */
 const keep = process.argv.includes('--keep')
 /** The control, `--control=daemon-spared`: the daemon is not killed, so the check must fail (helper_outlived_daemon). */
 const spared = process.argv.includes('--control=daemon-spared')
+const initPhase = process.argv.includes('--phase=init')
+const NAME = initPhase ? 'net-helper-hard-kill phase=init' : 'net-helper-hard-kill'
+const COMMAND = initPhase ? 'init' : 'serve'
 const win = process.platform === 'win32'
 // An installed Windows app has mousse-cli.exe (its installer makes it from Mousse.exe); an unpacked one has Mousse.exe
 // only, which runs the same daemon when MOUSSE_CLI is set.
@@ -49,7 +57,7 @@ const packagedHelper = !target
 
 function fail(reason, detail) {
   if (detail) console.log(detail)
-  console.log(`FAIL net-helper-hard-kill reason=${reason}`)
+  console.log(`FAIL ${NAME} reason=${reason}`)
   cleanup()
   process.exit(1)
 }
@@ -217,6 +225,7 @@ async function main() {
 
   // The second run starts the helper once it is ready (first `init` for the new endpoint, then `serve`).
   const log = []
+  if (initPhase) env.MOUSSE_NET_INIT_HOLD_MS = String(INIT_HOLD_MS)
   const root = startDaemon(log)
   let helper
   for (const until = Date.now() + 90_000; Date.now() < until && !helper; await sleep(500)) {
@@ -224,7 +233,7 @@ async function main() {
     helper = list.find(
       (row) =>
         row.path.endsWith(helperName) &&
-        / serve /.test(row.args) &&
+        new RegExp(` ${COMMAND} `).test(row.args) &&
         descends(list, row.pid, root.pid)
     )
     if (root.exitCode !== null) fail('daemon_exited', log.join('').slice(-2000))
@@ -233,8 +242,8 @@ async function main() {
   if (win && resolve(helper.path).toLowerCase() !== resolve(packagedHelper).toLowerCase())
     fail('wrong_helper', `${helper.path} is not ${packagedHelper}`)
   console.log(`daemon=${helper.ppid} helper=${helper.pid} ${helper.path}`)
-  // Up a moment, as a helper in use is.
-  await sleep(2_000)
+  // Up a moment, as a helper in use is (in `init`, well inside its hold).
+  await sleep(initPhase ? 1_000 : 2_000)
   if (!alive(helper.pid)) fail('helper_stopped_early', log.join('').slice(-2000))
   const killedAt = Date.now()
   if (spared) console.log('control=daemon-spared')
@@ -251,7 +260,7 @@ async function main() {
   if (took > EXIT_WITHIN_MS)
     fail('helper_exit_slow', `the helper exited ${took} ms after its daemon was killed`)
   cleanup()
-  console.log(`PASS net-helper-hard-kill helper_exit_ms=${took}`)
+  console.log(`PASS ${NAME} helper_exit_ms=${took}`)
 }
 
 main().catch((error) => fail('error', String(error?.stack ?? error)))

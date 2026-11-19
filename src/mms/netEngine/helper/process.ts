@@ -151,6 +151,17 @@ export function helperArgs(state: string, command: string[], insecureFileKey: bo
   return [...(insecureFileKey ? ['--insecure-file-key'] : []), '--state', state, ...command]
 }
 
+/** The arguments of `init` for a new endpoint, run for the app: it exits when its stdin closes (§1). */
+export function initArgs(state: string, profile: string, insecureFileKey: boolean): string[] {
+  return helperArgs(state, ['init', '--app', '--profile', profile], insecureFileKey)
+}
+
+/**
+ * `init`'s stdio. Its stdin is a pipe the daemon holds open and never writes: when the daemon is gone, even killed
+ * outright, the pipe closes and `init` exits, as `serve --app` does.
+ */
+export const INIT_STDIO = ['pipe', 'ignore', 'pipe'] as const
+
 /** Runs `init` for a new endpoint; rejects with what the helper said. */
 export function initEndpoint(
   binary: string,
@@ -159,18 +170,16 @@ export function initEndpoint(
   insecureFileKey: boolean
 ): Promise<void> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(
-      binary,
-      helperArgs(state, ['init', '--profile', profile], insecureFileKey),
-      {
-        stdio: ['ignore', 'ignore', 'pipe'],
-        env: helperEnv(),
-        windowsHide: true
-      }
-    )
+    const child = spawn(binary, initArgs(state, profile, insecureFileKey), {
+      stdio: [...INIT_STDIO],
+      env: helperEnv(),
+      windowsHide: true
+    })
+    child.stdin.on('error', () => undefined)
+    const stderrMax = engineLimits().helperStderrMaxBytes
     let stderr = ''
     child.stderr.setEncoding('utf8')
-    child.stderr.on('data', (text: string) => (stderr = (stderr + text).slice(-4096)))
+    child.stderr.on('data', (text: string) => (stderr = (stderr + text).slice(-stderrMax)))
     const timer = setTimeout(() => child.kill(), engineLimits().helperInitDeadlineMs)
     child.on('error', (error) => {
       clearTimeout(timer)
@@ -221,9 +230,10 @@ export function launchHelper(
       windowsHide: true
     }
   )
+  const stderrMax = engineLimits().helperStderrMaxBytes
   let stderr = ''
   child.stderr.setEncoding('utf8')
-  child.stderr.on('data', (text: string) => (stderr = (stderr + text).slice(-4096)))
+  child.stderr.on('data', (text: string) => (stderr = (stderr + text).slice(-stderrMax)))
   const closeListeners: Array<() => void> = []
   let closed = false
   const closeOnce = () => {

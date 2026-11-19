@@ -15,6 +15,8 @@ import {
   findNetHelper,
   helperArgs,
   helperProfileId,
+  INIT_STDIO,
+  initArgs,
   initEndpoint,
   launchHelper,
   readInsecureFileKey
@@ -40,8 +42,12 @@ describe('the identity key file', () => {
     expect(readInsecureFileKey(env, false)).toEqual({ on: true, problems: [] })
     const installed = readInsecureFileKey(env, true)
     expect(installed.on).toBe(false)
-    expect(installed.problems).toEqual(['MOUSSE_NET_ENGINE_INSECURE_FILE_KEY is ignored by an installed app'])
-    expect(readInsecureFileKey({ MOUSSE_NET_ENGINE_INSECURE_FILE_KEY: 'yes' }, false).on).toBe(false)
+    expect(installed.problems).toEqual([
+      'MOUSSE_NET_ENGINE_INSECURE_FILE_KEY is ignored by an installed app'
+    ])
+    expect(readInsecureFileKey({ MOUSSE_NET_ENGINE_INSECURE_FILE_KEY: 'yes' }, false).on).toBe(
+      false
+    )
   })
 })
 
@@ -92,15 +98,11 @@ describe.skipIf(!binary)('the helper process', () => {
     expect(Date.now() - closed).toBeLessThan(1_000)
   }, 60_000)
 
-  it('exits within a second of the process that started it being killed outright', async () => {
+  const killParent = async (args: string[], env: NodeJS.ProcessEnv = process.env) => {
     const parent = spawn(
       process.execPath,
-      [
-        join(__dirname, 'fixtures', 'helperParent.mjs'),
-        binary!,
-        JSON.stringify(helperArgs(state, ['serve', '--app', '--listen-ip', '127.0.0.1'], true))
-      ],
-      { stdio: ['ignore', 'pipe', 'inherit'] }
+      [join(__dirname, 'fixtures', 'helperParent.mjs'), binary!, ...args],
+      { stdio: ['ignore', 'pipe', 'inherit'], env }
     )
     const pid = await new Promise<number>((resolve, reject) => {
       parent.stdout.setEncoding('utf8')
@@ -113,8 +115,26 @@ describe.skipIf(!binary)('the helper process', () => {
     expect(alive(pid)).toBe(true)
     parent.kill('SIGKILL')
     const killed = Date.now()
-    while (alive(pid) && Date.now() - killed < 5_000) await new Promise((resolve) => setTimeout(resolve, 25))
-    expect(alive(pid)).toBe(false)
+    while (alive(pid) && Date.now() - killed < 5_000)
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    const outlived = alive(pid)
+    if (outlived) process.kill(pid)
+    expect(outlived).toBe(false)
     expect(Date.now() - killed).toBeLessThan(1_000)
+  }
+
+  it('exits within a second of the process that started it being killed outright', async () => {
+    await killParent([
+      JSON.stringify(helperArgs(state, ['serve', '--app', '--listen-ip', '127.0.0.1'], true))
+    ])
+  }, 60_000)
+
+  // The hold keeps `init` busy, as a slow keystore does, so the parent dies during it.
+  it('exits within a second of the daemon being killed during a first start (init)', async () => {
+    const fresh = join(folder, 'first-start')
+    await killParent(
+      [JSON.stringify(initArgs(fresh, helperProfileId(PROFILE), true)), JSON.stringify(INIT_STDIO)],
+      { ...process.env, MOUSSE_NET_INIT_HOLD_MS: '30000' }
+    )
   }, 60_000)
 })
