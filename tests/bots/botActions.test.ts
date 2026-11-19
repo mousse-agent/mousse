@@ -3,7 +3,7 @@ import { BOT_CHAT_INSTRUCTIONS, botInstructions } from '../../src/mms/bots/instr
 import { askProblem } from '../../src/shared/bots/personal/escalation'
 import masterGrant from './fixtures/asksFirstMasterGrant.json'
 import { MmsProfileServices } from '../../src/mms/MmsProfileServices'
-import { actionContinuation } from '../../src/mms/bots/actions/BotActions'
+import { actionContinuation, actionDigest } from '../../src/mms/bots/actions/BotActions'
 import { foldChatSummary } from '../../src/mms/bots/memory/chatSummary'
 import { createBotContextProvider } from '../../src/mms/bots/memory/contextPack'
 import { BOT_SCHEDULE_ACT_TOOLS, botMayBeOffered } from '../../src/shared/bots/personal/manifest'
@@ -4487,6 +4487,15 @@ it('E1 r2 source calls preserve the bot note and export no argument contract or 
   const memory = new BotMemoryStore({ db: f.store.db })
   expect(JSON.stringify(memory.actions(t.botId))).not.toContain(contract.digests.to)
   expect(memory.actions(t.botId).every(a => a.args_digest == null)).toBe(true)
+  // A legacy source with a single recipient carries the reversible hash of that address.
+  const recipientDigest = actionDigest(t.args.to[0])
+  f.store.run('UPDATE bot_actions SET bot_note = ? WHERE id = ?', JSON.stringify({ ...contract, digests: { to: recipientDigest } }), first.id)
+  const exported = await createBotMemoryAdmin({ store: memory }).export(t.botId, f.base)
+  for (const file of exported.files) {
+    const text = readFileSync(file, 'utf8')
+    expect(text).not.toContain(recipientDigest)
+    expect(text).not.toContain(first.args_digest)
+  }
   f.store.run('UPDATE bot_actions SET bot_note = ? WHERE id = ?', 'The bot’s own card note', first.id)
   expect(memory.actions(t.botId).find(a => a.id === first.id)?.bot_note).toBe('The bot’s own card note')
   expect(f.bots.alone.prepare(t.botId, 'note-preserved', t.request as never)).toBeUndefined()
