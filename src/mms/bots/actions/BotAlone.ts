@@ -5,7 +5,7 @@ const normalizedKey = (key: string): string => key.toLowerCase().replace(/[_-]/g
 const FILE_PLACES = new Set('folder folderid parent parentid path dir directory drive driveid'.split(' '))
 const FREE_CONTENT = new Set(['body', 'subject', 'text', 'content'])
 export interface ArgumentContract {
-  version: 3; keys: string[]; digests: Record<string, string>; varying: string[]
+  version: 4; keys: string[]; digests: Record<string, string>; varying: string[]
   tokens: Record<string, string[]>; extensions: Record<string, string>
 }
 const normalizedText = (value: string): string => value.normalize('NFKC').replace(/\p{Cf}/gu, '')
@@ -55,11 +55,11 @@ export function argumentContract(args: Record<string, unknown>, tokenKey: string
   const keys = Object.keys(args).sort()
   const varying = keys.filter(k => FREE_CONTENT.has(normalizedKey(k)) && typeof args[k] === 'string')
   const extensions = Object.fromEntries(keys.filter(k => normalizedKey(k) === 'name' && Object.keys(place ?? {}).some(key => FILE_PLACES.has(normalizedKey(key))) && !!filenameExtension(args[k])).map(k => [k, filenameExtension(args[k])!]))
-  return { version: 3, keys, digests: Object.fromEntries(keys.map(k => [k, actionDigest(args[k])])), varying: [...varying, ...Object.keys(extensions)], extensions,
+  return { version: 4, keys, digests: Object.fromEntries(keys.map(k => [k, actionDigest(args[k])])), varying: [...varying, ...Object.keys(extensions)], extensions,
     tokens: Object.fromEntries(varying.map(k => [k, addressTokens(args[k] as string).map(token => tokenDigest(tokenKey, k, token))])) }
 }
 function argumentsMatch(contract: ArgumentContract | undefined, args: Record<string, unknown>, tokenKey: string): boolean {
-  return contract?.version === 3 && actionDigest(Object.keys(args).sort()) === actionDigest(contract.keys)
+  return contract?.version === 4 && actionDigest(Object.keys(args).sort()) === actionDigest(contract.keys)
     && contract.keys.every(k => {
       if (actionDigest(args[k]) === contract.digests[k]) return true
       if (Object.hasOwn(contract.extensions, k)) {
@@ -117,7 +117,7 @@ export class BotAlone {
   private holds(botId: string, entry: Exception): boolean {
     const schedule = this.host.schedule(botId, entry.scheduleId)
     const binding = this.host.binding(botId, entry.serverId, entry.tool)
-    const intact = entry.arguments?.version === 3 && !!binding && !!schedule && actionDigest(schedule.prompt) === entry.promptDigest && actionDigest(binding) === actionDigest(entry.binding) && actionDigest(entry.place) === entry.placeDigest
+    const intact = entry.arguments?.version === 4 && !!binding && !!schedule && actionDigest(schedule.prompt) === entry.promptDigest && actionDigest(binding) === actionDigest(entry.binding) && actionDigest(entry.place) === entry.placeDigest
     if (!intact) this.remove(botId, aloneKey(entry))
     return this.host.enabled() && intact
   }
