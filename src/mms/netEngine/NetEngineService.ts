@@ -64,7 +64,7 @@ import { EnginePairing, fingerprintOf, type PairingStep } from './pairing'
 import { EngineEditor, engineEditorRefusal, type EngineEditorRights, type EngineEditorTestOptions } from './editor'
 import { TunnelError } from '../net/editor/tunnel'
 import { routeSetupProbes } from './probes'
-import { automatic } from './routes'
+import { automatic, loopbackClass } from './routes'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 import { readTicket } from './ticket'
 import { SshAdd } from './ssh/add'
@@ -593,10 +593,14 @@ export class NetEngineService implements EngineDirectoryPort {
       ...(facts.expiresAt !== undefined && facts.expiresAt * 1000 <= Date.now()
         ? { expired: true }
         : {}),
-      destinations: ticketDestinations(facts.routes, loopback),
+      // A loopback hint a check maps to another class reads as that class, and needs Connect as it would.
+      destinations: ticketDestinations(facts.routes, loopback).map((item) => {
+        const mapped = loopbackClass(item.route)
+        return { ...item, ...(mapped ? { cls: mapped } : {}), automatic: automatic(item.route) }
+      }),
       shareable: this.shareable().flatMap((route) => {
         const parsed = parseRoute(route)
-        const cls = parsed ? routeClass(parsed) : 'forbidden'
+        const cls = loopbackClass(route) ?? (parsed ? routeClass(parsed) : 'forbidden')
         return cls === 'forbidden' ? [] : [{ route, label: routeText(route), cls }]
       })
     }

@@ -33,6 +33,14 @@ export function testClassMap(env: NodeJS.ProcessEnv = process.env): Map<number, 
   return map
 }
 
+/** The class a check maps a loopback route's port to, in an unpackaged build (`tailnet` or `public`). */
+export function loopbackClass(route: string): 'tailnet' | 'public' | undefined {
+  if (packagedBuild() || automaticRoute(route) || !automaticRoute(route, true)) return undefined
+  const port = parseRoute(route)?.port
+  const cls = port === undefined ? undefined : testClassMap().get(port)
+  return cls === 'tailnet' || cls === 'public' ? cls : undefined
+}
+
 /**
  * 1a's automatic rule as this build's helper applies it (1b §1.3): private-range `tcp` literals, and loopback too
  * in an unpackaged build, whose debug helper dials it so checks run on one computer, except on a port the checks
