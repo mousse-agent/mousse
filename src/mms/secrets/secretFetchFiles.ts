@@ -91,7 +91,9 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
     }
     return file
   } catch (error) {
-    failure = error instanceof SecretFetchFileError ? error : new SecretFetchFileError()
+    failure = error instanceof SecretFetchFileError ? error : new SecretFetchFileError(
+      ['ENOENT', 'ENOTDIR', 'ELOOP'].includes((error as NodeJS.ErrnoException).code ?? '')
+    )
     throw failure
   } finally {
     let closeFailed = false
