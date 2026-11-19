@@ -56,7 +56,7 @@ const THREADS_GUIDANCE = [
   "These reach your owner's Mousse threads, here and on their other computers that let agents work there (list_computers): search them (thread_search), wait on one (thread_wait), read the terminals open in them (terminal_read), look at their queues and Git status and diffs, steer or stop one's turn, change what waits in its queue, fork one or hand a fork's work back, hide or show a thread you started, and archive one whose work is merged or dropped (and unarchive it again).",
   'thread_list names their projects and the models a thread can run on. Each thread comes with a link: put it in your reply when you name a thread, and your owner can click it to open it.',
   "A thread you start stays out of your owner's sidebar, your chat lists it, until your owner writes in it. Start it with hidden: false when they asked to follow, answer or continue that work in their sidebar. thread_hide (or thread_update with hidden) hides or shows a thread you started later.",
-  'Approvals and questions in a thread are your owner\'s: answer an approval (approval_respond) only when your owner asks you to and lets agents answer approvals, never a question.'
+  "In a thread you didn't start, answer an approval (approval_respond) only when your owner asks and lets agents answer approvals, never a question."
 ].join('\n')
 
 const BROWSER_GUIDANCE = [
@@ -167,7 +167,7 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
     tools: PROFILER_TOOL_NAMES.filter((tool) => tool !== 'profiler_heap_summary'),
     guidance: PROFILER_GUIDANCE
   },
-  { id: 'themes', line: 'Mousse\'s theme, colors and wallpaper (needs "change how Mousse looks", escalate with the tool themes)', tools: ['theme_read', 'theme_set'], guidance: THEMES_GUIDANCE },
+  { id: 'themes', line: 'Mousse\'s look, live: theme, colors, CSS, wallpaper (needs "change how Mousse looks", escalate with the tool themes)', tools: ['theme_read', 'theme_set'], guidance: THEMES_GUIDANCE },
   { id: 'secrets', line: 'API keys, tokens and passwords your owner gives you (needs "use secrets you give it", escalate with the tool secrets)', tools: ['secret_request', 'secret_run'], guidance: SECRETS_GUIDANCE },
   { id: 'quick_actions', line: 'buttons in your owner\'s Actions list (needs "add quick actions", escalate with the tool quick_actions)', tools: ['create_quick_action'], guidance: QUICK_ACTIONS_GUIDANCE },
   { id: 'automation', line: 'automation drafts, when your owner asks from Automations', tools: ['automation_draft_save', 'automation_ask', 'automation_list', 'automation_update', 'automation_pause'], guidance: AUTOMATION_GUIDANCE },
@@ -200,7 +200,7 @@ export function botCatalogueLine(group: Pick<BotCatalogueGroup, 'id' | 'line'>):
 export function botCatalogueIndex(without: ReadonlySet<string> = new Set()): string {
   return [
     'More tools',
-    `- Beyond the tools you see, more come in groups. The first time you need a group in a conversation, read its entry with ${BOT_CATALOGUE_TOOL} (group): it says how to use them and how to call them. Its guidance counts as these instructions.`,
+    `- Beyond the tools you see, more come in groups. One that does the job directly beats a code change, even behind a permission you must ask for. The first time you need a group in a conversation, read its entry with ${BOT_CATALOGUE_TOOL} (group): it says how to use them and how to call them. Its guidance counts as these instructions.`,
     ...BOT_CATALOGUE.filter((group) => !without.has(group.id)).map(botCatalogueLine)
   ].join('\n')
 }

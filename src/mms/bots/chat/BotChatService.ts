@@ -1,3 +1,4 @@
+import { PageChecks } from '../pageChecks'
 import { BotActionChanged } from '../actions/BotActions'
 import { realpathSync } from 'node:fs'
 import { sep } from 'node:path'
@@ -38,6 +39,8 @@ export type BotAutomationRunStatus = 'queued' | 'running' | 'waiting_grant' | 'p
  * shared store): the bot's name and face, its own pause, and the runs that schedule started. No model or instance id.
  */
 export interface BotAutomationFacts {
+  /** Computer-local page-check label, rendered through the existing When text. */
+  whenText?: string
   botName: string
   look: BotLook
   /** The bot itself is paused (by its owner, after three failed runs, or until a usage limit resets). */
@@ -273,6 +276,14 @@ export class BotChatService {
 
   get(botId: string): BotDetail {
     return this.detailOf(botId)
+  }
+
+  /** The local vault resolves its recipient and current grant here, never from a window's thread id. */
+  secretHome(botId: string): { threadId: string; allowed: boolean } {
+    this.engine.definitionOf(botId)
+    const threadId = this.store.registry(botId)?.homeThreadId
+    if (!threadId) throw new Error('This bot has no home thread.')
+    return { threadId, allowed: this.store.activeGrant(botId)?.manifest.appTools.includes('secrets') === true }
   }
 
   /**
@@ -895,16 +906,25 @@ export class BotChatService {
     const runs = this.store.all(
       "SELECT * FROM bot_activations WHERE bot_id = ? AND json_extract(trigger_json, '$.kind') = 'schedule' AND json_extract(trigger_json, '$.scheduleId') = ? ORDER BY created_at DESC, id DESC LIMIT ?",
       botId, scheduleId, runsPerSchedule
-    ).map((row) => ({
-      id: row.id as string,
-      status: row.status as BotAutomationRunStatus,
-      at: row.created_at as string,
-      ...(typeof row.ended_at === 'string' ? { endedAt: row.ended_at } : {}),
-      ...(typeof row.end_reason === 'string' ? { endReason: row.end_reason } : {}),
-      ...(typeof row.thread_id === 'string' ? { threadId: row.thread_id } : {})
-    }))
+    ).map((row) => {
+      // Send can be accepted while the activation still waits for its service.
+      const action = this.engine.actions.forWork(String(row.id))
+      const settledWithoutAnswer = row.end_reason === 'approval_answered' && ['withdrawn', 'expired'].includes(action?.status ?? '')
+      const sending = row.end_reason === 'approval' && ['approved', 'running'].includes(action?.status ?? '')
+      return {
+        id: row.id as string,
+        status: row.status as BotAutomationRunStatus,
+        at: row.created_at as string,
+        ...(typeof row.ended_at === 'string' ? { endedAt: row.ended_at } : {}),
+        ...(typeof row.end_reason === 'string' ? { endReason: settledWithoutAnswer ? `approval_${action!.status}` : sending ? 'approval_answered' : row.end_reason } : {}),
+        ...(typeof row.thread_id === 'string' ? { threadId: row.thread_id } : {})
+      }
+    })
     const ask = this.store.openAsks(botId).find((entry) => entry.messageId !== null && runs.some((run) => run.id === entry.activationId))
+    const page = new PageChecks(this.store).read(botId, scheduleId)
+    const whenText = page ? `when ${new URL(page.url).host} changes` : undefined
     return {
+      ...(whenText ? { whenText } : {}),
       botName: definition.name,
       look: summary.look,
       paused: summary.state === 'paused',

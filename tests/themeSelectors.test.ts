@@ -94,6 +94,7 @@ const PERMISSION_MODE_REVIEWED: Record<string, string> = {
   'src/renderer/components/ComposerFooter.tsx': 'shows the chip; the menu is ComposerPermissionPicker',
   'src/renderer/components/ComposerEffortPicker.tsx': 'hosts the menu; the choices are ComposerPermissionPicker',
   'src/renderer/components/OrchestratorChat.tsx': 'the handler, no control',
+  'src/renderer/components/sideChats/SideChatsPanel.tsx': 'a side chat\'s handler, no control; the menu is ComposerPermissionPicker',
   'src/renderer/components/settings/GeneralSettings.tsx': 'Settings → General, paused with the page',
   'src/renderer/components/NetDevicesSection.tsx': 'Settings → Devices, paused with the page; names a device’s highest mode, no control',
   'src/renderer/components/automations/AutomationDetail.tsx': 'only on the Automations page, paused with it',

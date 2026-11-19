@@ -64,6 +64,7 @@ const TEXT_FIELD_BORDERS = new Set([
   '.side-card-git-pr-title-input:focus',
   '.start-from-pr-input:focus',
   '.scheduled-input:focus-visible',
+  '.thread-filter-field:focus-visible',
   '.threads-sidebar-rename-input:focus'
 ])
 

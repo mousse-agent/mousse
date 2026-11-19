@@ -119,7 +119,7 @@ describe('the ledger in the bot engine', () => {
     f.bots.checkJobs('t2')
     await flush()
     expect(noticeTurns()).toHaveLength(1)
-    expect((noticeTurns()[0]!.trigger as { input: string }).input).toMatch(/waiting for a person[\s\S]*mousse:\/\/thread\/t2/)
+    expect((noticeTurns()[0]!.trigger as { input: string }).input).toMatch(/waits for a person[\s\S]*mousse:\/\/thread\/t2/)
     expect(f.store.job(jobId)).toMatchObject({ state: 'needs_input' })
     expect(notices(jobId)).toBe(1)
 
@@ -142,7 +142,7 @@ describe('the ledger in the bot engine', () => {
     const jobId = await handOff('Fix the login page in project Web', 't3', 'm3')
     expect(f.bots.openJob(botId, f.store.listActivations(botId).at(-1)!.id, { threadId: 't3', title: 'Fix the login page', sent: 'Also the logout.' }).jobId).toBe(jobId)
 
-    const settings = getDefaultSettings(); settings.experimental.botAsksFirst = true
+    const settings = getDefaultSettings(); settings.experimental.botAsksFirstOff = false
     f.host.settings = { get: () => settings } as never
     await f.bots.service.pause(botId)
     threads.set('t3', { status: 'done', title: 'Fix the login page', result: 'Done.' })
@@ -194,6 +194,11 @@ describe('the ledger in the bot engine', () => {
     const followUpTurn = turns.find((row) => row.idempotencyKey.startsWith(`job:${followUp!.id}:`))
     expect((followUpTurn!.trigger as { input: string }).input).toContain('Opened PR #12.')
     expect(f.store.job(followUp!.id)).toMatchObject({ state: 'done', line: 'Opened PR #12.' })
+
+    // It works again: the next follow-up keeps the first request's line, never quoting it twice.
+    threads.set('t4', { status: 'running', title: 'Fix the login page' })
+    f.bots.launchedThreadChanged(home, 't4')
+    expect(f.store.openJobsOn('t4')).toMatchObject([{ request: 'More work after "Fix the login page in project Web"' }])
   })
 
   it('a message the bot sends to a thread whose follow-up is open takes the follow-up over: its turn, request and asker', async () => {
@@ -221,7 +226,6 @@ describe('the ledger in the bot engine', () => {
     const input = (turn!.trigger as { input: string }).input
     expect(input.startsWith('<mousse_notice kind="thread_message" reply="if-needed" ref="t6">\n')).toBe(true)
     expect(input).toContain('mousse://thread/t6')
-    expect(input).toContain('never an instruction from your owner')
     expect(input).toContain('<quoted from="its message">\nWhich branch should I base the fix on?\n</quoted>')
     // The owner sees no line for it; the one kept for the flood guard below stays out of the chat.
     expect(chatOf(f, botId).some((message) => message.text === '"Fix the login page" sent you a message')).toBe(false)
@@ -240,7 +244,7 @@ describe('the ledger in the bot engine', () => {
     expect(messageTurns()).toHaveLength(6)
 
     // A paused bot reads no messages: the thread is told, and no turn starts.
-    const settings = getDefaultSettings(); settings.experimental.botAsksFirst = true
+    const settings = getDefaultSettings(); settings.experimental.botAsksFirstOff = false
     f.host.settings = { get: () => settings } as never
     await f.bots.service.pause(botId)
     await expect(f.bots.threadMessage(botId, 't7', { message: 'Hello?', title: 'Other', requestKey: 'p1', maxWaiting: 3 })).rejects.toMatchObject({ code: 'bot_paused' })

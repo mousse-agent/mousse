@@ -1,8 +1,8 @@
+import { unmistakableCredential } from '../../../shared/secretShapes'
 import { botActionRefusalText, isBotActionRefusalCode, type BotActionRefusalCode } from '../../../shared/bots/personal/actionRefusal'
 import { notice, quoted } from '../../../shared/mousseContext'
 /** Longest an accepted Send may wait before transport dispatch, counted from the owner's tap. */
 export const APPROVED_SEND_WINDOW_MS = 10 * 60_000
-import { MAX_SAME_WAKES } from '../../../shared/bots/personal/wakes'
 import { registerHeldCalls } from './lifecycle'
 import { randomUUID } from 'node:crypto'
 import type { MousseSettings } from '../../../shared/settings'
@@ -13,9 +13,9 @@ import { maskMemoryCredentials } from '../memory/guard'
 import { plainText, type BotMcpCallOutcome } from '../mcp/BotMcp'
 import type { ToolOutcome } from '../../run/mcp/appTools/types'
 
-/** The sole feature-switch read. No UI sets it until the complete feature ships. */
+/** The sole feature-switch read. The file setting remains a support rollback. */
 export function botAsksFirst(settings?: Pick<MousseSettings, 'experimental'>): boolean {
-  return settings?.experimental.botAsksFirst === true
+  return Boolean(settings && settings.experimental.botAsksFirstOff !== true)
 }
 export function readableActionTitle(name: string): string {
   const words = plainText(name, 160).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_ .:/-]+/g, ' ').trim()
@@ -73,18 +73,6 @@ function boundedActionResult(result: BotMcpCallOutcome): BotMcpCallOutcome {
     else high = mid - 1
   }
   return build(low)
-}
-// Deliberately narrower than the memory heuristic: IDs, attachments and prose need review, not refusal.
-const UNMISTAKABLE_KEYS = /\b(?:sk-[A-Za-z0-9_-]{16,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16}\b|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}\b|ya29\.[0-9A-Za-z_-]{20,})|-----BEGIN [A-Z ]*PRIVATE KEY-----/
-function unmistakableCredential(text: string): boolean {
-  if (UNMISTAKABLE_KEYS.test(text)) return true
-  for (const match of text.matchAll(/\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"'`]+/gi)) {
-    try {
-      const url = new URL(match[0])
-      if (url.password || [...url.searchParams].some(([key, value]) => value && /(?:token|key|secret|signature|password|passwd|pwd|authorization|credentials?)$/i.test(key))) return true
-    } catch { /* Invalid addresses remain visible to the owner. */ }
-  }
-  return false
 }
 /** Check original strings before any key-based hiding, including object keys and nested containers. */
 function containsCredential(value: unknown): boolean {
@@ -192,7 +180,7 @@ export function actionContinuation(action: Pick<ActionRow, 'status' | 'result_js
   const card = JSON.parse(action.card_json ?? '{}')
   if (result?.notSentInTime) return `${result.text} Nothing left Mousse. Decide whether a new request is needed.`
   const line = action.status === 'done' ? forgotten ? 'Your owner sent it.' : 'Your owner sent it. The tool answered:'
-    : action.status === 'declined' ? 'Your owner chose not to send this: carry on without it and say what you skipped.'
+    : action.status === 'declined' ? 'Your owner chose Not now; nothing was sent. Carry on without it and say what you skipped.'
       : action.status === 'expired' ? 'This expired, so nothing was sent.'
       : action.status === 'uncertain' ? 'It could not be confirmed whether this went through: check before trying again.'
         : result?.toolReportedError || card.toolReportedError ? 'The tool reported an error. It may have done part of it: check before trying again. The tool answered:'
@@ -204,9 +192,8 @@ interface Host {
   store: BotStore
   enabled(): boolean
   name(botId: string): string
-  refresh(): Promise<void>
+  refresh(tool?: BotMcpTool): Promise<boolean | void>
   park(row: BotActivationRow): void
-  lifetime(row: BotActivationRow): number
   origin(row: BotActivationRow): 'owner' | 'unattended' | undefined
   schema(tool: BotMcpTool): unknown
   binding(row: BotActivationRow, tool: BotMcpTool): unknown | undefined
@@ -225,6 +212,7 @@ const changed = () => new BotActionChanged('This changed since you saw it. Check
 export class BotActions {
   private warming?: Promise<void>
   private readonly executing = new Set<string>()
+  private readonly answering = new Set<string>()
   constructor(private readonly host: Host) {
     registerHeldCalls(host.store.db, {
       endWork: id => this.withdrawWork(id),
@@ -288,8 +276,8 @@ export class BotActions {
     return action.answered_at ? Date.parse(action.answered_at) + APPROVED_SEND_WINDOW_MS : 0
   }
   nextDueAt(botId?: string): number | undefined {
-    const times = (this.host.store.all("SELECT * FROM bot_actions WHERE status IN ('open', 'approved') AND (? IS NULL OR bot_id = ?)", botId ?? null, botId ?? null) as unknown as ActionRow[])
-      .map(action => action.status === 'approved' ? this.approvedDeadline(action) : Date.parse(action.expires_at))
+    const times = (this.host.store.all("SELECT * FROM bot_actions WHERE status = 'approved' AND (? IS NULL OR bot_id = ?)", botId ?? null, botId ?? null) as unknown as ActionRow[])
+      .map(action => this.approvedDeadline(action))
     return times.length ? Math.min(...times) : undefined
   }
   private sendTimeout(action: ActionRow): boolean {
@@ -299,9 +287,6 @@ export class BotActions {
     return moved
   }
   expireDue(): void {
-    for (const a of this.host.store.all("SELECT * FROM bot_actions WHERE status = 'open' AND expires_at <= ?", this.host.store.now())) {
-      if (this.transition(String(a.id), String(a.status), 'expired', { text: EXPIRED_WORK_TEXT })) this.finish(a as unknown as ActionRow)
-    }
     for (const action of this.host.store.all("SELECT * FROM bot_actions WHERE status = 'approved'") as unknown as ActionRow[])
       if (this.approvedDeadline(action) <= Date.parse(this.host.store.now())) this.sendTimeout(action)
   }
@@ -331,7 +316,7 @@ export class BotActions {
     return this.host.store.ownerLastWroteSeq(action.bot_id) > Number((removed ? card.removedOwnerSeq : card.ownerSeq) ?? (action.status === 'open' ? this.host.store.message(action.message_id)?.seq : 0) ?? 0) || note > Number((removed ? card.removedNoteSeq : card.noteSeq) ?? 0)
   }
   private refuse(row: BotActivationRow, action: ActionRow, text: string): ToolOutcome {
-    this.host.store.recordWorkRefusal(row.id, row.botId, `${action.id}:${text.startsWith('Your owner declined') ? 'repeat' : 'loop'}`, text)
+    this.host.store.recordWorkRefusal(row.id, row.botId, `${action.id}:${text.startsWith('Your owner chose Not now') ? 'repeat' : 'loop'}`, text)
     return { text, isError: true }
   }
   hold(row: BotActivationRow, dispatch: string, tool: BotMcpTool, args: Record<string, unknown>, toolCallId?: string): ToolOutcome {
@@ -359,12 +344,13 @@ export class BotActions {
     const history = scope as unknown as ActionRow[]
     const removed = history.find(action => JSON.parse(action.card_json ?? '{}').ownerRemoved && !this.ownerWroteAfter(action, true))
     if (removed) return this.refuse(row, removed, 'Your owner removed this request. Do not ask for it again unless they write.')
+    const open = history.filter(action => action.status === 'open')
+    if (origin === 'unattended' && open.length >= 3)
+      return this.refuse(row, open[0], 'Not sent: three requests for this tool already wait for your owner. Say in your report what you would have sent; do not ask again until one is answered.')
     const unanswered = history.filter(action => (['declined', 'expired'].includes(action.status) || origin === 'unattended' && action.status === 'open') && !this.ownerWroteAfter(action))
-    if (unanswered.length >= MAX_SAME_WAKES)
-      return this.refuse(row, unanswered[0], row.trigger.kind === 'schedule' ? 'Three requests for this tool are waiting or were not sent. Say what you need in your report.' : 'Three requests for this tool are waiting or were not sent. Say what you need in your report and wait for your owner.')
-    const refused = unanswered.find(action => action.args_digest === digest)
+    const refused = unanswered.find(action => action.args_digest === digest && (row.trigger.kind !== 'schedule' || action.activation_id === row.id))
     if (refused)
-      return this.refuse(row, refused, 'Your owner declined exactly this, or it expired. Do not ask again unless they write. Carry on without it.')
+      return this.refuse(row, refused, refused.status === 'expired' ? 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.' : 'Your owner chose Not now; nothing was sent. Do not ask again unless they write; carry on without it and say in your report what you skipped.')
     const binding = this.host.binding(row, tool)
     if (!binding) return { text: 'This tool changed. Carry on without it.', isError: true }
     if (containsCredential(args)) return { text: 'This contains something that looks like a secret. It is never sent through a tool this way. Send it without that value.', isError: true }
@@ -375,11 +361,14 @@ export class BotActions {
     const id = `action_${randomUUID()}`
     const messageId = `bm_${id}`
     this.host.store.db.transaction(() => {
+      const introduced = this.host.store.run("INSERT OR IGNORE INTO bot_memory_state(bot_id, key, value) VALUES(?, 'asks-first:introduced', '1')", row.botId)
+      if (introduced) this.host.post(row, `bm_asks_first_${row.botId}`, `${this.host.name(row.botId)} asks you before using tools that may send or change things. Tools that say they only read don't ask.`)
       this.host.store.run(`INSERT INTO bot_actions(id, call_key, bot_id, activation_id, lane, kind, target_json, exec_args,
         args_json, args_digest, binding_json, card_json, status, message_id, expires_at, created_at)
         VALUES(?, ?, ?, ?, 'run', 'mcp', ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
       id, callKey, row.botId, row.id, JSON.stringify({ server: tool.server, tool: tool.tool }), exact, JSON.stringify(review.args), actionDigest(JSON.parse(exact)), JSON.stringify(binding), JSON.stringify({ hasHiddenValues: review.hasHiddenValues, title: readableActionTitle(tool.tool), serverName: tool.serverName }), messageId,
-      new Date(Date.parse(this.host.store.now()) + this.host.lifetime(row)).toISOString(), this.host.store.now())
+      // expires_at is retained for older settled rows; open rows have no deadline.
+      '9999-12-31T23:59:59.999Z', this.host.store.now())
       this.host.park(row)
       this.host.post(row, messageId, `${tool.serverName} · ${tool.tool}\n${review.hasHiddenValues ? 'Hidden values will be sent.\n' : ''}${JSON.stringify(review.args)}`)
     })
@@ -420,7 +409,7 @@ export class BotActions {
 
   private valid(action: ActionRow, allowCold = false): BotActivationRow | undefined {
     const row = this.host.store.activation(action.activation_id)
-    if (!row || !action.exec_args || action.exec_args.length > ACTION_MAX_ARGUMENT_CHARS || (action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now()))) return undefined
+    if (!row || !action.exec_args || action.exec_args.length > ACTION_MAX_ARGUMENT_CHARS) return undefined
     try {
       const args: unknown = JSON.parse(action.exec_args)
       if (containsCredential(args) || actionDigest(args) !== action.args_digest) return undefined
@@ -457,10 +446,6 @@ export class BotActions {
       throw new BotActionChanged(botActionRefusalText(code), code)
     }
     if (action.status !== 'open') throw new BotActionChanged('This was already answered.', 'bot_action_settled')
-    if (action && action.status === 'open' && Date.parse(action.expires_at) <= Date.parse(this.host.store.now())) {
-      if (settle) this.expireDue()
-      throw new BotActionChanged('This expired, so nothing was sent.', 'bot_action_expired')
-    }
     if (action && input.answer === 'send' && this.host.store.registry(action.bot_id)?.pausedReason === 'owner') throw new BotActionChanged(`Resume ${this.host.name(action.bot_id)} to send this.`, 'bot_action_paused')
     const row = this.host.store.activation(action.activation_id)
     if (row?.trigger.kind === 'schedule' && this.host.obsolete(action)) {
@@ -472,17 +457,30 @@ export class BotActions {
     if (!action || action.status !== 'open' || action.args_digest !== input.digest || !this.valid(action, true)) throw changed()
     if (input.answer === 'send' && !this.host.binding(row!, JSON.parse(action.target_json))) {
       // Admission is synchronous at the bridge. Refuse before effects, then warm for a later tap.
-      this.warming ??= Promise.resolve().then(() => this.host.refresh()).catch(() => {}).finally(() => { this.warming = undefined })
+      this.warming ??= Promise.resolve().then(async () => { await this.host.refresh() }).catch(() => {}).finally(() => { this.warming = undefined })
       const service = JSON.parse(action.card_json ?? '{}').serverName ?? 'The service'
       throw new BotActionChanged(botActionRefusalText('bot_action_unreachable', { serverName: service }), 'bot_action_unreachable')
     }
     return action
   }
   async answer(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
+    if (this.answering.has(input.actionId)) throw changed()
+    this.answering.add(input.actionId)
+    try { return await this.answerOnce(input) }
+    finally { this.answering.delete(input.actionId) }
+  }
+  private async answerOnce(input: { actionId: string; digest: string; answer: 'send' | 'not_now' }): Promise<{ status: string }> {
+    if (input.answer === 'send') {
+      const held = this.get(input.actionId)
+      if (held?.status === 'open' && held.args_digest === input.digest && await this.host.refresh(JSON.parse(held.target_json)) === false) {
+        const service = JSON.parse(held.card_json ?? '{}').serverName ?? 'The service'
+        throw new BotActionChanged(botActionRefusalText('bot_action_unreachable', { serverName: service }), 'bot_action_unreachable')
+      }
+    }
     const action = this.checked(input, true)
     if (input.answer === 'not_now') {
       this.host.store.db.transaction(() => {
-        if (!this.transition(action.id, 'open', 'declined', { text: 'Your owner chose not to send this: carry on without it and say what you skipped.' })) throw changed()
+        if (!this.transition(action.id, 'open', 'declined', { text: 'Your owner chose Not now; nothing was sent. Carry on without it and say what you skipped.' })) throw changed()
         this.host.ownerAnswered(this.host.store.activation(action.activation_id)!)
       })
       this.finish(action)

@@ -1,3 +1,4 @@
+import { asksFirstFor } from '../../../shared/bots/personal/asksFirst'
 import { readableActionTitle, type ActionRow } from '../actions/BotActions'
 import type { BotActionCard } from '../../../shared/bots/personal/chat'
 import { workWaitLine, parkedNeedsOwner } from '../activation/workWaiting'
@@ -15,7 +16,7 @@ import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
 import { workModelDetail } from '../../../shared/bots/personal/chips'
 import type { BotJournal } from '../seams'
-import type { BotMcpWhere } from '../mcp/BotMcp'
+import { installationOf, type BotMcpWhere } from '../mcp/BotMcp'
 import { outOfSightRow, workWaits, type BotActivationRow, type BotEscalationRow, type BotMessageRow, type BotQuestionRow, type BotStore } from '../store/BotStore'
 import { plainChoices, type BotChatQuestion } from '../../../shared/bots/personal/questions'
 import { cardFileName, plainCards, type BotCard, type BotChatCard } from '../../../shared/bots/personal/cards'
@@ -27,10 +28,10 @@ import { WAKE_LINE_PREFIX, wakeEventLabel } from '../../../shared/bots/personal/
 import { BOT_FOLD_LINE_PREFIX, BOT_FOLD_LINE_TITLE } from '../../../shared/bots/personal/memory'
 
 function isServiceLine(id: string): boolean {
-  return ['bm_permission_', 'bm_schedule_ended_', 'bm_schedule_done_', WAKE_LINE_PREFIX, BOT_FOLD_LINE_PREFIX].some(prefix => id.startsWith(prefix))
+  return ['bm_asks_first_', 'bm_permission_', 'bm_schedule_ended_', 'bm_schedule_done_', WAKE_LINE_PREFIX, BOT_FOLD_LINE_PREFIX].some(prefix => id.startsWith(prefix))
 }
 import type { AppletReference } from '../../../shared/applets'
-import { BOT_USAGE_WINDOW_MS, turnUsageSummary } from '../activation/turnUsage'
+import { BOT_USAGE_WINDOW_MS, botContextSummary, turnUsageSummary } from '../activation/turnUsage'
 
 /**
  * The Bot UI's view of `bots.db` (Bot Phase 1 §5.1.1, §5.7): the chat rows (`bot_messages`), each
@@ -93,6 +94,16 @@ function oneLine(text: string, max = 120): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line
 }
 
+/**
+ * What each run of a schedule does, in its own words on one line, for About. A fixed line ("Say exactly: …") has none:
+ * its label already says it.
+ */
+function scheduleDoes(prompt: string | undefined): string | undefined {
+  const text = prompt?.replace(/\s+/g, ' ').trim()
+  if (!text || text.startsWith('Say exactly: ')) return undefined
+  return text.length > 240 ? `${text.slice(0, 239).trimEnd()}…` : text
+}
+
 export interface PostInput {
   /** Journal provenance only: the chat keeps the original author and text. */
   external?: boolean
@@ -119,6 +130,8 @@ export interface PostInput {
    * message of a dispatch also takes the cards its turn made (`show_card`), and a question's bubble its question's card.
    */
   cards?: BotCard[]
+  /** A service notice that stays in chat without its own notification. */
+  quiet?: true
   /**
    * For the owner's eyes only (#673: a picked model that can't run, by name): journaled as a hidden kind, which no
    * pack, search or read gives the bot, so it never learns a model's or an entry's name from its own chat.
@@ -221,7 +234,7 @@ export class BotChatProjection {
     classify?(message: BotChatMessage, input: PostInput): 'now' | 'soon' | 'later' | null
     tellingSettings?(botId: string): import('../../../shared/bots/personal/tellingSettings').BotTellingPreferences
     telling?(botId: string): string | undefined
-    schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean }>
+    schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean; name?: string; prompt?: string }>
     /**
      * Where a granted MCP server stands now (`BotMcp.where`), for About → Can use; undefined while the servers were not
      * read yet (nothing is shown gone then).
@@ -329,7 +342,7 @@ export class BotChatProjection {
       })
       // A row the chat never shows (an event's line, `outOfSightRow`) is kept for the bot's memory and its guards only:
       // it tells nobody and reaches no window.
-      const tell = outOfSightRow(input.kind, id) ? null : this.options.classify?.(this.toMessage(this.store.message(id)!), input) ?? null
+      const tell = input.quiet || outOfSightRow(input.kind, id) ? null : this.options.classify?.(this.toMessage(this.store.message(id)!), input) ?? null
       this.store.run('UPDATE bot_messages SET tell = ?, tell_at = ? WHERE id = ?', tell, tell ? this.options.tellAt?.(input.botId, tell, at, id) ?? at : null, id)
       return { row: this.store.message(id)!, inserted: true }
     })
@@ -482,10 +495,15 @@ export class BotChatProjection {
     const mcp = 'mcp' in escalation.permission ? escalation.permission.mcp : undefined
     const tools = mcp ? mcpAskTools(mcp) : []
     const more = mcp?.unusable ? `${mcp.unusable} more of ${mcp.name ? `${mcp.name}'s` : 'its'} tools can't be used by a bot.` : undefined
+    const asks = this.options.asksFirst?.() && mcp && tools.some(tool => {
+      const where = this.options.mcpWhere?.(mcp.serverId)
+      const server = where?.state === 'on' || where?.state === 'changed' ? where.server : undefined
+      return asksFirstFor({ tool, serverName: [server?.name ?? mcp.name ?? '', server?.installationId ?? installationOf(mcp.serverId)], readOnlyHint: server?.tools.find(t => t.tool === tool)?.readOnlyHint })
+    })
     return {
       askId: escalation.id,
       title: text.title,
-      note: text.note,
+      note: asks ? 'Tools that may send or change things ask before each use. Tools that say they only read do not ask.' : this.options.asksFirst?.() && mcp?.changes === 'unknown' ? 'Mousse decides which calls ask at each use. Tools that say they only read do not ask.' : text.note,
       ...(tip ? { tip } : {}),
       status: cardStatus(escalation.status),
       kind: isSpecialAsk(escalation.permission) ? 'export_memory' : 'permission',
@@ -680,9 +698,16 @@ export class BotChatProjection {
   /** About this bot: what it can use beyond the starter grant, its runs, and its waiting reminders. */
   detail(definition: BotDefinition, now: number): BotDetail {
     const grant = this.store.activeGrant(definition.id)
-    const runs: BotRunItem[] = (this.options.schedules?.(definition.id) ?? []).map((schedule) => (
-      { id: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), kind: 'schedule' as const, ...(schedule.jobId ? { jobId: schedule.jobId } : {}), ...(schedule.paused ? { paused: true as const } : {}) }
-    ))
+    const lastRuns = this.store.lastScheduleRuns(definition.id)
+    const runs: BotRunItem[] = (this.options.schedules?.(definition.id) ?? []).map((schedule) => {
+      const last = lastRuns.get(schedule.scheduleId)
+      const does = scheduleDoes(schedule.prompt)
+      return {
+        id: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), kind: 'schedule' as const, ...(schedule.jobId ? { jobId: schedule.jobId } : {}), ...(schedule.paused ? { paused: true as const } : {}),
+        ...(schedule.name ? { name: schedule.name } : {}), ...(does ? { does } : {}),
+        ...(last ? { lastAt: last.endedAt, lastOutcome: last.status === 'done' ? 'ok' as const : last.status === 'failed' ? 'failed' as const : 'stopped' as const } : {})
+      }
+    })
     const reminders: BotReminderItem[] = this.store.waitingReminders(definition.id).filter((reminder) => !reminder.workId).map((reminder) => (
       { id: reminder.id, dueAt: reminder.dueAt, text: reminder.text, ownerSet: reminder.ownerSet, ...(reminder.work ? { work: true as const } : {}), ...(reminder.wake ? { wake: reminder.event ? wakeEventLabel(reminder.event) : '' } : {}) }
     ))
@@ -696,7 +721,8 @@ export class BotChatProjection {
       ] : [],
       runs,
       reminders,
-      ...((usage) => (usage ? { usage } : {}))(turnUsageSummary(this.store.turnUsageSince(definition.id, 'chat', now - BOT_USAGE_WINDOW_MS)))
+      ...((usage) => (usage ? { usage } : {}))(turnUsageSummary(this.store.turnUsageSince(definition.id, 'chat', now - BOT_USAGE_WINDOW_MS))),
+      ...((context) => (context ? { context } : {}))(botContextSummary(this.store.lastTurnUsage(definition.id, 'chat')))
     }
   }
 
@@ -721,8 +747,8 @@ export class BotChatProjection {
         if (where?.state === 'off') return { id, title, note: `${name} is switched off in Settings → Skills & MCP, so this gives nothing while it is. Switch it on there to use it again, or remove it.`, grantedAt, mark: 'Switched off' }
         if (where?.state === 'mcp_off') return { id, title, note: `MCP is turned off in Settings → Skills & MCP, so this gives nothing while it is. Turn it on there to use it again, or remove it.`, grantedAt, mark: 'MCP is off' }
         if (where?.state === 'changed') return { id, title, note: `${name} was changed since you allowed it (it runs from another address or command now), so this gives nothing until ${name} is allowed again. The bot asks when it needs it; you can also remove it.`, grantedAt, mark: 'Changed' }
-        if (this.options.asksFirst?.() && manifest.mcp.some(tool => tool.serverId === permission.mcp.serverId && tool.level === 'asks_first'))
-          return { id, title, note: 'Asks you first before actions that can send or change things.', grantedAt, mark: 'Asks first', asksFirst: true }
+        if (this.options.asksFirst?.() && manifest.mcp.some(tool => tool.serverId === permission.mcp.serverId && asksFirstFor({ tool: tool.tool, serverName: [name, live?.installationId ?? installationOf(permission.mcp.serverId)], readOnlyHint: live?.tools.find(t => t.tool === tool.tool)?.readOnlyHint, storedLevel: tool.level })))
+          return { id, title, note: 'Asks you first before sending or changing something. What it does through threads, commands or secrets you gave it does not wait for a card.', grantedAt, mark: 'Asks first', asksFirst: true }
         const shown = tools.slice(0, 6).join(', ')
         const unusable = live?.unusable.length ? ` (${live.unusable.length} more of its tools can't be used by a bot)` : ''
         return { id, title, note: `${tools.length} tool${tools.length === 1 ? '' : 's'}: ${shown}${tools.length > 6 ? ', …' : ''}${unusable}`, grantedAt }

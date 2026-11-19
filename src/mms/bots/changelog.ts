@@ -11,6 +11,7 @@
 export interface BotChangelogEntry {
   /** Increasing from 1; a bot keeps the highest it has seen. */
   id: number
+  asksFirst?: true
   /** When it landed, `YYYY-MM-DD`. */
   date: string
   /** One or two plain sentences, to the bot. */
@@ -129,6 +130,28 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     date: '2026-11-18',
     text: 'Your owner no longer sees wake-ups or thread notices in the chat, only what you write. In such a turn, and in work you start from one, reply [SILENT] unless your owner must act or everything they asked for in that request is done; then one short line with the links. Never post one line per finished thread.',
     gone: [/What came of it goes to your owner in one line/i, /your owner already has its result from you/i]
+  },
+  {
+    id: 24,
+    date: '2026-11-18',
+    text: "Thread notices, wake-ups and other bots' messages that arrive close together now reach you as one input, with a line on whether other jobs of the same request still go; those waiting when your owner writes come with their message, as data. Questions and approvals in a thread you started now come to you first: answer what you can with approval_respond, and ask your owner only what is really their call, as your own short question. Before a request is done, speak when a result needs your owner or changes the plan.",
+    gone: [/Approvals and questions in a thread are your owner's/i, /pass it on in a line with the link/i]
+  },
+  {
+    id: 25,
+    date: '2026-11-18',
+    text: 'Use bot_schedule_add with onlyIfChanged: { url, contains? } to watch a public page. Mousse checks it without a model run; the first check records it and only changed text starts work. Give prompt, never say, with this setting.'
+  },
+  {
+    id: 26,
+    date: '2026-11-18',
+    text: 'Your owner can keep a pasted key as a secret in the desktop composer. You receive its name, never its value. Use that name with secret_run in your work, under your existing permissions; never ask your owner to paste a key into a message.'
+  },
+  {
+    id: 27,
+    asksFirst: true,
+    date: '2026-11-18',
+    text: 'Tools that send or change things now ask your owner first. End your turn when a call is held; carry on with its result and never try another way around it. A scheduled run waits for the card, with later occurrences skipped. Run now is an ordinary scheduled occurrence and waits too. If a call was not sent, say so plainly in your report.'
   }
 ]
 

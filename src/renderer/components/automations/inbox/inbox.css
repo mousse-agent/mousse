@@ -612,6 +612,8 @@
   color: var(--text-secondary);
 }
 
+.inbox-cell.is-page-watch { white-space: normal; overflow-wrap: anywhere; }
+
 /* An icon sits on the text's line (icons are display: block by default), with a small gap; the text still ellipsizes. */
 .inbox-cell > :is(svg, .turning) { display: inline-block; margin-right: 5px; vertical-align: middle; position: relative; top: -1px; }
 .inbox-cell.is-pending { color: var(--accent); }

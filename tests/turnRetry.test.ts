@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest'
 import { providerStatusError, usageLimitError } from '../src/mms/orchestrator/providerErrors'
 import { TURN_RETRY, turnRetryDelay, withRetries, type TurnRetryFacts } from '../src/mms/orchestrator/turnRetry'
 import { AppError } from '../src/shared/errors'
+import { harnessAppError } from '../src/shared/harness/types'
 
 const facts = (over: Partial<TurnRetryFacts> = {}): TurnRetryFacts => ({
   retries: 0, elapsedMs: 0, answered: false, toolStarted: false, steered: false, runtimeRetried: false, bot: false, ...over
@@ -19,6 +20,7 @@ describe('when a failed turn is sent again', () => {
   it.each<[string, unknown, Partial<TurnRetryFacts>, boolean]>([
     ['an unreachable provider, before anything happened', unreachable, {}, true],
     ['a timeout, before anything happened', timedOut, {}, true],
+    ['an agent that took the prompt and went silent', harnessAppError({ code: 'timeout', message: 'did not answer', promptTaken: true }), {}, false],
     ['after the provider answered', unreachable, { answered: true }, false],
     ['after a tool started', unreachable, { toolStarted: true }, false],
     ['after a steer went in', unreachable, { steered: true }, false],

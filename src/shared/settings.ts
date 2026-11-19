@@ -430,21 +430,33 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
 }
 
 /**
- * Features that are still being tried out, each off until turned on.
+ * Features that are still being tried out, each off until turned on (Mousse Plus (legacy) is the exception: on until
+ * turned off).
  *
  * `subagentWorktrees`: Mousse gives every subagent it starts a worktree of its own, made when the subagent starts from the
  * parent's current HEAD, on a `mousse/` branch, whatever the main agent asked for. Off: the main agent chooses, as it
  * always has (`workspace` isolated or shared). Either way a subagent's work is reported, never merged.
  */
 export interface ExperimentalSettings {
-  botAsksFirst: boolean
+  botAsksFirstOff: boolean
   subagentWorktrees: boolean
+  /**
+   * Mousse Plus (legacy), on unless turned off: today's Mousse ID sign-in, hosted relay and phone requests through
+   * Mousse Plus. Off, this profile's networking sends nothing to Mousse Plus and runs on LAN, SSH, tunnels and
+   * self-hosted relays only, as while the new networking engine and Plus are built and tried.
+   */
+  plusLegacy: boolean
   /** The profiler (Settings → Labs). */
   profiler: ProfilerSettings
 }
 
 export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings> | null): ExperimentalSettings {
-  return { botAsksFirst: raw?.botAsksFirst === true, subagentWorktrees: raw?.subagentWorktrees === true, profiler: normalizeProfilerSettings(raw?.profiler) }
+  return {
+    botAsksFirstOff: raw?.botAsksFirstOff === true,
+    subagentWorktrees: raw?.subagentWorktrees === true,
+    plusLegacy: raw?.plusLegacy !== false,
+    profiler: normalizeProfilerSettings(raw?.profiler)
+  }
 }
 
 /** A worktree folder the person chose, and the id written in its marker (`.mousse-worktrees.json`) when it was chosen. */

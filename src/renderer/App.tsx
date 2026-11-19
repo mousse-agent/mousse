@@ -42,6 +42,7 @@ import { useViewSwap } from './lib/motion'
 import { useMemoryNotices } from './hooks/useMemoryNotices'
 import { useWindowCounters } from './lib/windowCounters'
 import { normalizeRunSettings } from '../shared/settings'
+import { applyPlusLegacy } from './stores/mousseIdStore'
 import { isOlderThreadList, type ThreadListVersion } from '../shared/types'
 import { useAppCommands } from './commands/useAppCommands'
 import { useBotsStore } from './stores/botsStore'
@@ -297,6 +298,7 @@ export default function App() {
       setShortcuts(settings.shortcuts ?? {})
       useAppStore.getState().setNotifyBotThreads(settings.notifications?.botThreads === true)
       useAppStore.getState().setRunDefaults(normalizeRunSettings(settings.runs))
+      applyPlusLegacy(settings)
     })).catch(() => {})
     void window.mousse.threads.getActivity().then(applyIfCurrent(setThreadActivity))
     window.mousse.turn.getSnapshot().then(applyIfCurrent(setTurnSnapshot)).catch(() => {})
@@ -388,6 +390,7 @@ export default function App() {
         setShortcuts(settings?.shortcuts ?? {})
         useAppStore.getState().setNotifyBotThreads(settings?.notifications?.botThreads === true)
         useAppStore.getState().setRunDefaults(normalizeRunSettings(settings?.runs))
+        applyPlusLegacy(settings)
       })),
       // A turn that ends shows with its last text, never a frame before it.
       window.mousse.turn.onTurnState(applyIfCurrent(messageUpdates.flushBefore(setTurnState))),

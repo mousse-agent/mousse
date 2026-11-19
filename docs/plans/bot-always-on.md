@@ -2,7 +2,7 @@
 
 A bot that works while its owner is away needs five things that a chat assistant does not: nothing that starts it may be lost, its timers must survive a closed laptop, its memory must stay small and true, it must be able to act without holding keys or acting unasked, and it must not ring at 3 AM. This plan says how personal bots get all five while the bot chat stays what it is: a messenger with bubbles, quick replies and one About panel.
 
-**Status:** phases 0 and 1 are built and merged (issues #1288 and #1312; see [What phases 0 and 1 built](#what-phases-0-and-1-built) for where they differ from the text below). Phase 2 is built behind an experimental switch that is off; phases 3 and 4 remain design. See [What phase 2 built](#what-phase-2-built). Written against `origin/master` at `0bfd7f476` (15 Nov 2026), where the line numbers below point, and checked again for substance at `2e8a5b9ca` by an independent review, which this version takes in (see How this was decided). The line numbers have not been kept up as the code changed: find things by name. Paths are relative to the repository. Terms are the [glossary](../GLOSSARY.md)'s; how bots work today is in [`docs/bots.md`](../bots.md) and [`docs/bot-memory.md`](../bot-memory.md).
+**Status:** phases 0 and 1 are built and merged (issues #1288 and #1312; see [What phases 0 and 1 built](#what-phases-0-and-1-built) for where they differ from the text below). Phase 2 is built and asks first is on by default; phases 3 and 4 remain design. See [What phase 2 built](#what-phase-2-built). Written against `origin/master` at `0bfd7f476` (15 Nov 2026), where the line numbers below point, and checked again for substance at `2e8a5b9ca` by an independent review, which this version takes in (see How this was decided). The line numbers have not been kept up as the code changed: find things by name. Paths are relative to the repository. Terms are the [glossary](../GLOSSARY.md)'s; how bots work today is in [`docs/bots.md`](../bots.md) and [`docs/bot-memory.md`](../bot-memory.md).
 
 ## The request, and the short answer
 
@@ -124,7 +124,7 @@ At the original plan’s base, work waited between provider turns for three reas
 | Parked as | Woken by | Stranded when (ends with a line) | Work line |
 |---|---|---|---|
 | `question` | a tap, a reply, a default | the question is forgotten | waiting on you · Which flat…? |
-| `approval` (new) | Send, Not now, expiry | the card is withdrawn, the grant revoked | waiting on you · Send the email? |
+| `approval` (new) | Send, Not now | the card is withdrawn, the grant revoked | waiting on you · Send the email? |
 | `budget_exhausted` | Allow | no open ask for the limit | waiting on you · more time |
 | `usage_limit` | the reset time, Resume | no reset time | paused until 14:00 |
 | `waiting` (new) | its timer or event | the timer row is cancelled | checks again at 16:00 · waits for acme/app#12 |
@@ -135,7 +135,7 @@ Superseded by #1452: parked work has no general week expiry and the run lane has
 
 ### 4. What is due next
 
-`armDue` today reads only `bot_reminders` and `bot_questions.next_at`. One function, `nextDueAt(botId)`, returns the soonest of: reminders, wakes and waits; question follow-ups; approval follow-ups and expiries (`bot_actions.next_at`, `expires_at`); tellings to release; and schedules' next times. The engine's one timer arms on it, and "is this bot idle?" (nothing queued, running or ready, and nothing due within 30 minutes) is answered from it.
+`armDue` today reads only `bot_reminders` and `bot_questions.next_at`. One function, `nextDueAt(botId)`, returns the soonest of: reminders, wakes and waits; question follow-ups; approval follow-ups and the ten-minute accepted-Send deadline (`answered_at`); open cards have no deadline; tellings to release; and schedules' next times. The engine's one timer arms on it, and "is this bot idle?" (nothing queued, running or ready, and nothing due within 30 minutes) is answered from it.
 
 Each path that fires goes through one step, `fireDue({ botId, key, kind, dueAt, lateMs, missed?, ownerSet })`, which checks the bot's state, labels lateness and inserts the activation or the fixed line under today's keys.
 
@@ -157,15 +157,16 @@ ScheduledJob {
   tellMe?: TellMe
   bot: { botId, scheduleId, createdBy,
          ownerAsked?: true,                  // added in a turn the owner's own message started
-         say?: string,                       // a fixed line, posted with no model run
-         onlyIfChanged?: { url, contains? }  // a check with no model call before each run
+         say?: string                        // a fixed line, posted with no model run
   }
 }
 ```
 
-Everything new sits under `bot`, because `jobs-kept.json` keeps that field whole when an older build's save drops what it does not know (`ScheduledJobStore.ts:229`); `restoreDroppedFields` must also merge missing keys into a `bot` that survived. An older build runs a `say` job as a prompt that says it, and ends an `until` job at its time. The "where I left off" line and the page's last hash live in `bots.db`, never in `jobs.json`, so Forget and search reach them and a file rewritten every tick stays small.
+The page-check setting `onlyIfChanged: { url, contains? }` and its state live in `bot_memory_state`, never on `ScheduledJob` or `ScheduledJob.bot`.
 
-About → Runs and the automation card word each combination: "Inbox check · every weekday 09:00", "Says “Take your pills” · every day 08:00", "Tickets page · checks every 15 min · tells you when it changes", with " · until Fri 21 Nov" appended.
+The new fixed-line fields sit under `bot`, because `jobs-kept.json` keeps that field whole when an older build's save drops what it does not know (`ScheduledJobStore.ts:229`); `restoreDroppedFields` must also merge missing keys into a `bot` that survived. An older build runs a `say` job as a prompt that says it, and ends an `until` job at its time. The "where I left off" line and the page's last hash live in `bots.db`, never in `jobs.json`, so Forget and search reach them and a file rewritten every tick stays small.
+
+About → Runs words each combination: "Inbox check · every weekday 09:00", "Says “Take your pills” · every day 08:00", and "<label> · runs when example.com changes", with " · until Fri 21 Nov" appended. Automations keeps its own time wording: "Every 15 min · when example.com changes".
 
 ## 1. Event inbox
 
@@ -194,12 +195,12 @@ About → Runs and the automation card word each combination: "Inbox check · ev
 - **Wakes grow; standing triggers wait.** A wake on a pull request gains `on: 'merged' | 'checks' | 'review'`. A `checks` wake fires when every check on the current head has completed, with the pass and fail counts and the failed names as data; it needs the checks' state from the pull request read (`wakeSources.ts`).
 - **Files changed by two turns.** The chat and its work are told to keep the same list files, and nothing stops a lost update. On Pi, the authority records each file's hash when it is read and refuses an edit to a file that changed since; Claude Code's own Edit already refuses that; and the instructions say to read a list just before changing it, in one edit.
 - **A general "whenever X, do Y" engine is not built.** A schedule that runs as often as every minute, posts nothing when there is nothing new, and keeps a "where I left off" line covers it, at the cost of a model run per check. Requests from outside, files landing and MCP events come when someone needs them (phase 4), as rows in a `bot_events` table in `bots.db` keyed by the sender's own id, never in `jobs.json`.
-- **"Tell me when this page changes" without a model run per check comes in phase 3**, because its protocol has to be exact or it loses a change. `onlyIfChanged` puts a check in front of a schedule:
-  - **State** is kept per schedule in `bots.db`: the schedule's generation, the hash last handed to a run, the check in flight, and how many checks in a row failed.
+- **"Tell me when this page changes" without a model run per check**, because its protocol has to be exact or it loses a change. `onlyIfChanged` puts a check in front of a schedule:
+  - **Setting and state** are one `bot_memory_state` row, `pagecheck:<scheduleId>`, rather than a new `ScheduledJob.bot` field. The shared job crosses the bridge whole; this keeps its wire shape unchanged. Older builds run the prompt every time and lose nothing. The row keeps the URL, optional `contains` window, and state: the schedule's generation, the hash last handed to a run, the check in flight, and how many checks in a row failed.
   - **The first check** records the page and starts no run.
   - **The fetch** is made by Mousse under the same rules as a secret's request (a public address, checked and then used; no redirect to another host), with no secret. `runScheduledOccurrence` starts it and answers "not ready"; the next tick reads the result.
-  - **Unchanged:** the occurrence is skipped as `unchanged`: no activation, no run in the automation's list, no model call.
-  - **Changed:** the changed text is written to a file, and then one transaction inserts the run, which names that file, and moves the handed-over hash. A crash before it leaves the old hash, so the change is seen again; a crash after it leaves a run that holds the change. A run that then fails is told as a failure, so a change is never lost silently.
+  - **Unchanged:** the computer-only scheduler/engine outcome is `checked`, which advances the occurrence without setting `botSkip` (a new reason would cross to phones): no activation, no run in the automation's list, no model call.
+  - **Changed:** the text waits in `bot_memory_state`. One transaction inserts the run, writes the text into a file in that run’s folder, and moves the handed-over hash only if the queue accepts the run. The run names that file and owns it until it ends, even if its schedule ends or is removed. A crash before it leaves the old hash, so the change is seen again; a crash after it leaves a run that holds the change. A run that then fails is told as a failure, so a change is never lost silently.
   - **A result for an older generation** (the schedule was edited or removed while the page loaded) is dropped.
   - **A page that can't be read** six times in a row, or for a day, is told once ("I can't read the tickets page any more: it asks me to sign in") and counts as a failed run. It is never skipped in silence for ever.
 
@@ -271,19 +272,19 @@ About → Runs and the automation card word each combination: "Inbox check · ev
 
 **Decisions**
 
-- **A third level beside allowed and not allowed: asks first.** It is stored in the grant beside the allowed tool, so About, Remove and approval work unchanged.
-- **Not built (C6): Mousse decides what asks first, and when it can't tell, it asks.** An MCP tool that says it is read-only does not ask. One with no hints does not ask when its name starts with a reading word (get, list, search, read, find, fetch, show, describe, query, count). Every other MCP tool asks. `secret_fetch` asks for anything but a read, when the secret may change things at all. MCP tools and `secret_fetch` exist only in work and runs, so a chat turn never meets a card of this kind.
+- **Asks first is computed at call time.** The hint offered to the turn wins; a missing current tool asks. Without a hint the first reading word, later changing words and joining words decide. Server restarts and tools/list_changed re-list tools; Send requires a fresh bounded listing, and cold listings do not withdraw a waiting card. A stored development asks-first level is a floor. Computing instead of rewriting grants preserves their canonical form, digest and revision, warm chats and waiting-card bindings, and lets older builds read the profile without recomputing incompatible digests. About uses the same classifier.
+- **Built in C6: Mousse decides what asks first, and when it can't tell, it asks.** An MCP tool that says it is read-only does not ask. One with no hints does not ask when its whole first word is a reading word (get, list, search, read, find, fetch, show, describe, query, count), no later word changes things, and no word joins actions (and, then, or). Every other MCP tool asks. An explicit `readOnlyHint: false` always asks. Secret commands are outside this cover. MCP tools and `secret_fetch` exist only in work and runs, so a chat turn never meets a card of this kind.
 - **Mousse holds the call and runs it.** The deferred tool call of Claude Code was considered and rejected: it works only when a turn makes a single call, only in one runtime, and needs sessions kept on disk. The calls worth holding are ones Mousse already runs itself (`callForBot`, the app-tool registry). So Mousse stores the exact call in `bot_actions`, the work parks as `approval` between provider turns, and on **Send** Mousse makes the stored call and the work goes on with its result.
 - **What a held call is bound to**, so that Send does exactly what the card showed and does it once:
   - **One row per call.** The row is unique on the activation, its dispatch and the runtime's tool call id, so a call the runtime makes again returns the same row and the same card.
   - **The arguments as they will be sent** are kept exactly, apart from the masked copy the card and the journal show, and are cut down to the masked copy once the call has settled.
   - **What it was approved against:** a digest of those arguments, the MCP server as installed and the tool's schema, the granted server/tool pair and its held level, the schedule's revision if a schedule asked, and the limit of the device that started the work.
-  - **Send is a compare-and-set.** It names the row and the digest the card showed. It is refused, and the card redrawn, when the row has expired, was withdrawn, or any of those bindings has changed since ("This changed since you saw it"). A phone's Send names them too, so a stale phone can never approve a different email.
+  - **Send is a compare-and-set.** It names the row and the digest the card showed. It is refused, and the card redrawn, when an older row had already expired, was withdrawn, or any of those bindings has changed since ("This changed since you saw it"). A phone's Send names them too, so a stale phone can never approve a different email.
   - **Run once.** `open → approved → running` is committed before the call; then `done`, `failed` or `uncertain`. A call left `running` by a restart becomes `uncertain`, is never made again, and the bot is told to check first. A tool that takes an idempotency key is given the row's.
   - **Withdrawn with what it belongs to**, in the same transaction: a Stop of the work, a Forget of the card or of the message that asked for the work, the removal of the schedule, the removal of the tool or the grant, the deletion of the bot.
 - **The card** is drawn by Mousse from the stored arguments and is complete: every recipient, the account it goes from, attachments by name, the whole text (long values behind a fold, short bodies shown in place). It shows only what Mousse stored from the call. It has **Send** and **Not now**, and there is never a default yes. Afterwards it reads "Sent · 09:14", "Not sent", "Expired · not sent" or "Couldn't tell if it went through".
-- **How long a card is good for counts from when it was posted**, never from when the owner was told, so holding a banner at night cannot make an old action live longer. Work's cards are good for 48 hours. A schedule's card is good for one gap of its schedule, and at least an hour. Telling is separate: the first nudge counts from when the owner was told, at most two, and not at night. Expiry fires on the engine's timer (shared piece 4), and Send checks it once more.
-- **A scheduled run waits too.** It parks like work, so a sequence (draft, send, record) stays whole. An occurrence that falls while a run of its schedule is parked, or still finishing after its card expired, is skipped with today's reason ("the bot is waiting for your answer"). So while a card waits unanswered, a schedule runs at most about once an hour, even one set to every minute, and its left-off line lets the next run catch up. An expired card becomes a quiet line, "Expired · not sent", and expired lines of one schedule in a row fold into one, so after a night of hourly runs the owner finds one card and one line, not six cards.
+- **Superseded after #1481: cards now have no expiry.** The following was the earlier decision. **How long a card is good for counts from when it was posted**, never from when the owner was told, so holding a banner at night cannot make an old action live longer. Work's cards are good for 48 hours. A schedule's card is good for one gap of its schedule, and at least an hour. Telling is separate: the first nudge counts from when the owner was told, at most two, and not at night. Expiry fires on the engine's timer (shared piece 4), and Send checks it once more.
+- **Superseded after #1481: a schedule keeps one waiting run until answered or withdrawn; later occurrences are skipped.** The expiry and hourly repeat below were the earlier decision. **A scheduled run waits too.** It parks like work, so a sequence (draft, send, record) stays whole. An occurrence that falls while a run of its schedule is parked, or still finishing after its card expired, is skipped with today's reason ("the bot is waiting for your answer"). So while a card waits unanswered, a schedule runs at most about once an hour, even one set to every minute, and its left-off line lets the next run catch up. An expired card becomes a quiet line, "Expired · not sent", and expired lines of one schedule in a row fold into one, so after a night of hourly runs the owner finds one card and one line, not six cards.
 - **No "Always allow this".** Work the owner asks for in the chat asks each time: the owner is there. The earlier drafts of this plan had a broad Always, then one limited to destinations approved before; both were dropped, because a place the owner approved once can be a shared folder or a mailing list, and what is sent there can be shaped by what the work has read.
 - **One automation may be let to do one thing alone, in one place** (phase 3). The owner asks for it in their own turn ("let the scan sorter file things without asking"), and the answer is an ask in the ask's look: "Let ‘Sort new scans’ upload to your Scans folder in Drive without asking?" · Allow · Not now, on the computer only. What is stored is that automation, that tool, and the place as named arguments with their exact values, taken from a call the owner has already approved. A later call from that automation to that tool with those values runs; anything else asks. A tool with no argument Mousse can read as a place can't be let alone.
 - **Caps where the calls are made.** Every call in these classes, held or let alone, writes a `bot_actions` row. Over 20 an hour per tool or 100 a day per bot, a call that would run alone becomes a card: "Kai has uploaded 20 files this hour. Upload this one too?"
@@ -291,7 +292,7 @@ About → Runs and the automation card word each combination: "Inbox check · ev
 
 ### What asks first does not cover
 
-As built on master, it holds a bot's own MCP tool calls marked asks-first, through direct calls and `use_tool`. No classifier marks tools yet; only the development setter does.
+Asks first is on by default for a bot’s own MCP tool calls, through direct calls and `use_tool`, classified at call time from their hints and names. Threads, commands and secrets remain outside it.
 
 It does not cover:
 
@@ -300,7 +301,7 @@ It does not cover:
 - Commands, including background commands and secret commands; where no sandbox holds them they run as the owner's account.
 - Messages to other bots, whose turn may itself start a background command.
 - The bot's browser and anything it can do in its signed-in browser session.
-- MCP tools not marked asks-first.
+- MCP tools that only read.
 
 ## 5. Telling
 
@@ -342,7 +343,7 @@ It does not cover:
 
 All `bot_actions` columns are TEXT except `nudges` (INTEGER, NOT NULL, default 0). `id` is the primary key. `call_key`, `bot_id`, `activation_id`, `lane`, `kind`, `target_json`, `args_json`, `args_digest`, `binding_json`, `status` and `created_at` are NOT NULL: each call needs its identity, target, masked arguments, approval binding, state and creation time. `lane` is checked as `chat` or `run`; `kind` and `status` are checked against the sets above. Checks require `exec_args` to be NULL outside `open`, `approved` and `running`, and an `open` card to have `expires_at`. Other fields are nullable: exact arguments are cleared on settlement; place, card and bot note need not exist for counted calls; result, message, follow-up, expiry, answer and execution fields exist only when applicable. There are no foreign keys. Only the 30-day purge deletes actions; withdrawal when their work or cards end is defined by the later approval implementation. Memory export includes a masked `actions.jsonl`, excluding `exec_args`; whole-database migration copies include the table automatically. Every column except `exec_args` holds only masked text, ids and digests, with one deliberate exception: `place_json` holds exact values for phase 3 comparisons and is exported as such; `binding_json` holds the server’s id and a digest of its configuration, never the configuration itself.
 
-Outside `bots.db`: `ScheduledJob.bot` gains `ownerAsked` and `say`, and in phase 3 `onlyIfChanged` (its state is in `bots.db`); the grant gains the asks-first level and, in phase 3, an automation's exception (automation, tool, place); a secret's record gains the bots that use it and its binding (a request for one is an ordinary escalation row whose permission names the secret, so `bots.db` needs nothing for it); the profile's settings gain `notifications.quietHours`.
+Outside `bots.db`: `ScheduledJob.bot` gains `ownerAsked` and `say`; phase 3 keeps `onlyIfChanged` and its state entirely in `bot_memory_state`, with no shared-job field; the grant gains the asks-first level and, in phase 3, an automation's exception (automation, tool, place); a secret's record gains the bots that use it and its binding (a request for one is an ordinary escalation row whose permission names the secret, so `bots.db` needs nothing for it); the profile's settings gain `notifications.quietHours`.
 
 ## Phases
 
@@ -371,7 +372,7 @@ Each phase ships on its own and leaves bots working. The order is: what is unsaf
 
 - One park path, with the schedule's skip check counting a parked run.
 - `work_wait`.
-- Asks first, built behind a switch that is off and turned on when the whole of it is in: the engine and the held call's contract, the card, a scheduled run that parks, the phone.
+- Asks first, on by default since C6: the engine and the held call's contract, the card, a scheduled run that parks, the phone.
 
 **Phase 3: what needs approvals first.**
 
@@ -416,31 +417,32 @@ Both phases are on `master`. Each item was one pull request, reviewed on its own
 
 ## What phase 2 built
 
-C0, C1, C2, C3a, C8, C3b (#1392), C5 (#1403 and #1475), and C4 (#1390) are merged. Asks first remains behind a switch that is off. The classifier and switch-on are C6. Where this differs from the design above, this section records the built behaviour:
+C0, C1, C2, C3a, C8, C3b (#1392), C5 (#1403 and #1475), and C4 (#1390) are merged. C6 adds call-time classification, turns asks first on by default, and introduces the first held card once per bot. The explicit false setting remains a support rollback. Where this differs from the design above, this section records the built behaviour:
 
-- **Accepted Send:** at most ten minutes after the tap to reach the service, independent of the card's own expiry. Before dispatch it says Waiting for the service; afterwards Sending. A timeout sends nothing, clears executable arguments and tells the work. The work may ask again.
-- **Binding:** exact arguments and their digest, installed server id and tool name, configuration and schema digests, the granted pair's level, the starting device's limit, and schedule revision for a scheduled call. An unrelated permission or grant revision change does not invalidate it. Cards from #1340's older binding withdraw on upgrade (development profiles only).
-- **Freshness:** work cards last 48 hours; a schedule card lasts one gap, at least an hour, or one hour if its schedule cannot be found. A running call finishes. Switch rollback withdraws open and accepted unstarted calls with a truthful outcome.
-- **Unattended limits:** schedules and unattended work share history for each bot and tool. Three open, declined or expired cards since owner input refuse further requests; an identical declined/expired request is refused until the owner writes. Owner-started work keeps its own history. An identical open request is refused with a pointer to the existing card, not a second card.
-- **Nudges:** at most two, one hour after the card was told and a day after the first nudge was told; questions and cards share spacing, and quiet hours defer them. Nothing nudges at or after expiry or with the switch off; an hourly schedule's card never nudges.
+- **Accepted Send:** at most ten minutes after the tap to reach the service, independent of how long the card waited. Before dispatch it says Waiting for the service; afterwards Sending. A timeout sends nothing, clears executable arguments and tells the work. The work may ask again.
+- **Owner notes:** An owner note does not fence an open card; it only lifts refusals.
+- **Binding:** exact arguments and their digest, installed server id and tool name, configuration and schema digests, the granted pair’s effective call-time level, the starting device's limit, and schedule revision for a scheduled call. An unrelated permission or grant revision change does not invalidate it. Cards from #1340's older binding withdraw on upgrade (development profiles only).
+- **No card expiry:** the 48-hour and schedule-gap expiry were replaced after #1481. Work and schedule cards, including already-open development cards, wait for Send, Not now, Stop or an existing withdrawal cause. Already-expired rows keep their text and refusals. New rows fill the unused `expires_at` with `9999-12-31T23:59:59.999Z`; open-card timers and Send ignore it, without a database-version change. A running call finishes. Switch rollback withdraws open and accepted unstarted calls with a truthful outcome.
+- **Unattended limits:** schedules and unattended work share history for each bot and tool. Asks are not counted, aligning with the tool plan’s no-counts rule. An identical declined/expired request is refused until the owner writes. Unattended work and schedules share a limit of three open cards per bot and tool. Only open cards count; answering one frees a place. Declined, sent, withdrawn and older expired cards never count. Owner-started work has no such cap beyond its one waiting call. Owner-started work keeps its own history. An identical open request is refused with a pointer to the existing card, not a second card.
+- **Nudges:** at most two, one hour after the card was told and a day after the first nudge was told; questions and cards share spacing, and quiet hours defer them. Hourly schedule cards nudge on the same rule. No third nudge is sent; the card keeps waiting. Nothing nudges with the switch off.
 - **Devices and waiting:** Work access is required to answer a card. The queue cap excludes work waiting on a card. There are no run slots or general week expiry since #1452. Thread and command authority is as described under What asks first does not cover; the older secrets and background-command restrictions above were superseded.
+
+## Superseded decisions
+
+**Superseded after #1481: card expiry and ask counts.** The three-card rule was also removed to align with the tool plan’s no-counts rule; exact-repeat refusals remain. Unattended work and schedules share a limit of three open cards per bot and tool. Only open cards count; answering one frees a place. Declined, sent, withdrawn and older expired cards never count. Owner-started work has no such cap beyond its one waiting call. The 48-hour work deadline and one schedule gap (at least an hour) were replaced by no expiry. A waiting schedule skips later occurrences until the owner answers or the run is withdrawn. Asks first holds actions that send or change something; what it does through threads, commands or secrets it was given does not wait for a card. Wider cover belongs to `tool-api.md`.
 
 ## Open questions
 
-- After a rollback, should a tool marked asks-first run without asking, or be refused until the switch is on again?
+- **Answered by C6:** support can set `experimental.botAsksFirstOff` to true (the old `botAsksFirst` key is ignored). New calls run without asking; open and accepted unstarted cards withdraw, and running calls finish.
 
-- Does card expiry remain alongside `tool-api.md`'s no-default-timeout plan?
-- Does the three-unsent rule remain alongside that plan's “no counts” decision?
-- Does an owner note fence an existing card? Today it lifts refusals but leaves the card sendable.
 
 1. **Commands where no sandbox holds them** (Pi, Windows, Linux without bubblewrap). A bot with "run commands" there can do anything the owner's account can, in a run nobody is watching too, and no card can hold it. The review behind this version would switch commands off in runs nobody started on those computers. That would end every scheduled bot that runs a script on Windows. The original recommendation to refuse secrets is superseded by #1375. The remaining original recommendation was to keep commands, since the owner allowed it and can switch it off for the computer; and make the "run commands" ask say, on those computers, that it is the owner's whole account.
 2. **Superseded by #1452:** background commands are allowed in any bot chat turn under the grant, including a wake, instead of the proposed owner-turn-only restriction.
 3. **No "Always" at all for work the owner asks for.** An owner who has a bot send ten emails in a sitting taps Send ten times. Recommended: yes for now; the cards are the product, and letting one automation act alone covers the unattended case.
 4. **The owner's threads stay outside asks first**, as today. A card on every thread a bot starts would undo the hidden quick threads the product just gained. Recommended: leave it, and keep the computer's switch.
 5. **Quiet hours for threads too?** Bots and automations follow them from phase 1. Recommended: threads when asked for.
-6. **How long a card is good for:** 48 hours for work; for a schedule, one gap and at least an hour, which slows a faster schedule to about once an hour while its card waits. Both are constants.
-7. **A fixed line every hour rings in quiet hours.** A schedule's fixed line and a reminder the owner set are told at once, at any hour, because the owner asked for that time. A fixed line set for every hour therefore rings all night, and the way out is to change when it runs. Recommended: keep it; the alternative is that a repeating fixed line waits like other messages and only a one-off reminder rings.
-8. **A search index over masked text.** It would stop a held-back word weighing on the order of two ordinary search results that nearly tie (#1292's review found no case where it changed the order in 36 layouts). It needs every journal row of every bot indexed again. Left out of v11. Recommended: not until there is a case.
+6. **A fixed line every hour rings in quiet hours.** A schedule's fixed line and a reminder the owner set are told at once, at any hour, because the owner asked for that time. A fixed line set for every hour therefore rings all night, and the way out is to change when it runs. Recommended: keep it; the alternative is that a repeating fixed line waits like other messages and only a one-off reminder rings.
+7. **A search index over masked text.** It would stop a held-back word weighing on the order of two ordinary search results that nearly tie (#1292's review found no case where it changed the order in 36 layouts). It needs every journal row of every bot indexed again. Left out of v11. Recommended: not until there is a case.
 
 ## What this plan leaves out
 

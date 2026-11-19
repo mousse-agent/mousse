@@ -136,11 +136,12 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 .bot-bubble .bot-error, .bot-bubble .bot-message-files { margin-top: 8px; }
 /* "Worked for 32s ›": quiet, as under a thread's prompt, a step dimmer than the time; the chevron turns while the steps
    show. Never a fill: not the app's focus fill (a square grey box), not on hover or after a click. Hover only lightens
-   the words; keyboard focus alone draws a thin ring, which takes no room. */
+   the words; keyboard focus alone brightens them and underlines them, which takes no room. Never a ring: keyboard focus
+   in the app is never an outline (tests/renderer/keyboardFocusFill.test.ts). */
 .bot-worked { display: inline-flex; align-items: center; gap: 2px; padding: 0; border-radius: 3px; font-size: 11.5px; line-height: 16px; color: color-mix(in srgb, var(--text-secondary) 64%, transparent); font-variant-numeric: tabular-nums; transition: color 150ms ease-out; }
 .bot-bubble .bot-worked:is(:hover, :focus, :focus-visible) { outline: none; background: none; }
 .bot-bubble .bot-worked:hover { color: color-mix(in srgb, var(--text-secondary) 80%, transparent); }
-.bot-bubble .bot-worked:focus-visible { outline: 1px solid color-mix(in srgb, var(--text-secondary) 45%, transparent); outline-offset: 2px; }
+.bot-bubble .bot-worked:focus-visible { color: var(--text-secondary); text-decoration: underline; text-underline-offset: 2px; }
 .bot-worked-chevron { transition: transform 150ms ease-out; }
 .bot-worked-chevron[data-open] { transform: rotate(90deg); }
 .bot-steps { list-style: none; margin: 8px 0 2px; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--bot-meta); line-height: 19px; color: var(--text-secondary); }
@@ -411,13 +412,81 @@ button.bot-image:focus-visible > img { opacity: 0.82; }
 .bot-dialog-text { margin: 0; font-size: 13px; line-height: 1.6; color: var(--text-secondary); }
 .chat-primary-button.bot-danger-button { background: var(--error, #e79090); color: var(--surface-strong, #18151c); }
 
-/* About this bot: a narrow panel on the right. */
-.bot-about { width: 300px; flex-shrink: 0; border-left: 1px solid rgba(var(--accent-pale-rgb), .12); padding: 22px 18px; overflow: auto; }
-.bot-about-close { display: flex; }
+/* The panel takes Settings' tokens (.settings-scope): its spacing ramp, type scale, group surface, row anatomy and icon
+   buttons, so About reads like the rest of the app rather than a page of its own. The left edge drags its width
+   (the sidebars' handle); the header pairs the mouse with what it does now; sections fold as Settings' do. */
+.bot-about { position: relative; display: flex; flex-direction: column; flex-shrink: 0; min-width: 0; border-left: 1px solid var(--ui-line); }
+.bot-about-resize { right: auto; left: -4px; }
+.bot-about-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-12) var(--space-16) var(--space-24); }
+
+.bot-about-head { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-16); padding: var(--space-4) 0 var(--space-16); border-bottom: 1px solid var(--ui-line); }
+.bot-about-id { display: flex; flex-direction: column; min-width: 0; }
+.bot-about-name { display: flex; align-items: center; gap: var(--space-8); }
+.bot-about-name h2 { flex: 1; min-width: 0; margin: 0; font-size: var(--settings-fs-heading); font-weight: 600; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-about-close { margin: -2px calc(-1 * var(--space-4)) 0 0; }
+.bot-about-doing { margin: 2px 0 var(--space-8); font-size: 13px; line-height: 1.4; color: var(--text-primary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.bot-about-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: var(--space-12); row-gap: 2px; margin: 0; font-size: var(--settings-fs-small); line-height: 1.45; font-variant-numeric: tabular-nums; }
+.bot-about-facts dt { color: var(--text-secondary); }
+.bot-about-facts dd { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+/* Only status words take colour (Settings rule 12). */
+.bot-about .is-ok { color: var(--success); }
+.bot-about .is-warn { color: var(--warning); }
+.bot-about .is-bad { color: var(--danger); }
+
+/* A section: Settings' fold heading at row size, a full-width hit area, and one quiet summary while closed. */
+.bot-about-fold { margin-top: var(--space-4); }
+.bot-about-fold:first-of-type { margin-top: var(--space-12); }
+.bot-about-fold-head, .bot-about-memory { display: flex; align-items: center; gap: var(--space-8); width: calc(100% + 2 * var(--space-8)); min-height: 36px; margin: 0 calc(-1 * var(--space-8)); padding: 0 var(--space-8); border-radius: var(--ui-row-radius); text-align: left; color: var(--text-primary); transition: background-color .15s; }
+.bot-about-fold-head:hover, .bot-about-memory:hover { background: var(--ui-hover); }
+.bot-about-fold-icon { flex-shrink: 0; color: var(--text-secondary); }
+.bot-about-fold-title { flex-shrink: 0; font-size: var(--settings-fs-row); font-weight: 600; }
+.bot-about-fold-summary { flex: 1; min-width: 0; text-align: right; font-size: var(--settings-fs-small); color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.bot-about-fold.is-open .bot-about-fold-summary { visibility: hidden; }
+.bot-about-fold-chevron { flex-shrink: 0; margin-left: auto; color: var(--text-secondary); transition: transform 180ms var(--ui-collapse-ease-close); }
+.bot-about-fold-summary + .bot-about-fold-chevron { margin-left: 0; }
+.bot-about-fold.is-open .bot-about-fold-chevron { transform: rotate(90deg); transition-duration: 160ms; transition-timing-function: var(--ui-collapse-ease); }
+.bot-about-fold-body { padding: var(--space-4) 0 var(--space-12); }
+.bot-about-memory { margin-top: var(--space-4); }
+
+/* Rows on a section's surface: Settings' anatomy, tightened for a side panel. */
+.bot-about-surface { --settings-surface-x: var(--space-12); --settings-row-y: 10px; }
+.bot-about .settings-item { flex-wrap: nowrap; column-gap: var(--space-12); min-height: 0; }
+.bot-about .settings-item-lead { width: 18px; margin-right: calc(-1 * var(--space-4)); align-self: flex-start; padding-top: 1px; }
+.bot-about .settings-item-text { flex: 1 1 0; gap: 2px; }
+.bot-about .settings-item-title { font-size: 13px; line-height: 1.4; }
+.bot-about .settings-item-desc { font-size: 12px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.bot-about .settings-item-control { gap: var(--space-4); flex-shrink: 0; }
+.bot-about .settings-item-control .settings-btn.danger.confirm { height: var(--settings-control-h); padding: 0 var(--space-8); border-radius: var(--ui-control-radius); font-size: 12px; }
+.bot-about-status { margin-left: var(--space-8); font-size: 12px; color: var(--warning); white-space: nowrap; }
+.bot-about-value { font-size: var(--settings-fs-small); white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.bot-about-permission.is-off .settings-item-lead, .bot-about-permission.is-off .settings-item-title { opacity: .55; }
+.bot-about-permission .settings-item-desc { -webkit-line-clamp: 1; }
+
+/* Context: the composer's context bar and breakdown, laid open. */
+.bot-about .bot-about-context { flex-direction: column; align-items: stretch; justify-content: flex-start; gap: var(--space-8); }
+.bot-about-context-top { display: flex; align-items: baseline; gap: var(--space-8); font-variant-numeric: tabular-nums; }
+.bot-about-context-share { font-size: 22px; font-weight: 600; line-height: 1.1; letter-spacing: -.01em; }
+.bot-about-context-of { font-size: var(--settings-fs-small); color: var(--text-secondary); }
+.bot-about-breakdown { margin-top: 2px; }
+.bot-about-breakdown .context-usage-item { font-size: 12px; }
+.bot-about-breakdown .context-usage-swatch { border-radius: 2px; }
+
+/* An automation: its name, when it runs, what each run does, and how its last run went. */
+.bot-about-automation .settings-item-desc { display: flex; flex-direction: column; gap: 2px; -webkit-line-clamp: unset; }
+.bot-about-when { color: var(--text-secondary); }
+.bot-about-does { color: color-mix(in srgb, var(--text-primary) 78%, transparent); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* Runs on: the model rows and the device choice, as one block on the surface. */
+.bot-about-setup-body { display: block; padding: var(--space-8) 0; }
+.bot-about-line { display: grid; grid-template-columns: var(--bot-row-label, 78px) minmax(0, 1fr); column-gap: var(--space-8); align-items: center; padding: 3px 0; font-size: 12px; }
+.bot-about-setup .bot-about-row { font-size: 12px; }
+
+.bot-about-fold .bot-prompt-head { min-height: 0; margin: 0 0 var(--space-4); justify-content: flex-end; }
+.bot-about-fold .bot-prompt-head h3 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+
+.bot-about-foot { display: flex; gap: var(--space-8); margin-top: var(--space-16); padding-top: var(--space-16); border-top: 1px solid var(--ui-line); }
+.bot-about-foot .settings-btn { flex: 1; gap: 6px; height: 30px; border-radius: var(--ui-control-radius); font-size: var(--settings-fs-small); }
 .bot-close { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; color: var(--text-secondary); margin: -8px -6px 0 auto; }
-.bot-about-head { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; padding-bottom: 18px; border-bottom: 1px solid rgba(var(--accent-pale-rgb), .1); }
-.bot-about-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
-.bot-about h3 { margin: 18px 0 8px; font-size: 11px; font-weight: 500; letter-spacing: .075em; color: var(--text-secondary); }
 .bot-about-row { display: flex; align-items: center; gap: 9px; padding: 7px 0; font-size: 12px; }
 .bot-about-row > svg { color: var(--text-secondary); flex-shrink: 0; }
 .bot-about-row span { flex: 1; min-width: 0; }
@@ -456,8 +525,6 @@ html[data-theme] .bot-prompt-card textarea.bot-prompt-field { background: transp
 .bot-prompt-error { margin-top: 8px; }
 /* About's one Memory row: the count and its split; it opens the Memory dialog. */
 /* No heading of its own (the row names it): it keeps a section's space above it. */
-.bot-about-row.bot-about-memory { margin: 12px -8px 0; width: calc(100% + 16px); padding: 7px 8px; border-radius: 8px; text-align: left; color: var(--text-primary); font-size: 12px; }
-.bot-about-row.bot-about-memory:hover, .bot-about-row.bot-about-memory:focus-visible { background: color-mix(in srgb, var(--text-secondary) 10%, transparent); color: var(--text-primary); }
 
 /* The Memory dialog: a search box, then the owner's wishes and the bot's notes, each entry with its date. */
 .bot-memory-search { display: flex; align-items: center; gap: 8px; padding: 0 12px; margin-bottom: 12px; border-radius: 9px; border: 1px solid rgba(var(--accent-pale-rgb), .15); background: #0002; color: var(--text-secondary); }
@@ -507,9 +574,6 @@ html[data-theme] .bot-prompt-card textarea.bot-prompt-field { background: transp
 /* New bot's Runs on: Computer's label and control in the same columns as the rows. */
 .bot-new-runs-on .bot-new-row { display: grid; grid-template-columns: var(--bot-row-label) minmax(0, 1fr); column-gap: 12px; }
 .bot-new-runs-on .bot-new-row > .ui-select { width: 100%; }
-.bot-about-foot { display: flex; gap: 8px; margin-top: 22px; }
-.bot-about-foot button { flex: 1; }
-.bot-about-foot .is-danger { color: var(--error, #e79090); }
 
 /* The empty page. */
 .bot-empty-face { margin: 0 auto 18px; }
@@ -646,8 +710,6 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
   -webkit-user-select: text;
 }
 
-.bot-about-permission > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bot-about-permission .bot-about-next { display: inline; margin-left: 6px; }
 
 /* A held call uses the ask's controls; all outside data remains readable in place. */
 .bot-action-card { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
@@ -702,3 +764,10 @@ button.bot-reaction:hover, button.bot-reaction:focus-visible { background: color
 .bot-thread-crumb-bot:hover { color: var(--text-primary); }
 .bot-thread-crumb-sep { flex: none; font-weight: 400; color: var(--text-secondary); opacity: .7; }
 .bot-thread-crumb-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A private paste stays above the composer until its owner chooses. */
+.composer-question-modal.bot-pasted-secret.is-inline { max-width: none; padding: 12px; margin-bottom: 8px; }
+.bot-pasted-secret[role="alert"] { box-shadow: inset 0 0 0 1px var(--warning); }
+.bot-pasted-secret-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
+.bot-pasted-secret-controls .secret-request-keep { margin: 0; }
+.bot-pasted-secret-actions { display: flex; gap: 8px; }

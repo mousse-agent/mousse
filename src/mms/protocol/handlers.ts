@@ -3121,7 +3121,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const limit = deviceLimit(ctx)
         return { pending: limit ? ctx.mms.questions.listPendingForDevice(threadId, limit) : ctx.mms.questions.listShownForThread(threadId).map(shown) }
       }
-      return { pending: ctx.mms.questions.listAllPending().map(shown) }
+      // A request the bot that started its thread answers is marked, so a window leaves it out of Needs me.
+      const supervisorOf = (entry: { requestId: string; threadId: string }) => ctx.mms.orchestrator.supervisorOf(entry.threadId, entry.requestId)
+      return { pending: ctx.mms.questions.listAllPending().map((entry) => (supervisorOf(entry) ? { ...shown(entry), supervised: true } : shown(entry))) }
     }
     case 'subagents.stopAll': {
       // Lineage's Stop all: every subagent of the thread that is working, each with its own subtree; the thread keeps running.
@@ -3676,6 +3678,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       const serverId = asString(p.serverId, 'serverId', 256)
       await ctx.mms.mcpManager.restartServer(serverId)
+      await ctx.mms.mcpManager.refreshEnabledServer(serverId)
       ctx.emitEvent?.('mcp.changed', {})
       return { ok: true }
     }

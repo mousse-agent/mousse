@@ -316,6 +316,10 @@ export class MousseMainService extends MmsProfileServices {
           useSaved: (threadId, requestId) => services.secretRequests.useSaved(threadId, requestId),
           decline: (threadId, requestId) => services.secretRequests.decline(threadId, requestId)
         },
+        pasted: { vault: services.secretVault, homeFor: botId => {
+          if (!services.personalBots) throw new Error('Bots are not available.')
+          return services.personalBots.service.secretHome(botId)
+        } },
         list: () => services.secretVault.list(),
         delete: (name) => services.secretVault.delete(name)
       }

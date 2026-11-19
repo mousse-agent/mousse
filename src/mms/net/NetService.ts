@@ -458,8 +458,13 @@ export class NetService {
   private readonly shareBotsListeners = new Set<() => void>()
   /** Loopback listeners that exist only while a remote machine joins; never persisted. */
   private readonly enrollmentListeners = new Set<DirectTransport>()
-  /** The optional Mousse ID module; absent in builds and tests that leave it out. */
-  private readonly hosted?: HostedNet
+  /**
+   * The optional Mousse ID module; absent in builds and tests that leave it out, and while Mousse Plus (legacy) is
+   * off for this profile (`setPlusLegacy`).
+   */
+  private hosted?: HostedNet
+  /** Stops the running Mousse ID module's own work when Mousse Plus (legacy) is turned off. */
+  private hostedStop?: AbortController
   constructor(
     private readonly options: {
       profileDir: string
@@ -467,6 +472,8 @@ export class NetService {
       onChanged?(status: NetStatus): void
       composeRuntime?(runtime: NetRuntime): NetDomainComposition | void
       hosted?: HostedNetModule
+      /** Mousse Plus (legacy) is off for this profile at start: the module above is not run (`setPlusLegacy`). */
+      plusLegacyOff?: boolean
       /** Tests replace the `ssh` executable, the user's known_hosts file and the setup's inputs. */
       ssh?: { binary?: string; userKnownHosts?: string } & Partial<
         Omit<SshBootstrapOptions, 'binary' | 'userKnownHosts'>
@@ -504,7 +511,39 @@ export class NetService {
     }
   ) {
     this.clock = options.clock ?? systemClock
-    this.hosted = options.hosted?.create(this.hostedHost())
+    if (!options.plusLegacyOff) this.hosted = this.createHosted()
+  }
+  private createHosted(): HostedNet | undefined {
+    if (!this.options.hosted) return undefined
+    const stop = (this.hostedStop = new AbortController())
+    return this.options.hosted.create(this.hostedHost(AbortSignal.any([this.shutdownSignal.signal, stop.signal])))
+  }
+  /**
+   * Mousse Plus (legacy), in Settings → Labs, on by default. Off: this profile's Net runs as a build without the
+   * Mousse ID module, so it signs in to nothing, runs no hosted relay and sends no request to Mousse Plus. The saved
+   * sign-in and hosted relay row stay on disk for when it is turned on again. LAN, SSH, Tailscale, tunnels and
+   * self-hosted relays keep working either way. Applied at once, running transports restarted.
+   */
+  async setPlusLegacy(on: boolean): Promise<void> {
+    if (!this.options.hosted || this.stopped || on === !!this.hosted) return
+    await this.serial(async () => {
+      if (this.stopped || on === !!this.hosted) return
+      if (on) this.hosted = this.createHosted()
+      else {
+        this.hostedStop?.abort()
+        this.hosted?.identityReset()
+        this.hosted = undefined
+      }
+      if (!this.transport) return
+      await this.transport.teardown()
+      this.transport = undefined
+      this.syncPhoneWebRtc()
+      if (this.config.enabled && !this.disabled)
+        await this.activateWithHosted().catch((error) => {
+          this.lastError = error instanceof NetError ? error.code : 'internal'
+        })
+    })
+    this.emit()
   }
   runtime(): NetRuntime {
     if (this.stopped) throw new NetError('cancelled')
@@ -1075,7 +1114,7 @@ export class NetService {
     if (method === 'bridge.access.there') return this.track(this.accessThere(params.node as NodeId))
     if (method === 'net.editor.probe') return this.track(this.editorProbe(params.node as NodeId))
     if (method.startsWith('net.ssh.')) return this.track(this.sshRequest(method, params))
-    if (method.startsWith('net.plus.') && !this.hosted) throw hostedUnavailable()
+    if (method.startsWith('net.plus.') && !this.hosted) throw this.plusUnavailable()
     if (method === 'net.plus.login.cancel') return this.hosted!.cancelLogin()
     if (method === 'net.plus.enrollment.requests') return this.hosted!.enrollmentRequests()
     if (method === 'net.authority.status') {
@@ -1085,7 +1124,10 @@ export class NetService {
         : { phase: 'none' }
     }
     return this.serial(async () => {
-      if (method.startsWith('net.plus.')) return this.hosted!.request(method, params)
+      if (method.startsWith('net.plus.')) {
+        if (!this.hosted) throw this.plusUnavailable()
+        return this.hosted.request(method, params)
+      }
       switch (method) {
         case 'net.transport.configure': {
           const rt = this.requireEnrolled()
@@ -1483,14 +1525,23 @@ export class NetService {
   hostedSpaceMembershipChanged(): void {
     this.hosted?.membershipChanged()
   }
-  /** What the Mousse ID module may use. Each entry keeps NetService's own gates and queue. */
-  private hostedHost(): HostedNetHost {
+  /** Mousse ID is left out of this build, or Mousse Plus (legacy) is off for this profile. */
+  private plusUnavailable(): NetError {
+    return this.options.hosted
+      ? new NetError('profile_unsupported', 'Mousse Plus (legacy) is off in Settings → Labs.')
+      : hostedUnavailable()
+  }
+  /**
+   * What the Mousse ID module may use. Each entry keeps NetService's own gates and queue. `signal` also ends when
+   * Mousse Plus (legacy) is turned off; a module stopped that way no longer restarts the transports.
+   */
+  private hostedHost(signal: AbortSignal): HostedNetHost {
     return {
       clock: this.clock,
-      signal: this.shutdownSignal.signal,
+      signal,
       loadedRuntime: () => this.state,
       requireEnrolled: () => this.requireEnrolled(),
-      closed: () => this.stopped || this.disabled,
+      closed: () => this.stopped || this.disabled || signal.aborted,
       enabled: () => this.config.enabled,
       featureEnabled: (feature) => this.featureEnabled(feature),
       hostedSpacePeerAuthorized: (user, node) =>
@@ -1507,24 +1558,28 @@ export class NetService {
       transportRows: () => this.config.transports ?? [],
       validateTransport: (row) => this.createTransports().validate(row),
       saveHostedTransport: (row) => {
+        if (signal.aborted) return
         this.config.transports = [
           ...(this.config.transports ?? []).filter((item) => item.id !== HOSTED_RELAY_TRANSPORT),
           ...(row ? [row] : [])
         ]
         this.saveConfig()
       },
-      activate: () => this.activate(),
+      activate: async () => {
+        if (!signal.aborted) await this.activate()
+      },
       restartTransports: async () => {
+        if (signal.aborted) return
         await this.transport?.teardown()
         this.transport = undefined
         this.syncPhoneWebRtc()
         await this.activate()
       },
       reactivateIfRunning: async () => {
-        if (this.transport) await this.activate()
+        if (this.transport && !signal.aborted) await this.activate()
       },
       suspendHostedTransport: async () => {
-        await this.transport?.suspendHosted()
+        if (!signal.aborted) await this.transport?.suspendHosted()
       },
       hostedListening: () => this.transport?.hasPlusRelayListener() === true,
       directPathChanged: () => this.syncPhoneWebRtc(),

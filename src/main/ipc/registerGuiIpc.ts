@@ -347,6 +347,14 @@ function stoppedByPerson(data: unknown): boolean {
   return (data as { stoppedByPerson?: unknown } | null)?.stoppedByPerson === true
 }
 
+/**
+ * An activity or question event the service marked as a wait the bot that started the thread answers: no one is
+ * pinged for it (the card still shows in the thread).
+ */
+export function supervisedWait(data: unknown): boolean {
+  return (data as { supervised?: unknown } | null)?.supervised === true
+}
+
 function withThreadId<T extends object>(params: T, threadId: unknown): T & { threadId?: string } {
   return typeof threadId === 'string' && threadId.length > 0 ? { ...params, threadId } : params
 }
@@ -1011,7 +1019,7 @@ export function registerGuiIpc(
           if (state === 'completed') {
             notifyThread(event.threadId, 'completed', currentPresentation().getActiveThreadId())
           } else if (state === 'awaiting_input') {
-            notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
+            if (!supervisedWait(event.data)) notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
           } else if ((state === 'idle' && !stoppedByPerson(event.data)) || state === 'paused') {
             // A run that hit a usage limit stopped and waits for the person (or the reset). A turn a person stopped is not news.
             notifyThread(event.threadId, 'idle', currentPresentation().getActiveThreadId())
@@ -1026,7 +1034,7 @@ export function registerGuiIpc(
       if (isThreadActivityActive(activityTrackerFor().getState(event.threadId))) {
         // A question asked without waiting leaves the thread working: the person is told, and the agent carries on.
         if ((event.data as { wait?: unknown } | null)?.wait !== false) setThreadActivity(event.threadId, 'awaiting_input')
-        notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
+        if (!supervisedWait(event.data)) notifyThread(event.threadId, 'question', currentPresentation().getActiveThreadId())
       }
     }
     // Daemon-wide snapshots describe runtime state, not unread state. Reconcile
@@ -1213,7 +1221,7 @@ export function registerGuiIpc(
       // automation's to announce (`scheduled.runEnded`, as its Tell me says), unless it stopped to ask.
       const scheduledTurn = (event.data as { scheduled?: unknown } | null)?.scheduled === true
       // A turn a person stopped (theirs, or the thread that launched it) is not announced to them as stopped.
-      if (!replay && isThreadActivityActive(previousActivity) && state && !isThreadActivityActive(state) && !(scheduledTurn && state !== 'awaiting_input') && !(state === 'idle' && stoppedByPerson(event.data))) {
+      if (!replay && isThreadActivityActive(previousActivity) && state && !isThreadActivityActive(state) && !(scheduledTurn && state !== 'awaiting_input') && !(state === 'idle' && stoppedByPerson(event.data)) && !(state === 'awaiting_input' && supervisedWait(event.data))) {
         const kind: ThreadNotificationKind = state === 'completed'
           ? 'completed'
           : state === 'awaiting_input'
@@ -1238,7 +1246,7 @@ export function registerGuiIpc(
         tracker.setState(event.threadId, 'awaiting_input')
         target('threads:activity', tracker.getSnapshot())
       }
-      if (!replay) notifyThread(
+      if (!replay && !supervisedWait(event.data)) notifyThread(
         event.threadId,
         'question',
         presentationForSender(senderId).getActiveThreadId(),

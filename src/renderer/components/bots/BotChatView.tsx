@@ -1,3 +1,4 @@
+import { usePastedBotSecret } from './usePastedBotSecret'
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import { ArrowDown, Brain, ChevronRight, CircleAlert, Loader2, Reply, Shield, X } from '../../lib/icons'
 import { withAppletNames, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotError, type BotSummary } from '../../../shared/bots/personal/chat'
@@ -29,8 +30,7 @@ import { BotCards, galleryPaths } from './BotCards'
 import { BotActivitySticker, BotPresenceLine } from './BotPresence'
 import { askAnswerLine } from '../asks/AskCard'
 import { BotMenu } from './BotMenu'
-import { BotAboutPanel, RUNS_ON_ID } from './BotAboutPanel'
-import { centerWithin } from '../../lib/shellScroll'
+import { BotAboutPanel } from './BotAboutPanel'
 import { BotMemoryDialog } from './BotMemoryDialog'
 import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
 import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
@@ -635,7 +635,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const load = useBotsStore((s) => s.chatLoad[bot.id])
   const pending = useBotsStore((s) => s.pending[bot.id] ?? EMPTY)
   const happy = useBotsStore((s) => s.happy[bot.id])
-  const draft = useBotsStore((s) => s.drafts[bot.id] ?? '')
+  const storedDraft = useBotsStore((s) => s.drafts[bot.id] ?? '')
+  const pasted = usePastedBotSecret(bot, storedDraft)
+  const draft = pasted.draft
   const attachments = useBotsStore((s) => s.attachments[bot.id])
   const replying = useBotsStore((s) => s.replyingTo[bot.id])
   const aboutOpen = useBotsStore((s) => s.aboutOpen)
@@ -816,16 +818,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     // Sign in opens the card of the owner's provider entry the bot would run on; Set up opens the list.
     if (action.kind === 'sign_in' && action.instanceId) openProvider(action.instanceId)
     else if (action.kind === 'sign_in' || action.kind === 'open_providers') openSettingsSection('providers')
-    // A picked model that can't run (#673): About opens at Runs on. Only the panel scrolls: scrollIntoView also moved
-    // every box around it, the app's own included.
-    else if (action.kind === 'pick_model') {
-      useBotsStore.setState({ aboutOpen: true })
-      window.requestAnimationFrame(() => {
-        const runsOn = document.getElementById(RUNS_ON_ID)
-        const panel = runsOn?.closest('.bot-about')
-        if (runsOn && panel) centerWithin(panel, runsOn)
-      })
-    } else void store().resume(bot.id)
+    // A picked model that can't run (#673): About opens at its model rows.
+    else if (action.kind === 'pick_model') useBotsStore.setState({ aboutOpen: true, aboutFocus: 'runs-on' })
+    else void store().resume(bot.id)
   }, [bot.id, store])
   // Reply on a message: its quote goes above the composer, which takes the focus.
   const reply = useCallback((message: BotChatMessage) => {
@@ -944,6 +939,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         {!!pinnedOff.length && <div className="bot-pins" role="status" aria-label="Waiting on you">{pinnedOff.map((item) => <PinnedLine key={item.kind} botId={bot.id} item={item} />)}</div>}
         {/* A secret the bot asked for: typed into its private card, never into the chat. */}
         <BotSecretRequests homeThreadId={bot.homeThreadId} />
+        {pasted.offer}
         <ComposerNoticeProvider>
           <ComposerNoticeSource notice={error ? { tone: 'error', title: error, onDismiss: () => useBotsStore.setState({ error: null, errorBotId: null }) } : null} />
           <ComposerNoticeSlot />
@@ -956,7 +952,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           <ChatComposer
             key={bot.id}
             input={draft}
-            onInputChange={(value) => store().setDraft(bot.id, value)}
+            onInputChange={pasted.change}
             attachedFiles={files}
             onAttachedFilesChange={(next) => store().setAttachments(bot.id, next)}
             messageLimit={MAX_BOT_CHAT_TEXT}
@@ -969,8 +965,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             placeholder={`Message ${bot.name}`}
             stoppable={working}
             dictateWhileStoppable
-            extraActions={<BotEmojiButton field={composerField} value={draft} onChange={(value) => store().setDraft(bot.id, value)} />}
-            onSend={() => { void submitBotChat(bot.id) }}
+            extraActions={<BotEmojiButton field={composerField} value={draft} onChange={pasted.change} />}
+            onSend={() => { if (pasted.beforeSend()) void submitBotChat(bot.id) }}
             onStop={() => void store().stop(bot.id)}
             lastPrompt={lastPrompt}
           />

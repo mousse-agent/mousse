@@ -14,7 +14,7 @@ import { homedir, hostname } from 'os'
 import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
 import { SettingsStore } from './settings/SettingsStore'
-import type { MousseSettingsUpdate } from '../shared/settings'
+import { normalizeExperimentalSettings, type MousseSettingsUpdate } from '../shared/settings'
 import { rewriteMovedDefaults } from './settings/movedDefaults'
 import { ProviderAuthService } from './providers/ProviderAuthService'
 import { AppletStore } from './applets/AppletStore'
@@ -55,7 +55,7 @@ import { MousseMcpServer } from './run/mcp/MousseMcpServer'
 import { personTurnRequest } from './run/mcp/appTools/agentMessage'
 import { EffectWorker } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
-import { jobThreadIn, launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
+import { jobThreadIn, lastReplyOf, launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
 import { readRunResultText } from './run/delegation/hold'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
@@ -80,6 +80,7 @@ import { botThreadsForCatchUp } from './bots/memory/capture'
 import { BOT_PACK_REACTIONS, type BotSituation } from './bots/memory/contextPack'
 import { BOT_CHAT_DIGEST } from '../shared/bots/personal/memory'
 import { BOT_LAUNCHED_RECENT_MS } from '../shared/bots/personal/chat'
+import { BOT_THREADS_PERMISSION } from '../shared/bots/personal/manifest'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
@@ -807,7 +808,10 @@ export class MmsProfileServices {
           const record = this.threads.lifecycleStore.get(id)
           return Boolean(record && record.state !== 'active')
         },
-        result: (id, runId) => readRunResultText(this.runEngine.store, id, runId)
+        // A turn the owner started keeps no run result: then the thread's last reply, when the turn ended on one.
+        result: (id, runId) => readRunResultText(this.runEngine.store, id, runId) ?? lastReplyOf(this.orchestrator.visibleMessagesWithoutLoading(id)),
+        // What it waits on, for the bot that may answer it (`approval_respond`).
+        pending: (id) => this.questions.listPendingForThread(id)
       }, threadId),
       harness,
       notifyEffects: () => this.orchestrator.notifyEffects(),
@@ -903,6 +907,7 @@ export class MmsProfileServices {
           isSubagentThread: (threadId) => store.threadRole(threadId) === 'subagent'
         },
         context: {
+          asksFirstEnabled: () => botAsksFirst(this.settings.get()),
           filesFolder: (botId) => botFilesFolder(homeDir, botId),
           situation: (botId) => this.botSituation(botId),
           scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt,
@@ -990,6 +995,14 @@ export class MmsProfileServices {
     const orchestrator = this.orchestrator
     const ptys = this.ptyManager
     this.orchestrator.setBotNames(personalBots ? (botId) => personalBots.botName(botId) : null)
+    // A bot answers for the threads it started while it exists, is not paused and holds "use your threads" (`supervisorOf`).
+    const botStore = opened?.store
+    this.orchestrator.setBotSupervision(personalBots && botStore ? (botId) => {
+      const row = botStore.registry(botId)
+      if (!row || row.deletedAt || row.pausedReason) return undefined
+      if (!botStore.activeGrant(botId)?.manifest.appTools.includes(BOT_THREADS_PERMISSION)) return undefined
+      return { name: personalBots.botName(botId) ?? botId }
+    } : null)
     this.orchestrator.setRunning(new RunningRegistry({
       terminals: () => ptys.runningTerminals(),
       terminalOutput: (ptyId) => ptys.getScrollback(ptyId).slice(-8_000),
@@ -1101,7 +1114,7 @@ export class MmsProfileServices {
     }
     // The Automations inbox: every run, its report, usage and the Needs you queue (`automations/automations.db`).
     try {
-      this.automationRuns = new AutomationRuns({ profileHome: homeDir })
+      this.automationRuns = new AutomationRuns({ profileHome: homeDir, botReportLevel: (id, level) => this.personalBots?.scheduledReportLevel(id, level) ?? level })
     } catch (error) {
       console.warn('the automations inbox could not be opened; runs are kept only in each automation\'s history', { error: error instanceof Error ? error.message : String(error) })
     }
@@ -1322,6 +1335,8 @@ export class MmsProfileServices {
       profileDir: this.homeDir,
       editorSsh: { home: homedir(), mousseHome: this.installationHome, profile: this.profileId },
       hosted: mousseIdNetModule,
+      // Settings → Labs → Mousse Plus (legacy); a later change applies at once (below).
+      plusLegacyOff: !normalizeExperimentalSettings(this.settings.get().experimental).plusLegacy,
       onChanged: (status) => this.events.emit({ channel: 'net:updated', data: status }),
       composeRuntime: (runtime) => {
         // Net closed its earlier runtime without stopping (a removed computer's identity was set
@@ -1374,6 +1389,14 @@ export class MmsProfileServices {
         })
     })
     this.peers = new PeerDirectory({ net: this.net, engine: () => this.netEngine })
+    this.platform.onDispose(
+      onSettingsSaved(() => {
+        const on = normalizeExperimentalSettings(this.settings.get().experimental).plusLegacy
+        void this.net.setPlusLegacy(on).catch((error) => {
+          console.warn('Mousse Plus (legacy) could not be switched', { error: error instanceof Error ? error.message : String(error) })
+        })
+      })
+    )
     this.chatNetwork = new ChatNetworkBindingService({
       profileId: this.profileId,
       profileHome: this.homeDir,
@@ -2917,6 +2940,7 @@ export class MmsProfileServices {
         this.orchestrator.setRunEngine(null)
         this.orchestrator.setBotDispatcher(null)
         this.orchestrator.setBotThreads(null)
+        this.orchestrator.setBotSupervision(null)
         this.orchestrator.setBotAppTools(null)
       }],
       ['personal bots close', () => this.personalBots?.close()],

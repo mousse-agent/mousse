@@ -24,7 +24,7 @@ export interface AskText {
 export const THREADS_TEXT: AskText = {
   title: 'use your threads',
   note: 'Threads it starts run with full access on this computer.',
-  tip: 'It can read your threads, their queues and their Git status and diffs, here and on your other computers that let agents work there. When you ask it in its chat, or in work you gave it, it can start new threads, message, steer or stop them, change what waits in their queues, fork one and hand a fork\'s work back, and archive or unarchive them. A thread it starts runs commands and changes files without asking; a message it sends runs in that thread\'s own mode. It answers an approval only while you let agents answer approvals on other threads, and never a question.'
+  tip: 'It can read your threads, their queues and their Git status and diffs, here and on your other computers that let agents work there. When you ask it in its chat, or in work you gave it, it can start new threads, message, steer or stop them, change what waits in their queues, fork one and hand a fork\'s work back, and archive or unarchive them. A thread it starts runs commands and changes files without asking; a message it sends runs in that thread\'s own mode. It answers the questions and approvals of the threads it starts. In other threads it answers an approval only while you let agents answer approvals on other threads, and never a question.'
 }
 
 /** Tools by name, as a card says them after "wants to". */

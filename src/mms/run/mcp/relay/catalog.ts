@@ -18,6 +18,7 @@ export interface RelayCatalogDeps {
   manager: RelayCatalogManager
   settings: () => MousseIntegrationsSettings['mcp']
   now?: () => number
+  monotonic?: () => number
   /**
    * Whether the profile's own servers (the scope with no project) are listed even while no runtime has the relay on:
    * personal bots reach them through Mousse whatever the relay settings of the owner's threads (`BotMcp`).
@@ -28,6 +29,7 @@ export interface RelayCatalogDeps {
 /** One project scope's catalogue. */
 interface Scope {
   /** Each enabled installation's last good tools. */
+  serverTimes: Map<string, { monotonic: number; wall: number }>
   servers: Map<string, RelayServerTools>
   /** Installations whose last listing failed (their last good tools are kept). */
   failing: Set<string>
@@ -59,6 +61,7 @@ interface Scope {
 export class RelayCatalog {
   private readonly scopes = new Map<string, Scope>()
   private readonly now: () => number
+  private readonly monotonic: () => number
   private readonly unsubscribe: () => void
   private readonly listeners = new Set<(projectPath: string | undefined) => void>()
   private invalidations = 0
@@ -66,6 +69,7 @@ export class RelayCatalog {
 
   constructor(private readonly deps: RelayCatalogDeps) {
     this.now = deps.now ?? Date.now
+    this.monotonic = deps.monotonic ?? (() => performance.now())
     this.unsubscribe = deps.manager.onDiscoveryInvalidated(() => this.invalidate())
   }
 
@@ -93,6 +97,16 @@ export class RelayCatalog {
       const identity = scope.configured.get(entry.installationId)?.identity
       return { ...entry, failing: scope.failing.has(entry.installationId), starting: scope.starting.has(entry.installationId), ...(identity ? { identity, configDigest: scope.configured.get(entry.installationId)?.configDigest } : {}) }
     })
+  }
+
+  /** Last successful answer from this server, never the time a refresh merely started. */
+  serverRefreshedAt(installationId: string, projectPath?: string): number | undefined {
+    return this.scopes.get(scopeKey(projectPath))?.serverTimes.get(installationId)?.monotonic
+  }
+
+  /** Wall time accompanies monotonic time so sleep also ages Send evidence. */
+  serverRefreshedWallAt(installationId: string, projectPath?: string): number | undefined {
+    return this.scopes.get(scopeKey(projectPath))?.serverTimes.get(installationId)?.wall
   }
 
   /** Every configured installation of the scope, switched on or off, by its last read; empty while the scope is cold. */
@@ -153,6 +167,15 @@ export class RelayCatalog {
     return scope.refreshing
   }
 
+  /** A fresh read of one server after earlier refreshes, for an owner's Send. */
+  async refreshServer(installationId: string, projectPath?: string): Promise<void> {
+    const scope = this.scope(projectPath)
+    while (scope.refreshing) await scope.refreshing
+    if (this.disposed) return
+    scope.refreshing = this.read(projectPath, scope, { signIn: false, installationId }).finally(() => { scope.refreshing = undefined })
+    await scope.refreshing
+  }
+
   /**
    * Marks every scope stale (the manager's discovery cache was invalidated). The profile's own scope, which personal
    * bots read (`listProfile`), is read again at once, without a sign-in, so a server removed or added shows in About.
@@ -174,7 +197,7 @@ export class RelayCatalog {
     const key = scopeKey(projectPath)
     let scope = this.scopes.get(key)
     if (!scope) {
-      scope = { servers: new Map(), failing: new Set(), starting: new Set(), configured: new Map(), listing: [], byName: new Map(), previous: new Map(), revision: '', seen: -1 }
+      scope = { serverTimes: new Map(), servers: new Map(), failing: new Set(), starting: new Set(), configured: new Map(), listing: [], byName: new Map(), previous: new Map(), revision: '', seen: -1 }
       this.scopes.set(key, scope)
     }
     return scope
@@ -203,7 +226,7 @@ export class RelayCatalog {
    * so one slow server hides only itself. A server that fails keeps its last good tools; one that never listed is
    * kept with none, as failing. Nothing changes unless the configured servers could be read.
    */
-  private async read(projectPath: string | undefined, scope: Scope, options: { signIn?: false } = {}): Promise<void> {
+  private async read(projectPath: string | undefined, scope: Scope, options: { signIn?: false; installationId?: string } = {}): Promise<void> {
     const settings = this.deps.settings()
     const seen = this.invalidations
     try {
@@ -220,6 +243,9 @@ export class RelayCatalog {
       if (this.disposed) return
       const before = { servers: scope.servers, byName: scope.byName }
       const answered = new Map<string, RelayServerTools>()
+      if (options.installationId) for (const [id, entry] of before.servers) {
+        if (id !== options.installationId) answered.set(id, { ...entry, ...(scope.failing.has(id) ? { error: 'Previous listing failed' } : {}) })
+      }
       scope.configured = new Map(configured.map((server) => [mcpInstallationId(server), { serverName: server.name, identity: mcpServerIdentity(server), configDigest: shortHash(canonicalJson(server), 64) }]))
       const publish = (final: boolean): void => {
         if (this.disposed) return
@@ -258,18 +284,22 @@ export class RelayCatalog {
         scope.byName = new Map(tools.map((tool) => [tool.name, tool]))
         // A runtime reopens for a new revision: none is made while nothing answered yet.
         if (final || tools.length) scope.revision = catalogueRevision(eligible, digest)
-        scope.refreshedAt = this.now()
-        scope.settingsKey = settingsKey(settings)
+        if (!options.installationId) {
+          scope.refreshedAt = this.now()
+          scope.settingsKey = settingsKey(settings)
+        }
         this.published(projectPath)
       }
       publish(false)
       if (eligible.length) {
         const heard = (entry: RelayServerTools): void => {
           answered.set(entry.installationId, entry)
+          if (!entry.error) scope.serverTimes.set(entry.installationId, { monotonic: this.monotonic(), wall: this.now() })
           if (entry.error) logWarn('McpRelay', `Listing MCP server "${entry.serverName}" failed; its last good tools are kept: ${redactSensitiveText(entry.error)}`)
         }
         try {
           const listed = await this.deps.manager.getEnabledToolsByServer(projectPath, actor, {
+            ...(options.installationId ? { installationId: options.installationId } : {}),
             ...options,
             onServer: (entry) => {
               heard(entry)
@@ -287,8 +317,10 @@ export class RelayCatalog {
     } catch (error) {
       logWarn('McpRelay', `The relay catalogue could not be refreshed: ${redactSensitiveText(error instanceof Error ? error.message : String(error))}`)
     } finally {
-      scope.attemptedAt = this.now()
-      scope.seen = seen
+      if (!options.installationId) {
+        scope.attemptedAt = this.now()
+        scope.seen = seen
+      }
     }
   }
 }
