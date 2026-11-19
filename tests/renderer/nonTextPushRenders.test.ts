@@ -317,17 +317,17 @@ describe('the shared clock', () => {
   it('turns 5m into 6m a minute later, and renders only what shows a time', async () => {
     // Only the interval and the date are fake: React and `settle` keep their real timeouts.
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
-    // Five minutes after the threads' last update; one thread deletes itself in 30 minutes.
+    // Five minutes after the threads' last update; one thread archives itself in 30 minutes.
     vi.setSystemTime(Date.parse(at(1)) + 5 * 60_000)
     const expiring = { ...thread('other-a', 'Finished one'), expiresAt: new Date(Date.now() + 30 * 60_000).toISOString() } as Thread
     await mount({ threads: [thread('live-thread', 'Streaming now'), expiring, thread('other-b', 'Quiet one')] })
     const expiry = () => card('other-a')?.querySelector('.thread-expiry-icon')?.getAttribute('title')
     expect(card('other-b')?.querySelector('.threads-sidebar-card-age')?.textContent).toBe('5m')
-    expect(expiry()).toBe('Deletes in 30 minutes')
+    expect(expiry()).toBe('Archives in 30 minutes')
 
     const tick = await counted(() => { vi.advanceTimersByTime(60_000) })
     expect(card('other-b')?.querySelector('.threads-sidebar-card-age')?.textContent).toBe('6m')
-    expect(expiry()).toBe('Deletes in 29 minutes')
+    expect(expiry()).toBe('Archives in 29 minutes')
     // The clock renders the statuses and the expiry mark, not the rows, the list or the chat.
     expect(tick.counts['SidebarStatus:other-b']).toBeGreaterThan(0)
     expect(tick.rows).toEqual({})
