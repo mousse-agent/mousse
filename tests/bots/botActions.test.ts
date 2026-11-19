@@ -4081,7 +4081,7 @@ it.each(['place', 'schema', 'config', 'off', 'hour', 'day', 'removed'] as const)
   const next = await aloneNext(t, args)
   if (change === 'off') { expect(next.action).toBeUndefined(); return }
   expect(next.action.status).toBe('open')
-  if (change === 'schema' || change === 'config') expect(f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))?.mark).toBe('Changed')
+  if (change === 'schema' || change === 'config') expect(f.bots.alone.items(t.botId)).toEqual([])
   if (change === 'hour' || change === 'day') {
     expect(JSON.parse(next.action.card_json!).title).toBe(change === 'hour' ? `${f.bots.definitionOf(t.botId).name} has used this action 20 times this hour. Send this one too?` : `${f.bots.definitionOf(t.botId).name} has used tools 100 times today. Send this one too?`)
     expect(f.bots.service.get(t.botId).summary.stateText).toContain('Send · Mail')
@@ -4277,7 +4277,7 @@ it('E1 consent and About use verb phrases and place values joined in words', asy
   const item = f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => p.id.startsWith('alone:'))!
   expect(item.title).toBe('‘Send the email’ sends to one@example.test and two@example.test in Mail without asking')
   t.server.configDigest = 'changed'
-  expect(f.bots.alone.items(t.botId)[0]).toMatchObject({ mark: 'Changed', note: 'Send a call from this automation and ask again.' })
+  expect(f.bots.alone.items(t.botId)).toEqual([])
 })
 it('E1 an MCP tool name without ask points to the let-alone request shape', async () => {
   const t = await aloneAsk('not_now')
@@ -4309,7 +4309,7 @@ it('E1 a prompt change is inert even when no pruning observer runs', async () =>
   vi.spyOn(f.bots, 'editSchedule').mockImplementation((_botId, save) => save())
   f.scheduler.updateJob(t.schedule.jobId, { prompt: 'Different task' })
   expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*'")).toHaveLength(1)
-  expect(f.bots.alone.items(t.botId)[0]?.mark).toBe('Changed')
+  expect(f.bots.alone.items(t.botId)).toEqual([])
 })
 it.each(['edit', 'remove', 'bot-remove'] as const)('E1 %s removes consent through the scheduler update path', async kind => {
   const t = await aloneAsk()
@@ -4331,7 +4331,7 @@ it.each(['identity', 'switched-off'] as const)('E1 %s makes standing consent ine
     const id = f.bots.chat.detail(f.bots.definitionOf(t.botId), f.clock.now).permissions.find(p => !p.id.startsWith('alone:') && p.title.includes('Mail'))!.id
     f.store.keepDisabledPermission(t.botId, id, f.store.activeGrant(t.botId)!.manifest)
   }
-  expect(f.bots.alone.items(t.botId)[0]?.mark).toBe('Changed')
+  expect(f.bots.alone.items(t.botId)).toEqual([])
 })
 it('E1 the legacy respond Allow path saves the standing consent', async () => {
   const t = await aloneAsk('pending')
