@@ -52,6 +52,8 @@ export class ProfileHost {
   /** Archive/removal owns the profile through its metadata/filesystem commit or rollback. */
   private readonly lifecycleMutations = new Map<string, Promise<unknown>>()
   private stopping = false
+  /** The daemon is ready and its networked profiles were started: a profile started from now on starts its own. */
+  private networkReady = false
   private defaultServices: MmsProfileServices | null = null
   private defaultProfileId: ProfileId | null = null
 
@@ -185,6 +187,38 @@ export class ProfileHost {
     }
   }
 
+  /**
+   * Starts the network engine and helper of each running profile whose networking switch is on (design §1). Called
+   * in the background once the daemon published its readiness: the engine's database, identity bootstrap and
+   * tombstone sweep, and the helper's launch, never delay it. Each profile starts on its own, and a failure marks
+   * only that profile.
+   */
+  async startNetworkedProfiles(): Promise<void> {
+    this.networkReady = true
+    for (const record of this.manager.list()) {
+      if (this.stopping || record.status !== 'active') continue
+      await this.startNetworking(record.id)
+    }
+  }
+
+  /**
+   * Starts one profile's networking, once the daemon is ready (before that, `startNetworkedProfiles` does): for a
+   * profile that starts later (restored, or started again after a failed archive).
+   */
+  async startNetworking(profileId: string): Promise<void> {
+    if (!this.networkReady || this.stopping) return
+    const services = this.live.get(profileId)
+    if (!services?.netEngine.settings()?.enabled) return
+    try {
+      await services.netEngine.startHelper()
+    } catch (error) {
+      console.warn('the network helper did not start', {
+        profileId,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+
   async stopAll(): Promise<void> {
     this.stopping = true
     // An archive/remove that already passed admission remains installation-owned
@@ -255,7 +289,10 @@ export class ProfileHost {
         if (failed) {
           let active = false
           try { active = this.manager.get(profileId).status === 'active' } catch { /* removal completed */ }
-          if (active && !this.stopping) await this.getProfileServices(profileId).then((services) => services.start())
+          if (active && !this.stopping) {
+            await this.getProfileServices(profileId).then((services) => services.start())
+            void this.startNetworking(profileId)
+          }
         }
       }
     }

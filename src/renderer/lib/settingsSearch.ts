@@ -129,6 +129,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Finish connecting to another computer', section: 'connections', anchor: 'devices-join', keywords: ['join', 'retry', 'give up', 'pair', 'computers'], needs: { anchor: 'devices-networking', reason: 'This appears when a connection to another computer did not finish.' } },
   { title: 'Start over', section: 'connections', anchor: 'devices-start-over', keywords: ['reset', 'new keys', 'leave devices', 'networking'], needs: { anchor: 'devices-networking', reason: 'Start over appears once this computer has joined your devices.' } },
   { title: 'My devices', section: 'connections', anchor: 'devices-list', keywords: ['pair', 'add device', 'computers'] },
+  { title: 'New networking (LAN)', section: 'connections', anchor: 'devices-engine', keywords: ['pair', 'qr', 'scan', 'lan', 'network', 'computers'] },
   { title: 'Let my editor reach my other devices', section: 'connections', anchor: 'devices-editors', keywords: ['editors', 'ssh', 'computers'] },
   { title: 'Tailscale Serve', section: 'connections', anchor: 'devices-tailscale-serve' },
   { title: 'Connection add-ons', section: 'connections', anchor: 'devices-addons', keywords: ['tunnel', 'relay', 'ssh'] },

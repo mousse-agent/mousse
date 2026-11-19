@@ -24,14 +24,17 @@ import type {
   Clock,
   IdentityService,
   KeyStore,
+  RpcCaller,
   RpcContext,
   RpcMethod,
   StreamAuthority,
   StreamStore,
   SyncSession
 } from '../net/contracts'
+import { isEngineCaller } from '../net/contracts'
 import { canonicalJson, decodeEnvelope, encodeEnvelope, MAX_DISPLAY_JSON_NODES } from '../net/sync/codec'
 import type { DurableRpcDispatcher } from '../net/sync/rpcDispatcher'
+import type { BridgeClient } from '../netEngine/session/client'
 import type { NetDatabase } from '../net/store/database'
 
 export interface BridgeArtifactResult {
@@ -42,6 +45,8 @@ export interface BridgeArtifactResult {
 
 /** A stream grants exactly one same-user request's registered method capability. */
 export class BridgeArtifacts implements StreamAuthority {
+  /** Routed calls in flight whose durable result may come back as an artifact: `rpc` → `method` and `target`. */
+  private readonly expected = new Map<RpcId, { method: string; target: NodeId }>()
   constructor(
     private readonly options: {
       db: NetDatabase
@@ -102,9 +107,10 @@ export class BridgeArtifacts implements StreamAuthority {
     })
   }
 
-  canRead(stream: StreamId, peer: SyncSession['peer']): boolean {
+  canRead(stream: StreamId, peer: RpcCaller): boolean {
     const descriptor = this.options.store.getStream(stream)
-    if (descriptor?.kind !== 'node.artifact') return this.options.fallback.canRead(stream, peer)
+    if (descriptor?.kind !== 'node.artifact')
+      return !isEngineCaller(peer) && this.options.fallback.canRead(stream, peer)
     try {
       this.scope(descriptor, peer)
       return true
@@ -112,10 +118,10 @@ export class BridgeArtifacts implements StreamAuthority {
       return false
     }
   }
-  canFetchBlob(stream: StreamId, blob: BlobId, peer: SyncSession['peer']): boolean {
+  canFetchBlob(stream: StreamId, blob: BlobId, peer: RpcCaller): boolean {
     const descriptor = this.options.store.getStream(stream)
     if (descriptor?.kind !== 'node.artifact')
-      return this.options.fallback.canFetchBlob(stream, blob, peer)
+      return !isEngineCaller(peer) && this.options.fallback.canFetchBlob(stream, blob, peer)
     return this.canRead(stream, peer) && this.options.blobs.isReferenced(blob, stream)
   }
   acceptBlob(
@@ -123,11 +129,13 @@ export class BridgeArtifacts implements StreamAuthority {
     blob: BlobId,
     bytes: number,
     sealed: boolean,
-    peer: SyncSession['peer']
+    peer: RpcCaller
   ): void {
     const descriptor = this.options.store.getStream(stream)
-    if (descriptor?.kind !== 'node.artifact')
+    if (descriptor?.kind !== 'node.artifact') {
+      if (isEngineCaller(peer)) throw new NetError('forbidden')
       return this.options.fallback.acceptBlob(stream, blob, bytes, sealed, peer)
+    }
     const method = this.scope(descriptor, peer)
     if (
       !method.uploadEnabled ||
@@ -144,10 +152,11 @@ export class BridgeArtifacts implements StreamAuthority {
     blob: BlobId,
     bytes: number,
     sealed: boolean,
-    peer: SyncSession['peer']
+    peer: RpcCaller
   ): void {
     const descriptor = this.options.store.getStream(stream)
     if (descriptor?.kind !== 'node.artifact') {
+      if (isEngineCaller(peer)) throw new NetError('forbidden')
       this.options.fallback.blobCommitted?.(stream, blob, bytes, sealed, peer)
       return
     }
@@ -165,11 +174,16 @@ export class BridgeArtifacts implements StreamAuthority {
     id: EventId,
     bytes: Uint8Array,
     sig: Uint8Array,
-    peer: SyncSession['peer']
+    peer: RpcCaller
   ): AppendOutcome {
     const descriptor = this.options.store.getStream(stream)
-    if (descriptor?.kind !== 'node.artifact')
+    if (descriptor?.kind !== 'node.artifact') {
+      if (isEngineCaller(peer)) throw new NetError('forbidden')
       return this.options.fallback.append(stream, id, bytes, sig, peer)
+    }
+    // An engine caller is proven by its pinned channel and grant, not a v1 signature: its staged record is
+    // accepted into its own input artifact (scope checks the artifact's caller) without the author checks.
+    const engine = isEngineCaller(peer)
     const method = this.scope(descriptor, peer),
       envelope = decodeEnvelope(bytes)
         .envelope as import('../../shared/net').Envelope<'artifact.published'>,
@@ -181,20 +195,20 @@ export class BridgeArtifacts implements StreamAuthority {
       envelope.minor > NET_PROTO_MINOR ||
       envelope.id !== id ||
       envelope.stream !== stream ||
-      envelope.author.node !== peer.node ||
-      envelope.author.user !== peer.user ||
+      (!engine && (envelope.author.node !== peer.node || envelope.author.user !== peer.user)) ||
       envelope.body?.purpose !== 'input' ||
       envelope.body.rpc !== binding.rpc ||
       !envelope.blobs?.length
     )
       throw new NetError('forbidden')
-    this.options.identity.verifyAuthor(
-      envelope.author,
-      bytes,
-      sig,
-      this.options.clock.now(),
-      'newWork'
-    )
+    if (!engine)
+      this.options.identity.verifyAuthor(
+        envelope.author,
+        bytes,
+        sig,
+        this.options.clock.now(),
+        'newWork'
+      )
     for (const ref of envelope.blobs) {
       if (ref.sealed || this.options.blobs.size(ref.id) !== ref.bytes)
         throw new NetError('bad_request')
@@ -231,10 +245,14 @@ export class BridgeArtifacts implements StreamAuthority {
         peer.user !== self.user ||
         !binding ||
         binding.user !== self.user ||
-        binding.caller !== self.node ||
-        !this.options.ownsRequest?.(binding.rpc, binding.method, peer.node)
+        binding.caller !== self.node
       )
         return false
+      // A routed call this computer has in flight: the artifact holds its answer, under the capability the method
+      // is registered with (this computer is not a caller of its own routed methods).
+      if (this.expects(binding.rpc, binding.method, peer.node))
+        return this.options.rpc.methodInfo(binding.method)?.capability === binding.capability
+      if (!this.options.ownsRequest?.(binding.rpc, binding.method, peer.node)) return false
       const own = this.localPeer()
       return (
         this.options.rpc.authorizedMethod(binding.method, own).capability === binding.capability
@@ -245,7 +263,8 @@ export class BridgeArtifacts implements StreamAuthority {
   }
   verifyRecord(
     record: import('../../shared/net').StoredRecord,
-    descriptor: StreamDescriptor
+    descriptor: StreamDescriptor,
+    engine = false
   ): void {
     if (descriptor.kind !== 'node.artifact') return
     const envelope = decodeEnvelope(record.envelope)
@@ -257,9 +276,12 @@ export class BridgeArtifacts implements StreamAuthority {
       envelope.sealed ||
       envelope.body?.rpc !== binding.rpc ||
       !envelope.blobs?.length ||
-      envelope.author.user !== binding.user
+      (!engine && envelope.author.user !== binding.user)
     )
       throw new NetError('forbidden')
+    // Over an engine session the pinned channel is the proof, not the author: a staged input carries the
+    // caller computer's own author, and a result read back carries the host's.
+    if (engine) return
     if (
       envelope.body.purpose === 'input'
         ? envelope.author.node !== binding.caller
@@ -277,16 +299,18 @@ export class BridgeArtifacts implements StreamAuthority {
       throw new NetError('forbidden')
     const record = this.options.store.getById(ref.stream, ref.event)
     if (!record) throw new NetError('forbidden')
-    this.verifyRecord(record, descriptor)
+    const engine = isEngineCaller(context.caller)
+    this.verifyRecord(record, descriptor, engine)
     const envelope = decodeEnvelope(record.envelope)
       .envelope as import('../../shared/net').Envelope<'artifact.published'>
-    this.options.identity.verifyAuthor(
-      envelope.author,
-      record.envelope,
-      record.sig,
-      envelope.ts,
-      'history'
-    )
+    if (!engine)
+      this.options.identity.verifyAuthor(
+        envelope.author,
+        record.envelope,
+        record.sig,
+        envelope.ts,
+        'history'
+      )
     if (
       envelope.type !== 'artifact.published' ||
       envelope.body?.purpose !== 'input' ||
@@ -296,6 +320,149 @@ export class BridgeArtifacts implements StreamAuthority {
       throw new NetError('forbidden')
     return this.read(ref.blob)
   }
+  private expects(rpc: RpcId, method: string, target: NodeId): boolean {
+    const held = this.expected.get(rpc)
+    return !!held && held.method === method && held.target === target
+  }
+
+  /**
+   * The result of a routed call that came back as an artifact (a durable result over a reply's size): its record
+   * is read from the stream the owner made for it, then its blob. Over v1 that is the Hub's path, with the request
+   * expected for as long as it is read. Over an engine pairing the stream is stored under the pairing's local id and
+   * bound to it, and the pinned channel is the proof of its records (no author check).
+   */
+  async resolveRouted(
+    value: unknown,
+    client: BridgeClient,
+    target: NodeId,
+    rpc: RpcId,
+    method: string,
+    signal: AbortSignal | undefined,
+    engine?: { bind(stream: StreamId, node: NodeId): void }
+  ): Promise<unknown> {
+    if (!engine) {
+      this.expected.set(rpc, { method, target })
+      try {
+        return await this.resolveResult(value, client as SyncSession, rpc, method, signal)
+      } finally {
+        this.expected.delete(rpc)
+      }
+    }
+    if (signal?.aborted) throw new NetError('cancelled')
+    const result = value as BridgeArtifactResult,
+      descriptor = result?.descriptor,
+      ref = result?.artifact
+    if (
+      !result ||
+      typeof result !== 'object' ||
+      result.kind !== 'bridge.artifact.result.v1' ||
+      Object.keys(result).length !== 3 ||
+      !validateStreamDescriptor(descriptor) ||
+      descriptor.kind !== 'node.artifact' ||
+      !ref ||
+      Object.keys(ref).length !== 3 ||
+      !isId('stream', ref.stream) ||
+      !isId('event', ref.event) ||
+      !isBlobId(ref.blob) ||
+      descriptor.id !== ref.stream ||
+      descriptor.artifact?.rpc !== rpc ||
+      descriptor.artifact.method !== method
+    )
+      throw new NetError('forbidden')
+    const local: StreamDescriptor = { ...descriptor, authority: target }
+    this.options.db.transaction(() => {
+      const known = this.options.store.getStream(local.id)
+      if (known && known.authority !== target) throw new NetError('forbidden')
+      if (!known) this.options.store.createStream(local, 1)
+      engine.bind(local.id, target)
+    })
+    if (!this.options.store.getById(ref.stream, ref.event))
+      await this.readUntil(client, ref.stream, ref.event, signal)
+    const record = this.options.store.getById(ref.stream, ref.event)
+    if (!record) throw new NetError('forbidden')
+    const envelope = decodeEnvelope(record.envelope)
+      .envelope as import('../../shared/net').Envelope<'artifact.published'>
+    const publication = envelope.blobs?.find((row) => row.id === ref.blob)
+    if (
+      envelope.type !== 'artifact.published' ||
+      envelope.stream !== ref.stream ||
+      envelope.body?.purpose !== 'result' ||
+      envelope.body.rpc !== rpc ||
+      !publication ||
+      publication.sealed
+    )
+      throw new NetError('forbidden')
+    return this.fetchResult(client, ref, publication.bytes, signal)
+  }
+
+  /** Reads `stream` until the record `event` is stored (or the stream says it never will be). */
+  private readUntil(
+    session: Pick<BridgeClient, 'subscribe'>,
+    stream: StreamId,
+    event: EventId,
+    signal: AbortSignal | undefined
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let subscription: { close(): void } | undefined,
+        closed = false
+      const finish = (error?: unknown): void => {
+        if (closed) return
+        closed = true
+        timer.cancel()
+        subscription?.close()
+        signal?.removeEventListener('abort', abort)
+        error ? reject(error) : resolve()
+      }
+      const abort = (): void => finish(new NetError('cancelled'))
+      const timer = this.options.clock.setTimeout(() => finish(new NetError('deadline_exceeded')), 30_000)
+      signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) {
+        abort()
+        return
+      }
+      try {
+        subscription = session.subscribe(stream, {
+          onRecord: (record) => {
+            if (decodeEnvelope(record.envelope).envelope.id === event) finish()
+          },
+          onCaughtUp: () => {
+            if (!this.options.store.getById(stream, event)) finish(new NetError('forbidden'))
+          },
+          onSnapshotInstalled: () => {
+            if (this.options.store.getById(stream, event)) finish()
+            else finish(new NetError('forbidden'))
+          },
+          onError: (code) => finish(new NetError(code))
+        })
+      } catch (error) {
+        finish(error)
+      }
+      if (closed) subscription?.close()
+    })
+  }
+
+  /** The result's bytes, checked against what its record says, as the value it encodes. */
+  private async fetchResult(
+    session: Pick<BridgeClient, 'getBlob'>,
+    ref: RpcArtifactRef,
+    size: number,
+    signal: AbortSignal | undefined
+  ): Promise<unknown> {
+    const bytes = await session.getBlob(ref.stream, ref.blob, { signal })
+    if (signal?.aborted) throw new NetError('cancelled')
+    if (bytes.length !== size || `blb_${createHash('sha256').update(bytes).digest('hex')}` !== ref.blob)
+      throw new NetError('conflict')
+    let decoded: unknown
+    try {
+      decoded = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+    } catch {
+      throw new NetError('bad_request')
+    }
+    // A result goes out as an artifact because it is large: it keeps the display bound, not the wire's.
+    if (!Buffer.from(canonicalJson(decoded, MAX_DISPLAY_JSON_NODES)).equals(bytes)) throw new NetError('bad_request')
+    return decoded
+  }
+
   async resolveResult(
     value: unknown,
     session: SyncSession,
@@ -315,7 +482,10 @@ export class BridgeArtifacts implements StreamAuthority {
       ref = result.artifact
     const original = this.options.canonicalRequest?.(rpc, method, session.peer.node) ?? rpc
     if (
-      !this.options.ownsRequest?.(rpc, method, session.peer.node) ||
+      !(
+        this.options.ownsRequest?.(rpc, method, session.peer.node) ||
+        this.expects(rpc, method, session.peer.node)
+      ) ||
       Object.keys(result).length !== 3 ||
       !validateStreamDescriptor(descriptor) ||
       !ref ||
@@ -330,49 +500,7 @@ export class BridgeArtifacts implements StreamAuthority {
     )
       throw new NetError('forbidden')
     this.options.store.createStream(descriptor, 1)
-    if (!this.options.store.getById(ref.stream, ref.event)) {
-      await new Promise<void>((resolve, reject) => {
-        let subscription: { close(): void } | undefined,
-          closed = false
-        const finish = (error?: unknown): void => {
-          if (closed) return
-          closed = true
-          timer.cancel()
-          subscription?.close()
-          signal?.removeEventListener('abort', abort)
-          error ? reject(error) : resolve()
-        }
-        const abort = (): void => finish(new NetError('cancelled'))
-        const timer = this.options.clock.setTimeout(
-          () => finish(new NetError('deadline_exceeded')),
-          30_000
-        )
-        signal?.addEventListener('abort', abort, { once: true })
-        if (signal?.aborted) {
-          abort()
-          return
-        }
-        try {
-          subscription = session.subscribe(ref.stream, {
-            onRecord: (record) => {
-              if (decodeEnvelope(record.envelope).envelope.id === ref.event) finish()
-            },
-            onCaughtUp: () => {
-              if (!this.options.store.getById(ref.stream, ref.event))
-                finish(new NetError('forbidden'))
-            },
-            onSnapshotInstalled: () => {
-              if (this.options.store.getById(ref.stream, ref.event)) finish()
-              else finish(new NetError('forbidden'))
-            },
-            onError: (code) => finish(new NetError(code))
-          })
-        } catch (error) {
-          finish(error)
-        }
-        if (closed) subscription?.close()
-      })
-    }
+    if (!this.options.store.getById(ref.stream, ref.event)) await this.readUntil(session, ref.stream, ref.event, signal)
     if (!this.canReceive(descriptor, session.peer)) throw new NetError('forbidden')
     const record = this.options.store.getById(ref.stream, ref.event)!
     this.verifyRecord(record, descriptor)
@@ -388,24 +516,9 @@ export class BridgeArtifacts implements StreamAuthority {
     const publication = envelope.blobs?.find((row) => row.id === ref.blob)
     if (envelope.body?.purpose !== 'result' || !publication || publication.sealed)
       throw new NetError('forbidden')
-    const bytes = await session.getBlob(ref.stream, ref.blob, { signal })
-    if (signal?.aborted) throw new NetError('cancelled')
-    if (
-      bytes.length !== publication.bytes ||
-      `blb_${createHash('sha256').update(bytes).digest('hex')}` !== ref.blob
-    )
-      throw new NetError('conflict')
-    let decoded: unknown
-    try {
-      decoded = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
-    } catch {
-      throw new NetError('bad_request')
-    }
-    // A result goes out as an artifact because it is large: it keeps the display bound, not the wire's.
-    if (!Buffer.from(canonicalJson(decoded, MAX_DISPLAY_JSON_NODES)).equals(bytes)) throw new NetError('bad_request')
-    return decoded
+    return this.fetchResult(session, ref, publication.bytes, signal)
   }
-  private scope(descriptor: StreamDescriptor, peer: SyncSession['peer']): RpcMethod {
+  private scope(descriptor: StreamDescriptor, peer: RpcCaller): RpcMethod {
     const self = this.options.identity.self(),
       binding = descriptor.artifact
     if (
@@ -421,7 +534,7 @@ export class BridgeArtifacts implements StreamAuthority {
     if (method.capability !== binding.capability) throw new NetError('forbidden')
     return method
   }
-  private ensure(id: RpcId, method: RpcMethod, peer: SyncSession['peer']): StreamDescriptor {
+  private ensure(id: RpcId, method: RpcMethod, peer: RpcCaller): StreamDescriptor {
     const rpc = this.options.rpc.originalRequest(id, peer, method.method) ?? id
     const held = this.options.db.database
       .prepare('SELECT stream FROM net_bridge_artifacts WHERE caller=? AND rpc=? AND method=?')

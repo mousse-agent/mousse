@@ -1,0 +1,140 @@
+import { NetError, type NetErrorCode } from '../../../shared/net/errors'
+import { forbiddenReason, type NodeId } from '../../../shared/net'
+import { encodeMessage, MessageReader, type EngineMessage } from './frame'
+
+/** The stream labels an engine connection carries (§3.2); the helper passes on only these. */
+export const ENGINE_LABELS = [
+  'mousse.hello',
+  'mousse.rpc',
+  'mousse.sub',
+  'mousse.blob',
+  'mousse.put'
+] as const
+export type EngineLabel = (typeof ENGINE_LABELS)[number]
+
+/**
+ * One stream of a connection, as the helper hands it to the app: ordered bytes each way, a FIN, or a reset.
+ * The helper process and the in-memory test link both implement it.
+ */
+export interface EngineStream {
+  readonly label: EngineLabel
+  write(bytes: Uint8Array): void
+  /** FIN: nothing more is written this way. */
+  end(): void
+  /** Ends both ways at once. */
+  reset(reason?: string): void
+  /**
+   * Settles once a producer may write more (what it wrote has mostly left), or the stream ended. A stream without
+   * it never holds a producer back.
+   */
+  ready?(): Promise<void>
+  onData(listener: (bytes: Uint8Array) => void): void
+  /** The other side's FIN (no reason) or a reset (with its reason). */
+  onEnd(listener: (reason?: string) => void): void
+}
+
+/**
+ * One connection with one pairing. Inbound connections carry its calls to this computer (serving); outbound ones
+ * carry this computer's calls to it (client). `peer` is this computer's local id for the pairing.
+ */
+export interface EngineConnection {
+  readonly id: string
+  readonly peer: NodeId
+  readonly direction: 'inbound' | 'outbound'
+  /** On an inbound connection, the grant `conn.up` reported for the caller. */
+  readonly grant?: string
+  /** On an inbound connection, the endpoint of the caller. */
+  readonly endpoint?: string
+  /** Opens a stream; `method` names the call a `mousse.rpc` stream carries, which decides its class. */
+  open(label: EngineLabel, method?: string): EngineStream
+  onStream(listener: (stream: EngineStream) => void): void
+  onClose(listener: (reason: string) => void): void
+  close(reason: string): void
+  isOpen(): boolean
+}
+
+/** Messages over one stream. */
+export class Channel {
+  private readonly reader = new MessageReader()
+  private readonly listeners = new Set<(message: EngineMessage) => void>()
+  private readonly endListeners = new Set<(reason?: string) => void>()
+  private ended = false
+  private writable = true
+  constructor(readonly stream: EngineStream) {
+    stream.onData((bytes) => {
+      let messages: EngineMessage[]
+      try {
+        messages = this.reader.push(bytes)
+      } catch {
+        this.reset('bad_message')
+        return
+      }
+      for (const message of messages) for (const listener of this.listeners) listener(message)
+    })
+    stream.onEnd((reason) => {
+      if (reason !== undefined) this.writable = false
+      if (this.ended) return
+      this.ended = true
+      for (const listener of this.endListeners) listener(reason)
+    })
+  }
+  send(header: EngineMessage['header'], parts: readonly Uint8Array[] = []): void {
+    if (!this.writable) throw new NetError('peer_offline')
+    this.stream.write(encodeMessage(header, parts))
+  }
+  /** Waits until the stream takes more (`EngineStream.ready`); producers of many messages wait between them. */
+  async drained(): Promise<void> {
+    await this.stream.ready?.()
+  }
+  onMessage(listener: (message: EngineMessage) => void): void {
+    this.listeners.add(listener)
+  }
+  onEnd(listener: (reason?: string) => void): void {
+    this.endListeners.add(listener)
+  }
+  end(): void {
+    if (!this.writable) return
+    this.writable = false
+    this.stream.end()
+  }
+  reset(reason?: string): void {
+    this.writable = false
+    this.stream.reset(reason)
+  }
+  isOpen(): boolean {
+    return this.writable && !this.ended
+  }
+}
+
+/** What crosses for an error: its code and, for a refusal, the fixed word that says which kind. */
+export interface EngineWireError {
+  code: NetErrorCode
+  reason?: string
+}
+
+export function toWireError(error: unknown): EngineWireError {
+  const code = error instanceof NetError ? error.code : 'internal'
+  const details = error instanceof NetError ? error.details : undefined
+  const reason =
+    code === 'forbidden'
+      ? forbiddenReason(details)
+      : typeof (details as { reason?: unknown } | undefined)?.reason === 'string' &&
+          /^[a-z_]{1,64}$/.test((details as { reason: string }).reason)
+        ? (details as { reason: string }).reason
+        : undefined
+  return { code, ...(reason ? { reason } : {}) }
+}
+
+export function fromWireError(error: unknown): NetError {
+  const wire = error as Partial<EngineWireError> | undefined
+  const code = (typeof wire?.code === 'string' ? wire.code : 'internal') as NetErrorCode
+  try {
+    return new NetError(
+      code,
+      undefined,
+      typeof wire?.reason === 'string' ? { details: { reason: wire.reason } } : undefined
+    )
+  } catch {
+    return new NetError('internal')
+  }
+}

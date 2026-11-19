@@ -57,7 +57,6 @@ import {
   isId
 } from '../../shared/net'
 import {
-  methodAccess,
   needsWork,
   ROUTED_STREAM_ACCESS,
   STREAM_ACCESS
@@ -95,6 +94,8 @@ import type {
   PeerRef,
   TunnelLink
 } from './contracts'
+import { isEngineCaller, v1Caller } from './contracts'
+import { checkNodePolicy } from './checkNodePolicy'
 import type { SpaceJoinAdmissionPort } from './enrollment/quarantine'
 import { systemClock } from './clock'
 import { NetDatabase } from './store/database'
@@ -256,8 +257,6 @@ const CONTROL_METHOD = /^authority\.transfer\./
 /** The refusal of a device of this user's list that is not connected here. */
 const notConnected = () =>
   new NetError('forbidden', undefined, { details: { reason: 'not_connected' } })
-/** The refusal of a device this computer lets view threads and chat with bots only. */
-const workOff = () => new NetError('forbidden', undefined, { details: { reason: 'work_off' } })
 /**
  * The other devices of this computer's list now (not this one, none revoked), read with the pinned root key so a
  * locked key store reads it too. Undefined when the list cannot be read; empty when this computer has none.
@@ -690,6 +689,11 @@ export class NetService {
           identity,
           executions,
           clock: this.clock,
+          // Engine callers (Phase 1a pairings) are held to the engine service's own policy: no v1 gate applies.
+          authorizeEngine: (method, caller, capability) => {
+            if (!this.engineAuthorizer) throw new NetError('forbidden')
+            this.engineAuthorizer(method, caller, capability)
+          },
           authorizeMethod: (method, peer) => {
             this.assertEnabled()
             if (method.family === 'bridge' || method.family === 'routed')
@@ -699,28 +703,7 @@ export class NetService {
             // family and the calls with none alike; read on every call and on every lookup of a saved result.
             if (!CONTROL_METHOD.test(method.method) && !this.connectedHere(peer))
               throw notConnected()
-            // Read on every call, so a block takes effect on the device's next request, and
-            // on the lookup of a result it asked for earlier.
-            if (
-              (method.family === 'bridge' || method.family === 'routed') &&
-              policy.isBlocked(peer.node)
-            )
-              throw new NetError(
-                'forbidden',
-                undefined,
-                method.family === 'routed' ? { details: { reason: 'blocked' } } : undefined
-              )
-            if (method.family === 'routed') {
-              // The owner's switch is read on every call, so turning it off is also a kill switch.
-              if (this.config.workOnThreads === false)
-                throw new NetError('forbidden', undefined, { details: { reason: 'setting_off' } })
-              if (method.needsTerminal && !policy.get(peer.node).terminal)
-                throw new NetError('forbidden', undefined, { details: { reason: 'terminal_off' } })
-            }
-            // "Work on threads from this device" off: the device views threads and chats with bots, and every call
-            // that would start, change or stop work is refused, in every family, a saved result's lookup included.
-            if (needsWork(methodAccess(method.method)) && !policy.get(peer.node).work)
-              throw workOff()
+            checkNodePolicy(method, peer.node, policy, this.config)
           }
         }),
         transfer = new AuthorityTransferDelivery({ db, identity, keys })
@@ -744,7 +727,9 @@ export class NetService {
         authorize: (_params, context) => {
           if (policy.isBlocked(context.caller.node)) throw new NetError('forbidden')
         },
-        handle: async (_params, context) => this.phoneEndpoints(context.carrier, context.caller)
+        // Phone routes are for v1 phones only: an engine pairing is told of none.
+        handle: async (_params, context) =>
+          isEngineCaller(context.caller) ? { endpoints: [] } : this.phoneEndpoints(context.carrier, context.caller)
       })
       rpc.register({
         method: PHONE_WEBRTC_OFFER_METHOD,
@@ -771,7 +756,7 @@ export class NetService {
           if (policy.isBlocked(context.caller.node)) throw new NetError('forbidden')
         },
         handle: async (params, context) =>
-          this.phoneWebRtcOffer((params as { sdp: string }).sdp, context.carrier, context.caller)
+          this.phoneWebRtcOffer((params as { sdp: string }).sdp, context.carrier, v1Caller(context.caller))
       })
       rpc.register({
         method: 'authority.transfer.ready',
@@ -847,7 +832,7 @@ export class NetService {
             throw new NetError('bad_request')
           return params
         },
-        handle: async (_params, context) => this.accessMine(context.caller)
+        handle: async (_params, context) => this.accessMine(v1Caller(context.caller))
       })
       this.state = {
         db,
@@ -1128,6 +1113,8 @@ export class NetService {
         })
       )
     }
+    // The v1 rows alone. The daemon's `bridge.nodes` is answered by the peer directory (`mms/net/registerMethods.ts`),
+    // which adds the engine's pairings; this stays for in-process callers of the v1 view.
     if (method === 'bridge.nodes') return this.nodesView()
     if (method === 'bridge.access.there') return this.track(this.accessThere(params.node as NodeId))
     if (method === 'net.editor.probe') return this.track(this.editorProbe(params.node as NodeId))
@@ -1660,10 +1647,34 @@ export class NetService {
    * Moves the profile's `net` folder to `net.<label>-<time>` and leaves the service with no network
    * data, as on a computer that never had any. Nothing is deleted. Runs in the serial queue.
    */
+  /**
+   * Called before Start over (or a dropped join) moves this profile's `net/` folder aside, with the suffix it uses.
+   * The engine service stops there and moves its own folder aside with it, since its rows live in that `net.db`.
+   */
+  onSetAside(listener: (suffix: string) => Promise<void> | void): () => void {
+    this.setAsideListeners.add(listener)
+    return () => this.setAsideListeners.delete(listener)
+  }
+  private readonly setAsideListeners = new Set<(suffix: string) => Promise<void> | void>()
+  private engineAuthorizer?: (
+    method: import('./contracts').RpcMethod,
+    caller: import('./contracts').EngineCaller,
+    capability: import('../../shared/net').NodeCapability
+  ) => void
+  /** The engine service's policy for its callers on this runtime's dispatcher; unset, engine callers are refused. */
+  setEngineAuthorizer(authorize: NetService['engineAuthorizer']): void {
+    this.engineAuthorizer = authorize
+  }
+  /** "Work on threads from other devices" (on unless this computer turned it off), read by `checkNodePolicy`. */
+  nodePolicyConfig(): { workOnThreads?: boolean } {
+    return { workOnThreads: this.config.workOnThreads }
+  }
   private async setAsideNetwork(label: string): Promise<void> {
+    const suffix = `${label}-${Date.now()}`
+    for (const listener of this.setAsideListeners) await listener(suffix)
     await this.closeRuntime()
     const directory = join(this.options.profileDir, 'net')
-    let aside = `${directory}.${label}-${Date.now()}`
+    let aside = `${directory}.${suffix}`
     if (existsSync(aside)) aside += `-${randomBytes(4).toString('hex')}`
     try {
       renameSync(directory, aside)
@@ -4580,7 +4591,11 @@ export class NetService {
     })
   }
   /** `bridge.nodes`, plus the ssh route a peer offers that this computer has not approved. */
-  private async nodesView(): Promise<unknown> {
+  /**
+   * The `bridge.nodes` rows of this computer's v1 devices. `bridge.nodes` itself is answered by the peer directory,
+   * which adds these only while v1 networking is on.
+   */
+  async nodesView(): Promise<unknown> {
     const rt = this.requireEnrolled()
     const view = this.nodes() as { nodes: Array<{ node: NodeId; self: boolean }> }
     const offers = await Promise.all(

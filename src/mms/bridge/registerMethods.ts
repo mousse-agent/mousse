@@ -107,7 +107,7 @@ export function registerBridgeMethods(
       handle: async (context, params, binding) => {
         try {
           const service = await forProfile(binding!.profileId)
-          service.options.net.assertFeature('netBridge')
+          if (!service.bridgeOn()) throw new NetError('disabled')
           const local =
             method === 'bridge.hub.attach' || method === 'bridge.hub.detach'
               ? await events(context.connection, binding!, service)
@@ -135,7 +135,7 @@ export function registerBridgeMethods(
       handle: async (_context, params, binding) => {
         try {
           const service = await forProfile(binding!.profileId)
-          service.options.net.assertFeature('netBridge')
+          if (!service.bridgeOn()) throw new NetError('disabled')
           return service.activityAbout(method, params)
         } catch (error) {
           throw publicError(error)

@@ -49,6 +49,7 @@ import { createManagedBrowserInstaller } from './browser/install'
 import { bundledBrowserWorkerModule } from './browser/workerModulePath'
 import { registerBrowserSetupMethods, type BrowserSetupDomainRegistration } from './browser/registerBrowserSetupMethods'
 import { registerSpeechHostMethods } from './speech/registerSpeechHostMethods'
+import { registerNetEngineMethods } from './netEngine/registerMethods'
 
 export type { MmsOptions } from './MmsOptions'
 
@@ -184,6 +185,14 @@ export class MousseMainService extends MmsProfileServices {
     }
   }
 
+  /**
+   * Called once the daemon published its readiness. The network engines and their helpers start now, in the
+   * background: nothing waits for them, and readiness never waited for them either.
+   */
+  afterReady(): void {
+    void this.profileHost?.startNetworkedProfiles()
+  }
+
   override stop(options: { timeoutMs?: number } = {}): Promise<void> {
     this.beginShutdown()
     this.browserSetup.beginShutdown()
@@ -224,8 +233,16 @@ export class MousseMainService extends MmsProfileServices {
       }
       return services
     }
-    registerNetMethods(this.domains, async profileId => (await profile(profileId)).net)
+    registerNetMethods(
+      this.domains,
+      async profileId => (await profile(profileId)).net,
+      async profileId => {
+        const services = await profile(profileId)
+        return { peers: services.peers, engine: { isEngine: (node) => services.netEngine.isEngine(node), setPolicy: (node, change) => services.netEngine.setPolicy(node, change) } }
+      }
+    )
     registerEditorTunnelMethods(this.domains, async profileId => (await profile(profileId)).net)
+    registerNetEngineMethods(this.domains, async profileId => (await profile(profileId)).netEngine)
     registerBridgeMethods(this.domains, async profileId => (await profile(profileId)).bridge)
     this.domainCleanupSubscriptions.push(
       registerSpeechHostMethods(this.domains, async profileId => (await profile(profileId)).speechRelay)

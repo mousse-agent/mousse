@@ -1,3 +1,4 @@
+import { engineControl } from '../../netEngine/limits'
 import type { NodeId } from '../../../shared/net'
 import { ROUTED_TERMINALS_PER_NODE } from '../../../shared/bridge/routed'
 import { DomainRpcError } from '../../protocol/domainRegistry'
@@ -298,7 +299,8 @@ export class RoutedTerminals implements RoutedTerminalsPort {
     const entry = this.entries.get(ptyId)
     if (!entry || entry.node !== node)
       throw new DomainRpcError('pty_not_found', 'No such terminal in this thread', { id: ptyId })
-    if (seq <= entry.lastSeq) return { duplicate: true, lastSeq: entry.lastSeq }
+    // The once-or-unknown check's control applies a repeated number again.
+    if (seq <= entry.lastSeq && !engineControl('no-host-dedupe')) return { duplicate: true, lastSeq: entry.lastSeq }
     if (seq > entry.lastSeq + 1) {
       // Calls sent one after the other arrive in order, but nothing promises it: the one before this waits its turn.
       await new Promise<void>((resolve) => {

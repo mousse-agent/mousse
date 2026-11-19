@@ -1096,7 +1096,7 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'Providers, accounts and usage belong to the computer that holds the sign-ins; the picker reads providers.snapshots.'
   },
   {
-    prefixes: ['net.', 'bridge.', 'profiles.', 'speech.host.'],
+    prefixes: ['net.', 'netEngine.', 'bridge.', 'profiles.', 'speech.host.'],
     reason: 'Networking, devices, profiles and speech relay are managed on each computer itself.'
   },
   {

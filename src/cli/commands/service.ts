@@ -261,6 +261,8 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     )
 
     memoryMonitor?.start()
+    // Work that must not delay readiness starts now, in the background.
+    opened.mms.afterReady()
 
     await lifetime
     return state

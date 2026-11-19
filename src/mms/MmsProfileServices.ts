@@ -129,6 +129,8 @@ import {
 import { NetService } from './net/NetService'
 import { mousseIdNetModule } from './net/plus'
 import { BridgeProfileService } from './bridge/BridgeProfileService'
+import { PeerDirectory } from './bridge/peers'
+import { NetEngineService } from './netEngine/NetEngineService'
 import { ChatNetworkBindingService } from './chats/network/ChatNetworkBindingService'
 import type { SpaceProfileService } from './spaces/SpaceProfileService'
 import type { BotProfileService } from './bots/space/BotProfileService'
@@ -343,6 +345,10 @@ export class MmsProfileServices {
   /** The automations of the user's other computers, for windows' Automations page. Set and cleared with `threadRouter`. */
   remoteAutomations?: RemoteAutomationsPort
   readonly net: NetService
+  /** The engine side of networking (Phase 1a): pairings and their sessions, with or without v1. */
+  readonly netEngine: NetEngineService
+  /** The other computers Bridge reaches, over v1 (while on) and engine pairings. */
+  readonly peers: PeerDirectory
   readonly chatNetwork: ChatNetworkBindingService
   private bridgeService?: BridgeProfileService
   private speechRelayInstance?: SpeechRelay
@@ -359,7 +365,8 @@ export class MmsProfileServices {
     return this.bridgeService
   }
   get bridge(): BridgeProfileService {
-    this.net.assertFeature('netBridge')
+    // Bridge is on with v1's Bridge feature or with the engine.
+    if (!this.netEngine.on()) this.net.assertFeature('netBridge')
     return this.domainService()
   }
   get spaces(): SpaceProfileService {
@@ -1377,6 +1384,7 @@ export class MmsProfileServices {
           services: this,
           runtime,
           net: this.net,
+          peers: this.peers,
           nativeAdapters: opts?.nativeBotAdapters?.({ services: this, runtime, net: this.net }),
           trustedQaAdapters: opts?.trustedQaBotAdapters?.({
             services: this,
@@ -1400,6 +1408,24 @@ export class MmsProfileServices {
         }
       }
     })
+    this.netEngine = new NetEngineService({
+      profileDir: this.homeDir,
+      profileId: this.profileId,
+      net: this.net,
+      bridge: () => this.bridgeService,
+      // "<computer> (<profile>)", as the other computer's question names it (§5.1).
+      name: () => {
+        const computer = computerNameIfKnown() || hostname()
+        const profile = shared.listProfiles?.().find((item) => item.id === this.profileId)?.displayName
+        return profile ? `${computer} (${profile})` : computer
+      },
+      onChanged: () =>
+        this.events.emit({
+          channel: 'protocol:event',
+          data: { type: 'ui.notify', data: { kind: 'net-engine', profileId: this.profileId } }
+        })
+    })
+    this.peers = new PeerDirectory({ net: this.net, engine: () => this.netEngine })
     this.platform.onDispose(
       onSettingsSaved(() => {
         const on = normalizeExperimentalSettings(this.settings.get().experimental).plusLegacy
@@ -2664,6 +2690,9 @@ export class MmsProfileServices {
       this.scheduled.start()
     }
     await this.net.start()
+    // The network engine starts after the daemon is ready, with its helper (`ProfileHost.startNetworkedProfiles`):
+    // its database, identity bootstrap and tombstone sweep do not delay readiness. That is after v1 too, so a
+    // profile that joined another computer's network finds v1 on.
     // After the net service has loaded its ports, so the listener can refuse one of them.
     await this.listenScheduledWebhooksIfEnabled()
 
@@ -2917,6 +2946,7 @@ export class MmsProfileServices {
       () => this.scheduledWebhookServer.stop(),
       () => this.scheduled.shutdown(),
       () => this.stopRunEngine(),
+      () => this.netEngine.stop(),
       () => this.net.shutdown(),
       () => this.requests.waitForIdle(),
       () => this.catalogUnsubscribe?.(),

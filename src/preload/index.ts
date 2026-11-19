@@ -1468,6 +1468,14 @@ const api = {
       return () => ipcRenderer.removeListener('net:editor-asks', handler)
     }
   },
+  netEngine: {
+    /** A profile's new networking changed (its switch, helper, a device or its connection): read `netEngine.status` again. */
+    onChanged: (cb: (change: { profileId?: string }) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, change: { profileId?: string }) => cb(change)
+      ipcRenderer.on('netEngine:changed', handler)
+      return () => ipcRenderer.removeListener('netEngine:changed', handler)
+    }
+  },
   /** In-app updates from GitHub Releases (src/main/updates). */
   updates: {
     getState: (): Promise<UpdateState> => ipcRenderer.invoke(UPDATE_IPC.getState),

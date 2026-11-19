@@ -186,6 +186,7 @@ export function registerProfileDomain(registry: DomainHandlerRegistry, _main: Mo
       const record = host.manager.restore(input.profileId, input.expectedRevision)
       const services = await host.getProfileServices(record.id)
       await services.start()
+      void host.startNetworking(record.id)
       return { profile: host.toPublic(record) }
     }
   })

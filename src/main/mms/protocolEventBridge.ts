@@ -185,6 +185,11 @@ export function bridgeProtocolEvent(
       // The asks other computers made for editor connections changed: windows read the waiting ones again.
       const kind = (event.data as { kind?: unknown } | null)?.kind
       if (kind === 'remote-editor-ask' || kind === 'remote-editor-asks') broadcast('net:editor-asks', null)
+      // The new networking of a profile changed (its switch, helper, a device or its connection): windows read it again.
+      if (kind === 'net-engine') {
+        const profileId = (event.data as { profileId?: unknown }).profileId
+        broadcast('netEngine:changed', { profileId: typeof profileId === 'string' ? profileId : undefined })
+      }
       return true
     }
     case 'net.updated': {

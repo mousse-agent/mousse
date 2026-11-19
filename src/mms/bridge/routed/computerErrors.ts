@@ -40,12 +40,15 @@ const FORBIDDEN_WORDS: Record<ComputerForbiddenReason, (name: string) => string>
 
 export function computerForbidden(
   computer: ComputerRef,
-  reason: ComputerForbiddenReason
+  reason: ComputerForbiddenReason,
+  /** The Net code the other computer refused with, when it says more than `reason` (`bad_delegation`). */
+  cause?: string
 ): DomainRpcError {
   return new DomainRpcError('computer_forbidden', FORBIDDEN_WORDS[reason](computer.name), {
     node: computer.node,
     name: computer.name,
-    reason
+    reason,
+    ...(cause ? { cause } : {})
   })
 }
 
@@ -118,7 +121,7 @@ export function translateNetError(
     case 'revoked':
     case 'not_enrolled':
     case 'bad_delegation':
-      return computerForbidden(computer, 'capability')
+      return computerForbidden(computer, 'capability', error.code)
     case 'peer_offline':
     case 'route_unreachable':
       return computerOffline(computer)

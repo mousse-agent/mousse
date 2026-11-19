@@ -11,6 +11,7 @@ import { ThreadStorageLayout } from '../src/mms/data/ThreadStorageLayout'
 import { ScheduledJobStore, readTickerHeartbeat, recordTickerHeartbeat } from '../src/mms/scheduled/ScheduledJobStore'
 import { LineEditStatsStore } from '../src/mms/stats/LineEditStatsStore'
 import { MmsProfileServices } from '../src/mms/MmsProfileServices'
+import { ProfileHost } from '../src/mms/profiles/ProfileHost'
 import { ProfileDatabase } from '../src/mms/run/db/ProfileDatabase'
 import { RunEngine } from '../src/mms/run/RunEngine'
 import { RunStore } from '../src/mms/run/RunStore'
@@ -163,6 +164,7 @@ describe('explicit profile store roots', () => {
       scheduledWebhookServer: { stop: async () => { calls.push('webhooks') } },
       scheduled: { shutdown: () => { calls.push('scheduled'); if (failed === 'scheduled') throw new Error('scheduled failed') } },
       orchestrator: { holdApprovals: () => undefined, shutdown: async () => { calls.push('orchestrator') } },
+      netEngine: { stop: async () => { calls.push('netEngine') } },
       net: { shutdown: async () => { calls.push('net') } },
       requests: { waitForIdle: async () => { calls.push('requests') } },
       antigravity: { stop: () => { calls.push('antigravity') } },
@@ -178,7 +180,7 @@ describe('explicit profile store roots', () => {
       message: 'Failed to drain profile services',
       errors: [expect.objectContaining({ message: `${failed} failed` })]
     })
-    expect(calls).toEqual(['begin', 'undoRetention', 'pullRequestWatch', 'storageCleanup', 'storageUsage', 'lifecycle', 'platform', 'webhooks', 'scheduled', 'orchestrator', 'net', 'requests', 'antigravity', 'claudeSubscription', 'codex', 'pty', 'mcp'])
+    expect(calls).toEqual(['begin', 'undoRetention', 'pullRequestWatch', 'storageCleanup', 'storageUsage', 'lifecycle', 'platform', 'webhooks', 'scheduled', 'orchestrator', 'netEngine', 'net', 'requests', 'antigravity', 'claudeSubscription', 'codex', 'pty', 'mcp'])
     expect(service.started).toBe(true)
   })
 
@@ -201,6 +203,7 @@ describe('explicit profile store roots', () => {
       // The scheduler and requests settle late: the clean epoch end must still come after them.
       scheduled: { shutdown: async () => { await new Promise((resolve) => setTimeout(resolve, 20)); calls.push('scheduled done'); if (failing === 'scheduled') throw new Error('scheduled failed') } },
       orchestrator: { holdApprovals: () => undefined, shutdown: async () => { calls.push('orchestrator') }, setRunEngine: () => { calls.push('detach') }, setBotDispatcher: () => undefined, setBotThreads: () => undefined, setBotAppTools: () => undefined },
+      netEngine: { stop: async () => { calls.push('netEngine') } },
       net: { shutdown: async () => { calls.push('net') } },
       requests: { waitForIdle: async () => { await new Promise((resolve) => setTimeout(resolve, 10)); calls.push('requests idle') } },
       antigravity: { stop: () => { calls.push('antigravity') } },
@@ -234,7 +237,7 @@ describe('explicit profile store roots', () => {
 })
 
 describe('profile start order (H4)', () => {
-  it('recovers the run engine before scheduled jobs or the network can send a turn', async () => {
+  it('recovers the run engine before scheduled jobs or the network can send a turn, and leaves the network engine for after readiness', async () => {
     const profileHome = home('start-order')
     const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome })) })
     const calls: string[] = []
@@ -259,6 +262,8 @@ describe('profile start order (H4)', () => {
           calls.push('net')
         }
       },
+      // The network engine starts once the daemon is ready (ProfileHost.startNetworkedProfiles), not in the profile's start.
+      netEngine: { start: async () => { calls.push('netEngine') }, startHelper: async () => { calls.push('netEngine') } },
       orchestrator: {
         recoverRunEngineOnBoot: () => { engine.reconcileOnBoot(); calls.push('recover') },
         scheduleStartupQueueRecovery: () => undefined
@@ -286,5 +291,30 @@ describe('profile start order (H4)', () => {
     } finally {
       engine.store.db.close()
     }
+  })
+})
+
+describe('networking at startup', () => {
+  it('starts each networked profile once the daemon is ready, and a profile started later on its own', async () => {
+    const started: string[] = []
+    const profile = (id: string, enabled: boolean) => ({
+      netEngine: { settings: () => ({ enabled, profile: id }), startHelper: async () => { started.push(id) } }
+    })
+    const records = [{ id: 'a', status: 'active' }, { id: 'b', status: 'active' }, { id: 'off', status: 'active' }]
+    const host = Object.assign(Object.create(ProfileHost.prototype) as ProfileHost, {
+      stopping: false,
+      networkReady: false,
+      manager: { list: () => records },
+      live: new Map<string, unknown>([['a', profile('a', true)], ['off', profile('off', false)]])
+    })
+    // Before readiness a profile that starts does not start its networking.
+    await host.startNetworking('a')
+    expect(started).toEqual([])
+    await host.startNetworkedProfiles()
+    expect(started).toEqual(['a'])
+    // Restored after readiness: it starts its own.
+    ;(host as unknown as { live: Map<string, unknown> }).live.set('b', profile('b', true))
+    await host.startNetworking('b')
+    expect(started).toEqual(['a', 'b'])
   })
 })
