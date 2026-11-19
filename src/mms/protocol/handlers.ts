@@ -170,10 +170,10 @@ import { listFilesPlaces } from '../files/drives'
 import { browsedRootRefusal, browsedSaveRefusal, normalizedBrowsedRoot } from '../files/browsedRoot'
 import type { DomainConnectionContext } from './domainRegistry'
 import { DomainRpcError } from './domainRegistry'
-import { CLAUDE_USAGE_ID, keepAccountReading, keepUsage, readProviderUsage, recordLimitReading, steadyAccount, usageSlotList, usageSlots, withUsageDeadline } from './usageReads'
+import { cachedUsage, CLAUDE_USAGE_ID, readClaudeAccount, readClaudeAccountsPreview, readProviderUsage, recordLimitReading, usageSlotList, usageSlots } from './usageReads'
+import { usageWatch } from './usageWatch'
 import { limitReadings } from '../usageHistory/limitReadings'
 import { LIMIT_TREND_RANGES } from '../../shared/limitTrends'
-import type { UsageAccount } from '../../shared/providerAuth'
 import { WORKFLOW_RUN_CAPABILITY } from '../../shared/workflowRunPlatform'
 import { isInstallationMethod } from '../profiles/admission'
 import { ChatReferenceMetadataResolver } from '../data/resolveChatReferenceMetadata'
@@ -3845,6 +3845,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'Usage is read on its own computer')
       return { slots: usageSlots(ctx.mms, usageSlotList(ctx.mms)) }
     }
+    // A window shows a bot header's usage ring for this provider: it is read every 5 minutes while some window asks
+    // (`usageWatch.ts`), and each reading reaches every window as `providers.usage`. Answers with the last reading.
+    case 'providers.watchUsage': {
+      if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'Usage is read on its own computer')
+      const p = isObject(params) ? params : {}
+      const providerId = asString(p.providerId, 'providerId', 128)
+      const watched = usageWatch(ctx.mms).watch(providerId)
+      const cached = watched ? cachedUsage(ctx.mms, providerId) : undefined
+      return { watched, ...(cached ? { cached } : {}) }
+    }
     // How the 5-hour and weekly limits moved, from the readings kept of them (`limitReadings.ts`); this computer only.
     case 'providers.limitTrends': {
       if (!connectionIsLocal(ctx.connection)) throw new DomainRpcError('forbidden', 'Usage is read on its own computer')
@@ -3871,17 +3881,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const accountId = p.accountId === undefined ? undefined : asString(p.accountId, 'accountId', 256)
       const preview = p.preview === true
       if (providerId === CLAUDE_USAGE_ID && (accountId !== undefined || preview)) {
-        // Turned off in Settings: not on the page, so not read either.
-        if (ctx.mms.providerInstances?.isDisabled?.('claude')) return {}
-        const claude = ctx.mms.claudeSubscription
         if (accountId !== undefined) {
-          const read = await withUsageDeadline<UsageAccount | undefined>((signal) => claude.usageAccount(accountId, signal), () => ({ id: accountId, label: accountId, windows: [], problem: 'Not reachable' }))
-          const account = read && steadyAccount(ctx.mms, providerId, read)
-          if (account) keepAccountReading(ctx.mms, providerId, 'Claude subscription', account)
+          const account = await readClaudeAccount(ctx.mms, accountId)
           return { ...(account ? { account } : {}) }
         }
-        const provider = await withUsageDeadline((signal) => claude.usageAccountsPreview(signal), () => undefined)
-        if (provider) keepUsage(ctx.mms, provider)
+        const provider = await readClaudeAccountsPreview(ctx.mms)
         return { ...(provider ? { provider } : {}) }
       }
       const provider = await readProviderUsage(ctx.mms, providerId)

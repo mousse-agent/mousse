@@ -3551,6 +3551,7 @@ export function registerGuiIpc(
   )
   registerHandler('providers:usageSlots', async () => guiMms.request('providers.usageSlots'))
   registerHandler('providers:limitTrends', async (_e, range: LimitTrendRange) => guiMms.request('providers.limitTrends', { range }))
+  registerHandler('providers:watchUsage', async (_e, providerId: string) => guiMms.request('providers.watchUsage', { providerId }))
   registerHandler('usage:history', async (_e, request: UsageHistoryRequest) => guiMms.request('usage.history', request))
   registerHandler('providers:useLimitReset', async (_e, request: { providerId: string; creditId?: string }) =>
     guiMms.request('providers.useLimitReset', request)

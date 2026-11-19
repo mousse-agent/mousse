@@ -209,6 +209,9 @@ function useRunsOn(botId: string, refresh: string) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [botId])
   useEffect(read, [read, refresh])
+  // A pick in the header's model menu reads the rows into the store: Runs on shows them too.
+  const shared = useBotsStore((state) => state.modelInfo[botId])
+  useEffect(() => { if (shared && !saving.current) setChoices(shared) }, [shared])
   const pick = async (model: string | null) => {
     if (!choices) return
     setError(null)
@@ -234,6 +237,8 @@ function useRunsOn(botId: string, refresh: string) {
       saving.current -= 1
     }
     read()
+    // The header's model button shows the same rows.
+    void useBotsStore.getState().loadModelInfo(botId)
   }
   const saveImage = async (image: BotModelPick | null) => {
     if (!choices) return

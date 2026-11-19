@@ -174,6 +174,7 @@ export const GIT_ACCESS = {
   'providers.getSubscriptionUsage': 'none',
   'providers.usageSlots': 'none',
   'providers.limitTrends': 'none',
+  'providers.watchUsage': 'none',
   'usage.history': 'none',
   'providers.getUsageFor': 'none',
   'providers.useLimitReset': 'none',

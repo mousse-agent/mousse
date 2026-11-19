@@ -395,6 +395,7 @@ export const PROTOCOL_METHODS = [
   'providers.getSubscriptionUsage',
   'providers.usageSlots',
   'providers.limitTrends',
+  'providers.watchUsage',
   'usage.history',
   'providers.getUsageFor',
   'providers.useLimitReset',
@@ -604,6 +605,7 @@ export type ProtocolEventType =
   | 'providers.install-event'
   | 'providers.snapshots'
   | 'providers.operation'
+  | 'providers.usage'
   | 'mcp.changed'
   | 'turn.interrupted'
   | 'turn.aborted'
