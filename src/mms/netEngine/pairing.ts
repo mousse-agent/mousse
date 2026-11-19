@@ -8,7 +8,7 @@ import type { EngineHelper } from './helper/connections'
 import { engineControl, engineLimits } from './limits'
 import { privateRoute } from './routes'
 import type { EngineSessions } from './sessions'
-import type { EnginePeerRow, EnginePeerStore } from './store'
+import { isServingState, type EnginePeerRow, type EnginePeerStore } from './store'
 import { pairingLink, readTicket } from './ticket'
 
 /**
@@ -68,6 +68,8 @@ export class EnginePairing {
   private readonly outsideWindow = new Set<NodeId>()
   /** The step a pairing is running, so one runs at a time per pairing. */
   private readonly running = new Map<NodeId, Promise<void>>()
+  /** Removals under way, so one runs at a time per pairing and a second Remove joins it. */
+  private readonly removals = new Map<NodeId, Promise<void>>()
   private readonly waiters = new Set<() => void>()
   private readonly retries = new Map<NodeId, ReturnType<typeof setTimeout>>()
   /** Stopped at a test's crash point: nothing more is written in this run. */
@@ -172,10 +174,14 @@ export class EnginePairing {
     const identity = typeof joined.identity === 'string' ? joined.identity : facts.host
     const name = typeof joined.name === 'string' && joined.name ? joined.name : shortName(identity)
     const { peers } = this.port
+    // The row this join wrote or found was removed while the join ran: the removal stands.
+    const now = row && peers.get(row.localId)
+    if (row && (!now || !isServingState(now.state)))
+      throw new NetError('cancelled', 'Removed while joining.')
     // A row of an earlier pairing with this host (it removed this computer, then let it in again) replays its
     // grant and its pairback too: the host's new row waits for them.
     const saved =
-      row && row.state !== 'removing' && row.state !== 'removed'
+      row && now
         ? peers.update(row.localId, {
             state: 'joined',
             endpoint: identity,
@@ -230,7 +236,8 @@ export class EnginePairing {
         this.at('joined')
         const grant = await this.grantBack(row)
         this.alive()
-        peers.update(node, { grant, state: 'granted' })
+        // A removal that started meanwhile waits for this step, then revokes the grant: nothing is written here.
+        if (!peers.advance(node, ['joined'], { grant, state: 'granted' })) return
         this.port.changed()
         continue
       }
@@ -249,7 +256,7 @@ export class EnginePairing {
           ...(row.receipt ? { receipt: row.receipt } : {})
         })
         this.alive()
-        if (peers.get(node)?.state === 'granted') peers.setState(node, 'connected')
+        peers.advance(node, ['granted'], { state: 'connected' })
         this.notAccepted.delete(node)
         this.port.changed()
         return
@@ -403,8 +410,7 @@ export class EnginePairing {
     }
     await this.waitOnline(row.localId, engineLimits().pairbackDeadlineMs, () => this.dial(row))
     this.alive()
-    if (peers.get(row.localId)?.state === 'awaiting_pairback')
-      peers.setState(row.localId, 'connected')
+    peers.advance(row.localId, ['awaiting_pairback'], { state: 'connected' })
     this.port.changed()
   }
 
@@ -518,11 +524,24 @@ export class EnginePairing {
     const row = peers.get(node)
     if (!row) throw new NetError('bad_request', 'Unknown device.')
     if (row.state === 'removed') return
-    if (row.state !== 'removing') peers.setState(node, 'removing')
+    const under = this.removals.get(node)
+    if (under) return under
+    const run = this.removing(node).finally(() => this.removals.delete(node))
+    this.removals.set(node, run)
+    return run
+  }
+
+  private async removing(node: NodeId): Promise<void> {
+    const { peers } = this.port
+    peers.advance(node, SERVING, { state: 'removing' })
     this.notAccepted.delete(node)
     this.port.changed()
     if (!engineControl('teardown-on-event-only')) this.port.teardown(node)
+    // A step that waits for a connection stops now; one waiting on the helper (`grant.add`, say) ends first, so
+    // the grant it made is there to revoke and it writes nothing after.
+    for (const wake of [...this.waiters]) wake()
     this.at('removing')
+    await this.running.get(node)?.catch(() => undefined)
     await this.finishRemoval(peers.get(node)!)
   }
 
@@ -534,15 +553,21 @@ export class EnginePairing {
     if (!helper) throw new NetError('peer_offline', "Couldn't remove; try again.")
     if (row.invitation && row.state === 'removing' && row.ticket)
       await helper.request('join.cancel', { invitation: row.invitation }).catch(() => undefined)
-    const grant = Number(row.grant)
-    if (row.grant !== '' && Number.isSafeInteger(grant))
-      try {
-        await helper.request('grant.remove', { grant })
-      } catch (error) {
-        throw new NetError('peer_offline', "Couldn't remove; try again.", {
-          details: { reason: helperCode(error) ?? 'helper' }
-        })
-      }
+    try {
+      // The row's grant, and any other this computer made for that endpoint (a `grant.add` whose answer the
+      // removal overtook): none may outlive the removal and bring the pairing back.
+      const grants = new Set<number>()
+      if (row.grant !== '' && Number.isSafeInteger(Number(row.grant))) grants.add(Number(row.grant))
+      const listed = await helper.request('grants.list')
+      for (const grant of Array.isArray(listed.grants) ? listed.grants : [])
+        if (grant && grant.identity === row.endpoint && Number.isSafeInteger(Number(grant.grant)))
+          grants.add(Number(grant.grant))
+      for (const grant of grants) await helper.request('grant.remove', { grant })
+    } catch (error) {
+      throw new NetError('peer_offline', "Couldn't remove; try again.", {
+        details: { reason: helperCode(error) ?? 'helper' }
+      })
+    }
     this.at('grant-removed')
     if (row.endpoint) await helper.request('peer.forget', { identity: row.endpoint })
     this.alive()
@@ -568,12 +593,13 @@ export class EnginePairing {
     const until = Date.now() + ms
     while (!this.port.sessions.online(node)) {
       this.alive()
+      if (!this.port.peers.serving(node)) throw new NetError('cancelled', 'Removed.')
       const left = until - Date.now()
       if (left <= 0) throw new NetError('peer_offline')
       let wake = (): void => undefined
       const woken = new Promise<void>((resolve) => (wake = resolve))
       const check = (): void => {
-        if (this.port.sessions.online(node) || this.stopped) wake()
+        if (this.port.sessions.online(node) || this.stopped || !this.port.peers.serving(node)) wake()
       }
       this.waiters.add(check)
       // A connection the other side refused (it had no row yet) is asked for again after a while.
@@ -601,6 +627,8 @@ export class EnginePairing {
     if (this.crashed || this.stopped) throw new NetError('cancelled')
   }
 }
+
+const SERVING = ['consented', 'joined', 'granted', 'awaiting_pairback', 'connected'] as const
 
 /** The other computer refuses this one (it removed it, or never let it in). */
 function isRefusal(error: unknown): boolean {

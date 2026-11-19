@@ -6,9 +6,10 @@
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { newId, type NodeId, type StreamId } from '../../src/shared/net'
 import { NetDatabase } from '../../src/mms/net/store/database'
+import { EnginePairing } from '../../src/mms/netEngine/pairing'
 import { EngineSessions } from '../../src/mms/netEngine/sessions'
 import { Channel, type EngineConnection } from '../../src/mms/netEngine/session/transport'
 import { EnginePeerStore } from '../../src/mms/netEngine/store'
@@ -217,6 +218,78 @@ describe('removal rows', () => {
       0
     )
     expect(peers.get(kept.localId)?.state).toBe('connected')
+  })
+})
+
+describe('removal racing the pairing', () => {
+  it('waits for a grant.add under way, revokes the grant it made, and leaves the row removed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'engine-race-'))
+    const db = new NetDatabase({ profileDir: dir })
+    cleanups.push(
+      () => rmSync(dir, { recursive: true, force: true }),
+      () => db.close()
+    )
+    const peers = new EnginePeerStore(db)
+    const endpoint = 'ab'.repeat(32)
+    const row = peers.add({
+      endpoint,
+      fingerprint: 'sha256:x',
+      grant: '',
+      name: 'Host',
+      state: 'joined',
+      receipt: 'inv',
+      invitation: 'inv',
+      pairedAt: Date.now()
+    })
+    // The helper saves the grant as soon as it reads `grant.add`; its answer comes later.
+    const grants = new Map<number, string>()
+    let answerGrantAdd = (): void => undefined
+    const sent: string[] = []
+    const helper = {
+      info: {},
+      claim: () => undefined,
+      dial: async () => undefined,
+      request: async (op: string, fields: Record<string, unknown> = {}) => {
+        sent.push(op)
+        switch (op) {
+          case 'grant.add': {
+            grants.set(7, String(fields.identity))
+            await new Promise<void>((resolve) => (answerGrantAdd = resolve))
+            return { grant: 7 }
+          }
+          case 'grants.list':
+            return { grants: [...grants].map(([grant, identity]) => ({ grant, identity, role: 'owner' })) }
+          case 'grant.remove':
+            return { removed: grants.delete(Number(fields.grant)) }
+          default:
+            return {}
+        }
+      }
+    }
+    const pairing = new EnginePairing({
+      peers,
+      sessions: { online: () => false } as never,
+      helper: () => helper as never,
+      teardown: () => undefined,
+      changed: () => undefined
+    })
+    cleanups.push(() => pairing.stop())
+
+    const steps = pairing.advance(row.localId)
+    await vi.waitFor(() => expect(sent).toContain('grant.add'))
+    const removed = pairing.remove(row.localId)
+    expect(peers.get(row.localId)?.state).toBe('removing')
+    answerGrantAdd()
+    await removed
+    await new Promise((resolve) => setImmediate(resolve))
+
+    expect(peers.get(row.localId)?.state).toBe('removed')
+    expect([...grants.keys()]).toEqual([])
+    // Nothing brings the pairing back at the next start.
+    await pairing.reconcileGrants()
+    expect(peers.all().filter((r) => r.state !== 'removed')).toEqual([])
+    pairing.stop()
+    await steps
   })
 })
 

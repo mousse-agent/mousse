@@ -159,6 +159,31 @@ export class EnginePeerStore {
     return this.get(localId)
   }
 
+  /**
+   * Changes a pairing's row only while it is in one of the states `from` (a step that ran while a removal or another
+   * step moved the row on writes nothing). Answers the row, or undefined when it had moved on.
+   */
+  advance(
+    localId: NodeId,
+    from: readonly EnginePeerState[],
+    change: EnginePeerChange
+  ): EnginePeerRow | undefined {
+    const keys = (Object.keys(change) as (keyof EnginePeerChange)[]).filter(
+      (key) => change[key] !== undefined
+    )
+    let changed = false
+    this.db.transaction(() => {
+      this.db.charge(1)
+      changed =
+        this.db.database
+          .prepare(
+            `UPDATE net_engine_peers SET ${keys.map((key) => `${COLUMNS[key]}=?`).join(',')} WHERE local_id=? AND state IN (${from.map(() => '?').join(',')})`
+          )
+          .run(...keys.map((key) => change[key] ?? null), localId, ...from).changes > 0
+    })
+    return changed ? this.get(localId) : undefined
+  }
+
   /** Every row in `state`, oldest first. */
   inState(state: EnginePeerState): EnginePeerRow[] {
     return this.all().filter((row) => row.state === state)
