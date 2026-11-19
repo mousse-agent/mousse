@@ -1139,6 +1139,12 @@ html .chat-avatar[class*='chat-color-']:not(.group) {
   --chat-composer-gap: 22px;
 }
 
+/* The thread's pane already stands 8px off the window's bottom (frameless-shell.css), so its composer takes that much
+   less: its bottom edge lines up with a side chat's in the app panel, which reaches the window's bottom. */
+html[data-theme] .app .sidebar .chat:not(.chat--empty) {
+  --chat-composer-gap: 14px;
+}
+
 .chat:not(.chat--empty) .chat-input-area {
   padding-bottom: var(--chat-composer-gap);
 }
