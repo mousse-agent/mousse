@@ -5,12 +5,16 @@ import {
   BOT_ACCESSORY_LABELS,
   BOT_COLOUR_HEX,
   BOT_COLOURS,
+  BOT_EYE_COLOUR_LABELS,
+  BOT_EYE_COLOURS,
   BOT_EYES,
   BOT_EYES_LABELS,
   BOT_KIND_LABELS,
   BOT_KINDS,
+  botEyeColourOf,
   botEyesOf,
   botKindOf,
+  defaultEyeColour,
   normalizeBotLook,
   withKindAndEyes,
   type BotLook,
@@ -21,7 +25,7 @@ import './face.css'
 
 /**
  * Picks a bot's look (bot-ui §4.2): a large live preview with Shuffle and the character (mouse or
- * Mousse) under it; beside them the eight colours, the eight eye shapes and the 12 accessories, each
+ * Mousse) under it; beside them the eight colours, the eight eye shapes, black or white eyes and the 12 accessories, each
  * shown on the chosen character in the chosen colour. Tiles show the face alone, named by their
  * tooltip. Unknown stored values show, and are picked, as the default.
  */
@@ -52,7 +56,8 @@ export const BOT_COLOUR_LABELS: Record<(typeof BOT_COLOURS)[number], string> = {
 
 /**
  * A random look: a colour and accessory other than `current`'s, among the looks `existing` doesn't
- * wear while any is free, with a random character and eyes.
+ * wear while any is free, with a random character and eyes, and now and then a picked eye colour (otherwise the
+ * one that stands out on the colour).
  */
 export function shuffleLook(current: BotLook, existing: readonly BotLook[] = [], random: () => number = Math.random): KnownBotLook {
   const now = normalizeBotLook(current)
@@ -63,15 +68,19 @@ export function shuffleLook(current: BotLook, existing: readonly BotLook[] = [],
   const pool = free.length > 0 ? free : others
   const pick = pool[Math.min(pool.length - 1, Math.floor(random() * pool.length))]!
   const any = <T,>(list: readonly T[]): T => list[Math.min(list.length - 1, Math.floor(random() * list.length))]!
-  return withKindAndEyes(pick, any(BOT_KINDS), any(BOT_EYES))
+  const look = withKindAndEyes(pick, any(BOT_KINDS), any(BOT_EYES))
+  return random() < 0.3 ? { ...look, eyeColour: any(BOT_EYE_COLOURS) } : look
 }
 
 /** The look in words, for the preview's accessible name: "Purple Mousse with heart eyes and glasses". */
 export function lookLabel(look: KnownBotLook): string {
   const kind = botKindOf(look)
   const eyes = botEyesOf(look)
+  const eyeColour = botEyeColourOf(look)
+  // The eye colour is named only when it isn't the one the colour gets anyway.
+  const tint = eyeColour !== defaultEyeColour(look) ? `${BOT_EYE_COLOUR_LABELS[eyeColour].toLowerCase()} ` : ''
   const extras = [
-    ...(eyes !== 'pill' ? [`${BOT_EYES_LABELS[eyes].toLowerCase()} eyes`] : []),
+    ...(eyes !== 'pill' || tint ? [`${tint}${eyes !== 'pill' ? `${BOT_EYES_LABELS[eyes].toLowerCase()} ` : ''}eyes`] : []),
     ...(look.accessory !== 'none' ? [BOT_ACCESSORY_LABELS[look.accessory].toLowerCase()] : [])
   ]
   const noun = kind === 'mousse' ? BOT_KIND_LABELS.mousse : BOT_KIND_LABELS.mouse.toLowerCase()
@@ -139,6 +148,23 @@ export function BotLookPicker({ look, onChange, existingLooks = [], className, p
             content: (
               <>
                 <BotFace look={withKindAndEyes(current, kind, next)} state="idle" size={THUMB_SIZE} view="head" still />
+              </>
+            )
+          })}
+        />
+        <div className="bot-look-picker__label" id={`${id}-eye-colour`}>Eye colour</div>
+        <RadioRow
+          className="bot-look-picker__eyes bot-look-picker__eye-colours"
+          labelledBy={`${id}-eye-colour`}
+          options={BOT_EYE_COLOURS}
+          selected={botEyeColourOf(current)}
+          onSelect={(eyeColour) => onChange({ ...current, eyeColour })}
+          render={(eyeColour) => ({
+            label: `${BOT_EYE_COLOUR_LABELS[eyeColour]} eyes`,
+            className: 'bot-look-picker__accessory',
+            content: (
+              <>
+                <BotFace look={{ ...current, eyeColour }} state="idle" size={THUMB_SIZE} view="head" still />
               </>
             )
           })}

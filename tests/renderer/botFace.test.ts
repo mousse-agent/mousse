@@ -916,8 +916,12 @@ describe('BotFace props', () => {
     render(createElement(BotFaceStill, { look: { colour: 'purple', accessory: 'none', kind: 'mousse', eyes: 'star' }, state: 'idle', size: 48, view: 'head' }))
     expect(host.querySelector('svg')!.getAttribute('data-kind')).toBe('mousse')
     expect(faceUniforms({ colour: 'purple', accessory: 'none', kind: 'mousse', eyes: 'star' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([1, 6, 1])
-    expect(faceUniforms({ colour: 'purple', accessory: 'none' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([0, 0, 1])
+    expect(faceUniforms({ colour: 'purple', accessory: 'none' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([0, 0, 0])
     expect(faceUniforms({ colour: 'yellow', accessory: 'none', kind: 'mousse' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([1, 0, 0])
+    // A picked eye colour wins over the one the colour gets, on either character.
+    expect(faceUniforms({ colour: 'purple', accessory: 'none', eyeColour: 'white' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([0, 0, 1])
+    expect(faceUniforms({ colour: 'yellow', accessory: 'none', kind: 'mousse', eyeColour: 'white' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([1, 0, 1])
+    expect(faceUniforms({ colour: 'purple', accessory: 'none', kind: 'mousse', eyeColour: 'black' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([1, 0, 0])
     // The 3D eyes sit as far apart as the flat ones: wide eye shapes further out than the pill.
     for (const kind of ['mouse', 'mousse'] as const) {
       const spread = (eyes: 'star' | 'pill') => faceUniforms({ colour: 'coral', accessory: 'none', kind, eyes }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK[3]

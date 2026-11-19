@@ -117,6 +117,20 @@ describe('BotLookPicker', () => {
     expect(onChange).toHaveBeenLastCalledWith({ colour: 'purple', accessory: 'glasses', eyes: 'star' })
   })
 
+  it("picks black or white eyes, showing the colour's own until one is picked, and keeps it through other picks", () => {
+    const onChange = renderPicker({ colour: 'blue', accessory: 'none', kind: 'mousse' })
+    const group = host.querySelector('.bot-look-picker__eye-colours[role="radiogroup"]')!
+    expect(radios(group).map((radio) => radio.dataset.value)).toEqual(['black', 'white'])
+    expect(checked(group)?.dataset.value).toBe('white')
+    act(() => radios(group).find((radio) => radio.dataset.value === 'black')!.click())
+    expect(onChange).toHaveBeenLastCalledWith({ colour: 'blue', accessory: 'none', kind: 'mousse', eyeColour: 'black' })
+    const picked = renderPicker({ colour: 'blue', accessory: 'none', kind: 'mousse', eyeColour: 'black' })
+    expect(host.querySelector('.bot-look-picker__preview .bot-face')?.getAttribute('aria-label')).toBe('Blue Mousse with black eyes')
+    const [, , kinds] = groups()
+    act(() => radios(kinds!).find((radio) => radio.dataset.value === 'mouse')!.click())
+    expect(picked).toHaveBeenLastCalledWith({ colour: 'blue', accessory: 'none', eyeColour: 'black' })
+  })
+
   it('names a Mousse with its eyes and accessory, and draws the default pieces without stored fields', () => {
     const onChange = renderPicker({ colour: 'pink', accessory: 'crown', kind: 'mousse', eyes: 'heart' })
     const [colours, , kinds, eyes] = groups()
@@ -139,6 +153,11 @@ describe('shuffleLook', () => {
     const looks = [0, 0.999].map((r) => shuffleLook({ colour: 'coral', accessory: 'none' }, [], () => r))
     expect(new Set(looks.map((look) => look.kind ?? BOT_KINDS[0])).size).toBe(2)
     expect(new Set(looks.map((look) => look.eyes ?? BOT_EYES[0])).size).toBe(2)
+  })
+
+  it("now and then picks an eye colour, and otherwise leaves the colour's own", () => {
+    expect(shuffleLook({ colour: 'coral', accessory: 'none' }, [], () => 0.5).eyeColour).toBeUndefined()
+    expect(shuffleLook({ colour: 'coral', accessory: 'none' }, [], () => 0.1).eyeColour).toBe('black')
   })
 
   it('falls back to any other look when all are worn', () => {

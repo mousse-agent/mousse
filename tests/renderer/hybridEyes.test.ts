@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { BOT_EYES } from '../../src/shared/bots/personal/look'
+import { FEATURES_ONLY, FRONT_ONLY, faceUniforms, stillPose } from '../../src/renderer/components/bots/face/facePoses'
 import { eyeGeometry, FOLLOW_DOWN, FOLLOW_UP, FOLLOW_X, mouseArcPath, mouseEyePath, pointerLook } from '../../src/renderer/components/bots/face/hybridEyes'
 
 /** A 96 px face whose middle is at (500, 400). */
@@ -101,5 +102,84 @@ describe('where the flat eyes sit', () => {
     const { eyes } = eyeGeometry({ colour: 'coral', accessory: 'none' }, 'paused', 'full', 96)
     expect(Math.abs(eyes[0].angle)).toBeGreaterThan(0.1)
     expect(eyes[0].y).not.toBeCloseTo(eyes[1].y, 1)
+  })
+})
+
+describe('flat eyes that look about', () => {
+  /** The scale a `move` transform gives across and up, and its translation in pixels. */
+  const parse = (transform: string) => {
+    const [tx, ty] = /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(transform)!.slice(1).map(Number)
+    const [sx, sy] = /scale\(([-\d.]+), ([-\d.]+)\)/.exec(transform)!.slice(1).map(Number)
+    return { tx: tx!, ty: ty!, sx: sx!, sy: sy! }
+  }
+
+  it('fit into the glasses lenses: centred on both, smaller than without', () => {
+    for (const kind of ['mouse', 'mousse'] as const) {
+      const bare = eyeGeometry({ colour: 'coral', accessory: 'none', kind, eyes: 'star' }, 'needs_you', 'full', 200)
+      const glasses = eyeGeometry({ colour: 'coral', accessory: 'glasses', kind, eyes: 'star' }, 'needs_you', 'full', 200)
+      expect(glasses.es).toBeLessThan(bare.es * 0.6)
+      // Both eyes sit the same distance either side of the middle, nearer it than the bare star eyes.
+      expect(glasses.eyes[0].x + glasses.eyes[1].x).toBeCloseTo(200, 0)
+      expect(glasses.eyes[1].x - glasses.eyes[0].x).toBeLessThan(bare.eyes[1].x - bare.eyes[0].x)
+    }
+  })
+
+  it('go round the face and narrow towards its edge, and never past its outline or the lens', () => {
+    for (const accessory of ['none', 'glasses'] as const) {
+      for (const kind of ['mouse', 'mousse'] as const) {
+        const g = eyeGeometry({ colour: 'coral', accessory, kind, eyes: 'round' }, 'idle', 'full', 200)
+        expect(g.move(1, 0, 0)).toBe('none')
+        // A far look goes no further than a farther one: the eyes stop at the edge.
+        expect(g.move(1, 4, 2)).toBe(g.move(1, 40, 20))
+        expect(g.move(0, -4, -2)).toBe(g.move(0, -40, -20))
+      }
+    }
+    const mousse = eyeGeometry({ colour: 'coral', accessory: 'none', kind: 'mousse', eyes: 'round' }, 'idle', 'full', 200)
+    const right = parse(mousse.move(1, 0.7, 0))
+    expect(right.tx).toBeGreaterThan(0)
+    expect(right.sx).toBeLessThan(0.9)
+    expect(right.sy).toBeCloseTo(1, 1)
+  })
+
+  it('wearing glasses, the 3D eyes fit the lenses too, and a far look stays inside them', () => {
+    const at = (look: Parameters<typeof faceUniforms>[0], pose = stillPose('needs_you')) => faceUniforms(look, pose, { view: 'full', size: 120, samples: 1 })
+    const lens = at({ colour: 'coral', accessory: 'glasses', eyes: 'star' })
+    expect(lens.uK[3]).toBe(at({ colour: 'coral', accessory: 'glasses' }).uK[3])
+    expect(lens.uE2[2]).toBeLessThan(at({ colour: 'coral', accessory: 'none', eyes: 'star' }).uE2[2] * 0.6)
+    // A far look stays in the lens: no further than a nearer one that already reaches its edge.
+    const far = at({ colour: 'coral', accessory: 'glasses', kind: 'mousse' }, { ...stillPose('idle'), lookX: 9, lookY: 9 })
+    const farther = at({ colour: 'coral', accessory: 'glasses', kind: 'mousse' }, { ...stillPose('idle'), lookX: 90, lookY: 90 })
+    expect(far.uE2.slice(0, 2)).toEqual(farther.uE2.slice(0, 2))
+    expect(Math.abs(far.uE2[0])).toBeLessThan(1)
+  })
+})
+
+describe('the pictures laid with the flat eyes', () => {
+  it('an accessory-only picture has no eyes and no whiskers', () => {
+    const u = faceUniforms({ colour: 'coral', accessory: 'goggles', eyes: FRONT_ONLY as never }, stillPose('idle'), { view: 'full', size: 120, samples: 1 })
+    expect(u.uV[3]).toBe(2)
+    expect(u.uE2[1]).toBe(40)
+  })
+
+  it("the mouse's nose and whiskers are drawn on their own, keeping the whiskers' size rule", () => {
+    const look = { colour: 'coral', accessory: 'none', eyes: FEATURES_ONLY as never } as const
+    expect(faceUniforms(look, stillPose('idle'), { view: 'full', size: 120, samples: 1 }).uE2[1]).toBe(60)
+    expect(faceUniforms(look, stillPose('idle'), { view: 'full', size: 120, samples: 1 }).uV[3]).toBe(0)
+    expect(faceUniforms(look, stillPose('idle'), { view: 'full', size: 40, samples: 1 }).uV[3]).toBe(1)
+  })
+
+  it("the mouse's nose and whiskers turn with the eyes: the near side squeezes, the far side spreads, up to a cap", () => {
+    const g = eyeGeometry({ colour: 'coral', accessory: 'none' }, 'idle', 'head', 200)
+    expect(g.features(0, 0)).toEqual(['none', 'none'])
+    const matrix = (text: string): number[] => text.slice(7, -1).split(',').map(Number)
+    const [left, right] = g.features(0.7, 0).map(matrix) as [number[], number[]]
+    // Looking right, the right half is the near side.
+    expect(right[0]).toBeLessThan(1)
+    expect(left[0]).toBeGreaterThan(right[0]!)
+    // The nose goes right: both halves move the seam's top edge right.
+    expect(left[0]! * g.seam + left[4]!).toBeGreaterThan(g.seam)
+    expect(g.features(5, 0)).toEqual(g.features(20, 0))
+    expect(eyeGeometry({ colour: 'coral', accessory: 'none', kind: 'mousse' }, 'idle', 'head', 200).features(0.7, 0)).toEqual(['none', 'none'])
+    expect(eyeGeometry({ colour: 'coral', accessory: 'glasses' }, 'idle', 'head', 200).features(0.7, 0)).toEqual(['none', 'none'])
   })
 })
