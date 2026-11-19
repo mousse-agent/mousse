@@ -39,6 +39,11 @@ export function boundReadPath(raw: unknown, paths?: readonly string[]): string |
     decoded.split('/').some((s) => s === '.' || s === '..')
   )
     return
+  // Reject characters a lenient service may fold into separators, and invisible formatting.
+  if (/[\p{Cf}\u034f\u180b-\u180f\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/u.test(decoded)) return
+  if (/[\u2044\u2215\u2216\u29f5\u29f8\ufe68\uff0f\uff3c]/u.test(decoded)) return
+  const normalized = decoded.normalize('NFKC')
+  if (normalized.split('/').length !== decoded.split('/').length || normalized.includes('\\')) return
   if (paths && !paths.some((p) => decoded === p || decoded.startsWith(p + '/'))) return
   // Encoding each checked segment also escapes colons (for example GitHub compare refs);
   // the listed services decode them as segment data, never as a new URL authority.
