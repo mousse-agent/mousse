@@ -303,11 +303,11 @@ it('lists allowed prefixes for a path outside a known service', async () => {
   expect(out.text).toContain('/notifications')
   expect(out.text).not.toContain('ambiguous')
 })
-it('keeps the newest 20 response files and warns that they last only for this work', async () => {
+it('preserves unrecorded files and warns that responses last only for this work', async () => {
   const { run, home } = fixture()
   const folder = join(home, 'fetches')
   mkdirSync(folder)
-  // Mtime, rather than directory order or UUID order, defines old and new files.
+  // Pre-existing files were not recorded by this daemon and are never prune candidates.
   for (let i = 0; i < 20; i++) {
     const file = join(folder, String(i))
     ;(await import('node:fs')).writeFileSync(file, 'previous')
@@ -321,8 +321,8 @@ it('keeps the newest 20 response files and warns that they last only for this wo
   const out = await run()
   expect(out.text).toContain('only for this work')
   const files = readdirSync(folder)
-  expect(files).toHaveLength(20)
-  expect(files).not.toContain('0')
+  expect(files).toHaveLength(21)
+  expect(files).toContain('0')
   expect(files).toContain('19')
   expect(readFileSync(out.text.split('File: ')[1]!, 'utf8')).toHaveLength(70000)
 })
