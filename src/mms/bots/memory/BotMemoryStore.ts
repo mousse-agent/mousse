@@ -37,7 +37,7 @@ import type { BotJournalInput, BotStoreTx } from '../seams'
 import { CHAT_DIGEST_KEY, type ChatDigest, type ChatSummaryState, chatFingerprint, foldChatSummary, staleDigests } from './chatSummary'
 import { shortChipText } from '../../../shared/bots/personal/chips'
 import { classifyMemorySearchText, guardMemoryText, maskMemoryCredentials, relativeDateRefusal } from './guard'
-import { agoLabel, coreGauge, cut, dayLabel, runNotesGauge, usedTokens } from './render'
+import { agoLabel, coreGauge, cut, dayLabel, runNotesGauge, usedTokens, zonedDayBound } from './render'
 
 /**
  * The bot memory store (docs/plans/bot-context.md §3, §6–§8) over `bots.db`: the journal (append,
@@ -481,9 +481,9 @@ export class BotMemoryStore {
     this.expireMemories(botId)
     const limit = Math.min(Math.max(1, Math.floor(input.limit ?? BOT_MEMORY_SEARCH_LIMIT)), MAX_BOT_MEMORY_SEARCH_LIMIT)
     const kinds = new Set<BotMemorySearchKind>(input.kinds?.length ? input.kinds : ['chat', 'run', 'tool', 'memory'])
-    const since = isoOrUndefined(input.since) ?? ''
-    // A bare date as `until` includes that day.
-    const until = isoOrUndefined(input.until && /^\d{4}-\d{2}-\d{2}$/.test(input.until.trim()) ? `${input.until.trim()}T23:59:59.999Z` : input.until) ?? '9999'
+    // A bare date is the owner's day, in their zone (the times the bot reads are in it too); as `until` it includes that day.
+    const since = (input.since && zonedDayBound(input.since, this.zone())) ?? isoOrUndefined(input.since) ?? ''
+    const until = (input.until && zonedDayBound(input.until, this.zone(), true)) ?? isoOrUndefined(input.until) ?? '9999'
     const terms = ftsTerms(input.query ?? '')
     const journalKinds = (['chat', 'run', 'tool'] as const).filter((kind) => kinds.has(kind)).map((kind) => SEARCH_KIND_SQL[kind])
     const hits: BotMemoryHit[] = []
