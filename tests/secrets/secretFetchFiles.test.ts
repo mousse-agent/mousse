@@ -82,7 +82,7 @@ function fixture() {
     requests: new SecretRequests(vault),
     scratchRoot: scratch
   })
-  vi.mocked(publicFetch).mockResolvedValue({
+  vi.mocked(publicFetch).mockClear().mockResolvedValue({
     status: 200,
     headers: { 'content-type': 'text/plain' },
     body: Buffer.alloc(70000, 'x')
@@ -228,7 +228,7 @@ it('keeps a close failure local and releases the parent handle', async () => {
   expect(opened.size).toBe(0)
 })
 
-it('does not count a file removed before its open-fd location can be checked', async () => {
+it('counts a sent request even when its file disappears before verification', async () => {
   const f = fixture(),
     store = new BotStore({ profileHome: f.home })
   cleanup.push(() => store.close())
@@ -254,6 +254,54 @@ it('does not count a file removed before its open-fd location can be checked', a
   )
   expect(result.isError).toBe(true)
   expect(result.text).toMatch(/folder.*(?:changed|unavailable)/i)
-  expect(store.get('SELECT ran_at FROM bot_actions')?.ran_at).toBeNull()
+  expect(store.get('SELECT ran_at FROM bot_actions')?.ran_at).not.toBeNull()
+  expect(result.text).toContain('request was sent')
   expect(readdirSync(join(f.scratch, 'fetches'))).toEqual([])
+})
+
+async function countedRead(f: ReturnType<typeof fixture>, store: BotStore, n: number) {
+  const prepared = f.secrets.prepareFetch!(f.input)
+  return secretFetchAction(store, {
+    botId: 'owner', activationId: 'a', callKey: `cap-${n}`, secret: 'KEY',
+    service: 'OpenAI', args: {}, mask: text => text
+  }, uncount => prepared.send!(uncount))
+}
+it('refuses a persistent linked folder before sending and leaves no counted request', async () => {
+  const f = fixture(), store = new BotStore({ profileHome: f.home })
+  cleanup.push(() => store.close())
+  symlinkSync(f.outside, join(f.scratch, 'fetches'), 'dir')
+  for (let i = 0; i < 21; i++) expect((await countedRead(f, store, i)).isError).toBe(true)
+  expect(publicFetch).not.toHaveBeenCalled()
+  expect(store.get('SELECT count(*) AS n FROM bot_actions WHERE ran_at IS NOT NULL')?.n).toBe(0)
+})
+it('counts all sent requests when a linked folder prevents saving, then refuses call 21', async () => {
+  const f = fixture(), store = new BotStore({ profileHome: f.home })
+  cleanup.push(() => store.close())
+  const folder = join(f.scratch, 'fetches')
+  vi.mocked(publicFetch).mockImplementation(async () => {
+    rmSync(folder, { recursive: true, force: true })
+    symlinkSync(f.outside, folder, 'dir')
+    return { status: 200, headers: { 'content-type': 'text/plain' }, body: Buffer.alloc(70000) }
+  })
+  for (let i = 0; i < 20; i++) {
+    rmSync(folder, { recursive: true, force: true })
+    const out = await countedRead(f, store, i)
+    expect(out.isError).toBe(true)
+    expect(out.text).toContain('request was sent')
+  }
+  const last = await countedRead(f, store, 20)
+  expect(last.text).toContain('20 times this hour')
+  expect(publicFetch).toHaveBeenCalledTimes(20)
+  expect(store.get('SELECT count(*) AS n FROM bot_actions WHERE ran_at IS NOT NULL')?.n).toBe(20)
+})
+it('pins the directory opened just before replacement by a link', async () => {
+  const f = fixture(), folder = join(f.scratch, 'fetches')
+  hooks.afterOpen = path => {
+    if (path !== folder) return
+    hooks.afterOpen = undefined
+    renameSync(folder, folder + '-original')
+    symlinkSync(f.outside, folder, 'dir')
+  }
+  expect((await f.run()).isError).toBe(true)
+  expect(readdirSync(f.outside)).toEqual([])
 })

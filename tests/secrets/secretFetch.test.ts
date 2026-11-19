@@ -480,3 +480,10 @@ it.each([
   expect(result.isError).toBe(true)
   expect(publicFetch).not.toHaveBeenCalled()
 })
+
+it.each(['％2f', '％2e％2e', '？', '＃', '\ufe16', '\ufe56', '\ufe5f', '\ufe6a', '\u2047', '\u2048', '\u2049', '╱', '⟋', '⑊', 'ꓸꓸ', '܁܁', '·', 'a̸b'])(
+  'refuses non-plain or normalized delimiter segment %s', async segment => {
+    const { run } = fixture()
+    expect((await run({ path: `/v1/models/${segment}` })).isError).toBe(true)
+  }
+)
