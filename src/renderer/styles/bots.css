@@ -156,11 +156,14 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 /* The chat's live turn (BotTurnBody), in the bubble its message will be drawn in: the typing row and the reply share one
    grid cell, so the cell is as large as the larger of them. The row sits in a paragraph's line box (.an-md-p, as the
    reply's first line), so the bubble is as tall typing as with one line of reply. At the handoff the row fades out as
-   the words fade in, then stays unseen. While the bubble eases to a new height (useEasedHeight) it clips its contents. */
+   the words fade in, then stays unseen. While the bubble eases to a new height (useEasedHeight), or the turn grows into
+   the chat (useGrowIn), it clips what is below that height; the posted message's foot fades in as it is uncovered. */
 .bot-turn-body { display: grid; }
 .bot-turn-body > * { grid-area: 1 / 1; min-width: 0; }
 .bot-turn-body > .bot-markdown { margin: 0; }
-.bot-bubble.is-easing { overflow: clip; }
+.bot-bubble.is-easing, .bot-message.is-growing-in { box-sizing: border-box; overflow-y: clip; }
+.bot-message.is-growing-in > * { flex-shrink: 0; }
+.bot-message.was-live .bot-bubble-foot { animation: bot-turn-in calc(240ms * var(--ui-motion-scale, 1)) ease-out both; }
 .bot-turn-place { user-select: none; -webkit-user-select: none; }
 .bot-turn-place > .bot-turn-typing.an-md-p { display: flex; align-items: center; min-height: 1lh; margin: 0; white-space: normal; }
 .bot-turn-typing.is-held { visibility: hidden; }
@@ -168,7 +171,7 @@ html:not([data-acrylic='true']) .bot-conversation .chat-input-area.bot-input-are
 .bot-turn-reply.is-arriving { animation: bot-turn-in calc(180ms * var(--ui-motion-scale, 1)) ease-out both; }
 @keyframes bot-turn-out { to { opacity: 0; } }
 @keyframes bot-turn-in { from { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .bot-turn-typing.is-leaving, .bot-turn-reply.is-arriving { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .bot-turn-typing.is-leaving, .bot-turn-reply.is-arriving, .bot-message.was-live .bot-bubble-foot { animation: none; } }
 .bot-typing-row { display: inline-flex; align-items: flex-start; gap: 8px; }
 .bot-typing-dots { display: inline-flex; flex: none; align-items: center; gap: 4px; height: 18px; }
 .bot-typing-dots > i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-secondary); opacity: .35; }

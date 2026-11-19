@@ -390,6 +390,8 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
   const [reacted, setReacted] = useState(false)
   const bubble = useRef<HTMLDivElement>(null)
   const resize = useEasedHeight(bubble, wasLive.current, follow)
+  const article = useRef<HTMLElement>(null)
+  useGrowIn(article, Boolean(live), follow)
   // After every change of a bubble that was live (its posted message replacing its live words among them).
   useLayoutEffect(() => { if (wasLive.current) resize() })
   const picked = () => {
@@ -435,7 +437,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
       </span>
     </span>}
   </div>
-  return <article className={`chat-participant-message from-agent bot-message${from ? ' is-from-bot' : ''}${starts ? ' is-group-start' : ''}${reacted ? ' is-react-quiet' : ''}${message.reaction ? ' has-reaction' : ''}${menuOpen ? ' is-menu-open' : ''}${live ? ' bot-turn' : ''}`} {...(live ? {} : { 'data-message-id': message.id, 'data-turn-key': message.id })}
+  return <article ref={article} className={`chat-participant-message from-agent bot-message${from ? ' is-from-bot' : ''}${starts ? ' is-group-start' : ''}${reacted ? ' is-react-quiet' : ''}${message.reaction ? ' has-reaction' : ''}${menuOpen ? ' is-menu-open' : ''}${live ? ' bot-turn' : wasLive.current ? ' was-live' : ''}`} {...(live ? {} : { 'data-message-id': message.id, 'data-turn-key': message.id })}
     style={from ? { '--from-colour': BOT_COLOUR_HEX[normalizeBotLook(sender?.look).colour] } as CSSProperties : undefined}
     onMouseEnter={clampTools} onFocus={clampTools} onMouseLeave={reacted ? () => setReacted(false) : undefined}>
     {/* As in a group chat: the sender's face at the foot of its bubble. */}
@@ -471,8 +473,34 @@ function SystemLine({ row }: { row: Extract<BotChatRow, { kind: 'system' }> }) {
 /** What a bubble shows while it is the chat's live turn: whether it waits for the internet, and what it is doing now. */
 interface BotLive { offline: boolean; doing: string }
 
-/** How long a live bubble takes to ease to a new height (a wrapped line, its posted message's foot), before the speed scale. */
-export const BOT_GROW_MS = 160
+/**
+ * How quickly a live bubble takes a new height (a wrapped line, its posted message's foot), before the speed scale: the
+ * time constant of a critically damped spring. A new height while it moves carries on from its speed, so the bubble
+ * never stops and starts again, and a 23 px line moves it under 2 px a frame.
+ */
+export const BOT_GROW_TAU_MS = 80
+
+/** The same for the chat's turn growing into place (about 55 px with the space above it): under 2 px a frame. */
+export const BOT_GROW_IN_TAU_MS = 180
+
+/** A height moving toward its target, in px and px/ms, as of `last` (a frame's time). */
+interface Spring { x: number; v: number; last: number }
+
+/**
+ * Moves `spring` toward `target` up to `now`, in steps of at most 4 ms so it stays stable. A frame drawn late counts as
+ * one frame, not more: the bubble moves on as far as one frame would take it instead of catching up in a jump. True once
+ * it rests.
+ */
+function stepSpring(spring: Spring, target: number, now: number, tau: number): boolean {
+  const w = 1 / tau
+  for (let left = Math.min(now - spring.last, 17); left > 0; left -= 4) {
+    const h = Math.min(4, left)
+    spring.v += (w * w * (target - spring.x) - 2 * w * spring.v) * h
+    spring.x += spring.v * h
+  }
+  spring.last = now
+  return Math.abs(target - spring.x) < 0.1 && Math.abs(spring.v) < 0.002
+}
 
 /** The height `bubble` takes from its contents: the lowest of its children in the flow, and its own padding. */
 function naturalHeight(bubble: HTMLElement): number {
@@ -490,44 +518,102 @@ function naturalHeight(bubble: HTMLElement): number {
 /**
  * A bubble that eases to each new height instead of snapping to it, and the chat's end that follows it frame by frame
  * (`follow`, which leaves a reader who scrolled up where they are). The returned `resize` is called after each change of
- * its contents (in a layout effect, before the frame is drawn): the bubble then starts from the height it showed. Off
- * (`on` false, Animation speed Off or reduced motion), it only notes the height.
+ * its contents (in a layout effect, before the frame is drawn): the bubble holds the height it showed and moves from
+ * there each frame (`stepSpring`); a change while it moves only gives it a new target. Off (`on` false, Animation speed
+ * Off or reduced motion), it only notes the height.
  */
 function useEasedHeight(ref: RefObject<HTMLElement | null>, on: boolean, follow?: () => void): () => void {
   const scale = useMotionScale()
-  const state = useRef<{ height?: number; easing?: Animation; frame: number }>({ frame: 0 })
+  const state = useRef<{ target?: number; spring?: Spring; frame: number }>({ frame: 0 })
   const followRef = useRef(follow)
   followRef.current = follow
   useEffect(() => () => {
-    cancelAnimationFrame(state.current.frame)
-    state.current.easing?.cancel()
-  }, [])
+    const s = state.current
+    cancelAnimationFrame(s.frame)
+    if (!s.spring) return
+    s.spring = undefined
+    s.frame = 0
+    ref.current?.style.removeProperty('height')
+    ref.current?.classList.remove('is-easing')
+  }, [ref])
   return useCallback(() => {
     const element = ref.current
     const s = state.current
     if (!element || !on) return
     const height = naturalHeight(element)
-    const from = s.easing ? element.getBoundingClientRect().height : s.height
-    s.height = height
-    if (scale === 0 || from === undefined || Math.abs(from - height) < 0.5 || typeof element.animate !== 'function') return
-    s.easing?.cancel()
+    const shown = s.spring ? s.spring.x : s.target
+    s.target = height
+    if (s.spring || scale === 0 || shown === undefined || Math.abs(shown - height) < 0.5) return
+    const spring: Spring = { x: shown, v: 0, last: performance.now() }
+    s.spring = spring
     element.classList.add('is-easing')
-    const easing = element.animate([{ height: `${from}px` }, { height: `${height}px` }], { duration: BOT_GROW_MS * scale, easing: 'cubic-bezier(0.2, 0, 0, 1)' })
-    s.easing = easing
-    const done = () => {
-      if (s.easing !== easing) return
-      s.easing = undefined
-      element.classList.remove('is-easing')
-    }
-    easing.onfinish = done
-    easing.oncancel = done
-    cancelAnimationFrame(s.frame)
-    const step = () => {
+    element.style.height = `${shown}px`
+    const step = (now: number) => {
+      if (stepSpring(spring, s.target!, now, BOT_GROW_TAU_MS * scale)) {
+        s.spring = undefined
+        s.frame = 0
+        element.style.height = ''
+        element.classList.remove('is-easing')
+      } else {
+        element.style.height = `${spring.x}px`
+        s.frame = requestAnimationFrame(step)
+      }
       followRef.current?.()
-      s.frame = s.easing ? requestAnimationFrame(step) : 0
     }
     s.frame = requestAnimationFrame(step)
   }, [ref, on, scale])
+}
+
+/**
+ * The chat's live turn grows into place where it starts, as tall and as far below the message above as it will be, and
+ * fades in, so the chat moves up to it over a few frames instead of all at once (`follow` each frame). Only on its
+ * first draw while live (`on`), and not with motion off.
+ */
+function useGrowIn(ref: RefObject<HTMLElement | null>, on: boolean, follow?: () => void) {
+  const scale = useMotionScale()
+  const followRef = useRef(follow)
+  followRef.current = follow
+  const grown = useRef(!on)
+  useLayoutEffect(() => {
+    const element = ref.current
+    if (!element || grown.current) return
+    grown.current = true
+    if (scale === 0) return
+    const margin = parseFloat(getComputedStyle(element).marginTop) || 0
+    const spring: Spring = { x: 0, v: 0, last: performance.now() }
+    element.classList.add('is-growing-in')
+    const draw = (height: number) => {
+      const part = height > 0 ? Math.min(1, spring.x / height) : 1
+      element.style.height = `${spring.x}px`
+      element.style.marginTop = `${part * margin}px`
+      element.style.opacity = `${part}`
+    }
+    const settle = () => {
+      element.style.height = element.style.marginTop = element.style.opacity = ''
+      element.classList.remove('is-growing-in')
+    }
+    draw(naturalHeight(element))
+    let frame = 0
+    const step = (now: number) => {
+      const height = naturalHeight(element)
+      if (stepSpring(spring, height, now, BOT_GROW_IN_TAU_MS * scale)) {
+        frame = 0
+        settle()
+      } else {
+        draw(height)
+        frame = requestAnimationFrame(step)
+      }
+      followRef.current?.()
+    }
+    frame = requestAnimationFrame(step)
+    // Cut short (its effects run twice in development, or the speed changed): it starts again if it is drawn again.
+    return () => {
+      if (!frame) return
+      cancelAnimationFrame(frame)
+      settle()
+      grown.current = false
+    }
+  }, [ref, scale])
 }
 
 /** How long the typing row and the first words of the reply cross, before the speed scale. */
