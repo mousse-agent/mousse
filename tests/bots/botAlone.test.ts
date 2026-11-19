@@ -54,3 +54,12 @@ it.each(['a. b', 'tea.\n\n-- Penny', 'Thanks. See you soon.'])(
     expect(argumentContract({ body }, 'test-key').tokens.body).toEqual([])
   }
 )
+
+it.each(['folder', 'folder_id', 'PARENT-ID', 'parent', 'path', 'dir', 'directory', 'drive', 'DRIVE_ID'])(
+  'E1 r3c a varying filename requires a declared folder-like place: %s', key => {
+    expect(argumentContract({ name: 'scan-1.pdf' }, 'test-key', { [key]: 'scans' }).varying).toContain('name')
+  }
+)
+it.each([undefined, { repo: 'r' }, { database: 'd' }])('E1 r3c non-file places never make names variable: %j', place => {
+  expect(argumentContract({ name: 'scan-1.pdf' }, 'test-key', place).varying).not.toContain('name')
+})

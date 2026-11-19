@@ -4752,3 +4752,21 @@ it('E1 r3c an unsafe raw source filename does not grant variation', async () => 
   const t = await aloneAsk('allow', 'upload_file', undefined, { folder: 'scans', name: 'scan-１.pdf' })
   expect((await aloneNext(t, { ...t.args, name: 'scan-2.pdf' } as never)).action.status).toBe('open')
 })
+
+it.each([
+  '<a href="https&#58;//evil&#46;com">x</a>', '<a href="https&#x3a;//evil&#x2e;com">x</a>',
+  'see evil<b></b>.com', 'curl "evil"".com"', 'u = "evil" + ".com"',
+  'evil\u034f.com', 'evil\ufe0f.com', 'evil.\u0301com', 'evil\u2060.com',
+  '//intranet/x', 'evil%2Ecom', 'evil%EF%BC%8Ecom', 'evil&#46;com', 'evil&#x2e;com',
+  'https%3A%2F%2Fevil.example/x', 'https%253A%252F%252Fevil.example/x', 'owner%40evil.example'
+])('E1 r3c encoded and mark-padded destinations still ask: %s', async body => {
+  const t = await aloneAsk('allow', 'send', 'Hi, the report is at https://ok.com/r/1 . Thanks')
+  expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('open')
+  expect(t.calls).toHaveLength(1)
+})
+it('E1 r3c decoding is for matching only and preserves the sent text', async () => {
+  const t = await aloneAsk('allow', 'send', 'Old message owner@example.test')
+  const body = 'New message owner&#64;example.test'
+  expect((await aloneNext(t, { ...t.args, body })).action.status).toBe('done')
+  expect(t.calls.at(-1)).toMatchObject({ body })
+})
