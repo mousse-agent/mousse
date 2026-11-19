@@ -48,20 +48,6 @@
       "expiresAt": "2026-11-19T08:18:05.846Z"
     },
     {
-      "task": "bot-page-change-checks",
-      "session": "agibook-e0ccc0",
-      "machine": "agibook",
-      "branch": "bot-page-change-checks",
-      "paths": [
-        "src/mms/bots/activation/BotEngine.ts",
-        "src/mms/scheduled",
-        "src/mms/net-public",
-        "src/mms/run/mcp/appTools/bots.ts"
-      ],
-      "claimedAt": "2026-11-18T15:50:20.219Z",
-      "expiresAt": "2026-11-18T19:32:02.388Z"
-    },
-    {
       "task": "bot-pasted-secret",
       "session": "agibook-8341f1",
       "machine": "agibook",
@@ -116,6 +102,20 @@
       ],
       "claimedAt": "2026-11-18T15:49:33.335Z",
       "expiresAt": "2026-11-18T22:19:26.984Z"
+    },
+    {
+      "task": "labs-animation-toggles",
+      "session": "agibook-122a5c",
+      "machine": "agibook",
+      "branch": "labs-animation-toggles",
+      "paths": [
+        "src/shared/settings.ts",
+        "src/renderer/components/settings/LabsSettings.tsx",
+        "src/renderer/components/ThreadsSidebar.tsx",
+        "src/renderer/components/OrchestratorChat.tsx"
+      ],
+      "claimedAt": "2026-11-19T20:47:17.736Z",
+      "expiresAt": "2026-11-19T22:47:17.736Z"
     },
     {
       "task": "lan-direct-phone-path",
