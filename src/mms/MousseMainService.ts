@@ -221,7 +221,12 @@ export class MousseMainService extends MmsProfileServices {
         return services.netEngine
       },
       createProfile: async (label) => {
-        const id = host.manager.create({ displayName: label }).id
+        // A label another profile has gets a slug of its own (the label stays as the other computer typed it).
+        const taken = new Set(host.manager.list().map((record) => record.slug))
+        const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 56) || 'profile'
+        let slug = base
+        for (let n = 2; taken.has(slug); n++) slug = base + '-' + n
+        const id = host.manager.create({ displayName: label, slug }).id
         made.add(id)
         return id
       },

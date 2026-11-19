@@ -279,18 +279,11 @@ export class NetEngineService implements EngineDirectoryPort {
     } catch (error) {
       throw reachError(error)
     }
-    const saved = answer.routes && typeof answer.routes === 'object' ? answer.routes : undefined
-    if (saved) {
-      const before = readReach(helper.info.routes_config, helper.info)
-      helper.info.routes_config = saved
-      // Port forwards and tunnels that change without a restart show in the next invitation: what this computer
-      // advertises (and so may share) follows them now.
-      helper.info.routes = advertisedAfter(
-        helper.info.routes,
-        before,
-        readReach(saved, helper.info)
-      )
-    }
+    // The reply carries the saved config and what this computer advertises with it: a change that needs no restart
+    // shows in the next invitation, and what this computer may share follows it now.
+    const saved = answer.config && typeof answer.config === 'object' ? answer.config : undefined
+    if (saved) helper.info.routes_config = saved
+    if (Array.isArray(answer.routes)) helper.info.routes = strings(answer.routes)
     this.changed()
     if (answer.restart_needed !== true) return { restarted: false }
     await this.restartHelper()
@@ -1498,13 +1491,3 @@ function reachError(error: unknown): unknown {
   return error
 }
 
-/**
- * What this computer advertises after a routes change that needs no restart: its LAN and tailnet addresses as
- * before, with the port forwards and tunnels as now saved.
- */
-function advertisedAfter(routes: unknown, before: NetEngineReach, after: NetEngineReach): string[] {
-  const gone = new Set([...before.public, ...before.tunnels])
-  const kept = strings(routes).filter((route) => !gone.has(route))
-  for (const route of [...after.public, ...after.tunnels]) if (!kept.includes(route)) kept.push(route)
-  return kept
-}

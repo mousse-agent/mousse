@@ -1039,7 +1039,7 @@ export class FakeHelper {
             !after.public.length !== !before.public.length ||
             (after.forward_to ?? null) !== (before.forward_to ?? null) ||
             !after.tunnels.length !== !before.tunnels.length
-          return reply({ routes: after, restart_needed: restart })
+          return reply({ routes: advertised, restart_needed: restart, config: after })
         }
         case 'ssh.resolve': {
           const target = String(message.target ?? '')
