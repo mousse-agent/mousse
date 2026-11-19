@@ -13,7 +13,14 @@
  * (`netEngine.join`), the owner's window says Yes, and the apps finish both directions themselves.
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  existsSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { Socket } from 'node:net'
 import { join } from 'node:path'
@@ -24,6 +31,7 @@ import { dispatchMethod } from '../../../src/mms/protocol/handlers'
 import type { EngineHelper } from '../../../src/mms/netEngine/helper/connections'
 import type { NodeId } from '../../../src/shared/net'
 import { NET_LOCAL_CAPABILITY } from '../../../src/shared/net/local'
+import { OUTBOUND } from '../../../src/shared/privacy/outbound'
 import { qualifyId } from '../../../src/shared/threadRef'
 import { fakeShells, type Spawned } from '../../net/bridge/routed/terminalFixture'
 import { FakeNetwork, type FakeHelper } from '../fakeHelper'
@@ -412,7 +420,22 @@ function routedParams(mms: MousseMainService, method: string, params: unknown): 
   return share.length ? { ...params, share } : params
 }
 
+/** Hosts the app contacts for its other features, as its outbound inventory lists them. */
+const PRODUCT_HOSTS = new Set(
+  OUTBOUND.filter((entry) => entry.kind === 'contacted').flatMap((entry) => entry.hosts)
+)
+
 let guarded = false
+
+/** An attempt outside the cell: recorded, and where it went kept beside the reason (`egress`). */
+function denied(where: string): void {
+  // What the app contacts for other features (its outbound inventory, such as the daily agent version check) is
+  // not route setup: the kit judges that traffic on its own.
+  if (PRODUCT_HOSTS.has(where.replace(/:\d+$/, ''))) return
+  record('egress_attempted')
+  const out = process.env.MOUSSE_NET_ENGINE_CHECK_OUT
+  if (out) appendFileSync(join(out, 'egress'), `${where}\n`)
+}
 
 /**
  * The routes checks' egress guard in this process (1b §14, as the kit's preload does for the app): a request to
@@ -428,7 +451,7 @@ export function guardEgress(): void {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url)
     if (url.host === plus) record('plus_contacted')
-    else if (!/^(localhost|127\.|\[::1\])/.test(url.host)) record('egress_attempted')
+    else if (!/^(localhost|127\.|\[::1\])/.test(url.host)) denied(url.host)
     else return realFetch(input, init)
     throw new Error('egress denied by the check')
   }) as typeof fetch
@@ -448,7 +471,7 @@ export function guardEgress(): void {
           ? String(args[1] ?? 'localhost')
           : 'pipe'
     if (!['pipe', 'localhost', '::1'].includes(host) && !host.startsWith('127.')) {
-      record('egress_attempted')
+      denied(host)
       process.nextTick(() => this.destroy(new Error('egress denied by the check')))
       return this
     }
