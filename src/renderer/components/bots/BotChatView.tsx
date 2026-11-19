@@ -278,15 +278,17 @@ const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botNa
 /** A bot message uses only the bot's id, name and look, so a change of its state does not render it again. */
 const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message === b.message && a.asked === b.asked && a.onAction === b.onAction && a.browser === b.browser &&
   a.quote === b.quote && a.starts === b.starts && a.time === b.time && a.onReply === b.onReply && a.onApplet === b.onApplet && a.settled === b.settled &&
-  a.bot.id === b.bot.id && a.bot.name === b.bot.name
+  a.bot.id === b.bot.id && a.bot.name === b.bot.name && a.live === b.live && a.follow === b.follow
 
 /**
  * `browser`: the live preview of the bot's browser, on the reply of the last run that used it. `quote`: show the
  * message this one answers (it is not the one right above). `starts`: the first of its group, with the group's space
  * above it. `time`: shows its time (the last of a run in one minute does). `asked`: the message it answers, when loaded (how long it took). `onApplet`: opens one of its applets beside
- * the chat.
+ * the chat. `live`: the chat's turn, not posted yet: its typing dots, then its reply as it is written (`BotTurnBody`); its
+ * message, once posted, is drawn in this same bubble (`useReplyKeys`). `follow`: keeps the chat's end in view as the
+ * bubble grows.
  */
-interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; settled?: boolean; browser?: ReactNode; quote: boolean; starts: boolean; time: boolean; onReply(message: BotChatMessage): void; asked?: BotChatMessage; onApplet(applet: BotChatApplet): void }
+interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; settled?: boolean; browser?: ReactNode; quote: boolean; starts: boolean; time: boolean; onReply(message: BotChatMessage): void; asked?: BotChatMessage; onApplet(applet: BotChatApplet): void; live?: BotLive; follow?: () => void }
 
 /**
  * A reply's tools hang off its bubble's right edge: beside a wide bubble they move left, inside the transcript. Measured
@@ -344,8 +346,11 @@ const senderName = (from: BotMessageFrom, sender: BotSummary | undefined) => sen
  * Reply show beside it on hover; its applets sit under it; an open ask is quick replies under it. A message another of
  * the owner's bots sent it reads as in a group chat: that bot's face beside the bubble, its name on top, its colour.
  */
-const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settled, browser, quote, starts, time, onReply, asked, onApplet }: BotMessageProps) {
+const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settled, browser, quote, starts, time, onReply, asked, onApplet, live, follow }: BotMessageProps) {
   const store = useBotsStore.getState
+  // A bubble that was the chat's live turn eases to each new size: a line that wraps, then its posted message's foot.
+  const wasLive = useRef(false)
+  if (live) wasLive.current = true
   // A question's answers are buttons under it, so its words stop where their plain copy starts; a service whose
   // questions can't be answered here keeps that copy, and the owner answers with Reply.
   const canSnooze = useBotsStore((s) => !s.snoozeMissing)
@@ -384,6 +389,11 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
   // After a pick the bar goes, and stays gone while the pointer stays on the message; the focus goes to the bubble.
   const [reacted, setReacted] = useState(false)
   const bubble = useRef<HTMLDivElement>(null)
+  const resize = useEasedHeight(bubble, wasLive.current, follow)
+  const article = useRef<HTMLElement>(null)
+  useGrowIn(article, Boolean(live), follow)
+  // After every change of a bubble that was live (its posted message replacing its live words among them).
+  useLayoutEffect(() => { if (wasLive.current) resize() })
   const picked = () => {
     setReacted(true)
     bubble.current?.focus({ preventScroll: true })
@@ -402,7 +412,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
       {from && <span className="bot-from-name">{senderName(from, sender)}</span>}
       {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
       <BotReplyMedia images={shownImages} onMenuOpen={setMenuOpen} />
-      {message.action ? <BotActionCard card={message.action} botId={bot.id} botName={bot.name} messageId={message.id} /> : message.actionSentAt ? <p className="bot-question-settled" role="note" data-find-text data-message-id={message.id} data-part-index="0">Sent · <time dateTime={message.actionSentAt}>{botGroupTime(message.actionSentAt)}</time></p> : words && <div className="bot-find-text" data-find-text data-message-id={message.id} data-part-index="0"><BotMarkdown text={words} className="bot-markdown" /></div>}
+      {live ? <BotTurnBody botId={bot.id} botName={bot.name} live={live} onSize={resize} follow={follow} /> : message.action ? <BotActionCard card={message.action} botId={bot.id} botName={bot.name} messageId={message.id} /> : message.actionSentAt ? <p className="bot-question-settled" role="note" data-find-text data-message-id={message.id} data-part-index="0">Sent · <time dateTime={message.actionSentAt}>{botGroupTime(message.actionSentAt)}</time></p> : words && <div className="bot-find-text" data-find-text data-message-id={message.id} data-part-index="0"><BotMarkdown text={words} className="bot-markdown" /></div>}
       {cards && <BotCards cards={cards} botId={bot.id} />}
       {lostChips.length > 0 && <p className="bot-picture-chips">{lostChips.map((image) => <BotPathChip key={image.key} path={image.path!} />)}</p>}
       {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
@@ -417,7 +427,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
     </div>
     {/* As beside a thread's reply: read it aloud, copy it as written, reply to it. Anchored to the bubble's lower
         right edge and taking no width of its own, so the bubble is as wide with them as without. */}
-    <span ref={tools} className="bot-message-tools">
+    {!live && <span ref={tools} className="bot-message-tools">
       {canReact && <BotReactionBar current={message.reaction} onReact={react} onPicked={picked} onFocus={() => setReacted(false)} />}
       <span className="bot-message-actions">
         {(from ? from.message : message.text) && <ReadAloudButton speechKey={`bot:${message.id}`} markdown={from ? from.message : message.text} />}
@@ -425,9 +435,9 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
         {(from ? from.message : cards ? row.text : message.text) && <CopyButton text={from ? from.message : cards ? row.text : message.text} />}
         <ReplyButton onReply={() => onReply(message)} />
       </span>
-    </span>
+    </span>}
   </div>
-  return <article className={`chat-participant-message from-agent bot-message${from ? ' is-from-bot' : ''}${starts ? ' is-group-start' : ''}${reacted ? ' is-react-quiet' : ''}${message.reaction ? ' has-reaction' : ''}${menuOpen ? ' is-menu-open' : ''}`} data-message-id={message.id} data-turn-key={message.id}
+  return <article ref={article} className={`chat-participant-message from-agent bot-message${from ? ' is-from-bot' : ''}${starts ? ' is-group-start' : ''}${reacted ? ' is-react-quiet' : ''}${message.reaction ? ' has-reaction' : ''}${menuOpen ? ' is-menu-open' : ''}${live ? ' bot-turn' : wasLive.current ? ' was-live' : ''}`} {...(live ? {} : { 'data-message-id': message.id, 'data-turn-key': message.id })}
     style={from ? { '--from-colour': BOT_COLOUR_HEX[normalizeBotLook(sender?.look).colour] } as CSSProperties : undefined}
     onMouseEnter={clampTools} onFocus={clampTools} onMouseLeave={reacted ? () => setReacted(false) : undefined}>
     {/* As in a group chat: the sender's face at the foot of its bubble. */}
@@ -460,42 +470,229 @@ function SystemLine({ row }: { row: Extract<BotChatRow, { kind: 'system' }> }) {
   return <p className={className} role={row.note === 'error' ? 'alert' : 'note'} {...(row.title ? { title: row.title } : {})} {...(row.of ? { 'data-message-id': row.of } : {})}><span>{row.text}</span></p>
 }
 
+/** What a bubble shows while it is the chat's live turn: whether it waits for the internet, and what it is doing now. */
+interface BotLive { offline: boolean; doing: string }
+
 /**
- * While the chat's turn runs: the bot's next message, typing, as a messaging app shows it: three dots in a small bubble
- * in the bot's column, the only thing in the chat that moves, and beside them what the bot says it is doing now
- * (`useDoingLine`), in full; without its words, the dots alone. Waiting for the internet, it says so instead, still.
+ * How quickly a live bubble takes a new height (a wrapped line, its posted message's foot), before the speed scale: the
+ * time constant of a critically damped spring. A new height while it moves carries on from its speed, so the bubble
+ * never stops and starts again, and a 23 px line moves it under 2 px a frame.
  */
-function BotTyping({ bot, starts, offline, doing }: { bot: BotSummary; starts: boolean; offline: boolean; doing: string }) {
-  return <article className={`chat-participant-message from-agent bot-message bot-typing${starts ? ' is-group-start' : ''}`} role="status" aria-label={offline ? OFFLINE_TEXT : doing ? `${bot.name}: ${doing}` : `${bot.name} is typing`}>
-    <div className="bot-message-line">
-      {offline
-        ? <p className="bot-bubble bot-status-line">{OFFLINE_TEXT}</p>
-        : <TypingDots status={doing} />}
-    </div>
-  </article>
+export const BOT_GROW_TAU_MS = 80
+
+/** The same for the chat's turn growing into place (about 55 px with the space above it): under 2 px a frame. */
+export const BOT_GROW_IN_TAU_MS = 180
+
+/** A height moving toward its target, in px and px/ms, as of `last` (a frame's time). */
+interface Spring { x: number; v: number; last: number }
+
+/**
+ * Moves `spring` toward `target` up to `now`, in steps of at most 4 ms so it stays stable. A frame drawn late counts as
+ * one frame, not more: the bubble moves on as far as one frame would take it instead of catching up in a jump. True once
+ * it rests.
+ */
+function stepSpring(spring: Spring, target: number, now: number, tau: number): boolean {
+  const w = 1 / tau
+  for (let left = Math.min(now - spring.last, 17); left > 0; left -= 4) {
+    const h = Math.min(4, left)
+    spring.v += (w * w * (target - spring.x) - 2 * w * spring.v) * h
+    spring.x += spring.v * h
+  }
+  spring.last = now
+  return Math.abs(target - spring.x) < 0.1 && Math.abs(spring.v) < 0.002
+}
+
+/** The height `bubble` takes from its contents: the lowest of its children in the flow, and its own padding. */
+function naturalHeight(bubble: HTMLElement): number {
+  const top = bubble.getBoundingClientRect().top
+  const own = getComputedStyle(bubble)
+  let bottom = 0
+  for (const child of Array.from(bubble.children)) {
+    const style = getComputedStyle(child)
+    if (style.position === 'absolute' || style.position === 'fixed' || style.display === 'none') continue
+    bottom = Math.max(bottom, child.getBoundingClientRect().bottom - top + (parseFloat(style.marginBottom) || 0))
+  }
+  return bottom + (parseFloat(own.paddingBottom) || 0) + (parseFloat(own.borderBottomWidth) || 0)
 }
 
 /**
- * The reply the chat's turn is writing, in the bubble its message will have: whole words at an even pace, each fading in
- * as it shows (`useFlowingText`), so it reads as a steady flow and lines already shown never re-wrap. Until its first
- * word is whole, the typing bubble stays. Only this renders as the reply grows; its message, once posted, takes its place.
+ * A bubble that eases to each new height instead of snapping to it, and the chat's end that follows it frame by frame
+ * (`follow`, which leaves a reader who scrolled up where they are). The returned `resize` is called after each change of
+ * its contents (in a layout effect, before the frame is drawn): the bubble holds the height it showed and moves from
+ * there each frame (`stepSpring`); a change while it moves only gives it a new target. Off (`on` false, Animation speed
+ * Off or reduced motion), it only notes the height.
  */
-function BotLiveReply(props: { bot: BotSummary; starts: boolean; offline: boolean; doing: string; onGrow: () => void }) {
-  const reply = useBotLiveReply(props.bot.id)
+function useEasedHeight(ref: RefObject<HTMLElement | null>, on: boolean, follow?: () => void): () => void {
+  const scale = useMotionScale()
+  // A spring already moving takes a new speed at once; with motion off it stops where its target is.
+  const scaleRef = useRef(scale)
+  scaleRef.current = scale
+  const state = useRef<{ target?: number; spring?: Spring; frame: number }>({ frame: 0 })
+  const followRef = useRef(follow)
+  followRef.current = follow
+  const stop = useCallback(() => {
+    const s = state.current
+    cancelAnimationFrame(s.frame)
+    s.frame = 0
+    if (!s.spring) return
+    s.spring = undefined
+    ref.current?.style.removeProperty('height')
+    ref.current?.classList.remove('is-easing')
+  }, [ref])
+  useEffect(() => stop, [stop])
+  return useCallback(() => {
+    const element = ref.current
+    const s = state.current
+    if (!element || !on) return
+    if (scale === 0) stop()
+    const height = naturalHeight(element)
+    const shown = s.spring ? s.spring.x : s.target
+    s.target = height
+    if (s.spring || scale === 0 || shown === undefined || Math.abs(shown - height) < 0.5) return
+    const spring: Spring = { x: shown, v: 0, last: performance.now() }
+    s.spring = spring
+    element.classList.add('is-easing')
+    element.style.height = `${shown}px`
+    const step = (now: number) => {
+      if (stepSpring(spring, s.target!, now, BOT_GROW_TAU_MS * scaleRef.current)) stop()
+      else {
+        element.style.height = `${spring.x}px`
+        s.frame = requestAnimationFrame(step)
+      }
+      followRef.current?.()
+    }
+    s.frame = requestAnimationFrame(step)
+  }, [ref, on, scale, stop])
+}
+
+/**
+ * The chat's live turn grows into place where it starts, as tall and as far below the message above as it will be, and
+ * fades in, so the chat moves up to it over a few frames instead of all at once (`follow` each frame). Only on its
+ * first draw while live (`on`), and not with motion off.
+ */
+function useGrowIn(ref: RefObject<HTMLElement | null>, on: boolean, follow?: () => void) {
+  const scale = useMotionScale()
+  const followRef = useRef(follow)
+  followRef.current = follow
+  const grown = useRef(!on)
+  useLayoutEffect(() => {
+    const element = ref.current
+    if (!element || grown.current) return
+    grown.current = true
+    if (scale === 0) return
+    const margin = parseFloat(getComputedStyle(element).marginTop) || 0
+    const spring: Spring = { x: 0, v: 0, last: performance.now() }
+    element.classList.add('is-growing-in')
+    const draw = (height: number) => {
+      const part = height > 0 ? Math.min(1, spring.x / height) : 1
+      element.style.height = `${spring.x}px`
+      element.style.marginTop = `${part * margin}px`
+      element.style.opacity = `${part}`
+    }
+    const settle = () => {
+      element.style.height = element.style.marginTop = element.style.opacity = ''
+      element.classList.remove('is-growing-in')
+    }
+    draw(naturalHeight(element))
+    let frame = 0
+    const step = (now: number) => {
+      const height = naturalHeight(element)
+      if (stepSpring(spring, height, now, BOT_GROW_IN_TAU_MS * scale)) {
+        frame = 0
+        settle()
+      } else {
+        draw(height)
+        frame = requestAnimationFrame(step)
+      }
+      followRef.current?.()
+    }
+    frame = requestAnimationFrame(step)
+    // Cut short (its effects run twice in development, or the speed changed): it starts again if it is drawn again.
+    return () => {
+      if (!frame) return
+      cancelAnimationFrame(frame)
+      settle()
+      grown.current = false
+    }
+  }, [ref, scale])
+}
+
+/** How long the typing row and the first words of the reply cross, before the speed scale. */
+export const BOT_HANDOFF_MS = 180
+
+/**
+ * The chat's live turn inside its bubble, as a messaging app shows it. The bubble (a `BotMessage` with `live`) is the
+ * one its message, once posted, is drawn in, so nothing mounts or goes when the reply comes:
+ * - Typing: three dots and beside them what it is doing now (`useDoingLine`), in full, the only thing that moves.
+ *   Waiting for the internet, it says so instead, still.
+ * - Writing: the reply in whole words at an even pace, each fading in (`useFlowingText`), so lines already shown never
+ *   re-wrap. Until its first word is whole the dots stay. Each new line eases the bubble taller (`useEasedHeight`).
+ * - The handoff: the reply's words and the typing row share one place. The row fades out as the words fade in
+ *   (`BOT_HANDOFF_MS`; at once with motion off), then stays there unseen and still, keeping the bubble at least as tall
+ *   and as wide as it was. The reply's first line is as tall as the typing row (a paragraph's line, `.bot-turn-typing`).
+ */
+function BotTurnBody({ botId, botName, live, onSize, follow }: { botId: string; botName: string; live: BotLive; onSize: () => void; follow?: () => void }) {
+  const { offline, doing } = live
+  const reply = useBotLiveReply(botId)
   // Each reply of the turn is paced from its own start.
-  return <FlowingLiveReply key={reply?.messageId ?? ''} text={reply?.text ?? ''} {...props} />
+  const shown = useFlowingText(reply?.text ?? '', true, reply?.messageId ?? '')
+  const writing = shown !== ''
+  const scale = useMotionScale()
+  useLayoutEffect(() => {
+    onSize()
+    follow?.()
+  }, [shown, onSize, follow])
+  // The words beside the dots as the reply took over: the unseen row keeps them, so its size holds still.
+  const held = useRef(doing)
+  if (!writing) held.current = doing
+  // `leaving`: the typing row fading out over the first words.
+  const [leaving, setLeaving] = useState(false)
+  const wasWriting = useRef(writing)
+  useLayoutEffect(() => {
+    const was = wasWriting.current
+    wasWriting.current = writing
+    if (!writing || was || scale === 0) return
+    setLeaving(true)
+    const timer = setTimeout(() => setLeaving(false), BOT_HANDOFF_MS * scale)
+    return () => {
+      clearTimeout(timer)
+      setLeaving(false)
+    }
+  }, [writing, scale])
+  const typing = <span className={`an-md-p bot-turn-typing${writing ? leaving ? ' is-leaving' : ' is-held' : ''}`} aria-hidden={writing || undefined}>
+    {offline && !writing ? <span className="bot-status-line">{OFFLINE_TEXT}</span> : <TypingDots status={writing ? held.current : doing} still={writing && !leaving} />}
+  </span>
+  return <div className={`bot-turn-body ${writing ? 'bot-live-reply' : 'bot-typing'}`}
+    {...(writing ? { 'aria-busy': true } : { role: 'status', 'aria-label': offline ? OFFLINE_TEXT : doing ? `${botName}: ${doing}` : `${botName} is typing` })}>
+    {/* A paragraph's line box, as the reply's own first line has: the typing row is as tall as one line of it. */}
+    <div className="an-markdown bot-markdown bot-turn-place">{typing}</div>
+    {writing && <BotMarkdown text={shown} className={`bot-markdown bot-turn-reply${leaving ? ' is-arriving' : ''}`} streaming />}
+  </div>
 }
 
-function FlowingLiveReply({ bot, starts, offline, doing, onGrow, text }: { bot: BotSummary; starts: boolean; offline: boolean; doing: string; onGrow: () => void; text: string }) {
-  const shown = useFlowingText(text, true)
-  useLayoutEffect(onGrow, [shown, onGrow])
-  if (!shown) return <BotTyping bot={bot} starts={starts} offline={offline} doing={doing} />
-  return <article className={`chat-participant-message from-agent bot-message bot-live-reply${starts ? ' is-group-start' : ''}`} aria-busy="true">
-    <div className="bot-message-line">
-      <div className="bot-bubble"><BotMarkdown text={shown} className="bot-markdown" streaming /></div>
-    </div>
-  </article>
+/**
+ * The key of the chat's live bubble (`live`), and of the bot messages that took one over (`keys`): a bot message of the
+ * chat's turn (the latest `turn` named) that arrives after the chat first drew its rows, newer than every bot message
+ * before it, takes the live bubble's key, and the live bubble moves on to a new one. So a posted message is drawn in the
+ * bubble that was typing and writing it, not in a new one. Every other message keeps its id: loading older messages
+ * changes no key.
+ */
+function useReplyKeys(rows: readonly BotChatRow[], turn: string | undefined): { keys: ReadonlyMap<string, string>; live: string } {
+  const state = useRef<{ keys: Map<string, string>; next: number; turn?: string; seq: number } | null>(null)
+  const botSeq = (row: BotChatRow) => (row.kind === 'message' && row.message.author === 'bot' ? row.message.seq : -Infinity)
+  state.current ??= { keys: new Map(), next: 0, seq: Math.max(-Infinity, ...rows.map(botSeq)) }
+  const s = state.current
+  if (turn) s.turn = turn
+  for (const row of rows) {
+    if (row.kind !== 'message' || botSeq(row) <= s.seq) continue
+    s.seq = row.message.seq
+    if (s.turn && row.message.activationId === s.turn && !s.keys.has(row.message.id)) s.keys.set(row.message.id, `reply:${s.next++}`)
+  }
+  return { keys: s.keys, live: `reply:${s.next}` }
 }
+
+/** After a reply of the turn is posted, how long the turn waits before it shows typing again: most turns end with it. */
+export const BOT_AFTER_REPLY_MS = 700
 
 /**
  * A reply whose turn stopped before it finished (a Stop, a failure): what it had written, muted and marked stopped, as a
@@ -575,13 +772,14 @@ const TYPING_SHIMMER_DELAY_MS = 2 * TYPING_DOT_STEP_MS + 0.3 * TYPING_CYCLE_MS +
  * The typing dots move smoothly, every frame, on the compositor (opacity and transform only). They are Web Animations
  * rather than a CSS loop for the reason Turning gives (lib/turning.tsx): a repeating CSS animation wakes the main thread
  * at every iteration because React listens for `animationiteration`. The status's shimmer is transforms too. With
- * Animation speed Off or reduced motion all of it stays still, and the words are plain.
+ * Animation speed Off or reduced motion all of it stays still, and the words are plain; so is a row held unseen under
+ * a reply (`hold`).
  */
-function TypingDots({ status }: { status: string }) {
+function TypingDots({ status, still: hold = false }: { status: string; still?: boolean }) {
   const dotsRef = useRef<HTMLSpanElement>(null)
   const glintRef = useRef<HTMLSpanElement>(null)
   const bubbleRef = useRef<HTMLSpanElement>(null)
-  const still = useMotionScale() === 0
+  const still = useMotionScale() === 0 || hold
   useLayoutEffect(() => {
     if (still) return
     const dots = Array.from(dotsRef.current?.children ?? [])
@@ -614,7 +812,7 @@ function TypingDots({ status }: { status: string }) {
       }
     })
   }, [still, Boolean(status)])
-  return <span ref={bubbleRef} className={`bot-bubble bot-typing-bubble${still ? ' is-still' : ''}`}>
+  return <span ref={bubbleRef} className={`bot-typing-row${still ? ' is-still' : ''}`}>
     <span ref={dotsRef} className="bot-typing-dots" aria-hidden><i /><i /><i /></span>
     {status && <span className="bot-typing-status">
       {status}
@@ -837,6 +1035,19 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const writing = useHasBotLiveReply(bot.id)
   // What the bot says it is doing now, beside its typing dots; nothing of Mousse's own.
   const doing = useDoingLine(turn, botDoingLine({ status }))
+  // The turn's live bubble is drawn as the bot message it becomes, under the key its message takes over.
+  const replyKeys = useReplyKeys(shown, turn)
+  const live = useMemo<BotLive>(() => ({ offline, doing }), [offline, doing])
+  const liveMessage = useMemo<BotChatMessage>(() => ({ id: replyKeys.live, seq: -1, at: '', author: 'bot', kind: 'text', text: '', chips: [], ...(turn ? { activationId: turn } : {}) }), [replyKeys.live, turn])
+  // A reply of the turn just posted: typing shows again only if the turn still works a moment later.
+  const posted = !writing && turn && last?.kind === 'message' && last.message.author === 'bot' && last.message.activationId === turn ? last.message.id : undefined
+  const [quietDone, setQuietDone] = useState<string>()
+  useEffect(() => {
+    if (!posted) return
+    const timer = setTimeout(() => setQuietDone(posted), BOT_AFTER_REPLY_MS)
+    return () => clearTimeout(timer)
+  }, [posted])
+  const liveShown = (writing || working || offline) && (!posted || quietDone === posted)
   const followEnd = useCallback(() => {
     const element = transcript.current
     if (!element || !anchor.current.atEnd) return
@@ -918,17 +1129,14 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           // A reply shows what it answers unless that is the message right above it.
           const above = shown[index - 1]
           const quote = Boolean(message.replyTo) && (sending || !((above?.kind === 'message' && above.message.id === message.replyTo!.id) || (above?.kind === 'system' && above.of === message.replyTo!.id)))
-          return <Fragment key={message.id}>
+          return <Fragment key={replyKeys.keys.get(message.id) ?? message.id}>
             {day}
             {message.author === 'owner'
               ? <OwnerMessage botId={bot.id} message={message} pending={sending} botName={bot.name} quote={quote} starts={place.starts} time={place.time} marks={(marks ?? NO_MARKS).get(message.id)} onReply={sending ? undefined : reply} />
               : <BotMessage bot={bot} message={message} onAction={act} settled={message.error?.action?.kind === 'resume' && message.id !== resumeOn} browser={message.id === previewOn ? preview : undefined} quote={quote} starts={place.starts} time={place.time} onReply={reply} onApplet={openApplet}
-                asked={message.replyTo ? byId.get(message.replyTo.id) : undefined} />}
+                asked={message.replyTo ? byId.get(message.replyTo.id) : undefined} {...(replyKeys.keys.has(message.id) ? { follow: followEnd } : {})} />}
           </Fragment>
-        })}
-        {writing
-          ? <BotLiveReply bot={bot} starts={typingStarts} offline={offline} doing={doing} onGrow={followEnd} />
-          : (working || offline) && <BotTyping bot={bot} starts={typingStarts} offline={offline} doing={doing} />}
+        }).concat(liveShown ? [<Fragment key={replyKeys.live}>{null}<BotMessage bot={bot} message={liveMessage} onAction={act} quote={false} starts={typingStarts} time={false} onReply={reply} onApplet={openApplet} live={live} follow={followEnd} /></Fragment>] : [])}
         {/* A run still working before its reply: the preview follows it here. */}
         {preview && !previewOn && <div className="bot-browser-live">{preview}</div>}
         {bot.state === 'paused' && <p className="bot-paused-line" role="status">{bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused'}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
