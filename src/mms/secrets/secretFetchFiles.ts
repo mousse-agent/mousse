@@ -4,6 +4,7 @@ import {
   closeSync,
   constants,
   fstatSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -12,7 +13,7 @@ import {
   writeFileSync,
   type BigIntStats
 } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 /** Only these daemon-created names may be pruned; directory contents are never trusted. */
 const responses = new Map<string, { dev: bigint; ino: bigint; names: string[] }>()
@@ -44,7 +45,7 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
     if (!checked.isDirectory() || checked.isSymbolicLink()) throw new SecretFetchFileError(true)
     // Non-Linux Node cannot locate a file's parent through its fd. A child pins cwd instead;
     // merely comparing the bot-controlled path before/after open would leave another race.
-    if (process.platform !== 'linux') {
+    if (process.platform !== 'linux' || !existsSync('/proc/self/fd')) {
       let record = responses.get(folder)
       if (!record || !same(record, checked))
         record = { dev: checked.dev, ino: checked.ino, names: [] }
@@ -52,6 +53,7 @@ export function saveSecretFetchResponse(scratch: string, bytes: Buffer): string 
       const prune = record.names.slice(0, Math.max(0, record.names.length - 19))
       const result = saveSecretFetchAtCwd({
         folder,
+        botsFolder: dirname(dirname(scratch)),
         dev: checked.dev,
         ino: checked.ino,
         name,

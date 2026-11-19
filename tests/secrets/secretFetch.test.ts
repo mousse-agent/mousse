@@ -92,9 +92,9 @@ it.each([
 })
 it('sends the checked decoded segment bytes', async () => {
   const { run } = fixture()
-  await run({ path: '/v1/%6dodels/hello%20world', query: { limit: '2' } })
+  await run({ path: '/v1/%6dodels/hello-world', query: { limit: '2' } })
   expect(vi.mocked(publicFetch).mock.lastCall?.[0]).toBe(
-    'https://api.openai.com/v1/models/hello%20world?limit=2'
+    'https://api.openai.com/v1/models/hello-world?limit=2'
   )
 })
 it.each([

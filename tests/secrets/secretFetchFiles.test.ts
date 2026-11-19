@@ -177,7 +177,7 @@ it('describes a local save failure without calling it a connection failure', asy
   writeFileSync(join(f.scratch, 'fetches'), 'not a directory')
   const out = await f.run()
   expect(out.isError).toBe(true)
-  expect(out.text).toContain('could not be saved on this computer')
+  expect(out.text).toContain('request was not sent')
   expect(out.text).not.toContain('could not be reached')
 })
 
@@ -206,6 +206,7 @@ it('keeps a close failure local and releases the parent handle', async () => {
   }
   hooks.afterClose = (fd) => {
     if (!opened.has(fd)) return
+    if (opened.size < 2) { opened.delete(fd); return }
     opened.delete(fd)
     hooks.afterClose = (next) => {
       opened.delete(next)

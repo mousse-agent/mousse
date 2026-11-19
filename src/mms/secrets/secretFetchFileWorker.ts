@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 
-/** Node has no portable openat. A short-lived child pins the checked directory as its cwd;
+/** Node has no portable openat. Startup uses the daemon-owned bots folder, then A short-lived child pins the checked directory as its cwd;
  * every create/unlink is relative to that kernel-held directory, never the bot's mutable path.
  * It runs fixed daemon code, receives only masked bytes on stdin, and returns only an exit status.
  */
@@ -8,7 +8,7 @@ const SAVE = String.raw`
 const fs = require('node:fs')
 const same = (a, b) => a.dev === b.dev && a.ino === b.ino
 const [folder, dev, ino, name, ...prune] = process.argv.slice(1)
-const checked = { dev: Number(dev), ino: Number(ino) }
+const checked = { dev: BigInt(dev), ino: BigInt(ino) }
 let fd,
   parent,
   identity,
@@ -16,8 +16,8 @@ let fd,
   unsafe = false
 const current = () => {
   try {
-    const atPath = fs.lstatSync(folder)
-    const held = parent === undefined ? fs.statSync('.') : fs.fstatSync(parent)
+    const atPath = fs.lstatSync(folder, { bigint: true })
+    const held = parent === undefined ? fs.statSync('.', { bigint: true }) : fs.fstatSync(parent, { bigint: true })
     return (
       atPath.isDirectory() &&
       !atPath.isSymbolicLink() &&
@@ -29,6 +29,7 @@ const current = () => {
   }
 }
 try {
+  process.chdir(folder)
   if (process.platform !== 'win32')
     parent = fs.openSync(
       '.',
@@ -51,8 +52,8 @@ try {
       (fs.constants.O_NOFOLLOW || 0),
     0o600,
   )
-  identity = fs.fstatSync(fd)
-  if (!identity.isFile() || !same(identity, fs.lstatSync(name)) || !current()) {
+  identity = fs.fstatSync(fd, { bigint: true })
+  if (!identity.isFile() || !same(identity, fs.lstatSync(name, { bigint: true })) || !current()) {
     unsafe = true
     throw new Error()
   }
@@ -82,7 +83,7 @@ try {
     fs.closeSync(fd)
     if (!wrote) {
       try {
-        const entry = fs.lstatSync(name)
+        const entry = fs.lstatSync(name, { bigint: true })
         if (entry.isFile() && same(entry, identity)) fs.unlinkSync(name)
       } catch {}
     }
@@ -93,8 +94,9 @@ try {
 
 export function saveSecretFetchAtCwd(input: {
   folder: string
-  dev: number
-  ino: number
+  botsFolder: string
+  dev: bigint
+  ino: bigint
   name: string
   prune: readonly string[]
   bytes: Buffer
@@ -103,7 +105,7 @@ export function saveSecretFetchAtCwd(input: {
     process.execPath,
     ['-e', SAVE, input.folder, String(input.dev), String(input.ino), input.name, ...input.prune],
     {
-      cwd: input.folder,
+      cwd: input.botsFolder,
       input: input.bytes,
       // No NODE_OPTIONS, owner credentials or inherited startup scripts reach this helper.
       env: {
