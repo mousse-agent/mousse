@@ -8134,15 +8134,18 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * The chat turn Resume answers again: the newest one, when a usage limit ended it and nothing in the chat lane runs
    * or waits. None when the bot can't run now (its approval, its thread in the trash): Resume still clears the pause.
    * Its key keeps the owner's start (`chat:`, `answer:`), as `chat:after:` does, so the retry still holds the owner's
-   * threads and memory (`threadsActOf`, `memoryLaneOf`); any other start stays `resume:`, which acts on nothing.
+   * threads and memory (`threadsActOf`, `memoryLaneOf`). A start that may act without the owner (a wake, a thread's
+   * notice, a question's default) follows the `resume:` (`resume:wake:<id>`), so the retry may act as its original
+   * could. Any other start (another bot's message) is `resume:` alone, which only reads the owner's threads.
    */
   private chatToRetry(botId: string): { row: BotActivationRow; key: string; admitted: ReturnType<BotEngine['admissible']> } | undefined {
     if (this.store.laneActivations(botId, 'chat', ['queued', 'running', 'waiting_grant']).length) return undefined
     const row = this.store.newestActivation(botId, 'chat')
     if (!row || row.status !== 'failed' || row.endReason !== 'usage_limit' || row.trigger.kind !== 'manual') return undefined
-    const owner = ['chat:', 'answer:'].find((start) => row.idempotencyKey.startsWith(start)) ?? ''
+    const owner = ['chat:', 'answer:'].find((start) => row.idempotencyKey.startsWith(start))
+    const key = owner ? `${owner}${RESUME_KEY_PREFIX}${row.id}` : `${RESUME_KEY_PREFIX}${actingChatStartOf(row.idempotencyKey) ?? ''}${row.id}`
     try {
-      return { row, key: `${owner}resume:${row.id}`, admitted: this.admissible(botId) }
+      return { row, key, admitted: this.admissible(botId) }
     } catch {
       return undefined
     }
@@ -10668,14 +10671,29 @@ export function memoryLaneOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKe
  */
 const ACTING_CHAT_KEYS = ['create:', 'wake:', 'question:', 'job:', THREAD_MESSAGE_KEY_PREFIX] as const
 
+/** The start of a chat turn Resume retried after a usage limit (`chatToRetry`). */
+const RESUME_KEY_PREFIX = 'resume:'
+
+/**
+ * Which of `ACTING_CHAT_KEYS` started the chat turn keyed `key`, also through the `resume:` of the turns Resume
+ * retried after a usage limit (`resume:wake:<id>`, `resume:resume:job:<id>`); undefined for any other start. The
+ * `resume:` in front keeps the start's own readers (a wake's chain, a job's notice, quiet notices) from taking the
+ * retry for the original.
+ */
+function actingChatStartOf(key: string): string | undefined {
+  let rest = key
+  while (rest.startsWith(RESUME_KEY_PREFIX)) rest = rest.slice(RESUME_KEY_PREFIX.length)
+  return ACTING_CHAT_KEYS.find((start) => rest.startsWith(start))
+}
+
 /**
  * Whether the activation may start, message, stop, archive or hide the owner's threads ("use your threads"): a chat
  * turn its owner's message or tapped answer started (`chat:`, `answer:`), the bot's first message, a wake, a question's
- * default answer or a thread's notice (`ACTING_CHAT_KEYS`), and every run (work, a reminder's work, a schedule). Not
- * another bot's message (`botmsg:`).
+ * default answer or a thread's notice (`ACTING_CHAT_KEYS`, also when Resume retried it), and every run (work, a
+ * reminder's work, a schedule). Not another bot's message (`botmsg:`).
  */
 export function threadsActOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
-  return row.lane === 'run' || memoryLaneOf(row) === 'chat' || (row.lane === 'chat' && ACTING_CHAT_KEYS.some((key) => row.idempotencyKey.startsWith(key)))
+  return row.lane === 'run' || memoryLaneOf(row) === 'chat' || (row.lane === 'chat' && actingChatStartOf(row.idempotencyKey) !== undefined)
 }
 
 /** Why a turn holds the owner's threads to reading only (`BotAuthority.threadsReadOnly`); undefined when it may act. */
