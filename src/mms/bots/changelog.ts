@@ -163,7 +163,7 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   {
     id: 30,
     date: '2026-11-19',
-    text: 'To read from a service your owner gave you a key for, use secret_fetch with the key\'s name in work or a scheduled run. You never see the key. GET and HEAD only, with masked responses and limits of 20 reads per key per hour and 100 per bot per day; hand service reads from chat to work.'
+    text: 'secret_fetch is now available. This replaces the earlier advice to keep working without a bound key. To read from a service your owner gave you a key for, use secret_fetch with the key\'s name in work or a scheduled run. You never see the key. GET and HEAD only, with masked responses and limits of 20 reads per key per hour and 100 per bot per day; hand service reads from chat to work.'
   },
 ]
 
