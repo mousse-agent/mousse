@@ -64,7 +64,7 @@ export function LabsSettings({ settings, onUpdate }: { settings: MousseSettings;
           title="Sidebar animations"
           anchor="labs-sidebar-animations"
           htmlFor="labs-sidebar-animations"
-          description="Slide the sidebar and animate changes to its lists."
+          description="Animate sidebar transitions, working indicators, and the read-aloud waveform."
           control={
             <Switch
               id="labs-sidebar-animations"

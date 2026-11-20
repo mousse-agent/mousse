@@ -819,6 +819,12 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   margin-left: auto;
 }
 
+.threads-sidebar-status-icon--working {
+  display: inline-grid;
+  place-items: center;
+  color: var(--status-running);
+}
+
 .threads-sidebar-status-icon--completed {
   color: #4ade80;
 }
