@@ -42,6 +42,8 @@ function stubBridge(): void {
     })
   const sections: Record<string, unknown> = {
     orchestrator: section(orchestrator),
+    fileDrag: section({ pathOf: () => '' }),
+    threads: section({ attachmentPath: async () => '/staged/shot.png' }),
     skills: section({ list: () => Promise.resolve({ skills: [] }) }),
     queue: section({ list: async () => [], promoteToSteer: async () => ({ ok: true }) })
   }
@@ -158,6 +160,7 @@ describe('a sent message is on the screen from the click', () => {
     await act(async () => { composer().dispatchEvent(paste) })
     await settle()
     await type('Look at this')
+    await vi.waitFor(() => expect(host.querySelector<HTMLButtonElement>('[aria-label="Queue message"], [aria-label="Steer message"]')?.disabled).toBe(false))
     await press({ ctrlKey: true })
     expect(composer().value).toBe('')
     expect(steered()).toEqual(['Look at this'])
