@@ -362,19 +362,27 @@ function TurnWorkStatus({
 
 const NO_WAITS: readonly WaitSpan[] = [];
 const EMPTY_UI_MESSAGES: UIMessage[] = [];
+/** The work clock of a turn under way before its prompt is saved (`StartingTurnRow`). */
+const STARTING_TURN_ID = "__starting__";
+
+type WorkClock = { turnId: string; startedAt: number; endedAt: number | null };
 
 /**
  * A turn already under way whose first message has not been written yet (such as a newly started
  * subagent setting up its worktree): the same Working header and Starting… progress row that a
- * turn with a prompt shows before its first output arrives.
+ * turn with a prompt shows before its first output arrives. Its start goes on the list's work clock,
+ * so the turn row that takes over when the prompt is saved keeps counting from it.
  */
-function StartingTurnRow() {
+function StartingTurnRow({ clockRef }: { clockRef: React.MutableRefObject<WorkClock | null> }) {
   const state = useTurnProgressState();
   const startedAt = useMemo(() => {
     if (!state?.startedAt) return null;
     const ms = Date.parse(state.startedAt);
     return Number.isFinite(ms) ? ms : null;
   }, [state?.startedAt]);
+  useEffect(() => {
+    if (startedAt != null) clockRef.current = { turnId: STARTING_TURN_ID, startedAt, endedAt: null };
+  }, [clockRef, startedAt]);
   return (
     <div data-turn-key="__starting__" className="relative space-y-2">
       <div className="group/assistant-turn">
@@ -1423,11 +1431,7 @@ export const MessageList = memo(function MessageList({
   // it. Marker position state itself lives in the overlay so recomputes
   // never re-render the message list.
   const promptScrollAnimRef = useRef(0);
-  const workClockRef = useRef<{
-    turnId: string;
-    startedAt: number;
-    endedAt: number | null;
-  } | null>(null);
+  const workClockRef = useRef<WorkClock | null>(null);
   const [settledWork, setSettledWork] = useState<Record<string, number>>({});
   // The optimistic send id is replaced by the saved id a moment later. Keep
   // one React key so the bubble does not unmount and land again. The aliases
@@ -1802,7 +1806,11 @@ export const MessageList = memo(function MessageList({
 
   useEffect(() => {
     const turnId = lastUserMessageId;
-    if (!turnId) return;
+    if (!turnId) {
+      // A start that ended before its prompt was saved (stopped while setting up) times nothing later.
+      if (!replyActive && workClockRef.current?.turnId === STARTING_TURN_ID) workClockRef.current = null;
+      return;
+    }
     if (replyActive) {
       const clock = workClockRef.current;
       if (clock && clock.turnId !== turnId && clock.endedAt == null) {
@@ -2236,7 +2244,7 @@ export const MessageList = memo(function MessageList({
               />
             );
           })}
-          {turns.length === 0 && isStreaming && <StartingTurnRow />}
+          {turns.length === 0 && isStreaming && <StartingTurnRow clockRef={workClockRef} />}
         </div>
         {afterTurns != null && (
           // Clear of the last turn's toolbar, which reaches into the space below the rows.

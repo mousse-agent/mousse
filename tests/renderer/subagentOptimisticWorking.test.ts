@@ -216,7 +216,9 @@ describe('clicking a starting subagent in Nest', () => {
   }
 
   it('shows Working + Starting… and SubagentParentBar instead of the new-chat screen even before threads:updated or turnState arrive', async () => {
-    const summary = makeSubagentSummary({ childThreadId: 'sub-1', title: 'API reviewer', state: 'queued', activity: 'queued' })
+    // Started two minutes ago and still setting up: the Working time counts from then, before and after its prompt lands.
+    const createdAt = new Date(Date.now() - 125_000).toISOString()
+    const summary = makeSubagentSummary({ childThreadId: 'sub-1', title: 'API reviewer', state: 'queued', activity: 'queued', createdAt })
     listSubagents = async (id) => (id === 'parent-1' ? [summary] : [])
     useAppStore.getState().setSubagents('parent-1', [summary])
 
@@ -238,19 +240,21 @@ describe('clicking a starting subagent in Nest', () => {
     // Must immediately show SubagentParentBar identifying its parent.
     expect(host.querySelector('.subagent-parent-bar')?.textContent).toContain('Subagent of Build API')
     // Must optimistically show Working + Starting… in the transcript.
-    expect(host.querySelector('.turn-work-label')?.textContent).toMatch(/^Working/)
+    expect(host.querySelector('.turn-work-label')?.textContent).toMatch(/^Working.*2m/)
     expect(host.querySelector('[data-turn-progress="starting"]')?.textContent).toContain('Starting…')
 
     // Once the subagent's real first prompt arrives, the starting placeholder hands off cleanly to the turn row.
+    const now = new Date().toISOString()
     await act(async () => {
-      useAppStore.getState().setTurnState({ threadId: 'sub-1', turnId: 'run:1', phase: 'thinking', step: { kind: 'starting' }, startedAt: iso(1), updatedAt: iso(1) })
-      useAppStore.getState().addMessage({ id: 'sub-msg-1', role: 'user', content: 'Review the API endpoints', timestamp: iso(1) } as ChatMessage)
+      useAppStore.getState().setTurnState({ threadId: 'sub-1', turnId: 'run:1', phase: 'thinking', step: { kind: 'starting' }, startedAt: now, updatedAt: now })
+      useAppStore.getState().addMessage({ id: 'sub-msg-1', role: 'user', content: 'Review the API endpoints', timestamp: now } as ChatMessage)
     })
     await settle()
 
     expect(host.querySelector('[data-turn-key="__starting__"]')).toBeNull()
     expect(host.querySelectorAll('.turn-work-label')).toHaveLength(1)
-    expect(host.querySelector('.turn-work-label')?.textContent).toMatch(/^Working/)
+    // The time does not drop back to 0s when the prompt is saved.
+    expect(host.querySelector('.turn-work-label')?.textContent).toMatch(/^Working.*2m/)
     expect(host.textContent).toContain('Review the API endpoints')
   })
 
