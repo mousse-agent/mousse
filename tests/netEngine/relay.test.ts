@@ -184,6 +184,24 @@ describe('relays (Phase 3)', () => {
     expect(ops.filter((op) => op === 'relay.list')).toHaveLength(0)
   })
 
+  it('reads again only the list asked for while a read was running', async () => {
+    // The pairing's relay info answers slowly: a second offer arrives while the first read runs.
+    b.fake!.slow.set('peers.list', 400)
+    try {
+      const before = b.fake!.requests.length
+      b.fake!.emit({ ev: 'peer.relay.offered', identity: a.endpoint, destination: OTHER })
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      b.fake!.emit({ ev: 'peer.relay.offered', identity: a.endpoint, destination: OTHER })
+      await new Promise((resolve) => setTimeout(resolve, 1_500))
+      const ops = b.fake!.requests.slice(before).map((request) => request.op)
+      expect(ops.filter((op) => op === 'peers.list')).toHaveLength(2)
+      expect(ops.filter((op) => op === 'grants.list')).toHaveLength(0)
+      expect(ops.filter((op) => op === 'relay.list')).toHaveLength(0)
+    } finally {
+      b.fake!.slow.delete('peers.list')
+    }
+  })
+
   it('marks a host’s relay info out of date when it expires by its own clock, and wakes the windows then', async () => {
     // The helper still says fresh: the app decides from expires_at.
     const expiresAt = Math.floor(Date.now() / 1000) + 3 * 86_400

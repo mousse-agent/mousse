@@ -534,7 +534,8 @@ export class NetEngineService implements EngineDirectoryPort {
         .catch(() => undefined)
         .finally(() => {
           this.relayReading = undefined
-          if (this.relayWanted.size) this.rereadRelays()
+          // Only the lists asked for meanwhile: none asked for would read all three.
+          if (this.relayWanted.size) this.rereadRelays(...this.relayWanted)
         })
     }, engineLimits().relayReadDebounceMs)
     this.relayTimer.unref?.()

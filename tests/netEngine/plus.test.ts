@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { NetError } from '../../src/shared/net'
-import { EnginePlus, PLUS_FAILED, PLUS_WRONG_PAGE } from '../../src/mms/netEngine/plus'
+import { EnginePlus, PLUS_FAILED, PLUS_WEB_ORIGINS_VARIABLE, PLUS_WRONG_PAGE } from '../../src/mms/netEngine/plus'
 import { registerNetEngineMethods } from '../../src/mms/netEngine/registerMethods'
 import type { EngineHelper } from '../../src/mms/netEngine/helper/connections'
 import type { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
@@ -208,13 +208,53 @@ describe('the netEngine.* handlers for Plus and removals', () => {
     return { h, call, methods }
   }
 
-  it('refuses a sign-in page off the Plus address', async () => {
-    const { h, call } = handlers()
-    ;(h.stub as unknown as { request: (op: string) => Promise<Json> }).request = async (op: string) =>
-      op === 'plus.link.start'
-        ? { user_code: 'WXYZ-1234', verify_url: 'https://plus.test.evil.example/link', expires_at: 99 }
-        : { configured: true, linked: false, url: 'https://plus.test' }
-    await expect(call('netEngine.plus.signIn', {})).rejects.toThrow(PLUS_WRONG_PAGE)
+  /** Sign-in where Plus names `page`, with `MOUSSE_NET_ENGINE_PLUS_WEB_ORIGINS` set to `listed`: what it sent. */
+  async function signInAt(page: string, listed?: string) {
+    const sent: string[] = []
+    const stub = {
+      onEvent: () => () => undefined,
+      request: async (op: string): Promise<Json> => {
+        sent.push(op)
+        return op === 'plus.link.start'
+          ? { user_code: 'WXYZ-1234', verify_url: page, expires_at: 99 }
+          : { configured: true, linked: false, url: 'https://plus.test' }
+      }
+    }
+    const before = process.env[PLUS_WEB_ORIGINS_VARIABLE]
+    if (listed === undefined) delete process.env[PLUS_WEB_ORIGINS_VARIABLE]
+    else process.env[PLUS_WEB_ORIGINS_VARIABLE] = listed
+    try {
+      const plus = new EnginePlus(() => undefined)
+      plus.attach(stub as unknown as EngineHelper)
+      await settle()
+      const result = await plus.signIn().then(
+        (link) => ({ link }),
+        (error: Error) => ({ error })
+      )
+      return { ...result, sent }
+    } finally {
+      if (before === undefined) delete process.env[PLUS_WEB_ORIGINS_VARIABLE]
+      else process.env[PLUS_WEB_ORIGINS_VARIABLE] = before
+    }
+  }
+
+  it('takes a sign-in page on the Plus address, or on a listed Plus website', async () => {
+    expect((await signInAt('https://plus.test/link')).link?.verifyUrl).toBe('https://plus.test/link')
+    const listed = await signInAt('https://account.plusweb.test/link', 'https://other.test, https://account.plusweb.test/')
+    expect(listed.link?.verifyUrl).toBe('https://account.plusweb.test/link')
+    expect(listed.sent).not.toContain('plus.link.cancel')
+  })
+
+  it.each([
+    ['a look-alike of the Plus address', 'https://plus.test.evil.example/link', undefined],
+    ['a look-alike of a listed website', 'https://account.plusweb.test.evil.example/link', 'https://account.plusweb.test'],
+    ['a listed website over http', 'http://account.plusweb.test/link', 'https://account.plusweb.test'],
+    ['a website listed over http', 'http://account.plusweb.test/link', 'http://account.plusweb.test'],
+    ['a website not listed', 'https://account.plusweb.test/link', undefined]
+  ])('refuses %s, and cancels the sign-in the helper started', async (_name, page, listed) => {
+    const result = await signInAt(page, listed)
+    expect(result.error?.message).toBe(PLUS_WRONG_PAGE)
+    expect(result.sent).toContain('plus.link.cancel')
   })
 
   it('starts sign-in and hands the window the code and the page to type it on', async () => {

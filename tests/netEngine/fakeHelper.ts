@@ -535,6 +535,8 @@ export class FakeHelper {
   alive = true
   /** Every request its app sent, in order. */
   readonly requests: Array<Record<string, any>> = []
+  /** Ops whose request this helper takes up only after this many ms (a slow answer). */
+  readonly slow = new Map<string, number>()
   /** Its relays; a helper without them answers `unknown_op` to every relay request, as a 1b helper does. */
   get relays(): FakeRelays | undefined {
     return this.network.relays.get(this.identity)
@@ -775,7 +777,10 @@ export class FakeHelper {
         if (payload.byteLength && !fin) this.send(creditFrame(end.handle, payload.byteLength))
         continue
       }
-      this.request(JSON.parse(body.toString('utf8')) as Record<string, any>)
+      const message = JSON.parse(body.toString('utf8')) as Record<string, any>
+      const wait = this.slow.get(String(message.op))
+      if (wait) setTimeout(() => this.request(message), wait)
+      else this.request(message)
     }
   }
 

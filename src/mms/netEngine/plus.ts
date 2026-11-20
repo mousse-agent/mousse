@@ -24,8 +24,31 @@ const PLUS_TEXT: Record<string, string> = {
 /** What a Plus failure with no words here reads as: the helper's own reason never shows. */
 export const PLUS_FAILED = "The Plus request didn't go through."
 
-/** What a sign-in reads as when Plus names a page that is not on the Plus address. */
+/** What a sign-in reads as when Plus names a page that is neither on the Plus address nor a listed website. */
 export const PLUS_WRONG_PAGE = "Plus named a sign-in page that isn't on its address."
+
+/**
+ * The setting naming the Plus website's origins when they differ from the Plus address: `https://host[:port]`
+ * entries separated by commas. Unset (the default) means the Plus address only; an entry that is not a bare
+ * `https` origin is ignored.
+ */
+export const PLUS_WEB_ORIGINS_VARIABLE = 'MOUSSE_NET_ENGINE_PLUS_WEB_ORIGINS'
+
+/** The listed Plus website origins (`PLUS_WEB_ORIGINS_VARIABLE`), https only. */
+export function plusWebOrigins(env: NodeJS.ProcessEnv = process.env): Set<string> {
+  const origins = new Set<string>()
+  for (const entry of (env[PLUS_WEB_ORIGINS_VARIABLE] ?? '').split(',')) {
+    const text = entry.trim().replace(/\/$/, '')
+    if (!text) continue
+    try {
+      const url = new URL(text)
+      if (url.protocol === 'https:' && url.origin === text) origins.add(url.origin)
+    } catch {
+      // Not an origin: ignored.
+    }
+  }
+  return origins
+}
 
 /** The origin of an `http(s)` URL, or undefined. */
 function originOf(url: string | undefined): string | undefined {
@@ -272,9 +295,12 @@ export class EnginePlus {
     this.changed()
   }
 
-  /** Whether `url` is on the Plus address the helper said. */
+  /** Whether `url` is on the Plus address the helper said, or an https page on a listed Plus website. */
   private onPlus(url: string | undefined): boolean {
-    return !!this.origin && originOf(url) === this.origin
+    const origin = originOf(url)
+    if (!origin) return false
+    if (this.origin && origin === this.origin) return true
+    return url!.startsWith('https:') && plusWebOrigins().has(origin)
   }
 
   private require(): EngineHelper {
@@ -302,7 +328,14 @@ export class EnginePlus {
   async signIn(): Promise<{ userCode: string; verifyUrl: string; expiresAt: number }> {
     const reply = await this.call('plus.link.start')
     await this.refreshStatus()
-    if (!this.onPlus(str(reply.verify_url))) throw new NetError('forbidden', PLUS_WRONG_PAGE)
+    if (!this.onPlus(str(reply.verify_url))) {
+      // The helper would keep polling Plus for a sign-in nobody can finish here.
+      await this.require()
+        .request('plus.link.cancel')
+        .catch(() => undefined)
+      await this.refreshStatus()
+      throw new NetError('forbidden', PLUS_WRONG_PAGE)
+    }
     return {
       userCode: str(reply.user_code) ?? '',
       verifyUrl: str(reply.verify_url) ?? '',
