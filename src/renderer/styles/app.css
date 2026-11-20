@@ -2644,32 +2644,51 @@ html[data-chat-width='full'] .chat {
   overflow: hidden;
 }
 
-/* The Reply button beside text selected in a conversation. */
-.selection-reply-button {
+/* The bar beside text selected in a conversation: Read aloud and Reply in one raised pill, a hairline between. */
+.selection-actions {
   position: fixed;
   z-index: 1000;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 2px;
   height: 30px;
-  padding: 0 10px;
+  padding: 2px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--ui-raised, var(--surface-raised, #1c1c1c));
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  white-space: nowrap;
+}
+
+.selection-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 100%;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
   color: var(--text-primary);
   font-size: 12.5px;
   font-weight: 500;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
   cursor: pointer;
 }
 
-.selection-reply-button:hover {
+.selection-action:hover {
   background: rgba(var(--accent-rgb), 0.12);
-  border-color: rgba(var(--accent-rgb), 0.45);
 }
 
-.selection-reply-button:focus-visible {
+.selection-action:focus-visible {
+  outline: none;
   background-image: var(--ui-focus-layer);
+}
+
+.selection-actions-divider {
+  flex: none;
+  width: 1px;
+  height: 14px;
+  background: var(--border);
 }
 
 .browser-element-pill-tag {
@@ -5793,6 +5812,11 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 .assistant-response-metadata button:focus-visible {
   outline: none;
   background-image: var(--ui-focus-layer);
+}
+
+/* A message's actions are controls, not words: selecting across messages leaves out their times and labels. */
+.chat-message-toolbar {
+  user-select: none;
 }
 
 /* Copy, Details, Undo and Read aloud under a message: the focus fill, full strength while focused. */

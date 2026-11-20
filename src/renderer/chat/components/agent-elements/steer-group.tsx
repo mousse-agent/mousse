@@ -1,4 +1,4 @@
-import { memo, type ComponentType, type ComponentProps } from "react";
+import { memo, type ComponentType, type ComponentProps, type ReactNode } from "react";
 import type { UIMessage } from "ai";
 import { ArrowTurnForward } from "../../../lib/icons";
 import { UserMessage } from "./user-message";
@@ -11,13 +11,18 @@ interface SteerGroupProps {
   UserMessageComponent: ComponentType<ComponentProps<typeof UserMessage>>;
   className?: string;
   enableImagePreview?: boolean;
+  /**
+   * A steered message's actions (time, Read aloud, Copy, Repeat this), shown beside its bubble on hover or focus.
+   * No Edit or Undo: a steer has no checkpoint of its own to rewind to.
+   */
+  renderActions?: (message: UIMessage) => ReactNode;
 }
 
 /**
  * Messages sent into a reply that was already running (Steer), where they entered it: one block under a
  * single "Steer" label, the bubbles stacked tight, so several steers read as one interruption.
  */
-export const SteerGroup = memo(function SteerGroup({ messages, UserMessageComponent, className, enableImagePreview }: SteerGroupProps) {
+export const SteerGroup = memo(function SteerGroup({ messages, UserMessageComponent, className, enableImagePreview, renderActions }: SteerGroupProps) {
   // While the turn holds one of these steers for a running tool, the label row says what it waits for.
   const hold = useHeldSteer();
   const itemIds = messages.map((message) => (message.metadata as { steerItemId?: string } | undefined)?.steerItemId);
@@ -33,8 +38,9 @@ export const SteerGroup = memo(function SteerGroup({ messages, UserMessageCompon
       </div>
       <div className="steer-group-messages">
         {messages.map((message) => (
-          <div key={message.id} data-steered-id={message.id}>
+          <div key={message.id} data-steered-id={message.id} className="steer-group-item group/user-message">
             <UserMessageComponent message={message} className={className} enableImagePreview={enableImagePreview} />
+            {renderActions?.(message)}
           </div>
         ))}
       </div>
