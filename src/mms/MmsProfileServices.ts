@@ -915,6 +915,7 @@ export class MmsProfileServices {
         journal: {
           asksFirstEnabled: () => botAsksFirst(this.settings.get()),
           readThread: (threadId) => this.threads.loadThreadData(threadId),
+          transcriptStamp: (threadId) => this.threads.transcriptStamp(threadId),
           listThreads: () => botThreadsForCatchUp(store.captureThreads()),
           // A subagent's thread is copied as its own rows, never as the bot's words to its owner.
           isSubagentThread: (threadId) => store.threadRole(threadId) === 'subagent'

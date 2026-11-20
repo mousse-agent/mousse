@@ -51,7 +51,7 @@ export interface IndexSearchRequest {
 export interface IndexHit { threadId: string; messageId: string; body: string }
 
 /** What a thread's database files look like on disk; a different stamp means a write happened since. */
-function stampOf(dir: string): string {
+export function stampOf(dir: string): string {
   const parts: string[] = []
   for (const name of [THREAD_DB_FILE, `${THREAD_DB_FILE}-wal`]) {
     try {

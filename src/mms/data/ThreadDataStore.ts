@@ -75,6 +75,7 @@ import { sharedThreadDbClient, WORKER_BACKOFF_CODE } from './threadDb/threadDbCl
 import type { MessageEstimate } from '../orchestrator/contextEstimate'
 import { ThreadDbStore, type ThreadDataChange } from './threadDb/threadDbStore'
 import { THREAD_DB_FILE } from './threadDb/threadDbEngine'
+import { stampOf as threadDbStampOf } from './threadDb/threadIndex'
 import { publishStagedBlobs } from './threadDb/threadBlobs'
 import { forEachYielding } from '../startup/startupTiming'
 
@@ -2003,6 +2004,15 @@ export class ThreadDataStore extends EventEmitter {
 
   loadThreadData(id: string): ThreadData {
     return this.loadThreadDataFromDir(this.getThreadDir(id), id)
+  }
+
+  /**
+   * A stamp of the files a thread's transcript is read from, without reading them: a different stamp means a write
+   * happened since. Undefined when the thread keeps its transcript in JSON files, which have no single stamp.
+   */
+  transcriptStamp(id: string): string | undefined {
+    const threadDir = this.getThreadDir(id)
+    return ThreadDbStore.usesDb(threadDir) ? threadDbStampOf(threadDir) : undefined
   }
 
   /**

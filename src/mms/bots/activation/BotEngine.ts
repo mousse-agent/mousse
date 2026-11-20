@@ -7633,9 +7633,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * activations from before the chat (no selection) never had one.
    */
   private postMissingReplies(): void {
-    const rows = this.store.all(`SELECT id FROM bot_activations a WHERE selection_json IS NOT NULL AND (status IN ('waiting_grant', 'paused')
-      OR (status = 'done' AND a.lane = 'chat' AND NOT EXISTS (SELECT 1 FROM bot_activations b WHERE b.bot_id = a.bot_id AND b.lane = 'chat' AND b.status = 'done' AND b.ended_at > a.ended_at))
-      OR (status = 'done' AND a.lane = 'run' AND a.ended_at >= (SELECT MAX(b.created_at) FROM bot_activations b WHERE b.bot_id = a.bot_id AND b.lane = 'run' AND b.status = 'done')))`)
+    // Each bot's latest finished chat and run are found once: a subquery per activation made this
+    // activations × activations a bot, about half a second at startup with 1,700 activations.
+    const rows = this.store.all(`WITH chat AS (SELECT bot_id, MAX(ended_at) AS last FROM bot_activations WHERE lane = 'chat' AND status = 'done' GROUP BY bot_id),
+      run AS (SELECT bot_id, MAX(created_at) AS last FROM bot_activations WHERE lane = 'run' AND status = 'done' GROUP BY bot_id)
+      SELECT a.id FROM bot_activations a LEFT JOIN chat ON chat.bot_id = a.bot_id LEFT JOIN run ON run.bot_id = a.bot_id
+      WHERE a.selection_json IS NOT NULL AND (a.status IN ('waiting_grant', 'paused')
+      OR (a.status = 'done' AND a.lane = 'chat' AND (a.ended_at IS NULL OR chat.last IS NULL OR chat.last <= a.ended_at))
+      OR (a.status = 'done' AND a.lane = 'run' AND a.ended_at >= run.last))`)
     for (const { id } of rows) {
       try {
         const row = this.store.activation(id as string)
