@@ -74,8 +74,7 @@ function conversationRow(sidebar: HTMLElement | null) {
   if (!sidebar || !main) return null
   const { right, width: mainWidth } = main.getBoundingClientRect()
   const width = sidebar.getBoundingClientRect().width + mainWidth
-  const workspaceWidth = sidebar.parentElement?.clientWidth ?? 0
-  return width > 0 && workspaceWidth > 0 ? { right, width, mainWidth, workspaceWidth } : null
+  return width > 0 ? { right, width, mainWidth } : null
 }
 
 // The thread list arrives as `threads.updated` pushes (and again after a reconnect or an event gap). It is read
@@ -489,7 +488,6 @@ export default function App() {
       return
     }
     if (kind === 'main') {
-      // The divider stops where the conversation reaches its 280px minimum or its 60% share.
       const row = conversationRow(sidebarRef.current)
       if (row) setMainAreaWidth(mainAreaWidthAtPointer(clientX, row))
     }
