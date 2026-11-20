@@ -54,7 +54,8 @@ export interface AcpAdapterOptions {
  * An agent over the Agent Client Protocol (SPEC §13.4). The agent runs its own loop and tools
  * inside the project workspace (weak containment), reports text and tool calls only (sparse
  * events: no thinking, no usage), and keeps its own ACP session, resumed while the history
- * fingerprint matches. Steers cancel the active prompt and are sent as the next one.
+ * fingerprint matches. Steers cancel the active prompt and are sent as the next one, or join it as a second prompt on an
+ * agent that takes them so (`AcpQuirks.nativeSteerFrom`).
  *
  * The runtime is read through `client()` on every turn: a profile installs its services after the
  * orchestrator (and its adapter registry) is built.
