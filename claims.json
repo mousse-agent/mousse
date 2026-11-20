@@ -237,6 +237,22 @@
       "expiresAt": "2026-11-19T23:05:26.065Z"
     },
     {
+      "task": "net-lists-stream-compaction",
+      "session": "Avarnics-Mac-mini.local-8ee838",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "net-lists-stream-compaction",
+      "paths": [
+        "src/mms/net/store/streams.ts",
+        "src/mms/net/contracts.ts",
+        "src/mms/bridge/hub/service.ts",
+        "src/mms/bridge/BridgeProfileService.ts",
+        "src/mms/bridge/remote/MmsListsSource.ts",
+        "src/mms/bridge/copyLimits.ts"
+      ],
+      "claimedAt": "2026-11-20T12:55:33.822Z",
+      "expiresAt": "2026-11-20T15:55:33.822Z"
+    },
+    {
       "task": "plain-error-reasons",
       "session": "Avarnics-Mac-mini.local-4a3dd2",
       "machine": "Avarnics-Mac-mini.local",
