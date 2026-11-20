@@ -261,20 +261,6 @@
       "expiresAt": "2026-11-20T17:42:44.687Z"
     },
     {
-      "task": "turn-handoff",
-      "session": "Animatrix-85dfcd",
-      "machine": "Animatrix",
-      "branch": "turn-handoff",
-      "paths": [
-        "src/mms/orchestrator/OrchestratorService.ts",
-        "src/mms/run/delegation/wake.ts",
-        "src/mms/run/EffectOutbox.ts",
-        "src/mms/actions/ThreadActionService.ts"
-      ],
-      "claimedAt": "2026-11-20T17:12:38.368Z",
-      "expiresAt": "2026-11-20T19:12:38.368Z"
-    },
-    {
       "task": "worktree-branch-naming",
       "session": "Animatrix-aa1e90",
       "machine": "Animatrix",
