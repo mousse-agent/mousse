@@ -26,9 +26,8 @@ export const ANTIGRAVITY_NATIVE_STEER_FROM = '1.5.0'
 
 /**
  * The agent rejects plan mode and publishes no usage: the base ACP capabilities. `steer` stays `interrupt_restart`
- * although a 1.5 `agy` takes a steer into the running prompt (`ANTIGRAVITY_QUIRKS.nativeSteerFrom`): it runs only its
- * owner's messages (`ownerOnly.ts`), and `native` would let the engine push a subagent's notice into a running turn as
- * a prompt of its own (SPEC §14.3). A person's steer goes in at once either way; how is the session's choice.
+ * although a 1.5 `agy` takes a steer into the running prompt (`ANTIGRAVITY_QUIRKS.nativeSteerFrom`): `native` would let
+ * the engine push a subagent's notice into a running turn as a prompt of its own (SPEC §14.3). A person's steer goes in at once either way; how is the session's choice.
  */
 export const ANTIGRAVITY_CAPABILITIES: ProviderCapabilities = ACP_BASE_CAPABILITIES
 
