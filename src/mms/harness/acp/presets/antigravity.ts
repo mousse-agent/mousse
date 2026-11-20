@@ -17,14 +17,26 @@ import type { AcpQuirks } from '../quirks'
 
 export const ANTIGRAVITY_LABEL = 'Antigravity'
 
-/** The agent rejects plan mode and publishes no usage: the base ACP capabilities. */
+/**
+ * The first `agy` that folds a prompt sent during a running one into that work (1.4 queued it). Probed on 1.5.13: the
+ * running prompt answers `end_turn` as soon as the second arrives (or at its own end, when it was already finishing)
+ * and the second one carries the rest of the turn, steer included.
+ */
+export const ANTIGRAVITY_NATIVE_STEER_FROM = '1.5.0'
+
+/**
+ * The agent rejects plan mode and publishes no usage: the base ACP capabilities. `steer` stays `interrupt_restart`
+ * although a 1.5 `agy` takes a steer into the running prompt (`ANTIGRAVITY_QUIRKS.nativeSteerFrom`): it runs only its
+ * owner's messages (`ownerOnly.ts`), and `native` would let the engine push a subagent's notice into a running turn as
+ * a prompt of its own (SPEC §14.3). A person's steer goes in at once either way; how is the session's choice.
+ */
 export const ANTIGRAVITY_CAPABILITIES: ProviderCapabilities = ACP_BASE_CAPABILITIES
 
 /**
  * Client fs with the workspace check, `session/resume` for saved sessions, its exact protocol
- * version, and the `model` option with the account's listed models only.
+ * version, the `model` option with the account's listed models only, and its own steer from 1.5.0.
  */
-export const ANTIGRAVITY_QUIRKS: AcpQuirks = Object.freeze({ clientFs: true, preferResume: true, strictProtocol: true, modelConfigId: 'model' })
+export const ANTIGRAVITY_QUIRKS: AcpQuirks = Object.freeze({ clientFs: true, preferResume: true, strictProtocol: true, modelConfigId: 'model', nativeSteerFrom: ANTIGRAVITY_NATIVE_STEER_FROM })
 
 /** The method `authenticate` signs in with, eagerly, before the first `session/new`. */
 export const ANTIGRAVITY_AUTH_METHOD = 'oauth-personal'
