@@ -254,6 +254,20 @@
       ],
       "claimedAt": "2026-11-20T11:47:03.944Z",
       "expiresAt": "2026-11-20T13:47:03.944Z"
+    },
+    {
+      "task": "window-warm-start",
+      "session": "Animatrix-b233b3",
+      "machine": "Animatrix",
+      "branch": "window-warm-start",
+      "paths": [
+        "src/main/warmStart",
+        "src/main/ipc/registerGuiIpc.ts",
+        "src/renderer/App.tsx",
+        "src/main/mms/bootstrapPresentation.ts"
+      ],
+      "claimedAt": "2026-11-20T21:12:08.192Z",
+      "expiresAt": "2026-11-20T23:12:08.192Z"
     }
   ]
 }
