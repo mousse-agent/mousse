@@ -41,7 +41,7 @@ import type { ChatReference } from '../../shared/chatReferences'
 import { formatChatReferences, MOUSSE_REFERENCE_MIME, parseChatReference, parseReferenceDragData } from '../../shared/chatReferences'
 import { ownFileDrop, startDragOut } from '../lib/fileDragOut'
 import { ChatReferencePill } from './ReferencePill'
-import { threadIdsOfPaste, threadReferenceOf } from '../lib/threadReference'
+import { threadIdsInText } from '../lib/threadReference'
 import { insertTranscript } from '../dictation/insertTranscript'
 import { useDictation } from '../dictation/useDictation'
 import { useCommand } from '../commands/commandRegistry'
@@ -113,6 +113,8 @@ export interface ChatComposerProps {
   onAddReference?: (reference: ChatReference) => void | Promise<void>
   onRemoveReference?: (id: string) => void
   onReferenceError?: (message: string) => void
+  /** Why a pasted thread link may not go in this chat, else null; a refused paste is not inserted. */
+  pastedThreadRefusal?: (threadId: string) => string | null
   enabledSkills: SkillDescriptor[]
   /**
    * The model picker and context ring (see `ComposerFooter`). A thread's composer has them; a bot's
@@ -218,6 +220,7 @@ export function ChatComposer({
   onAddReference,
   onRemoveReference = () => {},
   onReferenceError = () => {},
+  pastedThreadRefusal,
   enabledSkills,
   run,
   slashCommands = true,
@@ -562,11 +565,11 @@ export function ChatComposer({
     const files = collectFilesFromDataTransfer(event.clipboardData)
     if (files.length === 0) {
       const text = event.clipboardData?.getData('text/plain') ?? ''
-      // A paste of nothing but thread links (Copy reference) becomes thread pills, for the agent to read by reference.
-      const linked = onAddReference ? threadIdsOfPaste(text) : null
-      if (linked) {
+      // A thread link (Copy reference) is pasted as text, unless this chat may not point at that thread.
+      const refused = pastedThreadRefusal ? threadIdsInText(text).map(pastedThreadRefusal).find(Boolean) : null
+      if (refused) {
         event.preventDefault()
-        for (const threadId of linked) takeReference(threadReferenceOf(threadId))
+        onReferenceError(refused)
         return
       }
       const selected = event.currentTarget.selectionEnd - event.currentTarget.selectionStart

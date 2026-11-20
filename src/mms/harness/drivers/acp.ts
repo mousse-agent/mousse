@@ -518,6 +518,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
   const client = {
     chat: (input: Parameters<AcpSessions['chat']>[0]) => sessions.chat(input),
     commitConversation: (threadId: string, history: string) => sessions.commitConversation(threadId, history),
+    commitInterrupted: (threadId: string, history: string) => sessions.commitInterrupted(threadId, history),
     configured: () => runtime.configured(),
     interrupt: (sessionId: string | undefined) => sessions.interrupt(sessionId)
   }

@@ -957,14 +957,14 @@ describe('worktree cleanup keeps the ignored files a dispatch made', () => {
     await f.service.run(f.request, f.context, f.execution)
     return f
   }
-  function storage(f: Awaited<ReturnType<typeof fixture>>) {
+  function storage(f: Awaited<ReturnType<typeof fixture>>, otherWork?: (path: string) => string | undefined) {
     const store = f.threads.lifecycleStore
     const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {} })
     const clock = new StorageSweepClock(store.root)
     clock.start()
     const policy = new StoragePolicyStore(store, clock)
     policy.configure(STORAGE_POLICY_DEFAULTS, true)
-    return new StorageCleanupService({ store, threads: f.threads, purge: coordinator.cleanup, policy, clock, idle: () => undefined, installationHome: f.home })
+    return new StorageCleanupService({ store, threads: f.threads, purge: coordinator.cleanup, policy, clock, idle: () => undefined, otherWork, installationHome: f.home })
   }
 
   it('a completed dispatch keeps its ignored outputs, then removes the worktree, and the copy gives back their exact bytes (the cleanup reproduction, inverted)', async () => {
@@ -1151,6 +1151,45 @@ describe('worktree cleanup keeps the ignored files a dispatch made', () => {
       expect(existsSync(worktree)).toBe(false)
       expect(guard.removes().map((call) => call.path)).toEqual([worktree])
       guard.assertNoRemoveOfExisting()
+      await cleanup.stop()
+    } finally {
+      guard.restore()
+    }
+  })
+
+  it('Storage keeps a dispatch\'s left worktree another thread works in, even once a plan listed it; once nobody does it removes it', async () => {
+    const files = outputs()
+    const f = await completedDispatch(files)
+    const limit = KEEP_COPY_LIMITS.bytes
+    KEEP_COPY_LIMITS.bytes = 1024
+    try {
+      f.commit()
+      await f.service.drainCleanup()
+    } finally {
+      KEEP_COPY_LIMITS.bytes = limit
+    }
+    const worktree = f.service.query(f.execution, f.context)!.worktree!.path
+    let other: string | undefined
+    const asked: string[] = []
+    const guard = installGitRemoveGuard()
+    try {
+      const cleanup = storage(f, (path) => { asked.push(path); return other })
+      const { token } = await cleanup.planWithToken()
+      // Work starts in it after the person confirmed the plan.
+      other = 'Another thread is working in this worktree'
+      const refused = await cleanup.run('manual', { plan: token })
+      expect(refused.items.filter((item) => item.rule === 'dispatch-worktree')).toEqual([expect.objectContaining({ outcome: 'kept', reason: other })])
+      expect(asked.at(-1)).toBe(worktree)
+      expect(guard.removes()).toEqual([])
+      for (const [path, bytes] of Object.entries(files)) expect(readFileSync(join(worktree, path)).equals(bytes)).toBe(true)
+      // A plan made while the work goes on does not offer it for removal.
+      expect((await cleanup.plan()).filter((item) => item.rule === 'dispatch-worktree')).toEqual([expect.objectContaining({ action: 'keep', reason: other })])
+
+      other = undefined
+      const again = await cleanup.planWithToken()
+      const confirmed = await cleanup.run('manual', { plan: again.token })
+      expect(confirmed.items.filter((item) => item.rule === 'dispatch-worktree')).toEqual([expect.objectContaining({ outcome: 'removed' })])
+      expect(existsSync(worktree)).toBe(false)
       await cleanup.stop()
     } finally {
       guard.restore()

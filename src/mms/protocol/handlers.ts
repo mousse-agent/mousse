@@ -1721,6 +1721,8 @@ function mergeSearchResults(local: ThreadSearchResult[], remote: ThreadSearchRes
 
 /** Transcripts a routed search reads: the newest threads, as the agent tool's search does. */
 const ROUTED_SEARCH_MESSAGE_THREADS = 100
+/** Results a `perThread` search may ask for: about one per thread, so a large profile's every match fits. */
+const SEARCH_PER_THREAD_MAX_LIMIT = 5000
 
 function lifecycleExpectedGeneration(params: Record<string, unknown>): number | undefined {
   const value = params.expectedGeneration
@@ -2377,9 +2379,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.search': {
       const p = isObject(params) ? params : {}
       const query = asString(p.query, 'query', 512)
+      // `perThread`: which threads match (the sidebar's filter), one message hit each, from this computer only; it may
+      // ask for every thread of the profile.
+      const perThread = p.perThread === true
       const limit =
         typeof p.limit === 'number' && Number.isFinite(p.limit) && p.limit > 0
-          ? Math.min(Math.floor(p.limit), 200)
+          ? Math.min(Math.floor(p.limit), perThread ? SEARCH_PER_THREAD_MAX_LIMIT : 200)
           : 50
       // Search hides subagents for every client, the desktop app included: a subagent is reached
       // through its parent's Lineage, not as a result of its own.
@@ -2391,11 +2396,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         hideSubagents: true,
         includeSettled: true,
         allow: (thread: Thread) => !thread.botOwned && !hidden?.has(thread.id),
-        ...(ctx.connection?.clientType === 'bridge' ? { maxMessageThreads: ROUTED_SEARCH_MESSAGE_THREADS } : {})
+        ...(ctx.connection?.clientType === 'bridge' ? { maxMessageThreads: ROUTED_SEARCH_MESSAGE_THREADS } : {}),
+        ...(perThread ? { perThread } : {})
       })
       // A window also searches the user's other computers (each with a short deadline) and is told which it could not.
       const remote =
-        ctx.connection?.clientType === 'gui' && ctx.mms.remoteLists
+        ctx.connection?.clientType === 'gui' && ctx.mms.remoteLists && !perThread
           ? await ctx.mms.remoteLists.search(ctx.connection.id, query, limit)
           : undefined
       if (!remote) return { results }
@@ -2761,6 +2767,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const text = asString(p.text, 'text')
       const runId = asOptionalString(p.runId, 256)
+      // A person's steer, from a window or the CLI, brings an archived thread back first.
+      if (isPerson(ctx.connection) || ctx.connection?.clientType === 'cli') await ctx.mms.orchestrator.unarchiveForPerson(threadId)
       if (runId) {
         const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
         const response = runCommandResponse(await ctx.mms.orchestrator.steerRun(runId, text, clientRequestId, threadId, undefined, undefined, deviceLimit(ctx), sentFromOf(ctx)), runId)
@@ -2794,6 +2802,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!Array.isArray(p.itemIds) || p.itemIds.length > 100) throw new DomainRpcError('invalid_params', 'itemIds must be a list of at most 100 ids')
       const itemIds = p.itemIds.map((id, index) => asString(id, `itemIds[${index}]`, 256))
       const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
+      await ctx.mms.orchestrator.unarchiveForPerson(threadId)
       const result = await ctx.mms.orchestrator.steerNow({ threadId, runId, holdGeneration, itemIds, clientRequestId })
       return { ...runCommandResponse(result, runId), clientRequestId }
     }
@@ -3148,6 +3157,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       rejectUnknownKeys(p, ['threadId'])
       const threadId = asString(p.threadId, 'threadId', 256)
       return { threadId, ...(await ctx.mms.orchestrator.stopSubagents(threadId)) }
+    }
+    case 'threads.backgroundWork': {
+      // What the thread runs in the background besides its subagents (the composer's status row).
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      return ctx.mms.orchestrator.backgroundWork(threadId)
+    }
+    case 'threads.stopBackground': {
+      // The status row's Stop of one item: a monitor, a background command, a hold, or the provider's own work.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'id'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const id = asString(p.id, 'id', 256)
+      return { ok: await ctx.mms.orchestrator.stopBackground(threadId, id) }
     }
     case 'subagents.list': {
       const p = isObject(params) ? params : {}

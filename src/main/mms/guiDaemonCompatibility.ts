@@ -15,6 +15,8 @@ export const GUI_REQUIRED_METHODS = [
   'storage.policy', 'storage.configure', 'storage.reviewDismiss', 'storage.cleanup.plan', 'storage.cleanup.run', 'storage.cleanup.lastReport',
   'storage.usage',
   'subagents.list',
+  // The composer's status row of a thread's background work; an older service lacks it.
+  'threads.backgroundWork', 'threads.stopBackground',
   // Settings → Providers runs on the harness gateway; an older service lacks it.
   'providers.snapshots', 'providers.catalog.addOptions', 'providers.instances.add', 'providers.instances.setSecret',
   'providers.instances.remove', 'providers.instances.configure',

@@ -1,18 +1,24 @@
 import { linkLabel } from "./link-label";
+import { parseThreadLink } from "../../../../shared/threadLink";
 
 /**
  * A prompt is plain text, but people paste links into it: bare web addresses and Markdown links such as
  * `[#35130](https://github.com/o/r/pull/35130)`. The bubble shows each as a link drawn by `LinkLabel`
- * (see link-label), like a link in a reply. Find reads the same labels (see find-index), so what it
- * counts is what the bubble shows.
+ * (see link-label), like a link in a reply. A thread's link (`mousse://thread/<id>`, bare, as `<…>` or as a
+ * Markdown link's target) is a link too, which the bubble draws as the thread's chip; inside inline code it stays text.
+ * Find reads the same labels (see find-index), so what it counts is what the bubble shows.
  */
 export type PromptSegment =
   | { kind: "text"; text: string }
   /** `text` is the label as written: a Markdown link's label, or the bare address itself. */
   | { kind: "link"; text: string; href: string };
 
-/** A Markdown link with a web address, or a bare web address. */
-const LINK_PATTERN = /\[([^\[\]\n]+)\]\((https?:\/\/[^\s()<>]+(?:\([^\s()<>]*\)[^\s()<>]*)*)\)|https?:\/\/[^\s<>"'`]+/gi;
+/**
+ * Inline code (left as text); a Markdown link with a web or thread address; a thread address as `<…>`; a bare web
+ * address; a bare thread address.
+ */
+const LINK_PATTERN =
+  /(`[^`\n]*`)|\[([^\[\]\n]+)\]\((https?:\/\/[^\s()<>]+(?:\([^\s()<>]*\)[^\s()<>]*)*|mousse:\/\/thread\/[\w-]+(?::[\w-]+)?\/?)\)|<(mousse:\/\/thread\/[\w-]+(?::[\w-]+)?\/?)>|https?:\/\/[^\s<>"'`]+|mousse:\/\/thread\/[\w-]+(?::[\w-]+)?\/?/gi;
 
 /** Punctuation that ends a sentence rather than the address it follows. */
 const TRAILING_PUNCTUATION = /[.,;:!?'"]+$/;
@@ -56,11 +62,14 @@ export function promptSegments(text: string): PromptSegment[] {
     else segments.push({ kind: "text", text: value });
   };
   for (const match of text.matchAll(LINK_PATTERN)) {
+    if (match[1] !== undefined) continue;
     const start = match.index ?? 0;
-    const markdownLabel = match[1];
-    const href = markdownLabel !== undefined ? match[2]! : trimBareUrl(match[0]);
-    const end = markdownLabel !== undefined ? start + match[0].length : start + href.length;
-    if (!isWebUrl(href)) continue;
+    const markdownLabel = match[2];
+    const bracketed = match[4];
+    const whole = markdownLabel !== undefined || bracketed !== undefined;
+    const href = markdownLabel !== undefined ? match[3]! : bracketed ?? trimBareUrl(match[0]);
+    const end = whole ? start + match[0].length : start + href.length;
+    if (!isWebUrl(href) && !parseThreadLink(href)) continue;
     pushText(text.slice(last, start));
     segments.push({ kind: "link", text: markdownLabel ?? href, href });
     // A bare address trimmed of its trailing punctuation leaves that punctuation as text.

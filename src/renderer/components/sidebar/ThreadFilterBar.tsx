@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import type { Project } from '../../../shared/types'
 import type { BotLook } from '../../../shared/bots/personal/look'
-import { Archive, Bot, Check, ChevronRight, EyeOff, Folder, X } from '../../lib/icons'
+import { Archive, ArrowLeftRight, Bot, Check, ChevronRight, EyeOff, Folder, X } from '../../lib/icons'
 import { FloatingPortal, useFloatingPosition } from '../../lib/floatingLayer'
 import { focusInitialMenuItem, menuItems, nextMenuIndex, useMenuKeyboard } from '../../hooks/useMenuKeyboard'
 import { filterSuggestions, orderOptions, SHOW_LABELS, type FilterOption, type FilterSuggestion, type ThreadShow } from '../../lib/threadFilter'
@@ -53,8 +53,10 @@ const SHOWS: readonly ThreadShow[] = ['mine', 'bots', 'all']
  *   one (click, or Enter on the highlighted one) makes it a filter.
  * - The button opens a short menu: Show, "Project ›" and "Bot ›" (each a small searchable list beside it), and Archived.
  *   In the Projects tab the menu lists the projects instead, ticked; unticking one leaves it out of the tree.
+ *
+ * The swap button after it switches the Threads tab between the Projects tree and the list of cards (`onSwapView`).
  */
-export function ThreadFilterBar({ view, projects, bots }: { view: 'projects' | 'threads'; projects: readonly ProjectOption[]; bots: readonly BotOption[] }) {
+export function ThreadFilterBar({ view, projects, bots, onSwapView }: { view: 'projects' | 'threads'; projects: readonly ProjectOption[]; bots: readonly BotOption[]; onSwapView?: () => void }) {
   const filter = useThreadFilterStore()
   const fieldId = useId()
   const [menuOpen, setMenuOpen] = useState(false)
@@ -148,6 +150,17 @@ export function ThreadFilterBar({ view, projects, bots }: { view: 'projects' | '
         >
           <FilterLines />
         </button>
+        {onSwapView && (
+          <button
+            type="button"
+            className="thread-filter-button thread-filter-swap"
+            aria-label={view === 'projects' ? 'Show as a list' : 'Show by project'}
+            title={view === 'projects' ? 'Show as a list' : 'Show by project'}
+            onClick={onSwapView}
+          >
+            <ArrowLeftRight size={15} strokeWidth={1.8} aria-hidden="true" />
+          </button>
+        )}
       </div>
 
       {suggestions.length > 0 && (

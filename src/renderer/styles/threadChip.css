@@ -76,7 +76,7 @@
  */
 .thread-chip-card {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
   gap: 2px 8px;
   width: min(300px, calc(100vw - 24px));
@@ -99,7 +99,6 @@
 }
 
 .thread-chip-card-note {
-  grid-column: 2;
   color: var(--text-secondary);
   font-size: 11px;
   line-height: 1.3;

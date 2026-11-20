@@ -107,6 +107,11 @@ export class ThreadSession {
   admissionRunId: string | undefined
   /** A queue drain requested while the turn was still settling; run once admission is cleared. */
   drainAfterSettle = false
+  /**
+   * The provider instance a running turn is on, when the thread was switched to another one meanwhile. The turn
+   * finishes there; once it has settled its process and Mousse credentials end, unless the thread switched back.
+   */
+  switchedFromInstance: string | undefined
   /** Stop requested after admission but before the turn created its abort controller. */
   abortRequested = false
   /**

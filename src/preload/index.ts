@@ -19,6 +19,7 @@ import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest
 import type { WindowResizeEdge } from '../shared/windowResize'
 import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../shared/updates'
 import type { SubagentSummary, SubagentsUpdatedEvent } from '../shared/subagents'
+import type { ThreadBackgroundWork } from '../shared/backgroundWork'
 import type {
   Agent,
   BrowserBounds,
@@ -993,6 +994,16 @@ const api = {
     }
   },
   threads: {
+    /** What the thread runs in the background besides its subagents (the composer's status row). */
+    backgroundWork: (threadId: string): Promise<ThreadBackgroundWork> => ipcRenderer.invoke('threads:backgroundWork', threadId),
+    /** Stops one item of it by id (`PROVIDER_BACKGROUND_ID` for the provider's own work); false when it was not running. */
+    stopBackground: (threadId: string, id: string): Promise<boolean> => ipcRenderer.invoke('threads:stopBackground', threadId, id),
+    /** The daemon's whole picture of a thread's background work, each time it changes. */
+    onBackgroundWork: (cb: (work: ThreadBackgroundWork) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, work: ThreadBackgroundWork) => cb(work)
+      ipcRenderer.on('threads:backgroundWork', handler)
+      return () => ipcRenderer.removeListener('threads:backgroundWork', handler)
+    },
     /**
      * A file attached in a thread's composer as a path on this computer: where it is, or, for a pasted one, a
      * temporary copy under the thread's folder (`new` before the thread is made).
@@ -1078,8 +1089,9 @@ const api = {
       ipcRenderer.invoke('threads:setExpiry', threadId, expiresAt, stopsRun),
     reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>
       ipcRenderer.invoke('threads:reorder', projectId, threadIds),
-    search: (query: string, limit?: number): Promise<ThreadSearchResponse> =>
-      ipcRenderer.invoke('threads:search', query, limit),
+    /** `perThread`: which threads match, one message hit each, from this computer only (the sidebar's filter). */
+    search: (query: string, limit?: number, options?: { perThread?: boolean }): Promise<ThreadSearchResponse> =>
+      ipcRenderer.invoke('threads:search', query, limit, options),
     /** Saves that moved only these threads' `updatedAt` (`threads.touched`), throttled by the service. */
     onTouched: (cb: (touches: Array<{ id: string; updatedAt: string }>) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, touches: Array<{ id: string; updatedAt: string }>) => cb(touches)

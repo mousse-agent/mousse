@@ -91,6 +91,8 @@ export const GIT_ACCESS = {
   'orchestrator.pendingQuestions': 'none',
   'subagents.list': 'none',
   'subagents.stopAll': 'owned',
+  'threads.backgroundWork': 'none',
+  'threads.stopBackground': 'none',
   'queue.list': 'none',
   'queue.enqueue': 'owned',
   'queue.edit': 'none',

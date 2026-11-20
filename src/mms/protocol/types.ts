@@ -311,6 +311,8 @@ export const PROTOCOL_METHODS = [
   'orchestrator.pendingQuestions',
   'subagents.list',
   'subagents.stopAll',
+  'threads.backgroundWork',
+  'threads.stopBackground',
   'queue.list',
   'queue.enqueue',
   'queue.edit',
@@ -569,6 +571,7 @@ export type ProtocolEventType =
   | 'git.selectionChanged'
   | 'thread.title-generation-failed'
   | 'subagents.updated'
+  | 'thread.backgroundWork'
   | 'thread.message'
   | 'thread.message-updated'
   | 'thread.messages'

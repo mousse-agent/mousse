@@ -1,4 +1,5 @@
 import type { NetStatus } from '../../shared/net'
+import { serviceFailureLine } from './errorText'
 
 declare const __MOUSSE_ID_ORIGIN__: string | undefined
 
@@ -221,6 +222,7 @@ export function signInErrorMessage(cause: unknown, origin: string, net?: NetStat
       // device list again, so the owner computer only needs to be open.
       return 'This computer was away too long to reconnect on its own. Open Mousse on the computer that owns your devices, then sign in here again to get the renewed device list.'
     default:
-      return String((cause as Error | null)?.message ?? cause)
+      // A dropped or slow call to Mousse's own background service, not a refusal from Mousse ID.
+      return serviceFailureLine(cause) ?? String((cause as Error | null)?.message ?? cause)
   }
 }

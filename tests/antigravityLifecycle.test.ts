@@ -8,6 +8,8 @@ import { antigravityAssistantMessage, antigravityHistory } from '../src/mms/harn
 import { LoginSession } from '../src/mms/providers/LoginSession'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { resolveBoundServices } from '../src/mms/profiles/admission'
+import { decideUsageLimit } from '../src/mms/run/pausePolicy'
+import { pausedLine } from '../src/mms/run/pauseText'
 import { PROFILES_V1_CAPABILITY } from '../src/shared/profiles/types'
 import type { MmsProfileServices } from '../src/mms/MmsProfileServices'
 import type { NativeLlmContext } from '../src/shared/types'
@@ -193,6 +195,119 @@ describe('Antigravity turn lifecycle', () => {
     expect(await service.login(session, input.cwd)).toEqual({ success: false, sessionId: 'setup', error: 'Install Antigravity first, then sign in' })
     expect(events).toEqual([])
     expect(processes).toHaveLength(0)
+  })
+})
+
+describe('Antigravity after a turn that did not finish', () => {
+  const promptsOf = (process: { connection: { agent: { request: { mock: { calls: unknown[][] } } } } }) => process.connection.agent.request.mock.calls
+    .filter(([name]) => name === methods.agent.session.prompt)
+    .map(([, params]) => (params as { prompt: Array<{ text?: string }> }).prompt.map((block) => block.text).join('\n'))
+  const quota = () => new RequestError(-32603, 'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 4h29m13s.')
+
+  it('resumes the session after a failed prompt, sending only the new message', async () => {
+    let failing = false
+    const { service, input, processes } = fixture(undefined, false, (method) => failing && method === methods.agent.session.prompt && quota())
+    await service.chat({ ...input, prompt: 'first', history: 'old history' })
+    service.commitConversation(input.threadId, 'after first')
+    failing = true
+    await expect(service.chat({ ...input, prompt: 'second', history: 'after first' })).rejects.toThrow()
+    // The adapter reports the history the failed turn left: its request, no reply.
+    service.commitInterrupted(input.threadId, 'after first + second')
+    failing = false
+    await service.chat({ ...input, prompt: 'third', history: 'after first + second' })
+    expect(processes).toHaveLength(2)
+    expect(processes[1].connection.agent.request).toHaveBeenCalledWith(methods.agent.session.resume, expect.objectContaining({ sessionId: 'session-1' }))
+    expect(processes[1].connection.agent.request).not.toHaveBeenCalledWith(methods.agent.session.new, expect.anything())
+    expect(promptsOf(processes[1])).toEqual(['third'])
+  })
+
+  it('resumes the session after a stopped prompt', async () => {
+    const { service, input, processes } = fixture()
+    await service.chat({ ...input, prompt: 'first' })
+    service.commitConversation(input.threadId, 'after first')
+    const stop = new AbortController()
+    const first = processes[0]
+    const answer = first.connection.agent.request.getMockImplementation()!
+    first.connection.agent.request.mockImplementation(async (method: string, params: { prompt?: Array<{ text?: string }> }) => {
+      if (method !== methods.agent.session.prompt) return answer(method, params)
+      // The prompt is running when Stop closes the agent's process.
+      return new Promise<never>((_, reject) => {
+        first.connection.signal.addEventListener('abort', () => reject(first.connection.signal.reason), { once: true })
+        stop.abort()
+      })
+    })
+    await expect(service.chat({ ...input, prompt: 'second', history: 'after first', signal: stop.signal })).rejects.toThrow()
+    service.commitInterrupted(input.threadId, 'after first + second')
+    await service.chat({ ...input, prompt: 'third', history: 'after first + second' })
+    expect(processes[1].connection.agent.request).toHaveBeenCalledWith(methods.agent.session.resume, expect.objectContaining({ sessionId: 'session-1' }))
+    expect(promptsOf(processes[1])).toEqual(['third'])
+  })
+
+  it('hands the history over again when a new session failed its first prompt before the agent worked on it', async () => {
+    // That prompt carried the handed-over history; the agent may never have kept it.
+    let failing = true
+    const { service, input, processes } = fixture(undefined, false, (method) => failing && method === methods.agent.session.prompt && quota())
+    await expect(service.chat({ ...input, prompt: 'first', history: 'old history' })).rejects.toThrow()
+    service.commitInterrupted(input.threadId, 'old history + first')
+    failing = false
+    await service.chat({ ...input, prompt: 'second', history: 'old history + first' })
+    expect(processes[1].connection.agent.request).not.toHaveBeenCalledWith(methods.agent.session.resume, expect.anything())
+    expect(promptsOf(processes[1])[0]).toContain('old history + first')
+  })
+
+  it('hands the history over again when the failed prompt carried a steer the agent never showed it read', async () => {
+    // The steer goes back and runs again: the agent may hold it while Mousse's history does not.
+    let failing = false
+    const { service, input, processes } = fixture(undefined, false, (method) => failing && method === methods.agent.session.prompt && quota())
+    await service.chat({ ...input, prompt: 'first' })
+    service.commitConversation(input.threadId, 'after first')
+    failing = true
+    let steer: { text: string; token: string } | undefined = { text: 'also check the tests', token: 'steer-1' }
+    const returnSteer = vi.fn()
+    await expect(service.chat({ ...input, prompt: 'second', history: 'after first', drainSteerEntry: () => { const entry = steer; steer = undefined; return entry }, returnSteer })).rejects.toThrow()
+    expect(returnSteer).toHaveBeenCalledWith('also check the tests', 'steer-1')
+    service.commitInterrupted(input.threadId, 'after first + second')
+    failing = false
+    await service.chat({ ...input, prompt: 'third', history: 'after first + second' })
+    expect(processes[1].connection.agent.request).not.toHaveBeenCalledWith(methods.agent.session.resume, expect.anything())
+    expect(promptsOf(processes[1])[0]).toContain('after first + second')
+  })
+})
+
+describe('Antigravity quota answers', () => {
+  // agy 1.5's own words when the account's quota is spent (its session/prompt error).
+  const QUOTA = 'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h29m13s.'
+  const pauseFor = async (error: unknown) => {
+    const { service, input } = fixture(undefined, false, (name) => name === methods.agent.session.prompt && error)
+    const failure = await service.chat(input).then(() => undefined, (caught: unknown) => caught)
+    return decideUsageLimit({ error: failure, run: {}, lookup: () => null, cap: 3, autoResume: true, nowMs: Date.now() })
+  }
+
+  it.each([
+    ['as its message', new RequestError(-32603, QUOTA)],
+    ['as the data under the SDK label', new RequestError(-32603, 'Internal error', QUOTA)]
+  ])('pauses the run until the reset agy names (%s)', async (_, error) => {
+    const before = Date.now()
+    const decision = await pauseFor(error)
+    expect(decision?.action).toBe('pause')
+    const pause = decision?.action === 'pause' ? decision.pause : undefined
+    const resetMs = ((4 * 60 + 29) * 60 + 13) * 1000
+    expect(Date.parse(pause!.until) - before).toBeGreaterThanOrEqual(resetMs - 1000)
+    expect(Date.parse(pause!.until) - Date.now()).toBeLessThanOrEqual(resetMs + 1000)
+    expect(pause).toMatchObject({ estimated: false, provider: 'antigravity' })
+    expect(pausedLine(pause!)).toContain("Antigravity's usage limit was reached (time reported by Antigravity)")
+  })
+
+  it('pauses on an estimate when agy names no reset time', async () => {
+    const decision = await pauseFor(new RequestError(-32603, 'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits.'))
+    expect(decision?.action === 'pause' && decision.pause).toMatchObject({ estimated: true, provider: 'antigravity' })
+  })
+
+  it.each([
+    'RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).',
+    'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 5s.'
+  ])('leaves a rate limit that clears in seconds as an ordinary failure: %s', async (text) => {
+    expect(await pauseFor(new RequestError(-32603, text))).toBeUndefined()
   })
 })
 

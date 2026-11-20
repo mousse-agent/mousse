@@ -133,4 +133,12 @@ describe('readableError', () => {
     expect(readableError(new Error("Error invoking remote method 'queue:list': Error: Too many pending requests"), 'x')).toBe('Mousse is busy. Try again in a moment.')
     expect(readableError(new Error(''), 'Could not load the queue.')).toBe('Could not load the queue.')
   })
+
+  it('reads a call the background service dropped or never answered in plain words, and a refusal as itself', () => {
+    expect(readableError(new Error("Error invoking remote method 'queue:list': Error: Connection closed"), 'x')).toBe('Mousse’s background service stopped answering. Try again.')
+    expect(readableError(new Error("Error invoking remote method 'queue:list': Error: Not connected"), 'x')).toBe('Mousse’s background service stopped answering. Try again.')
+    expect(readableError(new Error("Error invoking remote method 'queue:list': Error: Request timeout: queue.list"), 'x')).toBe('Mousse’s background service didn’t answer in time. Try again.')
+    expect(readableError({ code: 'service_timeout', message: 'anything' }, 'x')).toBe('Mousse’s background service didn’t answer in time. Try again.')
+    expect(readableError({ code: 'forbidden', message: 'Not allowed here.' }, 'x')).toBe('Not allowed here.')
+  })
 })

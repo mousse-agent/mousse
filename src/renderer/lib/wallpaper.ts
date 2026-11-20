@@ -260,20 +260,6 @@ function resolvedColor(token: string, doc: Document): Rgba {
   return { r, g, b, a: a / 255 }
 }
 
-/** Resolves when `html[data-user-theme-paused]` is gone. */
-function pauseEnded(doc: Document): Promise<void> {
-  return new Promise((resolve) => {
-    const root = doc.documentElement
-    if (!root.hasAttribute('data-user-theme-paused') || typeof MutationObserver !== 'function') { resolve(); return }
-    const observer = new MutationObserver(() => {
-      if (root.hasAttribute('data-user-theme-paused')) return
-      observer.disconnect()
-      resolve()
-    })
-    observer.observe(root, { attributes: true, attributeFilter: ['data-user-theme-paused'] })
-  })
-}
-
 function placeLayer(next: WallpaperLayer | null, doc: Document): void {
   layer = next
   releaseUnused(next?.url)
@@ -330,12 +316,6 @@ export function showWallpaper(profileId: string | null | undefined, wallpaper: T
       return
     }
     problem = null
-    // While the theme is paused for a decision its colours are off, so the page shows the base theme's: measuring now
-    // would fit the scrim to the wrong text. The layer is hidden meanwhile; it is measured once the pause ends.
-    if (doc.documentElement.hasAttribute('data-user-theme-paused')) {
-      await pauseEnded(doc)
-      if (run !== generation) return
-    }
     const base = resolvedColor('--surface-base', doc)
     const texts = [resolvedColor('--text-primary', doc), resolvedColor('--text-secondary', doc)]
     // Under acrylic the layer is see-through: text sits on the image at that opacity over the window's tint, so the
