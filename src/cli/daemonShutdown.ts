@@ -169,12 +169,12 @@ export const DRAIN_RETRY_DELAY_MS = 1_000
  * exits. Turns are cut off and recovered at the next start, as after a crash, so a quit, `service stop`
  * or an update install is never held up by work that does not end.
  */
-export const DRAIN_STUCK_AFTER_MS = 8_000
+export const DRAIN_STUCK_AFTER_MS = 3_000
 /**
  * The longest a daemon lives once it was asked to stop. Covers what the drain deadline cannot: a
  * teardown step that never answers, or a process that stays up after teardown ended.
  */
-export const DAEMON_EXIT_DEADLINE_MS = 12_000
+export const DAEMON_EXIT_DEADLINE_MS = 5_000
 
 /**
  * Ends the process `ms` after a stop began, whatever teardown is doing then. The timer does not keep
