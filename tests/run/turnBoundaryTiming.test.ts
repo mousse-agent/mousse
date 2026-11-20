@@ -174,8 +174,9 @@ describe('turn boundary timing for an ordinary thread', () => {
       // The phases add up to the line.
       expect(Object.values(line.phases).reduce((sum, phase) => sum + (phase.git ?? 0), 0)).toBe(line.git)
     }
-    // Starting a turn in a Git worktree runs Git, and so does recording its end.
-    expect(lines.every((line) => line.git > 0)).toBe(true)
+    // Starting a turn in a Git worktree runs Git, and so does recording its end; the queued turn starts from the first
+    // one's end (its hand-off) and runs none.
+    expect(lines.map((line) => line.git > 0)).toEqual([true, true, false, true])
   })
 
   it("counts the wait for a repository's lease in the phase that waited", async () => {
