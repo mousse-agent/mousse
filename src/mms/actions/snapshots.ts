@@ -619,6 +619,8 @@ interface Conversion {
   filtered: Set<string>
   /** `.git/info/attributes` is there: it applies even with conversions off. */
   infoAttributes: boolean
+  /** `git config --null --list`, as read for the conversion, for the exact tree to read its drivers from. */
+  configListing?: string
 }
 
 /**
@@ -629,13 +631,16 @@ interface Conversion {
  * from a snapshot): `GIT_ATTR_SOURCE` from Git 2.40; before, any `.gitattributes` in the tree counts as converting.
  */
 function* conversionSteps(top: string, files: PrivateFiles, paths: readonly string[], source?: string): Steps<Conversion> {
-  const config = yield* tryGitStep(top, ['config', '--get-regexp', '^core\\.(autocrlf|eol)$'])
+  // Every setting, once: the exact tree reads its filter drivers from the same listing (`configListing`). Each entry is
+  // `key\nvalue`, or `key` alone for a bare key, ended by NUL.
+  const config = yield* tryGitStep(top, ['config', '--null', '--list'], undefined, LISTING)
   let converts = false
-  for (const line of config.ok ? config.stdout.split(/\r?\n/).filter(Boolean) : []) {
-    const space = line.indexOf(' ')
-    const key = (space < 0 ? line : line.slice(0, space)).toLowerCase()
+  for (const item of config.ok ? config.stdout.split('\0').filter(Boolean) : []) {
+    const newline = item.indexOf('\n')
+    const key = (newline < 0 ? item : item.slice(0, newline)).toLowerCase()
+    if (key !== 'core.autocrlf' && key !== 'core.eol') continue
     // A bare `autocrlf` key reads as true; `core.eol` counts whatever it says.
-    if (key !== 'core.autocrlf' || !/^(false|no|off|0)$/i.test(space < 0 ? '' : line.slice(space + 1).trim())) converts = true
+    if (key !== 'core.autocrlf' || !/^(false|no|off|0)$/i.test(newline < 0 ? '' : item.slice(newline + 1).trim())) converts = true
   }
   const infoAttributes = files.infoAttributes ? yield* nonEmpty(files.infoAttributes) : false
   const modern = yield* readsAttrSource(top)
@@ -648,7 +653,7 @@ function* conversionSteps(top: string, files: PrivateFiles, paths: readonly stri
     }
   }
   if (source && !modern && !converts) converts = nul(yield* gitStep(top, ['ls-tree', '-r', '-z', '--name-only', '--full-tree', source], undefined, undefined, LISTING)).some((path) => path === '.gitattributes' || path.endsWith('/.gitattributes'))
-  return { converts, filtered, infoAttributes }
+  return { converts, filtered, infoAttributes, ...(config.ok ? { configListing: config.stdout } : {}) }
 }
 
 function* nonEmpty(path: string): Steps<boolean> {
@@ -785,7 +790,8 @@ function* exactIndexTree(top: string, files: PrivateFiles, entries: readonly Siz
   const empty = yield* emptyTreeSteps(top)
   const env = exactEnv(empty, index)
   // No filter driver runs while bytes are hashed, not even one `.git/info/attributes` names: every one is emptied.
-  const config = yield* gitStep(top, ['config', '--null', '--list'], undefined, undefined, LISTING)
+  // Read once for the conversion (`conversionSteps`); asked here only when that read failed.
+  const config = conversion.configListing ?? (yield* gitStep(top, ['config', '--null', '--list'], undefined, undefined, LISTING))
   const off = driversOffOf(config)
   const quiet = <T>(steps: Steps<T>): Steps<T> => withConfigSteps(off, steps)
   const links = entries.filter((entry) => entry.mode === '160000')

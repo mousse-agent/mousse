@@ -317,7 +317,7 @@ import { PublishService } from '../actions/PublishService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
 import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
-import { ThreadActionService } from '../actions/ThreadActionService'
+import { ThreadActionService, type TurnStartCheck } from '../actions/ThreadActionService'
 import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
 import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
 import type { NativeContextBoundary } from '../../shared/threadActions'
@@ -14312,6 +14312,8 @@ export class OrchestratorService extends EventEmitter {
       safeBoundaryProof: 'captured before admitting the turn user message'
     }
     let turnStartSha: string | undefined
+    /** The snapshot just made or found the start's commit there: it is not checked again (`OutsideChangesResult`). */
+    let recordedStartCheck: TurnStartCheck | undefined
     if (checkpointEnabled && checkpointCwd) {
       setupStep('snapshot')
       // Edits made outside Mousse since the last action become an action of their own, so Undo of this turn leaves them.
@@ -14322,11 +14324,13 @@ export class OrchestratorService extends EventEmitter {
         try {
           const prepared = await ensureSnapshotWorkspaceAsync({ threadDirectory: snapshotFolder.directory, threadId: snapshotFolder.threadId, workTree: snapshotFolder.workTree, projectId: snapshotFolder.projectId })
           checkpointCwd = prepared.record.workTree
-          turnStartSha = (await new ThreadActionService(snapshotFolder.directory).recordOutsideChanges({
+          const recorded = await new ThreadActionService(snapshotFolder.directory).recordOutsideChanges({
             threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
             heldThreadLease: session.executionLease ?? undefined, signal: setupSignal,
             presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
-          })).startSha
+          })
+          turnStartSha = recorded.startSha
+          recordedStartCheck = recorded.startCheck
           setSnapshotsOff(snapshotFolder.directory, undefined)
         } catch (error) {
           // A Stop that ended the wait for the folder's store ends the turn; it says nothing about the folder's snapshots.
@@ -14340,11 +14344,13 @@ export class OrchestratorService extends EventEmitter {
         }
       } else if (directory) {
         try {
-          turnStartSha = (await new ThreadActionService(directory).recordOutsideChanges({
+          const recorded = await new ThreadActionService(directory).recordOutsideChanges({
             threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
             heldThreadLease: session.executionLease ?? undefined, signal: setupSignal,
             presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
-          })).startSha
+          })
+          turnStartSha = recorded.startSha
+          recordedStartCheck = recorded.startCheck
         } catch (error) {
           // A worktree folder given a new repository (Initialize Git) has no commit to snapshot yet: the turn runs with
           // its conversation recorded alone, and Undo says why. Anything else still fails the turn.
@@ -14360,7 +14366,9 @@ export class OrchestratorService extends EventEmitter {
     // What `beginTurn` checks of the start, read here without blocking, where the turn already waited for its snapshot:
     // `beginTurn` itself runs with nothing awaited before the turn is registered, and reports the result as it always has.
     const turnStartCheck = checkpointEnabled && turnStartSha && checkpointCwd
-      ? await new ThreadActionService(this.resolveThreadDir(session.threadId)!).checkTurnStart(checkpointCwd, turnStartSha)
+      ? recordedStartCheck?.startSha === turnStartSha && recordedStartCheck.workspacePath === checkpointCwd
+        ? recordedStartCheck
+        : await new ThreadActionService(this.resolveThreadDir(session.threadId)!).checkTurnStart(checkpointCwd, turnStartSha)
       : undefined
     turnBoundaryMark(session.threadId, 'startCheck')
     closeRepositoryFacts()
