@@ -410,6 +410,18 @@ describe('AntigravityAdapter', () => {
     expect(service.chat).not.toHaveBeenCalled()
   })
 
+  it('reports the history a failed or stopped turn left, so the next turn may resume the agent session', async () => {
+    const turn = { instanceId: 'antigravity', llmProvider: 'antigravity', model: 'm' }
+    const failing = { ...client(async () => { throw new Error('quota') }), commitInterrupted: vi.fn() }
+    await expect(antigravityAdapter(() => failing).startTurn(input(turn), recordingSink(), control(), host({ nativeHistoryNow: () => 'history up to the failed request' }))).rejects.toThrow('quota')
+    expect(failing.commitInterrupted).toHaveBeenCalledExactlyOnceWith('thread-1', 'history up to the failed request')
+    expect(failing.commitConversation).not.toHaveBeenCalled()
+    const stop = new AbortController()
+    const stopped = { ...client(async () => { stop.abort(); throw new Error('aborted') }), commitInterrupted: vi.fn() }
+    await expect(antigravityAdapter(() => stopped).startTurn(input({ ...turn, signal: stop.signal }), recordingSink(), control(), host({ nativeHistoryNow: () => 'history up to the stopped request' }))).rejects.toThrow('aborted')
+    expect(stopped.commitInterrupted).toHaveBeenCalledExactlyOnceWith('thread-1', 'history up to the stopped request')
+  })
+
   it('relays text and tools, commits the history and falls back to the selected model metadata', async () => {
     const service = client(async (chat) => {
       chat.onTool?.({ phase: 'start', callId: 'c', title: 'Antigravity subagent: Research', toolName: 'start_subagent' })

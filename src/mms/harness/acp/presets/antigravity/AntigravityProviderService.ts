@@ -458,6 +458,11 @@ export class AntigravityProviderService {
     this.acp.commitConversation(threadId, history)
   }
 
+  /** The history a turn that did not finish left: its session may be resumed from it (`AcpSessions.commitInterrupted`). */
+  commitInterrupted(threadId: string, history: string): void {
+    this.acp.commitInterrupted(threadId, history)
+  }
+
   /** A turn on the thread's agent session (see `AcpSessions.chat`). */
   async chat(input: AcpChatInput): Promise<string> {
     input.signal?.throwIfAborted()
