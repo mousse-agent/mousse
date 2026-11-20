@@ -40,12 +40,20 @@ import { MmsProtocolServer } from '../../mms/protocol'
 import { prepareMemoryMonitor } from '../../mms/diagnostics/startMemoryMonitor'
 import { formatStartupTiming, startupPhase, startupTimingBegin, startupTimingEnd } from '../../mms/startup/startupTiming'
 import { logInfo } from '../../mms/log/diag'
+import { startDaemonExitWatchdog } from '../daemonExitWatchdog'
 import {
+  DAEMON_EXIT_DEADLINE_MS,
   armDaemonExitDeadline,
   stopRunningDaemon,
   shutdownDaemonLifecycle,
   type DaemonLifecycleState
 } from '../daemonShutdown'
+
+/**
+ * How much longer than the main thread's exit deadline the watchdog thread waits, so the ordinary
+ * shutdown always gets the first chance to finish.
+ */
+const EXIT_WATCHDOG_SLACK_MS = 3_000
 
 export async function runService(args: ParsedArgs): Promise<void> {
   const { globals, subcommand } = args
@@ -132,11 +140,16 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
   }
   const ownerToken = state.ownerToken!
   const exitDeadline = opts.exitDeadline ?? (opts.skipSignals ? undefined : { exit: (code: number) => process.exit(code) })
+  // The production daemon's deadline also runs off the main thread, where a long synchronous pass cannot hold it up.
+  const watchdog = opts.skipSignals
+    ? null
+    : startDaemonExitWatchdog({ homeDir, ownerToken, ms: (exitDeadline?.ms ?? DAEMON_EXIT_DEADLINE_MS) + EXIT_WATCHDOG_SLACK_MS })
 
   let memoryMonitor: ReturnType<typeof prepareMemoryMonitor> = null
   const shutdown = async (reason: string, exitCode = 0): Promise<void> => {
     memoryMonitor?.stop()
     memoryMonitor = null
+    watchdog?.arm()
     if (state.shuttingDown) {
       // Already stopping: wait for teardown (and stop anything startup made since).
       await shutdownDaemonLifecycle(state)

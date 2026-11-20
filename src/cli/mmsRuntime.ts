@@ -112,7 +112,7 @@ export function getMmsStopRequestPath(homeDir: string, token: string): string {
   return join(canonicalizeHome(homeDir), `mms.stop.request.${key}.json`)
 }
 
-function getLegacyStopRequestPath(homeDir: string): string {
+export function getLegacyStopRequestPath(homeDir: string): string {
   return join(canonicalizeHome(homeDir), MMS_STOP_REQUEST_FILENAME)
 }
 
