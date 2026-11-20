@@ -692,6 +692,16 @@ export class MmsProtocolServer {
       emitToSubscribers(this.ring.push('turn.state', state, state.threadId))
     })
 
+    // What a thread runs in the background changed (issue #1605): its monitors, background commands and holds, and its
+    // provider's own background work. The event carries the whole picture, so the composer's status row never refetches.
+    onOrch('background-work', ({ threadId }: { threadId: string }) => {
+      try {
+        emitToSubscribers(this.ring.push('thread.backgroundWork', services.orchestrator.backgroundWork(threadId), threadId))
+      } catch (error) {
+        console.warn('thread.backgroundWork could not be sent', { threadId, error: error instanceof Error ? error.message : String(error) })
+      }
+    })
+
     // Run Engine (SPEC §6): durable thread events and command acknowledgements.
     onOrch('run-event', (event: { threadId: string }) => {
       emitToSubscribers(this.ring.push('run.event', event, event.threadId))

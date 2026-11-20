@@ -177,7 +177,7 @@ function monitorEndText(payload: MonitorEventPayload): string | undefined {
     case 'chatty':
       return `It was stopped because it reported too much (${end.limit}). Make it report only what you need (filter its output), then start it again.`
     case 'stopped':
-      return 'It was stopped with background_stop.'
+      return 'The user stopped it.'
     case 'thread_stopped':
       return 'It was stopped because the thread was stopped.'
     case 'restart':

@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   MONITOR_BATCH_MAX_MS,
   MONITOR_BATCH_MS,
+  MONITOR_CHANGE_THROTTLE_MS,
   MONITOR_CHATTY_EVENTS_PER_MINUTE,
   MONITOR_CHATTY_NOTICES_PER_MINUTE,
   MONITOR_DEFAULT_MINUTES,
@@ -323,6 +324,36 @@ describe('thread monitors', () => {
     s.monitors.stop('t1', hold.id)
     expect(runtimes.getActivity('t1')).toBe('completed')
     expect(runtimes.waitsOnWork('t1')).toBe(false)
+  })
+
+  it('tells the app at once when one starts or ends, and a new latest line at most every throttle window', () => {
+    const changed: string[] = []
+    const s = setup({ changed: (threadId) => { changed.push(threadId) } })
+    const view = s.monitors.startMonitor(command())
+    expect(changed).toEqual(['t1'])
+    for (let index = 0; index < 20; index++) {
+      s.children[0]!.print(`line ${index}\n`)
+      vi.advanceTimersByTime(100)
+    }
+    // 2 s of lines: one update when the window closed, none per line.
+    expect(changed.length).toBeLessThanOrEqual(2)
+    vi.advanceTimersByTime(MONITOR_CHANGE_THROTTLE_MS)
+    const beforeEnd = changed.length
+    s.monitors.stop('t1', view.id)
+    expect(changed.length).toBe(beforeEnd + 1)
+    // Nothing waits to be told once it has ended.
+    vi.advanceTimersByTime(MONITOR_CHANGE_THROTTLE_MS * 3)
+    expect(changed.length).toBe(beforeEnd + 1)
+  })
+
+  it('a Stop from the app ends it and tells the agent with its next turn', () => {
+    const s = setup()
+    const view = s.monitors.startMonitor(command())
+    s.children[0]!.print('half done\n')
+    expect(s.monitors.stopByPerson('t2', view.id)).toBeUndefined()
+    expect(s.monitors.stopByPerson('t1', view.id)).toMatchObject({ id: view.id })
+    expect(s.posted.map((entry) => entry.payload)).toEqual([expect.objectContaining({ events: ['half done'], end: { reason: 'stopped' }, attention: 'none' })])
+    expect(s.killed[0]).toBe('4242 SIGTERM')
   })
 
   it('summarizes a thread\'s background work for the status row', () => {

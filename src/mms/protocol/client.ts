@@ -144,6 +144,7 @@ export const SHARED_READ_METHODS: ReadonlySet<string> = new Set([
   'skills.list',
   'storage.policy',
   'subagents.list',
+  'threads.backgroundWork',
   'thread.snapshot',
   'threads.approvalRules',
   'threads.get',

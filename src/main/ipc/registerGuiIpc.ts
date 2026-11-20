@@ -5,6 +5,7 @@ import { AppError, type AppErrorShape, errorDiagnostic, knownAppError, normalize
 import { PENDING_CHANGES_ERROR_CODES } from '../../shared/workspace'
 import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
 import type { SubagentSummary } from '../../shared/subagents'
+import type { ThreadBackgroundWork } from '../../shared/backgroundWork'
 import type { SetVendorSettingInput } from '../../shared/harness/vendorSettings'
 import { CHAT_METHODS } from '../../shared/chats'
 import { CHAT_RESOURCE_METHODS } from '../../shared/chatResources'
@@ -2716,6 +2717,11 @@ export function registerGuiIpc(
   })
   registerHandler('subagents:stopAll', async (_e, threadId: string) => {
     const res = await guiMms.request<{ ok: boolean }>('subagents.stopAll', { threadId })
+    return res.ok
+  })
+  registerHandler('threads:backgroundWork', async (_e, threadId: string) => guiMms.request<ThreadBackgroundWork>('threads.backgroundWork', { threadId }))
+  registerHandler('threads:stopBackground', async (_e, threadId: string, id: string) => {
+    const res = await guiMms.request<{ ok: boolean }>('threads.stopBackground', { threadId, id })
     return res.ok
   })
   registerHandler('subagents:list', async (_e, threadId: string) => {

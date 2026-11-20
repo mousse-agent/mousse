@@ -75,7 +75,7 @@ describe('monitor notices', () => {
     [{ reason: 'timeout', minutes: 30 }, 'background', /ran out of time after 30 minutes/],
     [{ reason: 'timeout', minutes: 360 }, 'keep_working', /Call keep_working again/],
     [{ reason: 'chatty', limit: 'more than 600 events in a minute' }, 'command', /reported too much \(more than 600 events in a minute\).*filter/],
-    [{ reason: 'stopped' }, 'command', /stopped with background_stop/],
+    [{ reason: 'stopped' }, 'command', /The user stopped it/],
     [{ reason: 'thread_stopped' }, 'url', /the thread was stopped/],
     [{ reason: 'restart' }, 'background', /Mousse restarted\. Start it again/]
   ] as const)('end %j of a %s says why', (end, monitorKind, expected) => {

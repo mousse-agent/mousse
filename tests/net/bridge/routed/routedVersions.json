@@ -734,6 +734,11 @@
     "digest": "2a27f073e7829290",
     "security": "04f7c680ffd36337"
   },
+  "threads.backgroundWork": {
+    "version": 1,
+    "digest": "2a27f073e7829290",
+    "security": "04f7c680ffd36337"
+  },
   "threads.clearApprovalRules": {
     "version": 1,
     "digest": "e2af3a0680e25499",
@@ -823,6 +828,11 @@
     "version": 1,
     "digest": "d45007f32a42eb40",
     "security": "ceacd93869361a7a"
+  },
+  "threads.stopBackground": {
+    "version": 1,
+    "digest": "0c8cf0ea228d517f",
+    "security": "926c4af141d1208d"
   },
   "threads.stopCompaction": {
     "version": 1,
