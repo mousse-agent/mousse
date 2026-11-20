@@ -448,11 +448,6 @@
   opacity: 0;
 }
 
-.threads-sidebar-thread-container:not(:has(> .threads-sidebar-card)) > .threads-sidebar-thread-actions {
-  padding-left: 0;
-  background: none;
-}
-
 .threads-sidebar-thread-actions {
   position: absolute;
   top: 50%;
@@ -460,11 +455,9 @@
   display: inline-flex;
   align-items: center;
   gap: 1px;
-  padding-left: 10px;
   opacity: 0;
   pointer-events: none;
   transform: translateY(-50%);
-  background: linear-gradient(90deg, transparent, var(--surface-strong) 10px);
   transition: opacity 0.15s;
 }
 
@@ -748,10 +741,6 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 
 /* The hover actions are bare icons on the row: no strip behind them and no fill on the buttons, at rest or under the
    pointer. The icon brightens instead; keyboard focus keeps a thin ring. */
-.app .threads-sidebar .threads-sidebar-thread-container > .threads-sidebar-thread-actions {
-  background: none;
-}
-
 .app .threads-sidebar .threads-sidebar-thread-action,
 .app .threads-sidebar .threads-sidebar-thread-action:is(:hover, :focus-visible, [aria-expanded='true']) {
   background: transparent;
