@@ -48,7 +48,7 @@ import { ALL_MIRROR_FIELDS, LAUNCH_MIRROR_FIELDS } from './harness/vendorMirror'
 import type { CliProviderConfigPatch } from '../shared/providerAuth'
 import type { ChatMessage, ScheduledJob, Thread } from '../shared/types'
 import { ProjectManager } from './data/ProjectManager'
-import { migrateWorktreeDefaultSetting } from './data/newThreadChoice'
+import { migrateWorktreeDefaultSetting, settleNewThreadPickerDefault } from './data/newThreadChoice'
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { backfillSubagentLineage } from './data/subagentLineage'
 import { OrchestratorService } from './orchestrator/OrchestratorService'
@@ -581,6 +581,12 @@ export class MmsProfileServices {
     })
     // The feature turns the store on; when it is off, MOUSSE_SQLITE_THREAD_STORE still can (development and tests).
     if (this.config.get().features.sqliteThreadStore) this.threads.setSqliteStoreEnabled(true)
+    // The New thread picker: on for a new profile, off for one already in use (decided once).
+    try {
+      settleNewThreadPickerDefault(config, () => this.projects.listProjects().length > 0 || this.threads.listThreads().length > 0)
+    } catch (error) {
+      console.warn('the New thread picker default could not be saved', error instanceof Error ? error.message : String(error))
+    }
     this.applets = new AppletStore(homeDir, id => this.threads.getThreadDir(id))
     this.projects.setThreadStore(this.threads)
     this.platform = new MmsProfilePlatform(this)

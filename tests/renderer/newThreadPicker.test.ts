@@ -43,7 +43,8 @@ beforeEach(() => {
     threadsSidebarOpen: true,
     projects: [project('web'), project('api', { node: 'mac', path: '/Users/me/api' }), project('docs')],
     threads: [thread('t1', 'web', '2026-11-20T09:00:00.000Z'), thread('t2', 'api', '2026-11-19T09:00:00.000Z')],
-    lastNewThreadProjectId: 'api'
+    lastNewThreadProjectId: 'api',
+    newThreadPicker: true
   })
   host = document.createElement('div')
   document.body.append(host)
@@ -159,6 +160,14 @@ it('starts without a project, adds a project, or closes on Escape', async () => 
 
 it('starts a thread at once when there is no project to pick', async () => {
   useAppStore.setState({ projects: [], threads: [] })
+  await show()
+  await clickNewThread()
+  expect(dialog()).toBeNull()
+  expect(actions.createAndSelectThread).toHaveBeenCalled()
+})
+
+it('starts a thread at once when the picker is turned off in Settings', async () => {
+  useAppStore.setState({ newThreadPicker: false })
   await show()
   await clickNewThread()
   expect(dialog()).toBeNull()
