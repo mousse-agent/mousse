@@ -37,6 +37,23 @@ describe('General settings through the daemon protocol', () => {
   })
 })
 
+it('saves the Threads group as its rows send it, the New thread picker switch included', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'mousse-general-settings-'))
+  try {
+    const settings = new SettingsStore(MousseConfigStore.load(home))
+    const ctx = { mms: { settings }, globalSequence: () => 1, emitEvent: vi.fn() } as unknown as HandlerContext
+    // Each row sends the whole group; a profile opened on this build has newThreadPicker saved.
+    const save = (runs: Record<string, unknown>) => dispatchMethod(ctx, 'settings.set', { partial: { runs: { ...settings.get().runs, ...runs } } })
+    await save({ newThreadPicker: false })
+    await save({ keepAwake: false })
+    await save({ newThreadPicker: true })
+    expect(new SettingsStore(MousseConfigStore.load(home)).get().runs).toMatchObject({ newThreadPicker: true, keepAwake: false })
+    await expect(save({ newThreadPicker: 'yes' })).rejects.toThrow('newThreadPicker must be a boolean')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
 // Bot quiet hours were removed: what an older version stored, or an older window still sends, is ignored.
 it('ignores bot quiet hours an older version stored or an older window sends', () => {
   const home = mkdtempSync(join(tmpdir(), 'mousse-quiet-settings-'))

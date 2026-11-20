@@ -56,6 +56,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Stopped', section: 'general', anchor: 'general-notify-stopped', keywords: ['notifications', 'when a thread stops', 'interrupted', 'failed', 'usage limit', 'toast', 'sound'] },
   { title: 'Keep computer awake', section: 'general', anchor: 'general-keep-awake', keywords: ['sleep', 'awake', 'power', 'caffeinate', 'suspend', 'idle', 'battery'] },
   { title: 'Goal turn limit', section: 'general', anchor: 'general-goal-turns', keywords: ['goal', '/goal', 'turns', 'continue', 'keep working', 'limit', 'autonomous'] },
+  { title: 'Pick a project for new threads', section: 'general', anchor: 'general-new-thread-picker', keywords: ['new thread', 'project picker', 'picker', 'grid', 'choose project', 'one click'] },
   { title: 'Archive private threads after', section: 'general', anchor: 'general-private-expiry', keywords: ['private', 'expire', 'expiry', 'auto archive', 'auto delete', 'timer', 'incognito', 'chats'] },
   { title: 'All threads on my other devices', section: 'general', anchor: 'general-remote-notifications', keywords: ['notifications', 'remote', 'computers'] },
   { title: 'Notify for bot threads', section: 'general', anchor: 'general-bot-thread-notifications', keywords: ['notifications', 'bots', 'hidden', 'sidebar'] },

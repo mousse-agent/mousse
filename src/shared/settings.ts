@@ -404,6 +404,12 @@ export interface RunSettings {
    * end, or Send now. Absent or `best_effort`: it goes in shortly after the tool. No UI sets it.
    */
   steerRelease?: Record<string, SteerRelease>
+  /**
+   * Whether the title bar's New thread asks for the project first, in a grid of projects, instead of opening a blank
+   * thread in the last project at once. A new profile starts with it on; a profile already in use when the picker came
+   * starts with it off (`settleNewThreadPickerDefault`). Absent counts as on.
+   */
+  newThreadPicker?: boolean
 }
 
 export type SteerRelease = 'best_effort' | 'strict'
@@ -418,6 +424,7 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
     : []
   return {
     ...(release.length ? { steerRelease: Object.fromEntries(release) } : {}),
+    ...(typeof raw?.newThreadPicker === 'boolean' ? { newThreadPicker: raw.newThreadPicker } : {}),
     resumeAfterUsageLimit: raw?.resumeAfterUsageLimit === true,
     usageLimitPauseCap:
       typeof cap === 'number' && Number.isInteger(cap) && cap >= 1 && cap <= MAX_USAGE_LIMIT_PAUSE_CAP
