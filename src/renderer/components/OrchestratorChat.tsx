@@ -1010,8 +1010,11 @@ export function OrchestratorChat() {
       conversationBranchId?: string,
       /** The settings the composer showed, which the turn must run on (a new chat's first send). */
       expect?: SendExpectation,
-      /** Steer: a message the running turn could not take yet (it is still being set up) is sent now once queued. */
-      steer?: boolean,
+      /**
+       * Steer: a message the running turn could not take yet (it is still being set up) is sent now once queued. `row`:
+       * the copy painted in the reply since the click, which the send keeps instead of painting it again.
+       */
+      steer?: boolean | { row: string | null },
       /** The copy of this message shown since the click (a new chat's first message): it is kept, not painted again. */
       firstPrompt?: ShownFirstPrompt
     ) => {
@@ -1055,8 +1058,12 @@ export function OrchestratorChat() {
       const promptThread = optimisticMessageId ? targetThreadId : null
       if (promptThread) promptsOnTheWay.current.set(promptThread, onTheWay + 1)
       if (steer) setSteersOnTheWay((current) => new Set(current).add(requestId))
-      // A steer queued first shows in the reply from now on, not only once it is sent now.
-      const steerRow = steer && queuesNow && targetThreadId === queue.threadId ? queue.beginComposerSteer(request.content, images) : null
+      // A steer queued first shows in the reply from now on, not only once it is sent now. One painted since the click
+      // stays the same row; it goes if the message starts a turn of its own instead.
+      const shownRow = typeof steer === 'object' ? steer.row : null
+      const paintsSteer = Boolean(steer) && queuesNow && targetThreadId === queue.threadId
+      if (shownRow && !paintsSteer) queue.endComposerSteer(shownRow, false)
+      const steerRow = paintsSteer ? shownRow ?? queue.beginComposerSteer(request.content, images) : null
       if (optimisticMessageId) {
         useAppStore.getState().addMessage({
           id: optimisticMessageId,
@@ -1459,6 +1466,8 @@ export function OrchestratorChat() {
     // A command's earlier answer (`/goal` alone) is about what was true then.
     if (command) setCommandInfo(null)
     let steerQueued = false
+    // A steer the turn could not take yet, painted in the reply since the click: the send below keeps that row.
+    let steerShown: string | null = null
     // `/goal <text>` on a new chat: the text is the first message, and the goal of the thread the send makes.
     let goalToAdopt: string | undefined
     if (command) {
@@ -1500,7 +1509,9 @@ export function OrchestratorChat() {
         // read again, and the text comes back to the composer only if it did not arrive.
         steered = 'uncertain'
       }
-      if (steerRow) queue.endComposerSteer(steerRow, steered === true)
+      // Not taken yet: it stays in the reply while it is queued and sent now below (a timer takes it out if no send follows).
+      if (steerRow) queue.endComposerSteer(steerRow, steered === true || steered === false)
+      if (steerRow && steered === false) steerShown = steerRow
       if (steered === 'uncertain') {
         setSendError(STEER_UNCONFIRMED)
         if (steerThread) {
@@ -1546,6 +1557,8 @@ export function OrchestratorChat() {
     const asked = questionsTakeMessage && !options?.skipQuestions ? pendingQuestions : null
     const card = questionCardRef.current
     if (asked && card && (text || images.length > 0)) {
+      // It answers a question instead: it is not on its way into the reply.
+      if (steerShown) queue.endComposerSteer(steerShown, false)
       const answered = card.answerWithMessage(text, images)
       if (!answered) {
         clearComposer()
@@ -1721,7 +1734,7 @@ export function OrchestratorChat() {
     }
     // The composer is clear and the send paints the message from here: the chat is no longer a new one.
     setFirstSendId(null)
-    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound, steerQueued, firstPrompt)
+    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound, steerShown ? { row: steerShown } : steerQueued, firstPrompt)
     // Refused: nothing runs, so the goal set for it goes too. (An unconfirmed send may have arrived; it keeps the goal.)
     if (goalThread && sent === false) void window.mousse.platformRequest.request('threads.goal', { threadId: goalThread, action: 'clear' }).catch(() => undefined)
     if (sent === false && stillVisible()) {

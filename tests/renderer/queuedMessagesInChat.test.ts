@@ -469,6 +469,36 @@ describe('queued messages in the conversation', () => {
     expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a'])
   })
 
+  it('keeps a message sent now in the reply when the queue drops it before its copy in the turn arrives', async () => {
+    await show([queued('a', 'one'), queued('b', 'two')])
+    await click(button('b', 'Send'))
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one')] }) })
+    expect(reply()).toEqual(['two'])
+    await act(async () => {
+      useAppStore.getState().addMessage({ id: 'echo-b', role: 'user', content: 'two', timestamp: '2026-11-09T10:01:00Z', steered: true, steerItemId: 'b' } as never)
+    })
+    expect(reply()).toEqual(['two'])
+    expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a'])
+  })
+
+  it('keeps a steer in the reply when it is sent now before the queue lists it', async () => {
+    let thread!: ReturnType<typeof useThreadQueue>
+    function Steering() {
+      thread = useThreadQueue({ threadId: 't1', onDraftToComposer: toComposer })
+      const transcript = useAppStore((state) => state.messages)
+      const steered = withSteersOnTheWay(transcript, thread.steersOnTheWay, 't1').filter((message) => message.role === 'user' && message.steered)
+      return createElement('ol', { className: 'reply' }, steered.map((message) => createElement('li', { key: message.id }, message.content)))
+    }
+    listed = [queued('a', 'one')]
+    act(() => root.render(createElement(Steering)))
+    await act(async () => { push!({ threadId: 't1', items: listed }) })
+    // The send answered with the queued item before the daemon's list shows it: it is sent now by its id.
+    await act(async () => { void thread.steer('srv-1', queued('srv-1', 'steer this')) })
+    expect(reply()).toEqual(['steer this'])
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('srv-1', 'steer this', { intent: 'steer', state: 'steering' })] }) })
+    expect(reply()).toEqual(['steer this'])
+  })
+
   it('shows a message sent now while its turn is being set up in the reply, and back in the queue if the turn never takes it', async () => {
     vi.useFakeTimers()
     try {
