@@ -46,9 +46,11 @@ export function TitleBar() {
   }, [needsMeCount])
   // In the Chats tab, New starts an agent chat. Search is in the navigation rail.
   const chatsMode = useAppStore((s) => s.sidebarMode === 'chats')
-  // New thread asks which project first; with none to pick from, it starts the thread at once.
+  // New thread asks which project first; with none to pick from, or the picker off, it starts the thread at once.
   const [projectPickerOpen, setProjectPickerOpen] = useState(false)
   const hasProjects = useAppStore((s) => s.projects.length > 0)
+  // Settings → General → Threads can turn the picker off, back to one click.
+  const pickerOn = useAppStore((s) => s.newThreadPicker)
   const sidebarLabel = threadsSidebarOpen ? 'Hide sidebar' : showBadge ? `Show sidebar · ${needsMeLabel(needsMe.threads, needsMe.bots)}` : 'Show sidebar'
   const sidebarTitle = useShortcutTitle(sidebarLabel, 'sidebar.toggle')
   const newThreadTitle = useShortcutTitle('New thread', 'thread.new')
@@ -122,7 +124,7 @@ export function TitleBar() {
               variant="titlebar"
               onClick={() => {
                 if (chatsMode) useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' })
-                else if (hasProjects) setProjectPickerOpen(true)
+                else if (hasProjects && pickerOn) setProjectPickerOpen(true)
                 else void createAndSelectThread()
               }}
             />

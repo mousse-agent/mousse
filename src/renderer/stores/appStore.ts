@@ -391,8 +391,10 @@ interface AppState {
   privateThreadExpiry: ExpiryPreset | 'never'
   /** Where a new thread in a project with no remembered checkout starts (`runs.newThreadWorktree`). */
   newThreadWorktree: boolean
+  /** Whether the title bar's New thread asks for the project first (`runs.newThreadPicker`, absent counts as on). */
+  newThreadPicker: boolean
   /** The new-chat defaults from Settings → Runs. */
-  setRunDefaults: (runs: Pick<RunSettings, 'privateThreadExpiry' | 'newThreadWorktree'>) => void
+  setRunDefaults: (runs: Pick<RunSettings, 'privateThreadExpiry' | 'newThreadWorktree' | 'newThreadPicker'>) => void
   setComposerWorkspaceDraft: (threadId: string | null, workspace?: ComposerWorkspace) => void
   /**
    * New threads or blank drafts whose workspace a send is preparing, keyed by
@@ -852,7 +854,8 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   setLastNewThreadProjectId: (lastNewThreadProjectId) => set({ lastNewThreadProjectId }),
   privateThreadExpiry: 'never',
   newThreadWorktree: true,
-  setRunDefaults: ({ privateThreadExpiry, newThreadWorktree }) => set({ privateThreadExpiry, newThreadWorktree }),
+  newThreadPicker: true,
+  setRunDefaults: ({ privateThreadExpiry, newThreadWorktree, newThreadPicker }) => set({ privateThreadExpiry, newThreadWorktree, newThreadPicker: newThreadPicker !== false }),
   workspacePending: {},
   setWorkspacePending: (profileId, threadId, pending) => set((state) => {
     const key = workspacePendingKey(profileId, threadId)
