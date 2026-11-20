@@ -280,17 +280,6 @@
       "expiresAt": "2026-11-20T12:53:30.178Z"
     },
     {
-      "task": "sent-message-shows-at-once",
-      "session": "Animatrix-e69064",
-      "machine": "Animatrix",
-      "branch": "sent-message-shows-at-once",
-      "paths": [
-        "src/renderer/components/OrchestratorChat.tsx"
-      ],
-      "claimedAt": "2026-11-20T12:06:10.409Z",
-      "expiresAt": "2026-11-20T14:06:10.409Z"
-    },
-    {
       "task": "steer-joins-prompt-on-its-way",
       "session": "Animatrix-618a93",
       "machine": "Animatrix",
