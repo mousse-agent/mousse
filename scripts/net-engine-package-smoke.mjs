@@ -16,11 +16,12 @@
 // Prints `app_build=<commit>[-dirty]`, `packaged_helper=<path>`, then `PASS package-smoke`, or
 // `FAIL package-smoke reason=<word>`: `bad_arguments`, `wrong_host` (a target this computer cannot package and
 // run), `stale_helper`, `build_failed`, `package_failed`, `missing_helper`, `helper_does_not_run`,
-// `app_not_started`, `helper_not_found`. Exit 0 only on PASS.
+// `app_not_started`, `helper_not_found`. Exit 0 only on PASS. The checkout needs its own `npm ci`: a node_modules
+// linked from elsewhere packages without its packages' dependencies (`package_failed`).
 //
 // Waits: MOUSSE_CHECK_PACKAGE_START_MS (180000) for the packaged app to be ready.
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { CheckFailed } from './check-packaged-net-helper.mjs'
@@ -167,6 +168,10 @@ async function main(argv) {
     chmodSync(staged, 0o755)
     writeFileSync(join(helperDir, 'TARGET'), `${triple}\n`)
 
+    // electron-builder reads the dependency tree from npm, which counts a linked node_modules' packages as
+    // extraneous and leaves their dependencies out of the package: the app would not start.
+    if (lstatSync(join(project, 'node_modules'), { throwIfNoEntry: false })?.isSymbolicLink())
+      throw new CheckFailed('package_failed', `${join(project, 'node_modules')} is a link to another folder; run npm ci in this checkout`)
     if (!flags.noBuild) step('npm', ['run', 'build'], 'build_failed')
 
     const [os, arch] = flags.target.split('-')
