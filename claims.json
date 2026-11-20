@@ -126,22 +126,6 @@
       "expiresAt": "2026-11-20T14:26:00.038Z"
     },
     {
-      "task": "fix-storage-cleanup-ram-spike",
-      "session": "agibook-306465",
-      "machine": "agibook",
-      "branch": "fix-storage-cleanup-ram-spike",
-      "paths": [
-        "src/mms/lifecycle/StorageCleanupService.ts",
-        "src/mms/lifecycle/ResourceInventory.ts",
-        "src/mms/lifecycle/LifecycleClaims.ts",
-        "src/mms/actions/UndoRetentionService.ts",
-        "src/mms/data/threadDb/threadDbEngine.ts",
-        "src/mms/data/threadRecords.ts"
-      ],
-      "claimedAt": "2026-11-20T20:11:35.798Z",
-      "expiresAt": "2026-11-20T22:24:57.684Z"
-    },
-    {
       "task": "fix-subagent-optimistic-working",
       "session": "Animatrix-6036c7",
       "machine": "Animatrix",
