@@ -34,7 +34,8 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.restoreAllMocks()
   await mms.stop()
-  rmSync(home, { recursive: true, force: true })
+  // Windows can still hold a file of the stopped service for a moment; a leftover temp folder is not a failure.
+  try { rmSync(home, { recursive: true, force: true }) } catch { /* ignore */ }
   delete process.env.MOUSSE_HOME
 })
 
