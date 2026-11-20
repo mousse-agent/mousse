@@ -15,7 +15,7 @@ import { SettingsStore } from '../mms/settings/SettingsStore'
 import { GuiMmsController } from './mms/GuiMmsController'
 import { stopServiceForQuit } from './mms/stopServiceForQuit'
 import { createTrayQuit } from './trayQuit'
-import { GuiConnectionLog } from './mms/guiConnectionLog'
+import { GuiConnectionLog, logErrorReferences } from './mms/guiConnectionLog'
 import { registerRendererErrorIpc, RendererErrorLog } from './diagnostics/rendererErrorLog'
 import { PresentationState } from './mms/PresentationState'
 import {
@@ -400,6 +400,8 @@ function startGuiApp(): void {
         controller.setConnectionLog(connectionLog)
         // A start after an update shows as a new version here; the restart itself has no other trace in main.
         connectionLog.write('app.start', { version: app.getVersion(), packaged: app.isPackaged, pid: process.pid })
+        // Each "Something went wrong … Reference: <id>" main shows can be found here, with its redacted causes.
+        logErrorReferences(connectionLog)
         const startedLog = connectionLog
         app.once('will-quit', () => startedLog.flushSync())
         controller.on('error', (error: Error) => {

@@ -3,6 +3,7 @@ import type { AgentReach, BridgeAccessMine, BridgeAccessThere, BridgeNodeConnect
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
+import { serviceFailureLine } from './errorText'
 import { parseVersion } from '../../shared/net/version'
 import { describePermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { accessPreset, accessPresetOf } from '../../shared/net/accessPresets'
@@ -128,7 +129,7 @@ export function joinErrorWords(error: { code?: unknown; details?: unknown; messa
     case 'conflict':
       return 'This computer is already set up with its own devices, so it can’t join another set.'
   }
-  return String(error.message ?? error.code ?? 'The connection failed.')
+  return serviceFailureLine(error) ?? String(error.message ?? error.code ?? 'The connection failed.')
 }
 
 /** Why this computer can't start over now, naming what stands in the way; undefined when it can. */
@@ -301,7 +302,7 @@ export function linkErrorWords(error: { code?: unknown; details?: unknown; messa
       return 'The computer that made this link refused it. Make a new link there.'
   }
   if (side === 'paste' && error.code === 'peer_key_mismatch') return 'Another computer answered for this link. Make a new link.'
-  return side === 'paste' ? joinErrorWords(error) : String(error.message ?? error.code ?? 'The link couldn’t be made.')
+  return side === 'paste' ? joinErrorWords(error) : serviceFailureLine(error) ?? String(error.message ?? error.code ?? 'The link couldn’t be made.')
 }
 
 /**

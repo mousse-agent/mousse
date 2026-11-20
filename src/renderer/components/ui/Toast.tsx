@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProp
 import { create } from 'zustand'
 import { Check, Copy, X } from '../../lib/icons'
 import { FloatingPortal } from '../../lib/floatingLayer'
+import { splitErrorReference } from '../../lib/errorText'
 import { reportError, useBugReportStore } from '../../stores/bugReportStore'
 import '../../styles/toast.css'
 
@@ -169,6 +170,9 @@ function ToastCard({ title, message, actions = [], tone = 'neutral', onOpen, ope
 }) {
   const [textElement, setTextElement] = useState<HTMLElement | null>(null)
   const fullText = title ? `${title}\n${message}` : message
+  // A generic failure's "Reference: <id>" goes to the tooltip; Copy, always shown then, copies it with the message.
+  const { text: shownMessage, reference } = splitErrorReference(message)
+  const tooltip = reference ? [detail, `Reference ${reference}`].filter(Boolean).join('\n') : detail
   const { overflows, expanded, setHovered, toggle } = useToastExpansion(ghost ? null : textElement, fullText, onPinnedChange)
   const [copied, setCopied] = useState(false)
   useEffect(() => {
@@ -182,7 +186,7 @@ function ToastCard({ title, message, actions = [], tone = 'neutral', onOpen, ope
     <>
       {spoken && <span className="sr-only">{spoken} </span>}
       {title && <span className="ui-toast-title">{title}</span>}
-      <span className="ui-toast-message">{message}</span>
+      <span className="ui-toast-message">{reference ? shownMessage : message}</span>
     </>
   )
   return (
@@ -200,12 +204,12 @@ function ToastCard({ title, message, actions = [], tone = 'neutral', onOpen, ope
     >
       <span className="ui-toast-body">
         {onOpen ? (
-          <button ref={setTextElement} type="button" className="ui-toast-text ui-toast-open" aria-label={openLabel} title={detail} onClick={onOpen}>{text}</button>
+          <button ref={setTextElement} type="button" className="ui-toast-text ui-toast-open" aria-label={openLabel} title={tooltip} onClick={onOpen}>{text}</button>
         ) : (
           <span
             ref={setTextElement}
             className="ui-toast-text"
-            title={detail}
+            title={tooltip}
             role={expandable ? 'button' : undefined}
             tabIndex={expandable ? 0 : undefined}
             aria-expanded={expandable ? expanded : undefined}
@@ -217,7 +221,7 @@ function ToastCard({ title, message, actions = [], tone = 'neutral', onOpen, ope
             } : undefined}
           >{text}</span>
         )}
-        {expanded && (
+        {(expanded || reference) && (
           <span className="ui-toast-tools">
             <button
               type="button"

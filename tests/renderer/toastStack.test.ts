@@ -173,6 +173,17 @@ describe('a toast whose text is cut off', () => {
     expect(writeText).toHaveBeenCalledWith(LONG)
     expect(card().querySelector('.ui-toast-copied')?.textContent).toBe('Copied')
   })
+
+  it('a failure with a reference shows Copy without opening, keeps the reference in the tooltip and copies it', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const message = 'Could not archive · Something went wrong. Please try again or report this error. Reference: 4f1e2d3c-aaaa-bbbb-cccc-0123456789ab'
+    act(() => { showToast({ message, tone: 'error' }) })
+    expect(messages()[0]).toBe('Could not archive · Something went wrong. Please try again or report this error.')
+    expect(text().getAttribute('title')).toBe('Reference 4f1e2d3c-aaaa-bbbb-cccc-0123456789ab')
+    await act(async () => { card().querySelector<HTMLButtonElement>('[data-action="copy"]')!.click() })
+    expect(writeText).toHaveBeenCalledWith(message)
+  })
 })
 
 describe('the toast stack above a pane footer', () => {
