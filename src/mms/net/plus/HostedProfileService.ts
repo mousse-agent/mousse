@@ -33,11 +33,11 @@ export function isAccountNetwork(error: unknown): boolean {
     (error.details as { reason?: unknown } | undefined)?.reason === ACCOUNT_NETWORK
   )
 }
-/** The refusal for a computer that keeps its own devices list (it hosts Spaces or has other devices). */
+/** The refusal for a computer that keeps its own devices list (it has other devices or Spaces). */
 export function accountNetworkKept(): NetError {
   return new NetError(
     'conflict',
-    'Your Mousse ID already has a devices list on another computer. This computer hosts Spaces or has its own devices, so it can’t join that list without leaving them.',
+    'Your Mousse ID already has a devices list on another computer. This computer has its own devices or Spaces, so it can’t join that list without leaving them. It keeps working on its own.',
     { details: { reason: ACCOUNT_NETWORK_KEPT } }
   )
 }

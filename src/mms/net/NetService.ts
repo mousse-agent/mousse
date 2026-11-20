@@ -1639,14 +1639,19 @@ export class NetService {
   /**
    * This computer owns a network that nobody else relies on, so it may leave it to join the
    * account's devices list: it may start over (no Space hosted, no other device holding a pass),
-   * keeps no bots in its list and is not signed in to Mousse ID. Spaces it only belongs to are
-   * joined again afterwards, as after Start over.
+   * belongs to no Space, keeps no bots in its list and is not signed in to Mousse ID. Leaving
+   * would drop it out of any Space, so a computer in one keeps its network.
    */
   private aloneOnNetwork(): boolean {
     try {
       if (!this.hasIdentity() || this.hosted?.status().configured) return false
       const check = this.startOverCheck()
-      return check.allowed === 'alone' && check.keeper && !this.runtime().identity.listsBots()
+      return (
+        check.allowed === 'alone' &&
+        check.keeper &&
+        check.spaces.length === 0 &&
+        !this.runtime().identity.listsBots()
+      )
     } catch {
       return false
     }

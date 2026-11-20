@@ -81,7 +81,7 @@ export interface HostedNetHost {
   dropUnsentJoin(): Promise<void>
   /**
    * This computer can leave its network to join the account's devices list without losing
-   * anything others rely on: it hosts no Space, no other device holds a pass in its list, it keeps
+   * anything: it hosts or belongs to no Space, no other device holds a pass in its list, it keeps
    * no bots and is not signed in to Mousse ID.
    */
   mayJoinAccount(): boolean

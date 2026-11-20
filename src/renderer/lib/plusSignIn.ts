@@ -208,7 +208,7 @@ export function signInErrorMessage(cause: unknown, origin: string, net?: NetStat
       // Mousse ID keeps one devices list per account, and this account's is on another computer.
       const reason = ((cause as { details?: { reason?: unknown } } | null)?.details ?? {}).reason
       if (reason === 'account_network_kept')
-        return 'Your Mousse ID already has a devices list on another computer. This computer hosts Spaces or has its own devices, so it can’t join that list without leaving them. It keeps working on its own.'
+        return 'Your Mousse ID already has a devices list on another computer. This computer has its own devices or Spaces, so it can’t join that list without leaving them. It keeps working on its own.'
       if (reason === 'account_network')
         return 'Your Mousse ID already has a devices list on another computer. Sign in again to join it.'
       // The daemon words every conflict the same; at sign-in it means this computer still holds the old account.

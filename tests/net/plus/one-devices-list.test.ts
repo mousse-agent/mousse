@@ -18,8 +18,9 @@ import type { NetStatus } from '../../../src/shared/net'
  * runs the real one.
  *
  * Inputs:
- * - who signs in: an owner computer with another live device (keeps its network), an owner alone
- *   on its network (may leave it), an owner still holding an earlier sign-in;
+ * - who signs in: an owner computer with another live device, or in a Space it hosts or belongs to
+ *   (keeps its network), an owner alone on its network (may leave it), an owner still holding an
+ *   earlier sign-in;
  * - where the refusal comes: bind with its own identity, bind with a join sign-in when no owner
  *   computer of the account's list is signed in, renewal of a registration whose list was folded.
  */
@@ -270,16 +271,21 @@ it('a computer still holding an earlier sign-in, refused a second devices list, 
 }, 30000)
 
 it.each([
-  { role: 'belongs to', spaces: [{ name: 'Team', host: false }], joins: true },
-  { role: 'hosts', spaces: [{ name: 'Team', host: true }], joins: false }
-])('an owner computer alone on its network that $role a Space signs in to join the account’s list: $joins', async ({ spaces, joins }) => {
+  { role: 'belongs to', spaces: [{ name: 'Team', host: false }] },
+  { role: 'hosts', spaces: [{ name: 'Team', host: true }] }
+])('an owner computer alone on its network that $role a Space keeps it: refused at bind, it says why', async ({ spaces }) => {
   const desk = await lone('Desk', spaces)
   const self = desk.net.runtime().identity.self()!
   const mousseId = fakeMousseId()
+  mousseId.refuseBind = true
 
-  await ipc(desk.net)('net.plus.login.begin', { configuration, deviceName: 'Desk', bindRoot: true })
-
-  // A Space it only belongs to is joined again afterwards; a Space it hosts would be stranded.
-  if (joins) expect(mousseId.logins[0]).not.toHaveProperty('nodeId')
-  else expect(mousseId.logins[0]).toMatchObject({ nodeId: self.node })
+  // Leaving its network would drop it out of the Space, so it signs in with its own identity.
+  await expect(signIn(desk.net)).rejects.toMatchObject({
+    code: 'conflict',
+    details: { reason: 'account_network_kept' }
+  })
+  expect(mousseId.logins[0]).toMatchObject({ nodeId: self.node })
+  expect(desk.net.request('net.plus.status', {})).toEqual({ configured: false, connected: false })
+  expect(desk.net.runtime().identity.self()).toMatchObject({ node: self.node, isAuthority: true })
+  expect(asideOf(desk.path)).toEqual([])
 }, 30000)
