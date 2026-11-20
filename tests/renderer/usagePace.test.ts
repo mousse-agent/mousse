@@ -15,6 +15,12 @@ describe('even pace on a limit', () => {
     expect(paceRemaining({ id: 'monthly', resetsAt: '2027-01-19T00:00:00Z' }, Date.parse('2027-01-03T12:00:00Z'))).toBe(50)
   })
 
+  it('reads a scoped window by its window part (Antigravity pools)', () => {
+    expect(paceRemaining({ id: 'gemini-models:5h', resetsAt: resets(2 * HOUR) }, NOW)).toBe(40)
+    expect(paceRemaining({ id: 'claude-and-gpt-models:weekly', resetsAt: resets(84 * HOUR) }, NOW)).toBe(50)
+    expect(paceRemaining({ id: 'gemini-models:quota', resetsAt: resets(HOUR) }, NOW)).toBeUndefined()
+  })
+
   it('has none for a window of unknown length, or without a reset still to come', () => {
     expect(paceRemaining({ id: 'credits', resetsAt: resets(HOUR) }, NOW)).toBeUndefined()
     expect(paceRemaining({ id: 'five_hour' }, NOW)).toBeUndefined()
