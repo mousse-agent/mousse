@@ -1157,7 +1157,14 @@ export class NetEngineService implements EngineDirectoryPort {
       this.settingsPath,
       JSON.stringify({ enabled, profile: this.options.profileId } satisfies EngineSettings)
     )
+    try {
+      this.onSwitched?.()
+    } catch {
+      // What reads the switch elsewhere catches up on its next change; the switch itself is saved.
+    }
   }
+  /** The switch was saved (on or off): the installation rewrites `endpoints.json`, which says it (Phase 1b §3.3). */
+  onSwitched?: () => void
 
   /** The endpoint goes aside; the next start makes a new one, and its pairings show "Pair again". */
   private setEndpointAside(why: string): void {

@@ -132,6 +132,11 @@ export interface EngineLimits {
   tunnelCloseLingerMs: number
   /** How long `mousse-cli net-engine join` waits for the other computer to let it in (its owner taps Yes there). */
   cliJoinWaitMs: number
+  /**
+   * Longest `mousse://pair` link main takes from the OS (argv, `open-url`); a ticket is a few hundred bytes. Anyone can
+   * hand the app a link, so it can only be lowered.
+   */
+  pairLinkMaxChars: number
 }
 
 /** The helper's `APP_READ_AHEAD_BYTES`: a stream's credit must cover it before the helper reads that stream. */
@@ -189,7 +194,8 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   sshRemoteReadMs: 30_000,
   cliStatusReadMs: 2_000,
   tunnelCloseLingerMs: 5_000,
-  cliJoinWaitMs: 16 * 60_000
+  cliJoinWaitMs: 16 * 60_000,
+  pairLinkMaxChars: 4096
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -244,14 +250,16 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   sshRemoteReadMs: 'MOUSSE_NET_ENGINE_SSH_REMOTE_READ_MS',
   cliStatusReadMs: 'MOUSSE_NET_ENGINE_CLI_STATUS_READ_MS',
   tunnelCloseLingerMs: 'MOUSSE_NET_ENGINE_TUNNEL_CLOSE_LINGER_MS',
-  cliJoinWaitMs: 'MOUSSE_NET_ENGINE_CLI_JOIN_WAIT_MS'
+  cliJoinWaitMs: 'MOUSSE_NET_ENGINE_CLI_JOIN_WAIT_MS',
+  pairLinkMaxChars: 'MOUSSE_NET_ENGINE_PAIR_LINK_MAX_CHARS'
 })
 
 /** Limits that guard this computer against another: a value above the default is refused, so they only tighten. */
 const TIGHTEN_ONLY: ReadonlySet<keyof EngineLimits> = new Set([
   'sshRemoteRequestMaxBytes',
   'sshRemoteReadMs',
-  'tunnelCloseLingerMs'
+  'tunnelCloseLingerMs',
+  'pairLinkMaxChars'
 ])
 
 /** Reads the limits from `env`; each problem names the variable, the value and the default kept. */

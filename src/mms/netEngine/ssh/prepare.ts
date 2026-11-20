@@ -65,7 +65,8 @@ export interface PreparePort {
   engine(selector: string): Promise<PrepareEngine>
   /** Runs `work` under the per-device lock 1a's removal takes for `joiner` on `selector`. */
   locked<T>(selector: string, joiner: string, work: () => Promise<T>): Promise<T>
-  startsAtLogin(): boolean
+  /** Whether Mousse starts at login on this computer (its startup entry is installed). */
+  startsAtLogin(): Promise<boolean> | boolean
   /** A check stops B after a step, as a crash would (the step is recorded; nothing after it). */
   crashAt?(step: PrepareStep): boolean
 }
@@ -200,13 +201,13 @@ export async function prepare(port: PreparePort, request: PrepareRequest): Promi
   })
 }
 
-function done(
+async function done(
   port: PreparePort,
   engine: PrepareEngine,
   record: SshRequest,
   selector: string,
   existing: boolean
-): PrepareReply {
+): Promise<PrepareReply> {
   const reply: PrepareReply = {
     identity: engine.identity,
     name: engine.name,
@@ -214,7 +215,7 @@ function done(
     grant_id: record.grantId ?? '',
     existing,
     already: false,
-    starts_at_login: port.startsAtLogin()
+    starts_at_login: await port.startsAtLogin()
   }
   // The control keeps no reply for an existing row: a repeat after a lost reply then has nothing to answer, and
   // reads removed.

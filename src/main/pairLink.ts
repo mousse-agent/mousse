@@ -5,7 +5,7 @@
  * an app a check started (`MOUSSE_CHECK`).
  */
 
-import { readEngineControl } from '../mms/netEngine/limits'
+import { engineLimits, readEngineControl } from '../mms/netEngine/limits'
 
 export const MOUSSE_SCHEME = 'mousse'
 
@@ -15,15 +15,18 @@ export const PAIR_LINK_IPC = {
   arrived: 'netEngine:pairLink'
 } as const
 
-/** Longest link accepted from the OS: a ticket is a few hundred bytes. */
-const PAIR_LINK_MAX_CHARS = 4096
-
-/** The first `mousse://pair` link among `args` (argv, or the URL `open-url` gave); anything else is none. */
-export function pairLinkFrom(args: readonly unknown[]): string | undefined {
+/**
+ * The first `mousse://pair` link among `args` (argv, or the URL `open-url` gave); anything else is none. A link longer
+ * than `maxChars` (the `pairLinkMaxChars` limit) is none.
+ */
+export function pairLinkFrom(
+  args: readonly unknown[],
+  maxChars: number = engineLimits().pairLinkMaxChars
+): string | undefined {
   for (const arg of args) {
     if (typeof arg !== 'string') continue
     const text = arg.trim()
-    if (text.length > PAIR_LINK_MAX_CHARS) continue
+    if (text.length > maxChars) continue
     if (!/^mousse:\/\/pair[/?#]/i.test(text)) continue
     if (!text.includes('#')) continue
     return text

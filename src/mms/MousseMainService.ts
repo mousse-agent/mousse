@@ -18,6 +18,7 @@ import {
   createRetainingGitWorktreeAdapter
 } from './profiles/migration/adapters'
 import { ProfileHost } from './profiles/ProfileHost'
+import { startsAtLogin } from './netEngine/loginStart'
 import { registerProfileDomain } from './profiles/profileDomain'
 import type { ProfileId } from '../shared/profiles/ids'
 import { registerEditorTunnelMethods, registerNetMethods } from './net/registerMethods'
@@ -151,7 +152,12 @@ export class MousseMainService extends MmsProfileServices {
         // One installation store for every profile: the default profile already reads through it.
         installationConfig,
         options: { ...options, homeDir: home },
-        configureServices: (profile) => service!.configureProfileBrowser(profile)
+        configureServices: (profile) => {
+          service!.configureProfileBrowser(profile)
+          // A profile's networking switch is said in `endpoints.json`, which `mousse-helper pipe` reads.
+          profile.netEngine.onSwitched = () => service!.sshEndpointsChanged()
+        },
+        onProfilesChanged: () => service!.sshEndpointsChanged()
       })
       host.attachDefault(service, defaultId)
       service.profileHost = host
@@ -232,9 +238,18 @@ export class MousseMainService extends MmsProfileServices {
         made.add(id)
         return id
       },
-      startsAtLogin: () => false
+      startsAtLogin: () => startsAtLogin()
     })
     return this.sshRemoteNow
+  }
+
+  /** A profile came or went, or its networking switch changed: `endpoints.json` follows, once SSH add is set up. */
+  sshEndpointsChanged(): void {
+    try {
+      this.sshRemoteNow?.writeEndpoints()
+    } catch (error) {
+      console.warn('endpoints.json was not rewritten', error instanceof Error ? error.message : String(error))
+    }
   }
 
   override stop(options: { timeoutMs?: number } = {}): Promise<void> {
