@@ -723,7 +723,7 @@ export type FrostedComposerSlider = 'frostedComposerOpacity' | 'frostedComposerB
 /** Slider bounds and defaults for the frosted composer. */
 export const FROSTED_COMPOSER_RANGES: Readonly<Record<FrostedComposerSlider, { min: number; max: number; step: number; default: number }>> = {
   frostedComposerOpacity: { min: 20, max: 95, step: 1, default: 60 },
-  frostedComposerBlur: { min: 0, max: 40, step: 1, default: 16 },
+  frostedComposerBlur: { min: 0, max: 40, step: 1, default: 6 },
   frostedComposerSaturation: { min: 1, max: 1.6, step: 0.02, default: 1.12 }
 }
 
