@@ -48,19 +48,6 @@
       "expiresAt": "2026-11-19T16:46:17.828Z"
     },
     {
-      "task": "feat/frameless-sidebar-and-panel",
-      "session": "agibook-0a55b4",
-      "machine": "agibook",
-      "branch": "feat/frameless-sidebar-and-panel",
-      "paths": [
-        "src/renderer/styles/frameless-shell.css",
-        "src/renderer/styles/threads-sidebar.css",
-        "src/renderer/lib/themeCss.ts"
-      ],
-      "claimedAt": "2026-11-20T08:36:14.251Z",
-      "expiresAt": "2026-11-20T10:36:14.251Z"
-    },
-    {
       "task": "lan-direct-phone-path",
       "session": "agibook-3233ef",
       "machine": "agibook",
