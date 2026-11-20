@@ -77,21 +77,22 @@ const DECISIONS: Record<string, string> = {
   'an editor access request left in Settings': 'src/renderer/components/devices/DeviceAccessRows.tsx',
   'an SSH route approval': 'src/renderer/components/devices/ApproveSshRouteDialog.tsx',
   'an SSH host key to trust (every dialog that shows one)': 'src/renderer/components/devices/HostKeyConfirm.tsx',
-  'trusting a repository\'s Git settings': 'src/renderer/components/ThreadsContextMenu.tsx',
+  'trusting a repository\'s Git settings': 'src/renderer/components/ThreadsContextMenu.tsx'
+}
+
+/**
+ * Pages, panels and menus that hold access settings in their own layout, rather than a request waiting for an answer.
+ * Each carries `data-mousse-guarded` while open: the theme's CSS is off there (its colors stay), so it cannot relabel,
+ * hide or move those controls.
+ */
+const GUARDED: Record<string, string> = {
+  'Settings pages other than Appearance': 'src/renderer/components/SettingsPage.tsx',
+  'the Automations page (permission modes, schedules)': 'src/renderer/components/AutomationsPage.tsx',
   'the composer\'s permission mode menu': 'src/renderer/components/ComposerPermissionPicker.tsx',
   'an automation draft, also in a chat': 'src/renderer/components/automations/DraftCard.tsx',
   'an agent definition (grants, scripts)': 'src/renderer/components/agentDefinitions/AgentEditor.tsx',
   'a device\'s limits': 'src/renderer/components/devices/DeviceLimitsDialog.tsx',
   'a bot\'s About panel (what it may use, which devices reach it)': 'src/renderer/components/bots/BotAboutPanel.tsx'
-}
-
-/**
- * Pages that hold access controls in their own layout. Each carries `data-mousse-guarded` while open: the theme's CSS is
- * off there (its colors stay), so it cannot relabel, hide or move those controls.
- */
-const GUARDED: Record<string, string> = {
-  'Settings pages other than Appearance': 'src/renderer/components/SettingsPage.tsx',
-  'the Automations page (permission modes, schedules)': 'src/renderer/components/AutomationsPage.tsx'
 }
 
 /**
