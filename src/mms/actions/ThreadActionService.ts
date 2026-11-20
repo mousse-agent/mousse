@@ -91,7 +91,7 @@ export interface OutsideChangesResult { startSha: string; action?: ThreadAction;
 const UNCAPTURED_START_FILE = 'uncaptured-start.json'
 interface UncapturedStart { startSha: string; error: string }
 /** Written when a turn's end could not be snapshotted; the next record of outside changes says it holds that turn's changes. */
-const UNRECORDED_END_FILE = 'unrecorded-end.json'
+export const UNRECORDED_END_FILE = 'unrecorded-end.json'
 interface UnrecordedEnd { actionId: string; turnId: string }
 
 export class ThreadActionService {

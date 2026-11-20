@@ -239,13 +239,16 @@ export function wakeThreads(
   outbox: EffectOutbox,
   capabilitiesFor: CapabilitiesFor | undefined,
   now: string,
-  awaitsAnswer?: AwaitsAnswer
+  awaitsAnswer?: AwaitsAnswer,
+  /** Only this thread's rows (a turn's settle wakes its own thread at once); every thread's when absent. */
+  onlyThreadId?: string
 ): WakeReport {
   const inbox = new Inbox(store)
   const delegations = new Delegations(store, inbox)
   const restored = store.db.transaction(() => restoreUndeliveredRows(store, outbox, now))
   const report: WakeReport = { wakes: [], steers: [], cancelled: cancelAcknowledgedWakes(store, outbox, now), restored }
   for (const threadId of inbox.listThreadsWithPending()) {
+    if (onlyThreadId !== undefined && threadId !== onlyThreadId) continue
     try {
       store.db.transaction(() => {
         const pending = inbox.listPending(threadId)

@@ -147,7 +147,7 @@ import { harnessAppError, isProviderTurnCap, isRetriesExhausted, onRetiredBareRo
 import type { McpAttachmentProvider, McpToolBoundary } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
-import { cancelQueuedWakes, deliverAtToolBoundary, releaseToolBoundary } from '../run/delegation/wake'
+import { cancelQueuedWakes, deliverAtToolBoundary, pendingWakeEffects, releaseToolBoundary, wakeThreads } from '../run/delegation/wake'
 import { taskCheckpoint } from '../run/delegation/checkpoint'
 import { remoteSubagentPreamble, subagentPreamble, withoutSubagentPreamble } from '../run/delegation/guidance'
 import { qualifyId } from '../../shared/threadRef'
@@ -317,10 +317,12 @@ import { PublishService } from '../actions/PublishService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
 import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
-import { ThreadActionService, type TurnStartCheck } from '../actions/ThreadActionService'
+import { ThreadActionService, UNRECORDED_END_FILE, type TurnStartCheck } from '../actions/ThreadActionService'
 import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
 import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
-import type { NativeContextBoundary } from '../../shared/threadActions'
+import type { NativeContextBoundary, ThreadAction } from '../../shared/threadActions'
+import type { WorkspaceExecutionContext } from '../../shared/workspace'
+import { ThreadJournal } from '../data/ThreadJournal'
 import { coverageNotice, SnapshotRefusedError, snapshotOriginAsync, takeSnapshotAsync } from '../actions/snapshots'
 import { git as actionGit, gitAsync as actionGitAsync, requireCleanAsync as requireCleanWorkspaceAsync, tryGitAsync as actionTryGitAsync } from '../actions/git'
 import {
@@ -423,6 +425,37 @@ import { computerUseAllowed } from '../run/mcp/appTools/computer'
 const PRIVATE_THREAD_REMOTE_REFUSAL = 'This is a private thread: it stays on this computer, so it cannot start or continue subagents on other computers.'
 
 /** A folder with no worktree whose turns are recorded in a hidden store (`snapshotFolderFor`). */
+/**
+ * The end of a thread's turn, handed to the turn its settle starts (`recordTurnHandoff`, `settleTurnHandoff`,
+ * `takeTurnHandoff`): that turn starts from this end snapshot instead of checking the worktree and snapshotting it
+ * again. Kept in memory only, for one settle.
+ */
+interface TurnHandoff {
+  /** The run whose end this is. */
+  runId: string
+  /** The end snapshot, the next turn's start. */
+  endSha: string
+  /** The action that recorded it, still the latest when used. */
+  actionId: string
+  conversationBranchId: string
+  /** The folder the turn's snapshots were taken in. */
+  workspacePath: string
+  /** The thread's journal length when it was recorded: any entry since (Undo, Publish, a revert) ends it. */
+  journalEntries: number
+  /** `workspace.json`'s generation when it was recorded. */
+  generation: number
+  /** The execution context the next turn runs in: the last one, with the branch and HEAD the end recorded. */
+  workspace: WorkspaceExecutionContext
+  /** Set at the settle: the turn that may use it, a queued message the settle admitted or one of these wakes. */
+  armed?: { admitted: true } | { wakeRunIds: string[] }
+}
+
+/** A context without what only the turn that made it says (`startNote`, `workspaceNote`). */
+function withoutTurnNotes(context: WorkspaceExecutionContext): WorkspaceExecutionContext {
+  const { startNote: _start, workspaceNote: _note, ...rest } = context
+  return rest
+}
+
 interface SnapshotFolder {
   /** The thread's data folder. */
   directory: string
@@ -2496,6 +2529,12 @@ export class OrchestratorService extends EventEmitter {
     this.emit('turn-state', state)
     this.runtimeManager?.setActivity(threadId, turnPhaseActivity(phase, patch?.blockedOnWait))
   }
+
+  /**
+   * The end of a thread's last turn, handed to the turn its settle starts (`TurnHandoff`), by thread. Set when a turn's
+   * checkpoint completes, armed or dropped at its settle, and taken (used or not) by the next turn that starts.
+   */
+  private readonly turnHandoffs = new Map<string, TurnHandoff>()
 
   /** Setup steps of turns that have not started yet, by thread (`beginSetupStep`). */
   private readonly setupSteps = new Map<string, { turnId: string; timer?: ReturnType<typeof setTimeout> }>()
@@ -12535,6 +12574,8 @@ export class OrchestratorService extends EventEmitter {
    */
   abortActiveTurn(threadId?: string, opts?: { clearQueue?: boolean; runId?: string }): boolean {
     const id = threadId ?? this.getBoundThreadId()
+    // After a Stop the next turn reads its folder afresh.
+    if (id) this.turnHandoffs.delete(id)
     const session = id
       ? this.boundSession.threadId === id
         ? this.boundSession
@@ -13790,7 +13831,97 @@ export class OrchestratorService extends EventEmitter {
           logDebug('OrchestratorService', 'post-turn queue drain failed to schedule', error, { threadId: session.threadId })
         }
       }
+      this.settleTurnHandoff(session, opts?.runId, Boolean(turnFailure) || requeued)
     }
+  }
+
+  /**
+   * The thread's last turn completed with its end recorded in its worktree: the turn its settle starts, with nothing
+   * done to the worktree by Mousse in between, starts from that end instead of reading and snapshotting the worktree
+   * again (`TurnHandoff`). Only a worktree's turn whose end is a real, reversible snapshot hands off.
+   */
+  private recordTurnHandoff(session: ThreadSession, end: { runId: string; action: ThreadAction; conversationBranchId: string; workspacePath: string; workspace: WorkspaceExecutionContext }): void {
+    this.turnHandoffs.delete(session.threadId)
+    const threadDir = this.resolveThreadDir(session.threadId)
+    if (!threadDir || end.action.state !== 'completed' || end.action.reversible === false || !end.action.endSha) return
+    if (end.workspace.lifecycle !== 'ready' || end.workspace.placement === 'project-folder' || !end.workspace.workspacePath) return
+    if (existsSync(join(threadDir, UNRECORDED_END_FILE))) return
+    const record = new ThreadWorkspaceManager(threadDir).load()
+    if (!record || record.snapshotSha !== end.action.endSha || record.worktreePath !== end.workspace.workspacePath) return
+    this.turnHandoffs.set(session.threadId, {
+      runId: end.runId,
+      endSha: end.action.endSha,
+      actionId: end.action.id,
+      conversationBranchId: end.conversationBranchId,
+      workspacePath: end.workspacePath,
+      journalEntries: new ThreadJournal(threadDir, { readOnly: true }).list().length,
+      generation: record.generation ?? 0,
+      workspace: { ...withoutTurnNotes(end.workspace), ...(end.action.git?.branchAfter !== undefined ? { branch: end.action.git.branchAfter } : {}), ...(end.action.git?.headAfter ? { headSha: end.action.git.headAfter } : {}), generation: record.generation ?? 0 }
+    })
+  }
+
+  /**
+   * At a turn's settle: its hand-off goes to the turn this settle starts, or nowhere. A queued message the settle's drain
+   * admitted is that turn. Otherwise the thread's pending notices are turned into a wake now (reconciler rule 4 for
+   * this thread, instead of on the reconciler's next pass), a wake deferred while the turn ran is brought forward, and
+   * only that wake's run may use it. Nothing waiting: it is dropped.
+   */
+  private settleTurnHandoff(session: ThreadSession, runId: string | undefined, ended: boolean): void {
+    const handoff = this.turnHandoffs.get(session.threadId)
+    const ours = handoff && !handoff.armed && handoff.runId === runId
+    if (handoff && !handoff.armed && (!ours || ended || session.deleted || session.abortRequested || session.stopping)) this.turnHandoffs.delete(session.threadId)
+    if (session.turnAdmitted) {
+      if (ours && this.turnHandoffs.has(session.threadId)) handoff.armed = { admitted: true }
+      return
+    }
+    if (session.deleted || session.threadId === '__unbound__') return
+    const wakeRunIds = this.wakeThreadNow(session.threadId)
+    if (!ours || !this.turnHandoffs.has(session.threadId)) return
+    if (wakeRunIds.length) handoff.armed = { wakeRunIds }
+    else this.turnHandoffs.delete(session.threadId)
+  }
+
+  /**
+   * Reconciler rule 4 for one thread, now: its pending notices become a wake without waiting for the next pass, and a
+   * wake turn deferred while the thread was busy is made due now. Returns the thread's queued wake runs.
+   */
+  private wakeThreadNow(threadId: string): string[] {
+    const engine = this.runEngine
+    if (!engine || !this.effectsEnabled()) return []
+    try {
+      const now = new Date(engine.store.db.clock()).toISOString()
+      engine.outbox.bringForwardDeferred(threadId, now)
+      wakeThreads(engine.store, engine.outbox, (id) => this.capabilitiesForThread(id), now, (id) => this.awaitsAnswer(id), threadId)
+      this.effectWorker?.notify()
+      return pendingWakeEffects(engine.store, threadId).map((effect) => effect.runId).filter((id): id is string => typeof id === 'string')
+    } catch (error) {
+      logDebug('OrchestratorService', 'waking the thread at its settle failed; the reconciler does it on its next pass', error, { threadId })
+      return []
+    }
+  }
+
+  /**
+   * The hand-off for the turn starting now, taken whether it is used or not. Used only by the turn its settle armed it
+   * for, and only while nothing of Mousse's touched the worktree since: no journal entry, the same latest action and
+   * recorded snapshot, the same conversation branch. An edit made outside Mousse in the seconds between the two turns
+   * then counts as made during this one, as an edit made while a turn runs does.
+   */
+  private takeTurnHandoff(session: ThreadSession, opts: { queueItemId?: string; runId?: string } | undefined): TurnHandoff | undefined {
+    const handoff = this.turnHandoffs.get(session.threadId)
+    this.turnHandoffs.delete(session.threadId)
+    if (!handoff?.armed) return undefined
+    if ('admitted' in handoff.armed ? !opts?.queueItemId : !(opts?.runId && handoff.armed.wakeRunIds.includes(opts.runId))) return undefined
+    return handoff
+  }
+
+  /** Whether `handoff` still describes the worktree as Mousse last left it (`takeTurnHandoff`). */
+  private turnHandoffHolds(session: ThreadSession, handoff: TurnHandoff, threadDir: string, conversationBranchId: string): boolean {
+    if (conversationBranchId !== handoff.conversationBranchId) return false
+    const record = new ThreadWorkspaceManager(threadDir).load()
+    if (!record || record.lifecycle !== 'ready' || record.snapshotSha !== handoff.endSha || (record.generation ?? 0) !== handoff.generation || record.worktreePath !== handoff.workspace.workspacePath) return false
+    if (new ThreadJournal(threadDir, { readOnly: true }).list().length !== handoff.journalEntries) return false
+    const latest = new ThreadActionService(threadDir).latest(conversationBranchId)
+    return latest?.id === handoff.actionId && latest.endSha === handoff.endSha && existsSync(handoff.workspace.workspacePath)
   }
 
   /**
@@ -14077,7 +14208,10 @@ export class OrchestratorService extends EventEmitter {
     session.setupStop = setupStop
     this.noteQueueWait(session)
     const turnId = opts?.runId ?? uuidv4()
-    const setupStep = (step: TurnSetupStep): void => this.beginSetupStep(session.threadId, turnId, step)
+    // The turn a settle started may start from the last turn's end (`TurnHandoff`), checked again once recovery is
+    // over. It does no setup then, so it shows no setup step.
+    let handoff = this.takeTurnHandoff(session, opts)
+    const setupStep = (step: TurnSetupStep): void => { if (!handoff) this.beginSetupStep(session.threadId, turnId, step) }
     const setupSignal = opts?.externalSignal ? AbortSignal.any([opts.externalSignal, setupStop.signal]) : setupStop.signal
     // A turn that cannot start now runs later, in its place: a claimed item goes back where it was
     // (never a replacement at the tail); anything else is queued with its run.
@@ -14234,7 +14368,12 @@ export class OrchestratorService extends EventEmitter {
           session.threadId
         )
         const threadDir = this.resolveThreadDir(session.threadId)
-        if (projectPath && threadDir) {
+        if (handoff && !(projectPath && threadDir && this.turnHandoffHolds(session, handoff, threadDir, recoveryManager?.load()?.conversationBranchId ?? 'main'))) handoff = undefined
+        if (handoff && projectPath && threadDir) {
+          // Nothing of Mousse's touched the worktree since the last turn ended in it: it is not checked again.
+          session.workspace = handoff.workspace
+          session.projectCwd = session.workspace.projectPath
+        } else if (projectPath && threadDir) {
           try {
             await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, setupStep)
             const pending = opts?.agent ? agentMessageWords(request.content, agentOriginOf(opts.agent)) : request.content
@@ -14262,6 +14401,8 @@ export class OrchestratorService extends EventEmitter {
         }
     }
 
+    // Only a worktree thread's turn takes the hand-off.
+    if (handoff && session.workspace !== handoff.workspace) handoff = undefined
     turnTimingMark(session.threadId, 'workspace')
     this.noteSetupOutcome(session.threadId, opts?.runId, true)
     // Pull any messages peers enqueued before we started.
@@ -14314,7 +14455,12 @@ export class OrchestratorService extends EventEmitter {
     let turnStartSha: string | undefined
     /** The snapshot just made or found the start's commit there: it is not checked again (`OutsideChangesResult`). */
     let recordedStartCheck: TurnStartCheck | undefined
-    if (checkpointEnabled && checkpointCwd) {
+    if (checkpointEnabled && checkpointCwd && handoff && !snapshotFolder && checkpointCwd === handoff.workspacePath) {
+      // The turn starts where the last one ended: an edit made outside Mousse since counts as made during this turn.
+      turnStartSha = handoff.endSha
+      recordedStartCheck = { workspacePath: checkpointCwd, startSha: handoff.endSha }
+      turnBoundaryMark(session.threadId, 'handoff')
+    } else if (checkpointEnabled && checkpointCwd) {
       setupStep('snapshot')
       // Edits made outside Mousse since the last action become an action of their own, so Undo of this turn leaves them.
       const directory = session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
@@ -14518,6 +14664,8 @@ export class OrchestratorService extends EventEmitter {
     this.markRun(engineRunId, (engine, id) => engine.markRunning(id))
     // The run is active: Mousse tool calls Claude made while it was being started act as it.
     if (opts?.continuationId) this.endContinuationHold(opts.continuationId, false, engineRunId ?? null)
+    /** The action the turn's checkpoint recorded in its worktree, for the next turn's hand-off (`recordTurnHandoff`). */
+    let endAction: ThreadAction | undefined
     const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed', signal?: AbortSignal, how?: { endOnly?: boolean }): Promise<void> => {
       turnBoundaryMark(session.threadId, 'finishing')
       if ((!checkpointEnabled || !turnStartSha || !checkpointCwd) && !conversationDirectory || session.threadId === '__unbound__') return
@@ -14563,6 +14711,7 @@ export class OrchestratorService extends EventEmitter {
           openRepositoryFacts()
           try { return await new ThreadActionService(threadDir).checkpointExistingTurn(checkpointOptions, turnStartSha!, state) } finally { closeRepositoryFacts() }
         })()
+      if (!conversationDirectory) endAction = action as ThreadAction
       turnBoundaryMark(session.threadId, 'receipt')
       for (let index = turnPresentationStart; index < session.messages.length; index += 1) {
         session.messages[index] = {
@@ -15766,6 +15915,9 @@ export class OrchestratorService extends EventEmitter {
     }
     this.persist(true)
     if (!executionFailed) markRunTerminal('completed', undefined, displayText || 'Done.')
+    if (!executionFailed && endAction && turnStartSha && checkpointCwd && !snapshotFolder && !session.sharedWorkspace && !session.primaryCheckout && session.workspace) {
+      this.recordTurnHandoff(session, { runId: turnId, action: endAction, conversationBranchId, workspacePath: checkpointCwd, workspace: session.workspace })
+    }
     turnBoundaryMark(session.threadId, 'completed')
     this.emit('response', response)
     this.emitThreadMessages(session.threadId, session.messages)

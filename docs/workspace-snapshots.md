@@ -89,6 +89,15 @@ Turn start no longer requires a clean worktree, no longer moves uncommitted chan
 
 A turn's start (from the workspace check to the start check) and its end (around the checkpoint) each read the worktree's top, Git folder, in-progress markers, HEAD and branch once, in one `rev-parse` and, when the branch is needed, one `symbolic-ref` (`src/mms/git/repositoryFacts.ts`). Every caller in that window (workspace check, lock identity, snapshot, checkpoint, receipt) uses those answers. What was read before the repository's lease is read again once it is held, and nothing carries over to the next window, so HEAD at the end and a `.git` replaced between turns are always read fresh. Hidden stores and synchronous callers ask Git themselves.
 
+### Hand-off to the next turn
+
+A turn that the previous turn's settle starts begins from that turn's end snapshot, without checking the worktree or taking a start snapshot (`OrchestratorService.recordTurnHandoff`, `settleTurnHandoff`, `takeTurnHandoff`). That turn is either a queued message the settle's queue drain admits, or the wake for notices that arrived during the turn: at its settle the thread runs reconciler rule 4 for itself, and a wake deferred while it was busy is made due, instead of waiting for the next reconciler pass. The hand-off is kept in memory and is used once at most:
+- It is recorded only when a worktree turn completed and its end is a real, reversible snapshot (no `unrecorded-end.json`) that is also `workspace.json`'s latest snapshot.
+- It is dropped at the settle when nothing is waiting, by a Stop, and by whichever turn starts next.
+- Before use it must still hold: no journal entry since, the same latest action and recorded snapshot, the same generation and conversation branch. An Undo, Publish or revert in between makes the turn read and snapshot the worktree as usual.
+
+A hand-off turn shows no setup step. An edit made outside Mousse in the seconds between the two turns counts as made during the next turn, as an edit made while a turn runs does.
+
 What still stops a turn: an operation Mousse left unfinished (an interrupted restore or checkpoint), until recovery settles it. Recovery runs before the next turn and admits `recovery_required` too, so a thread an older version left waiting unlocks on its own. A refused publish leaves nothing unfinished.
 
 ## Checkpoint
