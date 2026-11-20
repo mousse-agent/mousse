@@ -8,15 +8,17 @@ import { MousseMainService } from '../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import { encodeFrame, FrameDecoder } from '../src/mms/protocol/framing'
-import { envelopeFrames, requestFrames } from '../src/mms/protocol/envelopeChunks'
+import { EnvelopeAssembler, envelopeBudget, envelopeFrames, requestFrames } from '../src/mms/protocol/envelopeChunks'
+import { asChatImages } from '../src/mms/protocol/validators'
+import type { ProtocolEnvelopeChunk } from '../src/mms/protocol/types'
 import {
   MMS_PROTOCOL_CHUNK_CAPABILITY,
   MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY,
-  MMS_PROTOCOL_MAX_ENVELOPE_BYTES,
+  MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES,
   MMS_PROTOCOL_MAX_FRAME_BYTES,
   MMS_PROTOCOL_VERSION
 } from '../src/mms/protocol/types'
-import { IMAGE_MAX_DATA_CHARS, IMAGE_PREVIEW_DATA_CHARS } from '../src/shared/imageLimits'
+import { IMAGE_MAX_DATA_CHARS, IMAGE_PREVIEW_DATA_CHARS, MESSAGE_IMAGES_MAX_DATA_CHARS, MESSAGE_MAX_IMAGES } from '../src/shared/imageLimits'
 import { scriptTurns } from './net/bridge/hub/fixture'
 
 /**
@@ -35,13 +37,13 @@ describe('requestFrames', () => {
   it('sends one frame when it fits, chunks only to a service that takes them, and refuses past what can be sent', () => {
     const small = { kind: 'req', id: '1', method: 'm', params: { text: 'x' } }
     const large = { kind: 'req', id: '2', method: 'm', params: { text: 'x'.repeat(MMS_PROTOCOL_MAX_FRAME_BYTES) } }
-    const huge = { kind: 'req', id: '3', method: 'm', params: { text: 'x'.repeat(MMS_PROTOCOL_MAX_ENVELOPE_BYTES) } }
+    const huge = { kind: 'req', id: '3', method: 'm', params: { text: 'x'.repeat(MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES) } }
     const rows: Array<[string, unknown, boolean, 'frame' | 'chunks' | number]> = [
       ['fits, chunk-capable', small, true, 'frame'],
       ['fits, older service', small, false, 'frame'],
       ['past a frame, chunk-capable', large, true, 'chunks'],
       ['past a frame, older service', large, false, MMS_PROTOCOL_MAX_FRAME_BYTES],
-      ['past an envelope', huge, true, MMS_PROTOCOL_MAX_ENVELOPE_BYTES]
+      ['past an inbound envelope', huge, true, MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES]
     ]
     for (const [label, value, chunked, expected] of rows) {
       const out = requestFrames(value, chunked)
@@ -57,6 +59,36 @@ describe('requestFrames', () => {
       expect(decoded.every((frame) => frame.kind === (expected === 'frame' ? 'req' : 'envelope_chunk')), label).toBe(true)
       expect(decoded.length > 1, label).toBe(expected === 'chunks')
     }
+  })
+})
+
+describe('a message with the most images it may carry', () => {
+  it('takes 80 MB of images (as base64) and refuses more, and fits in one chunked request', () => {
+    // One shared string per image keeps the test's memory to one image.
+    const full = 'A'.repeat(IMAGE_MAX_DATA_CHARS)
+    const count = Math.floor(MESSAGE_IMAGES_MAX_DATA_CHARS / IMAGE_MAX_DATA_CHARS)
+    const rest = 'A'.repeat(MESSAGE_IMAGES_MAX_DATA_CHARS - count * IMAGE_MAX_DATA_CHARS)
+    const most = [...Array.from({ length: count }, (_, index) => ({ name: `${index}.png`, mimeType: 'image/png', data: full })), { name: 'rest.png', mimeType: 'image/png', data: rest }]
+    expect(most.length).toBeLessThanOrEqual(MESSAGE_MAX_IMAGES)
+    expect(asChatImages(most)).toHaveLength(most.length)
+    expect(() => asChatImages([...most.slice(0, -1), { ...most.at(-1)!, data: rest + 'AAAA' }])).toThrow(/larger together/)
+    // With its text and the JSON around it, it is still inside one inbound request.
+    expect(MESSAGE_IMAGES_MAX_DATA_CHARS + 2 * 1024 * 1024).toBeLessThan(MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES)
+  })
+})
+
+describe('chunked requests held at once', () => {
+  it('reserve their whole size from one budget; a transfer past it is refused, and a finished or dropped one gives it back', () => {
+    const budget = envelopeBudget(3 * 256 * 1024)
+    const chunk = (transferId: string, totalBytes: number): ProtocolEnvelopeChunk => ({ kind: 'envelope_chunk', transferId, index: 0, totalBytes, data: Buffer.alloc(Math.min(totalBytes, 256 * 1024), 32).toString('base64') })
+    const first = new EnvelopeAssembler(() => {}, 15_000, 4 * 1024 * 1024, budget)
+    const second = new EnvelopeAssembler(() => {}, 15_000, 4 * 1024 * 1024, budget)
+    expect(first.accept(chunk('one', 2 * 256 * 1024))).toBeNull()
+    expect(() => second.accept(chunk('two', 2 * 256 * 1024))).toThrow(/at once/)
+    first.reset()
+    expect(budget.used).toBe(0)
+    expect(second.accept(chunk('two', 2 * 256 * 1024))).toBeNull()
+    second.reset()
   })
 })
 
@@ -157,7 +189,6 @@ describe('service taking requests in chunks', () => {
     const thread = mms.threads.createThread('Refused images')
     const rows: Array<[string, unknown[], string]> = [
       ['one image past its size', [image('huge.png', IMAGE_MAX_DATA_CHARS + 4)], 'image_too_large'],
-      ['images together past the message total', [image('a.png', IMAGE_MAX_DATA_CHARS), image('b.png', IMAGE_MAX_DATA_CHARS), image('c.png', 6 * 1024 * 1024)], 'image_too_large'],
       ['a type no provider takes', [image('photo.bmp', 64, 'image/bmp')], 'image_unsupported']
     ]
     for (const [label, sent, code] of rows) {

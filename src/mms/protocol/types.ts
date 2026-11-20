@@ -11,12 +11,23 @@ import type { BrowserWorkerRequest, BrowserWorkerResponse } from '../../shared/b
 export const MMS_PROTOCOL_CHUNK_CAPABILITY = 'envelope-chunks.v1'
 /**
  * The client may send a request larger than one frame as envelope chunks (the same `envelope_chunk` frames the
- * service sends), up to `MMS_PROTOCOL_MAX_ENVELOPE_BYTES`. A client sends chunks only to a service that advertised
- * this, so an older service never receives one.
+ * service sends), up to `MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES`. A client sends chunks only to a service that
+ * advertised this, so an older service never receives one.
  */
 export const MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY = 'envelope-chunks-inbound.v1'
 export const MMS_PROTOCOL_CHUNK_BYTES = 256 * 1024
+/** One envelope the service sends a client in chunks. */
 export const MMS_PROTOCOL_MAX_ENVELOPE_BYTES = 32 * 1024 * 1024
+/**
+ * One request a client sends the service in chunks: a message with the most images it may carry (80 MiB as base64,
+ * about 107 MiB) and its text, with room for the JSON around them.
+ */
+export const MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES = 128 * 1024 * 1024
+/**
+ * Bytes of chunked requests the service holds while they arrive, across all connections: two full requests. A transfer
+ * that would take more closes its connection, so what arrives in chunks stays bounded however many clients send.
+ */
+export const MMS_PROTOCOL_MAX_INBOUND_IN_FLIGHT_BYTES = 2 * MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES
 /**
  * 2: the old provider methods (`providers.listConfigured`, `setApiKey`, `login*`, ...) and the
  * `providers.changed` / `providers.login-event` events are gone; clients use `providers.instances.*`,

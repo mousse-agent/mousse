@@ -5,7 +5,7 @@
  */
 
 import { cursorAt, cursorIndex } from '../../shared/pageCursor'
-import { IMAGE_PREVIEW_DATA_CHARS } from '../../shared/imageLimits'
+import { IMAGE_PREVIEW_DATA_CHARS, SNAPSHOT_IMAGE_DATA_CHARS } from '../../shared/imageLimits'
 
 interface Identified {
   id: string
@@ -147,6 +147,24 @@ export function withImageBudget<T extends WithImages>(items: readonly T[], budge
     remaining = kept.remaining
     return kept.message
   })
+}
+
+/**
+ * A transcript as a window is sent it whole: image data kept for the newest images while `budget` base64 characters
+ * last, every older one by name and type (fetched with `thread.messageImage` when shown), so a thread holding messages
+ * with many large images still fits one response.
+ */
+export function withNewestImages<T extends WithImages>(messages: readonly T[], budget = SNAPSHOT_IMAGE_DATA_CHARS): T[] {
+  let remaining = budget
+  const out = messages.slice()
+  for (let at = out.length - 1; at >= 0; at -= 1) {
+    const message = out[at]!
+    if (!Array.isArray(message?.images) || !message.images.length) continue
+    const kept = keepImagesWithin(message, remaining)
+    out[at] = kept.message
+    remaining = kept.remaining
+  }
+  return out
 }
 
 /** The message with each image reduced to its name and type; the data is fetched with `thread.messageImage`. */

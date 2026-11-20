@@ -14,7 +14,7 @@ import {
   GIT_OPERATIONS_CAPABILITY,
   MMS_PROTOCOL_CHUNK_CAPABILITY,
   MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY,
-  MMS_PROTOCOL_MAX_ENVELOPE_BYTES,
+  MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES,
   MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS,
   MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS,
   MMS_PROTOCOL_COMPACT_TIMEOUT_MS,
@@ -824,7 +824,7 @@ export class LocalMmsClient implements MmsClient {
     if (!this._connected || !this.socket || this.socket.destroyed) throw new Error('Socket not writable')
     const out = requestFrames(request, this._hello?.capabilities.includes(MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY) === true)
     if ('tooLarge' in out) {
-      const older = out.tooLarge.max < MMS_PROTOCOL_MAX_ENVELOPE_BYTES
+      const older = out.tooLarge.max < MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES
       throw new MmsProtocolError(
         'request_too_large',
         older ? 'This message is too large for the running Mousse service. Restart Mousse to send it.' : 'This message is too large to send.',

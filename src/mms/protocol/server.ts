@@ -27,6 +27,8 @@ import {
   MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY,
   MMS_PROTOCOL_CHUNK_BYTES,
   MMS_PROTOCOL_MAX_ENVELOPE_BYTES,
+  MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES,
+  MMS_PROTOCOL_MAX_INBOUND_IN_FLIGHT_BYTES,
   MMS_PROTOCOL_MAX_FRAME_BYTES,
   MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES,
   MMS_PROTOCOL_MAX_PENDING_REQUESTS,
@@ -58,7 +60,7 @@ import {
   keepsResponseForReplay,
   MMS_PROTOCOL_MAX_REPLAYED_RESPONSE_BYTES
 } from './replayCache'
-import { EnvelopeAssembler, envelopeFrames } from './envelopeChunks'
+import { EnvelopeAssembler, envelopeBudget, envelopeFrames } from './envelopeChunks'
 import { withImageBudget } from './transcriptPaging'
 import { cachedUsage, onUsageKept } from './usageReads'
 import { maxConnectionEventBytes, PROTOCOL_CONNECTION_EVENT_TYPES } from './types'
@@ -144,12 +146,15 @@ interface ClientSession {
   connectionEventLifetime: AbortController
   /**
    * A request larger than one frame, arriving in chunks (`MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY`): one transfer at a
-   * time, its chunks in order and nothing else between them, at most `MMS_PROTOCOL_MAX_ENVELOPE_BYTES`.
+   * time, its chunks in order and nothing else between them, at most `MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES`, within
+   * what all connections may hold at once (`MMS_PROTOCOL_MAX_INBOUND_IN_FLIGHT_BYTES`).
    */
   inbound: EnvelopeAssembler
 }
 
 export class MmsProtocolServer {
+  /** What chunked requests in flight hold across every connection (`MMS_PROTOCOL_MAX_INBOUND_IN_FLIGHT_BYTES`). */
+  private readonly inboundBudget = envelopeBudget(MMS_PROTOCOL_MAX_INBOUND_IN_FLIGHT_BYTES)
   private server: Server | null = null
   private readonly clients = new Map<string, ClientSession>()
   /**
@@ -998,7 +1003,7 @@ export class MmsProtocolServer {
     }
     session.writer = new OutboundWriter(socket, () => this.closeClient(session))
     // A transfer that stalls is a broken client: its connection closes, which drops what arrived.
-    session.inbound = new EnvelopeAssembler(() => this.closeClient(session))
+    session.inbound = new EnvelopeAssembler(() => this.closeClient(session), undefined, MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES, this.inboundBudget)
     this.clients.set(session.id, session)
 
     // Serialize decode + admission only. Disconnect cancels remaining chain work.

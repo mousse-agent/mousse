@@ -36,7 +36,7 @@ import {
 } from './connectionCommandValidate'
 import {
   MMS_PROTOCOL_CHUNK_BYTES,
-  MMS_PROTOCOL_MAX_ENVELOPE_BYTES,
+  MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES,
   MMS_PROTOCOL_MAX_ID_LENGTH,
   maxConnectionEventBytes,
   PROTOCOL_CONNECTION_EVENT_TYPES,
@@ -90,7 +90,7 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
           !isBoundedString(raw.transferId, 64, { nonEmpty: true }) ||
           !Number.isSafeInteger(raw.index) || (raw.index as number) < 0 ||
           !Number.isSafeInteger(raw.totalBytes) || (raw.totalBytes as number) < 1 ||
-          (raw.totalBytes as number) > MMS_PROTOCOL_MAX_ENVELOPE_BYTES ||
+          (raw.totalBytes as number) > MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES ||
           !isBoundedString(raw.data, Math.ceil(MMS_PROTOCOL_CHUNK_BYTES / 3) * 4, { nonEmpty: true }) ||
           !/^[A-Za-z0-9+/]+={0,2}$/.test(raw.data)) return null
       return raw as unknown as import('./types').ProtocolEnvelopeChunk

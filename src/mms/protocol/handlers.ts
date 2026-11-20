@@ -104,7 +104,7 @@ import {
   isObject
 } from './validators'
 import { FIRST_SEND_BINDING_CAPABILITY, PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
-import { imageAt, messagesAfter, messagesBefore, newestPage, withoutImageBytes, withImageBudget } from './transcriptPaging'
+import { imageAt, messagesAfter, messagesBefore, newestPage, withNewestImages, withoutImageBytes, withImageBudget } from './transcriptPaging'
 import { isOpenActivityRow } from '../run/restartNote'
 import { ROUTED_AGENT_READ, ROUTED_MESSAGES_PAGE_BYTES, ROUTED_RUN_WAIT_MAX_MS, ROUTED_SEND_WINDOW_KEY, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../shared/bridge/routed'
 import { waitOnRun } from '../run/runWait'
@@ -2459,7 +2459,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const items = ctx.mms.threads.loadMessageQueue(threadId)
         return {
           ...common,
-          messages: page?.messages ?? [],
+          messages: withNewestImages(page?.messages ?? []),
           ...(page?.earlier ? { earlier: page.earlier } : {}),
           queue: withTranscript ? withImageBudget(listPendingQueue(items).filter((item) => !item.internal)) : [],
           claimed: withImageBudget(listClaimedQueue(items).filter((item) => !item.internal)),
@@ -2475,7 +2475,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const position = ctx.mms.threads.threadDbPosition(threadId)
       return {
         ...common,
-        messages: shown.messages,
+        messages: withNewestImages(shown.messages),
         ...(shown.earlier ? { earlier: shown.earlier } : {}),
         queue: withTranscript ? withImageBudget(ctx.mms.orchestrator.listQueue(threadId)) : [],
         claimed: withImageBudget(listClaimedQueue(session.queue).filter((item) => !item.internal)),
