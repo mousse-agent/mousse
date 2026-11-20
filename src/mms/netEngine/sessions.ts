@@ -143,10 +143,18 @@ export class EngineSessions {
     return undefined
   }
 
-  /** Whether the other computer has a connection open to this one (it can reach this computer). */
-  serving(node: NodeId): boolean {
+  /**
+   * Whether the other computer has a connection open to this one (it can reach this computer); with `grant`, one
+   * made with that grant.
+   */
+  serving(node: NodeId, grant?: string): boolean {
     for (const host of this.hosts)
-      if (host.connection.peer === node && host.connection.isOpen()) return true
+      if (
+        host.connection.peer === node &&
+        host.connection.isOpen() &&
+        (grant === undefined || host.connection.grant === grant)
+      )
+        return true
     return false
   }
 

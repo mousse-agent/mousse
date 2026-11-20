@@ -33,6 +33,9 @@ describe('a device row (§5.2)', () => {
     ['this computer cannot reach it', { unreachable: 'out', online: false }, "This computer can't reach Studio", ['retry', 'remove']],
     ['it no longer accepts this one', { notAccepted: true, online: false }, 'Studio no longer accepts this computer', ['remove']],
     ['certificate outside its window', { certificateWindow: true, online: false }, CLOCK_MESSAGE, ['retry', 'remove']],
+    ['SSH sign-in refused (parked)', { sshParked: 'auth_denied', state: 'offline', online: false }, 'SSH sign-in to Studio was refused', ['retry', 'remove']],
+    ['SSH key changed (parked)', { sshParked: 'host_key_changed', state: 'offline', online: false }, "Studio's SSH key changed", ['retry', 'remove']],
+    ['SSH key not checked (parked)', { sshParked: 'host_key_unknown', state: 'connecting', online: false }, "Check Studio's SSH key", ['retry', 'remove']],
     ['removing', { state: 'removing', online: false }, 'Removing…', []],
     ['offline', { state: 'offline', online: false }, 'Offline', ['access', 'address', 'retry', 'remove']],
     ['one direction up, within the bound', { state: 'connecting' }, 'Connecting…', ['access', 'address', 'retry', 'remove']],
@@ -449,8 +452,14 @@ describe('relays (Phase 3 §B.5, §B.9, §B.11)', () => {
 
     await click(button('New relay key'))
     expect(d.called('netEngine.relay.rotate')).toEqual([{ relay: 'aa11' }])
+    // The helper answers before the relay takes the new key: pending, with no end time yet, and no second rotation.
+    await d.change({ relays: { available: true, list: [relay({ newKeyPending: true })] } })
+    expect(relayRow('relay.example.net:443')?.textContent).toContain('New key pending')
+    expect(relayRow('relay.example.net:443')?.textContent).not.toContain('Rotating until')
+    expect(button('New relay key')?.disabled).toBe(true)
     await d.change({ relays: { available: true, list: [relay({ rotatingUntil: Date.now() + 3_600_000 })] } })
     expect(relayRow('relay.example.net:443')?.textContent).toContain('Rotating until')
+    expect(relayRow('relay.example.net:443')?.textContent).not.toContain('New key pending')
 
     // The helper's relay.state reaches the window as a status change.
     await d.change({
@@ -608,6 +617,31 @@ describe('Add over SSH (1b §3.4)', () => {
       { routeId: 'r1', target: 'me@box.example', host: 'box.example', user: 'me', selector: 'b'.repeat(26) }
     ])
     expect(onClose).toHaveBeenCalled()
+  })
+
+  it('keeps a failed Connect’s error shown and signs in to list profiles only once', async () => {
+    const d = daemon(
+      { reach: { lan: true, tailnet: false, public: [], tunnels: [] } },
+      {
+        'netEngine.ssh.resolve': () => ({ ...resolved, pinned: true }),
+        'netEngine.ssh.profiles': () => ({
+          computer: 'Box',
+          os: 'macos',
+          profiles: [{ selector: 'a'.repeat(26), label: 'Main', networking: true }]
+        }),
+        'netEngine.ssh.connect': () => {
+          throw new Error('Mousse isn’t running for me on box.example.')
+        }
+      }
+    )
+    await mount(createElement(AddEngineDeviceDialog, { status: d.state.status, onClose: () => undefined }))
+    await click(button('Over SSH'))
+    await type(document.querySelector<HTMLInputElement>('input[aria-label="SSH address"]')!, 'me@box.example')
+    await click(button('Continue'))
+    await click(button('Connect'))
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('isn’t running')
+    expect(button('Connect')).toBeDefined()
+    expect(d.called('netEngine.ssh.profiles')).toHaveLength(1)
   })
 
   it('offers Over SSH only when the helper speaks protocol 1.1', async () => {

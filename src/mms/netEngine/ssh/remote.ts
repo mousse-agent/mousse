@@ -53,7 +53,7 @@ export class SshRemote {
   private timer?: ReturnType<typeof setInterval>
   /** A check stops B after a step of `prepare`, as a crash would. */
   crashAt?: (step: PrepareStep) => boolean
-  /** Requests and removals of one joiner on one profile run one at a time. */
+  /** Requests and removals of one remote computer run one at a time, on every profile. */
   private readonly locks = new Map<string, Promise<unknown>>()
 
   constructor(private readonly host: SshRemoteHost) {}
@@ -91,7 +91,11 @@ export class SshRemote {
 
   /** Gives a profile's engine the journal and its selector (its removals mark requests, §3.6). */
   attach(engine: NetEngineService, root: string): void {
-    engine.sshHost = { requests: this.requests, selector: () => this.selectorOf(root) }
+    engine.sshHost = {
+      requests: this.requests,
+      selector: () => this.selectorOf(root),
+      locked: (joiner, work) => this.locked(joiner, work)
+    }
   }
 
   /**
@@ -229,7 +233,7 @@ export class SshRemote {
           this.writeEndpoints()
           return engine.prepareEngine()
         },
-        locked: (selector, joiner, work) => this.locked(`${selector} ${joiner}`, work),
+        locked: (joiner, work) => this.locked(joiner, work),
         startsAtLogin: () => this.host.startsAtLogin(),
         crashAt: (step) => !!this.crashAt?.(step)
       },
@@ -238,7 +242,9 @@ export class SshRemote {
     return reply
   }
 
-  private locked<T>(key: string, work: () => Promise<T>): Promise<T> {
+  /** Runs `work` under the lock of the remote computer `joiner`: its prepares, on any profile, and its removals (§3.6). */
+  locked<T>(joiner: string, work: () => Promise<T>): Promise<T> {
+    const key = joiner.toLowerCase()
     const before = this.locks.get(key) ?? Promise.resolve()
     const run = before.catch(() => undefined).then(work)
     const held = run.catch(() => undefined)

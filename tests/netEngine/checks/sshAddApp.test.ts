@@ -123,7 +123,11 @@ describe('phase1b.ssh-add-app', () => {
     const { resolved, list } = await begin(a)
     expect(list.profiles.map((profile) => profile.selector)).toContain(bSelector())
     const from = fabric.crossed.length
+    // Connect reads the list it was shown: B is signed in to once more, for prepare (§3.4's four sessions).
+    const listed = served.filter((request) => request.op === 'profiles').length
+    expect(listed).toBeGreaterThan(0)
     expect(await connect(a, resolved.routeId, { selector: bSelector() }), lastError).toBe(true)
+    expect(served.filter((request) => request.op === 'profiles')).toHaveLength(listed)
     await step('unreachable', () =>
       eventually(() => {
         const row = sshRow(a)!
@@ -140,6 +144,18 @@ describe('phase1b.ssh-add-app', () => {
       await new Promise((resolve) => setTimeout(resolve, 1_000))
       expect(fabric.crossed.slice(from).filter((row) => row.header.t === 'pairback')).toEqual([])
     })
+  }, 120_000)
+
+  it('makes no profile unasked: Connect needs a profile picked or a new one named, not both', async () => {
+    const a = await make(`a${++made}`)
+    const { resolved } = await begin(a)
+    const before = served.filter((request) => request.op === 'prepare').length
+    for (const choice of [{}, { selector: bSelector(), newLabel: 'Both' }]) {
+      expect(await connect(a, resolved.routeId, choice)).toBe(false)
+      expect(lastError).toContain('needs selector or newLabel')
+    }
+    expect(served.filter((request) => request.op === 'prepare')).toHaveLength(before)
+    expect(sshRow(a)).toBeUndefined()
   }, 120_000)
 
   it('lists a profile paired elsewhere, and makes a new one', async () => {
@@ -257,6 +273,49 @@ describe('phase1b.ssh-add-app', () => {
       expect(rowFor(b, a)).toBeUndefined()
     })
   }, 180_000)
+
+  it('never lets a prepare running through a removal on B record its grant or row', async () => {
+    const a = await make(`a${++made}`)
+    const { resolved } = await begin(a)
+    let removal: Promise<void> | undefined
+    // B's owner removes A while prepare is between its row and its grant: the removal waits for that prepare.
+    b.mms.sshRemote()!.crashAt = (at) => {
+      if (at !== 'row') return false
+      b.mms.sshRemote()!.crashAt = undefined
+      removal = b.mms.netEngine.pairing().remove(rowFor(b, a)!.localId)
+      return false
+    }
+    expect(await connect(a, resolved.routeId, { selector: bSelector() })).toBe(false)
+    expect(lastError).toContain('removed')
+    await removal
+    const id = sshRow(a)!.ssh!.requestId!
+    await step('grant_survived_removal', async () => {
+      expect(await grantsAt(b.endpoint, a.endpoint)).toEqual([])
+      expect(rowFor(b, a)).toBeUndefined()
+      expect(b.mms.sshRemote()!.requests.get(id)?.state).toBe('removed')
+    })
+  }, 120_000)
+
+  it('removes the unrecorded grant of a request gone past its age, and owes no pairing for it', async () => {
+    const a = await make(`a${++made}`)
+    const { resolved } = await begin(a)
+    crashOnce('grant-saved')
+    expect(await connect(a, resolved.routeId, { selector: bSelector() })).toBe(false)
+    expect(rowFor(b, a)?.state).toBe('ssh_granting')
+    expect(await grantsAt(b.endpoint, a.endpoint)).toHaveLength(1)
+    // The request ages out of B's journal; B's next start finds the row's request gone.
+    b.mms.sshRemote()!.requests.prune(Date.now() / 1000 + 1)
+    await fabric.restartHelper(b)
+    await step('grant_survived_removal', () =>
+      eventually(async () => {
+        expect(await grantsAt(b.endpoint, a.endpoint)).toEqual([])
+        expect(rowFor(b, a)).toBeUndefined()
+      }, 10_000)
+    )
+    await fabric.restartHelper(b)
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+    await step('ssh_row_pairback', () => expect(rowFor(b, a)).toBeUndefined())
+  }, 120_000)
 
   it('answers a done request again only while its grant still serves', async () => {
     const a = await make(`a${++made}`)

@@ -58,7 +58,9 @@ export function readRelayInfo(value: unknown, now: number): NetEngineRelay | und
     callers: num(info.callers) ?? 0,
     // The helper names its own limit; none is assumed here.
     ...(num(info.callers_max) !== undefined ? { callersMax: num(info.callers_max) } : {}),
-    ...(until !== undefined && until * 1000 > now ? { rotatingUntil: until * 1000 } : {})
+    ...(until !== undefined && until * 1000 > now ? { rotatingUntil: until * 1000 } : {}),
+    // `relay.rotate` answers before the relay takes the new key; `rotating_until` comes with a later `relay.state`.
+    ...(info.new_key_pending === true ? { newKeyPending: true } : {})
   }
 }
 

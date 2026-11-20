@@ -69,6 +69,28 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
       warn: true,
       actions: ['remove']
     }
+  // An SSH login only the owner can fix: nothing signs in again until Retry (1b §1.4).
+  if (device.sshParked === 'auth_denied')
+    return {
+      line: `SSH sign-in to ${name} was refused`,
+      detail: 'Mousse uses your SSH keys or agent, never a password. Fix the key, then Retry.',
+      warn: true,
+      actions: ['retry', 'remove']
+    }
+  if (device.sshParked === 'host_key_changed')
+    return {
+      line: `${name}'s SSH key changed`,
+      detail: `Check the new key with Add over SSH, then Retry. Mousse won't sign in until then.`,
+      warn: true,
+      actions: ['retry', 'remove']
+    }
+  if (device.sshParked === 'host_key_unknown')
+    return {
+      line: `Check ${name}'s SSH key`,
+      detail: `Check and trust its key with Add over SSH, then Retry.`,
+      warn: true,
+      actions: ['retry', 'remove']
+    }
   if (device.certificateWindow)
     return {
       line: CLOCK_MESSAGE,

@@ -99,7 +99,17 @@ function validate(method: NetEngineLocalMethod, params: unknown): Record<string,
   )
     throw new DomainRpcError('bad_request', `${method} takes arrival "scan" or "link"`)
   if (method === 'netEngine.routes.config') reach(fields)
+  if (method === 'netEngine.ssh.connect' && !text(fields.selector) === !text(fields.newLabel))
+    throw new DomainRpcError('bad_request', `${method} needs selector or newLabel, one of them`)
   return fields
+}
+
+/** Connect's profile: the one picked, or the new one named (`validate` made sure there is exactly one). */
+function sshProfileChoice(
+  fields: Record<string, unknown>
+): { selector: string } | { newLabel: string } {
+  const selector = text(fields.selector)
+  return selector ? { selector } : { newLabel: text(fields.newLabel)! }
 }
 
 /**
@@ -228,9 +238,8 @@ export function registerNetEngineMethods(
                 target: p.target,
                 host: p.host,
                 user: text(p.user) ?? '',
-                ...(text(p.selector)
-                  ? { selector: p.selector }
-                  : { newLabel: text(p.newLabel) ?? 'Mousse' })
+                // The owner picks a profile or names a new one: none is ever made unasked.
+                ...sshProfileChoice(p)
               })
               return { node: row.localId, status: engine.status() }
             }
