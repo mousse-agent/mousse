@@ -5,7 +5,24 @@
  * with the thread's running subagents.
  */
 
-export type BackgroundItemKind = 'command' | 'url' | 'background' | 'keep_working'
+/** What a thread agent started in the background (`monitor_start`, `background_run`, `keep_working`). */
+export type MonitorKind = 'command' | 'url' | 'background' | 'keep_working'
+export type BackgroundItemKind = MonitorKind
+
+/**
+ * How a monitor, a background command or a `keep_working` hold ended: its script exited, its socket closed, it could not
+ * start or broke, its time ran out, it printed too much (`chatty`), it was stopped (by the person, from the app), its
+ * thread was stopped, or the daemon restarted under it.
+ */
+export type MonitorEnd =
+  | { reason: 'exit'; code: number | null; signal?: string }
+  | { reason: 'closed'; code: number; detail?: string }
+  | { reason: 'failed'; message: string }
+  | { reason: 'timeout'; minutes: number }
+  | { reason: 'chatty'; limit: string }
+  | { reason: 'stopped' }
+  | { reason: 'thread_stopped' }
+  | { reason: 'restart' }
 
 export interface BackgroundWorkItem {
   id: string

@@ -1,3 +1,4 @@
+import type { MonitorEnd, MonitorKind } from './backgroundWork'
 import type { AnsweredQuestion } from './types'
 
 /**
@@ -119,11 +120,21 @@ export interface SubagentNoticeItem {
    * without waiting. Its `childThreadId` is the thread itself. The transcript shows nothing for it: the answers row was
    * recorded when the person answered. A queued copy that waits for its turn shows `answers`.
    */
-  event?: 'question' | 'stopped' | 'answer'
+  event?: 'question' | 'stopped' | 'answer' | 'note' | 'monitor'
   /** With `event: 'question'`: the question the subagent waits on. With `event: 'answer'`: the question answered. */
   requestId?: string
   /** With `event: 'answer'`: the answers as the transcript shows them. */
   answers?: AnsweredQuestion[]
+  /**
+   * With `event: 'note'`: another agent's note (`thread_send` intent `note`). `childThreadId` and `title` are its
+   * sender's; `from` says where the sender stands to this thread. The transcript shows its words, not the notice text.
+   */
+  note?: { from: 'parent' | 'ancestor' | 'subagent' | 'sibling' | 'bot'; text: string }
+  /**
+   * With `event: 'monitor'`: what this thread's monitor, background command or hold reported (`delegationId` is its id,
+   * `title` its description, `childThreadId` the thread itself), and on its last notice how it ended.
+   */
+  monitor?: { kind: MonitorKind; lines: string[]; dropped?: number; end?: MonitorEnd; tail?: string }
 }
 
 /**
