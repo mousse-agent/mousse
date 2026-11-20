@@ -306,6 +306,7 @@ export class Fabric {
           (_, i) => `${47301 + i}=${CHECK_CLASS}`
         ).join(',')
       }
+      if (this.mappedPorts.has(name)) computer.port = this.mappedPorts.get(name)
       // A cross-machine cell's computers listen on every interface; the others only on loopback.
       process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP ||= process.env.MOUSSE_NET_ENGINE_CHECK_ROLE
         ? '0.0.0.0'
@@ -429,6 +430,22 @@ export class Fabric {
 
   /** In a real-helper run over ssh, each computer's test SSH server. */
   private readonly sshOf = new Map<Computer, SshHost>()
+
+  /** With the real helper and no route case: the computers whose loopback port the class map names. */
+  private readonly mappedPorts = new Map<string, number>()
+
+  /**
+   * With the real helper and no route case: the computer `name`, made later, listens on a loopback port the class
+   * map gives `cls`, so its ticket's hint is outside the automatic rule and only a join that approved it dials it
+   * (1b §1.3). Call it before the run's first helper starts: each helper reads the map once.
+   */
+  mapClass(name: string, cls: 'tailnet' | 'public'): void {
+    const port = 47390 + this.mappedPorts.size
+    this.mappedPorts.set(name, port)
+    process.env.MOUSSE_NET_TEST_CLASS_MAP = [process.env.MOUSSE_NET_TEST_CLASS_MAP, `${port}=${cls}`]
+      .filter(Boolean)
+      .join(',')
+  }
 
   /**
    * How `mousse-check probe` reaches `computer` on the route under test with the real helper (1b §6.3): `--route`

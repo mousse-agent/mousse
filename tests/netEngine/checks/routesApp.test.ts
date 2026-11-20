@@ -24,6 +24,8 @@ vi.hoisted(() => {
   process.env.MOUSSE_NET_ENGINE_PAIRING_RETRY_MS ||= '500'
 })
 
+import { parseRoute } from '../../../src/shared/netEngine/routes'
+import { loopbackClass } from '../../../src/mms/netEngine/routes'
 import {
   approveAll,
   CHECK_ROUTE,
@@ -70,6 +72,14 @@ describe.skipIf(CHECK_ROUTE === 'ssh')('phase1b.routes-app', () => {
     }
   }
 
+  /** A route that is not the route under test: another kind, or over tcp another class (LAN, say). */
+  const offRoute = (route: string): boolean => {
+    const expected = expectedRoute()!
+    const kind = parseRoute(route)?.kind
+    if ((kind === 'wss' ? 'ws' : kind) !== expected.kind) return true
+    return kind === 'tcp' && (loopbackClass(route) ?? 'lan') !== expected.class
+  }
+
   /** The routes of the pairbacks `from` sent so far. */
   const pairbacks = (from: Computer): string[][] =>
     fabric.crossed
@@ -88,6 +98,11 @@ describe.skipIf(CHECK_ROUTE === 'ssh')('phase1b.routes-app', () => {
         expect(preview.destinations.some((item) => !item.automatic)).toBe(true)
         expect(preview.shareable.map((item) => item.route)).toEqual(expect.arrayContaining(own))
       }
+    })
+    // A route of another kind or class carried back (the `route-leak` control's listener) is off the route.
+    await step('route_mismatch', async () => {
+      await eventually(() => expect(pairbacks(quiet).length).toBeGreaterThan(0), 30_000)
+      for (const routes of pairbacks(quiet)) expect(routes.filter(offRoute)).toEqual([])
     })
     await step('disclosed', async () => {
       await eventually(() => expect(pairbacks(quiet).length).toBeGreaterThan(0), 30_000)

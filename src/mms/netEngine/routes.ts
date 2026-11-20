@@ -84,9 +84,14 @@ export function approvedHints(hints: readonly string[]): string[] {
 
 /**
  * The routes a joiner's pairback carries (§1.3): its advertised routes under the automatic rule, then those the
- * owner ticked under "Also share", within 1a's limits. Under the `route-leak` control, its loopback listener first.
+ * owner ticked under "Also share", within 1a's limits. Under the `route-leak` control, `leaked` (a second address of its
+ * listener, outside the checks' class map) or else its loopback listener, first.
  */
-export function pairbackRoutes(info: Record<string, unknown>, share: readonly string[]): string[] {
+export function pairbackRoutes(
+  info: Record<string, unknown>,
+  share: readonly string[],
+  leaked?: string
+): string[] {
   const advertised = Array.isArray(info.routes)
     ? info.routes.filter((route): route is string => typeof route === 'string')
     : []
@@ -94,8 +99,8 @@ export function pairbackRoutes(info: Record<string, unknown>, share: readonly st
   const push = (route: string) => {
     if (!out.includes(route) && route.length <= PAIRBACK_MAX_ROUTE_BYTES) out.push(route)
   }
-  if (engineControl('route-leak') && typeof info.port === 'number')
-    push(`tcp://127.0.0.1:${info.port}`)
+  if (engineControl('route-leak') && (leaked || typeof info.port === 'number'))
+    push(leaked ?? `tcp://127.0.0.1:${info.port}`)
   for (const route of advertised) if (automatic(route)) push(route)
   for (const route of share) {
     const parsed = parseRoute(route)

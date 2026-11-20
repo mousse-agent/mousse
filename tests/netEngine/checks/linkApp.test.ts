@@ -8,7 +8,11 @@
  * back; a computer added over SSH converts its row only on the ticket's `PAIRED`.
  *
  * Controls: the app's (`MOUSSE_NET_ENGINE_CONTROL`) and the helper's (`RUSTFLAGS='--cfg mousse_control="..."'`,
- * which the fake helper's defects mirror) each fail with the reason `checks/phase1b.toml` names.
+ * which the fake helper's defects mirror) each fail with the reason `checks/phase1b.toml` names. Four of them only
+ * show against a helper that misbehaves (a host sending PAIRED before its key confirmation, a helper stopping between
+ * PAIRED and storing the outcome, an unpinned host's "already paired" believed): `link-code-bypass`, `done-pin-only`,
+ * `pin-stored-memory-only` and `link-pinned-journal` fail here with the fake helper only; the engine's send-link
+ * check covers them for the real one.
  */
 import { afterAll, describe, expect, it } from 'vitest'
 import { attachPairLinks, PAIR_LINK_IPC } from '../../../src/main/pairLink'
@@ -112,8 +116,10 @@ describe('phase1b.link-app', () => {
   afterAll(() => fabric.close(), 120_000)
 
   it('pairs through a chat link opened from the launch argv, by typing the code, Connected both ways', async () => {
-    // The host listens on a LAN and a tailnet address (a helper says its routes at hello).
+    // The host listens on a LAN and a tailnet address (a helper says its routes at hello). A real helper listens on
+    // one loopback port, which the class map makes a tailnet one.
     if (!REAL_HELPER) fabric.network.routes.set(fakeIdentity('link-host'), [LAN, TAILNET])
+    else fabric.mapClass('link-host', 'tailnet')
     const host = await fabric.computer('link-host')
     // The joiner listens on a LAN and a tailnet address too; it shares none it was not asked to.
     if (!REAL_HELPER)
@@ -159,7 +165,9 @@ describe('phase1b.link-app', () => {
     const approved = (facts.destinations as Array<{ route: string; automatic: boolean }>)
       .filter((destination) => !destination.automatic)
       .map((destination) => destination.route)
-    if (!REAL_HELPER) await step('approval_lost', () => expect(approved).toEqual([TAILNET]))
+    await step('approval_lost', () =>
+      expect(approved).toEqual(REAL_HELPER ? [expect.stringMatching(/^tcp:\/\/127\.0\.0\.1:/)] : [TAILNET])
+    )
 
     const joined = connect(joiner, opened)
     let askedCode = false

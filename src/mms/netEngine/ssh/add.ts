@@ -314,6 +314,8 @@ export class SshAdd {
     await helper.request('peer.addresses.set', {
       identity,
       routes: handedRoutes<string | Record<string, unknown>>([
+        // The `route-leak` control: what B offered beyond its SSH route goes first.
+        ...(engineControl('route-leak') ? leaked(reply.routes) : []),
         ...(row.addresses ?? []),
         { route_id: journal.routeId, selector: journal.selector, shell: journal.shell ?? 'sh' }
       ])
@@ -397,6 +399,10 @@ export class SshAdd {
     this.port.changed()
   }
 }
+
+/** Under the `route-leak` control, the routes B's reply offered (text only). */
+const leaked = (routes: unknown): string[] =>
+  Array.isArray(routes) ? routes.filter((route): route is string => typeof route === 'string') : []
 
 /** The §3.5 reason a NetError carries. */
 const reasonOf = (error: NetError): unknown =>
