@@ -1506,12 +1506,16 @@ export class ThreadDataStore extends EventEmitter {
    * Marks each of `threadIds` that is still listed as a personal bot's (`Thread.botOwned`), without
    * touching it: a bot's thread made by an earlier build, or by a bot that never runs again, leaves the
    * lists once its bots.db opens. Returns how many it marked.
+   *
+   * The lists are read once and the ids looked up in them: looking each id up on its own reads the whole
+   * standalone index again for every id, which at startup took seconds with a few hundred bot threads.
    */
   markBotOwned(threadIds: Iterable<string>): number {
+    const wanted = new Set(threadIds)
+    if (!wanted.size) return 0
     let marked = 0
-    for (const id of new Set(threadIds)) {
-      const thread = this.getThread(id)
-      if (!thread || thread.botOwned) continue
+    for (const thread of [...this.listAllThreads()]) {
+      if (!wanted.has(thread.id) || thread.botOwned) continue
       const updated = this.writeThreadMeta(thread, (base) => ({ ...base, botOwned: true }))
       if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
       this.patchListCache(updated)
