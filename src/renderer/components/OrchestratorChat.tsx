@@ -26,6 +26,7 @@ import { runSlashCommand, type SlashCommandEnv } from '../lib/slashCommands'
 import type { SkillDescriptor } from '../../shared/integrations'
 import { isThreadActivityActive, isTurnActivePhase, isTurnStoppable, type TurnPhase } from '../../shared/types'
 import { deletedThreadIds, useAppStore } from '../stores/appStore'
+import { holdModelPick, isSupersededModelPick, modelPickSaved, settleModelPick } from '../lib/modelPicks'
 import { useCommand } from '../commands/commandRegistry'
 import {
   ChatComposer,
@@ -761,8 +762,13 @@ export function OrchestratorChat() {
     }
   }, [activeThreadId])
 
+  // The newest read of the shown model (or pick) decides the picker: an older read that answers late changes nothing.
+  const selectionRequestRef = useRef(0)
+  // Saves of model picks run one after another, in the order picked.
+  const modelSaveRef = useRef<Promise<void>>(Promise.resolve())
   const refreshSelection = useCallback(async () => {
     if (!profileReady) return
+    const selectionRequest = ++selectionRequestRef.current
     const skillsRequest = window.mousse.skills.list()
     // Rejection is still surfaced by the await below; this only avoids an
     // unhandled rejection when the settings requests fail first.
@@ -782,19 +788,22 @@ export function OrchestratorChat() {
         : compaction
     )
     // The thread's model, else the one the composer starts on; with neither yet, the shown model stays.
-    const selectedModel = composerSelection({ threadModel: selectionThreadModel, profileDefault: settings.provider, providers: providersRef.current })
-    setProfileDefault((current) =>
-      current?.llmProvider === settings.provider.llmProvider &&
-      current.instanceId === settings.provider.instanceId &&
-      current.model === settings.provider.model
-        ? current
-        : { ...settings.provider }
-    )
-    // The picker shows the other computer's model while a chat that runs there is open.
-    if (!remoteNodeRef.current && selectedModel) {
-      setSelectedLlmProvider(selectedModel.llmProvider)
-      setSelectedInstanceId(selectedModel.instanceId)
-      setSelectedModelId(pickerModelId(selectedModel))
+    // Only the newest read (and no pick since it began) sets the model shown: settings read before a pick are older than it.
+    if (selectionRequest === selectionRequestRef.current) {
+      const selectedModel = composerSelection({ threadModel: selectionThreadModel, profileDefault: settings.provider, providers: providersRef.current })
+      setProfileDefault((current) =>
+        current?.llmProvider === settings.provider.llmProvider &&
+        current.instanceId === settings.provider.instanceId &&
+        current.model === settings.provider.model
+          ? current
+          : { ...settings.provider }
+      )
+      // The picker shows the other computer's model while a chat that runs there is open.
+      if (!remoteNodeRef.current && selectedModel) {
+        setSelectedLlmProvider(selectedModel.llmProvider)
+        setSelectedInstanceId(selectedModel.instanceId)
+        setSelectedModelId(pickerModelId(selectedModel))
+      }
     }
 
     const skillsSnapshot = await skillsRequest
@@ -1767,6 +1776,8 @@ export function OrchestratorChat() {
 
   const handleModelSelect = async (providerId: string, modelId: string) => {
     setModelMenuOpen(false)
+    // A read of the shown model that began before this pick must not put the previous model back.
+    selectionRequestRef.current += 1
     const instance = selectionFor(providerId)
     setSelectedLlmProvider(instance.llmProvider)
     setSelectedInstanceId(instance.instanceId)
@@ -1790,18 +1801,48 @@ export function OrchestratorChat() {
       return
     }
 
-    // Optimistic local meta so the composer badge updates before IPC returns.
-    const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
+    // Optimistic local meta so the composer badge updates before IPC returns. It is held until the newest pick is
+    // saved: a thread list that arrives meanwhile keeps it (`setThreads`), and picks are saved in the order made.
+    const threadId = activeThreadId
+    const override = { ...instance, ...pick }
+    const current = useAppStore.getState().threads.find((t) => t.id === threadId)
+    const ticket = current ? holdModelPick(current, override) : 0
     if (current) {
       useAppStore.getState().upsertThread({
         ...current,
-        modelOverride: { ...instance, ...pick },
+        modelOverride: override,
         updatedAt: new Date().toISOString()
       })
     }
 
-    const updated = await window.mousse.threads.setModel(activeThreadId, { ...instance, ...pick })
-    if (updated) useAppStore.getState().upsertThread(updated)
+    const save = async (): Promise<void> => {
+      // Picked again before this one's turn: only the newest pick is sent.
+      if (current && isSupersededModelPick(threadId, ticket)) return
+      try {
+        const updated = await window.mousse.threads.setModel(threadId, override)
+        if (!current) {
+          if (updated) useAppStore.getState().upsertThread(updated)
+          return
+        }
+        modelPickSaved(threadId, updated ?? undefined)
+        if (settleModelPick(threadId, ticket).latest && updated) useAppStore.getState().upsertThread(updated)
+      } catch (error) {
+        if (!current) {
+          setSendError(sendErrorLine(error))
+          return
+        }
+        // The daemon refused: show the model the thread really has, and why. A newer pick decides its own outcome.
+        const { latest, baseline } = settleModelPick(threadId, ticket)
+        if (!latest) return
+        // Only the model goes back: the rest of the row may have changed since the pick (title, status).
+        const row = useAppStore.getState().threads.find((t) => t.id === threadId)
+        if (baseline && row) useAppStore.getState().upsertThread({ ...row, modelOverride: baseline.modelOverride })
+        setSendError(sendErrorLine(error))
+      }
+    }
+    const saved = modelSaveRef.current.then(save)
+    modelSaveRef.current = saved
+    await saved
   }
 
   // The projects the toolbar offers: this computer's, or the picked computer's, which it lists with its own.

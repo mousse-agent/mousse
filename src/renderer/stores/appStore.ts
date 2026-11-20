@@ -33,6 +33,7 @@ import { savedMainAreaWidth } from '../lib/panelSplit'
 import type { ShortcutOverrides } from '../../shared/commands'
 import { parseCursor } from '../../shared/pageCursor'
 import { isThreadStarted } from '../../shared/threadTitle'
+import { withHeldModelPicks } from '../lib/modelPicks'
 import { tabAgreement, type SidebarTab, type ThreadListTab, type WorkspaceMode } from './sidebarTabAgreement'
 
 /** What the command palette leads with when it opens. */
@@ -1096,8 +1097,12 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       }
     }),
   setProjects: (projects) => set({ projects }),
-  setThreads: (threads) =>
-    set((state) => (sameThreadSnapshot(state.threads, threads) ? state : { threads })),
+  setThreads: (incoming) =>
+    set((state) => {
+      // A model pick still being saved stays as picked: a list read or pushed before it must not undo it.
+      const threads = withHeldModelPicks(incoming)
+      return sameThreadSnapshot(state.threads, threads) ? state : { threads }
+    }),
   upsertThread: (thread) =>
     set((s) => {
       const idx = s.threads.findIndex((entry) => entry.id === thread.id)
