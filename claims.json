@@ -245,19 +245,6 @@
       "expiresAt": "2026-11-20T12:53:30.178Z"
     },
     {
-      "task": "startup-scaling",
-      "session": "Animatrix-243bf9",
-      "machine": "Animatrix",
-      "branch": "startup-scaling",
-      "paths": [
-        "src/mms/data/ThreadDataStore.ts",
-        "src/mms/MmsProfileServices.ts",
-        "src/mms/lifecycle"
-      ],
-      "claimedAt": "2026-11-20T20:24:13.000Z",
-      "expiresAt": "2026-11-20T22:24:13.000Z"
-    },
-    {
       "task": "storage-cleanup-keeps-shared-worktrees",
       "session": "Animatrix-ab3a50",
       "machine": "Animatrix",
