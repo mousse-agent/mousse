@@ -134,10 +134,12 @@
         "src/mms/lifecycle/StorageCleanupService.ts",
         "src/mms/lifecycle/ResourceInventory.ts",
         "src/mms/lifecycle/LifecycleClaims.ts",
-        "src/mms/lifecycle/ResourceLifecycleStore.ts"
+        "src/mms/actions/UndoRetentionService.ts",
+        "src/mms/data/threadDb/threadDbEngine.ts",
+        "src/mms/data/threadRecords.ts"
       ],
       "claimedAt": "2026-11-20T20:11:35.798Z",
-      "expiresAt": "2026-11-20T22:11:35.798Z"
+      "expiresAt": "2026-11-20T22:24:57.684Z"
     },
     {
       "task": "fix-subagent-optimistic-working",
