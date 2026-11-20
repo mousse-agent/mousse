@@ -196,6 +196,25 @@ describe('Settings → Devices, new networking', () => {
     expect(host.textContent).not.toContain(question)
   })
 
+  it('shows "Let my other devices work here" while v1 is off, and turning it off goes to the daemon', async () => {
+    const label = "Let my other devices work on this device's threads"
+    const toggle = () => host.querySelector<HTMLElement>(`[role="switch"][aria-label="${label}"]`)
+    // v1 on: its own Devices group has the switch, so this one does not.
+    daemon({})
+    await mount()
+    expect(toggle()).toBeNull()
+    act(() => root.unmount())
+    root = createRoot(host)
+    const d = daemon({ workOnThreads: true })
+    await mount()
+    expect(toggle()?.getAttribute('aria-checked')).toBe('true')
+    await click(toggle()!)
+    expect(d.called('netEngine.workOnThreads')).toEqual([{ enabled: false }])
+    await d.change({ workOnThreads: false })
+    expect(toggle()?.getAttribute('aria-checked')).toBe('false')
+    expect(host.textContent).toContain('no other device can open or change this device’s threads')
+  })
+
   it('shows nothing in a build without the helper while the switch is off', async () => {
     daemon({ enabled: false, on: false, helper: { state: 'not_in_build' } })
     await mount()

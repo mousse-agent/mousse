@@ -1676,7 +1676,19 @@ export class NetService {
     if (!this.stopped) this.syncEditorSsh()
   }
   /**
-   * "Work on threads" (`bridge.workOnThreads`). Off ends what is open, not only the next call: the private streams,
+   * Whether v1 networking is on for this profile (switched on, with Bridge or Spaces): its Devices group shows
+   * "Work on threads" then; otherwise the engine's group shows the same switch (`netEngine.workOnThreads`).
+   */
+  v1On(): boolean {
+    return (
+      !this.stopped &&
+      !this.disabled &&
+      this.config.enabled === true &&
+      (this.config.features?.netBridge === true || this.config.features?.netSpaces === true)
+    )
+  }
+  /**
+   * "Work on threads" (`bridge.workOnThreads`, and `netEngine.workOnThreads` while v1 is off): the one setting. Off ends what is open, not only the next call: the private streams,
    * v1's editor tunnels and, through `onWorkOnThreadsOff`, the engine's.
    */
   setWorkOnThreads(enabled: boolean): void {

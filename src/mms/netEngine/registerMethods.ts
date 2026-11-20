@@ -58,6 +58,8 @@ function validate(method: NetEngineLocalMethod, params: unknown): Record<string,
     throw new DomainRpcError('bad_request', `${method} needs yes`)
   if (method === 'netEngine.loginStart' && typeof fields.start !== 'boolean')
     throw new DomainRpcError('bad_request', `${method} needs start`)
+  if (method === 'netEngine.workOnThreads' && typeof fields.enabled !== 'boolean')
+    throw new DomainRpcError('bad_request', `${method} needs enabled`)
   if (method === 'netEngine.invite' && fields.kind !== undefined && fields.kind !== 'link')
     throw new DomainRpcError('bad_request', `${method} takes kind "link" or none`)
   if (method === 'netEngine.join' && fields.share !== undefined && !strings(fields.share))
@@ -143,6 +145,9 @@ export function registerNetEngineMethods(
               return engine.status()
             case 'netEngine.loginStart':
               await engine.answerLoginStart(p.start)
+              return engine.status()
+            case 'netEngine.workOnThreads':
+              engine.setWorkOnThreads(p.enabled)
               return engine.status()
             case 'netEngine.address.remove':
               await engine.removeAddress(p.node, p.address)

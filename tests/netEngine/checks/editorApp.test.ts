@@ -140,8 +140,9 @@ describe('phase1b.editor-app', () => {
     ['the editor switch off', 'editor_off', (node: NodeId) => owner.dispatch('bridge.policy', { node, editor: false }, true)],
     ['a block', 'blocked', (node: NodeId) => owner.dispatch('bridge.policy', { node, blocked: true }, true)],
     ['a removal', undefined, (node: NodeId) => owner.dispatch('netEngine.remove', { node }, true)],
-    // The owner's own switch, for every device (what `bridge.workOnThreads` sets); it is turned back on after the case.
-    ['"Work on threads" off', 'setting_off', async () => owner.mms.net.setWorkOnThreads(false)]
+    // The owner's own switch, for every device: with v1 off, the new networking's Devices group has it. It is turned
+    // back on after the case.
+    ['"Work on threads" off', 'setting_off', () => owner.dispatch('netEngine.workOnThreads', { enabled: false }, true)]
   ] as const)('%s closes an open tunnel and sweeps what the endpoint started for it', async (_what, reason, change) => {
     const three = await caller(`three-${reason ?? 'removed'}`, true)
     const { tunnel } = await open(three.computer, three.ownerOn)
@@ -149,7 +150,10 @@ describe('phase1b.editor-app', () => {
     expect(served.node).toBe(three.onOwner)
     const sweeps = far.swept.length
     await change(three.onOwner)
-    if (reason === 'setting_off') onTestFinished(() => owner.mms.net.setWorkOnThreads(true))
+    if (reason === 'setting_off') {
+      onTestFinished(() => owner.dispatch('netEngine.workOnThreads', { enabled: true }, true))
+      expect((await owner.dispatch('netEngine.status', {}, true)).workOnThreads).toBe(false)
+    }
     await step('tunnel_outlived_right', async () => {
       const why = await Promise.race([tunnel.closed, new Promise((resolve) => setTimeout(() => resolve('open'), 10_000))])
       // A removal closes the pairing's connections as its row goes: the caller hears either first.

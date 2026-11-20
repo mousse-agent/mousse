@@ -286,8 +286,20 @@ export class NetEngineService implements EngineDirectoryPort {
       ...(this.helper?.speaks(1) ? { sendLink: true } : {}),
       ...(this.started?.pairing.links().length ? { links: this.started.pairing.links() } : {}),
       ...(this.started?.pairing.joins().length ? { joins: this.started.pairing.joins() } : {}),
-      ...(this.reach() ? { reach: this.reach() } : {})
+      ...(this.reach() ? { reach: this.reach() } : {}),
+      ...(this.options.net.v1On()
+        ? {}
+        : { workOnThreads: this.options.net.nodePolicyConfig().workOnThreads !== false })
     }
+  }
+
+  /**
+   * "Work on threads" from this group (v1 off): the same setting and the same switch as v1's, so turning it off ends
+   * the open editor tunnels and private streams with `setting_off`.
+   */
+  setWorkOnThreads(enabled: boolean): void {
+    this.options.net.setWorkOnThreads(enabled)
+    this.changed()
   }
 
   // ---------------------------------------------------------------- this computer's routes (Phase 1b §1.5)
