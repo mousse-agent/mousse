@@ -457,13 +457,17 @@ export function OrchestratorChat() {
   useEffect(() => setCommandInfo(null), [activeThreadId])
   /** Discard for a send refused over a conflict in the thread worktree; shown only while `sendError` is that refusal’s line. */
   const [sendChanges, setSendChanges] = useState<{ line: string; message: string; details: PendingChangesDetails } | null>(null)
+  /** Why this thread may not point at `threadId` (a private thread from a shared one), else null. */
+  const pastedThreadRefusal = useCallback((threadId: string) => {
+    const { threads, activeThreadId: here } = useAppStore.getState()
+    const thread = threads.find((entry) => entry.id === here)
+    return threadReferenceRefusal(threadId, { privateThread: Boolean(thread && isLocalOnlyThread(thread, threads)) })
+  }, [])
   const addResolvedReference = useCallback(async (reference: ChatReference) => {
     const expectedProfile = useAppStore.getState().profileId
     const expectedThread = useAppStore.getState().activeThreadId
     if (reference.kind === 'thread' && reference.threadId) {
-      const { threads } = useAppStore.getState()
-      const here = threads.find((thread) => thread.id === expectedThread)
-      const refused = threadReferenceRefusal(reference.threadId, { privateThread: Boolean(here && isLocalOnlyThread(here, threads)) })
+      const refused = pastedThreadRefusal(reference.threadId)
       if (refused) throw new Error(refused)
     }
     const resolved = await resolveChatReference(reference)
@@ -471,7 +475,7 @@ export function OrchestratorChat() {
     if (state.profileId !== expectedProfile || state.activeThreadId !== expectedThread) return
     state.addComposerReference(expectedThread, resolved)
     setSendError(null)
-  }, [])
+  }, [pastedThreadRefusal])
   const sendIds = useRef(new SendRetryIds())
   // Prompts sent here and still on their way, by thread (their send answers when the turn ends). A message sent
   // meanwhile is queued behind them, even before the thread reports the turn running.
@@ -2097,6 +2101,7 @@ export function OrchestratorChat() {
               onAddReference={addResolvedReference}
               onRemoveReference={(id) => removeComposerReference(activeThreadId, id)}
               onReferenceError={setSendError}
+              pastedThreadRefusal={pastedThreadRefusal}
               enabledSkills={enabledSkills}
               run={{
                 providers,
