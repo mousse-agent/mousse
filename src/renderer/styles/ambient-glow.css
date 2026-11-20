@@ -61,6 +61,8 @@
   -webkit-mask: var(--ambient-glow-mask) center / 100% 100% no-repeat;
   mask: var(--ambient-glow-mask) center / 100% 100% no-repeat;
   animation: var(--ambient-glow-anim) var(--ambient-glow-loop) var(--ambient-glow-ease) infinite;
+  /* A glow that takes another's place carries on its loop (AmbientGlow's `since`). */
+  animation-delay: var(--ambient-glow-delay, 0s);
 }
 
 /* Wave A: a broad body with two crests rising either side of centre. */
@@ -102,6 +104,7 @@
     linear-gradient(#000 0 0) border-box;
   mask-composite: intersect, add, exclude, add;
   animation: var(--ambient-glow-anim) var(--ambient-glow-loop) var(--ambient-glow-ease) infinite;
+  animation-delay: var(--ambient-glow-delay, 0s);
 }
 
 .app .chat--empty .chat-input-area .composer {

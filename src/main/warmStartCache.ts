@@ -1,10 +1,13 @@
 import { promises as fsp } from 'node:fs'
 import type { ProfilePublicDto } from '../shared/profiles/types'
-import type { WarmStartView } from '../shared/warmStart'
+import type { ProjectIconImage } from '../shared/projectIcon'
+import type { ThreadActivitySnapshot, ThreadActivityState } from '../shared/types'
+import type { WarmStartAppInfo, WarmStartView } from '../shared/warmStart'
 
 /**
  * The warm start: what each profile's window last showed (its thread list, projects, the open thread and that thread's
- * newest messages), so the next launch shows it before the background service answers.
+ * newest messages, the threads' settled states and the projects' icons), so the next launch shows it before the
+ * background service answers, looking as it did.
  *
  * Everything here is noted from what main already sends to a window; nothing asks the service. The file is read once
  * at startup and written in the background: a write waits for updates to settle (`WARM_START_WRITE_DELAY_MS`, at most
@@ -23,6 +26,11 @@ export const WARM_START_WRITE_DELAY_MS = 2_000
 export const WARM_START_MAX_WRITE_DELAY_MS = 20_000
 /** A profile picture larger than this is left out; the button shows the initial instead. */
 const MAX_AVATAR_CHARS = 64 * 1024
+/** A project icon larger than this is left out (its folder shows until the service answers), and at most this many. */
+const MAX_ICON_CHARS = 64 * 1024
+const MAX_ICONS = 64
+/** The states kept for the next launch: what a row shows of a finished or waiting thread. Working never is. */
+const SETTLED: ReadonlySet<ThreadActivityState> = new Set(['completed', 'awaiting_input'])
 
 interface ProfileEntry {
   profile?: ProfilePublicDto
@@ -30,6 +38,9 @@ interface ProfileEntry {
   projects?: unknown[]
   activeThreadId?: string | null
   transcript?: { threadId: string; messages: Array<{ id?: unknown }> } | null
+  activity?: ThreadActivitySnapshot
+  projectIcons?: Record<string, ProjectIconImage | null>
+  appInfo?: WarmStartAppInfo
 }
 
 interface WarmStartFile {
@@ -59,6 +70,16 @@ export interface WarmStartCacheOptions {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
+
+/** The settled states of a snapshot (`SETTLED`); a thread still working shows no state. */
+function settledActivity(data: unknown): ThreadActivitySnapshot | undefined {
+  if (!isRecord(data)) return undefined
+  const settled: ThreadActivitySnapshot = {}
+  for (const [threadId, state] of Object.entries(data)) {
+    if (SETTLED.has(state as ThreadActivityState)) settled[threadId] = state as ThreadActivityState
+  }
+  return settled
+}
 
 /** The rows of a list as a channel carries it: a bare array, or `{ threads }` / `{ projects }` (a versioned list). */
 function rowsOf(data: unknown, key: 'threads' | 'projects'): unknown[] | undefined {
@@ -134,8 +155,33 @@ export class WarmStartCache {
       threads: entry.threads as WarmStartView['threads'],
       projects: (entry.projects ?? []) as WarmStartView['projects'],
       activeThreadId,
-      messages: transcript as WarmStartView['messages']
+      messages: transcript as WarmStartView['messages'],
+      ...(isRecord(entry.activity) ? { activity: entry.activity } : {}),
+      ...(isRecord(entry.projectIcons) ? { projectIcons: entry.projectIcons } : {}),
+      ...(isRecord(entry.appInfo) ? { appInfo: entry.appInfo } : {})
     }
+  }
+
+  /** A project's icon as main read it for a window bound to `profileId` (`projects:icon`); null when it has none. */
+  noteProjectIcon(profileId: string | undefined, projectId: string, icon: ProjectIconImage | null): void {
+    if (!profileId || this.forgotten.has(profileId) || typeof projectId !== 'string') return
+    const entry = this.entry(profileId)
+    const icons = { ...entry.projectIcons }
+    const fits = icon === null || (typeof icon?.dataUrl === 'string' && icon.dataUrl.length <= MAX_ICON_CHARS)
+    if (fits) icons[projectId] = icon
+    else delete icons[projectId]
+    const ids = Object.keys(icons)
+    // The most recently read are kept.
+    if (ids.length > MAX_ICONS) for (const id of ids.slice(0, ids.length - MAX_ICONS)) delete icons[id]
+    entry.projectIcons = icons
+    this.schedule()
+  }
+
+  /** What `app:getInfo` answered a window bound to `profileId`. */
+  noteAppInfo(profileId: string | undefined, info: WarmStartAppInfo): void {
+    if (!profileId || this.forgotten.has(profileId) || !isRecord(info)) return
+    this.entry(profileId).appInfo = { platform: info.platform, repoRoot: info.repoRoot, llmProvider: info.llmProvider, ...(info.deviceName ? { deviceName: info.deviceName } : {}) }
+    this.schedule()
   }
 
   /** The thread a profile's window showed last, to open again at launch. */
@@ -158,8 +204,9 @@ export class WarmStartCache {
   }
 
   /**
-   * Something main sent to a window bound to `profileId`. Lists and the open thread's transcript are noted; the rest is
-   * ignored. Cheap: no copying beyond the open thread's newest messages, and no write until updates settle.
+   * Something main sent to a window bound to `profileId`. Lists, the threads' settled states and the open thread's
+   * transcript are noted; the rest is ignored. Cheap: no copying beyond the open thread's newest messages and the
+   * settled states, and no write until updates settle.
    */
   observe(profileId: string | undefined, channel: string, data: unknown): void {
     if (!profileId || this.forgotten.has(profileId)) return
@@ -174,6 +221,12 @@ export class WarmStartCache {
         const rows = rowsOf(data, 'projects')
         if (!rows) return
         this.entry(profileId).projects = rows
+        break
+      }
+      case 'threads:activity': {
+        const settled = settledActivity(data)
+        if (!settled) return
+        this.entry(profileId).activity = settled
         break
       }
       case 'thread:selected': {

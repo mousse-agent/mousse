@@ -70,6 +70,30 @@ describe('the warm start file', () => {
     expect(next.lastActiveThread('prf_a')).toBe('t1')
   })
 
+  it('keeps the threads\' settled states and the projects\' icons, within their limits', async () => {
+    const cache = new WarmStartCache(file, { fs, log })
+    showWindow(cache)
+    // Done and Input are kept; Working, Waiting and Paused show nothing until the service says so.
+    cache.observe('prf_a', 'threads:activity', { t1: 'completed', t2: 'processing', t3: 'awaiting_input', t4: 'waiting', t5: 'paused', t6: 'idle' })
+    const icon = (n: number) => ({ dataUrl: `data:image/png;base64,${n}` })
+    // A project without an icon is kept as such (its folder shows); one too large is left out (read when connected).
+    cache.noteProjectIcon('prf_a', 'none', null)
+    cache.noteProjectIcon('prf_a', 'large', { dataUrl: `data:image/png;base64,${'A'.repeat(70 * 1024)}` })
+    for (let n = 0; n < 70; n += 1) cache.noteProjectIcon('prf_a', `p${n}`, icon(n))
+    cache.noteAppInfo('prf_a', { platform: 'win32', repoRoot: 'C:/code', llmProvider: 'claude-subscription', deviceName: 'PC' })
+    await cache.flush()
+
+    const view = await new WarmStartCache(file, { fs, log }).view()
+    expect(view?.activity).toEqual({ t1: 'completed', t3: 'awaiting_input' })
+    const icons = view?.projectIcons ?? {}
+    expect(icons.large).toBeUndefined()
+    // At most 64, the most recently read.
+    expect(Object.keys(icons)).toHaveLength(64)
+    expect(icons.p69).toEqual(icon(69))
+    expect(icons.p5).toBeUndefined()
+    expect(view?.appInfo).toEqual({ platform: 'win32', repoRoot: 'C:/code', llmProvider: 'claude-subscription', deviceName: 'PC' })
+  })
+
   it('shows the profile a window was bound to last, and forgets a transcript when another thread opens', async () => {
     const cache = new WarmStartCache(file, { fs, log })
     showWindow(cache, 'prf_a')

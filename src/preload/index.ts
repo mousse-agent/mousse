@@ -208,6 +208,9 @@ async function attachmentPath(file: File, target: { kind: 'bot' } | { kind: 'thr
   return webUtils.getPathForFile(file) || ipcRenderer.invoke('attachments:stage', target, file.name, new Uint8Array(await file.arrayBuffer()))
 }
 
+/** The warm start is read once per page load (`app.warmStartView`). */
+let warmStartTaken = false
+
 const api = {
   platform: process.platform,
   startupAppearance: readStartupAppearanceArgument(process.argv),
@@ -1422,8 +1425,15 @@ const api = {
   },
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),
-    /** What this window's profile showed last time, to show until the service answers (display only). */
-    warmStart: (): Promise<WarmStartView | null> => ipcRenderer.invoke('app:warmStart'),
+    /**
+     * What this window's profile showed last time, to show until the service answers (display only). Synchronous, so
+     * the window's first frame shows it; answered once per page load, then null.
+     */
+    warmStartView: (): WarmStartView | null => {
+      if (warmStartTaken) return null
+      warmStartTaken = true
+      return (ipcRenderer.sendSync('app:warmStartView') as WarmStartView | null) ?? null
+    },
     getActiveProjectPath: (threadId?: string | null): Promise<string | null> =>
       ipcRenderer.invoke('app:getActiveProjectPath', threadId),
     getFilesRoot: (threadId?: string | null): Promise<string> =>

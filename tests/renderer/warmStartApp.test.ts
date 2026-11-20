@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 /**
  * The warm start, through the window itself: before the service answers, the window shows what its profile showed
- * last time (the sidebar's threads and the open thread's messages); the service's own lists and transcript then take
- * their place, a window bound to another profile drops it, and a message sent meanwhile goes once when connected.
+ * last time (the sidebar's threads and the open thread's messages) from its first render; the service's own lists and
+ * transcript then take their place without anything on screen changing that did not change (badges, icons, the
+ * transcript's scroll position, a new chat's greeting and composer), a window bound to another profile drops it, and a
+ * message sent meanwhile goes once when connected.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -60,6 +62,8 @@ let profilesList: ReturnType<typeof deferred<unknown>>
 let profilesStatus: ReturnType<typeof deferred<unknown>>
 let initialize: ReturnType<typeof deferred<void>>
 
+let extraAnswers: Record<string, (...args: unknown[]) => unknown> = {}
+
 function stubBridge(view: WarmStartView | null): void {
   // Never settles; callable too, for the calls whose answer is an unsubscribe function.
   const never: Record<string, unknown> & (() => void) = Object.assign(() => undefined, {})
@@ -69,7 +73,8 @@ function stubBridge(view: WarmStartView | null): void {
   const pending = () => never
   const settings = { provider: { llmProvider: 'claude-subscription', model: 'opus' }, permissions: { defaultMode: 'accept_edits' }, integrations: { skills: { enabledSkills: [] } } }
   const answers: Record<string, (...args: unknown[]) => unknown> = {
-    'app.warmStart': () => Promise.resolve(view),
+    // Main hands the warm start to the preload synchronously, before the window's first frame.
+    'app.warmStartView': () => view,
     'profiles.list': () => profilesList.promise,
     'profiles.status': () => profilesStatus.promise,
     'threads.initialize': () => initialize.promise,
@@ -79,7 +84,8 @@ function stubBridge(view: WarmStartView | null): void {
     'orchestrator.isTurnActive': () => Promise.resolve(false),
     'threads.get': (id) => Promise.resolve(thread(String(id), 'Release notes')),
     'threads.select': () => Promise.resolve(),
-    'queue.list': () => Promise.resolve([])
+    'queue.list': () => Promise.resolve([]),
+    ...extraAnswers
   }
   const section = (name: string): unknown => new Proxy({}, {
     get: (_target, key) => {
@@ -110,31 +116,52 @@ async function settle(rounds = 10): Promise<void> {
   for (let i = 0; i < rounds; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
 }
 
-/** Opens a window: the app starts fresh, as after a restart. */
-async function launch(): Promise<void> {
+/** The window's code, fresh, as after a restart; nothing rendered yet. */
+async function load(): Promise<typeof import('../../src/renderer/App').default> {
   vi.resetModules()
   const { default: App } = await import('../../src/renderer/App')
   ;({ useAppStore } = await import('../../src/renderer/stores/appStore'))
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
+  return App
+}
+
+/** Opens a window: the app starts fresh, as after a restart. */
+async function launch(): Promise<void> {
+  const App = await load()
   await act(async () => root.render(createElement(App)))
   await settle()
 }
 
 /** The service answers: the window's trusted binding, then its lists and the open thread's view. */
-async function connect(boundProfile: string, fresh: { threads: unknown[]; messages: unknown[] }): Promise<void> {
+async function bind(boundProfile: string): Promise<void> {
   profilesList.resolve({ defaultProfileId: WARM_PROFILE, profiles: [profile(WARM_PROFILE, 'Work'), profile(OTHER_PROFILE, 'Home')] })
   profilesStatus.resolve({ binding: { profileId: boundProfile, epoch: 1 } })
   await settle()
+}
+
+async function connect(boundProfile: string, fresh: { threads: unknown[]; messages: unknown[]; projects?: unknown[]; threadId?: string }): Promise<void> {
+  await bind(boundProfile)
+  const threadId = fresh.threadId ?? 't-release'
   await act(async () => {
-    listeners['projects.onUpdated']!([])
+    listeners['projects.onUpdated']!(fresh.projects ?? [])
     listeners['threads.onUpdated']!(fresh.threads, { epoch: 'service', seq: 1, generation: 1 })
-    listeners['threads.onSelected']!({ id: 't-release' })
-    listeners['threads.onView']!({ threadId: 't-release', messages: fresh.messages, agents: [], tasks: [] })
+    listeners['threads.onSelected']!({ id: threadId })
+    listeners['threads.onView']!({ threadId, messages: fresh.messages, agents: [], tasks: [] })
   })
   initialize.resolve()
   await settle(20)
+}
+
+/** What the window showed at every change while `run` ran, as read by `read`. */
+async function framesOf<T>(read: () => T, run: () => Promise<void>): Promise<T[]> {
+  const frames: T[] = []
+  const observer = new MutationObserver(() => frames.push(read()))
+  observer.observe(host, { subtree: true, childList: true, characterData: true, attributes: true })
+  await run()
+  observer.disconnect()
+  return frames
 }
 
 const sidebarText = () => host.querySelector('[data-mousse="sidebar"]')?.textContent ?? ''
@@ -163,6 +190,7 @@ beforeEach(() => {
   window.localStorage.setItem(`mousse-profile-${WARM_PROFILE}-workspace`, JSON.stringify({ threadsSidebarView: 'threads', lastThreadListView: 'threads' }))
   calls = []
   listeners = {}
+  extraAnswers = {}
   profilesList = deferred()
   profilesStatus = deferred()
   initialize = deferred()
@@ -250,5 +278,162 @@ describe('the window before the service answers', () => {
     await launch()
     expect(host.querySelector('[data-mousse="chat"]')).toBeNull()
     expect(host.querySelector('[data-workspace-loading]')).not.toBeNull()
+  })
+})
+
+describe('the first frame', () => {
+  it('shows the warm start in the first render, before any read settles', async () => {
+    stubBridge(warmView)
+    const App = await load()
+    // One synchronous render: no promise has settled, so nothing asked for asynchronously can be on screen.
+    act(() => root.render(createElement(App)))
+    expect(sidebarText()).toContain('Release notes')
+    expect(chatText()).toContain('Ship the warm start')
+    expect(host.querySelector('[data-workspace-loading]')).toBeNull()
+  })
+})
+
+describe('the handover', () => {
+  const ICON = 'data:image/png;base64,iVBORw0KGgo='
+  const project = { id: 'p-app', name: 'app', path: 'C:/code/app', createdAt: T, order: 0, detectedIconPath: 'C:/code/app/favicon.png', iconDetectedAt: T }
+  const inProject = (id: string, name: string) => ({ ...thread(id, name), projectId: 'p-app' })
+
+  it('shows the threads\' badges and the projects\' icons as they were, and the live lists keep them', async () => {
+    const threads = [inProject('t-release', 'Release notes'), inProject('t-login', 'Fix the login')]
+    stubBridge({
+      ...warmView,
+      threads: threads as never,
+      projects: [project] as never,
+      // A finished thread shows Done; one that was still working shows nothing until the service says so.
+      activity: { 't-login': 'completed', 't-release': 'processing' },
+      projectIcons: { 'p-app': { dataUrl: ICON } as never }
+    })
+    extraAnswers = {
+      'threads.getActivity': () => Promise.resolve({ 't-login': 'completed', 't-release': 'idle' }),
+      'projects.icon': () => Promise.resolve({ dataUrl: ICON })
+    }
+    await launch()
+    const icon = () => host.querySelector<HTMLImageElement>('[data-mousse="sidebar"] img[data-mousse="project-icon"]')?.getAttribute('src') ?? null
+    const done = () => [...host.querySelectorAll('[data-mousse="sidebar"] .threads-sidebar-card-status-done')].map((mark) => mark.closest('[data-thread-id]')?.getAttribute('data-thread-id')).sort().join(',')
+    const working = () => host.querySelectorAll('[data-mousse="sidebar"] .threads-sidebar-card-status-working').length
+    const warmDone = done()
+    expect(warmDone).toMatch(/^(t-login,?)+$/)
+    expect(working()).toBe(0)
+    expect(icon()).toBe(ICON)
+    // Nothing is read for the projects and threads in the file (icons, branches) before the window's profile is known.
+    expect([...callsNaming('p-app'), ...callsNaming('t-login'), ...callsNaming('t-release')]).toEqual([])
+
+    const frames = await framesOf(() => ({ done: done(), icon: icon() }), () => connect(WARM_PROFILE, { threads, messages: freshMessages, projects: [project] }))
+    expect(useAppStore.getState().workspaceReady).toBe(true)
+    expect(frames.filter((frame) => frame.done !== warmDone || frame.icon !== ICON)).toEqual([])
+    expect(done()).toBe(warmDone)
+    expect(icon()).toBe(ICON)
+  })
+
+  describe('the transcript\'s place', () => {
+    // jsdom lays nothing out: each turn is 300px tall, one after another, in a 600px list.
+    const TURN = 300
+    const VIEW = 600
+    const scrollTops = new WeakMap<Element, number>()
+    const isList = (element: Element) => element.classList.contains('an-message-list')
+    const turnsOf = (list: Element) => [...list.querySelectorAll<HTMLElement>('[data-turn-key]')]
+    const listOf = (element: Element) => element.closest('.an-message-list')
+    const originals = {
+      scrollTop: Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop')!,
+      scrollHeight: Object.getOwnPropertyDescriptor(Element.prototype, 'scrollHeight')!,
+      clientHeight: Object.getOwnPropertyDescriptor(Element.prototype, 'clientHeight')!,
+      rect: Element.prototype.getBoundingClientRect
+    }
+    beforeEach(() => {
+      Object.defineProperty(Element.prototype, 'scrollHeight', { configurable: true, get(this: Element) { return isList(this) ? turnsOf(this).length * TURN : 0 } })
+      Object.defineProperty(Element.prototype, 'clientHeight', { configurable: true, get(this: Element) { return isList(this) ? VIEW : 0 } })
+      Object.defineProperty(Element.prototype, 'scrollTop', {
+        configurable: true,
+        get(this: Element) { return scrollTops.get(this) ?? 0 },
+        set(this: Element, value: number) { scrollTops.set(this, Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight))) }
+      })
+      Element.prototype.getBoundingClientRect = function (this: Element) {
+        const list = isList(this) ? this : listOf(this)
+        const index = list && this !== list ? turnsOf(list).indexOf(this as HTMLElement) : -1
+        const top = list === this ? 0 : index >= 0 ? index * TURN - list!.scrollTop : 0
+        const height = list === this ? VIEW : index >= 0 ? TURN : 0
+        return { top, bottom: top + height, height, left: 0, right: 0, width: 0, x: 0, y: top, toJSON: () => ({}) } as DOMRect
+      }
+    })
+    afterEach(() => {
+      Object.defineProperty(Element.prototype, 'scrollTop', originals.scrollTop)
+      Object.defineProperty(Element.prototype, 'scrollHeight', originals.scrollHeight)
+      Object.defineProperty(Element.prototype, 'clientHeight', originals.clientHeight)
+      Element.prototype.getBoundingClientRect = originals.rect
+    })
+
+    // Four turns kept by the warm start; the service's transcript has an older one before them.
+    const kept = [1, 2, 3, 4].flatMap((n) => [say(`u${n}`, 'user', `Question ${n}`), say(`a${n}`, 'assistant', `Answer ${n}`)])
+    const full = [say('u0', 'user', 'Question 0'), say('a0', 'assistant', 'Answer 0'), ...kept]
+    const list = () => host.querySelector<HTMLElement>('[data-mousse="chat"] .an-message-list')!
+    const topOf = (turnKey: string) => turnsOf(list()).find((turn) => turn.dataset.turnKey === turnKey)!.getBoundingClientRect().top
+
+    it('opens the live transcript with the turn the person was reading at the same place', async () => {
+      stubBridge({ ...warmView, messages: kept as never })
+      await launch()
+      const warmList = list()
+      // Read up from the end: the second turn's top is 50px above the list's top.
+      await act(async () => {
+        warmList.scrollTop = TURN + 50
+        warmList.dispatchEvent(new Event('scroll'))
+      })
+      const reading = turnsOf(warmList)[1]!.dataset.turnKey!
+      expect(topOf(reading)).toBe(-50)
+
+      // The window learning its profile leaves the warm transcript where it is.
+      await bind(WARM_PROFILE)
+      expect(list()).toBe(warmList)
+      expect(list().scrollTop).toBe(TURN + 50)
+
+      await act(async () => {
+        listeners['projects.onUpdated']!([])
+        listeners['threads.onUpdated']!(freshThreads, { epoch: 'service', seq: 1, generation: 1 })
+        listeners['threads.onSelected']!({ id: 't-release' })
+        listeners['threads.onView']!({ threadId: 't-release', messages: full, agents: [], tasks: [] })
+      })
+      initialize.resolve()
+      await settle(20)
+      expect(host.querySelector('[data-warm-start]')).toBeNull()
+      expect(turnsOf(list())).toHaveLength(5)
+      expect(topOf(reading)).toBe(-50)
+    })
+
+    it('keeps a transcript read at its end at its end', async () => {
+      stubBridge({ ...warmView, messages: kept as never })
+      await launch()
+      expect(list().scrollTop).toBe(list().scrollHeight - VIEW)
+      await connect(WARM_PROFILE, { threads: freshThreads, messages: full })
+      expect(host.querySelector('[data-warm-start]')).toBeNull()
+      expect(list().scrollTop).toBe(list().scrollHeight - VIEW)
+    })
+  })
+
+  it('shows a new chat with the greeting, rows and composer the live chat shows, and keeps them', async () => {
+    const newChat = { id: 't-new', name: 'New thread', createdAt: T, updatedAt: T, order: -1, projectId: 'p-app' }
+    const threads = [newChat, inProject('t-login', 'Fix the login')]
+    stubBridge({ ...warmView, threads: threads as never, projects: [project] as never, activeThreadId: 't-new', messages: [] })
+    await launch()
+    const shown = () => ({
+      greeting: host.querySelector('[data-mousse="chat"] .chat-empty-title')?.textContent ?? null,
+      project: host.querySelector('[data-mousse="chat"] [aria-label="Project"]')?.textContent ?? null,
+      settings: Boolean(host.querySelector('[data-mousse="chat"] [aria-label="New thread settings"]')),
+      composer: Boolean(host.querySelector('[data-mousse="chat"] .composer-input'))
+    })
+    const warm = shown()
+    expect(warm.greeting).toBeTruthy()
+    expect(warm.project).toContain('app')
+    expect(warm).toMatchObject({ settings: true, composer: true })
+    // The project's Git state waits for the window's profile.
+    expect(calls.filter((call) => call.method.startsWith('git.'))).toEqual([])
+
+    const frames = await framesOf(shown, () => connect(WARM_PROFILE, { threads, messages: [], projects: [project], threadId: 't-new' }))
+    expect(host.querySelector('[data-warm-start]')).toBeNull()
+    expect(shown()).toEqual(warm)
+    expect(frames.filter((frame) => frame.greeting !== warm.greeting || !frame.composer || !frame.settings || frame.project !== warm.project)).toEqual([])
   })
 })

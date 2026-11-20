@@ -79,6 +79,21 @@ let openingEarly: { threadId: string; messages: ChatMessage[] } | null = null
  */
 let warmTranscript: { threadId: string; messages: WeakSet<ChatMessage> } | null = null
 
+/** A warm start's thread states: only a finished or waiting thread's, never Working (`WarmStartView.activity`). */
+function warmActivity(activity: unknown): ThreadActivitySnapshot {
+  const settled: ThreadActivitySnapshot = {}
+  if (!activity || typeof activity !== 'object') return settled
+  for (const [threadId, state] of Object.entries(activity)) {
+    if (state === 'completed' || state === 'awaiting_input') settled[threadId] = state
+  }
+  return settled
+}
+
+function isWarmAppInfo(info: unknown): info is NonNullable<AppState['appInfo']> {
+  const value = info as Record<string, unknown> | null | undefined
+  return Boolean(value && typeof value.platform === 'string' && typeof value.repoRoot === 'string' && typeof value.llmProvider === 'string')
+}
+
 /** A warm start's transcript as last known: nothing in it shows as still being written. */
 export function settleWarmMessages(messages: readonly ChatMessage[]): ChatMessage[] {
   return messages.map((message) => {
@@ -825,7 +840,10 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       projects: Array.isArray(view.projects) ? view.projects : [],
       activeThreadId: view.activeThreadId ?? null,
       messages,
-      transcriptPending: false
+      transcriptPending: false,
+      // The rows' Done and Input badges and provider marks, as they were: the live ones then change only what changed.
+      threadActivity: warmActivity(view.activity),
+      ...(isWarmAppInfo(view.appInfo) && !state.appInfo ? { appInfo: view.appInfo } : {})
     }
   }),
   holdWarmSend: (threadId) => set((state) => (state.warmView && !state.workspaceReady ? { warmSendThreadId: threadId } : state)),

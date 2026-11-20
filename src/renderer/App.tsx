@@ -20,6 +20,7 @@ import { ThreadSideCard } from './components/sideCard/ThreadSideCard'
 import { QuickActionEditorHost } from './components/QuickActionEditor'
 import { WorkspaceLoading } from './components/WorkspaceLoading'
 import { WarmChat } from './components/WarmChat'
+import { showSavedView } from './lib/warmHandover'
 
 import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { TitleBar } from './components/TitleBar'
@@ -87,6 +88,10 @@ const THREAD_LIST_FALLBACK_MS = 60_000
 const CHATS_FALLBACK_MS = 30_000
 
 
+
+// What this window's profile showed last time is in the store before App first renders, so the window's first frame
+// shows it. It is read once, from this computer only; the service is not asked and nothing in it is sent there.
+showSavedView()
 
 export default function App() {
 
@@ -211,13 +216,6 @@ export default function App() {
   }>({ kind: null, pointerId: null, clientX: null, frame: null })
   const sidebarRef = useRef<HTMLElement>(null)
   const threadsPaneRef = useRef<HTMLDivElement>(null)
-  // The warm start is read once, from this computer only; the service is not asked and nothing in it is sent there.
-  useEffect(() => {
-    void window.mousse.app.warmStart?.().then((view) => {
-      if (view) useAppStore.getState().showWarmView(view)
-    }).catch(() => undefined)
-  }, [])
-
   useEffect(() => {
     if (profileReady) return
     let disposed = false
