@@ -2,9 +2,9 @@
  * The owner checks' SSH test server in a real-helper run (`Fabric.sshHost`): over SSH the remote's `/bin/sh` runs
  * `<HOME>/.mousse/bin/mousse-cli`, a launcher the app writes in its Mousse home, so the server's session HOME must
  * hold that Mousse home as its `.mousse`. The kit's `startSshRoute` is replaced by a module that keeps what it was
- * given.
+ * given. The probe's pipe cases get a state folder whose control socket path fits a Unix socket address.
  */
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -46,4 +46,16 @@ export async function startSshRoute(options) {
     expect(given.home).toBeTruthy()
     expect(realpathSync(join(given.home!, '.mousse'))).toBe(realpathSync(b.home))
   }, 60_000)
+
+  // macOS refuses a socket path over 104 bytes, and the probe opens <pipe state>/control.sock by its full path.
+  it.skipIf(process.platform === 'win32')(
+    'hands the probe a pipe state folder short enough for its control socket',
+    () => {
+      const state = join(dir, 'x'.repeat(60), 'profiles', 'p'.repeat(36), 'net-engine', 'endpoint')
+      mkdirSync(state, { recursive: true })
+      const short = (fabric as unknown as { shortPath(folder: string): string }).shortPath(state)
+      expect(Buffer.byteLength(join(short, 'control.sock'))).toBeLessThan(104)
+      expect(realpathSync(short)).toBe(realpathSync(state))
+    }
+  )
 })

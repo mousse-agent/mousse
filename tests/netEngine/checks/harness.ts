@@ -447,7 +447,7 @@ export class Fabric {
         '--ssh-profile',
         ssh.selector,
         '--pipe-state',
-        join(computer.mms.netEngine.profileDir, 'net-engine', 'endpoint'),
+        this.shortPath(join(computer.mms.netEngine.profileDir, 'net-engine', 'endpoint')),
         '--pipe-helper',
         process.env.MOUSSE_NET_HELPER!.trim()
       ]
@@ -455,6 +455,18 @@ export class Fabric {
     if (CHECK_ROUTE === 'ws')
       return ['--route', `ws://127.0.0.1:${computer.mms.netEngine.reach()!.wsPort}/t/mousse-net/1`]
     return ['--route', `tcp://127.0.0.1:${computer.port}`]
+  }
+
+  /**
+   * `folder` by a short path on Unix: the probe opens `<state>/control.sock` by its full path, and a check's state
+   * folder is longer than a socket path may be on macOS (104 bytes). Windows names its pipe instead.
+   */
+  private shortPath(folder: string): string {
+    if (process.platform === 'win32') return folder
+    const short = mkdtempSync('/tmp/mp-')
+    symlinkSync(folder, join(short, 's'))
+    this.cleanups.push(() => rmSync(short, { recursive: true, force: true }))
+    return join(short, 's')
   }
 
   /**
