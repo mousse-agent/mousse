@@ -14,6 +14,8 @@
   --threads-sidebar-row-height: 32px;
   /* The extra height of a row that shows its latest reply under the title. */
   --threads-sidebar-preview-line: 16px;
+  /* Extra space between the last pinned thread and the first regular thread. */
+  --threads-sidebar-pinned-gap: 8px;
   container-type: inline-size;
   /* pill-tabs: the tab bar's width rules (components/ui/PillTabs.tsx) read this container. */
   container-name: threads-sidebar pill-tabs;
@@ -470,13 +472,13 @@
 }
 
 .threads-sidebar-thread-list {
-  max-height: calc(var(--threads-sidebar-row-height) * 5 + var(--threads-sidebar-preview-line) * var(--project-preview-shown, 0));
+  max-height: calc(var(--threads-sidebar-row-height) * 5 + var(--threads-sidebar-preview-line) * var(--project-preview-shown, 0) + var(--threads-sidebar-pinned-gap) * var(--project-pinned-gap-shown, 0));
   overflow: hidden;
   transition: max-height calc(350ms * var(--ui-motion-scale)) cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .threads-sidebar-thread-list.expanded {
-  max-height: calc(var(--threads-sidebar-row-height) * var(--project-thread-count, 5) + var(--threads-sidebar-preview-line) * var(--project-preview-count, 0));
+  max-height: calc(var(--threads-sidebar-row-height) * var(--project-thread-count, 5) + var(--threads-sidebar-preview-line) * var(--project-preview-count, 0) + var(--threads-sidebar-pinned-gap) * var(--project-pinned-gap, 0));
 }
 
 .threads-sidebar-thread-root {
@@ -741,6 +743,11 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+/* A small gap between pinned threads and regular threads, only when both are present. */
+:is(.threads-sidebar-feed-list, .threads-sidebar-thread-list) > .threads-sidebar-thread-container[data-pinned] + .threads-sidebar-thread-container:not([data-pinned]) {
+  margin-top: var(--threads-sidebar-pinned-gap);
 }
 
 .threads-sidebar-settled-count {
