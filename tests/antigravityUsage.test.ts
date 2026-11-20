@@ -12,7 +12,6 @@ import { AgyUsageTurnError, agyUsageRefusal, parseAgyUsage, runAgy, type AgyRunn
 import { antigravityDriver } from '../src/mms/harness/drivers/antigravity'
 import { CliVersionCache } from '../src/mms/harness/cliConfig'
 import type { DriverContext } from '../src/mms/harness/driver'
-import { LimitReadingStore } from '../src/mms/usageHistory/limitReadings'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 
 const homes: string[] = []
@@ -83,11 +82,6 @@ describe('reading the reply', () => {
     expect(parseAgyUsage(JSON.stringify({ ...JSON.parse(RECORDED), command: { name: 'usage', data: { groups: [] } } }))).toMatchObject({ status: 'unavailable', windows: [] })
   })
 
-  it('keeps no trend of these windows, so the background limit reads never ask agy', async () => {
-    const store = new LimitReadingStore(join(newHome(), 'readings.jsonl'))
-    await store.record({ id: 'antigravity', label: 'Antigravity', ...parseAgyUsage(RECORDED) })
-    expect(await store.lastReadAt('antigravity')).toBeUndefined()
-  })
 })
 
 describe('which agy versions are asked', () => {
@@ -135,6 +129,10 @@ describe('the read Mousse runs', () => {
     expect(binary).toBe(agy)
     expect(args).toEqual(['--gemini_dir', geminiHome, '--app_data_dir', 'antigravity-acp', '-p', '/usage', '--output-format', 'json'])
     expect(options.env.GEMINI_HOME).toBe(geminiHome)
+  })
+
+  it('is read only when asked, never by the background limit reads', () => {
+    expect(setup().runtime.usageOnRequest).toBe(true)
   })
 
   it('never asks an agy older than 1.1.11, where /usage would run a turn', async () => {

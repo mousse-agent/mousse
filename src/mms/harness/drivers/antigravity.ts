@@ -96,6 +96,7 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
         identity: async () => (service.signedIn() ? SIGN_IN_SUBJECT : undefined),
         // The plan limits, read by `agy` itself when the usage page asks; never in the background.
         usage: (signal) => service.usage(signal),
+        usageOnRequest: true,
         refreshModels: async (cwd) => void (await service.refreshModels(cwd)),
         signIn: (session, cwd) => service.login(session, cwd),
         signOut: () => service.logout(),
