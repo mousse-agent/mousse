@@ -185,20 +185,6 @@
       "expiresAt": "2026-11-20T12:40:26.020Z"
     },
     {
-      "task": "issue-1605-thread-monitors",
-      "session": "Animatrix-67b7fb",
-      "machine": "Animatrix",
-      "branch": "issue-1605-thread-monitors",
-      "paths": [
-        "src/mms/monitors",
-        "src/mms/run/mcp/appTools/monitors.ts",
-        "src/mms/runtime/ThreadRuntimeManager.ts",
-        "src/mms/running"
-      ],
-      "claimedAt": "2026-11-20T11:00:54.342Z",
-      "expiresAt": "2026-11-20T13:35:00.934Z"
-    },
-    {
       "task": "lan-direct-phone-path",
       "session": "agibook-3233ef",
       "machine": "agibook",
