@@ -68,6 +68,10 @@ function pourAfterSend(logo: HTMLElement): void {
   }
   currentPour = pour
   const check = (wait: number, last: boolean) => timers.push(setTimeout(() => {
+    if (typeof document === 'undefined' || document !== logo.ownerDocument || !document.body) {
+      stopPour()
+      return
+    }
     if (logo.isConnected) {
       if (last && currentPour === pour) stopPour()
       return
