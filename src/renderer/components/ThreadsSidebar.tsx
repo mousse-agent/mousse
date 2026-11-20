@@ -525,7 +525,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // The filter row's (ThreadFilterBar): Show, a bot, a project, Archived and what is typed; the Projects tab's unticked
   // projects. Show and the unticked projects are this profile's.
   const profileId = useAppStore((s) => s.profileId)
-  useEffect(() => { useThreadFilterStore.getState().load(profileId) }, [profileId])
+  // Before the window's profile is known the list is the warm start's (showWarmView): shown as it was, not acted on.
+  const warmOnly = useAppStore((s) => !s.profileReady && s.warmView !== null)
+  // The filter saved on this computer for the profile shown, the warm start's one included.
+  const filterProfileId = useAppStore((s) => (s.profileReady ? s.profileId : s.warmView?.profileId ?? s.profileId))
+  useEffect(() => { useThreadFilterStore.getState().load(filterProfileId) }, [filterProfileId])
   const filterQuery = useThreadFilterStore((s) => s.query)
   const filterShow = useThreadFilterStore((s) => s.show)
   const filterProjectId = useThreadFilterStore((s) => s.projectId)
@@ -1731,7 +1735,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   return (
 
     // While a menu is open, the rows under the pointer do not light their actions (see threads-sidebar.css).
-    <aside ref={asideRef} data-mousse="sidebar" className={`threads-sidebar${contextMenu || tabMenu ? ' menu-open' : ''}${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
+    <aside ref={asideRef} data-mousse="sidebar" inert={warmOnly || undefined} className={`threads-sidebar${contextMenu || tabMenu ? ' menu-open' : ''}${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
 
       <div className="threads-sidebar-tabs-row">
         <PillTabs

@@ -29,7 +29,10 @@ const messageOf = (cause: unknown) => cause instanceof Error ? cause.message : S
  */
 export function ProfileSwitcher({ onSwitched, variant = 'sidebar' }: ProfileSwitcherProps) {
   const rail = variant === 'rail'
-  const [profiles, setProfiles] = useState<ProfilePublicDto[]>([])
+  // Before the window's binding the warm start's profile (showWarmView) shows, and nothing is read or switched.
+  const warmPending = useAppStore((state) => !state.profileReady && state.warmView !== null)
+  const warmProfile = useAppStore((state) => state.warmView?.profile)
+  const [profiles, setProfiles] = useState<ProfilePublicDto[]>(() => (warmProfile ? [warmProfile] : []))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState(false)
@@ -85,6 +88,7 @@ export function ProfileSwitcher({ onSwitched, variant = 'sidebar' }: ProfileSwit
 
   useEffect(() => {
     setOpen(false)
+    if (warmPending) return
     void reload().catch((cause) => setError(messageOf(cause)))
     const refresh = () => { void reload().catch((cause) => setError(messageOf(cause))) }
     window.addEventListener('mousse:profiles-changed', refresh)
@@ -94,7 +98,7 @@ export function ProfileSwitcher({ onSwitched, variant = 'sidebar' }: ProfileSwit
       window.removeEventListener('mousse:profiles-changed', refresh)
       window.removeEventListener('focus', refresh)
     }
-  }, [profileId])
+  }, [profileId, warmPending])
 
   useEffect(() => {
     if (!open) setRowMenu(null)
@@ -199,7 +203,7 @@ export function ProfileSwitcher({ onSwitched, variant = 'sidebar' }: ProfileSwit
   }
 
   const active = profiles.filter((item) => item.status === 'active')
-  const selected = profiles.find((item) => item.id === profileId)
+  const selected = profiles.find((item) => item.id === (warmPending ? warmProfile?.id : profileId))
 
   const showDialog = (mode: ProfileEditMode) => {
     setDialogError(null)
@@ -370,13 +374,13 @@ export function ProfileSwitcher({ onSwitched, variant = 'sidebar' }: ProfileSwit
   const trigger = rail
     ? <button ref={triggerRef} className="navigation-rail-button profile-rail-trigger" type="button" data-mousse="rail-item" data-mousse-item="profile"
       aria-label={`Mousse profile: ${selected.displayName}`} title={selected.displayName}
-      aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+      aria-haspopup="menu" aria-expanded={open} onClick={() => { if (!warmPending) setOpen((value) => !value) }}>
       {avatar(selected)}
     </button>
     : <button ref={triggerRef} className="profile-sidebar-trigger"
         type="button" aria-label={withAccount ? `${signedIn ? `Mousse ID: ${mousseIdName(account.plus)}` : 'Sign in'}, Mousse profile: ${selected.displayName}` : `Mousse profile: ${selected.displayName}`}
         title={withAccount ? (signedIn ? account.plus?.email ?? mousseIdName(account.plus) : selected.displayName) : selected.displayName} aria-haspopup="menu" aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}>
+        onClick={() => { if (!warmPending) setOpen((value) => !value) }}>
         {withAccount ? <>
           {signedIn ? <MousseIdAvatar plus={account.plus} /> : avatar(selected)}
           <span className="profile-sidebar-text">

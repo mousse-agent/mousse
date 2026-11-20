@@ -1422,6 +1422,15 @@ export function OrchestratorChat() {
     goal: (threadId, action, text) => window.mousse.platformRequest.request<{ text?: string }>('threads.goal', { threadId, action, ...(text !== undefined ? { text } : {}) })
   })
 
+  // A message sent from the warm start (WarmChat) while the window was connecting goes once, as an ordinary send of the
+  // thread's draft, as soon as this chat has read the profile's settings. A send held for another thread is dropped;
+  // its text stays in that thread's draft.
+  const handleSendRef = useRef<typeof handleSend | null>(null)
+  const selectionRead = profileDefault !== undefined
+  useEffect(() => {
+    if (!workspaceReady || !selectionRead) return
+    if (useAppStore.getState().takeWarmSend(activeThreadId)) void handleSendRef.current?.()
+  }, [workspaceReady, selectionRead, activeThreadId])
   const handleSend = async (skillMode?: SkillChatMode, options?: { steer?: boolean; skipQuestions?: boolean }) => {
     if (!useAppStore.getState().workspaceReady) return
     // A file is sent as its path on this computer, which the agent of a thread on another computer can't read. A long
@@ -2039,6 +2048,8 @@ export function OrchestratorChat() {
     onSelect: (node) => void selectRunOnDevice(node),
     onOpenRemoteProject: openProjectOnRunOnDevice
   }
+
+  handleSendRef.current = handleSend
 
   return (
     <div data-mousse="chat" className={`chat${emptyThread ? ' chat--empty' : ''}`} data-new-chat-motion={emptyThread && !newChatAnimations ? 'off' : undefined} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>

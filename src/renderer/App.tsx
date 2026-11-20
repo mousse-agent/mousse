@@ -19,6 +19,7 @@ import { useThreadsPeek } from './hooks/useThreadsPeek'
 import { ThreadSideCard } from './components/sideCard/ThreadSideCard'
 import { QuickActionEditorHost } from './components/QuickActionEditor'
 import { WorkspaceLoading } from './components/WorkspaceLoading'
+import { WarmChat } from './components/WarmChat'
 
 import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { TitleBar } from './components/TitleBar'
@@ -111,6 +112,10 @@ export default function App() {
   // which takes the threads sidebar's place.
   const inboxThread = useInboxShowsThread() && automationsOpen
   const workspaceReady = useAppStore((s) => s.workspaceReady)
+  // What this window's profile showed last time, on screen until the workspace is ready (showWarmView).
+  const warmShown = useAppStore((s) => s.warmView !== null)
+  // The sidebar and conversation are laid out: from the trusted binding, or earlier from the warm start.
+  const workspaceShown = profileReady || warmShown
   const newBotOpen = useBotsStore((s) => s.newBotOpen)
   // The Automations page's (hidden) shell is there from the profile binding; the page itself, and its first inbox
   // read, mount once the workspace has painted (or when it is opened first) and then stay mounted.
@@ -206,6 +211,13 @@ export default function App() {
   }>({ kind: null, pointerId: null, clientX: null, frame: null })
   const sidebarRef = useRef<HTMLElement>(null)
   const threadsPaneRef = useRef<HTMLDivElement>(null)
+  // The warm start is read once, from this computer only; the service is not asked and nothing in it is sent there.
+  useEffect(() => {
+    void window.mousse.app.warmStart?.().then((view) => {
+      if (view) useAppStore.getState().showWarmView(view)
+    }).catch(() => undefined)
+  }, [])
+
   useEffect(() => {
     if (profileReady) return
     let disposed = false
@@ -261,7 +273,8 @@ export default function App() {
     }
     const finishHydration = (): void => {
       if (isCurrentProfile() && hydrationFinished && hydrationReceived) {
-        useAppStore.setState({ workspaceReady: true })
+        // The real chat takes the warm start's place in this update.
+        useAppStore.setState({ workspaceReady: true, warmView: null })
       }
     }
 
@@ -593,14 +606,15 @@ export default function App() {
           <Suspense fallback={null}><SubscriptionUsagePage key={profileId} onClose={() => setUsageOpen(false)} /></Suspense>
         </div>}
         <div className="app-workspace" data-workspace-swap={workspaceSwap ?? undefined} data-inbox-thread={inboxThread || undefined} style={{ display: railPageOpen && !inboxThread ? 'none' : 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
-        {!profileReady && <WorkspaceLoading
+        {!workspaceShown && <WorkspaceLoading
           error={bootstrapError}
           onRetry={retryBootstrap}
           sidebarWidth={threadsSidebarOpen ? threadsSidebarWidth : undefined}
         />}
 
-        {/* Profile-scoped panels need the trusted binding before their mount effects run. */}
-        {profileReady && <>
+        {/* Profile-scoped panels need the trusted binding before their mount effects run. Before it, the warm start shows
+            the sidebar (inert) and the conversation as they were, and asks the service nothing. */}
+        {workspaceShown && <>
           <SlidingThreadsPane
             open={threadsSidebarOpen && !inboxThread}
             width={threadsSidebarWidth}
@@ -650,19 +664,22 @@ export default function App() {
           style={layoutMode === 'chats' && !botThread ? { display: 'none' } : undefined}
         >
           {inboxThread && <RunStrip />}
-          {botThread && <Suspense fallback={null}><BotThreadHeader botId={botThread.botId} threadId={botThread.threadId} /></Suspense>}
+          {botThread && profileReady && <Suspense fallback={null}><BotThreadHeader botId={botThread.botId} threadId={botThread.threadId} /></Suspense>}
           <KeepMounted active={!usageOpen} className="keep-mounted-pane">
-          {workspaceReady ? <OrchestratorChat key={profileId} /> : <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />}
+          {workspaceReady ? <OrchestratorChat key={profileId} />
+            : warmShown ? <WarmChat error={bootstrapError} onRetry={retryBootstrap} />
+              : <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />}
 
           </KeepMounted>
-          <ThreadSideCard />
-          <QuickActionEditorHost />
+          {profileReady && <ThreadSideCard />}
+          {profileReady && <QuickActionEditorHost />}
         </aside>
 
 
 
         {/* The conversation pane is hidden here, so a failed workspace load shows in this pane's place. */}
-        {layoutMode === 'chats' && <KeepMounted active={!usageOpen && !botThread} className="keep-mounted-pane">
+        {layoutMode === 'chats' && !profileReady && <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />}
+        {layoutMode === 'chats' && profileReady && <KeepMounted active={!usageOpen && !botThread} className="keep-mounted-pane">
           {bootstrapError
             ? <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />
             : <Suspense fallback={null}><ChatWorkspace key={profileId} /></Suspense>}
@@ -687,8 +704,9 @@ export default function App() {
         <KeepMounted as="main" data-mousse="panel" active={panelShown} preserveLayout className={`main-area${panelClosing ? ' is-closing' : ''}`}
           // Beside it: the threads sidebar and its divider when open (the Runs list sits outside the workspace), and the 1px divider before it.
           style={mainAreaStyle(mainAreaWidth, (threadsSidebarOpen && !inboxThread ? threadsSidebarWidth + 1 : 0) + 1)}>
-          <MainViewTabs />
-          <MainViewPanel open={panelShown} />
+          {/* Before the binding the panel area only keeps its width, so the conversation does not move when it fills. */}
+          {profileReady && <MainViewTabs />}
+          {profileReady && <MainViewPanel open={panelShown} />}
         </KeepMounted>
         </>}
         </div>

@@ -114,6 +114,7 @@ import type {
   StartPullRequestThreadResult
 } from '../shared/pullRequests'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
+import type { WarmStartView } from '../shared/warmStart'
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThreadNotificationEvent } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
 import type {
@@ -1421,6 +1422,8 @@ const api = {
   },
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),
+    /** What this window's profile showed last time, to show until the service answers (display only). */
+    warmStart: (): Promise<WarmStartView | null> => ipcRenderer.invoke('app:warmStart'),
     getActiveProjectPath: (threadId?: string | null): Promise<string | null> =>
       ipcRenderer.invoke('app:getActiveProjectPath', threadId),
     getFilesRoot: (threadId?: string | null): Promise<string> =>
