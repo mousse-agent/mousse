@@ -11,7 +11,12 @@ const { useMousseIdStore } = await import('../../src/renderer/stores/mousseIdSto
 
 const policy = { blocked: false, maxPermissionMode: 'accept_edits', terminal: false, editor: false }
 /** A set-up computer that manages its devices, with one other computer and a phone. */
-const daemon = { error: undefined as string | undefined, removed: false, plus: undefined as Record<string, unknown> | undefined }
+const daemon = {
+  error: undefined as string | undefined,
+  removed: false,
+  plus: undefined as Record<string, unknown> | undefined,
+  finishError: undefined as unknown
+}
 const request = vi.fn(async (method: string) => {
   switch (method) {
     case 'net.status':
@@ -20,6 +25,11 @@ const request = vi.fn(async (method: string) => {
         self: { node: 'nod_self', user: 'usr_a', isAuthority: true, removed: daemon.removed }, peers: [], workOnThreads: true, error: daemon.error
       }
     case 'net.plus.status': return daemon.plus
+    case 'net.plus.login.begin':
+      return { id: 'login-1', userCode: 'ABCDEF-123456', verificationUri: 'https://id.example/approve', expiresAt: Date.now() + 60_000 }
+    case 'net.plus.login.finish':
+      if (daemon.finishError) throw daemon.finishError
+      return daemon.plus
     case 'net.transport.list': return { manifests: [], records: {}, settings: {} }
     case 'net.ssh.list': return { records: [] }
     case 'bridge.nodes': return { nodes: [
@@ -38,6 +48,7 @@ beforeEach(() => {
   daemon.error = undefined
   daemon.removed = false
   daemon.plus = undefined
+  daemon.finishError = undefined
   useMousseIdStore.setState({ runtimeOrigin: '' })
   host = document.createElement('div')
   document.body.append(host)
@@ -114,6 +125,32 @@ describe('Settings → Devices', () => {
     expect(host.textContent).toContain('This computer was removed from your devices. Sign in to add it back.')
     expect(host.textContent).not.toContain('Reconnecting')
     expect([...host.querySelectorAll('button')].map((button) => button.textContent)).toContain('Sign in')
+  })
+
+  it('a computer whose devices list was folded into the account’s one list is told to sign in again to join it', async () => {
+    daemon.plus = { configured: false, connected: false, reason: 'list_merged' }
+    useMousseIdStore.setState({ runtimeOrigin: 'https://id.example' })
+    await act(async () => root.render(createElement(MousseIdAccount, { onSetUp: () => undefined })))
+    await flush()
+    expect(host.textContent).toContain('Your devices are now on one list. Sign in again to join it.')
+    expect([...host.querySelectorAll('button')].map((button) => button.textContent)).toContain('Sign in')
+  })
+
+  it('a sign-in refused because the account keeps its devices list on another computer says so in plain words', async () => {
+    daemon.plus = { configured: false, connected: false }
+    // As the daemon's refusal reaches the window: code, message and details.
+    daemon.finishError = { code: 'conflict', message: 'The same identifier was used with different content.', details: { reason: 'account_network_kept' } }
+    useMousseIdStore.setState({ runtimeOrigin: 'https://id.example' })
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null)
+    await act(async () => root.render(createElement(MousseIdAccount, { onSetUp: () => undefined })))
+    await flush()
+    await act(async () => [...host.querySelectorAll('button')].find((button) => button.textContent === 'Sign in')!.click())
+    await flush()
+    open.mockRestore()
+    const alert = host.querySelector('[role="alert"]')?.textContent ?? ''
+    expect(alert).toContain('Your Mousse ID already has a devices list on another computer.')
+    expect(alert).toContain('can’t join that list without leaving them')
+    expect(alert).not.toMatch(/binding|identifier/i)
   })
 
   it('a disconnected account can be signed out, so signing in to a different one is never stuck', async () => {
