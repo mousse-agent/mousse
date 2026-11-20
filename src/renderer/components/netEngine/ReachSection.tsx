@@ -34,7 +34,13 @@ function advertised(status: NetEngineStatus, cls: 'lan' | 'tailnet'): string | u
  * a tunnel each take an address. Each has Test. A change that needs new listeners restarts the helper (about a
  * second offline); the others show in the next invitation. Under them, this computer's own relays (Phase 3 §B.9).
  */
-export function ReachSection({ status, onChanged }: { status: NetEngineStatus; onChanged: () => void }) {
+export function ReachSection({
+  status,
+  onChanged
+}: {
+  status: NetEngineStatus
+  onChanged: () => void
+}) {
   const reach = status.reach
   if (!reach && !status.relays) return null
   return (
@@ -215,7 +221,9 @@ function RouteRows({
               value={tunnel}
               placeholder="https://name.example.com"
               aria-label="Tunnel URL"
-              title={local ? `Point your tunnel at ${local}` : 'Your tunnel’s public https:// address.'}
+              title={
+                local ? `Point your tunnel at ${local}` : 'Your tunnel’s public https:// address.'
+              }
               onChange={(event) => setTunnel(event.target.value)}
             />
             <button
@@ -264,7 +272,11 @@ export function tunnelUrl(route: string): string {
 
 /** When the next registration starts, as the row says it: the time of day, to the second. */
 const clock = (at: number): string =>
-  new Date(at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  new Date(at).toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  })
 
 /** When the old relay key stops, as the row says it. */
 const until = (at: number): string =>
@@ -279,7 +291,10 @@ const until = (at: number): string =>
 export const RELAY_ENDED = 'The connection to the relay ended.'
 
 /** One own relay's state, one short line, with the reason as its tooltip. */
-export function relayLine(relay: NetEngineRelay, now = Date.now()): { line: string; detail?: string; warn?: boolean } {
+export function relayLine(
+  relay: NetEngineRelay,
+  now = Date.now()
+): { line: string; detail?: string; warn?: boolean } {
   // A reason with no words here gets a fixed line: the helper's own text never shows.
   const reason = relay.reason ? (RELAY_REASON_TEXT[relay.reason] ?? RELAY_ENDED) : undefined
   switch (relay.state) {
@@ -289,7 +304,10 @@ export function relayLine(relay: NetEngineRelay, now = Date.now()): { line: stri
       return { line: 'Connecting…' }
     case 'retrying':
       return {
-        line: relay.retryAt !== undefined && relay.retryAt > now ? `Retrying at ${clock(relay.retryAt)}` : 'Retrying…',
+        line:
+          relay.retryAt !== undefined && relay.retryAt > now
+            ? `Retrying at ${clock(relay.retryAt)}`
+            : 'Retrying…',
         detail: reason,
         warn: true
       }
@@ -314,7 +332,9 @@ function OwnRelayRows({ relays, onChanged }: { relays: NetEngineRelays; onChange
   const [, setTick] = useState(0)
   const nextRetry = Math.min(
     ...relays.list.flatMap((relay) =>
-      relay.state === 'retrying' && relay.retryAt !== undefined && relay.retryAt > Date.now() ? [relay.retryAt] : []
+      relay.state === 'retrying' && relay.retryAt !== undefined && relay.retryAt > Date.now()
+        ? [relay.retryAt]
+        : []
     )
   )
   useEffect(() => {
@@ -369,7 +389,10 @@ function OwnRelayRows({ relays, onChanged }: { relays: NetEngineRelays; onChange
             title={relay.endpoint}
             description={
               <span className="engine-row-line">
-                <span className={state.warn ? 'settings-status-warn' : undefined} title={state.detail}>
+                <span
+                  className={state.warn ? 'settings-status-warn' : undefined}
+                  title={state.detail}
+                >
                   {state.line}
                 </span>
                 {relay.state === 'registered' && (
@@ -385,16 +408,28 @@ function OwnRelayRows({ relays, onChanged }: { relays: NetEngineRelays; onChange
                     </span>
                   </>
                 )}
-                {relay.rotatingUntil !== undefined && (
+                {relay.newKeyPending ? (
                   <>
                     {' · '}
                     <span
                       className="settings-muted"
-                      title="The old key keeps working until then, so offline devices catch up."
+                      title="The relay hasn't taken the new key yet. The current key keeps working."
                     >
-                      Rotating until {until(relay.rotatingUntil)}
+                      New key pending
                     </span>
                   </>
+                ) : (
+                  relay.rotatingUntil !== undefined && (
+                    <>
+                      {' · '}
+                      <span
+                        className="settings-muted"
+                        title="The old key keeps working until then, so offline devices catch up."
+                      >
+                        Rotating until {until(relay.rotatingUntil)}
+                      </span>
+                    </>
+                  )
                 )}
               </span>
             }
@@ -403,7 +438,7 @@ function OwnRelayRows({ relays, onChanged }: { relays: NetEngineRelays; onChange
                 <button
                   type="button"
                   className="settings-btn"
-                  disabled={busy || relay.state !== 'registered'}
+                  disabled={busy || relay.state !== 'registered' || relay.newKeyPending}
                   title="Register with a new key; the old one keeps working for a while."
                   onClick={() => void run('netEngine.relay.rotate', { relay: relay.id })}
                 >
@@ -429,7 +464,11 @@ function OwnRelayRows({ relays, onChanged }: { relays: NetEngineRelays; onChange
         </p>
       )}
       {removing && (
-        <Modal open title={`Remove relay ${removing.endpoint}?`} onClose={() => setRemoving(undefined)}>
+        <Modal
+          open
+          title={`Remove relay ${removing.endpoint}?`}
+          onClose={() => setRemoving(undefined)}
+        >
           <p
             className="settings-muted"
             title="Adding it again needs a new link from mousse-relay enroll."

@@ -87,7 +87,18 @@ describe('relays (Phase 3)', () => {
     a.fake!.emit({ ev: 'relay.state', relay: aRelays.relays[0] })
     await eventually(() => expect(a.mms.netEngine.status().relays!.list[0]!.state).toBe('registered'))
     await a.dispatch('netEngine.relay.rotate', { relay: RELAY_ID }, true)
-    expect(a.mms.netEngine.status().relays!.list[0]!.rotatingUntil).toBeGreaterThan(Date.now())
+    // The answer comes while the new key is pending; when the old key stops arrives with the relay's next state.
+    expect(a.mms.netEngine.status().relays!.list[0]).toMatchObject({ newKeyPending: true })
+    expect(a.mms.netEngine.status().relays!.list[0]!.rotatingUntil).toBeUndefined()
+    Object.assign(aRelays.relays[0]!, {
+      new_key_pending: false,
+      rotating_until: Math.floor(Date.now() / 1000) + 3600
+    })
+    a.fake!.emit({ ev: 'relay.state', relay: aRelays.relays[0] })
+    await eventually(() =>
+      expect(a.mms.netEngine.status().relays!.list[0]!.rotatingUntil).toBeGreaterThan(Date.now())
+    )
+    expect(a.mms.netEngine.status().relays!.list[0]!.newKeyPending).toBeUndefined()
 
     await a.dispatch('netEngine.relay.remove', { relay: RELAY_ID }, true)
     expect(a.fake!.requests.filter((request) => request.op === 'relay.remove')).toEqual([

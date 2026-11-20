@@ -449,8 +449,14 @@ describe('relays (Phase 3 §B.5, §B.9, §B.11)', () => {
 
     await click(button('New relay key'))
     expect(d.called('netEngine.relay.rotate')).toEqual([{ relay: 'aa11' }])
+    // The helper answers before the relay takes the new key: pending, with no end time yet, and no second rotation.
+    await d.change({ relays: { available: true, list: [relay({ newKeyPending: true })] } })
+    expect(relayRow('relay.example.net:443')?.textContent).toContain('New key pending')
+    expect(relayRow('relay.example.net:443')?.textContent).not.toContain('Rotating until')
+    expect(button('New relay key')?.disabled).toBe(true)
     await d.change({ relays: { available: true, list: [relay({ rotatingUntil: Date.now() + 3_600_000 })] } })
     expect(relayRow('relay.example.net:443')?.textContent).toContain('Rotating until')
+    expect(relayRow('relay.example.net:443')?.textContent).not.toContain('New key pending')
 
     // The helper's relay.state reaches the window as a status change.
     await d.change({

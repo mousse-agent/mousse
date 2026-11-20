@@ -1410,7 +1410,8 @@ function relayAnswer(message: Record<string, any>, relays: FakeRelays): Record<s
         callers_max: 256,
         added_at: Math.floor(Date.now() / 1000),
         rotated_at: null,
-        rotating_until: null
+        rotating_until: null,
+        new_key_pending: false
       }
       relays.relays.push(relay)
       return { relay }
@@ -1425,7 +1426,8 @@ function relayAnswer(message: Record<string, any>, relays: FakeRelays): Record<s
       if (!relay) return { error: 'no_relay', reason: 'No such relay' }
       if (relay.state !== 'registered') return { error: 'not_registered', reason: 'not connected' }
       const now = Math.floor(Date.now() / 1000)
-      Object.assign(relay, { rotated_at: now, rotating_until: now + 3600 })
+      // The helper answers before the relay takes the new key; `rotating_until` comes later, in a `relay.state`.
+      Object.assign(relay, { rotated_at: now, new_key_pending: true })
       return { relay }
     }
     case 'peer.relay.allow':

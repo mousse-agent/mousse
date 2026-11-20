@@ -157,6 +157,8 @@ export interface NetEngineRelay {
   callersMax?: number
   /** While a new relay key is taking over: when the old one stops, ms since 1970. */
   rotatingUntil?: number
+  /** A new relay key is asked for and the relay has not taken it yet. */
+  newKeyPending?: boolean
 }
 
 /** What a relay error word (`relay.enroll`'s refusal, a registration's end) means, as Settings says it. */
