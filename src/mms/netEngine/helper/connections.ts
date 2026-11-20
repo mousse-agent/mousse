@@ -35,6 +35,11 @@ class HelperStream implements EngineStream {
   private readonly boundWaiters: Array<() => void> = []
   private writable = true
   private ended = false
+  /**
+   * Why this side ended the stream before the helper named it (`conn.down` or a reset): the handle that arrives
+   * later is reset at once, so it never holds credit for a stream nobody reads.
+   */
+  private cancelled?: string
   constructor(
     readonly label: EngineLabel,
     readonly cls: StreamClass,
@@ -58,6 +63,11 @@ class HelperStream implements EngineStream {
   bound(handle: number): void {
     this.handle = handle
     this.earlyBytes = 0
+    if (this.cancelled !== undefined) {
+      this.channel.reset(handle, this.cancelled)
+      this.wakeBound()
+      return
+    }
     for (const write of this.early.splice(0)) this.channel.send(handle, write.bytes, write.fin)
     this.wakeBound()
   }
@@ -76,6 +86,7 @@ class HelperStream implements EngineStream {
     this.writable = false
     this.early.length = 0
     if (this.handle !== undefined) this.channel.release(this.handle)
+    else this.cancelled = reason
     this.wakeBound()
     this.deliver({ kind: 'end', reason })
   }
@@ -111,7 +122,8 @@ class HelperStream implements EngineStream {
   reset(reason = 'reset'): void {
     const wasOpen = this.writable || !this.ended
     this.writable = false
-    if (this.handle !== undefined && wasOpen) this.channel.reset(this.handle, reason)
+    if (this.handle === undefined) this.cancelled = reason
+    else if (wasOpen && this.cancelled === undefined) this.channel.reset(this.handle, reason)
     this.early.length = 0
     this.wakeBound()
     this.deliver({ kind: 'end', reason })
@@ -208,7 +220,8 @@ export class HelperConnection implements EngineConnection {
     stream.bound(handle)
     void this.channel
       .request('stream.accept', { handle })
-      .catch(() => stream.failed('peer_offline'))
+      // Refused here (the control queue is full) or by the helper: the handle and its credit go, both ways.
+      .catch((error) => stream.reset(error instanceof NetError ? error.code : 'peer_offline'))
     if (this.streamListeners.length) for (const listener of this.streamListeners) listener(stream)
     else this.early.push(stream)
   }

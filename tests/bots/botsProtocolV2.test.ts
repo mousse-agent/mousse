@@ -189,6 +189,7 @@ describe('validation', () => {
       ['bots.update', { botId, look: { colour: 'teal', accessory: 'cap', glow: true } }],
       ['bots.update', { botId, look: { colour: 'teal', accessory: 'cap', kind: 7 } }],
       ['bots.update', { botId, look: { colour: 'teal', accessory: 'cap', eyes: 'x'.repeat(41) } }],
+      ['bots.update', { botId, look: { colour: 'teal', accessory: 'cap', eyeColour: 'x'.repeat(41) } }],
       ['bots.update', { botId, description: '   ' }],
       ['bots.update', { botId, description: 'x'.repeat(501) }],
       ['bots.update', { botId, description: 7 }],
@@ -264,8 +265,9 @@ describe('a bot through the v2 methods', () => {
     const botId = await created()
     expect((await call<{ bots: BotSummary[] }>('bots.personal.list')).bots).toMatchObject([{ id: botId, name: 'Inbox Helper', state: 'idle', unread: 1 }])
     expect(await call<{ bot: BotSummary }>('bots.update', { botId, name: 'Invoice Sum', look: { colour: 'pink', accessory: 'crown' } })).toMatchObject({ bot: { name: 'Invoice Sum', look: { colour: 'pink', accessory: 'crown' } } })
-    // A Mousse with heart eyes is kept; back to the mouse with pill eyes stores no extra fields.
+    // A Mousse with heart eyes, and a picked eye colour, are kept; back to the mouse with pill eyes stores no extra fields.
     expect((await call<{ bot: BotSummary }>('bots.update', { botId, look: { colour: 'pink', accessory: 'crown', kind: 'mousse', eyes: 'heart' } })).bot.look).toEqual({ colour: 'pink', accessory: 'crown', kind: 'mousse', eyes: 'heart' })
+    expect((await call<{ bot: BotSummary }>('bots.update', { botId, look: { colour: 'pink', accessory: 'crown', eyeColour: 'white' } })).bot.look).toEqual({ colour: 'pink', accessory: 'crown', eyeColour: 'white' })
     expect((await call<{ bot: BotSummary }>('bots.update', { botId, look: { colour: 'pink', accessory: 'crown', kind: 'mouse', eyes: 'pill' } })).bot.look).toEqual({ colour: 'pink', accessory: 'crown' })
 
     // The owner asks; the chat turn asks to run commands with `escalate`, and the card lands on its reply.

@@ -137,6 +137,78 @@ describe('the owner’s attached images', () => {
   })
 })
 
+describe('an image file written again at the same path', () => {
+  it('is read again when a new message shows it after the file changed, and only then', async () => {
+    let file = { size: 3, mtimeMs: 1000 }
+    readAsset.mockImplementation(async () => ({ data: new Uint8Array([1, 2, 3]), mimeType: 'image/png', ...file }))
+    const assetStamp = vi.fn(async () => file)
+    installPreload(fake, { fs: { readAsset, assetStamp } })
+    const shot = { name: 'chart.png', path: `${FOLDER}/chart.png` }
+    fake.chats.trip = [message(1, { author: 'owner', text: '', attachments: [shot] })]
+    await open()
+    const pictures = () => [...transcript().querySelectorAll('.bot-you .bot-image img')].map((img) => img.getAttribute('src'))
+    expect(pictures()).toEqual(['blob:image-1'])
+
+    // The same file again, unchanged: checked, not read.
+    await act(async () => fake.emit.message('trip', message(2, { author: 'owner', text: '', attachments: [shot] })))
+    await settle()
+    expect(assetStamp).toHaveBeenCalled()
+    expect(readAsset).toHaveBeenCalledTimes(1)
+    expect(pictures()).toEqual(['blob:image-1', 'blob:image-1'])
+
+    // Written again at the same size: the new write time is enough to read it again, and the old picture goes.
+    file = { size: 3, mtimeMs: 2000 }
+    await act(async () => fake.emit.message('trip', message(3, { author: 'owner', text: '', attachments: [shot] })))
+    await settle()
+    expect(readAsset).toHaveBeenCalledTimes(2)
+    expect(pictures()).toEqual(['blob:image-2', 'blob:image-2', 'blob:image-2'])
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:image-1')
+  })
+})
+
+describe('an image file that could not be read yet', () => {
+  it('is read again a moment later, and shows once it can be', async () => {
+    readAsset.mockRejectedValueOnce(new Error('busy'))
+    fake.chats.trip = [message(1, { author: 'owner', text: '', attachments: [{ name: 'late.png', path: `${FOLDER}/late.png` }] })]
+    await open()
+    expect(transcript().querySelector('.bot-you .bot-image.is-failed')?.textContent).toBe('late.png')
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)) })
+    await settle()
+    expect(transcript().querySelector('.bot-you .bot-image img')?.getAttribute('src')).toBe('blob:image-1')
+    expect(readAsset).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('an image the owner sends', () => {
+  it('keeps the composer’s picture in place from sending until the sent copy is read', async () => {
+    await open()
+    let sent!: () => void
+    const gate = new Promise<void>((resolve) => { sent = resolve })
+    const send = fake.client.send as ReturnType<typeof vi.fn>
+    const realSend = send.getMockImplementation()!
+    send.mockImplementationOnce((...args: unknown[]) => gate.then(() => realSend(...args)))
+    let read!: () => void
+    readAsset.mockImplementationOnce(() => new Promise((resolve) => { read = () => resolve({ data: new Uint8Array([1, 2, 3]), mimeType: 'image/png', size: 3, mtimeMs: 1 }) }))
+    const file = new File([new Uint8Array([1, 2, 3])], 'paste-1.png', { type: 'image/png' })
+    await act(async () => useBotsStore.getState().setAttachments(trip.id, [{ id: 'a1', file, previewUrl: 'blob:preview' }]))
+    const sending = act(async () => { await useBotsStore.getState().send(trip.id) })
+    await act(async () => {})
+    const picture = () => transcript().querySelector('.bot-you .bot-image img')?.getAttribute('src')
+    // While it is on its way.
+    expect(picture()).toBe('blob:preview')
+    sent()
+    await sending
+    await act(async () => {})
+    // Sent, its copy still being read.
+    expect(picture()).toBe('blob:preview')
+    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith('blob:preview')
+    await act(async () => read())
+    await settle()
+    expect(picture()).toBe('blob:image-1')
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:preview')
+  })
+})
+
 describe('images in the bot’s replies', () => {
   it('shows a data:image/png and an image file from its work as the reply’s pictures, named by their alt text', async () => {
     fake.chats.trip = [message(1, { text: `Sketch:\n\n![Day 1 sketch](${PNG})\n\nRoute:\n\n![Route map](/home/me/.mousse/bots/files/trip/route.png)` })]

@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 /**
  * The threads the owner's bots started, in the sidebar: one a bot keeps out of it (`Thread.hidden`) is not listed, and
- * the project menu's Hide bot threads and the Threads tab's Hide all bot threads hide the listed ones (`threads.setHidden`).
+ * a bot-started thread's own menu has Hide, and the project menu's Hide bot threads and the Threads tab's Hide all bot
+ * threads hide the listed ones (`threads.setHidden`).
  * Bringing one back is the bot chat's Show in sidebar (botThreadsUi.test.ts) or a message from its owner (threadHiddenProtocol.test.ts).
  */
 import { act, createElement } from 'react'
@@ -105,6 +106,19 @@ describe('bot threads in the sidebar', () => {
     rightClick(projectRow('Mousse'))
     expect(menuItem('Rename')).not.toBeNull()
     expect(menuItem('Hide bot threads')).toBeNull()
+  })
+
+  it('a bot-started thread\'s menu hides just that thread; other threads have no Hide', async () => {
+    show([thread('t1', 'Plain'), byBot('b1', 'Job one'), byBot('b2', 'Job two')])
+    rightClick(row('t1')!)
+    expect(menuItem('Rename')).not.toBeNull()
+    expect(menuItem('Hide')).toBeNull()
+
+    rightClick(row('b1')!)
+    await act(async () => menuItem('Hide')!.click())
+    expect(hiddenIds()).toEqual(['b1'])
+    expect(row('b1')).toBeNull()
+    expect(row('b2')).not.toBeNull()
   })
 
   it('the Threads tab\'s menu hides every listed bot thread, and opens only while there are some', async () => {

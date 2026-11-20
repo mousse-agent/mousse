@@ -160,8 +160,9 @@ export class LoginSession extends EventEmitter {
     })
   }
 
-  waitForCallbackUrl(): Promise<string> {
-    return this.waitForManualCode('Paste the Google redirect URL')
+  /** `signal` withdraws the paste field when the flow ends some other way. */
+  waitForCallbackUrl(signal?: AbortSignal): Promise<string> {
+    return this.waitForManualCode('Paste the Google redirect URL', signal)
   }
 
   private waitForManualCode(message: string, signal?: AbortSignal): Promise<string> {

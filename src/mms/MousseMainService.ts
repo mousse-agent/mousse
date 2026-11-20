@@ -18,6 +18,7 @@ import {
   createRetainingGitWorktreeAdapter
 } from './profiles/migration/adapters'
 import { ProfileHost } from './profiles/ProfileHost'
+import { startsAtLogin } from './netEngine/loginStart'
 import { registerProfileDomain } from './profiles/profileDomain'
 import type { ProfileId } from '../shared/profiles/ids'
 import { registerEditorTunnelMethods, registerNetMethods } from './net/registerMethods'
@@ -32,7 +33,9 @@ import { registerBotDeviceMethods } from './bots/deviceMethods'
 import { BotDefinitionError } from './bots/definitions/BotDefinitionStore'
 import { registerBotBrowserMethods } from './bots/browser/registerBotBrowserMethods'
 import { registerAutomationMethods } from './automations/registerMethods'
+import { registerComputerUseMethods } from './computerUse/registerMethods'
 import { registerSecretMethods } from './secrets/registerMethods'
+import { registerBugReportMethods } from './bugReports/registerMethods'
 import { registerWorkflowDefinitionMethods } from './workflows/registerDefinitionMethods'
 import { registerWorkflowRunMethods } from './workflows/registerRunMethods'
 import { registerIntegrationMethods, type IntegrationDomainRegistration } from './integrations/registerMethods'
@@ -149,7 +152,12 @@ export class MousseMainService extends MmsProfileServices {
         // One installation store for every profile: the default profile already reads through it.
         installationConfig,
         options: { ...options, homeDir: home },
-        configureServices: (profile) => service!.configureProfileBrowser(profile)
+        configureServices: (profile) => {
+          service!.configureProfileBrowser(profile)
+          // A profile's networking switch is said in `endpoints.json`, which `mousse-helper pipe` reads.
+          profile.netEngine.onSwitched = () => service!.sshEndpointsChanged()
+        },
+        onProfilesChanged: () => service!.sshEndpointsChanged()
       })
       host.attachDefault(service, defaultId)
       service.profileHost = host
@@ -221,13 +229,27 @@ export class MousseMainService extends MmsProfileServices {
         return services.netEngine
       },
       createProfile: async (label) => {
-        const id = host.manager.create({ displayName: label }).id
+        // A label another profile has gets a slug of its own (the label stays as the other computer typed it).
+        const taken = new Set(host.manager.list().map((record) => record.slug))
+        const base = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 56) || 'profile'
+        let slug = base
+        for (let n = 2; taken.has(slug); n++) slug = base + '-' + n
+        const id = host.manager.create({ displayName: label, slug }).id
         made.add(id)
         return id
       },
-      startsAtLogin: () => false
+      startsAtLogin: () => startsAtLogin()
     })
     return this.sshRemoteNow
+  }
+
+  /** A profile came or went, or its networking switch changed: `endpoints.json` follows, once SSH add is set up. */
+  sshEndpointsChanged(): void {
+    try {
+      this.sshRemoteNow?.writeEndpoints()
+    } catch (error) {
+      console.warn('endpoints.json was not rewritten', error instanceof Error ? error.message : String(error))
+    }
   }
 
   override stop(options: { timeoutMs?: number } = {}): Promise<void> {
@@ -323,6 +345,8 @@ export class MousseMainService extends MmsProfileServices {
       const services = await profile(profileId)
       return services.personalBots ? services.botBrowsers : null
     })
+    // Settings → Computer use: whether Cua Driver is here, and its installer.
+    registerComputerUseMethods(this.domains, async (profileId) => (await profile(profileId)).orchestrator.computerUse())
     registerAutomationMethods(this.domains, async (profileId) => {
       const services = await profile(profileId)
       return {
@@ -371,6 +395,7 @@ export class MousseMainService extends MmsProfileServices {
         delete: (name) => services.secretVault.delete(name)
       }
     })
+    registerBugReportMethods(this.domains, async (profileId) => (await profile(profileId)).bugReports)
     registerAgentDefinitionMethods(this.domains, async (profileId, request) =>
       (await profile(profileId)).platform.agentDomain(request.method, request.params))
     registerWorkflowDefinitionMethods(this.domains, async (profileId) =>

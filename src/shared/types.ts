@@ -110,7 +110,6 @@ export interface ScheduledRunAgent {
  * and its chat know the schedule by (`bot_schedule_list`), kept across the move from `bots.db`.
  */
 export interface ScheduledJobBot {
-  canWakeMe?: boolean
   /** A fixed reminder line, posted without a model run. */
   say?: string
   /** The owner's message or tapped answer started the turn that added this timer. */
@@ -561,6 +560,19 @@ export interface SendExpectation {
 }
 
 export type OrchestratorSendInput = string | OrchestratorSendRequest
+
+/** Why a thread's message could not start (`Thread.setupFailure`). */
+export interface ThreadSetupFailure {
+  /** One plain line, as the person reads it. */
+  reason: string
+  /** What Git or the system said, for the tooltip. */
+  detail?: string
+  at: string
+  /** The run that failed. */
+  runId?: string
+  /** The message can be sent again with Retry: Mousse kept it. */
+  retryable: boolean
+}
 
 export interface OrchestratorContextUsageRequest {
   draftInput?: string
@@ -1704,6 +1716,11 @@ export interface Thread {
   worktreeStartSha?: string
   /** The branch `worktreeStartSha` was read from, for display. */
   worktreeBaseBranch?: string
+  /**
+   * Its last message could not start: setting up its worktree failed before the agent ran. The chat and the sidebar row
+   * say why; Retry sends that message again on this thread, once. Cleared when a turn sets the worktree up, or on Retry.
+   */
+  setupFailure?: ThreadSetupFailure
   /** The pull request this thread created, started from, or watches; set by the daemon, never inferred from a branch name. */
   pullRequest?: ThreadPullRequestLink
   /**
@@ -1717,6 +1734,11 @@ export interface Thread {
    * Written when a turn ends; absent until the first turn that ends with this field known.
    */
   lastReply?: string
+  /**
+   * How the thread's latest run ended, for its links once it is quiet: `done` or `failed`. Written when a turn ends; a
+   * stopped run clears it. Kept in its metadata, so it outlives a restart.
+   */
+  lastRun?: 'done' | 'failed'
   /** The thread's goal (`/goal`): Mousse keeps starting turns while it is working. Set by the daemon. */
   goal?: import('./threadGoal').ThreadGoal
   /** Explicit sidebar position within this thread's project (or standalone group). */
@@ -2115,6 +2137,8 @@ export interface FileAsset {
   data: Uint8Array
   mimeType: string
   size: number
+  /** When the file was last written, as read; absent from an older daemon. */
+  mtimeMs?: number
 }
 
 export type GitChangeStatus =

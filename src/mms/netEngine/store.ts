@@ -74,6 +74,27 @@ export interface EnginePeerRow {
   offered?: string[]
   /** The SSH add's journal (§3.4), on rows with `source: "ssh"`. */
   ssh?: EngineSshJournal
+  /** The Send link this computer consented to join (1b §5.3), while its outcome is open and until pairback. */
+  link?: EngineLink
+}
+
+/**
+ * A Send link joined from this computer (kind 2): its ticket, and what Connect approved and shares back, kept so a
+ * join repeated after a restart sends the same lists. `pending` until the ticket's `PAIRED`: on a row added another
+ * way (over SSH) it is a pending link beside the row, whose own columns change only on that `PAIRED` (§3.6).
+ */
+export interface EngineLink {
+  ticket: string
+  /** The ticket hash (hex): `join.status` and `join.ack` name the flow by it. */
+  ticketHash: string
+  invitation: string
+  /** The ticket's hints Connect approved (`join {approved}`). */
+  approved: string[]
+  /** This computer's routes ticked under "Also share"; the row's `share` once paired. */
+  share: string[]
+  /** When the ticket's invitation ends, in seconds since 1970. */
+  expiresAt?: number
+  pending: boolean
 }
 
 /** What a pairing's row may change after it is saved; `null` deletes a stored value. */
@@ -89,6 +110,7 @@ export type EnginePeerChange = Partial<
   share?: string[] | null
   offered?: string[] | null
   ssh?: EngineSshJournal | null
+  link?: EngineLink | null
 }
 
 const COLUMNS: Record<keyof EnginePeerChange, string> = {
@@ -104,11 +126,12 @@ const COLUMNS: Record<keyof EnginePeerChange, string> = {
   approved: 'approved',
   share: 'share',
   offered: 'offered',
-  ssh: 'ssh'
+  ssh: 'ssh',
+  link: 'link'
 }
 
 /** Columns kept as JSON text; an empty list is stored as NULL. */
-const JSON_COLUMNS = new Set<keyof EnginePeerChange>(['approved', 'share', 'offered', 'ssh'])
+const JSON_COLUMNS = new Set<keyof EnginePeerChange>(['approved', 'share', 'offered', 'ssh', 'link'])
 
 /** A change's value as its column stores it. */
 function columnValue(key: keyof EnginePeerChange, value: unknown): string | null {
@@ -126,7 +149,8 @@ const ADDED_COLUMNS = [
   'approved',
   'share',
   'offered',
-  'ssh'
+  'ssh',
+  'link'
 ]
 
 export const isServingState = (state: EnginePeerState): boolean =>
@@ -147,7 +171,7 @@ export class EnginePeerStore {
   constructor(private readonly db: NetDatabase) {
     db.transaction(() => {
       db.database.exec(
-        'CREATE TABLE IF NOT EXISTS net_engine_peers(local_id TEXT PRIMARY KEY,endpoint TEXT NOT NULL,fingerprint TEXT NOT NULL,grant TEXT NOT NULL,name TEXT NOT NULL,state TEXT NOT NULL,receipt TEXT,paired_at INTEGER NOT NULL,invitation TEXT,ticket TEXT,addresses TEXT,source TEXT,approved TEXT,share TEXT,offered TEXT,ssh TEXT) STRICT; CREATE TABLE IF NOT EXISTS net_engine_streams(stream TEXT PRIMARY KEY,peer_local_id TEXT NOT NULL) STRICT; CREATE INDEX IF NOT EXISTS net_engine_streams_peer ON net_engine_streams(peer_local_id)'
+        'CREATE TABLE IF NOT EXISTS net_engine_peers(local_id TEXT PRIMARY KEY,endpoint TEXT NOT NULL,fingerprint TEXT NOT NULL,grant TEXT NOT NULL,name TEXT NOT NULL,state TEXT NOT NULL,receipt TEXT,paired_at INTEGER NOT NULL,invitation TEXT,ticket TEXT,addresses TEXT,source TEXT,approved TEXT,share TEXT,offered TEXT,ssh TEXT,link TEXT) STRICT; CREATE TABLE IF NOT EXISTS net_engine_streams(stream TEXT PRIMARY KEY,peer_local_id TEXT NOT NULL) STRICT; CREATE INDEX IF NOT EXISTS net_engine_streams_peer ON net_engine_streams(peer_local_id)'
       )
       // A table from before the journal or address columns gets them.
       const columns = new Set(
@@ -169,7 +193,7 @@ export class EnginePeerStore {
       this.db.charge(1)
       this.db.database
         .prepare(
-          'INSERT INTO net_engine_peers(local_id,endpoint,fingerprint,grant,name,state,receipt,paired_at,invitation,ticket,addresses,source,approved,share,offered,ssh) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+          'INSERT INTO net_engine_peers(local_id,endpoint,fingerprint,grant,name,state,receipt,paired_at,invitation,ticket,addresses,source,approved,share,offered,ssh,link) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
         )
         .run(
           saved.localId,
@@ -187,7 +211,8 @@ export class EnginePeerStore {
           columnValue('approved', saved.approved),
           columnValue('share', saved.share),
           columnValue('offered', saved.offered),
-          columnValue('ssh', saved.ssh)
+          columnValue('ssh', saved.ssh),
+          columnValue('link', saved.link)
         )
     })
     return saved
@@ -274,6 +299,16 @@ export class EnginePeerStore {
     return changed ? this.get(localId) : undefined
   }
 
+  /** Deletes a row that never served (a consented link whose join ended without pairing): nothing else holds it. */
+  forgetUnpaired(localId: NodeId): void {
+    this.db.transaction(() => {
+      this.db.charge(1)
+      this.db.database
+        .prepare("DELETE FROM net_engine_peers WHERE local_id=? AND state='consented' AND grant=''")
+        .run(localId)
+    })
+  }
+
   /** Every row in `state`, oldest first. */
   inState(state: EnginePeerState): EnginePeerRow[] {
     return this.all().filter((row) => row.state === state)
@@ -296,7 +331,7 @@ export class EnginePeerStore {
       this.db.charge(16)
       this.dropRows(localId)
       this.db.database
-        .prepare("UPDATE net_engine_peers SET state='removed',ticket=NULL WHERE local_id=?")
+        .prepare("UPDATE net_engine_peers SET state='removed',ticket=NULL,link=NULL WHERE local_id=?")
         .run(localId)
     })
   }
@@ -404,7 +439,8 @@ function toRow(row: Record<string, unknown>): EnginePeerRow {
     approved = readAddresses(row.approved),
     share = readAddresses(row.share),
     offered = readAddresses(row.offered),
-    ssh = readJournal(row.ssh)
+    ssh = readJournal(row.ssh),
+    link = readLink(row.link)
   return {
     localId: row.local_id as NodeId,
     endpoint: String(row.endpoint),
@@ -421,7 +457,29 @@ function toRow(row: Record<string, unknown>): EnginePeerRow {
     ...(approved.length ? { approved } : {}),
     ...(share.length ? { share } : {}),
     ...(offered.length ? { offered } : {}),
-    ...(ssh ? { ssh } : {})
+    ...(ssh ? { ssh } : {}),
+    ...(link ? { link } : {})
+  }
+}
+
+function readLink(value: unknown): EngineLink | undefined {
+  if (typeof value !== 'string') return undefined
+  try {
+    const link = JSON.parse(value) as Partial<EngineLink>
+    if (typeof link?.ticket !== 'string' || typeof link.ticketHash !== 'string') return undefined
+    const strings = (list: unknown): string[] =>
+      Array.isArray(list) ? list.filter((item): item is string => typeof item === 'string') : []
+    return {
+      ticket: link.ticket,
+      ticketHash: link.ticketHash,
+      invitation: typeof link.invitation === 'string' ? link.invitation : '',
+      approved: strings(link.approved),
+      share: strings(link.share),
+      ...(typeof link.expiresAt === 'number' ? { expiresAt: link.expiresAt } : {}),
+      pending: link.pending === true
+    }
+  } catch {
+    return undefined
   }
 }
 

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * A bot's checklist in its chat header: a count beside the bot menu while the bot keeps tasks, the list in a
+ * A bot's checklist in its chat header: a count beside the side-panel button while the bot keeps tasks, the list in a
  * popover on click, updated when the service says the bot changed, and gone when it keeps none.
  */
 import { act, createElement } from 'react'
@@ -9,6 +9,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { fakeBots, installPreload, summary, type FakeBots } from './fakeBotsClient'
 import { clearPrivateBotDrafts } from '../../src/renderer/components/bots/privateBotDrafts'
 import { setAnimationSpeed } from '../../src/renderer/lib/motion'
+import { setBotChecklistHidden } from '../../src/renderer/components/bots/botChecklistSetting'
 import type { BotTaskItem } from '../../src/shared/bots/personal/chat'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -74,15 +75,16 @@ afterEach(() => {
   useChatsStore.setState(chatsInitial)
   useBotsStore.setState(botsInitial)
   setAnimationSpeed('normal')
+  setBotChecklistHidden('flats', false)
 })
 
-it('shows how far the checklist is beside the bot menu, and the list on click', async () => {
+it('shows how far the checklist is beside the side-panel button, and the list on click', async () => {
   await open()
   const control = checklistButton()!
   expect(control.textContent).toBe('1/3')
   expect(control.getAttribute('aria-label')).toBe('Checklist, 1 of 3 done')
-  // It sits just before the bot menu.
-  expect(control.closest('.bot-tasks-root')?.nextElementSibling?.classList.contains('bot-menu-root')).toBe(true)
+  // It sits just before the side-panel button.
+  expect(control.closest('.bot-tasks-root')?.nextElementSibling?.getAttribute('aria-label')).toMatch(/side panel/)
   expect(popover()).toBeNull()
 
   await act(async () => control.click())
@@ -125,4 +127,28 @@ it('a click elsewhere closes the list', async () => {
   await act(async () => { document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) })
   await settle()
   expect(popover()).toBeNull()
+})
+
+it('the bot menu hides the checklist and shows it again, and the choice is kept for the bot', async () => {
+  await open()
+  const menuItem = async (label: string) => {
+    await act(async () => header().querySelector<HTMLButtonElement>('button[aria-label="Bot menu"]')!.click())
+    const item = [...header().querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((button) => button.textContent === label)
+    expect(item, label).toBeDefined()
+    await act(async () => item!.click())
+    await settle()
+  }
+
+  await menuItem('Hide checklist')
+  expect(checklistButton()).toBeNull()
+  expect(JSON.parse(localStorage.getItem('mousse-bot-checklist-hidden')!)).toEqual(['flats'])
+  // Opening the chat again keeps it hidden.
+  act(() => root.unmount())
+  root = createRoot(host)
+  await open()
+  expect(checklistButton()).toBeNull()
+
+  await menuItem('Show checklist')
+  expect(checklistButton()!.textContent).toBe('1/3')
+  expect(JSON.parse(localStorage.getItem('mousse-bot-checklist-hidden')!)).toEqual([])
 })

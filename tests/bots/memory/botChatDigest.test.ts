@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { BOT_CHAT_DIGEST, estimateTokens } from '../../../src/shared/bots/personal/memory'
 import { createBotJournal } from '../../../src/mms/bots/memory/capture'
 import { createBotContextProvider } from '../../../src/mms/bots/memory/contextPack'
-import type { ChatSummaryState } from '../../../src/mms/bots/memory/chatSummary'
+import { parseDigest, type ChatSummaryState } from '../../../src/mms/bots/memory/chatSummary'
 import type { BotChatDigestState, BotChatEpoch, BotChatEpochVerdict } from '../../../src/mms/bots/memory/contextBudget'
 import { BOT_CHANGELOG_LATEST } from '../../../src/mms/bots/changelog'
 import { disposeFixtures, memoryFixture, type MemoryFixture } from './memoryFixture'
@@ -245,5 +245,30 @@ describe('the digest of a fold', () => {
     const next = await turn('a3')
     expect(next).toMatchObject({ fresh: true, folded: { digest: false } })
     expect(next.text).not.toContain('Digest of')
+  })
+})
+
+describe('a digest answer is kept however the model dressed its headings', () => {
+  const sections = (heading: (name: string) => string) => ['Standing constraints', 'Decisions', 'Open threads', 'Finished work', 'Key facts']
+    .map((name) => `${heading(name)}\n- ${name === 'Open threads' ? 'Redesign the usage page (j5, i1)' : 'none'}`).join('\n')
+
+  it.each([
+    ['as asked', `Headline: Planning the usage page\n${sections((name) => `${name}:`)}`],
+    ['markdown headings, the headline on its own line', `# Headline\nPlanning the usage page\n\n${sections((name) => `## ${name}`)}`],
+    ['bold headings', `**Headline:** Planning the usage page\n${sections((name) => `**${name}:**`)}`],
+    ['a preface before it', `Here is the digest.\n\n### Headline: Planning the usage page\n${sections((name) => `### ${name}:`)}`]
+  ])('%s', (_name, answer) => {
+    expect(parseDigest(answer)).toEqual({
+      headline: 'Planning the usage page',
+      text: 'Standing constraints:\n- none\nDecisions:\n- none\nOpen threads:\n- Redesign the usage page (j5, i1)\nFinished work:\n- none\nKey facts:\n- none'
+    })
+  })
+
+  it.each([
+    ['no headline', 'Standing constraints:\n- none\nDecisions:\n- none\nOpen threads:\n- none\nFinished work:\n- none\nKey facts:\n- none'],
+    ['a section missing', 'Headline: Planning\nStanding constraints:\n- none\nDecisions:\n- none\nFinished work:\n- none\nKey facts:\n- none'],
+    ['a headline with no words', 'Headline:\nStanding constraints:\n- none\nDecisions:\n- none\nOpen threads:\n- none\nFinished work:\n- none\nKey facts:\n- none']
+  ])('but not %s', (_name, answer) => {
+    expect(parseDigest(answer)).toBeUndefined()
   })
 })

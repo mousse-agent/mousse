@@ -230,6 +230,11 @@ interface TabCapture {
   resizedUnseen?: boolean
   /** The page's size as last read before the resize not yet pictured, and how many reads since found it unchanged. */
   resizedFrom?: { width: number; height: number; reads: number }
+  /**
+   * New, or resized, and no still taken since: Chromium may send a picture painted at another shape (the moment the
+   * screen took a new pixel ratio), so each picture's shape is checked.
+   */
+  shapeUnsure?: boolean
   /** What was on top at a grid of points when last read, while a person holds the browser. */
   hits?: BrowserPictureHits
   /** The latest picture's scroll and grid are being read (the read under way): it is handed to no watcher before they are. */
@@ -408,6 +413,14 @@ export class ViewerCaptures {
     void this.readViewport(capture).then((changed) => { if (changed) this.pump(capture) })
   }
 
+  /** The session is laying its pages out at a new size: pictures painted meanwhile place nothing ('pageResized' follows). */
+  pageResizing(): void {
+    for (const capture of this.captures.values()) {
+      capture.resizedUnseen = true
+      capture.shapeUnsure = true
+    }
+  }
+
   /**
    * The session laid its pages out at a new size: each watched tab's next picture shows it. A fresh
    * still follows soon in case the page paints nothing by itself; pictures from before it place nothing.
@@ -523,7 +536,7 @@ export class ViewerCaptures {
       let capture = this.captures.get(info.cdpSessionId)
       if (!capture) {
         capture = {
-          info, viewport: { width: 1280, height: 720 }, viewportRead: false, width: 0, recent: [], frameSeq: 0, stateSeq: this.bump(),
+          info, viewport: { width: 1280, height: 720 }, viewportRead: false, shapeUnsure: true, width: 0, recent: [], frameSeq: 0, stateSeq: this.bump(),
           handedSeq: 0, quietSeq: -1, held: [], behind: false, loading: this.options.loading?.(info.cdpSessionId) ?? false,
           settleMs: this.settleMs, echoUntil: 0, echoChecks: 0, repeatGapMs: 0, actedAt: 0, watchers: new Set(), scroll: { x: 0, y: 0 }, latestSize: 0
         }
@@ -632,6 +645,14 @@ export class ViewerCaptures {
     // sent, or each still would bring another.
     if (capture.behind) {
       ack()
+      return
+    }
+    // A picture in another shape than the page is laid out in (painted the moment the screen took a new pixel ratio,
+    // before the page was laid out at its size again): not shown, it would be stretched. The size is read again, in
+    // case it changed. The shape, not the size: a pinch zoom shrinks the visible part, not its shape.
+    if (capture.shapeUnsure && !shapeFits(jpegPixels(event.data), capture.viewport)) {
+      ack()
+      this.resized(sessionId)
       return
     }
     // The same picture again (a paint that changed nothing visible): nothing to send.
@@ -898,6 +919,7 @@ export class ViewerCaptures {
       if (kept) {
         capture.resizedUnseen = false
         capture.resizedFrom = undefined
+        capture.shapeUnsure = false
       }
       capture.latest = { data: shot.data, width: Math.round(width * scale * ratio), height: Math.round(height * scale * ratio), viewport: { width, height }, at: this.now(), sharp: true, ...this.spot(capture) }
       capture.lastStill = shot
@@ -1020,4 +1042,31 @@ export class ViewerCaptures {
 
 interface LayoutMetrics {
   cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number }
+}
+
+/**
+ * Whether a picture can show a viewport of this size: the same shape, give or take scrollbars (a picture shows the
+ * page with them, the viewport's size is without them). Yes when its size cannot be read.
+ */
+function shapeFits(pixels: { width: number; height: number } | undefined, viewport: { width: number; height: number }): boolean {
+  if (!pixels?.width || !pixels.height || !viewport.width || !viewport.height) return true
+  const shape = pixels.width / pixels.height
+  return shape >= viewport.width / (viewport.height + SCROLLBAR_ROOM) * 0.99 && shape <= (viewport.width + SCROLLBAR_ROOM) / viewport.height * 1.01
+}
+
+/** How much room, in CSS pixels, scrollbars can take at an edge of the page. */
+const SCROLLBAR_ROOM = 24
+
+/** A JPEG's size in pixels, from its frame header near the start (the base64 of its first bytes alone is read). */
+function jpegPixels(base64: string): { width: number; height: number } | undefined {
+  const bytes = Buffer.from(base64.slice(0, 8_192), 'base64')
+  if (bytes[0] !== 0xff || bytes[1] !== 0xd8) return undefined
+  for (let at = 2; at + 9 < bytes.length;) {
+    if (bytes[at] !== 0xff) return undefined
+    const marker = bytes[at + 1]!
+    // Start of frame (baseline, extended, progressive, lossless): its height, then its width.
+    if (marker >= 0xc0 && marker <= 0xc3) return { height: bytes.readUInt16BE(at + 5), width: bytes.readUInt16BE(at + 7) }
+    at += 2 + bytes.readUInt16BE(at + 2)
+  }
+  return undefined
 }

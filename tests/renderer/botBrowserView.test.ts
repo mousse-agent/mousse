@@ -337,7 +337,7 @@ describe('what a page ran into', () => {
 })
 
 describe('the split view', () => {
-  it('Expand opens the bot\'s browser beside its chat; Take over, a click and Give back reach the bot\'s browser', async () => {
+  it('Expand opens the bot\'s browser beside its chat; the control switch takes it over, a click reaches it, and the switch gives it back', async () => {
     fake.chats.noobesh = [message(1, { text: 'Here it is.', activationId: 'act1' })]
     await open()
     const expand = button('Expand Noobesh\'s browser')!
@@ -345,16 +345,22 @@ describe('the split view', () => {
     await click(expand)
     const pane = host.querySelector<HTMLElement>('.watched-browser-pane')!
     expect(pane).not.toBeNull()
-    // Beside the chat, not inside it.
-    expect(pane.parentElement).toBe(host.querySelector('.chat-conversation')!.parentElement)
+    // Beside the chat, in its side panel's Browser view, outside the chat pane.
+    expect(pane.closest('.bot-side')?.getAttribute('data-view')).toBe('browser')
+    expect(host.querySelector('.bot-chat-pane')!.contains(pane)).toBe(false)
     expect(pane.querySelector<HTMLInputElement>('input')!.value).toBe('https://bank.example.com/statements')
     expect(pane.querySelector('[data-agent-cursor]')).not.toBeNull()
-    expect(pane.textContent).toContain('Noobesh is using its own browser')
+    // The thread browser's bar, and no line under the picture while the bot has it.
+    expect(pane.querySelector('.browser-toolbar .browser-url-form .browser-url-input')).not.toBeNull()
+    expect(pane.querySelector('.watched-browser-note')).toBeNull()
+    expect(button('Open in a window')).toBeUndefined()
     // The split view is watched at its width (up to 960) and 15 a second; the preview it covers is not.
     expect(watches().at(-1)).toMatchObject({ width: 960, fps: 15 })
+    // The switch shows who has it: the bot's icon, then the owner's.
+    expect(button('Take over')!.classList.contains('browser-access-agent')).toBe(true)
     await click(button('Take over'))
     expect(calls).toContainEqual(['bots.browser.hold', { botId: 'noobesh', viewId: expect.any(String), request: { op: 'take', platform: expect.any(String) } }])
-    expect(button('Give back')).toBeDefined()
+    expect(button('Give back')!.classList.contains('browser-access-human')).toBe(true)
     // Faster while the owner holds the browser.
     expect(watches().at(-1)).toMatchObject({ width: 960, fps: 30 })
     // A press and release on the picture land at the page's point: the frame is 1280×720 wide whatever its size on screen.
@@ -371,6 +377,15 @@ describe('the split view', () => {
     ])
     await click(button('Give back'))
     expect(calls).toContainEqual(['bots.browser.hold', { botId: 'noobesh', viewId: expect.any(String), request: { op: 'release', holdId: 'hold_1' } }])
+    // Full screen: the side panel takes the chat pane's place at no width of its own; leaving it puts the panel back.
+    const slide = host.querySelector<HTMLElement>('.bot-side-slide')!
+    const width = slide.querySelector<HTMLElement>('.bot-side')!.style.width
+    await click(button('Full screen'))
+    expect(slide.classList.contains('is-fullscreen')).toBe(true)
+    expect(slide.querySelector<HTMLElement>('.bot-side')!.style.width).toBe('')
+    await click(button('Exit full screen'))
+    expect(slide.classList.contains('is-fullscreen')).toBe(false)
+    expect(slide.querySelector<HTMLElement>('.bot-side')!.style.width).toBe(width)
     await click(button('Close the browser view'))
     expect(host.querySelector('.watched-browser-pane')).toBeNull()
     // Back to the preview's own size and rate.
@@ -465,7 +480,7 @@ describe('the person\'s input in the split view', () => {
       keys().dispatchEvent(new KeyboardEvent('keyup', { key, code, keyCode, bubbles: true, cancelable: true }))
     })
   }
-  const note = () => host.querySelector('.watched-browser-pane .watched-browser-note')!
+  const note = () => host.querySelector('.watched-browser-pane .watched-browser-note')
 
   it('sends each key down and up in order, with the character it types, and Enter after the text', async () => {
     await held()
@@ -482,7 +497,7 @@ describe('the person\'s input in the split view', () => {
       [6, { kind: 'keys', type: 'up', key: 'Enter', code: 'Enter', keyCode: 13, modifiers: 0 }]
     ])
     // Nothing is said while everything arrives.
-    expect(note().textContent).toContain('You\'re using Noobesh\'s browser')
+    expect(note()).toBeNull()
   })
 
   it('on a Mac, a key pressed with Command goes up at once (the window never hears it go up)', async () => {
@@ -540,10 +555,10 @@ describe('the person\'s input in the split view', () => {
     act(() => useAppStore.setState({ appInfo: { platform: 'darwin', repoRoot: '/', llmProvider: 'claude', deviceName: 'Studio Desk' } }))
     await type('a', 'KeyA', 65)
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)) })
-    expect(note().textContent).toBe('Sending…')
+    expect(note()?.textContent).toBe('Sending…')
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2_600)) })
-    expect(note().textContent).toContain('Not reaching Studio Desk')
-    expect(note().textContent).not.toContain('Mac mini')
+    expect(note()?.textContent).toContain('Not reaching Studio Desk')
+    expect(note()?.textContent).not.toContain('Mac mini')
     await click(button('Retry'))
     const sends = calls.filter(([method]) => method === 'bots.browser.send').map(([, params]) => (params as BotsBrowserApi['bots.browser.send']['params']).inputs.map((sent) => sent.seq))
     expect(sends.at(-1)).toEqual(sends[0])
@@ -571,7 +586,7 @@ describe('the person\'s input in the split view', () => {
     })
     expect(pane.querySelector('.watched-browser-mark')).not.toBeNull()
     await settle()
-    expect(note().textContent).toBe('Page changed · click again')
+    expect(note()?.textContent).toBe('Page changed · click again')
     expect(pane.querySelector('.watched-browser-mark.is-refused')).not.toBeNull()
   })
 
@@ -664,56 +679,22 @@ describe('the bot\'s browser in a real window', () => {
   }
   const holds = () => calls.filter(([method]) => method === 'bots.browser.hold').map(([, params]) => (params as { request: { op: string } }).request.op)
 
-  it('is offered, with what reloads in its tooltip, only where the service says this app may open one', async () => {
-    await pane({ windowable: undefined })
+  it('a browser held here in a window says so in one line, shows no pictures, and Give back gives it back', async () => {
+    const { pane: view } = await pane()
     expect(button('Open in a window')).toBeUndefined()
-    await act(async () => root.unmount())
-    root = createRoot(host)
-    useChatsStore.setState(chatsInitial)
-    // The split view closed, so the reply's preview (and its Expand) shows again.
-    useBotBrowserStore.getState().closePane()
-    await pane()
-    expect(button('Open in a window')!.title).toBe('Pages reload when the window opens and when it closes.')
-  })
-
-  it('takes the browser over and opens it in a window: one line in the view, no pictures, Close window gives it back', async () => {
-    const { asked, pane: view } = await pane()
-    expect(watches().at(-1)).toMatchObject({ width: 960 })
-    await click(button('Open in a window'))
+    await act(async () => useBotBrowserStore.getState().inWindow('noobesh', 'open'))
     await settle()
     expect(holds()).toEqual(['take'])
-    expect(asked).toEqual([{ botId: 'noobesh', viewId: expect.any(String), holdId: 'hold_1', op: 'open' }])
     expect(view().textContent).toContain('Open in a window on this computer.')
-    expect(view().textContent).toContain('Noobesh waits until you close the window.')
-    expect(button('Take over')).toBeUndefined()
-    expect(button('Give back')).toBeUndefined()
-    // Nothing is watched while it is in a window (the watch ends after its grace), and nothing is typed or clicked from here.
-    const watched = watches().length
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, STOP_GRACE_MS + 100)) })
-    expect(unwatches().length).toBeGreaterThan(0)
-    expect(watches().length).toBe(watched)
+    expect(view().textContent).toContain('Noobesh waits until you give it back.')
     expect(view().querySelector('.watched-browser-keys')).toBeNull()
-    await click(button('Close window'))
-    await settle()
-    expect(asked.at(-1)).toMatchObject({ op: 'close', holdId: 'hold_1' })
-    expect(useBotBrowserStore.getState().holds.noobesh).toBeUndefined()
-    expect(button('Take over')).toBeDefined()
-    // Pictures again.
-    expect(watches().length).toBeGreaterThan(watched)
-  })
-
-  it('a window that does not open says why in one line, and the browser is not left taken over', async () => {
-    const { pane: view } = await pane({}, (request) => (request.op === 'open' ? { refused: 'The window did not open on this computer, so the browser stays here.' } : {}))
-    await click(button('Open in a window'))
-    await settle()
+    await click(button('Give back'))
     expect(holds()).toEqual(['take', 'release'])
-    expect(useBotBrowserStore.getState().holds.noobesh).toBeUndefined()
-    expect(view().querySelector('.watched-browser-note')!.textContent).toBe('The window did not open on this computer, so the browser stays here.')
   })
 
   it('the window closed by the person gives the browser back without an error, and the view shows pictures again', async () => {
     await pane()
-    await click(button('Open in a window'))
+    await act(async () => useBotBrowserStore.getState().inWindow('noobesh', 'open'))
     await settle()
     let ended = false
     setBotBrowserTransport((async (method: BotsBrowserMethod, params: Record<string, unknown>) => {
@@ -737,7 +718,7 @@ describe('the bot\'s browser in a real window', () => {
     await settle()
     expect(calls.some(([method, params]) => method === 'bots.browser.hold' && (params as { request: { op: string } }).request.op === 'renew')).toBe(true)
     expect(useBotBrowserStore.getState().holds.noobesh).toBeUndefined()
-    expect(host.querySelector('.watched-browser-pane .watched-browser-note')!.textContent).not.toContain('You no longer hold this browser')
+    expect(host.querySelector('.watched-browser-pane .watched-browser-note')?.textContent ?? '').not.toContain('You no longer hold this browser')
     expect(button('Take over')).toBeDefined()
   })
 })

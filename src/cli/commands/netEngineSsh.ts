@@ -1,11 +1,9 @@
 import { connectDaemonClient } from '../daemonClient'
+import { engineLimits } from '../../mms/netEngine/limits'
 import type { ParsedArgs } from '../parseArgs'
 
 /** The line written before anything else on stdout (1b §3.3); the other computer discards what came before it. */
 export const SSH_MARKER = 'mousse-ssh/1'
-
-/** The longest request read from stdin. */
-const MAX_REQUEST_BYTES = 64 * 1024
 
 export interface NetEngineSshIo {
   stdin: NodeJS.ReadableStream
@@ -31,18 +29,33 @@ export async function runNetEngineSsh(io: NetEngineSshIo): Promise<void> {
   io.stdout.write(`${JSON.stringify(reply)}\n`)
 }
 
+/**
+ * One line from stdin: at most `MOUSSE_NET_ENGINE_SSH_REMOTE_REQUEST_MAX_BYTES`, within
+ * `MOUSSE_NET_ENGINE_SSH_REMOTE_READ_MS` (both can only be lowered). Too long or too slow is a bad request.
+ */
 function readRequest(stdin: NodeJS.ReadableStream): Promise<string> {
+  const { sshRemoteRequestMaxBytes, sshRemoteReadMs } = engineLimits()
   return new Promise((resolve, reject) => {
     let text = ''
+    const finish = (error?: Error, line?: string): void => {
+      clearTimeout(timer)
+      stdin.removeAllListeners('data')
+      stdin.pause?.()
+      if (error) reject(error)
+      else resolve(line ?? text)
+    }
+    const timer = setTimeout(() => finish(new SyntaxError('request too slow')), sshRemoteReadMs)
+    timer.unref?.()
     stdin.setEncoding?.('utf8')
     stdin.on('data', (chunk: string) => {
       text += chunk
-      if (text.length > MAX_REQUEST_BYTES) reject(new SyntaxError('request too long'))
       const end = text.indexOf('\n')
-      if (end >= 0) resolve(text.slice(0, end))
+      const line = end >= 0 ? text.slice(0, end) : text
+      if (Buffer.byteLength(line) > sshRemoteRequestMaxBytes) return finish(new SyntaxError('request too long'))
+      if (end >= 0) finish(undefined, line)
     })
-    stdin.on('end', () => resolve(text))
-    stdin.on('error', reject)
+    stdin.on('end', () => finish())
+    stdin.on('error', (error) => finish(error))
   })
 }
 

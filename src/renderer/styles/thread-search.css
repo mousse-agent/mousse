@@ -153,14 +153,13 @@ html:not([data-theme='light']):not([data-theme='high-contrast']) .thread-search-
   color: color-mix(in srgb, var(--accent) 50%, var(--text-secondary));
 }
 
-/* Mousse Dark: header, list and footer are one near-black surface with a mild accent tint. Its light leans to
-   the accent (--ui-sheen-tint: the accent lifted most of the way to white) and is stretched over the whole dialog
-   so the header never reads as a lighter band; the lines between the parts are only a breath. */
+/* Mousse Dark: header, list and footer are one near-black surface with the shared accent tint (--ui-lift,
+   polish.css). Its light is stretched over the whole dialog so the header never reads as a lighter band; the lines
+   between the parts are only a breath. */
 html[data-theme='blacksphere-plus'] .thread-search-dialog {
-  --ui-sheen-tint: color-mix(in srgb, rgb(var(--accent-rgb)) 30%, white);
-  background-color: color-mix(in srgb, var(--accent) 3%, #111113);
-  --ui-glint: color-mix(in srgb, var(--ui-sheen-tint) 32%, transparent);
-  --ui-sheen: radial-gradient(150% 130% at 50% -25%, color-mix(in srgb, var(--ui-sheen-tint) 6%, transparent) 0%, color-mix(in srgb, var(--ui-sheen-tint) 2%, transparent) 55%, transparent 100%);
+  background-color: color-mix(in srgb, var(--ui-lift) 8.5%, var(--surface-base));
+  --ui-glint: color-mix(in srgb, var(--ui-lift) 32%, transparent);
+  --ui-sheen: radial-gradient(150% 130% at 50% -25%, color-mix(in srgb, var(--ui-lift) 6%, transparent) 0%, color-mix(in srgb, var(--ui-lift) 2%, transparent) 55%, transparent 100%);
 }
 
 html[data-theme='blacksphere-plus'] .thread-search-input-row,

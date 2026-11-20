@@ -54,7 +54,7 @@ const built = spawnSync('cargo', ['build', '--release', '--locked'], { cwd: crat
 if (built.status !== 0) stop('the build failed')
 if (!existsSync(output)) stop(`the build left no ${output}`)
 
-/** The newest `VC\Redist\MSVC\<version>\x64\Microsoft.VC*.CRT` folder of the installed Visual Studio. */
+/** The newest `VC\Redist\MSVC\<version>\<x64|arm64>\Microsoft.VC*.CRT` folder of the installed Visual Studio. */
 function vcRuntimeDir() {
   const fromEnv = process.env.VCToolsRedistDir
   const roots = []
@@ -72,11 +72,13 @@ function vcRuntimeDir() {
       }
     }
   }
+  // The engine's own architecture, which is this computer's (x64, or arm64 on a Windows arm64 computer).
+  const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
   for (const root of roots) {
-    const x64 = join(root, 'x64')
-    if (!existsSync(x64)) continue
-    const crt = readdirSync(x64).find((entry) => /^Microsoft\.VC\d+\.CRT$/.test(entry))
-    if (crt && VC_RUNTIME.every((dll) => existsSync(join(x64, crt, dll)))) return join(x64, crt)
+    const folder = join(root, arch)
+    if (!existsSync(folder)) continue
+    const crt = readdirSync(folder).find((entry) => /^Microsoft\.VC\d+\.CRT$/.test(entry))
+    if (crt && VC_RUNTIME.every((dll) => existsSync(join(folder, crt, dll)))) return join(folder, crt)
   }
   return null
 }

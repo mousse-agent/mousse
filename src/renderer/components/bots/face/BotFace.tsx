@@ -1,9 +1,11 @@
 import { useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { BotState } from '../../../../shared/bots/personal/chat'
-import { BOT_ACCESSORY_HEX, BOT_ACCESSORY_LABELS, BOT_COLOUR_HEX, botEyesOf, botKindOf, normalizeBotLook, type BotLook, type KnownBotLook } from '../../../../shared/bots/personal/look'
+import { BOT_ACCESSORY_HEX, BOT_ACCESSORY_LABELS, BOT_COLOUR_HEX, botEyeColourOf, botEyesOf, botKindOf, normalizeBotLook, type BotLook, type KnownBotLook } from '../../../../shared/bots/personal/look'
 import { useMotionScale } from '../../../lib/motion'
-import { hexToRgb, mousseEyesWhite } from './facePoses'
+import { hexToRgb } from './facePoses'
 import { sharedFaceRenderer, sharedFaceRendererStatus, subscribeSharedFaceRenderer, type FaceHandle, type FaceSpec } from './faceRenderer'
+import { useFaceMode } from './faceMode'
+import { HybridFace } from './HybridFace'
 import './face.css'
 
 /**
@@ -75,6 +77,8 @@ export function BotFace(input: BotFaceProps) {
   const props = drawnProps(input)
   const status = useSyncExternalStore(subscribeSharedFaceRenderer, sharedFaceRendererStatus, () => 'unavailable' as const)
   const [broken, setBroken] = useState(false)
+  const mode = useFaceMode()
+  const motionOff = useMotionScale() === 0
   // The spec whose saved picture turned out missing; its face draws flat until the renderer is live.
   const [noPictureFor, setNoPictureFor] = useState<string | null>(null)
   // Whether this face's canvas has been drawn live, so it holds a real picture through a context loss.
@@ -91,6 +95,10 @@ export function BotFace(input: BotFaceProps) {
     wasFlatRef.current = flat
     if (flat) drawnRef.current = false
   })
+  // Settings → Labs → Performance (faceMode.ts): a moving face as a kept body picture with flat eyes over it.
+  if (mode === 'hybrid' && status === 'ready' && !broken && !props.still && !motionOff) {
+    return <HybridFace look={normalized.look} state={normalized.state} size={normalized.size} view={normalized.view} className={props.className} label={props.label} resting={props.resting} />
+  }
   if (flat) return <BotFaceStill {...props} />
   return (
     <BotFaceLive
@@ -106,7 +114,7 @@ export function BotFace(input: BotFaceProps) {
 }
 
 function specKey({ look, state, size, view }: NormalizedFaceProps): string {
-  return `${look.colour}|${look.accessory}|${look.kind ?? 'mouse'}|${look.eyes ?? 'pill'}|${state}|${view}|${size}`
+  return `${look.colour}|${look.accessory}|${look.kind ?? 'mouse'}|${look.eyes ?? 'pill'}|${botEyeColourOf(look)}|${state}|${view}|${size}`
 }
 
 interface BotFaceLiveProps extends DrawnFaceProps {
@@ -153,7 +161,7 @@ function BotFaceLive({ coverUntilDrawn, onBroken, onNoPicture, onDrawn: drawn, .
 
   useLayoutEffect(() => {
     handleRef.current?.update(specRef.current)
-  }, [look.colour, look.accessory, look.kind, look.eyes, state, size, view, still])
+  }, [look.colour, look.accessory, look.kind, look.eyes, look.eyeColour, state, size, view, still])
 
   return (
     <span
@@ -192,6 +200,7 @@ export function BotFaceStill(input: DrawnFaceProps) {
   const accessory = BOT_ACCESSORY_HEX[known.accessory]
   const asleep = state === 'paused'
   const mousse = botKindOf(known) === 'mousse'
+  const mouseInk = botEyeColourOf(known) === 'white' ? '#f2f2f0' : '#1c1c1f'
   return (
     <svg
       className={`bot-face bot-face-still${props.className ? ` ${props.className}` : ''}`}
@@ -208,19 +217,19 @@ export function BotFaceStill(input: DrawnFaceProps) {
       {...a11y(props.label)}
     >
       {mousse ? (
-        <MousseStill colour={body} asleep={asleep} tall={state === 'needs_you'} />
+        <MousseStill colour={body} whiteEyes={botEyeColourOf(known) === 'white'} asleep={asleep} tall={state === 'needs_you'} />
       ) : (
         <>
           <circle cx="10" cy="11" r="7" fill={body} />
           <circle cx="30" cy="11" r="7" fill={body} />
           <circle cx="20" cy="23" r="14" fill={body} />
           {asleep ? (
-            <g stroke="#1c1c1f" strokeWidth="1.6" strokeLinecap="round">
+            <g stroke={mouseInk} strokeWidth="1.6" strokeLinecap="round">
               <line x1="13.5" y1="22" x2="17" y2="22" />
               <line x1="23" y1="22" x2="26.5" y2="22" />
             </g>
           ) : (
-            <g fill="#1c1c1f">
+            <g fill={mouseInk}>
               <ellipse cx="15.5" cy="21.5" rx="1.8" ry={state === 'needs_you' ? 3 : 2.4} />
               <ellipse cx="24.5" cy="21.5" rx="1.8" ry={state === 'needs_you' ? 3 : 2.4} />
             </g>
@@ -252,13 +261,13 @@ function mixRgb(a: readonly number[], b: readonly number[], t: number): string {
  * The Mousse traced from the face shader's shape: the mousse with its curl (light at the top, deep
  * at the bottom), the glass outline and rim, and flat eyes in white or near-black.
  */
-function MousseStill({ colour, asleep, tall }: { colour: string; asleep: boolean; tall: boolean }) {
+function MousseStill({ colour, whiteEyes, asleep, tall }: { colour: string; whiteEyes: boolean; asleep: boolean; tall: boolean }) {
   const id = useId()
   const c = hexToRgb(colour)
   const white = [1, 1, 1]
   const deep = c.map((v, i) => v * [0.3, 0.26, 0.38][i])
   const glass = mixRgb(c, [0, 0, 0], 0.24)
-  const ink = mousseEyesWhite(colour) ? '#ffffff' : '#0e0b14'
+  const ink = whiteEyes ? '#ffffff' : '#0e0b14'
   return (
     <>
       <defs>

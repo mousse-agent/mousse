@@ -52,6 +52,7 @@ import {
   insecureFileKey,
   insecureFileKeyProblems,
   launchHelper,
+  packagedHelperCommit,
   type LaunchedHelper
 } from './helper/process'
 import {
@@ -60,7 +61,10 @@ import {
   HelperSupervisor,
   type HelperStatus
 } from './helper/supervisor'
+import type { LoginStartQuestion } from './loginStart'
 import { EnginePairing, fingerprintOf, type PairingStep } from './pairing'
+import { EngineEditor, engineEditorRefusal, type EngineEditorRights, type EngineEditorTestOptions } from './editor'
+import { TunnelError } from '../net/editor/tunnel'
 import { routeSetupProbes } from './probes'
 import {
   deviceRelay,
@@ -74,7 +78,7 @@ import {
   relaysStatus,
   type RelayView
 } from './relays'
-import { automatic } from './routes'
+import { automatic, loopbackClass } from './routes'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 import { readTicket } from './ticket'
 import { SshAdd } from './ssh/add'
@@ -99,6 +103,14 @@ interface Started {
   pairing: EnginePairing
   /** The host's owed rows being written from `grants.list`, while they are. */
   reconciling?: Promise<void>
+  /** The engine's own editor tunnels and SSH endpoint (Phase 1b §9.2). */
+  editor: EngineEditor
+  /** What reads a right for the editor refusal, live. */
+  rights: EngineEditorRights
+  /** Listeners to let go of at stop. */
+  release: Array<() => void>
+  /** Set when `stop` begins: the store may close (the profile's Net shuts down alongside) before the helper has. */
+  ending?: boolean
 }
 
 const policyView = (policy: NodePolicy): BridgeNodePolicy => ({
@@ -126,10 +138,22 @@ export class NetEngineService implements EngineDirectoryPort {
   private supervisor?: HelperSupervisor
   /** Why this profile's networking could not start, or turned itself off, until it starts again. */
   private problem?: string
+  /** The engine commit an installed app's helper must be built from, read at its launch. */
+  private packagedCommit?: string
   /** Starts a helper; tests put a fake one here. By default, the binary of this build (design §1). */
   launcher?: () => Promise<LaunchedHelper>
   /** Tests stop this computer at a pairing step, as a crash would (until the engine starts again). */
   pairingCrash?: (step: PairingStep) => boolean
+  /** Tests give the engine's editor tunnels an echo far end, a folder of host keys or an endpoint host of their own. */
+  editorTest?: EngineEditorTestOptions
+  /** The pairings the editor aliases were last told of. */
+  private aliasedComputers?: string
+  /** The pairings an editor can open a folder on: every serving one, by its name. */
+  private editorComputers(): Array<{ node: NodeId; name: string }> {
+    return (this.started?.peers.all() ?? [])
+      .filter((row) => row.state !== 'removing' && row.state !== 'removed')
+      .map((row) => ({ node: row.localId, name: row.name }))
+  }
   private starting?: Promise<void>
   /** When each condition a device's row reports began (`<node> finishing|in|out`), while it holds. */
   private readonly since = new Map<string, number>()
@@ -153,6 +177,8 @@ export class NetEngineService implements EngineDirectoryPort {
       name?: () => string
       /** Something a window shows changed: the switch, the helper, a device's row or whether it is online. */
       onChanged?: () => void
+      /** The installation's start-at-login question (§10), asked when the switch is turned on in a window. */
+      loginStart?: LoginStartQuestion
     }
   ) {
     options.net.onSetAside((suffix) => this.setAside(suffix))
@@ -231,16 +257,32 @@ export class NetEngineService implements EngineDirectoryPort {
     await this.start()
   }
 
-  /** The switch in Settings: on, and the helper runs. */
+  /**
+   * The switch in Settings: on, and the helper runs. The start-at-login question is settled beside the helper's
+   * start (it reads the startup entry), so the reply carries it.
+   */
   async switchOn(): Promise<void> {
     await this.enable()
-    await this.startHelper()
+    const question = this.options.loginStart?.turnedOn().catch(() => false)
+    try {
+      await this.startHelper()
+    } finally {
+      await question
+    }
+  }
+
+  /** The window's answer to the start-at-login question: `start` installs the existing startup entry. */
+  async answerLoginStart(start: boolean): Promise<void> {
+    await this.options.loginStart?.answer(start)
+    this.changed()
   }
 
   /** Turns the switch off: the helper gets `shutdown` and the engine stops. Pairings stay for the next time. */
   async disable(): Promise<void> {
     this.writeSettings(false)
     this.problem = undefined
+    // Turned off by the person: editor tunnels end, and what the endpoint started for any device stops.
+    this.started?.editor.tunnels.endAll('net_off')
     await this.stop()
     this.changed()
   }
@@ -261,10 +303,26 @@ export class NetEngineService implements EngineDirectoryPort {
       approvals: this.started?.pairing.pendingApprovals() ?? [],
       ...(this.routes().length ? { routes: this.routes() } : {}),
       ...(this.sharedAccount() ? { sharedAccount: true } : {}),
+      ...(this.settings()?.enabled && this.options.loginStart?.asking() ? { loginStart: 'ask' as const } : {}),
       scanIntervalMs: engineLimits().scanIntervalMs,
+      ...(this.helper?.speaks(1) ? { sendLink: true } : {}),
+      ...(this.started?.pairing.links().length ? { links: this.started.pairing.links() } : {}),
+      ...(this.started?.pairing.joins().length ? { joins: this.started.pairing.joins() } : {}),
       ...(this.reach() ? { reach: this.reach() } : {}),
-      ...(this.relayView ? { relays: relaysStatus(this.relayView) } : {})
+      ...(this.relayView ? { relays: relaysStatus(this.relayView) } : {}),
+      ...(this.options.net.v1On()
+        ? {}
+        : { workOnThreads: this.options.net.nodePolicyConfig().workOnThreads !== false })
     }
+  }
+
+  /**
+   * "Work on threads" from this group (v1 off): the same setting and the same switch as v1's, so turning it off ends
+   * the open editor tunnels and private streams with `setting_off`.
+   */
+  setWorkOnThreads(enabled: boolean): void {
+    this.options.net.setWorkOnThreads(enabled)
+    this.changed()
   }
 
   // ---------------------------------------------------------------- relays (Phase 3 §B.5, §B.9, §B.11)
@@ -461,18 +519,11 @@ export class NetEngineService implements EngineDirectoryPort {
     } catch (error) {
       throw reachError(error)
     }
-    const saved = answer.routes && typeof answer.routes === 'object' ? answer.routes : undefined
-    if (saved) {
-      const before = readReach(helper.info.routes_config, helper.info)
-      helper.info.routes_config = saved
-      // Port forwards and tunnels that change without a restart show in the next invitation: what this computer
-      // advertises (and so may share) follows them now.
-      helper.info.routes = advertisedAfter(
-        helper.info.routes,
-        before,
-        readReach(saved, helper.info)
-      )
-    }
+    // The reply carries the saved config and what this computer advertises with it: a change that needs no restart
+    // shows in the next invitation, and what this computer may share follows it now.
+    const saved = answer.config && typeof answer.config === 'object' ? answer.config : undefined
+    if (saved) helper.info.routes_config = saved
+    if (Array.isArray(answer.routes)) helper.info.routes = strings(answer.routes)
     this.changed()
     if (answer.restart_needed !== true) return { restarted: false }
     await this.restartHelper()
@@ -530,9 +581,14 @@ export class NetEngineService implements EngineDirectoryPort {
 
   /**
    * Connect on a ticket (§1.3): its destinations are approved, and `share` (some of `shareable()`, ticked under
-   * "Also share") goes in pairback beside this computer's LAN routes.
+   * "Also share") goes in pairback beside this computer's LAN routes. `arrival: 'link'`: it came as a Send link
+   * (§5.3), whatever its kind says.
    */
-  async join(ticket: string, share: readonly string[] = []): Promise<EnginePeerRow> {
+  async join(
+    ticket: string,
+    share: readonly string[] = [],
+    arrival?: 'link'
+  ): Promise<EnginePeerRow> {
     const started = this.require()
     const allowed = this.shareable()
     const unknown = share.find((route) => !allowed.includes(route))
@@ -542,7 +598,7 @@ export class NetEngineService implements EngineDirectoryPort {
       })
     await this.tellName()
     routeSetupProbes()
-    return started.pairing.join(ticket, { share: [...share] })
+    return started.pairing.join(ticket, { share: [...share], ...(arrival ? { arrival } : {}) })
   }
 
   // ---------------------------------------------------------------- Add over SSH (Phase 1b §3.4)
@@ -732,13 +788,18 @@ export class NetEngineService implements EngineDirectoryPort {
     return {
       ...(facts.name ? { name: facts.name } : {}),
       kind: facts.kind ?? 1,
+      invitation: facts.invitation,
       ...(facts.expiresAt !== undefined && facts.expiresAt * 1000 <= Date.now()
         ? { expired: true }
         : {}),
-      destinations: ticketDestinations(facts.routes, loopback),
+      // A loopback hint a check maps to another class reads as that class, and needs Connect as it would.
+      destinations: ticketDestinations(facts.routes, loopback).map((item) => {
+        const mapped = loopbackClass(item.route)
+        return { ...item, ...(mapped ? { cls: mapped } : {}), automatic: automatic(item.route) }
+      }),
       shareable: this.shareable().flatMap((route) => {
         const parsed = parseRoute(route)
-        const cls = parsed ? routeClass(parsed) : 'forbidden'
+        const cls = loopbackClass(route) ?? (parsed ? routeClass(parsed) : 'forbidden')
         return cls === 'forbidden' ? [] : [{ route, label: routeText(route), cls }]
       })
     }
@@ -867,6 +928,10 @@ export class NetEngineService implements EngineDirectoryPort {
     const row = started.peers.get(node)
     if (!row || row.state === 'removed') throw new NetError('bad_request', 'Unknown device.')
     if (row.state === 'removing') return started.pairing.remove(node)
+    if (started.pairing.linkUnfinished(node)) {
+      await started.pairing.retryLink(node)
+      return
+    }
     if (row.state !== 'connected' && row.state !== 'awaiting_pairback')
       await started.pairing.advance(node)
     if (!started.sessions.online(node) && this.helper && row.state !== 'consented')
@@ -911,7 +976,10 @@ export class NetEngineService implements EngineDirectoryPort {
                   : online || serving
                     ? 'connecting'
                     : 'offline'
-        const stuck = held(`${node} finishing`, state === 'finishing') >= stuckMs
+        // A Send link join waiting for its code is a person's wait, not a stuck pairing.
+        const stuck =
+          held(`${node} finishing`, state === 'finishing' && !started.pairing.linkJoining(node)) >=
+          stuckMs
         // One direction down for the bound while the other works.
         const paired = row.state === 'connected' && !direction
         const outDown = held(`${node} out`, paired && !online) >= stuckMs
@@ -939,6 +1007,14 @@ export class NetEngineService implements EngineDirectoryPort {
           ...(via ? { via } : {}),
           ...(row.offered?.length ? { offered: row.offered } : {}),
           ...(row.source ? { source: row.source } : {}),
+          ...(started.pairing.linkUnfinished(node)
+            ? {
+                unfinished: true,
+                ...(row.link?.expiresAt === undefined || row.link.expiresAt * 1000 > now
+                  ? { linkValid: true }
+                  : {})
+              }
+            : {}),
           ...(relay ? { relay } : {})
         }
       })
@@ -977,6 +1053,16 @@ export class NetEngineService implements EngineDirectoryPort {
       if (this.started) this.devices()
     } catch {
       // Stopping: its database closed already.
+    }
+    try {
+      // A pairing added, renamed or removed: the editor aliases follow (only when the list itself changed).
+      const computers = JSON.stringify(this.editorComputers())
+      if (this.started && computers !== this.aliasedComputers) {
+        this.aliasedComputers = computers
+        this.options.net.engineComputersChanged()
+      }
+    } catch {
+      // Read again on the next change.
     }
     try {
       this.options.onChanged?.()
@@ -1021,7 +1107,7 @@ export class NetEngineService implements EngineDirectoryPort {
      * did (the app stopping): then there is none.
      */
     const liveRow = (node: NodeId): EnginePeerRow | undefined => {
-      if (this.started?.peers !== peers) return undefined
+      if (this.started?.peers !== peers || this.started.ending) return undefined
       try {
         return peers.get(node)
       } catch {
@@ -1051,7 +1137,9 @@ export class NetEngineService implements EngineDirectoryPort {
           append: (...args) => bridge().artifacts.append(...args)
         },
         name: () => this.selfName(),
-        pairback: (caller, request) => pairing.pairback(caller, request)
+        pairback: (caller, request) => pairing.pairback(caller, request),
+        tunnel: (connection, stream) => editor.accept(connection, stream),
+        calledBy: (caller, name) => pairing.named(caller.node, name)
       },
       client: {
         get store() {
@@ -1074,6 +1162,8 @@ export class NetEngineService implements EngineDirectoryPort {
           this.changed()
         },
         onServingChanged: (node) => {
+          // A pairing that can no longer reach this computer keeps no editor tunnel here.
+          editor.reconcile()
           // B: A's first live inbound with the row's grant connects it ("Added over SSH from <A>").
           const row = liveRow(node)
           if (
@@ -1100,6 +1190,27 @@ export class NetEngineService implements EngineDirectoryPort {
       if (!service) throw new NetError('disabled')
       return service
     }
+    const rights: EngineEditorRights = {
+      on: () => this.started?.rt === rt,
+      row: (node) => peers.serving(node),
+      blocked: (node) => rt.policy.get(node).blocked,
+      connected: (node) => sessions.serving(node),
+      workOnThreads: () => net.nodePolicyConfig().workOnThreads !== false,
+      editor: (node) => rt.policy.get(node).editor
+    }
+    const editor = new EngineEditor({
+      rt,
+      directory: this.directory,
+      rights,
+      devices: () =>
+        peers
+          .all()
+          .map((row) => row.localId)
+          .filter((node) => engineEditorRefusal(rights, node) === undefined),
+      useSystemSsh: () => net.editorUsesSystemSsh(),
+      onFirstOpen: (node) => net.editorFirstOpened(node),
+      ...(this.editorTest ? { test: this.editorTest } : {})
+    })
     const pairing: EnginePairing = new EnginePairing({
       peers,
       sessions,
@@ -1137,10 +1248,24 @@ export class NetEngineService implements EngineDirectoryPort {
       }
     }, engineLimits().renewIntervalMs)
     timer.unref?.()
-    this.started = { rt, peers, sessions, timer, revocations, pairing }
+    // A block, a device's editor switch, the work switch: tunnels without the right end at once.
+    const release = [
+      rt.policy.onChange(() => editor.reconcile()),
+      net.onWorkOnThreadsOff(() => editor.reconcile())
+    ]
+    this.started = { rt, peers, sessions, timer, revocations, pairing, editor, rights, release }
     net.setEngineAuthorizer((method, caller, capability) =>
       this.authorizeEngine(method, caller, capability)
     )
+    net.setEngineEditor({
+      owns: (node) => this.started?.editor === editor && !!peers.get(node),
+      computers: () => (this.started?.editor === editor ? this.editorComputers() : []),
+      link: (node) => {
+        if (this.started?.editor !== editor || !peers.serving(node) || !sessions.online(node))
+          throw new TunnelError('offline')
+        return { tunnels: editor.tunnels, link: editor.clientLink(node, sessions.client(node)) }
+      }
+    })
     bridge().activateBridge()
     // What was read before the pairings were known (bot reach, the device lists) is read again.
     bridge().peers.changed()
@@ -1199,6 +1324,8 @@ export class NetEngineService implements EngineDirectoryPort {
     this.supervisor ??= new HelperSupervisor({
       launch: () => (this.launcher ?? (() => this.launchBuilt()))(),
       use: (pipe) => this.useHelper(pipe),
+      // An installed app runs only the helper it was packaged with (`launchBuilt` reads which).
+      expectedBuild: () => (this.launcher ? undefined : this.packagedCommit),
       mismatch: () => {
         this.writeSettings(false)
         this.problem = HELPER_TEXT.mismatch
@@ -1228,6 +1355,7 @@ export class NetEngineService implements EngineDirectoryPort {
   async launchBuilt(options: { port?: number } = {}): Promise<LaunchedHelper> {
     const binary = findNetHelper()
     if (!binary) throw new HelperNotInBuild()
+    this.packagedCommit = packagedBuild() ? packagedHelperCommit(binary) : undefined
     // A profile folder copied from another profile carries that profile's endpoint: it is set aside.
     const settings = this.settings()
     if (settings && settings.profile !== this.options.profileId) {
@@ -1253,7 +1381,14 @@ export class NetEngineService implements EngineDirectoryPort {
       this.settingsPath,
       JSON.stringify({ enabled, profile: this.options.profileId } satisfies EngineSettings)
     )
+    try {
+      this.onSwitched?.()
+    } catch {
+      // What reads the switch elsewhere catches up on its next change; the switch itself is saved.
+    }
   }
+  /** The switch was saved (on or off): the installation rewrites `endpoints.json`, which says it (Phase 1b §3.3). */
+  onSwitched?: () => void
 
   /** The endpoint goes aside; the next start makes a new one, and its pairings show "Pair again". */
   private setEndpointAside(why: string): void {
@@ -1263,6 +1398,7 @@ export class NetEngineService implements EngineDirectoryPort {
 
   async stop(): Promise<void> {
     await this.starting?.catch(() => undefined)
+    if (this.started) this.started.ending = true
     const supervisor = this.supervisor
     this.supervisor = undefined
     await supervisor?.stop()
@@ -1271,6 +1407,10 @@ export class NetEngineService implements EngineDirectoryPort {
     this.started = undefined
     this.own = undefined
     started.pairing.stop()
+    for (const release of started.release.splice(0)) release()
+    this.options.net.setEngineEditor(undefined)
+    // An ordinary end (a quit, a restart): editor servers keep running, as when an SSH server restarts.
+    started.editor.tunnels.endAll('net_off', false)
     if (this.stuckTimer) clearTimeout(this.stuckTimer)
     this.stuckTimer = undefined
     this.since.clear()
@@ -1301,6 +1441,15 @@ export class NetEngineService implements EngineDirectoryPort {
       throw new NetError('forbidden')
     if (!ENGINE_OWNER_METHODS.has(method.method)) throw new NetError('forbidden')
     checkNodePolicy(method, caller.node, started.rt.policy, this.options.net.nodePolicyConfig())
+    // The editor rows answer as the editor tunnel would (§9.2); the ask to turn the editor on works while it is off.
+    if (method.method.startsWith('routed.editor.')) {
+      const why = engineEditorRefusal(started.rights, caller.node, caller.grant)
+      if (why && !(why === 'editor_off' && method.method === 'routed.editor.ask')) {
+        // In the words a routed refusal has (`FORBIDDEN_REASONS`); the editor switch has none of its own there.
+        const reason = why === 'net_off' ? 'not_connected' : why === 'editor_off' ? undefined : why
+        throw new NetError('forbidden', undefined, reason ? { details: { reason } } : undefined)
+      }
+    }
   }
 
   /** `bridge.policy` for an engine pairing: what it may do here, kept in the same table as v1 devices'. */
@@ -1400,6 +1549,8 @@ export class NetEngineService implements EngineDirectoryPort {
     started.revocations.delete(node)
     started.rt.rpc.abortCaller(node)
     started.sessions.teardown(node, 'grant_revoked')
+    // Its editor tunnels end and what the endpoint started for it stops (its row is removing, or its grant gone).
+    started.editor.reconcile()
     this.options.bridge()?.releaseNode(node)
   }
 
@@ -1547,7 +1698,7 @@ export class NetEngineService implements EngineDirectoryPort {
 }
 
 /** Whether the profile at `home` has the new networking's switch on. */
-function engineOn(home: string): boolean {
+export function engineOn(home: string): boolean {
   try {
     const value = JSON.parse(readFileSync(join(home, 'net-engine', 'settings.json'), 'utf8')) as {
       enabled?: unknown
@@ -1689,13 +1840,3 @@ function reachError(error: unknown): unknown {
   return error
 }
 
-/**
- * What this computer advertises after a routes change that needs no restart: its LAN and tailnet addresses as
- * before, with the port forwards and tunnels as now saved.
- */
-function advertisedAfter(routes: unknown, before: NetEngineReach, after: NetEngineReach): string[] {
-  const gone = new Set([...before.public, ...before.tunnels])
-  const kept = strings(routes).filter((route) => !gone.has(route))
-  for (const route of [...after.public, ...after.tunnels]) if (!kept.includes(route)) kept.push(route)
-  return kept
-}

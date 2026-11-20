@@ -1,6 +1,7 @@
 import { NetError, isId } from '../../../shared/net'
 import { canonicalJson } from '../../net/sync/codec'
 import type { BridgeRemoteMethod } from './capabilities'
+import { USAGE_AGENT_LABELS, USAGE_HISTORY_RANGES, type UsageHistoryRange } from '../../../shared/usageHistory'
 import {
   REMOTE_MAX_ATTACHMENTS,
   REMOTE_ATTACHMENT_CHUNK_CHARS,
@@ -92,6 +93,12 @@ export function validateRemoteParams(
     // No `refresh`: scanning another computer's disk is not something a remote caller may ask for.
     case 'storage.usage':
       keys([])
+      break
+    case 'usage.history':
+      keys(['range'], ['timeZone', 'agent'])
+      if (!USAGE_HISTORY_RANGES.includes(p.range as UsageHistoryRange)) throw new NetError('bad_request')
+      text('timeZone', 64, true)
+      if (Object.hasOwn(p, 'agent') && !Object.hasOwn(USAGE_AGENT_LABELS, p.agent as string)) throw new NetError('bad_request')
       break
     case 'projects.match': {
       keys(['roots'], ['remotes'])

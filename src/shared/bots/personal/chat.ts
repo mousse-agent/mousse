@@ -122,7 +122,8 @@ export interface BotChatMessage {
   error?: BotError
   activationId?: string
   /** Files: the owner's attachments, and pictures a tool handed the bot (kept in its files folder). */
-  attachments?: Array<{ name: string; path: string }>
+  /** `previewUrl`: the composer's picture of an image still being sent (this window only; never stored or sent). */
+  attachments?: Array<{ name: string; path: string; previewUrl?: string }>
   /** Applets the reply shows under its words, as a thread's reply does (`publish_applet`). Absent from older services. */
   applets?: BotChatApplet[]
   /** The message this one answers, as a short quote: a bot's reply to the owner's message, or the owner's reply to the bot's. */
@@ -401,8 +402,6 @@ export interface BotReminderItem {
 
 /** About this bot. */
 export interface BotDetail {
-  tellingSettings?: import('./tellingSettings').BotTellingPreferences
-  telling?: string
   summary: BotSummary
   permissions: BotPermissionItem[]
   runs: BotRunItem[]

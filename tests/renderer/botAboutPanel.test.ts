@@ -531,17 +531,6 @@ describe("the bot's prompt in About", () => {
   })
 })
 
-it('formats stored telling hours in the window’s clock format', async () => {
-  const { botGroupTime } = await import('../../src/renderer/components/bots/messageGroups')
-  fake.details.b1.telling = 'An older service-formatted string must not be used'
-  fake.details.b1.tellingSettings = { tellMe: 'needs_you', quietHours: { from: '22:00', to: '08:00' }, canWakeMe: true }
-  await show()
-  const from = botGroupTime(new Date(2000, 0, 1, 22, 0).toISOString())
-  const to = botGroupTime(new Date(2000, 0, 1, 8, 0).toISOString())
-  expect(host.textContent).toContain(`Tells you when it needs you · Quiet ${from} to ${to} · can wake you`)
-  expect(host.textContent).not.toContain(fake.details.b1.telling)
-})
-
 it.each([true, false])('keeps whole-service controls with asks-first projection %s', async (asking) => {
   fake.details.b1.permissions = [{ id: 'mail', title: 'use Mail', enabled: true, grantedAt: AT, note: asking ? 'Asks you first before sending or changing something. What it does through threads, commands or secrets you gave it does not wait for a card.' : 'Use the connected Mail service.', ...(asking ? { mark: 'Asks first' } : {}) }]
   await show()

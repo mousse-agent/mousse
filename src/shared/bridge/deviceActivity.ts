@@ -206,6 +206,7 @@ const PHRASES: Record<string, Phrase> = {
   'orchestrator.steerNow': STEER_NOW,
   'orchestrator.abort': STOP,
   'orchestrator.retry': RETRY,
+  'orchestrator.retrySetup': TURN,
   'orchestrator.answerQuestions': ANSWER,
   'orchestrator.dismissQuestions': DISMISS,
   'queue.enqueue': QUEUED,

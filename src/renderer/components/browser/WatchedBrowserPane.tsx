@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import type { StoreApi, UseBoundStore } from 'zustand'
-import { ArrowLeft, ArrowRight, Globe, RefreshCw, X } from '../../lib/icons'
+import { ArrowLeft, ArrowRight, ArrowShrink, Bot, Maximize, RefreshCw, User, X } from '../../lib/icons'
 import { WATCHED_BROWSER_PANE, watchedBrowserPageSize, type WatchedBrowserDialog, type WatchedBrowserInput, type WatchedBrowserPageSize, type WatchedBrowserView } from '../../../shared/browser/watched'
 import { browserProblemForPerson } from '../../../shared/browser/navigation'
-import { BROWSER_WINDOW_LINE, BROWSER_WINDOW_TOOLTIP } from '../../../shared/browser/window'
+import { BROWSER_WINDOW_LINE } from '../../../shared/browser/window'
 import type { WatchedBrowserNeed, WatchedBrowserState, WatchedBrowserStream } from '../../stores/watchedBrowserStore'
 import type { ChannelHealth } from '../../stores/browserInputChannel'
 import { useAppStore } from '../../stores/appStore'
@@ -15,10 +15,11 @@ import './watchedBrowser.css'
 /**
  * A browser without a window, large, where the person watches it and can take it over: a bot's split
  * view beside its chat, or a thread agent's in that thread's Browser panel. It shows the tab its user
- * follows, as pictures the service pushes while it is on screen, with the agent cursor over them. Take
- * over hands the browser to this window (the agent's actions wait), and everything the person does then
- * reaches the page in order, each input answered; Give back returns it. Another window that holds it is
- * named, and can be taken over from here.
+ * follows, as pictures the service pushes while it is on screen, with the agent cursor over them. Its bar is
+ * the thread browser's: Back, Forward, Reload, the address, and who has it (the agent's or the person's
+ * icon), which is also the switch: from the agent's, it takes the browser over for this window (the agent's
+ * actions wait), and everything the person does then reaches the page in order, each input answered; from
+ * the person's, it gives it back. Another window that holds it is named, and can be taken over from here.
  */
 
 /** How long, in a few characters: "8 s", "3 min", "2 h". */
@@ -195,14 +196,27 @@ export interface WatchedBrowserKit<V extends WatchedBrowserView> {
  */
 export type WatchedBrowserHolding = 'this-window' | 'window' | 'another-window' | 'agent' | 'closed'
 
-/** Open in a window and Close window (a bot's browser on this computer): `offered` when this view may open one. */
-export interface WatchedBrowserWindowControl {
-  offered: boolean
-  open(): void
-  close(): void
+/** Full screen: the view over the whole centre pane (`on`), or back where it was. */
+export interface WatchedBrowserFullScreen {
+  on: boolean
+  toggle(): void
 }
 
-export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { percent?: number } }>({ kit, browserKey, label, user, view, line, lineDetail, closed, open, inWindow, className }: {
+/**
+ * Who has the browser, beside the address (`BrowserAgentStatus`'s look): the agent's icon, or the person's once
+ * this window holds it. Pressed, it takes the browser over, or gives it back.
+ */
+function ControlToggle({ user, held, elsewhere, busy, take, giveBack }: { user: string; held: boolean; elsewhere: boolean; busy: boolean; take(): void; giveBack(): void }) {
+  const owner = held ? 'human' : 'agent'
+  const Icon = held ? User : Bot
+  const title = held ? 'You have it. Give it back' : elsewhere ? 'Held in another window. Take it over here' : `${user} has it. Take it over`
+  return <button type="button" className={`browser-toolbar-btn browser-access browser-access-${owner} watched-browser-control`} data-state={owner}
+    aria-label={held ? 'Give back' : 'Take over'} aria-pressed={held} title={title} disabled={busy} onClick={held ? giveBack : take}>
+    <Icon size={14} className="browser-access-icon" aria-hidden="true" />
+  </button>
+}
+
+export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { percent?: number } }>({ kit, browserKey, label, user, view, line, lineDetail, closed, open, fullScreen, className }: {
   kit: WatchedBrowserKit<V>
   /** The browser's key in its store (a bot's id, a thread's id). */
   browserKey: string
@@ -211,7 +225,7 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   /** Who uses it ("Noobesh", "The agent"). */
   user: string
   view: V
-  /** The line under the picture when nothing else is to be said. */
+  /** The line under the picture when nothing else is to be said (none when empty). */
   line(holding: WatchedBrowserHolding): string
   /** Its tooltip. */
   lineDetail?(holding: WatchedBrowserHolding): string | undefined
@@ -219,8 +233,8 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   closed(typed: string): ReactNode
   /** Opens a closed browser at an address (a bot's); without it the address waits for an open browser. */
   open?(url: string | undefined): void
-  /** Open in a window and Close window (a bot's browser on this computer). */
-  inWindow?: WatchedBrowserWindowControl
+  /** Full screen over the whole centre pane, and back (a bot's browser). */
+  fullScreen?: WatchedBrowserFullScreen
   className?: string
 }) {
   const busy = kit.useStore((state) => state.busy)
@@ -266,6 +280,11 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   const send = (entry: WatchedBrowserInput) => { input.send(entry) }
   const holding: WatchedBrowserHolding = owner ? (windowed ? 'window' : 'this-window') : elsewhere ? 'another-window' : view.open ? 'agent' : 'closed'
 
+  // The line under the picture: an error, the page's problem, a quiet status, else the view's own line, if any.
+  const problem = view.open && view.problem ? browserProblemForPerson(view.problem) : undefined
+  const noteText = error ? error : problem ? problem.line : quiet ? status.text : line(holding)
+  const noteTitle = error ? errorDetail ?? undefined : problem ? problem.detail : quiet ? status.detail : lineDetail?.(holding) ?? noteText
+
   const go = () => {
     editing.current = false
     const text = address.trim()
@@ -276,24 +295,21 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
   }
 
   return <aside className={`watched-browser-pane${className ? ` ${className}` : ''}`} aria-label={label}>
-    <header className="watched-browser-bar">
-      <button type="button" aria-label="Back" title="Back" disabled={!drives || busy} onClick={() => send({ kind: 'back' })}><ArrowLeft size={15} /></button>
-      <button type="button" aria-label="Forward" title="Forward" disabled={!drives || busy} onClick={() => send({ kind: 'forward' })}><ArrowRight size={15} /></button>
-      <button type="button" aria-label="Reload" title="Reload" disabled={!drives || busy} onClick={() => send({ kind: 'reload' })}><RefreshCw size={15} /></button>
-      <form className={`watched-browser-address${view.open && view.loading ? ' is-loading' : ''}`} onSubmit={(event) => { event.preventDefault(); go() }}
+    <header className="browser-toolbar watched-browser-bar">
+      <button type="button" className="browser-toolbar-btn" aria-label="Back" title="Back" disabled={!drives || busy} onClick={() => send({ kind: 'back' })}><ArrowLeft size={16} /></button>
+      <button type="button" className="browser-toolbar-btn" aria-label="Forward" title="Forward" disabled={!drives || busy} onClick={() => send({ kind: 'forward' })}><ArrowRight size={16} /></button>
+      <button type="button" className="browser-toolbar-btn" aria-label="Reload" title="Reload" disabled={!drives || busy} onClick={() => send({ kind: 'reload' })}><RefreshCw size={16} /></button>
+      <form className={`browser-url-form watched-browser-address${view.open && view.loading ? ' is-loading' : ''}`} onSubmit={(event) => { event.preventDefault(); go() }}
         aria-busy={view.open && view.loading ? true : undefined}>
-        <Globe size={13} aria-hidden />
-        <input aria-label={`${label} address`} value={address} readOnly={view.open ? !drives : !open} placeholder="Enter a web address"
+        <input className="browser-url-input" aria-label={`${label} address`} value={address} readOnly={view.open ? !drives : !open} placeholder="Search or enter URL"
           onFocus={() => { editing.current = true }} onBlur={() => { editing.current = false }} onChange={(event) => setAddress(event.target.value)} spellCheck={false} />
       </form>
-      {view.open && !windowed && !elsewhere && inWindow?.offered && <button type="button" className="watched-browser-control" disabled={busy} title={BROWSER_WINDOW_TOOLTIP}
-        onClick={() => inWindow.open()}>Open in a window</button>}
-      {view.open && (windowed && owner
-        ? <button type="button" className="watched-browser-control" disabled={busy} title={BROWSER_WINDOW_TOOLTIP} onClick={() => inWindow?.close()}>Close window</button>
-        : owner
-        ? <button type="button" className="watched-browser-control" disabled={busy} onClick={() => void store().giveBack(browserKey)}>Give back</button>
-        : <button type="button" className="watched-browser-control" disabled={busy} title={elsewhere ? 'Held in another window' : undefined} onClick={() => void store().takeOver(browserKey, elsewhere)}>Take over</button>)}
-      <button type="button" aria-label="Close the browser view" title="Close" onClick={() => store().closePane()}><X size={15} /></button>
+      {/* Give back also closes a window an older app opened it in. */}
+      {view.open && <ControlToggle user={user} held={owner} elsewhere={elsewhere} busy={busy}
+        take={() => void store().takeOver(browserKey, elsewhere)} giveBack={() => void store().giveBack(browserKey)} />}
+      {fullScreen && <button type="button" className="browser-toolbar-btn" aria-label={fullScreen.on ? 'Exit full screen' : 'Full screen'} title={fullScreen.on ? 'Exit full screen' : 'Full screen'}
+        aria-pressed={fullScreen.on} onClick={fullScreen.toggle}>{fullScreen.on ? <ArrowShrink size={16} /> : <Maximize size={16} />}</button>}
+      <button type="button" className="browser-toolbar-btn" aria-label="Close the browser view" title="Close" onClick={() => store().closePane()}><X size={16} /></button>
     </header>
     <div className="watched-browser-stage" ref={stage}>
       <WatchedBrowserFrame label={label} view={view} frameRef={frame} className={drives ? 'is-held' : undefined} {...(windowed ? {} : input.frameHandlers)}>
@@ -313,10 +329,6 @@ export function WatchedBrowserPane<V extends WatchedBrowserView & { setup?: { pe
         <span>{said.text}</span>
         {said.retry && <button type="button" className="watched-browser-retry" onClick={() => store().retry(browserKey)}>Retry</button>}
       </p>
-      : <p className={`watched-browser-note${quiet ? ' is-quiet' : ''}`} role="status" title={error ? errorDetail ?? undefined : view.open && view.problem ? browserProblemForPerson(view.problem).detail : quiet ? status.detail : lineDetail?.(holding) ?? line(holding)}>{error
-        ? error
-        : view.open && view.problem ? browserProblemForPerson(view.problem).line
-        : quiet ? status.text
-        : line(holding)}</p>}
+      : noteText && <p className={`watched-browser-note${quiet ? ' is-quiet' : ''}`} role="status" title={noteTitle}>{noteText}</p>}
   </aside>
 }

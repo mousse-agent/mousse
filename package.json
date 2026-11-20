@@ -33,7 +33,7 @@
     "dist:win": "npm run typecheck && npm run dist:win:prep && electron-builder --win --publish never",
     "dist:win:cli": "npm run typecheck && npm run dist:win:prep && electron-builder --win --config electron-builder.cli.yml --publish never",
     "dist:win:prep": "npm run clean:build-output && npm run prepare:package && npm run build && node scripts/rebuild-native.mjs && node scripts/ensure-webrtc-prebuilt.mjs && node scripts/build-sshd-helper.mjs --require && node scripts/build-voice-engine.mjs --require && node scripts/build-net-helper.mjs --require",
-    "dist:linux": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && node scripts/build-voice-engine.mjs --require && electron-builder --linux AppImage --publish never && electron-builder --linux AppImage --config electron-builder.cli.yml --publish never",
+    "dist:linux": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && node scripts/build-voice-engine.mjs --require && node scripts/build-net-helper.mjs --require && electron-builder --linux AppImage --publish never && electron-builder --linux AppImage --config electron-builder.cli.yml --publish never",
     "dist:mac": "npm run clean:build-output && npm run prepare:package && npm run typecheck && npm run build && node scripts/rebuild-native.mjs && node scripts/build-voice-engine.mjs --require && node scripts/build-net-helper.mjs --require && electron-builder --mac dmg --publish never",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "lint": "eslint .",
@@ -225,7 +225,9 @@
       "node_modules/@cursor/sdk-*/**",
       "out/main/cursorHost.js",
       "out/main/threadDbWorker.js",
-      "out/cli/threadDbWorker.js"
+      "out/cli/threadDbWorker.js",
+      "out/main/usageHistoryWorker.js",
+      "out/cli/usageHistoryWorker.js"
     ],
     "npmRebuild": false,
     "extraResources": [
@@ -249,10 +251,7 @@
     "win": {
       "target": [
         {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
+          "target": "nsis"
         }
       ],
       "icon": "resources/icon.ico",
@@ -277,10 +276,7 @@
     "linux": {
       "target": [
         {
-          "target": "AppImage",
-          "arch": [
-            "x64"
-          ]
+          "target": "AppImage"
         }
       ],
       "category": "Development",

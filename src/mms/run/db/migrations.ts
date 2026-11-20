@@ -759,5 +759,14 @@ CREATE TABLE run_time_limits(
   updated_at TEXT NOT NULL
 ) STRICT;
 `
+  },
+  {
+    version: 25,
+    sql: `
+-- Proof that the owner wrote the run's message themselves (OwnerProof, JSON), written once when the run is created
+-- from a send that came in on a Mousse window's connection. NULL for every other run and for runs from before
+-- version 25: a provider that runs only turns the owner drives (Antigravity's Google sign-in) refuses those.
+ALTER TABLE runs ADD COLUMN owner_proof TEXT;
+`
   }
 ]

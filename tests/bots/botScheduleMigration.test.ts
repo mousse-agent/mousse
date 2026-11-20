@@ -211,20 +211,6 @@ describe('going back to an older build and coming back', () => {
     expect(jobs.getJob(job.id)!.bot).toMatchObject({ say: 'Take your pills' })
   })
 
-  it.each([true, false])('keeps canWakeMe %s through an older save of the bot link', canWakeMe => {
-    move()
-    const job = jobs.getJob('bot-a--news')!
-    jobs.updateJob(job.id, { bot: { ...job.bot!, canWakeMe } })
-    const inside = jobs as unknown as { config: MousseConfigStore }
-    inside.config.updateScheduledSection({ jobs: jobs.listJobs().map(row => {
-      const definition = jobToDefinition(row)
-      if (row.id === job.id) delete definition.bot!.canWakeMe
-      return definition
-    }) })
-    jobs.restoreDroppedFields()
-    expect(jobs.getJob(job.id)!.bot?.canWakeMe).toBe(canWakeMe)
-  })
-
   it('restoring dropped bot keys does not restore an intentionally removed model', () => {
     move()
     const job = jobs.getJob('bot-a--news')!

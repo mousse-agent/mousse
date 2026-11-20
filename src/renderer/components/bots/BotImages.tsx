@@ -3,51 +3,18 @@ import { Image as ImageIcon, Paperclip } from '../../lib/icons'
 import type { BotChatMessage } from '../../../shared/bots/personal/chat'
 import { useImageGallery } from '../../chat/components/agent-elements/image-gallery'
 import { ImageLightbox, type LightboxImage } from '../../chat/components/agent-elements/image-lightbox'
-import { fileLocation } from '../../utils/filesBrowse'
 import { routeLink } from '../../utils/chatLinks'
-import { SHOWN_IMAGE_TYPES, botImageSource, fileNameOf, isImageAttachment } from './imageSources'
+import { botImageSource, fileNameOf, isImageAttachment } from './imageSources'
+import { fileImages, listeners, loadFileImage, type FileImage } from './fileImageCache'
+
+export { adoptFilePreview, botFileImageUrl, resetBotFileImages } from './fileImageCache'
 
 /**
  * Pictures in a bot's chat, as a messaging app shows them: a rounded thumbnail in a fixed box (so nothing moves
  * when it loads), the name or alt text on hover, and a click opens the chat's preview with Previous and Next.
  */
 
-type FileImage = { url?: string; failed?: true }
-
-/** Image files read once per window: a chat's copies never change, so each path's picture is kept for the session. */
-const fileImages = new Map<string, FileImage>()
-const loading = new Map<string, Promise<void>>()
-const listeners = new Set<() => void>()
-
-/** The picture of an image file of this computer, once read; undefined while it is read or when it can't be. */
-export function botFileImageUrl(path: string): string | undefined {
-  return fileImages.get(path)?.url
-}
-
-/** Reads an image file through the Files panel's preview path; only PNG, JPEG, GIF and WebP become a picture. */
-function loadFileImage(path: string): Promise<void> {
-  const known = loading.get(path)
-  if (known) return known
-  const done = (image: FileImage) => {
-    fileImages.set(path, image)
-    for (const listener of listeners) listener()
-  }
-  const at = fileLocation(path)
-  const read = (async () => {
-    try {
-      const asset = await window.mousse.fs.readAsset(at.path, undefined, null, at.root)
-      if (!SHOWN_IMAGE_TYPES.has(asset.mimeType)) return done({ failed: true })
-      const bytes = Uint8Array.from(asset.data)
-      done({ url: URL.createObjectURL(new Blob([bytes.buffer], { type: asset.mimeType })) })
-    } catch {
-      done({ failed: true })
-    }
-  })()
-  loading.set(path, read)
-  return read
-}
-
-/** An image file's picture, read once per window (the Files pane shows it too). */
+/** An image file's picture, kept for the window and read again when the file changed (the Files pane shows it too). */
 export function useFileImage(path: string | undefined): FileImage | undefined {
   const [image, setImage] = useState(() => (path ? fileImages.get(path) : undefined))
   useEffect(() => {
@@ -85,12 +52,6 @@ export function useFailedFileImages(paths: readonly string[]): ReadonlySet<strin
   return failed
 }
 
-/** Forgets the pictures read so far. Tests start clean. */
-export function resetBotFileImages(): void {
-  for (const image of fileImages.values()) if (image.url) URL.revokeObjectURL(image.url)
-  fileImages.clear()
-  loading.clear()
-}
 
 /**
  * One thumbnail. `url` is the picture (a file's once read, or a `data:` image); without one the box shows empty
@@ -99,7 +60,9 @@ export function resetBotFileImages(): void {
 function Thumb({ id, url, name, failed, className }: { id: string; url?: string; name?: string; failed?: boolean; className?: string }) {
   const gallery = useImageGallery()
   const [open, setOpen] = useState(false)
-  const [broken, setBroken] = useState(false)
+  // Broken is that picture only: a file read again gives a new one.
+  const [brokenUrl, setBrokenUrl] = useState<string>()
+  const broken = !!url && brokenUrl === url
   const label = name?.trim() || undefined
   const classes = `bot-image${className ? ` ${className}` : ''}`
   if (!url || broken) {
@@ -110,7 +73,7 @@ function Thumb({ id, url, name, failed, className }: { id: string; url?: string;
   const image: LightboxImage = { id, url, filename: label }
   return <>
     <button type="button" className={classes} title={label} aria-label={label ? `Open image: ${label}` : 'Open image'} onClick={() => (gallery ? gallery.open(image) : setOpen(true))}>
-      <img src={url} alt={label ?? ''} loading="lazy" decoding="async" draggable={false} onError={() => setBroken(true)} />
+      <img src={url} alt={label ?? ''} loading="lazy" decoding="async" draggable={false} onError={() => setBrokenUrl(url)} />
     </button>
     {!gallery && <ImageLightbox open={open} onClose={() => setOpen(false)} images={[image]} />}
   </>
@@ -131,7 +94,9 @@ export function BotImageFiles({ files }: { files: BotFiles }) {
   const images = files.filter(isImageAttachment)
   if (!images.length) return null
   return <div className="bot-images" data-count={Math.min(images.length, 4)}>
-    {images.map((file, index) => <FileThumb key={`${index}:${file.path || file.name}`} path={file.path} name={file.name} />)}
+    {images.map((file, index) => (!file.path && file.previewUrl
+      ? <Thumb key={`${index}:${file.name}`} id={file.previewUrl} url={file.previewUrl} name={file.name} />
+      : <FileThumb key={`${index}:${file.path || file.name}`} path={file.path} name={file.name} />))}
   </div>
 }
 

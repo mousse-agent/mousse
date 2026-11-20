@@ -53,8 +53,11 @@ describe('readTicket', () => {
       // The key of a send link's flow and completion records (wire 10.2): SHA-256 of the CBOR bytes.
       hash: createHash('sha256').update(Buffer.from(encoded, 'base64url')).digest('hex')
     }
-    expect(readTicket(encoded)).toEqual(expected)
-    expect(readTicket(`mousse://pair#${encoded}`)).toEqual(expected)
+    expect(readTicket(encoded)).toMatchObject(expected)
+    expect(readTicket(`mousse://pair#${encoded}`)).toMatchObject(expected)
+    // The ticket hash is of the ticket's bytes, whatever link is around it.
+    expect(readTicket(`mousse://pair#${encoded}`).hash).toBe(readTicket(encoded).hash)
+    expect(readTicket(encoded).fragment).toBe(encoded)
   })
 
   it('refuses what is not a ticket', () => {

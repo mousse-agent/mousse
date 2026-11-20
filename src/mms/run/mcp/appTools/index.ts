@@ -3,9 +3,12 @@ import { appearanceTools } from './appearance'
 import { appletTools } from './applets'
 import { askUserTools } from './askUser'
 import { botMemoryTools, type BotMemoryToolHost } from './botMemory'
+import { botItemTools } from './botItems'
 import { botCatalogueTools } from './botCatalogue'
 import { botTools, type BotAppToolDeps } from './bots'
 import { browserTools } from './browser'
+import { computerTools } from './computer'
+import { bugReportTools } from './bugReports'
 import { delegationTools } from './delegation'
 import { familyRelation, threadFamily } from './family'
 import { goalTools } from './goal'
@@ -39,6 +42,7 @@ export type { BotMemoryToolHost } from './botMemory'
 export { TERMINAL_READ_TOOL } from './terminals'
 export { projectGitToolDefinitions, runProjectGitTool } from './projectGit'
 export type { ProfilerToolHost } from './profiler'
+export type { ComputerUseToolHost } from './computer'
 export {
   delegationToolDefinitions,
   dispatchDelegationTool,
@@ -53,7 +57,7 @@ export {
 } from './delegation'
 
 /** The tool families in the order runtimes are sent them, after the delegation tools. */
-export const APP_TOOL_FAMILIES = ['skills', 'questions', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit', 'profiler', 'appearance', 'terminals'] as const
+export const APP_TOOL_FAMILIES = ['skills', 'questions', 'tasks', 'quickActions', 'devGui', 'web', 'browser', 'computer', 'applets', 'delegation', 'thread', 'schedules', 'bots', 'projectGit', 'profiler', 'appearance', 'terminals'] as const
 export type AppToolFamily = (typeof APP_TOOL_FAMILIES)[number]
 
 /** What the central check of `readsOthers` and `managesOthers` tools reads (SPEC §15.1), all of it at call time. */
@@ -91,6 +95,7 @@ export function createAppToolRegistry(input: {
   botMemory?: BotMemoryToolHost | (() => BotMemoryToolHost | undefined)
 }): { registry: ToolRegistry; families: Record<AppToolFamily, string[]> } {
   const { host, engine } = input
+  const botMemory = typeof input.botMemory === 'function' ? input.botMemory : () => input.botMemory as BotMemoryToolHost | undefined
   const registry = new ToolRegistry({
     activeRunId: (threadId) => (engine ? engine.getActiveRun(threadId)?.runId ?? null : null),
     awaitLiveRun: host.awaitLiveRun ? (threadId) => host.awaitLiveRun!(threadId) : undefined,
@@ -107,6 +112,7 @@ export function createAppToolRegistry(input: {
     askApproval: host.askApproval ? (threadId, questions, options) => host.askApproval!(threadId, questions, options) : undefined,
     turns: input.turns,
     access: engine ? agentAccessPolicy(host, engine) : undefined,
+    botTimeZone: () => botMemory()?.memory?.zone(),
     ...input.options
   })
   const families = {} as Record<AppToolFamily, string[]>
@@ -115,7 +121,7 @@ export function createAppToolRegistry(input: {
     for (const tool of tools) registry.register(tool)
   }
   add('delegation', delegationTools(host))
-  add('questions', [...askUserTools(host), ...secretTools(host)])
+  add('questions', [...askUserTools(host), ...secretTools(host), ...bugReportTools(host)])
   add('tasks', [...taskTools(host), ...goalTools(host)])
   add('thread', engine ? threadTools(host, engine, input.bots) : [])
   add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])
@@ -124,8 +130,9 @@ export function createAppToolRegistry(input: {
   add('devGui', devGuiTools(host))
   add('web', webTools(host))
   add('browser', browserTools(host))
+  add('computer', computerTools(host))
   add('applets', appletTools())
-  add('bots', [...botTools(input.bots), ...botCatalogueTools(() => registry), ...(input.botMemory ? botMemoryTools(input.botMemory) : [])])
+  add('bots', [...botTools(input.bots), ...botCatalogueTools(() => registry), ...(input.botMemory ? [...botMemoryTools(input.botMemory), ...botItemTools(input.botMemory)] : [])])
   add('projectGit', projectGitTools(host))
   add('profiler', profilerTools(host, engine))
   add('appearance', appearanceTools(host))

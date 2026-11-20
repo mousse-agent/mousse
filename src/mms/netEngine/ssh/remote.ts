@@ -20,7 +20,8 @@ export interface SshRemoteHost {
   engine(profileId: string): Promise<NetEngineService>
   /** A new profile with `label`; answers its id. */
   createProfile(label: string): Promise<string>
-  startsAtLogin(): boolean
+  /** Whether Mousse starts at login for this OS account (`loginStart.startsAtLogin`). */
+  startsAtLogin(): Promise<boolean> | boolean
 }
 
 const SELECTOR = /^[a-z2-7]{26}$/
@@ -183,7 +184,7 @@ export class SshRemote {
     return {
       computer: hostname(),
       os: process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux',
-      starts_at_login: this.host.startsAtLogin(),
+      starts_at_login: await this.host.startsAtLogin(),
       profiles
     }
   }
@@ -198,7 +199,7 @@ export class SshRemote {
       ...(text('selector') ? { selector: text('selector') } : {}),
       ...(text('new_label') ? { newLabel: text('new_label')!.slice(0, 80) } : {})
     }
-    if (!Number.isSafeInteger(request.issuedAt) || !/^[0-9a-f]{64,}$/.test(request.joiner)) throw bad()
+    if (!Number.isSafeInteger(request.issuedAt) || !/^(?:[0-9a-f]{2}){1,256}$/.test(request.joiner)) throw bad()
     const limits = engineLimits()
     const reply = await prepare(
       {

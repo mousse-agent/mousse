@@ -46,7 +46,7 @@ import { CdpDisconnectedError } from '../cdp/connection'
 import { boundText, nowIso, optionalBoolean, optionalString, requiredId, sanitizeUrl, sleep, workerWarning } from '../util'
 import { BrowserWorkerError, isBrowserWorkerError } from '../errors'
 import { browserWindowDisplay, type BrowserWindowDisplay, type BrowserWindowEnd, type BrowserWindowState } from '../../shared/browser/window'
-import { WATCHED_BROWSER_PAGE, sameWatchedBrowserPageSize, watchedBrowserPageSize, type WatchedBrowserPageSize } from '../../shared/browser/watched'
+import { WATCHED_BROWSER_PAGE, WATCHED_BROWSER_PANE, sameWatchedBrowserPageSize, watchedBrowserPageSize, type WatchedBrowserPageSize } from '../../shared/browser/watched'
 
 export interface SessionConfig {
   profileId: string
@@ -210,6 +210,10 @@ export class ManagedSession {
   private page: WatchedBrowserPageSize = { ...WATCHED_BROWSER_PAGE.default }
   /** Counts the page's resizes: a picture or a screenshot from before the last one places nothing. */
   private sizeSeq = 0
+  /** The screen of the running Chromium (`screenAt`): its id, its size in CSS pixels and its pixel ratio. */
+  private screen?: { chrome: LaunchedChrome; id: string; width: number; height: number; scale: number }
+  /** Screen changes, one after another. */
+  private screenWork: Promise<void> = Promise.resolve()
   /** Each tab's title as its page last set it, by target id, for people watching. */
   private readonly viewerTitles = new Map<string, string>()
   /** Tabs whose page is still loading (its main frame started and has not stopped), by CDP session. */
@@ -1549,7 +1553,7 @@ export class ManagedSession {
     const count = (value: unknown, min: number, max: number, fallback: number) => typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, Math.floor(value))) : fallback
     const update = await this.viewerCaptures().next(this.viewerTab(tab), {
       watchKey,
-      maxWidth: count(params.maxWidth, 160, 1920, 960),
+      maxWidth: count(params.maxWidth, 160, WATCHED_BROWSER_PANE.maxWidth, 960),
       maxFps: count(params.maxFps, 1, 30, 15),
       afterFrame: count(params.afterFrame, 0, Number.MAX_SAFE_INTEGER, 0),
       afterState: count(params.afterState, 0, Number.MAX_SAFE_INTEGER, 0),
@@ -1577,7 +1581,7 @@ export class ManagedSession {
   async frame(params: Record<string, unknown>): Promise<BrowserViewerFrame> {
     const tab = this.requireTab(typeof params.tabId === 'string' ? params.tabId : this.activeTabId)
     const cdp = this.requireChrome().cdp
-    const maxWidth = typeof params.maxWidth === 'number' && params.maxWidth >= 160 ? Math.min(params.maxWidth, 1920) : 960
+    const maxWidth = typeof params.maxWidth === 'number' && params.maxWidth >= 160 ? Math.min(params.maxWidth, WATCHED_BROWSER_PANE.maxWidth) : 960
     const viewers = this.viewerCaptures()
     const { picture: painted, viewport } = await viewers.latest(this.viewerTab(tab), maxWidth)
     const cursor = this.liveCursor(tab)
@@ -2144,14 +2148,55 @@ export class ManagedSession {
     await this.sizeTab(tab, signal)
   }
 
-  /** Lays a tab's page out at the session's size (`page`). */
-  private sizeTab(tab: TabState, signal?: AbortSignal): Promise<unknown> {
+  /** Lays a tab's page out at the session's size (`page`), on a screen of its pixel ratio (`screenAt`). */
+  private async sizeTab(tab: TabState, signal?: AbortSignal): Promise<unknown> {
+    await this.screenAt(tab.cdpSessionId, this.page.scale, signal)
     return this.requireChrome().cdp.send('Emulation.setDeviceMetricsOverride', {
       width: this.page.width,
       height: this.page.height,
       deviceScaleFactor: this.page.scale,
       mobile: false
     }, { sessionId: tab.cdpSessionId, signal, timeoutMs: 5_000 })
+  }
+
+  /**
+   * Chromium paints its screencast at its screen's pixel ratio, not at the ratio a page is laid out at: on its own
+   * screen (ratio 1) every live picture is the page's size in CSS pixels, which a view on a screen of a higher ratio
+   * stretches (blurred text). So the screen of a browser without a window takes the page's ratio, at the same size in
+   * CSS pixels, before its pages are laid out at it. Where Chromium cannot (the call is experimental), the pictures stay
+   * the CSS size, as before.
+   */
+  private screenAt(cdpSessionId: string, scale: number, signal?: AbortSignal): Promise<void> {
+    const chrome = this.chrome
+    if (!chrome) return Promise.resolve()
+    const work = this.screenWork.then(async () => {
+      if (this.chrome !== chrome) return
+      let screen = this.screen?.chrome === chrome ? this.screen : undefined
+      if (!screen) {
+        const read = { chrome, id: '', width: 0, height: 0, scale: 1 }
+        let screenInfos: Array<{ id: string; width: number; height: number; devicePixelRatio?: number; isPrimary?: boolean }> | undefined
+        try {
+          ({ screenInfos } = await chrome.cdp.send<{ screenInfos?: typeof screenInfos }>(
+            'Emulation.getScreenInfos', {}, { sessionId: cdpSessionId, signal, timeoutMs: 5_000 }))
+        } catch (error) {
+          // Chromium refused it (it has no such call): pictures stay the CSS size for this browser. Cancelled or timed
+          // out: it is read again at the next resize.
+          if (error && typeof error === 'object' && 'cdpCode' in error) this.screen = read
+          return
+        }
+        screen = this.screen = read
+        const info = screenInfos?.find((entry) => entry.isPrimary) ?? screenInfos?.[0]
+        if (!info) return
+        Object.assign(screen, { id: info.id, width: info.width, height: info.height, scale: info.devicePixelRatio ?? 1 })
+      }
+      if (!screen.id || screen.scale === scale) return
+      await chrome.cdp.send('Emulation.updateScreen', {
+        screenId: screen.id, devicePixelRatio: scale, width: Math.round(screen.width * scale), height: Math.round(screen.height * scale)
+      }, { sessionId: cdpSessionId, signal, timeoutMs: 5_000 })
+      screen.scale = scale
+    }).catch(() => undefined)
+    this.screenWork = work
+    return work
   }
 
   /**
@@ -2166,6 +2211,7 @@ export class ManagedSession {
     if (sameWatchedBrowserPageSize(next, this.page)) return { ...this.page }
     this.page = next
     this.sizeSeq += 1
+    this.viewers?.pageResizing()
     // A window keeps its own size; the browser takes this one when it is without a window again.
     if (!this.windowed) await Promise.all([...this.tabs.values()].map((tab) => this.sizeTab(tab, signal).catch(() => undefined)))
     this.viewers?.pageResized()

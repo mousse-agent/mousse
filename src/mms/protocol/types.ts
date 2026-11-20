@@ -292,6 +292,7 @@ export const PROTOCOL_METHODS = [
   'orchestrator.steer',
   'orchestrator.steerNow',
   'orchestrator.retry',
+  'orchestrator.retrySetup',
   'orchestrator.isTurnActive',
   'orchestrator.contextUsage',
   'runs.list',
@@ -393,6 +394,9 @@ export const PROTOCOL_METHODS = [
   'providers.getUsage',
   'providers.getSubscriptionUsage',
   'providers.usageSlots',
+  'providers.limitTrends',
+  'providers.watchUsage',
+  'usage.history',
   'providers.getUsageFor',
   'providers.useLimitReset',
   'providers.setUsageProxyKey',
@@ -601,6 +605,7 @@ export type ProtocolEventType =
   | 'providers.install-event'
   | 'providers.snapshots'
   | 'providers.operation'
+  | 'providers.usage'
   | 'mcp.changed'
   | 'turn.interrupted'
   | 'turn.aborted'

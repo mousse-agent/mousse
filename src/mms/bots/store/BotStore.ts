@@ -376,6 +376,7 @@ CREATE INDEX bot_reminders_wakes ON bot_reminders(bot_id, wake, created_at);
   },
   {
     // All columns for always-on bots phase 1. Behavior is added by later items; old rows keep their meaning.
+    // bot_registry.tell_json held the removed Tells you setting; nothing reads or writes it any more.
     version: 10,
     sql: `
 ALTER TABLE bot_reminders ADD COLUMN snoozed_from TEXT;
@@ -536,8 +537,6 @@ export interface BotRegistryRow {
    * `rows`; each row then journals its model once more.
    */
   model: BotModelState | null
-  /** Telling wishes (v10), kept as JSON until a later phase item defines them. */
-  tellJson?: string | null
 }
 
 /**
@@ -579,8 +578,7 @@ function registryOf(row: Row): BotRegistryRow {
     failureStreak: num(row.failure_streak) ?? 0,
     error: json<BotStoredError>(row.error_json),
     readSeq: num(row.read_seq) ?? 0,
-    model: json<BotRegistryRow['model']>(row.model_json),
-    tellJson: str(row.tell_json)
+    model: json<BotRegistryRow['model']>(row.model_json)
   }
 }
 

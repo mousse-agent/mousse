@@ -61,12 +61,6 @@ html[data-acrylic='true'] .terminal-container .xterm-viewport {
   background-color: transparent !important;
 }
 
-/* The root tint also covers the one-pixel gap, so the divider cannot expose
-   a brighter strip of desktop between the panes. */
-html[data-acrylic='true'] .app .resizer {
-  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
-}
-
 html[data-acrylic='true'] .app .resizer:hover,
 html[data-acrylic='true'] .app .resizer.active {
   background: rgba(var(--accent-rgb), 0.35);

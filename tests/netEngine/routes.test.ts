@@ -146,7 +146,11 @@ describe('pairback', () => {
   it('a joiner sends its LAN routes and only the ticked others', () => {
     const info = {
       port: 47100,
-      routes: ['tcp://192.168.1.20:47100', 'tcp://100.101.7.2:47100', 'wss://x.example/mousse-net/1']
+      routes: [
+        'tcp://192.168.1.20:47100',
+        'tcp://100.101.7.2:47100',
+        'wss://x.example/mousse-net/1'
+      ]
     }
     expect(pairbackRoutes(info, [])).toEqual(['tcp://192.168.1.20:47100'])
     expect(pairbackRoutes(info, ['wss://x.example/mousse-net/1'])).toEqual([
@@ -176,5 +180,27 @@ describe('pairback', () => {
     expect(splitPairback(many)!.offered).toHaveLength(8)
     const long = `wss://${'a'.repeat(250)}.example/mousse-net/1`
     expect(splitPairback([long])!.offered).toEqual([])
+  })
+})
+
+describe('loopback in a debug build (MOUSSE_NET_TEST_CLASS_MAP)', () => {
+  it('is automatic except on a port the checks map to tailnet or public', async () => {
+    const { automatic } = await import('../../src/mms/netEngine/routes')
+    const before = process.env.MOUSSE_NET_TEST_CLASS_MAP
+    try {
+      process.env.MOUSSE_NET_TEST_CLASS_MAP = '47301=tailnet, 47302=public,47303=lan'
+      expect(automatic('tcp://127.0.0.1:47300')).toBe(true)
+      expect(automatic('tcp://127.0.0.1:47301')).toBe(false)
+      expect(automatic('tcp://127.0.0.1:47302')).toBe(false)
+      expect(automatic('tcp://127.0.0.1:47303')).toBe(true)
+      expect(automatic('tcp://192.168.1.2:47301')).toBe(true)
+      // `*=<class>`: every port the map leaves out.
+      process.env.MOUSSE_NET_TEST_CLASS_MAP = '47303=lan,*=public'
+      expect(automatic('tcp://127.0.0.1:47300')).toBe(false)
+      expect(automatic('tcp://127.0.0.1:47303')).toBe(true)
+    } finally {
+      if (before === undefined) delete process.env.MOUSSE_NET_TEST_CLASS_MAP
+      else process.env.MOUSSE_NET_TEST_CLASS_MAP = before
+    }
   })
 })

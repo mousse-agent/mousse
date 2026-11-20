@@ -152,10 +152,32 @@ describe('a turn that ends keeps its reply on the thread', () => {
     const pushes = seen.length
 
     transcript(thread.id).push({ id: 'u2', role: 'user', content: 'and now?', timestamp: '' })
-    mms.orchestrator.emit('turn-interrupted', { threadId: thread.id })
+    mms.orchestrator.emit('turn-completed', { threadId: thread.id })
     await new Promise((resolve) => setTimeout(resolve, 300))
 
     expect((await listed(thread.id))?.lastReply).toBe('Earlier answer')
     expect(seen.slice(pushes).filter((event) => event.type === 'threads.updated')).toEqual([])
+  })
+  it("keeps how the latest run ended in the thread's metadata, so a link still says Done or Failed after a restart", async () => {
+    const thread = (await window.request<{ thread: Thread }>('threads.create', { name: 'Run it' })).thread
+    const updatedAt = (await listed(thread.id))!.updatedAt
+    const kept = () => (JSON.parse(readFileSync(join(mms.threads.getThreadDir(thread.id), 'meta.json'), 'utf8')) as Thread).lastRun
+    const after = async (event: string) => {
+      mms.orchestrator.emit(event, { threadId: thread.id })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      return (await listed(thread.id))?.lastRun
+    }
+
+    expect(await after('turn-completed')).toBe('done')
+    expect(kept()).toBe('done')
+    expect(seen.some((event) => event.type === 'threads.updated' && (event.data as { threads: Thread[] }).threads.some((row) => row.id === thread.id && row.lastRun === 'done'))).toBe(true)
+    expect(await after('turn-failed')).toBe('failed')
+    expect(kept()).toBe('failed')
+    // A paused run has not ended; a stopped one clears it.
+    expect(await after('turn-paused')).toBe('failed')
+    expect(await after('turn-interrupted')).toBeUndefined()
+    expect(kept()).toBeUndefined()
+    // Not activity: the row keeps its place.
+    expect((await listed(thread.id))?.updatedAt).toBe(updatedAt)
   })
 })

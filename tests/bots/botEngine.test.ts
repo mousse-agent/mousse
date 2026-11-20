@@ -23,6 +23,7 @@ import type { BotDefinition, BotManifest } from '../../src/shared/bots/personal/
 import { BOT_TURN_WINDOW_MS } from '../../src/shared/bots/personal/definition'
 import type { Enforceability, RunPolicy } from '../../src/shared/harness/types'
 import { BOT_RUN_REPORT_LINE } from '../../src/mms/bots/memory/contextPack'
+import { BOT_ITEM_TOOLS } from '../../src/shared/bots/personal/items'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
 import { BOT_SUBAGENT_TOOLS, BOT_TASK_TOOLS } from '../../src/shared/bots/personal/manifest'
 
@@ -165,6 +166,8 @@ describe('approval', () => {
     expect(bots.prepare(turnStart(store.dispatch(activation.id, 1)!.runId!))).toMatchObject({ code: 'policy_unenforceable', refused: 'Codex can\'t limit tools to this list.' })
     // Nobody waits on a run: it ends failed (and counts toward the failure pause).
     expect(bots.getActivation(activation.id)).toMatchObject({ status: 'failed', endReason: 'policy_unenforceable' })
+    // Its error says the runtime's own reason, not only that it can't run here.
+    expect(store.registry('site-editor')?.error?.error.text).toBe('I can\'t run on the providers set up here: Codex can\'t limit tools to this list.')
   })
 
   it('a narrower revision runs without asking; a wider one waits for the owner', async () => {
@@ -255,7 +258,7 @@ describe('activation and dispatch', () => {
     // A run's request ends with what its last message is for (bot-context.md §5.2).
     expect(prepared.prompt).toBe(` /deploy now\n\n${BOT_RUN_REPORT_LINE}`)
     expect(prepared.instructions).toBe('You keep the site tidy.\n\nAnswer briefly.')
-    expect(prepared.policy).toMatchObject({ approvals: 'grants', approve: 'host', tools: { allow: ['escalate', 'find', 'grep', ...BOT_MEMORY_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'work_models'].sort() }, budget: { maxTurns: 30, maxWallMs: BOT_TURN_WINDOW_MS }, authority: { kind: 'bot' } })
+    expect(prepared.policy).toMatchObject({ approvals: 'grants', approve: 'host', tools: { allow: ['escalate', 'find', 'grep', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'report_bug', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'work_models'].sort() }, budget: { maxTurns: 30, maxWallMs: BOT_TURN_WINDOW_MS }, authority: { kind: 'bot' } })
     expect(prepared.authority.spend).toBeNull()
     expect(existsSync(join(prepared.scratch, 'tmp'))).toBe(true)
     expect(store.counters(activation.id).activeMs).toBe(BOT_TURN_WINDOW_MS)
@@ -351,7 +354,7 @@ describe('activation and dispatch', () => {
     if ('refused' in prepared) throw new Error(prepared.refused)
     // The memory tools and the listing of the owner's MCP servers are every bot's, beside its grant (Bot Phase 1 §5.10);
     // a run also splits its job among subagents, on models from work_models, and reads the rest of its tools from its catalogue.
-    expect(prepared.policy).toMatchObject({ tools: { allow: ['escalate', ...BOT_MEMORY_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'work_models'].sort() }, budget: { maxTurns: 5, maxWallMs: BOT_TURN_WINDOW_MS } })
+    expect(prepared.policy).toMatchObject({ tools: { allow: ['escalate', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_TASK_TOOLS, 'mcp_servers', 'publish_applet', 'read', 'report_bug', 'running_list', 'show_card', ...BOT_SUBAGENT_TOOLS, 'tool_catalogue', 'work_models'].sort() }, budget: { maxTurns: 5, maxWallMs: BOT_TURN_WINDOW_MS } })
     expect(store.counters(activation.id).activeMs).toBe(BOT_TURN_WINDOW_MS)
     // An ungranted tool in a run is refused and asked for once (Bot Phase 1 §5.4); the run goes on.
     expect(prepared.authority.check({ kind: 'builtin', tool: 'search', nativeName: 'grep', args: { path: root } })).toMatchObject({ ok: false, refused: { askId: expect.stringMatching(/^esc_/) } })

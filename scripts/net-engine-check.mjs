@@ -45,6 +45,8 @@ const CHECKS = {
   'phase1a.path-switch': 'tests/netEngine/checks/pathSwitch.test.ts',
   'phase1a.pair-offline': 'tests/netEngine/checks/pairOffline.test.ts',
   'phase1a.shared-computer': 'tests/netEngine/checks/sharedComputer.test.ts',
+  'phase1b.editor-app': 'tests/netEngine/checks/editorApp.test.ts',
+  'phase1b.no-rpc-without-grant': 'tests/netEngine/checks/noRpcWithoutGrant.test.ts',
   // 1a's app cases on one route, and the routes' own (1b §14).
   'phase1b.routes-app': [
     'tests/netEngine/checks/routesApp.test.ts',
@@ -56,7 +58,10 @@ const CHECKS = {
     'tests/netEngine/checks/reconnect.test.ts',
     'tests/netEngine/checks/pathSwitch.test.ts',
     'tests/netEngine/checks/sharedComputer.test.ts'
-  ]
+  ],
+  'phase1b.link-app': 'tests/netEngine/checks/linkApp.test.ts',
+  // Add over SSH (1b §3.4–§3.6).
+  'phase1b.ssh-add-app': 'tests/netEngine/checks/sshAddApp.test.ts'
 }
 /** The checks that run over one route (`--route`), and the routes each takes. */
 const ROUTED = { 'phase1b.routes-app': ['tcp', 'ws', 'ssh'] }

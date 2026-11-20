@@ -405,8 +405,52 @@ button.pr-panel-line:hover {
   margin: 0;
 }
 
-.pr-panel-notice[role='alert'] p {
-  color: var(--danger);
+/* Nothing to show, said calmly: a neutral icon in a soft circle, one short line, what it means, a next step. */
+.pr-panel-empty-state {
+  align-items: center;
+  gap: 6px;
+  padding: 40px 16px;
+  text-align: center;
+}
+
+.pr-panel-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  margin-bottom: 6px;
+  border-radius: 50%;
+  background: var(--ui-hover);
+  color: var(--text-secondary);
+}
+
+.pr-panel-notice .pr-panel-empty-title {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.pr-panel-empty-line {
+  max-width: 36ch;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.pr-panel-empty-state > .pr-panel-action {
+  margin-top: 8px;
+}
+
+.pr-panel-empty-state > .pr-panel-details {
+  align-self: stretch;
+  margin-top: 4px;
+  text-align: left;
+}
+
+.pr-panel-empty-state .pr-panel-signin-row {
+  justify-content: center;
+}
+
+.pr-panel-empty-state > .pr-panel-details summary {
+  text-align: center;
 }
 
 /* Signed out: a step to take, not a fault; the CLI's own words wait under Details. */

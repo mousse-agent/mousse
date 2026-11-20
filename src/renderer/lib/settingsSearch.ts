@@ -4,7 +4,7 @@ import { shortcutAnchor, shortcutRowTitle } from '../commands/shortcutEditing'
 import { STORAGE_RULE_COPY } from './storageCopy'
 
 /** The Settings pages, in nav order. */
-export const SETTINGS_SECTION_IDS = ['general', 'appearance', 'chat', 'speech', 'shortcuts', 'providers', 'agents', 'integrations', 'connections', 'storage', 'activity', 'labs'] as const
+export const SETTINGS_SECTION_IDS = ['general', 'appearance', 'chat', 'speech', 'shortcuts', 'providers', 'agents', 'integrations', 'computer', 'connections', 'storage', 'activity', 'labs'] as const
 export type SettingsSectionId = (typeof SETTINGS_SECTION_IDS)[number]
 
 /**
@@ -60,6 +60,10 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'All threads on my other devices', section: 'general', anchor: 'general-remote-notifications', keywords: ['notifications', 'remote', 'computers'] },
   { title: 'Notify for bot threads', section: 'general', anchor: 'general-bot-thread-notifications', keywords: ['notifications', 'bots', 'hidden', 'sidebar'] },
   { title: 'Updates', section: 'general', anchor: 'general-updates', keywords: ['version', 'check for updates', 'about', 'upgrade'] },
+  { title: 'Error reports', section: 'general', anchor: 'general-error-reports', keywords: ['bug report', 'report an error', 'feedback'] },
+  { title: 'Report button', section: 'general', anchor: 'general-report-button', keywords: ['error reports', 'bug report', 'feedback', 'github issue'] },
+  { title: 'File with gh', section: 'general', anchor: 'general-report-with-gh', keywords: ['error reports', 'bug report', 'github account', 'anonymous'] },
+  { title: 'Your reports', section: 'general', anchor: 'general-your-reports', keywords: ['error reports', 'bug reports', 'revoke', 'filed issues'] },
 
   { title: 'Mousse ID', section: 'connections', anchor: 'account-mousse-id', keywords: ['sign in', 'login'] },
   { title: 'Add a phone', section: 'connections', anchor: 'account-phones', keywords: ['phones', 'mobile', 'pair'] },
@@ -91,6 +95,9 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Subagents', section: 'agents', anchor: 'agents-subagents', keywords: ['subagent'] },
   { title: 'Let agents work on your other devices', section: 'agents', anchor: 'agents-remote-subagents', keywords: ['computers', 'remote', 'subagents on other devices', 'let agents start subagents on your other devices'] },
   { title: 'Worktree per subagent', section: 'agents', anchor: 'agents-subagent-worktrees', keywords: ['experimental', 'branch', 'give each subagent its own worktree'] },
+  { title: 'Cua Driver', section: 'computer', anchor: 'computer-driver', keywords: ['computer use', 'cua', 'install', 'version', 'desktop', 'screen'] },
+  { title: 'Driver', section: 'computer', anchor: 'computer-driver-path', keywords: ['computer use', 'cua driver', 'path', 'choose', 'executable'] },
+  { title: 'Agents can use this computer', section: 'computer', anchor: 'computer-agents', keywords: ['computer use', 'desktop', 'apps', 'click', 'type', 'bots', 'permission'] },
   { title: 'Secrets', section: 'agents', anchor: 'agents-secrets', keywords: ['secret', 'secrets', 'api key', 'token', 'password', 'credential', 'saved keys', 'revoke'] },
   { title: 'Automations', section: 'agents', anchor: 'agents-automations', keywords: ['automations agents add', 'schedule', 'scheduled tasks', 'agent jobs', 'limits', 'allow', 'keep'] },
   { title: 'At most', section: 'agents', anchor: 'agents-automations-active', keywords: ['automations', 'limits', 'active', 'most active automations'] },
@@ -136,6 +143,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: STORAGE_RULE_COPY.captures.title, section: 'storage', anchor: 'storage-captures', keywords: ['browser data', 'screenshots'] },
 
   { title: 'Mousse Plus (legacy)', section: 'labs', anchor: 'labs-plus-legacy', keywords: ['mousse id', 'account', 'relay', 'hosted relay', 'phone', 'networking', 'experimental'] },
+  { title: 'Performance', section: 'labs', anchor: 'labs-hybrid-bot-faces', keywords: ['bots', 'bot faces', 'gpu', '2d', 'hybrid', 'rendering', 'experimental'] },
   { title: 'Profiler', section: 'labs', anchor: 'labs-profiler', keywords: ['memory', 'ram', 'cpu', 'diagnostics', 'leak', 'performance', 'experimental'] },
   { title: 'Memory', section: 'labs', anchor: 'labs-profiler-memory', keywords: ['ram', 'diagnostics', 'report', 'leak', 'processes'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },
   { title: 'Memory notices', section: 'labs', anchor: 'labs-memory-notices', keywords: ['ram', 'diagnostics', 'notification'], needs: { anchor: 'labs-profiler', reason: 'This appears once the profiler is on.' } },

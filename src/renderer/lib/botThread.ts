@@ -64,3 +64,11 @@ export function useShownBotThread(): { botId: string; threadId: string } | null 
   const shown = useAppStore((s) => Boolean(botThread) && s.sidebarMode === 'chats' && s.activeThreadId === botThread?.threadId)
   return shown ? botThread : null
 }
+
+/** Whether a bot's thread shows in its chat pane right now (the same test as `useShownBotThread`, read once). */
+export function botThreadShownNow(): boolean {
+  const chats = useChatsStore.getState()
+  const app = useAppStore.getState()
+  const open = chats.botThread && chats.activeBotId === chats.botThread.botId ? chats.botThread : null
+  return Boolean(open) && app.sidebarMode === 'chats' && app.activeThreadId === open?.threadId
+}

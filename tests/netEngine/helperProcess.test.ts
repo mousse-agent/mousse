@@ -71,7 +71,7 @@ describe.skipIf(!binary)('the helper process', () => {
     const launched = launchHelper(binary!, state, true)
     const { helper, said } = hello(launched, helperProfileId(PROFILE))
     const answer = await said
-    expect(answer.proto).toEqual([1, 0])
+    expect(answer.proto).toEqual([1, 1])
     expect(answer.identity).toMatch(/^[0-9a-f]{64,}$/)
     expect(answer.paused ?? null).toBeNull()
     const asked = Date.now()

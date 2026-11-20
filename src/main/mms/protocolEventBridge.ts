@@ -249,6 +249,11 @@ export function bridgeProtocolEvent(
       if (data?.event) broadcast('providers:operation', data.event)
       return true
     }
+    // A provider's usage reading was kept (`usageReads.ts`): bot headers' usage rings follow it.
+    case 'providers.usage': {
+      broadcast('providers:usage', event.data)
+      return true
+    }
     case 'mcp.changed': {
       broadcast('mcp:changed', null)
       return true

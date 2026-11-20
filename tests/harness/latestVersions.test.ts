@@ -174,7 +174,7 @@ describe('which drivers have a version source', () => {
   it('Claude Code and Codex use npm, Antigravity its pinned release, ACP none', () => {
     expect(claudeCodeDriver().latestVersion).toEqual(claude)
     expect(codexDriver({ builtIn: () => ({}) as never }).latestVersion).toEqual(codex)
-    expect(antigravityDriver({ builtIn: () => ({}) as never }).latestVersion).toMatchObject({ kind: 'pinned' })
+    expect(antigravityDriver({ builtIn: () => ({ pinnedVersion: () => '1.1.1' }) as never }).latestVersion).toEqual({ kind: 'pinned', version: '1.1.1' })
     expect(acpDriver().latestVersion).toBeUndefined()
   })
 })

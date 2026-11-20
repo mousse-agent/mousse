@@ -37,7 +37,8 @@ import {
   type Computer
 } from './harness'
 
-describe('phase1b.routes-app', () => {
+// Over ssh nothing is advertised or shared: 1a's cases cover that route, each side holding the other's SSH route.
+describe.skipIf(CHECK_ROUTE === 'ssh')('phase1b.routes-app', () => {
   const fabric = new Fabric()
   // This check taps Use itself.
   fabric.autoUse = false
@@ -57,11 +58,7 @@ describe('phase1b.routes-app', () => {
     const stop = approveAll(owner)
     try {
       await step('unreachable', () =>
-        caller.dispatch(
-          'netEngine.join',
-          { ticket: invite.uri, share },
-          true
-        )
+        caller.dispatch('netEngine.join', { ticket: invite.uri, share }, true)
       )
     } finally {
       stop()
@@ -88,9 +85,7 @@ describe('phase1b.routes-app', () => {
       expect(preview.destinations.length).toBeGreaterThan(0)
       if (CHECK_ROUTE !== 'ssh') {
         expect(preview.destinations.some((item) => !item.automatic)).toBe(true)
-        expect(preview.shareable.map((item) => item.route)).toEqual(
-          expect.arrayContaining(own)
-        )
+        expect(preview.shareable.map((item) => item.route)).toEqual(expect.arrayContaining(own))
       }
     })
     await step('disclosed', async () => {

@@ -1,4 +1,5 @@
 import { isQuietHours } from '../../shared/settings'
+import { normalizeErrorReportSettings } from '../../shared/bugReports'
 import type { ContextSettings, MousseSettings, MousseSettingsUpdate } from '../../shared/settings'
 import { THEME_CSS_MAX_LENGTH, themeCssTooLong } from '../../shared/themes/cssSafety'
 import { CONTEXT_COMPACTION_DEFAULT_MARKER, DEFAULT_CONTEXT_COMPACTION_TOKENS, REMOVED_THEME_IDS, getDefaultSettings, normalizeAgentAccessSettings, normalizeAppearance, normalizeContextSettings, normalizeExperimentalSettings, normalizePermissionSettings, normalizeRunSettings, normalizeStorageSettings } from '../../shared/settings'
@@ -98,6 +99,7 @@ function normalizeSettings(settings: MousseSettings): MousseSettings {
     runs: normalizeRunSettings(settings.runs),
     experimental: normalizeExperimentalSettings(settings.experimental),
     storage: normalizeStorageSettings(settings.storage),
+    errorReports: normalizeErrorReportSettings(settings.errorReports),
     ...(typeof settings.provider?.model === 'string' ? { provider: upgradeSelection(settings.provider) } : {}),
     ...(settings.title ? { title: withInstance(settings.title) } : {}),
     // The bot's depth sets the level, so a bot model keeps none.

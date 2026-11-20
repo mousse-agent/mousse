@@ -107,7 +107,7 @@ async function fixture() {
   }
   const send = async (inputs: BotBrowserInput[], picture: number): Promise<BotBrowserAck[]> =>
     (await bots.send(BOT, VIEW, holdId, inputs.map((input) => ({ seq: ++seq, input, picture })))).acks
-  return { bots, open, pane, pictureAt, send, text, size, look }
+  return { bots, open, pane, pictureAt, pictures, send, text, size, look }
 }
 
 describe.skipIf(!chrome.ok)('a bot\'s browser at the split view\'s size', () => {
@@ -140,15 +140,21 @@ describe.skipIf(!chrome.ok)('a bot\'s browser at the split view\'s size', () => 
     await expect.poll(text, { timeout: 5_000 }).toContain('clicked bottom')
   })
 
-  it('at a pixel ratio of 2 the picture has twice the pixels, a click lands at the page\'s point, and the bot\'s screenshot stays at the page\'s size', async () => {
-    const { open, pictureAt, send, text, size, look } = await fixture()
+  it('at a pixel ratio of 2 every picture has twice the pixels (the live ones too, also past 1920 px), a click lands at the page\'s point, and the bot\'s screenshot stays at the page\'s size', async () => {
+    const { open, pane, pictureAt, pictures, send, text, size, look } = await fixture()
     await open({ width: 500, height: 800, scale: 2 })
     await expect.poll(size, { timeout: 15_000 }).toBe('500x800 ratio 2')
-    await expect.poll(async () => jpegSize((await pictureAt(500, 800)).data), { timeout: 15_000 }).toEqual({ width: 1000, height: 1600 })
     const shown = await pictureAt(500, 800)
+    const at = (width: number, height: number) => pictures().filter((picture) => picture.viewport.width === width && picture.viewport.height === height).map((picture) => jpegSize(picture.data))
+    expect(at(500, 800).length).toBeGreaterThan(0)
+    expect(at(500, 800).every((pixels) => pixels.width === 1000 && pixels.height === 1600), JSON.stringify(at(500, 800))).toBe(true)
     expect((await send(press(250, 760), shown.id)).every((ack) => ack.status === 'applied')).toBe(true)
     await expect.poll(text, { timeout: 5_000 }).toContain('clicked bottom')
     const seen = await look(true)
     expect(seen.screenshot).toMatchObject({ pixelWidth: 500, pixelHeight: 800 })
+    // A full-screen view: wider than 1920 px at its ratio.
+    await pane({ width: 1400, height: 800, scale: 2 })
+    await pictureAt(1400, 800)
+    expect(at(1400, 800).every((pixels) => pixels.width === 2800 && pixels.height === 1600), JSON.stringify(at(1400, 800))).toBe(true)
   })
 })

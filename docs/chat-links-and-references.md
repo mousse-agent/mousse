@@ -70,6 +70,22 @@ Internal drag sources use MIME type `application/x-mousse-reference` with JSON:
 
 The composer validates this untrusted payload, displays a removable blue titled link, and permits an attachment-only send. References are persisted per profile/thread. Sent messages contain a hidden, reconstructable reference block plus human-readable path/session context for the model.
 
-Project/thread metadata paths must be resolved in the daemon for the active profile. Use `ChatReferenceMetadataResolver`: thread references point to `ThreadDataStore.getThreadDir(id)/meta.json`; project references point to the active profile's actual `projects.json`. Renderer code must not infer profile storage paths. The composer resolves these references before attachment and again before send; a profile/thread change invalidates an in-flight result.
+Project/thread references are resolved in the daemon for the active profile with `ChatReferenceMetadataResolver`: a thread reference gets the thread's live title and no file path; a project reference points to the active profile's actual `projects.json`. A thread of another computer (a qualified id) is not resolved here. Renderer code must not infer profile storage paths. The composer resolves these references before attachment and again before send; a profile/thread change invalidates an in-flight result.
+
+## Thread references
+
+Right-click a thread wherever it shows (a sidebar row, a Nest row, a subagent card, a thread chip, a thread a bot started) and choose **Copy reference**: it copies the thread's link, `mousse://thread/<id>` (with `<node>:` for a thread of another computer). Pasting text that is nothing but thread links into a composer adds one thread pill per link instead of the text (`threadIdsOfPaste`); a link inside other text stays text. Dragging a sidebar thread onto the composer does the same.
+
+The agent gets the thread by reference, never its transcript. In a thread chat, the pill goes into the message's `[Mousse references]` block as the thread's title, `Link` and `Thread ID`, and a line telling the agent to read it with `thread_read`, as far as the request needs:
+
+| `thread_read` view | Holds |
+|---|---|
+| `summary` | Title, project, model, status, when its last turn completed, its linked pull request, how many messages; none of its content |
+| `recent` | Its last turns (3 by default, `turns` up to 10): each prompt, one line per step before the final answer, and the final answer, trimmed; `fromIndex` says where to page the full messages from |
+| `messages` | The full transcript, paged |
+
+In a bot chat, each pill is sent as the thread's link on a line of its own, which the chat draws as the thread's chip; the bot reads it the same way with "use your threads", and asks for that permission without it.
+
+The usual reach applies to every view. A private thread can be referenced only from a private thread, and a bot is never given a private thread; the composer refuses one with one line. A bot reads a subagent as far as it reaches the thread that started it. A thread of another computer is read there, as that computer allows.
 
 Pill activation is resource-first: projects open the Files view, threads select their chat, terminals select their owning thread/view/session, agent references (from older versions) open their owning thread, browser references open an internal browser tab, and only file references dispatch `mousse:open-file`.

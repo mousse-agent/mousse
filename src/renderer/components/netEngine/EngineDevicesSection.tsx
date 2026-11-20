@@ -6,6 +6,7 @@ import type { PlatformRequestMethod } from '../../../shared/platform'
 import { refreshComputers, useComputers } from '../../lib/computers'
 import { useAppStore } from '../../stores/appStore'
 import { DevicePresetRow } from '../devices/DevicePresetRow'
+import { WorkHereRow } from '../devices/WorkHereRow'
 import { errorText } from '../devices/useDaemonCall'
 import { RowMenu, type RowMenuItem } from '../integrations/RowMenu'
 import { SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
@@ -23,6 +24,8 @@ import {
   SHARED_ACCOUNT_LINE,
   type EngineRowAction
 } from './engineRows'
+import { takeOfferedPairLink, useOfferedPairLink } from './PairLinkHost'
+import { CodeEntry } from './SendLinkParts'
 import { ReachSection } from './ReachSection'
 import './engine.css'
 
@@ -78,6 +81,14 @@ export function EngineDevicesSection() {
   const [selected, setSelected] = useState<string>()
   const [addressFor, setAddressFor] = useState<NetEngineDevice>()
   const [removing, setRemoving] = useState<NetEngineDevice>()
+  // A `mousse://pair` link that opened Mousse opens Enter link with it.
+  const offered = useOfferedPairLink()
+  const [linkToEnter, setLinkToEnter] = useState<string>()
+  useEffect(() => {
+    if (!offered || !status) return
+    const link = takeOfferedPairLink()
+    if (link) setLinkToEnter(link)
+  }, [offered, status])
 
   const action = async (method: PlatformRequestMethod, params: unknown): Promise<boolean> => {
     setBusy(true)
@@ -288,6 +299,39 @@ export function EngineDevicesSection() {
             {line}
           </p>
         )}
+        {status.enabled && status.loginStart === 'ask' && (
+          <SettingsRow
+            title="Start Mousse at login so your other computers can reach this one?"
+            control={
+              <span className="engine-group-actions">
+                <button
+                  type="button"
+                  className="settings-btn"
+                  disabled={busy}
+                  onClick={() => void action('netEngine.loginStart', { start: false })}
+                >
+                  Not now
+                </button>
+                <button
+                  type="button"
+                  className="settings-btn primary"
+                  disabled={busy}
+                  onClick={() => void action('netEngine.loginStart', { start: true })}
+                >
+                  Start at login
+                </button>
+              </span>
+            }
+          />
+        )}
+        {/* v1's Devices group has this switch while v1 is on; while it is off, this group does. */}
+        {status.workOnThreads !== undefined && (
+          <WorkHereRow
+            on={status.workOnThreads}
+            busy={busy}
+            onChange={(next) => void action('netEngine.workOnThreads', { enabled: next })}
+          />
+        )}
         {status.on && status.devices.flatMap(row)}
         {status.on && !status.devices.length && (
           <p className="settings-muted devices-note">No computers yet.</p>
@@ -304,6 +348,29 @@ export function EngineDevicesSection() {
       )}
 
       {adding && <AddEngineDeviceDialog status={status} onClose={() => setAdding(false)} />}
+
+      {linkToEnter && !adding && (
+        <AddEngineDeviceDialog
+          status={status}
+          initial="enter"
+          initialLink={linkToEnter}
+          onClose={() => setLinkToEnter(undefined)}
+        />
+      )}
+
+      {/* A Send link join repeated by Retry or after a restart asks for the code here. */}
+      {!adding &&
+        !linkToEnter &&
+        (() => {
+          const waiting = status.joins?.find((join) => join.needsCode && join.node)
+          if (!waiting) return null
+          const device = status.devices.find((item) => item.node === waiting.node)
+          return (
+            <Modal open title={device ? `Pair with ${device.name}` : 'Enter link'} onClose={() => undefined}>
+              <CodeEntry join={waiting} />
+            </Modal>
+          )
+        })()}
 
       {addressFor && (
         <AddAddressDialog

@@ -16,6 +16,7 @@ import type { McpManager } from '../../../integrations/mcp/McpManager'
 import type { ModeCeiling } from '../../types'
 import type { RelayAdmission, RelayGrant } from '../relay/types'
 import { callForBot, type BotMcp } from '../../../bots/mcp/BotMcp'
+import { localizeIsoTimes } from '../../../bots/memory/render'
 import type { AppToolTurns } from './turns'
 import type { AgentAccessLevel } from '../../../../shared/settings'
 import {
@@ -156,6 +157,8 @@ export interface ToolRegistryOptions {
    * above, and each call runs here once its grant allows it. Absent: no bot turn is offered one.
    */
   botMcp?: Pick<BotMcp, 'call'>
+  /** The zone a bot's times are told in (its memory's, as its "Now" line); absent or undefined: times stay in UTC. */
+  botTimeZone?(): string | undefined
 }
 
 /** What `ToolRegistryOptions.reportLacks` is told. */
@@ -557,10 +560,10 @@ export class ToolRegistry {
           return await this.callUserMcp(inner.name, inner.args, { ...site, request: innerRequest })
         if (!named || !toolNeeds(named).callable || inner.name === BOT_USE_TOOL || !botMayBeOffered(inner.name))
           return refused('unknown_tool', `You have no tool named ${inner.name}. tool_catalogue lists each group's tools.`)
-        return await this.callAdmitted(inner.name, named, inner.args, caller, { ...site, request: innerRequest })
+        return this.inOwnerZone(turn, await this.callAdmitted(inner.name, named, inner.args, caller, { ...site, request: innerRequest }))
       }
       if (!tool) return await this.callUserMcp(name, args, site)
-      return await this.callAdmitted(name, tool, args, caller, site)
+      return this.inOwnerZone(turn, await this.callAdmitted(name, tool, args, caller, site))
     } catch (error) {
       const outcome = refusalOutcome(error)
       if (outcome) return outcome
@@ -638,6 +641,24 @@ export class ToolRegistry {
     }
     // A handler's own error result says why in words: it is put in the refusal shape here, once for every tool.
     return asRefusal(outcome)
+  }
+
+  /**
+   * A Mousse tool's result for a bot's turn, with its UTC times written in the owner's zone (`localizeIsoTimes`): the
+   * bot tells its owner the times it reads, so they read like its "Now" line. Other turns, the owner's own MCP
+   * servers' results, and a bot whose zone is not known are left as they came.
+   */
+  private inOwnerZone(turn: AppToolTurn, outcome: ToolOutcome): ToolOutcome {
+    if (!turn.bot) return outcome
+    let zone: string | undefined
+    try {
+      zone = this.options.botTimeZone?.()
+    } catch {
+      // Reading the zone never fails the call: the times stay in UTC.
+    }
+    if (!zone) return outcome
+    const text = localizeIsoTimes(outcome.text, zone)
+    return text === outcome.text ? outcome : { ...outcome, text }
   }
 
   /** `tool`'s authority in `turn` for this caller (`compileTool`). */

@@ -55,6 +55,14 @@ const sink = (): HandleSink & { got: number; ended?: string } => {
   return out
 }
 
+/** The handles the app reset, from the frames it wrote. */
+const resets = (written: Array<{ type: number; body: Buffer }>) =>
+  written
+    .filter((frame) => frame.type === FRAME_JSON)
+    .map((frame) => JSON.parse(frame.body.toString('utf8')) as { op?: string; handle?: number })
+    .filter((message) => message.op === 'stream.reset')
+    .map((message) => message.handle)
+
 describe('the app channel', () => {
   it('sends a stream only as far as the helper’s credit, with FIN after every queued byte', () => {
     const p = pipe()
@@ -229,6 +237,67 @@ describe('the helper, as the app sees it', () => {
     expect(credit(100)).toBe(appStreamCreditBytes)
   })
 
+  it('resets a stream the helper names in the same read as its connection going down', async () => {
+    const p = pipe()
+    const channel = new AppChannel(p.app)
+    let opened: EngineStream | undefined
+    new EngineHelper(channel, {
+      peers: { byIdentity: () => ({ node: 'node' as NodeId, grant: '1', endpoint: 'ab' }) },
+      attach: async (connection) => {
+        // Its reader is listening, as the session's always is.
+        opened = connection.open('mousse.rpc')
+        opened.onEnd(() => undefined)
+      },
+      name: () => 'Desk'
+    })
+    p.push(jsonFrame({ ev: 'conn.up', conn: 1, identity: 'ab', dir: 'in', grant: 1 }))
+    const ask = p.written
+      .filter((frame) => frame.type === FRAME_JSON)
+      .map((frame) => JSON.parse(frame.body.toString('utf8')) as { id: number; op: string })
+      .find((message) => message.op === 'stream.open')
+    expect(opened).toBeDefined()
+    // The helper's answer naming handle 5 and its conn.down arrive in one read.
+    p.push(
+      Buffer.concat([
+        jsonFrame({ re: ask!.id, handle: 5 }),
+        jsonFrame({ ev: 'conn.down', conn: 1, reason: 'closed' })
+      ])
+    )
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(resets(p.written)).toContain(5)
+    // Handle 5 holds nothing here any more: what the helper still sends on it is dropped.
+    p.push(dataFrame(5, new Uint8Array(3), false))
+    expect(channel.dropped).toBe(1)
+  })
+
+  it('resets a stream it could not accept because the control queue was full', async () => {
+    const p = pipe()
+    const channel = new AppChannel({ ...p.app, write: (bytes) => (p.app.write(bytes), false) })
+    const ended: Array<string | undefined> = []
+    new EngineHelper(channel, {
+      peers: { byIdentity: () => ({ node: 'node' as NodeId, grant: '1', endpoint: 'ab' }) },
+      attach: async (connection) =>
+        connection.onStream((stream) => stream.onEnd((reason) => ended.push(reason))),
+      name: () => 'Desk'
+    })
+    p.push(jsonFrame({ ev: 'conn.up', conn: 1, identity: 'ab', dir: 'in', grant: 1 }))
+    // The pipe takes nothing more: requests of halving sizes fill the control queue to within a bare request.
+    const fill = (pad: number, times: number) => {
+      for (let at = 0; at < times; at += 1) channel.request('stats', { pad: 'x'.repeat(pad) }).catch(() => undefined)
+    }
+    const big = engineLimits().appFrameMaxBytes - 1024
+    fill(big, Math.ceil(engineLimits().appControlQueueBytes / big) + 1)
+    for (let pad = big; pad >= 1; pad = Math.floor(pad / 2)) fill(pad, 3)
+    fill(0, 3)
+    p.push(jsonFrame({ ev: 'stream.incoming', conn: 1, handle: 9, label: 'mousse.rpc', class: 'interactive' }))
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(ended).toEqual(['rate_limited'])
+    // Handle 9 and its credit are gone here: what the helper still sends on it is dropped.
+    p.push(dataFrame(9, new Uint8Array(3), false))
+    expect(channel.dropped).toBe(1)
+    channel.close()
+  })
+
 
   it('says its name and profile in hello, and keeps whether networking is paused', async () => {
     const p = pipe()
@@ -242,9 +311,10 @@ describe('the helper, as the app sees it', () => {
     helper.onPaused((reason) => seen.push(reason))
     const hello = helper.hello()
     const asked = JSON.parse(p.written[0]!.body.toString('utf8'))
-    expect(asked).toMatchObject({ op: 'hello', proto: [1, 0], name: 'Desk', profile: 'profile-1' })
-    p.push(jsonFrame({ re: asked.id, proto: [1, 0], identity: 'ab', paused: 'journal' }))
+    expect(asked).toMatchObject({ op: 'hello', proto: [1, 1], name: 'Desk', profile: 'profile-1' })
+    p.push(jsonFrame({ re: asked.id, proto: [1, 1], identity: 'ab', paused: 'journal' }))
     await hello
+    expect(helper.speaks(1)).toBe(true)
     expect(helper.paused).toBe('journal')
     p.push(jsonFrame({ ev: 'net.resumed' }))
     p.push(jsonFrame({ ev: 'net.paused', reason: 'disk' }))

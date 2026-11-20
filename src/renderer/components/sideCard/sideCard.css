@@ -1,8 +1,11 @@
 /* Thread side card: a floating card on the right of the full-width thread view. */
 
 .sidebar {
-  --side-card-width: 272px;
+  --side-card-width: 296px;
+  /* The gap between the card and the conversation column. */
   --side-card-gutter: 12px;
+  /* The card sits flush with the pane's top and right edges. */
+  --side-card-edge: 0px;
 }
 
 /* The layer anchors the card to the thread pane. */
@@ -61,12 +64,12 @@
 
 .thread-side-card {
   position: absolute;
-  top: var(--side-card-gutter);
-  right: var(--side-card-gutter);
+  top: var(--side-card-edge);
+  right: var(--side-card-edge);
   display: flex;
   flex-direction: column;
   width: var(--side-card-width);
-  max-height: calc(100% - 2 * var(--side-card-gutter));
+  max-height: calc(100% - var(--side-card-edge) - var(--side-card-gutter));
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -128,14 +131,14 @@
 
 .thread-side-card-layer:has(> .chat-find-bar) > .thread-side-card {
   translate: 0 calc(var(--chat-find-bar-height) + var(--chat-find-bar-gap));
-  max-height: calc(100% - 2 * var(--side-card-gutter) - var(--chat-find-bar-height) - var(--chat-find-bar-gap));
+  max-height: calc(100% - var(--side-card-edge) - var(--side-card-gutter) - var(--chat-find-bar-height) - var(--chat-find-bar-gap));
 }
 
 /* Narrow thread area: the same card is an overlay. It slides in from the right
    edge over the conversation (which keeps its layout, nothing is reserved) with a
    light scrim behind it that closes it (both on the card's 180ms, which the exit wait
    in sideCardPresence.ts matches). Panes under 400px keep the card inside
-   the pane: min() is 272px whenever the pane has room for it and its gutters. */
+   the pane: min() is the card's width whenever the pane has room for it and its gutters. */
 .thread-side-card-layer--overlay {
   overflow: hidden;
 }
@@ -220,11 +223,13 @@
   min-width: 0;
 }
 
+/* Its -4px side margins widen its hit area past the heading's text; the cap adds them back, else a heading sized to
+   the button's content holds it 8px short and cuts a collapsed note ("0 of 2 d…") with room to spare. */
 .side-card-section-toggle {
   display: flex;
   align-items: center;
   gap: 6px;
-  max-width: 100%;
+  max-width: calc(100% + 8px);
   margin: -2px -4px;
   padding: 2px 4px;
   border: 0;

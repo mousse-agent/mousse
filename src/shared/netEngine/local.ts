@@ -13,9 +13,13 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.invite.cancel',
   'netEngine.approve',
   'netEngine.join',
+  'netEngine.join.code',
   'netEngine.retry',
   'netEngine.remove',
   'netEngine.address.add',
+  'netEngine.loginStart',
+  // "Work on threads", the safety switch, while v1 networking is off (its Devices group has it otherwise)
+  'netEngine.workOnThreads',
   // Phase 1b: routes (§1.3, §1.5, §4.3)
   'netEngine.address.remove',
   'netEngine.address.use',
@@ -36,6 +40,28 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.relay.disallow'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
+
+/** A Send link this computer shows (§5.1): the code to read out and the tries left, until it ends. */
+export interface NetEngineLinkInvite {
+  invitation: string
+  code: string
+  attemptsLeft: number
+  expiresAt?: number
+  /** Why it ended: `used`, `attempts_exhausted`, `expired`, `cancelled`. */
+  ended?: string
+  /** The pairing it made, once the other computer was let in. */
+  node?: string
+}
+
+/** A Send link join running here (§5.3): whether it waits for the code, and the tries left. */
+export interface NetEngineLinkJoin {
+  invitation: string
+  node?: string
+  needsCode: boolean
+  attemptsLeft?: number
+  /** The last code typed did not work. */
+  wrong?: boolean
+}
 
 /**
  * The default of the engine limit `scanIntervalMs` (`MOUSSE_NET_ENGINE_SCAN_INTERVAL_MS`). A window uses the value in
@@ -91,6 +117,10 @@ export interface NetEngineDevice {
   source?: 'ssh'
   /** Added over SSH, one way: `out`, this computer uses it; `in`, it uses this computer (§3.6). */
   direction?: 'out' | 'in'
+  /** A Send link it consented to did not finish (no code confirmed, or the outcome was lost): Retry or Remove. */
+  unfinished?: boolean
+  /** That link is still valid, so Retry may ask for the code again. */
+  linkValid?: boolean
   /** Its relays (Phase 3), when anything about them needs showing. */
   relay?: NetEngineDeviceRelay
 }
@@ -188,6 +218,8 @@ export interface NetEngineJoinPreview {
   name?: string
   /** 1: shown in person (QR); 2: sent as a link. */
   kind: number
+  /** The invitation id (hex): a Send link join's code requests and status name it. */
+  invitation?: string
   /** The ticket has expired by this computer's clock. */
   expired?: boolean
   /** Every hint this computer would dial, with its class; the non-automatic ones are what Connect approves. */
@@ -216,8 +248,25 @@ export interface NetEngineStatus {
   sharedAccount?: boolean
   /** How often Add device reads a camera frame for a pairing code (the engine limit `scanIntervalMs`). */
   scanIntervalMs?: number
+  /**
+   * `ask`: the start-at-login question waits for this window (design §10). Answered with `netEngine.loginStart
+   * {start}`; asked once per installation, while the switch is on.
+   */
+  loginStart?: 'ask'
+  /**
+   * "Let my other devices work here" (on unless turned off), set while v1 networking is off: this group shows the
+   * switch then (`netEngine.workOnThreads {enabled}`), and v1's Devices group shows it otherwise. One setting.
+   */
+  workOnThreads?: boolean
   /** This computer's own routes, when its helper speaks protocol 1.1. */
   reach?: NetEngineReach
+  /** The helper speaks protocol 1.1, so Send link and Enter link work. */
+  sendLink?: boolean
+  /** Send links this computer shows. */
+  links?: NetEngineLinkInvite[]
+  /** Send link joins running here. */
+  joins?: NetEngineLinkJoin[]
   /** This computer's own relays, when its helper has relays (Phase 3). */
   relays?: NetEngineRelays
 }
+

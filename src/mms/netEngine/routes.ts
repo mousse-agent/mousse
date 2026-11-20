@@ -21,20 +21,43 @@ export function privateRoute(route: string): boolean {
 }
 
 /**
- * Whether this build's helper dials loopback without approval: an unpackaged build's debug helper does, so checks
- * run on one computer, unless the checks map loopback to another class (`MOUSSE_NET_TEST_CLASS_MAP`, which the
- * debug helper reads too).
+ * The classes checks give loopback ports (`MOUSSE_NET_TEST_CLASS_MAP`, which the debug helper reads too):
+ * `<port>=<class>` entries separated by commas, plus an optional `*=<class>` for every port the map leaves out.
+ * Unmapped loopback counts as `lan`.
  */
-function loopbackAutomatic(): boolean {
-  return !packagedBuild() && !process.env.MOUSSE_NET_TEST_CLASS_MAP?.trim()
+export function testClassMap(env: NodeJS.ProcessEnv = process.env): Map<number | '*', string> {
+  const map = new Map<number | '*', string>()
+  for (const entry of (env.MOUSSE_NET_TEST_CLASS_MAP ?? '').split(',')) {
+    const match = /^\s*(\d{1,5}|\*)\s*=\s*(lan|tailnet|public)\s*$/.exec(entry)
+    if (match) map.set(match[1] === '*' ? '*' : Number(match[1]), match[2]!)
+  }
+  return map
+}
+
+/** The class the check's map gives loopback `port`, if any. */
+function mappedClass(port: number | undefined): string | undefined {
+  if (port === undefined) return undefined
+  const map = testClassMap()
+  return map.get(port) ?? map.get('*')
+}
+
+/** The class a check maps a loopback route's port to, in an unpackaged build (`tailnet` or `public`). */
+export function loopbackClass(route: string): 'tailnet' | 'public' | undefined {
+  if (packagedBuild() || automaticRoute(route) || !automaticRoute(route, true)) return undefined
+  const cls = mappedClass(parseRoute(route)?.port)
+  return cls === 'tailnet' || cls === 'public' ? cls : undefined
 }
 
 /**
  * 1a's automatic rule as this build's helper applies it (1b §1.3): private-range `tcp` literals, and loopback too
- * in an unpackaged build.
+ * in an unpackaged build, whose debug helper dials it so checks run on one computer, except on a port the checks
+ * map to another class.
  */
 export function automatic(route: string): boolean {
-  return automaticRoute(route, loopbackAutomatic())
+  if (automaticRoute(route)) return true
+  if (packagedBuild() || !automaticRoute(route, true)) return false
+  const cls = mappedClass(parseRoute(route)?.port)
+  return cls === undefined || cls === 'lan'
 }
 
 /**

@@ -1,16 +1,21 @@
 /* A to-do list (the side card's To-dos, a bot's checklist): quiet rows, the step in progress filled. */
 
+/* About seven and a half one-line rows (24.8px each, 1px apart): the cut row shows there is more, which scrolls. */
 .todo-checklist {
   display: flex;
   flex-direction: column;
   gap: 1px;
+  max-height: 194px;
   margin: 0 -6px;
   padding: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   list-style: none;
 }
 
 .todo-checklist-row {
   display: flex;
+  flex: none;
   align-items: flex-start;
   gap: 8px;
   min-width: 0;

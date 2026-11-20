@@ -97,7 +97,7 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
   {
     id: 15,
     date: '2026-11-16',
-    text: 'When the owner says how or when they want to be told, use telling_set and confirm in words, never memory_save. Quiet hours now exist: work and wake-ups still run, but banners and your questions’ nudges and defaults wait until they end. quietHours sets profile hours or off; tellMe sets your level (needs_you, look, fyi, every), with schedules true also your automations; canWakeMe sets your exception, or one automation with scheduleId.'
+    text: 'Quiet hours now exist: work and wake-ups still run, but banners and your questions’ nudges and defaults wait until they end.'
   },
   { id: 16, date: '2026-11-16', text: 'Work can now wait for a time or event with work_wait and end its turn. It carries on in the same work with what it already saw; use wake only in chat. Scheduled runs and subagents cannot wait.' },
   { id: 17, date: '2026-11-16', text: 'A turn now starts with a "Running now" note when something already runs in your folders (your background commands, servers), with its local address; running_list shows the list any time. Reuse a running server instead of starting another copy.' },
@@ -165,6 +165,17 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     date: '2026-11-19',
     text: 'secret_fetch is now available. This replaces the earlier advice to keep working without a bound key. To read from a service your owner gave you a key for, use secret_fetch with the key\'s name in work or a scheduled run. You never see the key. GET and HEAD only, with masked responses and limits of 20 reads per key per hour and 100 per bot per day; hand service reads from chat to work.'
   },
+  {
+    id: 31,
+    date: '2026-11-19',
+    text: 'You now keep a list of open items: everything your owner asked for and everything you promised, until they have it as asked or it is dropped (item_save, item_list). It comes with your memory in every chat turn, so what is pending no longer depends on the chat summary. In your next chat turn with your owner, start it: go through your chat summary and its digests\' open threads, "Threads you handed work to" and your recent chat, and add an item for each ask or promise still open, with source set to the j ref of the message it came from and its thread or pull request as a link. If you keep a daily cleanup schedule, add to its prompt that it reads the day\'s chat and adds an item for each ask or promise that has none.'
+  },
+  {
+    id: 32,
+    date: '2026-11-19',
+    text: 'You no longer have a telling setting: telling_set, your Tell me level and can-wake choices are gone. Message your owner when you judge they would want to know. When they say how or when they want to be told, save it with memory_save as an owner entry and follow it.',
+    gone: [/telling_set instead/i, /how and when your owner is told/i, /set it with telling_set/i]
+  }
 ]
 
 /** The newest entry's id: what a bot has seen once it is told everything. */

@@ -8,6 +8,7 @@ import { settleWaitingDelegations } from './delegation/hold'
 import { isAgentAccessLevel, narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { stableStringify } from './json'
 import { currentStopGeneration } from './stopGeneration'
+import { decodeOwnerProof, type OwnerProof } from './ownerProof'
 import {
   TERMINAL_RUN_STATUSES,
   attemptId as makeAttemptId,
@@ -127,6 +128,8 @@ export class RunStore {
     userMessageId?: string
     requestedAt?: string
     outcome?: RunOutcome
+    /** `RunRecord.ownerProof`: written with the run, never afterwards. */
+    ownerProof?: OwnerProof
   }): RunRecord {
     return this.db.transaction(() => {
       const max = this.db
@@ -147,15 +150,16 @@ export class RunStore {
         startedAt: null,
         completedAt: null,
         outcome: input.outcome ?? null,
-        heartbeatAt: null
+        heartbeatAt: null,
+        ...(input.ownerProof ? { ownerProof: { ...input.ownerProof } } : {})
       }
       this.db
         .statement(
           `INSERT INTO runs(run_id, thread_id, ordinal, status, epoch, active_attempt_id, source,
-             client_request_id, user_message_id, requested_at, started_at, completed_at, outcome, stop_generation)
-           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             client_request_id, user_message_id, requested_at, started_at, completed_at, outcome, stop_generation, owner_proof)
+           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
-        .run(...runParams(record), currentStopGeneration(this, record.threadId))
+        .run(...runParams(record), currentStopGeneration(this, record.threadId), jsonOrNull(record.ownerProof))
       this.appendEvent({
         threadId: record.threadId,
         runId: record.runId,
@@ -417,6 +421,21 @@ export class RunStore {
     return row ? toAttempt(row) : null
   }
 
+  /** The thread that ran each of these agent sessions (a Claude Code session, a Codex thread), where one did. */
+  threadsForSessions(sessionIds: readonly string[]): Map<string, string> {
+    const found = new Map<string, string>()
+    if (sessionIds.length === 0) return found
+    const rows = this.db
+      .statement(
+        `SELECT DISTINCT json_extract(a.provider_ref, '$.sessionId') AS session_id, r.thread_id AS thread_id
+           FROM run_attempts a JOIN runs r ON r.run_id = a.run_id
+          WHERE json_extract(a.provider_ref, '$.sessionId') IN (${sessionIds.map(() => '?').join(', ')})`
+      )
+      .all(...sessionIds)
+    for (const row of rows) found.set(String(row.session_id), String(row.thread_id))
+    return found
+  }
+
   listAttempts(runId: string): AttemptRecord[] {
     return this.db
       .statement('SELECT * FROM run_attempts WHERE run_id = ? ORDER BY ordinal')
@@ -657,8 +676,20 @@ function toRun(row: Row): RunRecord {
     completedAt: str(row.completed_at),
     outcome: json<RunOutcome>(row.outcome),
     heartbeatAt: str(row.heartbeat_at),
-    ...(isAgentAccessLevel(row.access_grant) ? { accessGrant: row.access_grant } : {})
+    ...(isAgentAccessLevel(row.access_grant) ? { accessGrant: row.access_grant } : {}),
+    ...ownerProofOf(row.owner_proof)
   }
+}
+
+/** A stored owner proof, kept only when it is exactly one (`decodeOwnerProof`). */
+function ownerProofOf(value: unknown): { ownerProof?: OwnerProof } {
+  let proof: OwnerProof | undefined
+  try {
+    proof = decodeOwnerProof(json<unknown>(value))
+  } catch {
+    // Unreadable is no proof.
+  }
+  return proof ? { ownerProof: proof } : {}
 }
 
 function toAttempt(row: Row): AttemptRecord {

@@ -1,0 +1,6 @@
+/* To-dos sits in a collapse wrapper that opens it when the thread has a list: the lines between it and the
+   sections beside it are drawn across that wrapper. */
+.side-card-section + .ui-collapse > .ui-collapse-clip > .side-card-todos > .side-card-section,
+.ui-collapse:has(> .ui-collapse-clip > .side-card-todos) + .side-card-section {
+  border-top: 1px solid var(--ui-line);
+}

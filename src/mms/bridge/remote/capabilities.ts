@@ -41,7 +41,9 @@ export const BRIDGE_REMOTE_METHODS = {
   'queue.reorder': { capability: 'chat', mutating: true },
   'queue.promoteToSteer': { capability: 'chat', mutating: true },
   // Disk usage totals by project, thread and kind: ids, names and byte counts only, never a path. Cached; a remote caller cannot force a rescan.
-  'storage.usage': { capability: 'read', mutating: false }
+  'storage.usage': { capability: 'read', mutating: false },
+  // Token and cost totals from the coding agents' logs on that computer: agents, models and numbers, never a path or log line.
+  'usage.history': { capability: 'read', mutating: false, ephemeral: true }
 } as const satisfies Record<string, { capability: NodeCapability; mutating: boolean; ephemeral?: boolean }>
 export type BridgeRemoteMethod = keyof typeof BRIDGE_REMOTE_METHODS
 /**
