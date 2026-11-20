@@ -8,7 +8,10 @@ import {
   type WallpaperBucket,
   type WallpaperPieceResult
 } from '../../shared/themes/wallpaperImage'
-import { contrastFloor, type Rgba } from './wallpaperContrast'
+import { contrastFloor, type Rgba, type SeeThrough } from './wallpaperContrast'
+
+/** How much of the wallpaper shows under acrylic, so the window's glass shows through it. */
+export const WALLPAPER_ACRYLIC_OPACITY = 0.55
 
 /**
  * A theme's wallpaper in this window. The daemon keeps the image (`WallpaperStore`); this window shows a copy sized for
@@ -26,8 +29,13 @@ export interface WallpaperLayer {
   url: string
   fit: ThemeWallpaper['fit']
   position: ThemeWallpaper['position']
-  /** The theme's background colour, resolved (`rgb(r g b)`), painted under the image and as its scrim. */
+  /** The theme's background colour, resolved (`rgb(r g b)`), painted under the image (when `opacity` is 1) and as its scrim. */
   base: string
+  /**
+   * How much of the layer shows, 0 to 1: 1 on a solid window, `WALLPAPER_ACRYLIC_OPACITY` under acrylic, where the layer
+   * has no solid colour under it and the window's glass shows through.
+   */
+  opacity: number
   /** How much of the scrim covers the image, 0 to 1: the theme's dim, raised when text needs it. */
   scrim: number
   /** The dim the theme asks for and the least that keeps text readable, both 0 to 1. */
@@ -231,10 +239,13 @@ function bucketNow(bridge: WallpaperBridge): Promise<number> {
   return displayLong
 }
 
-/** A colour the page uses, as RGBA: `var(--text-primary)` resolved by the browser, then read back through a canvas. */
+/**
+ * A colour the page uses, as RGBA: a token (`--text-primary`) or a CSS colour using tokens, resolved by the browser,
+ * then read back through a canvas.
+ */
 function resolvedColor(token: string, doc: Document): Rgba {
   const probe = doc.createElement('span')
-  probe.style.color = `var(${token})`
+  probe.style.color = token.startsWith('--') ? `var(${token})` : token
   probe.style.display = 'none'
   doc.body.appendChild(probe)
   const computed = getComputedStyle(probe).color
@@ -327,13 +338,20 @@ export function showWallpaper(profileId: string | null | undefined, wallpaper: T
     }
     const base = resolvedColor('--surface-base', doc)
     const texts = [resolvedColor('--text-primary', doc), resolvedColor('--text-secondary', doc)]
-    const floor = contrastFloor(copy.samples, { ...base, a: 1 }, texts)
+    // Under acrylic the layer is see-through: text sits on the image at that opacity over the window's tint, so the
+    // floor is measured against that, not against a solid base.
+    const acrylic = doc.documentElement.getAttribute('data-acrylic') === 'true'
+    const seeThrough: SeeThrough | undefined = acrylic
+      ? { opacity: WALLPAPER_ACRYLIC_OPACITY, backdrop: { ...resolvedColor('rgb(var(--acrylic-base-rgb, var(--surface-base-rgb)))', doc), a: 1 } }
+      : undefined
+    const floor = contrastFloor(copy.samples, { ...base, a: 1 }, texts, seeThrough)
     const dim = wallpaper.dim / 100
     placeLayer({
       url: copy.url,
       fit: wallpaper.fit,
       position: wallpaper.position,
       base: `rgb(${base.r} ${base.g} ${base.b})`,
+      opacity: seeThrough?.opacity ?? 1,
       scrim: Math.max(dim, floor),
       dim,
       floor
