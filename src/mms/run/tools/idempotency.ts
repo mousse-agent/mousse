@@ -58,7 +58,12 @@ export const NON_IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   'task_status',
   'task_cancel',
   'ask_user',
-  'queue_enqueue'
+  'queue_enqueue',
+  // Start, stop or hold background work of the thread (issue #1605).
+  'monitor_start',
+  'background_run',
+  'background_stop',
+  'keep_working'
 ])
 
 /**

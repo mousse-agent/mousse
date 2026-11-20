@@ -23,9 +23,9 @@ const BUSY_AGENT_STATUSES: ReadonlySet<AgentStatus> = new Set([
 
 /**
  * A live turn keeps its own state (Working, Waiting on a wait tool, or Input). Once it ends,
- * thread-owned agents, delegated tasks or provider background work (Claude's background agents and
- * shells) that are still running hold the thread in Waiting instead of Done, since they report back
- * to it.
+ * thread-owned agents, delegated tasks, provider background work (Claude's background agents and
+ * shells) or the thread's own monitors, background commands and `keep_working` holds that are still
+ * running hold the thread in Waiting instead of Done, since they report back to it.
  */
 export function deriveThreadActivity(
   turnActivity: ThreadActivityState,
@@ -58,6 +58,8 @@ export class ThreadRuntimeManager extends EventEmitter {
   private readonly pendingDelegations = new Set<string>()
   /** Threads whose provider still runs background work (Claude's agents and shells). */
   private readonly pendingBackgroundWork = new Set<string>()
+  /** Threads with a monitor, a background command or a `keep_working` hold running (`ThreadMonitors`). */
+  private readonly pendingMonitors = new Set<string>()
   private threadStore: ThreadDataStore | null = null
   private orchestrator: OrchestratorService | null = null
   private ptyManager: PtyManager | null = null
@@ -221,7 +223,7 @@ export class ThreadRuntimeManager extends EventEmitter {
 
   /** Whether the thread waits on delegated tasks, provider background work or a busy agent of its own. */
   waitsOnWork(threadId: string): boolean {
-    if (this.pendingDelegations.has(threadId) || this.pendingBackgroundWork.has(threadId)) return true
+    if (this.pendingDelegations.has(threadId) || this.pendingBackgroundWork.has(threadId) || this.pendingMonitors.has(threadId)) return true
     return Boolean(this.runtimes.get(threadId)?.agents.list().some((agent) => BUSY_AGENT_STATUSES.has(agent.status)))
   }
 
@@ -241,6 +243,14 @@ export class ThreadRuntimeManager extends EventEmitter {
     this.publishDerivedActivity(threadId, this.getOrHydrate(threadId))
   }
 
+  /** Whether the thread has monitors, background commands or a `keep_working` hold running; it shows Waiting meanwhile. */
+  setPendingMonitors(threadId: string, pending: boolean): void {
+    if (pending === this.pendingMonitors.has(threadId)) return
+    if (pending) this.pendingMonitors.add(threadId)
+    else this.pendingMonitors.delete(threadId)
+    this.publishDerivedActivity(threadId, this.getOrHydrate(threadId))
+  }
+
   private publishDerivedActivity(
     threadId: string,
     rt: ThreadRuntime,
@@ -250,7 +260,7 @@ export class ThreadRuntimeManager extends EventEmitter {
       this.turnActivity.get(threadId) ?? rt.activity,
       rt.agents.list(),
       this.pendingDelegations.has(threadId),
-      this.pendingBackgroundWork.has(threadId)
+      this.pendingBackgroundWork.has(threadId) || this.pendingMonitors.has(threadId)
     )
     if (!force && state === rt.activity) return
     if (state !== rt.activity) rt.setActivity(state)
@@ -369,6 +379,7 @@ export class ThreadRuntimeManager extends EventEmitter {
     this.turnActivity.delete(threadId)
     this.pendingDelegations.delete(threadId)
     this.pendingBackgroundWork.delete(threadId)
+    this.pendingMonitors.delete(threadId)
     this.unseenDone?.delete(threadId)
     this.lastUse.delete(threadId)
   }
@@ -386,7 +397,7 @@ export class ThreadRuntimeManager extends EventEmitter {
     if (this.orchestrator?.isTurnActive(threadId) || this.orchestrator?.isActiveTurnRunning(threadId)) return 'turn running'
     if (!this.activityRebuiltByRestart(threadId, rt.activity) || !this.activityRebuiltByRestart(threadId, this.turnActivity.get(threadId) ?? rt.activity))
       return 'activity shown'
-    if (this.pendingDelegations.has(threadId) || this.pendingBackgroundWork.has(threadId)) return 'waiting on work'
+    if (this.pendingDelegations.has(threadId) || this.pendingBackgroundWork.has(threadId) || this.pendingMonitors.has(threadId)) return 'waiting on work'
     if (rt.agents.list().some((agent) => BUSY_AGENT_STATUSES.has(agent.status))) return 'agent running'
     if (rt.tasks.list().some((task) => task.status === 'in_progress')) return 'task in progress'
     if (rt.ptyIds.size) return 'terminal open'

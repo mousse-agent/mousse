@@ -96,6 +96,7 @@ import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { steerReleaseWindow, steerStrategy, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { runningListText, runningNote, type RunningRegistry, type RunningScope, type RunningThreadInfo, type RunningViewer } from '../running/RunningRegistry'
+import type { MonitorSummary, ThreadMonitors } from '../monitors/ThreadMonitors'
 import { agentMessage, AppToolTurns, createAppToolRegistry, holdsPerson, type AgentAccessResult, type LacksReport, McpToolError, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, lineageRelation } from '../run/mcp/appTools/thread'
@@ -1929,6 +1930,19 @@ export class OrchestratorService extends EventEmitter {
     this.running = running
   }
 
+  /** What threads' agents left running in the background (`monitor_start`, `background_run`, `keep_working`). */
+  private monitors: ThreadMonitors | null = null
+
+  setMonitors(monitors: ThreadMonitors | null): void {
+    this.monitors = monitors
+  }
+
+  /** The thread's background work at a glance (counts and the latest event), or undefined when nothing runs. */
+  monitorSummary(threadId: string): MonitorSummary | undefined {
+    if (!this.monitors?.has(threadId)) return undefined
+    return this.monitors.summary(threadId)
+  }
+
   /**
    * The folders a turn works in and whose running list it gets: a thread's own folder and its project's; a bot's files
    * folder and the activation's scratch folder. Subagents sharing their parent's folder get the parent's list.
@@ -1956,7 +1970,12 @@ export class OrchestratorService extends EventEmitter {
     const { scope, viewer } = this.runningScope(turn)
     const entries = await running.list(scope)
     const sources = this.runningSources()
-    return kind === 'note' ? runningNote(entries, viewer, sources, Date.now()) : runningListText(entries, viewer, sources, Date.now())
+    const text = kind === 'note' ? runningNote(entries, viewer, sources, Date.now()) : runningListText(entries, viewer, sources, Date.now())
+    // Its WebSocket monitors and keep_working holds run no process, so the list above cannot show them.
+    const own = turn.bot ? [] : (this.monitors?.list(turn.threadId) ?? []).filter((view) => view.kind === 'url' || view.kind === 'keep_working')
+    if (!own.length) return text
+    const lines = own.map((view) => `- ${view.kind === 'url' ? `WebSocket monitor ${view.id}: ${view.description} (${view.url})` : `keep_working hold ${view.id}: ${view.description}`}, until ${view.until}`)
+    return [text, 'Also running for this thread (background_stop stops one by its id):', ...lines].filter(Boolean).join('\n')
   }
 
   /** The turn's running note, given up after `RUNNING_NOTE_BUDGET_MS` so a slow process listing never holds the turn. */
@@ -3974,17 +3993,21 @@ export class OrchestratorService extends EventEmitter {
       // Without a run engine there is only the local turn and its queue.
       const ended = this.endFolderWaits([threadId])
       this.endTurnSetups([threadId])
+      const monitorsStopped = this.stopMonitors([threadId], reason) > 0
       const aborted = this.abortActiveTurn(threadId, { clearQueue: opts.clearQueue })
       if (aborted) this.showStopped(threadId, stoppedBy)
-      return { ok: aborted || ended || compactionStopped, status: 'stopped', replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
+      return { ok: aborted || ended || compactionStopped || monitorsStopped, status: 'stopped', replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
     }
     const result = engine.stopSubtree({ threadId, reason, ...opts })
     if (result.status !== 'stopped') return { ok: false, ...result }
     // Work still waiting for its folder's volume (a pending macOS permission prompt) never starts, nor does a turn still
     // waiting to be set up (its repository held by another operation).
+    // And what they left running in the background (monitors, background commands, keep_working holds).
+    let monitorsStopped = 0
     if (!result.replayed) {
       this.endFolderWaits(result.threads)
       this.endTurnSetups(result.threads)
+      monitorsStopped = this.stopMonitors(result.threads, reason)
     }
     // The Stop is recorded (every thread of the subtree has a higher generation): a pull request watch on any of them ends now.
     this.emit('threads-stopped', { threadIds: [...result.threads] })
@@ -4045,8 +4068,26 @@ export class OrchestratorService extends EventEmitter {
       // And the threads they launched on other computers, there (kept until it is delivered).
       this.stopRemoteLaunches(result.threads, reason === 'deleted' || reason === 'expired' ? reason : 'stopped')
     }
-    const stoppedAnything = aborted || compactionStopped || worked.some(Boolean) || result.activeRuns.length + result.cancelledRuns.length + result.delegations.length > 0
+    const stoppedAnything = aborted || compactionStopped || monitorsStopped > 0 || worked.some(Boolean) || result.activeRuns.length + result.cancelledRuns.length + result.delegations.length > 0
     return { ok: stoppedAnything, ...result }
+  }
+
+  /**
+   * Ends the monitors, background commands and `keep_working` holds of stopped threads. Each thread is told with its next
+   * turn (a Stop never wakes it); a deleted thread is told nothing. How many ended.
+   */
+  private stopMonitors(threadIds: readonly string[], reason: string): number {
+    const monitors = this.monitors
+    if (!monitors) return 0
+    let stopped = 0
+    for (const id of threadIds) {
+      try {
+        stopped += monitors.stopThread(id, reason !== 'thread_deleted' && reason !== 'deleted')
+      } catch (error) {
+        console.warn('a stopped thread\'s monitors could not be stopped', { threadId: id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return stopped
   }
 
   /**
@@ -4684,6 +4725,7 @@ export class OrchestratorService extends EventEmitter {
       skills: () => this.skillsRegistry,
       quickActions: new QuickActionTools(questionApproval(this.questions), (action) => this.emit('quick-action-created', action)),
       running: (turn) => this.runningText(turn, 'list'),
+      monitors: () => this.monitors ?? undefined,
       web: new WebTools(this.providerAuth.credentials),
       devGui: new DevGuiTools(),
       // The git app tools read the project through their own scoped Git read (`git/scopedRead`).

@@ -102,6 +102,8 @@ import { TaskQueue } from './tasks/TaskQueue'
 import { WorktreeManager } from './worktree/WorktreeManager'
 import { PtyManager } from './terminals/PtyManager'
 import { RunningRegistry } from './running/RunningRegistry'
+import { ThreadMonitors } from './monitors/ThreadMonitors'
+import { postNote } from './run/mcp/appTools/threadNotes'
 import { McpRegistry } from './integrations/mcp/McpRegistry'
 import { McpManager } from './integrations/mcp/McpManager'
 import { SkillsRegistry } from './integrations/skills/SkillsRegistry'
@@ -1012,10 +1014,22 @@ export class MmsProfileServices {
       const row = botStore.registry(botId)
       return Boolean(row && !row.deletedAt && !row.pausedReason && botStore.activeGrant(botId)?.manifest.appTools.includes(BOT_COMPUTER_PERMISSION))
     } : null)
+    // What threads' agents leave running in the background (#1605). Its notices go to the thread's inbox, the path
+    // agents' notes take; a restart tells each thread whose monitors it ended, once the daemon is ready.
+    const runEngine = this.runEngine
+    const monitors = new ThreadMonitors({
+      post: (threadId, payload, key) => { postNote(runEngine, key, payload, threadId) },
+      working: (threadId, active) => this.threadRuntimes?.setPendingMonitors(threadId, active),
+      recordFile: join(this.homeDir, 'monitors.json'),
+      threadExists: (threadId) => Boolean(this.threads.getThread(threadId))
+    })
+    this.monitors = monitors
+    this.orchestrator.setMonitors(monitors)
     this.orchestrator.setRunning(new RunningRegistry({
       terminals: () => ptys.runningTerminals(),
       terminalOutput: (ptyId) => ptys.getScrollback(ptyId).slice(-8_000),
       watchers: () => personalBots?.runningWatchers() ?? [],
+      monitors: () => monitors.processes(),
       thread: (threadId) => orchestrator.runningSources().thread(threadId),
       botName: (botId) => personalBots?.botName(botId)
     }))
@@ -2109,6 +2123,8 @@ export class MmsProfileServices {
   /** Bug reports: filing, the reports filed from here, and agents' drafts waiting for the person. */
   bugReports!: BugReportService
   private secretSweepTimer: ReturnType<typeof setInterval> | null = null
+  /** Threads' monitors, background commands and `keep_working` holds. */
+  readonly monitors: ThreadMonitors
   automationDrafts!: AutomationDrafts
 
   /** The project the composer picked for the manager's next turns (see `automationManagerWorkspace`). */
@@ -2391,6 +2407,7 @@ export class MmsProfileServices {
     this.secretSweepTimer = null
     this.secretRequests?.dispose()
     this.bugReports?.dispose()
+    this.monitors.close()
     this.webhooksClosed = true
     if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
     this.webhookRetryTimer = null
@@ -2679,6 +2696,10 @@ export class MmsProfileServices {
     // Wake rows of a kind no longer written (an earlier pull request watch's) are settled before any worker can run one.
     this.runEngine.inbox.withdrawRetiredRows()
     this.startRunEngineWorkers()
+    // Monitors the last run left ended with it: their threads are told, in the background.
+    void this.monitors.recoverOnBoot().catch((error: unknown) => {
+      console.warn('monitors left by the last run could not be reported', { error: error instanceof Error ? error.message : String(error) })
+    })
 
     if (this.config.getScheduledSection().enabled) {
       // Bot schedules are jobs in the same scheduler: with it off, nothing starts on its own.
