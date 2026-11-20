@@ -4,6 +4,7 @@ import { ACTIVITY_DESCRIPTION_CHARS, isAcpSubagentTool, type ProviderToolEvent }
 import type { PermissionMode } from '../../../shared/permissionMode'
 import type { LlmModelOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
+import { IMAGE_MAX_DATA_CHARS } from '../../../shared/imageLimits'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { harnessAppError } from '../../../shared/harness/types'
 import { compareVersions } from '../../../shared/net/version'
@@ -121,10 +122,10 @@ interface DrainedSteer {
   images?: ChatImageAttachment[]
 }
 
-/** An image as an ACP image block, or undefined when agents are not sent it (BMP, JPEG, PNG or WebP up to 10 MiB). */
+/** An image as an ACP image block, or undefined when agents are not sent it (BMP, JPEG, PNG or WebP within `IMAGE_MAX_DATA_CHARS`). */
 function acpImageBlock(image: ChatImageAttachment): { type: 'image'; data: string; mimeType: string } | undefined {
   const mimeType = image.mimeType.toLowerCase()
-  if (!['image/bmp', 'image/jpeg', 'image/png', 'image/webp'].includes(mimeType) || Buffer.byteLength(image.data, 'base64') > 10 * 1024 * 1024) return undefined
+  if (!['image/bmp', 'image/jpeg', 'image/png', 'image/webp'].includes(mimeType) || image.data.length > IMAGE_MAX_DATA_CHARS) return undefined
   return { type: 'image', data: image.data, mimeType }
 }
 

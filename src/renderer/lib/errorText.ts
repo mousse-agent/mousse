@@ -2,6 +2,7 @@ import { COMPUTER_ERROR_CODES } from '../../shared/bridge/computerErrors'
 import { HARNESS_ERROR_CODES } from '../../shared/harness/types'
 import { PROVIDER_INSTANCE_ERROR_CODES } from '../../shared/providerInstances'
 import { SERVICE_ANSWERED_LATE, SERVICE_STOPPED_ANSWERING } from '../../shared/errors'
+import { SIZE_ERROR_CODES } from '../../shared/imageLimits'
 
 /** The message of a thrown value, whatever its type. */
 export function errorText(error: unknown): string {
@@ -113,6 +114,7 @@ const PLAIN_CODES = new Set<string>([
   ...HARNESS_ERROR_CODES,
   ...Object.values(PROVIDER_INSTANCE_ERROR_CODES),
   ...COMPUTER_ERROR_CODES,
+  ...SIZE_ERROR_CODES,
   'permission_mode_above_ceiling',
   'workflow_not_available_remotely'
 ])
@@ -121,8 +123,13 @@ const PLAIN_CODES = new Set<string>([
  * A failed send as the composer shows it: the message, prefixed with its code (`[code] …`) except
  * for provider errors, whose messages already say what happened and what to do next.
  */
+const OLD_IMAGE_SIZE_REFUSAL = /^(images|attachments\.[^\s]+)\[\d+\]\.data exceeds max size$/
+const OLD_IMAGE_SIZE_LINE = 'An image is too large for the Mousse running this thread. Update Mousse there, or attach a smaller image.'
+
 export function sendErrorLine(error: unknown): string {
   if (!error || typeof error !== 'object' || !('message' in error) || typeof error.message !== 'string') return 'The send failed. Please try again.'
   const code = 'code' in error && error.code !== undefined ? String(error.code) : ''
+  // A service from before larger images (another computer not yet updated) refuses one with its raw check.
+  if (code === 'invalid_params' && OLD_IMAGE_SIZE_REFUSAL.test(error.message)) return OLD_IMAGE_SIZE_LINE
   return code && !PLAIN_CODES.has(code) ? `[${code}] ${error.message}` : error.message
 }

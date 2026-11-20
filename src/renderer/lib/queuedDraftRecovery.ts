@@ -25,7 +25,8 @@ export function restoreQueuedDraft(
   for (const element of parts.browserElements) {
     store.addBrowserElementAttachment(threadId, { ...element, id: crypto.randomUUID(), text: element.text ?? '' })
   }
-  const images = (recovered.images ?? []).map((image): AttachedFile => {
+  // A large queued image comes by name only (the queue's preview budget); the message that started carries it.
+  const images = (recovered.images ?? []).filter((image) => image.data).map((image): AttachedFile => {
     const file = imagePayloadToFile(image)
     return { id: crypto.randomUUID(), file, previewUrl: URL.createObjectURL(file) }
   })

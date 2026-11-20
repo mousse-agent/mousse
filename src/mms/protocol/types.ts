@@ -1,5 +1,6 @@
 import { KEEP_AWAKE_CAPABILITY } from '../../shared/keepAwake'
 import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
+import { IMAGE_MAX_DATA_CHARS, MESSAGE_IMAGES_MAX_DATA_CHARS, MESSAGE_MAX_IMAGES } from '../../shared/imageLimits'
 /**
  * Versioned MMS local protocol envelopes (transport-independent).
  * No Electron imports.
@@ -8,6 +9,12 @@ import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
 import type { BrowserWorkerRequest, BrowserWorkerResponse } from '../../shared/browser/types'
 
 export const MMS_PROTOCOL_CHUNK_CAPABILITY = 'envelope-chunks.v1'
+/**
+ * The client may send a request larger than one frame as envelope chunks (the same `envelope_chunk` frames the
+ * service sends), up to `MMS_PROTOCOL_MAX_ENVELOPE_BYTES`. A client sends chunks only to a service that advertised
+ * this, so an older service never receives one.
+ */
+export const MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY = 'envelope-chunks-inbound.v1'
 export const MMS_PROTOCOL_CHUNK_BYTES = 256 * 1024
 export const MMS_PROTOCOL_MAX_ENVELOPE_BYTES = 32 * 1024 * 1024
 /**
@@ -47,9 +54,11 @@ export const MMS_PROTOCOL_MAX_METHOD_LENGTH = 96
 export const MMS_PROTOCOL_MAX_TEXT_LENGTH = 512 * 1024
 export const MMS_PROTOCOL_MAX_OWNER_TOKEN_LENGTH = 256
 export const MMS_PROTOCOL_MAX_ORDERED_IDS = 10_000
-export const MMS_PROTOCOL_MAX_IMAGES = 16
-/** Base64 image data length bound (well under max frame). */
-export const MMS_PROTOCOL_MAX_IMAGE_DATA_CHARS = 3 * 1024 * 1024
+export const MMS_PROTOCOL_MAX_IMAGES = MESSAGE_MAX_IMAGES
+/** Base64 characters in one image. A request past one frame goes in chunks (`MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY`). */
+export const MMS_PROTOCOL_MAX_IMAGE_DATA_CHARS = IMAGE_MAX_DATA_CHARS
+/** Base64 characters in all of one message's images. */
+export const MMS_PROTOCOL_MAX_MESSAGE_IMAGE_DATA_CHARS = MESSAGE_IMAGES_MAX_DATA_CHARS
 /** Outstanding reverse commands on one authenticated connection. */
 export const MMS_PROTOCOL_MAX_CONNECTION_COMMANDS = 8
 /** Outstanding reverse commands across the daemon. */
@@ -533,6 +542,7 @@ export const PROTOCOL_CAPABILITIES = [
   KEEP_AWAKE_CAPABILITY,
   BOT_TELLING_CAPABILITY,
   MMS_PROTOCOL_CHUNK_CAPABILITY,
+  MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY,
   'errors.v1',
   'health',
   'projects',

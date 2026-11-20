@@ -5,6 +5,7 @@
  */
 
 import { cursorAt, cursorIndex } from '../../shared/pageCursor'
+import { IMAGE_PREVIEW_DATA_CHARS } from '../../shared/imageLimits'
 
 interface Identified {
   id: string
@@ -130,6 +131,22 @@ export function keepImagesWithin<T extends WithImages>(message: T, remaining: nu
     }
   }
   return { message: { ...message, images }, remaining }
+}
+
+/**
+ * Messages or queued messages as a window is sent them in one update: image data kept while `budget` base64
+ * characters last, in order, and each image past it reduced to its name and type (fetched with `thread.messageImage`
+ * by its `messageId` or `queueItemId`). A queue goes out whole on every change, and a message with large images goes
+ * to every window and into the replay ring, so each update stays small however large the images are.
+ */
+export function withImageBudget<T extends WithImages>(items: readonly T[], budget = IMAGE_PREVIEW_DATA_CHARS): T[] {
+  let remaining = budget
+  return items.map((item) => {
+    if (!Array.isArray(item?.images) || !item.images.length) return item
+    const kept = keepImagesWithin(item, remaining)
+    remaining = kept.remaining
+    return kept.message
+  })
 }
 
 /** The message with each image reduced to its name and type; the data is fetched with `thread.messageImage`. */

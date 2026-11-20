@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { FrameDecodeError, encodeFrame } from './framing'
-import { MMS_PROTOCOL_CHUNK_BYTES, MMS_PROTOCOL_MAX_ENVELOPE_BYTES, type ProtocolEnvelopeChunk } from './types'
+import { MMS_PROTOCOL_CHUNK_BYTES, MMS_PROTOCOL_MAX_ENVELOPE_BYTES, MMS_PROTOCOL_MAX_FRAME_BYTES, type ProtocolEnvelopeChunk } from './types'
 
 /** Chunk bytes rather than JS characters so Unicode survives every boundary. */
 export function *envelopeFrames(body: Buffer, chunked: boolean): Generator<Buffer> {
@@ -15,6 +15,20 @@ export function *envelopeFrames(body: Buffer, chunked: boolean): Generator<Buffe
     yield encodeFrame({ kind: 'envelope_chunk', transferId, index, totalBytes: body.length,
       data: body.subarray(offset, offset + MMS_PROTOCOL_CHUNK_BYTES).toString('base64') })
   }
+}
+
+/**
+ * The frames a client sends for `value`: one frame when it fits, its chunks when it does not and the service takes
+ * chunked requests (`chunked`, `MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY`), up to one envelope. Past that, how large it
+ * is and the most that could have been sent.
+ */
+export function requestFrames(value: unknown, chunked: boolean): { frames: Buffer[] } | { tooLarge: { bytes: number; max: number } } {
+  const body = Buffer.from(JSON.stringify(value), 'utf-8')
+  if (body.length <= MMS_PROTOCOL_MAX_FRAME_BYTES) return { frames: [...envelopeFrames(body, false)] }
+  if (!chunked || body.length > MMS_PROTOCOL_MAX_ENVELOPE_BYTES) {
+    return { tooLarge: { bytes: body.length, max: chunked ? MMS_PROTOCOL_MAX_ENVELOPE_BYTES : MMS_PROTOCOL_MAX_FRAME_BYTES } }
+  }
+  return { frames: [...envelopeFrames(body, true)] }
 }
 
 export class EnvelopeAssembler {

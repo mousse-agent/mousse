@@ -18,6 +18,7 @@ import type {
 } from '../../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../../shared/settings'
 import type { ChatImageAttachment } from '../../../../shared/types'
+import { providerTakesImage } from '../../../../shared/imageLimits'
 import { mousseVersion } from '../../../appVersion'
 import { killTree } from '../../spawn'
 import { cliNames, codexStandalonePaths, findOnPath, withEnforced } from '../../env'
@@ -498,9 +499,9 @@ interface DrainedSteer {
   images?: ChatImageAttachment[]
 }
 
-/** The images Codex takes: JPEG, PNG, GIF or WebP up to 10 MiB. */
+/** The images Codex takes: JPEG, PNG, GIF or WebP within the per-image size (`shared/imageLimits.ts`). */
 function codexTakesImage(image: ChatImageAttachment): boolean {
-  return ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) && Buffer.byteLength(image.data, 'base64') <= 10 * 1024 * 1024
+  return providerTakesImage(image)
 }
 
 function codexImageInput(image: ChatImageAttachment): UserInput {

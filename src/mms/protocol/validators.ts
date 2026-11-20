@@ -12,6 +12,7 @@ import { PROVIDER_DRIVER_KINDS, type ModelOverride } from '../../shared/provider
 import { upgradeSelection } from '../../shared/modelSelection'
 import { MAX_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
 import { MAX_GOAL_TURN_LIMIT } from '../../shared/threadGoal'
+import { isInlineImageMimeType } from '../../shared/imageLimits'
 import { isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import {
   RESERVED_AGENT_IDS,
@@ -41,6 +42,7 @@ import {
   PROTOCOL_CONNECTION_EVENT_TYPES,
   MMS_PROTOCOL_MAX_IMAGE_DATA_CHARS,
   MMS_PROTOCOL_MAX_IMAGES,
+  MMS_PROTOCOL_MAX_MESSAGE_IMAGE_DATA_CHARS,
   MMS_PROTOCOL_MAX_METHOD_LENGTH,
   MMS_PROTOCOL_MAX_ORDERED_IDS,
   MMS_PROTOCOL_MAX_OWNER_TOKEN_LENGTH,
@@ -376,6 +378,11 @@ function invalidParams(message: string) {
   return knownAppError({ code: 'invalid_params', message }, { category: 'invalid', retryable: false })
 }
 
+/** An image, or a message's images together, past what a message may carry (`shared/imageLimits.ts`). */
+function imageTooLarge(message: string, image?: string) {
+  return knownAppError({ code: 'image_too_large', message, ...(image ? { details: { image } } : {}) }, { category: 'invalid', retryable: false })
+}
+
 /** Validate ChatMode from untrusted input. */
 export function asChatMode(v: unknown, name = 'mode'): ChatMode {
   if (typeof v === 'string') {
@@ -405,6 +412,7 @@ export function asChatImages(v: unknown, name = 'images'): ChatImageAttachment[]
     throw invalidParams(`${name} exceeds max ${MMS_PROTOCOL_MAX_IMAGES} images`)
   }
   const out: ChatImageAttachment[] = []
+  let total = 0
   for (let i = 0; i < v.length; i++) {
     const item = v[i]
     if (!isObject(item)) throw invalidParams(`${name}[${i}] must be an object`)
@@ -416,11 +424,22 @@ export function asChatImages(v: unknown, name = 'images'): ChatImageAttachment[]
       throw invalidParams(`${name}[${i}].mimeType must be a non-empty string`)
     }
     if (item.mimeType.length > 128) throw invalidParams(`${name}[${i}].mimeType too long`)
+    // Refused here, before the message is saved, rather than by the provider once its turn has started.
+    if (!isInlineImageMimeType(item.mimeType)) {
+      throw knownAppError(
+        { code: 'image_unsupported', message: `${item.name} is not a JPEG, PNG, GIF or WebP image.`, details: { image: item.name } },
+        { category: 'invalid', retryable: false }
+      )
+    }
     if (typeof item.data !== 'string' || !item.data) {
       throw invalidParams(`${name}[${i}].data must be a non-empty string`)
     }
     if (item.data.length > MMS_PROTOCOL_MAX_IMAGE_DATA_CHARS) {
-      throw invalidParams(`${name}[${i}].data exceeds max size`)
+      throw imageTooLarge(`${item.name} is larger than one image may be.`, item.name)
+    }
+    total += item.data.length
+    if (total > MMS_PROTOCOL_MAX_MESSAGE_IMAGE_DATA_CHARS) {
+      throw imageTooLarge('These images are larger together than one message may carry.')
     }
     out.push({ name: item.name, mimeType: item.mimeType, data: item.data })
   }
@@ -1143,11 +1162,14 @@ export function asOptionalAnswerAttachments(v: unknown): Record<string, ChatImag
   // No prototype: a question id such as `constructor` is an ordinary key here.
   const out = Object.create(null) as Record<string, ChatImageAttachment[]>
   let total = 0
+  let chars = 0
   for (const key of keys) {
     if (!key || key.length > 256) throw invalidParams('attachments key must be a question id')
     const images = asChatImages(o[key], `attachments.${key}`)
     total += images.length
     if (total > MMS_PROTOCOL_MAX_IMAGES) throw invalidParams(`attachments exceed max ${MMS_PROTOCOL_MAX_IMAGES} images`)
+    for (const image of images) chars += image.data.length
+    if (chars > MMS_PROTOCOL_MAX_MESSAGE_IMAGE_DATA_CHARS) throw imageTooLarge('These images are larger together than one message may carry.')
     if (images.length) out[key] = images
   }
   return Object.keys(out).length ? out : undefined
