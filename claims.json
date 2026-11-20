@@ -329,6 +329,21 @@
       ],
       "claimedAt": "2026-11-20T13:22:30.652Z",
       "expiresAt": "2026-11-20T17:42:44.687Z"
+    },
+    {
+      "task": "turn-boundary-timing",
+      "session": "Animatrix-e756fc",
+      "machine": "Animatrix",
+      "branch": "turn-boundary-timing",
+      "paths": [
+        "src/mms/diagnostics",
+        "src/mms/orchestrator/OrchestratorService.ts",
+        "src/mms/git",
+        "src/mms/actions/git.ts",
+        "src/mms/actions/snapshots.ts"
+      ],
+      "claimedAt": "2026-11-20T13:54:40.793Z",
+      "expiresAt": "2026-11-20T15:54:40.793Z"
     }
   ]
 }
