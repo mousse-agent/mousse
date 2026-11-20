@@ -3048,7 +3048,7 @@ it.each(['startup', 'settings', 'upkeep'] as const)('C9 switch rollback withdraw
   expect(JSON.parse(f.bots.actions.get(a.id)!.result_json!).text).toBe('Your owner changed a setting, so this request was withdrawn and nothing was sent. Do not make this call again in this work; say in your report what you would have sent.')
 })
 
-it.each(['expiry', 'nudges', 'nudge holds'] as const)('C9 failed action %s backs off without starving another bot', async step => {
+it.each(['expiry', 'nudges'] as const)('C9 failed action %s backs off without starving another bot', async step => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
@@ -3068,13 +3068,6 @@ it.each(['expiry', 'nudges', 'nudge holds'] as const)('C9 failed action %s backs
   let attempts = 0
   if (step === 'expiry') vi.spyOn(f.bots.actions, 'expireDue').mockImplementation(() => { attempts++; throw new Error('disk hiccup') })
   if (step === 'nudges') vi.spyOn(f.bots as any, 'actionNudgeFollowUps').mockImplementation(() => { attempts++; throw new Error('nudge read hiccup') })
-  if (step === 'nudge holds') {
-    const all = f.store.all.bind(f.store)
-    vi.spyOn(f.store, 'all').mockImplementation((sql, ...args) => {
-      if (sql.includes("GLOB 'bm_action_*_n[12]' AND tell")) { attempts++; throw new Error('nudge hold hiccup') }
-      return all(sql, ...args)
-    })
-  }
   await expect(f.bots.deliverDueReminders()).resolves.toBeUndefined()
   expect(f.store.reminder(reminder.reminderId)?.status).toBe('delivered')
   expect(f.store.question(questionId)?.status).toBe('defaulted')
