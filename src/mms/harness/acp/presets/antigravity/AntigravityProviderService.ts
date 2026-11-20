@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { methods, type NewSessionResponse } from '@agentclientprotocol/sdk'
 import type { CliProviderConfig, CliProviderConfigPatch, ConfiguredProvider, ProviderLoginOption, ProviderLoginResult } from '../../../../../shared/providerAuth'
@@ -6,12 +7,12 @@ import type { LlmModelOption, LlmProviderOption } from '../../../../../shared/se
 import { ANTIGRAVITY_INSTANCE_ID } from '../../../../../shared/providerInstances'
 import type { UserQuestionService } from '../../../../orchestrator/UserQuestionService'
 import { atomicWriteJsonSync } from '../../../../data/AtomicFs'
-import { compareVersions } from '../../../driver'
+import { compareVersions, type RuntimeUsage } from '../../../driver'
 import { agyStandalonePaths, cliNames, findOnPath } from '../../../env'
 import { isAuthRequired } from '../../auth'
 import type { AcpConnectionFactory } from '../../connection'
 import { modelOptions } from '../../models'
-import { ANTIGRAVITY_AUTH_METHOD, ANTIGRAVITY_LABEL, ANTIGRAVITY_QUIRKS, antigravityConnectionFactory, forwardAntigravityCallback, type AntigravityRuntimeChoice } from '../antigravity'
+import { ANTIGRAVITY_APP_DATA_DIR, ANTIGRAVITY_AUTH_METHOD, ANTIGRAVITY_LABEL, ANTIGRAVITY_QUIRKS, antigravityConnectionFactory, forwardAntigravityCallback, scrubbedAntigravityEnv, type AntigravityRuntimeChoice } from '../antigravity'
 import { keepOption } from '../../permissions'
 import { AcpSessions, type AcpChatInput, type AcpProcess, type SavedAcpSession } from '../../session'
 import type { LoginSession } from '../../../../providers/LoginSession'
@@ -21,6 +22,7 @@ import { directLaunch } from '../../../resolveWindowsShim'
 import { ANTIGRAVITY_RELEASE, antigravityInstallState, cancelAntigravityInstall, installedAntigravityBinary, manualAntigravityRuntime, onAntigravityInstallEvent, runSharedAntigravityInstall, type AntigravityInstallProgress } from './installation'
 import { activeNativeRuntime, installNativeAntigravity, readVendorFeed, type NativeRuntime, type NativeVerifier } from './nativeInstall'
 import { NATIVE_FEED_BASE, NATIVE_MIN_VERSION, WITHDRAWN_NATIVE_VERSIONS, nativeReleaseRefusal, nativeTarget, parseVendorFeed, type NativeRelease, type NativeTarget } from './nativeRelease'
+import { AgyUsageTurnError, agyUsageRefusal, parseAgyUsage, runAgy, type AgyRunner } from './usage'
 
 /** The 1.1.1 ACP server's version, as Mousse reports it. */
 const LEGACY_VERSION = ANTIGRAVITY_RELEASE.replace(/^agy_acp_server_/, '')
@@ -57,6 +59,8 @@ type ProfileSettings = {
   sessions?: Record<string, SavedAcpSession>
   /** The runtime `sessions` were opened on (absent: the 1.1.1 server). Another runtime starts them anew. */
   sessionsRuntime?: AntigravityRuntimeChoice['kind']
+  /** The `agy` whose limits reply reported a turn: its limits are not read again. */
+  usageStopped?: { binary: string; version: string }
 }
 const NOT_INSTALLED_MESSAGE = 'Install Antigravity first, then sign in'
 const SIGN_IN_REQUIRED_MESSAGE = 'Sign in to Antigravity in Settings before chatting'
@@ -78,6 +82,8 @@ export interface AntigravityServiceOptions {
   findUserAgy?: () => string | undefined
   /** Test seam: use the gateway's lookup (`useAgyFinder`) under test too, as it is used in production. */
   gatewayLookupUnderTest?: boolean
+  /** Test seam: runs `agy -p /usage` (the process boundary of the limits read). */
+  runAgy?: AgyRunner
   /** Test seams for Mousse's own `agy`: the target, the network, the start-up check and the clock. */
   native?: {
     target?: NativeTarget
@@ -119,6 +125,8 @@ export class AntigravityProviderService {
   private agyFinder?: () => string | undefined
   /** A running check of whether `agy` is already signed in. */
   private signInCheck?: Promise<boolean>
+  /** A running limits read: page reads that arrive meanwhile share it. */
+  private usageReading?: Promise<RuntimeUsage>
   /** Clients are told through these hooks, set by the profile services. */
   readonly hooks: { changed?: () => void; installProgress?: (message: string) => void } = {}
 
@@ -523,6 +531,51 @@ export class AntigravityProviderService {
       this.notifyChanged()
     }
   }
+  /**
+   * The account's plan limits, as `agy -p /usage --output-format json` reports them: the same `agy`
+   * and the same folders as Mousse's runs, so it answers for the same sign-in on every system (on
+   * Linux without D-Bus, `agy` keeps the sign-in in a file under those folders). Only when the usage
+   * page asks; `agy` itself asks Google. Refused below `AGY_USAGE_MIN_VERSION`, where `/usage` would
+   * run a turn, and never again for an `agy` whose reply reported one.
+   */
+  usage(signal: AbortSignal): Promise<RuntimeUsage> {
+    this.usageReading ??= this.readUsage(signal).finally(() => { this.usageReading = undefined })
+    return this.usageReading
+  }
+
+  private async readUsage(signal: AbortSignal): Promise<RuntimeUsage> {
+    const runtime = this.runtime()
+    if (!runtime) throw new Error(NOT_INSTALLED_MESSAGE)
+    if (runtime.kind !== 'native') return { status: 'unavailable', windows: [], message: 'Google\'s 1.1.1 ACP server reports no limits. Run agy to see them.' }
+    const env = withUserEnv(scrubbedAntigravityEnv(process.env), storedCliEnv(this.launchSettings()))
+    const managed = this.managedRuntime()
+    const version = managed?.path === runtime.binary ? managed.version : await this.versions.version(directLaunch(runtime.binary), env)
+    const refusal = agyUsageRefusal(version)
+    if (refusal) throw new Error(refusal)
+    const stopped = this.settings.usageStopped
+    if (stopped && stopped.binary === runtime.binary && stopped.version === version) throw new AgyUsageTurnError()
+    const geminiHome = join(this.profileDir, 'gemini-home')
+    const cwd = join(this.profileDir, 'usage')
+    const temp = join(this.profileHome, 'antigravity-tmp', randomUUID())
+    for (const dir of [geminiHome, cwd, temp]) mkdirSync(dir, { recursive: true, mode: 0o700 })
+    env.GEMINI_HOME = geminiHome
+    if (process.platform === 'win32') { env.TEMP = temp; env.TMP = temp } else env.TMPDIR = temp
+    try {
+      // Root flags take underscores under `-p`; `agy acp` takes the same folders with hyphens.
+      const stdout = await (this.options.runAgy ?? runAgy)(runtime.binary,
+        ['--gemini_dir', geminiHome, '--app_data_dir', ANTIGRAVITY_APP_DATA_DIR, '-p', '/usage', '--output-format', 'json'], { env, cwd, signal })
+      return parseAgyUsage(stdout)
+    } catch (error) {
+      if (error instanceof AgyUsageTurnError && version) {
+        this.settings.usageStopped = { binary: runtime.binary, version }
+        this.save()
+      }
+      throw error
+    } finally {
+      rmSync(temp, { recursive: true, force: true })
+    }
+  }
+
   /** The executable path, launch args and environment set in Settings → Providers. */
   async cliConfig(): Promise<CliProviderConfig> {
     const install = this.installState()

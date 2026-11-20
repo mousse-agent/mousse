@@ -57,6 +57,22 @@ profile share it. Mousse never reads the credentials itself.
 - Antigravity's personal Google sign-in still runs only messages its owner sends
   (`src/mms/harness/ownerOnly.ts`), whichever executable runs.
 
+## Limits on the Usage page
+
+The Usage page shows each quota pool's five-hour and weekly windows (Gemini; Claude and GPT; Gemini 4
+Argon), with what is left and when each resets. Mousse reads them by running the same `agy` as its
+turns, with the same folders, as `agy --gemini_dir … --app_data_dir antigravity-acp -p /usage
+--output-format json`, without a shell (a shell such as Git Bash rewrites `/usage` into a path).
+`agy` answers from its own command, with no model turn, in about 9 s; `agy` itself asks Google.
+
+- Only when the Usage page asks, within its deadline; reads that arrive together share one run.
+  Never at start-up, and never in the background: the window ids are per pool, so the background
+  limit reads, which keep only a provider's single five-hour and weekly trend, never pick it up.
+- An `agy` older than 1.1.11 is never asked: it takes `/usage` as a prompt and runs a turn.
+- A reply that reports a turn (`num_turns` other than 0) stops all reading for that `agy` version,
+  kept across restarts, and the page shows the error.
+- The 1.1.1 server reports no limits.
+
 ## Threads across a switch
 
 Saved sessions are tagged with the runtime they were opened on. A session from the other runtime is
