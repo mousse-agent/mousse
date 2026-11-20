@@ -29,7 +29,6 @@ export async function selectThread(threadId: string): Promise<void> {
   // A page opened from the rail covers the workspace; the thread has to be visible.
   store.setScheduledOpen(false)
   store.setUsageOpen(false)
-  if (threadId === store.activeThreadId && !store.openingThreadId) return
   await openAndSelect(threadId)
 }
 
@@ -39,7 +38,13 @@ export async function selectThread(threadId: string): Promise<void> {
  * (`openThreadWhenReady`), so it never shows without them. `keepWorkspace`: Chats stays on screen (a bot's thread in its pane).
  */
 export async function openAndSelect(threadId: string, options?: { keepWorkspace?: boolean }): Promise<void> {
-  const opening = useAppStore.getState().openThreadWhenReady(threadId, options)
+  const store = useAppStore.getState()
+  if (threadId === store.activeThreadId && !store.openingThreadId && !store.transcriptPending) {
+    const thread = store.threads.find((entry) => entry.id === threadId)
+    // A failed read can leave the row selected with an empty transcript. Opening it again asks the service again.
+    if (store.messages.length > 0 || (thread && !isThreadStarted(thread))) return
+  }
+  const opening = store.openThreadWhenReady(threadId, options)
   if (opening === 'held') setTimeout(() => useAppStore.getState().showOpeningThread(threadId), OPEN_THREAD_HOLD_MS)
   if (opening === 'cached') void afterNextPaint().then(() => useAppStore.getState().showOpeningThread(threadId))
   await selectOrSettle(threadId)

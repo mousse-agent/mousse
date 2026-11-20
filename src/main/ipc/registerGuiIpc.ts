@@ -1623,6 +1623,9 @@ export function registerGuiIpc(
       await catchUpWindow(senderId)
     } catch (error) {
       linkLog.write('check.failed', { window: senderId, reasons, error: describeLinkError(error) })
+      // A failed status check cannot say that the transcript is current. Read it in full or let the window's
+      // reopening do so if the connection closed.
+      if (reasons.includes('gap')) requestCatchUp(senderId, 'live-gap')
     } finally {
       if (reasons.includes('quiet')) quietWatch.checked(senderId)
     }

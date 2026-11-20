@@ -352,6 +352,7 @@ import {
   heartbeatExecutionLease,
   isExecutionLeaseHeld,
   isLeaseHeldByLivePeer,
+  LeaseBusyError,
   onExecutionLeaseReleased,
   readLeaseOwner,
   releaseExecutionLeaseHandle,
@@ -948,7 +949,7 @@ interface TurnStartRequest {
   settleNotice?: SettleNoticeItem[]
   /** A mode the turn must not exceed (`OrchestratorSendOptions.permissionMode`). */
   permissionMode?: PermissionMode
-  /** A bound send (`OrchestratorSendOptions.refuseQueue`): a turn that cannot start now is refused, never queued. */
+  /** A bound send (`OrchestratorSendOptions.refuseQueue`): keep its admission through setup instead of queuing it. */
   refuseQueue?: boolean
   /** A scheduled turn's model and origin; JSON-safe, so a `turn.start` effect keeps them across a restart. */
   modelOverride?: ModelOverride
@@ -13411,7 +13412,7 @@ export class OrchestratorService extends EventEmitter {
       continuationId?: string
       /** A mode this turn must not exceed (`OrchestratorSendOptions.permissionMode`). */
       permissionMode?: PermissionMode
-      /** A bound send: a turn that cannot start now is refused with its run cancelled, never queued. */
+      /** A bound send is refused if it cannot start after setup, never queued. */
       refuseQueue?: boolean
       /** A bot dispatch (PR 6 §4): its policy, authority and scratch folder. */
       bot?: PreparedBotTurn
@@ -13837,11 +13838,22 @@ export class OrchestratorService extends EventEmitter {
     if (session.threadId !== '__unbound__') {
       const threadDir = this.resolveThreadDir(session.threadId)
       if (threadDir && !lease) {
-        lease = tryAcquireExecutionLease(threadDir, {
-          source: 'orchestrator',
-          token: claimOwnerToken
-        })
-        // Peer won the race: the turn runs later, in its place, as soon as the lease is free.
+        const leaseOptions = { source: 'orchestrator', token: claimOwnerToken }
+        lease = tryAcquireExecutionLease(threadDir, leaseOptions)
+        if (!lease && opts?.refuseQueue && !expectedBranchOf(input)) {
+          // A writer can hold the lease after admission, including work in this process. Keep the admitted turn
+          // and its model and permission cap while waiting briefly. Stop cancels the wait with the rest of setup.
+          try {
+            lease = await waitAcquireExecutionLease(threadDir, { ...leaseOptions, signal: setupSignal })
+          } catch (error) {
+            if (setupSignal.aborted) {
+              if (this.lifecycle.signal.aborted || this.isShutdownAbort(opts.externalSignal?.reason)) return requeueUnstarted()
+              return this.endTurnBeforeStart(session, opts.runId, queueItemId, claimOwnerToken)
+            }
+            if (!(error instanceof LeaseBusyError)) throw error
+          }
+        }
+        // If the lease is still held, queue ordinary messages or refuse bound ones.
         if (!lease) {
           const queued = requeueUnstarted(true)
           if (queued.queueItem) this.waitForThreadLease(session.threadId, queued.queueItem.id)
