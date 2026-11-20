@@ -52,7 +52,7 @@ import {
   type QuestionCardHandle
 } from './ComposerQuestionModal'
 import { filesToImagePayloads, isImageMimeType } from '../utils/imageAttachments'
-import { composerFilePaths, fileAttachments, MESSAGE_TOO_LONG, REMOTE_FILES_REFUSAL, REMOTE_PASTE_TOO_LONG } from '../lib/composerFilePaths'
+import { composerFilePaths, fileAttachments, prestageImages, MESSAGE_TOO_LONG, REMOTE_FILES_REFUSAL, REMOTE_PASTE_TOO_LONG } from '../lib/composerFilePaths'
 import { preparedSend } from '../lib/attachmentPreparation'
 import { useAttachmentPreparation } from '../hooks/useAttachmentPreparation'
 import { parseUserMessageContent } from '../utils/messageAttachments'
@@ -413,6 +413,9 @@ export function OrchestratorChat() {
   )
   // Attached images are made ready as they are attached: their chips say how each goes, and Send uses what was prepared.
   const preparation = useAttachmentPreparation(attachedFiles, Boolean(remoteNode))
+  // Every inline image also goes as its file: a pasted one is written now, so the send does not wait for it. A thread
+  // on another computer takes no files.
+  useEffect(() => { if (!remoteNode) prestageImages(attachedFiles, activeThreadId) }, [attachedFiles, activeThreadId, remoteNode])
   const setVoiceMessages = useCallback(
     (update: VoiceMessage[] | ((prev: VoiceMessage[]) => VoiceMessage[])) => {
       setVoiceMessagesState((prev) => {

@@ -111,6 +111,21 @@ describe('preparing attachments as they are attached', () => {
     expect(fit).toHaveBeenCalledTimes(1)
   })
 
+  it('sends every inline image with its file too, so it can still be opened after a compaction; a remote thread gets none', async () => {
+    const { preparation, settled } = setup({ 'small.png': { width: 40, height: 40 } })
+    const files = [attached('s', file('small.png', 900, 'image/png'))]
+    preparation.update(files, false)
+    await settled()
+    const sent = preparedSend(files, preparation.getSnapshot())!
+    expect(sent.images.map((image) => image.name)).toEqual(['small.png'])
+    expect(sent.files.map((entry) => [entry.label ?? entry.file.name, entry.asPath === true])).toEqual([['small.png', false], ['small.png', true]])
+
+    const remote = setup({ 'small.png': { width: 40, height: 40 } })
+    remote.preparation.update(files, true)
+    await remote.settled()
+    expect(preparedSend(files, remote.preparation.getSnapshot())!.files.filter((entry) => entry.asPath)).toEqual([])
+  })
+
   it('fits existing images again when another one takes part of the message total, and their chips change', async () => {
     const { fake, preparation, settled } = setup({ 'one.png': { width: 50, height: 50 }, 'two.png': { width: 50, height: 50 } })
     const one = attached('one', file('one.png', 2700, 'image/png'))

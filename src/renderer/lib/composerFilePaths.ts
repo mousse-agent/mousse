@@ -40,18 +40,52 @@ export async function composerFilePaths(files: readonly ComposerFile[], threadId
   const pending = fileAttachments(files)
   const paths = new Map<string, string>()
   if (!pending.length) return paths
-  const stage = window.mousse.threads.attachmentPath as ((file: File, threadId?: string | null) => Promise<string>) | undefined
+  if (typeof window.mousse.threads.attachmentPath !== 'function') throw new Error('Restart Mousse to attach files.')
   for (const attached of pending) {
     if (attached.path) {
       paths.set(attached.id, attached.path)
       continue
     }
-    if (!stage) throw new Error('Restart Mousse to attach files.')
     try {
-      paths.set(attached.id, await stage(attached.file, threadId ?? null))
+      paths.set(attached.id, await stagedPath(attached.file, threadId ?? null))
     } catch (error) {
       throw new Error(ipcErrorLine(error) || `${attached.file.name} couldn't be attached.`)
     }
   }
   return paths
+}
+
+/**
+ * Each file's path for a thread, asked once: a dropped or picked file answers its own path (no copy), a pasted one is
+ * written to a temporary file. Kept by file while it is held, so staging at attach (`prestageImages`) is not done
+ * again at send; a failed one is asked again.
+ */
+const staged = new WeakMap<File, Map<string, Promise<string>>>()
+
+function stagedPath(file: File, threadId: string | null): Promise<string> {
+  const byThread = staged.get(file) ?? new Map<string, Promise<string>>()
+  staged.set(file, byThread)
+  const key = threadId ?? ''
+  let path = byThread.get(key)
+  if (!path) {
+    const stage = window.mousse.threads.attachmentPath as (file: File, threadId?: string | null) => Promise<string>
+    path = stage(file, threadId)
+    byThread.set(key, path)
+    path.catch(() => { if (byThread.get(key) === path) byThread.delete(key) })
+  }
+  return path
+}
+
+/**
+ * Writes the attached images that have no path of their own (pasted ones) to temporary files as they are attached,
+ * so the send, which names every inline image's file as well, does not wait for it. Failures wait for the send,
+ * which tries again and says why.
+ */
+export function prestageImages(files: readonly ComposerFile[], threadId: string | null | undefined): void {
+  if (typeof window.mousse?.threads?.attachmentPath !== 'function') return
+  for (const attached of files) {
+    if (attached.path || attached.asPath || !sentInline(attached.file)) continue
+    if (window.mousse.fileDrag?.pathOf?.(attached.file)) continue
+    void stagedPath(attached.file, threadId ?? null).catch(() => undefined)
+  }
 }

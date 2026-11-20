@@ -45,7 +45,10 @@ function stubBridge(): void {
     })
   const sections: Record<string, unknown> = {
     orchestrator: section('orchestrator', orchestrator),
-    skills: section('skills', { list: () => Promise.resolve({ skills: [] }) })
+    skills: section('skills', { list: () => Promise.resolve({ skills: [] }) }),
+    // Each inline image also goes as its file: a pasted one is written to a temporary file.
+    threads: section('threads', { attachmentPath: async (file: File) => `/tmp/mousse-attachments/${file.name}` }),
+    fileDrag: section('fileDrag', { pathOf: () => '' })
   }
   ;(window as unknown as { mousse: unknown }).mousse = new Proxy(sections, {
     get: (target, key) => {
@@ -202,7 +205,7 @@ describe('a steer with an image', () => {
     expect(orchestrator.sendToThread).toHaveBeenCalledTimes(1)
     const [threadId, request] = (orchestrator.sendToThread as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { content: string; images?: Array<{ mimeType: string; data: string }> }]
     expect(threadId).toBe('thread-a')
-    expect(request.content).toBe('Look at this')
+    expect(request.content).toMatch(/^Look at this\n\n\[Attached files: /)
     expect(request.images).toEqual([expect.objectContaining({ mimeType: 'image/png', data: 'iVBORw==' })])
     // Sent into the reply now, by the queued message's id.
     expect(promoteToSteer).toHaveBeenCalledWith('thread-a', 'q-shot')

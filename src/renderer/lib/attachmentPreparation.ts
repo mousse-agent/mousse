@@ -149,9 +149,10 @@ export function sendBlockedReason(files: readonly PreparableFile[], snapshot: Pr
 }
 
 /**
- * The message's files and inline images from what was prepared, without fitting anything again: an image that goes
- * smaller is followed by its original as a file (named "(original)"; not for a thread of another computer, which takes
- * no files), and one that goes as a file is sent as its path. Null while any image is not ready to send.
+ * The message's files and inline images from what was prepared, without fitting anything again. Every inline image is
+ * followed by its file, so the agent can still open it once a compaction drops the image: one sent as attached under
+ * its own name, one made smaller as its original (named "(original)"). Not for a thread of another computer, which
+ * takes no files. One that goes as a file is sent as its path. Null while any image is not ready to send.
  */
 export function preparedSend<T extends PreparableFile>(
   files: readonly T[],
@@ -174,8 +175,9 @@ export function preparedSend<T extends PreparableFile>(
     if (state.kind !== 'inline') return null
     out.push(attached)
     images.push(state.fit.image)
-    if (state.fit.changed && !snapshot.remote) {
-      out.push({ ...attached, id: `${attached.id}:original`, asPath: true, label: `${attached.label ?? attached.file.name} (original)` })
+    if (!snapshot.remote) {
+      const name = attached.label ?? attached.file.name
+      out.push({ ...attached, id: `${attached.id}:file`, asPath: true, label: state.fit.changed ? `${name} (original)` : name })
     }
   }
   return { files: out, images }

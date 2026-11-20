@@ -33,6 +33,8 @@ function stubBridge(): void {
   const sections: Record<string, unknown> = {
     orchestrator: section(orchestrator),
     threads: section(threads),
+    // A pasted file has no path of its own.
+    fileDrag: section({ pathOf: () => '' }),
     skills: section({ list: () => Promise.resolve({ skills: [] }) })
   }
   ;(window as unknown as { mousse: unknown }).mousse = new Proxy(sections, {
@@ -192,12 +194,17 @@ describe('an image attached in the composer', () => {
     await settle()
     expect(host.querySelector('.composer-attachment-status')).toBeNull()
     expect(reads).toHaveBeenCalledTimes(1)
+    // Its file is written as it is attached, so the send does not wait for it.
+    expect(threads.attachmentPath).toHaveBeenCalledWith(shot, 'thread-a')
 
     await type('what is this?')
     await pressEnter()
     const [, request] = (orchestrator.sendToThread as ReturnType<typeof vi.fn>).mock.calls[0]! as [string, { content: string; images?: Array<{ name: string; mimeType: string; data: string }> }]
     expect(request.images).toEqual([{ name: 'shot.png', mimeType: 'image/png', data: btoa(String.fromCharCode(...new Uint8Array(await shot.arrayBuffer()))) }])
     expect(reads).toHaveBeenCalledTimes(1)
+    // The message also names the image's file, for the agent to open once a compaction drops the image; written once.
+    expect(request.content).toContain('shot.png (/tmp/mousse-attachments/thread-a/1a2b3c4d-shot.png)')
+    expect(threads.attachmentPath).toHaveBeenCalledTimes(1)
   })
 
   it('that cannot be read here says it goes as a file, and is sent as its path', async () => {

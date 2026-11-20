@@ -14,7 +14,7 @@ import { formatAgo } from '../../lib/formatAgo'
 import { errorCodeOf } from '../../lib/threadSetup'
 import { sendErrorLine } from '../../lib/errorText'
 import { stopThreadNow } from '../../lib/stopThread'
-import { composerFilePaths } from '../../lib/composerFilePaths'
+import { composerFilePaths, prestageImages } from '../../lib/composerFilePaths'
 import { preparedSend } from '../../lib/attachmentPreparation'
 import { useAttachmentPreparation } from '../../hooks/useAttachmentPreparation'
 import { pickerIdFor, pickerProviders, projectScope, useProviderSnapshots } from '../../lib/providerSnapshots'
@@ -179,6 +179,8 @@ function SideChatColumn({ thread }: { thread: Thread }) {
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
   // Images are made ready as they are attached; Send uses what was prepared.
   const preparation = useAttachmentPreparation(attachedFiles, false)
+  // Every inline image also goes as its file: a pasted one is written now, so the send does not wait for it.
+  useEffect(() => { prestageImages(attachedFiles, threadId) }, [attachedFiles, threadId])
   const attachRules = useMemo(() => ({ remote: false, onRefused: (line: string) => setError(line) }), [])
 
   // The model and mode the side chat runs on: its parent's when it was made, and its own once changed here.
