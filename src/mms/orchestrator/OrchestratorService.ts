@@ -5862,6 +5862,15 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * A person who writes in an archived thread wants it back: it is unarchived through the app's own Unarchive
+   * (`settleThread`) before their message runs. A thread whose expiry passed stays archived; its send is refused.
+   */
+  private async unarchiveForPerson(threadId: string): Promise<void> {
+    if (!this.threadStore?.getThread(threadId)?.settledAt || this.isExpired(threadId)) return
+    await this.settleThread(threadId, false)
+  }
+
+  /**
    * `thread_archive` of another thread: an agent's turn the person started, or the owner's bot from its chat in a turn
    * that may act on threads (`botSenderOf`), archives or unarchives it through the app's own Archive (`settleThread`). An
    * agent's archive never ends work: a thread with a run working or paused, there or in a subagent below it, is refused,
@@ -13107,6 +13116,9 @@ export class OrchestratorService extends EventEmitter {
     if (session.deleted) {
       throw new Error(`Thread deleted: ${threadId}`)
     }
+    // A person's message from a window brings an archived thread back before it runs. Agents and bots are refused
+    // earlier (`thread_archived`) and never unarchive it.
+    if (opts?.source === 'gui' && !opts.agent && !opts.delegation) await this.unarchiveForPerson(threadId)
     // An edited prompt is refused at once when the thread is already on another branch; its turn checks again when it
     // starts, under the thread's lease, and it never waits in the queue, where nothing would check it.
     const expectedBranch = expectedBranchOf(input)
@@ -17602,6 +17614,8 @@ export class OrchestratorService extends EventEmitter {
       const botRefusal = this.botThreadRefusal(threadId)
       if (botRefusal) return { text: '', silent: false, error: botRefusal.message }
       if (this.isExpired(threadId)) return { text: '', silent: false, error: 'This thread has expired and is being archived.' }
+      // The person's message from their phone brings an archived thread back, as one from a window does.
+      await this.unarchiveForPerson(threadId)
 
       try {
         lease = await waitAcquireExecutionLease(threadStore.getThreadDir(threadId), {
