@@ -25,6 +25,7 @@ import type { DelegationToolsHost } from './delegation'
 import type { LacksReport, LiveRunGate } from './registry'
 import type { AppToolTurn, ToolLedger } from './types'
 import type { SecretToolHost } from './secrets'
+import type { ThreadMonitors } from '../../../monitors/ThreadMonitors'
 import type { TerminalInfo } from '../../../terminals/PtyManager'
 
 /** One match of `thread_search`. */
@@ -372,6 +373,11 @@ export interface AppToolHost extends DelegationToolsHost {
   quickActions?: QuickActionTools
   /** `running_list`: what runs now for the caller's folder (quick actions, background commands, servers), as text. */
   running?(turn: AppToolTurn): Promise<string>
+  /**
+   * The thread's monitors, background commands and `keep_working` holds (`monitor_start`, `background_run`,
+   * `background_stop`, `keep_working`); read at call time.
+   */
+  monitors?(): ThreadMonitors | undefined
   web?: WebTools
   devGui?: DevGuiTools
   /**
