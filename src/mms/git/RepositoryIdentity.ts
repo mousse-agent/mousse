@@ -9,6 +9,7 @@ import { execFile, execFileSync } from 'node:child_process'
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from './repoPrograms'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { timeGitChild, timeGitSync } from '../diagnostics/turnBoundary'
+import { repositoryFacts } from './repositoryFacts'
 
 export type RepositoryMutationCapability =
   | { allowed: true }
@@ -259,8 +260,10 @@ function gitAsync(cwd: string, ...args: string[]): Promise<string | null> {
 export async function resolveRepositoryIdentityAsync(cwd: string, options: ResolveRepositoryIdentityOptions = {}): Promise<RepositoryIdentity> {
   await waitForFolderAccess([resolve(cwd)])
   const worktreePath = await canonicalAsync(cwd)
-  const [commonRaw, bare, inside] = probeAnswers(await gitAsync(worktreePath, ...PROBE))
-  const head = commonRaw && bare !== 'true' && inside === 'true' ? await gitAsync(worktreePath, 'rev-parse', '--verify', '--quiet', 'HEAD') : null
+  // A turn's start or end asks once for all its callers (`repositoryFacts.ts`).
+  const facts = await repositoryFacts(worktreePath)
+  const [commonRaw, bare, inside] = facts ? [facts.commonDirRaw, facts.bare, facts.inside] : probeAnswers(await gitAsync(worktreePath, ...PROBE))
+  const head = commonRaw && bare !== 'true' && inside === 'true' ? (facts ? facts.head ?? null : await gitAsync(worktreePath, 'rev-parse', '--verify', '--quiet', 'HEAD')) : null
   const capability = capabilityOf(commonRaw, bare, inside, () => head)
   if (!capability.allowed && options.requireMutationCapability) throw new RepositoryIdentityError(capability)
 

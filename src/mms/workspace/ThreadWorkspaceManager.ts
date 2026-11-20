@@ -38,6 +38,7 @@ import { threadBranchNameAsync } from '../../shared/mousseBranches'
 import { threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { timeGitSync } from '../diagnostics/turnBoundary'
+import { branchOfHeadRef, forgetRepositoryFacts, repositoryFacts } from '../git/repositoryFacts'
 
 /** True for a pending journal record that a live writer is still finishing (`liveCheckpointTest`), so it waits on nothing yet. */
 export type InFlightTest = (entry: Pick<ThreadJournalRecord, 'operationType' | 'state'>) => boolean
@@ -804,9 +805,11 @@ export class ThreadWorkspaceManager {
     }
     try {
       // The branch and HEAD are the agent's to move: ready means the checkout is there and no Mousse operation waits.
-      await git(metadata.worktreePath, ['rev-parse', '--show-toplevel'])
+      // A turn's start asks once for all its callers (`repositoryFacts.ts`); Git's answer is the checkout being there.
+      const facts = await repositoryFacts(metadata.worktreePath)
+      if (!facts) await git(metadata.worktreePath, ['rev-parse', '--show-toplevel'])
       if (this.hasPendingOperation(options.inFlight)) throw new Error('A Mousse operation is waiting for recovery.')
-      const headSha = (await tryGit(metadata.worktreePath, ['rev-parse', 'HEAD'])).stdout || metadata.headSha
+      const headSha = (facts ? facts.head : (await tryGit(metadata.worktreePath, ['rev-parse', 'HEAD'])).stdout) || metadata.headSha
       const verified = { ...metadata, lifecycle: 'ready' as const, headSha, lastVerifiedAt: new Date().toISOString() }
       return verified
     } catch {
@@ -832,6 +835,8 @@ export class ThreadWorkspaceManager {
    */
   private async currentBranch(metadata: ThreadWorkspaceMetadata): Promise<string | undefined> {
     if (!await pathExists(metadata.worktreePath)) return metadata.branch
+    const facts = await repositoryFacts(metadata.worktreePath)
+    if (facts) return branchOfHeadRef(await facts.headRef())
     // A plain read: a branch name when HEAD is on one; detached HEAD answers nothing.
     if (!(await tryGit(metadata.worktreePath, ['rev-parse', '--git-dir'])).ok) return metadata.branch
     const current = await tryGit(metadata.worktreePath, ['symbolic-ref', '-q', '--short', 'HEAD'])

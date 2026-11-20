@@ -23,6 +23,7 @@ import { GIT_NULL_DEVICE } from '../git/gitNullDevice'
 import { retentionWindowText } from '../../shared/undoRetention'
 import { timeGitSync } from '../diagnostics/turnBoundary'
 import { turnBoundaryStep } from '../diagnostics/turnBoundary'
+import { branchOfHeadRef, repositoryFactsStep, type RepositoryFacts } from '../git/repositoryFacts'
 
 /**
  * Workspace snapshots (docs/workspace-snapshots.md): a commit whose tree is every file of a worktree (tracked and
@@ -363,7 +364,12 @@ interface PrivateFiles {
   infoAttributes?: string
 }
 
-function* privateFiles(top: string): Steps<PrivateFiles> {
+/** `rev-parse --show-toplevel`, from the turn's shared facts when they are open (`repositoryFacts.ts`). */
+function* topOf(cwd: string): Steps<string> {
+  return (yield* repositoryFactsStep(cwd))?.top ?? (yield* gitStep(cwd, ['rev-parse', '--show-toplevel']))
+}
+
+function* privateFiles(top: string, facts?: RepositoryFacts): Steps<PrivateFiles> {
   const store = activeHiddenStore(top)
   if (store) {
     // The store has no worktree index of anyone's, so its own is the persistent one: `git diff` against the folder reads it.
@@ -372,7 +378,7 @@ function* privateFiles(top: string): Steps<PrivateFiles> {
     return { directory, index: join(store.gitDir, 'index'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), stalled: join(directory, FILTER_STALLED), last: join(directory, 'snapshot-last.json') }
   }
   // `--git-path` keeps names Git doesn't know in the worktree's own Git directory, so each linked worktree has its own.
-  const [mousse, info] = (yield* gitStep(top, ['rev-parse', '--git-path', 'mousse', '--git-path', 'info/attributes'])).split(/\r?\n/)
+  const [mousse, info] = facts ? [facts.mousseDir, facts.infoAttributes] : (yield* gitStep(top, ['rev-parse', '--git-path', 'mousse', '--git-path', 'info/attributes'])).split(/\r?\n/)
   const directory = resolve(top, mousse!)
   yield* disk.mkdir(directory)
   return { directory, index: join(directory, 'snapshot-index'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), stalled: join(directory, FILTER_STALLED), last: join(directory, 'snapshot-last.json'), infoAttributes: resolve(top, info!) }
@@ -1066,7 +1072,7 @@ export function* worktreeTreeSteps(cwd: string): Steps<string> {
 
 /** The tree of the worktree's files right now, and their exact tree (see the exact-bytes note), without writing a commit. */
 export function* worktreeTreesSteps(cwd: string, options: { exact?: boolean } = {}): Steps<{ tree: string; exactTree?: string }> {
-  const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
+  const top = yield* topOf(cwd)
   const files = yield* privateFiles(top)
   const { tree } = yield* indexTree(top, files.index, yield* headOf(top))
   if (options.exact === false || activeHiddenStore(top)) return { tree }
@@ -1093,16 +1099,18 @@ function* readLast(path: string): Steps<LastSnapshot | undefined> {
  * previous snapshot had, that snapshot is returned. The caller holds the mutation locks.
  */
 export function* takeSnapshotSteps(cwd: string, input: SnapshotInput): Steps<Snapshot> {
-  const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
-  const files = yield* privateFiles(top)
-  const head = yield* headOf(top)
+  // A turn's start or end asks once for all its callers (`repositoryFacts.ts`); otherwise each is asked here.
+  const facts = yield* repositoryFactsStep(cwd)
+  const top = facts?.top ?? (yield* gitStep(cwd, ['rev-parse', '--show-toplevel']))
+  const files = yield* privateFiles(top, facts)
+  const head = facts ? facts.head : yield* headOf(top)
   // Where a turn's snapshot spends its time (`turnBoundary.ts`): nothing when no turn boundary is measured.
   turnBoundaryStep('snapshotHead')
   const { tree, gaps: coverageGaps } = yield* indexTree(top, files.index, head)
   turnBoundaryStep('snapshotIndex')
   const hidden = activeHiddenStore(top) !== undefined
-  const branch = hidden ? undefined : (yield* tryGitStep(top, ['branch', '--show-current'])).stdout || undefined
-  const operation = yield* operationInProgressSteps(top)
+  const branch = hidden ? undefined : facts ? branchOfHeadRef(yield* step(() => undefined, () => facts.headRef())) : (yield* tryGitStep(top, ['branch', '--show-current'])).stdout || undefined
+  const operation = yield* operationInProgressSteps(top, facts?.markers)
   turnBoundaryStep('snapshotState')
   // The exact tree comes from the same paths (see the exact-bytes note); a hidden store's tree already holds exact bytes.
   const exactResult = hidden ? undefined : yield* exactTreeSteps(top, files, tree, head)
@@ -1145,7 +1153,7 @@ export function takeSnapshotAsync(cwd: string, input: SnapshotInput): Promise<Sn
  * (`plannedExactGapsSteps`), recorded and named as a snapshot taken of the files would.
  */
 export function* snapshotOfTreeSteps(cwd: string, tree: string, input: SnapshotInput, exactTree?: string, exactGaps: CoverageGap[] = []): Steps<Snapshot> {
-  const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
+  const top = yield* topOf(cwd)
   const head = yield* headOf(top)
   const branch = activeHiddenStore(top) ? undefined : (yield* tryGitStep(top, ['branch', '--show-current'])).stdout || undefined
   const operation = yield* operationInProgressSteps(top)
@@ -1410,7 +1418,7 @@ export interface RestoreChangeInput extends SnapshotInput {
  * so the caller can write it down for recovery.
  */
 export function* restoreChangeSteps(cwd: string, input: RestoreChangeInput, planned?: (tree: string, exactTree?: string) => void): Steps<RestoreResult> {
-  const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
+  const top = yield* topOf(cwd)
   const merged = yield* mergeTreesSteps(top, input.base, input.ours, input.theirs)
   if ('conflicts' in merged) return merged
   const ours = yield* treeOfSteps(top, input.ours)
@@ -2024,7 +2032,7 @@ export function moveOutcome(progress: MoveProgress): 'applied' | 'not-applied' |
 }
 
 export function* moveProgressSteps(cwd: string, from: string, to: string, exact?: ExactMove): Steps<MoveProgress> {
-  const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
+  const top = yield* topOf(cwd)
   const progress: MoveProgress = { moved: [], unmoved: [], other: [], emptied: [] }
   const listed = (top: string, a: string, b: string) => gitStep(top, ['diff-tree', '-r', '-z', '--no-renames', '--name-only', a, b], undefined, undefined, LISTING)
   const paths = [...new Set([...nul(yield* listed(top, from, to)), ...(exact ? nul(yield* listed(top, exact.from, exact.to)) : [])])]
