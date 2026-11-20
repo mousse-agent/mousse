@@ -95,6 +95,8 @@ What still stops a turn: an operation Mousse left unfinished (an interrupted res
 
 `checkpoint()` records the action's end: it takes a snapshot, describes the Git work between the start and the end (`describeGit`), diffs the two trees, records the receipt and pins its refs. A failed or stopped turn is recorded the same way. There is no commit, so a user's own commit that a hook rejected is recorded as a failed action without anything to bypass; the `onFailure: 'record'` option is gone.
 
+The receipt's two refs and the worktree's pin of its newest snapshot (`retainedRef`) are written in one `update-ref --no-deref --stdin` transaction; the journal entry follows, and the worktree's record (`workspace.json`) only after it. A start whose snapshot was just made or found already there is not checked again before the turn begins (`OutsideChangesResult.startCheck`).
+
 A nested snapshot recorded while the action runs becomes one of its `contributions`, found by the action's time window (a snapshot has no ancestry to test).
 
 Interrupted checkpoints recover by taking the snapshot again from the files. If that fails too, the operation stays `recovery_required` with the new error, so the reason shown is what stopped the retake.

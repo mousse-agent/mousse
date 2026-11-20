@@ -54,8 +54,11 @@ export class ChangeReceiptService {
     const workspace = await manager.loadOrSnapshotAsync()
     const id = randomUUID()
     const refs = [`refs/mousse/changes/${id}/before`, `refs/mousse/changes/${id}/after`]
-    await gitAsync(workspacePath, ['update-ref', '--no-deref', refs[0], input.beforeSha])
-    await gitAsync(workspacePath, ['update-ref', '--no-deref', refs[1], input.afterSha])
+    // The workspace's pin of its newest snapshot (`refreshWorkspace`) is written with the receipt's own refs, in one
+    // transaction and one Git process; the record of the workspace is still written only after the journal.
+    const pin = workspace && await topOf(workspace.worktreePath) === await topOf(workspacePath) ? workspace.retainedRef : undefined
+    const updates = [[refs[0]!, input.beforeSha], [refs[1]!, input.afterSha], ...(pin ? [[pin, input.afterSha]] : [])]
+    await gitAsync(workspacePath, ['update-ref', '--no-deref', '--stdin'], undefined, ['start', ...updates.map(([ref, sha]) => `update ${ref} ${sha}`), 'prepare', 'commit', ''].join('\n'))
     const receipt: ChangeReceipt = {
       ...input, id,
       ...(coverageNotice(input.git?.coverageGaps) ? { notCovered: coverageNotice(input.git?.coverageGaps) } : {}),
@@ -66,7 +69,7 @@ export class ChangeReceiptService {
     }
     // Persist receipt before updating the cached workspace head. Recovery can rebuild the cache.
     this.journal.append({ operationId: input.operationId, operationType: `change-${input.kind}`, state: 'git_applied', details: { receipt } })
-    await this.refreshWorkspace(workspacePath, receipt)
+    await this.refreshWorkspace(workspacePath, receipt, pin)
     return receipt
   }
 
@@ -76,12 +79,13 @@ export class ChangeReceiptService {
     return this.record(workspacePath, input)
   }
 
-  private async refreshWorkspace(workspacePath: string, receipt: ChangeReceipt): Promise<void> {
+  /** `pinned`: the pin `record` already moved to this receipt's end, in its own refs' transaction. */
+  private async refreshWorkspace(workspacePath: string, receipt: ChangeReceipt, pinned?: string): Promise<void> {
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
     const workspace = await manager.loadOrSnapshotAsync()
     if (!workspace || await topOf(workspace.worktreePath) !== await topOf(workspacePath)) return
     if ((workspace.generation ?? 0) > receipt.generation) return
-    await gitAsync(workspacePath, ['update-ref', '--no-deref', workspace.retainedRef, receipt.afterSha])
+    if (pinned !== workspace.retainedRef) await gitAsync(workspacePath, ['update-ref', '--no-deref', workspace.retainedRef, receipt.afterSha])
     // A folder that is the person's has no `workspace.json`; its record keeps the latest snapshot.
     if (workspace.snapshotOnly) return recordSnapshotSha(this.threadDirectory, receipt.afterSha)
     // A snapshot receipt moves the pin and the latest snapshot; HEAD is whatever the thread's Git left it at.
