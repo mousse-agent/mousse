@@ -48,6 +48,21 @@
       "expiresAt": "2026-11-19T16:46:17.828Z"
     },
     {
+      "task": "antigravity-reasoning-picker",
+      "session": "agibook-b38960",
+      "machine": "agibook",
+      "branch": "antigravity-reasoning-picker",
+      "paths": [
+        "src/shared/modelVariants.ts",
+        "src/renderer/components/bots/BotModelButton.tsx",
+        "src/renderer/styles/bots.css",
+        "tests/renderer/composerRunControls.test.ts",
+        "tests/renderer/botModelButton.test.ts"
+      ],
+      "claimedAt": "2026-11-20T07:22:59.495Z",
+      "expiresAt": "2026-11-20T09:22:59.495Z"
+    },
+    {
       "task": "bot-automation-let-alone",
       "session": "agibook-66458b",
       "machine": "agibook",
