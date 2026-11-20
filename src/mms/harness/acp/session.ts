@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { methods, type NewSessionResponse } from '@agentclientprotocol/sdk'
-import type { ProviderToolEvent } from '../../../shared/agentActivity'
+import { ACTIVITY_DESCRIPTION_CHARS, isAcpSubagentTool, type ProviderToolEvent } from '../../../shared/agentActivity'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import type { LlmModelOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
@@ -27,6 +27,20 @@ import {
 import type { AcpQuirks } from './quirks'
 import { acpAgentError, agentCancelledError, promptStopOutcome } from './stopReason'
 import { xaiHandlers, xaiStopFailure } from './xai'
+
+/** The title is generic on agy: its launch arguments name the role and describe the work. */
+function subagentActivity(rawInput: unknown, title: string | undefined) {
+  const args = rawInput && typeof rawInput === 'object' ? rawInput as Record<string, unknown> : {}
+  const role = typeof args.Role === 'string' ? args.Role.trim() : ''
+  const agentType = typeof args.TypeName === 'string' ? args.TypeName.trim().slice(0, ACTIVITY_DESCRIPTION_CHARS) : ''
+  const prompt = typeof args.Prompt === 'string' ? args.Prompt.trim() : ''
+  return {
+    kind: 'subagent' as const,
+    description: (role || title || 'Task').slice(0, ACTIVITY_DESCRIPTION_CHARS),
+    ...(agentType ? { agentType } : {}),
+    ...(prompt ? { prompt } : {})
+  }
+}
 
 /**
  * The ACP session lifecycle shared by every ACP agent: one agent process per thread, kept between
@@ -775,7 +789,7 @@ export class AcpSessions {
       watchSilence()
       noteCommands(current, update)
       if (!update || typeof update !== 'object') return
-      const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; toolCallId?: string; title?: string; name?: string; status?: string; configOptions?: NewSessionResponse['configOptions']; currentModeId?: string }
+      const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; toolCallId?: string; title?: string; name?: string; status?: string; rawInput?: unknown; configOptions?: NewSessionResponse['configOptions']; currentModeId?: string }
       // The agent works on the prompt that carries drained steers: they are read now, before what it writes.
       // An update that may be a cancelled prompt's late one does not count: the carrying prompt's reply reads them then.
       if (prompting && event.sessionUpdate && PROMPT_WORK_UPDATES.has(event.sessionUpdate) && ofPromptInFlight(update)) readCarried()
@@ -784,11 +798,12 @@ export class AcpSessions {
         input.onText(text)
       }
       if (event.sessionUpdate === 'tool_call' && event.toolCallId) {
-        const subagent = event.name === 'start_subagent'
-        const title = subagent ? `${label} subagent: ${event.title ?? 'Task'}` : event.title ?? event.name ?? `${label} tool`
+        const subagent = isAcpSubagentTool(event.name)
+        const activity = subagent ? subagentActivity(event.rawInput, event.title) : undefined
+        const title = activity ? `${label} subagent: ${activity.description}` : event.title ?? event.name ?? `${label} tool`
         toolTitles.set(event.toolCallId, title)
         // A subagent call is never waited on by a held steer; any other call of an agent counts as foreground.
-        input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: event.name, ...(subagent ? { activity: { kind: 'subagent', description: event.title ?? 'Task' } } : {}) })
+        input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: event.name, ...(activity ? { activity } : {}) })
       }
       // A running call's own progress (its output, a new status) is a tool event: it restarts the release window.
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && toolTitles.has(event.toolCallId) && event.status !== 'completed' && event.status !== 'failed')

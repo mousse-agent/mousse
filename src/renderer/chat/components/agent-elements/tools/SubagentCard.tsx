@@ -213,7 +213,10 @@ export function NativeSubagentCardView({ card, now, nestedTools, chatStatus, inh
   const result = card.error ?? card.native?.result ?? null;
   // The row's line is plain text; opened, the whole report keeps its Markdown.
   const fullResult = result?.trim() ?? "";
-  const expandable = nestedTools.length > 0 || fullResult.length > 0;
+  const task = card.native?.acp?.prompt;
+  const noActivity = Boolean(card.native?.acp && !nestedTools.length && !fullResult);
+  const itemCount = nestedTools.length + Number(Boolean(fullResult)) + Number(Boolean(task)) + Number(noActivity);
+  const expandable = itemCount > 0;
   if (revealSeq !== null && revealSeq !== openedFor) {
     setOpenedFor(revealSeq);
     if (expandable) setOpen(true);
@@ -235,7 +238,14 @@ export function NativeSubagentCardView({ card, now, nestedTools, chatStatus, inh
         {expandable && <IconChevronDown className="subagent-card-chevron ui-collapse-chevron" data-open={open || undefined} aria-hidden="true" />}
       </button>
       {expandable && (
-        <Collapse open={open} className="subagent-card-calls" itemCount={nestedTools.length + (fullResult ? 1 : 0)}>
+        <Collapse open={open} className="subagent-card-calls" itemCount={itemCount}>
+          {task && (
+            <div className="subagent-card-full">
+              <strong>Assigned task</strong>
+              <p className="whitespace-pre-wrap">{task}</p>
+            </div>
+          )}
+          {noActivity && <p className="subagent-card-full">No subagent activity reported</p>}
           {fullResult && <NativeSubagentResult text={fullResult} failed={Boolean(card.error)} />}
           {nestedTools.map((nestedPart, index) => {
             const meta = toolRegistry[nestedPart.type];
