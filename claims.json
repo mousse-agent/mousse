@@ -48,6 +48,17 @@
       "expiresAt": "2026-11-19T16:46:17.828Z"
     },
     {
+      "task": "fix-subagent-optimistic-working",
+      "session": "Animatrix-6036c7",
+      "machine": "Animatrix",
+      "branch": "fix-subagent-optimistic-working",
+      "paths": [
+        "src/mms/orchestrator/OrchestratorService.ts"
+      ],
+      "claimedAt": "2026-11-20T10:40:26.020Z",
+      "expiresAt": "2026-11-20T12:40:26.020Z"
+    },
+    {
       "task": "lan-direct-phone-path",
       "session": "agibook-3233ef",
       "machine": "agibook",
