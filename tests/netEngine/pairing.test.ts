@@ -435,6 +435,76 @@ describe('a host removed here while its join ran', () => {
   })
 })
 
+describe('the service around SSH rows (1b §1.4, §3.6)', () => {
+  const peersOf = (computer: { mms: { netEngine: unknown } }) =>
+    (computer.mms.netEngine as unknown as { require(): { peers: EnginePeerStore } }).require().peers
+
+  it('unparks, when a host key is trusted, only the pairings whose SSH route goes to that host', async () => {
+    const fabric = new Fabric()
+    cleanups.push(() => fabric.close())
+    // A 1.1 helper: SSH routes.
+    fabric.network.minor = 1
+    const a = await fabric.computer('a')
+    const resolved = await a.dispatch('netEngine.ssh.resolve', { target: 'me@b.test' }, true)
+    const peers = peersOf(a)
+    const sshRow = (endpoint: string, routeId: string, host: string) =>
+      peers.add({
+        endpoint,
+        fingerprint: 'sha256:x',
+        grant: '',
+        name: host,
+        state: 'ssh_granted',
+        source: 'ssh',
+        ssh: { requestId: endpoint.slice(0, 32), routeId, host },
+        pairedAt: Date.now()
+      })
+    const toB = sshRow('b1'.repeat(32), resolved.routeId, 'b.test')
+    const toC = sshRow('c1'.repeat(32), 'otherroute', 'c.test')
+    const pairing = a.mms.netEngine.pairing()
+    pairing.park(toB.localId, 'host_key_unknown')
+    pairing.park(toC.localId, 'host_key_unknown')
+    await a.dispatch(
+      'netEngine.ssh.trust',
+      { routeId: resolved.routeId, sha256: 'SHA256:fake-b.test', host: 'b.test' },
+      true
+    )
+    expect(pairing.sshParked(toB.localId)).toBeUndefined()
+    expect(pairing.sshParked(toC.localId)).toBe('host_key_unknown')
+  }, 60_000)
+
+  it('connects an SSH row only on a connection with its grant, and serves no call for a row with no grant', async () => {
+    const fabric = new Fabric()
+    cleanups.push(() => fabric.close())
+    const owner = await fabric.computer('owner'),
+      caller = await fabric.computer('caller')
+    const { callerOnOwner } = await fabric.pair(owner, caller)
+    const peers = peersOf(owner)
+    // B's row for A as an SSH add leaves it before A's first inbound, holding a grant other than the one A dials with.
+    peers.update(callerOnOwner, {
+      source: 'ssh',
+      state: 'ssh_granted',
+      grant: '999',
+      ssh: { requestId: 'ab'.repeat(16) }
+    })
+    await fabric.restartHelper(caller)
+    const sessions = (owner.mms.netEngine as unknown as { require(): { sessions: EngineSessions } })
+      .require().sessions
+    await vi.waitFor(() => expect(sessions.serving(callerOnOwner)).toBe(true), { timeout: 15_000 })
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(peers.get(callerOnOwner)?.state).toBe('ssh_granted')
+
+    // A row with no grant: a connection that has none either is no caller.
+    peers.update(callerOnOwner, { source: null, state: 'connected', grant: '', ssh: null })
+    const row = peers.get(callerOnOwner)!
+    const callerOf = (owner.mms.netEngine as unknown as { callerOf(connection: unknown): unknown }).callerOf.bind(
+      owner.mms.netEngine
+    )
+    expect(() => callerOf({ peer: callerOnOwner, direction: 'inbound', grant: row.grant })).toThrow(
+      expect.objectContaining({ code: 'forbidden' })
+    )
+  }, 120_000)
+})
+
 describe('Start over', () => {
   it('sets the engine aside with the network: its devices go, the other computer keeps its row', async () => {
     const fabric = new Fabric()
