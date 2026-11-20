@@ -1721,6 +1721,8 @@ function mergeSearchResults(local: ThreadSearchResult[], remote: ThreadSearchRes
 
 /** Transcripts a routed search reads: the newest threads, as the agent tool's search does. */
 const ROUTED_SEARCH_MESSAGE_THREADS = 100
+/** Results a `perThread` search may ask for: about one per thread, so a large profile's every match fits. */
+const SEARCH_PER_THREAD_MAX_LIMIT = 5000
 
 function lifecycleExpectedGeneration(params: Record<string, unknown>): number | undefined {
   const value = params.expectedGeneration
@@ -2377,9 +2379,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.search': {
       const p = isObject(params) ? params : {}
       const query = asString(p.query, 'query', 512)
+      // `perThread`: which threads match (the sidebar's filter), one message hit each, from this computer only; it may
+      // ask for every thread of the profile.
+      const perThread = p.perThread === true
       const limit =
         typeof p.limit === 'number' && Number.isFinite(p.limit) && p.limit > 0
-          ? Math.min(Math.floor(p.limit), 200)
+          ? Math.min(Math.floor(p.limit), perThread ? SEARCH_PER_THREAD_MAX_LIMIT : 200)
           : 50
       // Search hides subagents for every client, the desktop app included: a subagent is reached
       // through its parent's Lineage, not as a result of its own.
@@ -2391,11 +2396,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         hideSubagents: true,
         includeSettled: true,
         allow: (thread: Thread) => !thread.botOwned && !hidden?.has(thread.id),
-        ...(ctx.connection?.clientType === 'bridge' ? { maxMessageThreads: ROUTED_SEARCH_MESSAGE_THREADS } : {})
+        ...(ctx.connection?.clientType === 'bridge' ? { maxMessageThreads: ROUTED_SEARCH_MESSAGE_THREADS } : {}),
+        ...(perThread ? { perThread } : {})
       })
       // A window also searches the user's other computers (each with a short deadline) and is told which it could not.
       const remote =
-        ctx.connection?.clientType === 'gui' && ctx.mms.remoteLists
+        ctx.connection?.clientType === 'gui' && ctx.mms.remoteLists && !perThread
           ? await ctx.mms.remoteLists.search(ctx.connection.id, query, limit)
           : undefined
       if (!remote) return { results }

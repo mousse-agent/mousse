@@ -113,6 +113,24 @@ describe('the sidebar filter', () => {
     expect(listed()).toEqual(['t1', 't2'])
   })
 
+  it('typing also lists the threads whose messages hold it, as the service finds them', async () => {
+    const search = vi.fn(async (query: string) => ({
+      results: query === 'flaky retry'
+        ? [{ threadId: 't2', threadName: 'Appointment reminders', matchType: 'message', messageId: 'm1', snippet: 'a flaky retry' }]
+        : []
+    }))
+    ;(window as unknown as { mousse: { threads: Record<string, unknown> } }).mousse.threads = { search }
+    show()
+    type('flaky retry')
+    // Nothing has the words in its title; the message match arrives once typing pauses.
+    expect(listed()).toEqual([])
+    await act(async () => { await new Promise((done) => setTimeout(done, 400)) })
+    expect(search).toHaveBeenLastCalledWith('flaky retry', expect.any(Number), { perThread: true })
+    expect(listed()).toEqual(['t2'])
+    type('')
+    expect(listed()).toEqual(['t1', 't2'])
+  })
+
   it('Show lists bot threads, hidden ones too, and its chip puts My threads back', async () => {
     show()
     openMenu()

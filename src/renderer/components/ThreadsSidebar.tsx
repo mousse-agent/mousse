@@ -7,6 +7,7 @@ import type { CSSProperties, KeyboardEvent } from 'react'
 import { Archive, ChevronRight, Folder, FolderOpen, Layers, ListTree, Lock, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pencil, Pin, Trash2 } from '../lib/icons'
 import '../styles/private-threads.css'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
+import { useThreadMessageMatches } from '../hooks/useThreadMessageMatches'
 
 import type { Project, Thread, ThreadActivitySnapshot, ThreadActivityState } from '../../shared/types'
 import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
@@ -536,16 +537,19 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   )
   const filtering = filterNarrows(filter)
   const bots = useBotsStore((s) => s.bots)
+  // What is typed also finds the threads whose messages hold it.
+  const messageMatches = useThreadMessageMatches(filterQuery)
   const inFilter = useMemo(() => {
     const projectById = new Map(projects.map((project) => [project.id, project]))
     const botById = new Map(bots.map((bot) => [bot.id, bot]))
     const context = {
       groupOf: (projectId: string) => groupOf.get(projectId) ?? projectId,
       projectName: (projectId: string) => projectById.get(projectId)?.name,
-      botName: (botId: string) => botById.get(botId)?.name
+      botName: (botId: string) => botById.get(botId)?.name,
+      messageMatches
     }
     return (thread: Thread) => threadInFilter(thread, filter, context)
-  }, [filter, projects, bots, groupOf])
+  }, [filter, projects, bots, groupOf, messageMatches])
 
   // Subagent threads sit under their parent, not beside it: the list holds the threads people started. A thread one of
   // the owner's bots keeps out of the sidebar (`Thread.hidden`, how a bot's threads start) is listed in its chat instead,
