@@ -254,6 +254,21 @@
       "expiresAt": "2026-11-20T14:33:21.627Z"
     },
     {
+      "task": "queued-row-wait-reason",
+      "session": "Animatrix-f67e07",
+      "machine": "Animatrix",
+      "branch": "queued-row-wait-reason",
+      "paths": [
+        "src/renderer/components/QueuedMessages.tsx",
+        "src/renderer/hooks/useThreadQueue.ts",
+        "src/mms/orchestrator/OrchestratorService.ts",
+        "src/mms/orchestrator/ThreadSession.ts",
+        "src/shared/types.ts"
+      ],
+      "claimedAt": "2026-11-20T14:35:25.124Z",
+      "expiresAt": "2026-11-20T16:35:25.124Z"
+    },
+    {
       "task": "read-aloud-sentence-splits-and-short-forms",
       "session": "Animatrix-ae54b8",
       "machine": "Animatrix",
