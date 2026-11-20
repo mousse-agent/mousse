@@ -17,7 +17,7 @@ The structure every tool an agent or a personal bot can call should have: how to
 - Names follow `<resource>_<action>`.
 - These verb-first names flip in PR 9: `list_tasks`, `create_task`, `update_task`, `list_skills`, `load_skill`, `list_models`, `list_computers`, `publish_applet`, `create_quick_action`, `withdraw_question`, `ask_user`, `show_card` and `make_image`.
 - Clear names stay: `browser_*`, `web_*`, `git_*`, `profiler_*`, `theme_*`, `secret_*` and `running_list`.
-- The bot-only `consult`, `remind` and `wake` are named exceptions until their families move.
+- The bot-only `consult` and `remind`, and `wake` (bots and threads), are named exceptions until their families move.
 - Provider-native tools and relayed `<server>__<tool>` tools keep their names.
 - "Task" means only a checklist item. A delegated assignment is "work" (`intent: work`, `view: delegations`), and results keep its `delegationId`.
 - A generated manifest appendix lists every tool and alias with its audience and per-variant needs. It replaces hand-kept tables like §1.5.
@@ -210,11 +210,12 @@ Under `approvals: never`, a variant that produces a request is unavailable, unle
 - Replaces: `set_profile`, `set_depth`, `use_model` and `telling_set` → `bot_update`, with authority checked per field; `memory_forget` → `memory_remove`.
 - `consult` stays until the bot port supplies context-thread resolution and serialised consults (`BotEngine.ts:5769`).
 
-**wake and terminal** (bots)
-- Tools: `wake_set`, `terminal_start`, `terminal_list`, `terminal_read`, `terminal_stop`.
+**wake and terminal** (bots and threads)
+- Tools: `wake_set` (bots and threads), `terminal_start`, `terminal_list`, `terminal_read`, `terminal_stop` (bots).
 - Replaces: `wake` and `work_wait` → `wake_set`; `watch_*` → `terminal_*`.
 - A wake is a durable continuation. It never resets a deadline, never creates authority and never becomes a person turn.
 - Wakes are listed and cancelled through thread status and Stop, so `wake_list` and `wake_remove` are not needed yet.
+- Threads have `wake`, `reminder_list` and `reminder_cancel` today, with the bots' names, parameters and limits: one tool per name, the bot's version on a bot turn. A thread's wake waits on a time, another thread's turn, or a pull request of one of the person's projects (merged, checks or review). The decisions are the bots' own (`src/mms/bots/wakeSources.ts`); `src/mms/wakes/ThreadWakes.ts` keeps them in a file, so they fire after a restart or sleep. A due wake is a `reconcile_notice` row with payload `thread_wake`, delivered as agent notes are: an idle thread starts a turn, a running one takes it as a steer or at its next Mousse tool call, and it waits while the thread waits on a person's answer. Pending wakes show with the thread's background work; Stop, archive and delete cancel them (the agent is told once, except on delete). Subagents set none: their task ends with the result to their parent, which can wake on the subagent's thread or the pull request.
 
 **monitors and background work** (threads; #1605)
 - Tools: `monitor_start`, `background_run`, `background_stop`, `keep_working`.

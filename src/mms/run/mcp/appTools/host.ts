@@ -378,6 +378,8 @@ export interface AppToolHost extends DelegationToolsHost {
    * `background_stop`, `keep_working`); read at call time.
    */
   monitors?(): ThreadMonitors | undefined
+  /** The thread's own wake-ups (`wake`, `reminder_list`, `reminder_cancel`); read at call time. */
+  threadWakes?(): import('../../../wakes/ThreadWakes').ThreadWakes | undefined
   web?: WebTools
   devGui?: DevGuiTools
   /**

@@ -7,7 +7,8 @@
 
 /** What a thread agent started in the background (`monitor_start`, `background_run`, `keep_working`). */
 export type MonitorKind = 'command' | 'url' | 'background' | 'keep_working'
-export type BackgroundItemKind = MonitorKind
+/** Those, and the agent's wake-ups still to come (`wake`): nothing runs for one, the thread carries on when it is due. */
+export type BackgroundItemKind = MonitorKind | 'wake'
 
 /**
  * How a monitor, a background command or a `keep_working` hold ended: its script exited, its socket closed, it could not
@@ -36,6 +37,8 @@ export interface BackgroundWorkItem {
   until: string
   /** Its last line of output or message, cut. */
   latest?: string
+  /** A wake-up on an event: what it waits for ("when acme/app#12 merges"); its `until` is then when it gives up. */
+  waitsFor?: string
 }
 
 export interface ThreadBackgroundWork {
@@ -56,6 +59,8 @@ export interface BackgroundCounts {
   subagents: number
   commands: number
   monitors: number
+  /** Wake-ups still to come: counted on their own, since nothing of them runs. */
+  wakes: number
 }
 
 export function backgroundCounts(work: ThreadBackgroundWork | undefined, runningSubagents: number): BackgroundCounts {
@@ -63,20 +68,25 @@ export function backgroundCounts(work: ThreadBackgroundWork | undefined, running
   return {
     subagents: runningSubagents,
     commands: items.filter((item) => item.kind === 'background').length + (work?.providerWork ? 1 : 0),
-    monitors: items.filter((item) => item.kind !== 'background').length
+    monitors: items.filter((item) => item.kind !== 'background' && item.kind !== 'wake').length,
+    wakes: items.filter((item) => item.kind === 'wake').length
   }
 }
 
 const plural = (count: number, one: string, many: string): string => `${count} ${count === 1 ? one : many}`
 
-/** "Waiting on 2 subagents, 1 command and 3 monitors", naming only what runs; empty when nothing does. */
+/**
+ * "Waiting on 2 subagents, 1 command and 3 monitors", naming only what runs, then the wake-ups set ("1 wake-up set");
+ * empty when there is nothing.
+ */
 export function backgroundHeadline(counts: BackgroundCounts): string {
   const parts = [
     counts.subagents ? plural(counts.subagents, 'subagent', 'subagents') : '',
     counts.commands ? plural(counts.commands, 'command', 'commands') : '',
     counts.monitors ? plural(counts.monitors, 'monitor', 'monitors') : ''
   ].filter(Boolean)
-  if (!parts.length) return ''
+  const wakes = counts.wakes ? `${plural(counts.wakes, 'wake-up', 'wake-ups')} set` : ''
+  if (!parts.length) return wakes
   const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`
-  return `Waiting on ${list}`
+  return `Waiting on ${list}${wakes ? ` · ${wakes}` : ''}`
 }

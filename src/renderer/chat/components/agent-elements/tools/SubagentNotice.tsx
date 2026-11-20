@@ -3,7 +3,7 @@ import type { BackgroundTaskNoticeItem, SubagentNoticeItem } from "../../../../.
 import type { SettleNoticeItem } from "../../../../../shared/settleNotice";
 import { settleNoticeName, settleNoticeOutcome } from "../../../adapters/settleNotice";
 import { backgroundNoticeName } from "../../../adapters/nativeSubagents";
-import { monitorNoticeLine, noteNoticeName, noticeItemName, noticeOutcome } from "../../../adapters/subagentNotice";
+import { monitorNoticeLine, noteNoticeName, noticeItemName, noticeOutcome, wakeNoticeLine } from "../../../adapters/subagentNotice";
 import { openThread } from "../../../../lib/openThread";
 import { ThreadChip } from "../../../../components/ThreadChip";
 import "./subagent-card.css";
@@ -27,7 +27,7 @@ export function SubagentNoticeView({ items, onOpen }: SubagentNoticeViewProps) {
   return (
     <div className="subagent-notice" role="note" aria-label="Notice from Mousse">
       {shown.map((item, index) => {
-        if (item.event === "note" || item.event === "monitor") return <OpenableNoticeRow key={`${item.event}:${item.delegationId}:${index}`} item={item} />;
+        if (item.event === "note" || item.event === "monitor" || item.event === "wake") return <OpenableNoticeRow key={`${item.event}:${item.delegationId}:${index}`} item={item} />;
         const name = noticeItemName(item);
         const { verb, tone } = noticeOutcome(item);
         return (
@@ -59,10 +59,14 @@ export function OpenableNoticeRow({ item, initiallyOpen = false }: { item: Subag
   const [open, setOpen] = useState(initiallyOpen);
   const line = item.event === "monitor"
     ? monitorNoticeLine(item)
-    : { name: noteNoticeName(item), detail: "sent a note", tone: "done" as const };
+    : item.event === "wake"
+      ? wakeNoticeLine(item)
+      : { name: noteNoticeName(item), detail: "sent a note", tone: "done" as const };
   const words = item.event === "note"
     ? item.note?.text ?? ""
-    : [
+    : item.event === "wake"
+      ? item.wake?.brief ?? ""
+      : [
         ...(item.monitor?.lines ?? []),
         ...(item.monitor?.dropped ? [`\u2026 ${item.monitor.dropped} more not shown`] : []),
         ...(item.monitor?.tail ? [item.monitor.tail.replace(/\s+$/, "")] : []),
@@ -81,7 +85,7 @@ export function OpenableNoticeRow({ item, initiallyOpen = false }: { item: Subag
         <span className="subagent-notice-name">{line.name}</span>
         <span className="subagent-notice-detail">{line.detail}</span>
       </button>
-      {open && words && (item.event === "note"
+      {open && words && (item.event === "note" || item.event === "wake"
         ? <div className="subagent-notice-words" data-kind="note">{words}</div>
         : <pre className="subagent-notice-words" data-kind="monitor">{words}</pre>)}
     </div>

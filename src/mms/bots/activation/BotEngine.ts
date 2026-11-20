@@ -16,7 +16,7 @@ import { type TellMe } from '../../../shared/types'
 import { tellingClass } from '../chat/telling'
 import { hasToolImages } from '../chat/toolImages'
 import { extractAppletParts } from '../../../shared/applets'
-import type { WakePullRequestState } from '../wakeSources'
+import { pullRequestWakeEvent, pullRequestWakeOutcome, threadWakeEvent, threadWakeOutcome, type WakePullRequestState } from '../wakeSources'
 import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
@@ -107,7 +107,7 @@ import { BotWatchers, DEFAULT_WATCHER_MINUTES, MAX_WATCHER_COMMAND_CHARS, MAX_WA
 import { lockedEnv } from '../../harness/env'
 import { MAX_BOT_MESSAGE_CHARS, MAX_BOT_MESSAGES_UNANSWERED_BY_OWNER, botMessageInput, botMessageKey, botMessageRowId, botMessageRowText, type BotMessageSender } from '../../../shared/bots/personal/botMessages'
 import { message as mousseMessage, notice as mousseNotice } from '../../../shared/mousseContext'
-import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_SAME_WAKES, MAX_WAKE_BRIEF_CHARS, WAKE_LINE_PREFIX, wakeCheckNames, wakeEventLabel, wakeFiredLabel, wakeInput, wakeLoopKey, SILENT_REPLY, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
+import { DEFAULT_EVENT_WAKE_HOURS, MAX_EVENT_WAKE_HOURS, MAX_SAME_WAKES, MAX_WAKE_BRIEF_CHARS, WAKE_LINE_PREFIX, wakeEventLabel, wakeFiredLabel, wakeInput, wakeLoopKey, SILENT_REPLY, type BotWakeEvent, type BotWakeFired } from '../../../shared/bots/personal/wakes'
 import type { LlmProviderOption } from '../../../shared/settings'
 import { BOT_THREADS_READ_ONLY_TURN_NOTE, botAllowedOf, namedPowerOf, type BotAllowed, type BotSwitchedOff } from '../instructions'
 import { isProviderTurnCap, type Enforceability, type HarnessError, type ProviderSelection, type RunPolicy } from '../../../shared/harness/types'
@@ -9346,29 +9346,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * working now (with its title), or an open pull request of a repository the owner has as a project.
    */
   private async checkedWakeEvent(botId: string, event: BotWakeEvent): Promise<BotWakeEvent> {
-    if (event.kind === 'thread') {
-      const home = this.store.registry(botId)?.homeThreadId
-      const seen = home ? this.host.wakeThread?.(home, event.threadId) : undefined
-      if (!seen) throw new BotEngineError('invalid_params', 'Wake-ups on threads can\'t be set here.')
-      if (seen.state === 'unreachable') throw new BotEngineError('invalid_params', `Thread ${event.threadId} is not available to you.`)
-      if (seen.state === 'archived' || seen.state === 'deleted') throw new BotEngineError('invalid_params', `Thread ${event.threadId} is ${seen.state}.`)
-      if (seen.state === 'idle') throw new BotEngineError('invalid_params', `Thread ${event.threadId} isn't working now${seen.lastRun ? `: its last turn ended ${seen.lastRun.status}${seen.lastRun.endedAt ? ` at ${clockTime(seen.lastRun.endedAt)}` : ''}` : ''}. Read it instead of waiting for it.`)
-      return { kind: 'thread', threadId: event.threadId, ...(seen.title ? { title: seen.title.slice(0, 120) } : {}) }
-    }
-    if (!this.host.pullRequestState) throw new BotEngineError('invalid_params', 'Wake-ups on pull requests can\'t be set here.')
     // A watcher is started by `watch_start`, never set as a wake.
     if (event.kind === 'watcher') throw new BotEngineError('invalid_params', 'Start a background command with watch_start.')
-    if (event.on !== undefined && !['merged', 'checks', 'review'].includes(event.on)) throw new BotEngineError('invalid_params', 'on is merged, checks or review.')
-    const read = await this.host.pullRequestState(event.repo, event.number)
-    if ('none' in read) throw new BotEngineError('invalid_params', `${event.repo} is not one of your owner's projects in Mousse, so its pull requests can't be watched.`)
-    if ('problem' in read) throw new BotEngineError('invalid_params', `${event.repo}#${event.number} couldn't be read: ${read.problem}`)
-    if (read.state === 'merged') throw new BotEngineError('invalid_params', `${event.repo}#${event.number} is merged already.`)
-    if (read.state === 'closed') throw new BotEngineError('invalid_params', `${event.repo}#${event.number} is closed without merging.`)
-    // A cursor from GitHub's own read avoids comparing its clock with this computer's clock.
-    const submitted = (read.reviews ?? []).filter((review) => review.submittedAt && Number.isFinite(Date.parse(review.submittedAt)))
-    const newest = submitted.reduce<string | null>((at, review) => !at || Date.parse(review.submittedAt!) > Date.parse(at) ? review.submittedAt! : at, null)
-    const reviewAfter = { at: newest, ids: submitted.filter((review) => newest && Date.parse(review.submittedAt!) === Date.parse(newest)).map((review) => review.id) }
-    return { kind: 'pr', repo: event.repo, number: event.number, ...(event.on ? { on: event.on } : {}), ...(event.on === 'review' ? { reviewAfter } : {}) }
+    let checked: BotWakeEvent | { problem: string }
+    if (event.kind === 'thread') {
+      const home = this.store.registry(botId)?.homeThreadId
+      checked = threadWakeEvent(event, home ? this.host.wakeThread?.(home, event.threadId) : undefined, clockTime)
+    } else {
+      if (!this.host.pullRequestState) throw new BotEngineError('invalid_params', 'Wake-ups on pull requests can\'t be set here.')
+      if (event.on !== undefined && !['merged', 'checks', 'review'].includes(event.on)) throw new BotEngineError('invalid_params', 'on is merged, checks or review.')
+      checked = pullRequestWakeEvent(event, await this.host.pullRequestState(event.repo, event.number), "your owner's")
+    }
+    if ('problem' in checked) throw new BotEngineError('invalid_params', checked.problem)
+    return checked
   }
 
   /**
@@ -9404,46 +9394,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     if (event.kind === 'watcher') return this.watchers.has(wake.id) ? undefined : { kind: 'ended', reason: 'restart' }
     if (event.kind === 'thread') {
       const home = this.store.registry(wake.botId)?.homeThreadId
-      const seen = home ? this.host.wakeThread?.(home, event.threadId) : undefined
-      if (!seen || seen.state === 'running') return undefined
-      if (seen.state === 'unreachable') return { kind: 'ended', reason: 'unreachable' }
-      if (seen.state === 'archived') return { kind: 'ended', reason: 'thread_archived' }
-      if (seen.state === 'deleted') return { kind: 'ended', reason: 'thread_deleted' }
-      const title = seen.title ?? event.title
-      return { kind: 'thread', threadId: event.threadId, status: seen.lastRun?.status ?? 'completed', ...(title ? { title: title.slice(0, 120) } : {}) }
+      return threadWakeOutcome(event, home ? this.host.wakeThread?.(home, event.threadId) : undefined)
     }
     if (now.getTime() - (this.wakeReadAt.get(wake.id) ?? 0) < PR_WAKE_READ_MS) return undefined
     this.wakeReadAt.set(wake.id, now.getTime())
-    const read = await this.host.pullRequestState?.(event.repo, event.number)
-    // Not read now (offline, the host failed, the project went): tried again later, until the wake gives up.
-    if (!read || 'none' in read || 'problem' in read) return undefined
-    if (read.state === 'merged' && event.on && event.on !== 'merged') return { kind: 'ended', reason: 'pr_merged' }
-    if (read.state === 'merged') return { kind: 'pr', repo: event.repo, number: event.number, state: 'merged', ...(read.title ? { title: read.title.slice(0, 120) } : {}) }
-    if (read.state === 'closed') return { kind: 'ended', reason: 'pr_closed' }
-    const pr = { kind: 'pr' as const, repo: event.repo, number: event.number, ...(read.title ? { title: read.title.slice(0, 120) } : {}) }
-    if (event.on === 'checks') {
-      const checks = read.checkRuns
-      // Missing/unknown checks cannot prove completion; skipped checks are complete but neither passed nor failed.
-      if (!read.headSha || !checks?.length || checks.some((check) => !['passing', 'failing', 'skipped', 'waiting'].includes(check.state))) return undefined
-      const failedNames = checks.filter((check) => check.state === 'failing').map((check) => check.name)
-      const waitingNames = checks.filter((check) => check.state === 'waiting').map((check) => check.name)
-      return { ...pr, state: 'checks', headSha: read.headSha.slice(0, 7), waiting: waitingNames.length, waitingNames: wakeCheckNames(waitingNames), passed: checks.filter((check) => check.state === 'passing').length, failed: failedNames.length, failedNames: wakeCheckNames(failedNames) }
-    }
-    if (event.on === 'review') {
-      const review = read.reviews?.filter((review) => {
-        if (!review.submittedAt || !Number.isFinite(Date.parse(review.submittedAt))) return false
-        // Older stored wakes have no GitHub cursor; retain their original cutoff until they end.
-        if (!event.reviewAfter) return Date.parse(review.submittedAt) > Date.parse(wake.createdAt)
-        if (!event.reviewAfter.at) return true
-        const time = Date.parse(review.submittedAt), cutoff = Date.parse(event.reviewAfter.at)
-        return time > cutoff || (time === cutoff && !event.reviewAfter.ids.includes(review.id))
-      })
-        .sort((a, b) => Date.parse(a.submittedAt!) - Date.parse(b.submittedAt!))
-        .find((review) => ['approved', 'changes_requested', 'commented'].includes(review.state))
-      if (review && (review.state === 'approved' || review.state === 'changes_requested' || review.state === 'commented'))
-        return { ...pr, state: 'review', reviewState: review.state, reviewer: review.author }
-    }
-    return undefined
+    return pullRequestWakeOutcome(event, await this.host.pullRequestState?.(event.repo, event.number), wake.createdAt)
   }
 
   /** A thread's run ended: the wakes waiting on that thread look now, not at the next tick. */

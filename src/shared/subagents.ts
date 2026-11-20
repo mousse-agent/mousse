@@ -120,7 +120,7 @@ export interface SubagentNoticeItem {
    * without waiting. Its `childThreadId` is the thread itself. The transcript shows nothing for it: the answers row was
    * recorded when the person answered. A queued copy that waits for its turn shows `answers`.
    */
-  event?: 'question' | 'stopped' | 'answer' | 'note' | 'monitor'
+  event?: 'question' | 'stopped' | 'answer' | 'note' | 'monitor' | 'wake'
   /** With `event: 'question'`: the question the subagent waits on. With `event: 'answer'`: the question answered. */
   requestId?: string
   /** With `event: 'answer'`: the answers as the transcript shows them. */
@@ -135,6 +135,11 @@ export interface SubagentNoticeItem {
    * `title` its description, `childThreadId` the thread itself), and on its last notice how it ended.
    */
   monitor?: { kind: MonitorKind; lines: string[]; dropped?: number; end?: MonitorEnd; tail?: string }
+  /**
+   * With `event: 'wake'`: this thread's own wake-up (`wake`) is due or what it waited on happened (`delegationId` is its
+   * id, `title` what happened in a few words, `childThreadId` the thread itself); `brief` is what the agent wrote for itself.
+   */
+  wake?: { brief: string }
 }
 
 /**

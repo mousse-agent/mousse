@@ -102,6 +102,7 @@ import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type Effe
 import { steerReleaseWindow, steerStrategy, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { runningListText, runningNote, type RunningRegistry, type RunningScope, type RunningThreadInfo, type RunningViewer } from '../running/RunningRegistry'
 import type { MonitorSummary, ThreadMonitors } from '../monitors/ThreadMonitors'
+import type { ThreadWakes } from '../wakes/ThreadWakes'
 import { PROVIDER_BACKGROUND_ID, type ThreadBackgroundWork } from '../../shared/backgroundWork'
 import { agentMessage, AppToolTurns, createAppToolRegistry, holdsPerson, type AgentAccessResult, type LacksReport, McpToolError, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
@@ -1989,6 +1990,13 @@ export class OrchestratorService extends EventEmitter {
     this.monitors = monitors
   }
 
+  /** Threads' agents' own wake-ups (`wake`): shown with the thread's background work, and cancelled by its Stop. */
+  private threadWakes: ThreadWakes | null = null
+
+  setThreadWakes(wakes: ThreadWakes | null): void {
+    this.threadWakes = wakes
+  }
+
   /** The thread's background work at a glance (counts and the latest event), or undefined when nothing runs. */
   monitorSummary(threadId: string): MonitorSummary | undefined {
     if (!this.monitors?.has(threadId)) return undefined
@@ -2012,7 +2020,16 @@ export class OrchestratorService extends EventEmitter {
       ...(view.latest ? { latest: view.latest } : {})
     }))
     const latest = items.length ? monitors?.summary(threadId).latest : undefined
-    return { threadId, items, providerWork: this.providerBackground.has(threadId), ...(latest ? { latest } : {}) }
+    // Its wake-ups still to come, after what runs: each says when, or what it waits for and when it gives up.
+    const wakes = (this.threadWakes?.list(threadId) ?? []).map((wake) => ({
+      id: wake.wakeId,
+      kind: 'wake' as const,
+      description: wake.brief.replace(/\s+/g, ' ').trim().slice(0, 120),
+      ...(wake.waitsFor ? { waitsFor: wake.waitsFor } : {}),
+      startedAt: wake.setAt,
+      until: wake.dueAt
+    }))
+    return { threadId, items: [...items, ...wakes], providerWork: this.providerBackground.has(threadId), ...(latest ? { latest } : {}) }
   }
 
   /** What the thread runs in the background changed: the app is told (`thread.backgroundWork`). */
@@ -2027,6 +2044,7 @@ export class OrchestratorService extends EventEmitter {
    */
   async stopBackground(threadId: string, id: string): Promise<boolean> {
     if (id === PROVIDER_BACKGROUND_ID) return this.providerBackground.has(threadId) ? this.stopProviderWork(threadId) : false
+    if (this.threadWakes?.cancel(threadId, id)) return true
     return Boolean(this.monitors?.stopByPerson(threadId, id))
   }
 
@@ -4259,13 +4277,14 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
-   * Ends the monitors, background commands and `keep_working` holds of stopped threads. Each thread is told with its next
-   * turn (a Stop never wakes it); a deleted thread is told nothing. How many ended.
+   * Ends the monitors, background commands and `keep_working` holds of stopped threads, and cancels their wake-ups. Each
+   * thread is told with its next turn (a Stop never wakes it); a deleted thread is told nothing. How many ended.
    */
   private stopMonitors(threadIds: readonly string[], reason: string): number {
+    // A Stop that only cancelled wake-ups still stopped something.
+    let stopped = this.cancelWakes(threadIds, reason)
     const monitors = this.monitors
-    if (!monitors) return 0
-    let stopped = 0
+    if (!monitors) return stopped
     for (const id of threadIds) {
       try {
         stopped += monitors.stopThread(id, reason !== 'thread_deleted' && reason !== 'deleted')
@@ -4274,6 +4293,26 @@ export class OrchestratorService extends EventEmitter {
       }
     }
     return stopped
+  }
+
+  /**
+   * Cancels the wake-ups of stopped threads: a person's or an agent's Stop, an archive or a delete. Each thread is told
+   * once with its next turn (a Stop never wakes it); a deleted one is told nothing. A run that reached its time limit
+   * keeps them: that ends a turn, not the thread's plan to carry on.
+   */
+  private cancelWakes(threadIds: readonly string[], reason: string): number {
+    const wakes = this.threadWakes
+    if (!wakes || reason === 'time_limit') return 0
+    const deleted = reason === 'thread_deleted' || reason === 'deleted'
+    let cancelled = 0
+    for (const id of threadIds) {
+      try {
+        cancelled += wakes.stopThread(id, !deleted, reason === 'settled' ? 'the thread was archived' : 'the thread was stopped')
+      } catch (error) {
+        console.warn('a stopped thread\'s wake-ups could not be cancelled', { threadId: id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return cancelled
   }
 
   /**
@@ -4912,6 +4951,7 @@ export class OrchestratorService extends EventEmitter {
       quickActions: new QuickActionTools(questionApproval(this.questions), (action) => this.emit('quick-action-created', action)),
       running: (turn) => this.runningText(turn, 'list'),
       monitors: () => this.monitors ?? undefined,
+      threadWakes: () => this.threadWakes ?? undefined,
       web: new WebTools(this.providerAuth.credentials),
       devGui: new DevGuiTools(),
       // The git app tools read the project through their own scoped Git read (`git/scopedRead`).

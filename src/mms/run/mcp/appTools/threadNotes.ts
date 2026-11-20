@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { Thread, ThreadNativeHelper } from '../../../../shared/types'
 import type { SteerStrategy } from '../../CommandPolicy'
 import type { RunEngine } from '../../RunEngine'
-import type { AgentNotePayload, InboxRecord, MonitorEventPayload, ThreadEvent } from '../../types'
+import type { AgentNotePayload, InboxRecord, MonitorEventPayload, ThreadEvent, ThreadWakePayload } from '../../types'
 import type { FamilyRelation } from './types'
 
 /**
@@ -36,7 +36,7 @@ export function noteFrom(relation: Exclude<FamilyRelation, 'native'>): AgentNote
 }
 
 /** Posts the note (or a monitor's notice) to the thread's inbox, once per request key. */
-export function postNote(engine: Pick<RunEngine, 'inbox' | 'getActiveRun'>, requestKey: string, payload: AgentNotePayload | MonitorEventPayload, threadId: string): { row: InboxRecord; replayed: boolean } {
+export function postNote(engine: Pick<RunEngine, 'inbox' | 'getActiveRun'>, requestKey: string, payload: AgentNotePayload | MonitorEventPayload | ThreadWakePayload, threadId: string): { row: InboxRecord; replayed: boolean } {
   const inboxId = noteInboxId(requestKey)
   const existing = engine.inbox.get(inboxId)
   if (existing) return { row: existing, replayed: true }

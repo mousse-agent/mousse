@@ -56,7 +56,7 @@ import { OrchestratorService } from './orchestrator/OrchestratorService'
 import { ProfileDatabase } from './run/db/ProfileDatabase'
 import { McpCredentials } from './run/mcp/McpCredentials'
 import { MousseMcpServer } from './run/mcp/MousseMcpServer'
-import { personTurnRequest } from './run/mcp/appTools/agentMessage'
+import { isPersonMessage, personTurnRequest } from './run/mcp/appTools/agentMessage'
 import { EffectWorker } from './run/EffectWorker'
 import { TERMINAL_RUN_STATUSES, type RunRecord, type ThreadEvent } from './run/types'
 import { jobThreadIn, lastReplyOf, launchedThreadsIn, watchLaunchedThreads } from './bots/launchedThreads'
@@ -64,7 +64,7 @@ import { readRunResultText } from './run/delegation/hold'
 import { Reconciler } from './run/Reconciler'
 import { RunEngine } from './run/RunEngine'
 import type { BotEngine } from './bots/activation/BotEngine'
-import { pullRequestStateOf, wakeThreadState } from './bots/wakeSources'
+import { pullRequestStateOf, wakeThreadState, type WakeThreadDeps } from './bots/wakeSources'
 import { wakeEventLabel } from '../shared/bots/personal/wakes'
 import { botThreadReach } from './run/mcp/appTools/thread'
 import { openPersonalBots } from './bots/activation/open'
@@ -104,6 +104,7 @@ import { WorktreeManager } from './worktree/WorktreeManager'
 import { PtyManager } from './terminals/PtyManager'
 import { RunningRegistry } from './running/RunningRegistry'
 import { ThreadMonitors, withShellPath } from './monitors/ThreadMonitors'
+import { ThreadWakes } from './wakes/ThreadWakes'
 import { sharedShellPath } from './harness/shellPath'
 import { postNote } from './run/mcp/appTools/threadNotes'
 import { McpRegistry } from './integrations/mcp/McpRegistry'
@@ -807,24 +808,8 @@ export class MmsProfileServices {
       },
       runs: () => this.runEngine,
       // What a bot's wakes wait on: one of the owner's threads it may see, and a pull request of one of their projects.
-      wakeThread: (from, threadId) => wakeThreadState({
-        thread: (id) => this.threads.getThread(id),
-        trashed: (id) => {
-          const record = this.threads.lifecycleStore.get(id)
-          return Boolean(record && record.state !== 'active')
-        },
-        reachable: (caller, id) => !('refused' in botThreadReach(this.orchestrator.mcpToolHost(), this.runEngine, caller, id)),
-        working: (id) => this.orchestrator.isTurnActive(id) || this.runEngine.getActiveRun(id) !== null || this.runEngine.store.getPausedRun(id) !== null,
-        lastRun: (id) => {
-          const run = this.runEngine.listRuns(id, { limit: 1 })[0]
-          return run ? { status: run.status, endedAt: run.completedAt } : undefined
-        }
-      }, from, threadId),
-      pullRequestState: (repo, number) => pullRequestStateOf({
-        folders: () => this.projects.listProjects().map((project) => project.path),
-        repository: async (folder) => (await this.gitService.codeHost.repositoryIdentity(folder)).nameWithOwner,
-        pullRequest: (folder, n) => this.gitService.codeHost.getPullRequestDetail(folder, n, { lineComments: false })
-      }, repo, number),
+      wakeThread: (from, threadId) => wakeThreadState(this.wakeThreadDeps((caller, id) => !('refused' in botThreadReach(this.orchestrator.mcpToolHost(), this.runEngine, caller, id))), from, threadId),
+      pullRequestState: (repo, number) => this.wakePullRequestState(repo, number),
       // The threads a bot started, hidden ones too, and how each stands: the bot is busy while any of them works. Of
       // those done, only the ones not archived and updated in the last six hours ("Recent").
       launchedThreads: (creators) => launchedThreadsIn({
@@ -1054,6 +1039,23 @@ export class MmsProfileServices {
     })
     this.monitors = monitors
     this.orchestrator.setMonitors(monitors)
+    // Threads' agents' own wake-ups (`wake`): kept per profile, delivered to the thread's inbox as notes are. They read
+    // threads and pull requests as a bot's wakes do; a thread's agent may wait on any thread but a bot's, and a shared
+    // thread's never on a private one.
+    const threadWakes = new ThreadWakes({
+      file: join(this.homeDir, 'thread-wakes.json'),
+      post: (threadId, payload, key) => { postNote(runEngine, key, payload, threadId) },
+      changed: (threadId) => this.orchestrator.backgroundWorkChanged(threadId),
+      threadState: (from, threadId) => wakeThreadState(this.wakeThreadDeps((caller, id) => {
+        if (this.orchestrator.mcpToolHost().botRole?.(id)) return false
+        return !(this.threads.getThread(id)?.localOnly && !this.threads.getThread(caller)?.localOnly)
+      }), from, threadId),
+      pullRequestState: (repo, number) => this.wakePullRequestState(repo, number),
+      personLastWroteAt: (threadId) => [...this.orchestrator.visibleMessagesWithoutLoading(threadId)].reverse().find((message) => !message.hidden && isPersonMessage(message))?.timestamp,
+      threadExists: (threadId) => Boolean(this.threads.getThread(threadId))
+    })
+    this.threadWakes = threadWakes
+    this.orchestrator.setThreadWakes(threadWakes)
     this.orchestrator.setRunning(new RunningRegistry({
       terminals: () => ptys.runningTerminals(),
       terminalOutput: (ptyId) => ptys.getScrollback(ptyId).slice(-8_000),
@@ -1652,9 +1654,14 @@ export class MmsProfileServices {
     })
     // A bot's wakes on a thread look when its run ends or it is archived, not only at the next tick.
     this.orchestrator.on('run-event', (event: ThreadEvent) => {
-      if (event.type === 'run.status' && TERMINAL_RUN_STATUSES.has((event.payload as RunRecord).status)) this.personalBots?.threadRunEnded(event.threadId)
+      if (event.type !== 'run.status' || !TERMINAL_RUN_STATUSES.has((event.payload as RunRecord).status)) return
+      this.personalBots?.threadRunEnded(event.threadId)
+      this.threadWakes.threadRunEnded(event.threadId)
     })
-    this.orchestrator.on('thread-settled', (payload: { threadId: string }) => this.personalBots?.threadRunEnded(payload.threadId))
+    this.orchestrator.on('thread-settled', (payload: { threadId: string }) => {
+      this.personalBots?.threadRunEnded(payload.threadId)
+      this.threadWakes.threadRunEnded(payload.threadId)
+    })
     // Any Stop that reaches a thread, and every subagent below it, ends its watch at once.
     this.orchestrator.on('threads-stopped', (payload: { threadIds: string[] }) => this.pullRequestWatch.onStopped(payload.threadIds))
     // An archived thread's watch ends as archived, not as stopped (`OrchestratorService.settleThread`).
@@ -1728,6 +1735,35 @@ export class MmsProfileServices {
     if (['trashed', 'purge-started'].includes(root.state))
       this.threads.lifecycleStore.withCleanupSettlement(taskId, settle)
     else settle()
+  }
+
+  /**
+   * How a wake sees a thread (`wakeThreadState`), a bot's and a thread agent's alike; `reachable` is who may wait on it.
+   * A thread works while a turn or run of it is live, waits its turn, or is paused by a usage limit (it goes on by itself).
+   */
+  private wakeThreadDeps(reachable: (from: string, threadId: string) => boolean): WakeThreadDeps {
+    return {
+      thread: (id) => this.threads.getThread(id),
+      trashed: (id) => {
+        const record = this.threads.lifecycleStore.get(id)
+        return Boolean(record && record.state !== 'active')
+      },
+      reachable,
+      working: (id) => this.orchestrator.isTurnActive(id) || this.runEngine.getActiveRun(id) !== null || this.runEngine.store.getPausedRun(id) !== null,
+      lastRun: (id) => {
+        const run = this.runEngine.listRuns(id, { limit: 1 })[0]
+        return run ? { status: run.status, endedAt: run.completedAt } : undefined
+      }
+    }
+  }
+
+  /** A pull request a wake waits on, read through the first of the person's projects whose repository it is. */
+  private wakePullRequestState(repo: string, number: number): ReturnType<typeof pullRequestStateOf> {
+    return pullRequestStateOf({
+      folders: () => this.projects.listProjects().map((project) => project.path),
+      repository: async (folder) => (await this.gitService.codeHost.repositoryIdentity(folder)).nameWithOwner,
+      pullRequest: (folder, n) => this.gitService.codeHost.getPullRequestDetail(folder, n, { lineComments: false })
+    }, repo, number)
   }
 
   /** Why a thread is not idle for storage cleanup, or undefined. Looks only at what is already loaded. */
@@ -2181,6 +2217,7 @@ export class MmsProfileServices {
   private secretSweepTimer: ReturnType<typeof setInterval> | null = null
   /** Threads' monitors, background commands and `keep_working` holds. */
   readonly monitors: ThreadMonitors
+  readonly threadWakes: ThreadWakes
   automationDrafts!: AutomationDrafts
 
   /** The project the composer picked for the manager's next turns (see `automationManagerWorkspace`). */
@@ -2467,6 +2504,7 @@ export class MmsProfileServices {
     this.secretRequests?.dispose()
     this.bugReports?.dispose()
     this.monitors.close()
+    this.threadWakes.close()
     this.webhooksClosed = true
     if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
     this.webhookRetryTimer = null
@@ -2828,6 +2866,8 @@ export class MmsProfileServices {
     }
     // Wake rows of a kind no longer written (an earlier pull request watch's) are settled before any worker can run one.
     startupPhase('start.runEngineWorkers', () => { this.runEngine.inbox.withdrawRetiredRows(); this.startRunEngineWorkers() })
+    // Threads' wake-ups whose time passed while the daemon was off fire now; the rest wait for theirs.
+    startupPhase('start.threadWakes', () => this.threadWakes.start())
     // Monitors the last run left ended with it: their threads are told, in the background.
     void this.monitors.recoverOnBoot().catch((error: unknown) => {
       console.warn('monitors left by the last run could not be reported', { error: error instanceof Error ? error.message : String(error) })

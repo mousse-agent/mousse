@@ -271,6 +271,7 @@ describe('profile start order (H4)', () => {
       runEngine: engine,
       startRunEngineWorkers: () => { calls.push('workers') },
       monitors: { recoverOnBoot: async () => undefined },
+      threadWakes: { start: () => undefined },
       startMcpServer: async () => undefined,
       threadRuntimes: { restoreOnStartup: () => undefined },
       questions: { markInterruptedByDaemonRestart: () => undefined },

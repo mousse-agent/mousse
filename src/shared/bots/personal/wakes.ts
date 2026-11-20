@@ -145,12 +145,13 @@ export const SILENT_REPLY = '[SILENT]'
  * it may end with no reply (`reply="if-needed"`, `SILENT_REPLY`), as the standing instructions say. `work`: a work
  * wait, which carries on its work instead. `late`: the time it was for, when it is said later (Mousse was off).
  */
-export function wakeInput(input: { brief: string; setAt: string; event: BotWakeEvent | null; fired: BotWakeFired | null; late?: string; chain: number; clock: (iso: string) => string; work?: boolean; wakeId?: string }): string {
+export function wakeInput(input: { brief: string; setAt: string; event: BotWakeEvent | null; fired: BotWakeFired | null; late?: string; chain: number; clock: (iso: string) => string; work?: boolean; wakeId?: string; thread?: boolean }): string {
+  const owner = input.thread ? 'the person' : 'your owner'
   const parts: NoticePart[] = []
   const set = input.clock(input.setAt)
   const fired = input.fired
   const what = input.work ? 'A work wait' : 'A wake-up'
-  if (!input.event) parts.push(`${what} you set at ${set} is due${input.late ? ` (it was for ${input.late})` : ''}.${input.work ? '' : ' Your owner did not write: you carry on by yourself.'}`)
+  if (!input.event) parts.push(`${what} you set at ${set} is due${input.late ? ` (it was for ${input.late})` : ''}.${input.work ? '' : ` ${input.thread ? 'The person' : 'Your owner'} did not write: you carry on by yourself.`}`)
   else if (fired?.kind === 'pr' && fired.state === 'checks') {
     parts.push(`${what} you set at ${set}: pull request ${fired.repo}#${fired.number}'s checks have settled. Passed: ${fired.passed}. Failed: ${fired.failed}. Waiting for approval: ${fired.waiting ?? 0}.`)
     if (fired.title) parts.push(quoted('pull request title', fired.title))
@@ -187,6 +188,8 @@ export function wakeInput(input: { brief: string; setAt: string; event: BotWakeE
   }
   parts.push(`What you wrote for yourself: ${input.brief}`)
   if (input.work) return notice({ kind: 'work_wait' }, [...parts, 'Carry on with this work in this thread, then report as usual.'])
-  parts.push(`This is wake-up ${input.chain} in a row without your owner. You can act in this turn yourself; the same wake-up again with no progress is refused.`)
+  parts.push(`This is wake-up ${input.chain} in a row without ${owner}. You can act in this turn yourself; the same wake-up again with no progress is refused.`)
+  // A thread's wake carries the thread on (`ThreadWakes`): a turn of its own, with no reply rule of a bot's chat.
+  if (input.thread) return notice({ kind: 'thread_wake', ...(input.wakeId ? { ref: input.wakeId } : {}) }, parts)
   return notice({ kind: 'bot_wake', reply: 'if-needed', ...(input.wakeId ? { ref: input.wakeId } : {}) }, parts)
 }

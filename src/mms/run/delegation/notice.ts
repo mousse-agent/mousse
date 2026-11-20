@@ -1,7 +1,7 @@
 import { notice, quoted, relayed, type NoticePart } from '../../../shared/mousseContext'
 import type { SubagentNoticeItem } from '../../../shared/subagents'
 import { isQuestionAnswerRow, type QuestionAnswerPayload } from '../OpenQuestions'
-import { isAgentNoteRow, isChildQuestionRow, isMonitorEventRow, type AgentNotePayload, type ChildLacksPayload, type ChildQuestionPayload, type ChildResultPayload, type InboxRecord, type MonitorEventPayload, type MonitorKind } from '../types'
+import { isAgentNoteRow, isChildQuestionRow, isMonitorEventRow, isThreadWakeRow, type ThreadWakePayload, type AgentNotePayload, type ChildLacksPayload, type ChildQuestionPayload, type ChildResultPayload, type InboxRecord, type MonitorEventPayload, type MonitorKind } from '../types'
 
 /** Characters of one subagent's result a notice shows (issue #142: the result is inlined once). */
 export const NOTICE_TASK_CHARS = 4_000
@@ -125,6 +125,12 @@ function noticeText(row: InboxRecord, context: NoticeContext, items: SubagentNot
       }
     })
     return monitorNotice(payload)
+  }
+  if (isThreadWakeRow(row)) {
+    const payload = row.payload as ThreadWakePayload
+    // One quiet row: what woke the thread, opening on what the agent wrote for itself.
+    items.push({ delegationId: payload.wakeId, childThreadId: row.threadId, title: payload.label, runStatus: 'wake', fullyShown: true, event: 'wake', wake: { brief: payload.brief } })
+    return payload.text
   }
   const stopped = row.payload as { kind?: unknown; delegationId?: string; childThreadId?: string } | null
   if (stopped?.kind === 'delegation_stopped' && stopped.childThreadId) {
