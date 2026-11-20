@@ -137,12 +137,19 @@ function hexChannels(value: string): string | null {
  */
 export function themeTokensCss(colors: Record<string, string>): string {
   const declarations: string[] = []
+  const applied = new Set<string>()
   for (const [name, value] of Object.entries(colors)) {
     if (!isThemeTokenName(name) || !isThemeColorValue(value)) continue
+    applied.add(name)
     declarations.push(`${name}: ${value.trim()} !important;`)
     const channels = hexChannels(value)
     if (channels && !(`${name}-rgb` in colors)) declarations.push(`${name}-rgb: ${channels} !important;`)
   }
+  // Mousse Dark sets --vscode-sideBar-background inline (#000000) and vscode-compat maps it to --surface-base, so a
+  // user theme setting --surface-strong ("sidebar and raised panels") or --surface-base would otherwise never reach the
+  // sidebar unless it also set the VS Code token directly.
+  if (applied.has('--surface-strong')) declarations.push('--vscode-sideBar-background: var(--surface-strong) !important;')
+  else if (applied.has('--surface-base')) declarations.push('--vscode-sideBar-background: var(--surface-base) !important;')
   return declarations.length ? `:root { ${declarations.join(' ')} }` : ''
 }
 

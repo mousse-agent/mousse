@@ -1277,24 +1277,38 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 /* More rows below the fold: the last rows fade out and the scrollbar stays drawn, so the list reads as one
-   that scrolls even with overlay scrollbars. Over the solid pane the fade is a band in the pane's colour laid
-   over the list's last 28px, scrollbar included (anchored to the list's box, outside its scrolled content); a
-   mask would make the GPU keep a list-sized copy of the list, its mask and their tiles (about 16 MB). In a
-   see-through (acrylic) window the mask stays. */
-html[data-acrylic='true'] .threads-sidebar-scroll[data-more-below] {
+   that scrolls even with overlay scrollbars. Over a solid built-in pane the fade is a band in the pane's colour
+   laid over the list's last 28px, scrollbar included (anchored to the list's box, outside its scrolled content);
+   a mask would make the GPU keep a list-sized copy of the list, its mask and their tiles (about 16 MB). In a
+   see-through (acrylic) window, over a wallpaper, or under an active user theme (where the sidebar's backdrop
+   may be feathered, gradient or custom CSS), the mask is used so no single solid colour paints over it. */
+:is(
+  html[data-acrylic='true'],
+  html[data-wallpaper],
+  html[data-user-theme]:not([data-user-theme-paused])
+) .threads-sidebar-scroll[data-more-below] {
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
   mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
 }
 
-html:not([data-acrylic='true']) .threads-sidebar {
+:is(
+  html:not([data-acrylic='true']):not([data-wallpaper]):not([data-user-theme]),
+  html:not([data-acrylic='true']):not([data-wallpaper])[data-user-theme-paused]
+) .threads-sidebar {
   anchor-scope: --threads-list;
 }
 
-html:not([data-acrylic='true']) .threads-sidebar-scroll[data-more-below] {
+:is(
+  html:not([data-acrylic='true']):not([data-wallpaper]):not([data-user-theme]),
+  html:not([data-acrylic='true']):not([data-wallpaper])[data-user-theme-paused]
+) .threads-sidebar-scroll[data-more-below] {
   anchor-name: --threads-list;
 }
 
-html:not([data-acrylic='true']) .threads-sidebar:has(> .threads-sidebar-scroll[data-more-below])::after {
+:is(
+  html:not([data-acrylic='true']):not([data-wallpaper]):not([data-user-theme]),
+  html:not([data-acrylic='true']):not([data-wallpaper])[data-user-theme-paused]
+) .threads-sidebar:has(> .threads-sidebar-scroll[data-more-below])::after {
   content: '';
   position: absolute;
   position-anchor: --threads-list;
