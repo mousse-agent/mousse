@@ -440,14 +440,17 @@ interface TurnHandoff {
   conversationBranchId: string
   /** The folder the turn's snapshots were taken in. */
   workspacePath: string
-  /** The thread's journal length when it was recorded: any entry since (Undo, Publish, a revert) ends it. */
-  journalEntries: number
+  /** The thread's latest journal sequence when it was recorded: any entry since (Undo, Publish, a revert) ends it. */
+  journalSequence: number
   /** `workspace.json`'s generation when it was recorded. */
   generation: number
   /** The execution context the next turn runs in: the last one, with the branch and HEAD the end recorded. */
   workspace: WorkspaceExecutionContext
-  /** Set at the settle: the turn that may use it, a queued message the settle admitted or one of these wakes. */
-  armed?: { admitted: true } | { wakeRunIds: string[] }
+  /**
+   * Set at the settle: the turn that may use it, the queued message the settle's drain claimed (its item and the claim's
+   * token, which a released and claimed-again item never has again) or one of these wakes.
+   */
+  armed?: { queueItemId: string; claimToken: string } | { wakeRunIds: string[] }
 }
 
 /** A context without what only the turn that made it says (`startNote`, `workspaceNote`). */
@@ -1254,6 +1257,8 @@ function durableSendInput(input: OrchestratorSendInput): OrchestratorSendInput {
 const SETUP_RETRY_FILE = 'setup-retry.json'
 /** How long a bot's or agent's `thread_create` / `thread_send` waits for the thread's worktree to be set up. */
 const SETUP_WAIT_MS = 45_000
+/** A turn whose setup waited longer than this (its folders, its drive, the thread's lease) takes no hand-off. */
+const HANDOFF_SETUP_WAIT_MS = 1_000
 /** How long a setup's outcome is kept for a waiter that asks after it ended. */
 const SETUP_OUTCOME_KEEP_MS = 5 * 60_000
 
@@ -6816,6 +6821,8 @@ export class OrchestratorService extends EventEmitter {
    * admission its send held is released, and a queue item whose run already ended leaves the queue.
    */
   private skipUnstartableTurn(payload: TurnStartPayload, entry: TurnResult | undefined, run: RunRecord): void {
+    // The turn a hand-off was armed for never starts: nothing else may use it.
+    this.turnHandoffs.delete(payload.threadId)
     if (entry && this.turnResults.get(payload.runId) === entry) this.turnResults.delete(payload.runId)
     const session = this.boundSession.threadId === payload.threadId ? this.boundSession : this.sessions.get(payload.threadId)
     if (session && entry?.payload.admissionHeld && !session.activeTurn) {
@@ -6841,6 +6848,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private abandonTurnStart(runId: string, entry: TurnResult): void {
     entry.abandoned = true
+    this.turnHandoffs.delete(entry.payload.threadId)
     this.turnResults.delete(runId)
     const { payload } = entry
     try {
@@ -10388,6 +10396,7 @@ export class OrchestratorService extends EventEmitter {
         console.warn('a deleted thread\'s work could not be stopped', { threadId, error: error instanceof Error ? error.message : String(error) })
       }).finally(() => setTimeout(forgetResults, 2_000).unref?.())
     }
+    this.turnHandoffs.delete(threadId)
     const session = this.sessions.get(threadId)
     if (session) {
       session.deleted = true
@@ -13814,6 +13823,8 @@ export class OrchestratorService extends EventEmitter {
         if (!session.abortRequested && !session.stopping) session.drainAfterSettle = true
         session.steerOnStart = []
       }
+      // Read before the reset below: a Stop that reached this turn drops its hand-off (`settleTurnHandoff`).
+      const stoppedAtSettle = session.abortRequested || session.stopping
       session.turnAdmitted = false
       session.admissionRunId = undefined
       session.abortRequested = false
@@ -13823,15 +13834,16 @@ export class OrchestratorService extends EventEmitter {
       this.effectWorker?.notify()
       // Post-turn drains are deferred to here: while admission is held the drain would see a
       // running turn and skip, stranding queued messages.
+      let claimedAtSettle: { queueItemId: string; claimToken: string } | undefined
       if (session.drainAfterSettle) {
         session.drainAfterSettle = false
         try {
-          this.scheduleQueueDrain(session)
+          this.scheduleQueueDrain(session, { onClaimed: (queueItemId, claimToken) => { claimedAtSettle = { queueItemId, claimToken } } })
         } catch (error) {
           logDebug('OrchestratorService', 'post-turn queue drain failed to schedule', error, { threadId: session.threadId })
         }
       }
-      this.settleTurnHandoff(session, opts?.runId, Boolean(turnFailure) || requeued)
+      this.settleTurnHandoff(session, opts?.runId, Boolean(turnFailure) || requeued || stoppedAtSettle, claimedAtSettle)
     }
   }
 
@@ -13842,6 +13854,8 @@ export class OrchestratorService extends EventEmitter {
    */
   private recordTurnHandoff(session: ThreadSession, end: { runId: string; action: ThreadAction; conversationBranchId: string; workspacePath: string; workspace: WorkspaceExecutionContext }): void {
     this.turnHandoffs.delete(session.threadId)
+    // A Stop that reached the turn while its end was recorded: the next turn reads the folder afresh.
+    if (session.abortRequested || session.stopping || session.deleted) return
     const threadDir = this.resolveThreadDir(session.threadId)
     if (!threadDir || end.action.state !== 'completed' || end.action.reversible === false || !end.action.endSha) return
     if (end.workspace.lifecycle !== 'ready' || end.workspace.placement === 'project-folder' || !end.workspace.workspacePath) return
@@ -13854,7 +13868,7 @@ export class OrchestratorService extends EventEmitter {
       actionId: end.action.id,
       conversationBranchId: end.conversationBranchId,
       workspacePath: end.workspacePath,
-      journalEntries: new ThreadJournal(threadDir, { readOnly: true }).list().length,
+      journalSequence: new ThreadJournal(threadDir, { readOnly: true }).latestSequence(),
       generation: record.generation ?? 0,
       workspace: { ...withoutTurnNotes(end.workspace), ...(end.action.git?.branchAfter !== undefined ? { branch: end.action.git.branchAfter } : {}), ...(end.action.git?.headAfter ? { headSha: end.action.git.headAfter } : {}), generation: record.generation ?? 0 }
     })
@@ -13866,12 +13880,16 @@ export class OrchestratorService extends EventEmitter {
    * this thread, instead of on the reconciler's next pass), a wake deferred while the turn ran is brought forward, and
    * only that wake's run may use it. Nothing waiting: it is dropped.
    */
-  private settleTurnHandoff(session: ThreadSession, runId: string | undefined, ended: boolean): void {
+  private settleTurnHandoff(session: ThreadSession, runId: string | undefined, ended: boolean, claimed: { queueItemId: string; claimToken: string } | undefined): void {
     const handoff = this.turnHandoffs.get(session.threadId)
     const ours = handoff && !handoff.armed && handoff.runId === runId
-    if (handoff && !handoff.armed && (!ours || ended || session.deleted || session.abortRequested || session.stopping)) this.turnHandoffs.delete(session.threadId)
+    if (handoff && !handoff.armed && (!ours || ended || session.deleted)) this.turnHandoffs.delete(session.threadId)
     if (session.turnAdmitted) {
-      if (ours && this.turnHandoffs.has(session.threadId)) handoff.armed = { admitted: true }
+      // Only the message this settle's drain claimed, under that claim, may use it.
+      if (ours && this.turnHandoffs.has(session.threadId)) {
+        if (claimed) handoff.armed = claimed
+        else this.turnHandoffs.delete(session.threadId)
+      }
       return
     }
     if (session.deleted || session.threadId === '__unbound__') return
@@ -13906,12 +13924,15 @@ export class OrchestratorService extends EventEmitter {
    * recorded snapshot, the same conversation branch. An edit made outside Mousse in the seconds between the two turns
    * then counts as made during this one, as an edit made while a turn runs does.
    */
-  private takeTurnHandoff(session: ThreadSession, opts: { queueItemId?: string; runId?: string } | undefined): TurnHandoff | undefined {
+  private takeTurnHandoff(session: ThreadSession, opts: { queueItemId?: string; claimOwnerToken?: string; runId?: string } | undefined): TurnHandoff | undefined {
     const handoff = this.turnHandoffs.get(session.threadId)
     this.turnHandoffs.delete(session.threadId)
     if (!handoff?.armed) return undefined
-    if ('admitted' in handoff.armed ? !opts?.queueItemId : !(opts?.runId && handoff.armed.wakeRunIds.includes(opts.runId))) return undefined
-    return handoff
+    const armed = handoff.armed
+    const meant = 'queueItemId' in armed
+      ? opts?.queueItemId === armed.queueItemId && opts.claimOwnerToken === armed.claimToken
+      : Boolean(opts?.runId && armed.wakeRunIds.includes(opts.runId))
+    return meant ? handoff : undefined
   }
 
   /** Whether `handoff` still describes the worktree as Mousse last left it (`takeTurnHandoff`). */
@@ -13919,7 +13940,7 @@ export class OrchestratorService extends EventEmitter {
     if (conversationBranchId !== handoff.conversationBranchId) return false
     const record = new ThreadWorkspaceManager(threadDir).load()
     if (!record || record.lifecycle !== 'ready' || record.snapshotSha !== handoff.endSha || (record.generation ?? 0) !== handoff.generation || record.worktreePath !== handoff.workspace.workspacePath) return false
-    if (new ThreadJournal(threadDir, { readOnly: true }).list().length !== handoff.journalEntries) return false
+    if (new ThreadJournal(threadDir, { readOnly: true }).latestSequence() !== handoff.journalSequence) return false
     const latest = new ThreadActionService(threadDir).latest(conversationBranchId)
     return latest?.id === handoff.actionId && latest.endSha === handoff.endSha && existsSync(handoff.workspace.workspacePath)
   }
@@ -14208,9 +14229,12 @@ export class OrchestratorService extends EventEmitter {
     session.setupStop = setupStop
     this.noteQueueWait(session)
     const turnId = opts?.runId ?? uuidv4()
-    // The turn a settle started may start from the last turn's end (`TurnHandoff`), checked again once recovery is
-    // over. It does no setup then, so it shows no setup step.
-    let handoff = this.takeTurnHandoff(session, opts)
+    // The turn a settle started may start from the last turn's end (`TurnHandoff`). It is taken now, used or not, and
+    // used only when the setup's waits did not wait and it still holds once recovery is over. It does no setup then,
+    // so it shows no setup step from then on.
+    let handoffOffer = this.takeTurnHandoff(session, opts)
+    const setupBegan = performance.now()
+    let handoff: TurnHandoff | undefined
     const setupStep = (step: TurnSetupStep): void => { if (!handoff) this.beginSetupStep(session.threadId, turnId, step) }
     const setupSignal = opts?.externalSignal ? AbortSignal.any([opts.externalSignal, setupStop.signal]) : setupStop.signal
     // A turn that cannot start now runs later, in its place: a claimed item goes back where it was
@@ -14299,6 +14323,8 @@ export class OrchestratorService extends EventEmitter {
       }
     }
     turnTimingMark(session.threadId, 'lease')
+    // A turn whose folder, drive or lease kept it waiting does not take the hand-off: anything may have changed meanwhile.
+    if (handoffOffer && performance.now() - setupBegan > HANDOFF_SETUP_WAIT_MS) handoffOffer = undefined
 
     if (recoveryDirectory && session.executionLease) {
       new ConversationActionService(recoveryDirectory).recover(session.executionLease, (action, kind) => {
@@ -14368,7 +14394,11 @@ export class OrchestratorService extends EventEmitter {
           session.threadId
         )
         const threadDir = this.resolveThreadDir(session.threadId)
-        if (handoff && !(projectPath && threadDir && this.turnHandoffHolds(session, handoff, threadDir, recoveryManager?.load()?.conversationBranchId ?? 'main'))) handoff = undefined
+        if (handoffOffer && projectPath && threadDir && this.turnHandoffHolds(session, handoffOffer, threadDir, recoveryManager?.load()?.conversationBranchId ?? 'main')) {
+          handoff = handoffOffer
+          // Recovery found nothing to do: whatever step it began is not shown.
+          this.endSetupStep(session.threadId)
+        }
         if (handoff && projectPath && threadDir) {
           // Nothing of Mousse's touched the worktree since the last turn ended in it: it is not checked again.
           session.workspace = handoff.workspace
@@ -16216,6 +16246,8 @@ export class OrchestratorService extends EventEmitter {
     opts?: {
       onSettled?: (result: 'idle' | 'ran' | 'failed') => void
       managedByStartup?: boolean
+      /** The item this drain claimed and is starting, with its claim's token, as soon as it is claimed. */
+      onClaimed?: (queueItemId: string, claimToken: string) => void
     }
   ): void {
     const settle = (result: 'idle' | 'ran' | 'failed'): void => {
@@ -16413,6 +16445,7 @@ export class OrchestratorService extends EventEmitter {
       ...(queued.origin?.kind === 'agent' ? { agent: agentOriginOf(queued.origin) } : {})
     })
     }
+    opts?.onClaimed?.(item.id, claimToken)
     let started: Promise<OrchestratorResponse | undefined>
     if (resume) {
       // The pause ends in the transaction that admits the continuation. A refusal (the pause ended some other
@@ -16957,6 +16990,8 @@ export class OrchestratorService extends EventEmitter {
     itemId: string,
     ownerToken?: string
   ): QueuedMessage | null {
+    // A claim given back starts no turn now: a hand-off armed for it goes.
+    this.turnHandoffs.delete(session.threadId)
     if (this.threadStore && session.threadId !== '__unbound__') {
       try {
         const released = releaseClaimDurable(this.threadStore, session.threadId, itemId, {

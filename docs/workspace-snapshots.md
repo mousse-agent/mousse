@@ -91,12 +91,13 @@ A turn's start (from the workspace check to the start check) and its end (around
 
 ### Hand-off to the next turn
 
-A turn that the previous turn's settle starts begins from that turn's end snapshot, without checking the worktree or taking a start snapshot (`OrchestratorService.recordTurnHandoff`, `settleTurnHandoff`, `takeTurnHandoff`). That turn is either a queued message the settle's queue drain admits, or the wake for notices that arrived during the turn: at its settle the thread runs reconciler rule 4 for itself, and a wake deferred while it was busy is made due, instead of waiting for the next reconciler pass. The hand-off is kept in memory and is used once at most:
+A turn that the previous turn's settle starts begins from that turn's end snapshot, without checking the worktree or taking a start snapshot (`OrchestratorService.recordTurnHandoff`, `settleTurnHandoff`, `takeTurnHandoff`). That turn is either a queued message the settle's queue drain claims, or the wake for notices that arrived during the turn: at its settle the thread runs reconciler rule 4 for itself, and a wake deferred while it was busy is made due, instead of waiting for the next reconciler pass. The hand-off is kept in memory and is used once at most:
 - It is recorded only when a worktree turn completed and its end is a real, reversible snapshot (no `unrecorded-end.json`) that is also `workspace.json`'s latest snapshot.
-- It is dropped at the settle when nothing is waiting, by a Stop, and by whichever turn starts next.
-- Before use it must still hold: no journal entry since, the same latest action and recorded snapshot, the same generation and conversation branch. An Undo, Publish or revert in between makes the turn read and snapshot the worktree as usual.
+- Only the turn it was armed for may use it: the queued message the settle's drain claimed, under that claim, or the wake runs pending at the settle.
+- It is dropped at the settle when nothing is waiting or the turn was stopped, by a Stop, when the thread is deleted, when the armed start is released or skipped without a turn, and by whichever turn starts next.
+- Before use it must still hold: no journal entry since, the same latest action and recorded snapshot, the same generation and conversation branch, and the worktree still there. An Undo, Publish or revert in between makes the turn read and snapshot the worktree as usual. A turn whose setup waited more than a second (its folders, its drive, the thread's lease) does not use it.
 
-A hand-off turn shows no setup step. An edit made outside Mousse in the seconds between the two turns counts as made during the next turn, as an edit made while a turn runs does.
+A hand-off turn shows no setup step once the hand-off is confirmed. An edit made outside Mousse in the seconds between the two turns counts as made during the next turn, as an edit made while a turn runs does.
 
 What still stops a turn: an operation Mousse left unfinished (an interrupted restore or checkpoint), until recovery settles it. Recovery runs before the next turn and admits `recovery_required` too, so a thread an older version left waiting unlocks on its own. A refused publish leaves nothing unfinished.
 

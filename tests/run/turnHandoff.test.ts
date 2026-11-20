@@ -6,11 +6,12 @@
  * (`[turn-boundary]`).
  *
  * Cases: a queued message; a wake for a notice that arrived during the turn (the fixture runs no reconciler, so only
- * the settle's own wake starts it); an Undo pressed between the turn and its wake; a message sent once the thread is
- * idle, after the person edited a file.
+ * the settle's own wake starts it); a wake the reconciler made and deferred before the settle; an Undo pressed between
+ * the turn and its wake; a Stop of the idle thread; a message sent or queued once the thread is idle, after the person
+ * edited a file; each check the hand-off must pass before use; the placements that never hand off.
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -20,6 +21,8 @@ import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { ThreadActionService } from '../../src/mms/actions/ThreadActionService'
 import { UndoService } from '../../src/mms/actions/UndoService'
 import { EffectWorker, type EffectExecutor } from '../../src/mms/run/EffectWorker'
+import { Reconciler } from '../../src/mms/run/Reconciler'
+import type { EffectRecord } from '../../src/mms/run/types'
 import { ThreadWorkspaceManager } from '../../src/mms/workspace/ThreadWorkspaceManager'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 import { pressed } from '../support/userRequest'
@@ -57,7 +60,10 @@ function gitProject(home: string): string {
   return projectDir
 }
 
-interface StartLine { runId: string; edge: string; git: number }
+interface StartLine { runId: string; edge: string; git: number; phases: Record<string, unknown> }
+
+/** Where the thread works: its own worktree (the default), its project's folder, a project without Git, a folder it shares, the project's own checkout. */
+type Placement = 'worktree' | 'project-folder' | 'no-git' | 'shared' | 'primary'
 
 describe('a turn its previous turn\'s settle starts', () => {
   let home: string | undefined
@@ -78,11 +84,12 @@ describe('a turn its previous turn\'s settle starts', () => {
   })
 
   /** A daemon over a Git project, its turns' start lines, and the thread's records. `holdWakes`: a wake turn waits for `releaseWakes`. */
-  async function setup(holdWakes = false) {
+  async function setup(holdWakes = false, placement: Placement = 'worktree') {
     home = mkdtempSync(join(tmpdir(), 'mousse-handoff-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
-    const projectDir = gitProject(home)
+    const projectDir = placement === 'no-git' ? join(home, 'project') : gitProject(home)
+    if (placement === 'no-git') mkdirSync(projectDir)
     const starts: StartLine[] = []
     vi.spyOn(console, 'info').mockImplementation((...args: unknown[]) => {
       const text = String(args[0])
@@ -110,12 +117,16 @@ describe('a turn its previous turn\'s settle starts', () => {
       d.orch.attachEffectWorker(gatedWorker)
     }
     const project = d.projects.openProject(projectDir)
-    const thread = d.store.createThread('Hand-off', project.id)
+    const thread = d.store.createThread('Hand-off', project.id, undefined, placement === 'project-folder' ? { worktreeEnabled: false } : {})
     d.orch.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'vendor-model' })
+    if (placement === 'shared') d.orch.getOrCreateSession(thread.id).sharedWorkspace = { path: projectDir, parentThreadId: 'parent', access: 'write' }
+    if (placement === 'primary') d.orch.getOrCreateSession(thread.id).primaryCheckout = { path: projectDir }
     const threadDir = d.store.getThreadDir(thread.id)
     const actionOf = (runId: string | undefined) => new ThreadActionService(threadDir).list().find((action) => action.turnId === runId)
     const idle = () => !d.orch.getOrCreateSession(thread.id).isTurnRunning() && !d.orch.getOrCreateSession(thread.id).turnAdmitted
-    return { d, adapter, thread, threadDir, starts, actionOf, idle, releaseWakes: () => releaseWakes() }
+    /** The thread's hand-off as the orchestrator holds it now. */
+    const handoff = () => (d.orch as any).turnHandoffs.get(thread.id) as Record<string, any> | undefined
+    return { d, adapter, thread, threadDir, starts, actionOf, idle, handoff, releaseWakes: () => releaseWakes() }
   }
 
   it('a message queued behind the turn starts from its end, with no Git, and its diff holds only its own work', async () => {
@@ -128,6 +139,7 @@ describe('a turn its previous turn\'s settle starts', () => {
     await waitFor(() => adapter.turns.length === 2 && idle(), 'the queued message to run and settle', 300_000)
     const secondRunId = d.engine.listRuns(thread.id).find((run) => run.runId !== first.runId)!.runId
     expect(starts.find((line) => line.runId === secondRunId)?.git).toBe(0)
+    expect(starts.find((line) => line.runId === secondRunId)?.phases.handoff).toBeDefined()
     const firstAction = actionOf(first.runId)!, secondAction = actionOf(secondRunId)!
     expect(secondAction.startSha).toBe(firstAction.endSha)
     expect(secondAction.changedPaths.map((change) => change.path)).toEqual(['second.txt'])
@@ -188,5 +200,112 @@ describe('a turn its previous turn\'s settle starts', () => {
     expect(outside.actor).toEqual({ kind: 'user' })
     expect(outside.changedPaths.map((change) => change.path)).toEqual(['README.md'])
     expect(own.changedPaths.map((change) => change.path)).toEqual(['later.txt'])
+  })
+
+  it('a wake the reconciler made and deferred between the run\'s end and its settle is brought forward and starts from its end', async () => {
+    const { d, adapter, thread, starts, actionOf, idle } = await setup()
+    const reconciler = new Reconciler({ store: d.engine.store, outbox: d.engine.outbox, tools: d.engine.tools, capabilitiesFor: (id) => d.orch.capabilitiesForThread(id) })
+    // Once the run has ended its record but the turn has not settled, a reconciler pass wakes the thread for a notice,
+    // and that wake is left as the worker's `thread_busy` defer leaves it, due in ten minutes: only the settle brings it
+    // forward.
+    let deferredWake: EffectRecord | undefined
+    const record = (d.orch as any).recordTurnHandoff.bind(d.orch)
+    ;(d.orch as any).recordTurnHandoff = (...args: unknown[]) => {
+      record(...args)
+      if (deferredWake) return
+      d.engine.inbox.append({ inboxId: `inbox:notice:${thread.id}:1:0`, threadId: thread.id, kind: 'reconcile_notice', payload: { text: 'write woken' } })
+      reconciler.runOnce()
+      const now = new Date(d.engine.store.db.clock()).toISOString()
+      deferredWake = d.engine.outbox.listForThread(thread.id, { status: 'pending' }).find((effect) => (effect.payload as { kind?: string } | null)?.kind === 'wake')!
+      ;(d.engine.outbox as any).write(deferredWake, { availableAt: new Date(Date.parse(now) + 600_000).toISOString(), lastError: 'thread_busy', updatedAt: now })
+    }
+    const first = await d.orch.send('write first', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
+    await waitFor(() => adapter.turns.length === 1, 'the first turn to reach the provider', 180_000)
+    adapter.answer()
+    await waitFor(() => adapter.turns.length === 2 && idle(), 'the deferred wake to run and settle', 240_000)
+    const wakes = d.engine.listRuns(thread.id).filter((run) => run.source === 'wake')
+    expect(deferredWake).toBeDefined()
+    expect(wakes.map((run) => run.runId)).toEqual([deferredWake!.runId])
+    expect(starts.find((line) => line.runId === wakes[0].runId)?.git).toBe(0)
+    expect(actionOf(wakes[0].runId)!.startSha).toBe(actionOf(first.runId)!.endSha)
+  })
+
+  it('a Stop of the idle thread ends the hand-off its wake was armed with: the wake reads the worktree again', async () => {
+    const { d, adapter, thread, starts, idle, handoff, releaseWakes } = await setup(true)
+    await d.orch.send('write first', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
+    await waitFor(() => adapter.turns.length === 1, 'the first turn to reach the provider', 180_000)
+    d.engine.inbox.append({ inboxId: `inbox:notice:${thread.id}:1:0`, threadId: thread.id, kind: 'reconcile_notice', payload: { text: 'write woken' } })
+    adapter.answer()
+    await waitFor(() => idle() && Boolean(handoff()?.armed), 'the turn to settle with its wake waiting', 300_000)
+    d.orch.abortActiveTurn(thread.id)
+    releaseWakes()
+    await waitFor(() => adapter.turns.length === 2 && idle(), 'the wake to run and settle', 300_000)
+    const wake = d.engine.listRuns(thread.id).find((run) => run.source === 'wake')!
+    expect(starts.find((line) => line.runId === wake.runId)!.git).toBeGreaterThan(0)
+  })
+
+  it('a turn whose settle starts nothing leaves no hand-off: a message queued later, after an edit, reads the worktree again', async () => {
+    const { d, adapter, thread, threadDir, starts, idle, handoff } = await setup()
+    const first = await d.orch.send('write first', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
+    await waitFor(() => adapter.turns.length === 1, 'the first turn to reach the provider', 180_000)
+    adapter.answer()
+    await waitFor(() => idle() && d.engine.getRun(first.runId!)?.status === 'completed', 'the first turn to settle', 300_000)
+    expect(handoff()).toBeUndefined()
+    const worktree = new ThreadWorkspaceManager(threadDir).load()!.worktreePath
+    writeFileSync(join(worktree, 'README.md'), 'edited by the person\n')
+    d.orch.enqueueAndDrain(thread.id, { content: 'write later', mode: 'agent' }, 'test')
+    await waitFor(() => adapter.turns.length === 2 && idle(), 'the queued turn to run and settle', 300_000)
+    expect(starts.find((line) => line.runId !== first.runId)!.git).toBeGreaterThan(0)
+    const actions = new ThreadActionService(threadDir).list()
+    expect(actions.at(-2)!.actor).toEqual({ kind: 'user' })
+    expect(actions.at(-2)!.changedPaths.map((change) => change.path)).toEqual(['README.md'])
+    expect(actions.at(-1)!.changedPaths.map((change) => change.path)).toEqual(['later.txt'])
+  })
+
+  it('a hand-off is used only while each thing it was recorded against is unchanged', async () => {
+    const { d, adapter, thread, threadDir, idle, handoff, releaseWakes } = await setup(true)
+    await d.orch.send('write first', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
+    await waitFor(() => adapter.turns.length === 1, 'the first turn to reach the provider', 180_000)
+    d.engine.inbox.append({ inboxId: `inbox:notice:${thread.id}:1:0`, threadId: thread.id, kind: 'reconcile_notice', payload: { text: 'write woken' } })
+    adapter.answer()
+    await waitFor(() => idle() && Boolean(handoff()?.armed), 'the turn to settle with its wake waiting', 300_000)
+    const recorded = handoff()!
+    const session = d.orch.getOrCreateSession(thread.id)
+    const holds = (candidate: Record<string, any>) => (d.orch as any).turnHandoffHolds(session, candidate, threadDir, 'main') as boolean
+    const manager = new ThreadWorkspaceManager(threadDir)
+    const record = readFileSync(manager.workspacePath, 'utf8')
+    const worktree = manager.load()!.worktreePath
+    // Each row changes one thing, so each check is the only one that refuses it.
+    const rows: Array<[string, () => boolean]> = [
+      ['a journal entry since', () => holds({ ...recorded, journalSequence: recorded.journalSequence - 1 })],
+      ['another latest action', () => holds({ ...recorded, actionId: 'another-action' })],
+      ['another recorded snapshot', () => {
+        writeFileSync(manager.workspacePath, JSON.stringify({ ...JSON.parse(record), snapshotSha: '0'.repeat(40) }))
+        try { return holds(recorded) } finally { writeFileSync(manager.workspacePath, record) }
+      }],
+      ['another conversation branch', () => holds({ ...recorded, conversationBranchId: 'another-branch' })],
+      ['another workspace generation', () => holds({ ...recorded, generation: recorded.generation + 1 })],
+      ['a missing worktree', () => {
+        renameSync(worktree, `${worktree}-moved`)
+        try { return holds(recorded) } finally { renameSync(`${worktree}-moved`, worktree) }
+      }]
+    ]
+    expect(holds(recorded)).toBe(true)
+    for (const [change, check] of rows) expect(check(), change).toBe(false)
+    expect(holds(recorded)).toBe(true)
+    releaseWakes()
+    await waitFor(() => adapter.turns.length === 2 && idle(), 'the wake to run and settle', 300_000)
+  })
+
+  it.each(['project-folder', 'no-git', 'shared', 'primary'] as const)('a thread working in a %s folder never hands off', async (placement) => {
+    const { d, adapter, thread, starts, idle } = await setup(false, placement)
+    const first = await d.orch.send('write first', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
+    await waitFor(() => adapter.turns.length === 1, 'the first turn to reach the provider', 180_000)
+    const second = await d.orch.send('write second', false, { threadId: thread.id, clientRequestId: 'second', awaitMode: 'ack' })
+    expect(second.queued).toBe(true)
+    adapter.answer()
+    await waitFor(() => adapter.turns.length === 2 && idle(), 'the queued message to run and settle', 300_000)
+    expect(starts.filter((line) => line.runId !== first.runId)).toHaveLength(1)
+    expect(starts.find((line) => line.runId !== first.runId)!.phases.handoff).toBeUndefined()
   })
 })
