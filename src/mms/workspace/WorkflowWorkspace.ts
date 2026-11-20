@@ -43,6 +43,8 @@ import { gitRunError, runGitProcess } from '../git/runGitProcess'
 import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
 import { timeGitSync } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile } from '../git/gitExecutable'
+import { gitCommonDirAsync } from '../lifecycle/canonicalPath'
+import { findListedWorktreeAsync } from '../lifecycle/worktreeRegistry'
 
 export interface WorkflowWorkspaceOwner {
   profileId: string
@@ -163,9 +165,16 @@ function liveBinding(
   return { thread, project }
 }
 
+/**
+ * Whether Git lists a worktree at `worktreePath` in the repository of `gitTopLevel`. Read from Git's registrations
+ * (`worktreeRegistry`): a worktree that is there costs its own registration, not one real path per worktree of the
+ * repository. A checkout whose `.git` cannot be read is asked of Git as before.
+ */
 async function listedWorktree(gitTopLevel: string, worktreePath: string): Promise<boolean> {
-  const listed = await git(gitTopLevel, ['worktree', 'list', '--porcelain'])
   const wanted = await canonicalPath(worktreePath)
+  const commonDir = await gitCommonDirAsync(gitTopLevel)
+  if (commonDir) return Boolean(await findListedWorktreeAsync(commonDir, wanted, pathsEqual))
+  const listed = await git(gitTopLevel, ['worktree', 'list', '--porcelain'])
   for (const line of listed.split(/\r?\n/)) {
     if (line.startsWith('worktree ') && await pathsEqual(line.slice(9), wanted)) return true
   }

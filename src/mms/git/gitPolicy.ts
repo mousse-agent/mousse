@@ -632,6 +632,14 @@ function gitEffect(sub: string, rest: readonly string[], stdin: string | undefin
       if (!ref) return { refs: [], unlistedRefs: true }
       return ref === 'HEAD' ? { refs: [], headBranch: true } : { refs: [ref], deref }
     }
+    case 'pack-refs': {
+      // Moves loose refs into `packed-refs`, values unchanged; symbolic refs are never packed. Without `--include` it
+      // packs every tag and, with `--all`, every ref; with it, only the refs its patterns match (`*` crosses `/`).
+      const value = (arg: string, index: number): string | undefined => arg === '--include' ? rest[index + 1] : arg.startsWith('--include=') ? arg.slice('--include='.length) : undefined
+      const includes = rest.flatMap((arg, index) => { const pattern = value(arg, index); return pattern === undefined ? [] : [pattern] })
+      const known = rest.every((arg, index) => arg === '--include' || arg.startsWith('--include=') || rest[index - 1] === '--include' || arg === '--no-prune' || arg === '--prune')
+      return known && includes.length ? { refs: includes } : { refs: [], unlistedRefs: true }
+    }
     case 'reflog': {
       const [first] = positionals(rest)
       if (first === 'expire' || first === 'delete') return { refs: [], banned: `"git reflog ${first}" removes the only record of commits nothing else reaches` }

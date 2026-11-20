@@ -76,6 +76,14 @@ describe('Mousse may change what it owns', () => {
     expect(decide({ args: ['branch', '-D', '--', 'feature'] })).toMatchObject({ allowed: false })
   })
 
+  it('packs only refs/mousse/* on its own; packing any other ref is the user\'s', () => {
+    expect(decide({ args: ['pack-refs', '--include', 'refs/mousse/*'] })).toMatchObject({ access: 'owned', allowed: true })
+    expect(decide({ args: ['pack-refs', '--include=refs/mousse/changes/*'] })).toMatchObject({ access: 'owned', allowed: true })
+    for (const args of [['pack-refs'], ['pack-refs', '--all'], ['pack-refs', '--include', 'refs/*'], ['pack-refs', '--include', 'refs/mousse/*', '--include', 'refs/heads/*'], ['pack-refs', '--include', 'refs/mousse/*', '--all']]) {
+      expect(decide({ args })).toMatchObject({ allowed: false })
+    }
+  })
+
   it('reads update-ref --stdin input, and refuses when it cannot see it', () => {
     const args = ['update-ref', '--no-deref', '--stdin']
     expect(decide({ args, stdin: 'start\ndelete refs/mousse/a 1\nprepare\ncommit\n' })).toMatchObject({ access: 'owned', allowed: true })

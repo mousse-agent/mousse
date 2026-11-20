@@ -117,6 +117,7 @@ import type { TerminalSendSink } from './terminals/PtyManager'
 import { type MmsOwnerHandle, type MmsOwnerRecord } from './ownership/MmsOwnerLease'
 import { ThreadRuntimeManager } from './runtime/ThreadRuntimeManager'
 import { UnseenDoneStore } from './runtime/UnseenDoneStore'
+import { LiveWorkMarks } from './runtime/LiveWorkMarks'
 import { UserQuestionService } from './orchestrator/UserQuestionService'
 import { ModeRegistry } from './modes/ModeRegistry'
 import { createProfileSecretAdapter, deleteProfileSecret, listProfileKeyNames, writeProfileSecret } from './profiles/secrets'
@@ -1115,7 +1116,8 @@ export class MmsProfileServices {
       orchestrator: this.orchestrator,
       ptyManager: this.ptyManager,
       questions: this.questions,
-      unseenDone: new UnseenDoneStore(homeDir)
+      unseenDone: new UnseenDoneStore(homeDir),
+      liveWork: new LiveWorkMarks(homeDir)
     })
     // A bot's task list changed: its header's checklist reads it again.
     if (personalBots) {
@@ -2888,7 +2890,9 @@ export class MmsProfileServices {
     await startupPhase('start.mcpServer', () => this.startMcpServer())
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
     // The daemon settles each thread on its first use, and the rest after ready (`startAfterReadyWork`).
-    startupPhase('start.threadRuntimes', () => this.deferStartupWork ? this.threadRuntimes.beginRestart() : this.threadRuntimes.restoreOnStartup())
+    // Only the threads whose saved agents or tasks were working, and those whose runs boot recovery cut off, are read.
+    const cutOff = this.orchestrator.restartCutOffThreads ?? []
+    startupPhase('start.threadRuntimes', () => this.deferStartupWork ? this.threadRuntimes.beginRestart(cutOff) : this.threadRuntimes.restoreOnStartup(cutOff))
     // Threads kept in thread.db are searched through the profile's index; it is caught up now and every minute. The
     // daemon's first sweep waits for the lifecycle pass after ready; a search waits for that sweep.
     startupPhase('start.searchIndex', () => this.threads.startSearchIndexSweep(undefined, this.deferStartupWork ? { after: this.startupLifecycleDone } : {}))

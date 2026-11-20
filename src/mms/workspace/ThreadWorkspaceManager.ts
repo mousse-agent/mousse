@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
+import { findListedWorktreeAsync, WorktreeListPass } from '../lifecycle/worktreeRegistry'
 import { assertFolderUnchanged, folderSignatureAsync, walkOwnedContentAsync } from '../lifecycle/verifiedDelete'
 import { getThreadLifecycleGate } from '../queue/ThreadLifecycleAdmission'
 import { execFileSync } from 'node:child_process'
@@ -430,6 +431,7 @@ export class ThreadWorkspaceManager {
       const branch = await this.freeTemporaryBranch(repository.primaryCheckoutPath)
       const retainedRef = `refs/mousse/threads/${threadId}/${conversationBranchId}`
       // In the worktree folder the person chose (Settings → Storage), or Mousse's own; see `worktreeLayout`.
+      const registrations = new WorktreeListPass()
       const placement = await placeThreadWorktree({
         home: getMousseHomeDir(),
         folder: chosenWorktreeFolder(this.threadDirectory),
@@ -439,7 +441,7 @@ export class ThreadWorkspaceManager {
         conversationBranchId,
         // Not the branch: its temporary name says nothing, and a rename later never moves the folder.
         // A name Git or a reconstruction manifest still names is never given to another worktree.
-        taken: (path) => this.pathNamed(repository.primaryCheckoutPath, path)
+        taken: (path) => this.pathNamed(repository.gitCommonDirectory, path, registrations)
       })
       const worktreePath = placement.path
       this.placementNote = placement.notConnected ? notConnectedPlacementNote(placement.notConnected) : undefined
@@ -753,11 +755,14 @@ export class ThreadWorkspaceManager {
     if (stored.branch === from) atomicWriteJsonSync(this.workspacePath, { ...stored, branch: to })
   }
 
-  /** Whether Git registers a worktree at `path`, or any thread's reconstruction manifest names it. */
-  private async pathNamed(checkoutPath: string, path: string): Promise<boolean> {
-    const listed = (await tryGit(checkoutPath, ['worktree', 'list', '--porcelain'])).stdout.split(/\r?\n/)
+  /**
+   * Whether Git registers a worktree at `path`, or any thread's reconstruction manifest names it. Git's registrations are
+   * read without running Git (`worktreeRegistry`), once for all the names one placement tries (`registrations`).
+   */
+  private async pathNamed(commonDir: string, path: string, registrations: WorktreeListPass): Promise<boolean> {
     const fold = (value: string): string => process.platform === 'win32' || process.platform === 'darwin' ? resolve(value).toLowerCase() : resolve(value)
-    if (listed.some((line) => line.startsWith('worktree ') && fold(line.slice('worktree '.length)) === fold(path))) return true
+    // A repository Git could not list names nothing here, as before.
+    if (await findListedWorktreeAsync(commonDir, path, (listed, wanted) => fold(listed) === fold(wanted), { pass: registrations }).catch(() => undefined)) return true
     const gate = getThreadLifecycleGate(this.threadDirectory)
     if (!(gate instanceof ResourceLifecycleStore)) return false
     const retirement = new WorktreeRetirementService(gate)
