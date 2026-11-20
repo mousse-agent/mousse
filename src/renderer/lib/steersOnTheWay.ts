@@ -1,4 +1,4 @@
-import type { ChatImageAttachment, ChatMessage } from '../../shared/types'
+import type { ChatImageAttachment, ChatMessage, TurnState } from '../../shared/types'
 
 /**
  * A steer sent here that the transcript does not show yet: painted in the reply at the click, so the message never
@@ -19,6 +19,16 @@ export interface SteerOnTheWay {
 }
 
 const ROW_PREFIX = 'steer-on-the-way:'
+
+/**
+ * Whether the thread's turn runs and takes a steer now: its prompt is in the transcript, so a steer painted last joins
+ * its reply. Not while it is still being set up (`queued`), nor once its provider has finished (`finalizing`): the
+ * message then goes into the next turn that runs, after that turn's prompt.
+ */
+export function turnTakesSteer(state: Pick<TurnState, 'phase' | 'turnId'> | undefined): boolean {
+  if (!state) return false
+  return state.phase === 'thinking' || state.phase === 'streaming' || state.phase === 'tool_running' || (state.phase === 'awaiting_input' && Boolean(state.turnId))
+}
 
 /** User messages with these words, shown or not (a copy a Stop withdrew still counts: it landed once). */
 export function countUserMessages(messages: readonly ChatMessage[], text: string): number {

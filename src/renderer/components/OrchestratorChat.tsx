@@ -38,7 +38,7 @@ import {
 import { MMS_PROTOCOL_MAX_TEXT_LENGTH } from '../../mms/protocol/types'
 import { attachedFilesIn, formatAttachedFilesMarker } from '../../shared/attachedFilesMarker'
 import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, type RecoveredQueueDraft } from '../hooks/useThreadQueue'
-import { withSteersOnTheWay } from '../lib/steersOnTheWay'
+import { turnTakesSteer, withSteersOnTheWay } from '../lib/steersOnTheWay'
 import { nextSteerableQueueItem } from '../lib/queuedContent'
 import { restoreQueuedDraft } from '../lib/queuedDraftRecovery'
 import { historyTokens as historyTokensOf } from '../lib/promptCache'
@@ -516,8 +516,17 @@ export function OrchestratorChat() {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index]!.role === 'user') { lastUserMessage = messages[index]; break }
   }
+  // The transcript's last turn is the one a message sent now joins: a turn that takes steers runs, or a prompt sent
+  // here is on its way (shown last). Otherwise, while a turn is set up (a wake, the queue's next message, a prompt from
+  // another window), it would land in the previous turn's finished reply: it waits first in the queue instead.
+  const replyTakesSteer = useAppStore((s) => (s.activeThreadId ? turnTakesSteer(s.turnStates[s.activeThreadId]) : false))
+  const replyOpen = replyTakesSteer || (activeThreadId ? (promptsOnTheWay.current.get(activeThreadId) ?? 0) > 0 : false)
+  const replyOpenRef = useRef(replyOpen)
+  replyOpenRef.current = replyOpen
   const queue = useThreadQueue({
     threadId: activeThreadId,
+    replyOpen,
+    turnActive: isTurnStoppable(turnState),
     optimisticItems: optimisticQueueItems,
     onOptimisticItemReconciled: onOptimisticQueueItemReconciled,
     hold: queueHold,
@@ -1072,11 +1081,12 @@ export function OrchestratorChat() {
       }
       const promptThread = optimisticMessageId ? targetThreadId : null
       if (promptThread) promptsOnTheWay.current.set(promptThread, onTheWay + 1)
-      if (steer) setSteersOnTheWay((current) => new Set(current).add(requestId))
       // A steer queued first shows in the reply from now on, not only once it is sent now. One painted since the click
-      // stays the same row; it goes if the message starts a turn of its own instead.
+      // stays the same row; it goes if the message starts a turn of its own instead. While the transcript's last turn
+      // is not the one it joins (a turn is still being set up), it shows in the queue, first, until a turn takes it.
       const shownRow = typeof steer === 'object' ? steer.row : null
-      const paintsSteer = Boolean(steer) && queuesNow && targetThreadId === queue.threadId
+      const paintsSteer = Boolean(steer) && queuesNow && targetThreadId === queue.threadId && replyOpenRef.current
+      if (paintsSteer) setSteersOnTheWay((current) => new Set(current).add(requestId))
       if (shownRow && !paintsSteer) queue.endComposerSteer(shownRow, false)
       const steerRow = paintsSteer ? shownRow ?? queue.beginComposerSteer(request.content, images) : null
       if (optimisticMessageId) {
@@ -1088,8 +1098,8 @@ export function OrchestratorChat() {
           images
         })
       }
-      // A steered message is not painted in the queue: it is on its way into the reply.
-      const optimisticQueueId = queuesNow && targetThreadId && !steer ? `optimistic:${crypto.randomUUID()}` : null
+      // A steered message painted in the reply is not painted in the queue too.
+      const optimisticQueueId = queuesNow && targetThreadId && !paintsSteer ? `optimistic:${crypto.randomUUID()}` : null
       if (optimisticQueueId && targetThreadId) {
         setOptimisticQueueItems((current) => [...current, {
           id: optimisticQueueId,
