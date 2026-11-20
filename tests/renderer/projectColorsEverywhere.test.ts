@@ -49,7 +49,7 @@ const card = (threadId: string) => `<button[^>]*class="[^"]*threads-sidebar-card
 const cardButton = (html: string, threadId: string) => html.match(new RegExp(card(threadId)))?.[0] ?? ''
 const cardTint = (html: string, threadId: string) => cardButton(html, threadId).match(/--project-tint:([^;"]+)/)?.[1]
 const cardMark = (html: string, threadId: string) =>
-  html.match(new RegExp(`${card(threadId)}\\s*<span class="threads-sidebar-card-mark[^"]*"(?: style="color:([^;"]+))?`))
+  html.match(new RegExp(`${card(threadId)}\\s*<span class="threads-sidebar-card-body">\\s*<span class="threads-sidebar-card-meta">\\s*<span class="threads-sidebar-card-mark[^"]*"(?: style="color:([^;"]+))?`))
 
 describe('a project’s color', () => {
   // Listed in an order of their own (dragged), unlike the order they were added in.

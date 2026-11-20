@@ -223,8 +223,9 @@ describe('thread titles', () => {
   const css = readFileSync('src/renderer/styles/threads-sidebar.css', 'utf8')
 
   it('keep the hover actions\' room at rest, so nothing moves when the pointer arrives', () => {
-    const rest = /\n\.threads-sidebar-thread-container > \.threads-sidebar-thread:not\(\.threads-sidebar-card\) \{([^}]*)\}/.exec(css)
-    expect(rest?.[1]).toMatch(/padding-right:\s*var\(--thread-actions-room\)/)
+    // The status the actions replace keeps at least their width.
+    const rest = /\n\.threads-sidebar-thread-container > \.threads-sidebar-thread:not\(\.threads-sidebar-card\) > \.threads-sidebar-thread-trailing \{([^}]*)\}/.exec(css)
+    expect(rest?.[1]).toMatch(/min-width:\s*calc\(var\(--thread-actions-room\)/)
     // No rule changes a row's padding on hover or focus.
     for (const [, selector, body] of css.matchAll(/([^{}]*):(?:hover|focus-within)[^{}]*\{([^}]*)\}/g)) {
       if (selector.includes('threads-sidebar-thread')) expect(body).not.toMatch(/padding/)

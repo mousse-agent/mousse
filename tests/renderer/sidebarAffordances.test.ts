@@ -30,7 +30,6 @@ vi.mock('../../src/renderer/components/chats/ChatsSidebar', () => ({ ChatsSideba
 const { ThreadsSidebar } = await import('../../src/renderer/components/ThreadsSidebar')
 const { ToastHost, dismissToast } = await import('../../src/renderer/components/ui/Toast')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
-const { worktreeMark } = await import('../../src/renderer/lib/worktreeMark')
 const { hasMoreBelow, revealDelta } = await import('../../src/renderer/lib/sidebarScroll')
 const { startRenderCounts, stopRenderCounts } = await import('../../src/renderer/chat/components/agent-elements/render-counts')
 const { ARCHIVED_FIRST_ROWS } = await import('../../src/renderer/components/sidebar/ArchivedList')
@@ -350,26 +349,6 @@ describe('the open thread', () => {
 })
 
 describe('row marks', () => {
-  it("marks only a checkout that differs from where its project's new threads start", () => {
-    const worktrees = [{ id: 'p1' }]
-    const folder = [{ id: 'p1', newThread: { worktreeEnabled: false } }]
-    expect(worktreeMark({ projectId: 'p1', worktreeEnabled: true }, worktrees)).toBeUndefined()
-    expect(worktreeMark({ projectId: 'p1', worktreeEnabled: false }, worktrees)).toBe('Primary checkout')
-    expect(worktreeMark({ projectId: 'p1', worktreeEnabled: true }, folder)).toBe('Worktree')
-    expect(worktreeMark({ projectId: 'p1' }, folder)).toBeUndefined()
-    expect(worktreeMark({ worktreeEnabled: false }, worktrees)).toBeUndefined()
-  })
-
-  it('marks only a row on its own worktree with the branch icon', () => {
-    const folderFirst = { ...project('p1', 'Mousse'), newThread: { worktreeEnabled: false } }
-    show([thread('a', 'Fix tests', { worktreeEnabled: true }), thread('b', 'Docs', { worktreeEnabled: false })], { active: 'a', projects: [folderFirst] })
-    expect(row('a').querySelector('.threads-sidebar-worktree-icon')?.getAttribute('title')).toBe('Worktree')
-    expect(row('b').querySelector('.threads-sidebar-worktree-icon')).toBeNull()
-    show([thread('a', 'Fix tests', { worktreeEnabled: true }), thread('b', 'Docs', { worktreeEnabled: false })], { active: 'a' })
-    expect(row('a').querySelector('.threads-sidebar-worktree-icon')).toBeNull()
-    expect(row('b').querySelector('.threads-sidebar-worktree-icon')).toBeNull()
-  })
-
   it("names every card's branch: its own worktree's, with the branch icon, else its project folder's; none without Git", async () => {
     const status = vi.fn(async (scope: { projectId: string | null; workspaceThreadId: string | null }) =>
       scope.workspaceThreadId === 'own' ? { isRepo: true, branch: 'mousse/fix-parser' } : scope.projectId === 'repo' ? { isRepo: true, branch: 'main' } : { isRepo: false, branch: null })
@@ -386,16 +365,16 @@ describe('row marks', () => {
     ], { view: 'threads', active: 'own', projects: [project('repo', 'Repo')] })
     await settle()
     expect(card('own')?.textContent).toBe('mousse/fix-parser')
-    expect(card('own')?.querySelector('svg')).not.toBeNull()
+    expect(card('own')?.querySelector('.threads-sidebar-branch-icon')).not.toBeNull()
     expect(card('folder')?.textContent).toBe('main')
-    expect(card('folder')?.querySelector('svg')).toBeNull()
+    expect(card('folder')?.querySelector('.threads-sidebar-branch-icon')).toBeNull()
     expect(card('unmade')?.textContent).toBe('main')
     // The worktree is read only through a scope that names the thread once its workspace is ready.
     expect(status.mock.calls.map(([scope]) => scope.workspaceThreadId).filter(Boolean)).toEqual(['own'])
 
     show([thread('plain', 'Notes', { projectId: 'plain' })], { view: 'threads', active: 'plain', projects: [project('plain', 'Plain')] })
     await settle()
-    expect(card('plain')).toBeNull()
+    expect(card('plain')?.textContent).toBe('')
   })
 
   it('gives a title a tooltip only when it does not fit', () => {
