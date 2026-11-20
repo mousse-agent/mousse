@@ -826,6 +826,12 @@ export function readSteerGroup(message: UIMessage): UIMessage[] | undefined {
   return Array.isArray(group) ? (group as UIMessage[]) : undefined;
 }
 
+/** True when `key` is the copy key (`user-<id>`) of a message steered into this turn's reply. */
+function isSteerCopyKeyOf(turn: Turn, key: string): boolean {
+  if (!key.startsWith("user-")) return false;
+  return turn.assistantMsgs.some((message) => readSteerGroup(message)?.some((steered) => `user-${steered.id}` === key));
+}
+
 /** Steer group rows by their first message, kept while their messages are the same objects (memoised rows). */
 const steerGroups = new WeakMap<UIMessage, UIMessage>();
 
@@ -2190,7 +2196,7 @@ export const MessageList = memo(function MessageList({
                 liveStartedAt={isLastTurn ? liveStartedAt : null}
                 sentAt={sentAtOf(turn.userMsg, openMemory)}
                 settledMs={turn.userMsg ? settledWork[turn.userMsg.id] : undefined}
-                copyActive={activeCopyId !== null && (activeCopyId === userCopyKey || activeCopyId === copyKey) ? activeCopyId : null}
+                copyActive={activeCopyId !== null && (activeCopyId === userCopyKey || activeCopyId === copyKey || isSteerCopyKeyOf(turn, activeCopyId)) ? activeCopyId : null}
                 editingPromptId={turn.userMsg && editingPromptId === turn.userMsg.id ? editingPromptId : null}
                 setEditingPromptId={setEditingPromptId}
                 markCopied={markCopied}
@@ -2725,6 +2731,25 @@ const TurnRow = memo(function TurnRow({
                       UserMessageComponent={CustomUserMessage}
                       className={userMessageClassName}
                       enableImagePreview={enableImagePreview}
+                      renderActions={(steered) => {
+                        const text = getTextFromParts(steered.parts ?? [], "");
+                        const key = `user-${steered.id}`;
+                        const createdAt = (steered as { createdAt?: Date | string }).createdAt;
+                        return (
+                          <MessageToolbar
+                            text={showCopyToolbar ? text : ""}
+                            timestamp={isMounted ? formatMessageTime(createdAt) : undefined}
+                            heightClass="h-6 pt-0"
+                            hoverClass="group-hover/user-message:opacity-100 group-hover/user-message:pointer-events-auto"
+                            isVisible={copyActive === key}
+                            alignClass="justify-end"
+                            onCopied={() => markCopied(key)}
+                            speechKey={key}
+                            // Like a prompt: an agent's or a bot's steer is not the person's to repeat.
+                            repeatText={agentOriginOfMessage(steered) !== undefined ? undefined : text}
+                          />
+                        );
+                      }}
                     />
                   ),
                 };

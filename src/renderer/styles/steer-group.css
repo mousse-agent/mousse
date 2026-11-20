@@ -52,3 +52,26 @@
   flex-direction: column;
   gap: 4px;
 }
+
+/* One steered message: its actions sit to the left of the bubble, at its foot, so the stack stays tight (no
+   toolbar row under each bubble). The bubble keeps the 80% cap of a prompt, measured on the whole row. */
+.steer-group-item {
+  display: flex;
+  flex-direction: row-reverse;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.steer-group-item > :first-child {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 80%;
+}
+
+.steer-group-item > :first-child .chat-user-bubble {
+  max-width: 100%;
+}
+
+.steer-group-item > .chat-message-toolbar {
+  flex: none;
+}
