@@ -3,7 +3,7 @@
  * that step instead of "Starting…": the thread's turn state is `queued` with a `preparing` step once the step has
  * taken a moment. Real orchestrator, Run Engine and Git; the test holds the project's repository, as another
  * operation would, so a step lasts as long as the test wants. Rows: a new thread's worktree (it then starts as usual),
- * a Stop during it, a worktree that then cannot be made, and an existing thread's check.
+ * a Stop during it, a worktree that then cannot be made, and an existing thread's snapshot.
  */
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -115,7 +115,7 @@ describe('the line under Working names a slow setup step', () => {
     expect(w.d.orch.getTurnState(thread.id).step).toBeUndefined()
   })
 
-  it("names the check of an existing thread's worktree while its start waits for the repository", async () => {
+  it("names the snapshot of an existing thread's worktree while its start waits for the repository", async () => {
     const w = world()
     const thread = w.thread()
     await w.d.orch.send('Hello', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
@@ -123,7 +123,7 @@ describe('the line under Working names a slow setup step', () => {
 
     await w.holdRepository()
     await w.d.orch.send('Again', false, { threadId: thread.id, clientRequestId: 'second', awaitMode: 'ack' })
-    await waitFor(() => w.preparing(thread.id, 'check'), 'the check step to show')
+    await waitFor(() => w.preparing(thread.id, 'snapshot'), 'the snapshot step to show')
     expect(w.pi.turns).toHaveLength(1)
     w.freeRepository()
     await waitFor(() => w.pi.turns.length === 2, 'the second turn to reach the agent', 40_000)
