@@ -18,6 +18,7 @@ import type { SubagentResultReport } from '../../src/shared/subagentResult'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import { CLAUDE_SUBSCRIPTION_CAPABILITIES } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import { phase6Daemon, waitFor } from './phase6Fixture'
+import { echoBranchNamer } from '../support/echoBranchNamer'
 
 type Script = (input: TurnInput, host: AdapterHost) => Promise<string>
 
@@ -40,6 +41,9 @@ class ScriptedAdapter implements ProviderAdapter {
   }
   async interrupt(): Promise<'interrupted' | 'not_active'> { return 'not_active' }
 }
+
+/** Subagent runs make worktrees and rename branches with real Git, which is slow on Windows under a parallel suite. */
+const RUN_WAIT_MS = 30_000
 
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 
@@ -83,6 +87,9 @@ describe('Give each subagent its own worktree', () => {
     })
     const d = phase6Daemon(home, [parent, child])
     stops.push(d.stop)
+    // Branches start on a temporary name and are renamed from what this namer is given (see `branchNaming`).
+    const forgetNamer = echoBranchNamer(home)
+    stops.push(async () => forgetNamer())
     ;(d.settings as { experimental: { subagentWorktrees: boolean } }).experimental = { subagentWorktrees }
     const project = d.projects.openProject(projectDir)
     // A parent with its worktree off works in the project folder itself.
@@ -103,7 +110,7 @@ describe('Give each subagent its own worktree', () => {
       outcomes.worker = await delegate(delegation, { workspace: 'isolated', role: 'implement' }, 'worker')
     })
     await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
-    for (const key of ['reader', 'worker']) await waitFor(() => d.engine.getRun(outcomes[key].childRunId as string)?.status === 'completed', `the ${key} run`)
+    for (const key of ['reader', 'worker']) await waitFor(() => d.engine.getRun(outcomes[key].childRunId as string)?.status === 'completed', `the ${key} run`, RUN_WAIT_MS)
 
     expect(outcomes.reader).not.toHaveProperty('workspace')
     const reader = d.store.getThread(outcomes.reader.childThreadId as string)!
@@ -114,7 +121,7 @@ describe('Give each subagent its own worktree', () => {
     const worker = d.store.getThread(outcomes.worker.childThreadId as string)!
     expect(worker.workspaceBinding).toEqual({ policy: 'isolated' })
     // Named from its task, not the guidance before it.
-    expect(workspaceOf(d, worker.id)!.branch).toBe('mousse/look-at-the-worker-path')
+    await waitFor(() => workspaceOf(d, worker.id)?.branch === 'mousse/look-at-the-worker-path', 'the branch named from the task')
     // Made at its first editing turn, from the project's committed HEAD, as before: not the parent's newer commit.
     expect(workspaceOf(d, worker.id)!.baseSha).toBe(git(projectDir, 'rev-parse', 'HEAD'))
     expect(workspaceOf(d, worker.id)!.baseSha).not.toBe(state.parentHead)
@@ -128,7 +135,7 @@ describe('Give each subagent its own worktree', () => {
       outcomes.worker = await delegate(delegation, { workspace: 'isolated', role: 'implement' }, 'worker')
     })
     await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
-    for (const key of ['reader', 'planner', 'worker']) await waitFor(() => d.engine.getRun(outcomes[key].childRunId as string)?.status === 'completed', `the ${key} run`)
+    for (const key of ['reader', 'planner', 'worker']) await waitFor(() => d.engine.getRun(outcomes[key].childRunId as string)?.status === 'completed', `the ${key} run`, RUN_WAIT_MS)
 
     // The reader asked for the parent's folder; the tool says where it went instead.
     expect(outcomes.reader).toMatchObject({ workspace: 'isolated', note: expect.stringContaining('worktree of its own') })
@@ -139,7 +146,7 @@ describe('Give each subagent its own worktree', () => {
       const workspace = workspaceOf(d, child.id)!
       expect(workspace.lifecycle, key).toBe('ready')
       // A mousse/ branch named from the subagent's task, not from the guidance its first message starts with.
-      expect(workspace.branch, key).toBe(`mousse/look-at-the-${key}-path`)
+      await waitFor(() => workspaceOf(d, child.id)?.branch === `mousse/look-at-the-${key}-path`, `the ${key} branch named from its task`)
       expect(workspace.worktreePath.startsWith(home!), key).toBe(true)
       expect(workspace.worktreePath).not.toBe(parentWorkspace.worktreePath)
       // Its own checkout, at the parent's commit: the parent's committed work is there.
@@ -161,7 +168,7 @@ describe('Give each subagent its own worktree', () => {
       outcomes.worker = await delegate(delegation, { workspace: 'isolated', role: 'implement' }, 'worker')
     }, { parentWorktree: false })
     await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
-    for (const key of ['reader', 'worker']) await waitFor(() => d.engine.getRun(outcomes[key].childRunId as string)?.status === 'completed', `the ${key} run`)
+    for (const key of ['reader', 'worker']) await waitFor(() => d.engine.getRun(outcomes[key].childRunId as string)?.status === 'completed', `the ${key} run`, RUN_WAIT_MS)
 
     // The parent worked in the project folder: no worktree of its own, and its commit is the folder's HEAD.
     expect(workspaceOf(d, thread.id)).toMatchObject({ kind: 'project-folder' })
@@ -187,7 +194,7 @@ describe('Give each subagent its own worktree', () => {
       outcomes.worker = await delegate(delegation, { workspace: 'isolated', role: 'implement' }, 'worker')
     }, { parentWorktree: false })
     await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
-    for (const key of ['reader', 'worker']) await waitFor(() => d.engine.getRun(outcomes[key].childRunId as string)?.status === 'completed', `the ${key} run`)
+    for (const key of ['reader', 'worker']) await waitFor(() => d.engine.getRun(outcomes[key].childRunId as string)?.status === 'completed', `the ${key} run`, RUN_WAIT_MS)
 
     expect(workspaceOf(d, thread.id)).toMatchObject({ kind: 'project-folder' })
     const reader = d.store.getThread(outcomes.reader.childThreadId as string)!
@@ -195,6 +202,7 @@ describe('Give each subagent its own worktree', () => {
     expect(workspaceOf(d, reader.id)).toBeUndefined()
     const worker = d.store.getThread(outcomes.worker.childThreadId as string)!
     expect(worker.workspaceBinding).toEqual({ policy: 'isolated' })
+    await waitFor(() => workspaceOf(d, worker.id)?.branch === 'mousse/look-at-the-worker-path', 'the branch named from the task')
     expect(workspaceOf(d, worker.id)).toMatchObject({ lifecycle: 'ready', branch: 'mousse/look-at-the-worker-path' })
     expect(workspaceOf(d, worker.id)!.kind).toBeUndefined()
     // The isolated child worked in its own worktree; the shared reader, as the main agent asked, in the parent's folder.
@@ -231,7 +239,7 @@ describe('Give each subagent its own worktree', () => {
         outcomes.worker = await delegate(delegation, { workspace: 'isolated', role: 'implement' }, 'worker')
       })
       await d.orch.send('Delegate it', false, { threadId: thread.id, clientRequestId: 'parent' })
-      for (const key of ['reader', 'worker']) await waitFor(() => d.engine.getRun(outcomes[key].childRunId as string)?.status === 'completed', `the ${key} run`)
+      for (const key of ['reader', 'worker']) await waitFor(() => d.engine.getRun(outcomes[key].childRunId as string)?.status === 'completed', `the ${key} run`, RUN_WAIT_MS)
       for (const key of ['reader', 'worker']) {
         expect(workspaceOf(d, outcomes[key].childThreadId as string)?.lifecycle, key).toBe('ready')
         expect(report(d, outcomes[key].delegationId as string)?.resultRef, key).toMatch(/^refs\/mousse\/delegations\//)
