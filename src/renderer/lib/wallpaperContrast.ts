@@ -51,30 +51,63 @@ function readable(texts: readonly Rgba[], background: [number, number, number], 
  * scrim of `base`; 1 when even a solid scrim does not make them read (the theme's own colours).
  */
 export function scrimNeeded(pixel: [number, number, number], base: [number, number, number], texts: readonly Rgba[], needed = READABLE_CONTRAST): number {
-  const at = (alpha: number) => readable(texts, over({ r: base[0], g: base[1], b: base[2], a: alpha }, pixel), needed)
-  if (at(0)) return 0
-  if (!at(1)) return 1
+  return leastScrim((alpha) => readable(texts, over({ r: base[0], g: base[1], b: base[2], a: alpha }, pixel), needed))
+}
+
+/** The smallest scrim alpha at which `reads` holds: 0 when none is needed, 1 when even a solid scrim does not do it. */
+function leastScrim(reads: (alpha: number) => boolean): number {
+  if (reads(0)) return 0
+  if (!reads(1)) return 1
   let low = 0
   let high = 1
   for (let step = 0; step < 12; step++) {
     const middle = (low + high) / 2
-    if (at(middle)) high = middle
+    if (reads(middle)) high = middle
     else low = middle
   }
   return high
 }
 
 /**
+ * A see-through layer: the wallpaper and its scrim drawn at `opacity` (0 to 1) with no solid colour under them, over
+ * `backdrop` (what shows through, taken as opaque). Under acrylic the backdrop is the window's tint.
+ */
+export interface SeeThrough {
+  opacity: number
+  backdrop: Rgba
+}
+
+/**
+ * What text sits on over one image sample (`pixel`, alpha 0 to 1) under a scrim of `base` at `alpha`, the two drawn at
+ * `layer.opacity` over `layer.backdrop`. A transparent sample shows only the scrim there.
+ */
+function seenThrough(pixel: Rgba, base: [number, number, number], alpha: number, layer: SeeThrough): [number, number, number] {
+  const image = [pixel.r, pixel.g, pixel.b]
+  const backdrop = [layer.backdrop.r, layer.backdrop.g, layer.backdrop.b]
+  // The layer's colour premultiplied by its coverage: the scrim over the image over nothing.
+  const coverage = alpha + (1 - alpha) * pixel.a
+  return [0, 1, 2].map((i) => layer.opacity * (base[i] * alpha + image[i] * pixel.a * (1 - alpha)) + (1 - layer.opacity * coverage) * backdrop[i]) as [number, number, number]
+}
+
+/**
  * The scrim alpha the image needs (0 to 1): the `FLOOR_PERCENTILE` of what each sample needs for 4.5:1, and at least
  * what every sample needs for 3:1, so no spot of the image leaves text unreadable. `samples` is RGBA, four bytes per
- * sample (an `ImageData`'s data); a transparent sample is flattened onto the base first, as the layer shows it.
+ * sample (an `ImageData`'s data). Without `layer` the image sits on the solid base (a transparent sample shows the base);
+ * with it the layer is see-through, and the floor is measured against what shows through as well.
  */
-export function contrastFloor(samples: Uint8ClampedArray, base: Rgba, texts: readonly Rgba[]): number {
+export function contrastFloor(samples: Uint8ClampedArray, base: Rgba, texts: readonly Rgba[], layer?: SeeThrough): number {
   const solid: [number, number, number] = [base.r, base.g, base.b]
   const needs: number[] = []
   let least = 0
   for (let index = 0; index + 3 < samples.length; index += 4) {
-    const pixel = over({ r: samples[index], g: samples[index + 1], b: samples[index + 2], a: samples[index + 3] / 255 }, solid)
+    const sample: Rgba = { r: samples[index], g: samples[index + 1], b: samples[index + 2], a: samples[index + 3] / 255 }
+    if (layer) {
+      const at = (needed: number) => (alpha: number) => readable(texts, seenThrough(sample, solid, alpha, layer), needed)
+      needs.push(leastScrim(at(READABLE_CONTRAST)))
+      least = Math.max(least, leastScrim(at(LEAST_CONTRAST)))
+      continue
+    }
+    const pixel = over(sample, solid)
     needs.push(scrimNeeded(pixel, solid, texts))
     least = Math.max(least, scrimNeeded(pixel, solid, texts, LEAST_CONTRAST))
   }

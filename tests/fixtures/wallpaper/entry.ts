@@ -1,3 +1,7 @@
+import { createElement } from 'react'
+import { flushSync } from 'react-dom'
+import { createRoot } from 'react-dom/client'
+import { ChatWallpaper } from '../../../src/renderer/components/ChatWallpaper'
 import { resetWallpapersForTests, showWallpaper, wallpaperLayerNow, type WallpaperBridge } from '../../../src/renderer/lib/wallpaper'
 import { isWallpaperCopy, readWallpaperHeader, type WallpaperPieceResult } from '../../../src/shared/themes/wallpaperImage'
 import type { ThemeWallpaper } from '../../../src/shared/themes/userThemes'
@@ -124,7 +128,40 @@ const until = async (check: () => boolean, ms = 8000): Promise<boolean> => {
     showWallpaper('p1', wallpaper)
     await until(() => wallpaperLayerNow() !== null && log.saves.length >= 2)
 
+    // The layer as drawn, solid and under acrylic: what the browser computes for the element the chat mounts.
+    const host = document.createElement('div')
+    host.style.cssText = 'position: relative; width: 400px; height: 300px'
+    document.body.appendChild(host)
+    flushSync(() => createRoot(host).render(createElement(ChatWallpaper)))
+    const drawn = () => {
+      const element = host.querySelector<HTMLElement>('[data-mousse="wallpaper"]')
+      if (!element) return null
+      const style = getComputedStyle(element)
+      return { opacity: style.opacity, backgroundColor: style.backgroundColor, image: style.backgroundImage.includes('blob:') }
+    }
+    const solidDrawn = drawn()
+    const solidLayer = wallpaperLayerNow()
+    document.documentElement.style.setProperty('--acrylic-base-rgb', '16, 20, 24')
+    document.documentElement.setAttribute('data-acrylic', 'true')
+    showWallpaper('p1', wallpaper)
+    await until(() => wallpaperLayerNow()?.opacity !== 1)
+    await new Promise((resolve) => requestAnimationFrame(resolve))
+    const acrylicDrawn = drawn()
+    const acrylicLayer = wallpaperLayerNow()
+    document.documentElement.setAttribute('data-acrylic', 'false')
+    showWallpaper('p1', wallpaper)
+    await until(() => wallpaperLayerNow()?.opacity === 1)
+    await new Promise((resolve) => requestAnimationFrame(resolve))
+    const offAgainDrawn = drawn()
+
     return {
+      drawn: {
+        solid: solidDrawn,
+        solidFloor: solidLayer?.floor ?? null,
+        acrylic: acrylicDrawn,
+        acrylicLayer: acrylicLayer && { opacity: acrylicLayer.opacity, floor: acrylicLayer.floor, scrim: acrylicLayer.scrim },
+        offAgain: offAgainDrawn
+      },
       shown,
       first: first && { dim: first.dim, floor: first.floor, scrim: first.scrim, base: first.base, fit: first.fit, url: first.url.startsWith('blob:') },
       copy: copyHeader,
