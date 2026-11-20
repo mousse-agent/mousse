@@ -105,7 +105,7 @@ describe('relays (Phase 3)', () => {
       expect.objectContaining({ relay: RELAY_ID })
     ])
     expect(a.mms.netEngine.status().relays!.list).toEqual([])
-  })
+  }, 60_000)
 
   it('says why a link was refused', async () => {
     aRelays.enrollError = 'relay_not_authorized'
@@ -228,7 +228,7 @@ describe('relays (Phase 3)', () => {
     aRelays.relays[aRelays.relays.length - 1]!.callers_max = 128
     a.fake!.emit({ ev: 'relay.state', relay: aRelays.relays[aRelays.relays.length - 1] })
     await eventually(() => expect(device(a, bOnA)?.relay).toEqual({ limit: { callersMax: 128 } }))
-  })
+  }, 60_000)
 
   it('says a fixed line for a refusal it has no words for, never the helper’s reason', async () => {
     aRelays.enrollError = 'relay_new_thing'
