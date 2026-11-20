@@ -8,6 +8,8 @@ import { englishMessagesEnv } from './gitProcess'
 import { GitPolicyError } from './gitPolicy'
 import { READ_ONLY_GIT_ENV } from './readOnlyGit'
 import { repoProgramEnv, repoProgramSettings, repoProgramSettingsAsync, withoutRepoPrograms, withoutRepoProgramsAsync } from './repoPrograms'
+import { timeGitChild, timeGitSync } from '../diagnostics/turnBoundary'
+import { gitEnvFor, gitFile } from './gitExecutable'
 
 /**
  * One path's state as `git status --porcelain` would print it: a code for the index side and one for the
@@ -40,16 +42,16 @@ function plumbingEnv(): NodeJS.ProcessEnv {
 async function plumbing(top: string, args: readonly string[]): Promise<string> {
   const argv = await withoutRepoProgramsAsync(top, args)
   return new Promise((resolvePromise, reject) => {
-    execFile('git', argv, { cwd: top, env: plumbingEnv(), encoding: 'utf8', windowsHide: true, timeout: 60_000, maxBuffer: MAX_OUTPUT }, (error, stdout, stderr) => {
+    timeGitChild(() => execFile(gitFile(), argv, { cwd: top, env: gitEnvFor(plumbingEnv()), encoding: 'utf8', windowsHide: true, timeout: 60_000, maxBuffer: MAX_OUTPUT }, (error, stdout, stderr) => {
       if (error) reject(Object.assign(new Error(stderr.trim() || error.message), { cause: error }))
       else resolvePromise(stdout)
-    })
+    }))
   })
 }
 
 /** The same read, blocking: for callers that cannot wait (the checks before a checkpoint). */
 function plumbingSync(top: string, args: readonly string[]): string {
-  const result = spawnSync('git', withoutRepoPrograms(top, args), { cwd: top, env: plumbingEnv(), encoding: 'utf8', windowsHide: true, timeout: 60_000, maxBuffer: MAX_OUTPUT })
+  const result = timeGitSync(() => spawnSync(gitFile(), withoutRepoPrograms(top, args), { cwd: top, env: gitEnvFor(plumbingEnv()), encoding: 'utf8', windowsHide: true, timeout: 60_000, maxBuffer: MAX_OUTPUT }))
   if (result.error) throw result.error
   if (result.status !== 0) throw new Error(result.stderr.trim() || `git ${args[0]} failed with exit code ${result.status}`)
   return result.stdout

@@ -114,7 +114,8 @@ describe('a turn that starts in a workspace changed outside Mousse', () => {
     userEdits(repo)
     const first = await actions.recordOutsideChanges(outside(repo))
     const again = await actions.recordOutsideChanges(outside(repo))
-    expect(again).toEqual({ startSha: first.startSha })
+    expect(again.startSha).toBe(first.startSha)
+    expect(again.action).toBeUndefined()
     expect(actions.list()).toHaveLength(1)
   })
 

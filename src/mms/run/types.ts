@@ -530,9 +530,50 @@ export function isAgentNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): bool
   return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'agent_note'
 }
 
-/** A note sent with `attention: none`: it never starts a turn of its own. */
+/** What a thread agent started in the background (`monitor_start`, `background_run`, `keep_working`). */
+export type { MonitorKind, MonitorEnd } from '../../shared/backgroundWork'
+import type { MonitorKind, MonitorEnd } from '../../shared/backgroundWork'
+
+/**
+ * Payload of a `reconcile_notice` row that carries what a thread's monitor or background command reported
+ * (`ThreadMonitors`): a batch of its events, and on the last one how it ended. It is delivered as an agent note is:
+ * steered into a native run, handed over with a Mousse tool's result on a runtime that restarts its reply, or as a wake
+ * turn of an idle thread. Its events are outside text: the notice quotes them.
+ */
+export interface MonitorEventPayload {
+  kind: 'monitor_event'
+  monitorId: string
+  monitorKind: MonitorKind
+  /** The agent's short description of it. */
+  description: string
+  /** What it printed or received since the last notice, one entry per line or message, each cut. */
+  events: string[]
+  /** Events left out of this notice because it was full. */
+  droppedEvents?: number
+  /** Set on its last notice. */
+  end?: MonitorEnd
+  /** A background command's last output, on its end notice. */
+  tail?: string
+  /** `needed` starts a notice turn on an idle thread; `none` waits for the thread's next turn (after a Stop). */
+  attention: 'needed' | 'none'
+}
+
+export function isMonitorEventRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'monitor_event'
+}
+
+/**
+ * A row that waits while the thread waits on a person's answer: an agent's note or a monitor's event. A live provider
+ * settles a pending request when it takes a steer, and neither answers one.
+ */
+export function waitsForAnswer(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return isAgentNoteRow(row) || isMonitorEventRow(row)
+}
+
+/** A note or a monitor's notice sent with `attention: none`: it never starts a turn of its own. */
 export function isQuietNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
-  return isAgentNoteRow(row) && (row.payload as AgentNotePayload).attention === 'none'
+  if (isAgentNoteRow(row)) return (row.payload as AgentNotePayload).attention === 'none'
+  return isMonitorEventRow(row) && (row.payload as MonitorEventPayload).attention === 'none'
 }
 
 /** Payload of a `turn.start` effect that wakes a thread for its pending inbox rows (rule 4). */

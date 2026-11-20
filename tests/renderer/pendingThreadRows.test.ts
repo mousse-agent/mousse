@@ -271,8 +271,7 @@ describe('in the sidebar', () => {
       act(() => useAppStore.setState({ sidebarAnimations: false }))
       expect(row.querySelector('.turning.icon-spin')).toBeNull()
       expect(cancel).toHaveBeenCalled()
-      if (view === 'projects') expect(row.querySelector('[aria-label="Agent is working"]')).not.toBeNull()
-      else expect(row.textContent).toContain('Working')
+      expect(row.textContent).toContain('Working')
 
       act(() => useAppStore.setState({ sidebarAnimations: true }))
       expect(row.querySelector('.turning.icon-spin')).not.toBeNull()
@@ -317,7 +316,7 @@ describe('in the sidebar', () => {
     expect(pending.dataset.threadId).toBe('pending:k1')
     expect(pending.textContent).toContain('Plan the release')
     expect(pending.classList.contains('active')).toBe(true)
-    expect(pending.querySelector('.threads-sidebar-status-spinner')).not.toBeNull()
+    expect(pending.querySelector('.threads-sidebar-card-status-working')).not.toBeNull()
     // Nothing to act on before the thread exists.
     act(() => pending.click())
     expect(actions.selectThread).not.toHaveBeenCalled()

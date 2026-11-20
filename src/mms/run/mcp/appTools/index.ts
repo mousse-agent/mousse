@@ -14,6 +14,7 @@ import { familyRelation, threadFamily } from './family'
 import { goalTools } from './goal'
 import { devGuiTools } from './devGui'
 import type { AppToolHost } from './host'
+import { monitorTools } from './monitors'
 import { profilerTools } from './profiler'
 import { projectGitTools } from './projectGit'
 import { quickActionTools, runningTools } from './quickActions'
@@ -40,6 +41,7 @@ export { AUTOMATION_TOOL_NAMES, type AutomationToolHost } from './automations'
 export { THEME_READ_TOOL, THEME_SET_TOOL, type AppearanceToolHost } from './appearance'
 export type { BotMemoryToolHost } from './botMemory'
 export { TERMINAL_READ_TOOL } from './terminals'
+export { MONITOR_PERMISSION_KEY, MONITOR_TOOL_NAMES } from './monitors'
 export { projectGitToolDefinitions, runProjectGitTool } from './projectGit'
 export type { ProfilerToolHost } from './profiler'
 export type { ComputerUseToolHost } from './computer'
@@ -126,7 +128,7 @@ export function createAppToolRegistry(input: {
   add('thread', engine ? threadTools(host, engine, input.bots) : [])
   add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])
   add('skills', skillTools(host))
-  add('quickActions', [...quickActionTools(host), ...runningTools(host)])
+  add('quickActions', [...quickActionTools(host), ...runningTools(host), ...monitorTools(host)])
   add('devGui', devGuiTools(host))
   add('web', webTools(host))
   add('browser', browserTools(host))

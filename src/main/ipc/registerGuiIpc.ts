@@ -5,6 +5,7 @@ import { AppError, type AppErrorShape, errorDiagnostic, knownAppError, normalize
 import { PENDING_CHANGES_ERROR_CODES } from '../../shared/workspace'
 import { registerLinuxWindowResizeIpc } from '../linuxWindowResizeIpc'
 import type { SubagentSummary } from '../../shared/subagents'
+import type { ThreadBackgroundWork } from '../../shared/backgroundWork'
 import type { SetVendorSettingInput } from '../../shared/harness/vendorSettings'
 import { CHAT_METHODS } from '../../shared/chats'
 import { CHAT_RESOURCE_METHODS } from '../../shared/chatResources'
@@ -2474,6 +2475,12 @@ export function registerGuiIpc(
       withThreadId({ messageId, index }, threadId)
     )
   )
+  registerHandler('threads:queueImage', async (_e, threadId: string, queueItemId: string, index: number) =>
+    guiMms.request<{ name: string; mimeType: string; data: string }>(
+      'thread.messageImage',
+      withThreadId({ queueItemId, index }, threadId)
+    )
+  )
 
   // What a window has in view may be older than what happened on the other computer once a call there is
   // not confirmed ("may have happened"): read it again.
@@ -2692,10 +2699,11 @@ export function registerGuiIpc(
       return res.threads
     }
   )
-  registerHandler('threads:search', async (_e, query: string, limit?: number) => {
+  registerHandler('threads:search', async (_e, query: string, limit?: number, options?: { perThread?: boolean }) => {
     const res = await guiMms.request<ThreadSearchResponse>('threads.search', {
       query,
-      limit
+      limit,
+      ...(options?.perThread === true ? { perThread: true } : {})
     })
     // The computers that were not searched are named with the matches of the others.
     return { results: res.results, ...(res.skipped?.length ? { skipped: res.skipped } : {}) }
@@ -2720,6 +2728,11 @@ export function registerGuiIpc(
   })
   registerHandler('subagents:stopAll', async (_e, threadId: string) => {
     const res = await guiMms.request<{ ok: boolean }>('subagents.stopAll', { threadId })
+    return res.ok
+  })
+  registerHandler('threads:backgroundWork', async (_e, threadId: string) => guiMms.request<ThreadBackgroundWork>('threads.backgroundWork', { threadId }))
+  registerHandler('threads:stopBackground', async (_e, threadId: string, id: string) => {
+    const res = await guiMms.request<{ ok: boolean }>('threads.stopBackground', { threadId, id })
     return res.ok
   })
   registerHandler('subagents:list', async (_e, threadId: string) => {

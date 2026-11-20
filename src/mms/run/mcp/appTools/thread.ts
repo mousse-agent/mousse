@@ -631,7 +631,7 @@ function sendConflict(error: unknown): McpToolError | undefined {
  */
 function assertTakesWork(host: AppToolHost, threadId: string): void {
   if (host.threadMeta?.(threadId)?.settledAt)
-    throw new McpToolError('mousse_conflict', `Thread ${threadId} is archived; it takes no new work until it is restored.`, { conflict: 'thread_archived', threadId })
+    throw new McpToolError('mousse_conflict', `Thread ${threadId} is archived; it takes no new work until it is unarchived. When the user wants it back, unarchive it with thread_archive (threadId, archived: false) first.`, { conflict: 'thread_archived', threadId })
 }
 
 /**

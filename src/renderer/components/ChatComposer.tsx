@@ -64,6 +64,8 @@ import {
   type ComposerQuoteDetail
 } from '../lib/composerQuotes'
 
+import { admitAttachments, type ChipStatus } from '../lib/attachmentPreparation'
+
 export interface AttachedFile {
   id: string
   file: File
@@ -74,6 +76,8 @@ export interface AttachedFile {
   label?: string
   /** A long text paste kept as a file: it can be opened, and put back into the box as text. */
   pastedText?: boolean
+  /** An image sent as its path, not inline: its original beside a smaller copy, or one that can't go inline. */
+  asPath?: boolean
 }
 
 /** What the chip and the message call an attached file. */
@@ -174,6 +178,15 @@ export interface ChatComposerProps {
   sendModeThreadId?: string
   /** The most characters a message carries: text pasted past it goes on the message as a text file. */
   messageLimit?: number
+  /** What getting each attached image ready came to, by attachment id (`useAttachmentPreparation`): shown on its chip. */
+  attachmentStatus?: ReadonlyMap<string, ChipStatus>
+  /** Why Send is held (an attachment still being prepared, or one that can't be sent); Send stays disabled with this tooltip. */
+  sendBlocked?: string | null
+  /**
+   * Files attached here are checked as they come (`admitAttachments`): one the message can't take is not attached, and
+   * `onRefused` gets a line naming it. `remote`: the thread runs on another computer, which takes images only.
+   */
+  attachRules?: { remote: boolean; onRefused: (line: string) => void }
 }
 
 const MENTION_SEARCH_DEBOUNCE_MS = 120
@@ -242,7 +255,10 @@ export function ChatComposer({
   sendModeThreadId,
   dictateWhileStoppable = false,
   extraActions,
-  messageLimit = Infinity
+  messageLimit = Infinity,
+  attachmentStatus,
+  sendBlocked = null,
+  attachRules
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const composerInputRef = useRef<HTMLTextAreaElement>(null)
@@ -418,6 +434,7 @@ export function ChatComposer({
     !transcribing &&
     pendingReferences === 0 &&
     !disabled &&
+    !sendBlocked &&
     skillsPickerQuery === null
 
   useEffect(() => {
@@ -485,8 +502,11 @@ export function ChatComposer({
   const addFiles = useCallback(
     (files: Array<File | Omit<AttachedFile, 'id'>>) => {
       if (!files.length) return
-      const next: AttachedFile[] = files.map((entry) => {
-        const attached = entry instanceof File ? { file: entry } : entry
+      const entries = files.map((entry) => (entry instanceof File ? { file: entry } : entry))
+      const admitted = attachRules ? admitAttachments(attachedFiles, entries, { remote: attachRules.remote }) : { accepted: entries }
+      if (admitted.refusal) attachRules?.onRefused(admitted.refusal)
+      if (!admitted.accepted.length) return
+      const next: AttachedFile[] = admitted.accepted.map((attached) => {
         return {
           ...attached,
           id: crypto.randomUUID(),
@@ -496,7 +516,7 @@ export function ChatComposer({
       onAttachedFilesChange([...attachedFiles, ...next])
       return next
     },
-    [attachedFiles, onAttachedFilesChange]
+    [attachedFiles, onAttachedFilesChange, attachRules]
   )
 
   const removeFile = (id: string) => {
@@ -951,9 +971,11 @@ export function ChatComposer({
         <div className="composer-attachments">
           <div className="composer-attachments-scroll">
             {/* An attached image opens a preview that steps through the other attached images. */}
-            <ImageGalleryProvider images={() => attachedFiles.flatMap(({ id, file, previewUrl }) => (previewUrl ? [{ id, url: previewUrl, filename: file.name }] : []))}>
+            <ImageGalleryProvider images={() => attachedFiles.flatMap(({ id, file, previewUrl }) => (previewUrl && !attachmentStatus?.get(id)?.noPreview ? [{ id, url: previewUrl, filename: file.name }] : []))}>
               {attachedFiles.map((attached) => {
-                const { id, file, previewUrl, path, pastedText } = attached
+                const { id, file, path, pastedText } = attached
+                // An image that can't be read here shows as a file chip, not a broken thumbnail.
+                const previewUrl = attachmentStatus?.get(id)?.noPreview ? undefined : attached.previewUrl
                 return (
                   <FileAttachment
                     key={id}
@@ -966,6 +988,7 @@ export function ChatComposer({
                     onOpen={pastedText ? () => void previewPastedText(id) : undefined}
                     onInsertText={pastedText ? () => void insertPastedText(id) : undefined}
                     className={pastedText ? 'max-w-[280px]' : undefined}
+                    status={attachmentStatus?.get(id)}
                     onRemove={() => removeFile(id)}
                     onDragStart={(event) => startDragOut(event, {
                       name: file.name,
@@ -1172,6 +1195,7 @@ export function ChatComposer({
         stoppable={stoppable}
         disabled={disabled}
         canSend={canSend}
+        sendBlocked={sendBlocked}
         isRecording={isRecording}
         recordingPending={recordingPending}
         transcribing={transcribing}

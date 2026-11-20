@@ -241,6 +241,14 @@ export interface SnapshotStage {
   abort(): void
 }
 
+/**
+ * One step of dropping records: at most `rows` of them, and records only until they reach `bytes` (at least one),
+ * since freeing a record costs in proportion to its size.
+ */
+export interface DropStep {
+  rows: number
+  bytes: number
+}
 export interface StreamStore {
   /** Local staging budget including the concrete meta validator's projection writes. */
   snapshotBatchLimit?(stream: StreamId): number
@@ -269,8 +277,38 @@ export interface StreamStore {
   read(stream: StreamId, after: StreamHead, through: number, budgetBytes: number): ReplayPage
   /** Why a subscriber at `after` cannot be served by replay, if so. */
   snapshotReason(stream: StreamId, after: StreamHead): SnapshotReason | undefined
-  /** Stream full meta history (all original epochs) or non-executable content projection. */
-  openSnapshot(stream: StreamId): SnapshotReader
+  /**
+   * Stream full meta history (all original epochs) or non-executable content projection. `from` starts a content
+   * stream's reader at that record (the start of the newest display snapshot), when the pinned generation still
+   * holds that very record there; otherwise it reads from the start.
+   */
+  openSnapshot(
+    stream: StreamId,
+    options?: { from?: { epoch: number; seq: number; id: EventId } }
+  ): SnapshotReader
+  /**
+   * The newest record of the current epoch whose envelope type is `type`, at or before `throughSeq` (the head when
+   * absent). Its cost is what lies after that record.
+   */
+  lastOfType?(stream: StreamId, type: string, throughSeq?: number): StoredRecord | undefined
+  /**
+   * A copy of another computer's thread display stream: drops records before `keep` (the first record of a state
+   * the caller has checked, such as a complete display snapshot) in one transaction of at most `step.rows` records
+   * and about `step.bytes` of them, with the tombstones before it. Nothing is dropped unless the active generation,
+   * at the current epoch, still holds `keep`, and no snapshot of the stream is being staged. Returns how many rows
+   * went; 0 when nothing is left to drop or nothing may go now.
+   */
+  dropBefore?(
+    stream: StreamId,
+    keep: { epoch: number; seq: number; id: EventId },
+    step: DropStep
+  ): number
+  /**
+   * Drops thread display records that nothing reads (an archived generation a newer snapshot replaced, earlier
+   * epochs of a thread that restarted) in one transaction of at most `step`, and the archived generations left
+   * empty. Returns how many rows went; 0 when nothing is left.
+   */
+  retireUnread?(step: DropStep): number
   /** Begin invisible bounded staging for a fixed target; incomplete work is discarded on crash. */
   beginSnapshot(stream: StreamId, target: StreamHead): SnapshotStage
   /** Bounded convenience wrapper only (<=500 rows/1 MiB); larger inputs throw too_large. */

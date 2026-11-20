@@ -65,7 +65,7 @@ const MASK = /(?<![\w-])(-webkit-)?mask(-image)?\s*:\s*(?!none\b)/
 /** Selector parts that apply only in a see-through window, with the frosted composer on, or over a theme's wallpaper. */
 const SEE_THROUGH = /(^|[\s(])html\[data-((acrylic|frosted-composer)='true'|wallpaper)\]/
 /** Sidebar also masks under an active user theme, where its backdrop may be feathered, gradient or custom CSS. */
-const USER_THEME_ACTIVE = /(^|[\s(])html\[data-user-theme\]:not\(\[data-user-theme-paused\]\)/
+const USER_THEME_ACTIVE = /(^|[\s(])html\[data-user-theme\](?![\w-])/
 
 describe('no mask on a whole pane where nothing shows through', () => {
   // A mask on a scroller makes the GPU keep a copy of the scroller, its mask and their tiles as long as it is on

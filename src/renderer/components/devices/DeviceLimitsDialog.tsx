@@ -55,7 +55,7 @@ export function DeviceLimitsDialog({ node, name, policy, onClose, onDone }: {
       onClose={onClose}
       footer={<button type="button" className={`${btn} primary`} disabled={busy || !changed} onClick={() => void save()}>Save</button>}
     >
-      <div className="devices-dialog" data-mousse-decision="">
+      <div className="devices-dialog" data-mousse-guarded="">
         <p className="settings-muted">These apply here only. {name} keeps its own limits for what this computer may do there.</p>
         {work !== undefined && <div className="devices-field">
           <span title={`Off, ${name} reads threads and chats with bots here, and can't start, send to, change or stop threads, see files or Git, or make or change bots.`}>Work on threads from this device</span>

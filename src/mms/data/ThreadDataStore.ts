@@ -41,6 +41,7 @@ import type {
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { visibleThreads } from '../../shared/threadLineage'
 import { normalizeQueuedMessages } from '../queue/ThreadMessageQueue'
+import { loadQueueImages, storeQueueImages, sweepQueueImages } from '../queue/queueImageFiles'
 import type { QueueJournal } from '../queue/queueJournal'
 import { withThreadDataMutationLock } from '../queue/ThreadExecutionLease'
 import type { ProjectManager } from './ProjectManager'
@@ -324,6 +325,11 @@ export interface ThreadSearchOptions {
   maxMessageThreads?: number
   /** Archived threads are searched too; without it they are left out. */
   includeSettled?: boolean
+  /**
+   * One message match per thread (its first), so a word that many messages of one thread hold does not use up the
+   * limit: for a caller that asks which threads match, not where (`searchThreadsAsync` only).
+   */
+  perThread?: boolean
 }
 
 /** A thread's `meta.json`, with a reasoning level packed into its model (written before #490) moved into its own field. */
@@ -1944,10 +1950,13 @@ export class ThreadDataStore extends EventEmitter {
     const audit = this.readJsonFile<Array<{ operationId: string; cancelledAt: string; queue: QueuedMessage[] }>>(auditPath, [])
     if (!Array.isArray(audit)) throw new Error('Corrupt lifecycle queue cancellation audit')
     if (!audit.some((entry) => entry.operationId === operationId)) {
-      audit.push({ operationId, cancelledAt: new Date().toISOString(), queue })
+      // The audit names the cancelled messages' images; their data goes with the queue's image files.
+      const named = queue.map((item) => item.images?.length ? { ...item, images: item.images.map(({ name, mimeType }) => ({ name, mimeType })) } : item)
+      audit.push({ operationId, cancelledAt: new Date().toISOString(), queue: named as QueuedMessage[] })
       this.writeJsonAtomic(auditPath, audit)
     }
     this.writeJsonAtomic(join(record.location, 'queue.json'), [])
+    sweepQueueImages(record.location, new Set())
   }
 
   /** Idempotent index projection; lifecycle location is the durable authority. */
@@ -2107,15 +2116,21 @@ export class ThreadDataStore extends EventEmitter {
         new Error('queue must be an array')
       )
     }
-    return normalizeQueuedMessages(raw, threadId)
+    // Images are kept in files beside queue.json (`queueImageFiles.ts`).
+    return loadQueueImages(threadDir, normalizeQueuedMessages(raw, threadId))
   }
 
-  /** Atomically persist the message queue for a thread (backwards-compatible queue.json). */
+  /**
+   * Atomically persist the message queue for a thread (queue.json). Its images go to files beside it, each written
+   * once, so a change to the queue writes only the small queue.json; files no message names are removed after.
+   */
   saveMessageQueue(id: string, queue: QueuedMessage[]): void {
     const threadDir = this.getThreadDir(id)
     this.ensureThreadDir(threadDir)
     const normalized = normalizeQueuedMessages(queue, id)
-    this.writeJsonAtomic(join(threadDir, 'queue.json'), normalized)
+    const stored = storeQueueImages(threadDir, normalized)
+    this.writeJsonAtomic(join(threadDir, 'queue.json'), stored.items)
+    sweepQueueImages(threadDir, stored.files)
   }
 
   /**
@@ -2688,13 +2703,14 @@ export class ThreadDataStore extends EventEmitter {
         if (budget <= 0) continue
         budget -= 1
         try {
-          messages.push(...this.messageResults(thread, plan, this.readJsonFile<Array<{ id: string; content: string }>>(join(threadDir, 'messages.json'), [])))
+          const found = this.messageResults(thread, plan, this.readJsonFile<Array<{ id: string; content: string }>>(join(threadDir, 'messages.json'), []))
+          messages.push(...(options.perThread ? found.slice(0, 1) : found))
         } catch {
           /* skip invalid thread data */
         }
       }
     }
-    if (indexed.length) messages.push(...(await this.indexedMessageResults(indexed, plan, limit)))
+    if (indexed.length) messages.push(...(await this.indexedMessageResults(indexed, plan, limit, options.perThread === true)))
     return this.finishSearch([...plan.titles, ...messages], limit)
   }
 
@@ -2703,22 +2719,23 @@ export class ThreadDataStore extends EventEmitter {
    * are found or the matches run out (a result that repeats another's does not count). If the index cannot answer,
    * each thread's transcript is searched in the read worker instead, so a broken cache never breaks search.
    */
-  private async indexedMessageResults(indexed: Array<Thread & { dir: string }>, plan: SearchPlan, limit: number): Promise<ScoredSearchResult[]> {
+  private async indexedMessageResults(indexed: Array<Thread & { dir: string }>, plan: SearchPlan, limit: number, perThread = false): Promise<ScoredSearchResult[]> {
     const byId = new Map(indexed.map((thread) => [thread.id, thread]))
     const ordered = [...indexed].sort((a, b) => a.name.localeCompare(b.name)).map((thread) => ({ id: thread.id, name: thread.name, dir: thread.dir }))
     const out: ScoredSearchResult[] = []
     const distinct = new Set<string>()
+    const keyOf = (result: ScoredSearchResult) => perThread ? result.threadId : `${result.threadId}:${result.messageId}:${result.snippet}`
     try {
       this.flushIndexNotices()
       const batch = Math.max(limit, 50)
       for (let offset = 0; distinct.size < limit; offset += batch) {
-        const hits = await this.threadDb().client.callIndex('indexSearch', this.homeDir, { query: plan.normalized, threads: ordered, limit: batch, offset })
+        const hits = await this.threadDb().client.callIndex('indexSearch', this.homeDir, { query: plan.normalized, threads: ordered, limit: batch, offset, perThread })
         for (const hit of hits) {
           const thread = byId.get(hit.threadId)
           if (!thread) continue
           for (const result of this.messageResults(thread, plan, [{ id: hit.messageId, content: hit.body }])) {
             out.push(result)
-            distinct.add(`${result.threadId}:${result.messageId}:${result.snippet}`)
+            distinct.add(keyOf(result))
           }
         }
         if (hits.length < batch) break
@@ -2733,10 +2750,10 @@ export class ThreadDataStore extends EventEmitter {
       for (const thread of ordered) {
         if (distinct.size >= limit) break
         try {
-          const found = await this.threadDb().client.call('searchTranscript', thread.dir, plan.normalized, Number.MAX_SAFE_INTEGER)
+          const found = await this.threadDb().client.call('searchTranscript', thread.dir, plan.normalized, perThread ? 1 : Number.MAX_SAFE_INTEGER)
           for (const result of this.messageResults(byId.get(thread.id)!, plan, found)) {
             out.push(result)
-            distinct.add(`${result.threadId}:${result.messageId}:${result.snippet}`)
+            distinct.add(keyOf(result))
           }
         } catch {
           /* skip a thread that cannot be read now */

@@ -12,6 +12,7 @@ import {
 } from '../queue/ThreadExecutionLease'
 import { resolve } from 'node:path'
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { forgetRepositoryFacts } from '../git/repositoryFacts'
 
 const mutationContext = new AsyncLocalStorage<Set<string>>()
 
@@ -75,6 +76,8 @@ export async function withGitMutationLocks<T>(
   const threadLease = await started.threadLease
   try {
     const repositoryLease = await acquireRepositoryLease(repository, { signal })
+    // What the turn read of its folder before this lease is read again under it: HEAD may have moved while it waited.
+    forgetRepositoryFacts()
     const scope = workSignal ? gitCancellationScope(workSignal) : undefined
     try {
       const held = new Set([...(heldRepositories ?? []), repository.key])

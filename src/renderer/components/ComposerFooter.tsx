@@ -116,6 +116,8 @@ export interface ComposerFooterProps {
   onSend?: () => void
   /** What the send button says it does, when not "Send message" / "Queue message": answering open questions, or "Deny and send" while an approval waits. */
   sendLabel?: string
+  /** Why Send is held (an attachment still being prepared, or one that can't be sent): its tooltip, and the button stays in place, disabled. */
+  sendBlocked?: string | null
   onStop?: () => void
   onStartRecording?: () => void
   /** Done: ends the recording and turns it into text. */
@@ -399,6 +401,7 @@ export function ComposerFooter({
   allowAttachWhileLoading = false,
   permission,
   sendLabel,
+  sendBlocked = null,
   dictateWhileStoppable = false,
   extraActions,
   sendMode
@@ -425,7 +428,7 @@ export function ComposerFooter({
   }
   // The send slot is Send, Queue, Stop or Stop recording. While a run goes and the box has text, Stop
   // sits left of it, so Queue and Stop are both one click and the slot never moves.
-  const stopInSlot = stoppable && !canSend
+  const stopInSlot = stoppable && !canSend && !sendBlocked
   const stopButton = (className: string) => (
     <button type="button" className={className} title={stopTitle} aria-label="Stop run" onClick={onStop} disabled={disabled}>
       <Square size={14} strokeWidth={2} fill="currentColor" />
@@ -539,7 +542,7 @@ export function ComposerFooter({
           <button
             type="button"
             className={`composer-action-btn${canSend ? ' composer-action-btn-active' : ''}`}
-            title={sendLabel ?? (loading ? runningTitle : 'Send')}
+            title={sendBlocked ?? sendLabel ?? (loading ? runningTitle : 'Send')}
             aria-label={sendLabel ?? (loading ? (steers ? 'Steer message' : 'Queue message') : 'Send message')}
             onClick={handleActionClick}
             disabled={disabled || !canSend}

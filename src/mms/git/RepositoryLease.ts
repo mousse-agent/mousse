@@ -42,6 +42,7 @@ import { requireRepositoryMutationCapability } from './RepositoryIdentity'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { sqliteFilePath } from '../data/sqliteFilePath'
 import { readProcessStart } from './stoppedGitTree'
+import { timeRepositoryLeaseWait } from '../diagnostics/turnBoundary'
 
 export const REPOSITORY_LEASE_FILENAME = 'repository-mutation.lease'
 export const REPOSITORY_LOCK_FILENAME = 'repository-mutation.lock'
@@ -536,7 +537,8 @@ export function acquireRepositoryLease(identity: RepositoryIdentity, opts: Acqui
       throw (error as RepositoryLeaseAbortedError & { busy?: RepositoryLeaseBusyError }).busy ?? busyError(identity.key, getRepositoryLeasePath(identity))
     })
   }
-  return new Promise((resolve, reject) => {
+  // Measured in the turn boundary it is waited for in, if any (`turnBoundary.ts`).
+  return timeRepositoryLeaseWait(new Promise<RepositoryLeaseHandle>((resolve, reject) => {
     const waiter: Waiter = { identity, opts, resolve, reject }
     if (opts.signal) {
       waiter.abort = () => {
@@ -554,5 +556,5 @@ export function acquireRepositoryLease(identity: RepositoryIdentity, opts: Acqui
       opts.signal.addEventListener('abort', waiter.abort, { once: true })
     }
     const queue = queues.get(identity.key) ?? []; queue.push(waiter); queues.set(identity.key, queue); void pump(identity.key)
-  })
+  }))
 }

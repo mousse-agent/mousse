@@ -10,6 +10,7 @@ import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
 import { worktreeTreeAsync } from '../src/mms/actions/snapshots'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { UndoService } from '../src/mms/actions/UndoService'
+import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { CRASH_CHILD_REQUIRE, actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { pressed } from './support/userRequest'
 
@@ -83,3 +84,28 @@ it('recovers an interrupted nested snapshot before its parent and keeps whole-pa
   expect(git(f.repo, 'status', '--porcelain')).toBe('')
   expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(appliedHead)
 }, 30_000)
+
+it.each(['before', 'after'])('a checkpoint in a thread worktree that stops %s its journal write recovers, with the pin, the record and Undo agreeing', async (phase) => {
+  // The receipt's refs and the worktree's pin of its newest snapshot go in one `update-ref --stdin`; the worktree's own
+  // record (`workspace.json`) is written only after the journal. A stop between the two must still recover.
+  writeFileSync(join(f.thread, 'meta.json'), JSON.stringify({ id: 'task' }))
+  const workspace = await new ThreadWorkspaceManager(f.thread).provision('task', 'main', f.repo)
+  const configPath = join(f.root, 'crash.json')
+  writeFileSync(configPath, JSON.stringify({ kind: 'checkpoint', phase, thread: f.thread, repo: workspace.worktreePath, options: actionOptions(workspace.worktreePath) }))
+  const runner = join(f.root, 'operation-crash.mjs')
+  await build({ entryPoints: ['tests/fixtures/git-foundation-operation-crash.ts'], outfile: runner, bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', banner: { js: CRASH_CHILD_REQUIRE } })
+  const child = spawnSync(process.execPath, [runner, configPath], { env: { ...process.env, MOUSSE_HOME: f.home }, windowsHide: true, encoding: 'utf8', timeout: 60_000 })
+  expect(child.status, child.stderr).toBe(86)
+  await new ThreadActionService(f.thread).recoverPending(workspace.worktreePath)
+  const latest = new ThreadActionService(f.thread).latest('main')!
+  expect(new ChangeReceiptService(f.thread).list().filter((receipt) => receipt.kind === 'checkpoint')).toHaveLength(1)
+  expect([...new ThreadJournal(f.thread).latestByOperation().values()].filter((entry) => ['prepared', 'git_applied', 'running', 'recovery_required'].includes(entry.state))).toEqual([])
+  const record = new ThreadWorkspaceManager(f.thread).load()!
+  expect(record.snapshotSha).toBe(latest.endSha)
+  expect(git(workspace.worktreePath, 'rev-parse', record.retainedRef)).toBe(latest.endSha)
+  const receipt = new ChangeReceiptService(f.thread).list().find((item) => item.operationId === latest.id)!
+  expect(receipt.retainedRefs.map((ref) => git(workspace.worktreePath, 'rev-parse', ref))).toEqual([receipt.beforeSha, receipt.afterSha])
+  expect(f.read(workspace.worktreePath)).toBe('checkpoint result\n')
+  await pressed('Undo', () => new UndoService(f.thread).undoLatest('main', workspace.worktreePath))
+  expect(f.read(workspace.worktreePath)).toBe('base\n')
+}, 120_000)

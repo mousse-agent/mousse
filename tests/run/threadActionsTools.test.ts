@@ -184,6 +184,8 @@ describe('tools that act on other threads (SPEC §15.1)', () => {
       threads.set('target', thread('target', { settledAt: NOW }))
       const archived = await denied(call('thread_send', { threadId: 'target', content: 'x' }))
       expect(archived).toMatchObject({ code: 'mousse_conflict', details: { conflict: 'thread_archived', threadId: 'target' } })
+      // The agent is told how to bring it back when the user wants that.
+      expect(archived!.message).toContain('thread_archive (threadId, archived: false)')
       const steer = await denied(call('thread_steer', { threadId: 'target', runId: 'any', text: 'x' }))
       expect(steer!.details).toMatchObject({ conflict: 'thread_archived' })
       // A Stop removes work: an archived thread that still has a live or paused run may be stopped.

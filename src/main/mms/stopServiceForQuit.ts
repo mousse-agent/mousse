@@ -6,7 +6,8 @@ import type { GuiMmsController } from './GuiMmsController'
  * Quit that also stops the background service (the tray's Quit). Holds the window client
  * first, so nothing starts the service again, then sends the stop and disconnects. Waits
  * neither for the service to stop nor for one still starting to become ready: the service
- * stops itself once it reads the request.
+ * stops itself once it reads the request, and its process ends within `DAEMON_EXIT_DEADLINE_MS`
+ * whatever its work is doing. A window opened meanwhile waits for it to go.
  */
 export async function stopServiceForQuit(
   controller: Pick<GuiMmsController, 'spawnedServiceToken' | 'stopForQuit'> | null,

@@ -106,6 +106,13 @@ describe('commandContextFromDom app state', () => {
     expect(commandContextFromDom(null, state({ turnStates: waiting(null) }), noOverlay).runActive).toBe(false)
   })
 
+  it('counts a thread waiting on its background work (monitors, commands, the provider) as a run Stop can end', () => {
+    const idle = { 'thread-1': { threadId: 'thread-1', phase: 'idle' } as CommandStateSlice['turnStates'][string] }
+    const work = { threadId: 'thread-1', items: [], providerWork: true }
+    expect(commandContextFromDom(null, state({ turnStates: idle, backgroundWorkByThread: { 'thread-1': work } }), noOverlay).runActive).toBe(true)
+    expect(commandContextFromDom(null, state({ turnStates: idle, backgroundWorkByThread: { other: work } }), noOverlay).runActive).toBe(false)
+  })
+
   it('counts a thread waiting for its subagents as a run Stop can end', () => {
     const idle = { 'thread-1': { threadId: 'thread-1', phase: 'idle' } as CommandStateSlice['turnStates'][string] }
     const child = (state: string) => ({ 'thread-1': [{ childThreadId: 'child-1', state } as CommandStateSlice['subagentsByParent'][string][number]] })

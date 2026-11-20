@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
 import { mousseGitEnv } from './gitEnv'
+import { timeGitChild } from '../diagnostics/turnBoundary'
+import { gitEnvFor, gitFile } from './gitExecutable'
 
 /** After a stopped process is asked to end, how long it has before its whole process group is killed. */
 const KILL_GRACE_MS = 2_000
@@ -159,14 +161,14 @@ export function runGit(cwd: string, args: readonly string[], options: GitRunOpti
       return
     }
     options.beforeStart?.()
-    const child = spawn('git', args, {
+    const child = timeGitChild(() => spawn(gitFile(), args, {
       cwd,
-      env: mousseGitEnv({ ...process.env, ...englishMessagesEnv(), ...options.env }),
+      env: gitEnvFor(mousseGitEnv({ ...process.env, ...englishMessagesEnv(), ...options.env })),
       stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       windowsHide: true,
       // Leads its own process group on POSIX, so a stop reaches hooks and helpers too.
       detached: process.platform !== 'win32'
-    })
+    }))
     if (child.stdin) {
       // A process that exits before reading all of its input closes the pipe; its exit status is the answer.
       child.stdin.on('error', () => undefined)

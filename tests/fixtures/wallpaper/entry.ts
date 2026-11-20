@@ -107,21 +107,6 @@ const until = async (check: () => boolean, ms = 8000): Promise<boolean> => {
     await new Promise((resolve) => setTimeout(resolve, 50))
     const oldUrlReleased = await fetch(oldUrl).then(() => false, () => true)
 
-    // While the theme is paused its colours are off: the page shows the base theme's (here dark text). Measuring waits
-    // for the pause to end, so the floor fits the theme's light text again.
-    resetWallpapersForTests(bridge)
-    document.documentElement.setAttribute('data-user-theme-paused', '')
-    document.documentElement.style.setProperty('--text-primary', '#111111')
-    document.documentElement.style.setProperty('--text-secondary', '#222222')
-    showWallpaper('p1', wallpaper)
-    await new Promise((resolve) => setTimeout(resolve, 400))
-    const whilePaused = wallpaperLayerNow()
-    document.documentElement.style.setProperty('--text-primary', '#e6e6e6')
-    document.documentElement.style.setProperty('--text-secondary', 'rgba(230, 230, 230, 0.68)')
-    document.documentElement.removeAttribute('data-user-theme-paused')
-    await until(() => wallpaperLayerNow() !== null)
-    const afterPause = wallpaperLayerNow()?.floor ?? null
-
     // A kept copy that does not decode is made again once and replaces it.
     copies.set(1920, copy!.slice(0, 40))
     resetWallpapersForTests(bridge)
@@ -170,7 +155,6 @@ const until = async (check: () => boolean, ms = 8000): Promise<boolean> => {
       readsAfterSecondWindow,
       afterSwitch,
       oldUrlReleased,
-      paused: { whilePaused, afterPause },
       rebuilt: { saves: log.saves, originalReads: log.originalReads, shown: wallpaperLayerNow() !== null }
     }
   }

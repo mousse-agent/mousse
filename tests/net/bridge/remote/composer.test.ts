@@ -156,6 +156,8 @@ describe('remote composer methods', () => {
     }
     ok('attachments.stage', chunk)
     bad('attachments.stage', { ...chunk, mimeType: 'text/html' })
+    // A type the service's validators refuse (no provider takes it inline) is refused before it is staged.
+    bad('attachments.stage', { ...chunk, mimeType: 'image/bmp' })
     bad('attachments.stage', { ...chunk, index: 1 })
     bad('attachments.stage', { ...chunk, data: 'not base64!' })
     bad('attachments.stage', { ...chunk, data: 'A'.repeat(48 * 1024 + 4) })

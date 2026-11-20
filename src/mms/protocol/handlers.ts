@@ -104,7 +104,7 @@ import {
   isObject
 } from './validators'
 import { FIRST_SEND_BINDING_CAPABILITY, PROTOCOL_CAPABILITIES, PROTOCOL_METHODS, MMS_PROTOCOL_VERSION } from './types'
-import { imageAt, messagesAfter, messagesBefore, newestPage, withoutImageBytes } from './transcriptPaging'
+import { imageAt, messagesAfter, messagesBefore, newestPage, withNewestImages, withoutImageBytes, withImageBudget } from './transcriptPaging'
 import { isOpenActivityRow } from '../run/restartNote'
 import { ROUTED_AGENT_READ, ROUTED_MESSAGES_PAGE_BYTES, ROUTED_RUN_WAIT_MAX_MS, ROUTED_SEND_WINDOW_KEY, ROUTED_SNAPSHOT_MESSAGE_BYTES } from '../../shared/bridge/routed'
 import { waitOnRun } from '../run/runWait'
@@ -184,6 +184,12 @@ import { isGitRepository, listChangedFiles, readFileVersions, worktreeRange } fr
 import { locateTurnFile, threadWroteFile, turnFilePath } from '../git/turnFile'
 import { writtenFilePaths } from '../../shared/turnFiles'
 import { resolveReviewScope } from '../actions/reviewRange'
+
+/** A send's answer as a window is sent it: a queued message's images within the queue's preview budget. */
+function queueItemForClient<T>(sent: T): T {
+  const item = (sent as { queueItem?: { images?: Array<{ name: string; mimeType: string; data?: string }> } } | null)?.queueItem
+  return item?.images?.length ? { ...sent, queueItem: withImageBudget([item])[0] } : sent
+}
 
 /** The writer holds of open terminals, one per thread and caller (`pty.create`). */
 const threadTerminalWriters = new ThreadTerminalWriters()
@@ -1721,6 +1727,8 @@ function mergeSearchResults(local: ThreadSearchResult[], remote: ThreadSearchRes
 
 /** Transcripts a routed search reads: the newest threads, as the agent tool's search does. */
 const ROUTED_SEARCH_MESSAGE_THREADS = 100
+/** Results a `perThread` search may ask for: about one per thread, so a large profile's every match fits. */
+const SEARCH_PER_THREAD_MAX_LIMIT = 5000
 
 function lifecycleExpectedGeneration(params: Record<string, unknown>): number | undefined {
   const value = params.expectedGeneration
@@ -2377,9 +2385,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'threads.search': {
       const p = isObject(params) ? params : {}
       const query = asString(p.query, 'query', 512)
+      // `perThread`: which threads match (the sidebar's filter), one message hit each, from this computer only; it may
+      // ask for every thread of the profile.
+      const perThread = p.perThread === true
       const limit =
         typeof p.limit === 'number' && Number.isFinite(p.limit) && p.limit > 0
-          ? Math.min(Math.floor(p.limit), 200)
+          ? Math.min(Math.floor(p.limit), perThread ? SEARCH_PER_THREAD_MAX_LIMIT : 200)
           : 50
       // Search hides subagents for every client, the desktop app included: a subagent is reached
       // through its parent's Lineage, not as a result of its own.
@@ -2391,11 +2402,12 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         hideSubagents: true,
         includeSettled: true,
         allow: (thread: Thread) => !thread.botOwned && !hidden?.has(thread.id),
-        ...(ctx.connection?.clientType === 'bridge' ? { maxMessageThreads: ROUTED_SEARCH_MESSAGE_THREADS } : {})
+        ...(ctx.connection?.clientType === 'bridge' ? { maxMessageThreads: ROUTED_SEARCH_MESSAGE_THREADS } : {}),
+        ...(perThread ? { perThread } : {})
       })
       // A window also searches the user's other computers (each with a short deadline) and is told which it could not.
       const remote =
-        ctx.connection?.clientType === 'gui' && ctx.mms.remoteLists
+        ctx.connection?.clientType === 'gui' && ctx.mms.remoteLists && !perThread
           ? await ctx.mms.remoteLists.search(ctx.connection.id, query, limit)
           : undefined
       if (!remote) return { results }
@@ -2447,10 +2459,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const items = ctx.mms.threads.loadMessageQueue(threadId)
         return {
           ...common,
-          messages: page?.messages ?? [],
+          messages: withNewestImages(page?.messages ?? []),
           ...(page?.earlier ? { earlier: page.earlier } : {}),
-          queue: withTranscript ? listPendingQueue(items).filter((item) => !item.internal) : [],
-          claimed: listClaimedQueue(items).filter((item) => !item.internal),
+          queue: withTranscript ? withImageBudget(listPendingQueue(items).filter((item) => !item.internal)) : [],
+          claimed: withImageBudget(listClaimedQueue(items).filter((item) => !item.internal)),
           connectionFailed: rt.connectionFailed,
           ...(page ? { seq: page.seq, epoch: page.epoch } : {})
         }
@@ -2463,10 +2475,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const position = ctx.mms.threads.threadDbPosition(threadId)
       return {
         ...common,
-        messages: shown.messages,
+        messages: withNewestImages(shown.messages),
         ...(shown.earlier ? { earlier: shown.earlier } : {}),
-        queue: withTranscript ? ctx.mms.orchestrator.listQueue(threadId) : [],
-        claimed: listClaimedQueue(session.queue).filter((item) => !item.internal),
+        queue: withTranscript ? withImageBudget(ctx.mms.orchestrator.listQueue(threadId)) : [],
+        claimed: withImageBudget(listClaimedQueue(session.queue).filter((item) => !item.internal)),
         connectionFailed: session.failedConnectionRequest !== null || rt.connectionFailed,
         ...(position ?? {})
       }
@@ -2723,7 +2735,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // Before the send: a send may answer only once its turn has run, and the thread shows in the sidebar from the click.
       showWrittenThread(ctx, threadId)
       const ownerProof = source === 'gui' ? ownerProofOf(ctx) : undefined
-      return await ctx.mms.orchestrator.send(input, false, {
+      return queueItemForClient(await ctx.mms.orchestrator.send(input, false, {
         threadId,
         source,
         ...(ownerProof ? { ownerProof } : {}),
@@ -2739,7 +2751,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ...(sentFrom ? { sentFrom } : {}),
         ...(refuseWhilePaused ? { refuseWhilePaused } : {}),
         ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})
-      })
+      }))
     }
     case 'orchestrator.abort': {
       const p = isObject(params) ? params : {}
@@ -2761,6 +2773,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const text = asString(p.text, 'text')
       const runId = asOptionalString(p.runId, 256)
+      // A person's steer, from a window or the CLI, brings an archived thread back first.
+      if (isPerson(ctx.connection) || ctx.connection?.clientType === 'cli') await ctx.mms.orchestrator.unarchiveForPerson(threadId)
       if (runId) {
         const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
         const response = runCommandResponse(await ctx.mms.orchestrator.steerRun(runId, text, clientRequestId, threadId, undefined, undefined, deviceLimit(ctx), sentFromOf(ctx)), runId)
@@ -2794,6 +2808,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!Array.isArray(p.itemIds) || p.itemIds.length > 100) throw new DomainRpcError('invalid_params', 'itemIds must be a list of at most 100 ids')
       const itemIds = p.itemIds.map((id, index) => asString(id, `itemIds[${index}]`, 256))
       const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
+      await ctx.mms.orchestrator.unarchiveForPerson(threadId)
       const result = await ctx.mms.orchestrator.steerNow({ threadId, runId, holdGeneration, itemIds, clientRequestId })
       return { ...runCommandResponse(result, runId), clientRequestId }
     }
@@ -2977,8 +2992,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // the revision is checked against. `open` is false while a merge-back keeps the queue from taking messages.
       const snapshot = ctx.mms.orchestrator.queueSnapshot(threadId)
       return {
-        items: snapshot.items,
-        claimed: snapshot.claimed,
+        items: withImageBudget(snapshot.items),
+        claimed: withImageBudget(snapshot.claimed),
         revision: snapshot.revision,
         open: snapshot.open,
         ...(snapshot.blockedReason ? { blockedReason: snapshot.blockedReason } : {})
@@ -3000,7 +3015,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         { source, ...(limit ? { permissionMode: limit } : {}), ...(sentFromOf(ctx) ? { sentFrom: sentFromOf(ctx) } : {}) }
       )
       noteSentFrom(ctx, threadId)
-      return { item, items: ctx.mms.orchestrator.listQueue(threadId) }
+      return { item: withImageBudget([item])[0], items: withImageBudget(ctx.mms.orchestrator.listQueue(threadId)) }
     }
     case 'queue.edit': {
       const p = isObject(params) ? params : {}
@@ -3016,7 +3031,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const sentFrom = sentFromOf(ctx)
       const item = queueRpc(() => ctx.mms.orchestrator.editQueuedItem(threadId, itemId, { content, mode }, { expectedRevision, ...(limit ? { permissionMode: limit } : {}), ...(sentFrom ? { sentFrom } : {}) }))
       noteSentFrom(ctx, threadId)
-      return { item, items: ctx.mms.orchestrator.listQueue(threadId) }
+      return { item: withImageBudget([item])[0], items: withImageBudget(ctx.mms.orchestrator.listQueue(threadId)) }
     }
     case 'queue.reorder': {
       const p = isObject(params) ? params : {}
@@ -3027,7 +3042,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       })
       const expectedRevision = asOptionalString(p.expectedRevision, 64)
       const items = queueRpc(() => ctx.mms.orchestrator.reorderQueue(threadId, orderedIds, { expectedRevision }))
-      return { items }
+      return { items: withImageBudget(items) }
     }
     case 'queue.remove': {
       const p = isObject(params) ? params : {}
@@ -3044,7 +3059,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         }
         throw new DomainRpcError('queue_item_not_found', 'Queued message was not found or is no longer removable.')
       }
-      return { outcome: 'removed', removed }
+      return { outcome: 'removed', removed: withImageBudget([removed])[0] }
     }
     case 'queue.promoteToSteer': {
       const p = isObject(params) ? params : {}
@@ -3057,7 +3072,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A thread released from memory is read off the event loop before the Steer reaches it.
       if (!ctx.mms.orchestrator.hasSession(threadId) && ctx.mms.threads.getThread(threadId)) await ctx.mms.orchestrator.ensureSessionLoaded(threadId).catch(() => undefined)
       const sent = queueRpc(() => ctx.mms.orchestrator.promoteQueueItem(threadId, itemId, { expectedRevision, expectedRunId, ...(limit ? { permissionCeiling: limit } : {}) }))
-      return { ok: sent.ok, ...(sent.notice ? { notice: sent.notice } : {}), items: ctx.mms.orchestrator.listQueue(threadId) }
+      return { ok: sent.ok, ...(sent.notice ? { notice: sent.notice } : {}), items: withImageBudget(ctx.mms.orchestrator.listQueue(threadId)) }
     }
     case 'orchestrator.contextUsage': {
       const p = isObject(params) ? params : {}
@@ -3148,6 +3163,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       rejectUnknownKeys(p, ['threadId'])
       const threadId = asString(p.threadId, 'threadId', 256)
       return { threadId, ...(await ctx.mms.orchestrator.stopSubagents(threadId)) }
+    }
+    case 'threads.backgroundWork': {
+      // What the thread runs in the background besides its subagents (the composer's status row).
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      return ctx.mms.orchestrator.backgroundWork(threadId)
+    }
+    case 'threads.stopBackground': {
+      // The status row's Stop of one item: a monitor, a background command, a hold, or the provider's own work.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'id'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const id = asString(p.id, 'id', 256)
+      return { ok: await ctx.mms.orchestrator.stopBackground(threadId, id) }
     }
     case 'subagents.list': {
       const p = isObject(params) ? params : {}
