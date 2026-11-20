@@ -437,15 +437,18 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     setSentNow({})
     setNext(new Set())
   }, [threadId])
+  // Marked messages the daemon's list has shown: one sent from the composer may be marked before the list has it.
+  const listedNext = useRef(new Set<string>())
   useEffect(() => {
-    if (!next.size) return
+    if (!next.size) { listedNext.current.clear(); return }
     const gone: string[] = []
     const joined: QueuedMessage[] = []
     for (const id of next) {
       const item = items.find((entry) => entry.id === id)
+      if (item) listedNext.current.add(id)
       // Gone: it started as a turn of its own (its prompt shows), joined a turn whose copy already shows, or was removed.
-      if (!item || item.id === lastPromptQueueItemId) gone.push(id)
-      else if (item.state === 'steering') joined.push(item)
+      if (id === lastPromptQueueItemId || (!item && listedNext.current.has(id))) gone.push(id)
+      else if (item?.state === 'steering') joined.push(item)
     }
     if (!gone.length && !joined.length) return
     // The running turn took it: it shows in that turn's reply, after its prompt, until its copy there arrives.

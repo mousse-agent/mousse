@@ -25,6 +25,7 @@ let root: Root
 let host: HTMLElement
 let listeners: Record<string, Array<(payload?: unknown) => void>>
 let promoteToSteer: ReturnType<typeof vi.fn>
+let orchestrator: Record<string, unknown>
 
 /** `window.mousse` for the chat: `queue.promoteToSteer` answers, `on…` subscriptions are captured; any other call stays pending. */
 function stubBridge(): void {
@@ -46,6 +47,7 @@ function stubBridge(): void {
     })
   const sections: Record<string, unknown> = {
     queue: section('queue', { promoteToSteer }),
+    orchestrator: section('orchestrator', orchestrator),
     skills: section('skills', { list: () => Promise.resolve({ skills: [] }) })
   }
   ;(window as unknown as { mousse: unknown }).mousse = new Proxy(sections, {
@@ -91,6 +93,7 @@ beforeEach(async () => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   listeners = {}
   promoteToSteer = vi.fn(async () => ({ ok: true }))
+  orchestrator = {}
   const useAppStore = await store()
   // The previous turn has finished; a new turn of the thread (a subagent's result woke it) is being set up, so the
   // thread has no running turn yet.
@@ -206,6 +209,32 @@ describe('a queued message sent now while the next turn is still being set up', 
     expect(queueRows().map((item) => item.dataset.queuedId)).toEqual(['q-1'])
     expect(row('q-1')!.textContent).not.toContain('Sends next')
     expect(shown()).toEqual(['Fix the bug', 'Fixed it.'])
+  })
+
+  it('from the composer (Ctrl+Enter) while the turn shows as set up: queued, marked as sending next, never in the finished reply', async () => {
+    const useAppStore = await store()
+    await act(async () => { useAppStore.setState({ turnStates: { 'thread-a': { phase: 'queued', turnId: 'run-4' } } as never }) })
+    await settle()
+    // The turn takes no steer yet: the message is queued and sent now by its id.
+    orchestrator.isTurnActive = vi.fn(async () => true)
+    orchestrator.steer = vi.fn(async () => false)
+    const queueItem = queued('q-7', 'use the id')
+    orchestrator.sendToThread = vi.fn(async () => ({ message: '', actions: [], queued: true, queueItem }))
+    const input = host.querySelector<HTMLTextAreaElement>('.composer-input')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, 'use the id')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true })) })
+    await settle()
+    await listQueue([queueItem])
+    await settle()
+
+    expect(orchestrator.steer).toHaveBeenCalledWith('use the id', 'thread-a')
+    expect(promoteToSteer).toHaveBeenCalledWith('thread-a', 'q-7')
+    expect(shown()).toEqual(['Fix the bug', 'Fixed it.'])
+    expect(queueRows().map((item) => item.dataset.queuedId)).toEqual(['q-7'])
+    expect(row('q-7')!.textContent).toContain('Sends next')
   })
 
   it('goes into a running reply from the click, as before', async () => {
