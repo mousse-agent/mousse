@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto'
 import { NetError } from '../../shared/net/errors'
 import type { NodeId } from '../../shared/net'
-import type {
-  NetEngineApproval,
-  NetEngineLinkInvite,
-  NetEngineLinkJoin
+import {
+  isSshParked,
+  type NetEngineApproval,
+  type NetEngineLinkInvite,
+  type NetEngineLinkJoin,
+  type NetEngineSshParked
 } from '../../shared/netEngine/local'
 import type { EngineCaller } from '../net/contracts'
 import { helperCode } from './helper/appChannel'
@@ -58,6 +60,8 @@ export interface PairingPort {
   sshRequest?(receipt: string): 'open' | 'done' | 'removed' | undefined
   /** A removal finished (its grants gone, its peer forgotten): the SSH requests of that peer read `removed`. */
   removed?(row: EnginePeerRow): Promise<void>
+  /** Runs a removal's steps under the lock its SSH prepares take for `endpoint` (§3.6); unset runs them as they are. */
+  exclusive?<T>(endpoint: string, work: () => Promise<T>): Promise<T>
 }
 
 /** How Connect joins: the arrival the ticket came by and, for a Send link, what the owner approved and shares. */
@@ -78,7 +82,8 @@ const LINK_ENDED = new Set([
   'not_supported',
   'declined',
   'pairing_declined',
-  'no_route'
+  'no_route',
+  'forgotten'
 ])
 
 const LINK_NOT_USED = "This link didn't work. Ask for a new one."
@@ -92,7 +97,8 @@ const LINK_TEXT: Record<string, string> = {
   pairing_failed:
     "That code didn't work. If you typed it exactly, the link may have been swapped; get a new one another way.",
   bad_ticket: LINK_DAMAGED,
-  not_supported: LINK_DAMAGED
+  not_supported: LINK_DAMAGED,
+  forgotten: 'Removed while joining.'
 }
 
 /** A row added over SSH runs its own steps (1b §3.6): 1a's ceremony, pairback and recovery skip it. */
@@ -121,6 +127,8 @@ export class EnginePairing {
   private readonly notAccepted = new Set<NodeId>()
   /** Pairings whose last dial failed on a certificate outside its validity window, until they connect again. */
   private readonly outsideWindow = new Set<NodeId>()
+  /** Pairings whose SSH login failed in a way only the owner can fix (§1.4): nothing dials them on its own. */
+  private readonly parked = new Map<NodeId, NetEngineSshParked>()
   /** The step a pairing is running, so one runs at a time per pairing. */
   private readonly running = new Map<NodeId, Promise<void>>()
   /** Removals under way, so one runs at a time per pairing and a second Remove joins it. */
@@ -171,6 +179,21 @@ export class EnginePairing {
   /** Its last dial failed on a certificate outside its window: either computer's clock may be wrong. */
   certificateWindow(node: NodeId): boolean {
     return this.outsideWindow.has(node)
+  }
+  /** Its SSH login failed in a way only the owner can fix, and nothing logs in again until the owner acts. */
+  sshParked(node: NodeId): NetEngineSshParked | undefined {
+    return this.parked.get(node)
+  }
+  /** A dial of it failed so (the helper's event, or Add over SSH's first dial): no step dials it on its own. */
+  park(node: NodeId, why: NetEngineSshParked): void {
+    this.parked.set(node, why)
+    this.port.changed()
+  }
+  /** The owner acted (Retry, an address, a key trusted): it may be dialled again. */
+  unpark(node?: NodeId): void {
+    if (node === undefined) this.parked.clear()
+    else this.parked.delete(node)
+    this.port.changed()
   }
 
   // ---------------------------------------------------------------- host: invitation and approval
@@ -270,11 +293,11 @@ export class EnginePairing {
       row = peers.update(row.localId, { approved, share })
     this.port.changed()
     this.at('consented')
-    const joined = await helper.request(
-      'join',
-      joinFields(helper, ticket, approved),
-      engineLimits().joinDeadlineMs
-    )
+    const joined = await helper
+      .request('join', joinFields(helper, ticket, approved), engineLimits().joinDeadlineMs)
+      .catch((error) => {
+        throw isForgotten(error) ? removedWhileJoining() : error
+      })
     return this.joined(row, facts, joined, share)
   }
 
@@ -291,8 +314,7 @@ export class EnginePairing {
     const { peers } = this.port
     // The row this join wrote or found was removed while the join ran: the removal stands.
     const now = row && peers.get(row.localId)
-    if (row && (!now || !isServingState(now.state)))
-      throw new NetError('cancelled', 'Removed while joining.')
+    if (row && (!now || !isServingState(now.state))) throw removedWhileJoining()
     // A row of an earlier pairing with this host (it removed this computer, then let it in again) replays its
     // grant and its pairback too: the host's new row waits for them.
     const saved =
@@ -430,6 +452,8 @@ export class EnginePairing {
         this.notAccepted.add(row.localId)
         throw error
       }
+      // The host was removed here while the join ran: the removal stands, and nothing dials it.
+      if (isForgotten(error)) throw removedWhileJoining()
       // The host may hold this computer's grant already: a dial it admits proves it.
       await this.helper().dial(row.endpoint)
       joined = { identity: row.endpoint, name: row.name }
@@ -747,6 +771,14 @@ export class EnginePairing {
       if (request === 'removed' && !engineControl('removal-skips-unsaved-grant'))
         await this.helper().request('grant.remove', { grant: grant.grant }).catch(() => undefined)
       if (request) continue
+      // Nor is one whose request this computer no longer keeps while its SSH row still waits: the row settles it.
+      if (
+        typeof grant.receipt === 'string' &&
+        this.port.peers
+          .all()
+          .some((row) => row.source === 'ssh' && row.ssh?.requestId === grant.receipt)
+      )
+        continue
       if (typeof grant.expires_at === 'number' && grant.expires_at <= now) continue
       this.owe(
         grant.identity,
@@ -839,6 +871,7 @@ export class EnginePairing {
   clientReady(node: NodeId): void {
     this.notAccepted.delete(node)
     this.outsideWindow.delete(node)
+    this.parked.delete(node)
     for (const wake of [...this.waiters]) wake()
     const row = this.port.peers.serving(node)
     if (
@@ -858,7 +891,7 @@ export class EnginePairing {
   async recover(): Promise<void> {
     const { peers } = this.port
     for (const row of peers.inState('removing'))
-      await this.finishRemoval(row).catch(() => undefined)
+      await this.finishRemovalLocked(row).catch(() => undefined)
     await this.reconcileGrants().catch(() => undefined)
     for (const row of peers.all()) {
       if (this.crashed || this.stopped) return
@@ -870,10 +903,11 @@ export class EnginePairing {
       )
         void this.advance(row.localId)
       if (
-        row.state === 'joined' ||
-        row.state === 'granted' ||
-        row.state === 'connected' ||
-        row.state === 'ssh_granted'
+        (row.state === 'joined' ||
+          row.state === 'granted' ||
+          row.state === 'connected' ||
+          row.state === 'ssh_granted') &&
+        !this.parked.has(row.localId)
       )
         void this.dial(row).catch(() => undefined)
     }
@@ -884,7 +918,8 @@ export class EnginePairing {
     if (this.retries.has(node) || this.stopped || this.crashed) return
     const timer = setTimeout(() => {
       this.retries.delete(node)
-      if (!this.stopped && !this.crashed) void this.advance(node)
+      // A parked SSH login waits for the owner's Retry: a step that would dial it again does not run.
+      if (!this.stopped && !this.crashed && !this.parked.has(node)) void this.advance(node)
     }, engineLimits().pairingRetryMs)
     timer.unref?.()
     this.retries.set(node, timer)
@@ -951,6 +986,11 @@ export class EnginePairing {
               ? this.port.peers.byEndpoint(event.identity)
               : undefined
           if (!row) return
+          // An SSH login only the owner can fix: the helper stops (`retry_ms` null), and so does this computer.
+          if (event.ev === 'dial.failed' && event.retry_ms === null && isSshParked(reason)) {
+            this.park(row.localId, reason)
+            return
+          }
           if (
             reason === 'peer_certificate' &&
             /validity|window/i.test(String(event.reason ?? ''))
@@ -992,6 +1032,7 @@ export class EnginePairing {
     const { peers } = this.port
     peers.advance(node, SERVING, { state: 'removing' })
     this.notAccepted.delete(node)
+    this.parked.delete(node)
     this.port.changed()
     if (!engineControl('teardown-on-event-only')) this.port.teardown(node)
     // A step that waits for a connection stops now; one waiting on the helper (`grant.add`, say) ends first, so
@@ -999,7 +1040,17 @@ export class EnginePairing {
     for (const wake of [...this.waiters]) wake()
     this.at('removing')
     await this.running.get(node)?.catch(() => undefined)
-    await this.finishRemoval(peers.get(node)!)
+    // A prepare of that computer running now ends first (it sees the row `removing` and records nothing more); its
+    // grant is then there to remove.
+    await this.finishRemovalLocked(peers.get(node)!)
+  }
+
+  /** Steps 2 and 3 under the lock the SSH prepares of that computer take (§3.6). */
+  private finishRemovalLocked(row: EnginePeerRow): Promise<void> {
+    const finish = () => this.finishRemoval(this.port.peers.get(row.localId) ?? row)
+    return this.port.exclusive && row.endpoint
+      ? this.port.exclusive(row.endpoint, finish)
+      : finish()
   }
 
   /** Steps 2 and 3 of a removal; a replay that finds the grant or the peer gone already carries on. */
@@ -1034,7 +1085,9 @@ export class EnginePairing {
       })
     }
     this.at('grant-removed')
-    if (row.endpoint) await helper.request('peer.forget', { identity: row.endpoint })
+    // An SSH add B never answered knows B only by its request (`ssh:<id>`): the helper holds no peer for it.
+    if (row.endpoint && !row.endpoint.startsWith('ssh:'))
+      await helper.request('peer.forget', { identity: row.endpoint })
     // A: the SSH route it kept for the other computer goes too (its config and pin).
     if (row.ssh?.routeId)
       await helper.request('ssh.forget', { route_id: row.ssh.routeId }).catch(() => undefined)
@@ -1114,6 +1167,14 @@ function linkError(reason: string): NetError {
     details: { reason: reason === 'already' ? 'link_not_used' : reason }
   })
 }
+
+/**
+ * The helper's join answer when this computer removed the host while the join ran (`peer.forget` won): it stored
+ * nothing, or what it stored went with the removal.
+ */
+const isForgotten = (error: unknown): boolean => helperCode(error) === 'forgotten'
+
+const removedWhileJoining = (): NetError => new NetError('cancelled', 'Removed while joining.')
 
 /** The other computer refuses this one (it removed it, or never let it in). */
 function isRefusal(error: unknown): boolean {

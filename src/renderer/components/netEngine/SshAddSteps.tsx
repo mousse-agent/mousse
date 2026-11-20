@@ -23,7 +23,7 @@ type Step =
   | { kind: 'target' }
   | { kind: 'key'; resolved: Resolved; probe: Probe }
   | { kind: 'profile'; resolved: Resolved; list: Profiles }
-  | { kind: 'connecting'; resolved: Resolved }
+  | { kind: 'connecting'; resolved: Resolved; list: Profiles }
 
 /** What `newLabel` holds when the owner picks "New profile". */
 const NEW = ''
@@ -71,8 +71,8 @@ export function SshAddSteps({ onDone }: { onDone: () => void }) {
     if (done) await profiles(resolved)
   }
 
-  const connect = async (resolved: Resolved) => {
-    setStep({ kind: 'connecting', resolved })
+  const connect = async (resolved: Resolved, list: Profiles) => {
+    setStep({ kind: 'connecting', resolved, list })
     const done = await call('netEngine.ssh.connect', {
       routeId: resolved.routeId,
       target: target.trim(),
@@ -80,8 +80,9 @@ export function SshAddSteps({ onDone }: { onDone: () => void }) {
       user: resolved.user,
       ...(choice ? { selector: choice } : { newLabel: label.trim() || 'Mousse' })
     })
+    // A failed Connect goes back to the same list with its error shown: no new sign-in on the other computer.
     if (done) onDone()
-    else void profiles(resolved)
+    else setStep({ kind: 'profile', resolved, list })
   }
 
   return (
@@ -171,7 +172,7 @@ export function SshAddSteps({ onDone }: { onDone: () => void }) {
               className="settings-btn primary"
               disabled={busy}
               title={`${step.list.computer} won’t use this computer unless you add it there too.`}
-              onClick={() => void connect(step.resolved)}
+              onClick={() => void connect(step.resolved, step.list)}
             >
               Connect
             </button>

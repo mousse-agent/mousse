@@ -6,7 +6,8 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { NetError } from '../../src/shared/net/errors'
 import { NetDatabase } from '../../src/mms/net/store/database'
 import type { EngineHelper } from '../../src/mms/netEngine/helper/connections'
 import { SshAdd, sshErrorText } from '../../src/mms/netEngine/ssh/add'
@@ -20,7 +21,10 @@ afterEach(() => {
 const B = 'bb'.repeat(32)
 const SELECTOR = 'abcdefghijklmnopqrstuvwxyz'
 
-function a(answers: { prepare: (request: Record<string, unknown>) => Record<string, unknown> }) {
+function a(answers: {
+  prepare: (request: Record<string, unknown>) => Record<string, unknown>
+  dial?: () => Promise<number>
+}) {
   const dir = mkdtempSync(join(tmpdir(), 'engine-ssh-'))
   const db = new NetDatabase({ profileDir: dir })
   cleanups.push(
@@ -31,10 +35,15 @@ function a(answers: { prepare: (request: Record<string, unknown>) => Record<stri
   const asked: Array<[string, any]> = []
   /** What the journal held when `prepare` went out. */
   const atPrepare: string[] = []
+  let dials = 0
+  const parked: string[] = []
   const helper = {
     speaks: () => true,
     claim: () => undefined,
-    dial: async () => 1,
+    dial: async () => {
+      dials += 1
+      return answers.dial ? answers.dial() : 1
+    },
     request: async (op: string, fields: any) => {
       asked.push([op, fields])
       if (op === 'ssh.run') {
@@ -55,9 +64,18 @@ function a(answers: { prepare: (request: Record<string, unknown>) => Record<stri
     name: () => 'A',
     limits: () => ({ deadlineMs: 5_000, maxAgeSecs: 86_400 }),
     changed: () => undefined,
-    now: () => now
+    now: () => now,
+    park: (_node, why) => void parked.push(why)
   })
-  return { ssh, peers, asked, atPrepare, later: (secs: number) => (now += secs) }
+  return {
+    ssh,
+    peers,
+    asked,
+    atPrepare,
+    parked,
+    dials: () => dials,
+    later: (secs: number) => (now += secs)
+  }
 }
 
 const reply = { identity: B, name: 'B', selector: SELECTOR, grant_id: '4', existing: false, already: false, starts_at_login: true }
@@ -118,6 +136,46 @@ describe('Add over SSH (A)', () => {
     await expect(u.ssh.connect(choice)).rejects.toBeTruthy()
     u.later(90_000)
     await expect(u.ssh.prepare(u.peers.all()[0]!)).rejects.toMatchObject({ details: { reason: 'expired' } })
+  })
+
+  it('records nothing over a removal made here while B answered', async () => {
+    let s!: ReturnType<typeof a>
+    s = a({
+      prepare: () => {
+        const row = s.peers.all()[0]!
+        s.peers.advance(row.localId, ['ssh_requested'], { state: 'removing' })
+        return reply
+      }
+    })
+    await expect(s.ssh.connect(choice)).rejects.toMatchObject({ details: { reason: 'removed_here' } })
+    expect(s.peers.all()[0]!.state).toBe('removing')
+    expect(s.dials()).toBe(0)
+  })
+
+  it('parks a first dial on an SSH login only the owner can fix, and tries other failures again', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    cleanups.push(() => vi.useRealTimers())
+    // Past `pairingRetryMs` (5 s by default) a few times over.
+    const wait = () => vi.advanceTimersByTimeAsync(20_000)
+    const refused = (why: string) => async () => {
+      throw new NetError('peer_offline', undefined, { details: { helper: 'unreachable', why } })
+    }
+    for (const why of ['auth_denied', 'host_key_changed', 'host_key_unknown']) {
+      const s = a({ prepare: () => reply, dial: refused(why) })
+      await s.ssh.connect(choice)
+      await wait()
+      expect(s.dials()).toBe(1)
+      expect(s.parked).toEqual([why])
+    }
+    const t = a({ prepare: () => reply, dial: refused('timeout') })
+    await t.ssh.connect(choice)
+    await wait()
+    expect(t.dials()).toBeGreaterThan(1)
+    expect(t.parked).toEqual([])
+    t.ssh.dispose()
+    const after = t.dials()
+    await wait()
+    expect(t.dials()).toBe(after)
   })
 
   it('lists only well-formed profile selectors', async () => {

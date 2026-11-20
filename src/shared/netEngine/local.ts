@@ -70,6 +70,16 @@ export interface NetEngineLinkJoin {
  */
 export const DEFAULT_SCAN_INTERVAL_MS = 200
 
+/**
+ * The SSH refusals that park a pairing (1b §1.4): the helper's `dial.failed` carries one in `why` with `retry_ms`
+ * null, and no login is tried again on its own (repeated denied logins trip fail2ban and `ufw limit`).
+ */
+export const NET_ENGINE_SSH_PARKED = ['auth_denied', 'host_key_changed', 'host_key_unknown'] as const
+export type NetEngineSshParked = (typeof NET_ENGINE_SSH_PARKED)[number]
+
+export const isSshParked = (why: unknown): why is NetEngineSshParked =>
+  (NET_ENGINE_SSH_PARKED as readonly unknown[]).includes(why)
+
 /** Where one paired computer is, as its row in Settings → Devices reads (design §5.2). */
 export type NetEngineDeviceState =
   /** Both directions work. */
@@ -106,6 +116,11 @@ export interface NetEngineDevice {
   unreachable?: 'in' | 'out'
   /** Its last connection attempt failed on a certificate outside its validity window (either clock may be wrong). */
   certificateWindow?: boolean
+  /**
+   * Its SSH login failed in a way only the owner can fix (§1.4): nothing logs in again until the owner checks it
+   * and presses Retry.
+   */
+  sshParked?: NetEngineSshParked
   /** Addresses added for it by hand (routes of any owner kind); none means it is found on the local network. */
   addresses?: string[]
   /** The class of the route its connection runs over now (`conn.up.route`), while one is up; `relay` through one. */

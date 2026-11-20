@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { newId, type NodeId, type StreamId } from '../../src/shared/net'
+import { NetError } from '../../src/shared/net/errors'
 import { NetDatabase } from '../../src/mms/net/store/database'
 import { EnginePairing } from '../../src/mms/netEngine/pairing'
 import { EngineSessions } from '../../src/mms/netEngine/sessions'
@@ -155,6 +156,23 @@ describe('client selection', () => {
   })
 })
 
+describe('serving', () => {
+  it('counts only a connection made with the grant asked for (an SSH row connects on its own grant)', async () => {
+    const callerOnOwner = newId('node') as NodeId
+    const sessions = new EngineSessions({
+      host: {} as never,
+      client: {} as never,
+      name: () => 'owner',
+      hooks: { onClientReady: () => undefined, onClientClosed: () => undefined }
+    })
+    const link = fakeLink({ ownerOnCaller: newId('node') as NodeId, callerOnOwner, grant: '1', endpoint: 'owner' })
+    await sessions.attach(link.inbound)
+    expect(sessions.serving(callerOnOwner)).toBe(true)
+    expect(sessions.serving(callerOnOwner, '1')).toBe(true)
+    expect(sessions.serving(callerOnOwner, '2')).toBe(false)
+  })
+})
+
 describe('removal rows', () => {
   function store() {
     const dir = mkdtempSync(join(tmpdir(), 'engine-store-'))
@@ -298,6 +316,122 @@ describe('removal racing the pairing', () => {
     expect(peers.all().filter((r) => r.state !== 'removed')).toEqual([])
     pairing.stop()
     await steps
+  })
+})
+
+describe('an SSH login only the owner can fix (1b §1.4)', () => {
+  it('parks the pairing on dial.failed with no retry, and only the owner unparks it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'engine-park-'))
+    const db = new NetDatabase({ profileDir: dir })
+    cleanups.push(
+      () => rmSync(dir, { recursive: true, force: true }),
+      () => db.close()
+    )
+    const peers = new EnginePeerStore(db)
+    const endpoint = 'cd'.repeat(32)
+    const row = peers.add({
+      endpoint,
+      fingerprint: 'sha256:x',
+      grant: '',
+      name: 'Host',
+      state: 'connected',
+      pairedAt: Date.now()
+    })
+    const dials: string[] = []
+    const pairing = new EnginePairing({
+      peers,
+      sessions: { online: () => false } as never,
+      helper: () => ({ info: {}, claim: () => undefined, dial: async (id: string) => void dials.push(id), request: async () => ({}) }) as never,
+      teardown: () => undefined,
+      changed: () => undefined
+    })
+    cleanups.push(() => pairing.stop())
+    const failed = (why: string, retry: number | null) =>
+      pairing.event({ ev: 'dial.failed', identity: endpoint, why, reason: 'text', retry_ms: retry })
+
+    // A failure the helper retries itself does not park.
+    failed('auth_denied', 1_000)
+    failed('timeout', null)
+    expect(pairing.sshParked(row.localId)).toBeUndefined()
+    for (const why of ['auth_denied', 'host_key_changed', 'host_key_unknown'] as const) {
+      failed(why, null)
+      expect(pairing.sshParked(row.localId)).toBe(why)
+    }
+    // Recovery dials every pairing but the parked one.
+    await pairing.recover()
+    expect(dials).toEqual([])
+    pairing.unpark(row.localId)
+    expect(pairing.sshParked(row.localId)).toBeUndefined()
+    await pairing.recover()
+    expect(dials).toEqual([endpoint])
+  })
+})
+
+describe('a host removed here while its join ran', () => {
+  it('stays removed: the join answers "Removed while joining." and nothing dials the host', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'engine-forgotten-'))
+    const db = new NetDatabase({ profileDir: dir })
+    cleanups.push(
+      () => rmSync(dir, { recursive: true, force: true }),
+      () => db.close()
+    )
+    const peers = new EnginePeerStore(db)
+    const host = Buffer.alloc(32, 7)
+    const route = Buffer.from('tcp://192.168.1.5:7000')
+    // A kind-1 ticket: host, invitation, one private route (CBOR, as the helper writes it).
+    const ticket = Buffer.concat([
+      Buffer.from([0xa4, 0x01, 0x01, 0x03, 0x58, host.byteLength]),
+      host,
+      Buffer.from([0x04, 0x50]),
+      Buffer.alloc(16, 9),
+      Buffer.from([0x07, 0x81, 0x60 | route.byteLength]),
+      route
+    ]).toString('base64url')
+    const dials: string[] = []
+    const forgotten = new NetError('internal', 'gone', { details: { helper: 'forgotten' } })
+    const pairing = new EnginePairing({
+      peers,
+      sessions: { online: () => false } as never,
+      helper: () =>
+        ({
+          info: {},
+          speaks: () => true,
+          claim: () => undefined,
+          dial: async (id: string) => void dials.push(id),
+          request: async (op: string) => {
+            if (op === 'join') throw forgotten
+            return {}
+          }
+        }) as never,
+      teardown: () => undefined,
+      changed: () => undefined
+    })
+    cleanups.push(() => pairing.stop())
+    await expect(pairing.join(ticket)).rejects.toMatchObject({ message: 'Removed while joining.' })
+    // A start repeats a consented join: the answer ends it with no dial in its place.
+    const row = peers.byEndpoint(host.toString('hex'))!
+    expect(row.state).toBe('consented')
+    pairing.stop()
+    const again = new EnginePairing({
+      peers,
+      sessions: { online: () => false } as never,
+      helper: () =>
+        ({
+          info: {},
+          speaks: () => true,
+          claim: () => undefined,
+          dial: async (id: string) => void dials.push(id),
+          request: async (op: string) => {
+            if (op === 'join') throw forgotten
+            return {}
+          }
+        }) as never,
+      teardown: () => undefined,
+      changed: () => undefined
+    })
+    cleanups.push(() => again.stop())
+    await again.advance(row.localId)
+    expect(dials).toEqual([])
   })
 })
 

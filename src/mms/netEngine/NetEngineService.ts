@@ -694,8 +694,15 @@ export class NetEngineService implements EngineDirectoryPort {
 
   // ---------------------------------------------------------------- Add over SSH (Phase 1b §3.4)
 
-  /** Set by the daemon: B's SSH request journal and this profile's selector. */
-  sshHost?: { requests: SshRequestStore; selector(): string }
+  /**
+   * Set by the daemon: B's SSH request journal, this profile's selector, and the lock of a remote computer that its
+   * prepares (on any profile) and its removals here share (§3.6).
+   */
+  sshHost?: {
+    requests: SshRequestStore
+    selector(): string
+    locked<T>(joiner: string, work: () => Promise<T>): Promise<T>
+  }
   private sshFlow?: SshAdd
 
   /** A's side of Add over SSH. */
@@ -710,7 +717,9 @@ export class NetEngineService implements EngineDirectoryPort {
         return { deadlineMs: limits.sshRequestDeadlineMs, maxAgeSecs: limits.sshRequestMaxAgeSecs }
       },
       changed: () => this.changed(),
-      now: () => Date.now() / 1000
+      now: () => Date.now() / 1000,
+      park: (node, why) => this.started?.pairing.park(node, why),
+      trusted: () => this.started?.pairing.unpark()
     })
     return this.sshFlow
   }
@@ -721,10 +730,12 @@ export class NetEngineService implements EngineDirectoryPort {
    */
   async sshConnect(choice: Parameters<SshAdd['connect']>[0]): Promise<EnginePeerRow> {
     const started = this.require()
+    // The list session 1 answered in this add: Connect signs in once more only for prepare (§3.4: four
+    // connections per add).
     const profile = choice.selector
-      ? (await this.sshAdd().profiles(choice.routeId, choice.host, choice.user)).profiles.find(
-          (item) => item.selector === choice.selector
-        )
+      ? this.sshAdd()
+          .listedProfiles(choice.routeId)
+          ?.profiles.find((item) => item.selector === choice.selector)
       : undefined
     const known = profile?.identity ? started.peers.serving(profile.identity as NodeId) : undefined
     const paired = profile?.identity ? started.peers.byEndpoint(profile.identity) : known
@@ -815,7 +826,8 @@ export class NetEngineService implements EngineDirectoryPort {
       rowGrant: (key) => {
         const row = started.peers.serving(key as NodeId)
         return row?.grant || undefined
-      }
+      },
+      rowState: (key) => started.peers.get(key as NodeId)?.state
     }
   }
 
@@ -867,9 +879,38 @@ export class NetEngineService implements EngineDirectoryPort {
       if (request?.grantId) {
         started.peers.update(row.localId, { grant: request.grantId })
         started.peers.advance(row.localId, ['ssh_granting'], { state: 'ssh_granted' })
-      } else if (!request || now - request.issuedAt > maxAge) started.peers.prune(row.localId)
+      } else if (!request || now - request.issuedAt > maxAge)
+        void this.expireSshRow(row).catch(() => undefined)
     }
     this.changed()
+  }
+
+  /**
+   * B: an `ssh_granting` row whose request is gone or past its age (§3.6), under the lock of that computer. A grant
+   * the request saved before recording it is found by identity and receipt and removed, the request reads
+   * `removed`, then the row goes: nothing is left for host recovery to take for an owed pairing.
+   */
+  private async expireSshRow(row: EnginePeerRow): Promise<void> {
+    const host = this.sshHost
+    const started = this.started
+    if (!host || !started || !row.endpoint) return
+    await host.locked(row.endpoint, async () => {
+      const helper = this.helper
+      const now =
+        this.started === started && !started.ending ? started.peers.get(row.localId) : undefined
+      if (!helper || now?.state !== 'ssh_granting') return
+      const requestId = now.ssh?.requestId
+      if (requestId) {
+        const listed = await helper.request('grants.list')
+        for (const grant of Array.isArray(listed.grants) ? listed.grants : [])
+          if (grant?.identity === now.endpoint && grant.receipt === requestId)
+            await helper.request('grant.remove', { grant: grant.grant })
+        if (host.requests.get(requestId)) host.requests.update(requestId, { state: 'removed' })
+      }
+      if (this.started !== started || started.ending) return
+      started.peers.prune(now.localId)
+      this.changed()
+    })
   }
 
   /** What a ticket would do before Connect (§1.3): its destinations by class, and what this computer may share. */
@@ -984,6 +1025,8 @@ export class NetEngineService implements EngineDirectoryPort {
    */
   private async setAddresses(row: EnginePeerRow, addresses: string[]): Promise<void> {
     const started = this.require()
+    // The owner changed how it is reached: a parked SSH login may be tried again.
+    started.pairing.unpark(row.localId)
     if (addresses.length > engineLimits().maxManualAddresses)
       throw new NetError('bad_request', 'Remove an address first.', {
         details: { reason: 'too_many' }
@@ -1019,6 +1062,8 @@ export class NetEngineService implements EngineDirectoryPort {
     const row = started.peers.get(node)
     if (!row || row.state === 'removed') throw new NetError('bad_request', 'Unknown device.')
     if (row.state === 'removing') return started.pairing.remove(node)
+    // The owner's Retry is what a parked SSH login waits for (§1.4).
+    started.pairing.unpark(node)
     if (started.pairing.linkUnfinished(node)) {
       await started.pairing.retryLink(node)
       return
@@ -1095,6 +1140,7 @@ export class NetEngineService implements EngineDirectoryPort {
           ...(stuck ? { stuck: true } : {}),
           ...(unreachable ? { unreachable } : {}),
           ...(started.pairing.certificateWindow(node) ? { certificateWindow: true } : {}),
+          ...(started.pairing.sshParked(node) ? { sshParked: started.pairing.sshParked(node) } : {}),
           ...(row.addresses?.length ? { addresses: row.addresses } : {}),
           ...(route ? { route } : {}),
           ...(via ? { via } : {}),
@@ -1263,7 +1309,8 @@ export class NetEngineService implements EngineDirectoryPort {
             row?.source === 'ssh' &&
             row.state === 'ssh_granted' &&
             !row.ssh?.routeId &&
-            sessions.serving(node)
+            !!row.grant &&
+            sessions.serving(node, row.grant)
           )
             peers.advance(node, ['ssh_granted'], { state: 'connected' })
           this.changed()
@@ -1312,6 +1359,9 @@ export class NetEngineService implements EngineDirectoryPort {
       changed: () => this.changed(),
       crashAt: (step) => !!this.pairingCrash?.(step),
       sshRequest: (receipt) => this.sshHost?.requests.get(receipt)?.state,
+      // A removal of a computer and its SSH prepares here take one lock: neither undoes the other (§3.6).
+      exclusive: (endpoint, work) =>
+        this.sshHost && endpoint ? this.sshHost.locked(endpoint, work) : work(),
       removed: async (row) => {
         const host = this.sshHost
         const helper = this.helper
@@ -1492,6 +1542,9 @@ export class NetEngineService implements EngineDirectoryPort {
   async stop(): Promise<void> {
     await this.starting?.catch(() => undefined)
     if (this.started) this.started.ending = true
+    // A's Add over SSH holds this run's store: the next start (after Start over, say) makes its own.
+    this.sshFlow?.dispose()
+    this.sshFlow = undefined
     const supervisor = this.supervisor
     this.supervisor = undefined
     await supervisor?.stop()
@@ -1730,7 +1783,13 @@ export class NetEngineService implements EngineDirectoryPort {
     const started = this.require()
     const row = started.peers.serving(connection.peer)
     const self = started.rt.identity.self()
-    if (!row || !self || connection.direction !== 'inbound' || row.grant !== connection.grant)
+    if (
+      !row ||
+      !self ||
+      connection.direction !== 'inbound' ||
+      !row.grant ||
+      row.grant !== connection.grant
+    )
       throw new NetError('forbidden')
     return {
       source: 'engine',
