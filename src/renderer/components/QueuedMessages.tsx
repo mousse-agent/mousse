@@ -31,6 +31,17 @@ export function skipCompactionLabel(historyTokens?: number): string {
 export const HELD_AFTER_STOP_TITLE = 'Sends after the reply to your next message, or send it now'
 /** A message sent now that no running turn could take yet: it goes in as soon as one can. */
 export const SENDS_NEXT_TITLE = 'Goes in as soon as the turn can take it'
+/** Why the queue waits while no reply runs (`QueuedMessage.waitsFor`, `waitsForLease`): the row's label and its title. */
+export const QUEUE_WAIT_LABELS = {
+  finish: { label: 'Waits for the last turn to finish', title: 'The reply is complete; the turn is still saving its checkpoint' },
+  setup: { label: 'Next turn is starting', title: 'The next turn is being set up' },
+  lease: { label: 'Waits for the thread to be free', title: 'Other work on this thread is running' }
+} as const
+
+/** What the queue waits for now, if anything beyond its turn. */
+export function queueWaitOf(items: readonly QueuedMessage[]): keyof typeof QUEUE_WAIT_LABELS | null {
+  return items.find((item) => item.waitsFor)?.waitsFor ?? (items.some((item) => item.waitsForLease) ? 'lease' : null)
+}
 
 const openQueueFolds = new Set<string>()
 
@@ -327,6 +338,9 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
 
   if (items.length === 0) return null
   const firstHeldId = shown.find((item) => !isOptimisticQueueItem(item) && item.state === 'pending')?.id
+  // No reply runs, yet the queue waits: the last turn is still finishing, the next one is being set up, or other work
+  // holds the thread. "Queued" alone would look stuck.
+  const wait = queueWaitOf(shown)
 
   const updateDragOrder = (next: string[] | null) => {
     dragOrderRef.current = next
@@ -432,6 +446,8 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
           ? <span className="queued-message-state" title={HELD_AFTER_STOP_TITLE}>Held after Stop</span>
           : hold
           ? <span className="queued-message-state is-held" title="Sends after compacting"><Loader2 size={12} className="animate-spin" aria-hidden="true" />Queued</span>
+          : wait
+          ? <span className="queued-message-state" title={QUEUE_WAIT_LABELS[wait].title}>{QUEUE_WAIT_LABELS[wait].label}</span>
           : <span className="queued-message-state" title="Sends when the current reply ends">Queued</span>
         return (
           <div

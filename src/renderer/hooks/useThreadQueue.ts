@@ -664,7 +664,8 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   // joined, not here, unless it is still marked as sending next (it moves there as the next render paints it); so does
   // one whose turn's prompt is in the transcript.
   const shown = useMemo(() => [
-    ...(startingShown ? [startingShown] : []),
+    // Taken for its turn, it waits for that turn's setup, whatever it waited for before.
+    ...(startingShown ? [startingShown.waitsFor === 'setup' ? startingShown : { ...startingShown, waitsFor: 'setup' as const }] : []),
     ...items,
     ...optimisticItems.filter((optimistic) => optimistic.threadId === threadId && !items.some((item) => sameQueuedSend(item, optimistic)))
   ].filter((item) => !item.internal && (item.state !== 'steering' || next.has(item.id)) && !sentNow[item.id] && !composerSteerItemIds.has(item.id) &&

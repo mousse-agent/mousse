@@ -138,6 +138,8 @@ export class ThreadSession {
    * then, so a repository another operation holds cannot keep a stopped thread busy. Cleared once the turn runs.
    */
   setupStop: AbortController | null = null
+  /** The wait the windows were last told the queue's pending messages have (`QueuedMessage.waitsFor`). */
+  queueWaitShown: import('../../shared/types').QueuedMessageWait | null = null
   activeToolCallMessageIds = new Map<string, string>()
   /** Provider tool call id → timeline message id for the turn's calls, finished ones too (parents of later children). */
   callToMessage = new Map<string, string>()
