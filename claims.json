@@ -2,6 +2,19 @@
   "version": 1,
   "claims": [
     {
+      "task": "acp-process-tree-stop",
+      "session": "Animatrix-e4839e",
+      "machine": "Animatrix",
+      "branch": "acp-process-tree-stop",
+      "paths": [
+        "src/mms/harness/acp/connection.ts",
+        "src/mms/harness/acp/presets/antigravity.ts",
+        "src/mms/harness/drivers/acp.ts"
+      ],
+      "claimedAt": "2026-11-20T06:56:37.148Z",
+      "expiresAt": "2026-11-20T08:56:37.148Z"
+    },
+    {
       "task": "antigravity-native-cli-runtime",
       "session": "Animatrix-28412c",
       "machine": "Animatrix",
