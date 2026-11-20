@@ -4131,6 +4131,130 @@ html[data-theme='high-contrast'] {
   height: 100%;
 }
 
+/* A page the tab couldn't open: the app's own page over the guest's blank error document. */
+.browser-load-error {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  overflow: auto;
+  padding: clamp(32px, 12%, 112px) 32px 32px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.browser-load-error-body {
+  width: 100%;
+  max-width: 520px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.browser-load-error-art {
+  width: 96px;
+  height: auto;
+  margin-bottom: 28px;
+  color: var(--text-secondary);
+}
+
+.browser-load-error-art-frame { opacity: 0.55; }
+.browser-load-error-art-plug { color: var(--accent); }
+.browser-load-error-art-spark { color: var(--accent); opacity: 0.6; }
+.browser-load-error-art-glow { fill: var(--accent); opacity: 0.1; }
+
+.browser-load-error-title {
+  margin: 0 0 10px;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--text-primary);
+}
+
+.browser-load-error-line {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.browser-load-error-line strong {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.browser-load-error-tips {
+  margin-top: 14px;
+}
+
+.browser-load-error-tips p { margin: 0; }
+
+.browser-load-error-tips ul {
+  margin: 4px 0 0;
+  padding-left: 20px;
+}
+
+.browser-load-error-tips li::marker { color: var(--accent); }
+
+.browser-load-error-code {
+  margin: 16px 0 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  opacity: 0.75;
+}
+
+.browser-load-error-details {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(var(--surface-strong-rgb), 0.45);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.browser-load-error-url {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text-primary);
+}
+
+.browser-load-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 28px;
+}
+
+.browser-load-error-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.browser-load-error-reload {
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.22);
+  background: rgba(var(--accent-rgb), 0.16);
+}
+
+.browser-load-error-reload:hover:not(:disabled) { background: rgba(var(--accent-rgb), 0.24); }
+.browser-load-error-reload:disabled { opacity: 0.7; cursor: default; }
+
+.browser-load-error-more {
+  border: 1px solid var(--border);
+  background: transparent;
+}
+
+.browser-load-error-more:hover { background: rgba(var(--surface-strong-rgb), 0.5); }
+
 .browser-webview {
   flex: 1;
   min-width: 0;
