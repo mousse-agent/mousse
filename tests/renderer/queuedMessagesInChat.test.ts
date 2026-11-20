@@ -499,12 +499,12 @@ describe('queued messages in the conversation', () => {
     expect(reply()).toEqual(['steer this'])
   })
 
-  it('shows a message sent now while its turn is being set up in the reply, and back in the queue if the turn never takes it', async () => {
+  it('shows a message sent now into the running reply back in the queue if the turn never takes it', async () => {
     vi.useFakeTimers()
     try {
       await show([queued('a', 'one'), queued('b', 'two')])
       await click(button('b', 'Send'))
-      // The turn is still being set up: the daemon lists B as waiting, first.
+      // The turn has not taken it: the daemon lists B as waiting, first.
       await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two'), queued('a', 'one')] }) })
       expect(rows().map((item) => item.dataset.queuedId)).toEqual(['a'])
       expect(reply()).toEqual(['two'])

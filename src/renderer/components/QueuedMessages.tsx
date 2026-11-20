@@ -29,6 +29,8 @@ export function skipCompactionLabel(historyTokens?: number): string {
 /** Threads whose long queue is shown in full. A thread is forgotten when its queue empties. */
 /** What sends a message a Stop held: the reply to the person's next message ends, or they send it now. */
 export const HELD_AFTER_STOP_TITLE = 'Sends after the reply to your next message, or send it now'
+/** A message sent now that no running turn could take yet: it goes in as soon as one can. */
+export const SENDS_NEXT_TITLE = 'Goes in as soon as the turn can take it'
 
 const openQueueFolds = new Set<string>()
 
@@ -416,12 +418,17 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
         // A pending steer item cannot be sent now: a subagent result that missed its turn runs as a turn of its own, and a
         // steer sent into another process's reply is that process's to take.
         const fixed = item.intent === 'steer'
+        // Sent now while no running turn could take it: it goes next, into the turn as soon as one can take it.
+        const goesNext = queue.sendingNext.has(item.id)
         const queuedAt = formatMessageTime(item.enqueuedAt)
         const sendLabel = fixed
           ? item.subagentNotice?.length || item.inboxIds?.length ? 'Runs as a turn of its own' : 'Sent into the running reply'
+          : goesNext ? SENDS_NEXT_TITLE
           : skipsCompaction ? skipCompactionLabel(hold?.historyTokens) : `Steer: send now (${steerKey})`
         // After a Stop nothing drains the queue: the next turn the person starts lifts the hold, and it sends after that.
-        const label = !last ? null : item.heldAfterStop
+        const label = goesNext
+          ? <span className="queued-message-state" title={SENDS_NEXT_TITLE}>Sends next</span>
+          : !last ? null : item.heldAfterStop
           ? <span className="queued-message-state" title={HELD_AFTER_STOP_TITLE}>Held after Stop</span>
           : hold
           ? <span className="queued-message-state is-held" title="Sends after compacting"><Loader2 size={12} className="animate-spin" aria-hidden="true" />Queued</span>
@@ -436,7 +443,7 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
             tabIndex={edit ? undefined : 0}
             aria-label={edit ? undefined : `Queued message. ${steerKey} sends it now.`}
             onKeyDown={(event) => {
-              if (edit || busy || fixed || !isSteerKey(event, platform)) return
+              if (edit || busy || fixed || goesNext || !isSteerKey(event, platform)) return
               event.preventDefault()
               event.stopPropagation()
               // The chord pressed again a moment after a steer lands on the next message (focus moved there): it sends
@@ -492,8 +499,8 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
                       type="button"
                       className="queued-message-btn queued-message-send"
                       title={sendLabel}
-                      aria-label={fixed || skipsCompaction ? sendLabel : 'Send the queued message now'}
-                      disabled={busy || fixed}
+                      aria-label={fixed || skipsCompaction || goesNext ? sendLabel : 'Send the queued message now'}
+                      disabled={busy || fixed || goesNext}
                       // A message sent now leaves the list at the click, so the next one moves under the pointer:
                       // the second click of a double click must not send that one too.
                       onClick={(event) => { if (event.detail <= 1) void queue.steer(item.id) }}
