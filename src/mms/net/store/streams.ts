@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 import type {
   AppendInput,
   AppendOutcome,
+  DropStep,
   ReplayPage,
   SnapshotReader,
   SnapshotStage,
@@ -84,6 +85,22 @@ function bounded(records: StoredRecord[]): void {
     records.reduce((n, r) => n + r.envelope.byteLength + r.sig.byteLength, 0) > STORE_TXN_MAX_BYTES
   )
     fail('too_large', 'Record batch exceeds transaction bounds.')
+}
+/** A drop step stays inside one transaction's bounds, with room for the tombstones and blob references it takes. */
+function checkStep(step: DropStep): void {
+  integer(step.rows, 1)
+  integer(step.bytes, 1)
+  if (step.rows > STORE_TXN_MAX_ROWS - 100 || step.bytes > STORE_TXN_MAX_BYTES)
+    fail('bad_request', 'Drop step exceeds its transaction.')
+}
+/** The first rows (by their `bytes`) until they reach `bytes`; at least one. */
+function upTo(rows: Row[], bytes: number): Row[] {
+  let total = 0
+  for (let index = 0; index < rows.length; index++) {
+    total += Number(rows[index]!.bytes)
+    if (total >= bytes) return rows.slice(0, index + 1)
+  }
+  return rows
 }
 
 export class SqliteStreamStore implements StreamStore {
@@ -271,7 +288,129 @@ export class SqliteStreamStore implements StreamStore {
     return { records, done: records.at(-1)!.seq === through }
   }
 
-  openSnapshot(stream: StreamId): SnapshotReader {
+  lastOfType(stream: StreamId, type: string, throughSeq?: number): StoredRecord | undefined {
+    const r = this.row(stream)
+    if (throughSeq !== undefined) integer(throughSeq)
+    // Read back from the head, so the cost is what lies after the record found.
+    const row = this.db.database
+      .prepare(
+        "SELECT * FROM net_records WHERE generation=? AND epoch=? AND seq<=? AND json_extract(CAST(envelope AS TEXT),'$.type')=? ORDER BY seq DESC LIMIT 1"
+      )
+      .get(r.active_generation, r.epoch, Math.min(throughSeq ?? r.head, r.head), type)
+    return row ? stored(row) : undefined
+  }
+
+  dropBefore(
+    stream: StreamId,
+    keep: { epoch: number; seq: number; id: EventId },
+    step: DropStep
+  ): number {
+    integer(keep.epoch, 1)
+    integer(keep.seq, 1)
+    checkStep(step)
+    return this.db.transaction(() => {
+      const r = this.row(stream)
+      if (r.kind !== 'node.thread') fail('forbidden', 'Only thread display copies drop records.')
+      // The state kept must still be the one held: a new generation or epoch is left alone.
+      if (r.epoch !== keep.epoch) return 0
+      const held = this.db.database
+        .prepare('SELECT id FROM net_records WHERE generation=? AND epoch=? AND seq=?')
+        .get(r.active_generation, keep.epoch, keep.seq)
+      if (!held || held.id !== keep.id) return 0
+      const rows = upTo(
+        this.db.database
+          .prepare(
+            'SELECT rowid,epoch,seq,length(envelope)+length(sig) AS bytes FROM net_records WHERE generation=? AND (epoch,seq)<(?,?) ORDER BY epoch,seq LIMIT ?'
+          )
+          .all(r.active_generation, keep.epoch, keep.seq, step.rows) as Row[],
+        step.bytes
+      )
+      this.db.charge(rows.length)
+      for (const row of rows)
+        this.db.database.prepare('DELETE FROM net_records WHERE rowid=?').run(row.rowid!)
+      // A copy takes records only from its authority, over its checked session, and checks each signature: an old
+      // id offered again at a new position could only come from the authority, which could sign the same anew.
+      // So no tombstone is kept for them, and earlier ones go too.
+      const ids = this.db.database
+        .prepare('SELECT rowid FROM net_event_ids WHERE stream=? AND (epoch,seq)<(?,?) LIMIT ?')
+        .all(stream, keep.epoch, keep.seq, 50) as Row[]
+      this.db.charge(ids.length)
+      for (const row of ids)
+        this.db.database.prepare('DELETE FROM net_event_ids WHERE rowid=?').run(row.rowid!)
+      this.removeDeadBlobRefs(stream, 40)
+      const last = rows.filter((row) => row.epoch === keep.epoch).at(-1)
+      if (last) {
+        this.db.charge(1)
+        this.db.database
+          .prepare('UPDATE net_streams SET retained=max(retained,?) WHERE id=?')
+          .run(last.seq, stream)
+      }
+      this.db.checkpoint('streams.dropBefore.beforeCommit')
+      return rows.length + ids.length
+    })
+  }
+
+  retireUnread(step: DropStep): number {
+    checkStep(step)
+    return this.db.transaction(() => {
+      // An archived generation of a thread display stream (a snapshot replaced it) and the records of earlier
+      // epochs in an active one (the thread restarted) are read by nothing: every read is of the active
+      // generation's current epoch.
+      const archived = this.db.database
+        .prepare(
+          "SELECT g.id,g.stream FROM net_generations g JOIN net_streams s ON s.id=g.stream WHERE s.kind='node.thread' AND g.state='archived' AND EXISTS(SELECT 1 FROM net_records r WHERE r.generation=g.id) LIMIT 1"
+        )
+        .get() as Row | undefined
+      let rows: Row[] = []
+      let stream: StreamId | undefined
+      if (archived) {
+        stream = archived.stream
+        rows = upTo(
+          this.db.database
+            .prepare(
+              'SELECT rowid,length(envelope)+length(sig) AS bytes FROM net_records WHERE generation=? LIMIT ?'
+            )
+            .all(archived.id, step.rows) as Row[],
+          step.bytes
+        )
+      } else
+        for (const s of this.db.database
+          .prepare("SELECT id,active_generation,epoch FROM net_streams WHERE kind='node.thread'")
+          .all() as Row[]) {
+          rows = upTo(
+            this.db.database
+              .prepare(
+                'SELECT rowid,length(envelope)+length(sig) AS bytes FROM net_records WHERE generation=? AND epoch<? LIMIT ?'
+              )
+              .all(s.active_generation, s.epoch, step.rows) as Row[],
+            step.bytes
+          )
+          if (rows.length) {
+            stream = s.id
+            break
+          }
+        }
+      this.db.charge(rows.length)
+      for (const row of rows)
+        this.db.database.prepare('DELETE FROM net_records WHERE rowid=?').run(row.rowid!)
+      if (stream) this.removeDeadBlobRefs(stream, 40)
+      const empty = this.db.database
+        .prepare(
+          "SELECT g.id FROM net_generations g JOIN net_streams s ON s.id=g.stream WHERE s.kind='node.thread' AND g.state='archived' AND NOT EXISTS(SELECT 1 FROM net_records r WHERE r.generation=g.id) LIMIT 20"
+        )
+        .all() as Row[]
+      this.db.charge(empty.length)
+      for (const row of empty)
+        this.db.database.prepare('DELETE FROM net_generations WHERE id=?').run(row.id!)
+      this.db.checkpoint('streams.retireUnread.beforeCommit')
+      return rows.length + empty.length
+    })
+  }
+
+  openSnapshot(
+    stream: StreamId,
+    options?: { from?: { epoch: number; seq: number; id: EventId } }
+  ): SnapshotReader {
     if (sourceReaders.size >= 32) fail('rate_limited', 'Too many open snapshot source readers.')
     // A read-only WAL transaction pins the generation and bytes even while a
     // writer appends, truncates or switches its active pointer.
@@ -284,11 +423,28 @@ export class SqliteStreamStore implements StreamStore {
         )
         .get(stream) as Row | undefined
       if (!r) fail('stream_unknown', 'Unknown stream.')
+      const from = options?.from
+      // Read from `from` only while the pinned generation still holds that very record there; otherwise from the start.
+      const start =
+        from &&
+        r.kind !== 'space.meta' &&
+        from.epoch === r.epoch &&
+        Number.isSafeInteger(from.seq) &&
+        from.seq >= 1 &&
+        from.seq <= r.head &&
+        (
+          connection
+            .prepare('SELECT id FROM net_records WHERE generation=? AND epoch=? AND seq=?')
+            .get(r.active_generation, from.epoch, from.seq) as Row | undefined
+        )?.id === from.id
+          ? { epoch: from.epoch, seq: from.seq - 1 }
+          : undefined
       const reader = this.reader(
         connection,
         r.active_generation,
         { epoch: r.epoch, seq: r.head },
         r.kind === 'space.meta',
+        start,
         () => {
           try {
             connection.exec('ROLLBACK')
@@ -777,10 +933,11 @@ export class SqliteStreamStore implements StreamStore {
     gen: string,
     target: StreamHead,
     meta: boolean,
+    after: StreamHead | undefined,
     cleanup: () => void
   ): SnapshotReader {
-    let afterEpoch = 0
-    let afterSeq = 0
+    let afterEpoch = after?.epoch ?? 0
+    let afterSeq = after?.seq ?? 0
     let closed = false
     return {
       target: Object.freeze({ ...target }),
