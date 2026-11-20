@@ -151,6 +151,21 @@
       "expiresAt": "2026-11-20T12:40:26.020Z"
     },
     {
+      "task": "git-restart-scaling",
+      "session": "Animatrix-57bbb8",
+      "machine": "Animatrix",
+      "branch": "git-restart-scaling",
+      "paths": [
+        "src/mms/lifecycle",
+        "src/mms/workspace",
+        "src/mms/runtime",
+        "src/mms/actions/UndoRetentionSweeper.ts",
+        "src/mms/git/gitPolicy.ts"
+      ],
+      "claimedAt": "2026-11-20T23:26:45.041Z",
+      "expiresAt": "2026-11-21T01:26:45.041Z"
+    },
+    {
       "task": "issue-1506-faster-worktree-checkout",
       "session": "Animatrix-2f5268",
       "machine": "Animatrix",
@@ -177,17 +192,6 @@
       ],
       "claimedAt": "2026-11-20T06:08:57.987Z",
       "expiresAt": "2026-11-20T08:08:57.987Z"
-    },
-    {
-      "task": "net-engine-1a",
-      "session": "Animatrix-880838",
-      "machine": "Animatrix",
-      "branch": "net-engine-1a",
-      "paths": [
-        "src/mms/netEngine"
-      ],
-      "claimedAt": "2026-11-18T12:37:39.165Z",
-      "expiresAt": "2026-11-19T23:05:26.065Z"
     },
     {
       "task": "net-lists-stream-compaction",
