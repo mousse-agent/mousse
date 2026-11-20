@@ -284,6 +284,8 @@ export interface AcpObservations {
 export interface AcpSessionsOptions {
   /** The agent's name in prompts and errors ("Allow Antigravity to run this tool?"). */
   label: string
+  /** The provider a usage limit the agent reports names (`antigravity`), for the pause's wording. */
+  usageLimitProvider?: string
   /** The instance of sessions saved before provider instances existed. */
   defaultInstanceId: string
   questions: UserQuestionService
@@ -1084,7 +1086,7 @@ export class AcpSessions {
       if (steerFailure) throw steerFailure
       if (silenceFailure && !input.signal?.aborted) throw silenceFailure
       // A sign-in the agent asks for is a sign-in; any other error the agent answered with is shown in its words.
-      throw this.authRequiredError(current, error) ?? (input.signal?.aborted ? undefined : acpAgentError(error)) ?? error
+      throw this.authRequiredError(current, error) ?? (input.signal?.aborted ? undefined : acpAgentError(error, this.options.usageLimitProvider)) ?? error
     } finally {
       clearTimeout(silenceTimer)
       current.activity = undefined

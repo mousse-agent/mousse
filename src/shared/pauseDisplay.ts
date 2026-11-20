@@ -5,7 +5,7 @@
  */
 
 /** How the failure text and the pause name a provider whose limit was hit. */
-export const PROVIDER_LABELS: Readonly<Record<string, string>> = { claude: 'Claude', 'claude-subscription': 'Claude', codex: 'Codex', anthropic: 'Anthropic', openai: 'OpenAI', 'openai-codex': 'ChatGPT' }
+export const PROVIDER_LABELS: Readonly<Record<string, string>> = { claude: 'Claude', 'claude-subscription': 'Claude', codex: 'Codex', anthropic: 'Anthropic', openai: 'OpenAI', 'openai-codex': 'ChatGPT', antigravity: 'Antigravity' }
 
 /** The provider as a person reads it, or undefined when the limit named none. */
 export function pauseProviderName(provider: string | undefined): string | undefined {

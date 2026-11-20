@@ -146,6 +146,7 @@ export class AntigravityProviderService {
     }
     this.acp = new AcpSessions({
       label: ANTIGRAVITY_LABEL,
+      usageLimitProvider: ANTIGRAVITY_PROVIDER_ID,
       defaultInstanceId: ANTIGRAVITY_INSTANCE_ID,
       questions,
       quirks: ANTIGRAVITY_QUIRKS,
