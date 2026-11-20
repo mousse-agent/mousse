@@ -142,6 +142,21 @@
       "expiresAt": "2026-11-20T13:15:48.246Z"
     },
     {
+      "task": "fix-quit-lingering-service",
+      "session": "Animatrix-70b894",
+      "machine": "Animatrix",
+      "branch": "fix-quit-lingering-service",
+      "paths": [
+        "src/cli/daemonShutdown.ts",
+        "src/cli/commands/service.ts",
+        "src/main/mms/GuiMmsController.ts",
+        "src/mms/orchestrator/OrchestratorService.ts",
+        "src/mms/actions/ThreadActionService.ts"
+      ],
+      "claimedAt": "2026-11-20T11:31:18.871Z",
+      "expiresAt": "2026-11-20T13:31:18.871Z"
+    },
+    {
       "task": "fix-subagent-optimistic-working",
       "session": "Animatrix-6036c7",
       "machine": "Animatrix",
