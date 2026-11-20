@@ -27,7 +27,6 @@ import { archiveThread, setThreadArchived, createAndSelectProjectThread, createA
 import { draftedThreadIds, draftedThreadsKey, unsentChatTitle, withUnsentChats } from '../lib/sidebarDrafts'
 import { dropPendingThreadRows, isPendingRowId, pruneRowKeys, servedPendingRows, usePendingThreadRows, withPendingRows } from '../lib/pendingThreadRows'
 import { runWithToast } from '../lib/actionToast'
-import { projectInitials } from '../lib/projectInitials'
 import { copyThreadReference } from '../lib/threadReference'
 import { Modal } from './ui/Modal'
 import { PillTabs, type PillTab } from './ui/PillTabs'
@@ -125,7 +124,7 @@ const isMenuKey = (event: KeyboardEvent) => event.key === 'ContextMenu' || (even
 /** On hover, a title cut off by an ellipsis gets the full text as its native tooltip; one that fits gets none. */
 const tooltipIfTruncated = (fullTitle: string) => (event: React.MouseEvent<HTMLElement>) => {
   const element = event.currentTarget
-  if (element.scrollWidth > element.clientWidth) element.title = fullTitle
+  if (element.scrollWidth > element.clientWidth || element.scrollHeight > element.clientHeight) element.title = fullTitle
   else element.removeAttribute('title')
 }
 
@@ -319,15 +318,15 @@ export function ThreadCardBody({
   const branch = useThreadBranch(thread, threadId)
   return (
     <>
-      {projectName ? (
-        <span className="threads-sidebar-card-mark" style={hue ? { color: projectHueColor(hue) } : undefined} aria-hidden="true"><ProjectIcon project={project} size={14} fallback={projectInitials(projectName)} /></span>
-      ) : (
-        <span className="threads-sidebar-card-mark threads-sidebar-card-mark-empty" aria-hidden="true">
-          <Folder size={13} strokeWidth={1.8} />
-        </span>
-      )}
       <span className="threads-sidebar-card-body">
         <span className="threads-sidebar-card-meta">
+          {projectName ? (
+            <span className="threads-sidebar-card-mark" style={hue ? { color: projectHueColor(hue) } : undefined} aria-hidden="true"><ProjectIcon project={project} size={14} fallback={<Folder size={14} strokeWidth={1.8} />} /></span>
+          ) : (
+            <span className="threads-sidebar-card-mark threads-sidebar-card-mark-empty" aria-hidden="true">
+              <Folder size={14} strokeWidth={1.8} />
+            </span>
+          )}
           <span className="threads-sidebar-card-project">{projectName ?? 'No project'}</span>
           {thread.pinnedAt && <Pin size={11} strokeWidth={2} className="threads-sidebar-card-pin" aria-label="Pinned" />}
           <ThreadPullRequestCount pullRequests={pullRequests} />
@@ -1289,8 +1288,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const statusNode = renderThreadStatus(thread.id, thread.setupFailure?.reason)
     const preview = replyPreviews ? thread.lastReply : undefined
     const pullRequests = threadPullRequestsOf(thread)
-    // A row with a preview is two lines tall (`rowShowsPreview` sizes its group's list to match).
-    const rowPreview = layout === 'row' && preview && !isRenaming && !isGeneratingTitle ? preview : undefined
     const worktree = worktreeMark(thread, projects)
     const hasDraft = draftedIds.has(thread.id)
     const showTrailing = Boolean(statusNode || worktree === 'Worktree' || thread.node || hasDraft)
@@ -1351,7 +1348,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           isActive ? ' active' : openSubagentParentId === thread.id ? ' has-open-subagent' : ''
 
-        }${thread.pinnedAt ? ' pinned' : ''}${isArchived ? ' settled' : ''}${unsentChat ? ' unsent-chat' : ''}${rowPreview ? ' has-preview' : ''}${hue ? ` project-tinted project-color-${threadProjectColors}` : ''}`}
+        }${thread.pinnedAt ? ' pinned' : ''}${isArchived ? ' settled' : ''}${unsentChat ? ' unsent-chat' : ''}${hue ? ` project-tinted project-color-${threadProjectColors}` : ''}`}
 
         style={hue ? ({ '--project-tint': projectHueColor(hue) } as CSSProperties) : undefined}
 
@@ -1472,14 +1469,13 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           <span className="threads-sidebar-skeleton" aria-label="Generating title" />
 
-        ) : rowPreview || pullRequests.length ? (
+        ) : pullRequests.length ? (
 
           <span className="threads-sidebar-thread-text">
             <span className="threads-sidebar-thread-line">
               <ThreadTitle name={thread.name} fullTitle={fullTitle} provisional={thread.titleSource === 'provisional'} onDoubleClick={renameFromTitle} />
               <ThreadPullRequestCount pullRequests={pullRequests} />
             </span>
-            {rowPreview && <ThreadReplyPreview text={rowPreview} />}
           </span>
 
         ) : unsentChat ? (
@@ -1629,11 +1625,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     )
   }
 
-  /** Whether a tree row shows a reply preview (and is two lines tall), as `renderThreadRow` decides it. */
-  const rowShowsPreview = (thread: Thread) => replyPreviews && Boolean(thread.lastReply) &&
-    !(renaming?.type === 'thread' && renaming.id === thread.id && !renaming.inNeedsMe) &&
-    !(pendingTitleIds.has(thread.id) && isDefaultThreadName(thread.name))
-
   /** Whether a pinned thread sits right above an unpinned one in `list` (for its list's max-height). */
   const isListedPinned = (thread: Thread) => Boolean(thread.pinnedAt) && !thread.settledAt
   const hasPinnedSplit = (list: readonly Thread[]) =>
@@ -1648,9 +1639,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           className={`threads-sidebar-thread-list ui-collapse-items${showAll ? ' expanded' : ''}`}
           style={{
             '--project-thread-count': groupThreads.length,
-            // Rows with a reply preview are a line taller; the list's height counts them.
-            '--project-preview-count': groupThreads.filter(rowShowsPreview).length,
-            '--project-preview-shown': groupThreads.slice(0, PROJECT_THREAD_PREVIEW_LIMIT).filter(rowShowsPreview).length,
             '--project-pinned-gap': hasPinnedSplit(groupThreads),
             '--project-pinned-gap-shown': hasPinnedSplit(groupThreads.slice(0, PROJECT_THREAD_PREVIEW_LIMIT))
           } as CSSProperties}

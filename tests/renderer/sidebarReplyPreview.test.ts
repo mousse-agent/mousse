@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
- * A thread's row shows its latest reply on one muted line under the title, and the pull requests it was linked to as a
- * small count whose tooltip lists them with their state, in the Projects tree and on the Threads tab's cards. Settings >
- * Appearance > Reply previews hides the line; the count stays.
+ * A Threads tab card shows its thread's latest reply on one muted line under the title; a Projects tree row never does
+ * (its title gets the room). Both show the pull requests the thread was linked to as a small count whose tooltip lists
+ * them with their state. Settings > Appearance > Reply previews hides the line; the count stays.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -55,6 +55,7 @@ let root: Root
 let host: HTMLElement
 
 beforeEach(() => {
+  setReplyPreviews(true)
   const call = (name: string) => (name.startsWith('on') ? () => () => {} : async () => undefined)
   const group = () => new Proxy({}, { get: (_target, key: string) => call(key) })
   ;(window as unknown as { mousse: unknown }).mousse = new Proxy({ platform: 'darwin' } as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
@@ -66,7 +67,6 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount())
   host.remove()
-  act(() => setReplyPreviews(true))
   useAppStore.setState(appOriginal)
 })
 
@@ -77,17 +77,25 @@ function show(view: 'projects' | 'threads') {
   if (view === 'projects' && !host.querySelector('button[data-thread-id="a"]')) act(() => host.querySelector<HTMLButtonElement>('.threads-sidebar-project-toggle')!.click())
 }
 
-const row = (id: string) => host.querySelector<HTMLButtonElement>(`button[data-thread-id="${id}"]`)!
+// The hidden tab's panel stays in the page; read the shown one.
+const row = (id: string) => host.querySelector<HTMLButtonElement>(`.threads-sidebar-section:not([hidden]) button[data-thread-id="${id}"]`)!
 const preview = (id: string) => row(id).querySelector('.threads-sidebar-reply-preview')?.textContent ?? null
 const count = (id: string) => row(id).querySelector('[role="img"][aria-label$="pull request"], [role="img"][aria-label$="pull requests"]')
 
+it('a Threads tab card shows the latest reply under the title, and nothing for a thread with none', () => {
+  show('threads')
+  expect(preview('a')).toBe('The lint step ran twice; it runs once now.')
+  expect(preview('c')).toBeNull()
+  expect(row('a').textContent).toContain('Fix the build')
+})
+
+it('a Projects tree row shows no reply', () => {
+  show('projects')
+  expect(preview('a')).toBeNull()
+  expect(row('a').textContent).toContain('Fix the build')
+})
+
 describe.each(['projects', 'threads'] as const)('a thread row in the %s view', (view) => {
-  it('shows the latest reply under the title, and nothing for a thread with none', () => {
-    show(view)
-    expect(preview('a')).toBe('The lint step ran twice; it runs once now.')
-    expect(preview('c')).toBeNull()
-    expect(row('a').textContent).toContain('Fix the build')
-  })
 
   it('counts the pull requests, and lists them with their state on hover', () => {
     show(view)

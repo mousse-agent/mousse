@@ -294,7 +294,7 @@ export function AppearanceSettings({
         <SettingsRow
           title="Reply previews"
           anchor="appearance-reply-previews"
-          description="The latest reply under each thread and bot."
+          description="The latest reply on each thread card and bot."
           control={
             <Switch
               label="Reply previews"
