@@ -398,23 +398,54 @@ function createEngine(
     anchor = pickReadingPoint(container, rows, containerTop);
   };
 
+  /** The reading point of a list that renders every row, picked before turns were added above it, and the scroll position then. */
+  let unwindowedHold: { held: HeldAnchor; scrollTop: number } | null = null;
+
   /**
-   * Called while rendering, before a list that rendered every row is windowed in a commit that also adds turns above
-   * its rows (an earlier page of a long thread): picks the reading point on the rows still on the page, so the first
-   * windowed commit holds it as any later one does. The browser's own anchoring is switched off by that same commit.
-   * The rows are not registered yet, so their keys are read from the page.
+   * Called while rendering a commit that adds turns above the rows of a list that rendered every row (an earlier page
+   * of a long thread): picks the reading point on the rows still on the page. The rows are not registered, so their
+   * keys are read from the page. A list that this commit windows holds it as any windowed commit does (the commit
+   * switches the browser's own anchoring off). One that stays short holds it in `holdUnwindowed`: the browser's own
+   * anchoring does nothing for a list scrolled to its very top, which is where a reader asks for the earlier page.
    */
-  const pickBeforeOpen = () => {
+  const pickBeforeOpen = (windowing: boolean) => {
     const options = getOptions();
     const container = options.containerRef.current;
     const rows = options.rowsRef.current;
+    unwindowedHold = null;
     if (!container || !rows || options.modeRef.current === "following-end") return;
-    anchor = pickReadingPoint(
+    const held = pickReadingPoint(
       container,
       rows,
       container.getBoundingClientRect().top,
       (el) => el.getAttribute("data-turn-key") ?? undefined,
     );
+    if (windowing) anchor = held;
+    else if (held) unwindowedHold = { held, scrollTop: container.scrollTop };
+  };
+
+  /**
+   * After the commit that added turns above a list that renders every row: the reading point goes back to where it
+   * was on screen. Measured on screen, not in the content, so a move the browser's anchoring already made is not
+   * made twice.
+   */
+  const holdUnwindowed = () => {
+    const pending = unwindowedHold;
+    unwindowedHold = null;
+    const options = getOptions();
+    const container = options.containerRef.current;
+    if (!pending || !container || options.modeRef.current === "following-end") return;
+    const { held, scrollTop } = pending;
+    const target = held.target;
+    if (target instanceof Range ? !target.startContainer.isConnected || target.collapsed : !target.isConnected) return;
+    const rect = target.getBoundingClientRect();
+    const containerTop = container.getBoundingClientRect().top;
+    const onScreen = scrollSpace(container, containerTop, held.edge === "bottom" ? rect.bottom : rect.top) - container.scrollTop;
+    const delta = onScreen - (held.pos - scrollTop);
+    if (Math.abs(delta) >= 1) {
+      options.onProgrammaticScroll();
+      container.scrollTop += delta;
+    }
   };
 
   /**
@@ -675,6 +706,7 @@ function createEngine(
     commit,
     attach,
     pickBeforeOpen,
+    holdUnwindowed,
   };
 }
 
@@ -722,16 +754,14 @@ export function useTurnWindow(options: TurnWindowOptions): TurnWindowApi {
     // Turns that arrived above the mounted rows (an earlier page of a long thread) do not change which turns are
     // mounted: the window moves with its rows, so the reading point stays in the document and the commit below holds
     // it where it was on screen. A list that rendered every row had them all mounted.
-    if (options.enabled) {
-      const prevN = prevKeys.length;
-      const previous = openedRef.current ? stored : { start: Math.min(1, prevN), end: Math.max(Math.min(1, prevN), prevN - 1), n: prevN };
-      const moved = shiftWindow(previous, prevKeys, options.keys);
-      if (moved) {
-        current = moved;
-        setStored(moved);
-        if (!openedRef.current) engine.pickBeforeOpen();
-      }
+    const prevN = prevKeys.length;
+    const previous = openedRef.current ? stored : { start: Math.min(1, prevN), end: Math.max(Math.min(1, prevN), prevN - 1), n: prevN };
+    const moved = shiftWindow(previous, prevKeys, options.keys);
+    if (moved && options.enabled) {
+      current = moved;
+      setStored(moved);
     }
+    if (moved && !openedRef.current) engine.pickBeforeOpen(options.enabled);
   }
   const keysVersion = versionRef.current;
 
@@ -765,6 +795,7 @@ export function useTurnWindow(options: TurnWindowOptions): TurnWindowApi {
   useLayoutEffect(() => {
     if (!enabled) {
       openedRef.current = false;
+      engine.holdUnwindowed();
       return;
     }
     const opening = !openedRef.current;
