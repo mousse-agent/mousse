@@ -2,18 +2,6 @@
   "version": 1,
   "claims": [
     {
-      "task": "acp-agent-thoughts",
-      "session": "Animatrix-8785a2",
-      "machine": "Animatrix",
-      "branch": "acp-agent-thoughts",
-      "paths": [
-        "src/mms/harness/acp/session.ts",
-        "src/mms/harness/drivers/acp/adapter.ts"
-      ],
-      "claimedAt": "2026-11-20T10:47:37.711Z",
-      "expiresAt": "2026-11-20T12:47:37.711Z"
-    },
-    {
       "task": "acp-process-tree-stop",
       "session": "Animatrix-e4839e",
       "machine": "Animatrix",
