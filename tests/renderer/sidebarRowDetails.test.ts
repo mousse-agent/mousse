@@ -50,7 +50,7 @@ const threads = [
   thread('d', 'In the folder', { worktreeEnabled: false })
 ]
 
-const appKeys = ['projects', 'threads', 'threadActivity', 'activeThreadId', 'threadsSidebarView', 'sidebarMode'] as const
+const appKeys = ['projects', 'threads', 'threadActivity', 'activeThreadId', 'threadsSidebarView', 'sidebarMode', 'appInfo'] as const
 const appOriginal = Object.fromEntries(appKeys.map((key) => [key, useAppStore.getInitialState()[key]]))
 
 let root: Root
@@ -90,9 +90,45 @@ it('a Projects tree row shows its branch under the title: its own worktree\'s, o
   bridge.workspace = { getStatus: async (id: string) => ({ metadata: { branch: `mousse/${id}` }, execution: { lifecycle: 'creating' } }) }
   show('projects')
   await act(async () => { for (let pass = 0; pass < 5; pass++) await Promise.resolve() })
-  const branch = (id: string) => row(id).querySelector('.threads-sidebar-thread-sub')?.textContent ?? null
+  const branch = (id: string) => row(id).querySelector('.threads-sidebar-thread-sub .threads-sidebar-branch-name')?.textContent ?? null
+  const ownWorktree = (id: string) => row(id).querySelector('.threads-sidebar-thread-sub .threads-sidebar-branch-icon') !== null
   expect(branch('a')).toBe('mousse/a')
+  expect(ownWorktree('a')).toBe(true)
   expect(branch('d')).toBe('master')
+  expect(ownWorktree('d')).toBe(false)
+})
+
+describe.each(['projects', 'threads'] as const)('the model a thread in the %s view runs on', (view) => {
+  it('shows as its agent\'s logo named in the tooltip: the one picked for it, else the default agent\'s', () => {
+    useAppStore.setState({ appInfo: { platform: 'darwin', repoRoot: '/', llmProvider: 'claude' } })
+    show(view)
+    act(() => useAppStore.getState().setThreads(threads.map((entry) => entry.id === 'a'
+      ? { ...entry, modelOverride: { instanceId: 'codex', llmProvider: 'codex', model: 'gpt-6.1-terra', name: 'GPT-6.1 Terra' } }
+      : entry)))
+    const model = (id: string) => row(id).querySelector('.threads-sidebar-model-icon')?.getAttribute('title') ?? null
+    expect(model('a')).toBe('GPT-6.1 Terra')
+    expect(model('c')).toBe('Default model')
+  })
+})
+
+it('a thread rested on opens its card beside it with the whole title, the project, computer, branch and model; leaving closes it', async () => {
+  vi.useFakeTimers()
+  try {
+    useAppStore.setState({ appInfo: { platform: 'darwin', repoRoot: '/', llmProvider: 'claude', deviceName: 'Studio' } })
+    const bridge = (window as unknown as { mousse: Record<string, unknown> }).mousse
+    bridge.git = { status: async () => ({ isRepo: true, branch: 'master' }) }
+    show('projects')
+    const card = () => document.querySelector('.threads-sidebar-hover-card')
+    act(() => { row('d').dispatchEvent(new PointerEvent('pointerover', { bubbles: true, pointerType: 'mouse' })) })
+    expect(card()).toBeNull()
+    await act(async () => { await vi.advanceTimersByTimeAsync(600) })
+    expect([...card()!.querySelectorAll('.threads-sidebar-hover-card-item')].map((item) => item.textContent)).toEqual(['Mousse', 'Studio', 'master', 'Default model'])
+    expect(card()!.querySelector('.threads-sidebar-hover-card-title')?.textContent).toBe('In the folder')
+    act(() => { row('d').dispatchEvent(new PointerEvent('pointerout', { bubbles: true, pointerType: 'mouse' })) })
+    expect(card()).toBeNull()
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 describe.each(['projects', 'threads'] as const)('a thread row in the %s view', (view) => {

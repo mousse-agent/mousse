@@ -4,17 +4,15 @@ import { flushSync } from 'react-dom'
 import { expiresAtAfter } from '../../shared/threadExpiry'
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, ChevronRight, Folder, FolderOpen, FolderKanban, GitBranch, Layers, ListTree, Lock, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pencil, Pin, Trash2 } from '../lib/icons'
+import { Archive, ChevronRight, Folder, FolderOpen, FolderKanban, Layers, ListTree, Lock, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pencil, Pin, Trash2 } from '../lib/icons'
 import '../styles/private-threads.css'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
 import type { Project, Thread, ThreadActivitySnapshot, ThreadActivityState } from '../../shared/types'
-import { worktreeMark } from '../lib/worktreeMark'
-import { useThreadBranch } from '../hooks/useThreadBranch'
 import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { arrangeThreadFeed, sortArchivedThreads, sortSidebarThreads, sortThreadFeed } from '../../shared/threadSidebarSort'
 import { openSubagentParentRow, rollUpActivities, visibleThreads } from '../../shared/threadLineage'
-import { needsMeLabel, threadAttention, threadStatus, worstOf, type ThreadAttention, type ThreadLinkStatus } from '../../shared/threadAttention'
+import { needsMeLabel, threadAttention, worstOf, type ThreadAttention, type ThreadLinkStatus } from '../../shared/threadAttention'
 import { needsMeThreads, useSupervisedWaits } from '../lib/needsMe'
 import { hasMoreBelow, revealDelta } from '../lib/sidebarScroll'
 import { SIDEBAR_REVEAL_TIMEOUT_MS, useSidebarRevealStore } from '../lib/sidebarReveal'
@@ -56,6 +54,7 @@ import { loadEditors, useEditorsStore } from '../stores/editorsStore'
 
 import { StartFromPullRequestDialog } from './StartFromPullRequestDialog'
 import { ThreadComputerBadge } from './ComputerBadge'
+import { ThreadBranchLine, ThreadHoverCard } from './ThreadRowDetails'
 import { UNKNOWN_COMPUTER_NAME, useComputers } from '../lib/computers'
 import { groupComputers, groupProjects } from '../lib/projectGroups'
 import { projectHueColor, projectHues } from '../lib/projectHues'
@@ -64,12 +63,12 @@ import { projectIconMenuActions } from '../lib/projectIconActions'
 import { projectTooltip, thisHomeFolder } from '../lib/projectTooltip'
 import { useThreadProjectColors } from '../lib/threadProjectColorsSetting'
 import { threadPullRequestsOf, type ThreadPullRequestSummary } from '../../shared/pullRequests'
-import { ThreadPullRequestCount, ThreadReplyPreview } from './ThreadRowExtras'
+import { ThreadReplyPreview } from './ThreadRowExtras'
 import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadSpeechIndicator'
 
 import { ProjectRunsDot } from './automations/inbox/ProjectRunsDot'
 import { countRender } from '../chat/components/agent-elements/render-counts'
-import { plainThreads, sameListedActivity, ThreadCardStatus, ThreadExpiryIcon, ThreadRowStatusIcon } from './ThreadRowStatus'
+import { plainThreads, sameListedActivity, ThreadCardStatus, ThreadExpiryIcon } from './ThreadRowStatus'
 import '../styles/threads-sidebar.css'
 import '../styles/sidebar-view-motion.css'
 
@@ -102,6 +101,8 @@ interface DraggedSidebarItem {
 }
 
 const PROJECT_THREAD_PREVIEW_LIMIT = 5
+/** How long the pointer rests on a thread before its card opens. */
+const HOVER_CARD_DELAY_MS = 500
 // "No project", the last group of the Projects tree, opens, closes and clips like a project under this id,
 // which is no project's.
 const OTHER_THREADS_ID = ':other'
@@ -283,7 +284,7 @@ export function ThreadCardBody({
   statusWithAge = false,
   linkStatus
 }: {
-  thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly' | 'expiresAt' | 'expiryStopsRun' | 'setupFailure' | 'worktreeEnabled'>
+  thread: Pick<Thread, 'name' | 'projectId' | 'updatedAt' | 'pinnedAt' | 'node' | 'offline' | 'notShared' | 'localOnly' | 'expiresAt' | 'expiryStopsRun' | 'setupFailure' | 'worktreeEnabled' | 'modelOverride'>
   projectName?: string
   /** The thread's project, for its own icon in the mark. */
   project?: Project
@@ -313,8 +314,6 @@ export function ThreadCardBody({
   /** A thread link's card: the status its link shows (`threadLinkStatus`), so the two never differ. */
   linkStatus?: ThreadLinkStatus
 }) {
-  // Every card names the branch its thread works on; none in a project without Git (or another computer's).
-  const branch = useThreadBranch(thread, threadId)
   return (
     <>
       <span className="threads-sidebar-card-body">
@@ -328,7 +327,6 @@ export function ThreadCardBody({
           )}
           <span className="threads-sidebar-card-project">{projectName ?? 'No project'}</span>
           {thread.pinnedAt && <Pin size={11} strokeWidth={2} className="threads-sidebar-card-pin" aria-label="Pinned" />}
-          <ThreadPullRequestCount pullRequests={pullRequests} />
           <ThreadCardStatus threadId={threadId} activity={activity} live={liveActivity} awaitsApproval={awaitsApproval} updatedAt={thread.updatedAt} withAge={statusWithAge} setupFailed={thread.setupFailure?.reason} linkStatus={linkStatus} />
         </span>
         {isRenaming ? (
@@ -343,25 +341,16 @@ export function ThreadCardBody({
           </span>
         )}
         {preview && !isRenaming && !isGeneratingTitle && <ThreadReplyPreview text={preview} className="threads-sidebar-card-preview" />}
-        {(branch || thread.node) && (
-          <span className="threads-sidebar-card-sub">
-            <ThreadComputerBadge thread={thread} withName className="threads-sidebar-card-device" />
-            {/* The branch icon marks a thread in its own worktree only. */}
-            {branch?.worktree && <GitBranch size={11} strokeWidth={2} aria-hidden="true" />}
-            {branch?.branch}
-          </span>
-        )}
+        <ThreadBranchLine
+          thread={thread}
+          threadId={threadId}
+          pullRequests={pullRequests}
+          lead={<ThreadComputerBadge thread={thread} withName className="threads-sidebar-card-device" />}
+          className="threads-sidebar-card-sub"
+        />
       </span>
     </>
   )
-}
-
-/** A Projects tree row's second line: the branch its thread works on, compact under the title; none in a project
- * without Git (or another computer's). */
-function ThreadRowBranch({ thread, threadId }: { thread: Pick<Thread, 'projectId' | 'node' | 'worktreeEnabled'>; threadId: string }) {
-  const branch = useThreadBranch(thread, threadId)
-  if (!branch?.branch) return null
-  return <span className="threads-sidebar-thread-sub">{branch.branch}</span>
 }
 
 export function ThreadsSidebar({ className = '' }: { className?: string }) {
@@ -495,6 +484,22 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   const [removingProject, setRemovingProject] = useState<ThreadsContextMenuTarget | null>(null)
 
   const [renaming, setRenaming] = useState<RenamingTarget | null>(null)
+  // The thread whose card shows beside the row the pointer rests on (`ThreadHoverCard`), and that row.
+  const [hoverCardId, setHoverCardId] = useState<string | null>(null)
+  const hoverCardAnchor = useRef<HTMLElement | null>(null)
+  const hoverCardTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const openHoverCardSoon = (threadId: string, anchor: HTMLElement) => {
+    clearTimeout(hoverCardTimer.current)
+    hoverCardTimer.current = setTimeout(() => {
+      hoverCardAnchor.current = anchor
+      setHoverCardId(threadId)
+    }, HOVER_CARD_DELAY_MS)
+  }
+  const closeHoverCard = () => {
+    clearTimeout(hoverCardTimer.current)
+    setHoverCardId(null)
+  }
+  useEffect(() => () => clearTimeout(hoverCardTimer.current), [])
   const [pendingTitleIds, setPendingTitleIds] = useState<Set<string>>(new Set())
   const pendingTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
@@ -1190,11 +1195,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
    */
   const liveActivityOf = (threadId: string) =>
     plainThreadIds.has(threadId) && !supervisedWaits.has(threadId) && rolledUpActivity[threadId] === undefined && threadActivity[threadId] === storeActivity[threadId]
-  const renderThreadStatus = (threadId: string, setupFailed?: string) => {
-    // A quiet thread shows nothing, whichever of Working and Waiting the list holds, unless its message did not start.
-    if (!setupFailed && threadStatus(shownActivityOf(threadId), approvalThreads.has(threadId)) === 'quiet') return null
-    return <ThreadRowStatusIcon threadId={threadId} activity={shownActivityOf(threadId)} live={liveActivityOf(threadId)} awaitsApproval={approvalThreads.has(threadId)} setupFailed={setupFailed} />
-  }
+  /** A tree row's status in words (Working 5m, Waiting, Input, Done), or its age when it is quiet, as a card says it. */
+  const renderThreadStatus = (thread: Thread) => (
+    <ThreadCardStatus threadId={thread.id} activity={shownActivityOf(thread.id)} live={liveActivityOf(thread.id)} awaitsApproval={approvalThreads.has(thread.id)} updatedAt={thread.updatedAt} setupFailed={thread.setupFailure?.reason} />
+  )
 
   useEffect(() => {
     if (pendingTitleIds.size === 0) return
@@ -1287,15 +1291,15 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     const unmade = unmadeRows.has(thread.id)
     // A new chat not sent yet, listed by its draft: it opens, and has nothing to rename, pin, archive or move yet.
     const unsentChat = !isThreadStarted(thread) && draftedIds.has(thread.id)
+    // A chat not sent yet has no status or age.
+    const statusNode = layout === 'row' && !unsentChat ? renderThreadStatus(thread) : null
     const actionless = unmade || unsentChat
     const isRenaming = renaming?.type === 'thread' && renaming.id === thread.id && Boolean(renaming.inNeedsMe) === inNeedsMe
     // A row already named (a pending send's, from its prompt) shows its name, not a placeholder.
     const isGeneratingTitle = pendingTitleIds.has(thread.id) && isDefaultThreadName(thread.name)
-    const statusNode = renderThreadStatus(thread.id, thread.setupFailure?.reason)
     const pullRequests = threadPullRequestsOf(thread)
-    const worktree = worktreeMark(thread, projects)
     const hasDraft = draftedIds.has(thread.id)
-    const showTrailing = Boolean(statusNode || worktree === 'Worktree' || thread.node || hasDraft)
+    const showTrailing = Boolean(statusNode || hasDraft)
     const groupId = groupIdOf(thread.projectId)
     const group = groupId ? groupById.get(groupId) : undefined
     // Only the Threads tab's cards carry the project's tint, unless Appearance turns it off; a thread without a
@@ -1372,8 +1376,18 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
         draggable={!isRenaming && !isArchived && !inNeedsMe && !actionless}
 
+        // Resting the pointer on the row, not on its buttons (which sit outside it), opens the thread's card.
+        onPointerEnter={(event) => {
+          if (event.pointerType === 'mouse' && !isRenaming && !unmade && !unsentChat) openHoverCardSoon(thread.id, event.currentTarget)
+        }}
+
+        onPointerLeave={closeHoverCard}
+
+        onPointerDown={closeHoverCard}
+
         onDragStart={(event) => {
           event.stopPropagation()
+          closeHoverCard()
           startDrag(event, dragItem)
         }}
 
@@ -1443,7 +1457,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           />
         ) : (
           <>
-        {/* The title takes the row's full width on its line; the branch sits under it with the marks and actions. */}
+        {/* Two lines: the title with its status or age (the hover actions take the status's place), then the branch,
+            the pull requests and the model. */}
         <span className="threads-sidebar-thread-text">
           <span className="threads-sidebar-thread-line">
             {thread.pinnedAt && <Pin size={12} strokeWidth={2} className="threads-sidebar-pin-icon" aria-hidden="true" />}
@@ -1463,13 +1478,16 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             ) : unsentChat ? (
               <UnsentChatTitle threadId={thread.id} />
             ) : (
-              <>
-                <ThreadTitle name={thread.name} fullTitle={fullTitle} provisional={thread.titleSource === 'provisional'} onDoubleClick={renameFromTitle} />
-                <ThreadPullRequestCount pullRequests={pullRequests} />
-              </>
+              <ThreadTitle name={thread.name} fullTitle={fullTitle} provisional={thread.titleSource === 'provisional'} onDoubleClick={renameFromTitle} />
             )}
           </span>
-          {!isRenaming && !unsentChat && <ThreadRowBranch thread={thread} threadId={thread.id} />}
+          <ThreadBranchLine
+            thread={thread}
+            threadId={thread.id}
+            pullRequests={pullRequests}
+            lead={<ThreadComputerBadge thread={thread} withName className="threads-sidebar-card-device" />}
+            className="threads-sidebar-thread-sub"
+          />
         </span>
 
         {showTrailing && (
@@ -1478,12 +1496,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             {hasDraft && (
               <span className="threads-sidebar-draft-icon" role="img" aria-label="Unsent draft" title="Unsent draft">
                 <Pencil size={12} strokeWidth={2} aria-hidden="true" />
-              </span>
-            )}
-            <ThreadComputerBadge thread={thread} className="threads-sidebar-device-icon" />
-            {worktree === 'Worktree' && (
-              <span className="threads-sidebar-worktree-icon" role="img" aria-label={worktree} title={worktree}>
-                <GitBranch size={12} strokeWidth={2} aria-hidden="true" />
               </span>
             )}
           </span>
@@ -1706,6 +1718,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       </div>
     )
   }
+
+  // Not while a menu is open or a row is renamed; gone with its thread.
+  const hoverCardShown = hoverCardId && !contextMenu && !tabMenu && !renaming ? threads.find((thread) => thread.id === hoverCardId) : undefined
 
   return (
 
@@ -2159,6 +2174,10 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           projectName={pullRequestProject.name}
           onClose={() => setPullRequestProject(null)}
         />
+      )}
+
+      {hoverCardShown && (
+        <ThreadHoverCard thread={hoverCardShown} project={projects.find((project) => project.id === hoverCardShown.projectId)} anchorRef={hoverCardAnchor} />
       )}
 
     </aside>

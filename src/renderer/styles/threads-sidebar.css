@@ -397,36 +397,48 @@
   --thread-actions-room: 76px;
 }
 
-/* A row keeps its hover actions' room at rest too, so nothing moves when the pointer arrives. At rest the room holds
-   the status, computer and worktree marks; the actions take their place on hover. With a branch line, the room is on
-   that line and the title runs the row's full width; without one, the title ends before the room. A card keeps its
-   actions over the age line, clear of the title. */
+/* A tree row is a two-line grid: the title, then its status or age; under them the branch line across the row's full
+   width. The title's wrapper lends its two lines to the grid. The status keeps at least the hover actions' room, so
+   nothing moves when the pointer arrives: the actions take its place. A card keeps its actions over the age line,
+   clear of the title. */
 .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) {
   position: relative;
-  padding-right: var(--thread-actions-room);
-}
-
-.threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card):has(.threads-sidebar-thread-sub) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: 18px 14px;
+  align-content: center;
+  gap: 1px 6px;
   padding-right: var(--ui-row-x, 9px);
 }
 
-.threads-sidebar-thread-sub {
-  padding-right: calc(var(--thread-actions-room) - var(--ui-row-x, 9px));
+.threads-sidebar-thread:not(.threads-sidebar-card) > .threads-sidebar-thread-text {
+  display: contents;
 }
 
-/* The marks and the actions sit on the branch line: the middle of the row's lower half. */
-.threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card):has(.threads-sidebar-thread-sub) > .threads-sidebar-thread-trailing,
-.threads-sidebar-thread-container:has(> .threads-sidebar-thread:not(.threads-sidebar-card) .threads-sidebar-thread-sub) > .threads-sidebar-thread-actions {
-  top: calc(50% + 9.5px);
+.threads-sidebar-thread:not(.threads-sidebar-card) .threads-sidebar-thread-line {
+  grid-area: 1 / 1;
+}
+
+.threads-sidebar-thread:not(.threads-sidebar-card) .threads-sidebar-thread-sub {
+  grid-area: 2 / 1 / 3 / -1;
 }
 
 .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) > .threads-sidebar-thread-trailing {
-  position: absolute;
-  top: 50%;
-  right: var(--ui-row-x, 9px);
+  grid-area: 1 / 2;
+  justify-content: flex-end;
+  min-width: calc(var(--thread-actions-room) - var(--ui-row-x, 9px) - 6px);
   margin-left: 0;
-  transform: translateY(-50%);
   transition: opacity 0.15s;
+}
+
+.threads-sidebar-thread-trailing :is(.threads-sidebar-card-status, .threads-sidebar-card-age) {
+  font-size: 11px;
+  line-height: 14px;
+}
+
+/* The actions sit on the title line: the middle of the row's upper half. */
+.threads-sidebar-thread-container:not(:has(> .threads-sidebar-card)) > .threads-sidebar-thread-actions {
+  top: calc(50% - 7.5px);
 }
 
 /* The marks give way to the hover actions. A row without actions (a chat not sent yet, a send the service has not
@@ -898,21 +910,6 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 /* A new chat not sent yet is listed by its draft, in italics. */
 .threads-sidebar-thread.unsent-chat .threads-sidebar-thread-name {
   font-style: italic;
-}
-
-.threads-sidebar-worktree-icon {
-  display: inline-flex;
-  flex-shrink: 0;
-  color: var(--text-secondary);
-  opacity: 0.85;
-}
-
-/* The computer a thread on another computer runs on. */
-.threads-sidebar-device-icon {
-  display: inline-flex;
-  flex-shrink: 0;
-  color: var(--text-secondary);
-  opacity: 0.85;
 }
 
 .threads-sidebar-card-device {
@@ -1508,7 +1505,8 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 /* Faded when the row turns or needs the person. */
-:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) > :not(.threads-sidebar-thread-trailing),
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) > :not(.threads-sidebar-thread-trailing, .threads-sidebar-thread-text),
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) > .threads-sidebar-thread-text > *,
 :where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread > .threads-sidebar-thread-trailing > :not(.turning, .threads-sidebar-status-icon--question) {
   filter: var(--sidebar-turning-fade, var(--sidebar-needs-fade, none));
 }
@@ -1545,13 +1543,92 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 .threads-sidebar-thread-sub {
-  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   color: var(--text-secondary);
   font-size: 11px;
   line-height: 14px;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+}
+
+/* The branch (or what stands in for it) takes the lower line's spare width; the pull requests and the model's logo
+   end it. */
+.threads-sidebar-branch {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
   opacity: 0.85;
+}
+
+.threads-sidebar-branch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The branch icon marks a thread on a worktree of its own. */
+.threads-sidebar-branch-icon {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.threads-sidebar-model-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+/* A thread's card beside the row the pointer rests on: the whole title, then its project, computer, branch and model. */
+.threads-sidebar-hover-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: max-content;
+  min-width: 200px;
+  max-width: min(320px, calc(100vw - 24px));
+  padding: 10px 12px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius, 10px);
+  background: var(--ui-raised, var(--floating-surface));
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
+  color: var(--text-primary);
+  font-size: 13px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.threads-sidebar-hover-card-title {
+  display: -webkit-box;
+  margin-bottom: 2px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.threads-sidebar-hover-card-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.threads-sidebar-hover-card-item > svg,
+.threads-sidebar-hover-card-item > [data-mousse='project-icon'] > svg {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.threads-sidebar-hover-card-note {
+  color: var(--text-secondary);
+  font-size: 11px;
 }
 
 .threads-sidebar-reply-preview {
