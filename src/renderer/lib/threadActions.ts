@@ -72,6 +72,17 @@ export async function createAndSelectThread(): Promise<void> {
     await createAndSelectProjectThread(remembered)
     return
   }
+  await openNoProjectThread()
+}
+
+/** The New thread picker's "No project": a thread on this computer without a project, remembered for the next new thread. */
+export async function createAndSelectNoProjectThread(): Promise<void> {
+  useAppStore.getState().setLastNewThreadProjectId(null)
+  await openNoProjectThread()
+}
+
+async function openNoProjectThread(): Promise<void> {
+  const store = useAppStore.getState()
   const thread = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly)) ?? await window.mousse.threads.create()
   store.upsertThread(thread)
   await selectThread(thread.id)
