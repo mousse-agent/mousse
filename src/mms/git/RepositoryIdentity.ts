@@ -8,6 +8,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { execFile, execFileSync } from 'node:child_process'
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from './repoPrograms'
 import { waitForFolderAccess } from '../files/folderAccess'
+import { timeGitChild, timeGitSync } from '../diagnostics/turnBoundary'
 
 export type RepositoryMutationCapability =
   | { allowed: true }
@@ -42,7 +43,7 @@ export interface ResolveRepositoryIdentityOptions {
 
 function git(cwd: string, ...args: string[]): string | null {
   try {
-    return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    return timeGitSync(() => execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).trim()
   } catch { return null }
 }
 function canonical(path: string): string { try { return realpathSync(path) } catch { return resolve(path) } }
@@ -243,7 +244,7 @@ export function resolveRepositoryIdentity(cwd: string, options: ResolveRepositor
 function gitAsync(cwd: string, ...args: string[]): Promise<string | null> {
   return withoutRepoProgramsAsync(cwd, args).then(
     (argv) => new Promise<string | null>((settle) => {
-      execFile('git', argv, { cwd, env: repoProgramEnv(), encoding: 'utf8', windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout) => settle(error ? null : stdout.trim()))
+      timeGitChild(() => execFile('git', argv, { cwd, env: repoProgramEnv(), encoding: 'utf8', windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout) => settle(error ? null : stdout.trim())))
     }),
     () => null
   )

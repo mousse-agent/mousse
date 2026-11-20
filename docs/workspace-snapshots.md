@@ -97,6 +97,10 @@ A nested snapshot recorded while the action runs becomes one of its `contributio
 
 Interrupted checkpoints recover by taking the snapshot again from the files. If that fails too, the operation stays `recovery_required` with the new error, so the reason shown is what stopped the retake.
 
+## Measuring a turn's start and end
+
+Every turn writes two `[turn-boundary]` lines to the service log (`src/mms/diagnostics/turnBoundary.ts`): one when it reaches its provider, one when it settles. Each lists its phases, each named by the mark that ends it (at the start `folders`, `lease`, `recovery`, `workspace`, then the snapshot's `locks`, `snapshotHead`, `snapshotIndex`, `snapshotState`, `snapshotExact`, `snapshotIgnored`, `snapshotCommit`, then `startCheck`, `accepted`, `starting`, … `harness`; at the end `finishing`, the same snapshot steps, `describe`, `receipt`, `completed`, `settled`) with their milliseconds and, per phase, the Git commands started (`git`), their summed lifetimes (`gitMs`), the time `spawn()` itself held the event loop (`spawnMs`), the commands run synchronously and their time (`sync`, `syncMs`), and the wait for the repository's lease (`leaseMs`). The start line also has `waitedMs`, from the run's request to the start of its setup. Commands are counted at each Git spawn site (`timeGitChild`, `timeGitSync`, `timeGitRun`), whatever executable they name; Git run through `simple-git` is not counted.
+
 ## Undo, Redo and revert
 
 All three are one operation, `restoreChange(worktree, { base, ours, theirs })`:

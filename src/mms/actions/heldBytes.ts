@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { createHash, randomUUID, type Hash } from 'node:crypto'
 import { readFrozenEntryAsync, type FrozenEntryProof } from '../lifecycle/verifiedDelete'
 import { gitEnv, guardedAsync } from './git'
+import { timeGitChild } from '../diagnostics/turnBoundary'
 
 /**
  * Which files on disk a restore can remove without a copy: those whose bytes are exactly what Git writes back from their
@@ -65,7 +66,7 @@ async function streamGitAsync(top: string, args: string[], input: string, onData
   const argv = await guardedAsync(top, args, { stdin: input, ...(env ? { env } : {}) })
   const group = deadline !== undefined && process.platform !== 'win32'
   return await new Promise<Streamed>((settle, fail) => {
-    const child = spawn('git', argv, { cwd: top, env: gitEnv(top, env), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], ...(group ? { detached: true } : {}) })
+    const child = timeGitChild(() => spawn('git', argv, { cwd: top, env: gitEnv(top, env), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], ...(group ? { detached: true } : {}) }))
     const errors: Buffer[] = []
     let failed: Error | undefined
     let stopped = false

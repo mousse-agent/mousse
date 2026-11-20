@@ -63,6 +63,7 @@ import type {
   GitPushOptions,
   GitStatusSnapshot
 } from '../../shared/types'
+import { timeGitChild } from '../diagnostics/turnBoundary'
 
 const gitErrors = createErrorProvider({
   git_push_failed: { category: 'unavailable', retryable: false, message: 'Git push failed. Check the configured upstream, push destination and remote access.' },
@@ -447,12 +448,12 @@ async function readBoundedGit(cwd: string, args: readonly string[], maxBytes: nu
     return ''
   }
   return new Promise((resolvePromise) => {
-    const child = spawn('git', guarded, {
+    const child = timeGitChild(() => spawn('git', guarded, {
       cwd,
       env: repoProgramEnv({ ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0', ...env }),
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true
-    })
+    }))
     const chunks: Buffer[] = []
     let size = 0
     let truncated = false
@@ -1999,12 +2000,12 @@ ${run.output}`))
   private async runBytes(cwd: string, args: readonly string[], options: { env?: Record<string, string>; input?: Buffer; userAction?: boolean } = {}): Promise<{ ok: boolean; stdout: Buffer; stderr: string }> {
     const guarded = await withoutRepoProgramsAsync(cwd, args, { env: options.env, ...(options.userAction ? { userAction: true } : {}) })
     return new Promise((resolvePromise) => {
-      const child = spawn('git', guarded, {
+      const child = timeGitChild(() => spawn('git', guarded, {
         cwd,
         env: repoProgramEnv({ ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0', ...options.env }),
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true
-      })
+      }))
       const out: Buffer[] = []
       const err: Buffer[] = []
       child.stdout.on('data', (chunk: Buffer) => out.push(chunk))

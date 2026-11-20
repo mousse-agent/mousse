@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { mousseGitEnv } from '../git/gitEnv'
 import { assertGitAllowed } from '../git/gitPolicy'
+import { timeGitChild } from '../diagnostics/turnBoundary'
 
 /**
  * Waits, without blocking the daemon, until the folders a request or turn works in can be read.
@@ -70,14 +71,14 @@ function gitCommonDir(folder: string): Promise<string | null> {
     const args = ['rev-parse', '--path-format=absolute', '--git-common-dir']
     assertGitAllowed({ cwd: folder, args })
     try {
-      execFile('git', ['-c', 'core.fsmonitor=false', ...args], {
+      timeGitChild(() => execFile('git', ['-c', 'core.fsmonitor=false', ...args], {
         cwd: folder,
         encoding: 'utf8',
         windowsHide: true,
         // A Git that never answers (a hung drive) is ended in the end; the caller stopped waiting long before.
         timeout: 120_000,
         env: mousseGitEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' })
-      }, (error, stdout) => settle(error ? null : stdout.trim() || null))
+      }, (error, stdout) => settle(error ? null : stdout.trim() || null)))
     } catch {
       // A path that is no folder (a chosen icon file) can't be Git's working folder, so it has no repository.
       settle(null)
