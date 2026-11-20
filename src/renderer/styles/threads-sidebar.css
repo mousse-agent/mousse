@@ -1319,29 +1319,26 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 :is(
   html[data-acrylic='true'],
   html[data-wallpaper],
-  html[data-user-theme]:not([data-user-theme-paused])
+  html[data-user-theme]
 ) .threads-sidebar-scroll[data-more-below] {
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
   mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
 }
 
 :is(
-  html:not([data-acrylic='true']):not([data-wallpaper]):not([data-user-theme]),
-  html:not([data-acrylic='true']):not([data-wallpaper])[data-user-theme-paused]
+  html:not([data-acrylic='true']):not([data-wallpaper]):not([data-user-theme])
 ) .threads-sidebar {
   anchor-scope: --threads-list;
 }
 
 :is(
-  html:not([data-acrylic='true']):not([data-wallpaper]):not([data-user-theme]),
-  html:not([data-acrylic='true']):not([data-wallpaper])[data-user-theme-paused]
+  html:not([data-acrylic='true']):not([data-wallpaper]):not([data-user-theme])
 ) .threads-sidebar-scroll[data-more-below] {
   anchor-name: --threads-list;
 }
 
 :is(
-  html:not([data-acrylic='true']):not([data-wallpaper]):not([data-user-theme]),
-  html:not([data-acrylic='true']):not([data-wallpaper])[data-user-theme-paused]
+  html:not([data-acrylic='true']):not([data-wallpaper]):not([data-user-theme])
 ) .threads-sidebar:has(> .threads-sidebar-scroll[data-more-below])::after {
   content: '';
   position: absolute;
