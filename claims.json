@@ -97,18 +97,6 @@
       ],
       "claimedAt": "2026-11-20T09:54:26.402Z",
       "expiresAt": "2026-11-20T11:54:26.402Z"
-    },
-    {
-      "task": "new-thread-picker-setting",
-      "session": "Animatrix-6f1724",
-      "machine": "Animatrix",
-      "branch": "new-thread-picker-setting",
-      "paths": [
-        "src/renderer/components/settings/RunSettingsGroup.tsx",
-        "src/mms/data/newThreadChoice.ts"
-      ],
-      "claimedAt": "2026-11-20T09:42:24.644Z",
-      "expiresAt": "2026-11-20T11:42:24.644Z"
     }
   ]
 }
