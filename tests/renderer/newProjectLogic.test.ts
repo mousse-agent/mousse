@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { githubRepository, joinFolder, newProjectRows, parentFolder, projectFolders, usualParent } from '../../src/renderer/components/newProjectLogic'
+import { githubRepository, joinFolder, newProjectRows, parentFolder, projectFolders, sameFolder, usualParent, withExisting } from '../../src/renderer/components/newProjectLogic'
 
 describe('githubRepository', () => {
   it.each([
@@ -75,5 +75,25 @@ describe('newProjectRows', () => {
     expect(kinds('/Users/me/dev/api', there)).toEqual(['add-path'])
     expect(kinds('/Users/', there)).toEqual(['add-path', 'suggest'])
     expect(kinds('acme/web-app', there)).toEqual([])
+  })
+})
+
+describe('a folder that is already a project', () => {
+  it.each([
+    ['C:\\dev\\notes', 'c:\\DEV\\notes\\', true],
+    ['/Users/me/notes', '/Users/me/notes/', true],
+    ['/Users/me/notes', '/Users/me/Notes', false],
+    ['/Users/me/notes', '/Users/me/notes2', false]
+  ])('%j and %j are the same folder: %s', (a, b, same) => {
+    expect(sameFolder(a, b)).toBe(same)
+  })
+
+  it('turns a clone and a new project there into one Open row', () => {
+    const groups = newProjectRows('acme/notes', { remote: false, parent: '/Users/me/dev' })
+    const existing = { id: 'p1', name: 'notes', path: '/Users/me/dev/notes' }
+    expect(withExisting(groups, (path) => (sameFolder(path, existing.path) ? existing : undefined))).toEqual([
+      { label: 'Open', rows: [{ kind: 'existing', projectId: 'p1', name: 'notes', path: '/Users/me/dev/notes' }] }
+    ])
+    expect(withExisting(groups, () => undefined)).toEqual(groups)
   })
 })

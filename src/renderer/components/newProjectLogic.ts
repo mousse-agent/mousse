@@ -16,6 +16,8 @@ export type NewProjectRow =
   | { kind: 'suggest'; path: string }
   /** A repository that is not on GitHub: shown, but it cannot be cloned. */
   | { kind: 'not-github' }
+  /** Where a clone or a new project would go is already a project here: it opens with a new thread instead. */
+  | { kind: 'existing'; projectId: string; name: string; path: string }
 
 export interface RowGroup {
   label: string
@@ -50,6 +52,35 @@ const separatorOf = (path: string) => (path.includes('\\') && !path.includes('/'
 /** `name` inside `parent`, with the parent's own separator. */
 export function joinFolder(parent: string, name: string): string {
   return `${parent.replace(/[\\/]+$/, '')}${separatorOf(parent)}${name}`
+}
+
+/** Whether two paths name the same folder: trailing separators aside, and without case on Windows. */
+export function sameFolder(a: string, b: string): boolean {
+  const trim = (path: string) => path.trim().replace(/[\\/]+$/, '')
+  const [x, y] = [trim(a), trim(b)]
+  return /^[A-Za-z]:|\\/.test(x) ? x.toLowerCase() === y.toLowerCase() : x === y
+}
+
+/**
+ * A clone or a new project whose folder is already a project here becomes that project's row, once: typing its name
+ * again opens it rather than offering to make it.
+ */
+export function withExisting(groups: readonly RowGroup[], projectAt: (path: string) => { id: string; name: string; path: string } | undefined): RowGroup[] {
+  const seen = new Set<string>()
+  return groups
+    .map((group) => ({
+      label: group.label,
+      rows: group.rows.flatMap((row): NewProjectRow[] => {
+        if ((row.kind !== 'clone' && row.kind !== 'create') || !row.destination) return [row]
+        const project = projectAt(row.destination)
+        if (!project) return [row]
+        if (seen.has(project.id)) return []
+        seen.add(project.id)
+        return [{ kind: 'existing', projectId: project.id, name: project.name, path: project.path }]
+      })
+    }))
+    .filter((group) => group.rows.length > 0)
+    .map((group) => (group.rows[0]!.kind === 'existing' ? { ...group, label: 'Open' } : group))
 }
 
 /** The folder a path is in; null for a path with none. */

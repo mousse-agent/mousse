@@ -13,7 +13,7 @@ import type { Project } from '../../shared/types'
 import { showToast } from './ui/Toast'
 import { Select, type SelectOption } from './ui/Select'
 import { Spinner } from './ui/Spinner'
-import { newProjectRows, projectFolders, usualParent, type NewProjectRow } from './newProjectLogic'
+import { newProjectRows, projectFolders, sameFolder, usualParent, withExisting, type NewProjectRow } from './newProjectLogic'
 import { shortPath } from './newThreadPickerLogic'
 import './newProjectDialog.css'
 
@@ -35,7 +35,8 @@ async function finish(project: Project): Promise<void> {
   }
   if (!app.projects.some((entry) => entry.id === project.id)) app.setProjects([...app.projects, project])
   showToast({
-    message: `${project.name} is ready`,
+    title: project.name,
+    message: 'Project ready',
     tone: 'success',
     action: { label: 'New thread', run: () => void runWithToast('start a thread', () => listProjectAndStartThread(project)) }
   })
@@ -95,12 +96,11 @@ function NewProjectPanel() {
   const remote = computer !== THIS_COMPUTER
   const computerName = remote ? byNode[computer]?.name ?? UNKNOWN_COMPUTER_NAME : 'This computer'
   const parent = chosenParent ?? usualParent(projects.filter((project) => !project.node).map((project) => project.path))
-  const groups = useMemo(
-    () => newProjectRows(query, remote
-      ? { remote: true, computer: computerName, folders: projectFolders(projects.filter((project) => project.node === computer).map((project) => project.path)) }
-      : { remote: false, parent }),
-    [query, remote, computer, computerName, projects, parent]
-  )
+  const groups = useMemo(() => {
+    if (remote) return newProjectRows(query, { remote: true, computer: computerName, folders: projectFolders(projects.filter((project) => project.node === computer).map((project) => project.path)) })
+    const local = projects.filter((project) => !project.node)
+    return withExisting(newProjectRows(query, { remote: false, parent }), (path) => local.find((project) => sameFolder(project.path, path)))
+  }, [query, remote, computer, computerName, projects, parent])
   const rows = useMemo(() => groups.flatMap((group) => group.rows), [groups])
   const active = Math.min(activeIndex, Math.max(rows.length - 1, 0))
 
@@ -119,6 +119,11 @@ function NewProjectPanel() {
   useEffect(() => {
     document.getElementById(`${listId}-${active}`)?.scrollIntoView?.({ block: 'nearest' })
   }, [active, listId])
+
+  // The field keeps the keyboard through a clone and after a failure, so Esc hides and typing goes on.
+  useEffect(() => {
+    if (!task.label) inputRef.current?.focus()
+  }, [task.label])
 
   const edit = (text: string) => {
     setQuery(text)
@@ -154,6 +159,11 @@ function NewProjectPanel() {
         return
       case 'not-github':
         return
+      case 'existing': {
+        const project = projects.find((entry) => entry.id === row.projectId)
+        if (project) await finish(project)
+        return
+      }
       case 'clone': {
         const destination = await destinationFor(row)
         if (!destination) return
@@ -229,7 +239,7 @@ function NewProjectPanel() {
             className="thread-search-input"
             value={query}
             placeholder={placeholder}
-            disabled={task.label !== null}
+            readOnly={task.label !== null}
             role="combobox"
             aria-expanded="true"
             aria-controls={listId}
@@ -344,5 +354,7 @@ function rowView(row: NewProjectRow, remote: boolean, computer: string): { icon:
       return { icon: <Folder size={15} strokeWidth={2} />, title: row.path }
     case 'not-github':
       return { icon: <AlertTriangle size={15} strokeWidth={2} />, title: 'Only GitHub repositories can be cloned' }
+    case 'existing':
+      return { icon: <Folder size={15} strokeWidth={2} />, title: `Open “${row.name}”`, meta: `Already a project · ${shortPath(row.path)}` }
   }
 }
