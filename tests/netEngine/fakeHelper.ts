@@ -177,6 +177,8 @@ export class FakeNetwork {
   readonly relayed = new Map<string, string>()
   /** Each identity's relays (Phase 3), kept across its helper's restarts; none means its helper has no relays. */
   readonly relays = new Map<string, FakeRelays>()
+  /** Each identity's Plus (Phase 4), kept across its helper's restarts; none means its helper has no Plus. */
+  readonly plus = new Map<string, FakePlus>()
 
   /** @internal Every peer `self` keeps something for. */
   knownPeers(self: string): Array<[string, Known]> {
@@ -520,6 +522,13 @@ export interface FakeRelays {
   enrollError?: string
   /** `relay.list` fails this many more times (a helper still starting) before it answers. */
   listFailures?: number
+}
+
+/** A helper's Plus (Phase 4): the answer to each `plus.*` and `removal.*` op, and how many more times each fails first. */
+export interface FakePlus {
+  answers: Record<string, Record<string, unknown>>
+  /** An op fails (`busy`, a helper still starting) this many more times before it answers. */
+  failures?: Record<string, number>
 }
 
 export class FakeHelper {
@@ -1004,6 +1013,15 @@ export class FakeHelper {
         const added = answer.relay as { destination?: string } | undefined
         if (op === 'relay.enroll' && added?.destination) this.network.relayed.set(this.identity, added.destination)
         return reply(answer)
+      }
+      if (this.helloed && (op.startsWith('plus.') || op.startsWith('removal.'))) {
+        const plus = this.network.plus.get(this.identity)
+        if (!plus) return reply({ error: 'unknown_op', reason: op })
+        if ((plus.failures?.[op] ?? 0) > 0) {
+          plus.failures![op]!--
+          return reply({ error: 'busy', reason: 'starting' })
+        }
+        return reply(plus.answers[op] ?? { error: 'unknown_op', reason: op })
       }
       if (!this.helloed && message.op !== 'hello')
         return reply({ error: 'no_hello', reason: 'hello first' })

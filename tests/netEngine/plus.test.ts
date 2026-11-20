@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { NetError } from '../../src/shared/net'
-import { EnginePlus } from '../../src/mms/netEngine/plus'
+import { EnginePlus, PLUS_FAILED, PLUS_WRONG_PAGE } from '../../src/mms/netEngine/plus'
 import { registerNetEngineMethods } from '../../src/mms/netEngine/registerMethods'
 import type { EngineHelper } from '../../src/mms/netEngine/helper/connections'
 import type { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
@@ -43,6 +43,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
 const LINKED = {
   configured: true,
   linked: true,
+  url: 'https://plus.test',
   account: { plan: 'active', period_ends_at: 1_800_000_000 },
   usage: { bulk: { allowance: 100, available: 40 }, interactive: { allowance: 50, available: 50 } }
 }
@@ -114,6 +115,66 @@ describe('EnginePlus', () => {
     plus.attach(h.stub)
     await expect(plus.refresh()).rejects.toThrow('Sign in to Plus first.')
   })
+
+  it('says one fixed line for a Plus failure it has no words for, never the helper’s reason', async () => {
+    const h = helper({
+      'plus.refresh': new NetError('internal', 'plus said: db shard 7 down', { details: { helper: 'plus_new_thing' } })
+    })
+    const plus = new EnginePlus(() => undefined)
+    plus.attach(h.stub)
+    await expect(plus.refresh()).rejects.toMatchObject({
+      message: PLUS_FAILED,
+      details: { reason: 'plus_new_thing' }
+    })
+  })
+
+  it('does not say signed in from a paid relay state that comes before the Plus state', async () => {
+    const h = helper({ 'plus.status': { ...LINKED, linked: false } })
+    const plus = new EnginePlus(() => undefined)
+    plus.attach(h.stub)
+    h.emit({ ev: 'plus.relay', bulk: { state: 'funded', bytes_left: 5000 } })
+    h.emit({ ev: 'plus.relay.paused', class: 'interactive', paused: true })
+    expect(plus.view().plus).toBeUndefined()
+    await settle()
+    expect(plus.view().plus).toMatchObject({
+      linked: false,
+      relay: { bulk: { state: 'funded', bytesLeft: 5000 }, interactive: { state: 'paused' } }
+    })
+  })
+
+  it('starts from nothing when a new helper says hello', async () => {
+    const first = helper({
+      'plus.status': LINKED,
+      'removal.list': {
+        removals: [{ id: 'r1', host: 'h1', removed: 'x1', name: 'Phone', grant: 4, state: 'sent' }],
+        asks: [{ identity: 'x1', name: 'Phone', host: 'h2', grant: 9 }]
+      }
+    })
+    const plus = new EnginePlus(() => undefined)
+    plus.attach(first.stub)
+    await settle()
+    first.emit({ ev: 'plus.relay', bulk: { state: 'funded', bytes_left: 5000 } })
+    expect(plus.view().removals).toHaveLength(1)
+    // The new helper has not answered yet.
+    const second = helper()
+    ;(second.stub as unknown as { request: () => Promise<never> }).request = () => new Promise(() => undefined)
+    plus.attach(second.stub)
+    expect(plus.view()).toEqual({})
+    // The old helper's events no longer count.
+    first.emit({ ev: 'removal.ask', identity: 'x1', name: 'Phone', host: 'h3', grant: 2 })
+    expect(plus.view()).toEqual({})
+  })
+
+  it('shows a sign-in code only with a page on the Plus address', async () => {
+    const link = { user_code: 'WXYZ-1234', verify_url: 'https://elsewhere.test/link', expires_at: 99 }
+    const h = helper({ 'plus.status': { configured: true, linked: false, url: 'https://plus.test', link } })
+    const plus = new EnginePlus(() => undefined)
+    plus.attach(h.stub)
+    await settle()
+    expect(plus.view().plus?.link).toBeUndefined()
+    h.emit({ ev: 'plus.status', configured: true, linked: false, link: { ...link, verify_url: 'https://plus.test/link' } })
+    expect(plus.view().plus?.link).toEqual({ userCode: 'WXYZ-1234', verifyUrl: 'https://plus.test/link', expiresAt: 99 })
+  })
 })
 
 describe('the netEngine.* handlers for Plus and removals', () => {
@@ -122,6 +183,7 @@ describe('the netEngine.* handlers for Plus and removals', () => {
     const methods = new Map<string, { validate: (p: unknown) => unknown; handle: (...args: unknown[]) => Promise<unknown> }>()
     const registry = { register: (m: { method: string }) => methods.set(m.method, m as never) }
     const h = helper({
+      'plus.status': { configured: true, linked: false, url: 'https://plus.test' },
       'plus.link.start': { user_code: 'WXYZ-1234', verify_url: 'https://plus.test/link', expires_at: 99 },
       'removal.plan': { hosts: [{ host: 'h1', name: 'Studio', grant: 4 }, { host: 'h2', name: 'Laptop' }] },
       'removal.confirm': {
@@ -145,6 +207,15 @@ describe('the netEngine.* handlers for Plus and removals', () => {
     }
     return { h, call, methods }
   }
+
+  it('refuses a sign-in page off the Plus address', async () => {
+    const { h, call } = handlers()
+    ;(h.stub as unknown as { request: (op: string) => Promise<Json> }).request = async (op: string) =>
+      op === 'plus.link.start'
+        ? { user_code: 'WXYZ-1234', verify_url: 'https://plus.test.evil.example/link', expires_at: 99 }
+        : { configured: true, linked: false, url: 'https://plus.test' }
+    await expect(call('netEngine.plus.signIn', {})).rejects.toThrow(PLUS_WRONG_PAGE)
+  })
 
   it('starts sign-in and hands the window the code and the page to type it on', async () => {
     const { call } = handlers()
@@ -174,6 +245,7 @@ describe('the netEngine.* handlers for Plus and removals', () => {
     expect(() =>
       methods.get('netEngine.removeEverywhere')!.validate({ node: 'n1', hosts: [{ host: 'h1' }] })
     ).toThrow(/hosts/)
+    expect(() => methods.get('netEngine.removeEverywhere')!.validate({ node: 'n1', hosts: [] })).toThrow(/hosts/)
     expect(() =>
       methods.get('netEngine.removeEverywhere.answer')!.validate({ identity: 'x1', host: 'h1', yes: true })
     ).toThrow(/grant/)

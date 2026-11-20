@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AlertTriangle, Cloud } from '../../lib/icons'
 import type { NetEngineStatus } from '../../../shared/netEngine/local'
 import type { PlatformRequestMethod } from '../../../shared/platform'
@@ -16,7 +16,20 @@ export function EnginePlusGroup({ status, read }: { status: NetEngineStatus; rea
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const plus = status.plus
+  // The code stops working at its expiry: the row turns back to Sign in then, without waiting for the helper.
+  const expiresAt = plus?.link?.expiresAt ? plus.link.expiresAt * 1000 : undefined
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    if (expiresAt === undefined || expiresAt <= Date.now()) return
+    const timer = setTimeout(
+      () => setTick((n) => n + 1),
+      Math.min(expiresAt - Date.now() + 50, 2 ** 31 - 1)
+    )
+    return () => clearTimeout(timer)
+  }, [expiresAt])
   if (!status.on || !plus?.configured) return null
+  const expired = expiresAt !== undefined && expiresAt <= Date.now()
+  const link = expired ? undefined : plus.link
 
   const call = async <T,>(method: PlatformRequestMethod): Promise<T | undefined> => {
     setBusy(true)
@@ -51,12 +64,12 @@ export function EnginePlusGroup({ status, read }: { status: NetEngineStatus; rea
       icon={Cloud}
       className="devices-group engine-group"
     >
-      {plus.link ? (
+      {link ? (
         <SettingsRow
           title="Sign in to Plus"
           description={
             <span className="engine-plus-link">
-              Type <code className="engine-plus-code">{plus.link.userCode}</code> on the Plus
+              Type <code className="engine-plus-code">{link.userCode}</code> on the Plus
               website
             </span>
           }
@@ -65,7 +78,7 @@ export function EnginePlusGroup({ status, read }: { status: NetEngineStatus; rea
               <button
                 type="button"
                 className="settings-btn primary"
-                onClick={() => open(plus.link!.verifyUrl)}
+                onClick={() => open(link.verifyUrl)}
               >
                 Open website
               </button>
@@ -83,7 +96,7 @@ export function EnginePlusGroup({ status, read }: { status: NetEngineStatus; rea
       ) : !plus.linked ? (
         <SettingsRow
           title="Mousse Plus"
-          description={linkResultText(plus.linkResult) ?? 'Not signed in'}
+          description={linkResultText(expired ? 'expired' : plus.linkResult) ?? 'Not signed in'}
           control={
             <button
               type="button"

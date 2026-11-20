@@ -18,7 +18,7 @@ import { SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
 import { Modal } from '../ui/Modal'
 import { AddEngineDeviceDialog } from './AddEngineDeviceDialog'
 import { EnginePlusGroup } from './EnginePlusGroup'
-import { hostLabel, removalText } from './plusRows'
+import { hostLabel, removalText, removalTitle } from './plusRows'
 import {
   engineRow,
   engineWhere,
@@ -418,29 +418,34 @@ export function EngineDevicesSection() {
             </p>
           ))}
         {status.on &&
-          removalGroups(status.removals).map(([removed, items]) => (
-            <SettingsRow
-              key={removed}
-              data-removal={removed}
-              title={`${items[0]!.name || removed.slice(0, 8)} removed on my hosts`}
-              description={
-                <span className="engine-row-line">
-                  {items.map((item, index) => {
-                    const text = removalText(item)
-                    return (
-                      <span key={item.id}>
-                        {index > 0 && ' · '}
-                        {hostLabel(item)}:{' '}
-                        <span className={text.warn ? 'settings-status-warn' : undefined}>
-                          {text.line}
+          removalGroups(status.removals).map(([removed, items]) => {
+            const title = removalTitle(items[0]!.name || removed.slice(0, 8), items)
+            return (
+              <SettingsRow
+                key={removed}
+                data-removal={removed}
+                title={
+                  <span className={title.warn ? 'settings-status-warn' : undefined}>{title.line}</span>
+                }
+                description={
+                  <span className="engine-row-line">
+                    {items.map((item, index) => {
+                      const text = removalText(item)
+                      return (
+                        <span key={item.id}>
+                          {index > 0 && ' · '}
+                          {hostLabel(item)}:{' '}
+                          <span className={text.warn ? 'settings-status-warn' : undefined}>
+                            {text.line}
+                          </span>
                         </span>
-                      </span>
-                    )
-                  })}
-                </span>
-              }
-            />
-          ))}
+                      )
+                    })}
+                  </span>
+                }
+              />
+            )
+          })}
         {error && (
           <p role="alert" className="chat-error devices-error">
             {error}

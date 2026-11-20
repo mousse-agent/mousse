@@ -147,6 +147,10 @@ export interface EngineLimits {
   relayReadRetryMs: number
   /** How many times the relays are asked for before the app gives up until the next relay event. */
   relayReadTries: number
+  /** Plus (Phase 4): after a failed read of the Plus state or the removals at hello, the wait before the next. */
+  plusReadRetryMs: number
+  /** How many times the Plus state and the removals are asked for at hello before the app waits for an event. */
+  plusReadTries: number
 }
 
 /** The helper's `APP_READ_AHEAD_BYTES`: a stream's credit must cover it before the helper reads that stream. */
@@ -210,7 +214,9 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   relayOffersShown: 3,
   relayReadDebounceMs: 100,
   relayReadRetryMs: 1_000,
-  relayReadTries: 5
+  relayReadTries: 5,
+  plusReadRetryMs: 1_000,
+  plusReadTries: 5
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -271,7 +277,9 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   relayOffersShown: 'MOUSSE_NET_ENGINE_RELAY_OFFERS_SHOWN',
   relayReadDebounceMs: 'MOUSSE_NET_ENGINE_RELAY_READ_DEBOUNCE_MS',
   relayReadRetryMs: 'MOUSSE_NET_ENGINE_RELAY_READ_RETRY_MS',
-  relayReadTries: 'MOUSSE_NET_ENGINE_RELAY_READ_TRIES'
+  relayReadTries: 'MOUSSE_NET_ENGINE_RELAY_READ_TRIES',
+  plusReadRetryMs: 'MOUSSE_NET_ENGINE_PLUS_READ_RETRY_MS',
+  plusReadTries: 'MOUSSE_NET_ENGINE_PLUS_READ_TRIES'
 })
 
 /** Limits that guard this computer against another: a value above the default is refused, so they only tighten. */

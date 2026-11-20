@@ -9,10 +9,13 @@ import {
   destinationText,
   ownerRoute,
   parseRoute,
+  relayText,
   routeText,
   ticketDestinations
 } from '../../src/shared/netEngine/routes'
 import { approvedHints, pairbackRoutes, splitPairback } from '../../src/mms/netEngine/routes'
+import { readRoute } from '../../src/mms/netEngine/helper/connections'
+import { engineWhere } from '../../src/renderer/components/netEngine/engineRows'
 
 describe('classifyIp (forbidden first, then the allowlist)', () => {
   it.each([
@@ -202,5 +205,38 @@ describe('loopback in a debug build (MOUSSE_NET_TEST_CLASS_MAP)', () => {
       if (before === undefined) delete process.env.MOUSSE_NET_TEST_CLASS_MAP
       else process.env.MOUSSE_NET_TEST_CLASS_MAP = before
     }
+  })
+})
+
+describe('a connection over a relay (Phase 3 own relays, Phase 4 the paid relay)', () => {
+  const device = { node: 'n1', name: 'Phone', shortId: 'a1b2c3d4', state: 'connected', online: true } as const
+  const label = (value: unknown) => {
+    const route = readRoute(value)
+    return engineWhere({
+      ...device,
+      ...(route ? { route: route.kind === 'relay' ? 'relay' : (route.class as 'lan') } : {}),
+      ...(route?.destination ? { via: relayText(route.destination) } : {})
+    })
+  }
+
+  it.each([
+    [
+      'the paid relay, typing',
+      { kind: 'relay', class: 'relay', destination: 'relay://r1.plus.example:443', relay: 'ab'.repeat(32) },
+      'Through relay r1.plus.example:443'
+    ],
+    [
+      'the paid relay, copies',
+      { kind: 'relay', class: 'relay_bulk', destination: 'relay://r1.plus.example:443', relay: 'ab'.repeat(32) },
+      'Through relay r1.plus.example:443'
+    ],
+    ['a relay this computer does not name', { kind: 'relay', class: 'relay', destination: null }, 'Through a relay']
+  ])('reads %s as a relay, never as LAN', (_name, route, line) => {
+    expect(readRoute(route)?.kind).toBe('relay')
+    expect(label(route)).toBe(line)
+  })
+
+  it('refuses a relay route of a class that is not a relay class', () => {
+    expect(readRoute({ kind: 'relay', class: 'lan', destination: 'relay://r1.plus.example:443' })).toBeUndefined()
   })
 })

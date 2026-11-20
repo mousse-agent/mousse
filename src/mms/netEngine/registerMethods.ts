@@ -74,6 +74,7 @@ function validate(method: NetEngineLocalMethod, params: unknown): Record<string,
     const hosts = fields.hosts
     const ok =
       Array.isArray(hosts) &&
+      hosts.length > 0 &&
       hosts.every(
         (h) =>
           h &&

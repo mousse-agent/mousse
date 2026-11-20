@@ -123,6 +123,12 @@ const click = async (target: HTMLElement | null | undefined) => {
 const menuItem = (label: string) =>
   [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent?.trim() === label)
 const text = () => (document.body.textContent ?? '').replace(/\s+/g, ' ')
+/** The removed device's row title, and whether it reads as a warning. */
+const removalTitle = () => {
+  const title = host.querySelector('[data-removal="x1"] .settings-item-title')
+  const span = title?.querySelector('span') ?? title
+  return { line: span?.textContent?.trim(), warn: !!span?.classList.contains('settings-status-warn') }
+}
 const statusLines = () => [...document.querySelectorAll('[role="status"]')].map((item) => item.textContent?.trim())
 
 describe('Mousse Plus in Settings → Devices', () => {
@@ -147,6 +153,25 @@ describe('Mousse Plus in Settings → Devices', () => {
     expect(d.openLoginUrl).toHaveBeenCalledTimes(2)
     await click(button('Cancel'))
     expect(d.called('netEngine.plus.cancel')).toHaveLength(1)
+  })
+
+  it('turns the code back to Sign in when it expires', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      const expiresAt = Math.floor(Date.now() / 1000) + 60
+      daemon({
+        plus: { configured: true, linked: false, link: { userCode: 'WXYZ-1234', verifyUrl: 'https://plus.test/link', expiresAt } }
+      })
+      await act(async () => root.render(createElement(EngineDevicesSection)))
+      for (let i = 0; i < 6; i++) await act(async () => vi.advanceTimersByTime(0))
+      expect(text()).toContain('Type WXYZ-1234 on the Plus website')
+      await act(async () => vi.advanceTimersByTime(61_000))
+      expect(text()).not.toContain('WXYZ-1234')
+      expect(text()).toContain('The code expired. Sign in again.')
+      expect(button('Sign in')).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it.each([
@@ -279,7 +304,8 @@ describe('Remove on all my hosts', () => {
   })
   it.each<[string, Partial<NetEngineRemoval>, string, boolean]>([
     ['applied', { state: 'done', result: 'applied' }, 'Removed', false],
-    ['stale', { state: 'done', result: 'stale' }, 'Already replaced by a newer pairing', false],
+    // A newer pairing of the device keeps its access on that host.
+    ['stale', { state: 'done', result: 'stale' }, 'Already replaced by a newer pairing', true],
     ['refused', { state: 'done', result: 'refused' }, 'Refused', true],
     ['sent by mail', { state: 'sent' }, 'Waiting (sent)', false],
     ['fetched by the host', { state: 'delivered' }, 'Delivered, not confirmed', false],
@@ -304,6 +330,20 @@ describe('Remove on all my hosts', () => {
     expect(host.querySelector('[data-removal="x1"]')?.textContent?.replace(/\s+/g, ' ')).toContain(
       'Studio: Removed · Office: Waiting for Office to collect its mail'
     )
+    expect(removalTitle()).toEqual({ line: 'Removing Phone on my hosts', warn: false })
+  })
+
+  it.each<[string, Array<Partial<NetEngineRemoval>>, string, boolean]>([
+    ['every host removed it', [{ state: 'done', result: 'applied' }, { state: 'done', result: 'applied' }], 'Phone removed on my hosts', false],
+    ['one host refused', [{ state: 'done', result: 'applied' }, { state: 'done', result: 'refused' }], 'Phone not removed on every host', true],
+    ['one host keeps a newer pairing', [{ state: 'done', result: 'applied' }, { state: 'done', result: 'stale' }], 'Phone not removed on every host', true],
+    ['one host never answered in time', [{ state: 'sent' }, { state: 'expired' }], 'Phone not removed on every host', true]
+  ])('titles the removal by its hosts’ states: %s', async (_name, states, line, warn) => {
+    daemon({
+      removals: states.map((fields, index) => removal({ id: `r${index}`, host: `h${index}`, hostName: `Host ${index}`, ...fields }))
+    })
+    await mount()
+    expect(removalTitle()).toEqual({ line, warn })
   })
 
   it('asks again for a host that named the device later, and sends the answer', async () => {

@@ -8,16 +8,34 @@ import type {
 } from '../../shared/netEngine/local'
 import { helperCode } from './helper/appChannel'
 import type { EngineHelper } from './helper/connections'
+import { engineLimits } from './limits'
 
 type Json = Record<string, unknown>
 
-/** What the helper's Plus failures read as (design A.2; the helper's own words for the rest). */
+/** What the helper's Plus failures read as (design A.2). A code with none here reads as `PLUS_FAILED`. */
 const PLUS_TEXT: Record<string, string> = {
   plus_off: "This build isn't set up for Plus.",
   not_linked: 'Sign in to Plus first.',
   unreachable: "Plus can't be reached. Try again later.",
   not_plus: 'No active Plus plan.',
   rate_limited: 'Too many tries. Wait a moment.'
+}
+
+/** What a Plus failure with no words here reads as: the helper's own reason never shows. */
+export const PLUS_FAILED = "The Plus request didn't go through."
+
+/** What a sign-in reads as when Plus names a page that is not on the Plus address. */
+export const PLUS_WRONG_PAGE = "Plus named a sign-in page that isn't on its address."
+
+/** The origin of an `http(s)` URL, or undefined. */
+function originOf(url: string | undefined): string | undefined {
+  if (!url) return undefined
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.origin : undefined
+  } catch {
+    return undefined
+  }
 }
 
 const num = (value: unknown): number | undefined =>
@@ -73,12 +91,13 @@ function ask(value: unknown): NetEngineRemovalAsk | undefined {
   }
 }
 
-/** A helper failure as the window shows it. */
+/** A helper failure as the window shows it; its code stays in `details.reason`. */
 function plusError(error: unknown): NetError {
   const code = helperCode(error)
-  const text = code ? PLUS_TEXT[code] : undefined
-  if (text) return new NetError(code === 'unreachable' ? 'route_unreachable' : 'forbidden', text)
-  return error instanceof NetError ? error : new NetError('internal')
+  if (!code) return error instanceof NetError ? error : new NetError('internal', PLUS_FAILED)
+  const text = PLUS_TEXT[code]
+  const kind = code === 'unreachable' ? 'route_unreachable' : text ? 'forbidden' : 'internal'
+  return new NetError(kind, text ?? PLUS_FAILED, { details: { reason: code } })
 }
 
 /**
@@ -88,6 +107,10 @@ function plusError(error: unknown): NetError {
  */
 export class EnginePlus {
   private plus?: NetEnginePlus
+  /** The paid relay as the helper last said; shown once `plus.status` has said whether this computer is signed in. */
+  private relay?: NetEnginePlus['relay']
+  /** The Plus address the helper uses (`plus.status`'s `url`): a sign-in page must be on it. */
+  private origin?: string
   private removals = new Map<string, NetEngineRemoval>()
   private asks: NetEngineRemovalAsk[] = []
   private helper?: EngineHelper
@@ -95,19 +118,37 @@ export class EnginePlus {
 
   constructor(private readonly changed: () => void) {}
 
-  /** A helper said hello: read its state, and follow its events. */
+  /** A helper said hello: nothing the last one said stands; read its state, and follow its events. */
   attach(helper: EngineHelper): void {
     this.off?.()
     this.helper = helper
+    this.plus = undefined
+    this.relay = undefined
+    this.origin = undefined
+    this.removals = new Map()
+    this.asks = []
     this.off = helper.onEvent((event) => this.event(event))
-    void helper
-      .request('plus.status')
-      .then((reply) => this.status(reply))
-      .catch(() => undefined)
-    void helper
-      .request('removal.list')
-      .then((reply) => this.list(reply))
-      .catch(() => undefined)
+    void this.read(helper, 'plus.status', (reply) => this.status(reply))
+    void this.read(helper, 'removal.list', (reply) => this.list(reply))
+  }
+
+  /**
+   * One read at hello. A helper that just started (or is busy) is asked again `plusReadRetryMs` later, at most
+   * `plusReadTries` times; one without Plus (`unknown_op`) is not.
+   */
+  private async read(helper: EngineHelper, op: string, apply: (reply: Json) => void): Promise<void> {
+    const { plusReadTries, plusReadRetryMs } = engineLimits()
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const reply = await helper.request(op)
+        if (this.helper === helper) apply(reply)
+        return
+      } catch (error) {
+        if (this.helper !== helper || helperCode(error) === 'unknown_op' || attempt >= plusReadTries) return
+        await new Promise((resolve) => setTimeout(resolve, plusReadRetryMs))
+        if (this.helper !== helper) return
+      }
+    }
   }
 
   /** What `netEngine.status` carries; `nameOf` names a host this computer is paired with. */
@@ -131,11 +172,13 @@ export class EnginePlus {
     const account = obj(reply.account)
     const usage = obj(reply.usage)
     const link = obj(reply.link)
-    const relay = this.plus?.relay
+    const relay = this.relay
+    this.origin = originOf(str(reply.url)) ?? this.origin
     this.plus = {
       configured: reply.configured !== false,
       linked: reply.linked === true,
-      ...(link && str(link.user_code) && str(link.verify_url)
+      // A sign-in page off the Plus address is not shown.
+      ...(link && str(link.user_code) && this.onPlus(str(link.verify_url))
         ? {
             link: {
               userCode: str(link.user_code)!,
@@ -184,15 +227,11 @@ export class EnginePlus {
       case 'plus.relay': {
         const interactive = relayClass(event.interactive)
         const bulk = relayClass(event.bulk)
-        this.plus = {
-          ...(this.plus ?? { configured: true, linked: true }),
-          relay: { ...(interactive ? { interactive } : {}), ...(bulk ? { bulk } : {}) }
-        }
-        return this.changed()
+        return this.setRelay({ ...(interactive ? { interactive } : {}), ...(bulk ? { bulk } : {}) })
       }
       case 'plus.relay.paused': {
         // Copies over the paid relay pause and resume on their own; the window shows a line, never a prompt.
-        const relay = { ...this.plus?.relay }
+        const relay = { ...this.relay }
         const cls =
           event.class === 'bulk'
             ? 'bulk'
@@ -205,8 +244,7 @@ export class EnginePlus {
           ...current,
           state: event.paused === true ? 'paused' : current.bytesLeft > 0 ? 'funded' : 'unfunded'
         }
-        this.plus = { ...(this.plus ?? { configured: true, linked: true }), relay }
-        return this.changed()
+        return this.setRelay(relay)
       }
       case 'removal.state': {
         const item = removal(event)
@@ -225,6 +263,18 @@ export class EnginePlus {
         return
       }
     }
+  }
+
+  /** The paid relay's state; it shows with the Plus state, never in place of it (nothing here says signed in). */
+  private setRelay(relay: NonNullable<NetEnginePlus['relay']>): void {
+    this.relay = relay
+    if (this.plus) this.plus = { ...this.plus, relay }
+    this.changed()
+  }
+
+  /** Whether `url` is on the Plus address the helper said. */
+  private onPlus(url: string | undefined): boolean {
+    return !!this.origin && originOf(url) === this.origin
   }
 
   private require(): EngineHelper {
@@ -252,6 +302,7 @@ export class EnginePlus {
   async signIn(): Promise<{ userCode: string; verifyUrl: string; expiresAt: number }> {
     const reply = await this.call('plus.link.start')
     await this.refreshStatus()
+    if (!this.onPlus(str(reply.verify_url))) throw new NetError('forbidden', PLUS_WRONG_PAGE)
     return {
       userCode: str(reply.user_code) ?? '',
       verifyUrl: str(reply.verify_url) ?? '',

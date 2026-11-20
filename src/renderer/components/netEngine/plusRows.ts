@@ -17,7 +17,8 @@ export function removalText(item: NetEngineRemoval): { line: string; warn?: bool
   switch (item.state) {
     case 'done':
       if (item.result === 'applied') return { line: 'Removed' }
-      if (item.result === 'stale') return { line: 'Already replaced by a newer pairing' }
+      // A newer pairing of the device stays on that host: it still has access there.
+      if (item.result === 'stale') return { line: 'Already replaced by a newer pairing', warn: true }
       return { line: 'Refused', warn: true }
     case 'sent':
       return { line: 'Waiting (sent)' }
@@ -30,6 +31,16 @@ export function removalText(item: NetEngineRemoval): { line: string; warn?: bool
     default:
       return { line: `Waits until this device reaches ${host}` }
   }
+}
+
+/**
+ * The title over one removed device's per-host states: removed only once every host removed it, a warning once a
+ * host did not, and removing while any host has yet to answer.
+ */
+export function removalTitle(name: string, items: NetEngineRemoval[]): { line: string; warn?: boolean } {
+  if (items.some((item) => removalText(item).warn)) return { line: `${name} not removed on every host`, warn: true }
+  if (items.every((item) => item.state === 'done')) return { line: `${name} removed on my hosts` }
+  return { line: `Removing ${name} on my hosts` }
 }
 
 /** How the last sign-in ended, when it did not end signed in. */
