@@ -23,10 +23,16 @@ const KIND_WORDS: Record<BackgroundWorkItem['kind'], string> = {
   command: 'Monitor',
   url: 'Monitor',
   background: 'Command',
-  keep_working: 'Waiting'
+  keep_working: 'Waiting',
+  wake: 'Wake-up'
 }
 
 const clock = (iso: string): string => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+/** A time, with its day when it is not today (a wake-up may be days ahead). */
+const when = (iso: string): string => {
+  const at = new Date(iso)
+  return at.toDateString() === new Date().toDateString() ? clock(iso) : at.toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+}
 
 /** The Details list: running subagents first, then the thread's own background work, then the provider's. */
 export function backgroundLines(
@@ -46,7 +52,9 @@ export function backgroundLines(
       key: item.id,
       title: item.description,
       kind: KIND_WORDS[item.kind],
-      tooltip: [item.command ?? item.url, item.latest, `Ends by ${clock(item.until)} at the latest`].filter(Boolean).join('\n'),
+      tooltip: item.kind === 'wake'
+        ? (item.waitsFor ? `Wakes ${item.waitsFor}, or at ${when(item.until)} at the latest` : `Wakes at ${when(item.until)}`)
+        : [item.command ?? item.url, item.latest, `Ends by ${clock(item.until)} at the latest`].filter(Boolean).join('\n'),
       stop: () => actions.stopItem(item.id)
     })),
     ...(work?.providerWork

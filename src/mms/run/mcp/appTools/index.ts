@@ -26,6 +26,7 @@ import { skillTools } from './skills'
 import { taskTools } from './tasks'
 import { terminalTools } from './terminals'
 import { botThreadReach, lineageRelation, threadTools } from './thread'
+import { shareWakeTools, threadWakeTools } from './threadWakes'
 import type { AppToolTurns } from './turns'
 import { webTools } from './web'
 
@@ -134,7 +135,8 @@ export function createAppToolRegistry(input: {
   add('browser', browserTools(host))
   add('computer', computerTools(host))
   add('applets', appletTools())
-  add('bots', [...botTools(input.bots), ...botCatalogueTools(() => registry), ...(input.botMemory ? [...botMemoryTools(input.botMemory), ...botItemTools(input.botMemory)] : [])])
+  // `wake`, `reminder_list` and `reminder_cancel` serve a bot's turn and any thread's (`shareWakeTools`).
+  add('bots', [...shareWakeTools(botTools(input.bots), threadWakeTools(host)), ...botCatalogueTools(() => registry), ...(input.botMemory ? [...botMemoryTools(input.botMemory), ...botItemTools(input.botMemory)] : [])])
   add('projectGit', projectGitTools(host))
   add('profiler', profilerTools(host, engine))
   add('appearance', appearanceTools(host))

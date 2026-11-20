@@ -554,16 +554,40 @@ export function isMonitorEventRow(row: Pick<InboxRecord, 'kind' | 'payload'>): b
 }
 
 /**
- * A row that waits while the thread waits on a person's answer: an agent's note or a monitor's event. A live provider
- * settles a pending request when it takes a steer, and neither answers one.
+ * Payload of a `reconcile_notice` row that carries a thread agent's own wake-up (`wake`, `ThreadWakes`): it was due, or
+ * what it waited on happened (another thread finished its turn, a pull request merged, its checks settled or it got a
+ * review), or it ended without it. It is delivered as an agent note is, and grants nothing: an idle thread starts a turn
+ * no person started, a running turn takes it as a steer or with its next Mousse tool call, and it waits while the thread
+ * waits on a person's answer. `text` is the whole notice the agent reads (`wakeInput`); the rest is for the app's row.
+ * One with `attention: none` says the thread's wake-ups were cancelled (its Stop or archive) and waits for its next turn.
  */
-export function waitsForAnswer(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
-  return isAgentNoteRow(row) || isMonitorEventRow(row)
+export interface ThreadWakePayload {
+  kind: 'thread_wake'
+  wakeId: string
+  /** What happened, in a few words: "Following up · acme/app#12 merged" (`wakeFiredLabel`). */
+  label: string
+  /** What the agent wrote for itself. */
+  brief: string
+  text: string
+  attention: 'needed' | 'none'
 }
 
-/** A note or a monitor's notice sent with `attention: none`: it never starts a turn of its own. */
+export function isThreadWakeRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'thread_wake'
+}
+
+/**
+ * A row that waits while the thread waits on a person's answer: an agent's note, a monitor's event or a wake-up. A live
+ * provider settles a pending request when it takes a steer, and none of them answers one.
+ */
+export function waitsForAnswer(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return isAgentNoteRow(row) || isMonitorEventRow(row) || isThreadWakeRow(row)
+}
+
+/** A note, a monitor's notice or a wake-up's sent with `attention: none`: it never starts a turn of its own. */
 export function isQuietNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
   if (isAgentNoteRow(row)) return (row.payload as AgentNotePayload).attention === 'none'
+  if (isThreadWakeRow(row)) return (row.payload as ThreadWakePayload).attention === 'none'
   return isMonitorEventRow(row) && (row.payload as MonitorEventPayload).attention === 'none'
 }
 

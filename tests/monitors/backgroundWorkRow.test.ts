@@ -17,18 +17,21 @@ const subagent = (childThreadId: string, state: string) => ({ childThreadId, tit
 
 describe('the background work line', () => {
   it.each([
-    [{ subagents: 2, commands: 1, monitors: 3 }, 'Waiting on 2 subagents, 1 command and 3 monitors'],
-    [{ subagents: 0, commands: 2, monitors: 1 }, 'Waiting on 2 commands and 1 monitor'],
-    [{ subagents: 1, commands: 0, monitors: 0 }, 'Waiting on 1 subagent'],
-    [{ subagents: 0, commands: 0, monitors: 0 }, '']
+    [{ subagents: 2, commands: 1, monitors: 3, wakes: 0 }, 'Waiting on 2 subagents, 1 command and 3 monitors'],
+    [{ subagents: 0, commands: 2, monitors: 1, wakes: 0 }, 'Waiting on 2 commands and 1 monitor'],
+    [{ subagents: 1, commands: 0, monitors: 0, wakes: 0 }, 'Waiting on 1 subagent'],
+    [{ subagents: 0, commands: 0, monitors: 0, wakes: 0 }, ''],
+    // A wake-up runs nothing: it is named after what runs, or alone.
+    [{ subagents: 0, commands: 0, monitors: 1, wakes: 1 }, 'Waiting on 1 monitor · 1 wake-up set'],
+    [{ subagents: 0, commands: 0, monitors: 0, wakes: 2 }, '2 wake-ups set']
   ])('%j → %s', (counts, text) => {
     expect(backgroundHeadline(counts)).toBe(text)
   })
 
-  it('counts holds with monitors and the provider\'s own work with commands', () => {
-    const counts = backgroundCounts(work([item('mon-1', 'command'), item('mon-2', 'url'), item('kw-1', 'keep_working'), item('bg-1', 'background')], true), 2)
-    expect(counts).toEqual({ subagents: 2, commands: 2, monitors: 3 })
-    expect(backgroundCounts(undefined, 0)).toEqual({ subagents: 0, commands: 0, monitors: 0 })
+  it('counts holds with monitors, the provider\'s own work with commands and wake-ups on their own', () => {
+    const counts = backgroundCounts(work([item('mon-1', 'command'), item('mon-2', 'url'), item('kw-1', 'keep_working'), item('bg-1', 'background'), item('wake-1', 'wake')], true), 2)
+    expect(counts).toEqual({ subagents: 2, commands: 2, monitors: 3, wakes: 1 })
+    expect(backgroundCounts(undefined, 0)).toEqual({ subagents: 0, commands: 0, monitors: 0, wakes: 0 })
   })
 })
 
@@ -49,6 +52,20 @@ describe('Details', () => {
     lines[3]!.stop()
     expect(stopSubagent).toHaveBeenCalledWith('c1')
     expect(stopItem.mock.calls).toEqual([['mon-1'], [PROVIDER_BACKGROUND_ID]])
+  })
+
+  it('a wake-up says when it wakes: what it waits for and when it gives up, or its time', () => {
+    const at = new Date()
+    at.setHours(15, 30, 0, 0)
+    const time = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    const lines = backgroundLines([], work([
+      { ...item('wake-1', 'wake', 'Read the review on PR 12'), until: at.toISOString(), waitsFor: 'when acme/app#12 is reviewed' },
+      { ...item('wake-2', 'wake', 'Check the nightly'), until: at.toISOString() }
+    ]), { stopSubagent: vi.fn(), stopItem: vi.fn() })
+    expect(lines.map((line) => [line.kind, line.tooltip])).toEqual([
+      ['Wake-up', `Wakes when acme/app#12 is reviewed, or at ${time} at the latest`],
+      ['Wake-up', `Wakes at ${time}`]
+    ])
   })
 })
 

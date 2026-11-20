@@ -41,7 +41,7 @@ export function nameRemovedSubagents(removed: readonly SubagentSummary[], messag
   const titles = new Map<string, string>()
   for (const message of messages) {
     for (const item of readSubagentNotice(message) ?? []) {
-      if (item.event === 'monitor') continue
+      if (item.event === 'monitor' || item.event === 'wake') continue
       const title = item.title?.replace(/\s+/g, ' ').trim()
       if (title) titles.set(item.childThreadId, title)
     }

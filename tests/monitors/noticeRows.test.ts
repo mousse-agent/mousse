@@ -12,7 +12,7 @@ import { OpenableNoticeRow } from '../../src/renderer/chat/components/agent-elem
 import { SubagentCardsContext } from '../../src/renderer/chat/components/agent-elements/tools/subagent-cards-context'
 import { monitorNoticeLine } from '../../src/renderer/chat/adapters/subagentNotice'
 import { planWakeNotice } from '../../src/mms/run/delegation/notice'
-import type { AgentNotePayload, InboxRecord, MonitorEventPayload } from '../../src/mms/run/types'
+import type { AgentNotePayload, InboxRecord, MonitorEventPayload, ThreadWakePayload } from '../../src/mms/run/types'
 import type { SubagentNoticeItem } from '../../src/shared/subagents'
 
 const row = (payload: unknown): InboxRecord => ({ inboxId: 'i1', threadId: 'parent', kind: 'reconcile_notice', payload }) as unknown as InboxRecord
@@ -82,5 +82,19 @@ describe('the transcript', () => {
     expect(html).not.toContain('mousse_notice')
     expect(html).not.toContain('chat-user-bubble')
     expect(html).toContain('Noted.')
+  })
+
+  it('draws a due wake-up as a quiet row that opens on its brief', () => {
+    const wake: ThreadWakePayload = { kind: 'thread_wake', wakeId: 'wake-1', label: 'Following up · acme/app#12 · checks passed', brief: 'Merge it if green.', text: '<mousse_notice kind="thread_wake">\nA wake-up you set is due.\n</mousse_notice>', attention: 'needed' }
+    const timed: ThreadWakePayload = { ...wake, wakeId: 'wake-2', label: 'Following up', brief: 'Check the nightly.' }
+    const planned = planWakeNotice([row(wake), row(timed)])
+    const html = render([message('wake', 'user', [{ type: 'text', text: planned.text }], { subagentNotice: planned.items })])
+    expect(html).toContain('Wake-up')
+    expect(html).toContain('acme/app#12 · checks passed')
+    expect(html).toContain('>due<')
+    expect(html).not.toContain('mousse_notice')
+    expect(html).not.toContain('chat-user-bubble')
+    const open = renderToStaticMarkup(createElement(OpenableNoticeRow, { item: planned.items[0]!, initiallyOpen: true }))
+    expect(open).toContain('<div class="subagent-notice-words" data-kind="note">Merge it if green.</div>')
   })
 })

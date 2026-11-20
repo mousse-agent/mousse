@@ -102,3 +102,12 @@ export function noteNoticeName(item: Pick<SubagentNoticeItem, 'title' | 'note'>)
   const title = item.title?.replace(/\s+/g, ' ').trim()
   return title ? `${who} “${title}”` : who
 }
+
+/**
+ * A wake-up's row: "Wake-up" and what happened ("Following up · acme/app#12 merged" reads "acme/app#12 merged"). It
+ * opens on what the agent wrote for itself.
+ */
+export function wakeNoticeLine(item: Pick<SubagentNoticeItem, 'title'>): { name: string; detail: string; tone: SubagentNoticeTone } {
+  const what = item.title?.replace(/\s+/g, ' ').trim().replace(/^Following up(?: · )?/, '') ?? ''
+  return { name: 'Wake-up', detail: what || 'due', tone: 'done' }
+}

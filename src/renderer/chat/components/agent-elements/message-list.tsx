@@ -2667,7 +2667,7 @@ const TurnRow = memo(function TurnRow({
             const notice = readSubagentNotice(msg);
             if (!notice) return [msg];
             const rest = notice.filter((item) =>
-              item.event === "note" || item.event === "monitor" ? true
+              item.event === "note" || item.event === "monitor" || item.event === "wake" ? true
                 : item.delegationId ? !cardedSubagents.has(item.delegationId) : !cardedThreads.has(item.childThreadId),
             );
             if (rest.length === 0) return [];
