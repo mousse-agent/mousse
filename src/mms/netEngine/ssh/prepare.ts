@@ -48,6 +48,8 @@ export interface PrepareEngine {
   grantLive(grantId: string): Promise<boolean>
   /** The grant id on a serving row, if the row still serves. */
   rowGrant(key: string): string | undefined
+  /** A row's state now (`removing` while a removal waits for this request), undefined once it is gone. */
+  rowState(key: string): string | undefined
 }
 
 export interface PreparePort {
@@ -63,8 +65,11 @@ export interface PreparePort {
   createProfile(label: string, requestId: string): Promise<string>
   /** Step 3: the profile's networking, on with nothing advertised, its helper running. */
   engine(selector: string): Promise<PrepareEngine>
-  /** Runs `work` under the per-device lock 1a's removal takes for `joiner` on `selector`. */
-  locked<T>(selector: string, joiner: string, work: () => Promise<T>): Promise<T>
+  /**
+   * Runs `work` under the lock of the remote computer `joiner`: every prepare of it, on any profile, and every
+   * removal of it take the same one (§3.6).
+   */
+  locked<T>(joiner: string, work: () => Promise<T>): Promise<T>
   startsAtLogin(): boolean
   /** A check stops B after a step, as a crash would (the step is recorded; nothing after it). */
   crashAt?(step: PrepareStep): boolean
@@ -91,14 +96,18 @@ const same = (a: SshRequest, b: PrepareRequest): boolean =>
 /**
  * B's side of `prepare` (1b §3.4 step 4): each step records its result before the next, so a repeat with the same
  * `request_id` resumes at the first unrecorded step, and a request already done answers its stored reply only while
- * its grant still serves. Runs under the removal lock of A on the profile.
+ * its grant still serves. The whole of it runs under the lock of A that A's removal takes too, and it checks the
+ * request and A's row again before each thing it records: a removal is never undone.
  */
 export async function prepare(port: PreparePort, request: PrepareRequest): Promise<PrepareReply> {
   if (!/^[0-9a-f]{32}$/.test(request.requestId))
     throw new NetError('bad_request', 'Bad request id.', { details: { reason: 'bad_request' } })
   if (!request.selector === !request.newLabel)
     throw new NetError('bad_request', 'Name one profile.', { details: { reason: 'bad_request' } })
+  return port.locked(request.joiner, () => prepareLocked(port, request))
+}
 
+async function prepareLocked(port: PreparePort, request: PrepareRequest): Promise<PrepareReply> {
   // The control makes the profile before the request is journaled: a crash between them leaves a profile no
   // repeat finds, so the repeat makes a second one.
   if (engineControl('profile-before-journal') && request.newLabel && !port.requests.get(request.requestId))
@@ -115,7 +124,13 @@ export async function prepare(port: PreparePort, request: PrepareRequest): Promi
     throw new NetError('bad_request', 'That request id was used for something else.', {
       details: { reason: 'bad_request' }
     })
-  if (record.state === 'removed') throw removed()
+  /** The request as recorded now; a removed one ends here. */
+  const current = (): SshRequest => {
+    const now = port.requests.get(request.requestId)
+    if (!now || now.state === 'removed') throw removed()
+    return now
+  }
+  record = current()
 
   // 2. Profile.
   let profile = record.profile
@@ -130,17 +145,23 @@ export async function prepare(port: PreparePort, request: PrepareRequest): Promi
       profile =
         port.profileTagged(request.requestId) ??
         (await port.createProfile(request.newLabel!, request.requestId))
+    current()
     record = port.requests.update(request.requestId, { profile })
     crash(port, 'profile')
   }
   const selector = profile
 
-  return port.locked(selector, request.joiner, async () => {
-    record = port.requests.get(request.requestId)!
-    if (record.state === 'removed') throw removed()
+  {
     // 3. Networking.
     const engine = await port.engine(selector)
+    record = current()
     crash(port, 'networking')
+    /** A's row is still the one this request writes to, not one a removal has taken. */
+    const ours = (key: string) => {
+      const state = engine.rowState(key)
+      if (state !== 'ssh_granting' && state !== 'ssh_granted' && state !== 'connected')
+        throw removed()
+    }
 
     if (record.state === 'done') {
       const stored = record.reply as PrepareReply | undefined
@@ -184,20 +205,25 @@ export async function prepare(port: PreparePort, request: PrepareRequest): Promi
     }
     if (record.row === 'existing') return done(port, engine, record, selector, true)
 
-    // 5. Grant: stored on the request, then on the row.
+    // 5. Grant: stored on the request, then on the row. A removal that came in meanwhile waits for this lock and
+    // then removes the grant by identity and receipt: nothing is recorded over it.
     let grant = record.grantId
     if (!grant) {
       grant = await engine.grantAdd(request)
       crash(port, 'grant-saved')
+      current()
+      ours(key!)
       record = port.requests.update(request.requestId, { grantId: grant })
       crash(port, 'grant-stored')
     }
+    current()
+    ours(key!)
     if (engine.rowGrant(key!) !== grant) engine.setRowGrant(key!, grant)
 
     // 6. Done.
     engine.granted(key!)
-    return done(port, engine, record, selector, false)
-  })
+    return done(port, engine, current(), selector, false)
+  }
 }
 
 function done(

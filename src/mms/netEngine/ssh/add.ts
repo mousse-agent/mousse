@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { NetError } from '../../../shared/net/errors'
-import { helperCode } from '../helper/appChannel'
+import { isSshParked, type NetEngineSshParked } from '../../../shared/netEngine/local'
+import { helperCode, helperWhy } from '../helper/appChannel'
 import type { EngineHelper } from '../helper/connections'
 import { engineControl, engineLimits } from '../limits'
 import type { EnginePeerRow, EnginePeerStore, EngineSshJournal } from '../store'
@@ -45,6 +46,10 @@ export interface SshAddPort {
   changed(): void
   /** Seconds since 1970. */
   now(): number
+  /** A dial failed on a login only the owner can fix (§1.4): the pairing shows it and is not dialled on its own. */
+  park?(node: EnginePeerRow['localId'], why: NetEngineSshParked): void
+  /** The owner trusted a host key: parked logins may be tried again. */
+  trusted?(): void
 }
 
 /** §3.5: each reason as one line, `<host>` and `<user>` filled in. */
@@ -138,12 +143,27 @@ export class SshAdd {
 
   async trust(routeId: string, sha256: string, host?: string): Promise<void> {
     await this.ask('ssh.trust', { route_id: routeId, sha256 }, host)
+    this.port.trusted?.()
+  }
+
+  /** The last profiles list session 1 answered, by route: Connect reads it rather than signing in again (§3.4). */
+  private readonly listed = new Map<string, SshProfiles>()
+
+  /** What session 1 last answered for `routeId`, if it ran in this add. */
+  listedProfiles(routeId: string): SshProfiles | undefined {
+    return this.listed.get(routeId)
   }
 
   /** Session 1: B's profiles. */
   async profiles(routeId: string, host?: string, user?: string): Promise<SshProfiles> {
     const reply = await this.run(routeId, { op: 'profiles' }, host, user)
     const list = Array.isArray(reply.profiles) ? reply.profiles : []
+    const answer = this.readProfiles(reply, list, host)
+    this.listed.set(routeId, answer)
+    return answer
+  }
+
+  private readProfiles(reply: Record<string, any>, list: unknown[], host?: string): SshProfiles {
     return {
       computer: String(reply.computer ?? host ?? ''),
       os: String(reply.os ?? ''),
@@ -273,6 +293,12 @@ export class SshAdd {
       ...(selector ? { selector } : {}),
       startsAtLogin: reply.starts_at_login === true
     }
+    // The owner removed this row here while B answered: nothing is recorded over the removal.
+    const removedHere = () =>
+      new NetError('bad_request', 'Removed on this computer.', {
+        details: { reason: 'removed_here' }
+      })
+    if (this.port.peers.get(row.localId)?.state !== 'ssh_requested') throw removedHere()
     // A row of an earlier add of this profile (one B removed, say) gives way to this one: one row per computer.
     for (const earlier of this.port.peers.all())
       if (
@@ -291,35 +317,70 @@ export class SshAdd {
         { route_id: journal.routeId, selector: journal.selector, shell: journal.shell ?? 'sh' }
       ]
     })
-    const saved = this.port.peers.update(row.localId, {
+    const saved = this.port.peers.advance(row.localId, ['ssh_requested'], {
       endpoint: identity,
       name,
       state: 'ssh_granted',
       ssh: journal
-    })!
+    })
+    if (!saved) {
+      // Removed meanwhile: B's pin and route go again, unless another live row still uses them.
+      const other = this.port.peers
+        .all()
+        .some((item) => item.endpoint === identity && item.state !== 'removed')
+      if (!other) await helper.request('peer.forget', { identity }).catch(() => undefined)
+      throw removedHere()
+    }
     this.port.changed()
     helper.claim(identity)
     this.dialUntilConnected(saved.localId, identity)
     return saved
   }
 
+  /** Retries of first dials waiting now; `dispose` clears them. */
+  private readonly retries = new Set<ReturnType<typeof setTimeout>>()
+  private disposed = false
+
+  /** Networking stopped: no retry runs after it (its store is closed). */
+  dispose(): void {
+    this.disposed = true
+    for (const timer of this.retries) clearTimeout(timer)
+    this.retries.clear()
+  }
+
   /**
    * A's first dial to B. One that fails (B's helper may not take the new grant yet, as right after B removed an
-   * earlier pairing) is tried again every `pairingRetryMs` while the row waits for it and networking runs.
+   * earlier pairing) is tried again every `pairingRetryMs` while the row waits for it and networking runs. A
+   * refusal only the owner can clear (`auth_denied`, `host_key_changed`, `host_key_unknown`) parks it instead: the
+   * row shows it and it is never retried on its own (§1.4; repeated denied logins trip fail2ban).
    */
   private dialUntilConnected(node: EnginePeerRow['localId'], identity: string): void {
-    const attempt = (): void => {
-      const helper = this.port.helper()
-      let waiting = false
+    const waiting = (): EnginePeerRow | undefined => {
+      if (this.disposed) return undefined
       try {
-        waiting = this.port.peers.get(node)?.state === 'ssh_granted'
+        const row = this.port.peers.get(node)
+        return row?.state === 'ssh_granted' ? row : undefined
       } catch {
         // Networking stopped and its store closed.
+        return undefined
       }
-      if (!helper || !waiting) return
-      void helper.dial(identity).catch(() => {
-        const timer = setTimeout(attempt, engineLimits().pairingRetryMs)
+    }
+    const attempt = (): void => {
+      const helper = this.port.helper()
+      if (!helper || !waiting()) return
+      void helper.dial(identity).catch((error) => {
+        if (!waiting()) return
+        const why = helperWhy(error) ?? (error instanceof NetError ? reasonOf(error) : undefined)
+        if (isSshParked(why)) {
+          this.port.park?.(node, why)
+          return
+        }
+        const timer = setTimeout(() => {
+          this.retries.delete(timer)
+          attempt()
+        }, engineLimits().pairingRetryMs)
         timer.unref?.()
+        this.retries.add(timer)
       })
     }
     attempt()

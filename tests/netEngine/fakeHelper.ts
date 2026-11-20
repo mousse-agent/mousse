@@ -122,6 +122,8 @@ export class FakeNetwork {
   readonly routes = new Map<string, string[]>()
   /** For each host identity, the grant each caller identity holds there (the helper's numbers; tests may name one). */
   private readonly grants = new Map<string, Map<string, number | string>>()
+  /** The receipt `grant.add` saved with a grant, by grant number (kept while the grant lives, as the helper does). */
+  readonly receipts = new Map<string, string>()
   /** For each identity, the identities it may dial (its peers). */
   private readonly peers = new Map<string, Set<string>>()
   /** Open invitations by ticket, with their host. */
@@ -264,6 +266,7 @@ export class FakeNetwork {
     for (const [caller, given] of held ?? [])
       if (String(given) === String(grant)) {
         held!.delete(caller)
+        this.receipts.delete(String(given))
         for (const conn of [...this.conns])
           if (
             (conn.a.identity === caller && conn.b.identity === host) ||
@@ -1222,8 +1225,12 @@ export class FakeHelper {
           this.event({ ev: 'invite.ended', invitation: waiting.invitation, reason: 'used' })
           return waiting.answer({})
         }
-        case 'grant.add':
-          return reply(this.network.grant(this.identity, String(message.identity)))
+        case 'grant.add': {
+          const added = this.network.grant(this.identity, String(message.identity))
+          if (!added.already && typeof message.receipt === 'string')
+            this.network.receipts.set(String(added.grant), message.receipt)
+          return reply(added)
+        }
         case 'grants.list':
           return reply({
             grants: this.network.grantsAt(this.identity).map(({ caller, grant }) => ({
@@ -1232,7 +1239,7 @@ export class FakeHelper {
               name: '',
               role: 'owner',
               expires_at: null,
-              receipt: null
+              receipt: this.network.receipts.get(String(grant)) ?? null
             }))
           })
         case 'grant.remove': {

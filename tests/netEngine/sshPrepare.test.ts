@@ -38,6 +38,18 @@ function b() {
   const grants = new Map<string, { identity: string; receipt?: string }>()
   let nextGrant = 1
   let crashAt: string | undefined
+  /** A step waits here while set (the grant being saved, a profile being made). */
+  const gates: { grant?: Promise<void>; profile?: Promise<void> } = {}
+  /** One lock per remote computer, as `SshRemote.locked` keeps it. */
+  const locks = new Map<string, Promise<unknown>>()
+  const locked = <T>(joiner: string, work: () => Promise<T>): Promise<T> => {
+    const run = (locks.get(joiner) ?? Promise.resolve()).catch(() => undefined).then(work)
+    locks.set(
+      joiner,
+      run.catch(() => undefined)
+    )
+    return run
+  }
   const crash = (step: string) => {
     if (crashAt === step) {
       crashAt = undefined
@@ -56,6 +68,7 @@ function b() {
       return key
     },
     grantAdd: async (request) => {
+      await gates.grant
       const held = [...grants].find(([, grant]) => grant.identity === request.joiner)
       const id = held?.[0] ?? String(nextGrant++)
       grants.set(id, { identity: request.joiner, receipt: request.requestId })
@@ -66,11 +79,13 @@ function b() {
       rows.get(key)!.grant = grant
     },
     granted: (key) => {
-      rows.get(key)!.state = 'ssh_granted'
+      const row = rows.get(key)!
+      if (row.state === 'ssh_granting') row.state = 'ssh_granted'
       crash('granted')
     },
     grantLive: async (id) => grants.has(id),
-    rowGrant: (key) => rows.get(key)?.grant
+    rowGrant: (key) => rows.get(key)?.grant,
+    rowState: (key) => rows.get(key)?.state
   })
   const port: PreparePort = {
     requests,
@@ -79,13 +94,14 @@ function b() {
     hasProfile: (selector) => profiles.has(selector),
     profileTagged: (tag) => [...profiles].find(([, value]) => value.tag === tag)?.[0],
     createProfile: async (_label, tag) => {
+      await gates.profile
       const selector = `prof${profiles.size + 1}`
       profiles.set(selector, { tag })
       crash('profile')
       return selector
     },
     engine: async (selector) => engine(selector),
-    locked: (_selector, _joiner, work) => work(),
+    locked,
     startsAtLogin: () => true
   }
   return {
@@ -94,6 +110,8 @@ function b() {
     profiles,
     rows,
     grants,
+    gates,
+    locked,
     crashAt: (step: string) => (crashAt = step)
   }
 }
@@ -191,5 +209,54 @@ describe('removal of A on B (§3.6)', () => {
     })
     expect(s.grants.size).toBe(0)
     await expect(prepare(s.port, request())).rejects.toMatchObject({ details: { reason: 'removed' } })
+  })
+
+  /** B's removal of A as `EnginePairing` runs it: the row `removing` at once, the rest under A's lock. */
+  const remove = (s: ReturnType<typeof b>, key: string) => {
+    s.rows.get(key)!.state = 'removing'
+    return s.locked(A, async () => {
+      for (const [grant, value] of [...s.grants]) if (value.identity === A) s.grants.delete(grant)
+      await removeRequestsOf(s.requests, A, 'prof1', {
+        list: async () => [...s.grants].map(([grant, value]) => ({ grant, ...value })),
+        remove: async (grant) => void s.grants.delete(grant)
+      })
+      s.rows.delete(key)
+    })
+  }
+
+  it('is never undone by the prepare whose grant was being saved when it came', async () => {
+    const s = b()
+    let release!: () => void
+    s.gates.grant = new Promise((resolve) => (release = resolve))
+    const running = prepare(s.port, request())
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    const [key] = [...s.rows.keys()]
+    expect(s.rows.get(key!)?.state).toBe('ssh_granting')
+    const removal = remove(s, key!)
+    release()
+    await expect(running).rejects.toMatchObject({ details: { reason: 'removed' } })
+    await removal
+    expect(s.requests.get(request().requestId)?.state).toBe('removed')
+    expect(s.grants.size).toBe(0)
+    expect(s.rows.size).toBe(0)
+    await expect(prepare(s.port, request())).rejects.toMatchObject({
+      details: { reason: 'removed' }
+    })
+  })
+})
+
+describe('two prepares of one request at once (§3.4 retry safety)', () => {
+  it('make one profile for a new label', async () => {
+    const s = b()
+    let release!: () => void
+    s.gates.profile = new Promise((resolve) => (release = resolve))
+    const fresh = request({ selector: undefined, newLabel: 'Work' })
+    const first = prepare(s.port, fresh)
+    const second = prepare(s.port, fresh)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    release()
+    const replies = await Promise.all([first, second])
+    expect(replies.map((reply) => reply.selector)).toEqual(['prof2', 'prof2'])
+    expect(s.profiles.size).toBe(2)
   })
 })
