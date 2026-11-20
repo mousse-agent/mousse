@@ -1047,20 +1047,15 @@ export function OrchestratorChat() {
       setConnectionFailed(false)
       setSendError(null)
       const stillVisible = () => useAppStore.getState().profileId === profileId && useAppStore.getState().activeThreadId === targetThreadId
-      // Keep retry identities across navigation without retaining message/image bodies.
-      const bytes = new TextEncoder().encode(JSON.stringify({ profileId, threadId: targetThreadId, content, mode, images }))
-      const signature = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('')
-      if (!stillVisible()) return
-      // The service's retry key: a send that may have arrived lends its id to the same message sent again.
-      const requestId = sendIds.current.begin(signature)
       const request = {
-        requestId,
         content: content || (images?.length ? '[Image attachment]' : ''),
         mode,
         images,
         ...(conversationBranchId ? { conversationBranchId } : {}),
         ...(expect ? { expect } : {})
       }
+      // Everything below up to the first await paints the message, in the same frame as the composer clears: it is
+      // never off the screen. Its retry id is read after it shows (`requestId`).
       // Paint an ordinary send before IPC/disk/provider work. The App event handler swaps this
       // row for the durable message by matching its content; stale hydration snapshots retain it.
       // The messages the transcript had before this one, to tell it from an identical one sent earlier.
@@ -1086,7 +1081,6 @@ export function OrchestratorChat() {
       // is not the one it joins (a turn is still being set up), it shows in the queue, first, until a turn takes it.
       const shownRow = typeof steer === 'object' ? steer.row : null
       const paintsSteer = Boolean(steer) && queuesNow && targetThreadId === queue.threadId && replyOpenRef.current
-      if (paintsSteer) setSteersOnTheWay((current) => new Set(current).add(requestId))
       if (shownRow && !paintsSteer) queue.endComposerSteer(shownRow, false)
       const steerRow = paintsSteer ? shownRow ?? queue.beginComposerSteer(request.content, images) : null
       if (optimisticMessageId) {
@@ -1111,9 +1105,7 @@ export function OrchestratorChat() {
           order: Number.MAX_SAFE_INTEGER,
           intent: 'normal',
           state: 'pending',
-          source: 'gui',
-          // The daemon's item carries the same id: whichever arrives first, the queue shows one.
-          clientRequestId: requestId
+          source: 'gui'
         }])
       }
       // Painted in the queue, but the service started its turn at once: the copy leaves the queue as the transcript
@@ -1145,11 +1137,23 @@ export function OrchestratorChat() {
           })
         }
       }
+      let signature = ''
+      let requestId = ''
       try {
+        // Keep retry identities across navigation without retaining message/image bodies. The message is sent even if
+        // its thread was left meanwhile: it is already shown there.
+        const bytes = new TextEncoder().encode(JSON.stringify({ profileId, threadId: targetThreadId, content, mode, images }))
+        signature = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('')
+        // The service's retry key: a send that may have arrived lends its id to the same message sent again.
+        requestId = sendIds.current.begin(signature)
+        const sentId = requestId
+        if (paintsSteer) setSteersOnTheWay((current) => new Set(current).add(sentId))
+        // The daemon's item carries the same id: whichever arrives first, the queue shows one.
+        if (optimisticQueueId) setOptimisticQueueItems((current) => current.map((item) => item.id === optimisticQueueId ? { ...item, clientRequestId: sentId } : item))
         const result = await (targetThreadId
-          ? window.mousse.orchestrator.sendToThread(targetThreadId, request)
-          : window.mousse.orchestrator.send(request)
-        ).finally(() => sendIds.current.replied(requestId))
+          ? window.mousse.orchestrator.sendToThread(targetThreadId, { requestId: sentId, ...request })
+          : window.mousse.orchestrator.send({ requestId: sentId, ...request })
+        ).finally(() => sendIds.current.replied(sentId))
         if (result.error && result.requestAcknowledged === false) throw result.error
         sendIds.current.settle(signature, requestId, 'answered')
         if (!stillVisible()) return
