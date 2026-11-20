@@ -100,8 +100,32 @@ function noticeText(row: InboxRecord, context: NoticeContext, items: SubagentNot
     })
     return questionNotice(payload, context)
   }
-  if (isAgentNoteRow(row)) return agentNoteNotice(row.payload as AgentNotePayload)
-  if (isMonitorEventRow(row)) return monitorNotice(row.payload as MonitorEventPayload)
+  if (isAgentNoteRow(row)) {
+    const payload = row.payload as AgentNotePayload
+    // The app shows the note's words on a row of its own, never the notice as the person's message.
+    items.push({ delegationId: '', childThreadId: payload.senderThreadId, title: payload.senderTitle, runStatus: 'note', fullyShown: true, event: 'note', note: { from: payload.from, text: payload.text } })
+    return agentNoteNotice(payload)
+  }
+  if (isMonitorEventRow(row)) {
+    const payload = row.payload as MonitorEventPayload
+    // One quiet row per notice: what the monitor reported, and how it ended.
+    items.push({
+      delegationId: payload.monitorId,
+      childThreadId: row.threadId,
+      title: payload.description || null,
+      runStatus: 'monitor',
+      fullyShown: true,
+      event: 'monitor',
+      monitor: {
+        kind: payload.monitorKind,
+        lines: payload.events,
+        ...(payload.droppedEvents ? { dropped: payload.droppedEvents } : {}),
+        ...(payload.end ? { end: payload.end } : {}),
+        ...(payload.tail?.trim() ? { tail: payload.tail } : {})
+      }
+    })
+    return monitorNotice(payload)
+  }
   const stopped = row.payload as { kind?: unknown; delegationId?: string; childThreadId?: string } | null
   if (stopped?.kind === 'delegation_stopped' && stopped.childThreadId) {
     const title = context.titleOf?.(stopped.childThreadId) ?? null

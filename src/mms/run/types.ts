@@ -531,22 +531,8 @@ export function isAgentNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): bool
 }
 
 /** What a thread agent started in the background (`monitor_start`, `background_run`, `keep_working`). */
-export type MonitorKind = 'command' | 'url' | 'background' | 'keep_working'
-
-/**
- * How a monitor, a background command or a `keep_working` hold ended: its script exited, its socket closed, it could not
- * start or broke, its time ran out, it printed too much (`chatty`), the agent stopped it, its thread was stopped, or the
- * daemon restarted under it.
- */
-export type MonitorEnd =
-  | { reason: 'exit'; code: number | null; signal?: string }
-  | { reason: 'closed'; code: number; detail?: string }
-  | { reason: 'failed'; message: string }
-  | { reason: 'timeout'; minutes: number }
-  | { reason: 'chatty'; limit: string }
-  | { reason: 'stopped' }
-  | { reason: 'thread_stopped' }
-  | { reason: 'restart' }
+export type { MonitorKind, MonitorEnd } from '../../shared/backgroundWork'
+import type { MonitorKind, MonitorEnd } from '../../shared/backgroundWork'
 
 /**
  * Payload of a `reconcile_notice` row that carries what a thread's monitor or background command reported
