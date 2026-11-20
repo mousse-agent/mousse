@@ -86,6 +86,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Models', section: 'agents', anchor: 'agents-models', keywords: ['model', 'default model', 'thread titles', 'bot model'] },
   { title: 'Default model', section: 'agents', anchor: 'agents-default-model', keywords: ['reasoning', 'effort', 'speed', 'fast'] },
   { title: 'Thread titles', section: 'agents', anchor: 'agents-title-model', keywords: ['title model', 'naming', 'chat titles'] },
+  { title: 'Title prompt', section: 'agents', anchor: 'agents-title-prompt', keywords: ['title instructions', 'naming prompt', 'thread titles'] },
   { title: 'Bot model', section: 'agents', anchor: 'agents-bot-model', keywords: ['bot model', 'bots', 'personal bots'] },
   { title: 'Context', section: 'agents', anchor: 'agents-context', keywords: ['compaction', 'prompt cache'] },
   { title: 'Compact context', section: 'agents', anchor: 'agents-context-compaction', keywords: ['compaction', 'tokens', 'summarize'] },

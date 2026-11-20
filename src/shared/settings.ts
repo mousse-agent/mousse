@@ -580,6 +580,8 @@ export interface MousseSettings {
     effort?: string
     /** Provider instance of the title model; absent on records from before instances (legacy mapping). */
     instanceId?: string
+    /** The person's own instructions for the title model (`titleSystemPrompt`); absent or blank for none. */
+    prompt?: string
   }
   /**
    * The model bots run on when a bot's own choice is automatic (Bot Phase 1 §5.6). Blank values are

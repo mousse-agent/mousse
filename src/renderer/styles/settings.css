@@ -1191,6 +1191,26 @@ button.theme-card:disabled {
   background-image: var(--ui-focus-layer);
 }
 
+/* Settings > Agents > Title prompt: a small box under the row, shown only while written or once filled. */
+.agents-title-prompt {
+  display: block;
+  width: 100%;
+  min-height: 52px;
+  padding: var(--space-8);
+  resize: vertical;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--settings-fs-small);
+}
+
+.agents-title-prompt:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}
+
 .user-theme-dropped {
   color: var(--warning);
 }
