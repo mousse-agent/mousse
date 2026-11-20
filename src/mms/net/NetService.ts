@@ -1031,8 +1031,9 @@ export class NetService {
         )
       )
     // Signing in to Mousse ID on a computer with no network identity joins the account's network.
-    // So does a computer whose network is only itself: it joins the account's devices when there
-    // are any, instead of adding a second, separate network to the account.
+    // So does a computer that can leave its network without losing anything others rely on: it
+    // joins the account's devices when there are any, since Mousse ID keeps one devices list per
+    // account. Only a computer that keeps its network signs in with its own identity.
     if (
       this.hosted &&
       ['net.plus.discover', 'net.plus.login.begin', 'net.plus.login.finish'].includes(method) &&
@@ -1620,10 +1621,11 @@ export class NetService {
         await this.firstSession(await this.serial(() => this.join(invite, name, undefined, undefined, true)))
       },
       dropUnsentJoin: () => this.serial(() => this.dropUnsentJoin()),
+      mayJoinAccount: () => this.aloneOnNetwork(),
       ownNode: () => (this.hasIdentity() ? this.runtime().identity.self()?.node : undefined),
       leaveLoneNetwork: () =>
         this.serial(async () => {
-          if (!this.aloneOnNetwork()) throw new NetError('conflict', 'This computer is no longer alone on its network.')
+          if (!this.aloneOnNetwork()) throw new NetError('conflict', 'This computer can no longer leave its network.')
           await this.setAsideNetwork('joined-account')
         })
     }
@@ -1635,9 +1637,10 @@ export class NetService {
     )
   }
   /**
-   * This computer owns a network that is only itself, with nothing to lose by joining another: it
-   * may start over (no Space hosted, no other device holding a pass), belongs to no Space, keeps
-   * no bots in its list and is not signed in to Mousse ID.
+   * This computer owns a network that nobody else relies on, so it may leave it to join the
+   * account's devices list: it may start over (no Space hosted, no other device holding a pass),
+   * belongs to no Space, keeps no bots in its list and is not signed in to Mousse ID. Leaving
+   * would drop it out of any Space, so a computer in one keeps its network.
    */
   private aloneOnNetwork(): boolean {
     try {

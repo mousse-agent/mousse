@@ -79,11 +79,17 @@ export interface HostedNetHost {
   joinWithInvite(invite: string, name: string): Promise<void>
   /** Sets aside the keys of a join that never sent its request; queues itself. */
   dropUnsentJoin(): Promise<void>
+  /**
+   * This computer can leave its network to join the account's devices list without losing
+   * anything: it hosts or belongs to no Space, no other device holds a pass in its list, it keeps
+   * no bots and is not signed in to Mousse ID.
+   */
+  mayJoinAccount(): boolean
   /** This computer's node when it has a network identity. */
   ownNode(): NodeId | undefined
   /**
-   * Sets aside a network that is only this computer, so it can join the account's network;
-   * refuses when that is no longer so. Queues itself.
+   * Sets aside this computer's network so it can join the account's network; refuses when
+   * `mayJoinAccount` is no longer so. Queues itself.
    */
   leaveLoneNetwork(): Promise<void>
 }

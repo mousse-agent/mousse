@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import type { PlusStatus } from '../../shared/net/local'
-import { formatCountdown, REMOVED_FROM_DEVICES, secondsLeft } from '../lib/plusSignIn'
+import { formatCountdown, LIST_MERGED, REMOVED_FROM_DEVICES, secondsLeft } from '../lib/plusSignIn'
 import { mousseIdName, mousseIdSignedIn, mousseIdPreparation, mousseIdSetupStep, useMousseId, useMousseIdStore, type SignInStart } from '../stores/mousseIdStore'
 import { MousseIdAvatar } from './MousseIdAvatar'
 import { SettingsGroup, SettingsRow } from './settings/SettingsRow'
@@ -62,7 +62,7 @@ export function MousseIdAccount({ onSetUp, lapsed = false, children }: { onSetUp
     : status === 'connected' ? <>{[who, plus?.plan].filter(Boolean).join(' · ')}{who || plus?.plan ? ' · ' : ''}<span className="settings-status-ok">Connected</span></>
       : status === 'reconnecting' ? <>{who ? `${who} · ` : ''}<span className="settings-status-warn">Reconnecting</span>{lapsed ? ' · waiting for your other computer to reconnect this one' : ''}</>
         : status === 'disconnected' ? `${who ? `${who} · ` : ''}Disconnected · sign in again to reconnect`
-          : SIGNED_OUT_LINE
+          : plus?.reason === 'list_merged' ? LIST_MERGED : SIGNED_OUT_LINE
   const setupStep = !signedIn && !pending && loaded && mousseIdPreparation(net) === 'manual' ? mousseIdSetupStep(net) : ''
   // A step asked for by Sign in goes once this device is ready or signed in.
   const setupNote = (!signedIn && mousseIdPreparation(net) !== 'ready' ? needsSetup : '') || setupStep

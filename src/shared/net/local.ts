@@ -338,6 +338,11 @@ export interface PlusStatus {
    * computer signed in. Display-only; it can be out of date until the next sign-in.
    */
   devices?: { used: number; limit: number }
+  /**
+   * Why this computer is not signed in. `list_merged`: Mousse ID moved the account's devices onto
+   * one list and this computer's list was folded into it; signing in again joins that list.
+   */
+  reason?: 'list_merged'
 }
 /** A phone asking to join through Mousse ID, as `net.plus.enrollment.requests` returns it. */
 export interface PlusEnrollmentRequestView {

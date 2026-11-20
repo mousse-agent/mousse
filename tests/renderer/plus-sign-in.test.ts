@@ -182,6 +182,15 @@ describe('sign-in errors', () => {
       .toBe('This computer is still set up for an earlier sign-in. Sign out, then sign in again.')
   })
 
+  it('says the account keeps one devices list, never "binding", when Mousse ID refuses a second one', () => {
+    const kept = signInErrorMessage({ code: 'conflict', details: { reason: 'account_network_kept' } }, origin)
+    expect(kept).toContain('Your Mousse ID already has a devices list on another computer.')
+    expect(kept).toContain('can’t join that list without leaving them')
+    const join = signInErrorMessage({ code: 'conflict', details: { reason: 'account_network' } }, origin)
+    expect(join).toBe('Your Mousse ID already has a devices list on another computer. Sign in again to join it.')
+    for (const text of [kept, join]) expect(text).not.toMatch(/binding/i)
+  })
+
   it('keeps other messages as they are', () => {
     expect(signInErrorMessage(new Error('Something else'), origin)).toBe('Something else')
   })

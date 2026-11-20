@@ -478,7 +478,9 @@ const DETAILED_METHODS: ReadonlySet<NetLocalMethod> = new Set([
   'net.join.retry',
   'net.startOver',
   'net.link.make',
-  'net.link.paste'
+  'net.link.paste',
+  // Why Mousse ID refused a sign-in: the account keeps one devices list (`account_network`).
+  'net.plus.login.finish'
 ])
 function publicError(code: keyof typeof NET_ERRORS, cause?: unknown, details?: unknown): AppError {
   const entry = NET_ERRORS[code]
