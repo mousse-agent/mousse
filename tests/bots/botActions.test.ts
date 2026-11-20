@@ -1609,20 +1609,15 @@ it('C4 About marks one service that asks first, and not with the switch off', as
   expect(permission()).toEqual(before)
 })
 
-it('C4 action telling names the action without its arguments and holds soon in quiet hours', async () => {
+it('C4 action telling names the action without its arguments', async () => {
   const t = await setup(true)
-  const end = f.clock.now + 3600_000
-  f.host.quietHoursFor = () => ({ end }) as never
   f.bots.markRead(t.botId, f.bots.service.chatList(t.botId).messages.at(-1)!.seq)
   f.bots.setTellingWindows(1)
   const events: any[] = []
   f.bots.events.on('tell', event => events.push(event))
   await t.call()
   const a = f.bots.actions.forWork(t.workId)!
-  expect(f.store.message(a.message_id)).toMatchObject({ tell: 'soon', tellAt: new Date(end).toISOString() })
-  f.bots.tellings.release(f.clock.now)
-  expect(events).toHaveLength(0)
-  f.clock.now = end
+  expect(f.store.message(a.message_id)).toMatchObject({ tell: 'soon' })
   f.bots.tellings.release(f.clock.now)
   expect(events.at(-1)).toMatchObject({ body: 'Wants to send', kind: 'question' })
   expect(JSON.stringify(events)).not.toContain('example.test')
@@ -3044,7 +3039,7 @@ it.each(['startup', 'settings', 'upkeep'] as const)('C9 switch rollback withdraw
     SELECT id || ?, call_key || ?, bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, card_json, ?, bot_note, result_json, message_id, expires_at, created_at, answered_at, ran_at FROM bot_actions WHERE id = ?`, `_${status}`, `_${status}`, status, a.id)
   f.host.settings!.get().experimental.botAsksFirstOff = true
   if (path === 'startup') { f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup() }
-  if (path === 'settings') f.bots.quietHoursChanged()
+  if (path === 'settings') f.bots.settingsChanged()
   if (path === 'upkeep') await f.bots.deliverDueReminders()
   for (const id of [a.id, `${a.id}_approved`]) expect(f.bots.actions.get(id)).toMatchObject({ status: 'withdrawn', exec_args: null })
   expect(f.bots.actions.get(`${a.id}_running`)?.status).toBe(path === 'startup' ? 'uncertain' : 'running')
@@ -3128,7 +3123,7 @@ it.each([
   if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
   if (path === 'pause') { f.bots.actions.transition(a.id, 'open', 'approved'); f.bots.pauseBot(t.botId) }
   if (path === 'permission') f.bots.setPermission(t.botId, 'default:mcp:mail', false)
-  if (path === 'switch') { f.host.settings!.get().experimental.botAsksFirstOff = true; f.bots.quietHoursChanged() }
+  if (path === 'switch') { f.host.settings!.get().experimental.botAsksFirstOff = true; f.bots.settingsChanged() }
   if (path === 'forget') {
     const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
     const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'card' })!
@@ -3219,12 +3214,12 @@ it('C9 switch rollback is atomic when a second row cannot be written', async () 
     SELECT id || '_accepted', call_key || '_accepted', bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, card_json, 'approved', message_id, expires_at, created_at, created_at FROM bot_actions WHERE id = ?`, a.id)
   f.store.run(`CREATE TRIGGER fail_switch_rollback BEFORE UPDATE OF status ON bot_actions WHEN OLD.status = 'approved' BEGIN SELECT RAISE(ABORT, 'write failed'); END`)
   f.host.settings!.get().experimental.botAsksFirstOff = true
-  expect(() => f.bots.quietHoursChanged()).toThrow()
+  expect(() => f.bots.settingsChanged()).toThrow()
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'open', exec_args: JSON.stringify(t.args) })
   expect(f.bots.actions.get(`${a.id}_accepted`)).toMatchObject({ status: 'approved', exec_args: JSON.stringify(t.args) })
   expect(f.store.message(a.message_id)?.text).toContain('Mail · send')
   f.store.run('DROP TRIGGER fail_switch_rollback')
-  f.bots.quietHoursChanged()
+  f.bots.settingsChanged()
   expect(f.store.all("SELECT id FROM bot_actions WHERE status IN ('open', 'approved')")).toEqual([])
   expect(t.calls).toEqual([])
 })

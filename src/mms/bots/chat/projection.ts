@@ -236,9 +236,8 @@ export class BotChatProjection {
     journal?: BotJournal
     /** `bots.message`, after the row's transaction committed. */
     emit(event: { botId: string; message: BotChatMessage }): void
-    /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
-    tellAt?(botId: string, tell: 'now' | 'soon' | 'later', at: string, messageId: string): string
     classify?(message: BotChatMessage, input: PostInput): 'now' | 'soon' | 'later' | null
+    /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
     schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean; name?: string; prompt?: string }>
     /**
      * Where a granted MCP server stands now (`BotMcp.where`), for About → Can use; undefined while the servers were not
@@ -354,7 +353,7 @@ export class BotChatProjection {
       // A row the chat never shows (an event's line, `outOfSightRow`) is kept for the bot's memory and its guards only:
       // it tells nobody and reaches no window.
       const tell = input.quiet || outOfSightRow(input.kind, id) ? null : this.options.classify?.(this.toMessage(this.store.message(id)!), input) ?? null
-      this.store.run('UPDATE bot_messages SET tell = ?, tell_at = ? WHERE id = ?', tell, tell ? this.options.tellAt?.(input.botId, tell, at, id) ?? at : null, id)
+      this.store.run('UPDATE bot_messages SET tell = ?, tell_at = ? WHERE id = ?', tell, tell ? at : null, id)
       return { row: this.store.message(id)!, inserted: true }
     })
     const message = this.toMessage(row)

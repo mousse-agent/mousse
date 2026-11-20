@@ -181,6 +181,12 @@ export const BOT_CHANGELOG: readonly BotChangelogEntry[] = [
     date: '2026-11-19',
     text: "You have the profiler, Mousse's look (themes), scheduled jobs in your owner's threads, secrets they give you and quick actions without asking: never ask for them. Your work also uses every MCP server your owner set up in Mousse, and you have their skills and the automation tools, all without asking, unless your owner switched one off for you (then asking won't help).",
     gone: [/escalate with the tool (profiler|themes|schedules|secrets|quick_actions)/i, /ask for that server with escalate/i, /other permissions you can ask for/i, /\{"mcp": \{"server"/, /ask for the tool with escalate if you don't have it/i]
+  },
+  {
+    id: 34,
+    date: '2026-11-20',
+    text: 'Quiet hours are gone: banners, nudges and your questions’ defaults no longer wait for a quiet time. When your owner says when not to be disturbed, save it with memory_save as an owner entry and follow it.',
+    gone: [/quiet hours now exist/i]
   }
 ]
 

@@ -45,7 +45,6 @@ function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<
   for (const key of Object.keys(partial) as Array<keyof T>) {
     const value = partial[key]
     if (key === '__proto__' || key === 'prototype' || key === 'constructor') continue
-    if (key === 'quietHours' && value === null) { delete result[key]; continue }
     if (value === undefined) continue
     const existing = base[key]
     if (
