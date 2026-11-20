@@ -104,7 +104,7 @@ interface DraggedSidebarItem {
 }
 
 const PROJECT_THREAD_PREVIEW_LIMIT = 5
-// "Other threads", the last group of the Projects tree, opens, closes and clips like a project under this id,
+// "No project", the last group of the Projects tree, opens, closes and clips like a project under this id,
 // which is no project's.
 const OTHER_THREADS_ID = ':other'
 const PROJECT_ATTENTION_TITLE: Record<Exclude<ThreadAttention, 'quiet' | 'needs-me'>, string> = {
@@ -444,6 +444,8 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // The Archived footer is not under Chats: it is hidden as Chats shows and unfolds as another view comes in,
   // so the list above it gives the room smoothly.
   const footerRef = useRef<HTMLDivElement>(null)
+  // Archived's list scrolls under its heading, so the heading stays in view however far the list is scrolled.
+  const archivedScrollRef = useRef<HTMLDivElement>(null)
   // The filter's Archived lists archived threads in place of the others, so the footer has nothing to add.
   const filterArchived = useThreadFilterStore((s) => s.archived)
   const footerHidden = contentView === 'chats' || filterArchived
@@ -632,7 +634,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     if (hasLocalProjects) void loadEditors()
   }, [hasLocalProjects])
   const groupIdOf = (projectId: string | undefined): string | undefined => (projectId ? groupOf.get(projectId) ?? projectId : undefined)
-  // The Projects tree group a thread lists under: its project's, else "Other threads" (threads without a project,
+  // The Projects tree group a thread lists under: its project's, else "No project" (threads without a project,
   // and threads whose project was removed from the sidebar).
   const listGroupOf = (projectId: string | undefined): string => {
     const groupId = groupIdOf(projectId)
@@ -768,7 +770,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     await createAndSelectProjectThread(projectId)
   }, { retry: true })
 
-  // The Projects tree's rows in order, as the keyboard walks them: each group (the projects, then "Other threads"
+  // The Projects tree's rows in order, as the keyboard walks them: each group (the projects, then "No project"
   // when it has threads), and the shown threads of an open one.
   const projectThreadsOf = (groupId: string) => treeThreads.filter((thread) => listGroupOf(thread.projectId) === groupId)
   // The filter leaves out the projects unticked in its menu and, while it narrows to some threads, the projects with none
@@ -779,7 +781,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     (filter.projectId === null || group.id === filter.projectId) &&
     (!treeNarrowed || projectThreadsOf(group.id).length > 0))
   const groupOpen = (groupId: string) => treeNarrowed || expandedProjects.has(groupId)
-  const treeGroupIds = [...shownGroups.map((group) => group.id), ...(otherThreads.length ? [OTHER_THREADS_ID] : [])]
+  // "No project" is always listed once there is a project, like a project with no threads, unless the filter narrows
+  // to one project or to threads it has none of. With no project at all it waits for a thread (the empty state says
+  // "No projects").
+  const showOtherThreads = filter.projectId === null && (otherThreads.length > 0 || (!treeNarrowed && projectGroups.length > 0))
+  const treeGroupIds = [...shownGroups.map((group) => group.id), ...(showOtherThreads ? [OTHER_THREADS_ID] : [])]
   const treeKeys = treeGroupIds.flatMap((groupId) => {
     const key = `project:${groupId}`
     if (!groupOpen(groupId)) return [key]
@@ -1676,7 +1682,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     )
   }
 
-  /** "Other threads", the Projects tree's last group: the threads of no project, with no project actions. */
+  /** "No project", the Projects tree's last group: the threads of no project, with no project actions. */
   const renderOtherThreads = () => {
     const expanded = groupOpen(OTHER_THREADS_ID)
     const treeKey = `project:${OTHER_THREADS_ID}`
@@ -1698,7 +1704,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           >
             <ChevronRight size={12} strokeWidth={2} className="threads-sidebar-project-chevron" aria-hidden="true" />
             <Layers size={16} strokeWidth={1.8} className="threads-sidebar-project-icon" aria-hidden="true" />
-            <span className="threads-sidebar-project-name">Other threads</span>
+            <span className="threads-sidebar-project-name">No project</span>
             {renderGroupStatus(otherThreads, expanded)}
           </button>
           {/* The global new thread: no project, as "No project" in the composer's picker. */}
@@ -1721,7 +1727,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
           className="threads-sidebar-children"
           itemCount={otherThreads.length}
         >
-          {renderGroupThreads(OTHER_THREADS_ID, otherThreads)}
+          {otherThreads.length === 0 ? (
+            <div className="threads-sidebar-empty threads-sidebar-empty-nested" role="none">No threads</div>
+          ) : renderGroupThreads(OTHER_THREADS_ID, otherThreads)}
         </Collapse>
       </div>
     )
@@ -2002,7 +2010,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
             })}
 
-          {otherThreads.length > 0 && renderOtherThreads()}
+          {showOtherThreads && renderOtherThreads()}
 
         </div>
 
@@ -2079,6 +2087,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
           {/* Built only while open, and only the cards in view (ArchivedList). A long list opens at once: its height
               motion would lay out the footer on every frame. */}
+          <div ref={archivedScrollRef} className="threads-sidebar-settled-scroll">
           <Collapse open={archivedExpanded} itemCount={archivedThreads.length} animate={sidebarAnimations && archivedThreads.length <= COLLAPSE_LONG_LIST}>
             {archivedThreads.length === 0 ? (
               <div className="threads-sidebar-tree threads-sidebar-thread-feed threads-sidebar-settled-list">
@@ -2088,7 +2097,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
               <ArchivedList
                 threads={archivedThreads}
                 renderRow={(thread) => renderThreadRow(thread, { root: true, layout: 'card' })}
-                scrollRef={footerRef}
+                scrollRef={archivedScrollRef}
                 keepIds={[
                   ...(contextMenu?.target.type === 'thread' && !contextMenu.inNeedsMe ? [contextMenu.target.id] : []),
                   ...(renaming?.type === 'thread' && !renaming.inNeedsMe ? [renaming.id] : []),
@@ -2097,6 +2106,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
               />
             )}
           </Collapse>
+          </div>
 
         </section>
 

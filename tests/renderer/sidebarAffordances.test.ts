@@ -134,7 +134,7 @@ describe('starting work', () => {
     expect(document.querySelector('[data-testid="pr-dialog"]')?.textContent).toBe('Mousse')
   })
 
-  it('gives Other threads a "New thread" button that starts a thread with no project, and no menu', () => {
+  it('gives No project a "New thread" button that starts a thread with no project, and no menu', () => {
     show([thread('a', 'Fix tests'), thread('b', 'Loose', { projectId: undefined })])
     const group = host.querySelector('.threads-sidebar-other-threads')!
     expect(group.querySelector('[aria-haspopup="menu"]')).toBeNull()
@@ -329,10 +329,10 @@ describe('the open thread', () => {
     expect(row('t7').classList.contains('active')).toBe(true)
   })
 
-  it('opens Other threads when it has no project', () => {
+  it('opens No project when it has no project', () => {
     show([thread('a', 'Fix tests'), thread('b', 'Loose', { projectId: undefined })], { active: 'b' })
     expect(row('b').closest('.threads-sidebar-other-threads')).not.toBeNull()
-    expect(projectRow('Other threads').getAttribute('aria-expanded')).toBe('true')
+    expect(projectRow('No project').getAttribute('aria-expanded')).toBe('true')
   })
 
   it('is marked by its background only', () => {
@@ -498,8 +498,8 @@ describe('the Projects tree', () => {
     key(projectRow('Mousse'), { key: 'ArrowLeft' })
     expect(projectRow('Mousse').getAttribute('aria-expanded')).toBe('false')
     key(projectRow('Mousse'), { key: 'End' })
-    expect(document.activeElement).toBe(projectRow('Notes'))
-    key(projectRow('Notes'), { key: 'Home' })
+    expect(document.activeElement).toBe(projectRow('No project'))
+    key(projectRow('No project'), { key: 'Home' })
     expect(document.activeElement).toBe(projectRow('Mousse'))
   })
 

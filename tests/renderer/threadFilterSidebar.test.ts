@@ -157,15 +157,15 @@ describe('the sidebar filter', () => {
   it('in the Projects tab the menu lists the projects ticked; unticking one leaves it out until its chip is cleared', () => {
     show('projects')
     const groups = () => [...panel().querySelectorAll('.threads-sidebar-project-name')].map((name) => name.textContent)
-    expect(groups()).toEqual(['mousse', 'smiletrack'])
+    expect(groups()).toEqual(['mousse', 'smiletrack', 'No project'])
     openMenu()
     expect(document.querySelector('[data-sub="project"]')).toBeNull()
     expect(ticked('smiletrack')).toBe('true')
     click(item('smiletrack'))
-    expect(groups()).toEqual(['mousse'])
+    expect(groups()).toEqual(['mousse', 'No project'])
     expect(chips()).toEqual(['1 hidden'])
     click(host.querySelector('button[aria-label^="Clear hidden projects filter"]'))
-    expect(groups()).toEqual(['mousse', 'smiletrack'])
+    expect(groups()).toEqual(['mousse', 'smiletrack', 'No project'])
   })
 
   it('a bot\'s See all opens the Threads tab on its threads; Archived opened there keeps the filter', async () => {
