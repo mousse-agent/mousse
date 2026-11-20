@@ -11,7 +11,12 @@ const connectionErrors = createErrorProvider({
     message: 'No answer came in time, so the message may have arrived. Sending it again will not run it twice.'
   },
   service_connection_lost: { category: 'unavailable', retryable: true, message: SERVICE_STOPPED_ANSWERING },
-  service_timeout: { category: 'timeout', retryable: true, message: SERVICE_ANSWERED_LATE }
+  service_timeout: { category: 'timeout', retryable: true, message: SERVICE_ANSWERED_LATE },
+  // A frame past the protocol's limit is refused before it is written, so nothing was sent.
+  request_too_large: {
+    category: 'invalid', retryable: false,
+    message: 'This message is too large to send.'
+  }
 })
 
 /**
@@ -35,6 +40,7 @@ export function guiChatRequestError(error: unknown): AppError {
   if (transport === 'lost') return connectionErrors.create('workspace_connection_lost', error)
   // The request was written and no answer came before this client gave up: the service may have taken it.
   if (transport === 'timeout') return connectionErrors.create('outcome_uncertain', error)
+  if (error instanceof Error && error.name === 'FrameTooLargeError') return connectionErrors.create('request_too_large', error)
   return error instanceof MmsProtocolError
     ? knownAppError({ code: error.code, message: error.message, details: error.details, errorInfo: error.errorInfo })
     : normalizeAppError(error)

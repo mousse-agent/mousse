@@ -45,7 +45,10 @@ function stubBridge(): void {
     })
   const sections: Record<string, unknown> = {
     orchestrator: section('orchestrator', orchestrator),
-    skills: section('skills', { list: () => Promise.resolve({ skills: [] }) })
+    skills: section('skills', { list: () => Promise.resolve({ skills: [] }) }),
+    // Each inline image also goes as its file: a pasted one is written to a temporary file.
+    threads: section('threads', { attachmentPath: async (file: File) => `/tmp/mousse-attachments/${file.name}` }),
+    fileDrag: section('fileDrag', { pathOf: () => '' })
   }
   ;(window as unknown as { mousse: unknown }).mousse = new Proxy(sections, {
     get: (target, key) => {
@@ -202,7 +205,7 @@ describe('a steer with an image', () => {
     expect(orchestrator.sendToThread).toHaveBeenCalledTimes(1)
     const [threadId, request] = (orchestrator.sendToThread as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { content: string; images?: Array<{ mimeType: string; data: string }> }]
     expect(threadId).toBe('thread-a')
-    expect(request.content).toBe('Look at this')
+    expect(request.content).toMatch(/^Look at this\n\n\[Attached files: /)
     expect(request.images).toEqual([expect.objectContaining({ mimeType: 'image/png', data: 'iVBORw==' })])
     // Sent into the reply now, by the queued message's id.
     expect(promoteToSteer).toHaveBeenCalledWith('thread-a', 'q-shot')
@@ -218,6 +221,9 @@ const steeredShown = () =>
 describe('a steer on its way into the reply', () => {
   it('shows in the reply from the click, before the service answers, and once when its copy arrives', async () => {
     orchestrator.isTurnActive = vi.fn(async () => true)
+    // The thread's turn runs: the transcript's last turn is the one the steer joins.
+    const { useAppStore: store } = await import('../../src/renderer/stores/appStore')
+    store.setState({ turnStates: { 'thread-a': { phase: 'thinking', turnId: 'run-1' } } as never })
     let answer!: (value: boolean) => void
     orchestrator.steer = vi.fn(() => new Promise<boolean>((resolve) => { answer = resolve }))
     await mount()
@@ -245,5 +251,33 @@ describe('a steer on its way into the reply', () => {
     await send('Use the id', { ctrlKey: true })
     await settle()
     expect(steeredShown()).toEqual([])
+  })
+})
+
+describe('a steer made while a prompt is on its way', () => {
+  it('is a steer even before the thread reports the turn running: it joins that turn once it can, not the end of the queue', async () => {
+    // The thread had a turn before; the new one is not reported running yet (no turn state, no activity).
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    useAppStore.setState({ loading: false, turnStates: { 'thread-a': { phase: 'completed', turnId: 'run-1' } } as never })
+    orchestrator.isTurnActive = vi.fn(async () => false)
+    // The turn is still being set up: it takes no steer yet.
+    orchestrator.steer = vi.fn(async () => false)
+    const queueItem = { id: 'q-steer', threadId: 'thread-a', content: 'Use the id', state: 'pending', intent: 'normal', enqueuedAt: new Date().toISOString(), order: 0 }
+    orchestrator.sendToThread = vi.fn((_thread: string, request: { content: string }) =>
+      request.content === 'Use the id' ? Promise.resolve({ message: '', actions: [], queued: true, queueItem }) : new Promise(() => undefined))
+    await mount()
+    const bridge = (window as unknown as { mousse: Record<string, Record<string, unknown>> }).mousse
+    const promoteToSteer = vi.fn(async () => ({ ok: true }))
+    bridge.queue.promoteToSteer = promoteToSteer
+    bridge.queue.list = vi.fn(async () => [])
+
+    await send('Fix the login bug')
+    await send('Use the id', { ctrlKey: true })
+    await settle()
+
+    expect(orchestrator.steer).toHaveBeenCalledWith('Use the id', 'thread-a')
+    // Queued while the turn is set up and sent now by its id: it goes into the turn as soon as it runs.
+    expect(promoteToSteer).toHaveBeenCalledWith('thread-a', 'q-steer')
+    expect(steeredShown()).toEqual(['Use the id'])
   })
 })

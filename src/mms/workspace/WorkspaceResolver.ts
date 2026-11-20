@@ -1,12 +1,13 @@
 import { createErrorProvider } from '../../shared/errors'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
-import type { ChatMode } from '../../shared/types'
+import type { ChatMode, TurnSetupStep } from '../../shared/types'
 import type { WorkspaceExecutionContext, WorkspaceLifecycle } from '../../shared/workspace'
 import { inspectPendingChangesAsync } from '../actions/git'
 import { PROJECT_FOLDER_REASON, type ThreadPlacement } from './threadPlacement'
 import { isProjectFolderWorkspace, ThreadWorkspaceManager } from './ThreadWorkspaceManager'
 import { startedInSnapshotStore } from './SnapshotWorkspace'
 import { assertWorktreeFolderConnected } from '../worktree/worktreeLayout'
+import { forgetRepositoryFacts } from '../git/repositoryFacts'
 
 /** A thread that records its turns in its folder's hidden store, whatever the folder has become since (`unavailableReason`). */
 export const SNAPSHOT_STORE_REASON = 'snapshot-store'
@@ -89,7 +90,9 @@ export class WorkspaceResolver {
     signal?: AbortSignal,
     heldThreadLease?: ThreadLeaseHandle,
     /** The thread's first message: a worktree made now names its branch from it (`ThreadWorkspaceManager.provision`). */
-    nameFrom?: string
+    nameFrom?: string,
+    /** Each slow step as it begins (the line under Working names it): checking the worktree, making it, or remaking it. */
+    onStep?: (step: TurnSetupStep) => void
   ): Promise<WorkspaceExecutionContext> {
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
     const mutating = modeMutatesFiles(mode)
@@ -98,11 +101,16 @@ export class WorkspaceResolver {
     if (existing?.lifecycle === 'provisioning' && await manager.reconcileFailedProvision(this.projectPath, signal)) existing = manager.load()
     if (existing) {
       if (existing.lifecycle !== 'ready') throw workspaceErrors.create('workspace_recovery_required', undefined, { state: existing.lifecycle })
+      onStep?.('check')
       // On a drive that is not connected: the turn waits for it (`DriveNotConnectedError`), and nothing is marked or rebuilt.
       await assertWorktreeFolderConnected(existing.worktreePath)
       const verified = await manager.verify(existing)
       if (verified.lifecycle === 'missing' && manager.hasReconstructionManifest(existing)) {
-        return manager.executionContext(this.projectPath, await manager.restore(this.projectPath, signal, heldThreadLease, this.notify))
+        onStep?.('restore')
+        const restored = await manager.restore(this.projectPath, signal, heldThreadLease, this.notify)
+        // The worktree was rebuilt: what the turn read of it before is read again (`repositoryFacts.ts`).
+        forgetRepositoryFacts()
+        return manager.executionContext(this.projectPath, restored)
       }
       if (verified.lifecycle !== 'ready') {
         // An operation of Mousse's own on the worktree that did not finish pauses the thread until it is recovered.
@@ -138,9 +146,11 @@ export class WorkspaceResolver {
     if (!repository.capability.gitBacked) {
       return { threadId: this.threadId, workspacePath: this.projectPath, projectPath: this.projectPath, primaryPath: this.projectPath, lifecycle: 'unprovisioned', capability: repository.capability }
     }
+    onStep?.('worktree')
     // Read before the worktree exists: what the project folder holds that the new worktree, cut from HEAD, will not.
     const startNote = await uncommittedLeftBehindNote(this.projectPath)
     await manager.provision(this.threadId, conversationBranchId, this.projectPath, signal, heldThreadLease, undefined, { nameFrom })
+    forgetRepositoryFacts()
     const note = [startNote, manager.placementNote].filter(Boolean).join(' ')
     return { ...await manager.executionContext(this.projectPath), ...(note ? { startNote: note } : {}) }
   }

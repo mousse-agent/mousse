@@ -8,6 +8,9 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { execFile, execFileSync } from 'node:child_process'
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from './repoPrograms'
 import { waitForFolderAccess } from '../files/folderAccess'
+import { timeGitChild, timeGitSync } from '../diagnostics/turnBoundary'
+import { repositoryFacts } from './repositoryFacts'
+import { gitEnvFor, gitFile } from './gitExecutable'
 
 export type RepositoryMutationCapability =
   | { allowed: true }
@@ -42,7 +45,7 @@ export interface ResolveRepositoryIdentityOptions {
 
 function git(cwd: string, ...args: string[]): string | null {
   try {
-    return execFileSync('git', withoutRepoPrograms(cwd, args), { cwd, env: repoProgramEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    return timeGitSync(() => execFileSync(gitFile(), withoutRepoPrograms(cwd, args), { cwd, env: gitEnvFor(repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })).trim()
   } catch { return null }
 }
 function canonical(path: string): string { try { return realpathSync(path) } catch { return resolve(path) } }
@@ -52,6 +55,18 @@ const realpathLikeSync = promisify(realpathCallback)
 
 async function canonicalAsync(path: string): Promise<string> {
   try { return await realpathLikeSync(path) } catch { return resolve(path) }
+}
+
+/**
+ * The three questions every identity asks, in one `rev-parse` (one process, which is what costs on Windows): the common
+ * Git directory, whether the repository is bare, and whether the folder is inside a working tree. Outside a repository
+ * Git answers none of them.
+ */
+const PROBE = ['rev-parse', '--git-common-dir', '--is-bare-repository', '--is-inside-work-tree'] as const
+
+function probeAnswers(output: string | null): [commonRaw: string | null, bare: string | null, inside: string | null] {
+  const lines = output?.split(/\r?\n/) ?? []
+  return lines.length === 3 ? [lines[0]!, lines[1]!, lines[2]!] : [null, null, null]
 }
 
 /** What a repository allows, from Git's answers; `head` is asked only when the rest allow a mutation. */
@@ -216,9 +231,7 @@ async function runMetadataChoiceAsync(commonDir: string, key: string, metadataHo
 /** Resolve a stable identity. Git's common-dir intentionally makes linked worktrees share it. Code that can wait uses {@link resolveRepositoryIdentityAsync}. */
 export function resolveRepositoryIdentity(cwd: string, options: ResolveRepositoryIdentityOptions = {}): RepositoryIdentity {
   const worktreePath = canonical(cwd)
-  const commonRaw = git(worktreePath, 'rev-parse', '--git-common-dir')
-  const bare = git(worktreePath, 'rev-parse', '--is-bare-repository')
-  const inside = git(worktreePath, 'rev-parse', '--is-inside-work-tree')
+  const [commonRaw, bare, inside] = probeAnswers(git(worktreePath, ...PROBE))
   const capability = capabilityOf(commonRaw, bare, inside, () => git(worktreePath, 'rev-parse', '--verify', '--quiet', 'HEAD'))
   if (!capability.allowed && options.requireMutationCapability) throw new RepositoryIdentityError(capability)
 
@@ -233,7 +246,7 @@ export function resolveRepositoryIdentity(cwd: string, options: ResolveRepositor
 function gitAsync(cwd: string, ...args: string[]): Promise<string | null> {
   return withoutRepoProgramsAsync(cwd, args).then(
     (argv) => new Promise<string | null>((settle) => {
-      execFile('git', argv, { cwd, env: repoProgramEnv(), encoding: 'utf8', windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout) => settle(error ? null : stdout.trim()))
+      timeGitChild(() => execFile(gitFile(), argv, { cwd, env: gitEnvFor(repoProgramEnv()), encoding: 'utf8', windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout) => settle(error ? null : stdout.trim())))
     }),
     () => null
   )
@@ -248,10 +261,10 @@ function gitAsync(cwd: string, ...args: string[]): Promise<string | null> {
 export async function resolveRepositoryIdentityAsync(cwd: string, options: ResolveRepositoryIdentityOptions = {}): Promise<RepositoryIdentity> {
   await waitForFolderAccess([resolve(cwd)])
   const worktreePath = await canonicalAsync(cwd)
-  const commonRaw = await gitAsync(worktreePath, 'rev-parse', '--git-common-dir')
-  const bare = await gitAsync(worktreePath, 'rev-parse', '--is-bare-repository')
-  const inside = await gitAsync(worktreePath, 'rev-parse', '--is-inside-work-tree')
-  const head = commonRaw && bare !== 'true' && inside === 'true' ? await gitAsync(worktreePath, 'rev-parse', '--verify', '--quiet', 'HEAD') : null
+  // A turn's start or end asks once for all its callers (`repositoryFacts.ts`).
+  const facts = await repositoryFacts(worktreePath)
+  const [commonRaw, bare, inside] = facts ? [facts.commonDirRaw, facts.bare, facts.inside] : probeAnswers(await gitAsync(worktreePath, ...PROBE))
+  const head = commonRaw && bare !== 'true' && inside === 'true' ? (facts ? facts.head ?? null : await gitAsync(worktreePath, 'rev-parse', '--verify', '--quiet', 'HEAD')) : null
   const capability = capabilityOf(commonRaw, bare, inside, () => head)
   if (!capability.allowed && options.requireMutationCapability) throw new RepositoryIdentityError(capability)
 

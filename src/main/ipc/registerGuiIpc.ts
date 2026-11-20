@@ -45,6 +45,7 @@ import { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { coalescedRunner } from '../mms/coalescedRunner'
 export { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { MmsProtocolError } from '../../mms/protocol/client'
+import { DELETE_TOO_LONG } from '../../shared/resourceLifecycle'
 import { guiChatRequestError, guiPlatformRequestError, guiSendFailureAnswer } from '../mms/requestErrors'
 import type { ProtocolEvent } from '../../mms/protocol'
 import {
@@ -2474,6 +2475,12 @@ export function registerGuiIpc(
       withThreadId({ messageId, index }, threadId)
     )
   )
+  registerHandler('threads:queueImage', async (_e, threadId: string, queueItemId: string, index: number) =>
+    guiMms.request<{ name: string; mimeType: string; data: string }>(
+      'thread.messageImage',
+      withThreadId({ queueItemId, index }, threadId)
+    )
+  )
 
   // What a window has in view may be older than what happened on the other computer once a call there is
   // not confirmed ("may have happened"): read it again.
@@ -2491,7 +2498,11 @@ export function registerGuiIpc(
     const res = await guiMms.request<{ threads: Pick<Thread, 'id' | 'settledAt' | 'lineage'>[] }>(
       'threads.delete',
       { threadId, discard: true }
-    )
+    ).catch((error: unknown) => {
+      // The request's time limit passed: the window says so in plain words instead of an unknown error.
+      if (error instanceof Error && /^Request timeout:/.test(error.message)) throw knownAppError({ code: 'delete_timeout', message: DELETE_TOO_LONG }, { category: 'unavailable', retryable: true })
+      throw error
+    })
     broadcastIfRouted([threadId], res)
   })
 

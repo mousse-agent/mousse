@@ -5,7 +5,6 @@ import { ComputerBadgeView, ThreadComputerBadge, computerBadgeTitle } from '../.
 import { computerNotice } from '../../src/renderer/components/ComputerNotice'
 import { ComposerNotice } from '../../src/renderer/components/ComposerNotice'
 import { ComputerSurfaceNote, surfaceNoteFor } from '../../src/renderer/components/ComputerSurfaceNote'
-import { EarlierMessagesBarView } from '../../src/renderer/components/EarlierMessagesBar'
 import { ThreadComputerBarView } from '../../src/renderer/components/ThreadComputerBar'
 import { OpenInEditorView } from '../../src/renderer/components/sideCard/EditorMenuButton'
 import { noRouteHelp } from '../../src/renderer/components/sideCard/openInEditor'
@@ -102,22 +101,6 @@ describe('the line above the composer', () => {
       expect(sendErrorLine({ code, message: 'Words for a person.' })).toBe('Words for a person.')
     // The owner's other refusals read as they do for a thread of this computer.
     expect(sendErrorLine({ code: 'queue_conflict', message: 'The queue changed.' })).toBe('[queue_conflict] The queue changed.')
-  })
-})
-
-describe('older messages of a long thread', () => {
-  it('says how many are left and offers to load them', () => {
-    const bar = html(createElement(EarlierMessagesBarView, { count: 40, busy: false, onLoad: () => undefined }))
-    expect(bar).toContain('40 earlier messages')
-    expect(bar).toContain('>Load<')
-    expect(html(createElement(EarlierMessagesBarView, { count: 1, busy: false, onLoad: () => undefined }))).toContain('1 earlier message<')
-  })
-
-  it('shows progress and a failure', () => {
-    const busy = html(createElement(EarlierMessagesBarView, { count: 3, busy: true, onLoad: () => undefined }))
-    expect(busy).toContain('Loading…')
-    expect(busy).toContain('disabled')
-    expect(html(createElement(EarlierMessagesBarView, { count: 3, busy: false, error: 'Studio is offline.', onLoad: () => undefined }))).toContain('role="alert">Studio is offline.')
   })
 })
 

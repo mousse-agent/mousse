@@ -5,6 +5,8 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { realPathOrAncestor } from './realPath'
 import { mousseGitEnv } from '../git/gitEnv'
 import { assertGitAllowed } from '../git/gitPolicy'
+import { timeGitChild } from '../diagnostics/turnBoundary'
+import { gitEnvFor, gitFile } from '../git/gitExecutable'
 
 /**
  * What a repository reads that can run programs and that lies in the working tree, as real paths:
@@ -35,8 +37,8 @@ function runGit(root: string, args: string[]): Promise<GitRun> {
     // Run in the folder rather than with `-C`, which the central check refuses; a missing folder is Git's "not a repository".
     if (!existsSync(root)) return resolveRun({ status: 128, stdout: '', missing: false })
     assertGitAllowed({ cwd: root, args })
-    execFile(
-      'git',
+    timeGitChild(() => execFile(
+      gitFile(),
       args,
       {
         cwd: root,
@@ -44,7 +46,7 @@ function runGit(root: string, args: string[]): Promise<GitRun> {
         timeout: GIT_TIMEOUT_MS,
         maxBuffer: 4 * 1024 * 1024,
         windowsHide: true,
-        env: mousseGitEnv({ ...process.env, GIT_TERMINAL_PROMPT: '0' })
+        env: gitEnvFor(mousseGitEnv({ ...process.env, GIT_TERMINAL_PROMPT: '0' }))
       },
       (error, stdout) => {
         if (!error) return resolveRun({ status: 0, stdout, missing: false })
@@ -54,7 +56,7 @@ function runGit(root: string, args: string[]): Promise<GitRun> {
         if (typeof failure.code === 'number' && !failure.killed) return resolveRun({ status: failure.code, stdout, missing: false })
         reject(error)
       }
-    )
+    ))
   })
 }
 

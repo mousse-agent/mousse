@@ -1,4 +1,5 @@
 import { knownAppError, normalizeAppError, parseErrorInfo, type AppErrorShape } from '../../shared/errors'
+import { DELETE_TOO_LONG } from '../../shared/resourceLifecycle'
 
 /**
  * Deleting archived threads: a thread is archived first, and only an archived thread is deleted, for good. No React
@@ -49,6 +50,14 @@ export function clearAllRequest(archived: readonly ArchivedThreadRef[]): DeleteR
   return { kind: 'all', threads: local, elsewhere: archived.length - local.length }
 }
 
+/**
+ * How long the dialog waits for one thread's delete. The service answers a delete well inside its requests' 60 s, and
+ * the app gives up on a request then; this is the last bound, for an answer that never comes back at all.
+ */
+export const DELETE_TIME_LIMIT_MS = 75_000
+
+export { DELETE_TOO_LONG }
+
 /** Why a delete did not go through, in the daemon's words when it gave them. */
 export function deleteErrorMessage(cause: unknown): string {
   const shape = cause as Partial<AppErrorShape> | null
@@ -57,19 +66,28 @@ export function deleteErrorMessage(cause: unknown): string {
   return normalizeAppError(cause, 'storage_request_failed').message
 }
 
+/** `work`, or a rejection with {@link DELETE_TOO_LONG} once `limitMs` has passed without an answer. */
+function withinTimeLimit<T>(work: Promise<T>, limitMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(DELETE_TOO_LONG)), limitMs) })
+  return Promise.race([work, late]).finally(() => clearTimeout(timer))
+}
+
 /**
  * Deletes the threads one after another; one that fails does not stop the rest. Says which failed and why, in a
- * single line when there are any.
+ * single line when there are any. A delete that does not answer within `limitMs` counts as failed, so the dialog
+ * never waits forever.
  */
 export async function deleteThreads(
   threads: readonly ArchivedThreadRef[],
-  remove: (threadId: string) => Promise<unknown>
+  remove: (threadId: string) => Promise<unknown>,
+  limitMs = DELETE_TIME_LIMIT_MS
 ): Promise<{ deleted: string[]; error?: string }> {
   const deleted: string[] = []
   const failed: Array<{ thread: ArchivedThreadRef; message: string }> = []
   for (const thread of threads) {
     try {
-      await remove(thread.id)
+      await withinTimeLimit(remove(thread.id), limitMs)
       deleted.push(thread.id)
     } catch (cause) {
       failed.push({ thread, message: deleteErrorMessage(cause) })

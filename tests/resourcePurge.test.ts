@@ -509,9 +509,25 @@ test('a thread no record owns, in an old data folder inside a project, refuses a
   mkdirSync(join(project, '.mousse', '.data', 'threads', 'old-thread'), { recursive: true })
   writeFileSync(join(project, '.mousse', '.data', 'threads', 'old-thread', 'meta.json'), JSON.stringify({ id: 'old-thread' }))
   const facts = new OwnershipFacts()
-  await expect(getExternalResourceClaims(f.store, new Set(), facts)).rejects.toThrow(/Unregistered task metadata/)
+  await expect(getExternalResourceClaims(f.store, new Set(), facts)).rejects.toThrow(/thread data it does not keep track of/)
   expect(facts.legacy.size).toBe(1)
   expect(facts.worktrees.size).toBe(0)
+})
+test('a copy a move left in an old project data folder, of a thread whose record names its own folder, is no other owner', async () => {
+  const f = fixture()
+  const project = join(f.root, 'project')
+  mkdirSync(project)
+  writeFileSync(join(f.home, 'projects.json'), JSON.stringify([{ path: project }]))
+  // The thread was moved into the profile's own folder; its old copy stayed behind, as a move to another drive leaves it.
+  const left = join(project, '.mousse', '.data', 'task')
+  mkdirSync(left, { recursive: true })
+  writeFileSync(join(left, 'meta.json'), JSON.stringify({ id: 'task' }))
+  await expect(getExternalResourceClaims(f.store, new Set())).resolves.toBeDefined()
+  // Control: a thread no record owns, next to it, still refuses, and the refusal names the folder.
+  const stray = join(project, '.mousse', '.data', 'stray')
+  mkdirSync(stray, { recursive: true })
+  writeFileSync(join(stray, 'meta.json'), JSON.stringify({ id: 'stray' }))
+  await expect(getExternalResourceClaims(f.store, new Set())).rejects.toThrow(stray)
 })
 test('an old data folder found clean before the worktrees were read is read again, so a thread that appeared there meanwhile still refuses', async () => {
   const f = fixture({ git: true })
@@ -525,9 +541,9 @@ test('an old data folder found clean before the worktrees were read is read agai
   // An older build's thread folder that no lifecycle record owns appears afterwards.
   mkdirSync(join(project, '.mousse', '.data', 'threads', 'late-thread'), { recursive: true })
   writeFileSync(join(project, '.mousse', '.data', 'threads', 'late-thread', 'meta.json'), JSON.stringify({ id: 'late-thread' }))
-  await expect(getExternalResourceClaims(f.store, new Set(), facts)).rejects.toThrow(/Unregistered task metadata/)
+  await expect(getExternalResourceClaims(f.store, new Set(), facts)).rejects.toThrow(/thread data it does not keep track of/)
   // The check a purge makes right before it removes anything answers from those facts, and refuses too.
-  expect(() => getExternalResourceClaimsFromFacts(f.store, new Set(), facts)).toThrow(/Unregistered task metadata/)
+  expect(() => getExternalResourceClaimsFromFacts(f.store, new Set(), facts)).toThrow(/thread data it does not keep track of/)
 })
 test('profile storage the installation does not list still blocks every permanent delete, broken thread or not', async () => {
   const f = fixture({ git: true })

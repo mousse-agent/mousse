@@ -41,6 +41,7 @@ import type {
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { visibleThreads } from '../../shared/threadLineage'
 import { normalizeQueuedMessages } from '../queue/ThreadMessageQueue'
+import { loadQueueImages, storeQueueImages, sweepQueueImages } from '../queue/queueImageFiles'
 import type { QueueJournal } from '../queue/queueJournal'
 import { withThreadDataMutationLock } from '../queue/ThreadExecutionLease'
 import type { ProjectManager } from './ProjectManager'
@@ -1950,10 +1951,13 @@ export class ThreadDataStore extends EventEmitter {
     const audit = this.readJsonFile<Array<{ operationId: string; cancelledAt: string; queue: QueuedMessage[] }>>(auditPath, [])
     if (!Array.isArray(audit)) throw new Error('Corrupt lifecycle queue cancellation audit')
     if (!audit.some((entry) => entry.operationId === operationId)) {
-      audit.push({ operationId, cancelledAt: new Date().toISOString(), queue })
+      // The audit names the cancelled messages' images; their data goes with the queue's image files.
+      const named = queue.map((item) => item.images?.length ? { ...item, images: item.images.map(({ name, mimeType }) => ({ name, mimeType })) } : item)
+      audit.push({ operationId, cancelledAt: new Date().toISOString(), queue: named as QueuedMessage[] })
       this.writeJsonAtomic(auditPath, audit)
     }
     this.writeJsonAtomic(join(record.location, 'queue.json'), [])
+    sweepQueueImages(record.location, new Set())
   }
 
   /** Idempotent index projection; lifecycle location is the durable authority. */
@@ -2113,15 +2117,21 @@ export class ThreadDataStore extends EventEmitter {
         new Error('queue must be an array')
       )
     }
-    return normalizeQueuedMessages(raw, threadId)
+    // Images are kept in files beside queue.json (`queueImageFiles.ts`).
+    return loadQueueImages(threadDir, normalizeQueuedMessages(raw, threadId))
   }
 
-  /** Atomically persist the message queue for a thread (backwards-compatible queue.json). */
+  /**
+   * Atomically persist the message queue for a thread (queue.json). Its images go to files beside it, each written
+   * once, so a change to the queue writes only the small queue.json; files no message names are removed after.
+   */
   saveMessageQueue(id: string, queue: QueuedMessage[]): void {
     const threadDir = this.getThreadDir(id)
     this.ensureThreadDir(threadDir)
     const normalized = normalizeQueuedMessages(queue, id)
-    this.writeJsonAtomic(join(threadDir, 'queue.json'), normalized)
+    const stored = storeQueueImages(threadDir, normalized)
+    this.writeJsonAtomic(join(threadDir, 'queue.json'), stored.items)
+    sweepQueueImages(threadDir, stored.files)
   }
 
   /**
@@ -2532,6 +2542,16 @@ export class ThreadDataStore extends EventEmitter {
     this.writeStandaloneIndex(index)
   }
 
+  /**
+   * A thread whose record names another folder was moved out of this old one already, and may since have been deleted:
+   * the copy the move left (one on another drive than the profile stays where it was) is never copied back.
+   */
+  private movedOutOfLegacy(legacyDir: string, threadId: string): boolean {
+    let record: ReturnType<ResourceLifecycleStore['get']>
+    try { record = this.lifecycleStore.get(threadId) } catch { return false }
+    return Boolean(record && !record.locations.some((location) => pathsEqual(location, legacyDir)))
+  }
+
   private scanProjectThreads(projectPath: string): Thread[] {
     const project = this.projectManager.listProjects().find((entry) => entry.path === projectPath)
     if (!project) return []
@@ -2541,7 +2561,8 @@ export class ThreadDataStore extends EventEmitter {
     const legacyRoot = this.storageLayout.legacyRepositoryRoot(projectPath)
     if (this.storageLayout.allowLegacyProjectData && existsSync(legacyRoot)) {
       for (const entry of readdirSync(legacyRoot, { withFileTypes: true })) {
-        if (entry.isDirectory()) this.storageMigration.migrateRepository(projectPath, project.id, entry.name)
+        if (!entry.isDirectory() || this.movedOutOfLegacy(join(legacyRoot, entry.name), entry.name)) continue
+        this.storageMigration.migrateRepository(projectPath, project.id, entry.name)
       }
     }
 

@@ -1171,6 +1171,9 @@ export type QueuedMessageState = 'pending' | 'steering' | 'claimed' | 'drained' 
  * Minimal durable claim metadata for a normal queue item reserved by an execution owner.
  * Sufficient to identify the owner and claim time; not a broad workflow state machine.
  */
+/** What a pending message waits for (`QueuedMessage.waitsFor`). */
+export type QueuedMessageWait = 'finish' | 'setup'
+
 export interface QueuedMessageClaim {
   ownerPid: number
   ownerToken: string
@@ -1248,6 +1251,12 @@ export interface QueuedMessage {
    * waiting for Send now after such a restart.
    */
   waitsForLease?: true
+  /**
+   * Why a pending message waits right now, beyond its place in the queue: the last turn's reply is shown complete but
+   * the turn is still finishing (its end checkpoint), or the next turn is being set up. Set only on the lists the
+   * service sends (never saved), and sent again whenever it changes.
+   */
+  waitsFor?: QueuedMessageWait
   /** A mode this turn must not exceed, set by a daemon-side sender (a scheduled job); it only tightens. */
   permissionMode?: PermissionMode
   /** The other computer of the user this message was sent or last edited from (a routed call); absent for this computer's own. */
@@ -1859,6 +1868,14 @@ export type TurnStep =
    * nothing back in time (its own retry, outside the attempt count).
    */
   | { kind: 'retrying'; attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: true }
+  /** The turn is not started yet: its setup does `what` (shown with phase `queued`), once that has taken a moment. */
+  | { kind: 'preparing'; what: TurnSetupStep }
+
+/**
+ * A step of a turn's setup that can take long: checking the thread's worktree, making it, making it again from its
+ * snapshot, or recording its files before the turn (each may wait for other work on the same repository).
+ */
+export type TurnSetupStep = 'check' | 'worktree' | 'restore' | 'snapshot'
 
 export function isTurnActivePhase(phase: TurnPhase): boolean {
   return phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing'

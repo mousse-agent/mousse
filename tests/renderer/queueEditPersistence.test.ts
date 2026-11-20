@@ -73,7 +73,7 @@ describe('an open edit of a queued message across a reload', () => {
 
   it('goes to the composer when its message left the queue meanwhile, once', async () => {
     const profileId = await reloadWith({ t1: { itemId: 'a', base: 'one\n\n[Attached files: notes.txt]', draft: 'one, edited', width: null } }, [])
-    expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, edited', markers: '[Attached files: notes.txt]' })
+    expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: 'one, edited', markers: '[Attached files: notes.txt]' }))
     expect(host.querySelector('.composer-notice')?.textContent).toContain(QUEUE_DRAFT_MOVED_NOTICE)
     // Taken out of the saved workspace as it was recovered: a later update or reload does not recover it again.
     expect(saved(profileId).queueEditDrafts).toEqual({})

@@ -29,9 +29,12 @@ import {
   canonicalizeHome,
   DAEMON_OWNER_TOKEN_ENV,
   pollUntilRuntimeReady,
+  readStopRequest,
   resolveRuntimeStatus,
   SERVICE_POLL_INTERVAL_MS,
   SERVICE_START_TIMEOUT_MS,
+  sleepAsync,
+  writeStopRequest,
   type MmsRuntimeRecord
 } from '../../cli/mmsRuntime'
 import {
@@ -117,6 +120,12 @@ export type GuiMmsConnectionState =
 
 /** Unsigned cold starts can be delayed by first-run antivirus inspection on Windows. */
 export const GUI_DAEMON_START_TIMEOUT_MS = 90_000
+/**
+ * How long the app waits for a service that is shutting down to exit before it reports the service as unavailable.
+ * Longer than the service's own exit deadline (`DAEMON_EXIT_DEADLINE_MS`), so a service of this version is always
+ * gone by then.
+ */
+export const EXITING_SERVICE_WAIT_MS = 30_000
 
 export interface GuiMmsControllerOptions {
   homeDir?: string
@@ -246,6 +255,8 @@ export class GuiMmsController extends EventEmitter {
   private readonly endpointOverride?: string
   private readonly ownerTokenOverride?: string
   private readonly requestTimeoutMs?: number
+  /** The owner token of the service the last connection attempt went to. */
+  private connectingToToken: string | null = null
   /** Where main writes what happens to its service connections (`<home>/logs/gui-connection.log`). */
   private linkLog: GuiConnectionLogSink | null = null
   /** Windows whose own connection closed without main closing it, waiting to be opened again. */
@@ -355,10 +366,7 @@ export class GuiMmsController extends EventEmitter {
         if (this.connected && this.lastHello) return this.lastHello
       }
       this.assertMayConnect()
-      // Tests may inject endpoint+token without a full runtime publication.
-      if (!(this.endpointOverride && this.ownerTokenOverride)) await this.ensureDaemonReady()
-      this.assertMayConnect()
-      return this.connectOnce()
+      return this.connectToService()
     })()
     this.startPromise = operation
     try {
@@ -1069,29 +1077,110 @@ export class GuiMmsController extends EventEmitter {
     this.client?.clearResnapshotFlag()
   }
 
-  private async ensureDaemonReady(): Promise<MmsRuntimeRecord> {
-    const runtime = resolveRuntimeStatus(this.homeDir)
-    if (runtime.running && runtime.record) {
-      return runtime.record
-    }
-
-    const owner = resolveOwnerStatus(this.homeDir)
-    if (owner.owned && owner.record) {
-      // Live owner but no runtime yet — wait for readiness publication.
-      this.setState('connecting')
-      const record = await pollUntilRuntimeReady(this.homeDir, {
-        timeoutMs: SERVICE_START_TIMEOUT_MS,
-        intervalMs: SERVICE_POLL_INTERVAL_MS,
-        isAborted: () => this.stopWaiting()
-      })
-      if (record) return record
+  /**
+   * Finds or starts the service and connects to it. A service that still holds the home after its endpoint went away
+   * (it is shutting down, or its server ended) can serve no one: it is asked to stop and waited for, and then the next
+   * service is found or started. Meanwhile the windows keep their loading state.
+   */
+  private async connectToService(): Promise<ProtocolHelloOk> {
+    // Tests may inject endpoint+token without a full runtime publication.
+    const injected = Boolean(this.endpointOverride && this.ownerTokenOverride)
+    const leaveBy = Date.now() + EXITING_SERVICE_WAIT_MS
+    for (;;) {
+      if (!injected) await this.ensureDaemonReady()
       this.assertMayConnect()
-      throw linkError('service_not_ready',
-        formatOwnerBusyMessage(owner.record, owner.heldUnreadable) +
-          ' (owner live but runtime readiness not published)'
-      )
+      let gone: string | null
+      try {
+        return await this.connectOnce()
+      } catch (err) {
+        gone = injected ? null : this.unreachableOwner(err)
+        // After stop, the failure is stop's doing: stay stopped.
+        if (!gone || Date.now() >= leaveBy || this.quitting || this.held) {
+          if (!this.quitting && !this.held) this.enterFailed(err instanceof Error ? err : new Error(String(err)))
+          throw err
+        }
+        this.log('service.unreachable', { error: describeLinkError(err) })
+      }
+      writeStopRequest(this.homeDir, gone, { shared: true })
+      await this.waitForServiceToLeave(gone, leaveBy)
     }
+  }
 
+  /** The service the failed connection went to, when it still holds the home but its endpoint is gone. */
+  private unreachableOwner(error: unknown): string | null {
+    const code = (error as { code?: unknown } | null)?.code
+    if (code !== 'ENOENT' && code !== 'ECONNREFUSED') return null
+    const owner = resolveOwnerStatus(this.homeDir)
+    const token = this.connectingToToken
+    return token && owner.owned && owner.record?.token === token ? token : null
+  }
+
+  /** Whether the service with `token` still holds the home. A lease being rewritten counts as held. */
+  private ownerHolds(token: string): boolean {
+    const owner = resolveOwnerStatus(this.homeDir)
+    return owner.heldUnreadable || (owner.owned && owner.record?.token === token)
+  }
+
+  /**
+   * Waits until the service with `token`, which was asked to stop, has let go of the home. The service exits within its
+   * own deadline; one still there at `leaveBy` is reported as unavailable.
+   */
+  private async waitForServiceToLeave(token: string, leaveBy: number): Promise<void> {
+    this.setState('connecting')
+    this.log('service.waiting-for-exit', {})
+    const since = Date.now()
+    while (this.ownerHolds(token)) {
+      this.assertMayConnect()
+      if (Date.now() >= leaveBy) {
+        throw linkError('service_exiting', 'The previous Mousse service is still shutting down')
+      }
+      await sleepAsync(SERVICE_POLL_INTERVAL_MS)
+    }
+    this.assertMayConnect()
+    this.log('service.exited', { waitedMs: Date.now() - since })
+  }
+
+  private async ensureDaemonReady(): Promise<MmsRuntimeRecord> {
+    const leaveBy = Date.now() + EXITING_SERVICE_WAIT_MS
+    for (;;) {
+      const runtime = resolveRuntimeStatus(this.homeDir)
+      if (runtime.running && runtime.record) {
+        // A service asked to stop keeps the home and its readiness until it exits: wait for it, then look again.
+        if (!readStopRequest(this.homeDir, runtime.record.token)) return runtime.record
+        await this.waitForServiceToLeave(runtime.record.token, leaveBy)
+        continue
+      }
+
+      const owner = resolveOwnerStatus(this.homeDir)
+      if (owner.owned && owner.record) {
+        const token = owner.record.token
+        if (readStopRequest(this.homeDir, token)) {
+          await this.waitForServiceToLeave(token, leaveBy)
+          continue
+        }
+        // Live owner but no runtime yet — wait for readiness publication. The wait ends early when that owner leaves
+        // or is asked to stop: the next pass waits for it to go, or starts the next service.
+        this.setState('connecting')
+        const stillStarting = (): boolean => this.ownerHolds(token) && !readStopRequest(this.homeDir, token)
+        const record = await pollUntilRuntimeReady(this.homeDir, {
+          timeoutMs: SERVICE_START_TIMEOUT_MS,
+          intervalMs: SERVICE_POLL_INTERVAL_MS,
+          isAborted: () => this.stopWaiting() || !stillStarting()
+        })
+        if (record) return record
+        this.assertMayConnect()
+        if (!stillStarting()) continue
+        throw linkError('service_not_ready',
+          formatOwnerBusyMessage(owner.record, owner.heldUnreadable) +
+            ' (owner live but runtime readiness not published)'
+        )
+      }
+      return this.startDaemonForHome(owner)
+    }
+  }
+
+  /** No service holds the home: start one (or wait for the one the dev script runs). */
+  private async startDaemonForHome(owner: ReturnType<typeof resolveOwnerStatus>): Promise<MmsRuntimeRecord> {
     if (owner.heldUnreadable) {
       throw linkError('owner_unreadable', formatOwnerBusyMessage(null, true))
     }
@@ -1216,6 +1305,7 @@ export class GuiMmsController extends EventEmitter {
     }
     const token = this.ownerTokenOverride ?? owner.token
     const endpoint = this.resolveEndpoint(owner)
+    this.connectingToToken = owner.token
 
     const client = new LocalMmsClient({
       homeDir: this.homeDir,
@@ -1286,8 +1376,6 @@ export class GuiMmsController extends EventEmitter {
         this.client = null
         this.detachEventHandlers()
       }
-      // After stop, the failure is stop's doing: stay stopped.
-      if (!this.quitting && !this.held) this.enterFailed(err instanceof Error ? err : new Error(String(err)))
       throw err
     }
   }
@@ -1358,11 +1446,7 @@ export class GuiMmsController extends EventEmitter {
         }
         this.client = null
       }
-      // Injected test endpoints skip daemon readiness; production waits for runtime.
-      if (!(this.endpointOverride && this.ownerTokenOverride)) {
-        await this.ensureDaemonReady()
-      }
-      const hello = await this.connectOnce()
+      const hello = await this.connectToService()
       this.log('service.restored', { reason, instance: hello.instanceId, windows: this.windowSessions.size })
       // Everything a restart needs happens here, on every reconnect: the windows are told the service restarted and
       // their lists are read again (`resnapshot`), and every window whose connection was lost is opened again.

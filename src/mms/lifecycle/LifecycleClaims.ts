@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { LifecycleResource, ResourceInventorySnapshot, TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import { ProfileManager } from '../profiles/ProfileManager'
 import { createInstallationPaths } from '../profiles/paths'
@@ -218,6 +218,30 @@ function claimsFrom(current: ResourceLifecycleStore, ownedIds: Set<string>, read
     }))
 }
 
+/** Why a thread folder no record owns refuses a delete, in words a person can act on. */
+function untrackedThread(path: string): string {
+  return `Mousse found thread data it does not keep track of at ${path}, so it can’t be sure nothing else uses the files this delete would remove. Move that folder somewhere else, then delete again.`
+}
+
+function inside(folder: string, path: string): boolean {
+  const rel = relative(resolve(folder), resolve(path))
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
+}
+
+/**
+ * Whether the thread folder at `path` (or, without one, the thread list entry) is a copy a move to the current layout
+ * left behind: a record of that thread, in one of the installation's profiles, says the thread was moved into that
+ * profile's own thread folders, and does not name `path`. The move keeps the old copy for recovery (in the migration
+ * trash, or where it was when that is on another drive) and never reads it again; what the thread uses is its record's.
+ * `movedOutOf`: the store whose own folders hold the copy; its own records are not where the thread was moved to.
+ */
+function leftByMove(listed: ReadonlyArray<{ store: ResourceLifecycleStore; records: TaskLifecycleRecord[] }>, taskId: string, path?: string, movedOutOf?: ResourceLifecycleStore): boolean {
+  return listed.some(({ store, records }) => store !== movedOutOf && records.some((record) =>
+    record.taskId === taskId &&
+    inside(join(store.profileHome, 'thread-data'), record.originalLocation) &&
+    !(path && record.locations.some((location) => resolve(location) === resolve(path)))))
+}
+
 /**
  * Every profile's lifecycle store with its records, once nothing but those records owns a thread there: the registered
  * profiles, their thread folders, the old data folders inside project folders and the thread indexes. None of this reads
@@ -251,8 +275,11 @@ function ownerStores(current: ResourceLifecycleStore, reads: OwnershipReads): Ar
     } else if (nested && existsSync(join(installation, 'threads-index.json')) && JSON.parse(readFileSync(join(installation, 'threads-index.json'), 'utf8')).length) throw new Error('Unmigrated legacy thread ownership prevents cleanup.')
   } else if (nested || existsSync(profilesRoot) && readdirSync(profilesRoot).length) throw new Error('Profile storage has no validated installation registry; cleanup is blocked.')
 
-  return stores.map((store) => {
-    const records = store.list()
+  const listed = stores.map((store) => ({ store, records: store.list() }))
+  // The layouts threads were moved out of: the installation's own folders from before profiles, and the old data folders
+  // inside project folders. A thread's copy left there by that move is no other owner (`leftByMove`).
+  const movedFrom = (store: ResourceLifecycleStore): boolean => nested && resolve(store.profileHome) === resolve(installation)
+  return listed.map(({ store, records }) => {
     let visited = 0
     const scanOwners = (root: string, path: string, depth = 0): void => {
       if (!existsSync(path)) return
@@ -263,7 +290,7 @@ function ownerStores(current: ResourceLifecycleStore, reads: OwnershipReads): Ar
       if (existsSync(meta)) {
         assertLifecyclePath(root, meta)
         const value = JSON.parse(readFileSync(meta, 'utf8')) as { id?: string }
-        if (!value.id || !records.some((record) => record.taskId === value.id && record.locations.some((location) => resolve(location) === resolve(path)))) throw new Error(`Unregistered task metadata prevents exclusive ownership proof in profile ${store.profileId}.`)
+        if (!value.id || !records.some((record) => record.taskId === value.id && record.locations.some((location) => resolve(location) === resolve(path))) && !(movedFrom(store) && leftByMove(listed, value.id, path, store))) throw new Error(untrackedThread(path))
         return // Historical generations inside a known task are not separate live owners.
       }
       for (const name of readdirSync(path)) {
@@ -284,7 +311,7 @@ function ownerStores(current: ResourceLifecycleStore, reads: OwnershipReads): Ar
         const scan = reads.legacy(join(project.path, '.mousse', '.data'))
         visited += scan.visited
         for (const meta of scan.metas) {
-          if (!meta.id || !records.some((record) => record.taskId === meta.id && record.locations.some((location) => resolve(location) === resolve(meta.path)))) throw new Error(`Unregistered task metadata prevents exclusive ownership proof in profile ${store.profileId}.`)
+          if (!meta.id || !records.some((record) => record.taskId === meta.id && record.locations.some((location) => resolve(location) === resolve(meta.path))) && !leftByMove(listed, meta.id, meta.path)) throw new Error(untrackedThread(meta.path))
         }
         if (scan.error) throw new Error(scan.error)
         if (visited > OWNER_SCAN_LIMIT) throw new Error('Unregistered storage layout exceeds bounded ownership discovery.')
@@ -294,7 +321,7 @@ function ownerStores(current: ResourceLifecycleStore, reads: OwnershipReads): Ar
     if (existsSync(index)) {
       assertLifecyclePath(store.profileHome, index)
       const entries = JSON.parse(readFileSync(index, 'utf8')) as Array<{ id?: string }>
-      if (!Array.isArray(entries) || entries.some((entry) => !entry.id || !records.some((record) => record.taskId === entry.id))) throw new Error(`Unregistered thread ownership in profile ${store.profileId} prevents cleanup.`)
+      if (!Array.isArray(entries) || entries.some((entry) => !entry.id || !records.some((record) => record.taskId === entry.id) && !(movedFrom(store) && leftByMove(listed, entry.id, undefined, store)))) throw new Error(`Unregistered thread ownership in profile ${store.profileId} prevents cleanup.`)
     }
     return { store, records }
   })

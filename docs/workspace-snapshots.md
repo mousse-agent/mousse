@@ -87,15 +87,23 @@ In detail:
 
 Turn start no longer requires a clean worktree, no longer moves uncommitted changes aside, and no longer compares the branch name or HEAD. `ThreadWorkspaceManager.verify` reports a workspace ready when the worktree exists and no Mousse operation is waiting for recovery (`recovery_required`, `prepared`, `git_applied`, `context_pending`).
 
+A turn's start (from the workspace check to the start check) and its end (around the checkpoint) each read the worktree's top, Git folder, in-progress markers, HEAD and branch once, in one `rev-parse` and, when the branch is needed, one `symbolic-ref` (`src/mms/git/repositoryFacts.ts`). Every caller in that window (workspace check, lock identity, snapshot, checkpoint, receipt) uses those answers. What was read before the repository's lease is read again once it is held, and nothing carries over to the next window, so HEAD at the end and a `.git` replaced between turns are always read fresh. Hidden stores and synchronous callers ask Git themselves.
+
 What still stops a turn: an operation Mousse left unfinished (an interrupted restore or checkpoint), until recovery settles it. Recovery runs before the next turn and admits `recovery_required` too, so a thread an older version left waiting unlocks on its own. A refused publish leaves nothing unfinished.
 
 ## Checkpoint
 
 `checkpoint()` records the action's end: it takes a snapshot, describes the Git work between the start and the end (`describeGit`), diffs the two trees, records the receipt and pins its refs. A failed or stopped turn is recorded the same way. There is no commit, so a user's own commit that a hook rejected is recorded as a failed action without anything to bypass; the `onFailure: 'record'` option is gone.
 
+The receipt's two refs and the worktree's pin of its newest snapshot (`retainedRef`) are written in one `update-ref --no-deref --stdin` transaction; the journal entry follows, and the worktree's record (`workspace.json`) only after it. A start whose snapshot was just made or found already there is not checked again before the turn begins (`OutsideChangesResult.startCheck`).
+
 A nested snapshot recorded while the action runs becomes one of its `contributions`, found by the action's time window (a snapshot has no ancestry to test).
 
 Interrupted checkpoints recover by taking the snapshot again from the files. If that fails too, the operation stays `recovery_required` with the new error, so the reason shown is what stopped the retake.
+
+## Measuring a turn's start and end
+
+Every turn writes two `[turn-boundary]` lines to the service log (`src/mms/diagnostics/turnBoundary.ts`): one when it reaches its provider, one when it settles. Each lists its phases, each named by the mark that ends it (at the start `folders`, `lease`, `recovery`, `workspace`, then the snapshot's `locks`, `snapshotHead`, `snapshotIndex`, `snapshotState`, `snapshotExact`, `snapshotIgnored`, `snapshotCommit`, then `startCheck`, `accepted`, `starting`, … `harness`; at the end `finishing`, the same snapshot steps, `describe`, `receipt`, `completed`, `settled`) with their milliseconds and, per phase, the Git commands started (`git`), their summed lifetimes (`gitMs`), the time `spawn()` itself held the event loop (`spawnMs`), the commands run synchronously and their time (`sync`, `syncMs`), and the wait for the repository's lease (`leaseMs`). The start line also has `waitedMs`, from the run's request to the start of its setup. Commands are counted at each Git spawn site (`timeGitChild`, `timeGitSync`, `timeGitRun`), whatever executable they name; Git run through `simple-git` is not counted.
 
 ## Undo, Redo and revert
 

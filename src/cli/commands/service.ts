@@ -41,6 +41,7 @@ import { prepareMemoryMonitor } from '../../mms/diagnostics/startMemoryMonitor'
 import { formatStartupTiming, startupPhase, startupTimingBegin, startupTimingEnd } from '../../mms/startup/startupTiming'
 import { logInfo } from '../../mms/log/diag'
 import {
+  armDaemonExitDeadline,
   stopRunningDaemon,
   shutdownDaemonLifecycle,
   type DaemonLifecycleState
@@ -91,6 +92,13 @@ export interface DaemonForegroundOptions {
    * stop before the lease exists. A new one when unset.
    */
   ownerToken?: string
+  /** Test inject: overrides the drain's retry delay and stuck deadline (see `DaemonLifecycleState.drainWait`). */
+  drainWait?: DaemonLifecycleState['drainWait']
+  /**
+   * How the process ends when it outlives `DAEMON_EXIT_DEADLINE_MS` after a stop. The production daemon
+   * exits the process; tests (`skipSignals`) have no deadline unless they pass one.
+   */
+  exitDeadline?: { ms?: number; exit: (code: number) => void }
   onLog?: (msg: string) => void
 }
 
@@ -119,9 +127,11 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     ownerToken: opts.ownerToken ?? createOwnerToken(),
     runtimeWritten: false,
     pollStop: null,
-    shuttingDown: false
+    shuttingDown: false,
+    ...(opts.drainWait ? { drainWait: opts.drainWait } : {})
   }
   const ownerToken = state.ownerToken!
+  const exitDeadline = opts.exitDeadline ?? (opts.skipSignals ? undefined : { exit: (code: number) => process.exit(code) })
 
   let memoryMonitor: ReturnType<typeof prepareMemoryMonitor> = null
   const shutdown = async (reason: string, exitCode = 0): Promise<void> => {
@@ -131,6 +141,14 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
       // Already stopping: wait for teardown (and stop anything startup made since).
       await shutdownDaemonLifecycle(state)
       return
+    }
+    // Once asked to stop, the process ends within the deadline, even if a teardown step never answers.
+    if (exitDeadline) {
+      armDaemonExitDeadline(state, {
+        ...(exitDeadline.ms === undefined ? {} : { ms: exitDeadline.ms }),
+        exit: () => exitDeadline.exit(exitCode),
+        onLog: (msg) => log(`\n${msg}`)
+      })
     }
     await shutdownDaemonLifecycle(state, {
       reason,

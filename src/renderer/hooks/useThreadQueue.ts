@@ -51,6 +51,19 @@ export interface UseThreadQueueOptions {
   lastPromptQueueItemId?: string | null
   /** Sends whose queued message is not shown (`QueuedMessage.clientRequestId`): steers on their way into the reply. */
   hiddenRequestIds?: ReadonlySet<string>
+  /**
+   * Whether the transcript's last turn is the one a message sent now joins: a turn that takes steers runs, or a prompt
+   * sent here is on its way. Otherwise (a turn is still being set up, a turn is ending, nothing runs) a message sent now
+   * stays first in the queue, marked as sending next, until a running turn takes it. Defaults to true.
+   */
+  replyOpen?: boolean
+  /** Whether a turn of the thread is running or being set up; when it ends, nothing is marked as sending next any more. */
+  turnActive?: boolean
+  /**
+   * Whether the thread's next turn is being set up (phase `queued`): the message the daemon took for it stays first in
+   * the list until the setup ends, however long that takes, instead of only for `STARTING_ITEM_HOLD_MS`.
+   */
+  turnSettingUp?: boolean
 }
 
 /** An unsaved edit whose message left the queue, as the composer takes it. */
@@ -59,6 +72,8 @@ export interface RecoveredQueueDraft {
   /** The message's composer markers: attached files, voice messages, browser elements, references. */
   markers: string
   images?: ChatImageAttachment[]
+  /** The queued message it was an edit of: its images that came by name only are fetched by this id. */
+  itemId?: string
 }
 
 /** What holds the queue: a running compaction, and the size of the history it would replace. */
@@ -99,6 +114,8 @@ export interface ThreadQueue {
   endComposerSteer: (key: string, taken: boolean) => void
   /** Steers sent here that the transcript does not show yet: the conversation paints them in the reply at once. */
   steersOnTheWay: SteerOnTheWay[]
+  /** Messages sent now while no running turn could take them yet: they wait first in the queue and go next. */
+  sendingNext: ReadonlySet<string>
   remove: (itemId: string) => Promise<void>
   /** Saves a new order; shown at once, put back when the save fails. */
   reorder: (orderedIds: string[]) => Promise<void>
@@ -151,7 +168,9 @@ export function sameQueuedSend(item: QueuedMessage, optimistic: QueuedMessage): 
  * Loads the thread's queue, keeps it in step with `queue:updated`, and wraps the queue's changes
  * (send now, remove, reorder, edit) with busy marks and error text.
  */
-export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticItemReconciled, hold = null, onDraftToComposer, lastPromptId = null, lastPromptQueueItemId = null, hiddenRequestIds }: UseThreadQueueOptions): ThreadQueue {
+export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticItemReconciled, hold = null, onDraftToComposer, lastPromptId = null, lastPromptQueueItemId = null, hiddenRequestIds, replyOpen = true, turnActive = false, turnSettingUp = false }: UseThreadQueueOptions): ThreadQueue {
+  const replyOpenRef = useRef(replyOpen)
+  replyOpenRef.current = replyOpen
   const [items, setItems] = useState<QueuedMessage[]>([])
   // The first queued message, just taken by the daemon for its turn, kept in the list until that turn's prompt shows
   // (the transcript's last prompt is no longer `promptId`, or is this message's).
@@ -265,7 +284,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     // Changed is not the same as having text: an edit that cleared the text of a message with attachments still
     // gives the attachments back.
     if (text === base.text || (!text && !base.markers && !images)) return
-    toComposer.current?.(thread, { text, markers: base.markers, ...(images ? { images } : {}) })
+    toComposer.current?.(thread, { text, markers: base.markers, itemId: draft.itemId, ...(images ? { images } : {}) })
     store.setQueueDraftNotice(thread, true)
     // The notice says what happened; an error about the same message (its edit refused) adds nothing.
     if (thread === threadIdRef.current) setError(null)
@@ -387,8 +406,8 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   // Send now requests in flight, by item: a second click before the first answers (and before the button shows
   // busy) sends nothing more.
   const steering = useRef(new Set<string>())
-  // Messages sent now leave the list at the click, and the reply shows them at once (`steersOnTheWay`). One that is
-  // refused comes back; one the daemon still lists as waiting (its turn is still being set up) comes back after a while.
+  // Messages sent now into a running reply leave the list at the click, and the reply shows them at once
+  // (`steersOnTheWay`). One that is refused comes back; one the daemon still lists as waiting comes back after a while.
   const [sentNow, setSentNow] = useState<Readonly<Record<string, SteerOnTheWay>>>({})
   sentNowRef.current = sentNow
   const sentNowTimers = useRef(new Map<string, number>())
@@ -402,11 +421,71 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
       return rest
     })
   }, [])
+  const hideSentNowLater = useCallback((itemId: string) => {
+    const previous = sentNowTimers.current.get(itemId)
+    if (previous !== undefined) window.clearTimeout(previous)
+    sentNowTimers.current.set(itemId, window.setTimeout(() => unsend(itemId), SENT_NOW_HIDE_MS))
+  }, [unsend])
+  // Messages sent now while no running turn could take them (a turn still being set up, a turn ending, nothing
+  // running). The transcript's last turn is not the one they join, so they are not painted in it: they wait first in
+  // the queue, marked as sending next, and move into the reply once the daemon hands them to the running turn.
+  const [next, setNext] = useState<ReadonlySet<string>>(() => new Set())
+  const dropNext = useCallback((ids: readonly string[]) => {
+    setNext((current) => {
+      if (!ids.some((id) => current.has(id))) return current
+      const kept = new Set(current)
+      for (const id of ids) kept.delete(id)
+      return kept
+    })
+  }, [])
   useEffect(() => () => {
     for (const timer of sentNowTimers.current.values()) window.clearTimeout(timer)
     sentNowTimers.current.clear()
     setSentNow({})
+    setNext(new Set())
   }, [threadId])
+  // Marked messages the daemon's list has shown: one sent from the composer may be marked before the list has it.
+  const listedNext = useRef(new Set<string>())
+  useEffect(() => {
+    if (!next.size) { listedNext.current.clear(); return }
+    const gone: string[] = []
+    const joined: QueuedMessage[] = []
+    for (const id of next) {
+      const item = items.find((entry) => entry.id === id)
+      if (item) listedNext.current.add(id)
+      // Gone: it started as a turn of its own (its prompt shows), joined a turn whose copy already shows, or was removed.
+      if (id === lastPromptQueueItemId || (!item && listedNext.current.has(id))) gone.push(id)
+      else if (item?.state === 'steering') joined.push(item)
+    }
+    if (!gone.length && !joined.length) return
+    // The running turn took it: it shows in that turn's reply, after its prompt, until its copy there arrives.
+    if (joined.length && threadId) {
+      const messages = useAppStore.getState().messages
+      setSentNow((current) => {
+        const painted = { ...current }
+        for (const item of joined) {
+          painted[item.id] ??= steerOnTheWay(`item:${item.id}`, threadId, item.content, messages, { itemId: item.id, images: item.images })
+        }
+        return painted
+      })
+      for (const item of joined) hideSentNowLater(item.id)
+    }
+    dropNext([...gone, ...joined.map((item) => item.id)])
+  }, [items, next, lastPromptQueueItemId, threadId, dropNext, hideSentNowLater])
+  // The turn ended without taking them (a Stop): they are ordinary queued messages again, first in the queue.
+  const wasActive = useRef(turnActive)
+  useEffect(() => {
+    if (wasActive.current && !turnActive) setNext((current) => (current.size ? new Set() : current))
+    wasActive.current = turnActive
+  }, [turnActive])
+  // A turn that runs takes them as it starts; one it still lists as waiting a while after is not joining it.
+  useEffect(() => {
+    if (!replyOpen || !next.size) return
+    const timer = window.setTimeout(() => {
+      dropNext(itemsRef.current.filter((item) => next.has(item.id) && item.state === 'pending').map((item) => item.id))
+    }, STARTING_ITEM_HOLD_MS)
+    return () => window.clearTimeout(timer)
+  }, [replyOpen, next, dropNext])
   // Gone from the daemon's list once its copy shows in the turn: nothing left to paint or hide. Gone before that (the
   // list is not updated yet, or dropped it before the copy arrived), it stays painted until the copy shows or the
   // timer ends, so it never leaves the reply for a moment. Listed as waiting again after it was on its way (a Stop
@@ -431,9 +510,15 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     const live = changeScope(threadId)
     const refused = 'Could not send it now; the reply may have ended. The message is still queued.'
     markBusy(itemId, true)
+    // Painted in the reply only when the reply it joins is the transcript's last turn; otherwise it goes next.
+    const paints = replyOpenRef.current
     const item = itemsRef.current.find((entry) => entry.id === itemId) ?? (known?.id === itemId ? known : undefined)
-    const painted = steerOnTheWay(`item:${itemId}`, threadId, item?.content ?? '', useAppStore.getState().messages, { itemId, images: item?.images })
-    setSentNow((current) => (current[itemId] ? current : { ...current, [itemId]: painted }))
+    if (paints) {
+      const painted = steerOnTheWay(`item:${itemId}`, threadId, item?.content ?? '', useAppStore.getState().messages, { itemId, images: item?.images })
+      setSentNow((current) => (current[itemId] ? current : { ...current, [itemId]: painted }))
+    } else {
+      setNext((current) => (current.has(itemId) ? current : new Set(current).add(itemId)))
+    }
     setError(null)
     setNotice(null)
     try {
@@ -441,24 +526,24 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
       if (!live()) return
       if (!sent.ok) {
         unsend(itemId)
+        dropNext([itemId])
         setError(refused)
         void loadQueue(threadId)
       } else {
         if (sent.notice === 'compaction_finished') setNotice(COMPACTION_FINISHED_NOTICE)
-        const previous = sentNowTimers.current.get(itemId)
-        if (previous !== undefined) window.clearTimeout(previous)
-        sentNowTimers.current.set(itemId, window.setTimeout(() => unsend(itemId), SENT_NOW_HIDE_MS))
+        if (paints) hideSentNowLater(itemId)
       }
     } catch (err) {
       if (!live()) return
       unsend(itemId)
+      dropNext([itemId])
       setError(readableError(err, refused))
       void loadQueue(threadId)
     } finally {
       steering.current.delete(key)
       if (live()) markBusy(itemId, false)
     }
-  }, [threadId, loadQueue, markBusy, changeScope, unsend])
+  }, [threadId, loadQueue, markBusy, changeScope, unsend, dropNext, hideSentNowLater])
 
   // Steers typed in the composer, painted in the reply from the click. One the service took stays painted until its
   // copy shows; if it never does (its turn is still being set up), the queue shows it again after a while.
@@ -475,7 +560,8 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     composerSteerTimers.current.clear()
   }, [])
   const beginComposerSteer = useCallback((content: string, images?: ChatImageAttachment[]): string | null => {
-    if (!threadId || (!content.trim() && !images?.length)) return null
+    // Not painted while the transcript's last turn is not the one it joins: it waits in the queue instead.
+    if (!threadId || (!content.trim() && !images?.length) || !replyOpenRef.current) return null
     const key = `composer:${crypto.randomUUID()}`
     const painted = steerOnTheWay(key, threadId, content, useAppStore.getState().messages, { images })
     setComposerSteers((current) => [...current, painted])
@@ -576,23 +662,27 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   useEffect(() => {
     if (!starting) return
     if (!startingShown) { setStarting(null); return }
+    // Its turn's setup can take a minute: the prompt shows only after it. The wait for the prompt starts when it ends.
+    if (turnSettingUp) return
     const timer = window.setTimeout(() => setStarting(null), STARTING_ITEM_HOLD_MS)
     return () => window.clearTimeout(timer)
-  }, [starting, startingShown])
-  // A message sent now (`steering`, or just clicked) shows in the transcript, in the reply it joined, not here; so does
+  }, [starting, startingShown, turnSettingUp])
+  // A message sent now (`steering`, or just clicked into a running reply) shows in the transcript, in the reply it
+  // joined, not here, unless it is still marked as sending next (it moves there as the next render paints it); so does
   // one whose turn's prompt is in the transcript.
   const shown = useMemo(() => [
-    ...(startingShown ? [startingShown] : []),
+    // Taken for its turn, it waits for that turn's setup, whatever it waited for before.
+    ...(startingShown ? [startingShown.waitsFor === 'setup' ? startingShown : { ...startingShown, waitsFor: 'setup' as const }] : []),
     ...items,
     ...optimisticItems.filter((optimistic) => optimistic.threadId === threadId && !items.some((item) => sameQueuedSend(item, optimistic)))
-  ].filter((item) => !item.internal && item.state !== 'steering' && !sentNow[item.id] && !composerSteerItemIds.has(item.id) &&
+  ].filter((item) => !item.internal && (item.state !== 'steering' || next.has(item.id)) && !sentNow[item.id] && !composerSteerItemIds.has(item.id) &&
     item.id !== lastPromptQueueItemId && !(item.clientRequestId && hiddenRequestIds?.has(item.clientRequestId))),
-  [startingShown, items, optimisticItems, threadId, sentNow, composerSteerItemIds, lastPromptQueueItemId, hiddenRequestIds])
+  [startingShown, items, optimisticItems, threadId, sentNow, next, composerSteerItemIds, lastPromptQueueItemId, hiddenRequestIds])
   // The message on its way into its turn takes no change.
   const busy = useMemo(() => (startingShown ? { ...busyIds, [startingShown.id]: true } : busyIds), [busyIds, startingShown])
 
   return useMemo(
-    () => ({ threadId, items: shown, busyIds: busy, error, clearError, notice, clearNotice, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, beginComposerSteer, endComposerSteer, steersOnTheWay, remove, reorder, edit }),
-    [threadId, shown, busy, error, clearError, notice, clearNotice, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, beginComposerSteer, endComposerSteer, steersOnTheWay, remove, reorder, edit]
+    () => ({ threadId, items: shown, busyIds: busy, error, clearError, notice, clearNotice, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, beginComposerSteer, endComposerSteer, steersOnTheWay, sendingNext: next, remove, reorder, edit }),
+    [threadId, shown, busy, error, clearError, notice, clearNotice, draftMoved, dismissDraftMoved, editDraft, startEdit, updateEdit, closeEdit, hold, steer, beginComposerSteer, endComposerSteer, steersOnTheWay, next, remove, reorder, edit]
   )
 }
