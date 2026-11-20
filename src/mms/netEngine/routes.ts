@@ -65,6 +65,16 @@ export function automatic(route: string): boolean {
  * `approved`. Loopback hints of an unpackaged build count too, whatever class the checks map them to; approving an
  * automatic hint changes nothing. Under the `lan-only-candidates` control, none.
  */
+/**
+ * A pairing's addresses as the app hands them to the helper (`peer.addresses.set`): all of them, or under the
+ * `lan-only-candidates` control its LAN addresses only (no other address and no SSH route), as the join's
+ * `approved` is then empty.
+ */
+export function handedRoutes<T>(routes: readonly T[]): T[] {
+  if (!engineControl('lan-only-candidates')) return [...routes]
+  return routes.filter((route) => typeof route === 'string' && privateRoute(route))
+}
+
 export function approvedHints(hints: readonly string[]): string[] {
   if (engineControl('lan-only-candidates')) return []
   return ticketDestinations(hints, !packagedBuild())

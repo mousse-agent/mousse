@@ -1267,8 +1267,17 @@ export class FakeHelper {
           this.peerAdds.push(routes)
           return reply({ already: this.network.peer(this.identity, String(message.identity)) })
         }
-        case 'peer.forget':
+        case 'peer.forget': {
+          // As the helper: the host's completion records go with it, and their pending marks settle, so no replay
+          // brings it back (unless `replay-after-removal`).
+          if (!this.network.defects.has('replay-after-removal'))
+            for (const flow of this.network.flowsOf(this).values())
+              if (flow.done?.identity === String(message.identity)) {
+                delete flow.done
+                flow.pending = false
+              }
           return reply({ forgotten: this.network.forget(this.identity, String(message.identity)) })
+        }
         case 'join.cancel': {
           const waiting = this.codeWaits.get(String(message.invitation))
           this.codeWaits.delete(String(message.invitation))

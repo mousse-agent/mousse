@@ -58,8 +58,11 @@ const CHECKS = {
   // Add over SSH (1b §3.4–§3.6).
   'phase1b.ssh-add-app': 'tests/netEngine/checks/sshAddApp.test.ts'
 }
-/** The checks that run over one route (`--route`), and the routes each takes. */
-const ROUTED = { 'phase1b.routes-app': ['tcp', 'ws', 'ssh'] }
+/** The checks that run over one route (`--route`), and the routes each takes: the cases checks/phase1b.toml gives. */
+const ROUTED = {
+  'phase1b.routes-app': ['tcp', 'ws', 'ssh'],
+  'phase1b.no-rpc-without-grant': ['tcp', 'ws', 'ssh']
+}
 /** The checks that run as cross-machine cells, one role per computer. */
 const CROSS_MACHINE = new Set(['phase1a.pair-offline', 'phase1a.shared-computer'])
 

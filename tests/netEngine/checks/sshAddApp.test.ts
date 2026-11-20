@@ -17,14 +17,22 @@
  * `ssh-row-pairback` ssh_row_pairback, `profile-before-journal` duplicate_after_crash, `grant-id-not-checked`
  * removed_grant_reported_live, `retry-after-connected` removal_undone, `overwrite-1a-row` 1a_row_lost,
  * `own-row-not-resumed` stuck_granting, `existing-reply-not-kept` existing_reply_lost,
- * `removal-skips-unsaved-grant` grant_survived_removal, `remote-autostart` daemon_started. The Send link that
- * converts SSH rows (`ssh-row-not-converted`) is the link slice's case.
+ * `removal-skips-unsaved-grant` grant_survived_removal, `remote-autostart` daemon_started, and
+ * `ssh-row-not-converted` stuck_finishing (a Send link between the two converts both rows).
  */
 import { PassThrough } from 'node:stream'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { runNetEngineCommand } from '../../../src/cli/commands/netEngineSsh'
 import type { PrepareStep } from '../../../src/mms/netEngine/ssh/prepare'
-import { deviceState, eventually, Fabric, rowFor, step, type Computer } from './harness'
+import {
+  connectedBothWays,
+  deviceState,
+  eventually,
+  Fabric,
+  rowFor,
+  step,
+  type Computer
+} from './harness'
 
 const HOST = 'b.test'
 /** Why the last Connect did not go through, for a failed step's message. */
@@ -330,6 +338,35 @@ describe('phase1b.ssh-add-app', () => {
       expect(repeat(a)).rejects.toMatchObject({ details: { reason: 'removed' } })
     )
   }, 120_000)
+
+  it('converts both rows of an SSH add only on a Send link’s PAIRED, and then pairs both ways', async () => {
+    const a = await make(`a${++made}`)
+    const { resolved } = await begin(a)
+    expect(await connect(a, resolved.routeId, { selector: bSelector() }), lastError).toBe(true)
+    await eventually(() => expect(sshRow(a)!.state).toBe('connected'), 30_000)
+    // A sends B a link; B opens it and types the code A shows.
+    const link = await a.dispatch('netEngine.invite', { kind: 'link' }, true)
+    const joined = b
+      .dispatch('netEngine.join', { ticket: link.uri, arrival: 'link' }, true)
+      .then(
+        () => undefined,
+        (error: unknown) => error
+      )
+    await eventually(() =>
+      expect(
+        b.mms.netEngine.status().joins?.find((join) => join.invitation === link.invitation)?.needsCode
+      ).toBe(true)
+    )
+    const code = a.mms.netEngine.status().links?.find((one) => one.invitation === link.invitation)?.code
+    await b.dispatch('netEngine.join.code', { invitation: link.invitation, code }, true)
+    expect(await joined).toBeUndefined()
+    // A row that kept `source: "ssh"` (the `ssh-row-not-converted` control) never finishes pairing.
+    await step('stuck_finishing', () => connectedBothWays(a, b))
+    await step('stuck_finishing', () => {
+      expect(rowFor(a, b)?.source).toBeUndefined()
+      expect(rowFor(b, a)?.source).toBeUndefined()
+    })
+  }, 180_000)
 
   it('never starts a daemon from net-engine ssh', async () => {
     const asked: Array<{ disableAutoStart?: boolean }> = []

@@ -64,7 +64,7 @@ import { EnginePairing, fingerprintOf, type PairingStep } from './pairing'
 import { EngineEditor, engineEditorRefusal, type EngineEditorRights, type EngineEditorTestOptions } from './editor'
 import { TunnelError } from '../net/editor/tunnel'
 import { routeSetupProbes } from './probes'
-import { automatic, loopbackClass } from './routes'
+import { automatic, handedRoutes, loopbackClass } from './routes'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 import { readTicket } from './ticket'
 import { SshAdd } from './ssh/add'
@@ -1580,12 +1580,12 @@ export function ownerRoutes(
   addresses: readonly string[]
 ): Array<string | SshRouteEntry> {
   const ssh = row.ssh
-  return [
+  return handedRoutes<string | SshRouteEntry>([
     ...addresses,
     ...(ssh?.routeId && ssh.selector
       ? [{ route_id: ssh.routeId, selector: ssh.selector, shell: ssh.shell ?? 'sh' }]
       : [])
-  ]
+  ])
 }
 
 /** A helper's refusal of the owner's addresses, as the row's dialog says it. */

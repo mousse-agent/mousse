@@ -21,6 +21,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -456,8 +457,14 @@ export class Fabric {
         stop: () => Promise<void>
       }>
     }
+    // Over SSH the remote's /bin/sh runs <HOME>/.mousse/bin/mousse-cli, a launcher the app writes in its Mousse
+    // home: the session's HOME holds this computer's Mousse home as its .mousse.
+    const user = realpathSync(mkdtempSync(join(tmpdir(), 'engine-check-ssh-user-')))
+    symlinkSync(home, join(user, '.mousse'), 'junction')
+    this.cleanups.push(() => rmSync(user, { recursive: true, force: true }))
     const server = await startSshRoute({
       keys: join(home, `ssh-server-${alias}`),
+      home: user,
       mousseHome: home,
       launchers:
         process.platform === 'win32'
