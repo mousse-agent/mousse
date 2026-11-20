@@ -244,6 +244,8 @@ export interface AcpChatInput {
    */
   bot?: true
   onText: (text: string) => void
+  /** The agent's thoughts so far this turn (`agent_thought_chunk`), cumulative like `onText`. */
+  onThinking?: (text: string) => void
   drainSteer?: () => string | undefined
   /**
    * A steer drain with its token (`TurnControl.drainSteerEntry`). With `expect`, it takes only when the decision now is
@@ -715,6 +717,7 @@ export class AcpSessions {
     }
     input.signal?.addEventListener('abort', abort, { once: true })
     let text = ''
+    let thinking = ''
     const toolTitles = new Map<string, string>()
     let resumed = !freshProcess
     let steerTimer: ReturnType<typeof setInterval> | undefined
@@ -796,6 +799,11 @@ export class AcpSessions {
       if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') {
         text += event.content.text ?? ''
         input.onText(text)
+      }
+      // Agents such as Antigravity say what they are doing between tool calls as thoughts, not as message text.
+      if (event.sessionUpdate === 'agent_thought_chunk' && event.content?.type === 'text' && event.content.text) {
+        thinking += event.content.text
+        input.onThinking?.(thinking)
       }
       if (event.sessionUpdate === 'tool_call' && event.toolCallId) {
         const subagent = isAcpSubagentTool(event.name)

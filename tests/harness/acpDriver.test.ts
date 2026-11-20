@@ -23,7 +23,10 @@ afterEach(() => {
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
-function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean } = {}) {
+type Update = Record<string, unknown>
+const say = (text: string): Update => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })
+
+function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean; updates?: Update[] } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-acp-driver-'))
   homes.push(home)
   const calls: string[] = []
@@ -48,7 +51,8 @@ function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean 
       })
       .onRequest(methods.agent.session.prompt, async (c) => {
         calls.push(`prompt ${c.params.sessionId}`)
-        await c.client.notify(methods.client.session.update, { sessionId: c.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hello' } } })
+        for (const update of options.updates ?? [say('hello')])
+          await c.client.notify(methods.client.session.update, { sessionId: c.params.sessionId, update: update as never })
         return { stopReason: 'end_turn' }
       })
   })
@@ -137,6 +141,32 @@ describe('the generic ACP driver', () => {
     await expect(harness.startTurn(spec(binding)).result).resolves.toMatchObject({ text: 'hello' })
     expect(calls.filter((call) => call.startsWith('prompt'))).toHaveLength(1)
     expect(notices).toEqual(['Fake agent approves tools itself.'])
+  })
+
+  it('shows the agent’s thoughts as they come, one row before each tool call and one after, then its reply', async () => {
+    const thought = (text: string): Update => ({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text } })
+    const { harness, spec } = fixture([], {
+      updates: [
+        thought('Reading the '), thought('switcher.'),
+        { sessionUpdate: 'tool_call', toolCallId: 'read1', title: 'Read SideChatsPanel.tsx', status: 'in_progress' },
+        { sessionUpdate: 'tool_call_update', toolCallId: 'read1', status: 'completed' },
+        thought('Found the race.'),
+        say('Fixed.')
+      ]
+    })
+    await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath } })
+    const binding = await harness.bind(harness.resolveStored({ instanceId: 'acp:fake-agent', llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent', permissionMode: 'full' })
+    const turn = spec(binding)
+    await expect(harness.startTurn(turn).result).resolves.toMatchObject({ text: 'Fixed.' })
+    const thinking = vi.mocked(turn.sink.thinking).mock.calls.map(([event]) => event)
+    const rows = thinking.filter((event) => event.phase === 'complete').map((event) => event.content)
+    expect(rows).toEqual(['Reading the switcher.', 'Found the race.'])
+    // The first thought is on screen before the tool call starts, not held to the end of the turn.
+    const firstThought = vi.mocked(turn.sink.thinking).mock.invocationCallOrder[0]!
+    const toolStart = vi.mocked(turn.sink.tool).mock.invocationCallOrder[0]!
+    expect(firstThought).toBeLessThan(toolStart)
+    // A thought is never the reply.
+    expect(vi.mocked(turn.sink.text).mock.calls.map(([event]) => event).filter((event) => event.phase === 'complete').map((event) => event.content)).toEqual(['Fixed.'])
   })
 
   it('never resumes across turns: the account is unknown, so each turn hands the history to a new session', async () => {

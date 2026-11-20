@@ -136,12 +136,23 @@ export class AcpAdapter implements ProviderAdapter {
       },
       onText: (content) => {
         progress()
+        // The reply began: the thought before it is done, and one that resumes after it is a new row.
+        streams.thinking.break()
         streams.text.update(content)
+      },
+      onThinking: (content) => {
+        progress()
+        // A thought after text keeps the text above it, as a tool call does.
+        streams.text.break()
+        streams.thinking.update(content)
       },
       onTool: (event) => {
         progress()
-        // A note that came before this call keeps its own row, above it; the next one starts below.
-        if (event.phase === 'start' && !event.parentCallId) streams.text.break()
+        // A thought or a note that came before this call keeps its own row, above it; the next one starts below.
+        if (event.phase === 'start' && !event.parentCallId) {
+          streams.thinking.break()
+          streams.text.break()
+        }
         if (event.phase === 'start') toolCalls.set(event.callId, 'running')
         // A running call's progress: it still runs (and has not failed).
         else if (event.phase === 'update') toolCalls.set(event.callId, toolCalls.get(event.callId) ?? 'running')
@@ -152,6 +163,7 @@ export class AcpAdapter implements ProviderAdapter {
       ...(client.interrupt ? { onSession: (sessionId: string) => sink.providerRef({ ...providerRef, sessionId }) } : {})
     })
     client.commitConversation(input.threadId, host.context.nativeHistoryAfterTurn(text))
+    streams.thinking.complete()
     streams.text.complete(text)
     const contextKey = `${input.llmProvider}:${input.model}`
     return {
