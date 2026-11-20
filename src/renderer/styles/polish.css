@@ -1280,7 +1280,9 @@ html[data-frosted-composer='true'] .chat:not(.chat--empty) .an-message-list {
   );
 }
 
+/* On the new-thread page there is no transcript: the glass frosts the glow behind the composer. */
 html[data-frosted-composer='true'] .app .chat:not(.chat--empty) .chat-input-area .composer,
+html[data-frosted-composer='true'] .app .chat--empty .chat-input-area .composer,
 html[data-frosted-composer='true'] .chat:not(.chat--empty) .chat-jump {
   background-color: rgba(var(--surface-soft-rgb), var(--frosted-composer-alpha, 0.6));
   -webkit-backdrop-filter: blur(var(--frosted-composer-blur, 6px)) saturate(var(--frosted-composer-saturate, 1.12));
