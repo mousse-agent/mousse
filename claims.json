@@ -96,20 +96,6 @@
       "expiresAt": "2026-11-20T13:15:48.246Z"
     },
     {
-      "task": "fix-nightly-electron-fixtures",
-      "session": "agibook-16dd8d",
-      "machine": "agibook",
-      "branch": "fix-nightly-electron-fixtures",
-      "paths": [
-        "tests/electronFixturesWithoutGpu.test.ts",
-        "tests/renderer/frameless-shell-electron.test.ts",
-        "tests/renderer/sentMessageShownAtOnce.test.ts",
-        "tests/fixtures/frameless-shell"
-      ],
-      "claimedAt": "2026-11-20T19:08:08.574Z",
-      "expiresAt": "2026-11-20T21:08:08.574Z"
-    },
-    {
       "task": "fix-quit-lingering-service",
       "session": "Animatrix-70b894",
       "machine": "Animatrix",
