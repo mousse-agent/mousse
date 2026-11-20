@@ -1031,11 +1031,14 @@ export class NetService {
         )
       )
     // Signing in to Mousse ID on a computer with no network identity joins the account's network.
+    // So does a computer whose network is only itself: it joins the account's devices when there
+    // are any, instead of adding a second, separate network to the account.
     if (
       this.hosted &&
       ['net.plus.discover', 'net.plus.login.begin', 'net.plus.login.finish'].includes(method) &&
       ((method === 'net.plus.login.finish' && this.hosted.handlesJoin(String(params.id))) ||
-        !this.hasIdentity())
+        !this.hasIdentity() ||
+        (method !== 'net.plus.login.finish' && this.aloneOnNetwork()))
     )
       return this.track(this.hosted.joinSignIn(method, params))
     // Joining, and finishing or giving up a join, need no network yet. The wait for the first
@@ -1616,7 +1619,13 @@ export class NetService {
       joinWithInvite: async (invite, name) => {
         await this.firstSession(await this.serial(() => this.join(invite, name, undefined, undefined, true)))
       },
-      dropUnsentJoin: () => this.serial(() => this.dropUnsentJoin())
+      dropUnsentJoin: () => this.serial(() => this.dropUnsentJoin()),
+      ownNode: () => (this.hasIdentity() ? this.runtime().identity.self()?.node : undefined),
+      leaveLoneNetwork: () =>
+        this.serial(async () => {
+          if (!this.aloneOnNetwork()) throw new NetError('conflict', 'This computer is no longer alone on its network.')
+          await this.setAsideNetwork('joined-account')
+        })
     }
   }
   /** A network identity exists for this profile; never creates the network database. */
@@ -1624,6 +1633,25 @@ export class NetService {
     return (
       existsSync(join(this.options.profileDir, 'net', 'net.db')) && !!this.runtime().identity.self()
     )
+  }
+  /**
+   * This computer owns a network that is only itself, with nothing to lose by joining another: it
+   * may start over (no Space hosted, no other device holding a pass), belongs to no Space, keeps
+   * no bots in its list and is not signed in to Mousse ID.
+   */
+  private aloneOnNetwork(): boolean {
+    try {
+      if (!this.hasIdentity() || this.hosted?.status().configured) return false
+      const check = this.startOverCheck()
+      return (
+        check.allowed === 'alone' &&
+        check.keeper &&
+        check.spaces.length === 0 &&
+        !this.runtime().identity.listsBots()
+      )
+    } catch {
+      return false
+    }
   }
   /** This computer has an identity that was removed from its devices (see `NetIdentityService.selfRemoved`). */
   private selfRemoved(): boolean {

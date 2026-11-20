@@ -232,10 +232,15 @@ export class HostedNetController implements HostedNet {
   private async completeJoin(grant: JoinGrant): Promise<PlusStatus> {
     const client = this.join(),
       deviceName = grant.deviceName,
-      target = joinTarget(await client.inventory(grant)),
-      account = grant.email ? { email: grant.email } : {}
+      found = joinTarget(await client.inventory(grant)),
+      account = grant.email ? { email: grant.email } : {},
+      own = this.host.ownNode(),
+      // A computer alone on its own network that the account already lists keeps it.
+      target = found && found.node !== own ? found : undefined
     if (target) {
       if (!target.online) throw new NetError('authority_offline')
+      // A computer alone on its own network leaves it to join the account's devices.
+      if (own) await this.host.leaveLoneNetwork()
       const { transportFingerprint } = await this.host.serial(() => this.host.prepareJoin())
       try {
         await this.joinTarget(grant, target.node, deviceName, transportFingerprint)
@@ -244,7 +249,7 @@ export class HostedNetController implements HostedNet {
         await this.host.dropUnsentJoin().catch(() => {})
         throw error
       }
-    } else await this.host.serial(() => this.host.createIdentity(deviceName))
+    } else if (!own) await this.host.serial(() => this.host.createIdentity(deviceName))
     return this.host.serial(async () => {
       this.assertTransportCapacity()
       const status = await this.service().useGrant(grant.configuration, grant.accessToken, !target, account)

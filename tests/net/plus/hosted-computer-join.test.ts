@@ -90,7 +90,7 @@ async function mousseId(root: string) {
       MONETIZATION_ENABLED: false
     },
     services: {
-      net: { service, login },
+      net: { service, login, serving: () => true },
       clock: { now: () => Date.now() },
       hosted: { entitlements: { get: async () => undefined } }
     }
@@ -153,6 +153,48 @@ it.skipIf(!process.env.MOUSSE_PLUS_ROOT)(
     expect(
       inventory.registrations.filter((row: { revokedAt: unknown }) => row.revokedAt === null).map((row: { nodeId: string }) => row.nodeId).sort()
     ).toEqual([owner.node, member.node].sort())
+  },
+  90000
+)
+
+it.skipIf(!process.env.MOUSSE_PLUS_ROOT)(
+  'a computer alone on a network of its own joins the account network when it signs in, instead of adding a second one',
+  async () => {
+    const fixture = await mousseId(process.env.MOUSSE_PLUS_ROOT!)
+    const desk = await profile({ initialize: false })
+    expect(await signIn(fixture, desk, 'Desk')).toMatchObject({ connected: true })
+    const owner = desk.services.net.runtime().identity.self()!
+    // Networking was turned on here before signing in: a network that is only this computer.
+    const mini = await profile()
+    const before = mini.services.net.runtime().identity.self()!
+    expect(before.isAuthority).toBe(true)
+
+    expect(await signIn(fixture, mini, 'Mac mini')).toMatchObject({ connected: true })
+
+    const member = mini.services.net.runtime().identity.self()!
+    expect(member.user).toBe(owner.user)
+    expect(member.node).not.toBe(before.node)
+    expect(member.isAuthority).toBe(false)
+    const nodes = ((await desk.services.net.request('bridge.nodes', {})) as { nodes: Array<{ node: string; name: string }> }).nodes
+    expect(nodes.find((row) => row.node === member.node)).toMatchObject({ name: 'Mac mini' })
+    const inventory = await fixture.service.inventory({ accountId: fixture.accountId, recentAuthAt: Date.now() })
+    expect(inventory.bindings.map((row: { userId: string }) => row.userId)).toEqual([owner.user])
+  },
+  90000
+)
+
+it.skipIf(!process.env.MOUSSE_PLUS_ROOT)(
+  'a computer alone on a network of its own keeps it when it is the account’s first computer',
+  async () => {
+    const fixture = await mousseId(process.env.MOUSSE_PLUS_ROOT!)
+    const desk = await profile()
+    const before = desk.services.net.runtime().identity.self()!
+
+    expect(await signIn(fixture, desk, 'Desk')).toMatchObject({ connected: true })
+
+    expect(desk.services.net.runtime().identity.self()).toMatchObject({ node: before.node, user: before.user, isAuthority: true })
+    const inventory = await fixture.service.inventory({ accountId: fixture.accountId, recentAuthAt: Date.now() })
+    expect(inventory.bindings.map((row: { userId: string }) => row.userId)).toEqual([before.user])
   },
   90000
 )

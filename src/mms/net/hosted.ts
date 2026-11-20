@@ -79,6 +79,13 @@ export interface HostedNetHost {
   joinWithInvite(invite: string, name: string): Promise<void>
   /** Sets aside the keys of a join that never sent its request; queues itself. */
   dropUnsentJoin(): Promise<void>
+  /** This computer's node when it has a network identity. */
+  ownNode(): NodeId | undefined
+  /**
+   * Sets aside a network that is only this computer, so it can join the account's network;
+   * refuses when that is no longer so. Queues itself.
+   */
+  leaveLoneNetwork(): Promise<void>
 }
 
 /** The module's side, called by NetService at the points where hosted behavior joins core. */
