@@ -78,19 +78,6 @@
       "expiresAt": "2026-11-20T13:11:09.414Z"
     },
     {
-      "task": "archived-thread-steer-cli-unarchive",
-      "session": "Animatrix-9282d6",
-      "machine": "Animatrix",
-      "branch": "archived-thread-steer-cli-unarchive",
-      "paths": [
-        "src/mms/protocol/handlers.ts",
-        "src/mms/orchestrator/OrchestratorService.ts",
-        "src/mms/run/mcp/appTools/thread.ts"
-      ],
-      "claimedAt": "2026-11-20T13:16:28.661Z",
-      "expiresAt": "2026-11-20T15:16:28.661Z"
-    },
-    {
       "task": "continuation-tools-wait-for-run",
       "session": "Animatrix-7c6ffa",
       "machine": "Animatrix",
