@@ -78,19 +78,6 @@
       "expiresAt": "2026-11-19T08:39:35.504Z"
     },
     {
-      "task": "bots-ask-first-default",
-      "session": "agibook-80ed0e",
-      "machine": "agibook",
-      "branch": "bots-ask-first-default",
-      "paths": [
-        "src/mms/bots",
-        "src/shared/bots/personal",
-        "src/shared/settings.ts"
-      ],
-      "claimedAt": "2026-11-18T15:49:33.335Z",
-      "expiresAt": "2026-11-18T22:19:26.984Z"
-    },
-    {
       "task": "lan-direct-phone-path",
       "session": "agibook-3233ef",
       "machine": "agibook",
@@ -104,6 +91,21 @@
       "expiresAt": "2026-11-19T15:05:18.193Z"
     },
     {
+      "task": "mousse-id-one-devices-list",
+      "session": "agibook-4b4072",
+      "machine": "agibook",
+      "branch": "mousse-id-one-devices-list",
+      "paths": [
+        "src/mms/net/plus",
+        "src/mms/net/NetService.ts",
+        "src/shared/net/local.ts",
+        "src/renderer/stores/mousseIdStore.ts",
+        "src/renderer/lib/plusSignIn.ts"
+      ],
+      "claimedAt": "2026-11-20T06:08:57.987Z",
+      "expiresAt": "2026-11-20T08:08:57.987Z"
+    },
+    {
       "task": "net-engine-1a",
       "session": "Animatrix-880838",
       "machine": "Animatrix",
@@ -113,21 +115,6 @@
       ],
       "claimedAt": "2026-11-18T12:37:39.165Z",
       "expiresAt": "2026-11-19T23:05:26.065Z"
-    },
-    {
-      "task": "plus-legacy-toggle",
-      "session": "agibook-07482f",
-      "machine": "agibook",
-      "branch": "plus-legacy-toggle",
-      "paths": [
-        "src/mms/net/NetService.ts",
-        "src/mms/MmsProfileServices.ts",
-        "src/shared/settings.ts",
-        "src/renderer/components/settings/LabsSettings.tsx",
-        "src/renderer/stores/mousseIdStore.ts"
-      ],
-      "claimedAt": "2026-11-18T22:01:23.773Z",
-      "expiresAt": "2026-11-19T00:01:23.773Z"
     }
   ]
 }
