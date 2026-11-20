@@ -441,6 +441,9 @@ describe('merged rule', () => {
 describe('leases and re-checks', () => {
   const holdRepository = (f: Fixture) => acquireRepositoryLease(resolveRepositoryIdentity(f.repo, { requireMutationCapability: true }))
   const cleanupHoldsThread = (f: Fixture) => vi.waitFor(() => expect(readLeaseOwner(getExecutionLeasePath(f.location))?.source).toBe('storage-cleanup'), { timeout: 20_000, interval: 20 })
+  // A person replacing the folder while cleanup runs: Windows refuses to rename a folder a Git process is still
+  // working in (EBUSY), so the person tries again a moment later.
+  const renameWhenFree = (from: string, to: string) => vi.waitFor(() => renameSync(from, to), { timeout: 10_000, interval: 25 })
 
   it('takes no lease during the scan phase: a terminal or turn started then gets the thread', async () => {
     const seen: boolean[] = []
@@ -529,7 +532,7 @@ describe('leases and re-checks', () => {
     let run: Promise<StorageCleanupReport>
     try {
       run = f.service.run('manual'); await cleanupHoldsThread(f)
-      renameSync(f.worktree, real); symlinkSync(real, f.worktree, process.platform === 'win32' ? 'junction' : 'dir')
+      await renameWhenFree(f.worktree, real); symlinkSync(real, f.worktree, process.platform === 'win32' ? 'junction' : 'dir')
     } finally { repository.release() }
     try { expect(item(await run)).toMatchObject({ outcome: 'kept', reason: 'Worktree is a link' }) }
     finally { rmSync(f.worktree, { recursive: true, force: true }) }
