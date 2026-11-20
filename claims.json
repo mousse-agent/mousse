@@ -244,6 +244,17 @@
       "expiresAt": "2026-11-20T14:06:10.409Z"
     },
     {
+      "task": "steer-joins-prompt-on-its-way",
+      "session": "Animatrix-618a93",
+      "machine": "Animatrix",
+      "branch": "steer-joins-prompt-on-its-way",
+      "paths": [
+        "src/renderer/components/OrchestratorChat.tsx"
+      ],
+      "claimedAt": "2026-11-20T12:14:25.307Z",
+      "expiresAt": "2026-11-20T14:14:25.307Z"
+    },
+    {
       "task": "storage-cleanup-keeps-shared-worktrees",
       "session": "Animatrix-ab3a50",
       "machine": "Animatrix",
