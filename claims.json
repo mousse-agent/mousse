@@ -122,6 +122,17 @@
       ],
       "claimedAt": "2026-11-18T12:37:39.165Z",
       "expiresAt": "2026-11-19T23:05:26.065Z"
+    },
+    {
+      "task": "read-aloud-sentence-splits-and-short-forms",
+      "session": "Animatrix-ae54b8",
+      "machine": "Animatrix",
+      "branch": "read-aloud-sentence-splits-and-short-forms",
+      "paths": [
+        "src/renderer/readAloud"
+      ],
+      "claimedAt": "2026-11-20T10:53:30.178Z",
+      "expiresAt": "2026-11-20T12:53:30.178Z"
     }
   ]
 }
