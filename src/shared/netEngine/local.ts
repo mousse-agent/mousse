@@ -37,7 +37,8 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.relay.remove',
   'netEngine.relay.rotate',
   'netEngine.relay.allow',
-  'netEngine.relay.disallow'
+  'netEngine.relay.disallow',
+  'netEngine.relay.dismiss'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
 
@@ -133,8 +134,11 @@ export interface NetEngineDeviceRelay {
   allowed?: string[]
   /** The relay info it sent (its manifest) has expired: its routes are tried last until it sends new info. */
   stale?: boolean
-  /** It is past this computer's relay limit (the first 256 callers): it can't reach this computer through one. */
-  limit?: boolean
+  /**
+   * It is past this computer's relay limit (a relay lists its first `callersMax` callers): it can't reach this
+   * computer through one. `callersMax` as this computer's relays name it, when one does.
+   */
+  limit?: { callersMax?: number }
 }
 
 /** One of this computer's own relays (Phase 3 §B.9), as Settings → Reach lists it. */
@@ -148,9 +152,9 @@ export interface NetEngineRelay {
   reason?: string
   /** When the next registration starts, ms since 1970, while retrying. */
   retryAt?: number
-  /** Callers listed with the relay, and the most it lists. */
+  /** Callers listed with the relay, and the most it lists (as the helper says; absent when it says none). */
   callers: number
-  callersMax: number
+  callersMax?: number
   /** While a new relay key is taking over: when the old one stops, ms since 1970. */
   rotatingUntil?: number
 }

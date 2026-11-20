@@ -56,7 +56,8 @@ export function readRelayInfo(value: unknown, now: number): NetEngineRelay | und
     ...(typeof info.reason === 'string' && state !== 'registered' ? { reason: info.reason } : {}),
     ...(state === 'retrying' && retryMs !== undefined ? { retryAt: now + retryMs } : {}),
     callers: num(info.callers) ?? 0,
-    callersMax: num(info.callers_max) ?? 256,
+    // The helper names its own limit; none is assumed here.
+    ...(num(info.callers_max) !== undefined ? { callersMax: num(info.callers_max) } : {}),
     ...(until !== undefined && until * 1000 > now ? { rotatingUntil: until * 1000 } : {})
   }
 }
@@ -112,16 +113,30 @@ export function readGrantRelays(answer: Record<string, unknown> | undefined): Ma
   return out
 }
 
-/** What one pairing's row shows about relays, or undefined when nothing needs showing. */
+/** The key of one pairing's relay destination in the dismissed set (`Not now`, `Stop using relay`). */
+export const dismissKey = (identity: string, destination: string): string =>
+  `${identity.toLowerCase()} ${destination}`
+
+/**
+ * What one pairing's row shows about relays, or undefined when nothing needs showing. `dismissed` holds the
+ * destinations the owner said Not now to or stopped using (`dismissKey`): they are not asked about again. At most
+ * `offersShown` are asked about at once; the rest wait their turn.
+ */
 export function deviceRelay(
   view: RelayView | undefined,
   identity: string,
-  now: number
+  now: number,
+  dismissed: ReadonlySet<string> = new Set(),
+  offersShown = Number.POSITIVE_INFINITY
 ): NetEngineDeviceRelay | undefined {
   if (!view) return undefined
   const key = identity.toLowerCase()
   const peer = view.peers.get(key)
-  const offered = peer?.routes.filter((route) => !route.approved).map((route) => route.destination) ?? []
+  const offered = (
+    peer?.routes
+      .filter((route) => !route.approved && !dismissed.has(dismissKey(key, route.destination)))
+      .map((route) => route.destination) ?? []
+  ).slice(0, offersShown)
   // Approved through a source of this pairing's own; one approved as this computer's own relay has none.
   const allowed =
     peer?.routes
@@ -130,12 +145,21 @@ export function deviceRelay(
   const stale = !!peer?.manifest && (peer.manifest.stale || peer.manifest.expiresAt * 1000 <= now)
   const limit = view.grants.get(key) === 'limit'
   if (!offered.length && !allowed.length && !stale && !limit) return undefined
+  // The limit as this computer's relays name it (`callers_max`), the largest when they differ.
+  const maxes = [...view.relays.values()].flatMap((relay) =>
+    relay.callersMax === undefined ? [] : [relay.callersMax]
+  )
   return {
     ...(offered.length ? { offered } : {}),
     ...(allowed.length ? { allowed } : {}),
     ...(stale ? { stale: true } : {}),
-    ...(limit ? { limit: true } : {})
+    ...(limit ? { limit: maxes.length ? { callersMax: Math.max(...maxes) } : {} } : {})
   }
+}
+
+/** Whether `destination` is one of the relay routes `identity`'s relay info offers here, approved or not. */
+export function offeredBy(view: RelayView | undefined, identity: string, destination: string): boolean {
+  return !!view?.peers.get(identity.toLowerCase())?.routes.some((route) => route.destination === destination)
 }
 
 /** When the next pairing's relay info goes stale (ms since 1970), after `now`. */
@@ -177,10 +201,18 @@ const RELAY_ERRORS: Record<string, NetError['code']> = {
   not_registered: 'peer_offline'
 }
 
-/** A helper's refusal of a relay request, as Settings says it (its code stays in `details.reason`). */
+/** What Settings says for a relay refusal it has no words for: the helper's own reason never shows. */
+export const RELAY_FAILED = "The relay request didn't go through."
+
+/**
+ * A helper's refusal of a relay request, as Settings says it (its code stays in `details.reason`). A code with no
+ * words here gets one fixed line; an error that is not the helper's (the app's own `NetError`) passes as it is.
+ */
 export function relayError(error: unknown): unknown {
   const code = helperCode(error)
-  const known = code ? RELAY_ERRORS[code] : undefined
-  if (!known || !code) return error
-  return new NetError(known, RELAY_REASON_TEXT[code], { details: { reason: code } })
+  if (!code) return error
+  const known = RELAY_ERRORS[code]
+  return known
+    ? new NetError(known, RELAY_REASON_TEXT[code], { details: { reason: code } })
+    : new NetError('internal', RELAY_FAILED, { details: { reason: code } })
 }

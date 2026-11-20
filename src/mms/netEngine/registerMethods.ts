@@ -28,7 +28,8 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.relay.remove': ['relay'],
   'netEngine.relay.rotate': ['relay'],
   'netEngine.relay.allow': ['node', 'destination'],
-  'netEngine.relay.disallow': ['node', 'destination']
+  'netEngine.relay.disallow': ['node', 'destination'],
+  'netEngine.relay.dismiss': ['node', 'destination']
 }
 
 const text = (value: unknown): string | undefined =>
@@ -201,6 +202,9 @@ export function registerNetEngineMethods(
             case 'netEngine.relay.allow':
             case 'netEngine.relay.disallow':
               await engine.allowRelay(p.node, p.destination, method === 'netEngine.relay.allow')
+              return engine.status()
+            case 'netEngine.relay.dismiss':
+              engine.dismissRelay(p.node, p.destination)
               return engine.status()
           }
         } catch (error) {

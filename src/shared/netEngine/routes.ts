@@ -367,6 +367,10 @@ export function automaticRoute(route: string, loopback = false): boolean {
 
 // ---------------------------------------------------------------- relays (Phase 3 §B.11)
 
+/**
+ * A route hint's length: at most 255 bytes, a wire constant (spec/wire.md §10.2 ticket key 7, §10.2.1 for the
+ * `relay` hint; docs/limits.md "Fixed on purpose"), not a limit.
+ */
 const RELAY_HINT_MAX_BYTES = 255
 
 /** A relay route hint or destination, read: where the relay is, and the destination an approval names. */

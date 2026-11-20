@@ -515,6 +515,8 @@ export interface FakeRelays {
   peers: Map<string, Record<string, any>>
   grants: Map<string, string>
   enrollError?: string
+  /** `relay.list` fails this many more times (a helper still starting) before it answers. */
+  listFailures?: number
 }
 
 export class FakeHelper {
@@ -1386,6 +1388,10 @@ function relayAnswer(message: Record<string, any>, relays: FakeRelays): Record<s
   const find = (id: unknown) => relays.relays.find((relay) => relay.id === id)
   switch (message.op) {
     case 'relay.list':
+      if (relays.listFailures) {
+        relays.listFailures -= 1
+        return { error: 'busy', reason: 'starting' }
+      }
       return { relays: relays.relays, available: relays.available }
     case 'relay.enroll': {
       if (relays.enrollError) return { error: relays.enrollError, reason: 'refused' }

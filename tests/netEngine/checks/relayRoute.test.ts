@@ -55,7 +55,7 @@ describe('the links and routes a relay run takes', () => {
   it.each([
     ['a relay connection through a run relay', { kind: 'relay', class: 'relay', destination: RELAYS[0] }, true],
     ['its bulk companion', { kind: 'relay', class: 'relay_bulk', destination: RELAYS[1] }, true],
-    ['one that names no destination', { kind: 'relay', class: 'relay' }, true],
+    ['one that names no destination', { kind: 'relay', class: 'relay' }, false],
     ['another relay', { kind: 'relay', class: 'relay', destination: 'relay://127.0.0.1:9' }, false],
     ['a direct tcp connection', { kind: 'tcp', class: 'lan' }, false],
     ['no route', undefined, false]

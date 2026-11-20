@@ -102,7 +102,7 @@ export function expectedRoute(): { kind: string; class: string } | undefined {
 
 /**
  * Whether a `conn.up` route is the one a routes run expects: its kind and class; for a relay, class `relay` or
- * `relay_bulk`, through one of `relays` when it names its destination.
+ * `relay_bulk`, naming as its destination one of the run's `relays`.
  */
 export function routeMatches(
   route: unknown,
@@ -113,7 +113,7 @@ export function routeMatches(
   if (up?.kind !== expected.kind) return false
   if (expected.kind !== 'relay') return up.class === expected.class
   if (up.class !== 'relay' && up.class !== 'relay_bulk') return false
-  return up.destination === undefined || relays.includes(String(up.destination).toLowerCase())
+  return typeof up.destination === 'string' && relays.includes(up.destination.toLowerCase())
 }
 
 export const DAY = 24 * 60 * 60_000
@@ -700,11 +700,19 @@ export class Fabric {
     }
     this.settled = true
     await Promise.all(this.all.map((computer) => this.restartHelper(computer)))
+    // Each side asks for its direction again while it is down, as a window's Retry would: a dial made while the
+    // other helper was still restarting is not retried by every helper.
     for (const { owner, caller, callerOnOwner, ownerOnCaller } of this.pairs)
       await step('not_reconnected', () =>
         eventually(() => {
-          expect(owner.mms.netEngine.online(callerOnOwner)).toBe(true)
-          expect(caller.mms.netEngine.online(ownerOnCaller)).toBe(true)
+          for (const [from, node] of [
+            [owner, callerOnOwner],
+            [caller, ownerOnCaller]
+          ] as const)
+            if (!from.mms.netEngine.online(node)) {
+              void from.mms.netEngine.dial(node).catch(() => undefined)
+              throw new Error(`${from.name} is not connected to its pairing yet`)
+            }
         }, 90_000)
       )
   }

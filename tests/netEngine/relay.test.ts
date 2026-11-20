@@ -4,7 +4,7 @@
  * Allow and taken back, its stale relay info, the 256-caller limit, the "Through relay" route, and a ticket's relay
  * hint approved at Connect. A helper without relays shows none.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { FakeRelays } from './fakeHelper'
 import { eventually, Fabric, type Computer } from './checks/harness'
 
@@ -108,14 +108,22 @@ describe('relays (Phase 3)', () => {
     }
   })
 
-  it('asks before dialling a host’s offered relay, and Allow and its removal go to the helper', async () => {
-    bRelays.peers.set(a.endpoint, {
-      routes: [{ destination: DESTINATION, relay: RELAY_ID, from: 'manifest', approved: false, source: null }],
-      manifest: { sequence: 1, issued_at: 1, expires_at: Math.floor(Date.now() / 1000) + 3600, stale: false },
-      keys: true,
-      caller: null
-    })
-    b.fake!.emit({ ev: 'peer.relay.offered', identity: a.endpoint, destination: DESTINATION })
+  const route = (destination: string, approved = false) => ({
+    destination,
+    relay: RELAY_ID,
+    from: 'manifest',
+    approved,
+    source: approved ? 'manifest' : null
+  })
+  const offer = (destinations: string[], manifest: Record<string, unknown> = { sequence: 1, issued_at: 1, expires_at: Math.floor(Date.now() / 1000) + 3600, stale: false }) => {
+    bRelays.peers.set(a.endpoint, { routes: destinations.map((d) => route(d)), manifest, keys: true, caller: null })
+    for (const destination of destinations)
+      b.fake!.emit({ ev: 'peer.relay.offered', identity: a.endpoint, destination })
+  }
+  const OTHER = 'relay://relay2.example.org:8443'
+
+  it('asks before dialling a host’s offered relay; Allow, and Stop using relay, go to the helper', async () => {
+    offer([DESTINATION])
     await eventually(() => expect(device(b, aOnB)?.relay).toEqual({ offered: [DESTINATION] }))
 
     await b.dispatch('netEngine.relay.allow', { node: aOnB, destination: DESTINATION }, true)
@@ -128,26 +136,116 @@ describe('relays (Phase 3)', () => {
     expect(b.fake!.requests.filter((request) => request.op === 'peer.relay.disallow')).toEqual([
       expect.objectContaining({ identity: a.endpoint, destination: DESTINATION })
     ])
-    await eventually(() => expect(device(b, aOnB)?.relay).toEqual({ offered: [DESTINATION] }))
+    // Stopping is the owner's answer: the row does not ask about that relay again, even after the app restarts.
+    b.fake!.emit({ ev: 'peer.relay.offered', identity: a.endpoint, destination: DESTINATION })
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(device(b, aOnB)?.relay).toBeUndefined()
   })
 
-  it('marks a host’s relay info out of date once its manifest expires', async () => {
-    bRelays.peers.get(a.endpoint)!.manifest = {
-      sequence: 2,
-      issued_at: 1,
-      expires_at: Math.floor(Date.now() / 1000) - 1,
-      stale: true
-    }
+  it('refuses Allow for a relay the host does not offer', async () => {
+    const before = b.fake!.requests.length
+    await expect(
+      b.dispatch('netEngine.relay.allow', { node: aOnB, destination: 'relay://elsewhere.example:443' }, true)
+    ).rejects.toMatchObject({ details: { reason: 'not_offered' } })
+    expect(b.fake!.requests.slice(before).some((request) => request.op === 'peer.relay.allow')).toBe(false)
+  })
+
+  it('takes Not now for good, and asks about a few relays at a time', async () => {
+    const many = [OTHER, 'relay://r3.example:443', 'relay://r4.example:443', 'relay://r5.example:443', 'relay://r6.example:443']
+    offer([DESTINATION, ...many])
+    // DESTINATION was stopped above; of the rest, three at a time.
+    await eventually(() => expect(device(b, aOnB)?.relay?.offered).toEqual(many.slice(0, 3)))
+    await b.dispatch('netEngine.relay.dismiss', { node: aOnB, destination: OTHER }, true)
+    expect(device(b, aOnB)?.relay?.offered).toEqual(many.slice(1, 4))
+    expect(b.fake!.requests.some((request) => request.op === 'peer.relay.allow' && request.destination === OTHER)).toBe(false)
+    await fabric.restartEngine(b)
+    await eventually(() => expect(device(b, aOnB)?.relay?.offered).toEqual(many.slice(1, 4)))
+  }, 60_000)
+
+  it('reads each changed list once for a burst of relay events', async () => {
+    const before = b.fake!.requests.length
+    for (let i = 0; i < 5; i++) b.fake!.emit({ ev: 'peer.relay.offered', identity: a.endpoint, destination: OTHER })
+    b.fake!.emit({ ev: 'peer.keys', identity: a.endpoint })
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const ops = b.fake!.requests.slice(before).map((request) => request.op)
+    expect(ops.filter((op) => op === 'peers.list')).toHaveLength(1)
+    expect(ops.filter((op) => op === 'grants.list')).toHaveLength(1)
+    expect(ops.filter((op) => op === 'relay.list')).toHaveLength(0)
+  })
+
+  it('marks a host’s relay info out of date when it expires by its own clock, and wakes the windows then', async () => {
+    // The helper still says fresh: the app decides from expires_at.
+    const expiresAt = Math.floor(Date.now() / 1000) + 3 * 86_400
+    bRelays.peers.get(a.endpoint)!.manifest = { sequence: 2, issued_at: 1, expires_at: expiresAt, stale: false }
     b.fake!.emit({ ev: 'peer.manifest', identity: a.endpoint, manifest: bRelays.peers.get(a.endpoint)!.manifest })
-    await eventually(() => expect(device(b, aOnB)?.relay?.stale).toBe(true))
+    await eventually(() =>
+      expect(b.fake!.requests.filter((request) => request.op === 'peers.list').length).toBeGreaterThan(0)
+    )
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(device(b, aOnB)?.relay?.stale).toBeUndefined()
+
+    // Ten seconds before the expiry (by a fake clock), the status schedules the windows' next read for it.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const timers = vi.spyOn(globalThis, 'setTimeout')
+    try {
+      vi.setSystemTime(expiresAt * 1000 - 10_000)
+      b.mms.netEngine.status()
+      expect(device(b, aOnB)?.relay?.stale).toBeUndefined()
+      const call = timers.mock.calls.find(([, ms]) => typeof ms === 'number' && ms >= 10_000 && ms <= 11_000)
+      expect(call).toBeDefined()
+      timers.mockRestore()
+
+      // When it fires, past the expiry, the windows read again and the row says so.
+      vi.setSystemTime(expiresAt * 1000 + 1_000)
+      const told = b.events.filter((event) => JSON.stringify(event).includes('"net-engine"')).length
+      ;(call![0] as () => void)()
+      expect(b.events.filter((event) => JSON.stringify(event).includes('"net-engine"')).length).toBeGreaterThan(told)
+      expect(device(b, aOnB)?.relay?.stale).toBe(true)
+    } finally {
+      timers.mockRestore()
+      vi.useRealTimers()
+    }
   })
 
-  it('says a device past the 256-caller limit can’t come through the relay', async () => {
+  it('says a device past the relay limit can’t come through it, with the limit the helper names', async () => {
     expect(device(a, bOnA)?.relay?.limit).toBeUndefined()
     aRelays.grants.set(b.endpoint, 'limit')
     a.fake!.emit({ ev: 'peer.keys', identity: b.endpoint })
-    await eventually(() => expect(device(a, bOnA)?.relay).toEqual({ limit: true }))
+    // No relay of A's names a limit yet: none is assumed.
+    await eventually(() => expect(device(a, bOnA)?.relay).toEqual({ limit: {} }))
+    await a.dispatch('netEngine.relay.enroll', { link: `mousse-relay://relay3.example:443/#${'E'.repeat(43)}.${'C'.repeat(22)}` }, true)
+    aRelays.relays[aRelays.relays.length - 1]!.callers_max = 128
+    a.fake!.emit({ ev: 'relay.state', relay: aRelays.relays[aRelays.relays.length - 1] })
+    await eventually(() => expect(device(a, bOnA)?.relay).toEqual({ limit: { callersMax: 128 } }))
   })
+
+  it('says a fixed line for a refusal it has no words for, never the helper’s reason', async () => {
+    aRelays.enrollError = 'relay_new_thing'
+    try {
+      await expect(a.dispatch('netEngine.relay.enroll', { link: LINK }, true)).rejects.toMatchObject({
+        message: "The relay request didn't go through.",
+        details: { reason: 'relay_new_thing' }
+      })
+    } finally {
+      delete aRelays.enrollError
+    }
+  })
+
+  it('asks a helper that is still starting for its relays again, a bounded number of times', async () => {
+    fabric.network.relays.set(identity('d'), { ...relays(), listFailures: 2 })
+    fabric.network.relays.set(identity('e'), { ...relays(), listFailures: 1_000 })
+    const d = await fabric.computer('d')
+    const e = await fabric.computer('e')
+    await eventually(() => expect(d.mms.netEngine.status().relays).toEqual({ available: true, list: [] }), 15_000)
+    // relayReadTries (5) asks, relayReadRetryMs apart, then none until the next relay event.
+    await eventually(
+      () => expect(e.fake!.requests.filter((request) => request.op === 'relay.list')).toHaveLength(5),
+      15_000
+    )
+    await new Promise((resolve) => setTimeout(resolve, 1_500))
+    expect(e.fake!.requests.filter((request) => request.op === 'relay.list')).toHaveLength(5)
+    expect(e.mms.netEngine.status().relays).toBeUndefined()
+  }, 60_000)
 
   it('shows no relays from a helper without them, and refuses relay calls there', async () => {
     expect(c.mms.netEngine.status().relays).toBeUndefined()

@@ -28,10 +28,16 @@ export const RELAY_STALE_LINE = 'Relay info out of date'
 export const RELAY_STALE_DETAIL = (name: string): string =>
   `The relay addresses ${name} sent have expired. They're tried last until it sends new ones.`
 
-/** A device past this computer's relay limit (§B.5): its caller key is not listed with the relay. */
-export const RELAY_LIMIT_LINE = 'Not reachable through the relay (limit 256)'
-export const RELAY_LIMIT_DETAIL =
-  'Your relays list the first 256 paired devices. LAN and other addresses still work.'
+/**
+ * A device past this computer's relay limit (§B.5): its caller key is not listed with the relay. The limit is the
+ * one the helper names (`callers_max`).
+ */
+export const relayLimitLine = (callersMax?: number): string =>
+  callersMax === undefined
+    ? 'Not reachable through the relay (over its limit)'
+    : `Not reachable through the relay (limit ${callersMax})`
+export const relayLimitDetail = (callersMax?: number): string =>
+  `Your relays list the first ${callersMax ?? 'few hundred'} paired devices. LAN and other addresses still work.`
 
 /** The one line a device's row shows for a relay route waiting for the owner's Allow (§B.11). */
 export const relayOfferLine = (name: string, destination: string): string =>

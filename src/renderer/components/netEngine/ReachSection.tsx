@@ -275,9 +275,13 @@ const until = (at: number): string =>
     minute: '2-digit'
   })
 
+/** The tooltip for a registration that ended for a reason with no words here. */
+export const RELAY_ENDED = 'The connection to the relay ended.'
+
 /** One own relay's state, one short line, with the reason as its tooltip. */
 export function relayLine(relay: NetEngineRelay, now = Date.now()): { line: string; detail?: string; warn?: boolean } {
-  const reason = relay.reason ? (RELAY_REASON_TEXT[relay.reason] ?? relay.reason) : undefined
+  // A reason with no words here gets a fixed line: the helper's own text never shows.
+  const reason = relay.reason ? (RELAY_REASON_TEXT[relay.reason] ?? RELAY_ENDED) : undefined
   switch (relay.state) {
     case 'registered':
       return { line: 'Connected' }
@@ -306,6 +310,18 @@ function OwnRelayRows({ relays, onChanged }: { relays: NetEngineRelays; onChange
   const { busy, error, setError, call } = useDaemonCall()
   const [link, setLink] = useState('')
   const [removing, setRemoving] = useState<NetEngineRelay>()
+  // "Retrying at <time>" turns to "Retrying…" once that time passes, without waiting for the next status.
+  const [, setTick] = useState(0)
+  const nextRetry = Math.min(
+    ...relays.list.flatMap((relay) =>
+      relay.state === 'retrying' && relay.retryAt !== undefined && relay.retryAt > Date.now() ? [relay.retryAt] : []
+    )
+  )
+  useEffect(() => {
+    if (!Number.isFinite(nextRetry)) return
+    const timer = setTimeout(() => setTick((n) => n + 1), Math.max(0, nextRetry - Date.now()) + 50)
+    return () => clearTimeout(timer)
+  }, [nextRetry])
   const run = async (method: PlatformRequestMethod, params: unknown): Promise<boolean> => {
     const done = !!(await call(method, params))
     if (done) onChanged()
@@ -363,7 +379,9 @@ function OwnRelayRows({ relays, onChanged }: { relays: NetEngineRelays; onChange
                       className="settings-muted"
                       title="Paired devices this relay lets through to this computer"
                     >
-                      {relay.callers} of {relay.callersMax} devices
+                      {relay.callersMax === undefined
+                        ? `${relay.callers} devices`
+                        : `${relay.callers} of ${relay.callersMax} devices`}
                     </span>
                   </>
                 )}

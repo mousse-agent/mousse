@@ -471,6 +471,31 @@ describe('relays (Phase 3 §B.5, §B.9, §B.11)', () => {
     expect(d.called('netEngine.relay.remove')).toEqual([{ relay: 'aa11' }])
   })
 
+  it('turns "Retrying at" into "Retrying…" once its time passes, without a new status', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+    try {
+      daemon({ relays: { available: true, list: [relay({ state: 'retrying', reason: 'relay_new_thing', retryAt: Date.now() + 5_000 })] } })
+      await act(async () => root.render(createElement(EngineDevicesSection)))
+      for (let i = 0; i < 6; i++) await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      expect(relayRow('relay.example.net:443')?.textContent).toContain('Retrying at ')
+      // A reason with no words in the app shows a fixed line, never the helper's word.
+      const line = [...relayRow('relay.example.net:443')!.querySelectorAll<HTMLElement>('[title]')].find((item) =>
+        item.textContent?.startsWith('Retrying')
+      )
+      expect(line?.title).toBe('The connection to the relay ended.')
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_100) })
+      expect(relayRow('relay.example.net:443')?.textContent).toContain('Retrying…')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('shows how many devices a relay lists without inventing its limit', async () => {
+    daemon({ relays: { available: true, list: [relay({ callersMax: undefined })] } })
+    await mount()
+    expect(relayRow('relay.example.net:443')?.textContent).toContain('Connected · 3 devices')
+  })
+
   it('says a relay that refused this computer is refused', async () => {
     daemon({ relays: { available: true, list: [relay({ state: 'refused', reason: 'relay_removed' })] } })
     await mount()
@@ -489,6 +514,14 @@ describe('relays (Phase 3 §B.5, §B.9, §B.11)', () => {
     expect(host.textContent).toContain('Studio can be reached through relay relay.example.net:443. Allow?')
     await click(button('Allow'))
     expect(d.called('netEngine.relay.allow')).toEqual([{ node: 'n1', destination: DESTINATION }])
+  })
+
+  it('offers Not now beside Allow, which goes to the daemon instead', async () => {
+    const d = daemon({ devices: [device({ node: 'n1', relay: { offered: [DESTINATION] } })] })
+    await mount()
+    await click(button('Not now'))
+    expect(d.called('netEngine.relay.dismiss')).toEqual([{ node: 'n1', destination: DESTINATION }])
+    expect(d.called('netEngine.relay.allow')).toEqual([])
   })
 
   it('takes an allowed relay back from the row menu', async () => {
@@ -511,11 +544,15 @@ describe('relays (Phase 3 §B.5, §B.9, §B.11)', () => {
     expect(note?.title).toMatch(/tried last/)
   })
 
-  it('says a device past the limit is not reachable through the relay', async () => {
-    daemon({ devices: [device({ node: 'n1', relay: { limit: true } }), device({ node: 'n2', name: 'Laptop' })] })
+  it('says a device past the limit is not reachable through the relay, with the limit the helper names', async () => {
+    const d = daemon({
+      devices: [device({ node: 'n1', relay: { limit: { callersMax: 128 } } }), device({ node: 'n2', name: 'Laptop' })]
+    })
     await mount()
-    expect(rowText('n1')).toContain('Not reachable through the relay (limit 256)')
-    expect(rowText('n2')).not.toContain('limit 256')
+    expect(rowText('n1')).toContain('Not reachable through the relay (limit 128)')
+    expect(rowText('n2')).not.toContain('Not reachable')
+    await d.change({ devices: [device({ node: 'n1', relay: { limit: {} } })] })
+    expect(rowText('n1')).toContain('Not reachable through the relay (over its limit)')
   })
 
   it('lists a ticket’s relay among the destinations as the relay it goes through', async () => {

@@ -15,9 +15,9 @@ import { AddEngineDeviceDialog } from './AddEngineDeviceDialog'
 import {
   engineRow,
   engineWhere,
+  relayLimitDetail,
+  relayLimitLine,
   relayOfferLine,
-  RELAY_LIMIT_DETAIL,
-  RELAY_LIMIT_LINE,
   RELAY_STALE_DETAIL,
   RELAY_STALE_LINE,
   SHARED_ACCOUNT_DETAIL,
@@ -193,8 +193,8 @@ export function EngineDevicesSection() {
             {relay?.limit && (
               <>
                 {' · '}
-                <span className="settings-muted" title={RELAY_LIMIT_DETAIL}>
-                  {RELAY_LIMIT_LINE}
+                <span className="settings-muted" title={relayLimitDetail(relay.limit.callersMax)}>
+                  {relayLimitLine(relay.limit.callersMax)}
                 </span>
               </>
             )}
@@ -234,17 +234,30 @@ export function EngineDevicesSection() {
           indent
           title={relayOfferLine(device.name, destination)}
           control={
-            <button
-              type="button"
-              className="settings-btn"
-              disabled={busy}
-              title="Not dialled until you allow it."
-              onClick={() =>
-                void action('netEngine.relay.allow', { node: device.node, destination })
-              }
-            >
-              Allow
-            </button>
+            <span className="engine-reach-control">
+              <button
+                type="button"
+                className="settings-btn"
+                disabled={busy}
+                title="Not asked again for this relay."
+                onClick={() =>
+                  void action('netEngine.relay.dismiss', { node: device.node, destination })
+                }
+              >
+                Not now
+              </button>
+              <button
+                type="button"
+                className="settings-btn"
+                disabled={busy}
+                title="Not dialled until you allow it."
+                onClick={() =>
+                  void action('netEngine.relay.allow', { node: device.node, destination })
+                }
+              >
+                Allow
+              </button>
+            </span>
           }
         />
       )),
