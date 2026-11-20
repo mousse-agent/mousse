@@ -29,21 +29,6 @@
       "expiresAt": "2026-11-19T15:02:10.909Z"
     },
     {
-      "task": "antigravity-native-subagent-details",
-      "session": "agibook-ee788b",
-      "machine": "agibook",
-      "branch": "antigravity-native-subagent-details",
-      "paths": [
-        "src/mms/harness/acp/session.ts",
-        "src/shared/agentActivity.ts",
-        "src/renderer/chat/adapters/nativeSubagents.ts",
-        "src/renderer/chat/adapters/mousseToUI.ts",
-        "src/renderer/chat/components/agent-elements/tools/SubagentCard.tsx"
-      ],
-      "claimedAt": "2026-11-20T07:45:45.298Z",
-      "expiresAt": "2026-11-20T09:45:45.298Z"
-    },
-    {
       "task": "antigravity-owner-only-turns",
       "session": "Animatrix-4789ec",
       "machine": "Animatrix",
@@ -89,20 +74,6 @@
       ],
       "claimedAt": "2026-11-18T20:43:07.500Z",
       "expiresAt": "2026-11-19T08:18:05.846Z"
-    },
-    {
-      "task": "bot-secret-fetch",
-      "session": "agibook-d8ef9c",
-      "machine": "agibook",
-      "branch": "bot-secret-fetch",
-      "paths": [
-        "src/mms/secrets",
-        "src/mms/net-public",
-        "src/mms/run/mcp/appTools/secrets.ts",
-        "src/shared/bots/personal"
-      ],
-      "claimedAt": "2026-11-18T21:20:44.630Z",
-      "expiresAt": "2026-11-19T07:57:05.583Z"
     },
     {
       "task": "bot-service-bound-secrets",
