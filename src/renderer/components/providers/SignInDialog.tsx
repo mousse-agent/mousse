@@ -5,6 +5,19 @@ import { useProviderSnapshotsStore } from '../../lib/providerSnapshots'
 import { Modal } from '../ui/Modal'
 import { errorText } from './parts'
 
+/** Whole seconds since `active` turned true, counted each second while it stays true; 0 otherwise. */
+function useElapsedSeconds(active: boolean): number {
+  const [seconds, setSeconds] = useState(0)
+  useEffect(() => {
+    setSeconds(0)
+    if (!active) return
+    const started = Date.now()
+    const timer = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 1000)
+    return () => clearInterval(timer)
+  }, [active])
+  return seconds
+}
+
 /** The pasted-address fallback shows only while the sign-in says it accepts one. */
 export function offersRedirectPaste(prompt: SignInPrompt): boolean {
   return prompt.type === 'auth_url' && prompt.acceptsRedirectPaste === true
@@ -49,6 +62,9 @@ export function SignInDialog({
   const [error, setError] = useState<string | null>(null)
   const [retrying, setRetrying] = useState(false)
   const openedRef = useRef<string | null>(null)
+  // While the agent starts, the wait is shown as it is: how long it has taken so far.
+  const starting = Boolean(operationId) && !prompt && !failed
+  const elapsed = useElapsedSeconds(starting)
 
   useEffect(() => {
     setAnswered(null)
@@ -114,6 +130,7 @@ export function SignInDialog({
           <div className="provider-login-loading" role="status">
             <Loader2 size={16} className="icon-spin" aria-hidden="true" />
             <span>{progress ?? 'Starting sign-in…'}</span>
+            {elapsed > 0 && <span className="provider-login-elapsed">{elapsed} s</span>}
           </div>
         )}
 

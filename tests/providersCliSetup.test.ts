@@ -69,6 +69,12 @@ describe('Setup row: the status and its one next step', () => {
     expect(buttons(html)).toEqual(['Sign in'])
   })
 
+  it('says on Sign out that it also signs out agy on this computer, for Antigravity only', () => {
+    const signedIn = { state: 'signed_in' as const, canSignOut: true, methodLabel: 'Google sign-in' }
+    expect(setupRow({ driver: 'antigravity', auth: signedIn })).toContain('title="Also signs out agy on this computer"')
+    expect(setupRow({ driver: 'claude', auth: signedIn })).not.toContain('Also signs out')
+  })
+
   it('signs a managed ChatGPT entry in with Continue with ChatGPT, and shows no usage on its card', () => {
     const managed = { driver: 'codex' as const, config: { home: 'private' as const, args: [], env: {}, setup: 'managed' as const } }
     expect(buttons(setupRow({ ...managed, auth: { state: 'signed_out', account: undefined } }))).toEqual(['Continue with ChatGPT'])
@@ -509,6 +515,37 @@ describe('Add provider choices', () => {
     expect(html).toContain('Not found automatically. Choose the executable.')
     expect(html).toContain('aria-label="Claude Code executable path"')
     expect(buttons(html)).toEqual(['Add'])
+  })
+
+  it('says Antigravity uses agy on this computer or installs it, with the executable on request', () => {
+    // Antigravity is offered once it is not in the list, so nothing is known about it yet.
+    const html = connect(addChoices([claude, codex], []).find((entry) => entry.key === 'new:antigravity'))
+    expect(html).toContain('Mousse uses agy on this computer, or installs it after adding.')
+    expect(buttons(html)).toEqual(['Choose an executable', 'Add'])
+    expect(html).toContain('title="agy, or Google&#x27;s 1.1.1 ACP server"')
+  })
+
+  it('adds Antigravity without an executable when it is not on this computer: it installs after adding', () => {
+    const notHere = snapshot({
+      instanceId: 'antigravity', driver: 'antigravity', displayName: 'Antigravity', enabled: { device: false, effective: false, setBy: 'device' },
+      install: { state: 'not_installed', canInstall: true }, runs: { state: 'no', failure: 'not_on_path' }, binary: undefined
+    })
+    const html = connect({ ...addChoices([claude, codex], []).find((entry) => entry.key === 'new:antigravity')!, existing: notHere } as AddChoice)
+    expect(html).toContain('Not on this computer yet. Install it after adding.')
+    expect(html).not.toContain('aria-label="Antigravity executable path"')
+    expect(buttons(html)).toEqual(['Choose an executable', 'Add'])
+    // What the executable may be is one hover away.
+    expect(html).toContain('title="agy, or Google&#x27;s 1.1.1 ACP server"')
+  })
+
+  it('names the agy Mousse found for Antigravity, with its version', () => {
+    const found = snapshot({
+      instanceId: 'antigravity', driver: 'antigravity', displayName: 'Antigravity', enabled: { device: false, effective: false, setBy: 'device' },
+      binary: { path: 'C:\\Users\\me\\AppData\\Local\\agy\\bin\\agy.exe', source: 'path', version: '1.5.13' }
+    })
+    const html = connect({ ...addChoices([claude, codex], []).find((entry) => entry.key === 'new:antigravity')!, existing: found } as AddChoice)
+    expect(html).toContain('Mousse found Antigravity 1.5.13 on this computer.')
+    expect(buttons(html)).toEqual(['Use a different executable', 'Add'])
   })
 
   it('asks a Custom command for its program, arguments, variables and name', () => {

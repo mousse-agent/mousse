@@ -1570,6 +1570,12 @@ html[data-theme='high-contrast'] .toggle-switch.on::after {
   color: var(--text-secondary);
 }
 
+.provider-login-elapsed {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
 .provider-login-message {
   margin: 0;
   font-size: var(--settings-fs-row);

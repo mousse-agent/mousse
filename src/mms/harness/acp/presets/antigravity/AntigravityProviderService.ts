@@ -1,28 +1,39 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { methods } from '@agentclientprotocol/sdk'
+import { methods, type NewSessionResponse } from '@agentclientprotocol/sdk'
 import type { CliProviderConfig, CliProviderConfigPatch, ConfiguredProvider, ProviderLoginOption, ProviderLoginResult } from '../../../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../../../shared/settings'
 import { ANTIGRAVITY_INSTANCE_ID } from '../../../../../shared/providerInstances'
 import type { UserQuestionService } from '../../../../orchestrator/UserQuestionService'
 import { atomicWriteJsonSync } from '../../../../data/AtomicFs'
+import { compareVersions } from '../../../driver'
+import { agyStandalonePaths, cliNames, findOnPath } from '../../../env'
+import { isAuthRequired } from '../../auth'
 import type { AcpConnectionFactory } from '../../connection'
 import { modelOptions } from '../../models'
 import { ANTIGRAVITY_AUTH_METHOD, ANTIGRAVITY_LABEL, ANTIGRAVITY_QUIRKS, antigravityConnectionFactory, forwardAntigravityCallback, type AntigravityRuntimeChoice } from '../antigravity'
 import { keepOption } from '../../permissions'
-import { AcpSessions, type AcpChatInput, type SavedAcpSession } from '../../session'
+import { AcpSessions, type AcpChatInput, type AcpProcess, type SavedAcpSession } from '../../session'
 import type { LoginSession } from '../../../../providers/LoginSession'
 import { settingsMirror, type MirrorField, type VendorMirror } from '../../../vendorMirror'
 import { requireExecutable, sharedCliVersions, storedCliArgs, storedCliEnv, withUserEnv, type CliVersionCache, type StoredCliConfig } from '../../../cliConfig'
 import { directLaunch } from '../../../resolveWindowsShim'
-import { ANTIGRAVITY_RELEASE, antigravityInstallState, cancelAntigravityInstall, installAntigravity, installedAntigravityBinary, onAntigravityInstallEvent, validateManualAntigravityBinary, type AntigravityInstallProgress } from './installation'
+import { ANTIGRAVITY_RELEASE, antigravityInstallState, cancelAntigravityInstall, installedAntigravityBinary, manualAntigravityRuntime, onAntigravityInstallEvent, runSharedAntigravityInstall, type AntigravityInstallProgress } from './installation'
 import { activeNativeRuntime, installNativeAntigravity, readVendorFeed, type NativeRuntime, type NativeVerifier } from './nativeInstall'
-import { NATIVE_FEED_BASE, NATIVE_RELEASES, WITHDRAWN_NATIVE_VERSIONS, classifyVendorFeed, nativeQualified, nativeReleaseRefusal, nativeTarget, type NativeRelease, type NativeTarget, type VendorFeed } from './nativeRelease'
+import { NATIVE_FEED_BASE, NATIVE_MIN_VERSION, WITHDRAWN_NATIVE_VERSIONS, nativeReleaseRefusal, nativeTarget, parseVendorFeed, type NativeRelease, type NativeTarget } from './nativeRelease'
 
 /** The 1.1.1 ACP server's version, as Mousse reports it. */
 const LEGACY_VERSION = ANTIGRAVITY_RELEASE.replace(/^agy_acp_server_/, '')
 /** Google's update feed is read at most this often (the pace of other agents' version checks). */
 const FEED_TTL_MS = 6 * 60 * 60_000
+/** How long a lookup of the user's own `agy` is reused: it is asked for on every status read. */
+const USER_AGY_TTL_MS = 15_000
+
+/**
+ * Under test, nothing outside the test is reached: no `agy` of this computer and no feed. A test
+ * runner started through vitest's Node API leaves `NODE_ENV` unset, so its worker flag counts too.
+ */
+const underTest = (): boolean => process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST)
 
 export const ANTIGRAVITY_PROVIDER_ID = 'antigravity'
 type ProfileSettings = {
@@ -39,8 +50,8 @@ type ProfileSettings = {
   /** Signed in on the 1.1.1 ACP server (its file-stored Google session). */
   signedIn?: boolean
   /**
-   * Signed in on the native CLI. Kept apart from `signedIn`: the two runtimes keep the Google session
-   * in different places and Mousse never moves one into the other, so a switch asks for a new sign-in.
+   * Signed in on `agy`, whose Google sign-in is the one this computer's `agy` keeps. Kept apart from
+   * `signedIn`: the 1.1.1 server keeps its own, so a switch reads the sign-in again.
    */
   nativeSignedIn?: boolean
   sessions?: Record<string, SavedAcpSession>
@@ -60,11 +71,16 @@ export interface AntigravityServiceOptions {
   launch?: () => StoredCliConfig
   /** Saves launch settings through the gateway's `configure` (an install drops a manual path). */
   saveLaunch?: (patch: CliProviderConfigPatch) => Promise<void>
-  /** Test seams for the native CLI: where it qualifies, the target, the reviewed release and the network. */
+  /**
+   * Finds the user's own `agy` (PATH, then Google's install folder). The driver hands in the
+   * gateway's lookup; tests pass their own, and without either none is found under test.
+   */
+  findUserAgy?: () => string | undefined
+  /** Test seam: use the gateway's lookup (`useAgyFinder`) under test too, as it is used in production. */
+  gatewayLookupUnderTest?: boolean
+  /** Test seams for Mousse's own `agy`: the target, the network, the start-up check and the clock. */
   native?: {
-    qualified?: (platform: NodeJS.Platform) => boolean
     target?: NativeTarget
-    release?: NativeRelease
     fetch?: typeof fetch
     verify?: NativeVerifier
     withdrawn?: readonly string[]
@@ -73,7 +89,7 @@ export interface AntigravityServiceOptions {
 }
 
 /**
- * The profile's Antigravity: its settings, the pinned install and the Google sign-in. Turns run
+ * The profile's Antigravity: its settings, the agent that runs and its Google sign-in. Turns run
  * on the ACP core (`harness/acp`) with the Antigravity preset.
  */
 export class AntigravityProviderService {
@@ -92,11 +108,17 @@ export class AntigravityProviderService {
   /** Bumped when a sign-in succeeds, so an older process's late sign-in request is ignored. */
   private signInGeneration = 0
   private readonly acp: AcpSessions
-  /** Google's update feed as last read, and when; read only where the native CLI qualifies. */
-  private feed?: { value: VendorFeed | undefined; at: number }
-  private feedReading?: Promise<VendorFeed | undefined>
-  /** The latest progress line of this service's native install. */
-  private nativeProgress?: string
+  /** Google's update feed as last read, and when: the release it names, undefined when unreadable. */
+  private feed?: { value: NativeRelease | undefined; at: number }
+  private feedReading?: Promise<NativeRelease | undefined>
+  /** The user's own `agy` as last looked up, and when. */
+  private userAgyFound?: { path: string | undefined; at: number }
+  /** Versions of the user's `agy`, by executable fingerprint: one too old is passed over. */
+  private readonly userAgyVersions = new Map<string, string | null>()
+  /** The gateway's lookup of the user's `agy` (its login-shell PATH too), set by the driver. */
+  private agyFinder?: () => string | undefined
+  /** A running check of whether `agy` is already signed in. */
+  private signInCheck?: Promise<boolean>
   /** Clients are told through these hooks, set by the profile services. */
   readonly hooks: { changed?: () => void; installProgress?: (message: string) => void } = {}
 
@@ -155,7 +177,7 @@ export class AntigravityProviderService {
       markSignedOut: () => this.markSignedOut(),
       signInRequiredMessage: SIGN_IN_REQUIRED_MESSAGE
     })
-    // The download is shared by every profile of the installation; each tells its own clients.
+    // An install is shared by every profile of the installation; each tells its own clients.
     this.unsubscribeInstall = onAntigravityInstallEvent(installationHome, (event) => {
       if (this.stopped) return
       if (event.type === 'progress') {
@@ -191,32 +213,79 @@ export class AntigravityProviderService {
   }
 
   /**
-   * The agent that runs. A manual path is always the user's own 1.1.1 server. Otherwise the native
-   * CLI runs where it qualifies and a verified copy is installed; else the 1.1.1 install, which
-   * stays as the fallback.
+   * The agent that runs, in this order: a manual path in Settings (`agy`, or the 1.1.1 server); the
+   * user's own `agy`, which updates itself; Mousse's own `agy`. An earlier 1.1.1 install runs only
+   * until Mousse's `agy` is installed (Update, or on its own once idle).
    */
   private runtime(): AntigravityRuntimeChoice | undefined {
     const manual = this.launchSettings().binaryPath
     if (manual) {
-      try { return { kind: 'legacy', binary: validateManualAntigravityBinary(manual) } } catch { return undefined }
+      try { return { ...manualAntigravityRuntime(manual), source: 'manual' } } catch { return undefined }
     }
+    const own = this.userAgy()
+    if (own) return { kind: 'native', binary: own, source: 'user' }
     const native = this.nativeRuntime()
-    if (native) return { kind: 'native', binary: native.binary }
+    if (native) return { kind: 'native', binary: native.binary, source: 'managed' }
     const legacy = installedAntigravityBinary(this.installationHome)
-    return legacy ? { kind: 'legacy', binary: legacy } : undefined
+    return legacy ? { kind: 'legacy', binary: legacy, source: 'managed' } : undefined
   }
 
   private binary(): string | undefined { return this.runtime()?.binary }
 
-  /** The kind that runs now; with nothing installed, the kind an install would add. */
+  /** The kind that runs now; with nothing installed, `agy`, which an install adds. */
   private runtimeKind(): AntigravityRuntimeChoice['kind'] {
-    return this.runtime()?.kind ?? (this.nativeAllowed() && !this.launchSettings().binaryPath ? 'native' : 'legacy')
+    return this.runtime()?.kind ?? 'native'
   }
 
   private sessionsRuntime(): AntigravityRuntimeChoice['kind'] { return this.settings.sessionsRuntime ?? 'legacy' }
 
-  private nativeAllowed(): boolean {
-    return (this.options.native?.qualified ?? nativeQualified)(process.platform) && this.nativeTarget() !== undefined
+  /**
+   * The user's own `agy`, unless its version is known to be older than `NATIVE_MIN_VERSION`. Looked
+   * up at most every `USER_AGY_TTL_MS`; its version is read once per executable, in the background.
+   */
+  private userAgy(): string | undefined {
+    const now = Date.now()
+    if (!this.userAgyFound || now - this.userAgyFound.at > USER_AGY_TTL_MS) {
+      // Under test only a lookup the test hands in runs: never this computer's own agy.
+      const lookup = underTest() && !this.options.gatewayLookupUnderTest ? undefined
+        : this.agyFinder ?? (() => findOnPath(cliNames('agy'), { env: process.env, searchPath: agyStandalonePaths() }))
+      const find = this.options.findUserAgy ?? lookup ?? (() => undefined)
+      let path: string | undefined
+      try { path = find() } catch { path = undefined }
+      const before = this.userAgyFound?.path
+      this.userAgyFound = { path, at: now }
+      if (before !== undefined && before !== path) this.runtimeChanged()
+    }
+    const path = this.userAgyFound.path
+    if (!path) return undefined
+    let key = path
+    try {
+      const info = statSync(path)
+      key = `${path}|${info.size}|${info.mtimeMs}`
+    } catch { /* looked up again on the next read */ }
+    if (!this.userAgyVersions.has(key)) {
+      this.userAgyVersions.set(key, null)
+      void this.versions.version(directLaunch(path), process.env).then((version) => {
+        if (!version) return
+        this.userAgyVersions.set(key, version)
+        if (compareVersions(version, NATIVE_MIN_VERSION) < 0) this.runtimeChanged()
+      })
+    }
+    const version = this.userAgyVersions.get(key)
+    return version && compareVersions(version, NATIVE_MIN_VERSION) < 0 ? undefined : path
+  }
+
+  /** Looks the user's `agy` up the way the gateway does, so both name the same executable. */
+  useAgyFinder(find: () => string | undefined): void {
+    this.agyFinder = find
+    this.userAgyFound = undefined
+  }
+
+  /** The agent to run changed on its own (an `agy` appeared or went): idle processes restart on it. */
+  private runtimeChanged(): void {
+    if (this.stopped) return
+    this.relaunchAfterSettingsChange()
+    this.notifyChanged()
   }
 
   /** This computer's target, found once (Linux checks for musl on disk). */
@@ -225,15 +294,22 @@ export class AntigravityProviderService {
     this.target ??= { value: this.options.native?.target ?? nativeTarget() }
     return this.target.value
   }
-  private nativeRelease(): NativeRelease | undefined {
-    const target = this.nativeTarget()
-    return this.options.native?.release ?? (target ? NATIVE_RELEASES[target] : undefined)
-  }
-  private withdrawn(): readonly string[] { return this.options.native?.withdrawn ?? WITHDRAWN_NATIVE_VERSIONS }
 
-  /** The verified native install, only where the native CLI qualifies. */
+  /**
+   * Withdrawn releases: Mousse's own list, and the installed one when Google's feed went back to an
+   * older version (the last good one then runs, and the feed's release installs on the next update).
+   */
+  private withdrawn(): readonly string[] {
+    const base = this.options.native?.withdrawn ?? WITHDRAWN_NATIVE_VERSIONS
+    const feed = this.feed?.value
+    if (!feed) return base
+    const installed = activeNativeRuntime(this.installationHome, this.nativeTarget(), base)
+    return installed && compareVersions(feed.version, installed.version) < 0 ? [...base, installed.version] : base
+  }
+
+  /** Mousse's own verified `agy`. */
   private nativeRuntime(): NativeRuntime | undefined {
-    return this.nativeAllowed() ? activeNativeRuntime(this.installationHome, this.nativeTarget(), this.withdrawn()) : undefined
+    return activeNativeRuntime(this.installationHome, this.nativeTarget(), this.withdrawn())
   }
 
   configured(): boolean { return Boolean(this.signedIn() && this.binary()) }
@@ -265,12 +341,16 @@ export class AntigravityProviderService {
     }
   }
 
-  /** Sign-in is separate from install: with no agent there is nothing to sign in to. */
+  /**
+   * Sign-in is separate from install: with no agent there is nothing to sign in to. `agy` shares the
+   * Google sign-in of this computer's `agy`: when it already has one, opening a session succeeds and
+   * no Google flow starts. Otherwise (and always on the 1.1.1 server) Google's sign-in runs.
+   */
   private async runLogin(session: LoginSession, cwd: string): Promise<ProviderLoginResult> {
     if (!this.binary()) throw new Error(NOT_INSTALLED_MESSAGE)
     session.abort.signal.throwIfAborted()
-    // The agent prints Google's link a moment after it starts; until then the sign-in shows as starting.
-    session.emitEvent({ sessionId: session.sessionId, type: 'progress', message: 'Starting Google sign-in…' })
+    const native = this.runtimeKind() === 'native'
+    session.emitEvent({ sessionId: session.sessionId, type: 'progress', message: native ? 'Starting Antigravity…' : 'Starting Google sign-in…' })
     // Ends with this sign-in however it ends (cancelled, failed or signed in): withdraws the paste field.
     const ended = new AbortController()
     const live = AbortSignal.any([session.abort.signal, ended.signal])
@@ -303,20 +383,65 @@ export class AntigravityProviderService {
         }
       })().catch(() => undefined)
       await this.acp.initialize(process)
-      await process.connection.agent.request(methods.agent.authenticate, { methodId: ANTIGRAVITY_AUTH_METHOD })
-      const newSession = await process.connection.agent.request(methods.agent.session.new, { cwd, mcpServers: [] })
+      let newSession = native ? await this.openSignedIn(process, cwd) : undefined
+      if (!newSession) {
+        if (native) session.emitEvent({ sessionId: session.sessionId, type: 'progress', message: 'Starting Google sign-in…' })
+        await process.connection.agent.request(methods.agent.authenticate, { methodId: ANTIGRAVITY_AUTH_METHOD })
+        newSession = await process.connection.agent.request(methods.agent.session.new, { cwd, mcpServers: [] })
+      }
       session.abort.signal.throwIfAborted()
-      const models = modelOptions(newSession)
-      if (!models.length) throw new Error('Google agent did not confirm account model access')
-      this.signInGeneration += 1
-      const signedInFlag = this.runtimeKind() === 'native' ? { nativeSignedIn: true } : { signedIn: true }
-      this.settings = { ...this.settings, ...signedInFlag, models, modelsRefreshedAt: new Date().toISOString() }
-      this.save()
+      if (!this.recordSignIn(modelOptions(newSession))) throw new Error('Google agent did not confirm account model access')
       return { success: true, sessionId: session.sessionId }
     } catch (error) {
       const cancelled = session.abort.signal.aborted
       return { success: false, sessionId: session.sessionId, error: cancelled ? 'Login cancelled' : error instanceof Error ? error.message : String(error) }
     } finally { ended.abort() }
+  }
+
+  /** A session opened without signing in: the existing sign-in works. Undefined when `agy` asks for one. */
+  private async openSignedIn(process: AcpProcess, cwd: string): Promise<NewSessionResponse | undefined> {
+    try {
+      return await process.connection.agent.request(methods.agent.session.new, { cwd, mcpServers: [] })
+    } catch (error) {
+      if (isAuthRequired(error)) return undefined
+      throw error
+    }
+  }
+
+  /** Records a sign-in the agent confirmed with the account's models; false when it listed none. */
+  private recordSignIn(models: LlmModelOption[]): boolean {
+    if (!models.length) return false
+    this.signInGeneration += 1
+    const signedInFlag = this.runtimeKind() === 'native' ? { nativeSignedIn: true } : { signedIn: true }
+    this.settings = { ...this.settings, ...signedInFlag, models, modelsRefreshedAt: new Date().toISOString() }
+    this.save()
+    return true
+  }
+
+  /**
+   * Whether `agy` already has a Google sign-in on this computer: one session opened without signing
+   * in (the agent decides; Mousse never reads its credentials). Run on an explicit check (Add,
+   * Check again, after install), never at start-up. True once recorded.
+   */
+  checkSignedIn(cwd: string = this.profileDir): Promise<boolean> {
+    if (this.signedIn()) return Promise.resolve(true)
+    if (this.stopped || this.settingsError || this.runtimeKind() !== 'native' || !this.binary()) return Promise.resolve(false)
+    this.signInCheck ??= (async () => {
+      const active = this.acp.launch('models')
+      try {
+        await this.acp.initialize(active)
+        const opened = await this.openSignedIn(active, cwd)
+        if (!opened || !this.recordSignIn(modelOptions(opened))) return false
+        this.notifyChanged()
+        return true
+      } catch {
+        return false
+      } finally {
+        this.acp.close(active)
+        this.signInCheck = undefined
+      }
+    })()
+    return this.signInCheck
   }
 
   /** Record only the canonical history that the owning turn durably committed. */
@@ -354,9 +479,8 @@ export class AntigravityProviderService {
     this.acp.forgetConversation(threadId)
   }
 
-  /** The agent's launch state for status: installing, and the executable it would run. */
+  /** The installation's install, whichever profile started it: running, and its latest progress line. */
   installState(): { installing: boolean; progress?: string } {
-    if (this.installing && this.nativeAllowed()) return { installing: true, ...(this.nativeProgress ? { progress: this.nativeProgress } : {}) }
     return antigravityInstallState(this.installationHome)
   }
 
@@ -375,6 +499,7 @@ export class AntigravityProviderService {
     return this.settings.models?.length ? this.settings.modelsRefreshedAt : undefined
   }
 
+  /** Signs the agent out. On `agy` that is this computer's `agy` sign-in, which every profile shares. */
   async logout(): Promise<void> {
     for (const session of this.loginSessions) session.abort.abort()
     this.closeAll()
@@ -421,9 +546,9 @@ export class AntigravityProviderService {
     }
   }
 
-  /** Checks launch settings before the gateway saves them: a manual agent without its helper. */
+  /** Checks launch settings before the gateway saves them: `agy`, or the 1.1.1 server beside its helper. */
   validateLaunch(patch: CliProviderConfigPatch): void {
-    if (typeof patch.binaryPath === 'string') validateManualAntigravityBinary(requireExecutable(patch.binaryPath, 'Antigravity'))
+    if (typeof patch.binaryPath === 'string') manualAntigravityRuntime(requireExecutable(patch.binaryPath, 'Antigravity'))
   }
 
   /** Why the settings file cannot be used, while that lasts (it is never overwritten then). */
@@ -436,6 +561,7 @@ export class AntigravityProviderService {
    * now and a busy one is replaced on that thread's next turn (resuming its ACP session).
    */
   launchChanged(): void {
+    this.userAgyFound = undefined
     this.relaunchAfterSettingsChange()
   }
 
@@ -462,8 +588,9 @@ export class AntigravityProviderService {
   }
 
   /**
-   * Downloads Google's pinned agent into the installation. Install and sign-in are separate:
-   * this never starts a sign-in. A manual executable path is dropped so the verified install is used.
+   * Installs the `agy` release Google's update feed names now into the installation. Install and
+   * sign-in are separate: this never starts a sign-in. A manual executable path is dropped so the
+   * installed `agy` is used.
    */
   async install(onProgress?: AntigravityInstallProgress): Promise<CliProviderConfig> {
     if (this.stopped) throw new Error('Antigravity provider is stopped')
@@ -471,8 +598,7 @@ export class AntigravityProviderService {
     const abort = new AbortController()
     this.installing = abort
     try {
-      if (this.nativeAllowed()) await this.installNative(abort.signal, onProgress)
-      else await installAntigravity(this.installationHome, abort.signal, onProgress)
+      await runSharedAntigravityInstall(this.installationHome, abort.signal, onProgress, (signal, progress) => this.installNative(signal, progress))
       // A cancel that lands after the download leaves the settings alone.
       abort.signal.throwIfAborted()
       // The manual path is dropped from the instance config (and its mirror) through the gateway.
@@ -489,77 +615,91 @@ export class AntigravityProviderService {
     }
   }
 
-  /** Stops the install running in this installation; false when none is running. */
+  /** Stops the install running in this installation, whichever profile started it; false when none is running. */
   cancelInstall(): boolean {
-    if (this.installing && this.nativeAllowed()) {
-      this.installing.abort()
-      return true
-    }
     return cancelAntigravityInstall(this.installationHome)
   }
 
-  /**
-   * Installs the reviewed native release (never one the feed names), after asking the feed whether
-   * Google withdrew it. An unreadable feed does not block: the release is checked on its own.
-   */
-  private async installNative(signal: AbortSignal, onProgress?: AntigravityInstallProgress): Promise<void> {
-    const release = this.nativeRelease()
+  /** Installs the release Google's feed names now; the feed must answer. */
+  private async installNative(signal: AbortSignal, progress: AntigravityInstallProgress): Promise<void> {
     const target = this.nativeTarget()
-    if (!release || !target) throw new Error('Google publishes no Antigravity CLI for this computer.')
-    const feed = await this.readFeed(true)
+    if (!target) throw new Error('Google publishes no Antigravity CLI for this computer.')
+    const release = await this.readFeed(true)
+    if (!release) throw new Error('Google\'s Antigravity update feed could not be read. Try again later.')
     const { fetch: fetchFile, verify } = this.options.native ?? {}
-    try {
-      await installNativeAntigravity(this.installationHome, {
-        release, target, signal, withdrawn: this.withdrawn(),
-        ...(feed ? { feed } : {}), ...(fetchFile ? { fetch: fetchFile } : {}), ...(verify ? { verify } : {}),
-        progress: (message, fraction, bytes) => {
-          this.nativeProgress = message
-          try { this.hooks.installProgress?.(message) } catch { /* progress is best effort */ }
-          onProgress?.(message, fraction, bytes)
-        }
-      })
-    } finally { this.nativeProgress = undefined }
+    await installNativeAntigravity(this.installationHome, {
+      release, target, signal, progress, withdrawn: this.withdrawn(),
+      ...(fetchFile ? { fetch: fetchFile } : {}), ...(verify ? { verify } : {})
+    })
+  }
+
+  /** Whether Mousse's own install is what runs (or would, once installed): Mousse keeps it current. */
+  private managesRuntime(): boolean {
+    const runtime = this.runtime()
+    return runtime ? runtime.source === 'managed' : !this.launchSettings().binaryPath
   }
 
   /**
-   * Google's feed entry for this computer, at most every `FEED_TTL_MS` unless `now`. Undefined when
-   * it could not be read. It tells only whether the reviewed release was withdrawn or a newer one exists.
+   * The release Google's feed names for this computer, read at most every `FEED_TTL_MS` unless
+   * `now`. Undefined when it could not be read or names no usable release. Read only while Mousse's
+   * own install is what runs. When it names a newer release than the one that runs and no turn is
+   * running, the update installs on its own.
    */
-  private readFeed(now = false): Promise<VendorFeed | undefined> {
+  private readFeed(now = false): Promise<NativeRelease | undefined> {
     const target = this.nativeTarget()
-    const release = this.nativeRelease()
-    if (!target || !release || !this.nativeAllowed()) return Promise.resolve(undefined)
+    if (!target || (!now && !this.managesRuntime())) return Promise.resolve(this.feed?.value)
     const clock = this.options.native?.now ?? Date.now
     if (!now && this.feed && clock() - this.feed.at < FEED_TTL_MS) return Promise.resolve(this.feed.value)
     if (this.feedReading) return this.feedReading
-    const fetchFile = this.options.native?.fetch ?? (process.env.NODE_ENV === 'test' ? undefined : fetch)
+    const fetchFile = this.options.native?.fetch ?? (underTest() ? undefined : fetch)
     if (!fetchFile) return Promise.resolve(undefined)
-    const before = this.feed?.value?.kind
+    const before = this.feed?.value?.version
     this.feedReading = readVendorFeed(`${NATIVE_FEED_BASE}/${target}.json`, fetchFile)
       .then((raw) => {
-        const value = raw === undefined ? undefined : classifyVendorFeed(raw, target, release)
+        const value = raw === undefined ? undefined : parseVendorFeed(raw, target)
         this.feed = { value, at: clock() }
-        if (value?.kind !== before) this.notifyChanged()
+        if (value?.version !== before) this.notifyChanged()
+        if (!now) this.updateWhenIdle()
         return value
       })
       .finally(() => { this.feedReading = undefined })
     return this.feedReading
   }
 
+  /** Installs the feed's release on its own when Mousse's install runs, is older, and nothing is running. */
+  private updateWhenIdle(): void {
+    if (this.stopped || this.installing || this.acp.busy() || !this.updateAvailable()) return
+    void this.install().catch(() => undefined)
+  }
+
+  /** The feed names a release that is not the one Mousse's own install runs now. */
+  private updateAvailable(): boolean {
+    const release = this.feed?.value
+    const runtime = this.runtime()
+    if (!release || runtime?.source !== 'managed' || nativeReleaseRefusal(release, this.withdrawn())) return false
+    const running = this.managedRuntime()?.version
+    return running !== release.version
+  }
+
   /**
-   * The version Update installs: the reviewed native release where it qualifies and is not
-   * withdrawn, else the 1.1.1 server. Reading it starts a feed check when one is due.
+   * The version Update installs, while Mousse's own install is what runs: the feed's release. The
+   * user's own `agy` updates itself and a manual path is the user's, so neither gets one. Reading it
+   * starts a feed check when one is due.
    */
-  pinnedVersion(): string {
-    if (!this.nativeAllowed()) return LEGACY_VERSION
+  latestVersion(): string | undefined {
+    if (!this.managesRuntime()) return undefined
     void this.readFeed()
-    const release = this.nativeRelease()
-    if (!release || nativeReleaseRefusal(release, this.feed?.value, this.withdrawn())) return this.managedRuntime()?.version ?? LEGACY_VERSION
+    const release = this.feed?.value
+    if (!release || nativeReleaseRefusal(release, this.withdrawn())) return undefined
     return release.version
   }
 
-  /** Mousse's own verified install, with its version: the native CLI where it qualifies, else the 1.1.1 server. */
+  /**
+   * Mousse's own install, with its version, when it is what runs: `agy`, else an earlier 1.1.1
+   * install. Undefined when the user's own `agy` or a manual path runs.
+   */
   managedRuntime(): { path: string; version: string } | undefined {
+    if (this.launchSettings().binaryPath || this.userAgy()) return undefined
     const native = this.nativeRuntime()
     if (native) return { path: native.binary, version: native.version }
     const legacy = installedAntigravityBinary(this.installationHome)

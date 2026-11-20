@@ -106,3 +106,22 @@ it('a sign-in whose link arrives late shows starting, then opens the link once h
   expect(button('Copy link')).toBeTruthy()
   expect(button("Browser didn't return here?")).toBeTruthy()
 })
+
+it('counts the seconds while the agent starts, and stops once Google\'s link shows', async () => {
+  vi.useFakeTimers()
+  try {
+    act(() => applyOperationEvent({ operationId: 'op-link', instanceId: 'antigravity', kind: 'sign_in', phase: 'progress', message: 'Starting Antigravity…' }))
+    act(() => root.render(createElement(SignInDialog, { operationId: 'op-link', name: 'Antigravity', onClose: () => {} })))
+    const status = () => document.body.querySelector('[role="status"]')?.textContent ?? ''
+    expect(status()).toBe('Starting Antigravity…')
+    act(() => { vi.advanceTimersByTime(3_000) })
+    expect(status()).toBe('Starting Antigravity…3 s')
+    act(() => applyOperationEvent({
+      operationId: 'op-link', instanceId: 'antigravity', kind: 'sign_in', phase: 'prompt',
+      prompt: { promptId: 'op-link:2', type: 'auth_url', url: 'https://accounts.example/auth', usesCallbackServer: true }
+    }))
+    expect(document.body.textContent).not.toMatch(/\d s/)
+  } finally {
+    vi.useRealTimers()
+  }
+})

@@ -481,7 +481,8 @@ describe('harness gateway: instances', () => {
         }
       })
       services.push(service)
-      vi.spyOn(service as unknown as { binary: () => string }, 'binary').mockReturnValue(join(dir, 'agy_acp_server'))
+      // The 1.1.1 server from a manual path: it always signs in through Google.
+      vi.spyOn(service as unknown as { runtime: () => unknown }, 'runtime').mockReturnValue({ kind: 'legacy', binary: join(dir, 'agy_acp_server'), source: 'manual' })
       const driver = adapterDriver(fake('antigravity'), { runtime: { signIn: (session, cwd) => service.login(session, cwd) } })
       const harness = testHarness({ drivers: [adapterDriver(pi()), driver], instances: instances(), profileHome: home() })
       const events: HarnessGatewayEvent[] = []
