@@ -151,17 +151,36 @@ describe('starting work', () => {
 })
 
 describe('tabs', () => {
-  it('label all three segments, not only the selected one', () => {
+  it('label both segments, not only the selected one', () => {
     show([thread('a', 'Fix tests')])
     const labels = [...host.querySelectorAll('[role="tab"] .threads-sidebar-tab-label')].map((label) => label.textContent)
-    expect(labels).toEqual(['Projects', 'Threads', 'Chats'])
+    expect(labels).toEqual(['Threads', 'Chats'])
   })
 
   it('keep their names as tooltips when the words are hidden', () => {
     show([thread('a', 'Fix tests')])
     const tabs = [...host.querySelectorAll<HTMLElement>('[role="tab"]')]
-    expect(tabs.map((tab) => [tab.title, tab.getAttribute('aria-label')])).toEqual([['Projects', 'Projects'], ['Threads', 'Threads'], ['Chats', 'Chats']])
-    expect(tabs.map((tab) => tab.classList.contains('active'))).toEqual([true, false, false])
+    expect(tabs.map((tab) => [tab.title, tab.getAttribute('aria-label')])).toEqual([['Threads', 'Threads'], ['Chats', 'Chats']])
+    expect(tabs.map((tab) => tab.classList.contains('active'))).toEqual([true, false])
+  })
+
+  it('show the threads by project or as one list under Threads, swapped by the button after the filter, and come back in the view used last', async () => {
+    show([thread('a', 'Fix tests')])
+    const swap = () => host.querySelector<HTMLButtonElement>('.thread-filter-swap')!
+    const shown = () => host.querySelector('.threads-sidebar-section:not([hidden])')!.classList
+    expect(shown().contains('threads-sidebar-section-projects')).toBe(true)
+    expect(swap().getAttribute('aria-label')).toBe('Show as a list')
+    await act(async () => swap().click())
+    expect(useAppStore.getState().threadsSidebarView).toBe('threads')
+    expect(shown().contains('threads-sidebar-section-feed')).toBe(true)
+    expect(swap().getAttribute('aria-label')).toBe('Show by project')
+    // The one Threads tab stays selected, and controls the list that shows.
+    const threadsTab = host.querySelector<HTMLElement>('[role="tab"][title="Threads"]')!
+    expect(threadsTab.classList.contains('active')).toBe(true)
+    expect(document.getElementById(threadsTab.getAttribute('aria-controls')!)?.hidden).toBe(false)
+    await act(async () => host.querySelector<HTMLElement>('[role="tab"][title="Chats"]')!.click())
+    await act(async () => threadsTab.click())
+    expect(useAppStore.getState().threadsSidebarView).toBe('threads')
   })
 
   it('make a bot from the + next to Bots in the Agents tab, which no longer opens Automations', async () => {

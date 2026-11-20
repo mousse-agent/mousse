@@ -12,6 +12,7 @@ import Archive01Icon from '@hugeicons/core-free-icons/Archive01Icon'
 import ArrowTurnBackwardIcon from '@hugeicons/core-free-icons/ArrowTurnBackwardIcon'
 import ArchiveRestoreIcon from '@hugeicons/core-free-icons/ArchiveRestoreIcon'
 import ArrowShrink02Icon from '@hugeicons/core-free-icons/ArrowShrink02Icon'
+import ArrowDataTransferHorizontalIcon from '@hugeicons/core-free-icons/ArrowDataTransferHorizontalIcon'
 import ArrowDown01Icon from '@hugeicons/core-free-icons/ArrowDown01Icon'
 import ArrowDown02Icon from '@hugeicons/core-free-icons/ArrowDown02Icon'
 import ArrowDownDoubleIcon from '@hugeicons/core-free-icons/ArrowDownDoubleIcon'
@@ -208,6 +209,8 @@ function createIcon(name: string, icon: IconSvgElement): IconComponent {
 export const Activity = /* @__PURE__ */ createIcon('Activity', Activity01Icon)
 export const AlertTriangle = /* @__PURE__ */ createIcon('AlertTriangle', Alert02Icon)
 export const Archive = /* @__PURE__ */ createIcon('Archive', Archive01Icon)
+/** Two arrows passing each other (⇄): swaps between two views. */
+export const ArrowLeftRight = /* @__PURE__ */ createIcon('ArrowLeftRight', ArrowDataTransferHorizontalIcon)
 export const ArrowDownLeft = /* @__PURE__ */ createIcon('ArrowDownLeft', ArrowDownLeft01Icon)
 export const ArrowLeft = /* @__PURE__ */ createIcon('ArrowLeft', ArrowLeft02Icon)
 export const ArrowRight = /* @__PURE__ */ createIcon('ArrowRight', ArrowRight02Icon)
