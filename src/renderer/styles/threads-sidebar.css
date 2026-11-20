@@ -398,9 +398,9 @@
 }
 
 /* A tree row is a two-line grid: the title, then its status or age; under them the branch line across the row's full
-   width. The title's wrapper lends its two lines to the grid. The status keeps at least the hover actions' room, so
-   nothing moves when the pointer arrives: the actions take its place. A card keeps its actions over the age line,
-   clear of the title. */
+   width. The title's wrapper lends its two lines to the grid. At rest the title runs up to the status; on hover the
+   actions take the status's place and its column widens to their width, so the title ends before them. A card keeps
+   its actions over the age line, clear of the title. */
 .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) {
   position: relative;
   display: grid;
@@ -426,9 +426,13 @@
 .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) > .threads-sidebar-thread-trailing {
   grid-area: 1 / 2;
   justify-content: flex-end;
-  min-width: calc(var(--thread-actions-room) - var(--ui-row-x, 9px) - 6px);
   margin-left: 0;
   transition: opacity 0.15s;
+}
+
+.threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions):is(:hover, :has(:focus-visible)) > .threads-sidebar-thread:not(.threads-sidebar-card) > .threads-sidebar-thread-trailing,
+.threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions [aria-expanded='true']) > .threads-sidebar-thread:not(.threads-sidebar-card) > .threads-sidebar-thread-trailing {
+  min-width: calc(var(--thread-actions-room) - var(--ui-row-x, 9px) - 6px);
 }
 
 .threads-sidebar-thread-trailing :is(.threads-sidebar-card-status, .threads-sidebar-card-age) {
@@ -1177,16 +1181,16 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 .threads-sidebar-device-detail { font-size: 11px; }
 
-/* Too narrow for three whole labels (the default 260px included): the open tab keeps its word and a fixed
-   width, so switching tabs does not resize it; the other two show their icons, with their names in the tooltips.
-   A label is shown whole or not at all. */
-@container pill-tabs (max-width: 319px) {
+/* The two tabs (Threads, Chats) split the bar equally with both words down to 200px. Narrower, the open tab keeps
+   its word and a fixed width, so switching tabs does not resize it; the other shows its icon, with its name in the
+   tooltip. A label is shown whole or not at all. */
+@container pill-tabs (max-width: 199px) {
   .threads-sidebar-tab:not(.active) .threads-sidebar-tab-label { display: none; }
   .threads-sidebar-tab.active { flex: 0 0 auto; min-width: 88px; padding: 0 8px; }
 }
 
-/* Too narrow even for one word beside two icons: every tab is an icon. */
-@container pill-tabs (max-width: 239px) {
+/* Too narrow even for one word beside an icon: every tab is an icon. */
+@container pill-tabs (max-width: 149px) {
   .threads-sidebar-tab-label { display: none; }
   .threads-sidebar-tab.active { flex: 1 1 0; min-width: 0; padding: 0 4px; }
 }

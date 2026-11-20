@@ -32,14 +32,14 @@
     gap calc(180ms * var(--ui-motion-scale, 1)) var(--ui-collapse-ease);
 }
 
-/* 240-319px wide, where only the open tab shows its word (threads-sidebar.css): the word widens into the
+/* 150-199px wide, where only the open tab shows its word (threads-sidebar.css): the word widens into the
    newly open tab while the old one narrows to its icon. At rest a word is shown whole or not at all.
    Tab widths never depend on the words: the open tab is a fixed 88px and the others split the rest equally.
    Basis and grow swap on the same curve, so the free space stays constant, every tab's width moves in a straight
    line and the tab that stays closed keeps its width; a word's width shows only inside its own tab. The closed
    basis is 16px, not 0, so it never drops under a tab's padding (which would change the free space mid-swap).
    The word itself grows to its own width (width auto), in step with the tab, without overshooting. */
-@container pill-tabs (min-width: 240px) and (max-width: 319px) {
+@container pill-tabs (min-width: 150px) and (max-width: 199px) {
   .threads-sidebar-tabs .threads-sidebar-tab { flex: 1 1 16px; min-width: 0; gap: 0; interpolate-size: allow-keywords; }
   .threads-sidebar-tabs .threads-sidebar-tab.active { flex: 0 0 88px; min-width: 0; gap: 5px; }
   .threads-sidebar-tabs .threads-sidebar-tab[role='tab'] .threads-sidebar-tab-label {
