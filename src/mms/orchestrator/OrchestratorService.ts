@@ -991,7 +991,10 @@ interface ContinuationTurnPayload {
   backgroundNotice?: BackgroundTaskNoticeItem[]
 }
 
-/** How long a Mousse tool call waits for the run of a turn the provider started, before it fails as usual. */
+/**
+ * How long a Mousse tool call waits for a turn the provider started to get a run, before it fails as usual. A run
+ * that is recorded and not over is waited for as long as it takes; this only checks it again at this interval.
+ */
 const CONTINUATION_CALL_WAIT_MS = 10_000
 /** How long a turn's start waits for its running list (`runningNoteFor`) before it starts without the note. */
 const RUNNING_NOTE_BUDGET_MS = 2_500
@@ -3191,14 +3194,33 @@ export class OrchestratorService extends EventEmitter {
     let settle!: (state: { runId: string | null }) => void
     const done = new Promise<{ runId: string | null }>((resolve) => { settle = resolve })
     // Claude keeps working while the run is made. Mousse tool calls it makes wait for the run to be
-    // active, so they act as it, not as a run that just ended or as no one; a run that never comes
-    // frees them after a while.
-    const timer = setTimeout(() => settle({ runId: null }), this.continuationCallWaitMs)
+    // active, so they act as it, not as a run that just ended or as no one. A run that is recorded and not
+    // over is on its way, however long the thread is busy or its setup takes, and its effect ends the hold
+    // either way: its calls keep waiting. Only a run that was never recorded, or that ended, frees them.
+    let recordedRunId: string | undefined
+    let timer: ReturnType<typeof setTimeout>
+    const expire = (): void => {
+      let run: ReturnType<typeof engine.getRun> | undefined
+      try {
+        run = recordedRunId ? engine.getRun(recordedRunId) : undefined
+      } catch {
+        // The engine is closed (the daemon is stopping): the run will not come.
+        run = undefined
+      }
+      if (run && !TERMINAL_RUN_STATUSES.has(run.status)) {
+        timer = setTimeout(expire, this.continuationCallWaitMs)
+        timer.unref?.()
+        return
+      }
+      settle({ runId: null })
+    }
+    timer = setTimeout(expire, this.continuationCallWaitMs)
     timer.unref?.()
     this.pendingContinuations.set(info.id, { threadId, reserved, done, settle: (runId) => { clearTimeout(timer); settle({ runId }) } })
     void engine.dispatch({ kind: 'send', threadId, clientRequestId: `continuation:${info.id}`, source: 'provider-continuation' })
       .then((result) => {
         if (result.status !== 'accepted') throw new Error(result.reason)
+        recordedRunId = result.runId
         const backgroundNotice = backgroundNoticeOf(info)
         const payload: ContinuationTurnPayload = { kind: 'continuation', threadId, runId: result.runId, continuationId: info.id, note, ...(backgroundNotice.length ? { backgroundNotice } : {}) }
         engine.outbox.enqueue({ effectId: `effect:${result.runId}:turn.start:1`, threadId, runId: result.runId, kind: 'turn.start', payload })
