@@ -361,6 +361,31 @@ function TurnWorkStatus({
 }
 
 const NO_WAITS: readonly WaitSpan[] = [];
+const EMPTY_UI_MESSAGES: UIMessage[] = [];
+
+/**
+ * A turn already under way whose first message has not been written yet (such as a newly started
+ * subagent setting up its worktree): the same Working header and Starting… progress row that a
+ * turn with a prompt shows before its first output arrives.
+ */
+function StartingTurnRow() {
+  const state = useTurnProgressState();
+  const startedAt = useMemo(() => {
+    if (!state?.startedAt) return null;
+    const ms = Date.parse(state.startedAt);
+    return Number.isFinite(ms) ? ms : null;
+  }, [state?.startedAt]);
+  return (
+    <div data-turn-key="__starting__" className="relative space-y-2">
+      <div className="group/assistant-turn">
+        <TurnWorkStatus active startedAt={startedAt} durationMs={null} />
+        <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">
+          <TurnProgressRow messages={EMPTY_UI_MESSAGES} standalone />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /**
  * " · (message icon) 3" after a finished turn's time: how many replies its fold hides. Only the icon and number show;
@@ -2211,6 +2236,7 @@ export const MessageList = memo(function MessageList({
               />
             );
           })}
+          {turns.length === 0 && isStreaming && <StartingTurnRow />}
         </div>
         {afterTurns != null && (
           // Clear of the last turn's toolbar, which reaches into the space below the rows.

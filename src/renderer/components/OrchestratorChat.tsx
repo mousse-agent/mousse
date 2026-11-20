@@ -58,6 +58,7 @@ import { createTurnActions, type TurnActions } from '../chat/components/agent-el
 import { countRender } from '../chat/components/agent-elements/render-counts'
 import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
+import { findSubagentEntry, isSubagentStartingOptimistically } from './subagentStatus'
 import { useSubagents } from '../hooks/useSubagents'
 import { isRunningSubagent, isWorkingSubagent } from '../../shared/subagents'
 import { stopAllSubagents } from './sideCard/lineageLogic'
@@ -114,7 +115,7 @@ import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
 import { resolveChatReference, resolveChatReferences } from '../utils/chatLinks'
 import { threadReferenceRefusal } from '../lib/threadReference'
-import { isLocalOnlyThread } from '../../shared/threadLineage'
+import { isLocalOnlyThread, isSubagentThread } from '../../shared/threadLineage'
 import { pickedSelection, pickerModelId } from '../../shared/modelSelection'
 import '../styles/compact-composer.css'
 import { CHAT_TOOL_RENDERERS } from './automations/inbox/ChatDraftCard'
@@ -250,6 +251,16 @@ export function OrchestratorChat() {
     s.threads.find((thread) => thread.id === s.activeThreadId)
   )
   const threads = useAppStore((s) => s.threads)
+  // If the open thread is a subagent listed under any parent in Nest (local by id, or remote by ref), recognise it
+  // immediately on click — even before threads:updated or its first turn-state lands.
+  const subagentsByParent = useAppStore((s) => s.subagentsByParent)
+  const ownSubagent = useMemo(
+    () => findSubagentEntry(subagentsByParent, activeThreadId),
+    [subagentsByParent, activeThreadId]
+  )
+  const ownSubagentParentId = activeThread?.lineage?.parentThreadId ?? ownSubagent?.parentThreadId ?? null
+  useSubagents(ownSubagentParentId && messages.length === 0 ? ownSubagentParentId : null)
+  const isSubagent = Boolean((activeThread && isSubagentThread(activeThread)) || ownSubagent)
   // The profile default.
   const [defaultPermissionMode, setDefaultPermissionMode] = useState<PermissionMode>(DEFAULT_PERMISSION_MODE)
   const permissionCeiling = permissionCeilingOf(activeThread, threads, defaultPermissionMode)
@@ -272,7 +283,7 @@ export function OrchestratorChat() {
   // (`handleSend`). Until it is sent, the chat is still the new chat it was, and its composer still holds the message.
   const [firstSendId, setFirstSendId] = useState<string | null>(null)
   const firstSendShown = firstSendId !== null && messages.some((message) => message.id === firstSendId)
-  const newChat = isNewEmptyThread(activeThreadId, activeThread, messages.length - (firstSendShown ? 1 : 0))
+  const newChat = isNewEmptyThread(activeThreadId, activeThread, messages.length - (firstSendShown ? 1 : 0)) && !ownSubagent
   // A new chat whose thread a send still has to make (none yet, or the empty one shown is of another project or
   // computer): it shows what its project remembers from the last pick there, and a pick waits with the draft.
   const createsThread = newChat && composerCreatesThread(activeThread, workspace)
@@ -569,8 +580,17 @@ export function OrchestratorChat() {
   useEffect(() => {
     if (shownRemote && activeThreadId) void hydrateMessageImages(activeThreadId)
   }, [shownRemote, activeThreadId, messages.length])
-  const chatStatus = useMemo(() => chatStatusFromTurn(turnState), [turnState])
-  const turnActive = isTurnActivePhase(turnState?.phase ?? 'idle')
+  const optimisticSubagentStarting = isSubagentStartingOptimistically({
+    subagent: ownSubagent?.subagent,
+    turnPhase: turnState?.phase,
+    messageCount: shownMessages.length,
+    hasSetupFailure: Boolean(activeThread?.setupFailure)
+  })
+  const chatStatus = useMemo(() => {
+    const base = chatStatusFromTurn(turnState)
+    return optimisticSubagentStarting && base === 'ready' ? 'submitted' : base
+  }, [turnState, optimisticSubagentStarting])
+  const turnActive = isTurnActivePhase(turnState?.phase ?? 'idle') || optimisticSubagentStarting
   // Stop also ends a turn that waits on an approval or an answer (it closes the request).
   const turnStoppable = isTurnStoppable(turnState)
   // Up in an empty composer brings back the last prompt sent in this thread: its text, without attachments.
@@ -1880,8 +1900,9 @@ export function OrchestratorChat() {
   }
 
   // A thread whose transcript is still loading is not empty: it shows the plain chat (no headline, logo or glow) until it lands.
+  // A subagent thread is never the new-chat empty screen either.
   const newChatAnimations = useAppStore((s) => s.newChatAnimations)
-  const emptyThread = shownMessages.length === 0 && !transcriptPending && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
+  const emptyThread = !isSubagent && shownMessages.length === 0 && !transcriptPending && !turnActive && !loading && !showQuestions && !sendError && !connectionFailed
   // A new thread's settings (project above the composer, where it runs and Private / Archive after below) leave once the first send starts.
   const newThreadSettings = newChat && !turnActive && !loading && !firstSendShown
   // The first message shows in the transcript while its thread is made: the locked composer that still holds it (to
@@ -1921,6 +1942,7 @@ export function OrchestratorChat() {
         permissionRequests={permissionRequests.controls}
         turnActions={turnActions}
         queue={queue}
+        startingSince={optimisticSubagentStarting ? ownSubagent?.subagent.createdAt : undefined}
         composer={(
       <div
         ref={inputAreaRef}
