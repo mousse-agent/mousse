@@ -436,7 +436,7 @@ describe('Publish over files Git converts: shapes, the index and recovery', () =
 
   it('a publish that landed before its record: the recovered notice restores an executable as one, in sh, bash and zsh', async () => {
     const f = kindsFixture()
-    await publishCrashingAt(f, `*" update-ref --no-deref refs/mousse/changes/"*`, 'publish-landed')
+    await publishCrashingAt(f, '*" update-ref --no-deref --stdin "*', 'publish-landed')
     expect(readFileSync(join(f.cwd, 'run.sh'), 'utf8')).toBe('echo published\n')
 
     const [settled] = await new PublishService(f.owner).recoverPending(f.workspace, f.cwd)
