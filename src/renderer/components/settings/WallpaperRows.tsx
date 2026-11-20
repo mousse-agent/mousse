@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import {
   WALLPAPER_DEFAULT_DIM,
   WALLPAPER_MAX_DIM,
@@ -8,7 +8,7 @@ import {
   type WallpaperPosition
 } from '../../../shared/themes/userThemes'
 import type { StoredWallpaperInfo } from '../../../shared/themes/wallpaperImage'
-import { useWallpaperLayer, useWallpaperProblem } from '../../lib/wallpaper'
+import { previewWallpaperDim, useWallpaperLayer, useWallpaperProblem } from '../../lib/wallpaper'
 import { useAppStore } from '../../stores/appStore'
 import { Select } from '../ui/Select'
 import { SettingsRow } from './SettingsRow'
@@ -57,6 +57,45 @@ function chooseError(error: unknown): { text: string; detail: string } {
     : { text: REFUSED_SHORT, detail: REFUSED_DETAIL }
 }
 
+/** How long Settings stays aside after a key moves the dim slider. */
+export const DIM_KEY_PEEK_MS = 700
+
+/**
+ * Settings steps aside (`html[data-settings-peek]`, app CSS) so the chat and its wallpaper show: while the dim slider is
+ * dragged, and for a moment after a key moves it.
+ */
+function useSettingsPeek(): { hold(): void; brief(): void } {
+  const timer = useRef<number | undefined>(undefined)
+  const release = useRef<(() => void) | null>(null)
+  const end = (): void => {
+    window.clearTimeout(timer.current)
+    timer.current = undefined
+    release.current?.()
+    release.current = null
+    document.documentElement.removeAttribute('data-settings-peek')
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- end reads only refs
+  useEffect(() => end, [])
+  return {
+    hold: () => {
+      end()
+      document.documentElement.setAttribute('data-settings-peek', '')
+      const events = ['pointerup', 'pointercancel', 'blur'] as const
+      for (const name of events) window.addEventListener(name, end)
+      release.current = () => { for (const name of events) window.removeEventListener(name, end) }
+    },
+    brief: () => {
+      if (release.current) return
+      window.clearTimeout(timer.current)
+      document.documentElement.setAttribute('data-settings-peek', '')
+      timer.current = window.setTimeout(end, DIM_KEY_PEEK_MS)
+    }
+  }
+}
+
+/** Keys that move a range input. */
+const SLIDER_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'])
+
 export interface WallpaperRowsProps {
   wallpaper: ThemeWallpaper | undefined
   onChange: (wallpaper: ThemeWallpaper | undefined) => void
@@ -80,10 +119,18 @@ export function WallpaperRows({ wallpaper, onChange }: WallpaperRowsProps) {
       setBusy(false)
     }
   }
-  const dim = wallpaper?.dim ?? WALLPAPER_DEFAULT_DIM
-  // The layer shows this theme's image: the dim it really uses, raised when text needs it.
-  const shownFloor = layer && wallpaper && layer.floor * 100 > dim + 0.5 ? Math.round(layer.floor * 100) : null
+  const peek = useSettingsPeek()
+  // The least dim that keeps text readable over this image (the layer measures it); the slider does not go below it,
+  // so it shows the dim really used and every move changes the look.
+  const floor = layer && wallpaper ? Math.min(WALLPAPER_MAX_DIM, Math.max(0, Math.ceil(layer.floor * 100 - 1e-6))) : 0
+  const dim = Math.max(floor, wallpaper?.dim ?? WALLPAPER_DEFAULT_DIM)
   const set = (patch: Partial<ThemeWallpaper>): void => { if (wallpaper) onChange({ ...wallpaper, ...patch }) }
+  const setDim = (value: number): void => {
+    const next = Math.max(floor, value)
+    // Drawn now; the theme's own preview follows when the slider rests.
+    previewWallpaperDim(next)
+    if (next !== wallpaper?.dim) set({ dim: next })
+  }
   return (
     <>
       <SettingsRow
@@ -130,9 +177,10 @@ export function WallpaperRows({ wallpaper, onChange }: WallpaperRowsProps) {
           <SettingsRow
             title="Wallpaper dim"
             htmlFor="wallpaper-dim"
-            description={shownFloor !== null
-              ? <span title="Text needs at least this much of the theme's background over this image to stay readable (4.5:1 contrast).">Raised to {shownFloor}% for readable text.</span>
-              : <span title="How much of the theme's background covers the image. Mousse dims more when text needs it.">Theme color over the image.</span>}
+            className="wallpaper-dim-row"
+            description={floor > 0
+              ? <span title="Text needs at least this much of the theme's background over this image (4.5:1 contrast).">At least {floor}% for readable text.</span>
+              : <span title="How much of the theme's background covers the image.">Theme color over the image.</span>}
             control={
               <>
                 <input
@@ -143,8 +191,10 @@ export function WallpaperRows({ wallpaper, onChange }: WallpaperRowsProps) {
                   max={WALLPAPER_MAX_DIM}
                   step={1}
                   value={dim}
-                  style={{ '--fill': `${(dim / WALLPAPER_MAX_DIM) * 100}%` } as CSSProperties}
-                  onInput={(event) => set({ dim: Number(event.currentTarget.value) })}
+                  style={{ '--fill': `${(dim / WALLPAPER_MAX_DIM) * 100}%`, '--floor': `${(floor / WALLPAPER_MAX_DIM) * 100}%` } as CSSProperties}
+                  onPointerDown={() => peek.hold()}
+                  onKeyDown={(event) => { if (SLIDER_KEYS.has(event.key)) peek.brief() }}
+                  onChange={(event) => setDim(Number(event.currentTarget.value))}
                 />
                 <span className="acrylic-intensity-value">{dim}</span>
               </>
