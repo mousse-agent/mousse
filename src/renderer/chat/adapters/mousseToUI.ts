@@ -10,6 +10,7 @@ import {
   parseUserMessageContent,
 } from '../../utils/messageAttachments'
 import { commandLabel, knownToolName, normalizeToolName, type AgentActivityItem } from '../../../shared/agentActivity'
+import { nativeSubagentInput } from './nativeSubagents'
 import { subagentToolOfRecord } from '../../../shared/subagentTools'
 import { splitExitCode } from '../components/agent-elements/utils/bash-output'
 import { getToolStatus } from '../components/agent-elements/utils/format-tool'
@@ -179,13 +180,7 @@ function activityPart(msg: ChatMessage, activity: AgentActivityItem): PartShape 
       return {
         type: isTask ? 'tool-Task' : 'tool-Agent',
         // The task id and the background flag let the card follow a background agent to its end.
-        input: compact({
-          subagent_type: activity.agentType,
-          model: activity.model,
-          description: activity.description,
-          run_in_background: activity.background ? true : undefined,
-          task_id: activity.nativeId,
-        }),
+        input: compact(nativeSubagentInput(activity)),
         output: running
           ? undefined
           : withInterruption(activity, compact({ totalDurationMs: activity.durationMs, summary: activity.summary, startedAt: activity.startedAt, endedAt: activity.endedAt })),

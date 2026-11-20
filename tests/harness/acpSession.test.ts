@@ -115,6 +115,26 @@ function core(connect: ReturnType<typeof scriptedAgent>['connect'], options: { c
 }
 
 describe('ACP sessions', () => {
+  it('passes the role and task from an agy 1.5.13 subagent launch to the transcript', async () => {
+    const rawInput = { Prompt: 'Compute the arithmetic 23 + 19 and report the result back to me.', Role: 'Arithmetic Solver', TypeName: 'self' }
+    const launch = { toolCallId: 'call_1071222551326134974', name: 'invoke_subagent', args: rawInput, kind: 'other', title: 'Run invoke_subagent', rawInput }
+    const agent = scriptedAgent({
+      prompt: async (_text, ctx) => {
+        await ctx.update({ ...launch, sessionUpdate: 'tool_call', status: 'in_progress' })
+        await ctx.update({ ...launch, sessionUpdate: 'tool_call_update', status: 'completed' })
+        return 'end_turn'
+      }
+    })
+    const { sessions } = core(agent.connect)
+    const onTool = vi.fn()
+    await sessions.chat({ threadId: 't', cwd: process.cwd(), model: 'default', prompt: 'Delegate 23 + 19', onText: vi.fn(), onTool })
+    expect(onTool).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      phase: 'start', callId: launch.toolCallId, toolName: 'invoke_subagent',
+      activity: { kind: 'subagent', description: rawInput.Role, agentType: rawInput.TypeName, prompt: rawInput.Prompt }
+    }))
+    expect(onTool).toHaveBeenNthCalledWith(2, expect.objectContaining({ phase: 'complete', callId: launch.toolCallId, status: 'completed' }))
+  })
+
   it('lists the session’s models, sets the chosen one, and runs the agent default without setting one', async () => {
     const agent = scriptedAgent({})
     const { sessions, models } = core(agent.connect)
