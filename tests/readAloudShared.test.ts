@@ -67,11 +67,11 @@ describe('splitSpeechChunks', () => {
     expect(splitSpeechChunks('  \n\n ', 100)).toEqual([])
   })
 
-  it('cuts sentences at words above the smaller of the first two limits, unless told where', () => {
-    const sentence = 'one two three four five six seven eight nine ten.'
-    const growing = (index: number): number => [30, 60][index] ?? 60
-    expect(splitSpeechChunks(sentence, growing)).toEqual(['one two three four five six', 'seven eight nine ten.'])
-    expect(splitSpeechChunks(sentence, growing, 100)).toEqual(['one two three four five six seven eight nine ten.'])
+  it('cuts an over-long sentence at a clause and keeps dotted words whole', () => {
+    expect(splitSpeechChunks('The file speechText.ts is at v1.2 now, and the next part of this sentence follows it.', 60)).toEqual([
+      'The file speechText.ts is at v1.2 now,',
+      'and the next part of this sentence follows it.'
+    ])
   })
 })
 

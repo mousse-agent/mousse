@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SpeakOptions } from '../src/renderer/readAloud/playback'
 import type { LocalTtsModelId, NativeSpeechResult } from '../src/shared/readAloud'
 import { PauseGate } from '../src/renderer/readAloud/playback'
+import { CLIP_GAP_SECONDS } from '../src/renderer/readAloud/localPlayback'
 import { splitSpeechSegments } from '../src/renderer/readAloud/speechText'
 
 vi.mock('../src/renderer/speech/audioLevels', () => ({
@@ -28,6 +29,7 @@ interface SpeakRequest {
   id?: number
   text: string
   voice: string
+  cut?: { startsMidSentence: boolean; endsMidSentence: boolean }
 }
 
 /** A worker or a native slot as the tests see it, in the order the engine created them. */
@@ -183,6 +185,8 @@ async function answerAll(): Promise<void> {
 
 interface FakeSource {
   onended: (() => void) | null
+  /** When the clip was scheduled to play, in seconds. */
+  startedAt?: number
 }
 
 class FakeAudioContext {
@@ -196,8 +200,15 @@ class FakeAudioContext {
   createBuffer(_channels: number, length: number, rate: number) {
     return { duration: length / rate, copyToChannel: () => undefined }
   }
-  createBufferSource(): FakeSource & { connect: () => void; start: () => void; stop: () => void } {
-    const source = { onended: null as (() => void) | null, connect: () => undefined, start: () => undefined, stop: () => undefined }
+  createBufferSource(): FakeSource & { connect: () => void; start: (at: number) => void; stop: () => void } {
+    const source: FakeSource & { connect: () => void; start: (at: number) => void; stop: () => void } = {
+      onended: null,
+      connect: () => undefined,
+      start: (at: number) => {
+        source.startedAt = at
+      },
+      stop: () => undefined
+    }
     FakeAudioContext.sources.push(source)
     return source
   }
@@ -627,5 +638,34 @@ describe('local read aloud with more than one model', () => {
     await done
     expect(onClip).toHaveBeenCalledTimes(2)
     expect(engines).toHaveLength(1)
+  })
+})
+
+describe('what local read aloud hands the voice', () => {
+  it('writes short forms out for English voices and leaves them for other languages', async () => {
+    await finishRead(startRead('IDK, the PR is fine.'))
+    expect(engines[0].speakRequests().map((request) => request.text)).toEqual(["I don't know, the P R is fine."])
+
+    await finishRead(startRead('IDK, the PR is fine.', new AbortController(), 'pocket-tts-fr'))
+    expect(workers()[0].speakRequests().map((request) => request.text)).toEqual(['IDK, the PR is fine.'])
+  })
+
+  it('tells the voice where a sentence was cut and joins its parts without the pause between sentences', async () => {
+    const read = startRead('When the model is ready, the first part plays at once. Then the next sentence is read.', new AbortController(), 'kitten-tts-micro')
+    await answerAll()
+    await vi.runAllTimersAsync()
+    const requests = workers().flatMap((worker) => worker.speakRequests())
+    expect(requests.sort((a, b) => a.id! - b.id!).map((request) => request.cut)).toEqual([
+      { startsMidSentence: false, endsMidSentence: true },
+      { startsMidSentence: true, endsMidSentence: false },
+      { startsMidSentence: false, endsMidSentence: false }
+    ])
+    const [first, second, third] = FakeAudioContext.sources.map((source) => source.startedAt!)
+    // Each clip is 0.1 s of speech. The parts of one sentence follow each other at once; the next
+    // sentence comes after the usual pause.
+    expect(second - first).toBeCloseTo(0.1)
+    expect(third - second).toBeCloseTo(0.1 + CLIP_GAP_SECONDS)
+    for (const source of [...FakeAudioContext.sources]) source.onended?.()
+    await read.done
   })
 })

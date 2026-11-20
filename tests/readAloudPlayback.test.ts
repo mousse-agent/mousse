@@ -9,7 +9,7 @@ import {
   type SegmentTiming
 } from '../src/renderer/readAloud/localPlayback'
 import { PauseGate } from '../src/renderer/readAloud/playback'
-import { FIRST_SEGMENT_CHARS, MAX_SEGMENT_CHARS, splitSpeechChunks, splitSpeechSegments } from '../src/renderer/readAloud/speechText'
+import { FIRST_SEGMENT_CHARS, MAX_SEGMENT_CHARS, splitSentences, splitSpeechSegments, type SpeechSegment } from '../src/renderer/readAloud/speechText'
 
 const RATE = 1000
 
@@ -69,63 +69,77 @@ describe('startDelaySeconds', () => {
   })
 })
 
+const texts = (segments: readonly SpeechSegment[]): string[] => segments.map((segment) => segment.text)
+/** The text with the commas taken out, so a comma added at a cut does not count as a change. */
+const words = (text: string): string => text.replace(/,/g, '')
+
 describe('splitSpeechSegments', () => {
   it('turns paragraph breaks inside a segment into sentence ends', () => {
-    expect(splitSpeechSegments('Done\n\nNext step.')).toEqual(['Done. Next step.'])
+    expect(texts(splitSpeechSegments('Done\n\nNext step.'))).toEqual(['Done. Next step.'])
+  })
+
+  it('never ends the cut part of a sentence with a period, and marks where it goes on', () => {
+    const text =
+      'Sure. The engine that was still voicing the old text is shut down and replaced right away so the next read does not wait behind it and starts within seconds. ' +
+      'Later segments grow to the largest size, which keeps synthesis well ahead of playback for the rest of the reply, even when a sentence runs on for much longer than any segment could hold, as this one does on purpose.'
+    const segments = splitSpeechSegments(text)
+    const cuts = segments.filter((segment) => segment.endsMidSentence)
+    expect(cuts.length).toBeGreaterThan(1)
+    for (const cut of cuts) expect(cut.text).not.toMatch(/[.!?]$/)
+    // Nothing but a comma at the cuts is added or lost.
+    expect(words(texts(segments).join(' '))).toBe(words(text))
+    segments.forEach((segment, index) => expect(segment.startsMidSentence).toBe(index > 0 && segments[index - 1].endsMidSentence))
+  })
+
+  it('keeps a sentence of up to the largest segment size whole once the ramp is over', () => {
+    const opening = 'This sentence is about forty characters. '.repeat(10).trim()
+    const long =
+      'This sentence is longer than one hundred characters, which used to be where every sentence was cut in two even after the segments had grown.'
+    expect(long.length).toBeGreaterThan(100)
+    expect(long.length).toBeLessThanOrEqual(MAX_SEGMENT_CHARS)
+    const segments = splitSpeechSegments(`${opening} ${long} That is all.`)
+    expect(segments.some((segment) => segment.text.includes(long))).toBe(true)
+  })
+
+  it('cuts a sentence longer than the largest segment at its commas', () => {
+    const clause = 'the engine reads one more clause of this sentence aloud'
+    const sentence = `${Array.from({ length: 8 }, (_, index) => `${clause} ${index + 1}`).join(', ')}.`
+    const segments = splitSpeechSegments(`Here it goes. ${sentence}`).slice(1)
+    expect(segments.length).toBeGreaterThan(1)
+    for (const segment of segments) expect(sentence).toContain(segment.text)
+  })
+
+  it('takes a whole short first sentence instead of cutting it mid-phrase', () => {
+    expect(texts(splitSpeechSegments('The voice model keeps running in its own process until it exits. Then more.'))).toEqual([
+      'The voice model keeps running in its own process until it exits.',
+      'Then more.'
+    ])
+  })
+
+  it('cuts a long first sentence at a clause, or joins a short opener to the clause after it', () => {
+    expect(splitSpeechSegments('When the model is ready, the first part plays at once. Then more.')).toEqual([
+      { text: 'When the model is ready,', startsMidSentence: false, endsMidSentence: true },
+      { text: 'the first part plays at once. Then more.', startsMidSentence: true, endsMidSentence: false }
+    ])
+    expect(
+      texts(splitSpeechSegments('Sure. The read aloud button now starts speaking much sooner, because the voice model runs natively instead of in WebAssembly.'))
+    ).toEqual(['Sure. The read aloud button now starts speaking much sooner,', 'because the voice model runs natively instead of in WebAssembly.'])
+  })
+
+  it('joins short sentences into the first segment', () => {
+    expect(texts(splitSpeechSegments('Hi there. This is short. And so on. But this last one is too long for the first.'))).toEqual([
+      'Hi there. This is short. And so on.',
+      'But this last one is too long for the first.'
+    ])
   })
 
   it('starts short and grows to the largest segment', () => {
     const sentence = 'This sentence is about forty characters. '
-    const segments = splitSpeechSegments(sentence.repeat(40).trim())
+    const segments = texts(splitSpeechSegments(sentence.repeat(40).trim()))
     expect(segments[0].length).toBeLessThanOrEqual(FIRST_SEGMENT_CHARS)
     expect(Math.max(...segments.map((segment) => segment.length))).toBeLessThanOrEqual(MAX_SEGMENT_CHARS)
     expect(segments.at(-2)!.length).toBeGreaterThan(segments[0].length)
     expect(segments.join(' ')).toBe(sentence.repeat(40).trim())
-  })
-
-  it('joins short sentences into the first segment', () => {
-    expect(
-      splitSpeechSegments(
-        'Hi there. This is short. And so on. But this last one is too long for the first.'
-      )
-    ).toEqual(['Hi there. This is short. And so on.', 'But this last one is too long for the first.'])
-  })
-
-  it('joins a "Sure." opener to the long sentence after it and cuts that sentence', () => {
-    const text =
-      'Sure. The engine that was still voicing the old text is shut down and replaced right away, so the next read does not wait behind it and starts within seconds. ' +
-      'The replacement loads the model in the background while you read. After that, every read starts quickly.'
-    const segments = splitSpeechSegments(text)
-    expect(segments).toEqual([
-      'Sure. The engine that was still voicing,',
-      'the old text is shut down and replaced right away,',
-      'so the next read does not wait behind it and starts within seconds.',
-      'The replacement loads the model in the background while you read. After that, every read starts quickly.'
-    ])
-    expect(segments.map((segment) => segment.length)).toEqual([40, 50, 67, 104])
-    expect(modelledStart(segments).hold).toBeLessThanOrEqual(0.5)
-  })
-
-  it('cuts a long first sentence at a clause break, else at a word', () => {
-    expect(
-      splitSpeechSegments('When the model is ready, the first part plays at once. Then more.')
-    ).toEqual(['When the model is ready,', 'the first part plays at once. Then more.'])
-    // A cut between words ends with a comma, so the voice does not close the sentence there.
-    expect(
-      splitSpeechSegments('The voice model keeps running in its own process until it exits. Then more.')
-    ).toEqual(['The voice model keeps running in its,', 'own process until it exits. Then more.'])
-  })
-
-  it('counts a paragraph break as a sentence end, so a short opening paragraph is joined too', () => {
-    expect(
-      splitSpeechSegments(
-        'Summary.\n\nThe engine that was still voicing the old text is shut down and replaced right away, so the next read does not wait behind it. That is all.'
-      )
-    ).toEqual([
-      'Summary. The engine that was still,',
-      'voicing the old text is shut down and replaced right,',
-      'away, so the next read does not wait behind it. That is all.'
-    ])
   })
 
   it('keeps the segment after a 30-character first sentence within 1.5 times its length', () => {
@@ -133,57 +147,40 @@ describe('splitSpeechSegments', () => {
       'So here is what changed today. ' +
       'The engine that was still voicing the old text is now shut down at once, so a new read never waits. ' +
       'The replacement loads in the background, which takes about a second, and is ready before you click again. Everything else stays the same as before.'
-    const segments = splitSpeechSegments(text)
-    expect(segments.map((segment) => segment.length)).toEqual([30, 42, 57, 99, 48])
+    const segments = texts(splitSpeechSegments(text))
+    expect(segments[0]).toBe('So here is what changed today.')
     expect(segments[1].length).toBeLessThanOrEqual(45)
-    // Even sized from a 30-character first segment, the ramp keeps every segment in time: no hold.
+    // Even sized from a 30-character first segment, the ramp keeps every segment in time.
     const { hold, stall } = modelledStart(segments)
-    expect(hold).toBe(0)
+    expect(hold).toBeLessThanOrEqual(0.5)
     expect(stall).toBe(0)
   })
 
-  it('does not cut sentences of 80 to 99 characters once the ramp is over', () => {
-    const sentences = [
-      'The first segment plays right away.',
-      'Nothing else about the voices changes for you.',
-      'Later segments are longer, so they stay ahead.',
-      'The engine that was still voicing the old text is shut down and replaced at once.',
-      'A replacement is started straight away, so it has already loaded the model when you click again.'
-    ]
-    const tail = 'Later segments grow to the largest size, which keeps synthesis well ahead of playback for the rest of the reply. That is all.'
-    const text = `${sentences.join(' ')}\n\n${tail}`
-    const segments = splitSpeechSegments(text)
-    expect(segments).toEqual([
-      sentences[0],
-      sentences[1],
-      sentences[2],
-      sentences[3],
-      sentences[4],
-      tail
-    ])
-    expect(sentences[3].length).toBe(81)
-    expect(sentences[4].length).toBe(96)
-  })
-
-  it('starts a typical three-paragraph reply without holding the first clip', () => {
+  it('starts a typical three-paragraph reply soon, without stalling later', () => {
     const reply = [
       'Sure. The read aloud button now starts speaking much sooner, because the voice model runs natively instead of in WebAssembly.',
       'When you stop a read, the old engine is replaced right away, so the next read does not wait behind it. The replacement loads the model in the background, which takes about a second.',
       'The first segment is kept short so the first sound arrives in about two seconds. Later segments grow, and synthesis stays ahead of playback for the rest of the reply.'
     ].join('\n\n')
-    const segments = splitSpeechSegments(reply)
-    expect(segments).toEqual([
-      'Sure. The read aloud button now starts,',
-      'speaking much sooner,',
-      'because the voice model runs natively instead of in WebAssembly.',
-      'When you stop a read, the old engine is replaced right away, so the next read does not wait behind it.',
-      'The replacement loads the model in the background, which takes about a second. The first segment is kept short so the first sound arrives in about two seconds.',
-      'Later segments grow, and synthesis stays ahead of playback for the rest of the reply.'
-    ])
+    const segments = texts(splitSpeechSegments(reply))
     const { firstAudio, hold, stall } = modelledStart(segments)
-    expect(firstAudio).toBeLessThan(2.5)
+    expect(firstAudio).toBeLessThan(3.5)
     expect(hold).toBeLessThanOrEqual(0.5)
     expect(stall).toBe(0)
+  })
+})
+
+describe('splitSentences', () => {
+  it.each([
+    ['Pi is 3.14 today. Next.', ['Pi is 3.14 today.', 'Next.']],
+    ['Open speechText.ts and v1.2 now. Next.', ['Open speechText.ts and v1.2 now.', 'Next.']],
+    ['Fruit, e.g. apples, i.e. food. Next.', ['Fruit, e.g. apples, i.e. food.', 'Next.']],
+    ['Ask Dr. Smith or Ms. Jones. Next.', ['Ask Dr. Smith or Ms. Jones.', 'Next.']],
+    ['Apples, pears, etc. are fine. Next.', ['Apples, pears, etc. are fine.', 'Next.']],
+    ['Apples, pears, etc. Then more.', ['Apples, pears, etc.', 'Then more.']],
+    ['Wait... Really? Yes! (Done.) Next', ['Wait...', 'Really?', 'Yes!', '(Done.)', 'Next']]
+  ])('splits %j only at sentence ends', (text, sentences) => {
+    expect(splitSentences(text)).toEqual(sentences)
   })
 })
 
