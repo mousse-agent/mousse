@@ -54,7 +54,7 @@ describe('stable theme selectors', () => {
 
 /**
  * Where a person approves, denies, allows or trusts something. Each carries `data-mousse-decision` while the decision is
- * open, and the theme is off while one is on the page (tests/renderer/theme-css-electron.test.ts shows the pause).
+ * open, and the theme's CSS is off while one is on the page (tests/renderer/theme-css-electron.test.ts shows it).
  * Two checks: these named surfaces, some of whose labels are variables, and a scan for any button labelled Allow,
  * Approve, Deny, Reject or Trust… in a file without the marker, so a new decision surface cannot ship unmarked.
  */
@@ -114,7 +114,7 @@ const PERMISSION_MODE_REVIEWED: Record<string, string> = {
 /** A button whose visible label is a decision word. */
 const DECISION_BUTTON = /(?:>|\/>|<\/[A-Za-z]+>)\s*(?:Allow|Approve|Deny|Reject|Trust[^<{]{0,40})\s*<\/button>|label: '(?:Allow|Approve|Deny|Reject)'/
 
-describe('decisions pause the theme', () => {
+describe('decisions turn the theme CSS off', () => {
   it.each(Object.entries(DECISIONS))('%s is marked data-mousse-decision', (_what, file) => {
     expect(readFileSync(file, 'utf8')).toContain('data-mousse-decision')
   })

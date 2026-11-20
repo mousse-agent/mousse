@@ -44,9 +44,6 @@ it('makes the copy once from an EXIF-rotated original, reuses it, drops it on a 
     expect(evidence.readsAfterSecondWindow).toBe(1)
     expect(evidence.afterSwitch).toEqual({ layer: null, attribute: false, variable: '' })
     expect(evidence.oldUrlReleased).toBe(true)
-    // Applied while paused: nothing is measured against the base theme's colours; after the pause the floor is the theme's.
-    expect(evidence.paused.whilePaused).toBeNull()
-    expect(evidence.paused.afterPause).toBeCloseTo(evidence.first.floor, 3)
     // A broken kept copy: the original is read once more, and the new copy replaces the old one.
     expect(evidence.rebuilt).toMatchObject({ originalReads: 2, shown: true })
     expect(evidence.rebuilt.saves[1]).toEqual({ bucket: 1920, replace: true, accepted: true })
