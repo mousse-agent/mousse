@@ -114,7 +114,8 @@
     "tests/net/chats/joined.test.ts",
     "tests/net/chats/publication.test.ts",
     "tests/net/chats/tasks.test.ts",
-    "tests/net/transports/lan-offline.test.ts"
+    "tests/net/transports/lan-offline.test.ts",
+    "tests/net/transports/lan-phone.test.ts"
   ],
   "daemon": [
     "tests/net/bots/daemon/reader.test.ts",
