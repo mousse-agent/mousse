@@ -27,6 +27,7 @@ import { addProjectAndStartThread, archiveThread, setThreadArchived, createAndSe
 import { draftedThreadIds, draftedThreadsKey, unsentChatTitle, withUnsentChats } from '../lib/sidebarDrafts'
 import { dropPendingThreadRows, isPendingRowId, pruneRowKeys, servedPendingRows, usePendingThreadRows, withPendingRows } from '../lib/pendingThreadRows'
 import { runWithToast } from '../lib/actionToast'
+import { projectInitials } from '../lib/projectInitials'
 import { copyThreadReference } from '../lib/threadReference'
 import { Modal } from './ui/Modal'
 import { PillTabs, type PillTab } from './ui/PillTabs'
@@ -120,12 +121,6 @@ type SidebarView = (typeof SIDEBAR_TABS)[number]['id']
 
 /** Shift+F10 or the context-menu key: open a row's menu from the keyboard. */
 const isMenuKey = (event: KeyboardEvent) => event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)
-
-function projectInitials(name: string): string {
-  const parts = name.split(/[\s/._-]+/).filter(Boolean)
-  const letters = `${parts[0]?.[0] ?? ''}${parts[1]?.[0] ?? parts[0]?.[1] ?? ''}`
-  return letters.toUpperCase() || '•'
-}
 
 /** On hover, a title cut off by an ellipsis gets the full text as its native tooltip; one that fits gets none. */
 const tooltipIfTruncated = (fullTitle: string) => (event: React.MouseEvent<HTMLElement>) => {
