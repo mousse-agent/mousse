@@ -48,8 +48,8 @@ export interface SshAddPort {
   now(): number
   /** A dial failed on a login only the owner can fix (§1.4): the pairing shows it and is not dialled on its own. */
   park?(node: EnginePeerRow['localId'], why: NetEngineSshParked): void
-  /** The owner trusted a host key: parked logins may be tried again. */
-  trusted?(): void
+  /** The owner trusted the host key of `routeId` (`host`): parked logins to that host may be tried again. */
+  trusted?(routeId: string, host?: string): void
 }
 
 /** §3.5: each reason as one line, `<host>` and `<user>` filled in. */
@@ -143,7 +143,7 @@ export class SshAdd {
 
   async trust(routeId: string, sha256: string, host?: string): Promise<void> {
     await this.ask('ssh.trust', { route_id: routeId, sha256 }, host)
-    this.port.trusted?.()
+    this.port.trusted?.(routeId, host)
   }
 
   /** The last profiles list session 1 answered, by route: Connect reads it rather than signing in again (§3.4). */
