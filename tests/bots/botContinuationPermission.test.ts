@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, expect, it, vi } from 'vitest'
 import type { BotTurnDispatcher } from '../../src/mms/bots/activation/dispatcher'
+import { setSharedShellPath } from '../../src/mms/harness/shellPath'
 import type { ClaudeSubscriptionProviderService } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { MousseMainService } from '../../src/mms/MousseMainService'
 import { ProviderAuthService } from '../../src/mms/providers/ProviderAuthService'
@@ -22,6 +23,7 @@ let main: MousseMainService
 
 beforeAll(async () => {
   home = mkdtempSync(join(realpathSync(tmpdir()), 'mousse-bot-continuation-mode-'))
+  setSharedShellPath({ entries: [], source: 'login_shell' })
   vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
   main = await MousseMainService.create({ homeDir: home, headless: true, ownerKind: 'test' })
   await main.start()
@@ -34,6 +36,7 @@ afterAll(async () => {
     finally { await main?.stop() }
   }
   finally {
+    setSharedShellPath(undefined)
     vi.restoreAllMocks()
     // On a busy Windows machine the stopped profile's folder can stay held past this (`botReplyFinalMessage` fails the
     // same way on master); a temporary folder left behind is no failure of what this file checks.
