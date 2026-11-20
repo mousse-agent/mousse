@@ -245,6 +245,19 @@
       "expiresAt": "2026-11-20T13:47:03.944Z"
     },
     {
+      "task": "thread-list-scaling",
+      "session": "Animatrix-596759",
+      "machine": "Animatrix",
+      "branch": "thread-list-scaling",
+      "paths": [
+        "src/mms/data/ThreadDataStore.ts",
+        "src/mms/protocol/server.ts",
+        "src/mms/lifecycle/ThreadExpiryService.ts"
+      ],
+      "claimedAt": "2026-11-20T23:01:48.345Z",
+      "expiresAt": "2026-11-21T01:01:48.345Z"
+    },
+    {
       "task": "window-warm-start",
       "session": "Animatrix-b233b3",
       "machine": "Animatrix",
