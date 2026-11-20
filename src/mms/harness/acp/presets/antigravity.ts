@@ -107,10 +107,16 @@ export function scrubbedAntigravityEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessE
 }
 
 /**
- * Which agent runs: Google's 1.1.1 ACP server (`legacy`, beside its local harness, the verified install
- * or a manual path) or the native Antigravity CLI (`native`, served as `agy acp`).
+ * Which agent runs: Google's `agy` CLI (`native`, served as `agy acp`) or the 1.1.1 ACP server
+ * (`legacy`, beside its local harness), and where it came from: a manual path in Settings, the
+ * user's own `agy` on this computer, or Mousse's own install.
  */
-export interface AntigravityRuntimeChoice { kind: 'legacy' | 'native'; binary: string }
+export interface AntigravityRuntimeChoice { kind: 'legacy' | 'native'; binary: string; source: 'manual' | 'user' | 'managed' }
+
+/** The first https link in a line the agent printed, when there is one. */
+function linkIn(line: string): string | undefined {
+  return /https:\/\/\S+/.exec(line)?.[0]
+}
 
 /** `agy acp` keeps its app data in `<gemini-dir>/<app-data-dir>`: the same folder the 1.1.1 server used. */
 export const ANTIGRAVITY_APP_DATA_DIR = 'antigravity-acp'
@@ -191,8 +197,10 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
     const connection = connectAcpProcess(child, request.handlers, {
       stdout: antigravityStdout(acceptAuthUrl),
       stderrLine: (line) => {
+        // The 1.1.1 server's line, the browser helper's, or agy's own ("Open this link in a browser…");
+        // only a Google sign-in with a loopback callback this process owns is taken (`callbackTarget`).
         const url = line.startsWith(AUTH_PREFIX) ? line.slice(AUTH_PREFIX.length)
-          : line.startsWith(BROWSER_MARKER) ? line.slice(BROWSER_MARKER.length) : undefined
+          : line.startsWith(BROWSER_MARKER) ? line.slice(BROWSER_MARKER.length) : linkIn(line)
         if (url) acceptAuthUrl(url)
       },
       onExit: () => {

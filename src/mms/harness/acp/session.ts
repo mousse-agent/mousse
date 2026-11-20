@@ -1076,6 +1076,11 @@ export class AcpSessions {
     }
   }
 
+  /** Whether any agent process runs a turn now. */
+  busy(): boolean {
+    return this.turning.size > 0
+  }
+
   /** Idle agent processes close now; a busy one is replaced on that thread's next turn. */
   closeIdle(): void {
     for (const [threadId, active] of this.sessions) {

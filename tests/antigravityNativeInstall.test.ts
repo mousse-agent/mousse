@@ -8,7 +8,7 @@ import {
   activeNativeRuntime, installNativeAntigravity, nativeRoot, verifyNativeHandshake, type NativeInstallOptions, type NativeVerifier
 } from '../src/mms/harness/acp/presets/antigravity/nativeInstall'
 import {
-  NATIVE_AGENT_NAME, NATIVE_RELEASES, classifyVendorFeed, isNativeAssetUrl, nativeTarget, type NativeRelease, type NativeTarget
+  NATIVE_AGENT_NAME, isNativeAssetUrl, nativeTarget, parseVendorFeed, type NativeRelease, type NativeTarget
 } from '../src/mms/harness/acp/presets/antigravity/nativeRelease'
 
 // The real install path on a real folder. Only the download and the agent's `initialize` are stood in for.
@@ -25,7 +25,7 @@ const urlFor = (version: string, folder = 'windows-x64', file = 'cli_windows_x64
 
 /** A Windows-style release (the download is the executable) of `version` holding `payload`. */
 function exeRelease(version: string, payload: Buffer): NativeRelease {
-  return { version, url: urlFor(version), format: 'exe', size: payload.length, executableSize: payload.length, sha512: sha512(payload) }
+  return { version, url: urlFor(version), format: 'exe', sha512: sha512(payload) }
 }
 const serve = (payload: Buffer): typeof fetch => vi.fn(async () => new Response(new Uint8Array(payload)))
 /** An agent answering `initialize` as Google's CLI of `version`. */
@@ -38,15 +38,7 @@ function install(home: string, release: NativeRelease, payload: Buffer, extra: P
 const activeFile = (home: string) => { const path = join(nativeRoot(home), 'active.json'); return existsSync(path) ? readFileSync(path, 'utf8') : undefined }
 const stagingLeft = (home: string) => existsSync(nativeRoot(home)) ? readdirSync(nativeRoot(home)).filter((entry) => entry.startsWith('.stage-')) : []
 
-describe('the reviewed release table', () => {
-  it('names a real Google path, size and SHA-512 for every target Google publishes', () => {
-    for (const [name, release] of Object.entries(NATIVE_RELEASES)) {
-      expect(isNativeAssetUrl(release.url, release.version, name as NativeTarget)).toBe(true)
-      expect(release.sha512).toMatch(/^[0-9a-f]{128}$/)
-      expect(release.size).toBeGreaterThan(0)
-    }
-  })
-
+describe('this computer\'s target in Google\'s feed', () => {
   it.each([
     ['win32', 'x64', false, 'windows_amd64'], ['win32', 'arm64', false, 'windows_arm64'],
     ['darwin', 'x64', false, 'darwin_amd64'], ['darwin', 'arm64', false, 'darwin_arm64'],
@@ -74,20 +66,27 @@ describe('Google asset URLs', () => {
 })
 
 describe('Google\'s update feed', () => {
-  const reviewed = exeRelease('1.5.12', Buffer.from('agent'))
-  const entry = (version: string, digest = reviewed.sha512, url = urlFor(version)) => ({ version, url, sha512: digest })
+  const digest = 'a'.repeat(128)
+  const entry = (version: string, sha = digest, url = urlFor(version)) => ({ version, url, sha512: sha })
+  // The feed names what Mousse installs: only a usable release on Google's exact path passes.
   it.each([
-    ['the reviewed release', entry('1.5.12'), { kind: 'reviewed', version: '1.5.12' }],
-    ['the reviewed release, digest in capitals', entry('1.5.12', reviewed.sha512.toUpperCase()), { kind: 'reviewed', version: '1.5.12' }],
-    ['a newer release', entry('1.6.0', 'a'.repeat(128)), { kind: 'newer', version: '1.6.0' }],
-    ['an older release', entry('1.5.11', 'a'.repeat(128)), { kind: 'withdrawn', version: '1.5.11' }],
-    ['the same version with another digest', entry('1.5.12', 'b'.repeat(128)), { kind: 'mismatch', version: '1.5.12' }],
-    ['a URL off Google\'s path', entry('1.6.0', 'a'.repeat(128), 'https://example.com/agy.exe'), { kind: 'invalid' }],
-    ['a short digest', entry('1.6.0', 'abc'), { kind: 'invalid' }],
-    ['a pre-release version', entry('1.6.0-rc1', 'a'.repeat(128)), { kind: 'invalid' }],
-    ['not an object', ['1.5.12'], { kind: 'invalid' }]
+    ['the current release', entry('1.5.13'), { version: '1.5.13', url: urlFor('1.5.13'), sha512: digest, format: 'exe' }],
+    ['its digest in capitals', entry('1.5.13', digest.toUpperCase()), { version: '1.5.13', url: urlFor('1.5.13'), sha512: digest, format: 'exe' }],
+    ['the oldest version agy acp runs', entry('1.5.0'), { version: '1.5.0', url: urlFor('1.5.0'), sha512: digest, format: 'exe' }],
+    ['a version older than 1.5.0', entry('1.4.9'), undefined],
+    ['a URL off Google\'s path', entry('1.5.13', digest, 'https://example.com/agy.exe'), undefined],
+    ['a URL for another version', entry('1.5.13', digest, urlFor('1.5.12')), undefined],
+    ['another system\'s file', entry('1.5.13', digest, urlFor('1.5.13', 'linux-x64', 'cli_linux_x64.tar.gz')), undefined],
+    ['a short digest', entry('1.5.13', 'abc'), undefined],
+    ['no digest', { version: '1.5.13', url: urlFor('1.5.13') }, undefined],
+    ['a pre-release version', entry('1.6.0-rc1'), undefined],
+    ['not an object', ['1.5.13'], undefined]
   ])('%s', (_case, raw, expected) => {
-    expect(classifyVendorFeed(raw, 'windows_amd64', reviewed)).toEqual(expected)
+    expect(parseVendorFeed(raw, 'windows_amd64')).toEqual(expected)
+  })
+
+  it('names an archive for macOS and Linux', () => {
+    expect(parseVendorFeed(entry('1.5.13', digest, urlFor('1.5.13', 'linux-x64', 'cli_linux_x64.tar.gz')), 'linux_amd64')?.format).toBe('tar.gz')
   })
 })
 
@@ -153,11 +152,10 @@ describe('installing the native CLI', () => {
   const newer = Buffer.from('newer agy bytes')
   it.each<[string, Partial<NativeInstallOptions> & { release?: NativeRelease; payload?: Buffer }, RegExp]>([
     ['a version Mousse withdrew', { withdrawn: ['1.6.0'] }, /withdrawn/],
-    ['a release Google withdrew', { feed: { kind: 'withdrawn', version: '1.5.12' } }, /withdrew/],
-    ['a feed that lists other bytes for the version', { feed: { kind: 'mismatch', version: '1.6.0' } }, /different/],
     ['a URL off Google\'s path', { release: { ...exeRelease('1.6.0', newer), url: 'https://example.com/agy.exe' } }, /release path/],
     ['another system\'s file', { release: { ...exeRelease('1.6.0', newer), url: urlFor('1.6.0', 'linux-x64', 'cli_linux_x64.tar.gz') } }, /release path/],
-    ['a download larger than reviewed', { payload: Buffer.concat([newer, Buffer.from('x')]) }, /larger/],
+    ['a download longer than Google announced', { fetch: vi.fn(async () => new Response(new Uint8Array(newer), { headers: { 'content-length': String(newer.length - 1) } })) }, /larger/],
+    ['a download announced over the size cap', { fetch: vi.fn(async () => new Response(new Uint8Array(newer), { headers: { 'content-length': String(900 * 1024 * 1024) } })) }, /larger/],
     ['a download with other bytes', { payload: Buffer.from('other agy bytes') }, /SHA-512/],
     ['a failed download', { fetch: vi.fn(async () => new Response('gone', { status: 404 })) }, /404/],
     ['an agent reporting another version', { verify: answers('1.5.12') }, /reports/],
@@ -224,17 +222,17 @@ describe('installing the native CLI', () => {
       return readFileSync(archive)
     }
     const linux: NativeTarget = 'linux_amd64'
-    const tarRelease = (bytes: Buffer, executableSize: number): NativeRelease => ({
-      version: '1.5.12', url: urlFor('1.5.12', 'linux-x64', 'cli_linux_x64.tar.gz'), format: 'tar.gz', size: bytes.length, executableSize, sha512: sha512(bytes)
+    const tarRelease = (bytes: Buffer): NativeRelease => ({
+      version: '1.5.12', url: urlFor('1.5.12', 'linux-x64', 'cli_linux_x64.tar.gz'), format: 'tar.gz', sha512: sha512(bytes)
     })
     const home = newHome()
     const good = await make(join(home, 'src-good'), { antigravity: 'linux agy' })
-    const installed = await installNativeAntigravity(home, { release: tarRelease(good, 9), target: linux, fetch: serve(good), verify: answers('1.5.12'), freeBytes: () => undefined })
+    const installed = await installNativeAntigravity(home, { release: tarRelease(good), target: linux, fetch: serve(good), verify: answers('1.5.12'), freeBytes: () => undefined })
     expect(readFileSync(installed.binary, 'utf8')).toBe('linux agy')
 
     const other = newHome()
     const extra = await make(join(other, 'src-extra'), { antigravity: 'linux agy', 'run.sh': 'echo' })
-    await expect(installNativeAntigravity(other, { release: tarRelease(extra, 9), target: linux, fetch: serve(extra), verify: answers('1.5.12'), freeBytes: () => undefined })).rejects.toThrow()
+    await expect(installNativeAntigravity(other, { release: tarRelease(extra), target: linux, fetch: serve(extra), verify: answers('1.5.12'), freeBytes: () => undefined })).rejects.toThrow()
     expect(activeNativeRuntime(other, linux)).toBeUndefined()
     expect(stagingLeft(other)).toEqual([])
   })

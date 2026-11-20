@@ -20,8 +20,8 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-/** `fail` may return the error a request rejects with. */
-function fixture(blockMethod?: string, installed = false, fail?: (method: string) => unknown) {
+/** `fail` may return the error a request rejects with; `kind` is the agent that runs once installed. */
+function fixture(blockMethod?: string, installed = false, fail?: (method: string) => unknown, kind: 'native' | 'legacy' = 'native') {
   const home = mkdtempSync(join(tmpdir(), 'mousse-acp-lifecycle-'))
   homes.push(home)
   const processes: Array<ReturnType<typeof createProcess>> = []
@@ -35,7 +35,8 @@ function fixture(blockMethod?: string, installed = false, fail?: (method: string
   })
   services.push(service)
   vi.spyOn(service, 'configured').mockReturnValue(true)
-  if (installed) vi.spyOn(service as unknown as { binary: () => string }, 'binary').mockReturnValue(join(home, 'agy_acp_server'))
+  if (installed) vi.spyOn(service as unknown as { runtime: () => unknown }, 'runtime')
+    .mockReturnValue({ kind, binary: join(home, kind === 'native' ? 'agy' : 'agy_acp_server'), source: 'managed' })
   let finishPrompt: (() => void) | undefined
   function createProcess() {
     const abort = new AbortController()
@@ -127,7 +128,7 @@ describe('Antigravity turn lifecycle', () => {
   })
 
   it.each(['stop', 'logout'] as const)('releases profile-owned login work on %s while Google sign-in is pending', async (operation) => {
-    const { service, input, processes } = fixture(methods.agent.authenticate, true)
+    const { service, input, processes } = fixture(methods.agent.authenticate, true, undefined, 'legacy')
     const session = new LoginSession('setup')
     const pending = service.login(session, input.cwd)
     await vi.waitFor(() => expect(processes[0]?.connection.agent.request).toHaveBeenCalledWith(methods.agent.authenticate, expect.anything()))
@@ -136,8 +137,8 @@ describe('Antigravity turn lifecycle', () => {
     expect(session.abort.signal.aborted).toBe(true)
   })
 
-  it('goes straight to Google sign-in once installed, without asking how to set up', async () => {
-    const { service, input, processes } = fixture(undefined, true)
+  it('goes straight to Google sign-in on the 1.1.1 server once installed, without asking how to set up', async () => {
+    const { service, input, processes } = fixture(undefined, true, undefined, 'legacy')
     const session = new LoginSession('setup')
     const events: unknown[] = []
     session.on('event', (event) => events.push(event))
@@ -148,6 +149,40 @@ describe('Antigravity turn lifecycle', () => {
     expect((service as unknown as { signInGeneration: number }).signInGeneration).toBe(1)
     // Only that it is starting: no setup choice or path prompt, and with no Google link printed, no paste field.
     expect((events as Array<{ type: string }>).map((event) => event.type)).toEqual(['progress'])
+  })
+
+  it('signs in on agy without a Google flow when the agy on this computer is already signed in', async () => {
+    const { service, input, processes } = fixture(undefined, true)
+    const session = new LoginSession('setup')
+    const events: Array<{ type: string; message?: string }> = []
+    session.on('event', (event) => events.push(event))
+    expect(await service.login(session, input.cwd)).toEqual({ success: true, sessionId: 'setup' })
+    expect(processes[0].connection.agent.request.mock.calls.map(([method]) => method)).toEqual([methods.agent.initialize, methods.agent.session.new])
+    expect(events.map((event) => event.message)).toEqual(['Starting Antigravity…'])
+    expect(service.signedIn()).toBe(true)
+  })
+
+  it('runs Google sign-in on agy when it asks for one', async () => {
+    let asked = false
+    const { service, input, processes } = fixture(undefined, true, (method) => {
+      if (method !== methods.agent.session.new || asked) return undefined
+      asked = true
+      return RequestError.authRequired()
+    })
+    const session = new LoginSession('setup')
+    const events: Array<{ type: string; message?: string }> = []
+    session.on('event', (event) => events.push(event))
+    expect(await service.login(session, input.cwd)).toEqual({ success: true, sessionId: 'setup' })
+    expect(processes[0].connection.agent.request.mock.calls.map(([method]) => method))
+      .toEqual([methods.agent.initialize, methods.agent.session.new, methods.agent.authenticate, methods.agent.session.new])
+    expect(events.map((event) => event.message)).toEqual(['Starting Antigravity…', 'Starting Google sign-in…'])
+  })
+
+  it('does not start Google sign-in on agy for an error that is not a sign-in request', async () => {
+    const { service, input, processes } = fixture(undefined, true, (method) => method === methods.agent.session.new && new RequestError(-32603, 'network down'))
+    const session = new LoginSession('setup')
+    expect(await service.login(session, input.cwd)).toMatchObject({ success: false, error: 'network down' })
+    expect(processes[0].connection.agent.request.mock.calls.map(([method]) => method)).not.toContain(methods.agent.authenticate)
   })
 
   it('fails sign-in fast, without a prompt or an agent, when Antigravity is not installed', async () => {
@@ -163,7 +198,7 @@ describe('Antigravity turn lifecycle', () => {
 
 describe('Antigravity auth-required answers', () => {
   const authRequired = () => RequestError.authRequired()
-  const signedInSettings = { signedIn: true, models: [{ id: 'account-model', label: 'Account Model' }] }
+  const signedInSettings = { nativeSignedIn: true, models: [{ id: 'account-model', label: 'Account Model' }] }
   const arm = (service: AntigravityProviderService) => {
     ;(service as unknown as { settings: unknown }).settings = { ...signedInSettings }
     const changed = vi.fn()
@@ -176,7 +211,7 @@ describe('Antigravity auth-required answers', () => {
     const { service, input } = fixture(undefined, false, (name) => name === method && authRequired())
     const { changed, saved } = arm(service)
     await expect(service.chat(input)).rejects.toThrow('Sign in to Antigravity in Settings before chatting')
-    expect(saved()).toMatchObject({ signedIn: false, models: [] })
+    expect(saved()).toMatchObject({ nativeSignedIn: false, models: [] })
     expect(changed).toHaveBeenCalledTimes(1)
   })
 
@@ -188,7 +223,7 @@ describe('Antigravity auth-required answers', () => {
     const { service, input } = fixture(undefined, false, (name) => name === methods.agent.session.new && new RequestError(-32000, message, data))
     const { changed, saved } = arm(service)
     await expect(service.chat(input)).rejects.toThrow('Sign in to Antigravity in Settings before chatting')
-    expect(saved()).toMatchObject({ signedIn: false, models: [] })
+    expect(saved()).toMatchObject({ nativeSignedIn: false, models: [] })
     expect(changed).toHaveBeenCalledTimes(1)
   })
 
@@ -203,7 +238,7 @@ describe('Antigravity auth-required answers', () => {
     const { service, input } = fixture(undefined, false, (name) => name === methods.agent.session.new && authRequired())
     const { changed, saved } = arm(service)
     await expect(service.refreshModels(input.cwd)).rejects.toThrow('Sign in to Antigravity in Settings before chatting')
-    expect(saved()).toMatchObject({ signedIn: false, models: [] })
+    expect(saved()).toMatchObject({ nativeSignedIn: false, models: [] })
     expect(changed).toHaveBeenCalledTimes(1)
   })
 
