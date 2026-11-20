@@ -122,12 +122,13 @@ if (flags.route) console.log(`route=${flags.route}`)
 
 const vitest = join(root, 'node_modules', 'vitest', 'vitest.mjs')
 const files = [CHECKS[id]].flat()
-// Over `tcp`, the route is mapped to the tailnet class, then the public one (1b §14).
+// Over `tcp`, the route is mapped to the tailnet class, then the public one (1b §14). Both always run: the kit
+// asks for connections of both classes, also from a run that failed (a control's), whose first reason stands.
 const passes = flags.route === 'tcp' ? ['tailnet', 'public'] : [undefined]
-let run = { status: 0 }
+let failed = false
 for (const cls of passes) {
   if (cls) console.log(`class=${cls}`)
-  run = spawnSync(
+  const run = spawnSync(
     process.execPath,
     [vitest, 'run', ...files, '--reporter=verbose', '--no-file-parallelism'],
     {
@@ -144,7 +145,7 @@ for (const cls of passes) {
       }
     }
   )
-  if (run.status !== 0 || existsSync(join(out, 'reason'))) break
+  if (run.status !== 0 || existsSync(join(out, 'reason'))) failed = true
 }
 // What a caller heard of its host's builds over the test link.
 for (const key of ['host_build', 'host_app_build']) {
@@ -154,7 +155,7 @@ for (const key of ['host_build', 'host_app_build']) {
 }
 const reasonFile = join(out, 'reason')
 const reason = existsSync(reasonFile) ? readFileSync(reasonFile, 'utf8').trim() : ''
-if (run.status === 0 && !reason) {
+if (!failed && !reason) {
   console.log(`PASS ${id}`)
   process.exit(0)
 }

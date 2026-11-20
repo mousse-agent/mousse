@@ -10,8 +10,9 @@
  *
  * Every connection must come up on the route under test (`conn.up.route`), else the run fails with
  * `route_mismatch`. The run also runs 1a's app cases over the route (`scripts/net-engine-check.mjs phase1b.routes-app
- * --route tcp|ws|ssh`). Its controls: `lan-only-candidates` (the joiner passes only LAN addresses) fails it with
- * `unreachable`; `route-leak` (routes other than the one under test, used first) with `route_mismatch`;
+ * --route tcp|ws|ssh`). Its controls: `lan-only-candidates` (the app passes only LAN addresses: a join approves
+ * none, and no pairing gets its other addresses or SSH route) leaves no connection on the route, which the kit
+ * judges `route_mismatch` before the run's own `unreachable`; `route-leak` (routes other than the one under test, used first) with `route_mismatch`;
  * `plus-probe` and `egress-probe` with what the kit's egress guard records (`plus_contacted`,
  * `egress_attempted`), which this run records too.
  */

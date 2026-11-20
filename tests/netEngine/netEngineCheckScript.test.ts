@@ -1,9 +1,12 @@
 /**
  * `scripts/net-engine-check.mjs`: the route cases the engine kit gives a check (`cases` in checks/phase1b.toml) are
  * each taken with `--route`, and a check with no cases takes none. Only the refusals are run here: a run that is
- * taken starts the check itself.
+ * taken starts the check itself. Over tcp a run has two passes (tailnet, then public), and the reason the first
+ * failed step of the run recorded is the one it reports.
  */
 import { spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
@@ -25,5 +28,26 @@ describe('net-engine-check.mjs route cases', () => {
     const refused = run('phase1b.link-app', '--route', 'tcp')
     expect(refused.status).toBe(2)
     expect(refused.stderr).toContain('phase1b.link-app takes no --route.')
+  })
+
+  it('keeps the first reason a run recorded when a later pass records another', async () => {
+    const out = mkdtempSync(join(tmpdir(), 'engine-check-out-'))
+    const before = process.env.MOUSSE_NET_ENGINE_CHECK_OUT
+    process.env.MOUSSE_NET_ENGINE_CHECK_OUT = out
+    try {
+      // The tailnet pass recorded its reason; the public pass, a new process, fails another step.
+      writeFileSync(join(out, 'reason'), 'probe_reached_app')
+      const { step } = await import('./checks/harness')
+      await expect(
+        step('route_mismatch', () => {
+          throw new Error('a later step failed')
+        })
+      ).rejects.toThrow()
+      expect(readFileSync(join(out, 'reason'), 'utf8')).toBe('probe_reached_app')
+    } finally {
+      if (before === undefined) delete process.env.MOUSSE_NET_ENGINE_CHECK_OUT
+      else process.env.MOUSSE_NET_ENGINE_CHECK_OUT = before
+      rmSync(out, { recursive: true, force: true })
+    }
   })
 })

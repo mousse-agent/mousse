@@ -118,7 +118,8 @@ function record(reason: string): void {
   const out = process.env.MOUSSE_NET_ENGINE_CHECK_OUT
   if (!out) return
   try {
-    writeFileSync(join(out, 'reason'), reason)
+    // A later pass of the same run (over tcp, the public class after the tailnet one) keeps the first reason.
+    writeFileSync(join(out, 'reason'), reason, { flag: 'wx' })
   } catch {
     // The FAIL line then has no reason, which the kit counts as a failed control.
   }
@@ -189,6 +190,8 @@ export class Fabric {
   private made = 0
   /** Every `conn.up` route a helper reported in a routes run, by the app it went to. */
   readonly routesSeen: Array<{ to: string; route: unknown }> = []
+  /** Every connection a helper announced (`conn.up`), by the app it went to and the identity on the other end. */
+  readonly announced: Array<{ to: string; identity: unknown }> = []
 
   constructor() {
     withoutAgentClis()
@@ -198,6 +201,7 @@ export class Fabric {
     const out = process.env.MOUSSE_NET_ENGINE_CHECK_OUT
     this.tap.watch = (message, to) => {
       if (message.ev !== 'conn.up') return
+      this.announced.push({ to, identity: message.identity })
       if (out) appendFileSync(join(out, 'conn-up.jsonl'), `${JSON.stringify({ ...message, to })}\n`)
       if (!expected) return
       this.routesSeen.push({ to, route: message.route })
@@ -425,6 +429,33 @@ export class Fabric {
 
   /** In a real-helper run over ssh, each computer's test SSH server. */
   private readonly sshOf = new Map<Computer, SshHost>()
+
+  /**
+   * How `mousse-check probe` reaches `computer` on the route under test with the real helper (1b §6.3): `--route`
+   * and, over ssh, its test server, the profile, and the pipe's state folder and helper.
+   */
+  probeRoute(computer: Computer): string[] {
+    if (CHECK_ROUTE === 'ssh') {
+      const ssh = this.sshOf.get(computer)!
+      return [
+        '--route',
+        'ssh',
+        '--ssh-config',
+        sshConfig(),
+        '--ssh-host',
+        ssh.alias,
+        '--ssh-profile',
+        ssh.selector,
+        '--pipe-state',
+        join(computer.mms.netEngine.profileDir, 'net-engine', 'endpoint'),
+        '--pipe-helper',
+        process.env.MOUSSE_NET_HELPER!.trim()
+      ]
+    }
+    if (CHECK_ROUTE === 'ws')
+      return ['--route', `ws://127.0.0.1:${computer.mms.netEngine.reach()!.wsPort}/t/mousse-net/1`]
+    return ['--route', `tcp://127.0.0.1:${computer.port}`]
+  }
 
   /**
    * `mms` answers SSH at `alias` on the kit's test SSH server (`MOUSSE_CHECK_TEST_SSHD`, started through
