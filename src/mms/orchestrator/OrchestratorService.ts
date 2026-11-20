@@ -14194,7 +14194,7 @@ export class OrchestratorService extends EventEmitter {
     this.markRun(engineRunId, (engine, id) => engine.markRunning(id))
     // The run is active: Mousse tool calls Claude made while it was being started act as it.
     if (opts?.continuationId) this.endContinuationHold(opts.continuationId, false, engineRunId ?? null)
-    const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed', signal?: AbortSignal): Promise<void> => {
+    const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed', signal?: AbortSignal, how?: { endOnly?: boolean }): Promise<void> => {
       if ((!checkpointEnabled || !turnStartSha || !checkpointCwd) && !conversationDirectory || session.threadId === '__unbound__') return
       const threadDir = this.resolveThreadDir(session.threadId)
       if (!threadDir) return
@@ -14225,6 +14225,10 @@ export class OrchestratorService extends EventEmitter {
             ? 'turn completed outside a partial tool call/result boundary'
             : undefined
         }
+      }
+      if (how?.endOnly && !conversationDirectory) {
+        new ThreadActionService(threadDir).recordTurnEndOnly(checkpointOptions, state)
+        return
       }
       const action = conversationDirectory
         ? new ConversationActionService(conversationDirectory).settle(turnId, session.messages.length, checkpointOptions.nativeContextBoundary, state, conversationToolsUsed, session.executionLease!, snapshotsOff, snapshotsNotCovered)
@@ -15234,7 +15238,9 @@ export class OrchestratorService extends EventEmitter {
       this.setTurnPhase(session.threadId, 'stopped')
       markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, partial)
       try {
-        await checkpointTurn('stopped', AbortSignal.timeout(this.stoppedTurnCheckpointWaitMs))
+        // A turn cut off by the service stopping saves where it ended and nothing more: it does not wait for its
+        // repository or run Git while the service exits. The next turn's recovery takes its snapshot.
+        await checkpointTurn('stopped', AbortSignal.timeout(this.stoppedTurnCheckpointWaitMs), { endOnly: restart })
       } catch (error) {
         // A stopped turn always ends, so its queued messages go and the thread is free. Where it ended is recorded by the
         // next turn's recovery (its checkpoint stays pending in the journal).

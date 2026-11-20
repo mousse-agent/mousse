@@ -294,6 +294,14 @@ export class ThreadActionService {
   }
 
   /**
+   * Saves where a turn ended (`recordTurnEnd`) and nothing else: no repository lease, no Git. For a turn cut off by the
+   * service stopping; the next turn's recovery takes its snapshot with this end.
+   */
+  recordTurnEndOnly(options: RunThreadActionOptions, state: 'completed' | 'stopped' | 'failed'): void {
+    if (options.heldThreadLease) this.recordTurnEnd(options, state)
+  }
+
+  /**
    * Saves on a running turn's action where the turn ended: its last message, its context boundary, its external effects
    * and the state it ended in, in the action list and in the journal entry that recovery reads. Needs only the thread's
    * lease (as `beginTurn`); nothing in the repository is touched.

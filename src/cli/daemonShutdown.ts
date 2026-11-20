@@ -157,15 +157,42 @@ export interface DaemonLifecycleState {
   teardown?: Promise<void>
   /** Overrides `DRAIN_RETRY_DELAY_MS` and `DRAIN_STUCK_AFTER_MS` (tests). */
   drainWait?: { retryDelayMs: number; stuckAfterMs: number }
+  /** The timer that ends the process if teardown or exit takes longer than `DAEMON_EXIT_DEADLINE_MS`. */
+  exitDeadline?: ReturnType<typeof setTimeout> | null
 }
 
 /** Pause between stop attempts while the service's work is still draining. */
 export const DRAIN_RETRY_DELAY_MS = 1_000
 /**
- * How long a drain may keep failing its stop before it counts as stuck. The daemon then stops anyway
- * and exits, so `service stop` and an update install are not held up forever by work that never ends.
+ * How long the service's work may take to drain, counted from the first stop attempt. A drain still
+ * going then, or a stop attempt that has not answered, counts as stuck: the daemon stops anyway and
+ * exits. Turns are cut off and recovered at the next start, as after a crash, so a quit, `service stop`
+ * or an update install is never held up by work that does not end.
  */
-export const DRAIN_STUCK_AFTER_MS = 2 * 60_000
+export const DRAIN_STUCK_AFTER_MS = 8_000
+/**
+ * The longest a daemon lives once it was asked to stop. Covers what the drain deadline cannot: a
+ * teardown step that never answers, or a process that stays up after teardown ended.
+ */
+export const DAEMON_EXIT_DEADLINE_MS = 12_000
+
+/**
+ * Ends the process `ms` after a stop began, whatever teardown is doing then. The timer does not keep
+ * the process alive by itself. Armed once per daemon.
+ */
+export function armDaemonExitDeadline(
+  state: DaemonLifecycleState,
+  opts: { ms?: number; exit: () => void; onLog?: (msg: string) => void }
+): void {
+  if (state.exitDeadline) return
+  const ms = opts.ms ?? DAEMON_EXIT_DEADLINE_MS
+  const timer = setTimeout(() => {
+    opts.onLog?.(`MMS did not exit within ${Math.round(ms / 1000)}s of the stop; exiting now`)
+    opts.exit()
+  }, ms)
+  timer.unref?.()
+  state.exitDeadline = timer
+}
 
 /**
  * Daemon teardown: stop protocol → stop MMS (scheduler) → runtime record →
@@ -209,28 +236,37 @@ async function tearDownRemaining(
     log(`protocol stop failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 
-  // A drain past the stop's own deadline is still running: keep the handle and keep trying, so the
-  // process does not exit while personal work is still being written. A drain still failing after
-  // `stuckAfterMs` is stuck: stop anyway.
+  // A drain past one stop attempt's deadline is still running: keep the handle and keep trying, so the
+  // process does not exit while personal work is still being written. Once `stuckAfterMs` has passed
+  // since the first attempt, the drain is stuck: stop anyway. An attempt that does not answer by then
+  // is stuck too; each attempt is given only the time left.
   const mms = state.mms
   const { retryDelayMs, stuckAfterMs } = state.drainWait ?? { retryDelayMs: DRAIN_RETRY_DELAY_MS, stuckAfterMs: DRAIN_STUCK_AFTER_MS }
-  let stuckAt: number | null = null
+  const stuckAt = Date.now() + stuckAfterMs
+  const forcing = (): void => log(`MMS work is still draining ${Math.round(stuckAfterMs / 1000)}s after the stop began; forcing the stop`)
   while (mms) {
+    const left = stuckAt - Date.now()
+    if (left <= 0) {
+      forcing()
+      break
+    }
     try {
-      await mms.stop()
+      if ((await settleWithin(mms.stop({ timeoutMs: Math.max(1, Math.ceil(left)) }), left)) === 'timeout') {
+        forcing()
+        break
+      }
       break
     } catch (err) {
       if (!isStillDraining(err)) {
         log(`mms.stop failed: ${err instanceof Error ? err.message : String(err)}`)
         break
       }
-      stuckAt ??= Date.now() + stuckAfterMs
       if (Date.now() >= stuckAt) {
-        log(`MMS work is still draining ${Math.round(stuckAfterMs / 1000)}s after the stop's deadline; forcing the stop`)
+        forcing()
         break
       }
-      log('MMS is still finishing its work; waiting before exiting')
-      await sleepAsync(retryDelayMs)
+      log(`MMS is still finishing its work${describeDrain(err)}; waiting before exiting`)
+      await sleepAsync(Math.min(retryDelayMs, Math.max(0, stuckAt - Date.now())))
     }
   }
   state.mms = null
@@ -249,6 +285,37 @@ async function tearDownRemaining(
   } catch {
     /* best-effort */
   }
+}
+
+/** Resolves 'timeout' when `work` has not settled within `ms`; a rejection passes through. */
+async function settleWithin(work: Promise<unknown>, ms: number): Promise<'settled' | 'timeout'> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), ms)
+  })
+  try {
+    return await Promise.race([work.then(() => 'settled' as const), late])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** What is still draining, from the error's activity counts: ` (agentRuns 2, ptyProcesses 1)`. */
+function describeDrain(error: unknown): string {
+  const found: string[] = []
+  const visit = (value: unknown): void => {
+    if (value instanceof AggregateError) {
+      value.errors.forEach(visit)
+      return
+    }
+    const activity = (value as { details?: { activity?: unknown } } | null)?.details?.activity
+    if (!activity || typeof activity !== 'object') return
+    for (const [name, count] of Object.entries(activity)) {
+      if (typeof count === 'number' && count > 0) found.push(`${name} ${count}`)
+    }
+  }
+  visit(error)
+  return found.length ? ` (${found.join(', ')})` : ''
 }
 
 /** The stop's deadline passed while work was still draining (`profile_busy`, `shutdown_timeout`). */
