@@ -2489,6 +2489,15 @@ html[data-chat-width='full'] .chat {
   min-height: 0;
 }
 
+.composer-input,
+.composer-input-backdrop {
+  /* Both layers reserve the same gutter, including at fractional zoom. */
+  scrollbar-gutter: stable;
+  /* Keep glyph widths consistent across the backdrop's inline spans. */
+  font-kerning: none;
+  font-variant-ligatures: none;
+}
+
 .composer-input-backdrop {
   box-sizing: border-box;
   /* Backdrop may not enforce the draft min-height; the textarea does. */

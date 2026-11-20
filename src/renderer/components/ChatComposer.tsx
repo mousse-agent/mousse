@@ -263,13 +263,7 @@ export function ChatComposer({
     const height = Math.max(64, Math.min(200, inputElement.scrollHeight))
     inputElement.style.removeProperty('height')
     inputElement.style.setProperty('--draft-input-height', `${height}px`)
-    // The backdrop paints the visible text: it wraps at the textarea's width, scrollbar excluded,
-    // and follows its scroll.
-    const backdrop = backdropRef.current
-    if (backdrop) {
-      backdrop.style.marginRight = `${inputElement.offsetWidth - inputElement.clientWidth}px`
-      backdrop.scrollTop = inputElement.scrollTop
-    }
+    if (backdropRef.current) backdropRef.current.scrollTop = inputElement.scrollTop
   }, [])
   useLayoutEffect(() => { resizeDraft() }, [input, resizeDraft])
   useEffect(() => {
