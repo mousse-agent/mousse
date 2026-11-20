@@ -75,19 +75,6 @@
       "expiresAt": "2026-11-20T13:11:09.414Z"
     },
     {
-      "task": "browser-unreachable-page",
-      "session": "agibook-cc8b65",
-      "machine": "agibook",
-      "branch": "browser-unreachable-page",
-      "paths": [
-        "src/renderer/components/BrowserPanel.tsx",
-        "src/renderer/components/browser",
-        "src/renderer/styles/app.css"
-      ],
-      "claimedAt": "2026-11-20T11:25:52.321Z",
-      "expiresAt": "2026-11-20T13:25:52.321Z"
-    },
-    {
       "task": "download-windows-git",
       "session": "agibook-b1b05b",
       "machine": "agibook",
