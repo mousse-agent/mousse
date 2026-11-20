@@ -1328,6 +1328,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
       <div
         key={rowKeys.get(thread.id) ?? thread.id}
         className={`threads-sidebar-thread-container${speakingThreadId === thread.id ? ' speaking' : ''}${dropLine}`}
+        data-pinned={(Boolean(thread.pinnedAt) && !isArchived) || undefined}
         inert={clipped || archiveMotion === 'leave' || undefined}
         aria-hidden={archiveMotion === 'leave' || undefined}
         data-archive-motion={archiveMotion}
@@ -1627,6 +1628,11 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     !(renaming?.type === 'thread' && renaming.id === thread.id && !renaming.inNeedsMe) &&
     !(pendingTitleIds.has(thread.id) && isDefaultThreadName(thread.name))
 
+  /** Whether a pinned thread sits right above an unpinned one in `list` (for its list's max-height). */
+  const isListedPinned = (thread: Thread) => Boolean(thread.pinnedAt) && !thread.settledAt
+  const hasPinnedSplit = (list: readonly Thread[]) =>
+    list.some((thread, index) => index > 0 && isListedPinned(list[index - 1]) && !isListedPinned(thread)) ? 1 : 0
+
   /** A group's thread rows: the first 5, and Show more for the rest. */
   const renderGroupThreads = (groupId: string, groupThreads: Thread[]) => {
     const showAll = expandedProjectThreadLists.has(groupId)
@@ -1638,7 +1644,9 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             '--project-thread-count': groupThreads.length,
             // Rows with a reply preview are a line taller; the list's height counts them.
             '--project-preview-count': groupThreads.filter(rowShowsPreview).length,
-            '--project-preview-shown': groupThreads.slice(0, PROJECT_THREAD_PREVIEW_LIMIT).filter(rowShowsPreview).length
+            '--project-preview-shown': groupThreads.slice(0, PROJECT_THREAD_PREVIEW_LIMIT).filter(rowShowsPreview).length,
+            '--project-pinned-gap': hasPinnedSplit(groupThreads),
+            '--project-pinned-gap-shown': hasPinnedSplit(groupThreads.slice(0, PROJECT_THREAD_PREVIEW_LIMIT))
           } as CSSProperties}
           role="none"
         >
