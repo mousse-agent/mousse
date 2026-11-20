@@ -29,6 +29,21 @@
       "expiresAt": "2026-11-19T15:02:10.909Z"
     },
     {
+      "task": "antigravity-native-steer",
+      "session": "Animatrix-602fa3",
+      "machine": "Animatrix",
+      "branch": "antigravity-native-steer",
+      "paths": [
+        "src/mms/harness/acp/session.ts",
+        "src/mms/harness/acp/quirks.ts",
+        "src/mms/harness/acp/presets/antigravity.ts",
+        "src/mms/harness/drivers/antigravity.ts",
+        "tests/harness/acpSession.test.ts"
+      ],
+      "claimedAt": "2026-11-20T13:07:46.100Z",
+      "expiresAt": "2026-11-20T15:07:46.100Z"
+    },
+    {
       "task": "antigravity-owner-only-turns",
       "session": "Animatrix-4789ec",
       "machine": "Animatrix",
