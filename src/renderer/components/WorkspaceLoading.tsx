@@ -1,3 +1,4 @@
+import type { WindowsGitSetup } from '../../shared/windowsGit'
 import { RefreshCw } from '../lib/icons'
 import { LOADER_DELAY_MS, useShownAfter } from './ui/DelayedLoader'
 import './workspace-loading.css'
@@ -10,19 +11,23 @@ interface WorkspaceLoadingProps {
   onRetry?: () => void
   sidebarWidth?: number
   conversationOnly?: boolean
+  windowsGitSetup?: WindowsGitSetup
 }
 
 /**
  * Content placeholders; the real titlebar and navigation remain available. No text while loading:
  * the skeleton appears only once the load takes longer than `WORKSPACE_SKELETON_DELAY_MS`.
+ * A prerequisite download reports its own status immediately.
  * A failure shows one error block with Retry in the same place.
  */
-export function WorkspaceLoading({ error, onRetry, sidebarWidth, conversationOnly = false }: WorkspaceLoadingProps) {
+export function WorkspaceLoading({ error, onRetry, sidebarWidth, conversationOnly = false, windowsGitSetup }: WorkspaceLoadingProps) {
+  const gitError = windowsGitSetup?.phase === 'failed' ? windowsGitSetup.message : undefined
+  const setup = windowsGitSetup?.phase === 'downloading' || windowsGitSetup?.phase === 'installing'
   const skeleton = useShownAfter(WORKSPACE_SKELETON_DELAY_MS)
 
   return (
     <div className={`workspace-loading${conversationOnly ? ' workspace-loading-conversation-only' : ''}`}
-      aria-busy={!error} data-workspace-loading={conversationOnly ? 'content' : 'connection'}>
+      aria-busy={!setup && !gitError && !error} data-workspace-loading={conversationOnly ? 'content' : 'connection'}>
       {skeleton && !conversationOnly && sidebarWidth !== undefined && <aside className="workspace-loading-sidebar"
         style={{ width: sidebarWidth }} aria-hidden="true">
         <div className="workspace-loading-line workspace-loading-heading" />
@@ -31,11 +36,16 @@ export function WorkspaceLoading({ error, onRetry, sidebarWidth, conversationOnl
         </div>)}
       </aside>}
       <section className="workspace-loading-content">
-        {error ? <div className="workspace-loading-error" role="alert">
+        {setup ? <div className="workspace-loading-error" role="status">
           <p className="workspace-loading-error-title">
-            {conversationOnly ? 'Could not load workspace' : 'Could not connect to workspace'}
+            {windowsGitSetup.phase === 'downloading' ? 'Downloading Git for Windows…' : 'Setting up Git for Windows…'}
           </p>
-          <p className="workspace-loading-detail">{error}</p>
+          <p className="workspace-loading-detail">Mousse needs Git to start the workspace.</p>
+        </div> : (gitError || error) ? <div className="workspace-loading-error" role="alert">
+          <p className="workspace-loading-error-title">
+            {gitError ? 'Could not set up Git for Windows' : conversationOnly ? 'Could not load workspace' : 'Could not connect to workspace'}
+          </p>
+          <p className="workspace-loading-detail">{gitError || error}</p>
           <button type="button" className="workspace-loading-retry" onClick={onRetry}>
             <RefreshCw size={14} aria-hidden="true" />Retry
           </button>

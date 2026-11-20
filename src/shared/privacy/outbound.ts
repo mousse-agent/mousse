@@ -40,6 +40,14 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     sources: ['src/main/updates/index.ts']
   },
   {
+    label: 'Git for Windows prerequisite (GitHub)',
+    kind: 'contacted',
+    hosts: ['github.com'],
+    when: 'When the Windows desktop app starts its workspace service and neither Git on PATH nor the Mousse copy is available.',
+    sends: 'a download request for the pinned MinGit release.',
+    sources: ['src/main/mms/windowsGit.ts']
+  },
+  {
     label: 'Codex download (GitHub)',
     kind: 'contacted',
     hosts: ['github.com'],

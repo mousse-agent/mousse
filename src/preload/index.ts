@@ -1,4 +1,5 @@
 import type { AppletApi, AppletUiEvent } from '../shared/appletRuntime'
+import type { WindowsGitSetup } from '../shared/windowsGit'
 import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 import type { BreachKind, MemoryNotice, MemoryStatus } from '../shared/diagnostics/memory'
 import type { WindowCacheSize } from '../shared/diagnostics/profiler'
@@ -1406,6 +1407,12 @@ const api = {
   },
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),
+    windowsGitSetup: (): Promise<WindowsGitSetup> => ipcRenderer.invoke('app:windowsGitSetup'),
+    onWindowsGitSetupChanged: (cb: (setup: WindowsGitSetup) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, setup: WindowsGitSetup) => cb(setup)
+      ipcRenderer.on('app:windowsGitSetupChanged', handler)
+      return () => ipcRenderer.removeListener('app:windowsGitSetupChanged', handler)
+    },
     getActiveProjectPath: (threadId?: string | null): Promise<string | null> =>
       ipcRenderer.invoke('app:getActiveProjectPath', threadId),
     getFilesRoot: (threadId?: string | null): Promise<string> =>
