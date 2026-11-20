@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import { Transform } from 'node:stream'
 import type { ProviderCapabilities } from '../../adapter'
 import { ACP_BASE_CAPABILITIES } from '../capabilities'
-import { connectAcpProcess, type AcpConnectionFactory } from '../connection'
+import { connectAcpProcess, treeKilledChild, type AcpConnectionFactory } from '../connection'
 import type { AcpQuirks } from '../quirks'
 
 /**
@@ -183,11 +183,12 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
     if (process.platform === 'win32') { env.TEMP = tempDir; env.TMP = tempDir }
     else env.TMPDIR = tempDir
     const args = [...antigravityRuntimeArgs(kind, geminiHome), ...options.args()]
-    const child = spawn(binary, args, { env: options.env(env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+    // A process group on POSIX, so Stop ends the agent's helpers with it (`treeKilledChild`).
+    const child = spawn(binary, args, { env: options.env(env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' })
     const acceptAuthUrl = (url: string) => {
       if (callbackTarget(url)) request.onAuthUrl?.(url)
     }
-    return connectAcpProcess(child, request.handlers, {
+    const connection = connectAcpProcess(child, request.handlers, {
       stdout: antigravityStdout(acceptAuthUrl),
       stderrLine: (line) => {
         const url = line.startsWith(AUTH_PREFIX) ? line.slice(AUTH_PREFIX.length)
@@ -199,5 +200,8 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
         void rm(tempDir, { recursive: true, force: true }).catch(() => undefined)
       }
     })
+    // The launcher starts the real agent and its local harness: closing ends all of them.
+    connection.child = treeKilledChild(child)
+    return connection
   }
 }
