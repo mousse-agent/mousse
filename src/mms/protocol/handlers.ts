@@ -5476,6 +5476,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     // With a `token` from the dry run it removes only what that plan named, and only if it is still eligible.
     case 'storage.cleanup.run': {
       const p = isObject(params) ? params : {}
+      // After the start's lifecycle pass, which finishes and checks the same records.
+      await ctx.mms.untilStartupLifecycleDone()
       return { report: await ctx.mms.storageCleanup.run('manual', p.token === undefined ? undefined : { plan: asPlanToken(p.token) }) }
     }
     // Dry run: what a run would remove or keep now. Changes nothing, so it is open to any local client too.

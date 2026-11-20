@@ -1,6 +1,7 @@
 import { profilerService } from '../diagnostics/profilerService'
 import type { BugReportService } from '../bugReports/BugReportService'
 import { turnTimingMark } from '../diagnostics/turnTiming'
+import { forEachYielding } from '../startup/startupTiming'
 import { describeQuestionAnswers } from './questionAnswers'
 import type { OpenQuestionCloseReason } from '../run/OpenQuestions'
 import { latestReplyPreview } from '../../shared/threadPreview'
@@ -14063,12 +14064,16 @@ export class OrchestratorService extends EventEmitter {
         else this.restoreConversationBoundary(session.threadId, action.presentationMessageStart, action.nativeContextStartBoundary!)
       })
     }
+    turnTimingMark(session.threadId, 'recoveryConversation')
 
     if (recoveryDirectory && recoveryWorkspace && session.executionLease) {
       const heldLease = session.executionLease
       // A merge of a subagent's result an older version left unfinished is cancelled, never run again; the thread hears of it.
       const cancelledIntegrations = cancelledIntegrationsNotice(await cancelPendingIntegrations(recoveryDirectory, recoveryWorkspace.worktreePath))
       if (cancelledIntegrations) this.sessionAls.run(session, () => this.addSystemMessage(cancelledIntegrations))
+      // Each recovery step is marked (from `recoveryConversation` above), so a slow first turn after a restart shows
+      // which one held it.
+      turnTimingMark(session.threadId, 'recoveryIntegrations')
       const primary = this.projectManager && this.threadStore
         ? resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId) : undefined
       if (primary) {
@@ -14076,13 +14081,17 @@ export class OrchestratorService extends EventEmitter {
         const merging = [...new Set(settled.flatMap((item) => item.state === 'cancelled' && item.mergeInProgress ? [item.mergeInProgress] : []))]
         if (merging.length) this.sessionAls.run(session, () => this.addSystemMessage(`A publish merge from an earlier version is still in progress in ${merging.join(', ')}; abort it (operations abort) or finish it with Git. It was not run again.`))
       }
+      turnTimingMark(session.threadId, 'recoveryPublish')
       await new ThreadActionService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease, setupSignal)
+      turnTimingMark(session.threadId, 'recoveryActions')
       await new CodeRevertService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease, setupSignal)
+      turnTimingMark(session.threadId, 'recoveryReverts')
       await new UndoService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, (action, kind) => {
         if (!action.nativeContextStartBoundary) return
         if (kind === 'redo') this.restoreConversationActionEnd(session.threadId, action.presentationMessageStart, action.presentationMessageEnd, action.nativeContextBoundary)
         else this.restoreConversationBoundary(session.threadId, action.presentationMessageStart, action.nativeContextStartBoundary)
       }, heldLease, setupSignal)
+      turnTimingMark(session.threadId, 'recoveryUndo')
       await new ConversationBranchService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, (branch) => {
         const path = join(recoveryDirectory, 'conversation-contexts', `${encodeURIComponent(branch.id)}.json`)
         const saved = JSON.parse(readFileSync(path, 'utf8')) as { schemaVersion: number; messages: ChatMessage[]; nativeContext: NativeLlmContext }
@@ -16272,12 +16281,16 @@ export class OrchestratorService extends EventEmitter {
   scheduleStartupQueueRecovery(): void {
     if (this.lifecycle.stopping) return
     if (!this.threadStore) return
-    setImmediate(() => {
-      this.recoverAndDrainPendingQueuesAsync().catch((err: unknown) => {
-        this.emit('queue-drain-failed', {
-          threadId: null,
-          error: err instanceof Error ? err.message : String(err)
-        })
+    setImmediate(() => void this.recoverStartupQueues())
+  }
+
+  /** The start's queue recovery (`scheduleStartupQueueRecovery`), begun now: settles once every queue was looked at. */
+  recoverStartupQueues(): Promise<void> {
+    if (this.lifecycle.stopping || !this.threadStore) return Promise.resolve()
+    return this.recoverAndDrainPendingQueuesAsync().catch((err: unknown) => {
+      this.emit('queue-drain-failed', {
+        threadId: null,
+        error: err instanceof Error ? err.message : String(err)
       })
     })
   }
@@ -16289,29 +16302,48 @@ export class OrchestratorService extends EventEmitter {
    */
   private async recoverAndDrainPendingQueuesAsync(): Promise<void> {
     if (this.lifecycle.stopping || !this.threadStore) return
+    const store = this.threadStore
     this.recoverGoalsOnce()
-    const ordered = this.startupRecoveryOrder()
-    for (const thread of ordered) {
-      if (this.lifecycle.stopping) return
-      if (thread.settledAt) continue
+    const ordered = this.startupRecoveryOrder().filter((thread) => !thread.settledAt)
+    const stopping = (): boolean => this.lifecycle.stopping
+    // Threads whose queue has agent commands the journal holds unfinished; all of them when the journal can't be read.
+    let journaled: ReadonlySet<string> | undefined
+    try { journaled = new Set(store.getQueueJournal()?.commands.unfinishedThreadIds() ?? []) } catch { journaled = undefined }
+    // Only a queue that holds a claim or an unfinished command has anything to reclaim; the others are not rewritten.
+    // Each thread is looked at in turn, giving requests their turn every few milliseconds.
+    const reclaim: Thread[] = []
+    await forEachYielding(ordered, (thread) => { if (this.needsStartupReclaim(thread.id, journaled)) reclaim.push(thread) }, stopping)
+    for (const thread of reclaim) {
+      if (stopping()) return
       // Reclaiming reads the transcript only for a queue that holds a claim.
-      if (!this.sessions.has(thread.id) && this.hasClaimedQueueItem(thread.id)) await this.threadStore.warmThread(thread.id).catch(() => undefined)
+      if (!this.sessions.has(thread.id) && this.hasClaimedQueueItem(thread.id)) await store.warmThread(thread.id).catch(() => undefined)
       this.reclaimForStartup(thread.id)
     }
-    for (const thread of ordered) {
-      if (this.lifecycle.stopping) return
-      if (thread.settledAt || this.startupDrainScheduled.has(thread.id)) continue
-      if (!this.sessions.has(thread.id)) {
-        // A thread with nothing to drain is not loaded at all: its transcript stays on disk until someone opens it.
-        if (!this.hasPendingNormalQueueItem(thread.id)) {
-          this.reclaimStaleThreadLease(thread.id)
-          continue
-        }
-        await this.threadStore.warmThread(thread.id).catch(() => undefined)
-      }
+    const drain: Thread[] = []
+    await forEachYielding(ordered, (thread) => {
+      if (this.startupDrainScheduled.has(thread.id)) return
+      // A thread with nothing to drain is not loaded at all: its transcript stays on disk until someone opens it.
+      if (this.sessions.has(thread.id) || this.hasPendingNormalQueueItem(thread.id)) drain.push(thread)
+      else this.reclaimStaleThreadLease(thread.id)
+    }, stopping)
+    for (const thread of drain) {
+      if (stopping()) return
+      if (this.startupDrainScheduled.has(thread.id)) continue
+      if (!this.sessions.has(thread.id)) await store.warmThread(thread.id).catch(() => undefined)
       this.considerStartupDrain(thread.id)
     }
     this.pumpStartupDrainQueue()
+  }
+
+  /** Whether the start must reclaim this thread's queue: it holds a claim, or the journal has an unfinished command for it. */
+  private needsStartupReclaim(threadId: string, journaled: ReadonlySet<string> | undefined): boolean {
+    if (!journaled || journaled.has(threadId)) return true
+    try {
+      return this.threadStore?.loadMessageQueue(threadId).some((item) => item.state === 'claimed') ?? false
+    } catch {
+      // An unreadable queue is reclaimed as before, which reports it.
+      return true
+    }
   }
 
   private hasPendingNormalQueueItem(threadId: string): boolean {

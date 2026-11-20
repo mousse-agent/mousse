@@ -54,6 +54,8 @@ export class ProfileHost {
   private stopping = false
   /** The daemon is ready and its networked profiles were started: a profile started from now on starts its own. */
   private networkReady = false
+  /** Set once the daemon is ready (`startAfterReadyWork`): a profile started after that runs its deferred passes at once. */
+  private daemonReady = false
   private defaultServices: MmsProfileServices | null = null
   private defaultProfileId: ProfileId | null = null
 
@@ -97,6 +99,7 @@ export class ProfileHost {
 
   attachDefault(services: MmsProfileServices, profileId: ProfileId): void {
     this.shared.configureServices?.(services)
+    services.setDaemonReady(() => this.daemonReady)
     this.defaultServices = services
     this.defaultProfileId = profileId
     this.live.set(profileId, services)
@@ -193,6 +196,15 @@ export class ProfileHost {
    * tombstone sweep, and the helper's launch, never delay it. Each profile starts on its own, and a failure marks
    * only that profile.
    */
+  /**
+   * The daemon is ready: each running profile begins the passes its start left for now (`startAfterReadyWork`), in the
+   * background. A profile started later begins them at the end of its start.
+   */
+  startAfterReadyWork(): void {
+    this.daemonReady = true
+    for (const services of this.live.values()) services.startAfterReadyWork()
+  }
+
   async startNetworkedProfiles(): Promise<void> {
     this.networkReady = true
     for (const record of this.manager.list()) {
@@ -533,6 +545,7 @@ export class ProfileHost {
       includeExternalCliConfigs: isDefault
     })
     this.shared.configureServices?.(services)
+    services.setDaemonReady(() => this.daemonReady)
     await services.initialize()
     return services
   }

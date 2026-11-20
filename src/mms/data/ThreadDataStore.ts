@@ -75,6 +75,7 @@ import type { MessageEstimate } from '../orchestrator/contextEstimate'
 import { ThreadDbStore, type ThreadDataChange } from './threadDb/threadDbStore'
 import { THREAD_DB_FILE } from './threadDb/threadDbEngine'
 import { publishStagedBlobs } from './threadDb/threadBlobs'
+import { forEachYielding } from '../startup/startupTiming'
 
 export { ThreadDataCorruptionError } from './legacyThreadData'
 
@@ -2705,6 +2706,8 @@ export class ThreadDataStore extends EventEmitter {
     const distinct = new Set<string>()
     const keyOf = (result: ScoredSearchResult) => perThread ? result.threadId : `${result.threadId}:${result.messageId}:${result.snippet}`
     try {
+      // The index's first sweep is sent first, so the worker answers from a caught-up (or rebuilt) index.
+      await this.firstSweep
       this.flushIndexNotices()
       const batch = Math.max(limit, 50)
       for (let offset = 0; distinct.size < limit; offset += batch) {
@@ -2861,10 +2864,15 @@ export class ThreadDataStore extends EventEmitter {
     await this.indexUpdate
   }
 
-  /** Threads kept in `thread.db`, with their folders. */
-  private databaseThreads(): Array<{ threadId: string; dir: string }> {
+  /**
+   * Threads kept in `thread.db`, with their folders. Read a few at a time, so a sweep over every thread never holds up
+   * requests; threads listed while it read are added at the end.
+   */
+  private async databaseThreads(shouldStop: () => boolean): Promise<Array<{ threadId: string; dir: string }>> {
     const out: Array<{ threadId: string; dir: string }> = []
-    for (const thread of this.listAllThreads()) {
+    const seen = new Set<string>()
+    const add = (thread: Thread): void => {
+      seen.add(thread.id)
       try {
         const dir = this.listedThreadDir(thread.id)
         if (ThreadDbStore.usesDb(dir)) out.push({ threadId: thread.id, dir })
@@ -2872,32 +2880,53 @@ export class ThreadDataStore extends EventEmitter {
         // A thread whose folder cannot be resolved now is not indexed now.
       }
     }
+    await forEachYielding(this.listAllThreads(), add, shouldStop)
+    for (const thread of this.listAllThreads()) if (!seen.has(thread.id)) add(thread)
     return out
   }
 
+  /** The search index's first sweep while it is waited for or runs: a search waits for it (`indexedMessageResults`). */
+  private firstSweep?: Promise<void>
+  private sweepStopped = false
+
   /**
-   * Keeps the search index matching the thread databases: at once, then every `intervalMs`. Threads whose
-   * database files changed since they were indexed (written by another process, or a notice that was lost) are
-   * caught up, and threads no longer listed are dropped. A missing or damaged index is rebuilt by the first pass.
+   * Keeps the search index matching the thread databases: once `after` settles (at once without it), then every
+   * `intervalMs`. Threads whose database files changed since they were indexed (written by another process, or a
+   * notice that was lost) are caught up, and threads no longer listed are dropped. A missing or damaged index is
+   * rebuilt by the first pass, which a search waits for.
    */
-  startSearchIndexSweep(intervalMs = 60_000): void {
-    if (this.sweepTimer) return
-    const sweep = (): void => {
-      const live = this.databaseThreads()
-      if (!live.length && !this.threadDbStore) return
-      this.threadDb().client.callIndex('indexReconcile', this.homeDir, live).catch((error: unknown) => {
-        if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE) return
-        console.warn('thread search index sweep failed', { error: error instanceof Error ? error.message : String(error) })
-      })
+  startSearchIndexSweep(intervalMs = 60_000, options: { after?: Promise<unknown> } = {}): void {
+    if (this.sweepTimer || this.firstSweep) return
+    this.sweepStopped = false
+    let sweeping = false
+    const sweep = async (): Promise<void> => {
+      if (sweeping || this.sweepStopped) return
+      sweeping = true
+      try {
+        const live = await this.databaseThreads(() => this.sweepStopped)
+        if (this.sweepStopped || (!live.length && !this.threadDbStore)) return
+        this.threadDb().client.callIndex('indexReconcile', this.homeDir, live).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException | undefined)?.code === WORKER_BACKOFF_CODE) return
+          console.warn('thread search index sweep failed', { error: error instanceof Error ? error.message : String(error) })
+        })
+      } finally {
+        sweeping = false
+      }
     }
-    sweep()
-    this.sweepTimer = setInterval(sweep, intervalMs)
-    this.sweepTimer.unref?.()
+    this.firstSweep = Promise.resolve(options.after).catch(() => undefined).then(async () => {
+      if (this.sweepStopped) return
+      await sweep()
+      if (this.sweepStopped) return
+      this.sweepTimer = setInterval(() => void sweep(), intervalMs)
+      this.sweepTimer.unref?.()
+    }).catch(() => undefined)
   }
 
   stopSearchIndexSweep(): void {
+    this.sweepStopped = true
     if (this.sweepTimer) clearInterval(this.sweepTimer)
     this.sweepTimer = undefined
+    this.firstSweep = undefined
     this.flushIndexNotices()
   }
 }
