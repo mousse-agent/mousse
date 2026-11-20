@@ -5,6 +5,7 @@ import type { NetLinkCheck, NetLinkMade, NetLinkPasted } from '../../../shared/n
 import type { PlatformRequestMethod } from '../../../shared/platform'
 import { CopyButton } from '../settings/IconButtons'
 import { Modal } from '../ui/Modal'
+import { ErrorLine } from '../ui/ErrorLine'
 import { useNow } from './AddDeviceDialog'
 
 type Failure = { code?: unknown; details?: unknown; message?: unknown }
@@ -113,7 +114,7 @@ export function MakeLinkDialog({ name, now: fixedNow, onMade, onClose }: {
     <Modal open title="Make a link" onClose={onClose} footer={footer || undefined}>
       <div className="devices-dialog">
         {body}
-        {failure && !asking && <p role="alert" className="chat-error">{linkErrorWords(failure, 'make')}</p>}
+        {failure && !asking && <ErrorLine message={linkErrorWords(failure, 'make')} />}
       </div>
     </Modal>
   )

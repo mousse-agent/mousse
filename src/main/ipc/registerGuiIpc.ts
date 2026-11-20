@@ -44,7 +44,7 @@ import { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { coalescedRunner } from '../mms/coalescedRunner'
 export { bootstrapPresentation } from '../mms/bootstrapPresentation'
 import { MmsProtocolError } from '../../mms/protocol/client'
-import { guiChatRequestError, guiSendFailureAnswer } from '../mms/requestErrors'
+import { guiChatRequestError, guiPlatformRequestError, guiSendFailureAnswer } from '../mms/requestErrors'
 import type { ProtocolEvent } from '../../mms/protocol'
 import {
   bridgeProtocolEvent,
@@ -506,9 +506,8 @@ export function registerGuiIpc(
           : value
       }
     } catch (error) {
-      const descriptor = error instanceof MmsProtocolError
-        ? knownAppError({ code: error.code, message: error.message, details: error.details, errorInfo: error.errorInfo })
-        : normalizeAppError(error, 'platform_request_failed')
+      const method = (request as { method?: unknown } | null)?.method
+      const descriptor = guiPlatformRequestError(error, typeof method === 'string' ? method : undefined)
       console.error('GUI platform request failed', errorDiagnostic(descriptor, 'platform.call'))
       return { ok: false, error: serializeAppError(descriptor) }
     }

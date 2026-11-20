@@ -2,6 +2,7 @@ import { memo } from "react";
 import { CircleX } from "../../../lib/icons";
 import { cn } from "./utils/cn";
 import { ReportButton } from "../../../components/bugReports/ReportButton";
+import { splitErrorReference } from "../../../lib/errorText";
 
 export type ErrorMessageProps = {
   title?: string;
@@ -13,15 +14,7 @@ export type ErrorMessageProps = {
   retryTitle?: string;
 };
 
-/** The reference an error was logged under, at the end of its message: `… Reference: 1ecec6b5-…`. */
-const REFERENCE = /\s*Reference:\s*(\S+)\s*$/;
-
-/** A message and the reference at its end, apart. */
-export function splitErrorReference(message: string): { text: string; reference?: string } {
-  const match = REFERENCE.exec(message);
-  if (!match) return { text: message.trim() };
-  return { text: message.slice(0, match.index).trim(), reference: match[1] };
-}
+export { splitErrorReference };
 
 /**
  * A failed request in the transcript: the title in the danger colour, then the message as the provider or Mousse gave
