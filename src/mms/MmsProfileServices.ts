@@ -2031,11 +2031,18 @@ export class MmsProfileServices {
     const running = (): string[] => this.runningForDelete(threadIds)
     const stopping = running()
     if (!stopping.length) return
-    for (const threadId of stopping) {
-      await this.orchestrator.stopThread(threadId, 'deleted', { clearQueue: true }).catch((error: unknown) => {
-        console.warn('a delete could not stop the thread\'s turn', { threadId, error: error instanceof Error ? error.message : String(error) })
-      })
-    }
+    // The Stops get the same bound as the wait for the turns to end after them. A Stop that does not answer leaves the
+    // delete to the trash's own check, which refuses while a turn still runs, instead of holding the delete with no answer.
+    const stops = (async () => {
+      for (const threadId of stopping) {
+        await this.orchestrator.stopThread(threadId, 'deleted', { clearQueue: true }).catch((error: unknown) => {
+          console.warn('a delete could not stop the thread\'s turn', { threadId, error: error instanceof Error ? error.message : String(error) })
+        })
+      }
+    })()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([stops, new Promise((resolve) => { timer = setTimeout(resolve, this.deleteStopWaitMs) })])
+    clearTimeout(timer)
     const until = Date.now() + this.deleteStopWaitMs
     while (running().length && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50))
   }
@@ -2499,6 +2506,8 @@ export class MmsProfileServices {
       const finished = await this.finishCutShortDeletes(new Set(returned.waiting))
       const kept = finished.filter((entry) => entry.outcome === 'kept')
       if (kept.length) console.warn('some threads in the trash could not be finished or put back; trying again at the next start', { kept })
+      const givenUp = finished.filter((entry) => entry.outcome === 'archived' && entry.reason)
+      if (givenUp.length) console.warn('deletes that kept being refused were given up; their threads are back in Archived', { threads: givenUp })
     } catch (error) {
       console.warn('threads in the trash could not be moved to Archived or finished', { error: error instanceof Error ? error.message : String(error) })
     }
