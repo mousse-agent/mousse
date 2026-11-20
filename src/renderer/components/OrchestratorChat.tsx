@@ -26,6 +26,7 @@ import { runSlashCommand, type SlashCommandEnv } from '../lib/slashCommands'
 import type { SkillDescriptor } from '../../shared/integrations'
 import { isThreadActivityActive, isTurnActivePhase, isTurnStoppable, type TurnPhase } from '../../shared/types'
 import { deletedThreadIds, useAppStore } from '../stores/appStore'
+import { holdModelPick, isSupersededModelPick, modelPickSaved, settleModelPick } from '../lib/modelPicks'
 import { useCommand } from '../commands/commandRegistry'
 import {
   ChatComposer,
@@ -37,7 +38,7 @@ import {
 import { MMS_PROTOCOL_MAX_TEXT_LENGTH } from '../../mms/protocol/types'
 import { attachedFilesIn, formatAttachedFilesMarker } from '../../shared/attachedFilesMarker'
 import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, type RecoveredQueueDraft } from '../hooks/useThreadQueue'
-import { withSteersOnTheWay } from '../lib/steersOnTheWay'
+import { turnTakesSteer, withSteersOnTheWay } from '../lib/steersOnTheWay'
 import { nextSteerableQueueItem } from '../lib/queuedContent'
 import { restoreQueuedDraft } from '../lib/queuedDraftRecovery'
 import { historyTokens as historyTokensOf } from '../lib/promptCache'
@@ -60,6 +61,8 @@ import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { findSubagentEntry, isSubagentStartingOptimistically } from './subagentStatus'
 import { useSubagents } from '../hooks/useSubagents'
+import { useBackgroundWork } from '../hooks/useBackgroundWork'
+import { BackgroundWorkRow } from './BackgroundWorkRow'
 import { isRunningSubagent, isWorkingSubagent } from '../../shared/subagents'
 import { stopAllSubagents } from './sideCard/lineageLogic'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
@@ -456,13 +459,17 @@ export function OrchestratorChat() {
   useEffect(() => setCommandInfo(null), [activeThreadId])
   /** Discard for a send refused over a conflict in the thread worktree; shown only while `sendError` is that refusal’s line. */
   const [sendChanges, setSendChanges] = useState<{ line: string; message: string; details: PendingChangesDetails } | null>(null)
+  /** Why this thread may not point at `threadId` (a private thread from a shared one), else null. */
+  const pastedThreadRefusal = useCallback((threadId: string) => {
+    const { threads, activeThreadId: here } = useAppStore.getState()
+    const thread = threads.find((entry) => entry.id === here)
+    return threadReferenceRefusal(threadId, { privateThread: Boolean(thread && isLocalOnlyThread(thread, threads)) })
+  }, [])
   const addResolvedReference = useCallback(async (reference: ChatReference) => {
     const expectedProfile = useAppStore.getState().profileId
     const expectedThread = useAppStore.getState().activeThreadId
     if (reference.kind === 'thread' && reference.threadId) {
-      const { threads } = useAppStore.getState()
-      const here = threads.find((thread) => thread.id === expectedThread)
-      const refused = threadReferenceRefusal(reference.threadId, { privateThread: Boolean(here && isLocalOnlyThread(here, threads)) })
+      const refused = pastedThreadRefusal(reference.threadId)
       if (refused) throw new Error(refused)
     }
     const resolved = await resolveChatReference(reference)
@@ -470,7 +477,7 @@ export function OrchestratorChat() {
     if (state.profileId !== expectedProfile || state.activeThreadId !== expectedThread) return
     state.addComposerReference(expectedThread, resolved)
     setSendError(null)
-  }, [])
+  }, [pastedThreadRefusal])
   const sendIds = useRef(new SendRetryIds())
   // Prompts sent here and still on their way, by thread (their send answers when the turn ends). A message sent
   // meanwhile is queued behind them, even before the thread reports the turn running.
@@ -524,8 +531,17 @@ export function OrchestratorChat() {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index]!.role === 'user') { lastUserMessage = messages[index]; break }
   }
+  // The transcript's last turn is the one a message sent now joins: a turn that takes steers runs, or a prompt sent
+  // here is on its way (shown last). Otherwise, while a turn is set up (a wake, the queue's next message, a prompt from
+  // another window), it would land in the previous turn's finished reply: it waits first in the queue instead.
+  const replyTakesSteer = useAppStore((s) => (s.activeThreadId ? turnTakesSteer(s.turnStates[s.activeThreadId]) : false))
+  const replyOpen = replyTakesSteer || (activeThreadId ? promptThreadsOnTheWay.has(activeThreadId) : false)
+  const replyOpenRef = useRef(replyOpen)
+  replyOpenRef.current = replyOpen
   const queue = useThreadQueue({
     threadId: activeThreadId,
+    replyOpen,
+    turnActive: isTurnStoppable(turnState),
     optimisticItems: optimisticQueueItems,
     onOptimisticItemReconciled: onOptimisticQueueItemReconciled,
     hold: queueHold,
@@ -776,8 +792,13 @@ export function OrchestratorChat() {
     }
   }, [activeThreadId])
 
+  // The newest read of the shown model (or pick) decides the picker: an older read that answers late changes nothing.
+  const selectionRequestRef = useRef(0)
+  // Saves of model picks run one after another, in the order picked.
+  const modelSaveRef = useRef<Promise<void>>(Promise.resolve())
   const refreshSelection = useCallback(async () => {
     if (!profileReady) return
+    const selectionRequest = ++selectionRequestRef.current
     const skillsRequest = window.mousse.skills.list()
     // Rejection is still surfaced by the await below; this only avoids an
     // unhandled rejection when the settings requests fail first.
@@ -797,19 +818,22 @@ export function OrchestratorChat() {
         : compaction
     )
     // The thread's model, else the one the composer starts on; with neither yet, the shown model stays.
-    const selectedModel = composerSelection({ threadModel: selectionThreadModel, profileDefault: settings.provider, providers: providersRef.current })
-    setProfileDefault((current) =>
-      current?.llmProvider === settings.provider.llmProvider &&
-      current.instanceId === settings.provider.instanceId &&
-      current.model === settings.provider.model
-        ? current
-        : { ...settings.provider }
-    )
-    // The picker shows the other computer's model while a chat that runs there is open.
-    if (!remoteNodeRef.current && selectedModel) {
-      setSelectedLlmProvider(selectedModel.llmProvider)
-      setSelectedInstanceId(selectedModel.instanceId)
-      setSelectedModelId(pickerModelId(selectedModel))
+    // Only the newest read (and no pick since it began) sets the model shown: settings read before a pick are older than it.
+    if (selectionRequest === selectionRequestRef.current) {
+      const selectedModel = composerSelection({ threadModel: selectionThreadModel, profileDefault: settings.provider, providers: providersRef.current })
+      setProfileDefault((current) =>
+        current?.llmProvider === settings.provider.llmProvider &&
+        current.instanceId === settings.provider.instanceId &&
+        current.model === settings.provider.model
+          ? current
+          : { ...settings.provider }
+      )
+      // The picker shows the other computer's model while a chat that runs there is open.
+      if (!remoteNodeRef.current && selectedModel) {
+        setSelectedLlmProvider(selectedModel.llmProvider)
+        setSelectedInstanceId(selectedModel.instanceId)
+        setSelectedModelId(pickerModelId(selectedModel))
+      }
     }
 
     const skillsSnapshot = await skillsRequest
@@ -1072,11 +1096,12 @@ export function OrchestratorChat() {
       }
       const promptThread = optimisticMessageId ? targetThreadId : null
       if (promptThread) notePromptOnTheWay(promptThread, 1)
-      if (steer) setSteersOnTheWay((current) => new Set(current).add(requestId))
       // A steer queued first shows in the reply from now on, not only once it is sent now. One painted since the click
-      // stays the same row; it goes if the message starts a turn of its own instead.
+      // stays the same row; it goes if the message starts a turn of its own instead. While the transcript's last turn
+      // is not the one it joins (a turn is still being set up), it shows in the queue, first, until a turn takes it.
       const shownRow = typeof steer === 'object' ? steer.row : null
-      const paintsSteer = Boolean(steer) && queuesNow && targetThreadId === queue.threadId
+      const paintsSteer = Boolean(steer) && queuesNow && targetThreadId === queue.threadId && replyOpenRef.current
+      if (paintsSteer) setSteersOnTheWay((current) => new Set(current).add(requestId))
       if (shownRow && !paintsSteer) queue.endComposerSteer(shownRow, false)
       const steerRow = paintsSteer ? shownRow ?? queue.beginComposerSteer(request.content, images) : null
       if (optimisticMessageId) {
@@ -1088,8 +1113,8 @@ export function OrchestratorChat() {
           images
         })
       }
-      // A steered message is not painted in the queue: it is on its way into the reply.
-      const optimisticQueueId = queuesNow && targetThreadId && !steer ? `optimistic:${crypto.randomUUID()}` : null
+      // A steered message painted in the reply is not painted in the queue too.
+      const optimisticQueueId = queuesNow && targetThreadId && !paintsSteer ? `optimistic:${crypto.randomUUID()}` : null
       if (optimisticQueueId && targetThreadId) {
         setOptimisticQueueItems((current) => [...current, {
           id: optimisticQueueId,
@@ -1253,9 +1278,12 @@ export function OrchestratorChat() {
   // The thread's subagents, and whether any still runs: the chat then shows "Waiting for subagents…".
   const threadSubagents = useSubagents(newChat ? null : activeThreadId)
   const subagentsRunning = threadSubagents.some(isRunningSubagent)
+  // What else it runs in the background (monitors, commands, holds, the provider's own work).
+  const backgroundWork = useBackgroundWork(newChat ? null : activeThreadId)
   const handleStop = useCallback(async () => {
-    // A thread whose own turn has ended but that waits for its subagents: Stop stops them, as Lineage's Stop all.
-    if (activeThreadId && !turnStoppable && !turnActive && !loading && subagentsRunning) {
+    // A thread whose own turn has ended but that waits for its subagents only: Stop stops them, as Lineage's Stop all.
+    // With background work as well, the thread's Stop ends all of it, its subagents included.
+    if (activeThreadId && !turnStoppable && !turnActive && !loading && subagentsRunning && !backgroundWork) {
       await stopAllSubagents({ stopAll: window.mousse.subagents.stopAll, abort: window.mousse.orchestrator.abort }, activeThreadId, threadSubagents)
       return
     }
@@ -1263,7 +1291,7 @@ export function OrchestratorChat() {
     if (activeThreadId) await stopThreadNow(activeThreadId)
     else await window.mousse.orchestrator.abort()
     await refreshTurnActive()
-  }, [activeThreadId, refreshTurnActive, turnStoppable, turnActive, loading, subagentsRunning, threadSubagents])
+  }, [activeThreadId, refreshTurnActive, turnStoppable, turnActive, loading, subagentsRunning, threadSubagents, backgroundWork])
   // Stop run is bound to a key; the command's own rule limits it to a thread with a run going.
   useCommand('run.stop', () => void handleStop())
 
@@ -1780,6 +1808,8 @@ export function OrchestratorChat() {
 
   const handleModelSelect = async (providerId: string, modelId: string) => {
     setModelMenuOpen(false)
+    // A read of the shown model that began before this pick must not put the previous model back.
+    selectionRequestRef.current += 1
     const instance = selectionFor(providerId)
     setSelectedLlmProvider(instance.llmProvider)
     setSelectedInstanceId(instance.instanceId)
@@ -1803,18 +1833,48 @@ export function OrchestratorChat() {
       return
     }
 
-    // Optimistic local meta so the composer badge updates before IPC returns.
-    const current = useAppStore.getState().threads.find((t) => t.id === activeThreadId)
+    // Optimistic local meta so the composer badge updates before IPC returns. It is held until the newest pick is
+    // saved: a thread list that arrives meanwhile keeps it (`setThreads`), and picks are saved in the order made.
+    const threadId = activeThreadId
+    const override = { ...instance, ...pick }
+    const current = useAppStore.getState().threads.find((t) => t.id === threadId)
+    const ticket = current ? holdModelPick(current, override) : 0
     if (current) {
       useAppStore.getState().upsertThread({
         ...current,
-        modelOverride: { ...instance, ...pick },
+        modelOverride: override,
         updatedAt: new Date().toISOString()
       })
     }
 
-    const updated = await window.mousse.threads.setModel(activeThreadId, { ...instance, ...pick })
-    if (updated) useAppStore.getState().upsertThread(updated)
+    const save = async (): Promise<void> => {
+      // Picked again before this one's turn: only the newest pick is sent.
+      if (current && isSupersededModelPick(threadId, ticket)) return
+      try {
+        const updated = await window.mousse.threads.setModel(threadId, override)
+        if (!current) {
+          if (updated) useAppStore.getState().upsertThread(updated)
+          return
+        }
+        modelPickSaved(threadId, updated ?? undefined)
+        if (settleModelPick(threadId, ticket).latest && updated) useAppStore.getState().upsertThread(updated)
+      } catch (error) {
+        if (!current) {
+          setSendError(sendErrorLine(error))
+          return
+        }
+        // The daemon refused: show the model the thread really has, and why. A newer pick decides its own outcome.
+        const { latest, baseline } = settleModelPick(threadId, ticket)
+        if (!latest) return
+        // Only the model goes back: the rest of the row may have changed since the pick (title, status).
+        const row = useAppStore.getState().threads.find((t) => t.id === threadId)
+        if (baseline && row) useAppStore.getState().upsertThread({ ...row, modelOverride: baseline.modelOverride })
+        setSendError(sendErrorLine(error))
+      }
+    }
+    const saved = modelSaveRef.current.then(save)
+    modelSaveRef.current = saved
+    await saved
   }
 
   // The projects the toolbar offers: this computer's, or the picked computer's, which it lists with its own.
@@ -2069,6 +2129,7 @@ export function OrchestratorChat() {
               onAddReference={addResolvedReference}
               onRemoveReference={(id) => removeComposerReference(activeThreadId, id)}
               onReferenceError={setSendError}
+              pastedThreadRefusal={pastedThreadRefusal}
               enabledSkills={enabledSkills}
               run={{
                 providers,
@@ -2111,6 +2172,9 @@ export function OrchestratorChat() {
                 <RemoteSubagentNotice runsOn={activeThread?.runsOn} />
                 <NativeHelperNotice thread={activeThread} />
                 <SubagentComposerBanner threadId={activeThreadId} />
+                {!newChat && activeThreadId && (
+                  <BackgroundWorkRow key={activeThreadId} threadId={activeThreadId} subagents={threadSubagents} work={backgroundWork} onStopAll={() => void handleStop()} />
+                )}
               </>}
               searchMentions={searchMentions}
               mentionScope={mentionScope}

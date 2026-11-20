@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 /**
- * A copied thread reference pasted into a thread's composer: it becomes a thread pill, and the message sent carries a
- * pointer to the thread (its id, link and how to read it), never its transcript. A private thread can't be pointed at
- * from a shared one. The real chat and composer; the bridge is a stub.
+ * A copied thread reference pasted into a thread's composer goes in as text, in the line being typed, and the message
+ * sent carries the link where it was written, with no references block; the sent bubble draws it as the thread's chip
+ * in place. A private thread can't be pointed at from a shared one. A sidebar thread dropped on the composer is still a
+ * pill, sent as a pointer to the thread, never its transcript. The real chat, composer and bubble; the bridge is a stub.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { THREAD_REFERENCE_NOTE, extractChatReferences } from '../../src/shared/chatReferences'
+import type { UIMessage } from 'ai'
+import { MOUSSE_REFERENCE_MIME, THREAD_REFERENCE_NOTE, extractChatReferences } from '../../src/shared/chatReferences'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -116,48 +118,68 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+/** A thread from the sidebar dropped on the composer. */
+async function drop(threadId: string, title: string): Promise<void> {
+  const event = new Event('drop', { bubbles: true, cancelable: true })
+  const data = JSON.stringify({ id: `thread:${threadId}`, kind: 'thread', title, threadId })
+  Object.defineProperty(event, 'dataTransfer', { value: { types: [MOUSSE_REFERENCE_MIME], files: [], getData: (type: string) => (type === MOUSSE_REFERENCE_MIME ? data : '') } })
+  await act(async () => { box().dispatchEvent(event) })
+  await settle()
+}
+
 describe('a thread reference pasted in a thread\'s composer', () => {
-  it('becomes a pill, and the message sent points at the thread without its content', async () => {
+  it('goes in as text where the caret is, and is sent in the line, with no references block', async () => {
     await mount()
-    expect(await paste('mousse://thread/thread-b')).toBe(true)
-    expect(box().value).toBe('')
-    expect(pills()).toEqual(['Design notes'])
+    await type('Pick up where ')
+    // Not taken by the composer: the text box inserts it at the caret, as any paste.
+    expect(await paste('mousse://thread/thread-b')).toBe(false)
+    expect(pills()).toEqual([])
 
-    await type('Pick up where this left off')
+    await type('Pick up where mousse://thread/thread-b left off')
     const content = await send()
-    expect(content).toContain('Pick up where this left off')
-    expect(content).toContain('Thread ID: thread-b')
-    expect(content).toContain('Link: mousse://thread/thread-b')
-    expect(content).toContain(THREAD_REFERENCE_NOTE)
-    expect(content).not.toMatch(/meta\.json|Path:/)
-    // The sent bubble shows the same pill again.
-    expect(extractChatReferences(content)).toMatchObject({ text: 'Pick up where this left off', references: [{ kind: 'thread', threadId: 'thread-b', title: 'Design notes' }] })
-    expect(pills()).toEqual([])
-  })
-
-  it('a link amid other words stays text', async () => {
-    await mount()
-    expect(await paste('see mousse://thread/thread-b for context')).toBe(false)
-    expect(pills()).toEqual([])
-  })
-
-  it('a thread of another computer becomes a pill without asking this daemon', async () => {
-    await mount()
-    expect(await paste('mousse://thread/nod_0123456789abcdefghjkmnpqrs:thread-z')).toBe(true)
-    expect(host.querySelectorAll('.composer-reference-pill')).toHaveLength(1)
+    expect(content).toBe('Pick up where mousse://thread/thread-b left off')
     expect(resolve).not.toHaveBeenCalled()
   })
 
-  it('a private thread is refused from a shared thread, with the reason', async () => {
+  it('a private thread is refused from a shared thread, with the reason, alone or amid other words', async () => {
     await mount()
-    await paste('mousse://thread/thread-p')
-    expect(pills()).toEqual([])
+    await type('see ')
+    expect(await paste('mousse://thread/thread-p')).toBe(true)
     expect(host.textContent).toContain('“Secret plans” is private')
+    expect(await paste('notes in mousse://thread/thread-p, and mousse://thread/thread-b')).toBe(true)
+    expect(box().value).toBe('see ')
   })
 
   it('a private thread may point at another private thread', async () => {
     await mount('thread-p')
-    await paste('mousse://thread/thread-b')
+    expect(await paste('mousse://thread/thread-p')).toBe(false)
+    expect(host.textContent).not.toContain('is private')
+  })
+
+  it('a dropped sidebar thread is a pill, and the message sent points at the thread without its content', async () => {
+    await mount()
+    await drop('thread-b', 'Design notes')
     expect(pills()).toEqual(['Design notes'])
+
+    await type('Pick up where this left off')
+    const content = await send()
+    expect(content).toContain('Thread ID: thread-b')
+    expect(content).toContain('Link: mousse://thread/thread-b')
+    expect(content).toContain(THREAD_REFERENCE_NOTE)
+    expect(content).not.toMatch(/meta\.json|Path:/)
+    expect(extractChatReferences(content)).toMatchObject({ text: 'Pick up where this left off', references: [{ kind: 'thread', threadId: 'thread-b', title: 'Design notes' }] })
+    expect(pills()).toEqual([])
+  })
+})
+
+describe('a sent message with a thread link', () => {
+  it('shows the thread\'s chip in place, in the flow of the text; a link in inline code stays text', async () => {
+    await mount()
+    const { UserMessage } = await import('../../src/renderer/chat/components/agent-elements/user-message')
+    const text = 'Pick up where mousse://thread/thread-b left off, not `mousse://thread/thread-a`'
+    await act(async () => root.render(createElement(UserMessage, { message: { id: 'm1', role: 'user', parts: [{ type: 'text', text }] } as UIMessage })))
+    const prompt = host.querySelector('.chat-user-text')!
+    expect([...prompt.childNodes].map((node) => (node as Element).classList?.contains('thread-chip') ? `[${node.textContent}]` : node.textContent))
+      .toEqual(['Pick up where ', '[Design notes]', ' left off, not `mousse://thread/thread-a`'])
   })
 })

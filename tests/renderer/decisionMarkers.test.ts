@@ -2,8 +2,8 @@
 /**
  * Decisions that are reached another way than their first prompt still pause a theme (#1142): the host key every SSH
  * dialog confirms (adding a device, renaming an address, approving a route), and an editor request answered in
- * Settings → Devices after its dialog was dismissed, and the composer's permission menu, whose Full access row a theme
- * could otherwise show as "Ask before acting". A plain question from the agent is not a decision: the theme stays on
+ * Settings → Devices after its dialog was dismissed. The composer's permission menu, whose Full access row a theme's CSS
+ * could otherwise show as "Ask before acting", turns the theme's CSS off and keeps its colors. A plain question from the agent is not a decision: the theme stays on
  * while it shows; an approval in the same dialog is. The pause itself is tests/renderer/theme-css-electron.test.ts.
  */
 import { createElement } from 'react'
@@ -33,11 +33,12 @@ describe('decision markers on shared and left-behind prompts', () => {
     expect(marked(renderToStaticMarkup(createElement(DeviceAccessView, props)))).toBe(false)
   })
 
-  it('the composer\'s permission menu, Full access row included, is a decision', () => {
+  it('the composer\'s permission menu, Full access row included, is guarded: theme CSS off, colors kept', () => {
     const control = { mode: 'ask' as const, agent: 'Claude Code', onSelect: () => {} }
     const html = renderToStaticMarkup(createElement(PermissionModeSection, { control, choice: permissionChoice(control), onPicked: () => {} }))
     expect(html).toContain('aria-label="Full access.')
-    expect(marked(html)).toBe(true)
+    expect(html).toContain('data-mousse-guarded=""')
+    expect(marked(html)).toBe(false)
   })
 
   it.each([

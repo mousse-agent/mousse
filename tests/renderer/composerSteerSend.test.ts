@@ -218,6 +218,9 @@ const steeredShown = () =>
 describe('a steer on its way into the reply', () => {
   it('shows in the reply from the click, before the service answers, and once when its copy arrives', async () => {
     orchestrator.isTurnActive = vi.fn(async () => true)
+    // The thread's turn runs: the transcript's last turn is the one the steer joins.
+    const { useAppStore: store } = await import('../../src/renderer/stores/appStore')
+    store.setState({ turnStates: { 'thread-a': { phase: 'thinking', turnId: 'run-1' } } as never })
     let answer!: (value: boolean) => void
     orchestrator.steer = vi.fn(() => new Promise<boolean>((resolve) => { answer = resolve }))
     await mount()

@@ -78,6 +78,11 @@ export function bridgeProtocolEvent(
       if (Array.isArray(touches)) broadcast('threads:touched', touches)
       return true
     }
+    case 'thread.backgroundWork': {
+      // The whole picture of what the thread runs in the background (the composer's status row).
+      if (threadId != null && event.data && typeof event.data === 'object') broadcast('threads:backgroundWork', event.data)
+      return true
+    }
     case 'subagents.updated': {
       const parentThreadId = (event.data as { parentThreadId?: string } | null)?.parentThreadId
       if (parentThreadId) broadcast('subagents:updated', { parentThreadId })

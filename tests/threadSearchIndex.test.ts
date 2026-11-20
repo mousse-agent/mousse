@@ -108,6 +108,18 @@ describe('thread search index', () => {
     expect(messageIds(await store.searchThreadsAsync('needle', 2))).toEqual(['dup', 'other'])
   })
 
+  it('names each matching thread once with perThread, so a thread with many matches does not crowd out the rest', async () => {
+    const store = open(home())
+    const busy = thread(store, 'A busy', Array.from({ length: 30 }, (_, i) => message(`b${i}`, `needle ${i}`)))
+    const quiet = thread(store, 'B quiet', [message('q1', 'no match'), message('q2', 'one needle')])
+    // Without it, the first thread's matches fill the limit.
+    expect(new Set((await store.searchThreadsAsync('needle', 2)).map((hit) => hit.threadId))).toEqual(new Set([busy]))
+    for (const query of ['needle', 'ne']) {
+      const hits = (await store.searchThreadsAsync(query, 2, { perThread: true })).filter((hit) => hit.matchType === 'message')
+      expect(hits.map((hit) => [hit.threadId, hit.messageId])).toEqual([[busy, 'b0'], [quiet, 'q2']])
+    }
+  })
+
   it("returns a thread's matches in transcript order, as the transcript search does", async () => {
     const store = open(home())
     const id = thread(store, 'Order', [message('first', 'match one'), message('second', 'match two')])

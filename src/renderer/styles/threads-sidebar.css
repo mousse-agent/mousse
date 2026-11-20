@@ -12,8 +12,8 @@
   max-width: 480px;
   min-height: 0;
   --threads-sidebar-row-height: 32px;
-  /* The extra height of a row that shows its latest reply under the title. */
-  --threads-sidebar-preview-line: 16px;
+  /* The extra height of a Projects tree thread row for its branch line under the title. */
+  --threads-sidebar-sub-line: 14px;
   /* Extra space between the last pinned thread and the first regular thread. */
   --threads-sidebar-pinned-gap: 8px;
   container-type: inline-size;
@@ -386,27 +386,63 @@
   height: var(--threads-sidebar-row-height);
 }
 
+/* A tree row has two lines: the title across the row's full width, and the thread's branch under it, compact. */
+.threads-sidebar-thread:not(.threads-sidebar-card) {
+  height: calc(var(--threads-sidebar-row-height) + var(--threads-sidebar-sub-line));
+}
+
 .threads-sidebar-thread-container {
   position: relative;
   /* The width the hover actions cover at the row's end: three 23px buttons and their inset. */
   --thread-actions-room: 76px;
 }
 
-/* A row keeps its hover actions' room at rest too, so a long title always ends in an ellipsis before them and
-   nothing moves when the pointer arrives. At rest the room holds the status, computer and worktree marks; the
-   actions take their place on hover. A card keeps its actions over the age line, clear of the title. */
+/* A tree row is a two-line grid: the title, then its status or age; under them the branch line across the row's full
+   width. The title's wrapper lends its two lines to the grid. At rest the title runs up to the status; on hover the
+   actions take the status's place and its column widens to their width, so the title ends before them. A card keeps
+   its actions over the age line, clear of the title. */
 .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) {
   position: relative;
-  padding-right: var(--thread-actions-room);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: 18px 14px;
+  align-content: center;
+  gap: 1px 6px;
+  padding-right: var(--ui-row-x, 9px);
+}
+
+.threads-sidebar-thread:not(.threads-sidebar-card) > .threads-sidebar-thread-text {
+  display: contents;
+}
+
+.threads-sidebar-thread:not(.threads-sidebar-card) .threads-sidebar-thread-line {
+  grid-area: 1 / 1;
+}
+
+.threads-sidebar-thread:not(.threads-sidebar-card) .threads-sidebar-thread-sub {
+  grid-area: 2 / 1 / 3 / -1;
 }
 
 .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) > .threads-sidebar-thread-trailing {
-  position: absolute;
-  top: 50%;
-  right: var(--ui-row-x, 9px);
+  grid-area: 1 / 2;
+  justify-content: flex-end;
   margin-left: 0;
-  transform: translateY(-50%);
   transition: opacity 0.15s;
+}
+
+.threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions):is(:hover, :has(:focus-visible)) > .threads-sidebar-thread:not(.threads-sidebar-card) > .threads-sidebar-thread-trailing,
+.threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions [aria-expanded='true']) > .threads-sidebar-thread:not(.threads-sidebar-card) > .threads-sidebar-thread-trailing {
+  min-width: calc(var(--thread-actions-room) - var(--ui-row-x, 9px) - 6px);
+}
+
+.threads-sidebar-thread-trailing :is(.threads-sidebar-card-status, .threads-sidebar-card-age) {
+  font-size: 11px;
+  line-height: 14px;
+}
+
+/* The actions sit on the title line: the middle of the row's upper half. */
+.threads-sidebar-thread-container:not(:has(> .threads-sidebar-card)) > .threads-sidebar-thread-actions {
+  top: calc(50% - 7.5px);
 }
 
 /* The marks give way to the hover actions. A row without actions (a chat not sent yet, a send the service has not
@@ -416,11 +452,6 @@
   opacity: 0;
 }
 
-.threads-sidebar-thread-container:not(:has(> .threads-sidebar-card)) > .threads-sidebar-thread-actions {
-  padding-left: 0;
-  background: none;
-}
-
 .threads-sidebar-thread-actions {
   position: absolute;
   top: 50%;
@@ -428,11 +459,9 @@
   display: inline-flex;
   align-items: center;
   gap: 1px;
-  padding-left: 10px;
   opacity: 0;
   pointer-events: none;
   transform: translateY(-50%);
-  background: linear-gradient(90deg, transparent, var(--surface-strong) 10px);
   transition: opacity 0.15s;
 }
 
@@ -472,13 +501,13 @@
 }
 
 .threads-sidebar-thread-list {
-  max-height: calc(var(--threads-sidebar-row-height) * 5 + var(--threads-sidebar-preview-line) * var(--project-preview-shown, 0) + var(--threads-sidebar-pinned-gap) * var(--project-pinned-gap-shown, 0));
+  max-height: calc((var(--threads-sidebar-row-height) + var(--threads-sidebar-sub-line)) * 5 + var(--threads-sidebar-pinned-gap) * var(--project-pinned-gap-shown, 0));
   overflow: hidden;
   transition: max-height calc(350ms * var(--ui-motion-scale)) cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .threads-sidebar-thread-list.expanded {
-  max-height: calc(var(--threads-sidebar-row-height) * var(--project-thread-count, 5) + var(--threads-sidebar-preview-line) * var(--project-preview-count, 0) + var(--threads-sidebar-pinned-gap) * var(--project-pinned-gap, 0));
+  max-height: calc((var(--threads-sidebar-row-height) + var(--threads-sidebar-sub-line)) * var(--project-thread-count, 5) + var(--threads-sidebar-pinned-gap) * var(--project-pinned-gap, 0));
 }
 
 .threads-sidebar-thread-root {
@@ -497,7 +526,7 @@
 
 .threads-sidebar-thread.threads-sidebar-card {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
   height: auto;
   min-height: 0;
@@ -550,30 +579,24 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   content: none;
 }
 
+/* The project's icon, bare, before its name on the card's first line. */
 .threads-sidebar-card-mark {
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  margin-top: 1px;
-  border-radius: 6px;
-  background: color-mix(in srgb, currentColor 16%, transparent);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: -0.04em;
-  line-height: 1;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
 }
 
 .threads-sidebar-card-mark-empty {
   color: var(--text-secondary);
-  background: transparent;
-  border: 1px dashed color-mix(in srgb, var(--text-secondary) 40%, transparent);
 }
 
 .threads-sidebar-card-body {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
   min-width: 0;
 }
 
@@ -586,6 +609,11 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   color: var(--text-secondary);
   font-size: 11px;
   line-height: 1.3;
+}
+
+/* The first line is a little taller than the text, so the project's icon fits. */
+.threads-sidebar-card-meta {
+  min-height: 18px;
 }
 
 .threads-sidebar-card-project {
@@ -717,10 +745,6 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 
 /* The hover actions are bare icons on the row: no strip behind them and no fill on the buttons, at rest or under the
    pointer. The icon brightens instead; keyboard focus keeps a thin ring. */
-.app .threads-sidebar .threads-sidebar-thread-container > .threads-sidebar-thread-actions {
-  background: none;
-}
-
 .app .threads-sidebar .threads-sidebar-thread-action,
 .app .threads-sidebar .threads-sidebar-thread-action:is(:hover, :focus-visible, [aria-expanded='true']) {
   background: transparent;
@@ -879,21 +903,6 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 /* A new chat not sent yet is listed by its draft, in italics. */
 .threads-sidebar-thread.unsent-chat .threads-sidebar-thread-name {
   font-style: italic;
-}
-
-.threads-sidebar-worktree-icon {
-  display: inline-flex;
-  flex-shrink: 0;
-  color: var(--text-secondary);
-  opacity: 0.85;
-}
-
-/* The computer a thread on another computer runs on. */
-.threads-sidebar-device-icon {
-  display: inline-flex;
-  flex-shrink: 0;
-  color: var(--text-secondary);
-  opacity: 0.85;
 }
 
 .threads-sidebar-card-device {
@@ -1172,16 +1181,16 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 .threads-sidebar-device-detail { font-size: 11px; }
 
-/* Too narrow for three whole labels (the default 260px included): the open tab keeps its word and a fixed
-   width, so switching tabs does not resize it; the other two show their icons, with their names in the tooltips.
-   A label is shown whole or not at all. */
-@container pill-tabs (max-width: 319px) {
+/* The two tabs (Threads, Chats) split the bar equally with both words down to 200px. Narrower, the open tab keeps
+   its word and a fixed width, so switching tabs does not resize it; the other shows its icon, with its name in the
+   tooltip. A label is shown whole or not at all. */
+@container pill-tabs (max-width: 199px) {
   .threads-sidebar-tab:not(.active) .threads-sidebar-tab-label { display: none; }
   .threads-sidebar-tab.active { flex: 0 0 auto; min-width: 88px; padding: 0 8px; }
 }
 
-/* Too narrow even for one word beside two icons: every tab is an icon. */
-@container pill-tabs (max-width: 239px) {
+/* Too narrow even for one word beside an icon: every tab is an icon. */
+@container pill-tabs (max-width: 149px) {
   .threads-sidebar-tab-label { display: none; }
   .threads-sidebar-tab.active { flex: 1 1 0; min-width: 0; padding: 0 4px; }
 }
@@ -1314,29 +1323,26 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 :is(
   html[data-acrylic='true'],
   html[data-wallpaper],
-  html[data-user-theme]:not([data-user-theme-paused])
+  html[data-user-theme]
 ) .threads-sidebar-scroll[data-more-below] {
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
   mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
 }
 
 :is(
-  html:not([data-acrylic='true']):not([data-wallpaper]):not([data-user-theme]),
-  html:not([data-acrylic='true']):not([data-wallpaper])[data-user-theme-paused]
+  html:not([data-acrylic='true']):not([data-wallpaper]):not([data-user-theme])
 ) .threads-sidebar {
   anchor-scope: --threads-list;
 }
 
 :is(
-  html:not([data-acrylic='true']):not([data-wallpaper]):not([data-user-theme]),
-  html:not([data-acrylic='true']):not([data-wallpaper])[data-user-theme-paused]
+  html:not([data-acrylic='true']):not([data-wallpaper]):not([data-user-theme])
 ) .threads-sidebar-scroll[data-more-below] {
   anchor-name: --threads-list;
 }
 
 :is(
-  html:not([data-acrylic='true']):not([data-wallpaper]):not([data-user-theme]),
-  html:not([data-acrylic='true']):not([data-wallpaper])[data-user-theme-paused]
+  html:not([data-acrylic='true']):not([data-wallpaper]):not([data-user-theme])
 ) .threads-sidebar:has(> .threads-sidebar-scroll[data-more-below])::after {
   content: '';
   position: absolute;
@@ -1489,7 +1495,8 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 /* Faded when the row turns or needs the person. */
-:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) > :not(.threads-sidebar-thread-trailing),
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) > :not(.threads-sidebar-thread-trailing, .threads-sidebar-thread-text),
+:where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) > .threads-sidebar-thread-text > *,
 :where(.threads-sidebar-tree[role='tree'], .threads-sidebar-feed-list) .threads-sidebar-thread-container > .threads-sidebar-thread > .threads-sidebar-thread-trailing > :not(.turning, .threads-sidebar-status-icon--question) {
   filter: var(--sidebar-turning-fade, var(--sidebar-needs-fade, none));
 }
@@ -1508,26 +1515,12 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   filter: var(--sidebar-needs-fade, none);
 }
 
-/* A thread's latest reply under its title, and its pull requests as a count (Settings > Appearance > Reply previews).
-   A row with a preview is one line taller; its title and count share the first line. */
-.threads-sidebar-thread.has-preview:not(.threads-sidebar-card) {
-  height: calc(var(--threads-sidebar-row-height) + var(--threads-sidebar-preview-line));
-}
-
-/* The marks and hover actions stay on the title line, so the preview runs the row's full width under them. */
-.threads-sidebar-thread-container > .threads-sidebar-thread.has-preview:not(.threads-sidebar-card) > .threads-sidebar-thread-trailing,
-.threads-sidebar-thread-container:has(> .threads-sidebar-thread.has-preview:not(.threads-sidebar-card)) > .threads-sidebar-thread-actions {
-  top: calc(var(--threads-sidebar-row-height) / 2);
-}
-
-.threads-sidebar-thread.has-preview:not(.threads-sidebar-card) .threads-sidebar-reply-preview {
-  margin-right: calc(var(--ui-row-x, 9px) - var(--thread-actions-room));
-}
-
+/* A tree row's two lines: the title with its marks and pull request count, then the branch. */
 .threads-sidebar-thread-text {
   display: flex;
   flex: 1;
   flex-direction: column;
+  gap: 1px;
   min-width: 0;
 }
 
@@ -1536,6 +1529,96 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   align-items: center;
   gap: 6px;
   min-width: 0;
+  line-height: 18px;
+}
+
+.threads-sidebar-thread-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 14px;
+}
+
+/* The branch (or what stands in for it) takes the lower line's spare width; the pull requests and the model's logo
+   end it. */
+.threads-sidebar-branch {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  opacity: 0.85;
+}
+
+.threads-sidebar-branch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The branch icon marks a thread on a worktree of its own. */
+.threads-sidebar-branch-icon {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.threads-sidebar-model-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+/* A thread's card beside the row the pointer rests on: the whole title, then its project, computer, branch and model. */
+.threads-sidebar-hover-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: max-content;
+  min-width: 200px;
+  max-width: min(320px, calc(100vw - 24px));
+  padding: 10px 12px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius, 10px);
+  background: var(--ui-raised, var(--floating-surface));
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
+  color: var(--text-primary);
+  font-size: 13px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.threads-sidebar-hover-card-title {
+  display: -webkit-box;
+  margin-bottom: 2px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.threads-sidebar-hover-card-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.threads-sidebar-hover-card-item > svg,
+.threads-sidebar-hover-card-item > [data-mousse='project-icon'] > svg {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.threads-sidebar-hover-card-note {
+  color: var(--text-secondary);
+  font-size: 11px;
 }
 
 .threads-sidebar-reply-preview {
@@ -1545,7 +1628,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 400;
-  line-height: var(--threads-sidebar-preview-line);
+  line-height: 16px;
   white-space: nowrap;
   text-overflow: ellipsis;
 }

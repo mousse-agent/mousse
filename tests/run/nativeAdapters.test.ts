@@ -1,5 +1,12 @@
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import type { Message } from '@earendil-works/pi-ai'
 import { describe, expect, it, vi } from 'vitest'
+import { AntigravityProviderService } from '../../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
+import { CursorAdapter, type CursorTurnClient } from '../../src/mms/harness/drivers/cursor/adapter'
+import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import type { ClaudeSubscriptionChatInput } from '../../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { antigravityAdapter } from '../../src/mms/harness/drivers/antigravity'
 import type { AcpTurnClient as AntigravityClient } from '../../src/mms/harness/drivers/acp/adapter'
@@ -48,6 +55,7 @@ function recordingSink(): TurnSink & { calls: Array<[string, unknown]> } {
     compaction: record('compaction'),
     retry: record('retry'),
     progress: record('progress'),
+    status: record('status'),
     usage: record('usage'),
     providerRef: record('providerRef'),
     steerAccepted: record('steerAccepted'),
@@ -410,6 +418,18 @@ describe('AntigravityAdapter', () => {
     expect(service.chat).not.toHaveBeenCalled()
   })
 
+  it('reports the history a failed or stopped turn left, so the next turn may resume the agent session', async () => {
+    const turn = { instanceId: 'antigravity', llmProvider: 'antigravity', model: 'm' }
+    const failing = { ...client(async () => { throw new Error('quota') }), commitInterrupted: vi.fn() }
+    await expect(antigravityAdapter(() => failing).startTurn(input(turn), recordingSink(), control(), host({ nativeHistoryNow: () => 'history up to the failed request' }))).rejects.toThrow('quota')
+    expect(failing.commitInterrupted).toHaveBeenCalledExactlyOnceWith('thread-1', 'history up to the failed request')
+    expect(failing.commitConversation).not.toHaveBeenCalled()
+    const stop = new AbortController()
+    const stopped = { ...client(async () => { stop.abort(); throw new Error('aborted') }), commitInterrupted: vi.fn() }
+    await expect(antigravityAdapter(() => stopped).startTurn(input({ ...turn, signal: stop.signal }), recordingSink(), control(), host({ nativeHistoryNow: () => 'history up to the stopped request' }))).rejects.toThrow('aborted')
+    expect(stopped.commitInterrupted).toHaveBeenCalledExactlyOnceWith('thread-1', 'history up to the stopped request')
+  })
+
   it('relays text and tools, commits the history and falls back to the selected model metadata', async () => {
     const service = client(async (chat) => {
       chat.onTool?.({ phase: 'start', callId: 'c', title: 'Antigravity subagent: Research', toolName: 'start_subagent' })
@@ -489,5 +509,78 @@ describe('AntigravityAdapter', () => {
       stop.abort()
       expect(completes(await toolEvents(stop.signal)).open).toEqual({ status: 'interrupted', interruptedBy: 'stop', summary: 'Stopped' })
     })
+  })
+})
+
+/**
+ * A turn is "Starting…" (`TurnState.step`) until its runtime reports something. Once the prompt reaches the agent, the
+ * runtime is up and the model is next: "Thinking…" (`status('waiting')`). Antigravity sends nothing until its reply,
+ * so without this the live row said "Starting…" all through a turn that was working.
+ */
+describe('an agent that got the prompt is no longer starting', () => {
+  it('ACP: the session says so while the agent works on the prompt, before any output', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-acp-started-'))
+    const workspace = join(home, 'workspace')
+    mkdirSync(workspace)
+    const questions = new UserQuestionService()
+    const sink = recordingSink()
+    let seenWhileWorking: Array<[string, unknown]> = []
+    const connect = vi.fn(() => {
+      const abort = new AbortController()
+      return {
+        child: { exitCode: 0, signalCode: null, kill: () => true },
+        connection: {
+          signal: abort.signal,
+          close: () => abort.abort(new Error('closed')),
+          agent: {
+            request: async (method: string) => {
+              if (method === 'initialize') return { protocolVersion: PROTOCOL_VERSION, agentCapabilities: {} }
+              if (method === 'session/new')
+                return { sessionId: 'acp-session', configOptions: [{ id: 'model', name: 'Model', type: 'select', currentValue: 'm', options: [{ value: 'm', name: 'M' }] }] }
+              if (method === 'session/prompt') {
+                // The agent works and reports nothing (no update) until its turn ends.
+                seenWhileWorking = [...sink.calls]
+                return { stopReason: 'end_turn' }
+              }
+              return {}
+            },
+            notify: async () => undefined
+          }
+        }
+      }
+    })
+    const service = new AntigravityProviderService(home, home, questions, undefined, { connect: connect as never })
+    Object.assign(service as unknown as Record<string, unknown>, { configured: () => true })
+    try {
+      await antigravityAdapter(() => service).startTurn(
+        input({ instanceId: 'antigravity', llmProvider: 'antigravity', model: 'm', cwd: workspace }),
+        sink,
+        control(),
+        host()
+      )
+      expect(seenWhileWorking.filter(([name]) => name === 'status')).toEqual([['status', 'waiting']])
+      expect(seenWhileWorking.some(([name]) => name === 'text' || name === 'progress')).toBe(false)
+    } finally {
+      service.stop()
+      questions.shutdown()
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('Cursor: each run sent says so', async () => {
+    const sink = recordingSink()
+    let seenWhileWorking: Array<[string, unknown]> = []
+    const client: CursorTurnClient = {
+      chat: async (chat) => {
+        chat.onProviderTurn?.()
+        seenWhileWorking = [...sink.calls]
+        return { text: '', interrupted: false }
+      },
+      commitConversation: () => {},
+      configured: () => true,
+      interrupt: async () => 'not_active'
+    }
+    await new CursorAdapter(() => client).startTurn(input({ instanceId: 'cursor', llmProvider: 'cursor', model: 'm' }), sink, control(), host())
+    expect(seenWhileWorking.filter(([name]) => name === 'status')).toEqual([['status', 'waiting']])
   })
 })

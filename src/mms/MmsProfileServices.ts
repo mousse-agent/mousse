@@ -102,6 +102,9 @@ import { TaskQueue } from './tasks/TaskQueue'
 import { WorktreeManager } from './worktree/WorktreeManager'
 import { PtyManager } from './terminals/PtyManager'
 import { RunningRegistry } from './running/RunningRegistry'
+import { ThreadMonitors, withShellPath } from './monitors/ThreadMonitors'
+import { sharedShellPath } from './harness/shellPath'
+import { postNote } from './run/mcp/appTools/threadNotes'
 import { McpRegistry } from './integrations/mcp/McpRegistry'
 import { McpManager } from './integrations/mcp/McpManager'
 import { SkillsRegistry } from './integrations/skills/SkillsRegistry'
@@ -149,7 +152,7 @@ import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier, type OwnedWorkEntry } from './execution/OwnedWorkBarrier'
 import { threadScope, type WorkScope } from './execution/workScope'
-import { canonicalPathSync, pathsOverlap } from './lifecycle/canonicalPath'
+import { canonicalPathSync, pathsOverlap, pathWithin } from './lifecycle/canonicalPath'
 import { readThreadWorkspaceRecord } from './workspace/ThreadWorkspaceManager'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
 import { buildResourceInventory } from './lifecycle/ResourceInventory'
@@ -159,7 +162,7 @@ import { clearCleanupMarker, StorageCleanupService } from './lifecycle/StorageCl
 import { StorageUsageService } from './lifecycle/StorageUsageService'
 import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
 import { StorageSweepClock } from './lifecycle/sweepClock'
-import { threadHasPendingWork } from './lifecycle/threadIdle'
+import { threadDescendants, threadHasPendingWork } from './lifecycle/threadIdle'
 import { listPendingQueue } from './queue/ThreadMessageQueue'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
@@ -1012,10 +1015,28 @@ export class MmsProfileServices {
       const row = botStore.registry(botId)
       return Boolean(row && !row.deletedAt && !row.pausedReason && botStore.activeGrant(botId)?.manifest.appTools.includes(BOT_COMPUTER_PERMISSION))
     } : null)
+    // What threads' agents leave running in the background (#1605). Its notices go to the thread's inbox, the path
+    // agents' notes take; a restart tells each thread whose monitors it ended, once the daemon is ready.
+    const runEngine = this.runEngine
+    // Scripts find what the agent's own commands find: the login shell's PATH, asked once per daemon and never waited for
+    // (a script started before the answer runs with the inherited PATH).
+    let shellPath: readonly string[] = []
+    void sharedShellPath().then((result) => { shellPath = result.entries }, () => undefined)
+    const monitors = new ThreadMonitors({
+      env: () => withShellPath(process.env, shellPath),
+      post: (threadId, payload, key) => { postNote(runEngine, key, payload, threadId) },
+      working: (threadId, active) => this.threadRuntimes?.setPendingMonitors(threadId, active),
+      changed: (threadId) => this.orchestrator.backgroundWorkChanged(threadId),
+      recordFile: join(this.homeDir, 'monitors.json'),
+      threadExists: (threadId) => Boolean(this.threads.getThread(threadId))
+    })
+    this.monitors = monitors
+    this.orchestrator.setMonitors(monitors)
     this.orchestrator.setRunning(new RunningRegistry({
       terminals: () => ptys.runningTerminals(),
       terminalOutput: (ptyId) => ptys.getScrollback(ptyId).slice(-8_000),
       watchers: () => personalBots?.runningWatchers() ?? [],
+      monitors: () => monitors.processes(),
       thread: (threadId) => orchestrator.runningSources().thread(threadId),
       botName: (botId) => personalBots?.botName(botId)
     }))
@@ -1634,6 +1655,7 @@ export class MmsProfileServices {
       policy: this.storagePolicy,
       clock: storageClock,
       idle: (threadId) => this.threadPendingWork(threadId),
+      otherWork: (path, exceptThreadId) => this.otherWorkIn(path, exceptThreadId),
       installationHome: shared.installationHome,
       codeHost: this.gitService.codeHost,
       browserCaptures: { workerArtifactRoot: this.platform.workerArtifactRoot, sessions: (staleBefore) => this.platform.browserSessionStates(staleBefore) },
@@ -1705,6 +1727,22 @@ export class MmsProfileServices {
       },
       threadId
     )
+  }
+
+  /**
+   * Why others use `path`, a worktree storage cleanup would remove, or undefined. A project whose folder is in it keeps
+   * it even with nothing running: removing it takes that project's folder away. A running turn or an open terminal of a
+   * thread other than `exceptThreadId` and its subagents keeps it while it works there. Reads only what is in memory.
+   */
+  private otherWorkIn(path: string, exceptThreadId?: string): string | undefined {
+    const root = canonicalPathSync(path)
+    const inside = (folder: string | undefined) => Boolean(folder) && pathWithin(root, canonicalPathSync(folder!))
+    if (this.projects.listProjects().some((project) => inside(project.path))) return "A project's folder is in this worktree"
+    let except: Set<string> | undefined
+    const other = (threadId: string) => !(except ??= new Set(exceptThreadId ? [exceptThreadId, ...threadDescendants(this.threads.listAllThreads(), exceptThreadId)] : [])).has(threadId)
+    if (this.orchestrator.liveWorkspaceClaims().some((claim) => inside(claim.path) && other(claim.threadId))) return 'Another thread is working in this worktree'
+    if (this.ptyManager.runningTerminals().some((terminal) => inside(terminal.cwd) && other(terminal.threadId) && this.ptyManager.isAlive(terminal.ptyId))) return 'A terminal is open in this worktree'
+    return undefined
   }
 
   /** The profile's execution a delete looks at: turns and sends, agent and chat runs, automations, MCP work. */
@@ -2109,6 +2147,8 @@ export class MmsProfileServices {
   /** Bug reports: filing, the reports filed from here, and agents' drafts waiting for the person. */
   bugReports!: BugReportService
   private secretSweepTimer: ReturnType<typeof setInterval> | null = null
+  /** Threads' monitors, background commands and `keep_working` holds. */
+  readonly monitors: ThreadMonitors
   automationDrafts!: AutomationDrafts
 
   /** The project the composer picked for the manager's next turns (see `automationManagerWorkspace`). */
@@ -2391,6 +2431,7 @@ export class MmsProfileServices {
     this.secretSweepTimer = null
     this.secretRequests?.dispose()
     this.bugReports?.dispose()
+    this.monitors.close()
     this.webhooksClosed = true
     if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
     this.webhookRetryTimer = null
@@ -2679,6 +2720,10 @@ export class MmsProfileServices {
     // Wake rows of a kind no longer written (an earlier pull request watch's) are settled before any worker can run one.
     this.runEngine.inbox.withdrawRetiredRows()
     this.startRunEngineWorkers()
+    // Monitors the last run left ended with it: their threads are told, in the background.
+    void this.monitors.recoverOnBoot().catch((error: unknown) => {
+      console.warn('monitors left by the last run could not be reported', { error: error instanceof Error ? error.message : String(error) })
+    })
 
     if (this.config.getScheduledSection().enabled) {
       // Bot schedules are jobs in the same scheduler: with it off, nothing starts on its own.

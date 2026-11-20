@@ -71,7 +71,7 @@ export interface AppearanceSettings {
   codeFont: FontChoice
   /** How cards in the Threads tab show their project's color. */
   threadProjectColors: ThreadProjectColorStyle
-  /** Thread rows and the Bots list show the latest reply under each title, on one muted line. */
+  /** Thread link cards and the Bots list show the latest reply under each title, on one muted line. */
   replyPreviews: boolean
   /** The title bar shows back and forward and the open thread's path (project / thread / subagent). */
   threadPathInTitleBar: boolean

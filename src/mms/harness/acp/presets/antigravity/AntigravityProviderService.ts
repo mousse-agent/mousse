@@ -146,6 +146,7 @@ export class AntigravityProviderService {
     }
     this.acp = new AcpSessions({
       label: ANTIGRAVITY_LABEL,
+      usageLimitProvider: ANTIGRAVITY_PROVIDER_ID,
       defaultInstanceId: ANTIGRAVITY_INSTANCE_ID,
       questions,
       quirks: ANTIGRAVITY_QUIRKS,
@@ -455,6 +456,11 @@ export class AntigravityProviderService {
   /** Record only the canonical history that the owning turn durably committed. */
   commitConversation(threadId: string, history: string): void {
     this.acp.commitConversation(threadId, history)
+  }
+
+  /** The history a turn that did not finish left: its session may be resumed from it (`AcpSessions.commitInterrupted`). */
+  commitInterrupted(threadId: string, history: string): void {
+    this.acp.commitInterrupted(threadId, history)
   }
 
   /** A turn on the thread's agent session (see `AcpSessions.chat`). */

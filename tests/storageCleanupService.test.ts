@@ -46,6 +46,7 @@ const copyBase = committedGitTemplate((repo) => {
 interface FixtureOptions {
   installationHome?: string
   idle?: (taskId: string) => string | undefined
+  otherWork?: (path: string, exceptThreadId?: string) => string | undefined
   codeHost?: { cachedDefaultBranch(cwd: string): string | undefined }
   thread?: Record<string, unknown>
   measure?: typeof measureTree
@@ -76,7 +77,7 @@ function fixture(options: FixtureOptions = {}) {
   const thread = { id: 'task', name: 'Task one', projectId: 'project-1', createdAt: OLD.toISOString(), ...options.thread }
   const service = new StorageCleanupService({
     store, threads: { getThread: (id) => id === 'task' ? thread as never : undefined }, purge: coordinator.cleanup, policy, clock,
-    idle: options.idle ?? (() => undefined), installationHome: options.installationHome ?? home, codeHost: options.codeHost, now, measure: options.measure, probeRemoval: options.probeRemoval
+    idle: options.idle ?? (() => undefined), otherWork: options.otherWork, installationHome: options.installationHome ?? home, codeHost: options.codeHost, now, measure: options.measure, probeRemoval: options.probeRemoval
   })
   const f = { root, home, location, repo, repositoryId, worktree, branch, sha, store, coordinator, clock, clockState, policy, service, thread, now }
   age(f)
@@ -549,6 +550,67 @@ describe('leases and re-checks', () => {
     vi.spyOn(WorktreeRetirementService.prototype, 'retire').mockImplementation(() => { throw new Error('Workspace content changed after retirement preview') })
     expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'Workspace content changed after retirement preview' })
     expect(existsSync(cleanupMarkerPath(f.store, 'task'))).toBe(false); expect(isExecutionLeaseHeld(f.location)).toBe(false)
+  }, 60_000)
+})
+
+describe('another thread working in the worktree', () => {
+  const OTHER = 'Another thread is working in this worktree'
+  /**
+   * `otherWork` is asked when the worktree is looked at (1), again under the leases (2) and right before the move (3).
+   * Each row has the other thread start working there at one of those points; work that starts at any of them keeps it.
+   * The last row is the control: with no one else in it, the same worktree is removed.
+   */
+  const rows: Array<{ name: string; from: number; kept: boolean }> = [
+    { name: 'already working when it is looked at', from: 1, kept: true },
+    { name: 'starts while cleanup takes the leases', from: 2, kept: true },
+    { name: 'starts while the checkout is prepared to move', from: 3, kept: true },
+    { name: 'nobody else works in it', from: Infinity, kept: false }
+  ]
+  const othersFrom = (from: number) => {
+    const calls: Array<[string, string | undefined]> = []
+    return { calls, otherWork: (path: string, except?: string) => { calls.push([path, except]); return calls.length >= from ? OTHER : undefined } }
+  }
+
+  it.each(rows)('inactive rule: $name', async ({ from, kept }) => {
+    const others = othersFrom(from)
+    const f = fixture({ otherWork: others.otherWork }); setPolicy(f, inactive())
+    const report = await f.service.run('manual')
+    if (kept) { expect(item(report)).toMatchObject({ outcome: 'kept', reason: OTHER }); expect(existsSync(f.worktree)).toBe(true); expect(existsSync(cleanupMarkerPath(f.store, 'task'))).toBe(false) }
+    else { expect(item(report)).toMatchObject({ rule: 'worktree-inactive', outcome: 'removed' }); expect(existsSync(f.worktree)).toBe(false); expect(others.calls).toHaveLength(3) }
+    // Asked about this worktree, leaving out the thread itself, whose own work `idle` covers.
+    expect(others.calls[0]).toEqual([f.worktree, 'task'])
+  }, 60_000)
+
+  it('merged rule: keeps a merged worktree another thread works in, and removes it once nobody does', async () => {
+    let other: string | undefined = OTHER
+    const f = fixture({ otherWork: () => other }); addRemote(f); setPolicy(f, { worktrees: { removeMerged: true } }); commit(f)
+    git(f.repo, ['merge', '--ff-only', '-q', f.branch])
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: OTHER })
+    expect(existsSync(f.worktree)).toBe(true)
+    other = undefined
+    expect(item(await f.service.run('manual'))).toMatchObject({ rule: 'worktree-merged', outcome: 'removed' })
+    expect(existsSync(f.worktree)).toBe(false)
+  }, 60_000)
+
+  it.each(rows)('deleted-threads rule: $name', async ({ from, kept }) => {
+    const others = othersFrom(from)
+    const f = fixture({ otherWork: others.otherWork }); await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+    setPolicy(f, { worktrees: { removeWithDeletedThreads: true } })
+    const report = await f.service.run('manual')
+    // Under the leases the purge keeps the checkout and words the reason as its own ("Checkout retained: …").
+    if (kept) { expect(item(report)).toMatchObject({ rule: 'worktree-deleted', outcome: 'kept', reason: expect.stringContaining(OTHER) }); expect(existsSync(f.worktree)).toBe(true) }
+    else { expect(item(report)).toMatchObject({ rule: 'worktree-deleted', outcome: 'removed' }); expect(existsSync(f.worktree)).toBe(false); expect(others.calls).toHaveLength(3) }
+    expect(others.calls[0]).toEqual([f.worktree, 'task'])
+  }, 60_000)
+
+  it('deleted-threads rule: a keep for work in it is not remembered, so the next run removes the worktree', async () => {
+    let other: string | undefined
+    let calls = 0
+    // Work starts there only under the leases, the keep the run would otherwise remember against an unchanged checkout.
+    const f = fixture({ otherWork: () => (++calls === 2 ? other : undefined) }); await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+    setPolicy(f, { worktrees: { removeWithDeletedThreads: true } }); other = OTHER
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: expect.stringContaining(OTHER) })
+    expect(item(await f.service.run('manual'))).toMatchObject({ rule: 'worktree-deleted', outcome: 'removed' })
   }, 60_000)
 })
 

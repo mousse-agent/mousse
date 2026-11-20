@@ -67,7 +67,7 @@ const NO_VOICE: VoiceMessage[] = []
 const NO_REFERENCES: ChatReference[] = []
 
 /**
- * A pill in a bot's composer (a pasted or dropped thread): one of the owner's threads the bot may read, never a private
+ * A pill in a bot's composer (a dropped thread): one of the owner's threads the bot may read, never a private
  * thread or a subagent. It is sent as the thread's link.
  */
 function addBotReference(botId: string, reference: ChatReference): void {
@@ -1215,6 +1215,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             onAddReference={(reference) => addBotReference(bot.id, reference)}
             onRemoveReference={(id) => store().removeReference(bot.id, id)}
             onReferenceError={(message) => useBotsStore.setState({ error: message, errorBotId: bot.id })}
+            pastedThreadRefusal={botThreadReferenceRefusal}
             messageLimit={MAX_BOT_CHAT_TEXT}
             voiceMessages={NO_VOICE}
             onVoiceMessagesChange={ignore}

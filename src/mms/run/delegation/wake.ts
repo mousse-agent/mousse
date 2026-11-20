@@ -10,7 +10,7 @@ import { writeTerminalRun } from '../terminal'
 import {
   TERMINAL_RUN_STATUSES,
   stoppedByPerson,
-  isAgentNoteRow,
+  waitsForAnswer,
   isQuietNoteRow,
   isRetiredInboxRow,
   isWakeTurnPayload,
@@ -29,11 +29,11 @@ export type CapabilitiesFor = (threadId: string) => ProviderCapabilities | null
 export type AwaitsAnswer = (threadId: string) => boolean
 
 /**
- * The rows that may be delivered now. While the thread waits on a person's answer, agent notes stay pending: a live
+ * The rows that may be delivered now. While the thread waits on a person's answer, agent notes and monitor events stay pending: a live
  * provider settles the request when it takes a steer, and a note never answers one. They go after the answer.
  */
 function deliverableRows(rows: InboxRecord[], awaitsAnswer: boolean): InboxRecord[] {
-  return awaitsAnswer ? rows.filter((row) => !isAgentNoteRow(row)) : rows
+  return awaitsAnswer ? rows.filter((row) => !waitsForAnswer(row)) : rows
 }
 
 export interface WakeReport {
