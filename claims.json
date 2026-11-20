@@ -129,20 +129,6 @@
       ],
       "claimedAt": "2026-11-18T12:37:39.165Z",
       "expiresAt": "2026-11-19T23:05:26.065Z"
-    },
-    {
-      "task": "recover-new-thread-send",
-      "session": "agibook-ca73ba",
-      "machine": "agibook",
-      "branch": "recover-new-thread-send",
-      "paths": [
-        "src/mms/orchestrator/OrchestratorService.ts",
-        "src/main/ipc/registerGuiIpc.ts",
-        "src/renderer/lib/threadActions.ts",
-        "src/renderer/lib/openThread.ts"
-      ],
-      "claimedAt": "2026-11-20T07:35:28.531Z",
-      "expiresAt": "2026-11-20T09:35:28.531Z"
     }
   ]
 }
