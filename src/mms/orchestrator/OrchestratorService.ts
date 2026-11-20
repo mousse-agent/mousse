@@ -315,6 +315,7 @@ import { occurrenceResultOfRun, scheduledReceiptId, type ScheduledRunProbe } fro
 import { UndoService } from '../actions/UndoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { PublishService } from '../actions/PublishService'
+import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
 import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
@@ -13893,9 +13894,8 @@ export class OrchestratorService extends EventEmitter {
       }
       return
     }
-    if (session.deleted || session.threadId === '__unbound__') return
-    const wakeRunIds = this.wakeThreadNow(session.threadId)
     if (!ours || !this.turnHandoffs.has(session.threadId)) return
+    const wakeRunIds = this.wakeThreadNow(session.threadId)
     if (wakeRunIds.length) handoff.armed = { wakeRunIds }
     else this.turnHandoffs.delete(session.threadId)
   }
@@ -14404,6 +14404,9 @@ export class OrchestratorService extends EventEmitter {
         )
         const threadDir = this.resolveThreadDir(session.threadId)
         if (handoffOffer && projectPath && threadDir && this.turnHandoffHolds(session, handoffOffer, threadDir, recoveryManager?.load()?.conversationBranchId ?? 'main')) {
+          // The reused snapshot skips the normal start check. Pending recovery must still
+          // stop the turn before the queue accepts its message.
+          new ChangeReceiptService(threadDir).assertNoPendingOperation()
           handoff = handoffOffer
           // Recovery found nothing to do: whatever step it began is not shown.
           this.endSetupStep(session.threadId)
