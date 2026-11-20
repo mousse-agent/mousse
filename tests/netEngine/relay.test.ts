@@ -90,8 +90,17 @@ describe('relays (Phase 3)', () => {
     // The answer comes while the new key is pending; when the old key stops arrives with the relay's next state.
     expect(a.mms.netEngine.status().relays!.list[0]).toMatchObject({ newKeyPending: true })
     expect(a.mms.netEngine.status().relays!.list[0]!.rotatingUntil).toBeUndefined()
+    // Cancel while pending: the helper is told, and the row says it is cancelling.
+    await a.dispatch('netEngine.relay.rotate', { relay: RELAY_ID, cancel: true }, true)
+    expect(a.fake!.requests.filter((request) => request.op === 'relay.rotate').at(-1)).toMatchObject({
+      relay: RELAY_ID,
+      cancel: true
+    })
+    expect(a.mms.netEngine.status().relays!.list[0]).toMatchObject({ newKeyPending: true, cancelling: true })
+    // The relay had taken the key already sent: it is committed.
     Object.assign(aRelays.relays[0]!, {
       new_key_pending: false,
+      cancelling: false,
       rotating_until: Math.floor(Date.now() / 1000) + 3600
     })
     a.fake!.emit({ ev: 'relay.state', relay: aRelays.relays[0] })
@@ -99,6 +108,27 @@ describe('relays (Phase 3)', () => {
       expect(a.mms.netEngine.status().relays!.list[0]!.rotatingUntil).toBeGreaterThan(Date.now())
     )
     expect(a.mms.netEngine.status().relays!.list[0]!.newKeyPending).toBeUndefined()
+    expect(a.mms.netEngine.status().relays!.list[0]!.cancelling).toBeUndefined()
+
+    // A full key chain: no new key until the time the helper names, and a refusal in words meanwhile.
+    const chainUntil = Math.floor(Date.now() / 1000) + 7200
+    Object.assign(aRelays.relays[0]!, { chain_full: true, chain_full_until: chainUntil })
+    a.fake!.emit({ ev: 'relay.state', relay: aRelays.relays[0] })
+    await eventually(() =>
+      expect(a.mms.netEngine.status().relays!.list[0]).toMatchObject({
+        chainFull: true,
+        chainFullUntil: chainUntil * 1000
+      })
+    )
+    await expect(a.dispatch('netEngine.relay.rotate', { relay: RELAY_ID }, true)).rejects.toMatchObject({
+      message: 'Too many key changes. Try again later.',
+      details: { reason: 'chain_full' }
+    })
+    // Once that time has passed, the chain no longer holds New relay key back.
+    Object.assign(aRelays.relays[0]!, { chain_full_until: Math.floor(Date.now() / 1000) - 1 })
+    a.fake!.emit({ ev: 'relay.state', relay: aRelays.relays[0] })
+    await eventually(() => expect(a.mms.netEngine.status().relays!.list[0]!.chainFull).toBeUndefined())
+    Object.assign(aRelays.relays[0]!, { chain_full: false, chain_full_until: null })
 
     await a.dispatch('netEngine.relay.remove', { relay: RELAY_ID }, true)
     expect(a.fake!.requests.filter((request) => request.op === 'relay.remove')).toEqual([

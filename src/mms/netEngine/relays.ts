@@ -49,6 +49,7 @@ export function readRelayInfo(value: unknown, now: number): NetEngineRelay | und
     : 'connecting'
   const retryMs = num(info.retry_ms)
   const until = num(info.rotating_until)
+  const chainUntil = num(info.chain_full_until)
   return {
     id: info.id,
     endpoint: info.endpoint,
@@ -60,7 +61,12 @@ export function readRelayInfo(value: unknown, now: number): NetEngineRelay | und
     ...(num(info.callers_max) !== undefined ? { callersMax: num(info.callers_max) } : {}),
     ...(until !== undefined && until * 1000 > now ? { rotatingUntil: until * 1000 } : {}),
     // `relay.rotate` answers before the relay takes the new key; `rotating_until` comes with a later `relay.state`.
-    ...(info.new_key_pending === true ? { newKeyPending: true } : {})
+    ...(info.new_key_pending === true ? { newKeyPending: true } : {}),
+    ...(info.new_key_pending === true && info.cancelling === true ? { cancelling: true } : {}),
+    // The relay holds as many keys as it allows: no new key until the oldest leaves (`chain_full_until`).
+    ...(info.chain_full === true && (chainUntil === undefined || chainUntil * 1000 > now)
+      ? { chainFull: true, ...(chainUntil !== undefined ? { chainFullUntil: chainUntil * 1000 } : {}) }
+      : {})
   }
 }
 
@@ -200,7 +206,10 @@ const RELAY_ERRORS: Record<string, NetError['code']> = {
   relay_not_authorized: 'forbidden',
   store_failed: 'internal',
   no_relay: 'bad_request',
-  not_registered: 'peer_offline'
+  not_registered: 'peer_offline',
+  rotating: 'conflict',
+  not_rotating: 'conflict',
+  chain_full: 'conflict'
 }
 
 /** What Settings says for a relay refusal it has no words for: the helper's own reason never shows. */

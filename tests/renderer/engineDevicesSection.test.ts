@@ -457,6 +457,14 @@ describe('relays (Phase 3 §B.5, §B.9, §B.11)', () => {
     expect(relayRow('relay.example.net:443')?.textContent).toContain('New key pending')
     expect(relayRow('relay.example.net:443')?.textContent).not.toContain('Rotating until')
     expect(button('New relay key')?.disabled).toBe(true)
+    // Cancel goes to the helper; while it ends, the row says so and offers no second Cancel.
+    await click(button('Cancel'))
+    expect(d.called('netEngine.relay.rotate').at(-1)).toEqual({ relay: 'aa11', cancel: true })
+    await d.change({ relays: { available: true, list: [relay({ newKeyPending: true, cancelling: true })] } })
+    expect(relayRow('relay.example.net:443')?.textContent).toContain('Cancelling…')
+    expect(relayRow('relay.example.net:443')?.textContent).not.toContain('New key pending')
+    expect(button('Cancel')).toBeUndefined()
+    expect(button('New relay key')?.disabled).toBe(true)
     await d.change({ relays: { available: true, list: [relay({ rotatingUntil: Date.now() + 3_600_000 })] } })
     expect(relayRow('relay.example.net:443')?.textContent).toContain('Rotating until')
     expect(relayRow('relay.example.net:443')?.textContent).not.toContain('New key pending')
@@ -494,6 +502,22 @@ describe('relays (Phase 3 §B.5, §B.9, §B.11)', () => {
       expect(line?.title).toBe('The connection to the relay ended.')
       await act(async () => { await vi.advanceTimersByTimeAsync(5_100) })
       expect(relayRow('relay.example.net:443')?.textContent).toContain('Retrying…')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('holds New relay key back while the key chain is full, until the time the helper names', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+    try {
+      daemon({ relays: { available: true, list: [relay({ chainFull: true, chainFullUntil: Date.now() + 60_000 })] } })
+      await act(async () => root.render(createElement(EngineDevicesSection)))
+      for (let i = 0; i < 6; i++) await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      expect(relayRow('relay.example.net:443')?.textContent).toContain('Too many key changes. Try again after ')
+      expect(button('New relay key')?.disabled).toBe(true)
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_100) })
+      expect(relayRow('relay.example.net:443')?.textContent).not.toContain('Too many key changes')
+      expect(button('New relay key')?.disabled).toBe(false)
     } finally {
       vi.useRealTimers()
     }
