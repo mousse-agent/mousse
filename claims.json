@@ -144,6 +144,21 @@
       "expiresAt": "2026-11-20T13:31:18.871Z"
     },
     {
+      "task": "fix-slow-daemon-startup",
+      "session": "Animatrix-0ed74a",
+      "machine": "Animatrix",
+      "branch": "fix-slow-daemon-startup",
+      "paths": [
+        "src/mms/MmsProfileServices.ts",
+        "src/mms/runtime/ThreadRuntimeManager.ts",
+        "src/cli/commands/service.ts",
+        "src/mms/startup/startupTiming.ts",
+        "src/mms/data/ThreadDataStore.ts"
+      ],
+      "claimedAt": "2026-11-20T12:26:00.038Z",
+      "expiresAt": "2026-11-20T14:26:00.038Z"
+    },
+    {
       "task": "fix-subagent-optimistic-working",
       "session": "Animatrix-6036c7",
       "machine": "Animatrix",
