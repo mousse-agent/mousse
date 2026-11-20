@@ -59,6 +59,20 @@
       "expiresAt": "2026-11-20T13:20:04.637Z"
     },
     {
+      "task": "fix-acp-out-of-turn-requests",
+      "session": "agibook-9bfa6e",
+      "machine": "agibook",
+      "branch": "fix-acp-out-of-turn-requests",
+      "paths": [
+        "src/mms/harness/acp/session.ts",
+        "src/mms/harness/acp/permissions.ts",
+        "src/mms/harness/acp/xai.ts",
+        "src/mms/run/mcp/instructions.ts"
+      ],
+      "claimedAt": "2026-11-20T20:50:53.551Z",
+      "expiresAt": "2026-11-20T22:50:53.551Z"
+    },
+    {
       "task": "fix-delete-hang",
       "session": "Animatrix-2b0044",
       "machine": "Animatrix",
