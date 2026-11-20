@@ -245,6 +245,21 @@
       "expiresAt": "2026-11-20T13:47:03.944Z"
     },
     {
+      "task": "thread-journal-scaling",
+      "session": "Animatrix-8aab10",
+      "machine": "Animatrix",
+      "branch": "thread-journal-scaling",
+      "paths": [
+        "src/mms/data/ThreadJournal.ts",
+        "src/mms/actions/ThreadActionService.ts",
+        "src/mms/actions/ChangeReceiptService.ts",
+        "src/mms/actions/UndoRetentionService.ts",
+        "src/mms/workspace"
+      ],
+      "claimedAt": "2026-11-20T23:03:35.429Z",
+      "expiresAt": "2026-11-21T01:03:35.429Z"
+    },
+    {
       "task": "thread-list-scaling",
       "session": "Animatrix-596759",
       "machine": "Animatrix",
