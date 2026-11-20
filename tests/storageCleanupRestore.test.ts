@@ -167,6 +167,34 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
     }
   }, 60_000)
 
+  it('keeps a worktree another thread works in: a project in its folder, or another thread\'s running turn; its own turn does not', async () => {
+    const project = mms.projects.openProject(f.repo)
+    const thread = mms.threads.createThread('Shared folder', project.id)
+    const { metadata } = await gui.request<{ metadata: { worktreePath: string } }>('workspace.restore', { threadId: thread.id })
+    const worktreePath = metadata.worktreePath
+    const other = mms.threads.createThread('Works in the folder', project.id)
+    const outcome = async () => (await gui.request<{ report: StorageCleanupReport }>('storage.cleanup.run', {})).report.items.find((entry) => entry.threadId === thread.id)
+
+    // A project added with a folder inside the worktree, with nothing running: removing the worktree takes its folder away.
+    const added = mms.projects.openProject(join(worktreePath, 'src'))
+    try { expect(await outcome()).toMatchObject({ rule: 'worktree-inactive', outcome: 'kept', reason: "A project's folder is in this worktree" }) }
+    finally { mms.projects.removeProject(added.id) }
+    expect(existsSync(worktreePath)).toBe(true)
+
+    // Another thread's turn running in it (as `liveWorkspaceClaims` reports a session's folder).
+    const live = vi.spyOn(mms.orchestrator, 'liveWorkspaceClaims').mockReturnValue([{ threadId: other.id, path: worktreePath, kind: 'live_cwd' }])
+    try { expect(await outcome()).toMatchObject({ outcome: 'kept', reason: 'Another thread is working in this worktree' }) }
+    finally { live.mockRestore() }
+    expect(existsSync(worktreePath)).toBe(true)
+
+    // The thread's own folder is no one else's: with only its own claim there, the rule removes the worktree.
+    const own = vi.spyOn(mms.orchestrator, 'liveWorkspaceClaims').mockReturnValue([{ threadId: thread.id, path: worktreePath, kind: 'live_cwd' }])
+    try { expect(await outcome()).toMatchObject({ rule: 'worktree-inactive', outcome: 'removed' }) }
+    finally { own.mockRestore() }
+    expect(existsSync(worktreePath)).toBe(false)
+    restored.push(worktreePath)
+  }, 120_000)
+
   it('storage.cleanup.run is open to a cli client while storage.configure is not', async () => {
     const report = (await cli.request<{ report: StorageCleanupReport }>('storage.cleanup.run', {})).report
     expect(report.trigger).toBe('manual')

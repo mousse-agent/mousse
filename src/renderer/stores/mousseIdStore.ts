@@ -15,6 +15,7 @@ import {
   withSignInCallback
 } from '../lib/plusSignIn'
 import { useAppStore } from './appStore'
+import { serviceFailureLine } from '../lib/errorText'
 
 export interface PendingSignIn {
   id: string
@@ -47,7 +48,7 @@ interface MousseIdState {
 
 const request = <T,>(method: PlatformRequestMethod, params: unknown = {}) =>
   window.mousse.platformRequest.request<T>(method, params)
-const message = (cause: unknown) => String((cause as Error | null)?.message ?? cause)
+const message = (cause: unknown) => serviceFailureLine(cause) ?? String((cause as Error | null)?.message ?? cause)
 const errorCode = (cause: unknown) => (cause as { code?: unknown } | null)?.code
 
 export { mousseIdPreparation, mousseIdSetupStep, signInErrorMessage }

@@ -244,6 +244,8 @@ export interface AcpChatInput {
    */
   bot?: true
   onText: (text: string) => void
+  /** The agent's thoughts so far this turn (`agent_thought_chunk`), cumulative like `onText`. */
+  onThinking?: (text: string) => void
   drainSteer?: () => string | undefined
   /**
    * A steer drain with its token (`TurnControl.drainSteerEntry`). With `expect`, it takes only when the decision now is
@@ -282,6 +284,8 @@ export interface AcpObservations {
 export interface AcpSessionsOptions {
   /** The agent's name in prompts and errors ("Allow Antigravity to run this tool?"). */
   label: string
+  /** The provider a usage limit the agent reports names (`antigravity`), for the pause's wording. */
+  usageLimitProvider?: string
   /** The instance of sessions saved before provider instances existed. */
   defaultInstanceId: string
   questions: UserQuestionService
@@ -330,6 +334,8 @@ export class AcpSessions {
   private readonly processes = new Set<AcpProcess>()
   /** Processes running a turn right now. */
   private readonly turning = new Set<AcpProcess>()
+  /** Per thread, the session a turn that did not finish left resumable, until `commitInterrupted` fingerprints it. */
+  private readonly interrupted = new Map<string, string>()
   private stopped = false
   private readonly prompter: PermissionPrompter
 
@@ -528,6 +534,21 @@ export class AcpSessions {
     this.options.store.setSaved(threadId, { ...saved, historyKey: this.historyKey(history) })
   }
 
+  /**
+   * A turn that did not finish (stopped, failed, a usage limit) left its saved session resumable: `history` is the
+   * canonical history as that turn left it (its request included, no reply), which the next turn sends as its history,
+   * so that turn resumes the session and sends only its new message. Only a session `chat` marked for it (see
+   * `resumableAfterFailure`) is fingerprinted; anything else stays as it was, and the next turn hands its history to a
+   * new session.
+   */
+  commitInterrupted(threadId: string, history: string): void {
+    const sessionId = this.interrupted.get(threadId)
+    this.interrupted.delete(threadId)
+    const saved = this.options.store.saved(threadId)
+    if (!sessionId || !saved || saved.sessionId !== sessionId) return
+    this.options.store.setSaved(threadId, { ...saved, historyKey: this.historyKey(history) })
+  }
+
   /** Drops the saved session of `threadId`; its next turn starts a new one with the history in the prompt. */
   forgetConversation(threadId: string): void {
     if (!this.options.store.saved(threadId)) return
@@ -672,6 +693,7 @@ export class AcpSessions {
   async chat(input: AcpChatInput): Promise<string> {
     const { label, store, questions, quirks } = this.options
     input.signal?.throwIfAborted()
+    this.interrupted.delete(input.threadId)
     const historyKey = this.historyKey(input.history ?? '')
     const instanceId = input.instanceId ?? this.options.defaultInstanceId
     // A native session belongs to the instance that opened it; another instance starts fresh.
@@ -715,12 +737,16 @@ export class AcpSessions {
     }
     input.signal?.addEventListener('abort', abort, { once: true })
     let text = ''
+    let thinking = ''
     const toolTitles = new Map<string, string>()
     let resumed = !freshProcess
     let steerTimer: ReturnType<typeof setInterval> | undefined
     let steerFailure: unknown
     // A prompt is in flight, and the agent's silence is counted (`PROMPT_SILENCE_MS`).
     let prompting = false
+    // A prompt of this turn was sent, and the agent showed it works on one (`PROMPT_WORK_UPDATES`).
+    let promptSent = false
+    let worked = false
     // Steers drained for the next prompt, and those the prompt in flight carries that the agent has not shown it has.
     // A drain with a token is read (`steerTaken`, `onSteer`) only once the agent works on the prompt that carries it,
     // or answers it; until then a failure hands it back (`returnSteer`), so it is never lost
@@ -792,10 +818,18 @@ export class AcpSessions {
       const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; toolCallId?: string; title?: string; name?: string; status?: string; rawInput?: unknown; configOptions?: NewSessionResponse['configOptions']; currentModeId?: string }
       // The agent works on the prompt that carries drained steers: they are read now, before what it writes.
       // An update that may be a cancelled prompt's late one does not count: the carrying prompt's reply reads them then.
-      if (prompting && event.sessionUpdate && PROMPT_WORK_UPDATES.has(event.sessionUpdate) && ofPromptInFlight(update)) readCarried()
+      if (prompting && event.sessionUpdate && PROMPT_WORK_UPDATES.has(event.sessionUpdate) && ofPromptInFlight(update)) {
+        worked = true
+        readCarried()
+      }
       if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') {
         text += event.content.text ?? ''
         input.onText(text)
+      }
+      // Agents such as Antigravity say what they are doing between tool calls as thoughts, not as message text.
+      if (event.sessionUpdate === 'agent_thought_chunk' && event.content?.type === 'text' && event.content.text) {
+        thinking += event.content.text
+        input.onThinking?.(thinking)
       }
       if (event.sessionUpdate === 'tool_call' && event.toolCallId) {
         const subagent = isAcpSubagentTool(event.name)
@@ -874,7 +908,8 @@ export class AcpSessions {
         }
         input.signal?.throwIfAborted()
         // Until the owning turn commits its updated history, this ACP session is
-        // deliberately non-resumable after a crash or a failed/aborted prompt.
+        // deliberately non-resumable after a crash or a failed/aborted prompt (an
+        // agent that resumes by `session/resume` may be fingerprinted after one: `commitInterrupted`).
         // A resumed session keeps the instructions it was given; a new one has none yet.
         current.instructionsHash = resumed ? saved?.instructionsHash : undefined
         const instructions = current.instructionsHash ? { instructionsHash: current.instructionsHash } : {}
@@ -1010,6 +1045,7 @@ export class AcpSessions {
         // xAI: the prompt is tagged, and ends at its reply or its `prompt_complete`, whichever is first.
         const promptId = quirks.xaiExtensions ? randomUUID() : undefined
         promptInFlight = promptId
+        promptSent = true
         const reply = active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId,
           prompt: [...blocks.map((block) => ({ type: 'text' as const, text: block })), ...attachments], ...(promptId ? { _meta: { promptId } } : {}) })
         const completion = promptId ? this.completionOf(active, promptId) : undefined
@@ -1072,6 +1108,16 @@ export class AcpSessions {
       for (const [callId, title] of toolTitles) input.onTool?.({ phase: 'complete', callId, title, status: 'unfinished' })
       return text
     } catch (error) {
+      // An agent that reopens a saved session by `session/resume` keeps it after a failed or stopped prompt. The next
+      // turn may resume it when the agent holds what Mousse's history then says: a prompt of this turn reached it, the
+      // session already held the conversation before it (resumed or reused) or the agent worked on it (a new session's
+      // first prompt carries the handed-over history, which the agent may not have kept if it never started), and no
+      // steer is in doubt (one a prompt carried that the agent never showed it read goes back and runs again, so
+      // Mousse's history lacks what the agent may hold). The adapter then fingerprints it (`commitInterrupted`).
+      const steerInDoubt = steerFailure !== undefined || carried.some((entry) => entry.token)
+      const sessionId = current.sessionId
+      if (quirks.preferResume && promptSent && (resumed || worked) && !steerInDoubt && sessionId && store.saved(input.threadId)?.sessionId === sessionId)
+        this.interrupted.set(input.threadId, sessionId)
       // Drained steers no prompt delivered go back; they run as the follow-up.
       handBack()
       this.close(current)
@@ -1079,7 +1125,7 @@ export class AcpSessions {
       if (steerFailure) throw steerFailure
       if (silenceFailure && !input.signal?.aborted) throw silenceFailure
       // A sign-in the agent asks for is a sign-in; any other error the agent answered with is shown in its words.
-      throw this.authRequiredError(current, error) ?? (input.signal?.aborted ? undefined : acpAgentError(error)) ?? error
+      throw this.authRequiredError(current, error) ?? (input.signal?.aborted ? undefined : acpAgentError(error, this.options.usageLimitProvider)) ?? error
     } finally {
       clearTimeout(silenceTimer)
       current.activity = undefined

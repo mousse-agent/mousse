@@ -3,6 +3,7 @@ import type { PlusStatus } from '../../shared/net/local'
 import { formatCountdown, LIST_MERGED, REMOVED_FROM_DEVICES, secondsLeft } from '../lib/plusSignIn'
 import { mousseIdName, mousseIdSignedIn, mousseIdPreparation, mousseIdSetupStep, useMousseId, useMousseIdStore, type SignInStart } from '../stores/mousseIdStore'
 import { MousseIdAvatar } from './MousseIdAvatar'
+import { ErrorLine } from './ui/ErrorLine'
 import { SettingsGroup, SettingsRow } from './settings/SettingsRow'
 import { ExternalLink, Logout, X } from '../lib/icons'
 import './account-section.css'
@@ -102,7 +103,7 @@ export function MousseIdAccount({ onSetUp, lapsed = false, children }: { onSetUp
           }
         />
       )}
-      {error && <p role="alert" className="chat-error account-error">{error}</p>}
+      {error && <ErrorLine message={error} className="chat-error account-error" />}
       {setupNote ? (
         <div className="account-note-row">
           <p role="status" className="settings-muted account-note">{setupNote}</p>

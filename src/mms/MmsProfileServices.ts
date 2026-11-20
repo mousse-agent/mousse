@@ -149,7 +149,7 @@ import type { MmsOptions } from './MmsOptions'
 import { MmsProfilePlatform } from './platform/MmsProfilePlatform'
 import { OwnedWorkBarrier, type OwnedWorkEntry } from './execution/OwnedWorkBarrier'
 import { threadScope, type WorkScope } from './execution/workScope'
-import { canonicalPathSync, pathsOverlap } from './lifecycle/canonicalPath'
+import { canonicalPathSync, pathsOverlap, pathWithin } from './lifecycle/canonicalPath'
 import { readThreadWorkspaceRecord } from './workspace/ThreadWorkspaceManager'
 import { ResourceLifecycleCoordinator } from './lifecycle/ResourceLifecycleCoordinator'
 import { buildResourceInventory } from './lifecycle/ResourceInventory'
@@ -159,7 +159,7 @@ import { clearCleanupMarker, StorageCleanupService } from './lifecycle/StorageCl
 import { StorageUsageService } from './lifecycle/StorageUsageService'
 import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
 import { StorageSweepClock } from './lifecycle/sweepClock'
-import { threadHasPendingWork } from './lifecycle/threadIdle'
+import { threadDescendants, threadHasPendingWork } from './lifecycle/threadIdle'
 import { listPendingQueue } from './queue/ThreadMessageQueue'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
@@ -1634,6 +1634,7 @@ export class MmsProfileServices {
       policy: this.storagePolicy,
       clock: storageClock,
       idle: (threadId) => this.threadPendingWork(threadId),
+      otherWork: (path, exceptThreadId) => this.otherWorkIn(path, exceptThreadId),
       installationHome: shared.installationHome,
       codeHost: this.gitService.codeHost,
       browserCaptures: { workerArtifactRoot: this.platform.workerArtifactRoot, sessions: (staleBefore) => this.platform.browserSessionStates(staleBefore) },
@@ -1705,6 +1706,22 @@ export class MmsProfileServices {
       },
       threadId
     )
+  }
+
+  /**
+   * Why others use `path`, a worktree storage cleanup would remove, or undefined. A project whose folder is in it keeps
+   * it even with nothing running: removing it takes that project's folder away. A running turn or an open terminal of a
+   * thread other than `exceptThreadId` and its subagents keeps it while it works there. Reads only what is in memory.
+   */
+  private otherWorkIn(path: string, exceptThreadId?: string): string | undefined {
+    const root = canonicalPathSync(path)
+    const inside = (folder: string | undefined) => Boolean(folder) && pathWithin(root, canonicalPathSync(folder!))
+    if (this.projects.listProjects().some((project) => inside(project.path))) return "A project's folder is in this worktree"
+    let except: Set<string> | undefined
+    const other = (threadId: string) => !(except ??= new Set(exceptThreadId ? [exceptThreadId, ...threadDescendants(this.threads.listAllThreads(), exceptThreadId)] : [])).has(threadId)
+    if (this.orchestrator.liveWorkspaceClaims().some((claim) => inside(claim.path) && other(claim.threadId))) return 'Another thread is working in this worktree'
+    if (this.ptyManager.runningTerminals().some((terminal) => inside(terminal.cwd) && other(terminal.threadId) && this.ptyManager.isAlive(terminal.ptyId))) return 'A terminal is open in this worktree'
+    return undefined
   }
 
   /** The profile's execution a delete looks at: turns and sends, agent and chat runs, automations, MCP work. */

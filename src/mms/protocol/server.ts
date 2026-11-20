@@ -1194,7 +1194,7 @@ export class MmsProtocolServer {
             kind: 'res',
             id: v.req.id,
             ok: false,
-            error: serializeAppError(normalizeAppError(err, 'handler_error'))
+            error: serializeAppError(normalizeAppError(err, 'handler_error', 'events.subscribe'))
           }
           this.sendRaw(session, response)
         } finally {
@@ -1331,7 +1331,7 @@ export class MmsProtocolServer {
             ? knownAppError({ code: err.code, message, details: { ...err.details, ...(err.pointer ? { pointer: err.pointer } : {}) } }, { category: err.code === 'SETTINGS_UNSUPPORTED' ? 'unsupported' : 'invalid', retryable: err.retryable })
           : err instanceof ProfileError
             ? knownAppError({ code: err.code.toLowerCase(), message, details: err.details }, { category: 'invalid', retryable: false })
-            : normalizeAppError(err, 'handler_error'))
+            : normalizeAppError(err, 'handler_error', method))
       }
       if (response.error) console.error('MMS request failed', errorDiagnostic(response.error, method))
       this.sendRaw(session, response)
