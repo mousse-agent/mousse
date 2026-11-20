@@ -125,7 +125,7 @@ interface DrainedSteer {
 /** An image as an ACP image block, or undefined when agents are not sent it (BMP, JPEG, PNG or WebP within `IMAGE_MAX_DATA_CHARS`). */
 function acpImageBlock(image: ChatImageAttachment): { type: 'image'; data: string; mimeType: string } | undefined {
   const mimeType = image.mimeType.toLowerCase()
-  if (!['image/bmp', 'image/jpeg', 'image/png', 'image/webp'].includes(mimeType) || image.data.length > IMAGE_MAX_DATA_CHARS) return undefined
+  if (!['image/bmp', 'image/jpeg', 'image/png', 'image/webp'].includes(mimeType) || typeof image.data !== 'string' || !image.data || image.data.length > IMAGE_MAX_DATA_CHARS) return undefined
   return { type: 'image', data: image.data, mimeType }
 }
 

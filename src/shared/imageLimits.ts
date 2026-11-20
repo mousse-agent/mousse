@@ -65,5 +65,6 @@ export function isInlineImageMimeType(mimeType: string): boolean {
 
 /** Whether a provider takes this image inline: a supported type within the per-image size. */
 export function providerTakesImage(image: { mimeType: string; data: string }): boolean {
-  return isInlineImageMimeType(image.mimeType) && image.data.length <= IMAGE_MAX_DATA_CHARS
+  // A queued image whose file went missing comes back by name only: it is left out, not sent empty.
+  return isInlineImageMimeType(image.mimeType) && typeof image.data === 'string' && image.data.length > 0 && image.data.length <= IMAGE_MAX_DATA_CHARS
 }
