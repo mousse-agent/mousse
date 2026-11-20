@@ -6,6 +6,7 @@ import { realPathOrAncestor } from './realPath'
 import { mousseGitEnv } from '../git/gitEnv'
 import { assertGitAllowed } from '../git/gitPolicy'
 import { timeGitChild } from '../diagnostics/turnBoundary'
+import { gitEnvFor, gitFile } from '../git/gitExecutable'
 
 /**
  * What a repository reads that can run programs and that lies in the working tree, as real paths:
@@ -37,7 +38,7 @@ function runGit(root: string, args: string[]): Promise<GitRun> {
     if (!existsSync(root)) return resolveRun({ status: 128, stdout: '', missing: false })
     assertGitAllowed({ cwd: root, args })
     timeGitChild(() => execFile(
-      'git',
+      gitFile(),
       args,
       {
         cwd: root,
@@ -45,7 +46,7 @@ function runGit(root: string, args: string[]): Promise<GitRun> {
         timeout: GIT_TIMEOUT_MS,
         maxBuffer: 4 * 1024 * 1024,
         windowsHide: true,
-        env: mousseGitEnv({ ...process.env, GIT_TERMINAL_PROMPT: '0' })
+        env: gitEnvFor(mousseGitEnv({ ...process.env, GIT_TERMINAL_PROMPT: '0' }))
       },
       (error, stdout) => {
         if (!error) return resolveRun({ status: 0, stdout, missing: false })
