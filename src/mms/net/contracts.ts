@@ -295,7 +295,8 @@ export interface StreamStore {
    * A copy of another computer's thread display stream: drops records before `keep` (the first record of a state
    * the caller has checked, such as a complete display snapshot) in one transaction of at most `step.rows` records
    * and about `step.bytes` of them, with the tombstones before it. Nothing is dropped unless the active generation,
-   * at the current epoch, still holds `keep`. Returns how many rows went; 0 when nothing is left to drop.
+   * at the current epoch, still holds `keep`, and no snapshot of the stream is being staged. Returns how many rows
+   * went; 0 when nothing is left to drop or nothing may go now.
    */
   dropBefore?(
     stream: StreamId,

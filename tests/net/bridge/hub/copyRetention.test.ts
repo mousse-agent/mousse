@@ -39,8 +39,11 @@ function temp(): string {
 
 const LISTS = 'mousse:lists'
 
-/** Another computer of the user that writes a lists stream, and this computer, which keeps a copy of it. */
-async function computers() {
+/**
+ * Another computer of the user that writes a lists stream, and this computer, which keeps a copy of it. With `own`,
+ * the stream is one this computer writes itself.
+ */
+async function computers(options: { own?: boolean } = {}) {
   const ownerDir = temp(),
     ownerDb = new NetDatabase({ profileDir: ownerDir }),
     ownerKeys = new FileKeyStore(ownerDir)
@@ -72,10 +75,11 @@ async function computers() {
   const store = new SqliteStreamStore(db)
   cleanups.push(() => store.close())
 
+  const author = options.own ? node : writer
   const descriptor: StreamDescriptor = {
     id: newId('stream'),
     kind: 'node.thread',
-    authority: writer,
+    authority: author,
     createdAt: 1
   }
   store.createStream(descriptor, 1)
@@ -90,7 +94,7 @@ async function computers() {
       stream: descriptor.id,
       type,
       crit: false,
-      author: { user, node: writer, keyEpoch: 1 },
+      author: { user, node: author, keyEpoch: 1 },
       ts: Date.now(),
       body
     })
@@ -99,7 +103,9 @@ async function computers() {
       seq: ++seq,
       recvTs: Date.now(),
       envelope,
-      sig: sign ? ownerKeys.signAsNode(envelope) : new Uint8Array(64).fill(1)
+      sig: sign
+        ? (options.own ? readerKeys : ownerKeys).signAsNode(envelope)
+        : new Uint8Array(64).fill(1)
     }
   }
   /** The records of one lists snapshot, as the other computer publishes it (begin, chunks, end). */
@@ -175,7 +181,7 @@ async function computers() {
   const attach = async () => {
     const shown: unknown[] = []
     const handle = await hub.attach(
-      { nodeId: writer as NodeId, entityId: LISTS },
+      { nodeId: author as NodeId, entityId: LISTS },
       (update) => {
         if (update.kind === 'snapshot') shown.push(update.value)
       },
@@ -203,7 +209,7 @@ async function computers() {
   const remember = (): void => {
     db.database
       .prepare('INSERT INTO net_bridge_hub_threads VALUES(?,?,?)')
-      .run(writer, `private:${LISTS}`, JSON.stringify(descriptor))
+      .run(author, `private:${LISTS}`, JSON.stringify(descriptor))
   }
   return {
     owner,
@@ -347,6 +353,27 @@ describe("a copy of another computer's lists", () => {
   })
 })
 
+describe('a stream this computer writes', () => {
+  it('loses only the records of epochs before its current one', async () => {
+    const f = await computers({ own: true })
+    f.receive([...f.snapshot(f.lists(1)), f.event()])
+    // The thread restarted: its display began a new epoch, which every read takes from.
+    f.store.beginNodeEpoch(f.descriptor.id, 2)
+    f.nextEpoch()
+    f.receive([...f.snapshot(f.lists(2)), ...f.snapshot(f.lists(3))])
+    await f.hub.tidyCopies()
+    expect(f.held()).toEqual(['2/1', '2/2', '2/3', '2/4', '2/5', '2/6'])
+  })
+
+  it('keeps every record of its current epoch, even ones a newer snapshot replaced', async () => {
+    const f = await computers({ own: true })
+    f.receive([...f.snapshot(f.lists(1)), ...f.snapshot(f.lists(2))])
+    f.remember()
+    await f.hub.tidyCopies()
+    expect(f.held()).toEqual(['1/1', '1/2', '1/3', '1/4', '1/5', '1/6'])
+  })
+})
+
 describe('dropping from a copy', () => {
   it('drops nothing once the snapshot it keeps is no longer held, and never from a space stream', async () => {
     const f = await computers()
@@ -383,6 +410,24 @@ describe('dropping from a copy', () => {
     expect(() => f.store.dropBefore(space.id, keep, { rows: 200, bytes: 1 << 20 })).toThrow(
       /Only thread display copies/
     )
+  })
+
+  it('drops nothing while a snapshot of the copy is staged, so the snapshot installs', async () => {
+    const f = await computers()
+    const held = [...f.snapshot(f.lists(1)), ...f.snapshot(f.lists(2))]
+    f.receive(held)
+    const keep = { epoch: 1, seq: 4, id: idOf(held[3]!) }
+    // The other computer answered a subscribe with a fresh snapshot, which arrives in two messages, and a drop
+    // step comes between them.
+    const fresh = f.snapshot(f.lists(3))
+    const stage = f.store.beginSnapshot(f.descriptor.id, { epoch: 1, seq: 9 })
+    stage.append(fresh.slice(0, 1))
+    const dropped = f.store.dropBefore!(f.descriptor.id, keep, { rows: 200, bytes: 1 << 20 })
+    stage.append(fresh.slice(1))
+    stage.commit()
+    expect(dropped).toBe(0)
+    expect(f.store.head(f.descriptor.id)).toMatchObject({ epoch: 1, seq: 9 })
+    expect((await f.attach()).shown).toEqual([f.lists(3)])
   })
 
   it('stops a step once its records reach its bytes, at least one record a step', async () => {

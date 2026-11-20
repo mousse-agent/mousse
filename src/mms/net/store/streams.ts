@@ -313,6 +313,14 @@ export class SqliteStreamStore implements StreamStore {
       if (r.kind !== 'node.thread') fail('forbidden', 'Only thread display copies drop records.')
       // The state kept must still be the one held: a new generation or epoch is left alone.
       if (r.epoch !== keep.epoch) return 0
+      // A snapshot being staged commits only if the stream row is as it was when staging began (`streamGuard`), and
+      // it replaces the generation this would drop from: nothing goes until it is done.
+      if (
+        this.db.database
+          .prepare("SELECT 1 FROM net_generations WHERE stream=? AND state='staging' LIMIT 1")
+          .get(stream)
+      )
+        return 0
       const held = this.db.database
         .prepare('SELECT id FROM net_records WHERE generation=? AND epoch=? AND seq=?')
         .get(r.active_generation, keep.epoch, keep.seq)
