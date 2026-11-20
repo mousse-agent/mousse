@@ -29,7 +29,10 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  try { await main?.stop() }
+  try {
+    try { await main?.threads.flushSearchIndex() }
+    finally { await main?.stop() }
+  }
   finally {
     vi.restoreAllMocks()
     // On a busy Windows machine the stopped profile's folder can stay held past this (`botReplyFinalMessage` fails the
@@ -46,6 +49,7 @@ it('a continuation of bot work is not told the thread\'s permission mode changed
   const scratch = mkdtempSync(join(home, 'scratch-'))
   const time = new AbortController()
   const settled: Array<{ text?: string }> = []
+  const settleRun = vi.spyOn(main.personalBots!, 'settleRun')
   const dispatcher: BotTurnDispatcher = {
     prepare: (payload) => ({
       activationId: payload.activationId,
@@ -80,7 +84,11 @@ it('a continuation of bot work is not told the thread\'s permission mode changed
       const sent = await runs.sendWithStart({ kind: 'send', threadId: thread.id, clientRequestId: `${thread.id}:d${n}`, source: 'bot', ...(previous ? { continuationOfRunId: previous } : {}) },
         (runId): BotTurnPayload => ({ kind: 'bot', runId, threadId: thread.id, activationId: 'act-1', dispatchN: n }))
       if (sent.status !== 'accepted') throw new Error('rejected')
-      await vi.waitFor(() => expect(settled).toHaveLength(n), { timeout: 20_000 })
+      await vi.waitFor(() => {
+        expect(settled).toHaveLength(n)
+        // The profile also handles the terminal run event on setImmediate, using its bot database.
+        expect(settleRun).toHaveBeenCalledWith(sent.runId)
+      }, { timeout: 20_000 })
       previous = sent.runId
     }
   } finally {
