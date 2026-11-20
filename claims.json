@@ -344,6 +344,23 @@
       ],
       "claimedAt": "2026-11-20T13:54:40.793Z",
       "expiresAt": "2026-11-20T15:54:40.793Z"
+    },
+    {
+      "task": "windows-run-real-git",
+      "session": "Animatrix-29e13b",
+      "machine": "Animatrix",
+      "branch": "windows-run-real-git",
+      "paths": [
+        "src/mms/git/gitExecutable.ts",
+        "src/mms/git",
+        "src/mms/actions",
+        "src/mms/files",
+        "src/mms/workspace",
+        "src/mms/worktree",
+        "src/mms/bridge/dispatch/git.ts"
+      ],
+      "claimedAt": "2026-11-20T13:55:30.791Z",
+      "expiresAt": "2026-11-20T15:55:30.791Z"
     }
   ]
 }
