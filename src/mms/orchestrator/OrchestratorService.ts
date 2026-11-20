@@ -97,6 +97,7 @@ import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type Effe
 import { steerReleaseWindow, steerStrategy, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { runningListText, runningNote, type RunningRegistry, type RunningScope, type RunningThreadInfo, type RunningViewer } from '../running/RunningRegistry'
 import type { MonitorSummary, ThreadMonitors } from '../monitors/ThreadMonitors'
+import { PROVIDER_BACKGROUND_ID, type ThreadBackgroundWork } from '../../shared/backgroundWork'
 import { agentMessage, AppToolTurns, createAppToolRegistry, holdsPerson, type AgentAccessResult, type LacksReport, McpToolError, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, lineageRelation } from '../run/mcp/appTools/thread'
@@ -1947,6 +1948,41 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * What the thread runs in the background besides its subagents, as the composer's status row shows it: its agent's
+   * monitors, background commands and holds, and whether its provider still runs background work.
+   */
+  backgroundWork(threadId: string): ThreadBackgroundWork {
+    const monitors = this.monitors
+    const items = (monitors?.list(threadId) ?? []).map((view) => ({
+      id: view.id,
+      kind: view.kind,
+      description: view.description,
+      ...(view.command ? { command: view.command } : {}),
+      ...(view.url ? { url: view.url } : {}),
+      startedAt: view.startedAt,
+      until: view.until,
+      ...(view.latest ? { latest: view.latest } : {})
+    }))
+    const latest = items.length ? monitors?.summary(threadId).latest : undefined
+    return { threadId, items, providerWork: this.providerBackground.has(threadId), ...(latest ? { latest } : {}) }
+  }
+
+  /** What the thread runs in the background changed: the app is told (`thread.backgroundWork`). */
+  backgroundWorkChanged(threadId: string): void {
+    this.emit('background-work', { threadId })
+  }
+
+  /**
+   * The person stops one piece of the thread's background work from the app: a monitor, a background command or a hold
+   * by its id (the agent is told with its next turn), or the provider's own background work (`PROVIDER_BACKGROUND_ID`).
+   * False when it is not running.
+   */
+  async stopBackground(threadId: string, id: string): Promise<boolean> {
+    if (id === PROVIDER_BACKGROUND_ID) return this.providerBackground.has(threadId) ? this.stopProviderWork(threadId) : false
+    return Boolean(this.monitors?.stopByPerson(threadId, id))
+  }
+
+  /**
    * The folders a turn works in and whose running list it gets: a thread's own folder and its project's; a bot's files
    * folder and the activation's scratch folder. Subagents sharing their parent's folder get the parent's list.
    */
@@ -3136,6 +3172,7 @@ export class OrchestratorService extends EventEmitter {
     if (active === this.providerBackground.has(threadId)) return
     if (active) this.providerBackground.add(threadId)
     else this.providerBackground.delete(threadId)
+    this.backgroundWorkChanged(threadId)
     try {
       this.runtimeManager?.setPendingBackgroundWork(threadId, active)
     } catch (error) {

@@ -261,6 +261,7 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'runs.wait': read('thread', ['threadId', 'runId', 'timeoutMs'], { owned: { runId: 'run' } }),
   'activity.get': read('thread', ['threadId']),
   'subagents.list': read('thread', ['threadId']),
+  'threads.backgroundWork': read('thread', ['threadId']),
   'agents.list': read('thread', ['threadId']),
   'tasks.list': read('thread', ['threadId']),
   'workspace.getStatus': read('thread', ['threadId', GEN]),
@@ -476,6 +477,7 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     owned: { runId: 'run' }
   }),
   'subagents.stopAll': chat('thread', ['threadId']),
+  'threads.stopBackground': chat('thread', ['threadId', 'id'], { required: ['id'] }),
   'agents.stop': chat('thread', ['threadId', 'agentId', 'merge'], { required: ['agentId'] }),
   'tasks.create': chat('thread', ['threadId', 'description', 'agentId', 'status'], {
     required: ['description']

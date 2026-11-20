@@ -1026,6 +1026,7 @@ export class MmsProfileServices {
       env: () => withShellPath(process.env, shellPath),
       post: (threadId, payload, key) => { postNote(runEngine, key, payload, threadId) },
       working: (threadId, active) => this.threadRuntimes?.setPendingMonitors(threadId, active),
+      changed: (threadId) => this.orchestrator.backgroundWorkChanged(threadId),
       recordFile: join(this.homeDir, 'monitors.json'),
       threadExists: (threadId) => Boolean(this.threads.getThread(threadId))
     })

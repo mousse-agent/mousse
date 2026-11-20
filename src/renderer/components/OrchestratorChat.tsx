@@ -61,6 +61,8 @@ import { SubagentParentBar } from './SubagentParentBar'
 import { SubagentComposerBanner } from './SubagentComposerBanner'
 import { findSubagentEntry, isSubagentStartingOptimistically } from './subagentStatus'
 import { useSubagents } from '../hooks/useSubagents'
+import { useBackgroundWork } from '../hooks/useBackgroundWork'
+import { BackgroundWorkRow } from './BackgroundWorkRow'
 import { isRunningSubagent, isWorkingSubagent } from '../../shared/subagents'
 import { stopAllSubagents } from './sideCard/lineageLogic'
 import { RemoteSubagentNotice } from './RemoteSubagentNotice'
@@ -1255,9 +1257,12 @@ export function OrchestratorChat() {
   // The thread's subagents, and whether any still runs: the chat then shows "Waiting for subagents…".
   const threadSubagents = useSubagents(newChat ? null : activeThreadId)
   const subagentsRunning = threadSubagents.some(isRunningSubagent)
+  // What else it runs in the background (monitors, commands, holds, the provider's own work).
+  const backgroundWork = useBackgroundWork(newChat ? null : activeThreadId)
   const handleStop = useCallback(async () => {
-    // A thread whose own turn has ended but that waits for its subagents: Stop stops them, as Lineage's Stop all.
-    if (activeThreadId && !turnStoppable && !turnActive && !loading && subagentsRunning) {
+    // A thread whose own turn has ended but that waits for its subagents only: Stop stops them, as Lineage's Stop all.
+    // With background work as well, the thread's Stop ends all of it, its subagents included.
+    if (activeThreadId && !turnStoppable && !turnActive && !loading && subagentsRunning && !backgroundWork) {
       await stopAllSubagents({ stopAll: window.mousse.subagents.stopAll, abort: window.mousse.orchestrator.abort }, activeThreadId, threadSubagents)
       return
     }
@@ -1265,7 +1270,7 @@ export function OrchestratorChat() {
     if (activeThreadId) await stopThreadNow(activeThreadId)
     else await window.mousse.orchestrator.abort()
     await refreshTurnActive()
-  }, [activeThreadId, refreshTurnActive, turnStoppable, turnActive, loading, subagentsRunning, threadSubagents])
+  }, [activeThreadId, refreshTurnActive, turnStoppable, turnActive, loading, subagentsRunning, threadSubagents, backgroundWork])
   // Stop run is bound to a key; the command's own rule limits it to a thread with a run going.
   useCommand('run.stop', () => void handleStop())
 
@@ -2144,6 +2149,9 @@ export function OrchestratorChat() {
                 <RemoteSubagentNotice runsOn={activeThread?.runsOn} />
                 <NativeHelperNotice thread={activeThread} />
                 <SubagentComposerBanner threadId={activeThreadId} />
+                {!newChat && activeThreadId && (
+                  <BackgroundWorkRow key={activeThreadId} threadId={activeThreadId} subagents={threadSubagents} work={backgroundWork} onStopAll={() => void handleStop()} />
+                )}
               </>}
               searchMentions={searchMentions}
               mentionScope={mentionScope}

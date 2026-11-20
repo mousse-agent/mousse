@@ -36,6 +36,8 @@ export const KEEP_WORKING_MAX_MINUTES = 6 * 60
 /** Events this close to each other are one notice; a stream that never pauses is still told this often. */
 export const MONITOR_BATCH_MS = 200
 export const MONITOR_BATCH_MAX_MS = 2_000
+/** How often at most a new latest line alone tells the app (the composer's status row); a start or an end tells it at once. */
+export const MONITOR_CHANGE_THROTTLE_MS = 2_000
 /** Characters of one event (a line or a message), and of all events in one notice; the rest are counted, not shown. */
 export const MONITOR_EVENT_CHARS = 1_000
 export const MONITOR_NOTICE_CHARS = 4_000
@@ -101,6 +103,8 @@ export interface ThreadMonitorsDeps {
   post(threadId: string, payload: MonitorEventPayload, key: string): void
   /** Whether the thread has anything running here, so it shows as Working (`ThreadRuntimeManager.setPendingMonitors`). */
   working?(threadId: string, active: boolean): void
+  /** What the thread runs changed (one started or ended, or a new latest line): the app is told (`thread.backgroundWork`). */
+  changed?(threadId: string): void
   /** Where the running ones are recorded, so a restart can tell their threads they ended. */
   recordFile?: string
   /** Whether a thread still exists (a leftover of a deleted one gets no notice). */
@@ -202,6 +206,8 @@ function defaultConnect(url: string): MonitorSocket {
 export class ThreadMonitors {
   private readonly entries = new Map<string, Entry>()
   private readonly requests = new Map<string, MonitorView>()
+  /** Threads whose latest line changed and whose app update waits for the throttle. */
+  private readonly changeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   /** What the record held when this process started: the previous one's, not told yet. */
   private leftovers: RecordRow[] = []
   private readonly loaded: Promise<void>
@@ -315,6 +321,7 @@ export class ThreadMonitors {
       if (this.requests.size > REMEMBERED_REQUESTS) this.requests.delete(this.requests.keys().next().value!)
     }
     this.deps.working?.(entry.threadId, true)
+    this.changed(entry.threadId)
     this.persist()
     return view
   }
@@ -372,7 +379,10 @@ export class ThreadMonitors {
     if (entry.kind === 'background') {
       entry.tail = (entry.tail + text).slice(-BACKGROUND_TAIL_CHARS)
       const last = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).pop()
-      if (last) entry.latest = { line: cut(last, LATEST_CHARS), at: Date.now() }
+      if (last) {
+        entry.latest = { line: cut(last, LATEST_CHARS), at: Date.now() }
+        this.changedLater(entry.threadId)
+      }
       return
     }
     const lines = (entry.partial[stream] + text).split(/\r?\n/)
@@ -389,6 +399,7 @@ export class ThreadMonitors {
     const text = cut(raw.replace(/\s+$/, ''), MONITOR_EVENT_CHARS)
     entry.events += 1
     entry.latest = { line: cut(text.replace(/\s+/g, ' ').trim(), LATEST_CHARS), at: now }
+    this.changedLater(entry.threadId)
     if (entry.batch.length === 0 && entry.dropped === 0) entry.batchStarted = now
     if (entry.batch.length && entry.batchChars + text.length > MONITOR_NOTICE_CHARS) entry.dropped += 1
     else {
@@ -463,7 +474,31 @@ export class ThreadMonitors {
     this.kill(entry)
     if (!wasRunning) return
     this.deps.working?.(entry.threadId, this.has(entry.threadId))
+    this.changed(entry.threadId)
     this.persist()
+  }
+
+  /** Tells the app now, and drops a throttled update still waiting for the thread. */
+  private changed(threadId: string): void {
+    const timer = this.changeTimers.get(threadId)
+    if (timer) clearTimeout(timer)
+    this.changeTimers.delete(threadId)
+    try {
+      this.deps.changed?.(threadId)
+    } catch (error) {
+      console.warn('a change of background work could not be reported', { threadId, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** A new latest line: the app is told at most every `MONITOR_CHANGE_THROTTLE_MS`. */
+  private changedLater(threadId: string): void {
+    if (!this.deps.changed || this.changeTimers.has(threadId)) return
+    const timer = setTimeout(() => {
+      this.changeTimers.delete(threadId)
+      if (this.has(threadId)) this.changed(threadId)
+    }, MONITOR_CHANGE_THROTTLE_MS)
+    timer.unref?.()
+    this.changeTimers.set(threadId, timer)
   }
 
   private kill(entry: Entry): void {
@@ -509,6 +544,18 @@ export class ThreadMonitors {
     }
   }
 
+  /**
+   * The person stopped one from the app: it ends, and the agent is told with its next turn (never woken for it).
+   * Undefined when it is not running.
+   */
+  stopByPerson(threadId: string, id: string): MonitorView | undefined {
+    const entry = this.entries.get(id)
+    if (!entry || entry.threadId !== threadId) return undefined
+    const view = this.view(entry)
+    this.end(entry, { reason: 'stopped' }, 'none')
+    return view
+  }
+
   /** Ends the thread's `keep_working` holds; how many. */
   release(threadId: string): number {
     const holds = [...this.entries.values()].filter((entry) => entry.threadId === threadId && entry.kind === 'keep_working')
@@ -529,6 +576,8 @@ export class ThreadMonitors {
   /** Mousse is closing: everything ends untold; the record stays, so the next start tells each thread. */
   close(): void {
     this.closed = true
+    for (const timer of this.changeTimers.values()) clearTimeout(timer)
+    this.changeTimers.clear()
     for (const entry of [...this.entries.values()]) {
       entry.ended = true
       if (entry.timer) clearTimeout(entry.timer)

@@ -3149,6 +3149,21 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       return { threadId, ...(await ctx.mms.orchestrator.stopSubagents(threadId)) }
     }
+    case 'threads.backgroundWork': {
+      // What the thread runs in the background besides its subagents (the composer's status row).
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      return ctx.mms.orchestrator.backgroundWork(threadId)
+    }
+    case 'threads.stopBackground': {
+      // The status row's Stop of one item: a monitor, a background command, a hold, or the provider's own work.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'id'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const id = asString(p.id, 'id', 256)
+      return { ok: await ctx.mms.orchestrator.stopBackground(threadId, id) }
+    }
     case 'subagents.list': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId'])
