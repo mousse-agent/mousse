@@ -57,7 +57,7 @@ describe('the row', () => {
     expect(closed).toContain('aria-expanded="false"')
     expect(closed).not.toContain('1 test failed')
     const open = renderToStaticMarkup(createElement(OpenableNoticeRow, { item: background, initiallyOpen: true }))
-    expect(open).toContain('<pre class="subagent-notice-words">1 test failed</pre>')
+    expect(open).toContain('<pre class="subagent-notice-words" data-kind="monitor">1 test failed</pre>')
     // An end with nothing to show cannot be opened.
     expect(renderToStaticMarkup(createElement(OpenableNoticeRow, { item: item({ kind: 'command', lines: [], end: { reason: 'restart' } }) }))).toContain('disabled')
   })

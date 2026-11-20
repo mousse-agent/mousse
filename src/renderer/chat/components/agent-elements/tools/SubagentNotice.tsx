@@ -81,7 +81,9 @@ export function OpenableNoticeRow({ item, initiallyOpen = false }: { item: Subag
         <span className="subagent-notice-name">{line.name}</span>
         <span className="subagent-notice-detail">{line.detail}</span>
       </button>
-      {open && words && <pre className="subagent-notice-words">{words}</pre>}
+      {open && words && (item.event === "note"
+        ? <div className="subagent-notice-words" data-kind="note">{words}</div>
+        : <pre className="subagent-notice-words" data-kind="monitor">{words}</pre>)}
     </div>
   );
 }

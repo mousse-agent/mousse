@@ -385,6 +385,12 @@ button.subagent-notice-row:disabled {
   overflow-wrap: anywhere;
 }
 
+/* A note is an agent's words: prose, not output. */
+.subagent-notice-words[data-kind="note"] {
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+}
+
 /* A runtime's own subagent (Claude Code's Agent) has no thread: its row opens in place on its result and the calls it made. */
 .subagent-card-native .subagent-card-chevron {
   /* A down chevron: open turns it to point up (collapse.css turns it). */
