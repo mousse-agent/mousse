@@ -792,6 +792,8 @@ export class MmsProtocolServer {
     if (secretRequests) {
       onEmitter(secretRequests, 'changed', (payload: { threadId: string }) => {
         if (secretRequests.waiting(payload.threadId)) services.orchestrator.setAwaitingInput(payload.threadId)
+        // The last secret typed in, with no question left: the thread stops waiting, as after an answer.
+        else if (!questions.listPendingForThread(payload.threadId).length) services.orchestrator.inputAnswered(payload.threadId)
         emitToSubscribers(this.ring.push('secrets.requests.changed', { threadId: payload.threadId }, payload.threadId))
       })
     }

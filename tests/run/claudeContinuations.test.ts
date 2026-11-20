@@ -240,6 +240,27 @@ describe('Claude background helpers through the orchestrator (issue #142)', () =
     expect(manager.getActivity(s.childThread)).toBe('completed')
   })
 
+  it('an approval asked by background work after the turn ended stops waiting on the person once answered', async () => {
+    const manager = new ThreadRuntimeManager()
+    const s = await scene({ manager })
+    expect(manager.getActivity(s.childThread)).toBe('waiting')
+    // The daemon marks a thread as waiting for input when a question or approval opens on it, and calls back once the
+    // thread's last one is answered (`questions` pending / cleared in the protocol server).
+    s.d.orch.setAwaitingInput(s.childThread)
+    expect(manager.getActivity(s.childThread)).toBe('awaiting_input')
+    s.d.orch.inputAnswered(s.childThread)
+    expect(manager.getActivity(s.childThread)).toBe('waiting')
+    expect(s.d.orch.getTurnState(s.childThread).phase).not.toBe('awaiting_input')
+
+    // Once the work is over, a later request and its answer leave the thread quiet, not Done again.
+    s.cli.last.emit(notification('build-1'), textDelta('done'), resultFrame({ text: 'done', origin: 'task-notification' }))
+    await waitFor(() => manager.getActivity(s.childThread) === 'completed', 'the work to finish')
+    s.d.orch.setAwaitingInput(s.childThread)
+    expect(manager.getActivity(s.childThread)).toBe('awaiting_input')
+    s.d.orch.inputAnswered(s.childThread)
+    expect(manager.getActivity(s.childThread)).toBe('idle')
+  })
+
   it('a Stop that cannot end what the provider runs says so in the thread (issue #417)', async () => {
     const s = await scene()
     vi.spyOn(s.service, 'stopThread').mockImplementation(() => {

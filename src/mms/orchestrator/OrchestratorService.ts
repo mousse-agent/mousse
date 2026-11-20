@@ -2388,8 +2388,8 @@ export class OrchestratorService extends EventEmitter {
   /** The clock saved queue holds are renewed and judged by (tests move it). */
   private queueHoldClock: () => number = () => Date.now()
 
-  /** The phase a running turn was in when it asked the person something (`setAwaitingInput`, `inputAnswered`). */
-  private readonly phaseBeforeInput = new Map<string, { phase: TurnPhase; turnId: string | null; activeMessageId?: string }>()
+  /** The turn state a thread was in when it asked the person something (`setAwaitingInput`, `inputAnswered`). */
+  private readonly phaseBeforeInput = new Map<string, TurnState>()
 
   /** `blockedOnWait`: every running tool call only waits, so the thread shows Waiting. */
 
@@ -2486,7 +2486,7 @@ export class OrchestratorService extends EventEmitter {
 
   setAwaitingInput(threadId: string): void {
     const existing = this.turnStates.get(threadId)
-    if (existing && isTurnActivePhase(existing.phase)) this.phaseBeforeInput.set(threadId, { phase: existing.phase, turnId: existing.turnId, ...(existing.activeMessageId ? { activeMessageId: existing.activeMessageId } : {}) })
+    if (existing && existing.phase !== 'awaiting_input') this.phaseBeforeInput.set(threadId, existing)
     this.setTurnPhase(threadId, 'awaiting_input')
   }
 
@@ -2494,13 +2494,28 @@ export class OrchestratorService extends EventEmitter {
    * The thread's last question or approval was answered: a turn that still runs goes back to the phase it asked from.
    * Without this it reads as waiting for an answer until the provider sends its next event (a whole command, after an
    * approved Bash), and the composer queues what the person meant as a steer.
+   *
+   * A request asked while no turn runs (the provider's own background work after its turn ended) puts back the state
+   * the thread had before it, else the thread and every parent above it would wait on the person until its next turn.
+   * A finished turn comes back quiet, not Done: the person has just been in the thread.
    */
   inputAnswered(threadId: string): void {
     const before = this.phaseBeforeInput.get(threadId)
     this.phaseBeforeInput.delete(threadId)
     const existing = this.turnStates.get(threadId)
-    if (existing?.phase !== 'awaiting_input' || !existing.turnId || !this.sessions.get(threadId)?.activeTurn) return
-    const same = before && before.turnId === existing.turnId
+    if (existing?.phase !== 'awaiting_input') return
+    if (!existing.turnId || !this.sessions.get(threadId)?.activeTurn) {
+      if (!before || before.phase === 'completed' || before.phase === 'idle') {
+        this.setTurnPhase(threadId, 'idle')
+        return
+      }
+      const state: TurnState = { ...before, updatedAt: new Date().toISOString() }
+      this.turnStates.set(threadId, state)
+      this.emit('turn-state', state)
+      this.runtimeManager?.setActivity(threadId, turnPhaseActivity(state.phase))
+      return
+    }
+    const same = before && isTurnActivePhase(before.phase) && before.turnId === existing.turnId
     this.setTurnPhase(threadId, same ? before.phase : 'thinking', same && before.activeMessageId ? { activeMessageId: before.activeMessageId } : undefined)
   }
 
