@@ -16,8 +16,10 @@ type Phase =
 /** The report dialog, one per window: the draft as it will go out, editable, with diagnostics only when ticked. */
 export function BugReportDialogHost() {
   const open = useBugReportStore((state) => state.open)
-  // Agents' drafts (`report_bug`) wait in the service until a window shows them.
-  useEffect(() => watchPendingBugReports(), [])
+  const profileReady = useAppStore((state) => state.profileReady)
+  // Agents' drafts (`report_bug`) wait in the service until a window shows them. They belong to the profile, so the
+  // window asks only once it is bound to one.
+  useEffect(() => (profileReady ? watchPendingBugReports() : undefined), [profileReady])
   if (!open) return null
   return <BugReportDialog key={open.kind === 'agent' ? open.pending.id : open.key} open={open} />
 }

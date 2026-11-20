@@ -169,7 +169,7 @@ html:not([data-theme='high-contrast']) .app :is(.threads-sidebar-thread.active, 
   background: linear-gradient(90deg,
     var(--selected-row-fill-edge) 0% 25%, var(--selected-row-fill-mid) 50%, var(--selected-row-fill-edge) 75% 100%)
     30% 0 / 200% 100% no-repeat;
-  animation: selected-row-band calc(5s * var(--ui-motion-scale, 1)) ease-in-out infinite alternate;
+  animation: selected-row-band calc(5s * var(--ui-motion-scale, 1)) steps(75) infinite alternate;
 }
 
 html:not([data-theme='high-contrast']) .app :is(.threads-sidebar-thread.active, .chat-list-row.active, .bot-row[aria-current='true'])::after {
@@ -191,7 +191,7 @@ html:not([data-theme='high-contrast']) .app :is(.threads-sidebar-thread.active, 
   -webkit-mask-composite: xor;
   mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
   pointer-events: none;
-  animation: selected-row-band-edge calc(5s * var(--ui-motion-scale, 1)) ease-in-out infinite alternate;
+  animation: selected-row-band-edge calc(5s * var(--ui-motion-scale, 1)) steps(75) infinite alternate;
 }
 
 @keyframes selected-row-band {

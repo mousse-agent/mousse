@@ -15,6 +15,7 @@ import { localDeviceName } from './sideCard/deviceMenu'
 import { SettingsGroup } from './settings/SettingsRow'
 import { DelayedLoader } from './ui/DelayedLoader'
 import { Select } from './ui/Select'
+import { CLAUDE_USAGE_ID } from './bots/botUsageRing'
 import { needsProxyKey, ProxyKeyNote, UsageSettingsButton, type SaveProxyKey } from './UsageProxyControls'
 import type { ProvidersUsageResponse, ProviderUsage, ProviderUsageWindow, UseLimitResetResponse } from '../../shared/providerAuth'
 import { UsageBar } from './UsageBar'
@@ -165,7 +166,7 @@ const UsageProviderCard = memo(function UsageProviderCard({ provider, computerNa
  * except the card that asks for the proxy's key, which is how those numbers start.
  */
 export function hiddenClaude(provider: ProviderUsage): boolean {
-  if (provider.id !== 'claude-subscription' || needsProxyKey(provider)) return false
+  if (provider.id !== CLAUDE_USAGE_ID || needsProxyKey(provider)) return false
   return !provider.proxy || (provider.windows.length === 0 && !provider.accounts?.length)
 }
 

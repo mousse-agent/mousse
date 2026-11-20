@@ -729,8 +729,8 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 }
 
 .app .threads-sidebar .threads-sidebar-thread-action:focus-visible {
-  outline: 1px solid color-mix(in srgb, var(--text-primary) 35%, transparent);
-  outline-offset: -1px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .app .threads-sidebar .threads-sidebar-thread-action:not(.danger):focus-visible {

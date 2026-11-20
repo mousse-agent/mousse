@@ -1060,15 +1060,22 @@ export class ThreadDataStore extends EventEmitter {
    * the settings revision moves on from the one on disk. A standalone thread is written from `known`, as before.
    */
   private writeThreadMeta<T extends Thread>(known: T, change: (base: T, cacheTrusted: boolean) => T): T {
-    const path = join(this.getThreadDir(known.id), 'meta.json')
+    const threadDir = this.getThreadDir(known.id)
+    const path = join(threadDir, 'meta.json')
+    // A save's `updatedAt` that `touchAfterSave` held back from the file is newer than the file's: this write keeps it,
+    // so the thread's time never moves back in the file or in the lists patched from the result.
+    const keepHeldTime = (updated: T): T => {
+      const held = this.pendingMetaTouch.get(threadDir)
+      return held && held > updated.updatedAt ? { ...updated, updatedAt: held } : updated
+    }
     const projectId = known.projectId
     if (!projectId) {
-      const updated = change(this.metaOnDisk(path, known), false)
+      const updated = keepHeldTime(change(this.metaOnDisk(path, known), false))
       this.writeJsonAtomic(path, updated)
       return updated
     }
     return this.withPathGates([path], () => this.projectListWrite(projectId, (cacheTrusted) => {
-      const updated = change(cacheTrusted ? known : this.metaOnDisk(path, known), cacheTrusted)
+      const updated = keepHeldTime(change(cacheTrusted ? known : this.metaOnDisk(path, known), cacheTrusted))
       atomicWriteJsonSync(path, updated)
       return updated
     }))

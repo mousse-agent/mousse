@@ -150,11 +150,35 @@ export const OUTBOUND: readonly OutboundEntry[] = [
     ]
   },
   {
+    label: 'Bug reports (GitHub)',
+    kind: 'contacted',
+    hosts: ['api.github.com'],
+    when: 'When you file a bug report from an error\'s Report button or approve an agent\'s draft, when Settings checks or withdraws a report you filed, and when an update says which of your reports it fixes.',
+    sends: 'the report exactly as you saw it in the draft, and your GitHub sign-in when you file with your own account.',
+    sources: ['src/mms/bugReports/BugReportService.ts']
+  },
+  {
+    label: 'Services an agent reads with a saved key (GitHub, Stripe, Notion and others)',
+    kind: 'contacted',
+    hosts: ['api.github.com', 'api.stripe.com', 'api.notion.com', 'api.openai.com', 'api.anthropic.com', 'huggingface.co'],
+    when: 'Only when an agent reads one of these services with a key you saved and bound to it in Settings → Secrets.',
+    sends: 'a read request (GET or HEAD) to the paths that service allows, with your saved key.',
+    sources: ['src/shared/secretServices.ts', 'src/mms/secrets/secretFetch.ts']
+  },
+  {
+    label: 'Computer use driver (Cua)',
+    kind: 'contacted',
+    hosts: ['cua.ai'],
+    when: 'When you install the computer use driver from Mousse.',
+    sends: 'a download request for the driver\'s official installer, which then downloads the driver.',
+    sources: ['src/shared/computerUse.ts', 'src/mms/computerUse/ComputerUseDriver.ts']
+  },
+  {
     label: 'Links and names Mousse never connects to',
     kind: 'link',
     hosts: [
       'accounts.google.com', 'agentclientprotocol.com', 'api.example.com', 'auth.x.ai', 'chatgpt.com', 'code.claude.com',
-      'example.com', 'example.invalid', 'www.apple.com', 'www.w3.org'
+      'example.com', 'example.invalid', 'unavailable.invalid', 'www.apple.com', 'www.w3.org'
     ]
   },
   {
