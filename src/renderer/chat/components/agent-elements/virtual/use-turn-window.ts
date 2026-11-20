@@ -319,12 +319,13 @@ function createEngine(
     container: HTMLElement,
     rows: HTMLElement,
     containerTop: number,
+    keyOf: (el: Element) => string | undefined = (el) => keyOfEl.get(el),
   ): HeldAnchor | null => {
     const topEdge = containerTop + container.clientTop;
     let rowEl: Element | null = null;
     let lastRow: Element | null = null;
     for (const child of Array.from(rows.children)) {
-      if (!keyOfEl.has(child)) continue;
+      if (keyOf(child) === undefined) continue;
       lastRow = child;
       if (child.getBoundingClientRect().bottom > topEdge) {
         rowEl = child;
@@ -333,7 +334,7 @@ function createEngine(
     }
     rowEl ??= lastRow;
     if (!rowEl) return null;
-    const key = keyOfEl.get(rowEl)!;
+    const key = keyOf(rowEl)!;
     const root = domNode(rowEl, rowEl.getBoundingClientRect(), true);
     const { node: picked, edge } = pickReadingNode(root, topEdge);
     const rect = picked.el.getBoundingClientRect();
@@ -395,6 +396,25 @@ function createEngine(
       follower?.();
     }
     anchor = pickReadingPoint(container, rows, containerTop);
+  };
+
+  /**
+   * Called while rendering, before a list that rendered every row is windowed in a commit that also adds turns above
+   * its rows (an earlier page of a long thread): picks the reading point on the rows still on the page, so the first
+   * windowed commit holds it as any later one does. The browser's own anchoring is switched off by that same commit.
+   * The rows are not registered yet, so their keys are read from the page.
+   */
+  const pickBeforeOpen = () => {
+    const options = getOptions();
+    const container = options.containerRef.current;
+    const rows = options.rowsRef.current;
+    if (!container || !rows || options.modeRef.current === "following-end") return;
+    anchor = pickReadingPoint(
+      container,
+      rows,
+      container.getBoundingClientRect().top,
+      (el) => el.getAttribute("data-turn-key") ?? undefined,
+    );
   };
 
   /**
@@ -654,6 +674,7 @@ function createEngine(
     subscribe,
     commit,
     attach,
+    pickBeforeOpen,
   };
 }
 
@@ -708,6 +729,7 @@ export function useTurnWindow(options: TurnWindowOptions): TurnWindowApi {
       if (moved) {
         current = moved;
         setStored(moved);
+        if (!openedRef.current) engine.pickBeforeOpen();
       }
     }
   }
