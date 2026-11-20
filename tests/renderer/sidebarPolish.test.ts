@@ -2,7 +2,7 @@
 /**
  * Sidebar rows show their state: an empty project offers New thread, project rows have a disclosure chevron and a
  * tooltip with their folder, pinned threads list first, pinned cards carry the pin on their meta line, threads
- * of no project form "Other threads", the Projects tree's last group, thread titles end in an ellipsis and never move
+ * of no project form "No project", the Projects tree's last group, thread titles end in an ellipsis and never move
  * on hover, and the project menu holds every project action, the rare Git one in a submenu. While a menu is open
  * the sidebar is marked so other rows do not light their actions.
  */
@@ -170,14 +170,14 @@ describe('pinned threads', () => {
   })
 })
 
-describe('Other threads', () => {
+describe('No project', () => {
   const groupNames = () => [...host.querySelectorAll<HTMLElement>('.threads-sidebar-project-toggle')].map((item) => item.textContent)
 
   it('is the Projects tree’s last group, with the same rows as a project and no project actions', () => {
     show([thread('a', 'Fix tests'), thread('b', 'Loose', { projectId: undefined }), thread('c', 'Stray', { projectId: 'gone' })])
-    expect(groupNames()).toEqual(['Mousse', 'Other threads'])
+    expect(groupNames()).toEqual(['Mousse', 'No project'])
     expect(host.querySelector('.threads-sidebar-footer')?.textContent).not.toContain('No project')
-    openProject('Other threads')
+    openProject('No project')
     const row = host.querySelector<HTMLElement>('button[data-thread-id="b"]')!
     expect(row.closest('.threads-sidebar-other-threads .threads-sidebar-children')).not.toBeNull()
     expect(row.closest('[role="tree"]')?.getAttribute('aria-label')).toBe('Projects')
@@ -187,16 +187,16 @@ describe('Other threads', () => {
     expect(group.querySelector('.threads-sidebar-project-more')).toBeNull()
     // Its one action is the global new thread, with no project.
     expect(group.querySelector('.threads-sidebar-project-new-chat')?.getAttribute('aria-label')).toBe('New thread')
-    act(() => { projectRow('Other threads').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })) })
+    act(() => { projectRow('No project').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })) })
     expect(menu()).toBeNull()
   })
 
-  it('is hidden without threads, and shown under No projects', () => {
+  it('is listed after the projects even without threads, and shown under No projects', () => {
     show([thread('a', 'Fix tests')])
-    expect(groupNames()).toEqual(['Mousse'])
+    expect(groupNames()).toEqual(['Mousse', 'No project'])
     show([thread('b', 'Loose', { projectId: undefined })], { projects: [] })
     expect(host.textContent).toContain('No projects')
-    expect(groupNames()).toEqual(['Other threads'])
+    expect(groupNames()).toEqual(['No project'])
   })
 
   it('is walked as part of the Projects tree, its one Tab stop', () => {
@@ -206,16 +206,16 @@ describe('Other threads', () => {
     expect(items().map((item) => item.tabIndex)).toEqual([0, -1])
     projectRow().focus()
     key(projectRow(), { key: 'ArrowDown' })
-    expect(document.activeElement).toBe(projectRow('Other threads'))
-    key(projectRow('Other threads'), { key: 'ArrowRight' })
-    expect(projectRow('Other threads').getAttribute('aria-expanded')).toBe('true')
-    key(projectRow('Other threads'), { key: 'ArrowRight' })
+    expect(document.activeElement).toBe(projectRow('No project'))
+    key(projectRow('No project'), { key: 'ArrowRight' })
+    expect(projectRow('No project').getAttribute('aria-expanded')).toBe('true')
+    key(projectRow('No project'), { key: 'ArrowRight' })
     expect((document.activeElement as HTMLElement).dataset.threadId).toBe('b')
     key(document.activeElement!, { key: 'End' })
     expect((document.activeElement as HTMLElement).dataset.threadId).toBe('c')
     expect(items().filter((item) => item.tabIndex === 0)).toEqual([document.activeElement])
     key(document.activeElement!, { key: 'ArrowLeft' })
-    expect(document.activeElement).toBe(projectRow('Other threads'))
+    expect(document.activeElement).toBe(projectRow('No project'))
   })
 })
 
@@ -347,7 +347,7 @@ describe('focus dimming', () => {
     expect(activeGroups()).toEqual(['p2'])
   })
 
-  it('marks "Other threads" when the open thread has no project', () => {
+  it('marks "No project" when the open thread has no project', () => {
     show(threads, { projects })
     open('c')
     expect(activeGroups()).toHaveLength(1)

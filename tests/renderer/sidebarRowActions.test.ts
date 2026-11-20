@@ -122,10 +122,10 @@ describe('naming', () => {
     expect(html).not.toMatch(/Settle|Recent chats|New chat/)
   })
 
-  it('lists a thread whose project was removed under Other threads', () => {
+  it('lists a thread whose project was removed under No project', () => {
     setStore({ projects: [project('p1', 'Mousse')], threads: [thread('a', 'Fix tests', { projectId: 'gone' })], threadsSidebarView: 'projects', sidebarMode: 'projects' })
     const html = renderToStaticMarkup(createElement(ThreadsSidebar))
-    expect(html).toContain('<span class="threads-sidebar-project-name">Other threads</span>')
+    expect(html).toContain('<span class="threads-sidebar-project-name">No project</span>')
     expect(html).not.toContain('No project ·')
   })
 })

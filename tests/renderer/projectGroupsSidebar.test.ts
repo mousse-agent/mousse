@@ -69,7 +69,7 @@ describe('the Projects view with a project on several computers', () => {
     setStores({ projects, threads, threadsSidebarView: 'projects' })
     const html = render()
     expect(groups(html)).toBe(3)
-    expect(names(html)).toEqual(['Mousse', 'Notes', 'Studio only'])
+    expect(names(html)).toEqual(['Mousse', 'Notes', 'Studio only', 'No project'])
     expect(html).not.toContain('mousse-on-studio')
   })
 
@@ -94,7 +94,7 @@ describe('the Projects view with a project on several computers', () => {
   it('does not group by a weak match, and says nothing of one', () => {
     setStores({ projects: [project('p1', 'Mousse'), project(`${B}:b1`, 'Fork', { node: B, similarTo: 'p1' })], threads: [], threadsSidebarView: 'projects' })
     const html = render()
-    expect(names(html)).toEqual(['Mousse', 'Fork'])
+    expect(names(html)).toEqual(['Mousse', 'Fork', 'No project'])
     expect(html).not.toContain('Also on')
   })
 
