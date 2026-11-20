@@ -1,7 +1,7 @@
 /**
  * SPEC §16.1: handoffs are stored artifacts. Strategy decisions on the engine, then a real
  * orchestrator switching pi → Claude-shaped adapter: the `<handoff>` block reaches the prompt, the
- * marker links the artifact, a pending handoff blocks a second switch, and a throw marks it failed.
+ * marker links the artifact, a switch made while that turn runs waits for the next turn, and a throw marks it failed.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -12,7 +12,7 @@ import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { HandoffItem } from '../../src/mms/run/handoff/budget'
 import type { ProviderRef } from '../../src/mms/run/types'
 import { delegationFixture, type DelegationFixture } from './delegationFixture'
-import { CLAUDE, PI, claudeAdapter, phase6Daemon, piAdapter, type Phase6Daemon } from './phase6Fixture'
+import { CLAUDE, PI, claudeAdapter, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 describe('HandoffService strategies (SPEC §16.1)', () => {
   let fx: DelegationFixture | undefined
@@ -190,7 +190,7 @@ describe('provider switch through the orchestrator (SPEC §16.1)', () => {
     return { pi, claude, d: daemon }
   }
 
-  it('delivers a full_summary <handoff> block in the prompt, links it from the marker and blocks a second switch while pending', async () => {
+  it('delivers a full_summary <handoff> block in the prompt, links it from the marker, and takes a switch made while it is pending from the next turn on', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
     let blockedSwitch: unknown
@@ -228,16 +228,16 @@ describe('provider switch through the orchestrator (SPEC §16.1)', () => {
       // The new model is told it is a different one, after the history and before the person's message.
       '[Mousse] Model change: you are now Claude Sonnet (Test claude). The earlier assistant replies in this thread were written by GPT-Replay (openai).\n\nSecond question'
     )
-    expect(blockedSwitch).toMatchObject({ code: 'handoff_pending' })
+    // A switch made while the handoff's turn runs is not refused: that turn finishes as it was, the next one runs on the newest pick.
+    expect(blockedSwitch).toBeNull()
 
     const [handoff] = d.engine.handoffs.listForThread(thread.id)
     expect(handoff).toMatchObject({ strategy: 'full_summary', status: 'delivered', selectedItems: 2, omittedItems: 0, toRef: { provider: 'claude-subscription' }, fromRef: { provider: 'openai' } })
     const marker = d.orch.getMessages(thread.id).find((message) => message.kind === 'context_handoff')
     expect(marker?.contextHandoff).toMatchObject({ handoffId: handoff.handoffId, strategy: 'full_summary', selectedItems: 2, omittedItems: 0 })
-    // Delivered: switching again is allowed.
-    expect(() => d.orch.setThreadModelOverride(thread.id, PI)).not.toThrow()
+    expect(d.orch.getThreadModelOverride(thread.id)).toMatchObject({ llmProvider: 'openai' })
 
-    // Back on pi: Claude ran on run 2, so pi (last on run 1) gets the delta since then, in its prompt.
+    // Back on pi (picked while Claude's turn ran): Claude ran on run 2, so pi (last on run 1) gets the delta since then.
     await d.orch.send('Third question', false, { threadId: thread.id, clientRequestId: 'send-3' })
     const third = d.engine.handoffs.listForThread(thread.id)[1]
     expect(third).toMatchObject({ strategy: 'delta', coveredFromOrdinal: 2, coveredToOrdinal: 2, status: 'delivered' })
@@ -249,6 +249,71 @@ describe('provider switch through the orchestrator (SPEC §16.1)', () => {
     const canonical = d.orch.getNativeContext(thread.id).messages
     expect(canonical.filter((message) => message.role === 'user').map((message) => message.content)).toEqual(['First question', 'Second question', 'Third question'])
   }, 30_000)
+
+  describe('a provider switch made while a turn runs', () => {
+    /** Which adapters were asked to end a thread's process, and the Mousse credentials revoked, in order. */
+    const watch = (pi: ReturnType<typeof piAdapter>, claude: ReturnType<typeof claudeAdapter>, d: Phase6Daemon) => {
+      const calls: string[] = []
+      pi.stopThread = async () => { calls.push('stop:pi'); return 'stopped' }
+      claude.stopThread = async () => { calls.push('stop:claude'); return 'stopped' }
+      d.orch.setMcpAttachment({ bearerForTurn: () => ({ url: 'http://127.0.0.1:9/mcp', token: 't', tokenHash: 'h' }), turnEnded: () => undefined, revokeThread: () => { calls.push('revoke') } })
+      return calls
+    }
+
+    it('lets the turn finish on its provider, ends that provider after it, and runs the next turn on the new one', async () => {
+      let during: string[] = []
+      let calls: string[] = []
+      const { pi, claude, d } = setup(async () => {
+        d.orch.setThreadModelOverride(thread.id, PI)
+        during = [...calls]
+        return 'Claude here.'
+      })
+      calls = watch(pi, claude, d)
+      const thread = d.store.createThread('Mid-turn switch')
+      d.orch.setThreadModelOverride(thread.id, CLAUDE)
+      calls.length = 0
+
+      const first = await d.orch.send('Question', false, { threadId: thread.id, clientRequestId: 'mid-1' })
+      expect(first.message).toBe('Claude here.')
+      expect(first.error).toBeUndefined()
+      // Nothing was ended while the turn ran; once it settled, Claude's process and credentials were.
+      expect(during).toEqual([])
+      await waitFor(() => calls.includes('stop:claude'), 'the old provider to be ended')
+      expect(calls).toContain('revoke')
+      expect(calls).not.toContain('stop:pi')
+
+      // The pick applied to the next turn, which hands Claude's reply over to pi.
+      await d.orch.send('Next', false, { threadId: thread.id, clientRequestId: 'mid-2' })
+      expect(pi.turns).toHaveLength(1)
+      expect(pi.turns[0].prompt).toContain('[assistant] Claude here.')
+    }, 30_000)
+
+    it('ends nothing when the thread is switched back before the turn settles', async () => {
+      let calls: string[] = []
+      const { pi, claude, d } = setup(async () => {
+        d.orch.setThreadModelOverride(thread.id, PI)
+        d.orch.setThreadModelOverride(thread.id, CLAUDE)
+        return 'Claude here.'
+      })
+      calls = watch(pi, claude, d)
+      const thread = d.store.createThread('Switch and back')
+      d.orch.setThreadModelOverride(thread.id, CLAUDE)
+      calls.length = 0
+      await d.orch.send('Question', false, { threadId: thread.id, clientRequestId: 'back-1' })
+      expect(calls).toEqual([])
+    }, 30_000)
+
+    it('control: with no turn running, the switch ends the old provider at once', async () => {
+      const { pi, claude, d } = setup()
+      const calls = watch(pi, claude, d)
+      const thread = d.store.createThread('Idle switch')
+      d.orch.setThreadModelOverride(thread.id, CLAUDE)
+      calls.length = 0
+      d.orch.setThreadModelOverride(thread.id, PI)
+      expect(calls).toContain('revoke')
+      await waitFor(() => calls.includes('stop:claude'), 'the old provider to be ended')
+    })
+  })
 
   it('marks the handoff failed when the adapter throws', async () => {
     const { claude, d } = setup()
