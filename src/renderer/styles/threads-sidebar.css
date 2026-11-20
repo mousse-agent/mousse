@@ -12,8 +12,8 @@
   max-width: 480px;
   min-height: 0;
   --threads-sidebar-row-height: 32px;
-  /* The extra height of a Projects tree thread row, whose title may take a second line. */
-  --threads-sidebar-title-line: 16px;
+  /* The extra height of a Projects tree thread row for its branch line under the title. */
+  --threads-sidebar-sub-line: 14px;
   /* Extra space between the last pinned thread and the first regular thread. */
   --threads-sidebar-pinned-gap: 8px;
   container-type: inline-size;
@@ -386,18 +386,9 @@
   height: var(--threads-sidebar-row-height);
 }
 
-/* A tree row has room for two lines, so a long title wraps instead of ending at the hover actions' room. */
+/* A tree row has two lines: the title across the row's full width, and the thread's branch under it, compact. */
 .threads-sidebar-thread:not(.threads-sidebar-card) {
-  height: calc(var(--threads-sidebar-row-height) + var(--threads-sidebar-title-line));
-}
-
-.threads-sidebar-thread:not(.threads-sidebar-card) .threads-sidebar-thread-name {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  line-height: 1.3;
+  height: calc(var(--threads-sidebar-row-height) + var(--threads-sidebar-sub-line));
 }
 
 .threads-sidebar-thread-container {
@@ -406,12 +397,27 @@
   --thread-actions-room: 76px;
 }
 
-/* A row keeps its hover actions' room at rest too, so a long title always ends in an ellipsis before them and
-   nothing moves when the pointer arrives. At rest the room holds the status, computer and worktree marks; the
-   actions take their place on hover. A card keeps its actions over the age line, clear of the title. */
+/* A row keeps its hover actions' room at rest too, so nothing moves when the pointer arrives. At rest the room holds
+   the status, computer and worktree marks; the actions take their place on hover. With a branch line, the room is on
+   that line and the title runs the row's full width; without one, the title ends before the room. A card keeps its
+   actions over the age line, clear of the title. */
 .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) {
   position: relative;
   padding-right: var(--thread-actions-room);
+}
+
+.threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card):has(.threads-sidebar-thread-sub) {
+  padding-right: var(--ui-row-x, 9px);
+}
+
+.threads-sidebar-thread-sub {
+  padding-right: calc(var(--thread-actions-room) - var(--ui-row-x, 9px));
+}
+
+/* The marks and the actions sit on the branch line: the middle of the row's lower half. */
+.threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card):has(.threads-sidebar-thread-sub) > .threads-sidebar-thread-trailing,
+.threads-sidebar-thread-container:has(> .threads-sidebar-thread:not(.threads-sidebar-card) .threads-sidebar-thread-sub) > .threads-sidebar-thread-actions {
+  top: calc(50% + 9.5px);
 }
 
 .threads-sidebar-thread-container > .threads-sidebar-thread:not(.threads-sidebar-card) > .threads-sidebar-thread-trailing {
@@ -486,13 +492,13 @@
 }
 
 .threads-sidebar-thread-list {
-  max-height: calc((var(--threads-sidebar-row-height) + var(--threads-sidebar-title-line)) * 5 + var(--threads-sidebar-pinned-gap) * var(--project-pinned-gap-shown, 0));
+  max-height: calc((var(--threads-sidebar-row-height) + var(--threads-sidebar-sub-line)) * 5 + var(--threads-sidebar-pinned-gap) * var(--project-pinned-gap-shown, 0));
   overflow: hidden;
   transition: max-height calc(350ms * var(--ui-motion-scale)) cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .threads-sidebar-thread-list.expanded {
-  max-height: calc((var(--threads-sidebar-row-height) + var(--threads-sidebar-title-line)) * var(--project-thread-count, 5) + var(--threads-sidebar-pinned-gap) * var(--project-pinned-gap, 0));
+  max-height: calc((var(--threads-sidebar-row-height) + var(--threads-sidebar-sub-line)) * var(--project-thread-count, 5) + var(--threads-sidebar-pinned-gap) * var(--project-pinned-gap, 0));
 }
 
 .threads-sidebar-thread-root {
@@ -1521,11 +1527,12 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   filter: var(--sidebar-needs-fade, none);
 }
 
-/* A tree row's pull requests as a count after its title. */
+/* A tree row's two lines: the title with its marks and pull request count, then the branch. */
 .threads-sidebar-thread-text {
   display: flex;
   flex: 1;
   flex-direction: column;
+  gap: 1px;
   min-width: 0;
 }
 
@@ -1534,6 +1541,17 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   align-items: center;
   gap: 6px;
   min-width: 0;
+  line-height: 18px;
+}
+
+.threads-sidebar-thread-sub {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 14px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  opacity: 0.85;
 }
 
 .threads-sidebar-reply-preview {

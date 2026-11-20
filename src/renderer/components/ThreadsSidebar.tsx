@@ -63,7 +63,6 @@ import { ProjectIcon } from './ProjectIcon'
 import { projectIconMenuActions } from '../lib/projectIconActions'
 import { projectTooltip, thisHomeFolder } from '../lib/projectTooltip'
 import { useThreadProjectColors } from '../lib/threadProjectColorsSetting'
-import { useReplyPreviews } from '../lib/replyPreviewSetting'
 import { threadPullRequestsOf, type ThreadPullRequestSummary } from '../../shared/pullRequests'
 import { ThreadPullRequestCount, ThreadReplyPreview } from './ThreadRowExtras'
 import { ThreadSpeechIndicator, useSpeakingThreadId } from '../readAloud/ThreadSpeechIndicator'
@@ -124,7 +123,7 @@ const isMenuKey = (event: KeyboardEvent) => event.key === 'ContextMenu' || (even
 /** On hover, a title cut off by an ellipsis gets the full text as its native tooltip; one that fits gets none. */
 const tooltipIfTruncated = (fullTitle: string) => (event: React.MouseEvent<HTMLElement>) => {
   const element = event.currentTarget
-  if (element.scrollWidth > element.clientWidth || element.scrollHeight > element.clientHeight) element.title = fullTitle
+  if (element.scrollWidth > element.clientWidth) element.title = fullTitle
   else element.removeAttribute('title')
 }
 
@@ -306,7 +305,7 @@ export function ThreadCardBody({
   onCancelRename: () => void
   /** Double-click on the title starts a rename. */
   onStartRename?: (event: React.MouseEvent<HTMLElement>) => void
-  /** The latest reply, shown under the title; absent when it has none or previews are off. */
+  /** The latest reply, shown under the title (a thread link's card); absent when it has none or previews are off. */
   preview?: string
   pullRequests: readonly ThreadPullRequestSummary[]
   /** The status says how long ago too when it is Done or waits for the person (`ThreadCardStatus`'s `withAge`). */
@@ -355,6 +354,14 @@ export function ThreadCardBody({
       </span>
     </>
   )
+}
+
+/** A Projects tree row's second line: the branch its thread works on, compact under the title; none in a project
+ * without Git (or another computer's). */
+function ThreadRowBranch({ thread, threadId }: { thread: Pick<Thread, 'projectId' | 'node' | 'worktreeEnabled'>; threadId: string }) {
+  const branch = useThreadBranch(thread, threadId)
+  if (!branch?.branch) return null
+  return <span className="threads-sidebar-thread-sub">{branch.branch}</span>
 }
 
 export function ThreadsSidebar({ className = '' }: { className?: string }) {
@@ -597,7 +604,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   }, [feedThreads, needsMe, showNeedsMe])
 
   const threadProjectColors = useThreadProjectColors()
-  const replyPreviews = useReplyPreviews()
   const hueByGroup = useMemo(
     () => projectHues(projectGroups.map((group) => ({ id: group.id, createdAt: group.project.createdAt }))),
     [projectGroups]
@@ -1286,7 +1292,6 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     // A row already named (a pending send's, from its prompt) shows its name, not a placeholder.
     const isGeneratingTitle = pendingTitleIds.has(thread.id) && isDefaultThreadName(thread.name)
     const statusNode = renderThreadStatus(thread.id, thread.setupFailure?.reason)
-    const preview = replyPreviews ? thread.lastReply : undefined
     const pullRequests = threadPullRequestsOf(thread)
     const worktree = worktreeMark(thread, projects)
     const hasDraft = draftedIds.has(thread.id)
@@ -1434,59 +1439,38 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
             onRename={(name) => void submitRename(name)}
             onCancelRename={endRename}
             onStartRename={renameFromTitle}
-            preview={preview}
             pullRequests={pullRequests}
           />
         ) : (
           <>
-        {thread.pinnedAt && (
+        {/* The title takes the row's full width on its line; the branch sits under it with the marks and actions. */}
+        <span className="threads-sidebar-thread-text">
+          <span className="threads-sidebar-thread-line">
+            {thread.pinnedAt && <Pin size={12} strokeWidth={2} className="threads-sidebar-pin-icon" aria-hidden="true" />}
 
-          <Pin size={12} strokeWidth={2} className="threads-sidebar-pin-icon" aria-hidden="true" />
+            {thread.localOnly && (
+              <span className="thread-private-icon" title="Private: stays on this computer">
+                <Lock size={12} strokeWidth={2} aria-label="Private" />
+              </span>
+            )}
 
-        )}
+            {thread.expiresAt && <ThreadExpiryIcon expiresAt={thread.expiresAt} size={12} />}
 
-        {thread.localOnly && (
-          <span className="thread-private-icon" title="Private: stays on this computer">
-            <Lock size={12} strokeWidth={2} aria-label="Private" />
+            {isRenaming ? (
+              <SidebarRenameInput initialName={renaming.name} onSubmit={(name) => void submitRename(name)} onCancel={endRename} />
+            ) : isGeneratingTitle ? (
+              <span className="threads-sidebar-skeleton" aria-label="Generating title" />
+            ) : unsentChat ? (
+              <UnsentChatTitle threadId={thread.id} />
+            ) : (
+              <>
+                <ThreadTitle name={thread.name} fullTitle={fullTitle} provisional={thread.titleSource === 'provisional'} onDoubleClick={renameFromTitle} />
+                <ThreadPullRequestCount pullRequests={pullRequests} />
+              </>
+            )}
           </span>
-        )}
-
-        {thread.expiresAt && <ThreadExpiryIcon expiresAt={thread.expiresAt} size={12} />}
-
-        {isRenaming ? (
-
-          <SidebarRenameInput
-
-            initialName={renaming.name}
-
-            onSubmit={(name) => void submitRename(name)}
-
-            onCancel={endRename}
-
-          />
-
-        ) : isGeneratingTitle ? (
-
-          <span className="threads-sidebar-skeleton" aria-label="Generating title" />
-
-        ) : pullRequests.length ? (
-
-          <span className="threads-sidebar-thread-text">
-            <span className="threads-sidebar-thread-line">
-              <ThreadTitle name={thread.name} fullTitle={fullTitle} provisional={thread.titleSource === 'provisional'} onDoubleClick={renameFromTitle} />
-              <ThreadPullRequestCount pullRequests={pullRequests} />
-            </span>
-          </span>
-
-        ) : unsentChat ? (
-
-          <UnsentChatTitle threadId={thread.id} />
-
-        ) : (
-
-          <ThreadTitle name={thread.name} fullTitle={fullTitle} provisional={thread.titleSource === 'provisional'} onDoubleClick={renameFromTitle} />
-
-        )}
+          {!isRenaming && !unsentChat && <ThreadRowBranch thread={thread} threadId={thread.id} />}
+        </span>
 
         {showTrailing && (
           <span className="threads-sidebar-thread-trailing">

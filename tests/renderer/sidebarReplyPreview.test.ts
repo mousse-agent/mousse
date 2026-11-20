@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
- * A Threads tab card shows its thread's latest reply on one muted line under the title; a Projects tree row never does
- * (its title gets the room). Both show the pull requests the thread was linked to as a small count whose tooltip lists
- * them with their state. Settings > Appearance > Reply previews hides the line; the count stays.
+ * The sidebar shows no thread's latest reply, Reply previews on or off: a Projects tree row shows its branch under the
+ * title instead. Both views show the pull requests the thread was linked to as a small count whose tooltip lists them
+ * with their state.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -45,7 +45,9 @@ const threads = [
   }),
   // Linked before the list was kept: its one link counts.
   thread('b', 'Old link', { pullRequest: legacyLink }),
-  thread('c', 'Nothing yet')
+  thread('c', 'Nothing yet'),
+  // In its project's own folder: the folder's branch.
+  thread('d', 'In the folder', { worktreeEnabled: false })
 ]
 
 const appKeys = ['projects', 'threads', 'threadActivity', 'activeThreadId', 'threadsSidebarView', 'sidebarMode'] as const
@@ -82,20 +84,25 @@ const row = (id: string) => host.querySelector<HTMLButtonElement>(`.threads-side
 const preview = (id: string) => row(id).querySelector('.threads-sidebar-reply-preview')?.textContent ?? null
 const count = (id: string) => row(id).querySelector('[role="img"][aria-label$="pull request"], [role="img"][aria-label$="pull requests"]')
 
-it('a Threads tab card shows the latest reply under the title, and nothing for a thread with none', () => {
-  show('threads')
-  expect(preview('a')).toBe('The lint step ran twice; it runs once now.')
-  expect(preview('c')).toBeNull()
-  expect(row('a').textContent).toContain('Fix the build')
-})
-
-it('a Projects tree row shows no reply', () => {
+it('a Projects tree row shows its branch under the title: its own worktree\'s, or its project folder\'s', async () => {
+  const bridge = (window as unknown as { mousse: Record<string, unknown> }).mousse
+  bridge.git = { status: async () => ({ isRepo: true, branch: 'master' }) }
+  bridge.workspace = { getStatus: async (id: string) => ({ metadata: { branch: `mousse/${id}` }, execution: { lifecycle: 'creating' } }) }
   show('projects')
-  expect(preview('a')).toBeNull()
-  expect(row('a').textContent).toContain('Fix the build')
+  await act(async () => { for (let pass = 0; pass < 5; pass++) await Promise.resolve() })
+  const branch = (id: string) => row(id).querySelector('.threads-sidebar-thread-sub')?.textContent ?? null
+  expect(branch('a')).toBe('mousse/a')
+  expect(branch('d')).toBe('master')
 })
 
 describe.each(['projects', 'threads'] as const)('a thread row in the %s view', (view) => {
+  it('shows no reply, Reply previews on or off', () => {
+    show(view)
+    expect(preview('a')).toBeNull()
+    expect(row('a').textContent).toContain('Fix the build')
+    act(() => setReplyPreviews(false))
+    expect(preview('a')).toBeNull()
+  })
 
   it('counts the pull requests, and lists them with their state on hover', () => {
     show(view)
@@ -106,23 +113,15 @@ describe.each(['projects', 'threads'] as const)('a thread row in the %s view', (
     expect(count('b')?.getAttribute('title')).toBe('#5')
     expect(count('c')).toBeNull()
   })
-
-  it('hides the reply with Reply previews off, and keeps the count', () => {
-    show(view)
-    act(() => setReplyPreviews(false))
-    expect(preview('a')).toBeNull()
-    expect(count('a')?.getAttribute('aria-label')).toBe('2 pull requests')
-  })
 })
 
 describe('a list push that changes only what a row shows beside its title', () => {
-  it('updates the reply and the count, though the thread\'s time did not move', () => {
+  it('updates the count, though the thread\'s time did not move', () => {
     show('threads')
     const pushed = threads.map((entry) => entry.id === 'a'
-      ? { ...entry, lastReply: 'Merged; the build is green.', pullRequests: entry.pullRequests!.map((pr) => ({ ...pr, state: 'merged' as const, isDraft: undefined })) }
+      ? { ...entry, pullRequests: entry.pullRequests!.map((pr) => ({ ...pr, state: 'merged' as const, isDraft: undefined })) }
       : { ...entry })
     act(() => useAppStore.getState().setThreads(pushed))
-    expect(preview('a')).toBe('Merged; the build is green.')
     expect(count('a')?.getAttribute('title')).toBe('#7 Run lint once · merged\n#9 Cache the lint step · merged')
   })
 })
