@@ -34,7 +34,7 @@ import type { ShortcutOverrides } from '../../shared/commands'
 import { parseCursor } from '../../shared/pageCursor'
 import { isThreadStarted } from '../../shared/threadTitle'
 import { withHeldModelPicks } from '../lib/modelPicks'
-import { tabAgreement,type SidebarTab, type ThreadListTab, type WorkspaceMode } from './sidebarTabAgreement'
+import { tabAgreement, type SidebarTab, type ThreadListTab, type WorkspaceMode } from './sidebarTabAgreement'
 
 /** What the command palette leads with when it opens. */
 export type PaletteMode = 'all' | 'messages'

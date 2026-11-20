@@ -1834,7 +1834,9 @@ export function OrchestratorChat() {
         // The daemon refused: show the model the thread really has, and why. A newer pick decides its own outcome.
         const { latest, baseline } = settleModelPick(threadId, ticket)
         if (!latest) return
-        if (baseline) useAppStore.getState().upsertThread(baseline)
+        // Only the model goes back: the rest of the row may have changed since the pick (title, status).
+        const row = useAppStore.getState().threads.find((t) => t.id === threadId)
+        if (baseline && row) useAppStore.getState().upsertThread({ ...row, modelOverride: baseline.modelOverride })
         setSendError(sendErrorLine(error))
       }
     }
