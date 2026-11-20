@@ -3,7 +3,7 @@ import { expiryPresetMs } from '../../shared/threadExpiry'
 import { composerWorkspaceFor, rememberedChoiceOf, workspaceWithPrivate } from './newThread'
 import { openSubagentParentRow, visibleThreads } from '../../shared/threadLineage'
 import { findUnstartedThread, isThreadStarted } from '../../shared/threadTitle'
-import type { NewThreadChoice, Thread } from '../../shared/types'
+import type { NewThreadChoice, Project, Thread } from '../../shared/types'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
@@ -177,6 +177,11 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
 export async function addProjectAndStartThread(): Promise<void> {
   const project = await window.mousse.projects.open()
   if (!project) return
+  await listProjectAndStartThread(project)
+}
+
+/** A project just added (opened, cloned, made, or on another computer): listed at once, and a new thread opened in it. */
+export async function listProjectAndStartThread(project: Project): Promise<void> {
   const store = useAppStore.getState()
   // The service also pushes the list, but that can come after the new thread is open.
   if (!store.projects.some((entry) => entry.id === project.id)) store.setProjects([...store.projects, project])

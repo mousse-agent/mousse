@@ -9,7 +9,7 @@ import { projectInitials } from '../lib/projectInitials'
 import { useThreadProjectColors } from '../lib/threadProjectColorsSetting'
 import { lastUsedBy } from '../lib/threadFilter'
 import { runWithToast } from '../lib/actionToast'
-import { addProjectAndStartThread, createAndSelectNoProjectThread, createAndSelectProjectThread } from '../lib/threadActions'
+import { createAndSelectNoProjectThread, createAndSelectProjectThread } from '../lib/threadActions'
 import { botDayLabel } from './bots/messageGroups'
 import { ProjectIcon } from './ProjectIcon'
 import { Select, type SelectOption } from './ui/Select'
@@ -239,7 +239,7 @@ function PickerDialog({ onClose }: { onClose: () => void }) {
             className="new-thread-picker-action"
             onClick={() => {
               onClose()
-              void runWithToast('add the project', addProjectAndStartThread)
+              useAppStore.getState().setNewProjectOpen(true)
             }}
           >
             <FolderPlus size={14} strokeWidth={2} aria-hidden="true" />

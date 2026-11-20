@@ -8,7 +8,6 @@ const actions = vi.hoisted(() => ({
   createAndSelectThread: vi.fn(async () => undefined),
   createAndSelectProjectThread: vi.fn(async (_projectId: string) => undefined),
   createAndSelectNoProjectThread: vi.fn(async () => undefined),
-  addProjectAndStartThread: vi.fn(async () => undefined)
 }))
 vi.mock('../../src/renderer/lib/threadActions', () => actions)
 vi.mock('../../src/renderer/components/WindowCaptionButtons', () => ({ WindowCaptionButtons: () => null }))
@@ -150,7 +149,10 @@ it('starts without a project, adds a project, or closes on Escape', async () => 
   expect(dialog()).toBeNull()
   await clickNewThread()
   await act(async () => [...dialog()!.querySelectorAll('button')].find((button) => button.textContent === 'Add project')!.click())
-  expect(actions.addProjectAndStartThread).toHaveBeenCalled()
+  // Add project closes the picker and opens New project.
+  expect(dialog()).toBeNull()
+  expect(useAppStore.getState().newProjectOpen).toBe(true)
+  await act(async () => useAppStore.setState({ newProjectOpen: false }))
   await clickNewThread()
   await press('Escape')
   expect(dialog()).toBeNull()

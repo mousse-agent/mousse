@@ -317,6 +317,12 @@ interface AppState {
   /** What the palette leads with: `messages` is Search everything, with commands last (the rail's search opens it so). Kept on close. */
   paletteMode: PaletteMode
   setPaletteOpen: (open: boolean, mode?: PaletteMode) => void
+  /** New project (the title bar's Add project): clone, make or add a project. Not persisted. */
+  newProjectOpen: boolean
+  setNewProjectOpen: (open: boolean) => void
+  /** Where New project puts new and cloned projects, once chosen; unset: the folder most projects here are in. */
+  newProjectParent: string | null
+  setNewProjectParent: (path: string | null) => void
   /** The sidebar's tab. It and `sidebarMode` always agree (`agreeWithTab`): setting either moves the other. */
   threadsSidebarView: SidebarTab
   setThreadsSidebarView: (view: SidebarTab) => void
@@ -670,7 +676,7 @@ const personalWorkspaceKeys = [
   'sidebarMode', 'mainAreaWidth', 'threadsSidebarWidth', 'threadsSidebarOpen', 'mainAreaOpen', 'chatMode',
   'openedSurfaceKinds', 'sideCardCollapsed', 'chatsSidebarCollapsed',
   'composerDrafts', 'composerReferences', 'composerWorkspaceDrafts', 'threadsSidebarView', 'lastThreadListView', 'threadFeedOrder',
-  'reviewIgnoreWhitespace', 'queueEditDrafts', 'lastNewThreadProjectId'
+  'reviewIgnoreWhitespace', 'queueEditDrafts', 'lastNewThreadProjectId', 'newProjectParent'
 ] as const
 let profileActivated = false
 
@@ -776,6 +782,10 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   paletteMode: 'all',
   // Closing keeps the mode, so the fading palette keeps its rows; each opening sets it again.
   setPaletteOpen: (paletteOpen, mode = 'all') => set(paletteOpen ? { paletteOpen, paletteMode: mode } : { paletteOpen }),
+  newProjectOpen: false,
+  setNewProjectOpen: (newProjectOpen) => set({ newProjectOpen }),
+  newProjectParent: null,
+  setNewProjectParent: (newProjectParent) => set({ newProjectParent }),
   threadsSidebarOpen: true,
   mainAreaOpen: false,
   sideCardOn: true,
@@ -1240,6 +1250,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       shimmerAnimations: true,
       composerWorkspaceDrafts: {},
       lastNewThreadProjectId: null as string | null,
+      newProjectParent: null as string | null,
       composerDrafts: {},
       composerReferences: {},
       queueEditDrafts: {} as Record<string, QueueEditDraft>,
@@ -1261,6 +1272,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
         if (raw) next = sanitizeSavedWorkspace({ ...next, ...JSON.parse(raw) })
         if (!Array.isArray(next.threadFeedOrder)) next.threadFeedOrder = []
         if (typeof next.lastNewThreadProjectId !== 'string') next.lastNewThreadProjectId = null
+        if (typeof next.newProjectParent !== 'string') next.newProjectParent = null
         next.queueEditDrafts = queueEditDraftsFromStorage(next.queueEditDrafts)
       } catch { /* malformed profile-local state is discarded */ }
     }
@@ -1277,6 +1289,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       shortcuts: {},
       notifyBotThreads: false,
       paletteOpen: false,
+      newProjectOpen: false,
       ...next,
       queueDraftNotices: {},
       messages: [],

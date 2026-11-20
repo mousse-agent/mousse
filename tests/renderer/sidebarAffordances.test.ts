@@ -17,7 +17,6 @@ const actions = vi.hoisted(() => ({
   selectThread: vi.fn(async () => undefined),
   createAndSelectThread: vi.fn(async () => undefined),
   createAndSelectProjectThread: vi.fn(async () => undefined),
-  addProjectAndStartThread: vi.fn(async () => undefined)
 }))
 vi.mock('../../src/renderer/lib/threadActions', () => actions)
 // Neighbours that read the daemon. The pull request dialog leaves a mark to find.
@@ -119,7 +118,8 @@ describe('starting work', () => {
     const empty = host.querySelector<HTMLElement>('.threads-sidebar-empty-projects')!
     expect(empty.textContent).toBe('No projects' + 'Add project')
     click(empty.querySelector('button')!)
-    expect(actions.addProjectAndStartThread).toHaveBeenCalledTimes(1)
+    // It opens New project, as the title bar's Add project does.
+    expect(useAppStore.getState().newProjectOpen).toBe(true)
     expect(host.querySelector('[role="tree"]')).toBeNull()
   })
 

@@ -1,0 +1,168 @@
+// @vitest-environment jsdom
+import { act, createElement } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import type { Project } from '../../src/shared/types'
+
+const actions = vi.hoisted(() => ({
+  createAndSelectThread: vi.fn(async () => undefined),
+  createAndSelectProjectThread: vi.fn(async () => undefined),
+  createAndSelectNoProjectThread: vi.fn(async () => undefined),
+  listProjectAndStartThread: vi.fn(async (_project: unknown) => undefined)
+}))
+const remote = vi.hoisted(() => ({ openRemoteProject: vi.fn() }))
+vi.mock('../../src/renderer/lib/threadActions', () => actions)
+vi.mock('../../src/renderer/lib/remoteComputers', () => ({ openRemoteProject: remote.openRemoteProject, remoteErrorMessage: (_e: unknown, name: string) => `Could not reach ${name}` }))
+vi.mock('../../src/renderer/components/WindowCaptionButtons', () => ({ WindowCaptionButtons: () => null }))
+vi.mock('../../src/renderer/components/TitleBarNav', () => ({ TitleBarNav: () => null }))
+;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+
+const { TitleBar } = await import('../../src/renderer/components/TitleBar')
+const { NewProjectDialog } = await import('../../src/renderer/components/NewProjectDialog')
+const { ToastHost, dismissToast } = await import('../../src/renderer/components/ui/Toast')
+const { useAppStore } = await import('../../src/renderer/stores/appStore')
+const { useComputersStore } = await import('../../src/renderer/lib/computers')
+const { qualifyId } = await import('../../src/shared/threadRef')
+
+const project = (id: string, path: string, extra: Partial<Project> = {}): Project => ({ id, name: id, path, createdAt: '2026-10-01T00:00:00.000Z', order: 0, ...extra })
+
+let host: HTMLDivElement
+let root: Root
+const api = {
+  open: vi.fn(async (_target?: unknown): Promise<Project | null> => null),
+  chooseFolder: vi.fn(async (): Promise<string | null> => null),
+  cloneRepository: vi.fn(async (_input: unknown): Promise<{ project: { id: string; name: string; path: string } }> => ({ project: { id: 'web-app', name: 'web-app', path: 'C:\\dev\\web-app' } }))
+}
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  Object.assign(window, {
+    mousse: {
+      app: { setAttentionCount: vi.fn(async () => undefined) },
+      projects: { open: api.open, chooseFolder: api.chooseFolder },
+      github: { cloneRepository: api.cloneRepository }
+    }
+  })
+  useComputersStore.setState({ loaded: true, byNode: {} })
+  useAppStore.setState({
+    sidebarMode: 'threads',
+    newProjectOpen: false,
+    newProjectParent: null,
+    projects: [project('a', 'C:\\dev\\a'), project('b', 'C:\\dev\\b')],
+    threads: []
+  })
+  host = document.createElement('div')
+  document.body.append(host)
+  root = createRoot(host)
+})
+
+afterEach(() => {
+  act(() => root.unmount())
+  host.remove()
+  act(() => dismissToast())
+})
+
+const show = async () => {
+  await act(async () => root.render(createElement('div', null, createElement(TitleBar), createElement(NewProjectDialog), createElement(ToastHost))))
+}
+const openDialog = async () => {
+  await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Add project"]')!.click())
+}
+const dialog = () => host.querySelector<HTMLElement>('[role="dialog"][aria-label="New project"]')
+const input = () => dialog()!.querySelector<HTMLInputElement>('input')!
+const rowTitles = () => [...dialog()!.querySelectorAll('[role="option"] .thread-search-result-title')].map((title) => title.textContent)
+const press = async (key: string) => {
+  await act(async () => { input().dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })) })
+}
+const type = async (text: string) => {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input(), text)
+    input().dispatchEvent(new Event('input', { bubbles: true }))
+  })
+}
+
+it('opens from Add project; Open a folder runs the folder picker and the new project starts a thread', async () => {
+  const added = project('site', 'C:\\dev\\site')
+  api.open.mockResolvedValueOnce(added)
+  await show()
+  await openDialog()
+  expect(rowTitles()).toEqual(['Open a folder…', 'Clone a repository…', 'New empty project…'])
+  await press('Enter')
+  expect(api.open).toHaveBeenCalledWith()
+  expect(actions.listProjectAndStartThread).toHaveBeenCalledWith(added)
+  expect(dialog()).toBeNull()
+})
+
+it('clones a pasted GitHub URL into the folder most projects are in, then starts a thread there', async () => {
+  await show()
+  await openDialog()
+  await type('https://github.com/acme/web-app')
+  expect(rowTitles()[0]).toBe('Clone acme/web-app')
+  expect(dialog()!.textContent).toContain('into C:\\dev\\web-app')
+  await press('Enter')
+  expect(api.cloneRepository).toHaveBeenCalledWith({ repository: 'acme/web-app', destination: 'C:\\dev\\web-app' })
+  expect(actions.listProjectAndStartThread).toHaveBeenCalledWith(expect.objectContaining({ id: 'web-app', path: 'C:\\dev\\web-app' }))
+})
+
+it('makes a new empty project, asking where it goes when no folder is known, and remembers the folder', async () => {
+  useAppStore.setState({ projects: [] })
+  api.chooseFolder.mockResolvedValueOnce('D:\\work')
+  api.open.mockResolvedValueOnce(project('notes', 'D:\\work\\notes'))
+  await show()
+  await openDialog()
+  await type('notes')
+  expect(rowTitles()).toEqual(['New empty project “notes”'])
+  await press('Enter')
+  expect(api.chooseFolder).toHaveBeenCalled()
+  expect(api.open).toHaveBeenCalledWith({ path: 'D:\\work\\notes', create: true })
+  expect(useAppStore.getState().newProjectParent).toBe('D:\\work')
+})
+
+it('adds a typed folder, and shows a failure in the dialog, which stays open', async () => {
+  api.open.mockRejectedValueOnce(new Error('That folder already has files in it. Open it as a project instead.'))
+  await show()
+  await openDialog()
+  await type('C:\\work\\api')
+  expect(rowTitles()).toEqual(['Add C:\\work\\api'])
+  await press('Enter')
+  expect(api.open).toHaveBeenCalledWith({ path: 'C:\\work\\api' })
+  expect(dialog()!.querySelector('[role="alert"]')!.textContent).toContain('already has files')
+  expect(actions.listProjectAndStartThread).not.toHaveBeenCalled()
+})
+
+it('keeps a clone going after Esc, then offers a thread in a toast', async () => {
+  let finish!: (value: { project: { id: string; name: string; path: string } }) => void
+  api.cloneRepository.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+  await show()
+  await openDialog()
+  await type('acme/web-app')
+  await press('Enter')
+  expect(dialog()!.querySelector('[role="status"]')!.textContent).toContain('Cloning acme/web-app…')
+  await press('Escape')
+  expect(dialog()).toBeNull()
+  await act(async () => finish({ project: { id: 'web-app', name: 'web-app', path: 'C:\\dev\\web-app' } }))
+  expect(actions.listProjectAndStartThread).not.toHaveBeenCalled()
+  // Toasts draw in their own layer on the page.
+  expect(document.body.textContent).toContain('web-app is ready')
+  await act(async () => [...document.querySelectorAll('button')].find((button) => button.textContent === 'New thread')!.click())
+  expect(actions.listProjectAndStartThread).toHaveBeenCalledWith(expect.objectContaining({ id: 'web-app' }))
+})
+
+it('on another computer, offers its project folders and adds a typed path there', async () => {
+  useComputersStore.setState({ loaded: true, byNode: { nod_mac: { node: 'nod_mac', name: 'Mac mini', online: true } } })
+  useAppStore.setState({ projects: [project('a', 'C:\\dev\\a'), project('api', '/Users/me/dev/api', { node: 'nod_mac' })] })
+  remote.openRemoteProject.mockResolvedValueOnce({ ok: true, project: project('p9', '/Users/me/dev/site') })
+  await show()
+  await openDialog()
+  await act(async () => dialog()!.querySelector<HTMLButtonElement>('[aria-label="Computer"]')!.click())
+  const mac = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((option) => !dialog()!.contains(option) && option.textContent?.includes('Mac mini'))!
+  await act(async () => mac.click())
+  expect(input().placeholder).toContain('Mac mini')
+  expect(rowTitles()).toEqual(['/Users/me/dev/'])
+  await press('Tab')
+  expect(input().value).toBe('/Users/me/dev/')
+  await type('/Users/me/dev/site')
+  await press('Enter')
+  expect(remote.openRemoteProject).toHaveBeenCalledWith('nod_mac', '/Users/me/dev/site')
+  expect(actions.listProjectAndStartThread).toHaveBeenCalledWith(expect.objectContaining({ id: qualifyId('nod_mac', 'p9'), node: 'nod_mac' }))
+})

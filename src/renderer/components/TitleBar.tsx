@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Edit, FolderPlus, Info, PanelLeft, PanelRightClose, PanelRightOpen } from '../lib/icons'
 import { useShortcutTitle } from '../commands/commandRegistry'
-import { addProjectAndStartThread, createAndSelectThread } from '../lib/threadActions'
-import { runWithToast } from '../lib/actionToast'
+import { createAndSelectThread } from '../lib/threadActions'
 import { useChatsStore } from '../stores/chatsStore'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
 import { TitleBarNav } from './TitleBarNav'
@@ -113,7 +112,7 @@ export function TitleBar() {
                 label="Add project"
                 title={addProjectTitle}
                 variant="titlebar"
-                onClick={() => void runWithToast('add the project', addProjectAndStartThread)}
+                onClick={() => useAppStore.getState().setNewProjectOpen(true)}
               />
             )}
             <IconButton
