@@ -40,8 +40,7 @@
   align-items: start;
   gap: 10px;
   width: 100%;
-  /* Room on the right for the star. */
-  padding: 8px 30px 8px 8px;
+  padding: 8px;
   border-radius: inherit;
   text-align: left;
   color: var(--text-primary);
@@ -73,7 +72,9 @@
   min-width: 0;
 }
 
+/* Only the name's line makes room for the star; the lines under it use the card's full width. */
 .new-thread-picker-name {
+  padding-right: 22px;
   font-size: 13px;
   font-weight: 500;
   line-height: 18px;
@@ -106,7 +107,6 @@
   flex-shrink: 0;
 }
 
-/* A long folder is cut at its start, so its own name stays. */
 .new-thread-picker-path {
   font-size: 11.5px;
   line-height: 16px;
@@ -114,8 +114,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  direction: rtl;
-  text-align: left;
 }
 
 /* The star: the model picker's, shown on the hovered or highlighted card and always once starred. */

@@ -13,7 +13,7 @@ import { addProjectAndStartThread, createAndSelectNoProjectThread, createAndSele
 import { botDayLabel } from './bots/messageGroups'
 import { ProjectIcon } from './ProjectIcon'
 import { Select, type SelectOption } from './ui/Select'
-import { gridMove, initialIndex, pickerSections, type GridDirection, type PickerCard } from './newThreadPickerLogic'
+import { gridMove, initialIndex, pickerSections, shortPath, type GridDirection, type PickerCard } from './newThreadPickerLogic'
 import './newThreadPicker.css'
 
 /** Cards per row; the stylesheet lays the grid out in as many columns. */
@@ -159,7 +159,7 @@ function PickerDialog({ onClose }: { onClose: () => void }) {
               <span className="new-thread-picker-computer">{card.computer}</span>
               {when && <span className="new-thread-picker-when">· {when}</span>}
             </span>
-            <span className="new-thread-picker-path" title={project.path}><bdi>{project.path}</bdi></span>
+            <span className="new-thread-picker-path" title={project.path}>{shortPath(project.path)}</span>
           </span>
         </button>
         <button

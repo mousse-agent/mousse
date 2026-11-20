@@ -22,6 +22,15 @@ const byRecent = (a: PickerCard, b: PickerCard) =>
   b.project.createdAt.localeCompare(a.project.createdAt) ||
   a.project.name.localeCompare(b.project.name)
 
+/**
+ * A folder as its card shows it: a home folder on any computer (macOS, Linux or Windows) as "~", so the part that tells
+ * projects apart fits. The shared folders beside the homes (/Users/Shared, C:\Users\Public) are nobody's home and stay.
+ * The card's tooltip and the search keep the full path.
+ */
+export function shortPath(path: string): string {
+  return path.replace(/^(?:\/Users\/(?!Shared(?:\/|$))[^/]+|\/home\/[^/]+|[A-Za-z]:\\Users\\(?!Public(?:\\|$))[^\\]+)(?=[\\/]|$)/, '~')
+}
+
 /** Whether every word of the query is in the project's name, computer or folder. */
 export function matchesQuery(card: PickerCard, query: string): boolean {
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)

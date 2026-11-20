@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { gridMove, pickerSections, type GridDirection } from '../../src/renderer/components/newThreadPickerLogic'
+import { gridMove, pickerSections, shortPath, type GridDirection } from '../../src/renderer/components/newThreadPickerLogic'
 import type { Project } from '../../src/shared/types'
 
 describe('gridMove', () => {
@@ -64,5 +64,21 @@ describe('pickerSections', () => {
   ])('matches %s', (_name, query, expected) => {
     const { starred, recent } = pickerSections(projects, lastUsed, (node) => names[node]!, query)
     expect([...ids(starred), ...ids(recent)]).toEqual(expected)
+  })
+})
+
+describe('shortPath', () => {
+  it.each([
+    ['/Users/me/dev/web-app', '~/dev/web-app'],
+    ['/home/me/work/api', '~/work/api'],
+    ['C:\\Users\\me\\dev\\web-app', '~\\dev\\web-app'],
+    ['/Users/me', '~'],
+    ['/Users/Shared/demo/web-app', '/Users/Shared/demo/web-app'],
+    ['C:\\Users\\Public\\dev\\x', 'C:\\Users\\Public\\dev\\x'],
+    ['/srv/www/landing', '/srv/www/landing'],
+    ['D:\\work\\api', 'D:\\work\\api'],
+    ['/Usersfoo/me/x', '/Usersfoo/me/x']
+  ])('%s → %s', (path, shown) => {
+    expect(shortPath(path)).toBe(shown)
   })
 })

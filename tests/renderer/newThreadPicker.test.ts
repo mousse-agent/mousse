@@ -81,7 +81,8 @@ it('opens a picker of every computer\'s projects from New thread, newest used fi
   expect(optionNames()).toEqual(['web', 'api', 'docs'])
   const api = options()[1]!.textContent!
   expect(api).toContain('Mac mini')
-  expect(api).toContain('/Users/me/api')
+  // A home folder shows as ~; the tooltip keeps the full path.
+  expect(options()[1]!.querySelector('[title="/Users/me/api"]')!.textContent).toBe('~/api')
   expect(options()[2]!.textContent).toContain('This computer')
   expect(highlighted()).toBe('api')
   await press('Enter')
