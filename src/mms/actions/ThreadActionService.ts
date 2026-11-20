@@ -18,6 +18,7 @@ import { changedPathsAsync, git, gitAsync, tryGitAsync } from './git'
 import { coverageNotice, describeGitAsync, namedGapsAsync, sameTreeAsync, SnapshotRefusedError, snapshotUncoveredAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 import { activeHiddenStore } from '../git/hiddenStore'
 import { inThreadSnapshotScope, inThreadSnapshotScopeAsync, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
+import { turnBoundaryStep } from '../diagnostics/turnBoundary'
 
 export interface RunThreadActionOptions {
   threadId: string
@@ -187,7 +188,7 @@ export class ThreadActionService {
    * Returns the snapshot the next action starts from. The caller holds the thread lease, as for `beginTurn`.
    */
   async recordOutsideChanges(options: OutsideChangesOptions): Promise<{ startSha: string; action?: ThreadAction }> {
-    return withGitMutationLocks(this.threadDirectory, options.workspacePath, 'outside-changes', () => this.recordOutsideChangesHeld(options), options.signal, options.heldThreadLease)
+    return withGitMutationLocks(this.threadDirectory, options.workspacePath, 'outside-changes', () => { turnBoundaryStep('locks'); return this.recordOutsideChangesHeld(options) }, options.signal, options.heldThreadLease)
   }
 
   /** `recordOutsideChanges` for a caller that already holds the mutation locks. */
@@ -243,7 +244,7 @@ export class ThreadActionService {
     if (options.heldThreadLease) this.recordTurnEnd(options, state)
     let locked = false
     try {
-      return await withGitMutationLocks(this.threadDirectory, options.workspacePath, 'turn-checkpoint', () => { locked = true; return this.checkpointTurnHeld(options, startSha, state) }, options.signal, options.heldThreadLease, options.signalEndsWork ? options.signal : undefined)
+      return await withGitMutationLocks(this.threadDirectory, options.workspacePath, 'turn-checkpoint', () => { locked = true; turnBoundaryStep('locks'); return this.checkpointTurnHeld(options, startSha, state) }, options.signal, options.heldThreadLease, options.signalEndsWork ? options.signal : undefined)
     } catch (error) {
       // The agent removed its own workspace (a subagent that cleaned up its worktree after its work landed): there is
       // nothing left to snapshot, and the turn's work is not what failed. Only when Git found no repository before the
@@ -540,6 +541,7 @@ export class ThreadActionService {
     const notCovered = coverageNotice(snapshot.coverageGaps)
     if (notCovered) action.notCovered = notCovered
     action.changedPaths = await changedPathsAsync(workspacePath, action.startSha, snapshot.sha)
+    turnBoundaryStep('describe')
     action.state = state
     action.completedAt = new Date().toISOString()
     const receipts = new ChangeReceiptService(this.threadDirectory)

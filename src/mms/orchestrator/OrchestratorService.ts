@@ -1,6 +1,7 @@
 import { profilerService } from '../diagnostics/profilerService'
 import type { BugReportService } from '../bugReports/BugReportService'
 import { turnTimingMark } from '../diagnostics/turnTiming'
+import { inTurnBoundary, turnBoundaryMark, turnBoundaryReplyDone, turnBoundaryStarted } from '../diagnostics/turnBoundary'
 import { describeQuestionAnswers } from './questionAnswers'
 import type { OpenQuestionCloseReason } from '../run/OpenQuestions'
 import { latestReplyPreview } from '../../shared/threadPreview'
@@ -13960,20 +13961,28 @@ export class OrchestratorService extends EventEmitter {
   private async executeTurn(...args: Parameters<OrchestratorService['executeTurnBody']>): Promise<OrchestratorResponse> {
     const runId = args[3]?.runId
     const threadId = this.session.threadId
-    // A subagent that may edit its parent's folder records that folder as its turn starts and ends: its result is
-    // measured from those, never from the parent's own turn records, which say nothing once the parent's turn has ended.
-    const writer = runId ? this.sharedWriterOf(runId) : undefined
-    if (writer && runId) await this.recordSharedFolder(writer, runId, 'start')
-    try {
-      return await this.executeTurnBody(...args)
-    } finally {
-      // A turn that ended before it started (a setup failure, a Stop, a requeue) shows no setup step any more.
-      this.endSetupStep(threadId, true)
-      if (runId) this.appToolTurns.dropRun(runId)
-      // A turn that completed recorded its end before its run did (`executeTurnBody`); one that failed or was stopped
-      // records it here, so a later look at its result still has it.
-      if (writer && runId && !this.sharedFolderEnded.delete(runId)) await this.recordSharedFolder(writer, runId, 'end')
-    }
+    // Where the turn's start and end spend their time, logged for every thread (`turnBoundary.ts`).
+    let requestedAt: string | undefined
+    try { requestedAt = runId ? this.runEngine?.getRun(runId)?.requestedAt : undefined } catch { /* Measured without it. */ }
+    return inTurnBoundary({ threadId, ...(runId ? { runId } : {}), ...(requestedAt ? { requestedAt } : {}) }, async () => {
+      // A subagent that may edit its parent's folder records that folder as its turn starts and ends: its result is
+      // measured from those, never from the parent's own turn records, which say nothing once the parent's turn has ended.
+      const writer = runId ? this.sharedWriterOf(runId) : undefined
+      if (writer && runId) {
+        await this.recordSharedFolder(writer, runId, 'start')
+        turnBoundaryMark(threadId, 'sharedFolder')
+      }
+      try {
+        return await this.executeTurnBody(...args)
+      } finally {
+        // A turn that ended before it started (a setup failure, a Stop, a requeue) shows no setup step any more.
+        this.endSetupStep(threadId, true)
+        if (runId) this.appToolTurns.dropRun(runId)
+        // A turn that completed recorded its end before its run did (`executeTurnBody`); one that failed or was stopped
+        // records it here, so a later look at its result still has it.
+        if (writer && runId && !this.sharedFolderEnded.delete(runId)) await this.recordSharedFolder(writer, runId, 'end')
+      }
+    })
   }
 
   /** Runs whose turn already recorded the shared folder's end (`recordSharedFolder`), until their `executeTurn` returns. */
@@ -14345,6 +14354,7 @@ export class OrchestratorService extends EventEmitter {
     const turnStartCheck = checkpointEnabled && turnStartSha && checkpointCwd
       ? await new ThreadActionService(this.resolveThreadDir(session.threadId)!).checkTurnStart(checkpointCwd, turnStartSha)
       : undefined
+    turnBoundaryMark(session.threadId, 'startCheck')
     // A run started again after a restart (reconciler rule 5) whose message the transcript already has, tagged with
     // its run, does not take it in a second time: the turn runs on it.
     if (!reuseLastUser && !queueItemId && opts?.runId && this.runEngine && session.messages.some((message) => message.role === 'user' && message.turnId === opts.runId)) {
@@ -14444,6 +14454,7 @@ export class OrchestratorService extends EventEmitter {
     // C2: a run that cannot be marked starting (cancelled meanwhile, or held by another turn) is
     // not this turn's to run; it ends here, before any provider I/O.
     this.markRunStarting(engineRunId)
+    turnBoundaryMark(session.threadId, 'starting')
     this.deliverRestartNote(session.threadId, engineRunId)
     this.deliverContinuationNote(engineRunId)
     let conversationToolsUsed = false
@@ -14463,6 +14474,7 @@ export class OrchestratorService extends EventEmitter {
         nativeContextStartBoundary: turnNativeStartBoundary, nativeContextBoundary: turnNativeStartBoundary
       }, turnStartSha, turnStartCheck)
     }
+    turnBoundaryMark(session.threadId, 'beginTurn')
     const turn: ActiveTurnControl = {
       abort: new AbortController(),
       pendingSteer: [] as SteerEntry[],
@@ -14490,6 +14502,7 @@ export class OrchestratorService extends EventEmitter {
     // The run is active: Mousse tool calls Claude made while it was being started act as it.
     if (opts?.continuationId) this.endContinuationHold(opts.continuationId, false, engineRunId ?? null)
     const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed', signal?: AbortSignal): Promise<void> => {
+      turnBoundaryMark(session.threadId, 'finishing')
       if ((!checkpointEnabled || !turnStartSha || !checkpointCwd) && !conversationDirectory || session.threadId === '__unbound__') return
       const threadDir = this.resolveThreadDir(session.threadId)
       if (!threadDir) return
@@ -14524,6 +14537,7 @@ export class OrchestratorService extends EventEmitter {
       const action = conversationDirectory
         ? new ConversationActionService(conversationDirectory).settle(turnId, session.messages.length, checkpointOptions.nativeContextBoundary, state, conversationToolsUsed, session.executionLease!, snapshotsOff, snapshotsNotCovered)
         : await new ThreadActionService(threadDir).checkpointExistingTurn(checkpointOptions, turnStartSha!, state)
+      turnBoundaryMark(session.threadId, 'receipt')
       for (let index = turnPresentationStart; index < session.messages.length; index += 1) {
         session.messages[index] = {
           ...session.messages[index],
@@ -15273,6 +15287,8 @@ export class OrchestratorService extends EventEmitter {
       const previous = engineRunId ? this.runEngine?.previousBinding(session.threadId, engineRunId, binding.instanceId) : undefined
       const attemptOrdinal = engineRunId ? this.runEngine?.activeAttemptOrdinal(engineRunId) : undefined
       let result: Awaited<ReturnType<HarnessGateway['startTurn']>['result']>
+      // The provider is called: the turn's start is logged here.
+      turnBoundaryStarted(session.threadId, 'harness')
       turnTimingMark(session.threadId, 'harness')
       const firstRequestAt = Date.now()
       // A request that failed for a passing reason before the provider answered, ran a tool or took a steer is sent
@@ -15367,6 +15383,8 @@ export class OrchestratorService extends EventEmitter {
         assistantText = providerFailureText(providerError)
       }
     } finally {
+      // The provider's turn is over: the turn's end is measured from here.
+      turnBoundaryReplyDone(session.threadId)
       // Nothing is held once the provider's turn is over: what is still pending is an unread steer, and the turn's end
       // handles it like any other (a follow-up turn, or back in the queue after a Stop).
       if (turnHold) {
@@ -15720,6 +15738,7 @@ export class OrchestratorService extends EventEmitter {
     }
     this.persist(true)
     if (!executionFailed) markRunTerminal('completed', undefined, displayText || 'Done.')
+    turnBoundaryMark(session.threadId, 'completed')
     this.emit('response', response)
     this.emitThreadMessages(session.threadId, session.messages)
     settleOnce(aborted, executionFailed)

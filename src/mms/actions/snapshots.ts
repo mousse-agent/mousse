@@ -21,6 +21,8 @@ import { files as disk, runAsync, step, type Steps } from './steps'
 import type { DiscardGit } from './provenDiscard'
 import { GIT_NULL_DEVICE } from '../git/gitNullDevice'
 import { retentionWindowText } from '../../shared/undoRetention'
+import { timeGitSync } from '../diagnostics/turnBoundary'
+import { turnBoundaryStep } from '../diagnostics/turnBoundary'
 
 /**
  * Workspace snapshots (docs/workspace-snapshots.md): a commit whose tree is every file of a worktree (tracked and
@@ -270,7 +272,7 @@ function candidateFiles(top: string): Steps<string[]> {
   const args = ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.', ...builtInPathspecs().exclude]
   const options = { maxBuffer: 32 * 1024 * 1024, timeout: 60_000 }
   return step(
-    () => listedCandidates(spawnSync('git', guarded(top, args), { cwd: top, encoding: 'utf8', env: gitEnv(top), ...options })),
+    () => listedCandidates(timeGitSync(() => spawnSync('git', guarded(top, args), { cwd: top, encoding: 'utf8', env: gitEnv(top), ...options }))),
     async () => listedCandidates(await runGitProcess(await guardedAsync(top, args), { cwd: top, env: gitEnv(top), ...options }))
   )
 }
@@ -1094,12 +1096,17 @@ export function* takeSnapshotSteps(cwd: string, input: SnapshotInput): Steps<Sna
   const top = yield* gitStep(cwd, ['rev-parse', '--show-toplevel'])
   const files = yield* privateFiles(top)
   const head = yield* headOf(top)
+  // Where a turn's snapshot spends its time (`turnBoundary.ts`): nothing when no turn boundary is measured.
+  turnBoundaryStep('snapshotHead')
   const { tree, gaps: coverageGaps } = yield* indexTree(top, files.index, head)
+  turnBoundaryStep('snapshotIndex')
   const hidden = activeHiddenStore(top) !== undefined
   const branch = hidden ? undefined : (yield* tryGitStep(top, ['branch', '--show-current'])).stdout || undefined
   const operation = yield* operationInProgressSteps(top)
+  turnBoundaryStep('snapshotState')
   // The exact tree comes from the same paths (see the exact-bytes note); a hidden store's tree already holds exact bytes.
   const exactResult = hidden ? undefined : yield* exactTreeSteps(top, files, tree, head)
+  turnBoundaryStep('snapshotExact')
   const exactTree = exactResult && 'tree' in exactResult ? exactResult.tree : undefined
   // What only Git's form of is kept is named with the rest, and recorded under its own key (`x`), never as not covered:
   // a restore writes it.
@@ -1107,6 +1114,7 @@ export function* takeSnapshotSteps(cwd: string, input: SnapshotInput): Steps<Sna
   const named = [...coverageGaps, ...exactGaps]
   const state = { tree, ...(exactTree ? { exactTree } : {}), ...(head ? { head } : {}), ...(branch ? { branch } : {}), ...(operation ? { operationInProgress: operation } : {}), ...(named.length ? { coverageGaps: named } : {}) }
   const { ignored, truncated } = yield* ignoredNow(top)
+  turnBoundaryStep('snapshotIgnored')
   const record = uncoveredRecord(coverageGaps, ignored, truncated, exactGaps)
   const uncovered = record.value
   const previous = yield* readLast(files.last)
@@ -1120,6 +1128,7 @@ export function* takeSnapshotSteps(cwd: string, input: SnapshotInput): Steps<Sna
   const subject = `${SUBJECT}${input.reason.split(/\r?\n/)[0]!.trim()}`
   const sha = yield* commitSnapshot(top, tree, exactTree, head, subject, trailers)
   yield* disk.writeText(files.last, JSON.stringify({ sha, tree, ...(head ? { head } : {}), uncovered, ...(exactTree ? { exact: exactTree } : {}) } satisfies LastSnapshot))
+  turnBoundaryStep('snapshotCommit')
   return { sha, ...state }
 }
 

@@ -6,7 +6,11 @@
  * A turn is begun under its bot (`begin`), moved to its home thread once its dispatch knows it (`bind`), and marked by
  * the orchestrator and the runtime on that thread (`mark`); `firstText` logs it and ends it. A thread with no begun
  * turn is never marked, so ordinary threads cost one map lookup. Measurements only: nothing reads them back.
+ *
+ * Every mark is also a phase of the turn's boundary (`turnBoundary.ts`), which every thread logs.
  */
+
+import { turnBoundaryMark } from './turnBoundary'
 
 interface Turn { start: number; marks: [string, number][] }
 
@@ -43,6 +47,7 @@ export function turnTimingBind(botId: string, threadId: string): void {
 /** A step of the turn on `threadId` was reached. The first of each label counts. */
 export function turnTimingMark(threadId: string, label: string): void {
   markOn(turns.get(threadId), label)
+  turnBoundaryMark(threadId, label)
 }
 
 /** A step of `botId`'s turn before its dispatch knows its thread (its model, its context, the internet check). */

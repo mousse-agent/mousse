@@ -14,6 +14,7 @@ import { waitForFolderAccess } from '../files/folderAccess'
 import { LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitProcess'
 import { files, runAsync, step, type Steps } from './steps'
 import { discardProvenAsync, stagedEntryDigests, stagedModes, stagedSince, waitForIndexAsync, type DiscardGit, type LeftAsItIs } from './provenDiscard'
+import { timeGitSync } from '../diagnostics/turnBoundary'
 
 /**
  * `args` as Mousse's own commands run them: no repository program, and, for a folder whose snapshots live in a hidden
@@ -75,14 +76,14 @@ export const LISTING: GitReadOptions = { maxBuffer: LISTING_MAX_BUFFER }
  */
 export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string, options?: GitReadOptions): string {
   try {
-    return execFileSync('git', guarded(cwd, args, { ...(env ? { env } : {}), ...(input !== undefined ? { stdin: input } : {}) }), {
+    return timeGitSync(() => execFileSync('git', guarded(cwd, args, { ...(env ? { env } : {}), ...(input !== undefined ? { stdin: input } : {}) }), {
       cwd,
       env: gitEnv(cwd, env),
       encoding: 'utf8',
       maxBuffer: options?.maxBuffer ?? (input !== undefined ? LISTING_MAX_BUFFER : DEFAULT_MAX_BUFFER),
       ...(input !== undefined ? { input } : {}),
       stdio: [input !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe']
-    }).trim()
+    })).trim()
   } catch (error) {
     const refusal = filterRefusal(String((error as { stderr?: unknown }).stderr ?? ''))
     if (refusal) throw new Error(refusal, { cause: error })
@@ -106,7 +107,7 @@ export async function gitAsync(cwd: string, args: string[], env?: NodeJS.Process
  * with nothing awaited before what it guards (Abort's last check right before Git starts). Throws when Git fails.
  */
 export function listZSync(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string[] {
-  const result = spawnSync('git', guarded(cwd, args, { ...(env ? { env } : {}) }), { cwd, encoding: 'utf8', env: gitEnv(cwd, env), maxBuffer: LISTING_MAX_BUFFER })
+  const result = timeGitSync(() => spawnSync('git', guarded(cwd, args, { ...(env ? { env } : {}) }), { cwd, encoding: 'utf8', env: gitEnv(cwd, env), maxBuffer: LISTING_MAX_BUFFER }))
   if (result.error || result.status !== 0) throw new Error(`Command failed: git ${args.join(' ')}${result.stderr ? `\n${result.stderr.trim()}` : ''}`)
   return result.stdout.split('\0').filter(Boolean)
 }
@@ -120,7 +121,7 @@ export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv, opt
     rethrowGitPolicyError(error)
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
   }
-  const result = spawnSync('git', safe, { cwd, encoding: 'utf8', env: gitEnv(cwd, env), maxBuffer: options?.maxBuffer ?? DEFAULT_MAX_BUFFER })
+  const result = timeGitSync(() => spawnSync('git', safe, { cwd, encoding: 'utf8', env: gitEnv(cwd, env), maxBuffer: options?.maxBuffer ?? DEFAULT_MAX_BUFFER }))
   const stderr = result.stderr.trim()
   // Output cut off at the limit is a failure, even when Git exited 0 before it was stopped (`spawnSync` reports both).
   const ok = !result.error && result.status === 0

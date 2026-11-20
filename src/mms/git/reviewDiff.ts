@@ -19,6 +19,7 @@ import {
 } from '../../shared/review'
 import { gitEnv, guarded, tryGit, tryGitAsync } from '../actions/git'
 import { unchangedWorktreePaths } from './workingTreeStatus'
+import { timeGitChild } from '../diagnostics/turnBoundary'
 
 /** Git's own heuristic: a NUL byte in the first 8 KB means the file is binary. */
 const BINARY_SNIFF_BYTES = 8192
@@ -114,10 +115,10 @@ export function parseNumstatZ(output: string): NumstatEntry[] {
 
 function hashEmptyTree(cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = execFile('git', guarded(cwd, ['hash-object', '-t', 'tree', '--stdin']), { cwd, env: gitEnv(cwd), encoding: 'utf8' }, (error, stdout) => {
+    const child = timeGitChild(() => execFile('git', guarded(cwd, ['hash-object', '-t', 'tree', '--stdin']), { cwd, env: gitEnv(cwd), encoding: 'utf8' }, (error, stdout) => {
       if (error) reject(error)
       else resolve(stdout.trim())
-    })
+    }))
     child.stdin?.end()
   })
 }
