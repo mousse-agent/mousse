@@ -26,8 +26,8 @@ let api: { list: ReturnType<typeof vi.fn>; edit: ReturnType<typeof vi.fn>; reord
 let toComposer: ReturnType<typeof vi.fn>
 
 /** The queue as the chat renders it: in the conversation, with its errors and notes in the composer's notice slot. */
-function Chat({ hold = null, lastPromptId = null, lastPromptQueueItemId = null }: { hold?: QueueHold | null; lastPromptId?: string | null; lastPromptQueueItemId?: string | null }) {
-  const thread = useThreadQueue({ threadId: 't1', hold, onDraftToComposer: toComposer, lastPromptId, lastPromptQueueItemId })
+function Chat({ hold = null, lastPromptId = null, lastPromptQueueItemId = null, turnSettingUp = false }: { hold?: QueueHold | null; lastPromptId?: string | null; lastPromptQueueItemId?: string | null; turnSettingUp?: boolean }) {
+  const thread = useThreadQueue({ threadId: 't1', hold, onDraftToComposer: toComposer, lastPromptId, lastPromptQueueItemId, turnSettingUp })
   // The reply's steered messages, as the conversation shows them: the transcript with the steers on their way.
   const transcript = useAppStore((state) => state.messages)
   const steered = withSteersOnTheWay(transcript, thread.steersOnTheWay, 't1').filter((message) => message.role === 'user' && message.steered)
@@ -615,8 +615,8 @@ describe('queued messages in the conversation', () => {
 
 describe('the first queued message when its turn starts', () => {
   /** The chat with the transcript's last prompt: `p1` until the next turn's prompt shows. */
-  const render = (prompt: { id: string; queueItemId?: string }) =>
-    act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(Chat, { lastPromptId: prompt.id, lastPromptQueueItemId: prompt.queueItemId ?? null }))))
+  const render = (prompt: { id: string; queueItemId?: string }, turnSettingUp = false) =>
+    act(() => root.render(createElement(ComposerNoticeProvider, null, createElement(Chat, { lastPromptId: prompt.id, lastPromptQueueItemId: prompt.queueItemId ?? null, turnSettingUp }))))
   const start = async (items: QueuedMessage[]) => {
     listed = items
     render({ id: 'p1' })
@@ -642,6 +642,25 @@ describe('the first queued message when its turn starts', () => {
     // The last turn finished and the daemon took A for the next one, still being set up.
     await act(async () => { push!({ threadId: 't1', items: [] }) })
     expect(row('a').querySelector('.queued-message-state')?.textContent).toBe('Next turn is starting')
+  })
+
+  it('stays as long as its turn is being set up, then waits a while for its prompt', async () => {
+    vi.useFakeTimers()
+    try {
+      await start([queued('a', 'one')])
+      // The daemon took A for its turn, whose setup takes a minute.
+      render({ id: 'p1' }, true)
+      await act(async () => { push!({ threadId: 't1', items: [] }) })
+      await act(async () => { vi.advanceTimersByTime(60_000) })
+      expect(ids()).toEqual(['a'])
+      expect(row('a').querySelector('.queued-message-state')?.textContent).toBe('Next turn is starting')
+      // The setup ends: its prompt is due; with none, it leaves after the usual while.
+      render({ id: 'p1' })
+      await act(async () => { vi.advanceTimersByTime(STARTING_ITEM_HOLD_MS) })
+      expect(ids()).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('leaves when another prompt shows, or after a while when none does', async () => {

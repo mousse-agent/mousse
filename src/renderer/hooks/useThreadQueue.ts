@@ -59,6 +59,11 @@ export interface UseThreadQueueOptions {
   replyOpen?: boolean
   /** Whether a turn of the thread is running or being set up; when it ends, nothing is marked as sending next any more. */
   turnActive?: boolean
+  /**
+   * Whether the thread's next turn is being set up (phase `queued`): the message the daemon took for it stays first in
+   * the list until the setup ends, however long that takes, instead of only for `STARTING_ITEM_HOLD_MS`.
+   */
+  turnSettingUp?: boolean
 }
 
 /** An unsaved edit whose message left the queue, as the composer takes it. */
@@ -163,7 +168,7 @@ export function sameQueuedSend(item: QueuedMessage, optimistic: QueuedMessage): 
  * Loads the thread's queue, keeps it in step with `queue:updated`, and wraps the queue's changes
  * (send now, remove, reorder, edit) with busy marks and error text.
  */
-export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticItemReconciled, hold = null, onDraftToComposer, lastPromptId = null, lastPromptQueueItemId = null, hiddenRequestIds, replyOpen = true, turnActive = false }: UseThreadQueueOptions): ThreadQueue {
+export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticItemReconciled, hold = null, onDraftToComposer, lastPromptId = null, lastPromptQueueItemId = null, hiddenRequestIds, replyOpen = true, turnActive = false, turnSettingUp = false }: UseThreadQueueOptions): ThreadQueue {
   const replyOpenRef = useRef(replyOpen)
   replyOpenRef.current = replyOpen
   const [items, setItems] = useState<QueuedMessage[]>([])
@@ -657,9 +662,11 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   useEffect(() => {
     if (!starting) return
     if (!startingShown) { setStarting(null); return }
+    // Its turn's setup can take a minute: the prompt shows only after it. The wait for the prompt starts when it ends.
+    if (turnSettingUp) return
     const timer = window.setTimeout(() => setStarting(null), STARTING_ITEM_HOLD_MS)
     return () => window.clearTimeout(timer)
-  }, [starting, startingShown])
+  }, [starting, startingShown, turnSettingUp])
   // A message sent now (`steering`, or just clicked into a running reply) shows in the transcript, in the reply it
   // joined, not here, unless it is still marked as sending next (it moves there as the next render paints it); so does
   // one whose turn's prompt is in the transcript.

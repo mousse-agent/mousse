@@ -538,6 +538,7 @@ export function OrchestratorChat() {
     threadId: activeThreadId,
     replyOpen,
     turnActive: isTurnStoppable(turnState),
+    turnSettingUp: turnState?.phase === 'queued',
     optimisticItems: optimisticQueueItems,
     onOptimisticItemReconciled: onOptimisticQueueItemReconciled,
     hold: queueHold,
