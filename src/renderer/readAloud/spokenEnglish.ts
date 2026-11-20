@@ -20,7 +20,8 @@ const ORDINAL_EXCEPTIONS: Record<string, string> = {
 }
 const CURRENCY: Record<string, string> = { $: 'dollar', '€': 'euro', '£': 'pound', '¥': 'yen', '₹': 'rupee', '₩': 'won', '₿': 'bitcoin' }
 const SCALE_WORDS: Record<string, string> = { K: 'thousand', M: 'million', B: 'billion', T: 'trillion' }
-const UNITS: Record<string, string> = {
+/** Units read after a number, by their lowercase spelling. */
+export const UNITS: Readonly<Record<string, string>> = {
   km: 'kilometers', kg: 'kilograms', mg: 'milligrams', ml: 'milliliters', gb: 'gigabytes', mb: 'megabytes', kb: 'kilobytes',
   tb: 'terabytes', hz: 'hertz', khz: 'kilohertz', mhz: 'megahertz', ghz: 'gigahertz', mph: 'miles per hour',
   kph: 'kilometers per hour', ms: 'milliseconds', ns: 'nanoseconds', 'µs': 'microseconds', '°c': 'degrees Celsius',

@@ -1,5 +1,6 @@
 import type { KokoroTtsModel, NativeSpeechResult } from '../../shared/readAloud'
 import type { LocalTtsWorkerEvent, LocalTtsWorkerRequest } from './localTtsWorker'
+import type { SentenceCut } from './speechText'
 
 /** What the read aloud engine uses of a worker; a WebAssembly `Worker` or a `NativeTtsSlot`. */
 export interface TtsWorker {
@@ -21,6 +22,7 @@ interface SpeakRequest {
   text: string
   voice: string
   speed: number
+  cut?: SentenceCut
 }
 
 /** Set once a slot could not start; Kokoro then runs on WebAssembly until the app restarts. */
@@ -103,7 +105,7 @@ export class NativeTtsSlot implements TtsWorker {
       this.fallback?.postMessage(message)
     } else if (message.type === 'speak') {
       if (this.state === 'closed' || this.state === 'failed') return
-      this.queue.push({ id: message.id, text: message.text, voice: message.voice, speed: message.speed })
+      this.queue.push({ id: message.id, text: message.text, voice: message.voice, speed: message.speed, cut: message.cut })
       this.pump()
     } else if (message.type === 'cancel') {
       const queued = this.queue.findIndex((request) => request.id === message.id)

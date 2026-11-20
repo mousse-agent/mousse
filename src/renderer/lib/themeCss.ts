@@ -165,55 +165,48 @@ export function themeTokensCss(colors: Record<string, string>): string {
 }
 
 /**
- * While a person is asked to decide something (approve or deny a tool, allow a bot, a device or a browser), the page
- * shows Mousse as it is, without any theme: those controls carry `data-mousse-decision`, and while one is on the page
- * the theme sheet is off. A theme could otherwise relabel, hide, move or cover Approve and Deny.
+ * Where a person is asked to decide something (approve or deny a tool, allow a bot, a device or a browser), the
+ * controls carry `data-mousse-decision`.
  */
 export const DECISION_SELECTOR = '[data-mousse-decision]'
 
 /**
- * A page that holds access controls in its own layout (Settings, the Automations page: permission modes, schedules,
- * devices) carries `data-mousse-guarded`. While one is open, the theme's CSS is off, so it cannot relabel, hide or move
- * those controls, but its colors stay, so the window keeps the person's colours.
+ * A page, panel or menu that holds access settings in its own layout (Settings, the Automations page, a bot's About
+ * panel, the permission menu) carries `data-mousse-guarded`.
  */
 export const GUARDED_SELECTOR = '[data-mousse-guarded]'
 
-/** The theme's color tokens. */
+/** The theme's color tokens: always on while the theme is. */
 let tokenSheet: CSSStyleSheet | null = null
 /** The theme's own CSS. */
 let themeSheet: CSSStyleSheet | null = null
 let guard: MutationObserver | null = null
-/** Whether a user theme is on: the guard runs while one is, whatever it carries (CSS, colors, a wallpaper or nothing). */
+/** Whether a user theme is on: the guard runs while one is. */
 let themeActive = false
 
 /**
- * Pauses the theme while a decision is on the page: both sheets are turned off and `html[data-user-theme-paused]` is
- * set, which also hides the wallpaper (app CSS). On a guarded page only the theme's CSS is off. On again once neither
- * is left.
+ * While a decision or a guarded page is on screen, only the theme's own CSS is off, so it cannot relabel, hide, move or
+ * cover Approve, Deny or a permission control. The theme never goes off as a whole: its colors and its wallpaper stay.
  */
-function syncDecisionPause(doc: Document): void {
-  const paused = themeActive && doc.querySelector(DECISION_SELECTOR) !== null
-  const guarded = themeActive && doc.querySelector(GUARDED_SELECTOR) !== null
-  if (tokenSheet && tokenSheet.disabled !== paused) tokenSheet.disabled = paused
-  if (themeSheet && themeSheet.disabled !== (paused || guarded)) themeSheet.disabled = paused || guarded
-  if (doc.documentElement.hasAttribute('data-user-theme-paused') !== paused) doc.documentElement.toggleAttribute('data-user-theme-paused', paused)
+function syncCssGuard(doc: Document): void {
+  const cssOff = themeActive && doc.querySelector(`${DECISION_SELECTOR}, ${GUARDED_SELECTOR}`) !== null
+  if (themeSheet && themeSheet.disabled !== cssOff) themeSheet.disabled = cssOff
 }
 
 /**
- * Starts or stops the decision guard. It runs while a user theme is on, even one with no CSS and no colors (a theme that
- * only has a wallpaper), so nothing of a theme shows while a person decides. A mutation observer pauses it before the
- * next frame whenever a decision appears (mutation records are delivered before the page paints).
+ * Starts or stops the guard. A mutation observer turns the theme's CSS off before the next frame whenever a decision or
+ * a guarded page appears (mutation records are delivered before the page paints).
  */
 export function setUserThemeActive(active: boolean, doc: Document = document): void {
   themeActive = active
   if (active && !guard && typeof MutationObserver === 'function') {
-    guard = new MutationObserver(() => syncDecisionPause(doc))
+    guard = new MutationObserver(() => syncCssGuard(doc))
     guard.observe(doc.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-mousse-decision', 'data-mousse-guarded'] })
   } else if (!active) {
     guard?.disconnect()
     guard = null
   }
-  syncDecisionPause(doc)
+  syncCssGuard(doc)
 }
 
 /**
@@ -241,7 +234,7 @@ export function applyThemeCss(css: string, options: { tokens?: Record<string, st
   themeSheet ??= new CSSStyleSheet()
   themeSheet.replaceSync(ownCss.css)
   if (!themeActive) setUserThemeActive(true, doc)
-  else syncDecisionPause(doc)
+  else syncCssGuard(doc)
   // The colors first, then the theme's CSS, as one sheet had them.
   const ours = [tokenSheet, themeSheet]
   const current = doc.adoptedStyleSheets

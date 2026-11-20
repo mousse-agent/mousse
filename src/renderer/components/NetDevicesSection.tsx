@@ -12,6 +12,8 @@ import { ApproveSshRouteDialog } from './devices/ApproveSshRouteDialog'
 import { EditorSshSettings } from './devices/EditorSshSettings'
 import { RenameEndpointDialog, UndoSetupDialog, UpdateRemoteDialog } from './devices/SshRecordDialogs'
 import { Modal } from './ui/Modal'
+import { ErrorLine } from './ui/ErrorLine'
+import { serviceFailureLine } from '../lib/errorText'
 import { takePendingDevice } from '../lib/settingsNavigation'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from './settings/SettingsRow'
 import { CopyButton } from './settings/IconButtons'
@@ -154,7 +156,7 @@ export function NetDevicesSection() {
     catch (cause) {
       if (alive.current) {
         const joining = method === 'bridge.join' || method === 'net.join.retry'
-        const message = joining ? joinErrorWords(cause as { code?: unknown; details?: unknown; message?: unknown }) : String((cause as Error)?.message ?? cause)
+        const message = joining ? joinErrorWords(cause as { code?: unknown; details?: unknown; message?: unknown }) : serviceFailureLine(cause) ?? String((cause as Error)?.message ?? cause)
         // A lapsed device pass is told by the Reconnecting note, in plain words; a join's failure is always told here.
         setError(!joining && (cause as { code?: unknown })?.code === 'bad_delegation' ? '' : message)
         if (joining && (cause as { code?: unknown })?.code === 'keystore_locked') setJoinNeedsPassphrase(true)
@@ -653,7 +655,7 @@ export function NetDevicesSection() {
       : lapsed && <SettingsGroup className="devices-group">{reconnectingNote}</SettingsGroup>}
 
     {/* The passphrase row answers a refused keychain; its "locked" error would only repeat it. */}
-    {error && !addStep && !(needsPassphrase && error === keychainRefusal) && <p role="alert" className="chat-error devices-error">{error}</p>}
+    {error && !addStep && !(needsPassphrase && error === keychainRefusal) && <ErrorLine message={error} className="chat-error devices-error" />}
 
     {setupNeeded && (
       <SettingsGroup title="This computer" icon={Monitor} className="devices-group">
@@ -883,7 +885,7 @@ export function NetDevicesSection() {
               <input type="password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} autoComplete="new-password" />
             </label>
           )}
-          {error && <p role="alert" className="chat-error">{error}</p>}
+          {error && <ErrorLine message={error} />}
         </form>
       </Modal>
     )}

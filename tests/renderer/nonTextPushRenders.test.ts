@@ -258,9 +258,9 @@ describe('pushes other than text while a reply streams', () => {
       ({ ...activity(parent), sub })
     await mount({ view: 'projects', threads: [...listed(), subagent], activity: tree('processing') })
     const useAppStore = await store()
-    const status = (threadId: string) => host.querySelector(`.threads-sidebar-thread[data-thread-id="${threadId}"] .threads-sidebar-status-spinner, .threads-sidebar-thread[data-thread-id="${threadId}"] .threads-sidebar-status-icon`)
-    const working = (threadId: string) => status(threadId)?.classList.contains('threads-sidebar-status-spinner')
-    const waiting = (threadId: string) => status(threadId)?.getAttribute('aria-label') === 'Agent is waiting'
+    const status = (threadId: string) => host.querySelector(`.threads-sidebar-thread[data-thread-id="${threadId}"] .threads-sidebar-card-status`)
+    const working = (threadId: string) => status(threadId)?.classList.contains('threads-sidebar-card-status-working')
+    const waiting = (threadId: string) => status(threadId)?.classList.contains('threads-sidebar-card-status-waiting')
     // Subagents sit under their parent, not beside it.
     expect(host.querySelector('.threads-sidebar-thread[data-thread-id="sub"]')).toBeNull()
     expect(working('live-thread')).toBe(true)

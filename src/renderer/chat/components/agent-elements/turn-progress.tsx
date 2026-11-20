@@ -4,7 +4,7 @@ import { Collapse } from "../../../components/ui/Collapse";
 import { LiveRunBodyContext, dropLiveRunFocus, liveRunToggleFocus, useToolOpen } from "./tools/tool-open-state";
 import { IconChevronRight } from "../../../lib/icons";
 import { useReplyPacing } from "../../../lib/replyPacingSetting";
-import type { TurnPhase, TurnStep } from "../../../../shared/types";
+import type { TurnPhase, TurnSetupStep, TurnStep } from "../../../../shared/types";
 import { isWaitingPermissionRequest } from "./tools/permission-request";
 import { useSubagentCards } from "./tools/subagent-cards-context";
 import type { SubagentCardModel } from "../../adapters/subagentCards";
@@ -31,6 +31,8 @@ export type TurnProgressState = {
   stopping?: boolean;
   /** The thread, and when the service last changed its turn state: together they name one sighting of a step. */
   threadId?: string | null;
+  /** When the current turn (or optimistic subagent startup) began, for the Working timer before a prompt is saved. */
+  startedAt?: string;
   updatedAt?: string;
   /**
    * A person's steer is held (`TurnState.heldSteer`): the line's tooltip says when it goes in. `turn_end`: strict
@@ -53,6 +55,7 @@ export function useTurnProgressState(): TurnProgressState | null {
 
 export type TurnProgressKind =
   | "starting"
+  | "preparing"
   | "waiting"
   | "thinking"
   | "writing"
@@ -234,11 +237,18 @@ export function stepSeenAt(state: TurnProgressState | null | undefined, now = Da
 }
 
 /** The steps that show the thinking icon: those that read "Thinking…", and the turn's start. */
-const THINKING_KINDS: ReadonlySet<TurnProgressKind> = new Set(["thinking", "starting", "waiting", "finishing"]);
+const THINKING_KINDS: ReadonlySet<TurnProgressKind> = new Set(["thinking", "starting", "preparing", "waiting", "finishing"]);
 
 /** A turn not started yet reads "Starting…"; the wait for the model's first output says only that it thinks. */
 const STARTING: TurnProgress = { kind: "starting", label: "Starting…", title: "Starting the agent and its tools" };
 const WAITING: TurnProgress = { kind: "waiting", label: "Thinking…", title: "Waiting for the model's first output" };
+/** A step of the turn's setup that took a moment (`TurnStep` `preparing`), before the agent starts. */
+const PREPARING: Record<TurnSetupStep, TurnProgress> = {
+  check: { kind: "preparing", label: "Checking worktree…", title: "Checking this thread's worktree before the turn. Waits for other work on the same repository." },
+  worktree: { kind: "preparing", label: "Creating worktree…", title: "Making this thread's worktree: a copy of the project on a new branch" },
+  restore: { kind: "preparing", label: "Restoring worktree…", title: "Making this thread's worktree again from its last snapshot" },
+  snapshot: { kind: "preparing", label: "Taking snapshot…", title: "Recording the worktree's files before the turn, so Undo can bring them back. Waits for other work on the same repository." },
+};
 const WRITING: TurnProgress = { kind: "writing", label: "Writing…" };
 
 function hasContent(messages: readonly UIMessage[]): boolean {
@@ -339,6 +349,7 @@ function describeProgress({ state, messages, stepSince, awaitingSubagents, spawn
   }
 
   if (step?.kind === "starting") return STARTING;
+  if (step?.kind === "preparing") return PREPARING[step.what] ?? STARTING;
   if (step?.kind === "waiting") return WAITING;
 
   const content = hasContent(messages);

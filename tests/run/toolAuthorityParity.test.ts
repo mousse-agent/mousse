@@ -149,6 +149,7 @@ async function snapshotOf(kind: TurnKind) {
       skills: () => ({}) as never,
       web: {} as never,
       quickActions: {} as never,
+      monitors: () => ({}) as never,
       secrets: () => ({}) as never,
       terminals: () => ({ list: () => [], output: () => undefined, mask: (text: string) => text }) as never,
       appearance: () => ({}) as never,

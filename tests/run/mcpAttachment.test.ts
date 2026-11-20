@@ -19,7 +19,7 @@ import { antigravityAdapter } from '../../src/mms/harness/drivers/antigravity'
 import type { AcpTurnClient as AntigravityClient } from '../../src/mms/harness/drivers/acp/adapter'
 import { ClaudeSubscriptionAdapter, type ClaudeSubscriptionClient } from '../../src/mms/harness/drivers/claudeCode/adapter'
 import type { AdapterHost, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
-import { acpMcpServers, claudeMcpServers, MOUSSE_MCP_TOKEN_ENV } from '../../src/mms/run/mcp/attachment'
+import { acpMcpServers, claudeMcpServers, MOUSSE_MCP_TOKEN_ENV, stdioBridgeCli } from '../../src/mms/run/mcp/attachment'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
 
 const MCP = { url: 'http://127.0.0.1:4567/mcp', token: 'tok-secret' }
@@ -434,6 +434,20 @@ describe('Antigravity attachment', () => {
     expect(server.args).not.toContain(MCP.token)
     expect(server.env).toContainEqual({ name: MOUSSE_MCP_TOKEN_ENV, value: MCP.token })
     await antigravity.stop()
+  })
+
+  it('starts the stdio bridge on Electron as plain Node, with ELECTRON_RUN_AS_NODE of its own: Antigravity passes its environment on', () => {
+    // Antigravity's launch sets ELECTRON_RUN_AS_NODE=1 and agy passes it to the MCP servers it starts: there `--cli` is a
+    // bad Node option and the bridge exits at once. Electron's main mode reads no stdin on Windows either.
+    const host = { execPath: '/app/Mousse', electron: true, runAsNode: false, cliScript: '/app/resources/app.asar/out/cli/index.js' }
+    const [server] = acpMcpServers(MCP, { http: false, cli: stdioBridgeCli(host) }) as Array<{ command: string; args: string[]; env: Array<{ name: string; value: string }> }>
+    expect(server.command).toBe('/app/Mousse')
+    expect(server.args).toEqual([host.cliScript, 'engine', 'mcp-stdio', '--url', MCP.url])
+    expect(server.env).toContainEqual({ name: 'ELECTRON_RUN_AS_NODE', value: '1' })
+    expect(server.env).toContainEqual({ name: MOUSSE_MCP_TOKEN_ENV, value: MCP.token })
+    // A daemon already running as plain Node on Electron sets it too, rather than relying on the agent's environment.
+    expect(stdioBridgeCli({ ...host, runAsNode: true, cliScript: undefined }).env).toMatchObject({ ELECTRON_RUN_AS_NODE: '1' })
+    expect(stdioBridgeCli({ execPath: '/usr/bin/node', electron: false, runAsNode: false }).env).not.toHaveProperty('ELECTRON_RUN_AS_NODE')
   })
 
   it('attaches nothing without host.mcp', async () => {

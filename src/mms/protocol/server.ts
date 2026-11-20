@@ -24,8 +24,11 @@ import type { RemoteListsPort } from './remoteListsPort'
 import { parseEnvelope, validateHello, validateRequest, asAfterSequence, isObject } from './validators'
 import {
   MMS_PROTOCOL_CHUNK_CAPABILITY,
+  MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY,
   MMS_PROTOCOL_CHUNK_BYTES,
   MMS_PROTOCOL_MAX_ENVELOPE_BYTES,
+  MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES,
+  MMS_PROTOCOL_MAX_INBOUND_IN_FLIGHT_BYTES,
   MMS_PROTOCOL_MAX_FRAME_BYTES,
   MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES,
   MMS_PROTOCOL_MAX_PENDING_REQUESTS,
@@ -57,7 +60,8 @@ import {
   keepsResponseForReplay,
   MMS_PROTOCOL_MAX_REPLAYED_RESPONSE_BYTES
 } from './replayCache'
-import { envelopeFrames } from './envelopeChunks'
+import { EnvelopeAssembler, envelopeBudget, envelopeFrames } from './envelopeChunks'
+import { withImageBudget } from './transcriptPaging'
 import { cachedUsage, onUsageKept } from './usageReads'
 import { maxConnectionEventBytes, PROTOCOL_CONNECTION_EVENT_TYPES } from './types'
 import { BOTS_BROWSER_STREAM_CAPABILITY } from '../../shared/bots/personal/browser'
@@ -140,9 +144,17 @@ interface ClientSession {
   writer: OutboundWriter
   connectionEventPending: number
   connectionEventLifetime: AbortController
+  /**
+   * A request larger than one frame, arriving in chunks (`MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY`): one transfer at a
+   * time, its chunks in order and nothing else between them, at most `MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES`, within
+   * what all connections may hold at once (`MMS_PROTOCOL_MAX_INBOUND_IN_FLIGHT_BYTES`).
+   */
+  inbound: EnvelopeAssembler
 }
 
 export class MmsProtocolServer {
+  /** What chunked requests in flight hold across every connection (`MMS_PROTOCOL_MAX_INBOUND_IN_FLIGHT_BYTES`). */
+  private readonly inboundBudget = envelopeBudget(MMS_PROTOCOL_MAX_INBOUND_IN_FLIGHT_BYTES)
   private server: Server | null = null
   private readonly clients = new Map<string, ClientSession>()
   /**
@@ -617,9 +629,10 @@ export class MmsProtocolServer {
       }
     )
 
+    // A message's images go to windows within one update's image budget; the rest by name, fetched as they are shown.
     onOrch('thread-message', (payload: { threadId: string; message: unknown }) => {
       emitToSubscribers(
-        this.ring.push('thread.message', { message: payload.message }, payload.threadId)
+        this.ring.push('thread.message', { message: liveMessage(payload.message) }, payload.threadId)
       )
     })
 
@@ -627,15 +640,16 @@ export class MmsProtocolServer {
       emitToSubscribers(
         this.ring.push(
           'thread.message-updated',
-          { message: payload.message },
+          { message: liveMessage(payload.message) },
           payload.threadId
         )
       )
     })
 
     onOrch('thread-messages', (payload: { threadId: string; messages: unknown; replace?: boolean }) => {
+      const messages = Array.isArray(payload.messages) ? withImageBudget(payload.messages as Array<{ images?: never }>) : payload.messages
       emitToSubscribers(
-        this.ring.push('thread.messages', { messages: payload.messages, ...(payload.replace ? { replace: true } : {}) }, payload.threadId)
+        this.ring.push('thread.messages', { messages, ...(payload.replace ? { replace: true } : {}) }, payload.threadId)
       )
     })
 
@@ -690,6 +704,16 @@ export class MmsProtocolServer {
 
     onOrch('turn-state', (state: TurnState) => {
       emitToSubscribers(this.ring.push('turn.state', state, state.threadId))
+    })
+
+    // What a thread runs in the background changed (issue #1605): its monitors, background commands and holds, and its
+    // provider's own background work. The event carries the whole picture, so the composer's status row never refetches.
+    onOrch('background-work', ({ threadId }: { threadId: string }) => {
+      try {
+        emitToSubscribers(this.ring.push('thread.backgroundWork', services.orchestrator.backgroundWork(threadId), threadId))
+      } catch (error) {
+        console.warn('thread.backgroundWork could not be sent', { threadId, error: error instanceof Error ? error.message : String(error) })
+      }
     })
 
     // Run Engine (SPEC §6): durable thread events and command acknowledgements.
@@ -792,6 +816,8 @@ export class MmsProtocolServer {
     if (secretRequests) {
       onEmitter(secretRequests, 'changed', (payload: { threadId: string }) => {
         if (secretRequests.waiting(payload.threadId)) services.orchestrator.setAwaitingInput(payload.threadId)
+        // The last secret typed in, with no question left: the thread stops waiting, as after an answer.
+        else if (!questions.listPendingForThread(payload.threadId).length) services.orchestrator.inputAnswered(payload.threadId)
         emitToSubscribers(this.ring.push('secrets.requests.changed', { threadId: payload.threadId }, payload.threadId))
       })
     }
@@ -972,9 +998,12 @@ export class MmsProtocolServer {
       completedIds: new Set(),
       writer: undefined as unknown as OutboundWriter,
       connectionEventPending: 0,
-      connectionEventLifetime: new AbortController()
+      connectionEventLifetime: new AbortController(),
+      inbound: undefined as unknown as EnvelopeAssembler
     }
     session.writer = new OutboundWriter(socket, () => this.closeClient(session))
+    // A transfer that stalls is a broken client: its connection closes, which drops what arrived.
+    session.inbound = new EnvelopeAssembler(() => this.closeClient(session), undefined, MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES, this.inboundBudget)
     this.clients.set(session.id, session)
 
     // Serialize decode + admission only. Disconnect cancels remaining chain work.
@@ -1018,8 +1047,9 @@ export class MmsProtocolServer {
    * - events.subscribe boundary mutation is awaited (serialized atomic)
    * - Other handlers start concurrently; responses complete out-of-order by id
    */
-  private async admitFrame(session: ClientSession, raw: unknown): Promise<void> {
+  private async admitFrame(session: ClientSession, frame: unknown): Promise<void> {
     if (session.closed) return
+    let raw = frame
 
     if (!session.authenticated) {
       const v = validateHello(raw)
@@ -1053,6 +1083,7 @@ export class MmsProtocolServer {
         advertised.filter(
           (capability) =>
             capability !== MMS_PROTOCOL_CHUNK_CAPABILITY &&
+            capability !== MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY &&
             capability !== PROFILES_V1_CAPABILITY &&
             capability !== ERROR_INFO_CAPABILITY &&
             capability !== BOT_TELLING_CAPABILITY &&
@@ -1061,6 +1092,7 @@ export class MmsProtocolServer {
         )
       )
       if (requested.has(MMS_PROTOCOL_CHUNK_CAPABILITY) && advertised.includes(MMS_PROTOCOL_CHUNK_CAPABILITY)) session.capabilities.add(MMS_PROTOCOL_CHUNK_CAPABILITY)
+      if (requested.has(MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY) && advertised.includes(MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY)) session.capabilities.add(MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY)
       if (v.hello.clientType === 'gui' && requested.has(BOT_TELLING_CAPABILITY)) session.capabilities.add(BOT_TELLING_CAPABILITY)
       // The app holds the sleep blocker while it is attached (`refreshKeepAwakeHolders`).
       if (v.hello.clientType === 'gui' && requested.has(KEEP_AWAKE_CAPABILITY)) session.capabilities.add(KEEP_AWAKE_CAPABILITY)
@@ -1093,6 +1125,20 @@ export class MmsProtocolServer {
       this.attachCommandConnection(session)
       this.sendRaw(session, ok)
       return
+    }
+
+    // A request larger than one frame comes in chunks, only from a client this connection allowed to send them. A
+    // broken sequence (out of order, another transfer, another frame between, a wrong size) closes the connection.
+    if (isObject(raw) && raw.kind === 'envelope_chunk') {
+      if (!session.capabilities.has(MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY)) throw new FrameDecodeError('Unnegotiated envelope chunk')
+      const chunk = parseEnvelope(raw)
+      if (chunk?.kind !== 'envelope_chunk') throw new FrameDecodeError('Malformed envelope chunk')
+      const complete = session.inbound.accept(chunk)
+      if (complete === null) return
+      if (!isObject(complete) || complete.kind !== 'req') throw new FrameDecodeError('Invalid assembled envelope')
+      raw = complete
+    } else if (session.inbound.active) {
+      throw new FrameDecodeError('Interrupted envelope transfer')
     }
 
     const env = parseEnvelope(raw)
@@ -1192,7 +1238,7 @@ export class MmsProtocolServer {
             kind: 'res',
             id: v.req.id,
             ok: false,
-            error: serializeAppError(normalizeAppError(err, 'handler_error'))
+            error: serializeAppError(normalizeAppError(err, 'handler_error', 'events.subscribe'))
           }
           this.sendRaw(session, response)
         } finally {
@@ -1329,7 +1375,7 @@ export class MmsProtocolServer {
             ? knownAppError({ code: err.code, message, details: { ...err.details, ...(err.pointer ? { pointer: err.pointer } : {}) } }, { category: err.code === 'SETTINGS_UNSUPPORTED' ? 'unsupported' : 'invalid', retryable: err.retryable })
           : err instanceof ProfileError
             ? knownAppError({ code: err.code.toLowerCase(), message, details: err.details }, { category: 'invalid', retryable: false })
-            : normalizeAppError(err, 'handler_error'))
+            : normalizeAppError(err, 'handler_error', method))
       }
       if (response.error) console.error('MMS request failed', errorDiagnostic(response.error, method))
       this.sendRaw(session, response)
@@ -1693,6 +1739,8 @@ export class MmsProtocolServer {
     session.completedResponseSizes.clear()
     session.completedResponseBytes = 0
     session.completedIds.clear()
+    // A request still arriving in chunks is dropped with its connection.
+    session.inbound.reset()
     this.clients.delete(session.id)
     this.refreshTellingWindows()
     this.refreshKeepAwakeHolders()
@@ -1739,4 +1787,10 @@ function stripErrorInfo(value: unknown, depth = 0): unknown {
     result[key] = next
   }
   return changed ? result : value
+}
+
+/** A message as windows are sent it as it is written: its images within one update's budget (`withImageBudget`). */
+function liveMessage(message: unknown): unknown {
+  const images = (message as { images?: unknown } | null)?.images
+  return Array.isArray(images) && images.length ? withImageBudget([message as { images?: never }])[0] : message
 }

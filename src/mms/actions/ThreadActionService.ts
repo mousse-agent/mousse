@@ -18,6 +18,8 @@ import { changedPathsAsync, git, gitAsync, tryGitAsync } from './git'
 import { coverageNotice, describeGitAsync, namedGapsAsync, sameTreeAsync, SnapshotRefusedError, snapshotUncoveredAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 import { activeHiddenStore } from '../git/hiddenStore'
 import { inThreadSnapshotScope, inThreadSnapshotScopeAsync, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
+import { turnBoundaryStep } from '../diagnostics/turnBoundary'
+import { repositoryFacts } from '../git/repositoryFacts'
 
 export interface RunThreadActionOptions {
   threadId: string
@@ -77,6 +79,13 @@ export class ActionExecutionError extends Error {
  * kept so that `beginTurn` throws it where it always did.
  */
 export interface TurnStartCheck { workspacePath: string; startSha: string; error?: unknown }
+
+/**
+ * Where the next action starts. `startCheck` is set when `startSha` is a snapshot this call just made or found already
+ * there (its commit is known to exist), so `beginTurn` needs no {@link ThreadActionService.checkTurnStart}; a start the
+ * snapshot could not capture has none.
+ */
+export interface OutsideChangesResult { startSha: string; action?: ThreadAction; startCheck?: TurnStartCheck }
 
 /** Written when a turn's start could not be snapshotted; the checkpoint of the action that starts there reads it. */
 const UNCAPTURED_START_FILE = 'uncaptured-start.json'
@@ -186,12 +195,12 @@ export class ThreadActionService {
    *
    * Returns the snapshot the next action starts from. The caller holds the thread lease, as for `beginTurn`.
    */
-  async recordOutsideChanges(options: OutsideChangesOptions): Promise<{ startSha: string; action?: ThreadAction }> {
-    return withGitMutationLocks(this.threadDirectory, options.workspacePath, 'outside-changes', () => this.recordOutsideChangesHeld(options), options.signal, options.heldThreadLease)
+  async recordOutsideChanges(options: OutsideChangesOptions): Promise<OutsideChangesResult> {
+    return withGitMutationLocks(this.threadDirectory, options.workspacePath, 'outside-changes', () => { turnBoundaryStep('locks'); return this.recordOutsideChangesHeld(options) }, options.signal, options.heldThreadLease)
   }
 
   /** `recordOutsideChanges` for a caller that already holds the mutation locks. */
-  async recordOutsideChangesHeld(options: OutsideChangesOptions): Promise<{ startSha: string; action?: ThreadAction }> {
+  async recordOutsideChangesHeld(options: OutsideChangesOptions): Promise<OutsideChangesResult> {
     const metadata = await new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshotAsync()
     const latest = this.latest(options.conversationBranchId)
     let snapshot: Snapshot
@@ -212,9 +221,10 @@ export class ThreadActionService {
     let unrecorded: UnrecordedEnd | undefined
     try { unrecorded = JSON.parse(readFileSync(join(this.threadDirectory, UNRECORDED_END_FILE), 'utf8')) as UnrecordedEnd } catch { unrecorded = undefined }
     rmSync(join(this.threadDirectory, UNRECORDED_END_FILE), { force: true })
-    if (!known || !(await tryGitAsync(options.workspacePath, ['cat-file', '-e', `${known}^{commit}`])).ok || await sameTreeAsync(options.workspacePath, known, snapshot.sha)) {
+    // A snapshot that reused the latest one has just checked it is there: it is not asked again.
+    if (!known || (known !== snapshot.sha && !(await tryGitAsync(options.workspacePath, ['cat-file', '-e', `${known}^{commit}`])).ok) || await sameTreeAsync(options.workspacePath, known, snapshot.sha)) {
       await receipts.adoptSnapshot(options.workspacePath, snapshot)
-      return { startSha: snapshot.sha }
+      return { startSha: snapshot.sha, startCheck: { workspacePath: options.workspacePath, startSha: snapshot.sha } }
     }
     const at = options.presentationMessageStart ?? latest?.presentationMessageEnd ?? 0
     const action = await this.checkpointTurnHeld({
@@ -229,7 +239,8 @@ export class ThreadActionService {
       const all = this.list(), recorded = all.find((item) => item.id === action.id)
       if (recorded) { recorded.notice = `These changes include those of turn ${unrecorded.turnId}, whose end could not be recorded.`; this.replace(all); action.notice = recorded.notice }
     }
-    return { startSha: action.endSha, action }
+    // The checkpoint's end is a snapshot it just made or found there.
+    return { startSha: action.endSha, action, startCheck: { workspacePath: options.workspacePath, startSha: action.endSha } }
   }
 
   /** Checkpoint a turn while the caller owns the execution lease, or acquire it for standalone callers. */
@@ -243,7 +254,7 @@ export class ThreadActionService {
     if (options.heldThreadLease) this.recordTurnEnd(options, state)
     let locked = false
     try {
-      return await withGitMutationLocks(this.threadDirectory, options.workspacePath, 'turn-checkpoint', () => { locked = true; return this.checkpointTurnHeld(options, startSha, state) }, options.signal, options.heldThreadLease, options.signalEndsWork ? options.signal : undefined)
+      return await withGitMutationLocks(this.threadDirectory, options.workspacePath, 'turn-checkpoint', () => { locked = true; turnBoundaryStep('locks'); return this.checkpointTurnHeld(options, startSha, state) }, options.signal, options.heldThreadLease, options.signalEndsWork ? options.signal : undefined)
     } catch (error) {
       // The agent removed its own workspace (a subagent that cleaned up its worktree after its work landed): there is
       // nothing left to snapshot, and the turn's work is not what failed. Only when Git found no repository before the
@@ -492,7 +503,7 @@ export class ThreadActionService {
     action: ThreadAction,
     state: 'completed' | 'stopped' | 'failed'
   ): Promise<void> {
-    workspacePath = await gitAsync(workspacePath, ['rev-parse', '--show-toplevel'])
+    workspacePath = (await repositoryFacts(workspacePath))?.top ?? await gitAsync(workspacePath, ['rev-parse', '--show-toplevel'])
     action.state = 'checkpointing'
     this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'prepared', expectedPreState: { startSha: action.startSha }, details: { action, actionState: state } })
     const threadId = (await new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshotAsync())?.threadId
@@ -548,6 +559,7 @@ export class ThreadActionService {
     const notCovered = coverageNotice(snapshot.coverageGaps)
     if (notCovered) action.notCovered = notCovered
     action.changedPaths = await changedPathsAsync(workspacePath, action.startSha, snapshot.sha)
+    turnBoundaryStep('describe')
     action.state = state
     action.completedAt = new Date().toISOString()
     const receipts = new ChangeReceiptService(this.threadDirectory)

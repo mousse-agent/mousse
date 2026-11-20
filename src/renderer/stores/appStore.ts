@@ -23,6 +23,7 @@ import { parseChatReference, type ChatReference } from '../../shared/chatReferen
 import { queueEditDraftsForStorage, queueEditDraftsFromStorage, type QueueEditDraft } from '../lib/queuedContent'
 import { isQualifiedId } from '../../shared/threadRef'
 import type { SubagentSummary } from '../../shared/subagents'
+import type { ThreadBackgroundWork } from '../../shared/backgroundWork'
 import type { AppletReference } from '../../shared/applets'
 import type { ChatMode } from '../../shared/types'
 import { DEFAULT_CHAT_MODE } from '../../shared/types'
@@ -33,6 +34,7 @@ import { savedMainAreaWidth } from '../lib/panelSplit'
 import type { ShortcutOverrides } from '../../shared/commands'
 import { parseCursor } from '../../shared/pageCursor'
 import { isThreadStarted } from '../../shared/threadTitle'
+import { withHeldModelPicks } from '../lib/modelPicks'
 import { tabAgreement, type SidebarTab, type ThreadListTab, type WorkspaceMode } from './sidebarTabAgreement'
 
 /** What the command palette leads with when it opens. */
@@ -365,6 +367,9 @@ interface AppState {
   removedSubagentsByParent: Record<string, SubagentSummary[]>
   /** Takes a thread's list as the daemon sent it: removed subagents go to `removedSubagentsByParent`, the rest to `subagentsByParent`. */
   setSubagents: (parentThreadId: string, subagents: SubagentSummary[]) => void
+  /** What each thread runs in the background besides its subagents, as the daemon last pushed it (`thread.backgroundWork`). Not persisted. */
+  backgroundWorkByThread: Record<string, ThreadBackgroundWork>
+  setBackgroundWork: (work: ThreadBackgroundWork) => void
   turnStates: TurnStateSnapshot
   /** Stops shown before the daemon confirmed them, by thread (`lib/optimisticStop`). Not persisted. */
   stopRequests: Record<string, StopRequest>
@@ -801,6 +806,17 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
   threadActivity: {},
   subagentsByParent: {},
   removedSubagentsByParent: {},
+  backgroundWorkByThread: {},
+  setBackgroundWork: (work) => {
+    set((s) => {
+      const empty = work.items.length === 0 && !work.providerWork
+      if (empty && !s.backgroundWorkByThread[work.threadId]) return s
+      const next = { ...s.backgroundWorkByThread }
+      if (empty) delete next[work.threadId]
+      else next[work.threadId] = work
+      return { backgroundWorkByThread: next }
+    })
+  },
   setSubagents: (parentThreadId, subagents) => {
     const live = subagents.filter((row) => !row.removed)
     const removed = subagents.filter((row) => row.removed)
@@ -1096,8 +1112,12 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       }
     }),
   setProjects: (projects) => set({ projects }),
-  setThreads: (threads) =>
-    set((state) => (sameThreadSnapshot(state.threads, threads) ? state : { threads })),
+  setThreads: (incoming) =>
+    set((state) => {
+      // A model pick still being saved stays as picked: a list read or pushed before it must not undo it.
+      const threads = withHeldModelPicks(incoming)
+      return sameThreadSnapshot(state.threads, threads) ? state : { threads }
+    }),
   upsertThread: (thread) =>
     set((s) => {
       const idx = s.threads.findIndex((entry) => entry.id === thread.id)
@@ -1306,6 +1326,7 @@ export const useAppStore = create<AppState>()(persist(tabAgreement((set, get) =>
       threadActivity: {},
       subagentsByParent: {},
       removedSubagentsByParent: {},
+      backgroundWorkByThread: {},
       turnStates: {},
       stopRequests: {},
       documentTabs: [],

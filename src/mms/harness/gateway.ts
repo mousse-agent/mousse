@@ -272,8 +272,9 @@ export interface HarnessGateway {
   /**
    * Ends what a thread's process still runs in the background (`ProviderAdapter.stopThread`), on
    * whichever instance holds it: the thread may have switched instances since. 'stopped' when one did.
+   * With `instanceId`, only that instance's process ends (a turn on another instance is left alone).
    */
-  stopThread(threadId: string): Promise<'stopped' | 'not_active'>
+  stopThread(threadId: string, instanceId?: string): Promise<'stopped' | 'not_active'>
   /**
    * Stops one native helper of `hostThreadId`'s run on the instance that runs it (`ProviderAdapter.stopNativeHelper`).
    * `unsupported`: that instance's runtime cannot stop a single helper.
@@ -425,7 +426,7 @@ export interface HarnessInstances {
    */
   usage(scope: ProviderScope, options?: { includeSignedOut?: boolean }): Promise<ProviderUsage[]>
   /** The instances the usage page lists (enabled ones with a usage reader, signed in or not), without reading any. */
-  usageSlots(scope: ProviderScope): Array<{ id: string; label: string; signedOut?: true }>
+  usageSlots(scope: ProviderScope): Array<{ id: string; label: string; signedOut?: true; onRequestOnly?: true }>
   /** One listed instance's usage, as `usage` reads it; undefined for an instance the page does not list. */
   usageFor(scope: ProviderScope, instanceId: string): Promise<ProviderUsage | undefined>
   /** Uses one limit-reset credit of a listed, signed-in instance whose runtime has them. */
@@ -996,7 +997,10 @@ export class Harness implements HarnessGateway {
       snapshots: (scope) => this.snapshots(scope),
       refreshStaleModelsOnDesktopOpen: () => this.refreshStaleModelsOnDesktopOpen(),
       usage: (scope, options) => this.usage(scope, options),
-      usageSlots: (scope) => this.usageIds(scope, true).map(({ instanceId, signedOut }) => ({ id: instanceId, label: this.displayName(this.record(instanceId, { allowDisabled: true })), ...(signedOut ? { signedOut: true as const } : {}) })),
+      usageSlots: (scope) => this.usageIds(scope, true).map(({ instanceId, signedOut }) => {
+        const record = this.record(instanceId, { allowDisabled: true })
+        return { id: instanceId, label: this.displayName(record), ...(signedOut ? { signedOut: true as const } : {}), ...(record.runtime.usageOnRequest ? { onRequestOnly: true as const } : {}) }
+      }),
       useLimitReset: async (scope, instanceId, creditId) => {
         const listed = this.usageIds(scope, false).find((entry) => entry.instanceId === instanceId)
         const record = listed && this.recordOrUndefined(instanceId)
@@ -2033,8 +2037,9 @@ export class Harness implements HarnessGateway {
     return released
   }
 
-  async stopThread(threadId: string): Promise<'stopped' | 'not_active'> {
-    const results = await Promise.allSettled([...this.records.values()].map((record) => record.runtime.adapter.stopThread?.(threadId)))
+  async stopThread(threadId: string, instanceId?: string): Promise<'stopped' | 'not_active'> {
+    const records = [...this.records.entries()].filter(([id]) => instanceId === undefined || id === instanceId).map(([, record]) => record)
+    const results = await Promise.allSettled(records.map((record) => record.runtime.adapter.stopThread?.(threadId)))
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (results.some((result) => result.status === 'fulfilled' && result.value === 'stopped')) return 'stopped'
     if (failed) throw failed.reason

@@ -4,6 +4,8 @@ import { GIT_NULL_DEVICE } from '../../git/gitNullDevice'
 import { assertGitAllowed, type UserAction } from '../../git/gitPolicy'
 import { HOOK_EVENTS } from '../../git/repoPrograms'
 import { NetError } from '../../../shared/net'
+import { timeGitChild } from '../../diagnostics/turnBoundary'
+import { gitEnvFor, gitFile } from '../../git/gitExecutable'
 
 const remoteConfiguration = new Set([
   'GIT_CONFIG_GLOBAL',
@@ -60,12 +62,12 @@ function runGit(
       reject(error)
       return
     }
-    execFile(
-      'git',
+    timeGitChild(() => execFile(
+      gitFile(),
       [...safety, ...args],
       {
         cwd,
-        env,
+        env: gitEnvFor(env),
         encoding: 'utf8',
         maxBuffer: maximumBytes,
         timeout: 60_000,
@@ -78,7 +80,7 @@ function runGit(
           )
         else resolve(stdout.trim())
       }
-    )
+    ))
   })
 }
 

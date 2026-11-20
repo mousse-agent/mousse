@@ -1,11 +1,12 @@
 import { findLocalTtsModel, type LocalTtsModel, type LocalTtsModelId } from '../../shared/readAloud'
 import type { LocalTtsWorkerEvent, LocalTtsWorkerRequest } from './localTtsWorker'
-import { CLIP_GAP_SECONDS, MAX_START_DELAY_SECONDS, startDelaySeconds, trimSilence, type SegmentTiming } from './localPlayback'
+import { MAX_START_DELAY_SECONDS, gapAfter, startDelaySeconds, trimSilence, type SegmentTiming } from './localPlayback'
 import type { SpeakOptions } from './playback'
 import { createLevelMeter } from '../speech/audioLevels'
 import { serveModelFiles } from '../speechModels/pageSupport'
 import { NativeTtsSlot, nativeKokoroUnavailable, type TtsWorker } from './nativeSlot'
-import { splitSpeechSegments } from './speechText'
+import { spokenShortForms, spokenShortFormsIfEnglish } from './shortForms'
+import { splitSpeechSegments, type SpeechSegment } from './speechText'
 
 /**
  * The models run on one WebAssembly thread per worker (only dictation asks for more), at roughly
@@ -143,6 +144,23 @@ export function disposeLocalEngine(reason = 'The voice model was unloaded while 
   }
 }
 
+/**
+ * The segments `model` voices for `text`. Short forms are written out first, so segment lengths
+ * count what is actually said: always for the English voices, never for the Pocket voices of other
+ * languages, and for Supertonic, which speaks many languages, only when the text looks English.
+ */
+function segmentsFor(model: LocalTtsModel, text: string): SpeechSegment[] {
+  if (model.runtime === 'pocket' && model.language !== 'en') return splitSpeechSegments(text)
+  if (model.runtime === 'supertonic') return splitSpeechSegments(spokenShortFormsIfEnglish(text))
+  return splitSpeechSegments(spokenShortForms(text, { espeak: model.runtime === 'kokoro' || model.runtime === 'kitten' }))
+}
+
+/** A request to voice `segment`. */
+function speakRequest(id: number, segment: SpeechSegment, voice: string, speed: number): LocalTtsWorkerRequest {
+  const { text, startsMidSentence, endsMidSentence } = segment
+  return { type: 'speak', id, text, voice, speed, cut: { startsMidSentence, endsMidSentence } }
+}
+
 interface SegmentState extends SegmentTiming {
   audio?: { samples: Float32Array; sampleRate: number }
 }
@@ -159,7 +177,7 @@ export function speakWithLocalModel(
     if (signal.aborted) return resolve()
     const model = findLocalTtsModel(modelId)
     if (!model) return reject(new Error('This voice model is not available'))
-    const segments = splitSpeechSegments(text)
+    const segments = segmentsFor(model, text)
     if (segments.length === 0) return resolve()
     cancelIdleDispose()
     activeSessions++
@@ -171,7 +189,7 @@ export function speakWithLocalModel(
     const meter = createLevelMeter(context)
     meter.analyser.connect(context.destination)
     onLevels(meter.levels)
-    const states: SegmentState[] = segments.map((segment) => ({ chars: segment.length }))
+    const states: SegmentState[] = segments.map((segment) => ({ chars: segment.text.length }))
     const inFlight = new Map<number, { index: number; worker: TtsWorker }>()
     const busy = new Set<TtsWorker>()
     const sources = new Set<AudioBufferSourceNode>()
@@ -224,12 +242,12 @@ export function speakWithLocalModel(
         busy.add(worker)
         inFlight.set(id, { index: nextDispatch, worker })
         states[nextDispatch].startedAt = seconds()
-        send(worker, { type: 'speak', id, text: segments[nextDispatch], voice: voice ?? model.defaultVoice, speed: speed() })
+        send(worker, speakRequest(id, segments[nextDispatch], voice ?? model.defaultVoice, speed()))
         nextDispatch++
       }
     }
 
-    const schedule = (audio: { samples: Float32Array; sampleRate: number }): void => {
+    const schedule = (audio: { samples: Float32Array; sampleRate: number }, gap: number): void => {
       if (audio.samples.length === 0) return
       const buffer = context.createBuffer(1, audio.samples.length, audio.sampleRate)
       buffer.copyToChannel(audio.samples as Float32Array<ArrayBuffer>, 0)
@@ -237,7 +255,7 @@ export function speakWithLocalModel(
       source.buffer = buffer
       source.connect(meter.analyser)
       const startAt = Math.max(nextStart, context.currentTime + 0.05)
-      nextStart = startAt + buffer.duration + CLIP_GAP_SECONDS
+      nextStart = startAt + buffer.duration + gap
       sources.add(source)
       source.onended = () => {
         sources.delete(source)
@@ -273,7 +291,7 @@ export function speakWithLocalModel(
       while (nextPlay < states.length) {
         const state = states[nextPlay]
         if (!state.audio) break
-        schedule(state.audio)
+        schedule(state.audio, gapAfter(segments[nextPlay]))
         state.audio = undefined
         nextPlay++
         dispatch()
@@ -296,7 +314,7 @@ export function speakWithLocalModel(
       const samples = trimSilence(message.samples, message.sampleRate)
       state.audio = { samples, sampleRate: message.sampleRate }
       state.finishedAt = seconds()
-      state.seconds = samples.length / message.sampleRate + CLIP_GAP_SECONDS
+      state.seconds = samples.length / message.sampleRate + gapAfter(segments[request.index])
       dispatch()
       drain()
     }
@@ -343,7 +361,7 @@ export function synthesizeWithLocalModel(
     if (signal.aborted) return resolve()
     const model = findLocalTtsModel(modelId)
     if (!model) return reject(new Error('This voice model is not available'))
-    const segments = splitSpeechSegments(text)
+    const segments = segmentsFor(model, text)
     if (segments.length === 0) return resolve()
     cancelIdleDispose()
     activeSessions++
@@ -381,7 +399,7 @@ export function synthesizeWithLocalModel(
         const id = ++lastRequestId
         busy.add(worker)
         inFlight.set(id, { index: nextDispatch, worker })
-        send(worker, { type: 'speak', id, text: segments[nextDispatch], voice: voice ?? model.defaultVoice, speed })
+        send(worker, speakRequest(id, segments[nextDispatch], voice ?? model.defaultVoice, speed))
         nextDispatch++
       }
     }

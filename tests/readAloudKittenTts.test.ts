@@ -14,6 +14,7 @@ import { KITTEN_TTS_MICRO, KITTEN_TTS_MINI, KITTEN_TTS_NANO, LOCAL_TTS_MODELS, f
 describe('kittenChunks', () => {
   it('splits sentences, drops their end marks and closes each with a comma', () => {
     expect(kittenChunks('Hello. World! Yes?? Fine')).toEqual(['Hello,', 'World,', 'Yes,', 'Fine,'])
+    expect(kittenChunks('Ask Dr. Smith, e.g. today. Done.')).toEqual(['Ask Dr. Smith, e.g. today,', 'Done,'])
   })
 
   it('keeps commas, semicolons and colons a piece already ends with', () => {

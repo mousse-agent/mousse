@@ -1,5 +1,5 @@
 import type * as Ort from 'onnxruntime-web'
-import { UnigramTokenizer, splitPocketChunks, type PocketTextOptions } from './pocketText'
+import { UnigramTokenizer, splitPocketChunks, type PocketCut, type PocketTextOptions } from './pocketText'
 
 /**
  * Pocket TTS inference over the INT8 ONNX export `Alias-Alias/pocket-3-3-0-tts-onnx` (bundle schema
@@ -196,8 +196,8 @@ export interface PocketFiles {
 export interface PocketSynthesizer {
   voices: string[]
   sampleRate: number
-  /** Voices one piece of text. */
-  synthesize: (text: string, voice: string) => Promise<Float32Array>
+  /** Voices one piece of text; `cut` says whether it starts or ends partway through a sentence. */
+  synthesize: (text: string, voice: string, cut?: PocketCut) => Promise<Float32Array>
 }
 
 /** Standard normal numbers scaled by `std`, by the Box-Muller transform. */
@@ -317,9 +317,9 @@ export async function createPocketSynthesizer(
   return {
     voices: bundle.voices.length > 0 ? bundle.voices : [...voiceRecords.keys()],
     sampleRate: bundle.sampleRate,
-    synthesize: async (text, voice) => {
+    synthesize: async (text, voice, cut) => {
       const parts: Float32Array[] = []
-      for (const chunk of splitPocketChunks(text, tokenizer, bundle.text)) {
+      for (const chunk of splitPocketChunks(text, tokenizer, bundle.text, cut)) {
         const frames = bundle.framesAfterEos ?? chunk.framesAfterEos
         parts.push(await decode(await generateLatents(chunk.text, frames, voice)))
       }
