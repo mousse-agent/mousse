@@ -6,6 +6,7 @@ import type { PlatformRequestMethod } from '../../../shared/platform'
 import { refreshComputers, useComputers } from '../../lib/computers'
 import { useAppStore } from '../../stores/appStore'
 import { DevicePresetRow } from '../devices/DevicePresetRow'
+import { WorkHereRow } from '../devices/WorkHereRow'
 import { errorText } from '../devices/useDaemonCall'
 import { RowMenu, type RowMenuItem } from '../integrations/RowMenu'
 import { SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
@@ -259,6 +260,14 @@ export function EngineDevicesSection() {
                 </button>
               </span>
             }
+          />
+        )}
+        {/* v1's Devices group has this switch while v1 is on; while it is off, this group does. */}
+        {status.workOnThreads !== undefined && (
+          <WorkHereRow
+            on={status.workOnThreads}
+            busy={busy}
+            onChange={(next) => void action('netEngine.workOnThreads', { enabled: next })}
           />
         )}
         {status.on && status.devices.flatMap(row)}

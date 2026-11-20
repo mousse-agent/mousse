@@ -135,7 +135,7 @@ describe('the question through the window\'s daemon calls', () => {
     const engine = new NetEngineService({
       profileDir,
       profileId: 'p1',
-      net: { onSetAside: () => undefined } as never,
+      net: { onSetAside: () => undefined, v1On: () => true } as never,
       bridge: () => undefined,
       loginStart: new LoginStartQuestion(loginStartFile(installation), startupEntry(installation))
     })

@@ -4,6 +4,7 @@
  * argv, macOS `open-url`.
  */
 import { describe, expect, it } from 'vitest'
+import { readEngineLimits } from '../src/mms/netEngine/limits'
 import {
   attachPairLinks,
   PAIR_LINK_IPC,
@@ -29,6 +30,19 @@ describe('pairLinkFrom', () => {
     ['not text', [42, null], undefined]
   ])('%s', (_name, argv, link) => {
     expect(pairLinkFrom(argv)).toBe(link)
+  })
+})
+
+describe('the longest link taken from the OS', () => {
+  it('is MOUSSE_NET_ENGINE_PAIR_LINK_MAX_CHARS, which can only be lowered', () => {
+    const lowered = readEngineLimits({ MOUSSE_NET_ENGINE_PAIR_LINK_MAX_CHARS: '100' })
+    expect(lowered.problems).toEqual([])
+    const link = `mousse://pair#${'A'.repeat(200)}`
+    expect(pairLinkFrom(['Mousse', link], lowered.limits.pairLinkMaxChars)).toBeUndefined()
+    expect(pairLinkFrom(['Mousse', link])).toBe(link)
+    const raised = readEngineLimits({ MOUSSE_NET_ENGINE_PAIR_LINK_MAX_CHARS: '100000' })
+    expect(raised.limits.pairLinkMaxChars).toBe(4096)
+    expect(raised.problems.join()).toMatch(/MOUSSE_NET_ENGINE_PAIR_LINK_MAX_CHARS.*lowered/)
   })
 })
 

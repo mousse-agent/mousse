@@ -13,7 +13,7 @@ import { systemProcessHost } from '../net/editor/endpoint/systemHost'
 import { findSshdHelper } from '../net/editor/endpoint/windowsHost'
 import { EditorTunnels, type EditorTunnelOptions } from '../net/editor/tunnel'
 import type { NetRuntime } from '../net/NetService'
-import { engineControl } from './limits'
+import { engineControl, engineLimits } from './limits'
 import type { EngineClient } from './session/client'
 import { Channel, type EngineConnection, type EngineStream } from './session/transport'
 
@@ -42,6 +42,10 @@ interface Held {
   channel: Channel
   sentEnd: boolean
   gotEnd: boolean
+  /** The other side ended the stream (FIN or reset): its slot on the connection is free. */
+  ended?: boolean
+  /** After this side let the tunnel go, how long the other side has to end the stream before it is reset. */
+  linger?: ReturnType<typeof setTimeout>
 }
 
 /**
@@ -90,7 +94,7 @@ export class EngineTunnelLink implements TunnelLink {
     if (message.t === 'tunnel.close') {
       // Nothing follows a close on this tunnel.
       this.held.delete(message.tunnel)
-      held.channel.end()
+      this.release(held)
       return
     }
     if (message.t === 'tunnel.data' && message.end) {
@@ -119,6 +123,8 @@ export class EngineTunnelLink implements TunnelLink {
       channel.reset('bad_message')
     }
     channel.onMessage(({ header, parts }) => {
+      // A tunnel this side let go reads nothing more: what the other side still sends is dropped.
+      if (id !== undefined && this.held.get(id) !== held) return
       const message = (
         header.t === 'tunnel.data' ? { ...header, parts: parts.map((part) => part.byteLength) } : header
       ) as unknown as TunnelMessage
@@ -137,10 +143,12 @@ export class EngineTunnelLink implements TunnelLink {
       // Nothing follows a close either way: this side's half ends too, so the stream (and its credit) is let go.
       if (message.t === 'tunnel.close') {
         if (this.held.get(id) === held) this.held.delete(id)
-        channel.end()
+        this.release(held)
       }
     })
     channel.onEnd(() => {
+      held.ended = true
+      if (held.linger) clearTimeout(held.linger)
       // The other side is done with the stream: so is this one, whatever it still meant to say.
       channel.end()
       if (id === undefined || this.held.get(id) !== held) return
@@ -158,7 +166,21 @@ export class EngineTunnelLink implements TunnelLink {
 
   /** Both directions said `end`: nothing more is needed this way (a late credit has nobody waiting for it). */
   private maybeEnd(held: Held): void {
-    if (held.sentEnd && held.gotEnd) held.channel.end()
+    if (held.sentEnd && held.gotEnd) this.release(held)
+  }
+
+  /**
+   * This side is done with a tunnel's stream: its half ends (so a close already written still arrives), and the other
+   * side has `tunnelCloseLingerMs` to end its half too. One that does not is reset then, so a stream it keeps open
+   * never holds one of the connection's stream slots (`appStreamsPerConnection`) that calls and subscriptions need.
+   */
+  private release(held: Held): void {
+    held.channel.end()
+    if (held.ended || held.linger) return
+    held.linger = setTimeout(() => {
+      if (!held.ended) held.channel.reset('closed')
+    }, engineLimits().tunnelCloseLingerMs)
+    held.linger.unref?.()
   }
 }
 

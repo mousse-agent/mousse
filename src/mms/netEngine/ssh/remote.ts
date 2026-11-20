@@ -20,7 +20,8 @@ export interface SshRemoteHost {
   engine(profileId: string): Promise<NetEngineService>
   /** A new profile with `label`; answers its id. */
   createProfile(label: string): Promise<string>
-  startsAtLogin(): boolean
+  /** Whether Mousse starts at login for this OS account (`loginStart.startsAtLogin`). */
+  startsAtLogin(): Promise<boolean> | boolean
 }
 
 const SELECTOR = /^[a-z2-7]{26}$/
@@ -187,7 +188,7 @@ export class SshRemote {
     return {
       computer: hostname(),
       os: process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux',
-      starts_at_login: this.host.startsAtLogin(),
+      starts_at_login: await this.host.startsAtLogin(),
       profiles
     }
   }

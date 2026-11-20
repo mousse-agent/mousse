@@ -1362,25 +1362,7 @@ export class NetService {
           // "Let my other computers work on this computer's threads". Any computer sets it for itself; it
           // takes effect on the next routed call, so turning it off is also the kill switch.
           this.requireEnrolled()
-          if (params.enabled !== undefined) {
-            const was = this.config.workOnThreads !== false
-            this.config = { ...this.config, workOnThreads: params.enabled === true }
-            this.saveConfig()
-            // Off ends the private streams that are open, not only the next call.
-            if (was && params.enabled !== true) {
-              this.endPrivateServing(this.domain?.privateStreams?.release() ?? [])
-              // ...and the editor tunnels, which are shell access on this computer.
-              this.tunnels?.reconcile()
-              for (const listener of this.workOffListeners) {
-                try {
-                  listener()
-                } catch {
-                  // The engine's own reconcile cannot stop v1's.
-                }
-              }
-            }
-            this.emit()
-          }
+          if (params.enabled !== undefined) this.setWorkOnThreads(params.enabled === true)
           return { enabled: this.config.workOnThreads !== false }
         }
         case 'bridge.shareBots': {
@@ -1692,6 +1674,40 @@ export class NetService {
   /** The engine's pairings changed (one added, renamed or removed): the editor aliases follow. */
   engineComputersChanged(): void {
     if (!this.stopped) this.syncEditorSsh()
+  }
+  /**
+   * Whether v1 networking is on for this profile (switched on, with Bridge or Spaces): its Devices group shows
+   * "Work on threads" then; otherwise the engine's group shows the same switch (`netEngine.workOnThreads`).
+   */
+  v1On(): boolean {
+    return (
+      !this.stopped &&
+      !this.disabled &&
+      this.config.enabled === true &&
+      (this.config.features?.netBridge === true || this.config.features?.netSpaces === true)
+    )
+  }
+  /**
+   * "Work on threads" (`bridge.workOnThreads`, and `netEngine.workOnThreads` while v1 is off): the one setting. Off ends what is open, not only the next call: the private streams,
+   * v1's editor tunnels and, through `onWorkOnThreadsOff`, the engine's.
+   */
+  setWorkOnThreads(enabled: boolean): void {
+    const was = this.config.workOnThreads !== false
+    this.config = { ...this.config, workOnThreads: enabled }
+    this.saveConfig()
+    if (was && !enabled) {
+      this.endPrivateServing(this.domain?.privateStreams?.release() ?? [])
+      // ...and the editor tunnels, which are shell access on this computer.
+      this.tunnels?.reconcile()
+      for (const listener of this.workOffListeners) {
+        try {
+          listener()
+        } catch {
+          // The engine's own reconcile cannot stop v1's.
+        }
+      }
+    }
+    this.emit()
   }
   /** Turning "Work on threads" off is heard by the engine too, which ends its editor tunnels. */
   onWorkOnThreadsOff(listener: () => void): () => void {

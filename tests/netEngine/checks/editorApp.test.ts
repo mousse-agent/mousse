@@ -3,8 +3,8 @@
  * caller opens it through the same local methods `mousse-cli net ssh-proxy` uses; it rides a `mousse.tunnel` stream
  * to the owner's own `EditorTunnels`, which hand it to the owner's SSH endpoint (here a stand-in that echoes and
  * records). With the device's editor switch off the open is refused `editor_off` and the endpoint serves nothing;
- * turning the switch off, a block and a removal each close an open tunnel with their reason and sweep what the
- * endpoint started for that device.
+ * turning the switch off, a block, a removal and turning "Work on threads" off each close an open tunnel with their
+ * reason and sweep what the endpoint started for that device.
  *
  * Its controls: `tunnel-ignores-editor` (the refusal skips the editor switch) fails it with `tunnel_without_editor`;
  * `no-reconcile` (engine rights changes leave tunnels open) with `tunnel_outlived_right`.
@@ -14,7 +14,7 @@ import { mkdtempSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { NodeId } from '../../../src/shared/net'
 import type { EditorEndpointPort } from '../../../src/mms/net/editor/endpoint/port'
 import { KEY_B } from '../../net/ssh/bed'
@@ -139,7 +139,10 @@ describe('phase1b.editor-app', () => {
   it.each([
     ['the editor switch off', 'editor_off', (node: NodeId) => owner.dispatch('bridge.policy', { node, editor: false }, true)],
     ['a block', 'blocked', (node: NodeId) => owner.dispatch('bridge.policy', { node, blocked: true }, true)],
-    ['a removal', undefined, (node: NodeId) => owner.dispatch('netEngine.remove', { node }, true)]
+    ['a removal', undefined, (node: NodeId) => owner.dispatch('netEngine.remove', { node }, true)],
+    // The owner's own switch, for every device: with v1 off, the new networking's Devices group has it. It is turned
+    // back on after the case.
+    ['"Work on threads" off', 'setting_off', () => owner.dispatch('netEngine.workOnThreads', { enabled: false }, true)]
   ] as const)('%s closes an open tunnel and sweeps what the endpoint started for it', async (_what, reason, change) => {
     const three = await caller(`three-${reason ?? 'removed'}`, true)
     const { tunnel } = await open(three.computer, three.ownerOn)
@@ -147,6 +150,10 @@ describe('phase1b.editor-app', () => {
     expect(served.node).toBe(three.onOwner)
     const sweeps = far.swept.length
     await change(three.onOwner)
+    if (reason === 'setting_off') {
+      onTestFinished(() => owner.dispatch('netEngine.workOnThreads', { enabled: true }, true))
+      expect((await owner.dispatch('netEngine.status', {}, true)).workOnThreads).toBe(false)
+    }
     await step('tunnel_outlived_right', async () => {
       const why = await Promise.race([tunnel.closed, new Promise((resolve) => setTimeout(() => resolve('open'), 10_000))])
       // A removal closes the pairing's connections as its row goes: the caller hears either first.

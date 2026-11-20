@@ -18,6 +18,8 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.remove',
   'netEngine.address.add',
   'netEngine.loginStart',
+  // "Work on threads", the safety switch, while v1 networking is off (its Devices group has it otherwise)
+  'netEngine.workOnThreads',
   // Phase 1b: routes (§1.3, §1.5, §4.3)
   'netEngine.address.remove',
   'netEngine.address.use',
@@ -197,6 +199,11 @@ export interface NetEngineStatus {
    * {start}`; asked once per installation, while the switch is on.
    */
   loginStart?: 'ask'
+  /**
+   * "Let my other devices work here" (on unless turned off), set while v1 networking is off: this group shows the
+   * switch then (`netEngine.workOnThreads {enabled}`), and v1's Devices group shows it otherwise. One setting.
+   */
+  workOnThreads?: boolean
   /** This computer's own routes, when its helper speaks protocol 1.1. */
   reach?: NetEngineReach
   /** The helper speaks protocol 1.1, so Send link and Enter link work. */

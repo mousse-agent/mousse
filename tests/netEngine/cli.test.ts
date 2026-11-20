@@ -239,6 +239,7 @@ describe('net-engine join of a Send link', () => {
     let pending = false
     let tries = 3
     let finish!: (value: unknown) => void
+    let fail!: (error: Error) => void
     const client: NetEngineCliClient = {
       async request(method: string, params?: any) {
         calls.push([method, params])
@@ -256,7 +257,7 @@ describe('net-engine join of a Send link', () => {
           } as never
         if (method === 'netEngine.join') {
           pending = true
-          return new Promise((resolve) => (finish = resolve)) as never
+          return new Promise((resolve, reject) => ((finish = resolve), (fail = reject))) as never
         }
         if (method === 'netEngine.join.code') {
           if (params.code === good) {
@@ -268,7 +269,7 @@ describe('net-engine join of a Send link', () => {
         throw new Error(method)
       }
     }
-    return { client, calls }
+    return { client, calls, fail: (error: Error) => fail(error) }
   }
 
   it('lists the destinations, asks before dialling, and sends only the code typed at the terminal', async () => {
@@ -284,6 +285,23 @@ describe('net-engine join of a Send link', () => {
     expect(term.said.some((line) => /didn't work/.test(line))).toBe(true)
     expect(term.emitted[0]!.text).toMatch(/Paired with Studio/)
   })
+
+  it('a join that fails while the code question waits ends the question and the command', async () => {
+    const { client, fail } = service('123456')
+    const term = terminal(['y'])
+    // The code question waits as a terminal does, until a line is typed or the question is stopped.
+    const asked = term.io.ask
+    term.io.ask = (question, signal) => {
+      if (!/code/.test(question)) return asked(question, signal)
+      term.asked.push(question)
+      setImmediate(() => fail(new Error('join_refused')))
+      return new Promise((resolve) => signal?.addEventListener('abort', () => resolve(undefined), { once: true }))
+    }
+    await expect(executeNetEngineCommand({ kind: 'join', ticket: LINK, yes: false }, client, term.io)).rejects.toThrow(
+      /join_refused/
+    )
+    expect(term.asked.some((question) => /code/.test(question))).toBe(true)
+  }, 5000)
 
   it('a No sends nothing; without a terminal nothing is asked or sent, --yes included', async () => {
     const no = service('123456')

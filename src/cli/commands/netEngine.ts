@@ -230,8 +230,8 @@ export interface NetEngineCliIO {
   say(text: string): void
   /** Whether a person is at a terminal (stdin and stdout). */
   tty: boolean
-  /** Reads one line typed at the terminal, or undefined when the input ended. */
-  ask(question: string): Promise<string | undefined>
+  /** Reads one line typed at the terminal, or undefined when the input ended or `signal` stopped the question. */
+  ask(question: string, signal?: AbortSignal): Promise<string | undefined>
   /** Settles when the service says this profile's networking changed, or the wait was ended. */
   changed(signal: AbortSignal): Promise<void>
   /** Ctrl+C. */
@@ -598,8 +598,10 @@ async function join(
           io.say("That code didn't work. If you typed it exactly, the link may have been swapped; get a new one another way.")
         let code: string | undefined
         for (;;) {
+          // The join may end while the question waits (refused, failed, or timed out): the question goes with it.
           const typed = await io.ask(
-            `Type the code shown on the other computer${pending.attemptsLeft !== undefined ? ` (${pending.attemptsLeft} ${pending.attemptsLeft === 1 ? 'try' : 'tries'} left)` : ''}: `
+            `Type the code shown on the other computer${pending.attemptsLeft !== undefined ? ` (${pending.attemptsLeft} ${pending.attemptsLeft === 1 ? 'try' : 'tries'} left)` : ''}: `,
+            ended.signal
           )
           if (typed === undefined) return
           code = typed.replace(/\s+/g, '')
@@ -726,16 +728,23 @@ function terminalIO(args: ParsedArgs, client: DaemonClient, catchInterrupt: bool
     emit: (value, text) => writeOutput(args.globals.mode, value, () => text),
     say: (text) => process.stderr.write(`${text}\n`),
     tty: !!process.stdin.isTTY && !!process.stdout.isTTY,
-    ask: (question) =>
+    ask: (question, signal) =>
       new Promise((resolve) => {
+        if (signal?.aborted) return resolve(undefined)
         const lines = createInterface({ input: process.stdin, output: process.stderr, terminal: true })
         let answered = false
+        const stop = (): void => {
+          process.stderr.write('\n')
+          lines.close()
+        }
+        signal?.addEventListener('abort', stop, { once: true })
         lines.question(question, (answer) => {
           answered = true
           lines.close()
           resolve(answer)
         })
         lines.once('close', () => {
+          signal?.removeEventListener('abort', stop)
           if (!answered) resolve(undefined)
         })
       }),

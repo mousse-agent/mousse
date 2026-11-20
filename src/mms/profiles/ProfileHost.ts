@@ -40,6 +40,8 @@ export interface ProfileHostShared {
    * read at start, such as what bots may do here before the owner changed it.
    */
   installationConfig?: MousseConfigStore
+  /** A profile was created, archived, restored or removed (the installation's SSH endpoints follow, Phase 1b §3.3). */
+  onProfilesChanged?: () => void
 }
 
 export class ProfileHost {
@@ -312,7 +314,18 @@ export class ProfileHost {
   async archive(profileRef: string, expectedRevision: number): Promise<ProfileRecord> {
     const record = this.manager.get(profileRef)
     if (record.revision !== expectedRevision) throw new ProfileRevisionConflictError(record.id, expectedRevision, record.revision)
-    return this.withDrainedProfile(record.id, () => this.manager.archive(record.id, expectedRevision))
+    const archived = await this.withDrainedProfile(record.id, () => this.manager.archive(record.id, expectedRevision))
+    this.profilesChanged()
+    return archived
+  }
+
+  /** Tells the installation a profile came or went (create, archive, restore, remove). Never throws. */
+  profilesChanged(): void {
+    try {
+      this.shared.onProfilesChanged?.()
+    } catch {
+      // What follows the profiles catches up on its next change.
+    }
   }
 
   /** Idempotent host cleanup; shared provider/owner teardown remains with MousseMainService. */
@@ -355,7 +368,11 @@ export class ProfileHost {
       })
     }
     const identity = lstatSync(preview.ownedRoots[0])
-    return this.withDrainedProfile(preview.profileId, () => this.removeDrained(preview, expectedRevision, identity))
+    const removed = await this.withDrainedProfile(preview.profileId, () =>
+      this.removeDrained(preview, expectedRevision, identity)
+    )
+    this.profilesChanged()
+    return removed
   }
 
   private removeDrained(preview: ProfileRemovePreview, expectedRevision: number, identity: { dev: number; ino: number }): ProfileRemovePreview {
