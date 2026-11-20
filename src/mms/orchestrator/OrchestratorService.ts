@@ -1129,7 +1129,7 @@ const QUEUE_REPAIR_ATTEMPTS = 6
 /** How often a message queued behind the thread lease looks whether another process released it. */
 const LEASE_WAIT_POLL_MS = 500
 /** A turn's setup step (making its worktree, its snapshot) is named under Working once it has taken this long. */
-const SETUP_STEP_SHOWN_MS = 400
+const SETUP_STEP_SHOWN_MS = 1_000
 /**
  * The longest a lease wait goes between looks while a turn of the thread is only admitted (it may wait minutes for its
  * folders or an unplugged drive): from LEASE_WAIT_POLL_MS the interval doubles up to this.
