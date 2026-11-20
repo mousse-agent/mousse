@@ -296,19 +296,6 @@
       ],
       "claimedAt": "2026-11-20T11:47:03.944Z",
       "expiresAt": "2026-11-20T13:47:03.944Z"
-    },
-    {
-      "task": "thread-links-paste-inline",
-      "session": "Animatrix-abc2e2",
-      "machine": "Animatrix",
-      "branch": "thread-links-paste-inline",
-      "paths": [
-        "src/renderer/lib/threadReference.ts",
-        "src/renderer/components/ChatComposer.tsx",
-        "src/renderer/chat/components/agent-elements"
-      ],
-      "claimedAt": "2026-11-20T12:51:52.650Z",
-      "expiresAt": "2026-11-20T14:51:52.650Z"
     }
   ]
 }
