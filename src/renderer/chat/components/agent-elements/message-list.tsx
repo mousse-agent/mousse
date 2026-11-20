@@ -738,6 +738,8 @@ function MessageToolbar({
         hoverClass,
         visible && "opacity-100 pointer-events-auto",
       )}
+      // Set while it shows without hover or focus: copied, read aloud, or its menu open.
+      data-pinned={visible || undefined}
       onMouseDown={(event) => event.stopPropagation()}
       onPointerDown={(event) => event.stopPropagation()}
     >
@@ -2439,6 +2441,27 @@ const TurnRow = memo(function TurnRow({
   countRender("TurnRow");
   const turnActionsForEdit = useTurnActions();
   const foldingIn = useFoldingIn(replyActive && isLastTurn);
+  // A steered message's actions: a prompt's, less Edit and Undo (a steer has no checkpoint of its own). Kept while
+  // its inputs are, so the memoised Steer block re-renders only when they change.
+  const renderSteerActions = useCallback((steered: UIMessage) => {
+    const text = getTextFromParts(steered.parts ?? [], "");
+    const key = `user-${steered.id}`;
+    const createdAt = (steered as { createdAt?: Date | string }).createdAt;
+    return (
+      <MessageToolbar
+        text={showCopyToolbar ? text : ""}
+        timestamp={isMounted ? formatMessageTime(createdAt) : undefined}
+        heightClass="h-6 pt-0"
+        hoverClass="group-hover/user-message:opacity-100 group-hover/user-message:pointer-events-auto"
+        isVisible={copyActive === key}
+        alignClass="justify-end"
+        onCopied={() => markCopied(key)}
+        speechKey={key}
+        // Like a prompt: an agent's or a bot's steer is not the person's to repeat.
+        repeatText={agentOriginOfMessage(steered) !== undefined ? undefined : text}
+      />
+    );
+  }, [showCopyToolbar, isMounted, copyActive, markCopied]);
   return (
     <div
       ref={rowRef}
@@ -2731,25 +2754,7 @@ const TurnRow = memo(function TurnRow({
                       UserMessageComponent={CustomUserMessage}
                       className={userMessageClassName}
                       enableImagePreview={enableImagePreview}
-                      renderActions={(steered) => {
-                        const text = getTextFromParts(steered.parts ?? [], "");
-                        const key = `user-${steered.id}`;
-                        const createdAt = (steered as { createdAt?: Date | string }).createdAt;
-                        return (
-                          <MessageToolbar
-                            text={showCopyToolbar ? text : ""}
-                            timestamp={isMounted ? formatMessageTime(createdAt) : undefined}
-                            heightClass="h-6 pt-0"
-                            hoverClass="group-hover/user-message:opacity-100 group-hover/user-message:pointer-events-auto"
-                            isVisible={copyActive === key}
-                            alignClass="justify-end"
-                            onCopied={() => markCopied(key)}
-                            speechKey={key}
-                            // Like a prompt: an agent's or a bot's steer is not the person's to repeat.
-                            repeatText={agentOriginOfMessage(steered) !== undefined ? undefined : text}
-                          />
-                        );
-                      }}
+                      renderActions={renderSteerActions}
                     />
                   ),
                 };

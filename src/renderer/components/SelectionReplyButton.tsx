@@ -70,7 +70,7 @@ function readSpot(): Spot | null {
  * The bar beside text selected in a conversation: Read aloud, and Reply where the conversation has a composer (#364).
  * Reply puts the text in that composer as a Reply pill, at the caret; the agent gets it in double quotes, alone in its
  * paragraph. Read aloud keeps the selection, so the bar stays and shows Stop while it plays; clicking away closes the
- * bar and the reading goes on (the thread's speech indicator stops it).
+ * bar and the reading goes on; Stop beside the thread in the sidebar ends it.
  */
 export function SelectionReplyButton() {
   const [spot, setSpot] = useState<Spot | null>(null)

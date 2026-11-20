@@ -2,7 +2,7 @@
 /**
  * The bar beside text selected in a conversation: Read aloud always, Reply only where the conversation has a composer.
  * Read aloud keeps the selection, so the bar stays and turns to Stop while the text plays; the bar keeps inside the
- * window by its own width.
+ * window by its own width. Once the bar has closed, the thread's indicator in the sidebar stops the reading.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QUOTE_SOURCE_ATTRIBUTE, SelectionReplyButton, selectionSpeechKey } from '../../src/renderer/components/SelectionReplyButton'
 import { COMPOSER_QUOTE_EVENT } from '../../src/renderer/lib/composerQuotes'
 import { useReadAloudStore } from '../../src/renderer/readAloud/readAloudStore'
+import { ThreadSpeechIndicator, useSpeakingThreadId } from '../../src/renderer/readAloud/ThreadSpeechIndicator'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -85,10 +86,20 @@ describe('the selected text bar', () => {
     expect(bar()).toBeNull()
   })
 
-  it('Read aloud reads the selection and keeps the bar, which turns to Stop while it plays', () => {
+  it('Read aloud reads the selection and keeps the bar through a real press, and the bar turns to Stop while it plays', () => {
     select({ composer: false })
-    act(() => button('Read aloud')!.click())
+    const read = button('Read aloud')!
+    // A press as the browser sends it: the bar survives pointerdown, and cancels mousedown so the selection stays.
+    const Pointer = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent
+    act(() => { read.dispatchEvent(new Pointer('pointerdown', { bubbles: true, cancelable: true })) })
+    expect(bar()).not.toBeNull()
+    const mousedown = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+    act(() => { read.dispatchEvent(mousedown) })
+    expect(mousedown.defaultPrevented).toBe(true)
+    act(() => { read.dispatchEvent(new Pointer('pointerup', { bubbles: true, cancelable: true })) })
+    act(() => { read.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })) })
     expect(useReadAloudStore.getState().pending).toMatchObject({ key: selectionSpeechKey(TEXT), text: TEXT })
+    expect(bar()).not.toBeNull()
     expect(window.getSelection()!.toString()).toBe(TEXT)
     act(() => useReadAloudStore.setState({ activeKey: selectionSpeechKey(TEXT), status: 'playing', pickerOpen: false }))
     expect(button('Stop reading')?.textContent).toBe('Stop')
@@ -100,5 +111,21 @@ describe('the selected text bar', () => {
     // The selection ends at 900 in a 1024-wide window: a 180-wide bar starts at 1024 - 180 - 8.
     expect(window.innerWidth).toBe(1024)
     expect(bar()!.style.left).toBe('836px')
+  })
+
+  it('once the bar has closed, Stop beside the thread in the sidebar ends the reading, from loading on', () => {
+    // The sidebar row shows the indicator for the speaking thread, as ThreadsSidebar does.
+    const SidebarRow = () => (useSpeakingThreadId() === 'thread' ? createElement(ThreadSpeechIndicator) : null)
+    const sidebar = document.createElement('div')
+    document.body.append(sidebar)
+    const sidebarRoot = createRoot(sidebar)
+    act(() => sidebarRoot.render(createElement(SidebarRow)))
+    act(() => useReadAloudStore.setState({ activeKey: selectionSpeechKey(TEXT), threadId: 'thread', status: 'loading' }))
+    expect(sidebar.querySelector('button[aria-label="Pause reading aloud"]')).toBeNull()
+    act(() => sidebar.querySelector<HTMLButtonElement>('button[aria-label="Stop reading aloud"]')!.click())
+    expect(useReadAloudStore.getState()).toMatchObject({ activeKey: null, status: 'idle' })
+    expect(sidebar.querySelector('button')).toBeNull()
+    act(() => sidebarRoot.unmount())
+    sidebar.remove()
   })
 })

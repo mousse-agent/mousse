@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * A message steered into a running reply has its own actions, like a prompt: its time, Read aloud, Copy and, for a
+ * A message steered into a running reply has its own actions, like a prompt: when it was sent, Read aloud, Copy and, for a
  * person's steer, Repeat this. It has no Edit and no Undo, since a steer has no checkpoint of its own to go back to.
  * An agent's steer, like an agent's prompt, has no Repeat this.
  */
@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MessageList } from '../../src/renderer/chat/components/agent-elements/message-list'
 import { createTurnActions, TurnActionsContext } from '../../src/renderer/chat/components/agent-elements/turn-actions'
 import { mousseToUIMessages } from '../../src/renderer/chat/adapters/mousseToUI'
+import { formatMessageTime } from '../../src/renderer/chat/components/agent-elements/utils/message-time'
 import { PromptUndoProvider } from '../../src/renderer/components/PromptUndoControls'
 import { useReadAloudStore } from '../../src/renderer/readAloud/readAloudStore'
 import { useAppStore } from '../../src/renderer/stores/appStore'
@@ -65,6 +66,7 @@ describe('a steered message\'s actions', () => {
   it('a person\'s steer offers Read aloud, Copy and Repeat this, and no Edit or Undo', async () => {
     await show()
     const item = steer('s1')
+    expect(item.querySelector('.chat-message-toolbar')!.textContent).toContain(formatMessageTime(at)!)
     expect(button(item, 'Read aloud')).not.toBeNull()
     expect(button(item, 'Copy')).not.toBeNull()
     expect(button(item, 'Message actions')).not.toBeNull()
@@ -92,9 +94,11 @@ describe('a steered message\'s actions', () => {
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: vi.fn(async () => undefined) } })
     await show()
     const toolbar = () => steer('s1').querySelector<HTMLElement>('.chat-message-toolbar')!
-    expect(toolbar().classList.contains('opacity-100')).toBe(false)
+    expect(toolbar().hasAttribute('data-pinned')).toBe(false)
     act(() => button(steer('s1'), 'Copy')!.click())
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith('use pnpm, not npm')
-    expect(toolbar().classList.contains('opacity-100')).toBe(true)
+    expect(toolbar().hasAttribute('data-pinned')).toBe(true)
+    // Only the steer that was copied.
+    expect(steer('s2').querySelector('.chat-message-toolbar')!.hasAttribute('data-pinned')).toBe(false)
   })
 })

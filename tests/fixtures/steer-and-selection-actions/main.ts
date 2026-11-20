@@ -38,15 +38,26 @@ async function main() {
       if (!ready) await delay(20)
     }
     if (!ready) throw new Error('The steered messages never showed their actions')
+    let repeat = false
+    for (let index = 0; index < 250 && !repeat; index++) {
+      repeat = await execute<boolean>('qa.repeatReady()')
+      if (!repeat) await delay(20)
+    }
+    if (!repeat) throw new Error('The steered messages never offered Repeat this')
     await execute('qa.frames(3)')
     const steers = await execute('qa.steers()')
+    await execute('qa.narrow(500)')
+    await execute('qa.frames(3)')
+    const narrowSteers = await execute('qa.steers()')
+    await execute('qa.narrow(900)')
+    await execute('qa.frames(3)')
     const bar = await execute('qa.select()')
     if (process.env.MOUSSE_STEER_SELECTION_ACTIONS_CAPTURE) {
       await execute('qa.reveal()')
       writeFileSync(process.env.MOUSSE_STEER_SELECTION_ACTIONS_CAPTURE, (await window.webContents.capturePage()).toPNG())
     }
     await execute('qa.unmount()')
-    writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ steers, bar, pageErrors: await execute('qa.errors()'), rendererErrors }))
+    writeFileSync(join(directory, 'evidence.json'), JSON.stringify({ steers, narrowSteers, bar, pageErrors: await execute('qa.errors()'), rendererErrors }))
   } finally {
     window.destroy()
     server.close()

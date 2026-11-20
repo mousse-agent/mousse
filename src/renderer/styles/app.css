@@ -5814,6 +5814,11 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
   background-image: var(--ui-focus-layer);
 }
 
+/* A message's actions are controls, not words: selecting across messages leaves out their times and labels. */
+.chat-message-toolbar {
+  user-select: none;
+}
+
 /* Copy, Details, Undo and Read aloud under a message: the focus fill, full strength while focused. */
 .chat-message-toolbar button:focus-visible,
 .chat-user-image:focus-visible {

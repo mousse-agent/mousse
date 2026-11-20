@@ -9,8 +9,9 @@ import { expect, it } from 'vitest'
 import { build as viteBuild } from 'vite'
 
 type Box = { left: number; right: number; top: number; bottom: number; width: number; height: number }
+type Steer = { id: string; item: Box; message: Box; bubble: Box; actions: Box }
 type Evidence = {
-  steers: { id: string; item: Box; message: Box; bubble: Box; actions: Box }[]
+  steers: Steer[]; narrowSteers: Steer[]
   bar: { windowWidth: number; selectionRight: number; bar: Box | null; buttons: string[] }
   pageErrors: string[]; rendererErrors: string[]
 }
@@ -35,16 +36,24 @@ it('puts a steer\'s actions beside its bubble, adding no height to the stack, an
     const result = JSON.parse(readFileSync(join(directory, 'evidence.json'), 'utf8')) as Evidence
     expect(result.pageErrors).toEqual([])
 
-    expect(result.steers.map((steer) => steer.id)).toEqual(['s1', 's2', 's3'])
-    for (const steer of result.steers) {
-      const where = JSON.stringify(steer)
-      // No toolbar row under the bubble: the row is as tall as its message.
-      expect(steer.item.height - steer.message.height, where).toBeLessThan(1)
-      // Left of the bubble, at its foot, never over it.
-      expect(steer.actions.right, where).toBeLessThanOrEqual(steer.bubble.left + 0.5)
-      expect(Math.abs(steer.actions.bottom - steer.item.bottom), where).toBeLessThan(1)
-      // A long steer keeps a prompt's 80% cap.
-      expect(steer.bubble.width, where).toBeLessThanOrEqual(steer.item.width * 0.8 + 1)
+    for (const [pane, steers] of [['900px', result.steers], ['500px', result.narrowSteers]] as const) {
+      expect(steers.map((steer) => steer.id)).toEqual(['s1', 's2', 's3'])
+      for (const steer of steers) {
+        const where = `${pane} ${JSON.stringify(steer)}`
+        // Never over the bubble: beside it, or under it when there is no room beside.
+        expect(steer.actions.right <= steer.bubble.left + 0.5 || steer.actions.top >= steer.bubble.bottom - 0.5, where).toBe(true)
+        expect(steer.bubble.width, where).toBeLessThanOrEqual(steer.item.width * 0.8 + 1)
+      }
+      const [short, long, agent] = steers
+      for (const steer of [short, agent]) {
+        const where = `${pane} ${JSON.stringify(steer)}`
+        // A short steer adds no row: its actions sit left of the bubble, at its foot.
+        expect(steer.item.height - steer.message.height, where).toBeLessThan(1)
+        expect(steer.actions.right, where).toBeLessThanOrEqual(steer.bubble.left + 0.5)
+        expect(Math.abs(steer.actions.bottom - steer.item.bottom), where).toBeLessThan(1)
+      }
+      // A long steer is as wide as a prompt: the hidden actions take none of its width.
+      expect(long.bubble.width, `${pane} ${JSON.stringify(long)}`).toBeGreaterThanOrEqual(long.item.width * 0.8 - 2)
     }
 
     const { bar, windowWidth, selectionRight, buttons } = result.bar

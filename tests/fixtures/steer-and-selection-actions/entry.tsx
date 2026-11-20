@@ -1,11 +1,12 @@
-import React, { useMemo } from 'react'
+import React, { useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { flushSync } from 'react-dom'
 import { MessageList } from '../../../src/renderer/chat/components/agent-elements/message-list'
 import { mousseToUIMessages } from '../../../src/renderer/chat/adapters/mousseToUI'
+import { PromptUndoProvider } from '../../../src/renderer/components/PromptUndoControls'
 import { SelectionReplyButton } from '../../../src/renderer/components/SelectionReplyButton'
 import { useAppStore } from '../../../src/renderer/stores/appStore'
-import type { ChatMessage } from '../../../src/shared/types'
+import type { ChatMessage, Thread } from '../../../src/shared/types'
 import '../../../src/renderer/styles/app.css'
 
 const at = (n: number) => new Date(Date.UTC(2026, 10, 18, 10, 0, 0) + n * 1000).toISOString()
@@ -19,7 +20,12 @@ const messages: ChatMessage[] = [
   { id: 'a2', role: 'assistant', content: 'Switched to pnpm and regenerated the lockfile.', timestamp: at(5), turnId: 't1' },
 ] as ChatMessage[]
 
-useAppStore.setState({ activeThreadId: 'thread', profileId: 'profile' })
+useAppStore.setState({ activeThreadId: 'thread', profileId: 'profile', threads: [{ id: 'thread', name: 'Fix the build' } as Thread] })
+// The turn's history, so the prompt actions are the real ones (Repeat this included) rather than a bare toolbar.
+const proof = { compactionGeneration: 0, fidelity: 'exact' as const, safeBoundaryProof: 'test' }
+const actions = [{ id: 'action-t1', turnId: 't1', conversationBranchId: 'main', state: 'completed', nativeContextStartBoundary: { messageIndex: 0, ...proof }, nativeContextBoundary: { messageIndex: 5, ...proof } }]
+;(window as unknown as { mousse: unknown }).mousse = { actions: { list: async () => ({ actions, receipts: [], journalGeneration: 1, activeBranchId: 'main' }) } }
+let setPaneWidth: (width: string) => void = () => {}
 const root = createRoot(document.getElementById('root')!)
 const errors: string[] = []
 window.addEventListener('error', (event) => errors.push(event.message))
@@ -33,20 +39,28 @@ const box = (element: Element | null) => {
 
 function Chat() {
   const ui = useMemo(() => mousseToUIMessages(messages), [])
+  const [width, setWidth] = useState('100vw')
+  setPaneWidth = setWidth
   return (
-    <div style={{ width: '100vw', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ height: 520, display: 'flex', flexDirection: 'column' }}>
-        <MessageList messages={ui} status="ready" />
+    <PromptUndoProvider threadId="thread" busy={false} revision={1}>
+      <div style={{ width, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ height: 520, display: 'flex', flexDirection: 'column' }}>
+          <MessageList messages={ui} status="ready" />
+        </div>
+        <textarea className="composer-input" />
+        <SelectionReplyButton />
       </div>
-      <textarea className="composer-input" />
-      <SelectionReplyButton />
-    </div>
+    </PromptUndoProvider>
   )
 }
 
 ;(window as unknown as { qa: unknown }).qa = {
   show: () => flushSync(() => root.render(<Chat />)),
   ready: () => document.querySelectorAll('[data-steered-id] .chat-message-toolbar').length === 3,
+  /** Narrows the chat pane, as a split view or a small window would. */
+  narrow: (width: number) => flushSync(() => setPaneWidth(`${width}px`)),
+  /** Every steer's actions, once Repeat this is among them (the menu shows once the turn's history has arrived). */
+  repeatReady: () => document.querySelectorAll('[data-steered-id] .chat-message-toolbar button[aria-label="Message actions"]').length === 2,
   frames: async (count: number) => { for (let index = 0; index < count; index++) await frame() },
   /** Each steered message: its row, its message, its bubble and its actions. */
   steers: () => [...document.querySelectorAll('[data-steered-id]')].map((item) => ({
