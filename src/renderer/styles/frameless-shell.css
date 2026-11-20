@@ -1,9 +1,9 @@
 /*
  * The frameless shell. The rail, the title bar and the threads sidebar keep the theme's own colours and draw no lines
  * (the dividers stay as drag handles that light up on hover). The chat pane in the middle (a thread, a bot's thread or a
- * bot's chat) is one rounded surface a step brighter than them, lit at its edges by a dim sheen instead of a border.
- * Everything inside it that paints the pane's colour (the transcript's fades, bubbles, the composer)
- * takes it from `--pane-surface`, which a user theme can set in its colours.
+ * bot's chat) and the right panel's content card are rounded surfaces a step brighter than the canvas, lit at their
+ * edges by a dim sheen instead of a border. Everything inside them that paints the pane's colour (the transcript's
+ * fades, bubbles, the composer) takes it from `--pane-surface`, which a user theme can set in its colours.
  *
  * Loaded last (main.tsx); rules that meet theme or lazily loaded rules carry `html[data-theme]` to stay ahead of them.
  */
@@ -66,7 +66,8 @@ html[data-theme]:not([data-theme='light']) .app :is(.sidebar, .chat-workspace) [
 }
 
 /* The edge light: a 1px ring painted over the pane's content, shaped by the pane's corners. */
-html[data-theme] .app :is(.sidebar, .chat-workspace)::after {
+html[data-theme] .app :is(.sidebar, .chat-workspace)::after,
+html[data-theme] .app .main-area > :not(.header)::after {
   content: '';
   position: absolute;
   inset: 0;
@@ -83,4 +84,110 @@ html[data-theme] .app :is(.sidebar, .chat-workspace)::after {
 /* A bot's chat paints its bubbles and the ring around its face from --bg-primary (bots.css): the pane, here. */
 html[data-theme] .app .bot-conversation {
   --bg-primary: var(--pane-surface);
+}
+
+/* ---------- Docked sidebar: feathered atmospheric well ----------
+ * When a theme tints the docked threads sidebar (via --surface-strong, custom CSS or a wallpaper), dissolving its
+ * perimeter softly into the window canvas prevents a sharp vertical wall, a corner wedge next to the rounded chat
+ * pane, and a tinted overhang at the bottom. Placed at z-index: -1 inside an isolated stacking context, the feather
+ * paints over the sidebar's own background while staying behind every row, scrollbar and the bottom-anchored profile
+ * switcher. Acrylic, high-contrast and the hover-peek overlay drawer stay untouched.
+ */
+html[data-theme]:not([data-acrylic='true']):not([data-theme='high-contrast'])
+  .app
+  .sliding-threads-pane:not(.sliding-threads-pane--overlay)
+  .threads-sidebar {
+  position: relative;
+  isolation: isolate;
+}
+
+html[data-theme]:not([data-acrylic='true']):not([data-theme='high-contrast'])
+  .app
+  .sliding-threads-pane:not(.sliding-threads-pane--overlay)
+  .threads-sidebar::before {
+  --sidebar-well-edge: var(--app-window-bg, var(--surface-base));
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    linear-gradient(
+      to left,
+      var(--sidebar-well-edge) 0%,
+      color-mix(in srgb, var(--sidebar-well-edge) 52%, transparent) 7px,
+      color-mix(in srgb, var(--sidebar-well-edge) 14%, transparent) 15px,
+      transparent 22px
+    ),
+    linear-gradient(
+      to bottom,
+      var(--sidebar-well-edge) 0%,
+      color-mix(in srgb, var(--sidebar-well-edge) 48%, transparent) 6px,
+      transparent 18px
+    ),
+    linear-gradient(
+      to top,
+      var(--sidebar-well-edge) 0%,
+      color-mix(in srgb, var(--sidebar-well-edge) 45%, transparent) 5px,
+      transparent 16px
+    ),
+    linear-gradient(
+      to right,
+      var(--sidebar-well-edge) 0%,
+      color-mix(in srgb, var(--sidebar-well-edge) 45%, transparent) 4px,
+      transparent 12px
+    );
+}
+
+/* ---------- Right panel: BotSidePanel pattern (floating tabs + specular card) ----------
+ * Matches BotSidePanel (bots.css): 8px right/bottom frame padding, a transparent floating tab strip on the window
+ * canvas, and a rounded --pane-surface content card with the shared 1px specular ring (above). overflow: clip keeps
+ * scrollIntoView from scrolling the panel container (shell-scroll-electron.test.ts).
+ */
+html[data-theme] .app .main-area {
+  box-sizing: border-box;
+  padding: 0 8px 8px 0;
+  background: transparent;
+}
+
+html[data-theme] .app .main-area > .header {
+  min-height: 0;
+  padding: 4px 0 8px 2px;
+  border-bottom: 0;
+  background: transparent;
+}
+
+html[data-theme] .app .main-area > :not(.header) {
+  position: relative;
+  border-radius: var(--pane-radius);
+  overflow: clip;
+  --pane-backdrop: var(--pane-surface);
+  background: var(--pane-backdrop);
+  box-shadow: var(--pane-shadow);
+}
+
+/* Interior panel toolbars and sidebars sit directly on the card's --pane-surface rather than painting
+ * separate --surface-strong slabs or accent-tinted borders against the rounded corners. */
+html[data-theme] .app .main-area > :not(.header) :is(
+  .panel-toolbar,
+  .browser-tabs,
+  .browser-toolbar,
+  .browser-device-toolbar,
+  .browser-notice,
+  .files-sidebar,
+  .git-sidebar
+) {
+  background: transparent;
+}
+
+html[data-theme] .app .main-area > :not(.header) :is(.panel-toolbar, .browser-tabs, .browser-toolbar) {
+  border-bottom: 1px solid var(--ui-line);
+}
+
+html[data-theme] .app .main-area > :not(.header) :is(.browser-device-toolbar, .browser-notice) {
+  border-top-color: var(--ui-line);
+}
+
+html[data-theme] .app .main-area > :not(.header) :is(.files-sidebar, .git-sidebar) {
+  border-right-color: var(--ui-line);
 }
