@@ -105,6 +105,19 @@
       "expiresAt": "2026-11-20T13:20:04.637Z"
     },
     {
+      "task": "fix-delete-hang",
+      "session": "Animatrix-2b0044",
+      "machine": "Animatrix",
+      "branch": "fix-delete-hang",
+      "paths": [
+        "src/mms/lifecycle",
+        "src/renderer/lib/archivedThreads.ts",
+        "src/main/ipc/registerGuiIpc.ts"
+      ],
+      "claimedAt": "2026-11-20T11:29:05.831Z",
+      "expiresAt": "2026-11-20T13:29:05.831Z"
+    },
+    {
       "task": "fix-model-switch-mid-turn",
       "session": "Animatrix-6036c7",
       "machine": "Animatrix",
