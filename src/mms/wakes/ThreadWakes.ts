@@ -16,6 +16,7 @@ import { notice } from '../../shared/mousseContext'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { clockTime } from '../bots/chat/projection'
 import {
+  PR_WAKE_READ_MS,
   pullRequestWakeEvent,
   pullRequestWakeOutcome,
   threadWakeEvent,
@@ -46,8 +47,6 @@ import type { ThreadWakePayload } from '../run/types'
 
 /** How often waiting wakes are looked at: what a timer paused by sleep catches up within, and thread events between run ends. */
 export const THREAD_WAKE_TICK_MS = 30_000
-/** How often one wake reads its pull request, as a bot's does. */
-export const THREAD_WAKE_PR_READ_MS = 2 * 60_000
 /** A time wake fired this much after its time is said to be late (Mousse was off, or the computer slept). */
 const LATE_MS = 60_000
 const HOUR_MS = 60 * 60_000
@@ -314,7 +313,7 @@ export class ThreadWakes {
       let fired: BotWakeFired | undefined
       try {
         if (wake.event.kind === 'thread') fired = threadWakeOutcome(wake.event, this.deps.threadState(wake.threadId, wake.event.threadId))
-        else if (now - (this.readAt.get(wake.id) ?? 0) >= THREAD_WAKE_PR_READ_MS) {
+        else if (now - (this.readAt.get(wake.id) ?? 0) >= PR_WAKE_READ_MS) {
           this.readAt.set(wake.id, now)
           fired = pullRequestWakeOutcome(wake.event, await this.deps.pullRequestState(wake.event.repo, wake.event.number), wake.setAt)
         }
@@ -329,7 +328,9 @@ export class ThreadWakes {
   /** Posts the wake's notice to its thread's inbox, then forgets it. A failed post keeps it for the next tick. */
   private fire(wake: ThreadWake, fired: BotWakeFired | null, late?: string): void {
     const text = wakeInput({ thread: true, brief: wake.brief, setAt: wake.setAt, event: wake.event, fired, ...(late ? { late } : {}), chain: wake.chain, clock: clockTime, wakeId: wake.id })
-    const payload: ThreadWakePayload = { kind: 'thread_wake', wakeId: wake.id, label: wakeFiredLabel(fired), brief: wake.brief, text, attention: 'needed' }
+    // A time wake fired late says so on its row too ("Wake-up · was for 19:21").
+    const label = !fired && late ? `${wakeFiredLabel(fired)} · was for ${late}` : wakeFiredLabel(fired)
+    const payload: ThreadWakePayload = { kind: 'thread_wake', wakeId: wake.id, label, brief: wake.brief, text, attention: 'needed' }
     try {
       this.deps.post(wake.threadId, payload, `thread-wake:${wake.id}`)
     } catch (error) {

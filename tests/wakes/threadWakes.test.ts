@@ -10,7 +10,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { MAX_SAME_WAKES } from '../../src/shared/bots/personal/wakes'
 import type { WakePullRequestState, WakeThreadState } from '../../src/mms/bots/wakeSources'
 import type { ThreadWakePayload } from '../../src/mms/run/types'
-import { THREAD_WAKE_PR_READ_MS, THREAD_WAKE_TICK_MS, ThreadWakes } from '../../src/mms/wakes/ThreadWakes'
+import { PR_WAKE_READ_MS } from '../../src/mms/bots/wakeSources'
+import { THREAD_WAKE_TICK_MS, ThreadWakes } from '../../src/mms/wakes/ThreadWakes'
 
 const T0 = Date.parse('2026-11-20T10:00:00.000Z')
 const MINUTE = 60_000
@@ -135,6 +136,7 @@ describe('thread wake-ups', () => {
     await settle()
     expect(second.posts.map((post) => post.key)).toEqual([`thread-wake:${added.wakeId}`])
     expect(second.posts[0]!.payload.text).toMatch(/is due \(it was for /)
+    expect(second.posts[0]!.payload.label).toMatch(/^Following up · was for /)
   })
 
   it('a post that fails keeps the wake for the next tick', async () => {
@@ -203,7 +205,7 @@ describe('thread wake-ups', () => {
     expect(h.prReads()).toBe(readsAtSet + 1)
     expect(h.posts).toEqual([])
     h.setPr({ state: 'open', title: 'Add wakes', headSha: 'abcdef1234', checkRuns: [{ name: 'build', state: 'passing' }, { name: 'lint', state: 'failing' }] })
-    await h.advance(THREAD_WAKE_PR_READ_MS)
+    await h.advance(PR_WAKE_READ_MS)
     expect(h.posts).toHaveLength(1)
     expect(h.posts[0]!.payload.text).toContain("pull request acme/app#12's checks have settled. Passed: 1. Failed: 1.")
     expect(h.posts[0]!.payload.label).toBeTruthy()
@@ -215,7 +217,7 @@ describe('thread wake-ups', () => {
     h.wakes.start()
     await h.wakes.add('t1', { brief: 'Rebase after merge', event: { kind: 'pr', repo: 'acme/app', number: 12 } })
     h.setPr({ state: 'closed' })
-    await h.advance(THREAD_WAKE_PR_READ_MS)
+    await h.advance(PR_WAKE_READ_MS)
     expect(h.posts[0]!.payload.text).toContain('ended without it: the pull request was closed without merging.')
   })
 

@@ -82,6 +82,9 @@ export async function pullRequestStateOf(deps: PullRequestStateDeps, repo: strin
 // agent's (`ThreadWakes`). Each reads the thread or the pull request its own way, then asks these.
 
 type ThreadWakeEvent = Extract<BotWakeEvent, { kind: 'thread' }>
+/** How often one wake, a bot's or a thread's, reads its pull request. */
+export const PR_WAKE_READ_MS = 2 * 60_000
+
 type PullRequestWakeEvent = Extract<BotWakeEvent, { kind: 'pr' }>
 
 /**

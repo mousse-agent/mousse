@@ -16,7 +16,7 @@ import { type TellMe } from '../../../shared/types'
 import { tellingClass } from '../chat/telling'
 import { hasToolImages } from '../chat/toolImages'
 import { extractAppletParts } from '../../../shared/applets'
-import { pullRequestWakeEvent, pullRequestWakeOutcome, threadWakeEvent, threadWakeOutcome, type WakePullRequestState } from '../wakeSources'
+import { PR_WAKE_READ_MS, pullRequestWakeEvent, pullRequestWakeOutcome, threadWakeEvent, threadWakeOutcome, type WakePullRequestState } from '../wakeSources'
 import type { BotMemoryStore } from '../memory/BotMemoryStore'
 import type { ScheduledMissedRuns } from '../../../shared/types'
 import { requestJournalRows } from '../memory/requestFrames'
@@ -456,7 +456,6 @@ const DEFAULT_OWNER_TURN_WAIT_MS = 60_000
 /** A reminder said later than this (Mousse was off) says what time it was for. */
 const REMINDER_LATE_MS = 2 * 60_000
 /** How often a wake on a pull request reads it. */
-const PR_WAKE_READ_MS = 2 * 60_000
 const HOUR_MS = 60 * 60_000
 /** How long a dispatch's reply waits for the executor's final message before it is posted without it. */
 const REPLY_WAIT_MS = 5_000
