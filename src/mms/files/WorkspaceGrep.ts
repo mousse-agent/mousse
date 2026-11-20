@@ -8,6 +8,7 @@ import { detectGitRoute, isPhysicallyWithin, type GitRoute } from './WorkspaceIn
 import { getWorkspaceIndexRegistry, type WorkspaceIndexLookup } from './WorkspaceIndexRegistry'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { timeGitChild } from '../diagnostics/turnBoundary'
+import { gitEnvFor, gitFile } from '../git/gitExecutable'
 
 export interface GrepWorkspaceOptions {
   /** Regular expressions run in `git grep` only; elsewhere the query is searched literally. */
@@ -321,11 +322,11 @@ async function grepWithGit(
         reject(abortError())
         return
       }
-      const child = timeGitChild(() => spawnGit('git', argv, {
+      const child = timeGitChild(() => spawnGit(gitFile(), argv, {
         cwd: root,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })
+        env: gitEnvFor(repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' }))
       }))
       let stoppedByUs = false
       let deadlineHit = false

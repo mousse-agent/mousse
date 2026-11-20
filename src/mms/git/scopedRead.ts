@@ -7,6 +7,7 @@ import { nonInteractiveGitEnv, withGitConfigEnv } from './gitEnv'
 import { assertGitAllowed } from './gitPolicy'
 import { touchesGitMetadata } from '../agents/gitMetadata'
 import { timeGitChild } from '../diagnostics/turnBoundary'
+import { gitEnvFor, gitFile } from './gitExecutable'
 
 /**
  * The agent tools' `git_status` and `git_diff` (the Mousse MCP server's app tools and the legacy
@@ -105,8 +106,8 @@ function git(cwd: string, args: readonly string[], repo?: Repo, withSystem = fal
       reject(error)
       return
     }
-    timeGitChild(() => execFile('git', [...SAFE_CONFIG, ...args], {
-      cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024, env: gitEnv(repo, withSystem)
+    timeGitChild(() => execFile(gitFile(), [...SAFE_CONFIG, ...args], {
+      cwd, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 32 * 1024 * 1024, env: gitEnvFor(gitEnv(repo, withSystem))
     }, (error, stdout, stderr) => {
       const exit = error ? (error as { code?: unknown }).code : 0
       if (error && typeof exit !== 'number') reject(error)

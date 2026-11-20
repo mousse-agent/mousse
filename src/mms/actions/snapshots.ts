@@ -24,6 +24,7 @@ import { retentionWindowText } from '../../shared/undoRetention'
 import { timeGitSync } from '../diagnostics/turnBoundary'
 import { turnBoundaryStep } from '../diagnostics/turnBoundary'
 import { branchOfHeadRef, repositoryFactsStep, type RepositoryFacts } from '../git/repositoryFacts'
+import { gitEnvFor, gitFile } from '../git/gitExecutable'
 
 /**
  * Workspace snapshots (docs/workspace-snapshots.md): a commit whose tree is every file of a worktree (tracked and
@@ -273,7 +274,7 @@ function candidateFiles(top: string): Steps<string[]> {
   const args = ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.', ...builtInPathspecs().exclude]
   const options = { maxBuffer: 32 * 1024 * 1024, timeout: 60_000 }
   return step(
-    () => listedCandidates(timeGitSync(() => spawnSync('git', guarded(top, args), { cwd: top, encoding: 'utf8', env: gitEnv(top), ...options }))),
+    () => listedCandidates(timeGitSync(() => spawnSync(gitFile(), guarded(top, args), { cwd: top, encoding: 'utf8', env: gitEnvFor(gitEnv(top)), ...options }))),
     async () => listedCandidates(await runGitProcess(await guardedAsync(top, args), { cwd: top, env: gitEnv(top), ...options }))
   )
 }
