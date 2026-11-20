@@ -219,7 +219,7 @@ Under `approvals: never`, a variant that produces a request is unavailable, unle
 **monitors and background work** (threads; #1605)
 - Tools: `monitor_start`, `background_run`, `background_stop`, `keep_working`.
 - `monitor_start` runs a script (each printed line is an event) or watches a `wss://` socket (`ws://` only on loopback); events within 200 ms are one notice. `background_run` tells the agent once, when its command ends, with the exit code and the end of its output. `keep_working` keeps the thread Working while it waits on something outside Mousse; `release: true` ends its holds. `background_stop` stops any of them by id.
-- Notices are `reconcile_notice` rows with payload `monitor_event`, delivered as agent notes are; the output is quoted. Every end is told (exit, socket close, failure, timeout, over-chatty, `background_stop`, thread Stop, daemon restart); a Stop's notice waits for the next turn.
+- Notices are `reconcile_notice` rows with payload `monitor_event`, delivered as agent notes are; the output is quoted. Every end is told (exit, socket close, failure, timeout, over-chatty, thread Stop, daemon restart); a Stop's notice waits for the next turn. `background_stop` posts no notice: its result carries what was not reported yet.
 - Limits are named constants in `src/mms/monitors/ThreadMonitors.ts`; nothing caps how many run at once.
 - Starting a script needs what the agent's shell needs (`editsWorkspace`, asks unless Full access, refused in Plan and read-only subagents). Bots keep `watch_start` and `wake`; these four are not offered to bots yet.
 

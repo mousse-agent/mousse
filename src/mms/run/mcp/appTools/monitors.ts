@@ -84,7 +84,7 @@ export function monitorTools(host: AppToolHost): MousseTool[] {
         `Events within ${MONITOR_BATCH_MS} ms of each other arrive as one notice.`,
         'Make the script print on failure, on exit and on timeout too, not only on success: a script that prints nothing looks the same as one still waiting.',
         `Filter its output to the lines you need (grep): a monitor that reports more than ${MONITOR_CHATTY_EVENTS_PER_MINUTE} events or ${MONITOR_CHATTY_NOTICES_PER_MINUTE} notices in a minute is stopped.`,
-        'When it ends (the script exits, the socket closes, its time runs out, it is stopped, the thread is stopped, or Mousse restarts) a last notice says why; after a timeout start it again if you still need it.',
+        'When it ends (the script exits, the socket closes, its time runs out, the thread is stopped, or Mousse restarts) a last notice says why; after a timeout start it again if you still need it.',
         'Prefer a monitor or background_run to polling in a loop or waiting in your turn. The thread shows as Working while it runs. Stop it with background_stop.'
       ].join(' '),
       inputSchema: {
@@ -156,7 +156,7 @@ export function monitorTools(host: AppToolHost): MousseTool[] {
     },
     {
       name: 'background_stop',
-      description: 'Stop one of this thread\'s monitors, background commands or keep_working holds by its id (from monitor_start, background_run, keep_working or running_list). Its last notice, with anything it reported since the one before, comes with your next turn.',
+      description: 'Stop one of this thread\'s monitors, background commands or keep_working holds by its id (from monitor_start, background_run, keep_working or running_list). No notice follows: this result carries anything it reported since its last notice (unreported) and a background command\'s last output (tail).',
       inputSchema: {
         type: 'object',
         properties: { id: { type: 'string', description: 'The id it was started with.' } },
@@ -171,7 +171,15 @@ export function monitorTools(host: AppToolHost): MousseTool[] {
         if (!id) throw new MonitorInputError('id is required.')
         const stopped = service.stop(threadOf(ctx), id)
         if (!stopped) throw new MonitorInputError(`Nothing with id ${id} runs in this thread now; it may have ended already.`)
-        return { id: stopped.id, kind: stopped.kind, description: stopped.description, stopped: true }
+        return {
+          id: stopped.id,
+          kind: stopped.kind,
+          description: stopped.description,
+          stopped: true,
+          ...(stopped.unreported ? { unreported: stopped.unreported } : {}),
+          ...(stopped.droppedEvents ? { droppedEvents: stopped.droppedEvents } : {}),
+          ...(stopped.tail ? { tail: stopped.tail } : {})
+        }
       })
     },
     {

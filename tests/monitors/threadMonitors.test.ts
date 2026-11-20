@@ -17,11 +17,13 @@ import {
   MONITOR_CHATTY_NOTICES_PER_MINUTE,
   MONITOR_DEFAULT_MINUTES,
   MONITOR_EVENT_CHARS,
+  MONITOR_KILL_GRACE_MS,
   MONITOR_MAX_MINUTES,
   MONITOR_NOTICE_CHARS,
   MonitorInputError,
   ThreadMonitors,
   monitorUrlProblem,
+  withShellPath,
   type MonitorSocket,
   type ThreadMonitorsDeps
 } from '../../src/mms/monitors/ThreadMonitors'
@@ -33,6 +35,7 @@ class FakeChild extends EventEmitter {
   readonly stderr = Object.assign(new EventEmitter(), { setEncoding: () => undefined })
   pid = 4242
   exitCode: number | null = null
+  signalCode: NodeJS.Signals | null = null
   print(text: string, stream: 'stdout' | 'stderr' = 'stdout'): void {
     this[stream].emit('data', text)
   }
@@ -71,6 +74,7 @@ function setup(extra: Partial<ThreadMonitorsDeps> = {}) {
       return socket
     },
     kill: (pid, signal) => { killed.push(`${pid} ${signal}`) },
+    platform: 'linux',
     ...extra
   })
   return { monitors, posted, children, sockets, killed, working, spawned }
@@ -144,7 +148,8 @@ describe('thread monitors', () => {
     { name: 'monitor times out', kind: 'command', end: () => vi.advanceTimersByTime(MONITOR_DEFAULT_MINUTES * 60_000), reason: 'timeout', attention: 'needed' },
     { name: 'background command exits', kind: 'background', end: (s) => s.children[0]!.exit(0), reason: 'exit', attention: 'needed' },
     { name: 'background command times out', kind: 'background', end: () => vi.advanceTimersByTime(30 * 60_000), reason: 'timeout', attention: 'needed' },
-    { name: 'stopped by background_stop', kind: 'command', end: (s, id) => s.monitors.stop('t1', id), reason: 'stopped', attention: 'none' },
+    // The agent's own background_stop: its result says so (below), no notice follows.
+    { name: 'stopped by background_stop', kind: 'command', end: (s, id) => s.monitors.stop('t1', id), reason: 'none' },
     { name: 'its thread is stopped', kind: 'url', end: (s) => s.monitors.stopThread('t1'), reason: 'thread_stopped', attention: 'none' },
     { name: 'background command, its thread stopped', kind: 'background', end: (s) => s.monitors.stopThread('t1'), reason: 'thread_stopped', attention: 'none' },
     { name: 'its thread is deleted', kind: 'command', end: (s) => s.monitors.stopThread('t1', false), reason: 'none' },
@@ -186,9 +191,56 @@ describe('thread monitors', () => {
       }
     }
     expect(s.monitors.list('t1')).toEqual([])
-    // A script that did not end by itself is killed; a socket is closed.
-    if (kind === 'command' && reason !== 'exit') expect(s.killed[0]).toBe('4242 SIGTERM')
+    // A script's process group ends with it, however it ended (what it left running included); a socket is closed.
+    if (kind === 'command') expect(s.killed[0]).toBe('4242 SIGTERM')
     if (kind === 'url') expect(s.sockets[0]!.terminated).toBe(true)
+  })
+
+  it('background_stop tells nothing later: its result carries what was not reported yet, and a command\'s last output', () => {
+    const s = setup()
+    const monitor = s.monitors.startMonitor(command())
+    const background = s.monitors.startBackground(command('t1', { description: 'build' }))
+    s.children[0]!.print('unsent line\n')
+    s.children[1]!.print('compiling\n')
+    expect(s.monitors.stop('t1', monitor.id)).toMatchObject({ id: monitor.id, unreported: ['unsent line'] })
+    expect(s.monitors.stop('t1', background.id)).toMatchObject({ id: background.id, tail: 'compiling\n' })
+    vi.advanceTimersByTime(MONITOR_MAX_MINUTES * 60_000)
+    expect(s.posted).toEqual([])
+  })
+
+  describe('ending a script\'s processes', () => {
+    it('on macOS and Linux the group gets SIGTERM, then SIGKILL after the grace even once the script itself is gone', () => {
+      const s = setup()
+      const view = s.monitors.startMonitor(command())
+      s.monitors.stop('t1', view.id)
+      // The shell leader ended on SIGTERM; what it left in its group may not have.
+      s.children[0]!.signalCode = 'SIGTERM'
+      vi.advanceTimersByTime(MONITOR_KILL_GRACE_MS)
+      expect(s.killed).toEqual(['4242 SIGTERM', '4242 SIGKILL'])
+    })
+
+    it('on macOS and Linux a script that exits on its own takes what it left in its group with it', () => {
+      const s = setup()
+      s.monitors.startMonitor(command())
+      s.children[0]!.exit(0)
+      vi.advanceTimersByTime(MONITOR_KILL_GRACE_MS)
+      expect(s.killed).toEqual(['4242 SIGTERM', '4242 SIGKILL'])
+    })
+
+    it('on Windows only a live tree is ended, and one that died by a signal is not killed again', () => {
+      const exited = setup({ platform: 'win32' })
+      exited.monitors.startMonitor(command())
+      exited.children[0]!.exit(0)
+      vi.advanceTimersByTime(MONITOR_KILL_GRACE_MS)
+      expect(exited.killed).toEqual([])
+
+      const signalled = setup({ platform: 'win32' })
+      const view = signalled.monitors.startMonitor(command())
+      signalled.monitors.stop('t1', view.id)
+      signalled.children[0]!.signalCode = 'SIGTERM'
+      vi.advanceTimersByTime(MONITOR_KILL_GRACE_MS)
+      expect(signalled.killed).toEqual(['4242 SIGTERM'])
+    })
   })
 
   it('a script exit carries its code; a socket close its code and reason', () => {
@@ -319,6 +371,28 @@ describe('after a restart', () => {
     await third.monitors.recoverOnBoot()
     // Only the monitor of t3, still running when the second run closed.
     expect(third.posted.map((entry) => entry.threadId)).toEqual(['t3'])
+  })
+
+  it('a monitor started just before Mousse closes is still told after the restart: a write waiting in line keeps it', async () => {
+    const recordFile = join(dir, 'monitors.json')
+    const before = setup({ recordFile })
+    // Its write waits behind the read of the old record; close() runs before it.
+    const view = before.monitors.startMonitor(command('t1'))
+    before.monitors.close()
+    await before.monitors.settled()
+    const after = setup({ recordFile, threadExists: () => true })
+    expect(await after.monitors.recoverOnBoot()).toBe(1)
+    expect(after.posted[0]).toMatchObject({ threadId: 't1', payload: { monitorId: view.id, end: { reason: 'restart' } } })
+  })
+})
+
+describe('withShellPath', () => {
+  it('adds the login shell\'s PATH entries after the inherited ones, once each, under the name the environment uses', () => {
+    expect(withShellPath({ PATH: '/usr/bin:/bin', HOME: '/h' }, ['/opt/homebrew/bin', '/usr/bin'], 'darwin')).toEqual({ PATH: '/usr/bin:/bin:/opt/homebrew/bin', HOME: '/h' })
+    expect(withShellPath({ Path: 'C:\\Windows' }, ['C:\\Tools'], 'win32')).toEqual({ Path: 'C:\\Windows;C:\\Tools' })
+    expect(withShellPath({}, ['/usr/local/bin'], 'linux')).toEqual({ PATH: '/usr/local/bin' })
+    const env = { PATH: '/bin' }
+    expect(withShellPath(env, [], 'linux')).toBe(env)
   })
 })
 

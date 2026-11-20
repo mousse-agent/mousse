@@ -53,6 +53,8 @@ export const MONITOR_CONNECT_TIMEOUT_MS = 15_000
 export const MONITOR_MESSAGE_BYTES = 1_000_000
 /** How long a stopped script has to end before its tree is killed outright. */
 export const MONITOR_KILL_GRACE_MS = 3_000
+/** How long after a script exits its output may still arrive before it counts as ended (something it left holds the pipe). */
+export const MONITOR_EXIT_DRAIN_MS = 1_000
 
 const CHATTY_WINDOW_MS = 60_000
 const LATEST_CHARS = 200
@@ -146,6 +148,19 @@ interface RecordRow {
   threadId: string
   kind: MonitorKind
   description: string
+}
+
+/**
+ * The environment a monitor's script runs with: `env` with the login shell's PATH entries after its own (as the agent's
+ * shell commands find them, `sharedShellPath`), so `gh`, `npm` or a Homebrew tool is found when Mousse was opened from
+ * the desktop with a short PATH.
+ */
+export function withShellPath(env: NodeJS.ProcessEnv, entries: readonly string[], platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+  if (!entries.length) return env
+  const key = Object.keys(env).find((name) => name.toUpperCase() === 'PATH') ?? (platform === 'win32' ? 'Path' : 'PATH')
+  const separator = platform === 'win32' ? ';' : ':'
+  const own = (env[key] ?? '').split(separator).filter(Boolean)
+  return { ...env, [key]: [...new Set([...own, ...entries])].join(separator) }
 }
 
 const cut = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
@@ -322,13 +337,20 @@ export class ThreadMonitors {
     child.stdout?.on('data', (chunk: Buffer | string) => this.output(entry, 'out', String(chunk)))
     child.stderr?.on('data', (chunk: Buffer | string) => this.output(entry, 'err', String(chunk)))
     child.once('error', (error) => this.end(entry, { reason: 'failed', message: error.message }, 'needed'))
-    child.once('close', (code, signal) => {
+    const exited = (code: number | null, signal: NodeJS.Signals | null): void => {
       // A monitor's last line with no newline still counts.
       for (const stream of ['out', 'err'] as const) {
         if (entry.partial[stream] && entry.kind !== 'background') this.event(entry, entry.partial[stream])
         entry.partial[stream] = ''
       }
       this.end(entry, { reason: 'exit', code, ...(signal ? { signal } : {}) }, 'needed')
+    }
+    child.once('close', exited)
+    // A process it left running (`tail -f x &`) keeps its output open, so `close` would wait for it: the script's exit
+    // counts once its last output had time to arrive, and the end then stops what it left.
+    child.once('exit', (code, signal) => {
+      const drain = setTimeout(() => exited(code, signal), MONITOR_EXIT_DRAIN_MS)
+      drain.unref?.()
     })
   }
 
@@ -437,7 +459,8 @@ export class ThreadMonitors {
     const wasRunning = this.entries.delete(entry.id)
     const told = attention !== 'silent' && (entry.kind !== 'keep_working' || end.reason === 'timeout')
     if (told) this.post(entry, attention, end)
-    if (end.reason !== 'exit') this.kill(entry)
+    // Even after a script exits on its own, what it left in its process group (`tail -f x &`) ends with it.
+    this.kill(entry)
     if (!wasRunning) return
     this.deps.working?.(entry.threadId, this.has(entry.threadId))
     this.persist()
@@ -449,30 +472,47 @@ export class ThreadMonitors {
     }
     const child = entry.child
     const pid = child?.pid
-    if (!child || pid === undefined || child.exitCode !== null) return
+    if (!child || pid === undefined) return
+    const running = (): boolean => child.exitCode === null && child.signalCode === null
+    // On macOS and Linux the script leads its own process group, which outlives it when it leaves something behind: the
+    // group is ended whatever ended the script, and sent SIGKILL after the grace (a group already gone is harmless). On
+    // Windows a tree is found from its live root only.
+    const group = (this.deps.platform ?? process.platform) !== 'win32'
+    if (!group && !running()) return
     const kill = this.deps.kill ?? killProcessTree
     try { kill(pid, 'SIGTERM') } catch { /* gone */ }
     const timer = setTimeout(() => {
-      if (child.exitCode === null) {
+      if (group || running()) {
         try { kill(pid, 'SIGKILL') } catch { /* gone */ }
       }
     }, MONITOR_KILL_GRACE_MS)
     timer.unref?.()
   }
 
-  /** Stops one of the thread's own; its end notice waits for the thread's next turn. Undefined when it is not running. */
-  stop(threadId: string, id: string): MonitorView | undefined {
+  /**
+   * Stops one of the thread's own (`background_stop`). The agent learns it from the tool's result, so no notice follows:
+   * the result carries what it reported since its last notice, and a background command's last output. Undefined when it
+   * is not running.
+   */
+  stop(threadId: string, id: string): (MonitorView & { unreported?: string[]; droppedEvents?: number; tail?: string }) | undefined {
     const entry = this.entries.get(id)
     if (!entry || entry.threadId !== threadId) return undefined
     const view = this.view(entry)
-    this.end(entry, { reason: 'stopped' }, 'none')
-    return view
+    const unreported = [...entry.batch]
+    const dropped = entry.dropped
+    this.end(entry, { reason: 'stopped' }, 'silent')
+    return {
+      ...view,
+      ...(unreported.length ? { unreported } : {}),
+      ...(dropped ? { droppedEvents: dropped } : {}),
+      ...(entry.kind === 'background' && entry.tail.trim() ? { tail: entry.tail } : {})
+    }
   }
 
   /** Ends the thread's `keep_working` holds; how many. */
   release(threadId: string): number {
     const holds = [...this.entries.values()].filter((entry) => entry.threadId === threadId && entry.kind === 'keep_working')
-    for (const hold of holds) this.end(hold, { reason: 'stopped' }, 'none')
+    for (const hold of holds) this.end(hold, { reason: 'stopped' }, 'silent')
     return holds.length
   }
 
@@ -578,11 +618,12 @@ export class ThreadMonitors {
   private persist(): void {
     const file = this.deps.recordFile
     if (!file) return
+    // What runs now, taken when asked: a write that waits behind another still writes what ran then, never what a
+    // `close()` in between left (nothing), so a restart still tells those threads.
+    const running: RecordRow[] = [...this.entries.values()].filter((entry) => entry.kind !== 'keep_working').map((entry) => ({ id: entry.id, threadId: entry.threadId, kind: entry.kind, description: entry.description }))
     this.writing = this.writing.then(async () => {
-      const rows: RecordRow[] = [
-        ...this.leftovers,
-        ...[...this.entries.values()].filter((entry) => entry.kind !== 'keep_working').map((entry) => ({ id: entry.id, threadId: entry.threadId, kind: entry.kind, description: entry.description }))
-      ]
+      // The last run's leftovers are read only once the old record is loaded, which every write waits for.
+      const rows: RecordRow[] = [...this.leftovers, ...running]
       try {
         await atomicWriteFile(file, `${JSON.stringify({ version: 1, monitors: rows })}\n`)
       } catch (error) {

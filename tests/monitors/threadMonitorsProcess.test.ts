@@ -73,3 +73,25 @@ describe('thread monitors with real scripts', () => {
     expect(posted.at(-1)).toMatchObject({ end: { reason: 'thread_stopped' }, attention: 'none' })
   })
 })
+
+describe.skipIf(process.platform === 'win32')('thread monitors on macOS and Linux', () => {
+  let dir: string | undefined
+  let monitors: ThreadMonitors | undefined
+  afterEach(() => {
+    monitors?.close()
+    if (dir) rmSync(dir, { recursive: true, force: true })
+    dir = undefined
+  })
+
+  it('a script that exits leaving a process behind ends at once, and what it left ends with it', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'mousse-monitor-group-'))
+    const posted: MonitorEventPayload[] = []
+    monitors = new ThreadMonitors({ post: (_threadId, payload) => { posted.push(structuredClone(payload)) } })
+    // The sleep keeps the script's output open: without the exit drain the end would wait for the timeout.
+    monitors.startMonitor({ threadId: 't1', description: 'leftover', cwd: dir, command: 'sleep 300 & echo "left $!"; exit 4' })
+    await until(() => posted.some((payload) => payload.end), 'the end notice', 5_000)
+    const left = Number(posted.flatMap((payload) => payload.events).find((line) => line.startsWith('left '))!.slice(5))
+    expect(posted.at(-1)!.end).toEqual({ reason: 'exit', code: 4 })
+    await until(() => !alive(left), 'the leftover to die')
+  })
+})

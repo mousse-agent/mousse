@@ -102,7 +102,8 @@ import { TaskQueue } from './tasks/TaskQueue'
 import { WorktreeManager } from './worktree/WorktreeManager'
 import { PtyManager } from './terminals/PtyManager'
 import { RunningRegistry } from './running/RunningRegistry'
-import { ThreadMonitors } from './monitors/ThreadMonitors'
+import { ThreadMonitors, withShellPath } from './monitors/ThreadMonitors'
+import { sharedShellPath } from './harness/shellPath'
 import { postNote } from './run/mcp/appTools/threadNotes'
 import { McpRegistry } from './integrations/mcp/McpRegistry'
 import { McpManager } from './integrations/mcp/McpManager'
@@ -1017,7 +1018,12 @@ export class MmsProfileServices {
     // What threads' agents leave running in the background (#1605). Its notices go to the thread's inbox, the path
     // agents' notes take; a restart tells each thread whose monitors it ended, once the daemon is ready.
     const runEngine = this.runEngine
+    // Scripts find what the agent's own commands find: the login shell's PATH, asked once per daemon and never waited for
+    // (a script started before the answer runs with the inherited PATH).
+    let shellPath: readonly string[] = []
+    void sharedShellPath().then((result) => { shellPath = result.entries }, () => undefined)
     const monitors = new ThreadMonitors({
+      env: () => withShellPath(process.env, shellPath),
       post: (threadId, payload, key) => { postNote(runEngine, key, payload, threadId) },
       working: (threadId, active) => this.threadRuntimes?.setPendingMonitors(threadId, active),
       recordFile: join(this.homeDir, 'monitors.json'),
