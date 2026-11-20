@@ -425,7 +425,7 @@ export interface HarnessInstances {
    */
   usage(scope: ProviderScope, options?: { includeSignedOut?: boolean }): Promise<ProviderUsage[]>
   /** The instances the usage page lists (enabled ones with a usage reader, signed in or not), without reading any. */
-  usageSlots(scope: ProviderScope): Array<{ id: string; label: string; signedOut?: true }>
+  usageSlots(scope: ProviderScope): Array<{ id: string; label: string; signedOut?: true; onRequestOnly?: true }>
   /** One listed instance's usage, as `usage` reads it; undefined for an instance the page does not list. */
   usageFor(scope: ProviderScope, instanceId: string): Promise<ProviderUsage | undefined>
   /** Uses one limit-reset credit of a listed, signed-in instance whose runtime has them. */
@@ -996,7 +996,10 @@ export class Harness implements HarnessGateway {
       snapshots: (scope) => this.snapshots(scope),
       refreshStaleModelsOnDesktopOpen: () => this.refreshStaleModelsOnDesktopOpen(),
       usage: (scope, options) => this.usage(scope, options),
-      usageSlots: (scope) => this.usageIds(scope, true).map(({ instanceId, signedOut }) => ({ id: instanceId, label: this.displayName(this.record(instanceId, { allowDisabled: true })), ...(signedOut ? { signedOut: true as const } : {}) })),
+      usageSlots: (scope) => this.usageIds(scope, true).map(({ instanceId, signedOut }) => {
+        const record = this.record(instanceId, { allowDisabled: true })
+        return { id: instanceId, label: this.displayName(record), ...(signedOut ? { signedOut: true as const } : {}), ...(record.runtime.usageOnRequest ? { onRequestOnly: true as const } : {}) }
+      }),
       useLimitReset: async (scope, instanceId, creditId) => {
         const listed = this.usageIds(scope, false).find((entry) => entry.instanceId === instanceId)
         const record = listed && this.recordOrUndefined(instanceId)

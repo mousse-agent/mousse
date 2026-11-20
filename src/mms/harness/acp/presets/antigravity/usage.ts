@@ -38,9 +38,9 @@ const text = (value: unknown, max = 120): string | undefined =>
 
 /**
  * The usage page's windows for a reply: each quota pool's five-hour and weekly windows, with what is
- * left and when it resets. Ids are `<pool>:<window>`, never a bare `five_hour` or `seven_day`: the
- * background limit reads (`LimitPoller`) keep trends only for those, so Antigravity is read only when
- * the usage page asks. Throws for a reply that is not the command's, and `AgyUsageTurnError` for
+ * left and when it resets. Ids are `<pool>:<window>`, so each pool keeps its own limit trend. The
+ * runtime is marked `usageOnRequest`: Antigravity is read only when the usage page asks, never by the
+ * background limit reads. Throws for a reply that is not the command's, and `AgyUsageTurnError` for
  * one that reports a turn.
  */
 export function parseAgyUsage(stdout: string): RuntimeUsage {

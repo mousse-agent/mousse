@@ -326,6 +326,8 @@ export interface DriverRuntime {
    * Throws when it cannot be read; the gateway reports that as an error entry. Absent: no usage.
    */
   usage?(signal: AbortSignal): Promise<RuntimeUsage>
+  /** The usage is read only when someone asks (the usage page), never by the background limit reads (`LimitPoller`). */
+  usageOnRequest?: true
   /**
    * Uses one limit-reset credit of the signed-in account (the one named, or the provider's next) and
    * reads the limits again. Absent: the provider has no resets to use.

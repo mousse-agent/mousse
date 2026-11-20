@@ -45,6 +45,8 @@ export class LimitPoller {
         if (this.stopped) return
         // Signed out, or billed by key without limits: nothing to read.
         if (slot.signedOut || slot.authType === 'api_key') continue
+        // A provider read only on request (Antigravity runs its own CLI to read): never read in the background.
+        if (slot.onRequestOnly) continue
         // Only a provider with a 5-hour or weekly limit kept this month: others have no trend to add to.
         const recorded = await readings.lastReadAt(slot.id)
         if (recorded === undefined) continue
