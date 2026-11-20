@@ -15,8 +15,9 @@ import { errorCodeOf } from '../../lib/threadSetup'
 import { sendErrorLine } from '../../lib/errorText'
 import { stopThreadNow } from '../../lib/stopThread'
 import { composerFilePaths } from '../../lib/composerFilePaths'
+import { preparedSend } from '../../lib/attachmentPreparation'
+import { useAttachmentPreparation } from '../../hooks/useAttachmentPreparation'
 import { pickerIdFor, pickerProviders, projectScope, useProviderSnapshots } from '../../lib/providerSnapshots'
-import { filesToImagePayloads } from '../../utils/imageAttachments'
 import { MousseAgentChatShell } from '../../chat/components/MousseAgentChatShell'
 import { chatStatusFromTurn, mousseToUIMessages, reuseUIMessages } from '../../chat/adapters/mousseToUI'
 import { usePermissionRequests } from '../../hooks/usePermissionRequests'
@@ -176,6 +177,9 @@ function SideChatColumn({ thread }: { thread: Thread }) {
     state.setComposerDraft(threadId, typeof value === 'function' ? value(current) : value)
   }, [threadId])
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
+  // Images are made ready as they are attached; Send uses what was prepared.
+  const preparation = useAttachmentPreparation(attachedFiles, false)
+  const attachRules = useMemo(() => ({ remote: false, onRefused: (line: string) => setError(line) }), [])
 
   // The model and mode the side chat runs on: its parent's when it was made, and its own once changed here.
   const [catalog, setCatalog] = useState<LlmProviderOption[]>([])
@@ -214,10 +218,18 @@ function SideChatColumn({ thread }: { thread: Thread }) {
   }
 
   const send = async () => {
-    const files = attachedFiles
-    const filePaths = await composerFilePaths(files, threadId)
+    // The images as prepared when attached; one made smaller also goes as its original file.
+    const prepared = preparedSend(attachedFiles, preparation.snapshot)
+    if (!prepared) return
+    const { files, images } = prepared
+    let filePaths: Map<string, string>
+    try {
+      filePaths = await composerFilePaths(files, threadId)
+    } catch (caught) {
+      setError(sendErrorLine(caught))
+      return
+    }
     const content = buildComposerMessageContent(input, files, NO_VOICE, [], [], filePaths).trim()
-    const images = await filesToImagePayloads(files.map((attached) => attached.file))
     if (!content && images.length === 0) return
     if (content.length > MMS_PROTOCOL_MAX_TEXT_LENGTH) {
       setError('This message is too long. Attach it as a file instead.')
@@ -225,6 +237,12 @@ function SideChatColumn({ thread }: { thread: Thread }) {
     }
     const text = content || '[Image attachment]'
     setError(null)
+    const sentFiles = attachedFiles
+    // Not sent: the text and its files come back to the composer.
+    const restoreUnsent = () => {
+      setInput((current) => current || content)
+      setAttachedFiles((current) => [...sentFiles, ...current])
+    }
     setInput('')
     setAttachedFiles([])
     const shownId = busy ? null : showSentPrompt(threadId, text)
@@ -238,14 +256,14 @@ function SideChatColumn({ thread }: { thread: Thread }) {
       })
       if (result.error) {
         if (shownId) dropSentPrompt(threadId, shownId)
-        if (result.requestAcknowledged === false) setInput((current) => current || content)
+        if (result.requestAcknowledged === false) restoreUnsent()
         setError(sendErrorLine(result.error))
       } else if (result.queued && shownId) {
         dropSentPrompt(threadId, shownId)
       }
     } catch (caught) {
       if (shownId) dropSentPrompt(threadId, shownId)
-      setInput((current) => current || content)
+      restoreUnsent()
       setError(sendErrorLine(caught))
     } finally {
       setSending(false)
@@ -294,6 +312,9 @@ function SideChatColumn({ thread }: { thread: Thread }) {
                 onInputChange={setInput}
                 attachedFiles={attachedFiles}
                 onAttachedFilesChange={setAttachedFiles}
+                attachmentStatus={preparation.statuses}
+                sendBlocked={preparation.blocked}
+                attachRules={attachRules}
                 messageLimit={MMS_PROTOCOL_MAX_TEXT_LENGTH}
                 voiceMessages={NO_VOICE}
                 onVoiceMessagesChange={() => undefined}

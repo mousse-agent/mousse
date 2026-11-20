@@ -1,5 +1,5 @@
-import { isImageMimeType } from '../utils/imageAttachments'
 import { ipcErrorLine } from './errorText'
+import { isInlineCandidate } from './attachmentPreparation'
 
 /** What a thread's composer says when files are attached to a thread whose agent runs on another computer. */
 export const REMOTE_FILES_REFUSAL = "Files can't be attached to threads on another computer yet."
@@ -15,16 +15,20 @@ interface ComposerFile {
   id: string
   file: File
   path?: string
+  /** What the message calls the file, when not its file name. */
+  label?: string
+  /** An image sent as its path, not inline (`preparedSend`). */
+  asPath?: boolean
 }
 
-/** An image the model receives inline (a vision payload); every other file is sent as its path. */
+/** An image the model receives inline (a vision payload, fitted at attach: `attachmentPreparation.ts`); every other file is sent as its path. */
 export function sentInline(file: File): boolean {
-  return isImageMimeType(file.type)
+  return isInlineCandidate(file)
 }
 
 /** The files sent as paths, not inline. */
 export function fileAttachments<T extends ComposerFile>(files: readonly T[]): T[] {
-  return files.filter((attached) => !sentInline(attached.file))
+  return files.filter((attached) => attached.asPath || attached.path !== undefined || !sentInline(attached.file))
 }
 
 /**

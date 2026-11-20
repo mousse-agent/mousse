@@ -2,7 +2,6 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { REMOTE_FILES_REFUSAL } from '../../src/renderer/lib/composerFilePaths'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -82,6 +81,23 @@ async function pressEnter(): Promise<void> {
   await settle()
 }
 
+async function remoteThread(): Promise<void> {
+  const { useAppStore } = await import('../../src/renderer/stores/appStore')
+  const now = new Date().toISOString()
+  useAppStore.setState({ threads: [{ id: 'thread-a', name: 'A', createdAt: now, updatedAt: now, startedAt: now, order: 0, node: 'node-mac' }] as never })
+}
+
+/** A PNG of `width` × `height` as far as its header goes: what the composer reads of it before sending it as it is. */
+function png(name: string, width = 32, height = 32): File {
+  const bytes = new Uint8Array(64)
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52])
+  new DataView(bytes.buffer).setUint32(16, width)
+  new DataView(bytes.buffer).setUint32(20, height)
+  return new File([bytes], name, { type: 'image/png' })
+}
+
+const sendButton = () => host.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')
+
 const chipNames = () => [...host.querySelectorAll('.composer-attachments [title]')].map((node) => node.textContent?.trim()).filter(Boolean)
 
 beforeEach(async () => {
@@ -155,16 +171,68 @@ describe('a video or other file pasted in the composer', () => {
     expect(chipNames()).toContain('clip.mp4')
   })
 
-  it('is refused on a thread whose agent runs on another computer, before anything is sent', async () => {
-    const { useAppStore } = await import('../../src/renderer/stores/appStore')
-    const now = new Date().toISOString()
-    useAppStore.setState({ threads: [{ id: 'thread-a', name: 'A', createdAt: now, updatedAt: now, startedAt: now, order: 0, node: 'node-mac' }] as never })
+  it('is refused as it is attached on a thread whose agent runs on another computer, with a line naming it', async () => {
+    await remoteThread()
     await mount()
     await paste([new File([new Uint8Array([1])], 'clip.mp4', { type: 'video/mp4' })])
+    expect(chipNames()).toEqual([])
+    expect(host.textContent).toContain("clip.mp4 wasn't attached")
     await type('look')
     await pressEnter()
     expect(threads.attachmentPath).not.toHaveBeenCalled()
+  })
+})
+
+describe('an image attached in the composer', () => {
+  it('is prepared as it is attached, and the send carries what was prepared without reading it again', async () => {
+    const reads = vi.spyOn(FileReader.prototype, 'readAsDataURL')
+    await mount()
+    const shot = png('shot.png')
+    await paste([shot])
+    await settle()
+    expect(host.querySelector('.composer-attachment-status')).toBeNull()
+    expect(reads).toHaveBeenCalledTimes(1)
+
+    await type('what is this?')
+    await pressEnter()
+    const [, request] = (orchestrator.sendToThread as ReturnType<typeof vi.fn>).mock.calls[0]! as [string, { content: string; images?: Array<{ name: string; mimeType: string; data: string }> }]
+    expect(request.images).toEqual([{ name: 'shot.png', mimeType: 'image/png', data: btoa(String.fromCharCode(...new Uint8Array(await shot.arrayBuffer()))) }])
+    expect(reads).toHaveBeenCalledTimes(1)
+  })
+
+  it('that cannot be read here says it goes as a file, and is sent as its path', async () => {
+    await mount()
+    const heic = new File([new Uint8Array([1, 2, 3])], 'photo.heic', { type: 'image/heic' })
+    await paste([heic])
+    await settle()
+    expect(host.querySelector('.composer-attachment-status')?.textContent).toBe('Sent as file')
+    // It can't be read here, so its chip is a file chip, not a broken thumbnail.
+    expect(host.querySelector('.composer-attachments img')).toBeNull()
+    await type('and this?')
+    await pressEnter()
+    expect(threads.attachmentPath).toHaveBeenCalledWith(heic, 'thread-a')
+    const [, request] = (orchestrator.sendToThread as ReturnType<typeof vi.fn>).mock.calls[0]! as [string, { content: string; images?: unknown[] }]
+    expect(request.content).toContain('photo.heic (/tmp/mousse-attachments/thread-a/1a2b3c4d-photo.heic)')
+    expect(request.images ?? []).toEqual([])
+  })
+
+  it('that a thread on another computer cannot take is marked, and Send stays disabled with the reason', async () => {
+    await remoteThread()
+    await mount()
+    await paste([new File([new Uint8Array([1, 2, 3])], 'photo.heic', { type: 'image/heic' })])
+    await settle()
+    await type('look')
+    expect(host.querySelector('.composer-attachment-status')?.textContent).toBe("Can't be sent")
+    expect(sendButton()?.disabled).toBe(true)
+    expect(sendButton()?.title).toContain("photo.heic can't be sent")
+    await pressEnter()
     expect(orchestrator.sendToThread).not.toHaveBeenCalled()
-    expect(host.textContent).toContain(REMOTE_FILES_REFUSAL)
+  })
+
+  it('past the message image count is refused as it is attached, naming the file', async () => {
+    await mount()
+    for (let index = 0; index < 16; index += 1) await paste([png(`shot-${index}.png`)])
+    await paste([png('one-too-many.png')])
+    expect(host.textContent).toContain("one-too-many.png wasn't attached")
   })
 })

@@ -8,7 +8,7 @@ import type {
 } from '../net'
 import type { AgentExecutionBudget } from '../agents/execution'
 import type { UsageAgentId, UsageHistoryRange } from '../usageHistory'
-import { IMAGE_MAX_DATA_CHARS, MESSAGE_MAX_IMAGES, REMOTE_MESSAGE_IMAGES_MAX_DATA_CHARS } from '../imageLimits'
+import { IMAGE_MAX_DATA_CHARS, INLINE_IMAGE_MIME_TYPES, MESSAGE_MAX_IMAGES, REMOTE_MESSAGE_IMAGES_MAX_DATA_CHARS } from '../imageLimits'
 export interface BridgeEntityRef {
   nodeId: NodeId
   entityId: string
@@ -32,7 +32,8 @@ export const REMOTE_ATTACHMENT_CHUNK_CHARS = 48 * 1024
  * carries (`shared/imageLimits.ts`), so no image is staged that its message would refuse.
  */
 export const REMOTE_ATTACHMENT_MAX_CHARS = Math.min(IMAGE_MAX_DATA_CHARS, REMOTE_MESSAGE_IMAGES_MAX_DATA_CHARS)
-export const REMOTE_ATTACHMENT_MIME = /^image\/(png|jpeg|gif|webp|bmp)$/
+/** The image types a remote send stages: those every provider takes inline (`INLINE_IMAGE_MIME_TYPES`), as the service's validators require. */
+export const REMOTE_ATTACHMENT_MIME = new RegExp(`^(${INLINE_IMAGE_MIME_TYPES.join('|')})$`)
 /** A remote send or queued message: text, optional chat mode, and images staged with `attachments.stage`. */
 export interface BridgeChatInput {
   threadId: string
