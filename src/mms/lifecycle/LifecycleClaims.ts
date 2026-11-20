@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import type { LifecycleResource, ResourceInventorySnapshot, TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import { ProfileManager } from '../profiles/ProfileManager'
 import { createInstallationPaths } from '../profiles/paths'
-import { collectingReads, finalReads, inventoryFrom, OWNER_SCAN_LIMIT, OwnershipFacts, readOwnershipFacts, type OwnershipNeed, type OwnershipReads } from './ResourceInventory'
+import { collectingReads, createInventoryStorePass, finalReads, inventoryFrom, OWNER_SCAN_LIMIT, OwnershipFacts, readOwnershipFacts, type InventoryStorePass, type OwnershipNeed, type OwnershipReads } from './ResourceInventory'
 import { assertLifecyclePath, ResourceLifecycleStore } from './ResourceLifecycleStore'
 import { canonicalPathAsync, comparablePath, pathsOverlap, registeredWorktreesAsync } from './canonicalPath'
 import { repositoryKeyOf } from '../git/RepositoryIdentity'
@@ -115,9 +115,10 @@ function threadName(location: string, taskId: string): string {
   return name || taskId
 }
 
-function unverifiedClaim(store: ResourceLifecycleStore, current: ResourceLifecycleStore, record: TaskLifecycleRecord, inventory: ResourceInventorySnapshot, reads: OwnershipReads): ExternalClaim {
+function unverifiedClaim(store: ResourceLifecycleStore, current: ResourceLifecycleStore, record: TaskLifecycleRecord, inventory: ResourceInventorySnapshot, reads: OwnershipReads, pass?: InventoryStorePass): ExternalClaim {
   const owners = new Set([record.taskId, ...inventory.resources.map((resource) => resource.ownerTaskId)])
-  const tasks = [...owners].map((id) => id === record.taskId ? record : store.get(id)).filter((task): task is TaskLifecycleRecord => Boolean(task))
+  const lookupTask = (id: string): TaskLifecycleRecord | undefined => id === record.taskId ? record : (pass ? pass.taskById.get(id) : store.get(id))
+  const tasks = [...owners].map(lookupTask).filter((task): task is TaskLifecycleRecord => Boolean(task))
   const paths = new Set<string>()
   for (const task of tasks) for (const location of [task.location, ...task.locations]) paths.add(location)
   for (const resource of inventory.resources) if (isAbsolute(resource.identity) && !resource.identity.includes('#') && resource.kind !== 'git-ref' && resource.kind !== 'artifact') paths.add(resource.identity)
@@ -144,7 +145,7 @@ function unverifiedClaim(store: ResourceLifecycleStore, current: ResourceLifecyc
   // The thread named is the one whose worktree failed, which may be a thread this one owns.
   const failed = inventory.resources.filter((resource) => resource.kind === 'worktree' && resource.ownership === 'unknown')
   const worktrees = failed.length ? [...new Set(failed.map((resource) => resource.identity))] : inventory.blockers.map((blocker) => blocker.slice(UNVERIFIED_WORKTREE.length).split(': ')[0]!)
-  const broken = (failed[0] && store.get(failed[0].ownerTaskId)) || record
+  const broken = (failed[0] && lookupTask(failed[0].ownerTaskId)) || record
   const where = resolve(store.profileHome) === resolve(current.profileHome) ? '' : ' in another profile'
   const reason = `Thread “${threadName(broken.location, broken.taskId)}”${where} has ${worktrees.length === 1 ? 'a worktree' : 'worktrees'} Mousse can’t check: ${worktrees.join(', ')}.`
   return {
@@ -181,18 +182,32 @@ export async function getExternalResourceClaims(current: ResourceLifecycleStore,
     const needs: OwnershipNeed[] = []
     try {
       const claims = claimsFrom(current, ownedIds, collectingReads(facts, needs))
-      if (!needs.length && (!early.length || !facts.worktrees.size)) return claims
+      if (!needs.length) {
+        if (early.length && facts.worktrees.size) {
+          const refresh = early
+          early = []
+          for (const root of refresh) facts.legacy.delete(root)
+          await readOwnershipFacts(refresh.map((root) => ({ kind: 'legacy' as const, root })), facts)
+          // Re-verify ownerStores with the freshly scanned legacy folders; a thread that appeared there during the Git
+          // checks refuses here, and any newly registered project's legacy folder is collected and scanned.
+          const lateNeeds: OwnershipNeed[] = []
+          try {
+            ownerStores(current, collectingReads(facts, lateNeeds))
+          } catch (error) {
+            if (!lateNeeds.length) throw error
+          }
+          if (lateNeeds.length) {
+            await readOwnershipFacts(lateNeeds, facts)
+            continue
+          }
+        }
+        return claims
+      }
     } catch (error) {
       // A first pass may stop on a real refusal before naming every checkout; that refusal stands once nothing is missing.
       if (!needs.length) throw error
     }
     if (round >= 8) return claimsFrom(current, ownedIds, finalReads(facts))
-    if (!needs.length) {
-      // Everything is read and Git was among it: forget the early scans, so the next round reads them again.
-      for (const root of early) facts.legacy.delete(root)
-      early = []
-      continue
-    }
     await readOwnershipFacts(needs, facts)
   }
 }
@@ -206,16 +221,42 @@ export function getExternalResourceClaimsFromFacts(current: ResourceLifecycleSto
 }
 
 function claimsFrom(current: ResourceLifecycleStore, ownedIds: Set<string>, reads: OwnershipReads): ExternalClaims {
-  return ownerStores(current, reads).flatMap(({ store, records }) =>
-    records.filter((record) => record.state !== 'purged' && !(resolve(store.profileHome) === resolve(current.profileHome) && ownedIds.has(record.taskId))).flatMap((record) => {
-      const inventory = inventoryFrom(store, record, {}, reads)
+  return ownerStores(current, reads).flatMap(({ store, records }) => {
+    const pass = createInventoryStorePass(records)
+    const sameProfile = resolve(store.profileHome) === resolve(current.profileHome)
+    const included = records.filter((record) => record.state !== 'purged' && !(sameProfile && ownedIds.has(record.taskId)))
+    const includedIds = new Set(included.map((record) => record.taskId))
+    // A child whose ancestor is also included is already inventoried in full as part of that ancestor's owned tree.
+    const hasIncludedAncestor = (record: TaskLifecycleRecord): boolean => {
+      const seen = new Set<string>([record.taskId])
+      let parentId = record.parentTaskId
+      while (parentId && !seen.has(parentId)) {
+        if (includedIds.has(parentId)) return true
+        seen.add(parentId)
+        parentId = pass.taskById.get(parentId)?.parentTaskId
+      }
+      return false
+    }
+    const roots = included.filter((record) => !hasIncludedAncestor(record))
+    const covered = new Set<string>()
+    const markCovered = (taskId: string): void => {
+      if (covered.has(taskId)) return
+      covered.add(taskId)
+      for (const child of pass.childrenByParent.get(taskId) ?? []) markCovered(child.taskId)
+    }
+    for (const root of roots) markCovered(root.taskId)
+    // Guard against corrupt parent cycles: any included record not covered by a root is still inventoried.
+    for (const record of included) if (!covered.has(record.taskId)) { roots.push(record); markCovered(record.taskId) }
+    return roots.flatMap((record) => {
+      const inventory = inventoryFrom(store, record, {}, reads, pass)
       // Paths are compared by their real paths, so an alias (a link, `/tmp` for `/private/tmp`) names the same folder.
       const claims: ExternalClaims = inventory.resources.map((resource) => ({ ...resource, peerProfileId: store.profileId, ...(isAbsolute(resource.identity) ? { canonicalIdentity: reads.canonical(resource.identity) } : {}) }))
       if (!inventory.blockers.length) return claims
       // Records read in full, with only a checkout that can't be verified: what the thread may own is known, so only that is held.
-      if (inventory.blockers.every((blocker) => blocker.startsWith(UNVERIFIED_WORKTREE))) return [...claims, unverifiedClaim(store, current, record, inventory, reads)]
+      if (inventory.blockers.every((blocker) => blocker.startsWith(UNVERIFIED_WORKTREE))) return [...claims, unverifiedClaim(store, current, record, inventory, reads, pass)]
       throw new Error(`Shared ownership cannot be proven for profile ${store.profileId}, task ${record.taskId}: ${inventory.blockers.join('; ')}`)
-    }))
+    })
+  })
 }
 
 /** Why a thread folder no record owns refuses a delete, in words a person can act on. */

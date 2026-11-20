@@ -59,6 +59,25 @@ export function readThreadRecordSync(path: string): { raw: string; data: unknown
   return { raw: JSON.stringify(data), data }
 }
 
+/**
+ * Reads `agents.json`, `mousse-agent-sessions.json` and artifact-bearing `messages.json` from a thread's database
+ * in a single worker call and database open.
+ */
+export function readThreadLifecycleRecordsSync(location: string): {
+  agents?: { raw: string; data: unknown }
+  sessions?: { raw: string; data: unknown }
+  messages: { raw: string; data: unknown }
+} {
+  const stat = lstatSync(join(location, THREAD_DB_FILE))
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('Thread database is not a regular file')
+  const loaded = sharedThreadDbClient().callSync('readLifecycleRecords', location, ARTIFACT_MARKERS) as { agents?: unknown; sessions?: unknown; messages: unknown[] }
+  return {
+    ...(loaded.agents !== undefined ? { agents: { raw: JSON.stringify(loaded.agents), data: loaded.agents } } : {}),
+    ...(loaded.sessions !== undefined ? { sessions: { raw: JSON.stringify(loaded.sessions), data: loaded.sessions } } : {}),
+    messages: { raw: loaded.messages.length ? JSON.stringify(loaded.messages) : '[]', data: loaded.messages }
+  }
+}
+
 /** `readThreadRecordSync` for a caller that can wait; a file is read without blocking. */
 export async function readThreadRecord(path: string): Promise<unknown> {
   const parts = split(path)

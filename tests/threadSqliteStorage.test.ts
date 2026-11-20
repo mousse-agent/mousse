@@ -6,7 +6,8 @@ import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { settleThreadMutationOwnership } from '../src/mms/queue/ThreadExecutionLease'
-import { readThreadRecordSync, threadRecordPath } from '../src/mms/data/threadRecords'
+import { readThreadLifecycleRecordsSync, readThreadRecordSync, threadRecordPath } from '../src/mms/data/threadRecords'
+import { ThreadDbEngine } from '../src/mms/data/threadDb/threadDbEngine'
 import { ThreadGenerationStore } from '../src/mms/data/ThreadGenerationStore'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import type { ChatMessage, NativeLlmContext } from '../src/shared/types'
@@ -361,5 +362,34 @@ describe('threads kept in thread.db', () => {
     expect(() => threads.setThreadWorktreeEnabled(thread.id, true)).not.toThrow()
     threads.mutateThreadData(thread.id, () => ({ messages: [message('m1', 'one')] }))
     expect(() => open(path).threads.setThreadWorktreeEnabled(thread.id, false)).toThrow()
+  })
+
+  it('reads agents, sessions and artifact-bearing messages in one read-only open without checkpointing an active WAL', () => {
+    const path = home()
+    const { threads } = open(path)
+    const thread = threads.createThread('Batched lifecycle', undefined, undefined, { started: true })
+    const dir = threads.getThreadDir(thread.id)
+    const artifactId = '11111111-1111-4111-8111-111111111111'
+    threads.mutateThreadData(thread.id, () => ({
+      messages: [message('m1', 'plain'), { ...message('m2', 'with artifact'), artifactId } as never],
+      agents: [{ id: 'a1', worktreePath: '/w/a1', branch: 'mousse/agent/a1' } as never],
+      mousseAgentSessions: [{ id: 's1', worktreePath: '/w/s1', $history: ['omitted'], $context: { big: true } } as never]
+    }))
+    // Keep a separate write engine open so the WAL stays active and uncheckpointed, then read via a fresh engine.
+    const reader = new ThreadDbEngine({ idleCloseMs: 0 })
+    const walBefore = existsSync(join(dir, 'thread.db-wal')) ? readFileSync(join(dir, 'thread.db-wal')).length : 0
+    const batched = reader.readLifecycleRecords(dir, ['"sha256"', '"artifactId"', '"artifactRef"', '"blobId"'])
+    expect(batched.agents).toEqual([{ id: 'a1', worktreePath: '/w/a1', branch: 'mousse/agent/a1' }])
+    expect(batched.sessions).toEqual([expect.objectContaining({ id: 's1', worktreePath: '/w/s1' })])
+    expect((batched.sessions as Array<Record<string, unknown>>)[0]).not.toHaveProperty('$history')
+    expect((batched.sessions as Array<Record<string, unknown>>)[0]).not.toHaveProperty('$context')
+    expect(batched.messages).toHaveLength(1)
+    expect((batched.messages[0] as { id: string }).id).toBe('m2')
+    expect(reader.openCount()).toBe(0)
+    if (walBefore > 0) expect(readFileSync(join(dir, 'thread.db-wal')).length).toBe(walBefore)
+    const viaHelper = readThreadLifecycleRecordsSync(dir)
+    expect(viaHelper.agents?.data).toEqual(batched.agents)
+    expect(viaHelper.sessions?.data).toEqual(batched.sessions)
+    expect(viaHelper.messages.data).toEqual(batched.messages)
   })
 })

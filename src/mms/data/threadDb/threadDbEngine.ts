@@ -585,22 +585,47 @@ export class ThreadDbEngine {
   }
 
   /**
+   * Opens an unopened thread database read-only for a one-shot lifecycle read, so scanning hundreds of idle threads
+   * neither acquires write locks nor checkpoints their WALs on close. Falls back to `open()` when the database is
+   * already open, still on format 1 (needs migration), or SQLite cannot open a WAL database read-only.
+   */
+  private withRecordDb<T>(dir: string, fn: (db: DatabaseSync) => T): T {
+    if (this.connections.has(dir)) return fn(this.open(dir).db)
+    const path = this.path(dir)
+    try { statSync(path) } catch { throw new ThreadDbError('missing', `No thread database at ${path}`) }
+    let ro: DatabaseSync | undefined
+    try {
+      ro = new DatabaseSync(sqliteFilePath(path), { readOnly: true })
+      ro.exec('PRAGMA busy_timeout=5000; PRAGMA cache_size=64;')
+      const version = Number((ro.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+      if (version === THREAD_DB_FORMAT) return fn(ro)
+    } catch {
+      // Fall back to the normal connection path (handles v1 migration, WAL without -shm, or format errors).
+    } finally {
+      try { ro?.close() } catch { /* Already closed or failed to open. */ }
+    }
+    try {
+      return fn(this.open(dir).db)
+    } finally {
+      this.close(dir)
+    }
+  }
+
+  /**
    * One record of a thread for the lifecycle code, read without leaving a connection open (a move or purge may follow):
    * `agents.json` (the agents), `mousse-agent-sessions.json` (subagent session headers, without their histories) or
    * `messages.json` (only the transcript rows that mention one of `needles`). `undefined` when the thread has none.
    */
   readRecord(dir: string, name: string, needles: string[] = []): unknown {
-    const wasOpen = this.connections.has(dir)
-    try {
-      const connection = this.open(dir)
+    return this.withRecordDb(dir, (db) => {
       if (name === 'messages.json') {
         const where = needles.map(() => 'instr(payload, ?) > 0').join(' OR ') || '1'
-        const rows = connection.db.prepare(`SELECT payload FROM items WHERE coll = 'm' AND (${where}) ORDER BY ord, rid`).all(...needles) as Array<{ payload: string }>
+        const rows = db.prepare(`SELECT payload FROM items WHERE coll = 'm' AND (${where}) ORDER BY ord, rid`).all(...needles) as Array<{ payload: string }>
         return rows.map((row) => JSON.parse(row.payload))
       }
       const key = name === 'agents.json' ? 'agents' : name === 'mousse-agent-sessions.json' ? 'sessions' : undefined
       if (!key) throw new Error(`Unknown thread record ${name}`)
-      const row = this.statement(connection, 'SELECT payload FROM state WHERE key = ?').get(key) as { payload: string } | undefined
+      const row = db.prepare('SELECT payload FROM state WHERE key = ?').get(key) as { payload: string } | undefined
       if (!row) return undefined
       const value = JSON.parse(row.payload) as unknown
       if (key !== 'sessions' || !Array.isArray(value)) return value
@@ -608,9 +633,31 @@ export class ThreadDbEngine {
         const { $history: _history, $context: _context, ...rest } = header as Record<string, unknown>
         return rest
       })
-    } finally {
-      if (!wasOpen) this.close(dir)
-    }
+    })
+  }
+
+  /**
+   * All three lifecycle records (`agents`, `sessions`, and artifact-bearing `messages`) in a single database open,
+   * avoiding three open/close cycles per thread during inventory scans.
+   */
+  readLifecycleRecords(dir: string, needles: string[] = []): { agents?: unknown; sessions?: unknown; messages: unknown[] } {
+    return this.withRecordDb(dir, (db) => {
+      const stateRows = db.prepare("SELECT key, payload FROM state WHERE key IN ('agents', 'sessions')").all() as Array<{ key: string; payload: string }>
+      let agents: unknown
+      let sessions: unknown
+      for (const row of stateRows) {
+        const value = JSON.parse(row.payload) as unknown
+        if (row.key === 'agents') agents = value
+        else if (row.key === 'sessions') {
+          sessions = Array.isArray(value)
+            ? value.map((header) => { const { $history: _history, $context: _context, ...rest } = header as Record<string, unknown>; return rest })
+            : value
+        }
+      }
+      const where = needles.map(() => 'instr(payload, ?) > 0').join(' OR ') || '1'
+      const rows = db.prepare(`SELECT payload FROM items WHERE coll = 'm' AND (${where}) ORDER BY ord, rid`).all(...needles) as Array<{ payload: string }>
+      return { agents, sessions, messages: rows.map((row) => JSON.parse(row.payload)) }
+    })
   }
 
   /** Modification time of the database and its WAL, whichever is later. */
