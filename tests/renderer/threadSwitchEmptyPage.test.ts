@@ -277,6 +277,20 @@ describe('switching threads', () => {
     expect(host.querySelector('.empty-logo-liquid')).not.toBeNull()
   })
 
+  it('opens a working thread again when its first view failed and its row is already selected', async () => {
+    threads.select = vi.fn(async () => undefined).mockRejectedValueOnce(new Error('service gone'))
+    await mount()
+    await switchTo('thread-unreachable')
+    const useAppStore = await store()
+    act(() => useAppStore.getState().setThreadActivity({ 'thread-unreachable': 'processing' }))
+    expect(shownThread()).toEqual({ thread: 'thread-unreachable', messages: '' })
+
+    await switchTo('thread-unreachable')
+    expect(threads.select).toHaveBeenCalledTimes(2)
+    await deliverView('thread-unreachable', [message('unreachable-1', 'First message')])
+    expect(shownThread()).toEqual({ thread: 'thread-unreachable', messages: 'unreachable-1' })
+  })
+
   it('stops waiting when the select fails', async () => {
     threads.select = vi.fn(async () => { throw new Error('service gone') })
     await mount()
