@@ -5942,9 +5942,10 @@ export class OrchestratorService extends EventEmitter {
 
   /**
    * A person who writes in an archived thread wants it back: it is unarchived through the app's own Unarchive
-   * (`settleThread`) before their message runs. A thread whose expiry passed stays archived; its send is refused.
+   * (`settleThread`) before their message or steer runs: from a window, their phone or the CLI. A thread whose expiry
+   * passed stays archived; its send is refused. Agents and bots never come here (`thread_archived`).
    */
-  private async unarchiveForPerson(threadId: string): Promise<void> {
+  async unarchiveForPerson(threadId: string): Promise<void> {
     if (!this.threadStore?.getThread(threadId)?.settledAt || this.isExpired(threadId)) return
     await this.settleThread(threadId, false)
   }
@@ -13195,9 +13196,9 @@ export class OrchestratorService extends EventEmitter {
     if (session.deleted) {
       throw new Error(`Thread deleted: ${threadId}`)
     }
-    // A person's message from a window brings an archived thread back before it runs. Agents and bots are refused
-    // earlier (`thread_archived`) and never unarchive it.
-    if (opts?.source === 'gui' && !opts.agent && !opts.delegation) await this.unarchiveForPerson(threadId)
+    // A person's message from a window or the CLI brings an archived thread back before it runs. Agents and bots are
+    // refused earlier (`thread_archived`) and never unarchive it.
+    if ((opts?.source === 'gui' || opts?.source === 'cli') && !opts.agent && !opts.delegation) await this.unarchiveForPerson(threadId)
     // An edited prompt is refused at once when the thread is already on another branch; its turn checks again when it
     // starts, under the thread's lease, and it never waits in the queue, where nothing would check it.
     const expectedBranch = expectedBranchOf(input)

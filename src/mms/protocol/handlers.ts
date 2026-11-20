@@ -2761,6 +2761,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const threadId = asString(p.threadId, 'threadId', 256)
       const text = asString(p.text, 'text')
       const runId = asOptionalString(p.runId, 256)
+      // A person's steer, from a window or the CLI, brings an archived thread back first.
+      if (isPerson(ctx.connection) || ctx.connection?.clientType === 'cli') await ctx.mms.orchestrator.unarchiveForPerson(threadId)
       if (runId) {
         const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
         const response = runCommandResponse(await ctx.mms.orchestrator.steerRun(runId, text, clientRequestId, threadId, undefined, undefined, deviceLimit(ctx), sentFromOf(ctx)), runId)
@@ -2794,6 +2796,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (!Array.isArray(p.itemIds) || p.itemIds.length > 100) throw new DomainRpcError('invalid_params', 'itemIds must be a list of at most 100 ids')
       const itemIds = p.itemIds.map((id, index) => asString(id, `itemIds[${index}]`, 256))
       const clientRequestId = asOptionalClientRequestId(p.clientRequestId) ?? randomUUID()
+      await ctx.mms.orchestrator.unarchiveForPerson(threadId)
       const result = await ctx.mms.orchestrator.steerNow({ threadId, runId, holdGeneration, itemIds, clientRequestId })
       return { ...runCommandResponse(result, runId), clientRequestId }
     }
