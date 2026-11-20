@@ -14,6 +14,7 @@ import { showToast } from './ui/Toast'
 import { Select, type SelectOption } from './ui/Select'
 import { Spinner } from './ui/Spinner'
 import { newProjectRows, projectFolders, usualParent, type NewProjectRow } from './newProjectLogic'
+import { shortPath } from './newThreadPickerLogic'
 import './newProjectDialog.css'
 
 const THIS_COMPUTER = 'self'
@@ -324,7 +325,8 @@ function NewProjectPanel() {
 }
 
 function rowView(row: NewProjectRow, remote: boolean, computer: string): { icon: ReactNode; title: string; meta?: string; end?: string } {
-  const into = (destination: string | null) => (destination ? `into ${destination}` : 'Choose where it goes first')
+  // A home folder reads as ~, as on the New thread picker's cards.
+  const into = (destination: string | null) => (destination ? `into ${shortPath(destination)}` : 'Choose where it goes first')
   switch (row.kind) {
     case 'open-folder':
       return { icon: <FolderOpen size={15} strokeWidth={2} />, title: 'Open a folder…', end: 'Browse' }
