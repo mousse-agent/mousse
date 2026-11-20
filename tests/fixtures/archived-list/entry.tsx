@@ -42,11 +42,13 @@ const frames = (count: number) => new Promise<void>((done) => {
   const step = (left: number) => (left ? requestAnimationFrame(() => step(left - 1)) : done())
   step(count)
 })
-const footer = () => document.querySelector<HTMLElement>('.threads-sidebar-footer')!
+// Archived's list scrolls under its heading; the heading itself stays put in the footer.
+const footer = () => document.querySelector<HTMLElement>('.threads-sidebar-settled-scroll')!
+const pinnedFooter = () => document.querySelector<HTMLElement>('.threads-sidebar-footer')!
 const drawn = () => [...document.querySelectorAll<HTMLElement>('.threads-sidebar-settled-list button[data-thread-id]')]
 const idOf = (row: HTMLElement) => row.dataset.threadId!
 
-/** What the footer shows: every point down its middle that is not the heading lands on a card or a gap between two. */
+/** What the list shows: every point down its middle lands on a card or a gap between two, and the heading is in view. */
 function view() {
   const box = footer().getBoundingClientRect()
   const heading = document.querySelector('.threads-sidebar-section-settled .threads-sidebar-heading')!.getBoundingClientRect()
@@ -66,6 +68,7 @@ function view() {
     last: shown.length ? idOf(shown[shown.length - 1]) : null,
     scrollTop: footer().scrollTop,
     room: footer().scrollHeight - footer().clientHeight,
+    headingShown: heading.top >= pinnedFooter().getBoundingClientRect().top - 1 && heading.bottom <= box.top + 1 && heading.height > 0,
   }
 }
 

@@ -991,7 +991,10 @@ interface ContinuationTurnPayload {
   backgroundNotice?: BackgroundTaskNoticeItem[]
 }
 
-/** How long a Mousse tool call waits for the run of a turn the provider started, before it fails as usual. */
+/**
+ * How long a Mousse tool call waits for a turn the provider started to get a run, before it fails as usual. A run
+ * that is recorded and not over is waited for as long as it takes; this only checks it again at this interval.
+ */
 const CONTINUATION_CALL_WAIT_MS = 10_000
 /** How long a turn's start waits for its running list (`runningNoteFor`) before it starts without the note. */
 const RUNNING_NOTE_BUDGET_MS = 2_500
@@ -2894,6 +2897,28 @@ export class OrchestratorService extends EventEmitter {
       })
     })
     const onEvent = (event: ThreadEvent): void => {
+      // A newly delegated child run begins in `queued` while its turn waits to be claimed or sets up its worktree.
+      // Report its turn state immediately so opening the subagent from Nest shows Working / Starting… instead of an
+      // empty chat. Settle it if the run ends before the turn executor ever moves it out of `queued`.
+      if (event.type === 'run.created') {
+        const run = event.payload as Partial<RunRecord> | undefined
+        if (run?.source === 'delegation' && run.status === 'queued' && typeof run.runId === 'string' && !isTurnActivePhase(this.turnStates.get(event.threadId)?.phase ?? 'idle')) {
+          this.setTurnPhase(event.threadId, 'queued', { turnId: run.runId })
+        }
+      }
+      if (event.type === 'run.status') {
+        const run = event.payload as Partial<RunRecord> | undefined
+        const current = this.turnStates.get(event.threadId)
+        if (run?.status && TERMINAL_RUN_STATUSES.has(run.status) && current?.phase === 'queued' && current.turnId === run.runId) {
+          if (run.status === 'completed') this.setTurnPhase(event.threadId, 'completed', { turnId: run.runId })
+          else if (run.status === 'failed' || run.status === 'uncertain') {
+            const error = typeof run.outcome?.error === 'string' ? run.outcome.error : undefined
+            this.setTurnPhase(event.threadId, 'failed', { turnId: run.runId, ...(error ? { error } : {}) })
+          } else {
+            this.setTurnPhase(event.threadId, 'idle')
+          }
+        }
+      }
       // Running delegated tasks wake the parent when they finish; until then its thread is Waiting.
       if (event.type === 'delegation.status') {
         this.runtimeManager?.setPendingDelegations(event.threadId,
@@ -3169,14 +3194,33 @@ export class OrchestratorService extends EventEmitter {
     let settle!: (state: { runId: string | null }) => void
     const done = new Promise<{ runId: string | null }>((resolve) => { settle = resolve })
     // Claude keeps working while the run is made. Mousse tool calls it makes wait for the run to be
-    // active, so they act as it, not as a run that just ended or as no one; a run that never comes
-    // frees them after a while.
-    const timer = setTimeout(() => settle({ runId: null }), this.continuationCallWaitMs)
+    // active, so they act as it, not as a run that just ended or as no one. A run that is recorded and not
+    // over is on its way, however long the thread is busy or its setup takes, and its effect ends the hold
+    // either way: its calls keep waiting. Only a run that was never recorded, or that ended, frees them.
+    let recordedRunId: string | undefined
+    let timer: ReturnType<typeof setTimeout>
+    const expire = (): void => {
+      let run: ReturnType<typeof engine.getRun> | undefined
+      try {
+        run = recordedRunId ? engine.getRun(recordedRunId) : undefined
+      } catch {
+        // The engine is closed (the daemon is stopping): the run will not come.
+        run = undefined
+      }
+      if (run && !TERMINAL_RUN_STATUSES.has(run.status)) {
+        timer = setTimeout(expire, this.continuationCallWaitMs)
+        timer.unref?.()
+        return
+      }
+      settle({ runId: null })
+    }
+    timer = setTimeout(expire, this.continuationCallWaitMs)
     timer.unref?.()
     this.pendingContinuations.set(info.id, { threadId, reserved, done, settle: (runId) => { clearTimeout(timer); settle({ runId }) } })
     void engine.dispatch({ kind: 'send', threadId, clientRequestId: `continuation:${info.id}`, source: 'provider-continuation' })
       .then((result) => {
         if (result.status !== 'accepted') throw new Error(result.reason)
+        recordedRunId = result.runId
         const backgroundNotice = backgroundNoticeOf(info)
         const payload: ContinuationTurnPayload = { kind: 'continuation', threadId, runId: result.runId, continuationId: info.id, note, ...(backgroundNotice.length ? { backgroundNotice } : {}) }
         engine.outbox.enqueue({ effectId: `effect:${result.runId}:turn.start:1`, threadId, runId: result.runId, kind: 'turn.start', payload })
@@ -4238,9 +4282,9 @@ export class OrchestratorService extends EventEmitter {
    * Stop's interrupt is killed. True when there was a process to end. What could not be ended is said
    * in the thread, so it never looks stopped while something still runs. Never throws.
    */
-  async stopProviderWork(threadId: string): Promise<boolean> {
+  async stopProviderWork(threadId: string, instanceId?: string): Promise<boolean> {
     try {
-      return (await this.harness.stopThread(threadId)) === 'stopped'
+      return (await this.harness.stopThread(threadId, instanceId)) === 'stopped'
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.warn('provider stop failed', { threadId, error: message })
@@ -7538,6 +7582,7 @@ export class OrchestratorService extends EventEmitter {
       // Never for a private thread: `delegateRemoteTask` refuses it before the engine gets here.
       if (this.isLocalOnly(parentThread.id)) throw new Error(PRIVATE_THREAD_REMOTE_REFUSAL)
       const child = this.threadStore.createThread(title, parentThread.projectId, undefined, {
+        started: true,
         lineage: lineageForChild(parentThread),
         ownerThreadId: parentThread.id,
         workspaceBinding: { policy: request.workspace === 'shared' ? 'shared' : 'isolated' },
@@ -7567,6 +7612,7 @@ export class OrchestratorService extends EventEmitter {
     // With "Give each subagent its own worktree" on, the child's worktree starts at the parent's HEAD as it is now.
     const startSha = request.workspace === 'isolated' && this.subagentWorktreesOn() ? this.parentHeadNow(request.parentThreadId) : undefined
     const child = this.threadStore.createThread(title, parentThread.projectId, undefined, {
+      started: true,
       lineage: lineageForChild(parentThread),
       ownerThreadId: parentThread.id,
       // `access` is kept whether or not the parent has a folder: a read-only child stays read-only without one.
@@ -10005,14 +10051,30 @@ export class OrchestratorService extends EventEmitter {
       return migrated?.instanceId ?? migrated?.llmProvider
     }
     const switched = instanceKey(session.modelOverride) !== instanceKey(next)
-    // SPEC §16.1: one provider switch at a time; a pending handoff must be delivered or fail first.
-    const pending = switched ? this.runEngine?.handoffs.pendingForThread(threadId) : null
-    if (pending)
-      throw new DomainRpcError('handoff_pending', `Thread ${threadId} is still handing its context to ${pending.toRef.provider}; switch providers after that turn.`, { handoffId: pending.handoffId })
+    // SPEC §16.1: one provider switch at a time. A pending handoff belongs to the turn that is delivering it, which
+    // is still running: the switch waits for that turn like any other (below), and the turn after it plans its own
+    // handoff to the newest choice, so a second switch replaces the first.
+    const turnLive = switched && (session.isTurnRunning() || session.turnAdmitted || Boolean(this.runEngine?.handoffs.pendingForThread(threadId)))
+    // The running turn finishes on the provider it started on; ending that provider's process or credentials now would
+    // fail its stream and its tool calls. The switch applies to the next turn and the old provider is cleaned up when
+    // this one settles (`endSwitchedProvider`). A second switch keeps the instance the turn is really on.
+    let live: string | undefined
+    if (turnLive && !session.switchedFromInstance) {
+      try {
+        live = this.resolvedForThread(threadId).instanceId
+      } catch {
+        live = undefined
+      }
+    }
     // Written first: a conditional change (`ifRevision`) the thread on disk refuses changes nothing here either.
     const stored = next ? structuredClone(next) : undefined
     if (this.threadStore) {
       this.threadStore.updateThreadMeta(threadId, { modelOverride: stored }, opts.ifRevision !== undefined ? { ifRevision: opts.ifRevision } : {})
+    }
+    if (turnLive) {
+      if (live) session.switchedFromInstance = live
+      session.modelOverride = stored ? structuredClone(stored) : undefined
+      return session.modelOverride
     }
     // The old provider's process is stopped while the thread still resolves to it; its helpers end with it.
     if (switched) void this.stopProviderWork(threadId)
@@ -10020,6 +10082,26 @@ export class OrchestratorService extends EventEmitter {
     // SPEC §15.1: a credential belongs to a thread and provider instance; a switch revokes it.
     if (switched) this.revokeMcp(threadId)
     return session.modelOverride
+  }
+
+  /**
+   * A turn has settled after the thread was switched to another provider meanwhile: the provider it ran on ends its
+   * process and the thread's credentials are revoked, as a switch with no turn running does at once. Nothing happens
+   * when the thread went back to that provider. Runs before the queue drains, so the next turn is never caught by it.
+   */
+  private endSwitchedProvider(session: ThreadSession): void {
+    const from = session.switchedFromInstance
+    if (!from) return
+    session.switchedFromInstance = undefined
+    let current: string | undefined
+    try {
+      current = this.resolvedForThread(session.threadId).instanceId
+    } catch {
+      current = undefined
+    }
+    if (current === from) return
+    void this.stopProviderWork(session.threadId, from)
+    this.revokeMcp(session.threadId)
   }
 
   /** Bind the GUI/CLI active session to a thread (call on thread switch). */
@@ -13493,6 +13575,7 @@ export class OrchestratorService extends EventEmitter {
       session.abortRequested = false
       session.stopping = false
       session.sentAfterStop = []
+      this.endSwitchedProvider(session)
       this.effectWorker?.notify()
       // Post-turn drains are deferred to here: while admission is held the drain would see a
       // running turn and skip, stranding queued messages.
@@ -14438,6 +14521,16 @@ export class OrchestratorService extends EventEmitter {
         // Read-only with no folder to hold it in: refuse rather than run with every tool.
         throw new AppError({ code: 'read_only_needs_folder', message: 'This read-only subagent has no folder to be held read-only in, so it cannot run.', errorInfo: { category: 'unavailable', retryable: false } })
       }
+      // SPEC §16.1-§16.2: planned before the binding is made (that can take a while), so the switch marker shows its
+      // strategy as soon as the turn starts. A turn that fails from here settles the handoff as failed.
+      const modelOverride = opts?.modelOverride ?? session.modelOverride
+      const planning: { failed: boolean; nativeFork?: boolean } = { failed: false }
+      handoffs = await this.planTurnHandoffs({
+        session, runId: engineRunId, resolved: instance, selection: selectedModel, previousModel,
+        content: userContent, images, mode, modelOverride, planning
+      })
+      if (handoffs) this.recordHandoffMarkers(session, handoffs, switchMarker, turnId, selectedModel)
+      turnTimingMark(session.threadId, 'handoffs')
       // The attempt's immutable binding; a retry of the same run keeps the one it already has.
       const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, () => opts?.origin ?? this.turnOrigin(session.threadId, request.workflowInvocationId), {
         permissionMode: this.requestedPermissionMode(session.threadId, this.limitedByJob(this.limitedByContinuation(opts?.permissionMode, engineRunId, session.threadId), opts?.schedule)),
@@ -14446,7 +14539,6 @@ export class OrchestratorService extends EventEmitter {
       }, opts?.bot?.policy)
       turnTimingMark(session.threadId, 'bind')
       // Every runtime owns its loop, context and tools and receives prior turns as a prompt preamble.
-      const modelOverride = opts?.modelOverride ?? session.modelOverride
       const contextSettings = normalizeContextSettings(this.settingsStore.get().context)
       // Every thread turn is admitted to its task tree's browser grant, so a subagent on another runtime still finds the
       // tree its own runs came from; runtimes with their own loop get the browser through Mousse's MCP server.
@@ -14459,16 +14551,9 @@ export class OrchestratorService extends EventEmitter {
         : this.mainBrowserFactory
           ? treeBrowser
           : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined
-      const planning: { failed: boolean; nativeFork?: boolean } = { failed: false }
       // An edited prompt's first turn: the model is told the files were not rewound, and which ones differ.
       const editDirectory = session.threadId !== '__unbound__' && displayUserMessage && !reuseLastUser ? this.resolveThreadDir(session.threadId) : undefined
       const editNote = editDirectory ? await this.editedPromptNote(editDirectory, conversationBranchId, turnId, turnStartSha, checkpointCwd) : undefined
-      handoffs = await this.planTurnHandoffs({
-        session, runId: engineRunId, resolved: instance, selection: selectedModel, previousModel,
-        content: userContent, images, mode, modelOverride, planning
-      })
-      if (handoffs) this.recordHandoffMarkers(session, handoffs, switchMarker, turnId, selectedModel)
-      turnTimingMark(session.threadId, 'handoffs')
       // The first turn on a different model: the agent is told which model it is and which wrote the earlier replies.
       const modelNote = displayUserMessage ? this.modelChangeNoteFor(session.messages, turnPresentationStart, turnId, reuseLastUser) : undefined
       // A thread with a working goal: every turn tells the agent the goal and how to report on it (`goal_status`).

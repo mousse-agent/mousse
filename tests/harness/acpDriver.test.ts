@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { methods, PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { AcpConnection } from '../../src/mms/harness/acp/connection'
 import { acpDriver } from '../../src/mms/harness/drivers/acp'
 import type { Harness, TurnSpec } from '../../src/mms/harness/gateway'
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
@@ -26,7 +27,23 @@ afterEach(() => {
 type Update = Record<string, unknown>
 const say = (text: string): Update => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } })
 
-function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean; updates?: Update[] } = {}) {
+/**
+ * The connection as the SDK runs it over stdio: an update reaches `onUpdate` only after its handler chain (some
+ * microtasks), while the answer to a request settles at once. An update written just before an answer lands after it.
+ */
+function lateUpdates(connection: AcpConnection): AcpConnection {
+  let handler: AcpConnection['onUpdate']
+  return Object.defineProperty(connection, 'onUpdate', {
+    get: () => (update: unknown, sessionId?: string) => {
+      let chain = Promise.resolve()
+      for (let step = 0; step < 50; step++) chain = chain.then(() => undefined)
+      void chain.then(() => handler?.(update, sessionId))
+    },
+    set: (next: AcpConnection['onUpdate']) => { handler = next }
+  })
+}
+
+function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean; lateUpdates?: boolean; updates?: Update[] } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'mousse-acp-driver-'))
   homes.push(home)
   const calls: string[] = []
@@ -60,7 +77,8 @@ function fixture(authMethods: unknown[] = [], options: { starts?: () => boolean;
   const instances = new ProviderInstanceService({ store: { read: () => ({ instances: stored, seedVersion: 1 }), write: (next) => { stored = next.instances } } })
   const notices: string[] = []
   let clock = Date.now()
-  const harness = testHarness({ drivers: [acpDriver({ connect: (_context, request) => agent.connect(request) })], instances, profileHome: home, now: () => clock })
+  const connect = (request: Parameters<typeof agent.connect>[0]) => options.lateUpdates ? lateUpdates(agent.connect(request)) : agent.connect(request)
+  const harness = testHarness({ drivers: [acpDriver({ connect: (_context, request) => connect(request) })], instances, profileHome: home, now: () => clock })
   harness.setLiveHost({ notice: (_threadId, text) => notices.push(text) })
   harnesses.push(harness)
   const sink = Object.fromEntries(['text', 'thinking', 'tool', 'nativeMessages', 'compaction', 'retry', 'progress', 'usage', 'providerRef', 'steerAccepted', 'providerMetrics', 'lineEdits'].map((name) => [name, vi.fn()])) as unknown as TurnSpec['sink']
@@ -167,6 +185,13 @@ describe('the generic ACP driver', () => {
     expect(firstThought).toBeLessThan(toolStart)
     // A thought is never the reply.
     expect(vi.mocked(turn.sink.text).mock.calls.map(([event]) => event).filter((event) => event.phase === 'complete').map((event) => event.content)).toEqual(['Fixed.'])
+  })
+
+  it('keeps the reply an agent writes just before it answers the prompt', async () => {
+    const { harness, spec } = fixture([], { lateUpdates: true })
+    await harness.instances.add({ driver: 'acp', config: { displayName: 'Fake agent', binaryPath: process.execPath } })
+    const binding = await harness.bind(harness.resolveStored({ instanceId: 'acp:fake-agent', llmProvider: '', model: 'default' }, { purpose: 'turn' }), { mode: 'agent', permissionMode: 'full' })
+    await expect(harness.startTurn(spec(binding)).result).resolves.toMatchObject({ text: 'hello' })
   })
 
   it('never resumes across turns: the account is unknown, so each turn hands the history to a new session', async () => {

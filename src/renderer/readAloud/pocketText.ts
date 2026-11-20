@@ -157,10 +157,27 @@ function ensureTerminalPunctuation(text: string): string {
   return `${text}.`
 }
 
+/** Makes a part that stops partway through a sentence end with a comma or the punctuation it has. */
+function ensureClausePunctuation(text: string): string {
+  const core = stripEnd(text, `${CLOSERS} `)
+  if (!core || TERMINAL_PUNCTUATION.includes(core[core.length - 1]) || WEAK_PUNCTUATION.includes(core[core.length - 1])) return text
+  return `${text},`
+}
+
 const isUpper = (character: string): boolean => character !== character.toLowerCase() && character === character.toUpperCase()
 
-/** The text as the model should read it, and how many frames to keep generating after it signals the end. */
-export function preparePocketText(input: string, options: PocketTextOptions): { text: string; framesAfterEos: number } {
+/** Whether a piece of text starts or ends partway through a sentence. Read aloud cuts long sentences. */
+export interface PocketCut {
+  startsMidSentence?: boolean
+  endsMidSentence?: boolean
+}
+
+/**
+ * The text as the model should read it, and how many frames to keep generating after it signals
+ * the end. A piece that starts partway through a sentence is not capitalized, and one that ends
+ * partway keeps its comma instead of getting a period, so the two read as one sentence.
+ */
+export function preparePocketText(input: string, options: PocketTextOptions, cut: PocketCut = {}): { text: string; framesAfterEos: number } {
   let text = input.trim()
   const replacements = Object.entries(options.replaceCharacters)
   if (replacements.length > 0) {
@@ -173,8 +190,8 @@ export function preparePocketText(input: string, options: PocketTextOptions): { 
   if (options.removeSemicolons) text = text.replaceAll(';', ',')
   const words = text.split(/\s+/).filter(Boolean).length
   const framesAfterEos = words <= 4 ? 3 : 1
-  if (options.capitalizeFirstLetter && !isUpper(text[0])) text = text[0].toUpperCase() + text.slice(1)
-  if (options.appendTerminalPunctuation) text = ensureTerminalPunctuation(text)
+  if (options.capitalizeFirstLetter && !cut.startsMidSentence && !isUpper(text[0])) text = text[0].toUpperCase() + text.slice(1)
+  if (options.appendTerminalPunctuation) text = cut.endsMidSentence ? ensureClausePunctuation(text) : ensureTerminalPunctuation(text)
   if (options.padWithSpacesForShortInputs && words < 5) text = ' '.repeat(8) + text
   return { text, framesAfterEos }
 }
@@ -209,10 +226,17 @@ function segmentsFrom(tokens: readonly number[], indices: readonly number[], tok
 
 /**
  * Splits text into chunks of at most `maxTokensPerChunk` tokens at sentence ends, then at commas,
- * semicolons and colons inside sentences that are too long, and regroups short sentences.
+ * semicolons and colons inside sentences that are too long, and regroups short sentences. A chunk
+ * that ends inside a sentence keeps its comma rather than getting a period, and the chunk after it
+ * is not capitalized; `cut` says whether the whole input starts or ends inside a sentence.
  */
-export function splitPocketChunks(input: string, tokenizer: UnigramTokenizer, options: PocketTextOptions): Array<{ text: string; framesAfterEos: number }> {
-  const prepared = preparePocketText(input, options).text.trim()
+export function splitPocketChunks(
+  input: string,
+  tokenizer: UnigramTokenizer,
+  options: PocketTextOptions,
+  cut: PocketCut = {}
+): Array<{ text: string; framesAfterEos: number }> {
+  const prepared = preparePocketText(input, options, cut).text.trim()
   const tokens = tokenizer.encode(prepared)
   const [, ...sentenceEnds] = tokenizer.encode('.!...?')
   const isDecimalPeriod = (index: number): boolean => {
@@ -223,39 +247,40 @@ export function splitPocketChunks(input: string, tokenizer: UnigramTokenizer, op
   const sentences = segmentsFrom(tokens, boundaryIndices(tokens, new Set(sentenceEnds), isDecimalPeriod), tokenizer)
 
   const [, ...weakEnds] = tokenizer.encode(',;:')
-  const refined: Array<{ tokens: number; text: string }> = []
-  for (const sentence of sentences) {
+  // `ends` is true for a part that ends a sentence.
+  const refined: Array<{ tokens: number; text: string; ends: boolean }> = []
+  sentences.forEach((sentence, index) => {
+    const ends = index < sentences.length - 1 || !cut.endsMidSentence
     if (sentence.tokens <= options.maxTokensPerChunk) {
-      refined.push(sentence)
-      continue
+      refined.push({ ...sentence, ends })
+      return
     }
     const subTokens = tokenizer.encode(sentence.text.trim())
     const parts = segmentsFrom(subTokens, boundaryIndices(subTokens, new Set(weakEnds)), tokenizer)
-    if (parts.length > 1) refined.push(...parts)
-    else refined.push(sentence)
-  }
+    if (parts.length > 1) refined.push(...parts.map((part, at) => ({ ...part, ends: at === parts.length - 1 && ends })))
+    else refined.push({ ...sentence, ends })
+  })
 
-  const chunks: string[] = []
+  const chunks: Array<{ text: string; ends: boolean }> = []
   let current = ''
   let currentTokens = 0
-  for (const { tokens: count, text } of refined) {
-    if (current === '') {
-      current = text
-      currentTokens = count
-    } else if (currentTokens + count > options.maxTokensPerChunk) {
-      chunks.push(current.trim())
-      current = text
-      currentTokens = count
-    } else {
-      current += ` ${text}`
-      currentTokens += count
+  let currentEnds = true
+  for (const { tokens: count, text, ends } of refined) {
+    if (current !== '' && currentTokens + count > options.maxTokensPerChunk) {
+      chunks.push({ text: current.trim(), ends: currentEnds })
+      current = ''
+      currentTokens = 0
     }
+    current = current === '' ? text : `${current} ${text}`
+    currentTokens += count
+    currentEnds = ends
   }
-  if (current !== '') chunks.push(current.trim())
+  if (current !== '') chunks.push({ text: current.trim(), ends: currentEnds })
 
   // Each chunk is prepared again, as the model's own loop does, and waits two frames longer after the end signal.
-  return chunks.map((chunk) => {
-    const { text, framesAfterEos } = preparePocketText(chunk, options)
+  return chunks.map((chunk, index) => {
+    const startsMidSentence = index === 0 ? cut.startsMidSentence : !chunks[index - 1].ends
+    const { text, framesAfterEos } = preparePocketText(chunk.text, options, { startsMidSentence, endsMidSentence: !chunk.ends })
     return { text, framesAfterEos: framesAfterEos + 2 }
   })
 }

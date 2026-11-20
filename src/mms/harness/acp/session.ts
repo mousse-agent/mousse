@@ -1061,6 +1061,9 @@ export class AcpSessions {
         } finally {
           active.prompting = undefined
         }
+        // The SDK settles an answer at once but hands an update to its handlers a few steps later: what the agent
+        // wrote just before it answered (often its whole reply) is still on its way. It lands before the turn ends.
+        await new Promise<void>((resolve) => setImmediate(resolve))
         prompting = false
         // The agent answered the prompt: it has the steers it carried, whatever it says of how it ended.
         readCarried()

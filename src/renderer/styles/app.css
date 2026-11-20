@@ -2489,6 +2489,15 @@ html[data-chat-width='full'] .chat {
   min-height: 0;
 }
 
+.composer-input,
+.composer-input-backdrop {
+  /* Both layers reserve the same gutter, including at fractional zoom. */
+  scrollbar-gutter: stable;
+  /* Keep glyph widths consistent across the backdrop's inline spans. */
+  font-kerning: none;
+  font-variant-ligatures: none;
+}
+
 .composer-input-backdrop {
   box-sizing: border-box;
   /* Backdrop may not enforce the draft min-height; the textarea does. */
@@ -2578,8 +2587,8 @@ html[data-chat-width='full'] .chat {
 .composer-quote-chip {
   padding: 1px 2px;
   margin: 0 -2px;
-  background: rgba(var(--accent-rgb), 0.12);
-  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.35);
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-primary) 9%, transparent);
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 }
@@ -2594,7 +2603,7 @@ html[data-chat-width='full'] .chat {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  color: var(--accent);
+  color: var(--text-secondary);
 }
 
 /* A quote in a sent message: the reply icon and the quoted words, on a line of their own. */
@@ -2605,12 +2614,12 @@ html[data-chat-width='full'] .chat {
   width: fit-content;
   max-width: 100%;
   margin: 2px 0 8px;
-  padding: 4px 9px;
-  border-radius: 8px;
-  background: rgba(var(--accent-rgb), 0.12);
-  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.3);
-  font-size: 0.92em;
-  line-height: 1.45;
+  padding: 3px 8px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  color: var(--text-secondary);
+  font-size: 0.82em;
+  line-height: 1.4;
   white-space: normal;
 }
 
@@ -2625,7 +2634,7 @@ html[data-chat-width='full'] .chat {
 .sent-quote-icon {
   flex-shrink: 0;
   margin-top: 0.2em;
-  color: var(--accent);
+  opacity: 0.8;
 }
 
 .sent-quote-text {
@@ -2633,35 +2642,53 @@ html[data-chat-width='full'] .chat {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
   overflow: hidden;
-  opacity: 0.9;
 }
 
-/* The Reply button beside text selected in a conversation. */
-.selection-reply-button {
+/* The bar beside text selected in a conversation: Read aloud and Reply in one raised pill, a hairline between. */
+.selection-actions {
   position: fixed;
   z-index: 1000;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 2px;
   height: 30px;
-  padding: 0 10px;
+  padding: 2px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--ui-raised, var(--surface-raised, #1c1c1c));
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  white-space: nowrap;
+}
+
+.selection-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 100%;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
   color: var(--text-primary);
   font-size: 12.5px;
   font-weight: 500;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
   cursor: pointer;
 }
 
-.selection-reply-button:hover {
+.selection-action:hover {
   background: rgba(var(--accent-rgb), 0.12);
-  border-color: rgba(var(--accent-rgb), 0.45);
 }
 
-.selection-reply-button:focus-visible {
+.selection-action:focus-visible {
+  outline: none;
   background-image: var(--ui-focus-layer);
+}
+
+.selection-actions-divider {
+  flex: none;
+  width: 1px;
+  height: 14px;
+  background: var(--border);
 }
 
 .browser-element-pill-tag {
@@ -4103,6 +4130,130 @@ html[data-theme='high-contrast'] {
   width: 100%;
   height: 100%;
 }
+
+/* A page the tab couldn't open: the app's own page over the guest's blank error document. */
+.browser-load-error {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  overflow: auto;
+  padding: clamp(32px, 12%, 112px) 32px 32px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.browser-load-error-body {
+  width: 100%;
+  max-width: 520px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.browser-load-error-art {
+  width: 96px;
+  height: auto;
+  margin-bottom: 28px;
+  color: var(--text-secondary);
+}
+
+.browser-load-error-art-frame { opacity: 0.55; }
+.browser-load-error-art-plug { color: var(--accent); }
+.browser-load-error-art-spark { color: var(--accent); opacity: 0.6; }
+.browser-load-error-art-glow { fill: var(--accent); opacity: 0.1; }
+
+.browser-load-error-title {
+  margin: 0 0 10px;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--text-primary);
+}
+
+.browser-load-error-line {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.browser-load-error-line strong {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.browser-load-error-tips {
+  margin-top: 14px;
+}
+
+.browser-load-error-tips p { margin: 0; }
+
+.browser-load-error-tips ul {
+  margin: 4px 0 0;
+  padding-left: 20px;
+}
+
+.browser-load-error-tips li::marker { color: var(--accent); }
+
+.browser-load-error-code {
+  margin: 16px 0 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  opacity: 0.75;
+}
+
+.browser-load-error-details {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(var(--surface-strong-rgb), 0.45);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.browser-load-error-url {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text-primary);
+}
+
+.browser-load-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 28px;
+}
+
+.browser-load-error-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.browser-load-error-reload {
+  border: 1px solid rgba(var(--accent-pale-rgb), 0.22);
+  background: rgba(var(--accent-rgb), 0.16);
+}
+
+.browser-load-error-reload:hover:not(:disabled) { background: rgba(var(--accent-rgb), 0.24); }
+.browser-load-error-reload:disabled { opacity: 0.7; cursor: default; }
+
+.browser-load-error-more {
+  border: 1px solid var(--border);
+  background: transparent;
+}
+
+.browser-load-error-more:hover { background: rgba(var(--surface-strong-rgb), 0.5); }
 
 .browser-webview {
   flex: 1;
@@ -5785,6 +5936,11 @@ html[data-theme='high-contrast'] .composer-question-option.selected {
 .assistant-response-metadata button:focus-visible {
   outline: none;
   background-image: var(--ui-focus-layer);
+}
+
+/* A message's actions are controls, not words: selecting across messages leaves out their times and labels. */
+.chat-message-toolbar {
+  user-select: none;
 }
 
 /* Copy, Details, Undo and Read aloud under a message: the focus fill, full strength while focused. */

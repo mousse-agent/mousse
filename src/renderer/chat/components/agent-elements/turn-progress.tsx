@@ -31,6 +31,8 @@ export type TurnProgressState = {
   stopping?: boolean;
   /** The thread, and when the service last changed its turn state: together they name one sighting of a step. */
   threadId?: string | null;
+  /** When the current turn (or optimistic subagent startup) began, for the Working timer before a prompt is saved. */
+  startedAt?: string;
   updatedAt?: string;
   /**
    * A person's steer is held (`TurnState.heldSteer`): the line's tooltip says when it goes in. `turn_end`: strict

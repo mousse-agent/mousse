@@ -51,7 +51,7 @@ const KEEP_MEMO_TTL_MS = 7 * DAY_MS
 /** Errors that mean "not now" rather than "this failed": the profile or the task is busy. They are kept and retried. */
 const BUSY_REASON = /^Cannot trash thread:|Cleanup owns this task|is still active|execution lease busy|Repository is busy/i
 /** Keep reasons that can differ on the next look, so they are not remembered. */
-const TRANSIENT_REASON = /Settings changed|Commit changed|in use|busy|owns this task|still active|lease/i
+const TRANSIENT_REASON = /Settings changed|Commit changed|in use|busy|owns this task|still active|lease|working in this|open in this|folder is in this/i
 const IN_USE_REASON = 'Files in this worktree are in use'
 /** `realpathSync` without blocking (the same answers, unlike `fs/promises`' native one). */
 const realpathLike = promisify(realpathCallback)
@@ -120,6 +120,12 @@ export interface StorageCleanupDeps {
   clock: StorageSweepClock
   /** Why a thread is not idle (`threadHasPendingWork`), or undefined. */
   idle(threadId: string): string | undefined
+  /**
+   * Why others use the folder `path` (a worktree a rule would remove), or undefined: a project's folder is in it, or a
+   * turn or terminal of a thread other than `exceptThreadId` and its subagents works in it. Removing the folder would
+   * pull it out from under them, and `idle` looks only at the thread itself. Without it, nothing else is checked.
+   */
+  otherWork?(path: string, exceptThreadId?: string): string | undefined
   installationHome: string
   codeHost?: { cachedDefaultBranch(cwd: string): string | undefined }
   /**
@@ -657,6 +663,8 @@ export class StorageCleanupService {
     let busy: string | undefined
     try { busy = this.deps.idle(record.taskId) } catch { busy = undefined }
     if (busy) return { keep: busy, remember: false }
+    const shared = this.deps.otherWork?.(workspace.worktreePath, record.taskId)
+    if (shared) return { keep: shared, remember: false }
     if (isExecutionLeaseHeld(record.location)) return { keep: 'Thread is in use', remember: false }
     if (workspace.lifecycle !== 'ready') return { keep: 'Workspace is not ready', remember: true, fingerprint }
     let facts: Awaited<ReturnType<StorageCleanupService['inspectCheckout']>>
@@ -693,15 +701,15 @@ export class StorageCleanupService {
         if (await readOnlyGitAsync(path, ['rev-parse', 'HEAD']) !== head) return 'Commit changed since check'
         // Again, with nothing awaited after it: the reads above wait.
         if (this.deps.policy.digest() !== snapshot.digest) return 'Settings changed since check'
-        return this.probeRemoval(path)
+        return this.deps.otherWork?.(path, record.taskId) ?? this.probeRemoval(path)
       } catch (error) { return (error as Error).message }
     }
     // The checks that can change without the reads above, once more right before the move, with nothing awaited between
-    // them and its start (retirement prepares first): the settings, and on Windows whether a file in it is open.
+    // them and its start (retirement prepares first): the settings, others' work in it, and on Windows whether a file in it is open.
     const beforeMove = (): string | undefined => {
       try {
         if (this.deps.policy.digest() !== snapshot.digest) return 'Settings changed since check'
-        return this.probeRemoval(path)
+        return this.deps.otherWork?.(path, record.taskId) ?? this.probeRemoval(path)
       } catch (error) { return (error as Error).message }
     }
     try { await this.deps.purge.retireTrashed(record.taskId, { recheck, beforeMove }) }
@@ -860,6 +868,8 @@ export class StorageCleanupService {
     if (!await present(path)) return undefined
     const busy = this.deps.idle(record.taskId)
     if (busy) return { keep: busy }
+    const shared = this.deps.otherWork?.(path, record.taskId)
+    if (shared) return { keep: shared }
     if (isExecutionLeaseHeld(record.location)) return { keep: 'Thread is in use' }
     const facts = await this.inspectCheckout(record, workspace)
     if ('keep' in facts) return facts
@@ -911,6 +921,8 @@ export class StorageCleanupService {
         if (this.deps.policy.digest() !== verdict.policyDigest) return kept('Settings changed since check')
         const busy = this.deps.idle(record.taskId)
         if (busy) return kept('Thread became busy')
+        const shared = this.deps.otherWork?.(workspace.worktreePath, record.taskId)
+        if (shared) return kept(shared)
         const bound = readWorkspaceFile(record.location)
         if (!bound || bound.worktreePath !== workspace.worktreePath || bound.branch !== workspace.branch || bound.headSha !== workspace.headSha || bound.lifecycle !== workspace.lifecycle) return kept('Workspace changed since check')
         const placement = await this.placementProblem(workspace, record.taskId)
@@ -933,6 +945,8 @@ export class StorageCleanupService {
           if (this.deps.policy.digest() !== verdict.policyDigest) stop(kept('Settings changed since check'))
           const busyNow = this.deps.idle(record.taskId)
           if (busyNow) stop(kept('Thread became busy'))
+          const sharedNow = this.deps.otherWork?.(workspace.worktreePath, record.taskId)
+          if (sharedNow) stop(kept(sharedNow))
           const boundNow = readWorkspaceFile(record.location)
           if (!boundNow || boundNow.worktreePath !== workspace.worktreePath || boundNow.branch !== workspace.branch || boundNow.headSha !== workspace.headSha || boundNow.lifecycle !== workspace.lifecycle) stop(kept('Workspace changed since check'))
           let inUseNow: string | undefined
@@ -1219,7 +1233,8 @@ export class StorageCleanupService {
       if (!existsSync(kept.path)) continue
       const measurement = await this.measure(kept.path, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
       const { rule, key, label, threadId, projectId } = this.dispatchWorktreeBase(kept)
-      planned.push({ rule, key, label, ...(threadId ? { threadId } : {}), ...(projectId ? { projectId } : {}), action: 'remove', reason: await this.dispatchWorktreeReason(kept), bytes: measurement.bytes, ...approximate(measurement) })
+      const shared = this.deps.otherWork?.(kept.path)
+      planned.push({ rule, key, label, ...(threadId ? { threadId } : {}), ...(projectId ? { projectId } : {}), action: shared ? 'keep' : 'remove', reason: shared ?? await this.dispatchWorktreeReason(kept), bytes: measurement.bytes, ...approximate(measurement) })
     }
     return planned
   }
@@ -1239,6 +1254,9 @@ export class StorageCleanupService {
       const measurement = await this.measure(kept.path, { mode: 'reclaim', budgetMs: MEASURE_BUDGET_MS })
       const sized = { bytes: measurement.bytes, files: measurement.files, ...approximate(measurement) }
       if (!allowed?.has(base.key!)) { items.push({ ...base, ...sized, outcome: 'kept', reason: `${await this.dispatchWorktreeReason(kept)} Preview cleanup lists it.` }); continue }
+      // Confirmed in a plan, but someone may have started working in it since.
+      const shared = this.deps.otherWork?.(kept.path)
+      if (shared) { items.push({ ...base, ...sized, outcome: 'kept', reason: shared }); continue }
       // The ignored files go, as confirmed; Git's own data of the worktree is kept, as a copy the dispatch owns.
       let owner: string | undefined
       try { owner = dispatchKeptFilesOwner(this.deps.store.profileHome, kept.dispatchId) } catch { owner = undefined }

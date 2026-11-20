@@ -407,19 +407,22 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     sentNowTimers.current.clear()
     setSentNow({})
   }, [threadId])
-  // Gone from the daemon's list: nothing left to hide. Listed as waiting again after it was on its way (a Stop put
-  // it back first in the queue): it shows again at once.
+  // Gone from the daemon's list once its copy shows in the turn: nothing left to paint or hide. Gone before that (the
+  // list is not updated yet, or dropped it before the copy arrived), it stays painted until the copy shows or the
+  // timer ends, so it never leaves the reply for a moment. Listed as waiting again after it was on its way (a Stop
+  // put it back first in the queue): it shows again at once.
   const seenSteering = useRef(new Set<string>())
+  const transcript = useAppStore((state) => state.messages)
   useEffect(() => {
     for (const item of items) if (item.state === 'steering') seenSteering.current.add(item.id)
-    for (const id of Object.keys(sentNow)) {
+    for (const [id, painted] of Object.entries(sentNow)) {
       const item = items.find((entry) => entry.id === id)
-      if (!item || (item.state === 'pending' && seenSteering.current.has(id))) {
+      if (item ? item.state === 'pending' && seenSteering.current.has(id) : steerLanded(painted, transcript)) {
         seenSteering.current.delete(id)
         unsend(id)
       }
     }
-  }, [items, sentNow, unsend])
+  }, [items, sentNow, transcript, unsend])
   const steer = useCallback(async (itemId: string, known?: QueuedMessage) => {
     if (!threadId) return
     const key = `${threadId}\n${itemId}`
@@ -485,7 +488,6 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     composerSteerTimers.current.set(key, window.setTimeout(() => dropComposerSteer(key), SENT_NOW_HIDE_MS))
   }, [dropComposerSteer])
   // Its copy showed: nothing left to paint, and the queue no longer looks for it.
-  const transcript = useAppStore((state) => state.messages)
   useEffect(() => {
     for (const steer of composerSteers) if (steer.threadId === threadId && steerLanded(steer, transcript)) dropComposerSteer(steer.key)
   }, [composerSteers, transcript, threadId, dropComposerSteer])

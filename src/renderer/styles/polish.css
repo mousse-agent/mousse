@@ -375,7 +375,7 @@ html[data-theme='high-contrast'] {
    (`--project-hue`, set on the row from projectHues), the same as on its threads' cards, never its place in the list. */
 .app .threads-sidebar-project .threads-sidebar-project-icon { color: var(--project-hue, currentColor); }
 
-/* "Other threads" reads quieter than a project: regular weight, muted, no hue. Its header dims like a group out
+/* "No project" reads quieter than a project: regular weight, muted, no hue. Its header dims like a group out
    of focus unless it holds the open thread (threads-sidebar.css). */
 .app .threads-sidebar-other-threads .threads-sidebar-project-toggle {
   font-weight: 400;

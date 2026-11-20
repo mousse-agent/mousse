@@ -129,7 +129,12 @@ export class AcpAdapter implements ProviderAdapter {
         steerTaken: (token) => ctl.steerTaken?.(token),
         returnSteer: (text, token) => ctl.returnSteer?.(text, token),
         onBoundary: () => sink.boundary?.(),
-        onProviderTurn: () => sink.providerTurn?.(),
+        onProviderTurn: () => {
+          sink.providerTurn?.()
+          // The prompt reached the agent, so its runtime is up and the model is next: the turn is no longer starting.
+          // An agent that sends nothing until its reply (Antigravity) would otherwise read "Starting…" all through it.
+          sink.status?.('waiting')
+        },
         onToolAwaiting: (callId, waiting) => sink.toolAwaiting?.(callId, waiting),
         onSteer: (steer, token) => {
           progress()

@@ -27,8 +27,8 @@ runLocalTtsWorker<PocketTtsModel>({
       readGraph: (graph) => readFile(paths[graph])
     })
     return {
-      synthesize: async (segment, voice, speed) => {
-        const audio = await pocket.synthesize(model.language === 'en' ? spokenEnglish(segment) : segment, voice)
+      synthesize: async (segment, voice, speed, cut) => {
+        const audio = await pocket.synthesize(model.language === 'en' ? spokenEnglish(segment) : segment, voice, cut)
         return { samples: stretchSpeech(audio, pocket.sampleRate, speed), sampleRate: pocket.sampleRate }
       }
     }

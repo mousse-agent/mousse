@@ -378,7 +378,7 @@ describe('the sibling menu', () => {
 
   it('lists the other threads without a project, and leaves out Chats threads', () => {
     const chat = thread('chat', 'Agent chat')
-    expect(siblingThreads('loose', [...threads, chat], projects, new Set(['chat']))).toEqual({ label: 'Other threads', threads: [{ id: 'loose', name: 'Explain git rebase' }] })
+    expect(siblingThreads('loose', [...threads, chat], projects, new Set(['chat']))).toEqual({ label: 'No project', threads: [{ id: 'loose', name: 'Explain git rebase' }] })
   })
 })
 

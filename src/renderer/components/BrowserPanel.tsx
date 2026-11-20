@@ -39,6 +39,8 @@ import {
   browserAgentState,
   type BrowserNoticeState
 } from './browser/BrowserToolbarParts'
+import { BrowserLoadErrorPage } from './browser/BrowserLoadErrorPage'
+import { isPageLoadRejection, isShownLoadFailure, type BrowserLoadFailure } from './browser/browserLoadError'
 
 const BLANK_URL = 'about:blank'
 /** How long a success notice stays under the toolbar. Errors stay until dismissed or replaced. */
@@ -263,6 +265,9 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
   const onStateRef = useRef(onState)
   const onNavStateRef = useRef(onNavState)
   const onMediaRef = useRef(onMedia)
+  // The page the tab couldn't open, shown over the guest's blank error document until a page commits.
+  const [failure, setFailure] = useState<BrowserLoadFailure | null>(null)
+  const [pageLoading, setPageLoading] = useState(false)
   zoomRef.current = tab.zoomFactor
   onReadyRef.current = onReady
   onStateRef.current = onState
@@ -307,8 +312,12 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
       update()
     }
 
-    const onStartLoading = () => onNavStateRef.current(tab.id, { ...readNav(), isLoading: true })
+    const onStartLoading = () => {
+      setPageLoading(true)
+      onNavStateRef.current(tab.id, { ...readNav(), isLoading: true })
+    }
     const onStopLoading = () => {
+      setPageLoading(false)
       update()
       onNavStateRef.current(tab.id, { ...readNav(), isLoading: false })
     }
@@ -316,12 +325,19 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
     const onMediaStarted = () => onMediaRef.current(tab.id, true)
     const onMediaPaused = () => onMediaRef.current(tab.id, false)
     // A new page in the tab has stopped whatever the last one played.
-    const onNavigate = () => { onMediaPaused(); update() }
+    // did-navigate fires only for a page that committed, never for Chromium's error document.
+    const onNavigate = () => { setFailure(null); onMediaPaused(); update() }
+    const onFailLoad = (domEvent: Event) => {
+      const event = domEvent as Electron.DidFailLoadEvent
+      if (!isShownLoadFailure(event.errorCode, event.isMainFrame)) return
+      setFailure({ url: event.validatedURL, errorCode: event.errorCode, errorDescription: event.errorDescription })
+    }
 
     webview.addEventListener('dom-ready', onDomReady)
     webview.addEventListener('did-start-loading', onStartLoading)
     webview.addEventListener('did-stop-loading', onStopLoading)
     webview.addEventListener('did-navigate', onNavigate)
+    webview.addEventListener('did-fail-load', onFailLoad)
     webview.addEventListener('did-navigate-in-page', update)
     webview.addEventListener('page-title-updated', update)
     webview.addEventListener('media-started-playing', onMediaStarted)
@@ -342,6 +358,7 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
       webview.removeEventListener('did-start-loading', onStartLoading)
       webview.removeEventListener('did-stop-loading', onStopLoading)
       webview.removeEventListener('did-navigate', onNavigate)
+      webview.removeEventListener('did-fail-load', onFailLoad)
       webview.removeEventListener('did-navigate-in-page', update)
       webview.removeEventListener('page-title-updated', update)
       webview.removeEventListener('media-started-playing', onMediaStarted)
@@ -358,18 +375,26 @@ function BrowserWebview({ tab, profileId, active, agentControlled, agentCursor, 
 
   const preset = DEVICE_PRESETS.find((item) => item.id === tab.devicePreset)
   const blank = tab.url === BLANK_URL
+  const failed = !blank && failure !== null
+  const reloadFailed = () => {
+    if (!failure) return
+    const pending = withWebview(ref.current, (wv) => wv.loadURL(failure.url), undefined)
+    // A failure that repeats replaces this page's; nothing else to report.
+    void pending?.catch(() => {})
+  }
   useEffect(() => { if (agentControlled) ref.current?.blur() }, [agentControlled])
   return (
     <KeepMounted active={active} preserveLayout
-      className={`browser-viewport${active ? ' active' : ''}${blank ? ' browser-viewport-blank' : ''}`}
+      className={`browser-viewport${active ? ' active' : ''}${blank || failed ? ' browser-viewport-blank' : ''}`}
       style={tab.deviceToolbarOpen && preset?.width ? { width: preset.width } : undefined}
     >
       {blank && <BrowserStartPage />}
+      {failed && <div style={{ display: 'contents' }} inert={agentControlled}><BrowserLoadErrorPage failure={failure} loading={pageLoading} onReload={reloadFailed} /></div>}
       <webview
         ref={ref}
         data-browser-tab-id={tab.id}
         inert={agentControlled}
-        className={`browser-webview${blank ? ' browser-webview-hidden' : ''}`}
+        className={`browser-webview${blank || failed ? ' browser-webview-hidden' : ''}`}
         src={initialUrl.current}
         partition={`persist:mousse-profile-${profileId.toLowerCase()}`}
         allowpopups={ALLOW_POPUPS_ATTRIBUTE}
@@ -652,6 +677,8 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
       // A newer navigation or a redirect can intentionally cancel this load.
       const failure = error as { errno?: number; code?: string; message?: string }
       if (failure.errno === -3 || failure.code === 'ERR_ABORTED' || /ERR_ABORTED|\(-3\)/.test(failure.message ?? '')) return
+      // The tab shows its own page for an address it couldn't open.
+      if (isPageLoadRejection(error)) return
       setBrowserError(error)
     })
   }

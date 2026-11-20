@@ -14,6 +14,8 @@
   --threads-sidebar-row-height: 32px;
   /* The extra height of a row that shows its latest reply under the title. */
   --threads-sidebar-preview-line: 16px;
+  /* Extra space between the last pinned thread and the first regular thread. */
+  --threads-sidebar-pinned-gap: 8px;
   container-type: inline-size;
   /* pill-tabs: the tab bar's width rules (components/ui/PillTabs.tsx) read this container. */
   container-name: threads-sidebar pill-tabs;
@@ -470,13 +472,13 @@
 }
 
 .threads-sidebar-thread-list {
-  max-height: calc(var(--threads-sidebar-row-height) * 5 + var(--threads-sidebar-preview-line) * var(--project-preview-shown, 0));
+  max-height: calc(var(--threads-sidebar-row-height) * 5 + var(--threads-sidebar-preview-line) * var(--project-preview-shown, 0) + var(--threads-sidebar-pinned-gap) * var(--project-pinned-gap-shown, 0));
   overflow: hidden;
   transition: max-height calc(350ms * var(--ui-motion-scale)) cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .threads-sidebar-thread-list.expanded {
-  max-height: calc(var(--threads-sidebar-row-height) * var(--project-thread-count, 5) + var(--threads-sidebar-preview-line) * var(--project-preview-count, 0));
+  max-height: calc(var(--threads-sidebar-row-height) * var(--project-thread-count, 5) + var(--threads-sidebar-preview-line) * var(--project-preview-count, 0) + var(--threads-sidebar-pinned-gap) * var(--project-pinned-gap, 0));
 }
 
 .threads-sidebar-thread-root {
@@ -741,6 +743,11 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+/* A small gap between pinned threads and regular threads, only when both are present. */
+:is(.threads-sidebar-feed-list, .threads-sidebar-thread-list) > .threads-sidebar-thread-container[data-pinned] + .threads-sidebar-thread-container:not([data-pinned]) {
+  margin-top: var(--threads-sidebar-pinned-gap);
 }
 
 .threads-sidebar-settled-count {
@@ -1181,25 +1188,41 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 
 /* Under the lists: "Archived". The footer is pinned to the bottom of the pane, just above the profile: its auto
    top margin takes whatever room the lists leave, so it stays at the bottom when the lists are short. When the
-   lists are taller than the sidebar they shrink and scroll and the footer stays in view. The footer is the one
-   scroll container for its own sections: it takes what they need up to 45vh, and the lists above give up the room. */
+   lists are taller than the sidebar they shrink and scroll and the footer stays in view. The footer takes what
+   Archived needs up to 45vh, and the lists above give up the room. Only Archived's list scrolls: its heading stays
+   in view however far the list is scrolled, or scrolled to reveal the open thread. */
 .threads-sidebar-footer {
   flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   max-height: 45vh;
-  overflow-y: auto;
+  overflow: hidden;
   margin-top: auto;
+}
+
+.threads-sidebar-footer > .threads-sidebar-section.threads-sidebar-section-settled {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  min-height: 0;
+}
+
+.threads-sidebar-settled-scroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* Archived opens and closes with the shared Collapse, like a project. While it moves, its rows are capped at the
    room the footer shows under the heading (45vh less `--threads-sidebar-settled-head`, measured on each toggle), so
    a long list's height and fade play over what is on screen instead of filling the footer in one frame. At rest
-   nothing is capped and the footer scrolls as above. */
-.threads-sidebar-footer:has(> .threads-sidebar-section-settled > .ui-collapse[data-motion]) {
+   nothing is capped and the list scrolls as above. */
+.threads-sidebar-settled-scroll:has(> .ui-collapse[data-motion]) {
   overflow-y: hidden;
 }
 
-.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse[data-motion] > .ui-collapse-clip > * {
+.threads-sidebar-settled-scroll > .ui-collapse[data-motion] > .ui-collapse-clip > * {
   max-height: calc(45vh - var(--threads-sidebar-settled-head, 48px));
   overflow: hidden;
 }
@@ -1210,33 +1233,33 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
    them, not the clip inside it: mid-motion the grid row is only part of the box (an auto-height grid sizes
    itself by the fr fraction and the row by its square), so the row sits at the bottom of the box and the rows
    overflow it upward, right up to the heading. */
-.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse {
+.threads-sidebar-settled-scroll > .ui-collapse {
   align-content: end;
 }
 
-.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse > .ui-collapse-clip {
+.threads-sidebar-settled-scroll > .ui-collapse > .ui-collapse-clip {
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
 }
 
-.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse > .ui-collapse-clip > * {
+.threads-sidebar-settled-scroll > .ui-collapse > .ui-collapse-clip > * {
   flex: none;
 }
 
-.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse[data-motion] {
+.threads-sidebar-settled-scroll > .ui-collapse[data-motion] {
   overflow: hidden;
 }
 
-.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse[data-motion] > .ui-collapse-clip {
+.threads-sidebar-settled-scroll > .ui-collapse[data-motion] > .ui-collapse-clip {
   overflow: visible;
 }
 
-.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse[data-motion='exit'] {
+.threads-sidebar-settled-scroll > .ui-collapse[data-motion='exit'] {
   mask-image: linear-gradient(to top, #000 calc(100% - 20px), transparent calc(100% - 4px));
 }
 
-.threads-sidebar-footer > .threads-sidebar-section-settled > .ui-collapse[data-motion='exit'] > .ui-collapse-clip {
+.threads-sidebar-settled-scroll > .ui-collapse[data-motion='exit'] > .ui-collapse-clip {
   mask-image: none;
 }
 
@@ -1392,7 +1415,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 
 /* Focus: what is outside the open thread's context sits back a little, so it stands out. In Projects every
    group's header but the open thread's group's dims, and every thread row but the open one (its group's other
-   rows too); in Threads every card but the open one. With nothing open nothing dims, except "Other threads",
+   rows too); in Threads every card but the open one. With nothing open nothing dims, except "No project",
    which always reads quieter unless it holds the open thread. Hover, keyboard focus and an open menu bring a row
    up. A status that needs the person keeps its full colour; Archived keeps its own fade (above). */
 @property --sidebar-row-dim {
