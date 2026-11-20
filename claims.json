@@ -137,6 +137,19 @@
       "expiresAt": "2026-11-20T12:40:26.020Z"
     },
     {
+      "task": "issue-1506-faster-worktree-checkout",
+      "session": "Animatrix-2f5268",
+      "machine": "Animatrix",
+      "branch": "issue-1506-faster-worktree-checkout",
+      "paths": [
+        "src/mms/worktree/WorktreeManager.ts",
+        "src/mms/workspace/ThreadWorkspaceManager.ts",
+        "src/mms/workspace/WorkspaceResolver.ts"
+      ],
+      "claimedAt": "2026-11-20T19:52:24.757Z",
+      "expiresAt": "2026-11-20T21:52:24.757Z"
+    },
+    {
       "task": "keep-typing-after-send",
       "session": "Animatrix-5a1927",
       "machine": "Animatrix",
