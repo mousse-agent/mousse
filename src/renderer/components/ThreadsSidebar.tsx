@@ -4,7 +4,7 @@ import { flushSync } from 'react-dom'
 import { expiresAtAfter } from '../../shared/threadExpiry'
 import type { CSSProperties, KeyboardEvent } from 'react'
 
-import { Archive, ChevronRight, Folder, FolderOpen, FolderKanban, Layers, ListTree, Lock, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pencil, Pin, Trash2 } from '../lib/icons'
+import { Archive, ChevronRight, Folder, FolderOpen, Layers, ListTree, Lock, MessagesSquare, MessageSquarePlus, MoreHorizontal, Pencil, Pin, Trash2 } from '../lib/icons'
 import '../styles/private-threads.css'
 import { useThreadsAwaitingApproval } from '../hooks/useThreadsAwaitingApproval'
 
@@ -18,7 +18,7 @@ import { hasMoreBelow, revealDelta } from '../lib/sidebarScroll'
 import { SIDEBAR_REVEAL_TIMEOUT_MS, useSidebarRevealStore } from '../lib/sidebarReveal'
 import { setReferenceDragData } from '../../shared/chatReferences'
 import { useAppStore } from '../stores/appStore'
-import { workspaceModeFor } from '../stores/sidebarTabAgreement'
+import { workspaceModeFor, type SidebarTab } from '../stores/sidebarTabAgreement'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
 import { archiveThread, setThreadArchived, createAndSelectProjectThread, createAndSelectThread, hideThreads, selectThread } from '../lib/threadActions'
@@ -111,12 +111,14 @@ const PROJECT_ATTENTION_TITLE: Record<Exclude<ThreadAttention, 'quiet' | 'needs-
   paused: 'Paused',
   done: 'Done'
 }
+// One Threads tab shows the thread list by project (the Projects tree) or as one list of cards; the swap button beside
+// the filter switches between the two (`threadsSidebarView` keeps which).
 const SIDEBAR_TABS = [
-  { id: 'projects', label: 'Projects', icon: FolderKanban },
   { id: 'threads', label: 'Threads', icon: ListTree },
   { id: 'chats', label: 'Chats', icon: MessagesSquare }
 ] as const satisfies readonly PillTab<string>[]
-type SidebarView = (typeof SIDEBAR_TABS)[number]['id']
+type SidebarView = SidebarTab
+type SidebarTabId = (typeof SIDEBAR_TABS)[number]['id']
 
 /** Shift+F10 or the context-menu key: open a row's menu from the keyboard. */
 const isMenuKey = (event: KeyboardEvent) => event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)
@@ -964,7 +966,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
   // The Threads tab's menu, while bot threads are listed: Hide all bot threads. From the keyboard (the menu key) it
   // opens below the tab.
   const [tabMenu, setTabMenu] = useState<{ x: number; y: number; returnFocus: HTMLElement } | null>(null)
-  const openTabMenu = (tab: SidebarView, event: React.MouseEvent<HTMLButtonElement>) => {
+  const openTabMenu = (tab: SidebarTabId, event: React.MouseEvent<HTMLButtonElement>) => {
     if (tab !== 'threads' || !shownBotThreads.length) return
     event.preventDefault()
     const anchor = event.currentTarget
@@ -1728,14 +1730,24 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
     <aside ref={asideRef} data-mousse="sidebar" className={`threads-sidebar${contextMenu || tabMenu ? ' menu-open' : ''}${className ? ` ${className}` : ''}`} style={{ width: threadsSidebarWidth }}>
 
       <div className="threads-sidebar-tabs-row">
-        <PillTabs tabs={SIDEBAR_TABS} value={sidebarView} onSelect={setSidebarView} onTabContextMenu={openTabMenu} ariaLabel="Sidebar" idPrefix={tabsId} />
+        <PillTabs
+          tabs={SIDEBAR_TABS}
+          value={sidebarView === 'chats' ? 'chats' : 'threads'}
+          // Threads comes back in the view used last.
+          onSelect={(tab) => void setSidebarView(tab === 'chats' ? 'chats' : useAppStore.getState().lastThreadListView)}
+          onTabContextMenu={openTabMenu}
+          ariaLabel="Sidebar"
+          idPrefix={tabsId}
+        />
       </div>
 
-      {contentView !== 'chats' && <ThreadFilterBar view={contentView} projects={projectOptions} bots={botOptions} />}
+      {contentView !== 'chats' && (
+        <ThreadFilterBar view={contentView} projects={projectOptions} bots={botOptions} onSwapView={() => void setSidebarView(contentView === 'projects' ? 'threads' : 'projects')} />
+      )}
 
       <div ref={scrollRef} className="threads-sidebar-scroll" data-view={contentView} data-fill={footerHidden || undefined} data-more-below={moreBelow || undefined}>
 
-      <div className="threads-sidebar-section threads-sidebar-section-projects" role="tabpanel" id={`${tabsId}-projects-panel`} aria-labelledby={`${tabsId}-projects-tab`} hidden={contentView !== 'projects'}>
+      <div className="threads-sidebar-section threads-sidebar-section-projects" role="tabpanel" id={`${tabsId}-${contentView === 'projects' ? 'threads' : 'projects'}-panel`} aria-labelledby={`${tabsId}-threads-tab`} hidden={contentView !== 'projects'}>
 
         {contentView === 'projects' && renderNeedsMe()}
 
@@ -2007,7 +2019,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-      <div className="threads-sidebar-section threads-sidebar-section-feed" role="tabpanel" id={`${tabsId}-threads-panel`} aria-labelledby={`${tabsId}-threads-tab`} hidden={contentView !== 'threads'}>
+      <div className="threads-sidebar-section threads-sidebar-section-feed" role="tabpanel" id={`${tabsId}-${contentView === 'projects' ? 'feed' : 'threads'}-panel`} aria-labelledby={`${tabsId}-threads-tab`} hidden={contentView !== 'threads'}>
         {contentView === 'threads' && renderNeedsMe()}
         <div
           className="threads-sidebar-tree threads-sidebar-thread-feed threads-sidebar-feed-list"
