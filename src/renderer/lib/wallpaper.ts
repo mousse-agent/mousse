@@ -361,6 +361,18 @@ export function showWallpaper(profileId: string | null | undefined, wallpaper: T
   })
 }
 
+/**
+ * Shows `dim` (0 to 100) on the layer at once, for the dim slider while it moves: only the scrim changes, and never below
+ * the floor already measured, which does not depend on the dim. The theme's own change follows and measures again.
+ */
+export function previewWallpaperDim(dim: number): void {
+  if (!layer) return
+  const next = dim / 100
+  if (next === layer.dim) return
+  layer = { ...layer, dim: next, scrim: Math.max(next, layer.floor) }
+  notify()
+}
+
 function subscribe(listener: () => void): () => void {
   listeners.add(listener)
   return () => listeners.delete(listener)
@@ -396,4 +408,10 @@ export type { StoredWallpaperInfo }
 /** The layer as it is now, outside React (tests). */
 export function wallpaperLayerNow(): WallpaperLayer | null {
   return layer
+}
+
+/** Tests: shows `next` as the layer without loading an image. */
+export function showWallpaperLayerForTests(next: WallpaperLayer | null): void {
+  layer = next
+  notify()
 }

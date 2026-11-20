@@ -1301,6 +1301,41 @@ button.theme-card:disabled {
   opacity: 0.5;
 }
 
+/* Wallpaper dim: the part below the readability floor (--floor) is drawn muted;
+   the knob does not go there. */
+.wallpaper-dim-row .acrylic-intensity-dial::-webkit-slider-runnable-track {
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--accent) 35%, var(--ui-line-strong)) var(--floor, 0%),
+    var(--accent) var(--floor, 0%) var(--fill, 50%),
+    var(--ui-line-strong) var(--fill, 50%));
+}
+
+.wallpaper-dim-row .acrylic-intensity-dial::-moz-range-track {
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--accent) 35%, var(--ui-line-strong)) var(--floor, 0%),
+    var(--accent) var(--floor, 0%) var(--fill, 50%),
+    var(--ui-line-strong) var(--fill, 50%));
+}
+
+/* While the dim is adjusted (WallpaperRows), Settings steps aside so the chat and
+   its wallpaper show; only the dim row stays, on a solid card. The shadow spread
+   draws the card without moving the knob under the pointer. */
+html[data-settings-peek] .settings-page {
+  visibility: hidden;
+}
+
+html[data-settings-peek] .app[data-overlay-active='true'],
+html[data-settings-peek] .settings-page .wallpaper-dim-row {
+  visibility: visible;
+}
+
+html[data-settings-peek] .settings-page .wallpaper-dim-row {
+  border-top-color: transparent;
+  border-radius: 12px;
+  background: var(--surface-base);
+  box-shadow: 0 0 0 12px var(--surface-base), 0 8px 32px 12px rgb(0 0 0 / 0.25);
+}
+
 .accent-grid {
   display: flex;
   flex-wrap: wrap;
