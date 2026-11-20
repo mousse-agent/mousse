@@ -326,6 +326,23 @@
       ],
       "claimedAt": "2026-11-20T11:47:03.944Z",
       "expiresAt": "2026-11-20T13:47:03.944Z"
+    },
+    {
+      "task": "thread-wakes",
+      "session": "Avarnics-Mac-mini.local-27ac43",
+      "machine": "Avarnics-Mac-mini.local",
+      "branch": "thread-wakes",
+      "paths": [
+        "src/mms/wakes",
+        "src/shared/bots/personal/wakes.ts",
+        "src/mms/bots/wakeSources.ts",
+        "src/mms/run/mcp/appTools/threadWakes.ts",
+        "src/shared/backgroundWork.ts",
+        "src/renderer/components/BackgroundWorkRow.tsx",
+        "docs/plans/tool-api.md"
+      ],
+      "claimedAt": "2026-11-20T13:22:30.652Z",
+      "expiresAt": "2026-11-20T15:22:30.652Z"
     }
   ]
 }
