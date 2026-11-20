@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { PROFILER_TOOL_NAMES } from '../../../shared/diagnostics/profiler'
 import type { McpAttachment } from './MousseMcpServer'
 
@@ -34,8 +35,47 @@ export function defaultMousseCliCommand(): CliCommand {
   return { command: process.execPath, args: process.argv[1] ? [process.argv[1]] : [], env: {} }
 }
 
+/** The runtime that starts the stdio bridge: this process's executable, and the CLI bundle beside the code when there is one. */
+export interface BridgeHost {
+  execPath: string
+  /** Electron's runtime (main mode, or plain Node when `runAsNode`). */
+  electron: boolean
+  runAsNode: boolean
+  /** `out/cli/index.js`. */
+  cliScript?: string
+}
+
+/** The CLI bundle beside the bundle that runs this code: the CLI's own folder, or `out/cli` from `out/main` (or a chunk folder below it). */
+function cliBundleScript(): string | undefined {
+  const here = dirname(typeof __filename === 'string' ? __filename : fileURLToPath(import.meta.url))
+  for (const dir of [join(here, '..', 'cli'), join(here, '..', '..', 'cli')]) {
+    const script = join(dir, 'index.js')
+    if (existsSync(script)) return script
+  }
+  return undefined
+}
+
+function currentBridgeHost(): BridgeHost {
+  const electron = Boolean(process.versions.electron)
+  const runAsNode = process.env.ELECTRON_RUN_AS_NODE === '1'
+  return { execPath: process.execPath, electron, runAsNode, ...(electron && !runAsNode ? { cliScript: cliBundleScript() } : {}) }
+}
+
+/**
+ * How the stdio bridge starts. On Electron's runtime it runs as plain Node, with `ELECTRON_RUN_AS_NODE=1` in its own
+ * environment rather than inherited: an agent passes its own environment on to the MCP servers it starts, and
+ * Antigravity's has that variable set, which makes `--cli` a bad Node option (the bridge exits at once). Electron's main
+ * mode is not used for it either: there the bridge reads no stdin on Windows, so it relays nothing.
+ */
+export function stdioBridgeCli(host: BridgeHost = currentBridgeHost()): CliCommand {
+  const cli = defaultMousseCliCommand()
+  if (process.env.MOUSSE_CLI_PATH || !host.electron) return cli
+  if (host.runAsNode) return { ...cli, env: { ...cli.env, ELECTRON_RUN_AS_NODE: '1' } }
+  return host.cliScript ? { command: host.execPath, args: [host.cliScript], env: { ELECTRON_RUN_AS_NODE: '1' } } : cli
+}
+
 /** `mousse-cli engine mcp-stdio --url <url>` with the token in the environment. */
-export function stdioBridgeCommand(attachment: McpAttachment, cli: CliCommand = defaultMousseCliCommand()): CliCommand {
+export function stdioBridgeCommand(attachment: McpAttachment, cli: CliCommand = stdioBridgeCli()): CliCommand {
   return {
     command: cli.command,
     args: [...cli.args, 'engine', 'mcp-stdio', '--url', attachment.url],
