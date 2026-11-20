@@ -20,6 +20,8 @@ import {
 } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import { codexMcpConfigOverrides } from '../src/mms/run/mcp/attachment'
 import { CODEX_ONE_SHOT_FEATURES_OFF, codexOneShotRunsOn } from '../src/mms/harness/vendors/codex/oneShot'
+import { CHATGPT_CODEX_BASE_URL, type CodexDirectStream } from '../src/mms/harness/vendors/codex/directOneShot'
+import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream } from '@earendil-works/pi-ai'
 
 type Message = { id?: number | string; method?: string; params?: unknown }
 type Reply = { result?: unknown; error?: { code: number; message: string } }
@@ -260,7 +262,8 @@ describe('CodexProviderService', () => {
       { id: 'gpt-a', label: 'GPT A', efforts: ['low', 'ultra'], thinkingOff: false, defaultEffort: 'low', effortDescriptions: { low: 'Fast responses', ultra: 'Maximum reasoning with automatic task delegation' } },
       { id: 'gpt-b', label: 'GPT B', oneShot: false }
     ])
-    expect(service.llmProvider()).toEqual({ id: 'codex', label: 'Codex', models })
+    // On OpenAI's own provider a one-shot is a direct request with no tools, so the picker offers every model.
+    expect(service.llmProvider()).toEqual({ id: 'codex', label: 'Codex', models: [models[0], { id: 'gpt-b', label: 'GPT B' }] })
 
     const fresh = scriptedServer(() => chatgpt)
     const unlisted = new CodexProviderService(mkdtempSync(join(tmpdir(), 'mousse-codex-empty-')), questions, { launch: fresh.launch, findBinary: () => binary })
@@ -881,6 +884,128 @@ describe('CodexProviderService options (managed Codex)', () => {
       expect(codexModelOption(listed('gpt-v2', 'v2') as never).oneShot).toBe(false)
       expect(codexModelOption(listed('gpt-old') as never).oneShot).toBe(false)
       expect([null, 'v1', 'v2', 'v3', undefined].map(codexOneShotRunsOn)).toEqual([true, false, false, false, false])
+    })
+
+    describe("as a direct request on OpenAI's provider with a ChatGPT sign-in", () => {
+      const TOKEN = 'header.eyJ0b2tlbiI6dHJ1ZX0.sig'
+      const reply = (text: string): AssistantMessage => ({
+        role: 'assistant', api: 'openai-codex-responses', provider: 'openai-codex', model: 'm', content: [{ type: 'text', text }], stopReason: 'stop', timestamp: 0,
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }
+      })
+      /** A transport whose answer `script` writes; every request is recorded. */
+      function directStream(script: (stream: AssistantMessageEventStream, signal: AbortSignal) => void = (stream) => {
+        const message = reply('Login redirect fix')
+        stream.push({ type: 'text_delta', contentIndex: 0, delta: 'Login redirect fix', partial: message })
+        stream.push({ type: 'done', reason: 'stop', message })
+        stream.end(message)
+      }) {
+        const requests: Array<{ model: any; context: any; options: any }> = []
+        const send = vi.fn((model: unknown, context: unknown, options: any) => {
+          requests.push({ model, context, options })
+          const stream = createAssistantMessageEventStream()
+          queueMicrotask(() => script(stream, options.signal))
+          return stream
+        }) as unknown as CodexDirectStream
+        return { send, requests }
+      }
+      /** A server that answers `getAuthStatus` as `auth` says, and lists `LISTED`. */
+      function authServer(auth: Record<string, unknown>) {
+        const server = scriptedServer((message) => {
+          const method = message.method!
+          if (method === 'account/read') return chatgpt
+          if (method === 'getAuthStatus') return { result: auth }
+          if (method === 'model/list') return { result: { data: LISTED, nextCursor: null } }
+          if (method === 'config/read') return { result: { config: { mcp_servers: {} }, layers: [] } }
+          return { result: {} }
+        })
+        return { ...server, requests: (method: string) => server.messages.filter((message) => message.method === method) }
+      }
+      const withStream = (server: { launch: NonNullable<CodexServiceDependencies['launch']> }, send: CodexDirectStream, settings: Record<string, unknown> = {}) => {
+        mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
+        writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, ...settings }))
+        const service = new CodexProviderService(home, questions, { launch: server.launch, directStream: send }, { launch: () => ({ binaryPath: binary }), signedOut: () => signedOut })
+        services.push(service)
+        return service
+      }
+
+      it("names a chat on a model with subagents through one request with no tools and Codex's own token", async () => {
+        const server = authServer({ authMethod: 'chatgpt', authToken: TOKEN })
+        const direct = directStream()
+        const service = withStream(server, direct.send, { models: [{ id: 'gpt-v2', label: 'GPT V2', efforts: ['low', 'high'] }] })
+        const onActivity = vi.fn()
+        const answer = await service.oneShot({ model: 'gpt-v2:low', system: 'Name the chat.', prompt: 'Request: fix the login redirect', onActivity }, new AbortController().signal)
+        expect(answer).toEqual({ text: 'Login redirect fix' })
+        // Codex's token as it holds it: Mousse never asks Codex to refresh it.
+        expect(server.requests('getAuthStatus').map((message) => message.params)).toEqual([{ includeToken: true, refreshToken: false }])
+        // No Codex thread or turn runs.
+        expect(server.requests('thread/start')).toEqual([])
+        expect(server.requests('turn/start')).toEqual([])
+        expect(direct.requests).toHaveLength(1)
+        const [request] = direct.requests
+        expect(request.model).toMatchObject({ id: 'gpt-v2', api: 'openai-codex-responses', baseUrl: CHATGPT_CODEX_BASE_URL })
+        // The system text and one user message, with no tools declared.
+        expect(request.context.messages).toEqual([
+          { role: 'system', content: 'Name the chat.', timestamp: 0 },
+          expect.objectContaining({ role: 'user', content: 'Request: fix the login redirect' })
+        ])
+        expect(request.options).toMatchObject({ apiKey: TOKEN, transport: 'sse', maxRetries: 0, reasoningEffort: 'low' })
+        expect(onActivity).toHaveBeenCalled()
+      })
+
+      it("runs the model Codex lists for `default`, with that model's own effort, and refuses an unlisted one", async () => {
+        const direct = directStream()
+        const service = withStream(authServer({ authMethod: 'chatgpt', authToken: TOKEN }), direct.send)
+        await service.oneShot({ model: 'default', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)
+        expect(direct.requests[0].model.id).toBe('gpt-x')
+        expect(direct.requests[0].options.reasoningEffort).toBe('low')
+        await expect(service.oneShot({ model: 'gpt-missing', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'model_unavailable' })
+        expect(direct.requests).toHaveLength(1)
+      })
+
+      it('aborts the request on Stop', async () => {
+        let seen: AbortSignal | undefined
+        const direct = directStream((_stream, signal) => { seen = signal })
+        const service = withStream(authServer({ authMethod: 'chatgpt', authToken: TOKEN }), direct.send)
+        const stop = new AbortController()
+        const run = service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, stop.signal)
+        await vi.waitFor(() => expect(seen).toBeDefined())
+        stop.abort(new Error('Stopped'))
+        await expect(run).rejects.toThrow()
+        expect(seen!.aborted).toBe(true)
+      })
+
+      it('reports a failed request', async () => {
+        const direct = directStream((stream) => {
+          const message: AssistantMessage = { ...reply(''), content: [], stopReason: 'error', errorMessage: 'You have hit your ChatGPT usage limit (plus plan).' }
+          stream.push({ type: 'error', reason: 'error', error: message })
+          stream.end(message)
+        })
+        const service = withStream(authServer({ authMethod: 'chatgpt', authToken: TOKEN }), direct.send)
+        await expect(service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'provider_usage_limit' })
+      })
+
+      it('is not used by a managed entry on its own provider, which keeps the app-server rule and its marks', async () => {
+        const server = authServer({ authMethod: 'chatgpt', authToken: TOKEN })
+        const direct = directStream()
+        const service = managed(server as never, { models: { list: async () => [{ id: 'gpt-v2', label: 'GPT V2', oneShot: false }] } }, { directStream: direct.send })
+        await service.refreshModels()
+        expect(service.models()).toEqual([{ id: 'gpt-v2', label: 'GPT V2', oneShot: false }])
+        await expect(service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'unsupported' })
+        expect(server.requests('getAuthStatus')).toEqual([])
+        expect(direct.requests).toEqual([])
+      })
+
+      it.each([
+        ['an API-key sign-in', { authMethod: 'apikey', authToken: 'sk-test' }],
+        ['no token', { authMethod: 'chatgpt', authToken: null }],
+        ['a Codex that does not report one', {}]
+      ])('keeps the app-server rule with %s', async (_case, auth) => {
+        const direct = directStream()
+        const service = withStream(authServer(auth), direct.send)
+        await expect(service.oneShot({ model: 'gpt-v2', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal))
+          .rejects.toMatchObject({ code: 'unsupported', message: expect.stringContaining('GPT-V2 can start subagents') })
+        expect(direct.requests).toEqual([])
+      })
     })
 
     it('ends as refused and interrupts the turn when Codex starts any tool', async () => {

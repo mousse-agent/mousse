@@ -240,7 +240,7 @@ import { MirroredRun, NativeMirrorThreads } from './nativeMirrorThreads'
 import { nativeSessionEpoch, type CallAttribution } from '../run/nativeHelpers'
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { agentMessageWords } from '../../shared/agentMessageWords'
-import { buildTitlePrompt, cleanTitleText, fitTitle, heuristicTitle, normalizeTitle, TITLE_SYSTEM_PROMPT, titleContextOf, type TitleContext } from '../../shared/threadTitleText'
+import { buildTitlePrompt, cleanTitleText, fitTitle, heuristicTitle, normalizeTitle, titleContextOf, titleSystemPrompt, type TitleContext } from '../../shared/threadTitleText'
 import {
   buildPermissionModeChangeNotice,
   getLastUserPermissionMode,
@@ -11691,7 +11691,7 @@ export class OrchestratorService extends EventEmitter {
    * by its typed error, never swapped for another provider.
    */
   private async generateTitleText(context: TitleContext, threadId: string | undefined): Promise<string | null> {
-    const text = await this.titleModelText(TITLE_SYSTEM_PROMPT, buildTitlePrompt(context), {
+    const text = await this.titleModelText(titleSystemPrompt(this.settingsStore.get().title.prompt), buildTitlePrompt(context), {
       task: 'title',
       scope: threadId ? this.threadScope(threadId) : undefined,
       sessionKey: threadId ?? `title:${context.request.slice(0, 200)}`,
@@ -11722,9 +11722,11 @@ export class OrchestratorService extends EventEmitter {
    * `scope`, bounds the wait and never retries; the caller falls back when it throws.
    */
   private async titleModelText(system: string, prompt: string, options: { task: OneShotTask; scope: ProviderScope | undefined; sessionKey: string; maxChars: number; signal?: AbortSignal }): Promise<string> {
+    // The title prompt is the title's own instruction (`generateTitleText`), not part of the selection.
+    const { prompt: _titlePrompt, ...selection } = this.settingsStore.get().title
     try {
       const { text } = await this.harness.oneShot({
-        selection: this.settingsStore.get().title,
+        selection,
         ...(options.scope ? { scope: options.scope } : {}),
         purpose: 'title',
         system,
