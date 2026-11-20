@@ -219,6 +219,7 @@ import {
   type TurnEnd,
   type TurnPhase,
   type TurnStep,
+  type TurnSetupStep,
   type TurnState,
   type HeldSteer,
   type TurnStateSnapshot,
@@ -1127,6 +1128,8 @@ const QUEUED_ROW_RELEASE_RETRY_MS = 2_000
 const QUEUE_REPAIR_ATTEMPTS = 6
 /** How often a message queued behind the thread lease looks whether another process released it. */
 const LEASE_WAIT_POLL_MS = 500
+/** A turn's setup step (making its worktree, its snapshot) is named under Working once it has taken this long. */
+const SETUP_STEP_SHOWN_MS = 1_000
 /**
  * The longest a lease wait goes between looks while a turn of the thread is only admitted (it may wait minutes for its
  * folders or an unplugged drive): from LEASE_WAIT_POLL_MS the interval doubles up to this.
@@ -2490,6 +2493,40 @@ export class OrchestratorService extends EventEmitter {
     else if (existing?.turnId) this.runHeartbeats.delete(existing.turnId)
     this.emit('turn-state', state)
     this.runtimeManager?.setActivity(threadId, turnPhaseActivity(phase, patch?.blockedOnWait))
+  }
+
+  /** Setup steps of turns that have not started yet, by thread (`beginSetupStep`). */
+  private readonly setupSteps = new Map<string, { turnId: string; timer?: ReturnType<typeof setTimeout> }>()
+
+  /**
+   * A turn's setup began a step that can take long (`TurnStep` `preparing`). It is shown, with phase `queued`, only
+   * once it has taken `SETUP_STEP_SHOWN_MS`, so a quick setup never flashes a line by; a later step replaces it, and
+   * the turn's start ends it (`endSetupStep`). Costs a timer: nothing waits for it.
+   */
+  private beginSetupStep(threadId: string, turnId: string, what: TurnSetupStep): void {
+    const previous = this.setupSteps.get(threadId)
+    if (previous?.timer) clearTimeout(previous.timer)
+    const entry: { turnId: string; timer?: ReturnType<typeof setTimeout> } = { turnId }
+    entry.timer = setTimeout(() => {
+      entry.timer = undefined
+      if (this.setupSteps.get(threadId) !== entry) return
+      // Never over a turn that runs, this one's once started or another's.
+      const current = this.turnStates.get(threadId)
+      if (current && isTurnActivePhase(current.phase) && (current.phase !== 'queued' || current.turnId !== turnId)) return
+      this.setTurnPhase(threadId, 'queued', { turnId, step: { kind: 'preparing', what } })
+    }, SETUP_STEP_SHOWN_MS)
+    entry.timer.unref?.()
+    this.setupSteps.set(threadId, entry)
+  }
+
+  /** The setup is over. `abandoned`: its turn never started, so a step it showed goes and the thread is idle again. */
+  private endSetupStep(threadId: string, abandoned = false): void {
+    const entry = this.setupSteps.get(threadId)
+    if (!entry) return
+    if (entry.timer) clearTimeout(entry.timer)
+    this.setupSteps.delete(threadId)
+    const current = this.turnStates.get(threadId)
+    if (abandoned && current?.phase === 'queued' && current.turnId === entry.turnId && current.step?.kind === 'preparing') this.setTurnPhase(threadId, 'idle')
   }
 
   /**
@@ -7646,11 +7683,12 @@ export class OrchestratorService extends EventEmitter {
    * parent's HEAD recorded when it was started, under the Mousse home, whatever the turn's mode. Its `mousse/` branch is named
    * from its task (`nameFrom`), as any thread's is from its first message.
    */
-  private async seedSubagentWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease'], nameFrom?: string): Promise<void> {
+  private async seedSubagentWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease'], nameFrom?: string, onStep?: (step: TurnSetupStep) => void): Promise<void> {
     const startSha = this.threadStore?.getThread(threadId)?.workspaceBinding?.startSha
     if (!startSha) return
     const manager = new ThreadWorkspaceManager(threadDir)
     if (manager.load()) return
+    onStep?.('worktree')
     await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, startSha, { nameFrom })
   }
 
@@ -8238,7 +8276,7 @@ export class OrchestratorService extends EventEmitter {
     return text || this.threadStore?.getThread(threadId)?.name
   }
 
-  private async seedForkWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease']): Promise<void> {
+  private async seedForkWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease'], onStep?: (step: TurnSetupStep) => void): Promise<void> {
     const engine = this.runEngine
     const fork = engine?.transfers.listPending(threadId, 'fork')[0]
     if (!engine || !fork || fork.payload.seed) return
@@ -8266,6 +8304,7 @@ export class OrchestratorService extends EventEmitter {
         // A checkpoint is a snapshot: the fork's worktree is made at the commit the snapshot was taken on (the source's
         // HEAD then) and the snapshot's files are written over it, so no snapshot commit becomes the fork's branch.
         const seedHead = checkpoint ? (await snapshotOriginAsync(sourceWorkspace?.worktreePath ?? projectPath, checkpoint.endSha)).head : undefined
+        onStep?.('worktree')
         await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, checkpoint ? seedHead : typeof seed.sha === 'string' ? seed.sha : undefined, { ...(checkpoint ? { snapshot: checkpoint.endSha } : {}), nameFrom: this.branchNameSource(threadId), onNotice: this.restoreNotifier(threadId) })
       }
     } catch (error) {
@@ -13920,6 +13959,7 @@ export class OrchestratorService extends EventEmitter {
   /** One turn; whatever way it ends, nothing of its app-tool context stays registered. */
   private async executeTurn(...args: Parameters<OrchestratorService['executeTurnBody']>): Promise<OrchestratorResponse> {
     const runId = args[3]?.runId
+    const threadId = this.session.threadId
     // A subagent that may edit its parent's folder records that folder as its turn starts and ends: its result is
     // measured from those, never from the parent's own turn records, which say nothing once the parent's turn has ended.
     const writer = runId ? this.sharedWriterOf(runId) : undefined
@@ -13927,6 +13967,8 @@ export class OrchestratorService extends EventEmitter {
     try {
       return await this.executeTurnBody(...args)
     } finally {
+      // A turn that ended before it started (a setup failure, a Stop, a requeue) shows no setup step any more.
+      this.endSetupStep(threadId, true)
       if (runId) this.appToolTurns.dropRun(runId)
       // A turn that completed recorded its end before its run did (`executeTurnBody`); one that failed or was stopped
       // records it here, so a later look at its result still has it.
@@ -14023,6 +14065,8 @@ export class OrchestratorService extends EventEmitter {
     const setupStop = new AbortController()
     session.setupStop = setupStop
     this.noteQueueWait(session)
+    const turnId = opts?.runId ?? uuidv4()
+    const setupStep = (step: TurnSetupStep): void => this.beginSetupStep(session.threadId, turnId, step)
     const setupSignal = opts?.externalSignal ? AbortSignal.any([opts.externalSignal, setupStop.signal]) : setupStop.signal
     // A turn that cannot start now runs later, in its place: a claimed item goes back where it was
     // (never a replacement at the tail); anything else is queued with its run.
@@ -14121,6 +14165,8 @@ export class OrchestratorService extends EventEmitter {
 
     if (recoveryDirectory && recoveryWorkspace && session.executionLease) {
       const heldLease = session.executionLease
+      // Finishing what an earlier turn left unfinished in the worktree may wait for other work on its repository.
+      setupStep('check')
       // A merge of a subagent's result an older version left unfinished is cancelled, never run again; the thread hears of it.
       const cancelledIntegrations = cancelledIntegrationsNotice(await cancelPendingIntegrations(recoveryDirectory, recoveryWorkspace.worktreePath))
       if (cancelledIntegrations) this.sessionAls.run(session, () => this.addSystemMessage(cancelledIntegrations))
@@ -14176,11 +14222,11 @@ export class OrchestratorService extends EventEmitter {
         const threadDir = this.resolveThreadDir(session.threadId)
         if (projectPath && threadDir) {
           try {
-            await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease)
+            await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, setupStep)
             const pending = opts?.agent ? agentMessageWords(request.content, agentOriginOf(opts.agent)) : request.content
-            await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, pending))
+            await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, pending), setupStep)
             session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.placementOf(session.threadId), this.restoreNotifier(session.threadId))
-              .resolve(request.mode, 'main', setupSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, pending))
+              .resolve(request.mode, 'main', setupSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, pending), setupStep)
           } catch (error) {
             // Never a silent blank thread: the chat, the sidebar row and whoever sent it are told why (`Thread.setupFailure`).
             if (!setupSignal.aborted && !this.lifecycle.signal.aborted) this.recordSetupFailure(session.threadId, threadDir, request, error, { runId: opts?.runId, retryable: !reuseLastUser && !request.workflowInvocationId && !(typeof input !== 'string' && input.continuationOfRunId) })
@@ -14215,6 +14261,7 @@ export class OrchestratorService extends EventEmitter {
     if (request.conversationBranchId && request.conversationBranchId !== (recoveryManager?.load()?.conversationBranchId ?? 'main')) throw branchChanged()
 
     if (request.workflowInvocationId) {
+      this.endSetupStep(session.threadId)
       return await this.executeWorkflowChatTurn(session, request, opts)
     }
 
@@ -14249,6 +14296,7 @@ export class OrchestratorService extends EventEmitter {
     }
     let turnStartSha: string | undefined
     if (checkpointEnabled && checkpointCwd) {
+      setupStep('snapshot')
       // Edits made outside Mousse since the last action become an action of their own, so Undo of this turn leaves them.
       const directory = session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
       if (snapshotFolder) {
@@ -14379,7 +14427,6 @@ export class OrchestratorService extends EventEmitter {
     this.transcript.reset()
     turnTimingMark(session.threadId, 'accepted')
 
-    const turnId = opts?.runId ?? uuidv4()
     // Run Engine bridge (SPEC §5): the run id is the turn id; each mark is one CAS write.
     const engineRunId = this.runEngine ? opts?.runId : undefined
     let runTerminalMarked = false
@@ -14432,6 +14479,7 @@ export class OrchestratorService extends EventEmitter {
     } else {
       opts?.externalSignal?.addEventListener('abort', mirrorExternalAbort, { once: true })
     }
+    this.endSetupStep(session.threadId)
     this.setTurnPhase(session.threadId, 'queued', { turnId })
     // Until its provider reports something, the turn is starting: the runtime, its tools and Skills are being set up.
     this.setTurnPhase(session.threadId, 'thinking', { turnId, step: { kind: 'starting' } })
