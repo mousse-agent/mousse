@@ -6,7 +6,7 @@ import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { settleThreadMutationOwnership } from '../src/mms/queue/ThreadExecutionLease'
-import { readThreadLifecycleRecordsSync, readThreadRecordSync, threadRecordPath } from '../src/mms/data/threadRecords'
+import { lifecycleRecordReads, readThreadLifecycleRecordsSync, readThreadRecordSync, threadRecordPath } from '../src/mms/data/threadRecords'
 import { ThreadDbEngine } from '../src/mms/data/threadDb/threadDbEngine'
 import { ThreadGenerationStore } from '../src/mms/data/ThreadGenerationStore'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
@@ -391,5 +391,30 @@ describe('threads kept in thread.db', () => {
     expect(viaHelper.agents?.data).toEqual(batched.agents)
     expect(viaHelper.sessions?.data).toEqual(batched.sessions)
     expect(viaHelper.messages.data).toEqual(batched.messages)
+  })
+
+  it('opens an unchanged thread database once across ownership passes, and sees a write on the very next read', () => {
+    const path = home()
+    const { threads } = open(path)
+    const dirs = [0, 1, 2].map((i) => {
+      const thread = threads.createThread(`Owner ${i}`, undefined, undefined, { started: true })
+      threads.mutateThreadData(thread.id, () => ({ agents: [{ id: `a${i}`, worktreePath: `/w/a${i}`, branch: `mousse/agent/a${i}` } as never] }))
+      return { id: thread.id, dir: threads.getThreadDir(thread.id) }
+    })
+    const before = lifecycleRecordReads.count
+    for (let pass = 0; pass < 3; pass++) for (const { dir } of dirs) readThreadLifecycleRecordsSync(dir)
+    // Three passes over three unchanged databases: each opened once, not three times.
+    expect(lifecycleRecordReads.count - before).toBe(3)
+    // A new agent worktree in one thread: an ownership pass that missed it could let cleanup remove it.
+    threads.mutateThreadData(dirs[1]!.id, () => ({ agents: [
+      { id: 'a1', worktreePath: '/w/a1', branch: 'mousse/agent/a1' } as never,
+      { id: 'b1', worktreePath: '/w/b1', branch: 'mousse/agent/b1' } as never
+    ] }))
+    expect((readThreadLifecycleRecordsSync(dirs[1]!.dir).agents?.data as Array<{ id: string }>).map((agent) => agent.id)).toEqual(['a1', 'b1'])
+    expect(lifecycleRecordReads.count - before).toBe(4)
+    // Each caller gets its own copy: changing one does not change what the next pass reads.
+    const copy = readThreadLifecycleRecordsSync(dirs[0]!.dir).agents!.data as Array<{ id: string }>
+    copy[0]!.id = 'changed'
+    expect((readThreadLifecycleRecordsSync(dirs[0]!.dir).agents?.data as Array<{ id: string }>)[0]!.id).toBe('a0')
   })
 })
