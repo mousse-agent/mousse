@@ -26,6 +26,7 @@ import { adapterDriver } from '../../src/mms/run/testkit/harness'
 import type { DriverRuntime } from '../../src/mms/harness/driver'
 import { refusalOfResponse } from './appToolsFixture'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
+import { echoBranchNamer } from '../support/echoBranchNamer'
 
 /**
  * A fault a test puts before every atomic JSON write: the store writes a project thread's first `meta.json` directly
@@ -449,6 +450,9 @@ describe('thread_create end to end (SPEC §15.1)', () => {
         if (input.threadId === w.parent.id) seen.made = parse<AgentCreatedThread>(await call(mcp!, 'thread_create', { projectId: w.repo.id, firstMessage: 'Fix the login redirect', clientRequestId: 'named' }))
         return 'ok'
       })
+      // The branch starts on a temporary name and is renamed from what this namer is given (see `branchNaming`).
+      const forgetNamer = echoBranchNamer(home!)
+      stops.push(async () => forgetNamer())
       await w.attach()
       await w.run(w.parent.id, GO, 'go')
       const runId = (seen.made.firstMessage as { runId: string }).runId
@@ -458,8 +462,9 @@ describe('thread_create end to end (SPEC §15.1)', () => {
       expect(agentMessageWords(stored.content, stored.origin)).toBe('Fix the login redirect')
       // The title Mousse gives a thread from its first message, and the worktree's branch, come from the words alone.
       expect(w.d.store.getThread(seen.made.threadId)?.name).toBe(heuristicTitle('Fix the login redirect'))
-      const branches = execFileSync('git', ['branch', '--list', 'mousse/*', '--format=%(refname:short)'], { cwd: join(home!, 'repo'), encoding: 'utf8' }).split('\n').filter(Boolean)
-      expect(branches).toEqual([expect.stringMatching(/^mousse\/fix-the-login-redirect/)])
+      const branches = () => execFileSync('git', ['branch', '--list', 'mousse/*', '--format=%(refname:short)'], { cwd: join(home!, 'repo'), encoding: 'utf8' }).split('\n').filter(Boolean)
+      await waitFor(() => branches().some((branch) => branch.startsWith('mousse/fix-the-login-redirect')), 'the branch named from the words')
+      expect(branches()).toEqual([expect.stringMatching(/^mousse\/fix-the-login-redirect/)])
     })
 
     it('an agent message in a row counts: a creation at the hop limit is refused before anything is made, and so is one from a run that carries on that chain', async () => {
