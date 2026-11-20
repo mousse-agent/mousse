@@ -7,6 +7,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { WindowsGitSetup } from '../../src/shared/windowsGit'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -26,14 +27,17 @@ vi.mock('../../src/renderer/components/MainViewTabs', () => ({ MainViewTabs: () 
 vi.mock('../../src/renderer/components/MainViewPanel', () => ({ MainViewPanel: stub('panel-area') }))
 vi.mock('../../src/renderer/components/sideCard/ThreadSideCard', () => ({ ThreadSideCard: () => null }))
 vi.mock('../../src/renderer/components/QuickActionEditor', () => ({ QuickActionEditorHost: () => null }))
-vi.mock('../../src/renderer/components/WorkspaceLoading', () => ({ WorkspaceLoading: () => null }))
 vi.mock('../../src/renderer/commands/useAppCommands', () => ({ useAppCommands: () => {} }))
 vi.mock('../../src/renderer/commands/useCommandShortcuts', () => ({ useCommandShortcuts: () => {} }))
 
 /** Every bridge call stays pending, except the main process's selection and "open thread" events, which the test drives. */
 let selected: ((payload: { id: string }) => void) | undefined
 let openThread: ((threadId: string) => void) | undefined
-function bridge(): unknown {
+function bridge(git?: {
+  initial: WindowsGitSetup
+  subscribe: (listener: (setup: WindowsGitSetup) => void) => void
+  listProfiles: () => Promise<unknown>
+}): unknown {
   const pending: Record<string, unknown> & (() => void) = Object.assign(() => {}, {})
   pending.then = () => pending
   pending.catch = () => pending
@@ -41,6 +45,13 @@ function bridge(): unknown {
   const node = (path: string): unknown => new Proxy(() => {}, {
     get: (_target, key) => {
       if (key === 'then') return undefined
+      if (!path && key === 'platform' && git) return 'win32'
+      if (path === 'app' && key === 'windowsGitSetup' && git) return async () => git.initial
+      if (path === 'app' && key === 'onWindowsGitSetupChanged' && git) return (listener: (setup: WindowsGitSetup) => void) => {
+        git.subscribe(listener)
+        return () => {}
+      }
+      if (path === 'profiles' && key === 'list' && git) return git.listProfiles
       if (path === 'threads' && key === 'onSelected') return (listener: typeof selected) => { selected = listener; return () => { selected = undefined } }
       if (path === 'app' && key === 'onOpenThread') return (listener: typeof openThread) => { openThread = listener; return () => { openThread = undefined } }
       if (path === 'threads' && key === 'select') return async () => undefined
@@ -101,4 +112,32 @@ describe('the window under the Chats tab', () => {
     expect(conversationShown()).toBe(true)
     expect(shown('chats')).toBe(false)
   })
+})
+
+it('shows the prerequisite before the workspace connects and retries after a download failure', async () => {
+  let update!: (setup: WindowsGitSetup) => void
+  let fail!: (reason: Error) => void
+  const first = new Promise<never>((_, reject) => { fail = reject })
+  const listProfiles = vi.fn(() => new Promise<never>(() => {}))
+    .mockImplementationOnce(() => first)
+  ;(window as unknown as { mousse: unknown }).mousse = bridge({
+    initial: { phase: 'downloading' },
+    subscribe: (listener) => { update = listener },
+    listProfiles
+  })
+  useAppStore.setState({ profileReady: false, workspaceReady: false })
+  await act(async () => root.render(createElement(App)))
+  expect(host.querySelector('[role="status"]')?.textContent).toContain('Downloading Git for Windows')
+
+  await act(async () => {
+    update({ phase: 'failed', message: 'Offline' })
+    fail(new Error("Error invoking remote method 'profiles:list': Offline"))
+  })
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain('Could not set up Git for Windows')
+  const retry = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Retry')
+  expect(retry).toBeDefined()
+  await act(async () => retry!.click())
+  expect(listProfiles).toHaveBeenCalledTimes(2)
+  await act(async () => update({ phase: 'installing' }))
+  expect(host.querySelector('[role="status"]')?.textContent).toContain('Setting up Git for Windows')
 })

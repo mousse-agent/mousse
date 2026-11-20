@@ -3,7 +3,7 @@
  * started then runs the old executable and keeps the installer from replacing it.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,6 +12,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
 import { GuiMmsController } from '../src/main/mms/GuiMmsController'
+import * as daemonHost from '../src/cli/daemonHost'
+import * as windowsGit from '../src/main/mms/windowsGit'
 
 function fakeWindow(id: number): WebContents {
   return Object.assign(new EventEmitter(), { id, isDestroyed: () => false }) as unknown as WebContents
@@ -33,6 +35,36 @@ describe('GuiMmsController while an update installs', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
+  })
+
+  it('waits for Git setup before starting the daemon and passes the new Git on its PATH', async () => {
+    const home = newHome()
+    const gui = new GuiMmsController({ homeDir: home })
+    const cmdDir = join(home, 'git', 'cmd')
+    let completeSetup!: (cmdDir: string) => void
+    const installing = new Promise<string>((resolve) => { completeSetup = resolve })
+    vi.spyOn(windowsGit, 'ensureWindowsGit').mockImplementation(({ onSetup }) => {
+      onSetup({ phase: 'downloading' })
+      return installing
+    })
+    vi.spyOn(daemonHost, 'resolveDaemonHostInvocation').mockReturnValue({
+      command: process.execPath,
+      argsPrefix: ['-e', 'console.log(process.env.PATH)', '--'],
+      env: { PATH: 'original-path', ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}) }
+    })
+
+    try {
+      const start = gui.start()
+      const failure = expect(start).rejects.toThrow('MMS daemon exited before readiness')
+      expect(gui.windowsGitSetup?.phase).toBe('downloading')
+      completeSetup(cmdDir)
+      await failure
+      expect(readFileSync(join(home, 'mms-startup.log'), 'utf8').trim()).toBe(`${cmdDir};original-path`)
+      expect(gui.windowsGitSetup).toBeNull()
+    } finally {
+      completeSetup(cmdDir)
+      await gui.stop()
+    }
   })
 
   it('a window request after the service exited starts it again after a plain stop, but not in install mode', async () => {

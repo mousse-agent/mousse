@@ -25,6 +25,8 @@ import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { resolveDaemonHostInvocation } from '../../cli/daemonHost'
 import { daemonCommand } from './daemonCommand'
+import { ensureWindowsGit, withWindowsGitPath } from './windowsGit'
+import type { WindowsGitSetup } from '../../shared/windowsGit'
 import {
   canonicalizeHome,
   DAEMON_OWNER_TOKEN_ENV,
@@ -217,6 +219,8 @@ export class GuiMmsController extends EventEmitter {
   private readonly windowEventUnsubs = new Map<number, () => void>()
   private baseBinding: TrustedProfileBinding | null = null
   private state: GuiMmsConnectionState = 'idle'
+  private gitSetup: WindowsGitSetup = null
+  private gitSetupAbort?: AbortController
   private quitting = false
   /**
    * Set while an update installs (`stopForInstall`) or when Mousse quits and stops its service (`stopForQuit`). Unlike
@@ -300,6 +304,16 @@ export class GuiMmsController extends EventEmitter {
     return this.state
   }
 
+  get windowsGitSetup(): WindowsGitSetup {
+    return this.gitSetup
+  }
+
+  private setWindowsGitSetup(setup: WindowsGitSetup): void {
+    if (this.gitSetup === setup) return
+    this.gitSetup = setup
+    this.emit('windows-git-setup', setup)
+  }
+
   get connected(): boolean {
     return this.state === 'ready' && Boolean(this.client?.connected)
   }
@@ -373,6 +387,7 @@ export class GuiMmsController extends EventEmitter {
    */
   async stop(): Promise<void> {
     this.quitting = true
+    this.gitSetupAbort?.abort()
     this.clearReconnectTimer()
     for (const reopen of this.windowReopens.values()) if (reopen.timer) clearTimeout(reopen.timer)
     this.windowReopens.clear()
@@ -1070,6 +1085,7 @@ export class GuiMmsController extends EventEmitter {
   }
 
   private async ensureDaemonReady(): Promise<MmsRuntimeRecord> {
+    this.setWindowsGitSetup(null)
     const runtime = resolveRuntimeStatus(this.homeDir)
     if (runtime.running && runtime.record) {
       return runtime.record
@@ -1153,6 +1169,26 @@ export class GuiMmsController extends EventEmitter {
       env: process.env,
       host
     })
+    const setup = new AbortController()
+    this.gitSetupAbort = setup
+    let gitPath: string | undefined
+    try {
+      gitPath = await ensureWindowsGit({
+        homeDir: this.homeDir,
+        env,
+        signal: setup.signal,
+        onSetup: (state) => this.setWindowsGitSetup(state)
+      })
+    } catch (error) {
+      if (!setup.signal.aborted) {
+        this.setWindowsGitSetup({ phase: 'failed', message: error instanceof Error ? error.message : String(error) })
+      }
+      throw error
+    } finally {
+      this.gitSetupAbort = undefined
+      if (this.gitSetup?.phase !== 'failed') this.setWindowsGitSetup(null)
+    }
+    this.assertMayConnect()
     mkdirSync(this.homeDir, { recursive: true })
     const ownerToken = createOwnerToken()
     const logPath = join(this.homeDir, 'mms-startup.log')
@@ -1165,7 +1201,7 @@ export class GuiMmsController extends EventEmitter {
         {
           detached: true,
           stdio: ['ignore', logFd, logFd],
-          env: { ...env, MOUSSE_HOME: this.homeDir, [DAEMON_OWNER_TOKEN_ENV]: ownerToken },
+          env: { ...withWindowsGitPath(env, gitPath), MOUSSE_HOME: this.homeDir, [DAEMON_OWNER_TOKEN_ENV]: ownerToken },
           windowsHide: true
         }
       )

@@ -19,6 +19,7 @@ import { useThreadsPeek } from './hooks/useThreadsPeek'
 import { ThreadSideCard } from './components/sideCard/ThreadSideCard'
 import { QuickActionEditorHost } from './components/QuickActionEditor'
 import { WorkspaceLoading } from './components/WorkspaceLoading'
+import type { WindowsGitSetup } from '../shared/windowsGit'
 
 import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { TitleBar } from './components/TitleBar'
@@ -195,6 +196,7 @@ export default function App() {
   const [resizing, setResizing] = useState<'main' | 'threads' | null>(null)
   const [bootstrapError, setBootstrapError] = useState<string | null>(null)
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0)
+  const [windowsGitSetup, setWindowsGitSetup] = useState<WindowsGitSetup>(null)
   const retryBootstrap = useCallback(() => setBootstrapAttempt((attempt) => attempt + 1), [])
   // A rail page that replaces the workspace hides the sidebar, so the peek stands down for it.
   const threadsPeek = useThreadsPeek(!threadsSidebarOpen && !railPageOpen)
@@ -206,6 +208,22 @@ export default function App() {
   }>({ kind: null, pointerId: null, clientX: null, frame: null })
   const sidebarRef = useRef<HTMLElement>(null)
   const threadsPaneRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (profileReady || window.mousse.platform !== 'win32') return
+    let live = true
+    let receivedUpdate = false
+    const unsubscribe = window.mousse.app.onWindowsGitSetupChanged((setup) => {
+      receivedUpdate = true
+      setWindowsGitSetup(setup)
+    })
+    void window.mousse.app.windowsGitSetup().then((setup) => {
+      if (live && !receivedUpdate) setWindowsGitSetup(setup)
+    }).catch(() => {})
+    return () => {
+      live = false
+      unsubscribe()
+    }
+  }, [profileReady])
   useEffect(() => {
     if (profileReady) return
     let disposed = false
@@ -596,6 +614,7 @@ export default function App() {
         {!profileReady && <WorkspaceLoading
           error={bootstrapError}
           onRetry={retryBootstrap}
+          windowsGitSetup={windowsGitSetup}
           sidebarWidth={threadsSidebarOpen ? threadsSidebarWidth : undefined}
         />}
 

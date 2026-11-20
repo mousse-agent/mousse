@@ -3084,6 +3084,14 @@ export function registerGuiIpc(
     llmProvider: settings.get().provider.llmProvider
   }))
 
+  registerHandler('app:windowsGitSetup', () => guiMms.windowsGitSetup)
+  guiMms.on('windows-git-setup', (setup: import('../../shared/windowsGit').WindowsGitSetup) => {
+    // This runs before any window has a profile binding.
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('app:windowsGitSetupChanged', setup)
+    }
+  })
+
   // Profile operations are installation metadata plus a trusted per-window
   // binding. The renderer supplies only an id/slug; daemon admission resolves
   // the owned profile root and changes the sender's session epoch.
