@@ -211,6 +211,7 @@ import {
   type OrchestratorSendInput,
   type PendingUserQuestions,
   type QueuedMessage,
+  type QueuedMessageWait,
   type Thread,
   type ThreadTitleSource,
   type ThreadSetupFailure,
@@ -10581,7 +10582,7 @@ export class OrchestratorService extends EventEmitter {
   getMessageQueue(threadId?: string): QueuedMessage[] {
     const id = threadId ?? this.getBoundThreadId()
     if (!id) return []
-    return listPendingQueue(this.getOrCreateSession(id).queue).filter((item) => !item.internal)
+    return this.withQueueWait(id, listPendingQueue(this.getOrCreateSession(id).queue).filter((item) => !item.internal))
   }
 
   listQueue(threadId: string): QueuedMessage[] {
@@ -10593,7 +10594,45 @@ export class OrchestratorService extends EventEmitter {
     this.settleNotices?.touch(threadId)
     // Every change sends the whole queue: images past a preview budget go by name and type (`withImageBudget`).
     const pending = withImageBudget(listPendingQueue(items).filter((item) => !item.internal))
-    this.emit('queue-updated', { threadId, items: pending })
+    const session = this.loadedSession(threadId)
+    if (session) session.queueWaitShown = this.queueWaitOf(session) ?? null
+    this.emit('queue-updated', { threadId, items: this.withQueueWait(threadId, pending) })
+  }
+
+  /**
+   * Why the thread's pending messages wait now (`QueuedMessage.waitsFor`): its last turn's reply shows complete but the
+   * turn is still finishing (its end checkpoint), or its next turn is being set up. Undefined otherwise.
+   */
+  private queueWaitOf(session: ThreadSession | undefined): QueuedMessageWait | undefined {
+    if (!session) return undefined
+    if (session.activeTurn) {
+      const phase = this.turnStates.get(session.threadId)?.phase
+      return phase === 'completed' || phase === 'failed' ? 'finish' : undefined
+    }
+    return session.setupStop ? 'setup' : undefined
+  }
+
+  /** The listed `items` with why they wait now. */
+  private withQueueWait(threadId: string, items: QueuedMessage[]): QueuedMessage[] {
+    const wait = this.queueWaitOf(this.loadedSession(threadId))
+    return items.map((item) => {
+      // A steer, or a message a Stop holds, waits for something else.
+      if (wait && item.state === 'pending' && item.intent === 'normal' && !item.heldAfterStop) return item.waitsFor === wait ? item : { ...item, waitsFor: wait }
+      if (!item.waitsFor) return item
+      const { waitsFor: _wait, ...rest } = item
+      return rest
+    })
+  }
+
+  /** Sends the queue again when why its messages wait changed (a turn starts finishing, or its setup starts or ends). */
+  private noteQueueWait(session: ThreadSession): void {
+    const wait = this.queueWaitOf(session) ?? null
+    if (wait === session.queueWaitShown) return
+    if (!listPendingQueue(session.queue).some((item) => !item.internal)) {
+      session.queueWaitShown = wait
+      return
+    }
+    this.emitQueueUpdated(session.threadId, session.queue)
   }
 
   private emitThreadMessages(threadId: string, messages: ChatMessage[], replace = false): void {
@@ -11201,7 +11240,7 @@ export class OrchestratorService extends EventEmitter {
       if ((error as { code?: unknown } | null)?.code === 'merge_back_pending') blocked = 'merge_back_pending'
     }
     return {
-      items: listPendingQueue(all).filter((item) => !item.internal),
+      items: this.withQueueWait(threadId, listPendingQueue(all).filter((item) => !item.internal)),
       claimed: listClaimedQueue(all).filter((item) => !item.internal),
       revision: queueRevision(all),
       open: blocked === undefined,
@@ -12592,6 +12631,7 @@ export class OrchestratorService extends EventEmitter {
     if (wasAborted) this.returnUnreadSteerItems(session, turn.pendingSteer)
     const hadUnreadSteers = !wasAborted && this.handOffUnreadSteers(session, turn)
     if (session.activeTurn === turn) session.activeTurn = null
+    this.noteQueueWait(session)
     // The agent asked to archive the thread when this turn ends.
     this.archiveAfterTurnEnds(session.threadId, turn.runId, wasAborted ? 'interrupted' : paused ? 'paused' : failed ? 'failed' : 'completed')
     // The turn's terminal write saw its unread steers and held the thread's tasks. They are queued as a
@@ -13678,6 +13718,7 @@ export class OrchestratorService extends EventEmitter {
       throw error
     } finally {
       session.setupStop = null
+      this.noteQueueWait(session)
       // A queue item that was never accepted stays on the queue and keeps its run queued.
       const requeued = turnResponse?.queued === true ||
         (opts?.queueItemId !== undefined && session.queue.some((item) => item.id === opts.queueItemId))
@@ -13813,6 +13854,7 @@ export class OrchestratorService extends EventEmitter {
     else opts?.externalSignal?.addEventListener('abort', abort, { once: true })
     this.activeTurn = turn
     session.setupStop = null
+    this.noteQueueWait(session)
     this.applyRequestedAbort(session, turn)
     // The thread runs again: what a Stop held in its queue goes on after this turn, as after any turn that ends.
     if (!turn.abort.signal.aborted) this.releaseStopHold(session)
@@ -13980,6 +14022,7 @@ export class OrchestratorService extends EventEmitter {
     // turn before it started.
     const setupStop = new AbortController()
     session.setupStop = setupStop
+    this.noteQueueWait(session)
     const setupSignal = opts?.externalSignal ? AbortSignal.any([opts.externalSignal, setupStop.signal]) : setupStop.signal
     // A turn that cannot start now runs later, in its place: a claimed item goes back where it was
     // (never a replacement at the tail); anything else is queued with its run.
@@ -14445,6 +14488,7 @@ export class OrchestratorService extends EventEmitter {
     this.activeTurn = turn
     // From here a Stop aborts the turn itself.
     session.setupStop = null
+    this.noteQueueWait(session)
     this.applyRequestedAbort(session, turn)
     // The thread runs again: what a Stop held in its queue goes on after this turn, as after any turn that ends.
     if (!turn.abort.signal.aborted) this.releaseStopHold(session)
@@ -15605,6 +15649,8 @@ export class OrchestratorService extends EventEmitter {
       this.setTurnPhase(session.threadId, 'completed')
       this.markRun(engineRunId, (engine, id) => engine.markFinalizing(id))
     }
+    // The reply shows complete: a message queued now waits for the turn to finish, and says so.
+    this.noteQueueWait(session)
     // A subagent that edits its parent's folder: the folder as its turn ended, recorded while the run is still
     // finalizing, so its parent's result never comes without it.
     const sharedWriter = engineRunId ? this.sharedWriterOf(engineRunId) : undefined
