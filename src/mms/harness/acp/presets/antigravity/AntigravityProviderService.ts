@@ -31,6 +31,12 @@ const FEED_TTL_MS = 6 * 60 * 60_000
 /** How long a lookup of the user's own `agy` is reused: it is asked for on every status read. */
 const USER_AGY_TTL_MS = 15_000
 
+/**
+ * Under test, nothing outside the test is reached: no `agy` of this computer and no feed. A test
+ * runner started through vitest's Node API leaves `NODE_ENV` unset, so its worker flag counts too.
+ */
+const underTest = (): boolean => process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST)
+
 export const ANTIGRAVITY_PROVIDER_ID = 'antigravity'
 type ProfileSettings = {
   /**
@@ -74,6 +80,8 @@ export interface AntigravityServiceOptions {
    * gateway's lookup; tests pass their own, and without either none is found under test.
    */
   findUserAgy?: () => string | undefined
+  /** Test seam: use the gateway's lookup (`useAgyFinder`) under test too, as it is used in production. */
+  gatewayLookupUnderTest?: boolean
   /** Test seam: runs `agy -p /usage` (the process boundary of the limits read). */
   runAgy?: AgyRunner
   /** Test seams for Mousse's own `agy`: the target, the network, the start-up check and the clock. */
@@ -246,8 +254,10 @@ export class AntigravityProviderService {
   private userAgy(): string | undefined {
     const now = Date.now()
     if (!this.userAgyFound || now - this.userAgyFound.at > USER_AGY_TTL_MS) {
-      const find = this.options.findUserAgy ?? this.agyFinder ?? (process.env.NODE_ENV === 'test' ? () => undefined
-        : () => findOnPath(cliNames('agy'), { env: process.env, searchPath: agyStandalonePaths() }))
+      // Under test only a lookup the test hands in runs: never this computer's own agy.
+      const lookup = underTest() && !this.options.gatewayLookupUnderTest ? undefined
+        : this.agyFinder ?? (() => findOnPath(cliNames('agy'), { env: process.env, searchPath: agyStandalonePaths() }))
+      const find = this.options.findUserAgy ?? lookup ?? (() => undefined)
       let path: string | undefined
       try { path = find() } catch { path = undefined }
       const before = this.userAgyFound?.path
@@ -694,7 +704,7 @@ export class AntigravityProviderService {
     const clock = this.options.native?.now ?? Date.now
     if (!now && this.feed && clock() - this.feed.at < FEED_TTL_MS) return Promise.resolve(this.feed.value)
     if (this.feedReading) return this.feedReading
-    const fetchFile = this.options.native?.fetch ?? (process.env.NODE_ENV === 'test' ? undefined : fetch)
+    const fetchFile = this.options.native?.fetch ?? (underTest() ? undefined : fetch)
     if (!fetchFile) return Promise.resolve(undefined)
     const before = this.feed?.value?.version
     this.feedReading = readVendorFeed(`${NATIVE_FEED_BASE}/${target}.json`, fetchFile)

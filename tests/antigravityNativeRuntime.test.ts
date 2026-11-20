@@ -88,6 +88,8 @@ interface Setup {
   feed?: string
   home?: string
   signedOut?: boolean
+  /** Use the gateway's lookup handed in by the driver, as in production. */
+  gatewayLookup?: boolean
 }
 
 function setup(options: Setup = {}) {
@@ -117,8 +119,9 @@ function setup(options: Setup = {}) {
   const service = new AntigravityProviderService(home, home, new UserQuestionService(), versions, {
     launch: () => launch, saveLaunch,
     connect: () => agentProcess(requests, agent) as never,
-    // Without one, no agy is found under test until the driver hands in the gateway's lookup.
+    // Without one, no agy is found under test; the gateway's lookup runs only where a test opts in.
     ...(options.userAgy ? { findUserAgy: () => userAgy } : {}),
+    ...(options.gatewayLookup ? { gatewayLookupUnderTest: true } : {}),
     native: {
       target: 'windows_amd64', fetch: fetchFile as unknown as typeof fetch,
       verify: async (binary) => ({ name: NATIVE_AGENT_NAME, version: readFileSync(binary, 'utf8').replace('agy ', '') })
@@ -224,8 +227,7 @@ describe('which Antigravity runs', () => {
   })
 
   it('finds the user\'s agy the way the gateway does once the driver created the runtime', async () => {
-    const { service, driver, paths } = setup()
-    expect((await service.cliConfig()).resolvedBinaryPath).toBeUndefined()
+    const { service, driver, paths } = setup({ gatewayLookup: true })
     runtimeOf(driver, () => paths.userAgy)
     expect((await service.cliConfig()).resolvedBinaryPath).toBe(paths.userAgy)
   })
