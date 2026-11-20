@@ -6,7 +6,7 @@
 import { existsSync, lstatSync, readFileSync } from 'fs'
 import { readFile } from 'fs/promises'
 import { basename, dirname, join } from 'path'
-import { sharedThreadDbClient } from './threadDb/threadDbClient'
+import { sharedThreadDbClient, threadDbWriteCount } from './threadDb/threadDbClient'
 import { THREAD_DB_FILE } from './threadDb/threadDbEngine'
 import { stampOf } from './threadDb/threadIndex'
 
@@ -88,8 +88,9 @@ export function readThreadLifecycleRecordsSync(location: string): {
 } {
   const stat = lstatSync(join(location, THREAD_DB_FILE))
   if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('Thread database is not a regular file')
-  // Taken before the read: a write during or after it gives the next pass a different stamp.
-  const stamp = stampOf(location)
+  // Taken before the read: a write during or after it gives the next pass a different stamp. This process's own writes
+  // are counted too, whatever the file system's time resolution (`threadDbWriteCount`).
+  const stamp = `${stampOf(location)}|${threadDbWriteCount(location)}`
   let text = lifecycleRecordsCache.get(location)
   if (text?.stamp !== stamp) {
     lifecycleRecordReads.count += 1
