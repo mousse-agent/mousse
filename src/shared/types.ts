@@ -1868,6 +1868,14 @@ export type TurnStep =
    * nothing back in time (its own retry, outside the attempt count).
    */
   | { kind: 'retrying'; attempt: number; maxAttempts?: number; delayMs?: number; noResponse?: true }
+  /** The turn is not started yet: its setup does `what` (shown with phase `queued`), once that has taken a moment. */
+  | { kind: 'preparing'; what: TurnSetupStep }
+
+/**
+ * A step of a turn's setup that can take long: checking the thread's worktree, making it, making it again from its
+ * snapshot, or recording its files before the turn (each may wait for other work on the same repository).
+ */
+export type TurnSetupStep = 'check' | 'worktree' | 'restore' | 'snapshot'
 
 export function isTurnActivePhase(phase: TurnPhase): boolean {
   return phase === 'queued' || phase === 'thinking' || phase === 'streaming' || phase === 'tool_running' || phase === 'finalizing'

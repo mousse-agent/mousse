@@ -130,6 +130,23 @@ describe('the line under Working', () => {
     expectLive('Starting…')
   })
 
+  it("1. a slow step of the turn's setup, before the agent starts: its name, with the thinking icon Starting… has", () => {
+    for (const [what, label] of [
+      ['worktree', 'Creating worktree…'],
+      ['check', 'Checking worktree…'],
+      ['restore', 'Restoring worktree…'],
+      ['snapshot', 'Taking snapshot…']
+    ] as const) {
+      render([ask()], 'submitted', { phase: 'queued', step: { kind: 'preparing', what } })
+      expectLive(label)
+      expect(line()!.title).not.toBe('')
+      expect(line()!.querySelector('svg.thinking-icon')).not.toBeNull()
+    }
+    // A step from a newer service this window does not know yet: the line of a turn not started yet.
+    render([ask()], 'submitted', { phase: 'queued', step: { kind: 'preparing', what: 'something-new' } as never })
+    expectLive('Starting…')
+  })
+
   it('1. the runtime, its tools and Skills being set up: Starting…, what starts in the tooltip', () => {
     render([ask()], 'streaming', { phase: 'thinking', step: { kind: 'starting' } })
     expectLive('Starting…')
