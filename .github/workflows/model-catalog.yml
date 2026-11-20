@@ -1,0 +1,82 @@
+name: Model catalog
+
+# Publishes src/mms/models/models.json as models-1.json on the `models` release, with its Ed25519
+# signature models-1.json.sig (docs/providers/model-catalog.md, "Publishing"). Started by hand from
+# master. The model-catalog environment's required reviewer approves the run before the job starts
+# and its signing key is read.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-catalog
+  cancel-in-progress: false
+
+env:
+  GH_REPO: ${{ github.repository }}
+  TAG: models
+  ASSET: models-1.json
+
+jobs:
+  publish:
+    name: Publish the model catalog
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: model-catalog
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.20.0'
+          cache: npm
+      - run: npm ci
+      - name: Validate the catalog
+        run: npx vitest run tests/modelCatalogBundled.test.ts
+      - name: Copy the catalog
+        run: mkdir -p publish && cp src/mms/models/models.json "publish/$ASSET"
+      - name: The revision is higher than the published one, or the bytes are identical
+        run: |
+          status=$(curl --silent --show-error --location --retry 3 --output published.json --write-out '%{http_code}' \
+            "https://github.com/$GH_REPO/releases/download/$TAG/$ASSET")
+          if [ "$status" = 404 ]; then
+            echo "Nothing is published yet."
+          elif [ "$status" = 200 ]; then
+            node scripts/check-model-catalog-revision.mjs --published published.json "publish/$ASSET"
+          else
+            echo "::error::Fetching the published catalog answered HTTP $status."
+            exit 1
+          fi
+      - name: Sign and verify
+        env:
+          MODEL_CATALOG_SIGNING_KEY: ${{ secrets.MODEL_CATALOG_SIGNING_KEY }}
+        run: node scripts/sign-model-catalog.mjs "publish/$ASSET"
+      - name: Create the models release once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            gh release create "$TAG" --prerelease --latest=false --target "$GITHUB_SHA" --title "Model catalog" \
+              --notes "Mousse's model catalog (docs/providers/model-catalog.md). Not an app release."
+          fi
+      - name: The models release is a prerelease
+        # A normal release would become "latest", and stable builds would then look for
+        # latest.yml on it and fail to update.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=$(gh release view "$TAG" --json isPrerelease,isDraft --jq 'select(.isDraft | not) | .isPrerelease')
+          if [ "$prerelease" != true ]; then
+            echo "::error::The $TAG release must be a published prerelease. Mark it as a prerelease, not latest, then run this again."
+            exit 1
+          fi
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "publish/$ASSET" "publish/$ASSET.sig" --clobber

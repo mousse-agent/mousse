@@ -16,6 +16,8 @@ The nightly compares `master` with the commit of the newest nightly release. Wit
 
 The newest 10 nightlies are kept; older ones and their tags are deleted.
 
+The `models` release is not an app build: it holds the model catalog, published by `model-catalog.yml` (see [the model catalog](providers/model-catalog.md#publishing)). It must stay a prerelease that is never marked latest, or stable builds would look for their update file on it.
+
 macOS gets two disk images: `arm64` for Apple silicon and `x64` for Intel Macs. Without a Developer ID certificate they are ad-hoc signed and not notarized, so macOS blocks the first launch: open Mousse once, then choose **Open Anyway** in System Settings → Privacy & Security. Its `mousse-cli` is inside the app at `Mousse.app/Contents/Resources/mousse-cli`.
 
 ## The app version
