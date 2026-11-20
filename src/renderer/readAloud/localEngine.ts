@@ -5,7 +5,7 @@ import type { SpeakOptions } from './playback'
 import { createLevelMeter } from '../speech/audioLevels'
 import { serveModelFiles } from '../speechModels/pageSupport'
 import { NativeTtsSlot, nativeKokoroUnavailable, type TtsWorker } from './nativeSlot'
-import { spokenShortForms } from './shortForms'
+import { spokenShortForms, spokenShortFormsIfEnglish } from './shortForms'
 import { splitSpeechSegments, type SpeechSegment } from './speechText'
 
 /**
@@ -145,11 +145,13 @@ export function disposeLocalEngine(reason = 'The voice model was unloaded while 
 }
 
 /**
- * The segments `model` voices for `text`. Short forms are written out first, except for the
- * Pocket voices of other languages, so segment lengths count what is actually said.
+ * The segments `model` voices for `text`. Short forms are written out first, so segment lengths
+ * count what is actually said: always for the English voices, never for the Pocket voices of other
+ * languages, and for Supertonic, which speaks many languages, only when the text looks English.
  */
 function segmentsFor(model: LocalTtsModel, text: string): SpeechSegment[] {
   if (model.runtime === 'pocket' && model.language !== 'en') return splitSpeechSegments(text)
+  if (model.runtime === 'supertonic') return splitSpeechSegments(spokenShortFormsIfEnglish(text))
   return splitSpeechSegments(spokenShortForms(text, { espeak: model.runtime === 'kokoro' || model.runtime === 'kitten' }))
 }
 

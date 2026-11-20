@@ -4,10 +4,12 @@
  *
  * Capital-letter initialisms without a vowel (PR, MCP, NPM, HTML) are spelled by rule and need no
  * entry. Initialisms that are said as a word (JSON, WASM, RAM, YAML, REST) and shouted words
- * (STOP, NOTE, TODO, OK) need none either: they are left alone.
+ * (STOP, NOTE, TODO, OK) need none either: they are left alone. Voices that read through espeak
+ * (Kokoro, Kitten) already say most initialisms right as written, so for them only
+ * `ESPEAK_SPELLED` is spelled.
  */
 
-/** Capital-letter initialisms with a vowel that are spelled letter by letter. Plurals ("APIs") follow. */
+/** Capital-letter initialisms with a vowel that are spelled letter by letter. */
 export const SPELLED_INITIALISMS: readonly string[] = [
   'AI', 'API', 'AWS', 'CI', 'CLI', 'CPU', 'EOF', 'ETA', 'EU', 'FAQ', 'GPU', 'GUI', 'ID', 'IDE', 'IO', 'IP', 'IPC',
   'OCR', 'OS', 'OSS', 'PII', 'PID', 'PTY', 'QA', 'SEO', 'SSO', 'TTY', 'UI', 'URI', 'URL', 'USB', 'UTC', 'UTF', 'UUID',
@@ -17,9 +19,12 @@ export const SPELLED_INITIALISMS: readonly string[] = [
 /** Capital words without a vowel that are said as they are, not spelled. */
 export const NOT_SPELLED: readonly string[] = ['BRR', 'GRR', 'HMM', 'HMMM', 'MMM', 'PFFT', 'PSST', 'SHH', 'SHHH', 'TSK', 'ZZZ']
 
+/** The initialisms espeak reads as a word ("ETA" as "eta"), spelled for espeak voices. */
+export const ESPEAK_SPELLED: readonly string[] = ['ETA', 'GUI', 'URI', 'URL']
+
 /**
  * Short forms said as words. Keys match whole words in any letter case, except keys marked
- * `exactCase`, which match only as written (so "VS Code" and the `nvm` tool are left alone).
+ * `exactCase`, which match only as written (so "VS Code" is left alone).
  */
 export const SAID_AS: Readonly<Record<string, string | { say: string; exactCase: true }>> = {
   idk: "I don't know",
@@ -34,7 +39,6 @@ export const SAID_AS: Readonly<Record<string, string | { say: string; exactCase:
   wip: 'work in progress',
   'tl;dr': 'T L D R',
   tldr: 'T L D R',
-  NVM: { say: 'never mind', exactCase: true },
   'e.g.': 'for example',
   'i.e.': 'that is',
   'etc.': 'et cetera',
@@ -47,6 +51,7 @@ export const SAID_AS: Readonly<Record<string, string | { say: string; exactCase:
   l10n: 'localization',
   a11y: 'accessibility',
   k8s: 'Kubernetes',
+  ctrl: 'control',
   stdin: 'standard in',
   stdout: 'standard out',
   stderr: 'standard error'

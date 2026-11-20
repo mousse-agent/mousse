@@ -1,7 +1,7 @@
 import { PROVIDER_TTS_MAX_CHARS, type ProviderSpeechResult } from '../../shared/readAloud'
 import type { SpeakOptions } from './playback'
 import { createLevelMeter } from '../speech/audioLevels'
-import { spokenShortForms } from './shortForms'
+import { spokenShortFormsIfEnglish } from './shortForms'
 import { splitSpeechChunks } from './speechText'
 
 export type { SpeakOptions } from './playback'
@@ -111,7 +111,7 @@ export function speakWithProvider(
   options: SpeakOptions
 ): Promise<void> {
   return playChunks(
-    splitSpeechChunks(spokenShortForms(text), PROVIDER_TTS_MAX_CHARS),
+    splitSpeechChunks(spokenShortFormsIfEnglish(text), PROVIDER_TTS_MAX_CHARS),
     (chunk) =>
       window.mousse.readAloud.synthesizeWithProvider({
         providerId,

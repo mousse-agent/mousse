@@ -126,6 +126,14 @@ describe('splitSpeechSegments', () => {
     ).toEqual(['Sure. The read aloud button now starts speaking much sooner,', 'because the voice model runs natively instead of in WebAssembly.'])
   })
 
+  it('drops a dash at a cut, so no part ends on a dangling dash', () => {
+    expect(texts(splitSpeechSegments('Loading the model takes a little while - about a second on most computers - and then the first part plays.'))).toEqual([
+      'Loading the model takes a little while,',
+      'about a second on most computers,',
+      'and then the first part plays.'
+    ])
+  })
+
   it('joins short sentences into the first segment', () => {
     expect(texts(splitSpeechSegments('Hi there. This is short. And so on. But this last one is too long for the first.'))).toEqual([
       'Hi there. This is short. And so on.',
@@ -156,19 +164,27 @@ describe('splitSpeechSegments', () => {
     expect(stall).toBe(0)
   })
 
-  it('starts a typical three-paragraph reply soon, without stalling later', () => {
-    const reply = [
-      'Sure. The read aloud button now starts speaking much sooner, because the voice model runs natively instead of in WebAssembly.',
-      'When you stop a read, the old engine is replaced right away, so the next read does not wait behind it. The replacement loads the model in the background, which takes about a second.',
-      'The first segment is kept short so the first sound arrives in about two seconds. Later segments grow, and synthesis stays ahead of playback for the rest of the reply.'
-    ].join('\n\n')
+  const TYPICAL_REPLY = [
+    'Sure. The read aloud button now starts speaking much sooner, because the voice model runs natively instead of in WebAssembly.',
+    'When you stop a read, the old engine is replaced right away, so the next read does not wait behind it. The replacement loads the model in the background, which takes about a second.',
+    'The first segment is kept short so the first sound arrives in about two seconds. Later segments grow, and synthesis stays ahead of playback for the rest of the reply.'
+  ].join('\n\n')
+  it.each([
+    // The first sound in seconds, modelled: the native engine on two slots.
+    ['a typical three-paragraph reply', TYPICAL_REPLY, 3.5],
+    ['a short opener before a sentence without a clause break', 'Good question. The short answer is that the queue drains before the next turn starts. Nothing else waits.', 2.5],
+    [
+      'a long first sentence without a clause break',
+      'The read aloud engine now keeps every part of a long opening sentence together for the listener to follow. More follows here.',
+      2.6
+    ]
+  ])('starts %s soon, without stalling later', (_name, reply, seconds) => {
     const segments = texts(splitSpeechSegments(reply))
     const { firstAudio, hold, stall } = modelledStart(segments)
-    expect(firstAudio).toBeLessThan(3.5)
+    expect(firstAudio).toBeLessThan(seconds)
     expect(hold).toBeLessThanOrEqual(0.5)
     expect(stall).toBe(0)
-  })
-})
+  })})
 
 describe('splitSentences', () => {
   it.each([
@@ -176,6 +192,7 @@ describe('splitSentences', () => {
     ['Open speechText.ts and v1.2 now. Next.', ['Open speechText.ts and v1.2 now.', 'Next.']],
     ['Fruit, e.g. apples, i.e. food. Next.', ['Fruit, e.g. apples, i.e. food.', 'Next.']],
     ['Ask Dr. Smith or Ms. Jones. Next.', ['Ask Dr. Smith or Ms. Jones.', 'Next.']],
+    ['It took 30 ms. The next one.', ['It took 30 ms.', 'The next one.']],
     ['Apples, pears, etc. are fine. Next.', ['Apples, pears, etc. are fine.', 'Next.']],
     ['Apples, pears, etc. Then more.', ['Apples, pears, etc.', 'Then more.']],
     ['Wait... Really? Yes! (Done.) Next', ['Wait...', 'Really?', 'Yes!', '(Done.)', 'Next']]

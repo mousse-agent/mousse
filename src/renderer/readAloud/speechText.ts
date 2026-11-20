@@ -105,7 +105,9 @@ export function markdownToSpeechText(markdown: string): string {
 // ---------------------------------------------------------------------------------------------
 
 /** Words (lowercase, without their final period) whose period never ends a sentence. */
-const ABBREVIATIONS = new Set(['e.g', 'i.e', 'mr', 'mrs', 'ms', 'dr', 'prof', 'vs', 'cf', 'approx'])
+const ABBREVIATIONS = new Set(['e.g', 'i.e', 'vs', 'cf', 'approx'])
+/** Titles whose period never ends a sentence when they are capitalized; `30 ms.` still does. */
+const TITLES = new Set(['Mr', 'Mrs', 'Ms', 'Dr', 'Prof'])
 /** A sentence mark with its closing quotes or brackets, before a space or the end of the text. */
 const SENTENCE_MARK = /[.!?…]+["'’”)\]]*(?=\s|$)/g
 
@@ -114,12 +116,12 @@ const SENTENCE_MARK = /[.!?…]+["'’”)\]]*(?=\s|$)/g
  * "Dr.") never does. After "etc." or a word with dots in it ("a.m.", "notes.md"), it does only
  * before a capital letter or the end of the text.
  */
-function endsSentence(text: string, at: number, mark: string): boolean {
+export function endsSentence(text: string, at: number, mark: string): boolean {
   if (!mark.startsWith('.') || mark.startsWith('..')) return true
   const word = /([A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*)$/.exec(text.slice(0, at))?.[1]
   if (!word) return true
   const lower = word.toLowerCase()
-  if (ABBREVIATIONS.has(lower)) return false
+  if (ABBREVIATIONS.has(lower) || TITLES.has(word)) return false
   if (lower !== 'etc' && !word.includes('.')) return true
   const next = text.slice(at + mark.length).trimStart()
   return next === '' || /^["'“‘(]?[A-Z]/.test(next)
@@ -184,16 +186,22 @@ function clauseCut(sentence: string, max: number, target: number): number | null
 const PHRASE_STARTS =
   /\s(?=(?:the|a|an|to|of|in|on|at|for|with|from|by|into|about|after|before|during|without|that|this|these|those|its|their|his|her|our|your|my|who|what|how|why)\s)/gi
 
+/** A cut before a phrase word is taken only this close to the target length. */
+const PHRASE_SLACK = 15
+
 /**
- * A cut at a clause when there is one, else before a word that starts a phrase ("the", "of"), else
- * between the words nearest `target`, else at `max`.
+ * A cut at a clause when there is one, else before a word that starts a phrase ("the", "of") within
+ * `PHRASE_SLACK` of `target`, else between the words nearest `target`, else at `max`.
  */
 function cutAt(sentence: string, max: number, target: number): number {
   const clause = clauseCut(sentence, max, target)
   if (clause !== null) return clause
   const spaces = (pattern: RegExp): number[] =>
     [...sentence.matchAll(pattern)].map((match) => match.index).filter((at) => at > 0 && sentence.slice(0, at).trim().length <= max)
-  const phrases = spaces(PHRASE_STARTS).filter((at) => at >= MIN_CLAUSE_CHARS)
+  const phrases = spaces(PHRASE_STARTS).filter((at) => {
+    const head = sentence.slice(0, at).trim().length
+    return head >= MIN_CLAUSE_CHARS && Math.abs(head - target) <= PHRASE_SLACK
+  })
   return nearest(sentence, phrases.length > 0 ? phrases : spaces(/\s+/g), target) ?? max
 }
 
@@ -264,7 +272,7 @@ export const FIRST_SEGMENT_CHARS = 40
  * A first sentence longer than `FIRST_SEGMENT_CHARS` is cut at a clause near that length, or
  * kept whole when it has no clause break and fits in this.
  */
-export const FIRST_SENTENCE_CHARS = 80
+export const FIRST_SENTENCE_CHARS = 66
 /** A shorter first segment still sizes the next ones as if it were this long. */
 const MIN_FIRST_SEGMENT_CHARS = 30
 /** Later segments grow from this size to the largest one. */
@@ -288,7 +296,7 @@ const keepGoing = (text: string): string => (/[.!?…,;:—–-]["'’”)\]]*$/
  * Whole sentences stay together whenever they fit. The first segment takes whole sentences up to
  * `FIRST_SEGMENT_CHARS`; a longer first sentence, or a short opener such as "Sure." followed by a
  * long one, is cut at the clause nearest that length within `FIRST_SENTENCE_CHARS`, else kept
- * whole when it fits there. Each later segment k may be `min(MAX_SEGMENT_CHARS, 100 × 1.25^k,
+ * whole when it fits there, else cut between words near that length. Each later segment k may be `min(MAX_SEGMENT_CHARS, 100 × 1.25^k,
  * L0 × 1.5^k)` long, where L0 is the first segment's length (at least 30): growing by 1.5× at most
  * keeps synthesis ahead of playback from the first clip on. Only a sentence longer than its
  * segment is cut, at a clause when it has one, else between words; a cut part ends with a comma,
@@ -319,19 +327,21 @@ export function splitSpeechSegments(text: string): SpeechSegment[] {
     let endsMidSentence = false
     const sentence = sentences[next]
     // Takes the part of the sentence before `at`; the rest starts the next segment.
+    // A dash at the cut is dropped; the comma that ends the part takes its place.
     const take = (at: number): void => {
-      body = joined(keepGoing(sentence.text.slice(0, at).trim()))
+      body = joined(keepGoing(sentence.text.slice(0, at).trim().replace(/\s*[-–—]$/, '')))
       sentences[next] = { text: sentence.text.slice(at).trim(), startsMidSentence: true }
       endsMidSentence = true
     }
     if (sentence && index === 0 && body.length < FIRST_SEGMENT_CHARS / 2) {
-      // An opener alone would make a tiny first clip that the next one cannot keep up with.
+      // An opener alone would make a tiny first clip that the next one cannot keep up with, so it
+      // takes the next sentence along, or the start of it.
       const offset = body ? body.length + 1 : 0
       const room = FIRST_SENTENCE_CHARS - offset - 1
       const clause = clauseCut(sentence.text, room, FIRST_SEGMENT_CHARS - offset)
       if (clause !== null) take(clause)
       else if (offset + sentence.text.length <= FIRST_SENTENCE_CHARS) body = joined(sentences[next++].text)
-      else if (!body) take(cutAt(sentence.text, room, FIRST_SEGMENT_CHARS))
+      else take(cutAt(sentence.text, room, FIRST_SEGMENT_CHARS - offset))
     } else if (sentence && !body) {
       // One character is kept free for the comma that ends the cut part.
       take(cutAt(sentence.text, pack - 1, pack - 1))

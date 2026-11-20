@@ -643,11 +643,15 @@ describe('local read aloud with more than one model', () => {
 
 describe('what local read aloud hands the voice', () => {
   it('writes short forms out for English voices and leaves them for other languages', async () => {
+    // Kokoro reads through espeak, which says "PR" right as written.
     await finishRead(startRead('IDK, the PR is fine.'))
-    expect(engines[0].speakRequests().map((request) => request.text)).toEqual(["I don't know, the P R is fine."])
+    expect(engines[0].speakRequests().map((request) => request.text)).toEqual(["I don't know, the PR is fine."])
+
+    await finishRead(startRead('IDK, the PR is fine.', new AbortController(), 'supertonic-3'))
+    expect(workers()[0].speakRequests().map((request) => request.text)).toEqual(["I don't know, the P R is fine."])
 
     await finishRead(startRead('IDK, the PR is fine.', new AbortController(), 'pocket-tts-fr'))
-    expect(workers()[0].speakRequests().map((request) => request.text)).toEqual(['IDK, the PR is fine.'])
+    expect(workers()[1].speakRequests().map((request) => request.text)).toEqual(['IDK, the PR is fine.'])
   })
 
   it('tells the voice where a sentence was cut and joins its parts without the pause between sentences', async () => {
