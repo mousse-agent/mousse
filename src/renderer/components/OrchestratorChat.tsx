@@ -1467,6 +1467,19 @@ export function OrchestratorChat() {
     const firstPromptIn = new Set<string | null>([activeThreadId])
     // What was typed while the row's frame was drawn (the composer is not locked yet): kept when the send clears it.
     let typedMeanwhile = ''
+    // On a thread already made, what was typed after the click while the send was still being prepared (references,
+    // files, a command, the model it runs on): the clear keeps it as the start of the next message.
+    const typedSince = () => startingBlank ? '' : typedAfterSend(input, useAppStore.getState().composerDrafts[activeThreadId ?? '__blank__'] ?? '')
+    let keptTyped = ''
+    const clearSent = (releaseUrls?: boolean) => {
+      keptTyped = typedSince()
+      clearComposer(releaseUrls)
+      if (keptTyped) setInput(keptTyped)
+    }
+    // A message that did not go comes back to the composer: ahead of what the clear kept, as the draft was; never over
+    // a message typed since.
+    const unsentText = (current: string, sent: string) =>
+      !current || current === sent ? input : keptTyped && current === keptTyped ? input + keptTyped : current
     try {
     // The thread this send starts is listed now, before anything below awaits: the sidebar paints its row in the next
     // frame, named from the prompt and Working, and the thread's own row takes its place when the service lists it.
@@ -1534,11 +1547,11 @@ export function OrchestratorChat() {
     let goalToAdopt: string | undefined
     if (command) {
       if (command.kind === 'done') {
-        setInput('')
+        setInput(typedSince())
         return
       }
       if (command.kind === 'info') {
-        setInput('')
+        setInput(typedSince())
         if (stillVisible()) setCommandInfo(command.message)
         return
       }
@@ -1558,7 +1571,7 @@ export function OrchestratorChat() {
       // Steer (Ctrl/Cmd+Enter) during a run: the text goes into the running turn instead of the queue. The composer
       // clears at once, as a send does: what is typed while this steer is on its way is the next message, and a clear
       // when the steer answers would wipe it.
-      clearComposer(false)
+      clearSent(false)
       const steerThread = activeThreadId
       const seenBefore = new Set(useAppStore.getState().messages.map((message) => message.id))
       // It shows in the reply at once, as sent, until the copy the service writes there arrives.
@@ -1587,7 +1600,7 @@ export function OrchestratorChat() {
             if (!stillVisible()) return
             if (outcome === 'missing') {
               setSendError(STEER_NOT_ARRIVED)
-              setInput((current) => current || input)
+              setInput((current) => unsentText(current, trimmed))
             } else if (outcome === 'arrived') {
               setSendError(null)
               releaseComposerUrls()
@@ -1623,7 +1636,7 @@ export function OrchestratorChat() {
       if (steerShown) queue.endComposerSteer(steerShown, false)
       const answered = card.answerWithMessage(text, images)
       if (!answered) {
-        clearComposer()
+        clearSent()
         return
       }
       const outcome = await window.mousse.orchestrator.answerQuestionsDetailed(
@@ -1634,7 +1647,7 @@ export function OrchestratorChat() {
       )
       setPendingQuestions((current) => (current?.requestId === asked.requestId ? null : current))
       if (outcome.ok) {
-        clearComposer()
+        clearSent()
         return
       }
       // Another client answered first or the request was closed: say so and keep the message.
@@ -1769,12 +1782,12 @@ export function OrchestratorChat() {
     // Clear only after we accept the send/queue path (control commands already cleared above).
     // A skill chip attached in the composer applies to this prompt only —
     // the global chat mode is left untouched.
-    clearComposer(false)
+    clearSent(false)
     // Thread preparation is complete. The send promise lasts for the entire
     // first turn, so it must not keep typing, queueing, or Stop disabled.
     releaseWorkspacePending()
     const restoreUnsent = () => {
-      setInput((current) => current === text || !current ? input : current)
+      setInput((current) => unsentText(current, text))
       setAttachedFiles((current) => [...attachedFiles, ...current])
       setVoiceMessages((current) => [...voiceMessages, ...current])
       browserElements.forEach((element) => useAppStore.getState().addBrowserElementAttachment(targetThreadId, element))
