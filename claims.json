@@ -89,6 +89,19 @@
       "expiresAt": "2026-11-20T12:55:12.525Z"
     },
     {
+      "task": "fix-new-thread-stuck-starting",
+      "session": "Animatrix-a49ec5",
+      "machine": "Animatrix",
+      "branch": "fix-new-thread-stuck-starting",
+      "paths": [
+        "src/mms/harness/drivers/acp/adapter.ts",
+        "src/mms/harness/drivers/cursor/adapter.ts",
+        "tests/run/nativeAdapters.test.ts"
+      ],
+      "claimedAt": "2026-11-20T11:15:48.246Z",
+      "expiresAt": "2026-11-20T13:15:48.246Z"
+    },
+    {
       "task": "fix-subagent-optimistic-working",
       "session": "Animatrix-6036c7",
       "machine": "Animatrix",
