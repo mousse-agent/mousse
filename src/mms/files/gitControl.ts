@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { realPathOrAncestor } from './realPath'
 import { mousseGitEnv } from '../git/gitEnv'
 import { assertGitAllowed } from '../git/gitPolicy'
+import { timeGitChild } from '../diagnostics/turnBoundary'
 
 /**
  * What a repository reads that can run programs and that lies in the working tree, as real paths:
@@ -35,7 +36,7 @@ function runGit(root: string, args: string[]): Promise<GitRun> {
     // Run in the folder rather than with `-C`, which the central check refuses; a missing folder is Git's "not a repository".
     if (!existsSync(root)) return resolveRun({ status: 128, stdout: '', missing: false })
     assertGitAllowed({ cwd: root, args })
-    execFile(
+    timeGitChild(() => execFile(
       'git',
       args,
       {
@@ -54,7 +55,7 @@ function runGit(root: string, args: string[]): Promise<GitRun> {
         if (typeof failure.code === 'number' && !failure.killed) return resolveRun({ status: failure.code, stdout, missing: false })
         reject(error)
       }
-    )
+    ))
   })
 }
 

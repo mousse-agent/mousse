@@ -4,6 +4,7 @@ import { GIT_NULL_DEVICE } from '../../git/gitNullDevice'
 import { assertGitAllowed, type UserAction } from '../../git/gitPolicy'
 import { HOOK_EVENTS } from '../../git/repoPrograms'
 import { NetError } from '../../../shared/net'
+import { timeGitChild } from '../../diagnostics/turnBoundary'
 
 const remoteConfiguration = new Set([
   'GIT_CONFIG_GLOBAL',
@@ -60,7 +61,7 @@ function runGit(
       reject(error)
       return
     }
-    execFile(
+    timeGitChild(() => execFile(
       'git',
       [...safety, ...args],
       {
@@ -78,7 +79,7 @@ function runGit(
           )
         else resolve(stdout.trim())
       }
-    )
+    ))
   })
 }
 
