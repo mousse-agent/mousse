@@ -63,6 +63,8 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
     mirrorsVendorFile: true,
     // Sign-in and sign-out run in Mousse, whichever executable runs.
     ownsSignIn: true,
+    // Chat titles, pull request drafts and commit messages: one prompt in a session of its own (`service.oneShot`).
+    oneShot: true,
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     caps: () => ANTIGRAVITY_CAPS,
     updateCommand: () => undefined,
@@ -108,6 +110,7 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
         managed: () => service.managedRuntime(),
         validateOverride: (path) => void manualAntigravityRuntime(path),
         forgetConversation: (threadId) => service.forgetConversation(threadId),
+        oneShot: (spec, signal) => service.oneShot(spec, signal),
         stop: () => {}
       }
     }

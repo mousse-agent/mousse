@@ -73,18 +73,16 @@ describe.each(ROWS)('idle compaction on $name', (row) => {
     const thread = daemon.store.createThread('Idle')
     if (row.selection) daemon.orch.setThreadModelOverride(thread.id, row.selection)
     const usage = () => daemon!.orch.getContextUsage({ draftInput: 'a draft', mode: 'agent' }, thread.id)
-    // Sent as a Mousse window sends it: Antigravity's personal sign-in runs only messages its owner sends.
-    const sendOptions = { threadId: thread.id, ...(row.driver === 'antigravity' ? { source: 'gui', ownerProof: { via: 'gui' as const } } : {}) }
-    return { orch: daemon.orch, thread, usage, compactConversation, sendOptions }
+    return { orch: daemon.orch, thread, usage, compactConversation }
   }
 
   it('records the prompt cache after a turn, and Compact now compacts the history and leaves it cold', async () => {
-    const { orch, thread, usage, compactConversation, sendOptions } = start()
+    const { orch, thread, usage, compactConversation } = start()
     const before = await usage()
     expect(before.promptCache).toBeUndefined()
     expect(before.historyEstimate).toBeUndefined()
 
-    for (const content of ['one', 'two', 'three', 'four']) await orch.send({ content, mode: 'agent' }, false, sendOptions)
+    for (const content of ['one', 'two', 'three', 'four']) await orch.send({ content, mode: 'agent' }, false, { threadId: thread.id })
     const after = await usage()
     // Codex, Cursor and ACP agents report no cache lifetime: the composer shows idle time and goes cold after an hour.
     expect(after.promptCache).toMatchObject({ lastRequestAt: expect.any(Number) })
@@ -116,8 +114,8 @@ describe.each(ROWS)('idle compaction on $name', (row) => {
 
   if (!row.reportsContext) {
     it('sends no cache record or estimate for another model than the one the cache was made on', async () => {
-      const { orch, thread, usage, sendOptions } = start()
-      await orch.send({ content: 'one', mode: 'agent' }, false, sendOptions)
+      const { orch, thread, usage } = start()
+      await orch.send({ content: 'one', mode: 'agent' }, false, { threadId: thread.id })
       expect((await usage()).promptCache).toBeDefined()
       orch.setThreadModelOverride(thread.id, { ...row.selection!, model: 'another-model' })
       const elsewhere = await usage()

@@ -1,7 +1,6 @@
 import type { ExecutionBinding } from '../../shared/harness/types'
 import type { AgentAccessLevel } from '../../shared/settings'
 import type { PermissionMode } from '../../shared/permissionMode'
-import type { OwnerProof } from './ownerProof'
 export type RunStatus =
   | 'queued'
   | 'starting'
@@ -47,8 +46,6 @@ export interface RunPause {
   /** The message queue item that carries the continue turn (`resume:<runId>`). */
   resumeItemId?: string
   resumeRequested?: 'auto' | 'user'
-  /** The owner pressed Resume now from a Mousse window (`OwnerProof`): the continue turn carries it. */
-  resumeOwner?: OwnerProof
   /**
    * The automatic timer fired more than 24 h after `until` (Mousse was off) and was dropped
    * (`endPause(…, 'stale')`): the run is still `paused`, `autoResume` is off, and only Resume now
@@ -122,12 +119,6 @@ export interface RunRecord {
    * is never granted more. Absent on runs from before it was recorded, and on a run whose turn never started.
    */
   accessGrant?: AgentAccessLevel
-  /**
-   * The owner sent this run's message themselves, from a Mousse window here or on another of their computers
-   * (`ownerProof.ts`). Set only when the run is created, from the connection the send came in on, or for a Resume now
-   * from the press recorded on its pause. Absent on every other run.
-   */
-  ownerProof?: OwnerProof
 }
 
 export interface ProviderRef {
