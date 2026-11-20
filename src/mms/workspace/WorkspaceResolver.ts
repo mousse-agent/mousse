@@ -88,7 +88,7 @@ export class WorkspaceResolver {
     conversationBranchId = 'main',
     signal?: AbortSignal,
     heldThreadLease?: ThreadLeaseHandle,
-    /** The thread's first message: a worktree made now names its branch from it (`ThreadWorkspaceManager.provision`). */
+    /** The thread's first message: a worktree made now is named from it in the background (`ThreadWorkspaceManager.provision`). */
     nameFrom?: string,
     /** Each slow step as it begins (the line under Working names it): checking the worktree, making it, or remaking it. */
     onStep?: (step: TurnSetupStep) => void
@@ -101,6 +101,12 @@ export class WorkspaceResolver {
     if (existing) {
       if (existing.lifecycle !== 'ready') throw workspaceErrors.create('workspace_recovery_required', undefined, { state: existing.lifecycle })
       onStep?.('check')
+      // A rename of the worktree's branch that a stop left unsettled: settled from the repository, as part of checking the
+      // worktree, before the turn reads the record.
+      if (manager.branchRenamePending()) {
+        try { await manager.settleBranchRename({ signal }) } catch (error) { console.warn('[branches] an unsettled branch rename could not be settled', { threadId: this.threadId, error: error instanceof Error ? error.message : String(error) }) }
+        existing = manager.load() ?? existing
+      }
       // On a drive that is not connected: the turn waits for it (`DriveNotConnectedError`), and nothing is marked or rebuilt.
       await assertWorktreeFolderConnected(existing.worktreePath)
       const verified = await manager.verify(existing)

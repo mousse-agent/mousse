@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { access, mkdir, readdir, realpath, rename, rm } from 'node:fs/promises'
 import { nonInteractiveGitEnv } from '../git/gitEnv'
-import { assertGitAllowedAsync, rethrowGitPolicyError, type UserAction } from '../git/gitPolicy'
+import { assertGitAllowedAsync, rethrowGitPolicyError, withOwnedBranches, type UserAction } from '../git/gitPolicy'
 import { safeWorktreeGit } from '../worktree/WorktreeManager'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
@@ -34,7 +34,9 @@ import type {
   WorkspaceExecutionContext
 } from '../../shared/workspace'
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '../git/repoPrograms'
-import { threadBranchNameAsync } from '../../shared/mousseBranches'
+import { DEFAULT_BRANCH_PREFIX, isAcceptableThreadBranchName } from '../../shared/mousseBranches'
+import { branchNamingFor, requestBranchName, temporaryBranchName } from './branchNaming'
+import { BRANCH_RENAME_OPERATION, threadBranchRecord, type ThreadBranchRecord } from './threadBranchRecords'
 import { threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { settlesItself } from '../../shared/resourceLifecycle'
 
@@ -388,9 +390,10 @@ export class ThreadWorkspaceManager {
      * thread's latest one, so the first turn starts from it instead of recording it as outside changes. `onNotice` gets
      * what that write kept or left as it is, as a line for the thread.
      *
-     * `nameFrom`: the thread's first message. The worktree's branch is named from it once, here, as `mousse/<slug>`
-     * (see `threadBranchName`), and never renamed; the name is checked against the repository under its lease. A private
-     * thread's (`Thread.localOnly`) is `mousse/private-<id>` instead.
+     * `nameFrom`: the thread's first message. The worktree is made at once on a temporary branch `<prefix>/<random id>`
+     * (Settings → Storage → Branches), checked against the repository under its lease. Once it is ready, the title model
+     * is asked in the background for a name from `nameFrom`, and the branch is renamed to it (`nameBranchLater`); nothing
+     * waits on that. A private thread's (`Thread.localOnly`) first message is never sent: its branch keeps the random name.
      *
      * `onWorktreeMade`: runs once the worktree is made and its files written, still under the repository's lease and
      * before anything else can fail: what Mousse wrote there, as a caller that may have to remove it again reads it.
@@ -418,10 +421,10 @@ export class ThreadWorkspaceManager {
       // Without a start from the caller, the branch picked for the thread when it was created (`Thread.worktreeStartSha`).
       startSha ??= threadFolderWorktreeStart(this.threadDirectory)
       const head = startSha ? await git(repository.primaryCheckoutPath, ['rev-parse', '--verify', `${startSha}^{commit}`]) : primaryHead
-      // Named once, under the repository's lease, so two threads cannot take the same name.
-      // A private thread's branch never carries its first message: Git reads from the user's other computers list branch names.
-      const nameFrom = threadFolderIsLocalOnly(this.threadDirectory) ? `private ${threadId.replace(/[^A-Za-z0-9]/g, '').slice(0, 8)}` : options.nameFrom
-      const branch = await threadBranchNameAsync(nameFrom, threadId, async (name) => (await tryGit(repository.primaryCheckoutPath, ['for-each-ref', '--count=1', '--format=%(refname)', `refs/heads/${name}`])).stdout !== '')
+      // A temporary name, picked under the repository's lease so two threads cannot take the same one. A private thread's
+      // first message is never sent for naming: Git reads from the user's other computers list branch names.
+      const nameFrom = threadFolderIsLocalOnly(this.threadDirectory) ? undefined : options.nameFrom?.trim() || undefined
+      const branch = await this.freeTemporaryBranch(repository.primaryCheckoutPath)
       const retainedRef = `refs/mousse/threads/${threadId}/${conversationBranchId}`
       // In the worktree folder the person chose (Settings → Storage), or Mousse's own; see `worktreeLayout`.
       const placement = await placeThreadWorktree({
@@ -431,7 +434,7 @@ export class ThreadWorkspaceManager {
         projectName: basename(repository.primaryCheckoutPath),
         threadId,
         conversationBranchId,
-        branch,
+        // Not the branch: its temporary name says nothing, and a rename later never moves the folder.
         // A name Git or a reconstruction manifest still names is never given to another worktree.
         taken: (path) => this.pathNamed(repository.primaryCheckoutPath, path)
       })
@@ -462,8 +465,9 @@ export class ThreadWorkspaceManager {
         lastVerifiedAt: new Date().toISOString(),
         ...(options.untrusted ? { untrusted: true as const } : {})
       } satisfies ThreadWorkspaceMetadata)
-      if (options.untrusted) await addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, options.enableWorktreeConfig, options.userRequested)
-      else await git(repository.primaryCheckoutPath, [...LONG_PATHS, 'worktree', 'add', '-b', branch, worktreePath, head])
+      // Mousse makes this branch (`-b` fails when the name is taken), whatever prefix the person chose.
+      if (options.untrusted) await withOwnedBranches([branch], () => addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, options.enableWorktreeConfig, options.userRequested))
+      else await withOwnedBranches([branch], () => git(repository.primaryCheckoutPath, [...LONG_PATHS, 'worktree', 'add', '-b', branch, worktreePath, head]))
       if (options.snapshot) {
         // A fresh checkout holds Git's form of every file, so nothing is kept here unless something wrote into it meanwhile.
         const moved = await moveFilesToSnapshotAsync(worktreePath, await git(worktreePath, ['rev-parse', 'HEAD^{tree}']), options.snapshot, { owner: this.threadDirectory, action: 'Starting the worktree' })
@@ -502,6 +506,7 @@ export class ThreadWorkspaceManager {
         state: 'completed',
         details: { intentSequence: intent.sequence, head, branch, retainedRef }
       })
+      if (nameFrom) this.nameBranchLater(threadId, branch, nameFrom)
       return metadata
     } catch (error) {
       this.journal.append({
@@ -546,7 +551,7 @@ export class ThreadWorkspaceManager {
       const tip = (await tryGit(repository.primaryCheckoutPath, ['rev-parse', '--verify', '--quiet', ref])).stdout
       if (tip && expected.head && tip === expected.head && !listed.includes(`branch ${ref}`)) {
         // Left behind is harmless (the next worktree takes another name), so a refusal here changes nothing.
-        try { await git(repository.primaryCheckoutPath, ['update-ref', '-d', ref, tip]) } catch { /* The branch stays. */ }
+        try { await withOwnedBranches([metadata.branch], () => git(repository.primaryCheckoutPath, ['update-ref', '-d', ref, tip])) } catch { /* The branch stays. */ }
       }
       await rm(this.workspacePath, { force: true })
       this.journal.append({ operationId: last.operationId, operationType: 'workspace-provision', state: 'cancelled', details: { reconciled: 'worktree add failed; nothing was made' } })
@@ -554,6 +559,176 @@ export class ThreadWorkspaceManager {
     } finally {
       repositoryLease.release()
     }
+  }
+
+  /**
+   * A temporary branch name for a new worktree (`<prefix>/<random id>`): no branch has it, none is under it, and no branch
+   * is named after one of its folders. With the person's prefix taken as a branch itself, Mousse's default prefix.
+   */
+  private async freeTemporaryBranch(checkoutPath: string): Promise<string> {
+    const { prefix } = branchNamingFor(this.threadDirectory)
+    for (const candidate of prefix === DEFAULT_BRANCH_PREFIX ? [prefix] : [prefix, DEFAULT_BRANCH_PREFIX]) {
+      if (await this.folderOfNameTaken(checkoutPath, candidate)) continue
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const name = temporaryBranchName(candidate)
+        if (!await this.branchNameTaken(checkoutPath, name)) return name
+      }
+    }
+    throw new Error('Mousse could not find a free branch name for the worktree.')
+  }
+
+  /** Whether a branch of this name is there, or branches under it. */
+  private async branchNameTaken(checkoutPath: string, name: string): Promise<boolean> {
+    return (await tryGit(checkoutPath, ['for-each-ref', '--count=1', '--format=%(refname)', `refs/heads/${name}`])).stdout !== ''
+  }
+
+  /** Whether `prefix` or one of its parent folders is a branch, so no branch can be made under it. */
+  private async folderOfNameTaken(checkoutPath: string, prefix: string): Promise<boolean> {
+    const parts = prefix ? prefix.split('/') : []
+    for (let index = 1; index <= parts.length; index++) {
+      if ((await tryGit(checkoutPath, ['rev-parse', '--verify', '--quiet', `refs/heads/${parts.slice(0, index).join('/')}`])).ok) return true
+    }
+    return false
+  }
+
+  /** Whether a rename of the worktree's branch has no outcome recorded; reads only the journal's index of latest records. */
+  branchRenamePending(): boolean {
+    for (const entry of this.journal.latestByOperation().values()) if (entry.operationType === BRANCH_RENAME_OPERATION && entry.state === 'planned') return true
+    return false
+  }
+
+  /** The branches Mousse's records show it made for this thread's worktree, by their current names (`threadBranchRecord`). */
+  branchRecord(metadata = this.load()): ThreadBranchRecord {
+    return threadBranchRecord(this.journal.list(), metadata && !isProjectFolderWorkspace(metadata) ? { worktreePath: metadata.worktreePath } : {})
+  }
+
+  /** The background naming `provision` started for the branch it made, settled once it renamed it or kept its name. */
+  branchNaming?: Promise<void>
+
+  /** Asks the title model for a name for the new worktree's branch and renames it, in the background; never throws. */
+  private nameBranchLater(threadId: string, branch: string, text: string): void {
+    this.branchNaming = (async () => {
+      const name = await requestBranchName(this.threadDirectory, threadId, text)
+      if (!name || name === branch) return
+      const outcome = await this.renameOwnBranch(branch, name)
+      if (outcome !== 'renamed') console.info('[branches] the worktree branch keeps its temporary name', { threadId, reason: outcome })
+    })().catch((error) => console.warn('[branches] the worktree branch could not be renamed', { threadId, error: error instanceof Error ? error.message : String(error) }))
+  }
+
+  /** Why the thread's branch `from` may not be renamed now, or undefined when it may. Reads only Mousse's records. */
+  private renameRefusal(from: string): string | undefined {
+    const metadata = this.load()
+    if (!metadata || isProjectFolderWorkspace(metadata) || metadata.lifecycle !== 'ready') return 'the worktree is not ready'
+    if (metadata.branch !== from) return 'the workspace records another branch'
+    // A worktree being retired or rebuilt keeps the name its reconstruction record has.
+    if (this.hasReconstructionManifest(metadata) || this.rebuildUnfinished(metadata)) return 'the worktree is being retired or rebuilt'
+    const record = this.branchRecord(metadata)
+    if (record.pending) return 'another rename is not settled'
+    if (!record.owned.has(from)) return 'Mousse did not make this branch'
+    return undefined
+  }
+
+  /**
+   * Renames the thread's worktree branch from `from` to `to` with `git branch -m`, which fails when `to` is taken and
+   * renames the branch the worktree has checked out; the worktree's folder keeps its name. Only a branch Mousse's records
+   * show it made (`branchRecord`), only while the workspace is ready on it, and under the repository's lease (waited for
+   * at most 30 seconds). Returns 'renamed', or why the branch keeps its name.
+   *
+   * Each step leaves a state a stop can be settled from: the journal's planned record first (Mousse still owns only
+   * `from`), then Git's rename, then workspace.json, then the completed record that moves ownership to `to`. A stop in
+   * between is settled from the repository (`settleBranchRename`).
+   */
+  async renameOwnBranch(from: string, to: string, signal?: AbortSignal): Promise<string> {
+    if (!isAcceptableThreadBranchName(to) || to === from) return 'the name is not usable'
+    const early = this.renameRefusal(from)
+    if (early) return early
+    const checkoutPath = this.load()?.integrationTarget?.checkoutPath
+    if (!checkoutPath) return 'the workspace records no project checkout'
+    const metadata = this.load()!
+    const repository = await this.resolveRepositoryAsync(checkoutPath)
+    if (!repository.capability.gitBacked || repository.repositoryId !== metadata.repositoryId) return 'the repository changed'
+    let lease: RepositoryLeaseHandle
+    try {
+      lease = await acquireRepositoryLease(await resolveRepositoryIdentityAsync(repository.gitTopLevel, { requireMutationCapability: true }), { signal, maxWaitMs: 30_000 })
+    } catch (error) {
+      if (error instanceof RepositoryLeaseBusyError) return 'the repository is busy'
+      throw error
+    }
+    try {
+      const primary = repository.primaryCheckoutPath
+      const refusal = this.renameRefusal(from)
+      if (refusal) return refusal
+      const current = this.load()!
+      if (!await pathExists(current.worktreePath)) return 'the worktree is not there'
+      if (!(await tryGit(primary, ['rev-parse', '--verify', '--quiet', `refs/heads/${from}`])).ok) return 'the branch is gone'
+      if (await this.branchNameTaken(primary, to)) return 'the name is taken'
+      const operationId = randomUUID()
+      const intent = this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: { from, to, worktreePath: current.worktreePath } })
+      try {
+        await withOwnedBranches([from, to], () => git(primary, ['branch', '-m', '--', from, to]))
+      } catch (error) {
+        // Git refused (a name another branch's folder holds, for one), or failed part way: the repository says which.
+        const settled = await this.settlePendingRename(primary, current.worktreePath, { from, to, operationId })
+        if (settled === 'renamed') return 'renamed'
+        return `Git did not rename it: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`
+      }
+      this.recordBranchName(from, to)
+      this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'completed', details: { intentSequence: intent.sequence, from, to } })
+      return 'renamed'
+    } finally {
+      lease.release()
+    }
+  }
+
+  /**
+   * Settles a rename a stop left without an outcome, from the repository: done when the worktree is on `to` (or `to` is
+   * there and `from` is not), not done when it is on `from` (or `from` is there and `to` is not). Either way workspace.json
+   * is made to agree. When the repository cannot tell (both names there, or neither, and the worktree on neither),
+   * Mousse gives up both names: it never deletes or renames either branch afterwards. Takes the repository's lease unless
+   * the caller holds it.
+   */
+  async settleBranchRename(options: { holdingRepositoryLease?: boolean; signal?: AbortSignal } = {}): Promise<void> {
+    const metadata = this.load()
+    if (!metadata || isProjectFolderWorkspace(metadata)) return
+    const pending = this.branchRecord(metadata).pending
+    // A retired worktree's reconstruction record names the branch as it was; it is settled once nothing is retired.
+    if (!pending || this.hasReconstructionManifest(metadata)) return
+    if (!metadata.integrationTarget?.checkoutPath) return
+    const repository = await this.resolveRepositoryAsync(metadata.integrationTarget.checkoutPath)
+    if (!repository.capability.gitBacked) return
+    const lease = options.holdingRepositoryLease ? undefined : await acquireWorkspaceRepositoryLease(await resolveRepositoryIdentityAsync(repository.gitTopLevel, { requireMutationCapability: true }), options.signal)
+    try {
+      const again = this.branchRecord(this.load()).pending
+      if (again?.operationId === pending.operationId) await this.settlePendingRename(repository.primaryCheckoutPath, pending.worktreePath, pending)
+    } finally {
+      lease?.release()
+    }
+  }
+
+  private async settlePendingRename(primary: string, worktreePath: string, pending: { from: string; to: string; operationId: string }): Promise<'renamed' | 'not-renamed' | 'unknown'> {
+    const { from, to, operationId } = pending
+    const exists = async (name: string): Promise<boolean> => (await tryGit(primary, ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`])).ok
+    const [hasFrom, hasTo] = [await exists(from), await exists(to)]
+    const head = await pathExists(worktreePath) ? (await tryGit(worktreePath, ['symbolic-ref', '-q', 'HEAD'])).stdout : ''
+    const outcome = head === `refs/heads/${to}` && hasTo ? 'renamed'
+      : head === `refs/heads/${from}` && hasFrom ? 'not-renamed'
+        : hasTo && !hasFrom ? 'renamed'
+          : hasFrom && !hasTo ? 'not-renamed'
+            : 'unknown'
+    if (outcome === 'renamed') {
+      this.recordBranchName(from, to)
+      this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'completed', details: { from, to, settled: true } })
+    } else {
+      this.recordBranchName(to, from)
+      this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: outcome === 'unknown' ? 'cancelled' : 'failed', details: { from, to, settled: true, ...(outcome === 'unknown' ? { disowned: true } : {}) } })
+    }
+    return outcome
+  }
+
+  /** Points workspace.json at `to` when it names `from`; every other field stays as written. */
+  private recordBranchName(from: string, to: string): void {
+    const stored = JSON.parse(readFileSync(this.workspacePath, 'utf8')) as ThreadWorkspaceMetadata
+    if (stored.branch === from) atomicWriteJsonSync(this.workspacePath, { ...stored, branch: to })
   }
 
   /** Whether Git registers a worktree at `path`, or any thread's reconstruction manifest names it. */

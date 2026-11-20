@@ -327,13 +327,16 @@ export async function resolveOwnedThreadWorkspace(
 }
 
 /**
- * Whether the branch a thread's workspace records is the thread's own: `mousse/<slug>`, named once when its worktree was
- * made, or for a thread made before that, `mousse/thread/<thread>/<conversation branch>`. Another thread's id-named branch,
- * and a branch outside `mousse/`, are never its own. With an active conversation branch (`activated`), any of the thread's
- * id-named branches counts, and so does the Git branch a fork made before snapshots recorded, which the checkout may still be on.
+ * Whether the branch a thread's workspace records is the thread's own: one the thread's journal shows Mousse made for
+ * its worktree, under its current name (`recorded`, see `threadBranchRecord`), whatever its prefix; or by the older rule,
+ * any `mousse/<name>`, or `mousse/thread/<thread>/<conversation branch>` for a thread made before branches were named.
+ * Another thread's id-named branch is never its own, nor is a branch outside `mousse/` that the journal does not name.
+ * With an active conversation branch (`activated`), any of the thread's id-named branches counts, and so does the Git
+ * branch a fork made before snapshots recorded, which the checkout may still be on.
  */
-export function isThreadOwnBranch(branch: string, threadId: string, conversationBranchId: string, activated?: { gitBranch?: string }): boolean {
+export function isThreadOwnBranch(branch: string, threadId: string, conversationBranchId: string, activated?: { gitBranch?: string }, recorded?: ReadonlySet<string>): boolean {
   if (activated?.gitBranch && branch === activated.gitBranch) return true
+  if (recorded?.has(branch) && !isIdNamedMousseBranch(branch)) return true
   if (!isMousseBranchName(branch)) return false
   if (!isIdNamedMousseBranch(branch)) return true
   return activated ? branch.startsWith(`mousse/thread/${threadId}/`) : branch === `mousse/thread/${threadId}/${conversationBranchId}`
@@ -357,7 +360,8 @@ async function validateThreadWorkspaceMetadata(
     .find((branch) => branch.id === branchId && branch.lifecycle === 'active')
   // Activating a conversation branch no longer switches Git branches, so the checkout stays on the thread's own; forks made
   // before snapshots recorded a Git branch of their own, which the checkout may still be on.
-  const ownBranch = isThreadOwnBranch(metadata.branch, threadId, branchId, activated)
+  // The journal is read only for a branch the older rule does not cover (a renamed branch, a prefix the person chose).
+  const ownBranch = isThreadOwnBranch(metadata.branch, threadId, branchId, activated) || isThreadOwnBranch(metadata.branch, threadId, branchId, activated, manager.branchRecord(metadata).owned)
   const expectedRef = activated?.retainedRef ?? `refs/mousse/threads/${threadId}/${branchId}`
   // A worktree made in a worktree folder the person chose is named after the thread's branch there (`worktreeLayout`).
   const inChosenFolder = Boolean(chosenFolderPlace(metadata.worktreePath)) && isThreadWorktreePlace(metadata.worktreePath, { home: getMousseHomeDir(), repositoryId: repository.repositoryId, threadId })

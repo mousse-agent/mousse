@@ -1,102 +1,131 @@
 /**
- * The branches Mousse owns: everything under `mousse/`. A thread's worktree branch is `mousse/<slug>`, named once from the
- * thread's first message when the worktree is made. Threads made before that keep their id-named branches
- * (`mousse/thread/<threadId>/<branchId>`, and `mousse/agent/…`, `mousse/workflow/…` for agents and workflows): they are
- * still Mousse's, and nothing renames them.
+ * Branch names Mousse makes and owns.
+ *
+ * A thread's worktree is made at once on a temporary branch `<prefix>/<random id>` (Settings → Storage → Branches; the
+ * prefix is `mousse` unless the person changed it). Afterwards the title model may name it from the thread's first
+ * message, and Mousse renames it once. Which branches are Mousse's is decided by its own records (the thread's journal
+ * names every branch it made with `git worktree add -b` and every rename it did), not by a name's prefix: a renamed
+ * `fix/login-button` is as much Mousse's as `mousse/a1b2c3d4`, and a person's own `mousse/x` would not be.
+ *
+ * The prefix rule below (`isMousseBranchName`) stays for records written before that: threads made earlier have
+ * `mousse/<slug>` or id-named branches (`mousse/thread/<threadId>/<branchId>`, and `mousse/agent/…`, `mousse/workflow/…`
+ * for agents and workflows), and they are still Mousse's.
  */
 
 export const MOUSSE_BRANCH_PREFIX = 'mousse/'
 
-/** The longest slug a thread branch gets, before a `-2` style suffix. */
-export const THREAD_BRANCH_SLUG_MAX = 40
+/** The prefix of a thread's temporary branch when the person set none. */
+export const DEFAULT_BRANCH_PREFIX = 'mousse'
 
-/** The id-named branches made before thread branches were named from their first message. */
+/** The longest branch name the title model may give, prefix included. */
+export const NAMED_BRANCH_MAX = 80
+
+/** The id-named branches made before thread branches were named after their first message. */
 const ID_NAMED = /^mousse\/(thread|agent|workflow)\//
 
-/**
- * Slugs that would clash with the id-named branches: Git cannot hold `mousse/thread` and `mousse/thread/<id>/main` at
- * once, since one ref would have to be a folder of the other.
- */
-const RESERVED_SLUGS = new Set(['thread', 'agent', 'workflow'])
+/** Names that would clash with the id-named branches, as a branch or as a folder of one. */
+const RESERVED = /^mousse\/(thread|agent|workflow)(\/|$)/
 
-/** A name Git accepts as a branch (the rules of `git check-ref-format`, kept strict). */
-function validBranchName(name: string): boolean {
+/** A name Git accepts as a branch (the rules of `git check-ref-format --branch`, kept strict: ASCII only). */
+export function isValidBranchName(name: string | undefined | null): name is string {
+  if (typeof name !== 'string' || name.length === 0 || name.length > 255 || name === 'HEAD') return false
   if (!/^[A-Za-z0-9._/-]+$/.test(name)) return false
   if (name.includes('..') || name.includes('//') || name.endsWith('/') || name.endsWith('.') || name.endsWith('.lock')) return false
-  return name.split('/').every((part) => part.length > 0 && !part.startsWith('.') && !part.endsWith('.lock'))
+  return name.split('/').every((part) => part.length > 0 && !part.startsWith('.') && !part.startsWith('-') && !part.endsWith('.lock'))
 }
 
-/** Whether Mousse owns this branch: any valid branch name under `mousse/`, the id-named ones included. */
+/** Whether a branch is under `mousse/`: Mousse's by the rule older records rely on, the id-named ones included. */
 export function isMousseBranchName(name: string | undefined | null): boolean {
-  return typeof name === 'string' && name.startsWith(MOUSSE_BRANCH_PREFIX) && name.length > MOUSSE_BRANCH_PREFIX.length && validBranchName(name)
+  return typeof name === 'string' && name.startsWith(MOUSSE_BRANCH_PREFIX) && name.length > MOUSSE_BRANCH_PREFIX.length && isValidBranchName(name)
 }
 
-/** Whether a full ref name is Mousse's own: anything under `refs/mousse/`, or a branch under `refs/heads/mousse/`. */
+/** Whether a full ref name is Mousse's by name: anything under `refs/mousse/`, or a branch under `refs/heads/mousse/`. */
 export function isMousseOwnedRef(ref: string | undefined | null): boolean {
   if (typeof ref !== 'string') return false
   if (ref.startsWith('refs/mousse/')) return true
   return ref.startsWith('refs/heads/') && isMousseBranchName(ref.slice('refs/heads/'.length))
 }
 
-/** Whether this is one of the id-named branches made before thread branches were named from their first message. */
+/** Whether this is one of the id-named branches made before thread branches were named after their first message. */
 export function isIdNamedMousseBranch(name: string | undefined | null): boolean {
-  return typeof name === 'string' && ID_NAMED.test(name) && validBranchName(name)
+  return typeof name === 'string' && ID_NAMED.test(name) && isValidBranchName(name)
 }
 
 /**
- * A short branch slug from free text: lowercase ASCII letters, digits and single hyphens, at most
- * `THREAD_BRANCH_SLUG_MAX` characters, cut at a word boundary when it can be. Empty when the text has nothing usable.
+ * A branch prefix as typed in Settings: a trailing slash is optional, characters a branch cannot hold become hyphens, and
+ * an empty prefix means none. A prefix inside the id-named branches' folders (`mousse/thread`, …) falls back to the default.
  */
-export function threadBranchSlug(text: string): string {
-  const words = text
+export function normalizeBranchPrefix(raw: unknown): string {
+  if (typeof raw !== 'string') return DEFAULT_BRANCH_PREFIX
+  const parts = raw
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/[^A-Za-z0-9._/-]+/g, '-')
+    .split('/')
+    .map((part) => part.replace(/\.{2,}/g, '.').replace(/-{2,}/g, '-').replace(/^[.-]+/, '').replace(/(\.lock)+$/i, '').replace(/[.]+$/, ''))
+    .filter(Boolean)
+  const prefix = parts.join('/').slice(0, 40).replace(/[./-]+$/, '')
+  if (!prefix) return ''
+  if (!isValidBranchName(prefix) || RESERVED.test(prefix) || prefix === 'HEAD') return DEFAULT_BRANCH_PREFIX
+  return prefix
+}
+
+/** `<prefix>/<name>`, or `<name>` without a prefix. */
+export function withBranchPrefix(prefix: string, name: string): string {
+  return prefix ? `${prefix}/${name}` : name
+}
+
+/**
+ * Whether Mousse may give a thread's branch this name: a valid branch name, not too long, and never one of the id-named
+ * branches or their folders, which other records give meaning to.
+ */
+export function isAcceptableThreadBranchName(name: string | undefined | null): name is string {
+  return isValidBranchName(name) && name.length <= NAMED_BRANCH_MAX && !RESERVED.test(name) && !name.startsWith('refs/')
+}
+
+/** The kinds the title model may start a branch with when it picks the prefix itself. */
+export const SEMANTIC_BRANCH_KINDS = ['feat', 'fix', 'refactor', 'docs', 'test', 'chore', 'perf', 'build', 'ci', 'style'] as const
+
+/** A model's words as one branch segment: lowercase ASCII letters, digits and single hyphens. */
+function segment(text: string, max: number): string {
+  return text
     .normalize('NFKD')
     .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-    .split(' ')
-    .filter(Boolean)
-  let slug = ''
-  for (const word of words) {
-    const next = slug ? `${slug}-${word}` : word
-    if (next.length > THREAD_BRANCH_SLUG_MAX) {
-      if (!slug) slug = word.slice(0, THREAD_BRANCH_SLUG_MAX)
-      break
-    }
-    slug = next
-  }
-  return slug
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, max)
+    .replace(/-+$/, '')
 }
+
+/** How the person chose to name thread branches (Settings → Storage → Branches). */
+export type BranchNamingMode = 'static' | 'semantic' | 'custom'
 
 /**
- * The branch a thread's new worktree gets: `mousse/<slug>` from `text` (the thread's first message), or
- * `mousse/thread-<first 8 of the id>` when the text has no usable word. `taken` says whether a name is already used in
- * the repository (a branch of that name, or branches under it); a taken or reserved name gets `-2`, `-3`, … appended.
+ * The branch the title model's answer names, or undefined when it names nothing usable. Only the answer's first line
+ * counts, without quotes or backticks.
+ *
+ * - `static`: the answer is a short slug; the branch is `<prefix>/<slug>`.
+ * - `semantic`: the answer is `<kind>/<slug>` with a kind from `SEMANTIC_BRANCH_KINDS`; anything else names nothing.
+ * - `custom`: the answer is the whole branch name, as the person's instructions asked; it is only checked.
  */
-export function threadBranchName(text: string | undefined, threadId: string, taken: (name: string) => boolean): string {
-  const { base, names } = threadBranchCandidates(text, threadId)
-  for (const name of names) if (!taken(name)) return name
-  throw new Error(`No free branch name for ${MOUSSE_BRANCH_PREFIX}${base}`)
-}
-
-/** {@link threadBranchName} with a `taken` that answers later, as a Git read without blocking does. The same names, in the same order. */
-export async function threadBranchNameAsync(text: string | undefined, threadId: string, taken: (name: string) => Promise<boolean>): Promise<string> {
-  const { base, names } = threadBranchCandidates(text, threadId)
-  for (const name of names) if (!await taken(name)) return name
-  throw new Error(`No free branch name for ${MOUSSE_BRANCH_PREFIX}${base}`)
-}
-
-/** The names `threadBranchName` tries, in order: the slug, then `-2`, `-3`, … , skipping reserved and invalid ones. */
-function threadBranchCandidates(text: string | undefined, threadId: string): { base: string; names: Generator<string> } {
-  const fallback = `thread-${threadId.replace(/[^A-Za-z0-9]/g, '').slice(0, 8).toLowerCase() || 'new'}`
-  const base = threadBranchSlug(text ?? '') || fallback
-  function* names(): Generator<string> {
-    for (let suffix = 1; suffix < 1000; suffix++) {
-      const slug = suffix === 1 ? base : `${base}-${suffix}`
-      const name = `${MOUSSE_BRANCH_PREFIX}${slug}`
-      if (RESERVED_SLUGS.has(slug) || !validBranchName(name)) continue
-      yield name
-    }
+export function branchNameFromModel(answer: string | null | undefined, mode: BranchNamingMode, prefix: string): string | undefined {
+  const line = (answer ?? '').split(/\r?\n/).map((text) => text.trim()).find(Boolean)
+  if (!line) return undefined
+  const text = line.replace(/^(branch( name)?\s*:\s*)/i, '').replace(/^[`'"]+|[`'"]+$/g, '').trim()
+  let name: string | undefined
+  if (mode === 'custom') {
+    name = text.replace(/\s+/g, '-')
+  } else if (mode === 'semantic') {
+    const match = /^([A-Za-z]+)\s*\/\s*(.+)$/.exec(text)
+    const kind = match?.[1].toLowerCase()
+    if (!match || !(SEMANTIC_BRANCH_KINDS as readonly string[]).includes(kind!)) return undefined
+    const slug = segment(match[2], NAMED_BRANCH_MAX - kind!.length - 1)
+    name = slug ? `${kind}/${slug}` : undefined
+  } else {
+    // The model was asked for a slug; a prefix it added anyway is dropped, so the person's prefix is the only one.
+    const slug = segment(text.includes('/') ? text.slice(text.lastIndexOf('/') + 1) : text, NAMED_BRANCH_MAX - prefix.length - 1)
+    name = slug ? withBranchPrefix(prefix, slug) : undefined
   }
-  return { base, names: names() }
+  return isAcceptableThreadBranchName(name) ? name : undefined
 }

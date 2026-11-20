@@ -11649,6 +11649,20 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * The title model's answer when asked to name a thread's worktree branch (`branchNaming`): the same model, scope and
+   * gateway as chat titles. Undefined when no title model is chosen; the branch then keeps its temporary name.
+   */
+  async askBranchName(request: { threadId: string; system: string; prompt: string }): Promise<string | undefined> {
+    if (!this.hasTitleModel()) return undefined
+    return this.titleModelText(request.system, request.prompt, {
+      task: 'branch_name',
+      scope: this.threadScope(request.threadId),
+      sessionKey: request.threadId,
+      maxChars: 120
+    })
+  }
+
+  /**
    * One request with no tools on the title model the user chose, through the gateway's `oneShot`:
    * chat titles, pull request drafts and commit messages. The gateway resolves the selection in
    * `scope`, bounds the wait and never retries; the caller falls back when it throws.

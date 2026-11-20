@@ -8,6 +8,7 @@ import { measureTree } from './fixtures/resource-lifecycle-qualification'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
+import { registerBranchNamer } from '../src/mms/workspace/branchNaming'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { archived } from './support/archived'
@@ -82,6 +83,40 @@ it('restarts cleanup at every external irreversible ledger boundary without offe
     } finally { f.dispose() }
   }
   expect(boundaryCount).toBeGreaterThan(3)
+}, 120_000)
+
+it.each([
+  ['named by the title model outside mousse/', false],
+  ['a person\'s, named only by an edited workspace record', true]
+])('a purged thread\'s branch %s', async (_case, edited) => {
+  const f = gitFoundationFixture()
+  try {
+    const location = join(f.home, 'thread-data', 'task')
+    mkdirSync(location, { recursive: true }); writeFileSync(join(location, 'meta.json'), '{"id":"task"}')
+    const store = new ResourceLifecycleStore({ profileId: 'qualification', profileHome: f.home })
+    store.registerTask({ taskId: 'task', location }); registerThreadLifecycleGate(f.home, store)
+    const forget = registerBranchNamer(f.home, { settings: () => ({ mode: 'semantic', prefix: 'team', instructions: '' }), ask: async () => 'fix/login-button' })
+    const manager = new ThreadWorkspaceManager(location)
+    await manager.provision('task', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
+    await manager.branchNaming
+    forget()
+    expect(manager.load()!.branch).toBe('fix/login-button')
+    git(f.repo, 'branch', 'feature/theirs')
+    if (edited) writeFileSync(join(location, 'workspace.json'), JSON.stringify({ ...manager.load(), branch: 'feature/theirs' }))
+    const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {} })
+    await coordinator.trash({ taskId: 'task', operationId: 'branch-trash' })
+    const preview = await coordinator.cleanup.preview('task')
+    if (edited) {
+      // The journal never names it: it is not Mousse's to delete, whatever the record says.
+      expect(preview.blockers).toEqual(expect.arrayContaining([expect.stringMatching(/not Mousse-owned|no longer owns/)]))
+    } else {
+      expect(preview.blockers).toEqual([])
+      expect(preview.items).toContainEqual(expect.objectContaining({ kind: 'ref', identity: 'refs/heads/fix/login-button', recordedBranch: true }))
+      await coordinator.purge({ taskId: 'task', operationId: 'branch-purge', expectedGeneration: preview.generation, previewDigest: preview.digest })
+      expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/heads/fix/', 'refs/heads/team/')).toBe('')
+    }
+    expect(git(f.repo, 'branch', '--list', 'feature/theirs', '--format=%(refname:short)')).toBe('feature/theirs')
+  } finally { f.dispose() }
 }, 120_000)
 
 it('keeps an interrupted purge pending while its repository is offline and resumes only after the same repository returns', async () => {

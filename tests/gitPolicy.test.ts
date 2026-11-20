@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   assertGitAllowed, assertGitAllowedAsync, clearGitPolicyLog, decideGitCommand, GitPolicyError, gitPolicyLog, gitPolicyMode, isOwnedPath, isOwnedRef,
-  currentUserRequest, registerOwnedGitRoot, stripInheritedGitEnv, userAction, withGitAccess, withUserRequest, type GitCommandRequest, type GitDecision
+  currentUserRequest, registerOwnedGitRoot, stripInheritedGitEnv, userAction, withGitAccess, withOwnedBranches, withUserRequest, type GitCommandRequest, type GitDecision
 } from '../src/mms/git/gitPolicy'
 import { guardedSimpleGit, repoProgramEnv, withoutDeref, withoutRepoPrograms } from '../src/mms/git/repoPrograms'
 import { tryGit } from '../src/mms/actions/git'
@@ -148,6 +148,24 @@ describe('Mousse may change what it owns', () => {
     expect(decide({ args: ['push', 'origin', 'HEAD:refs/heads/main'] })).toMatchObject({ allowed: false })
     expect(decide({ args: ['push', '-u', 'origin', 'HEAD:refs/heads/mousse/x'] })).toMatchObject({ allowed: false })
     expect(decide({ args: ['push', 'origin', 'HEAD:refs/heads/mousse/x'], userRequested: USER })).toMatchObject({ access: 'userRequested', allowed: true })
+  })
+
+  it('counts a branch outside mousse/ as owned only inside a scope that names it, for writes and for a rename between owned names', () => {
+    const add = { args: ['worktree', 'add', '-b', 'av/1a2b3c4d', join(owned, 'wt'), 'HEAD'] }
+    const rename = { args: ['branch', '-m', '--', 'av/1a2b3c4d', 'fix/login-button'] }
+    // Outside a scope: a person's branch names, whatever Mousse is doing.
+    expect(decide(add)).toMatchObject({ allowed: false, reason: expect.stringContaining('refs/heads/av/1a2b3c4d') })
+    expect(decide(rename)).toMatchObject({ allowed: false })
+    withOwnedBranches(['av/1a2b3c4d'], () => {
+      expect(decide(add)).toMatchObject({ access: 'owned', allowed: true })
+      // One name of the two is not enough: the new name, and its config section, would be a person's.
+      expect(decide(rename)).toMatchObject({ allowed: false })
+      expect(decide({ args: ['update-ref', 'refs/heads/main', 'abc'] })).toMatchObject({ allowed: false })
+      withOwnedBranches(['fix/login-button'], () => expect(decide(rename)).toMatchObject({ access: 'owned', allowed: true }))
+    })
+    // A rename that is not between two named branches still writes the repository's config.
+    withOwnedBranches(['av/1a2b3c4d'], () => expect(decide({ args: ['branch', '-m', 'av/1a2b3c4d'] })).toMatchObject({ allowed: false }))
+    expect(isOwnedRef('refs/heads/av/1a2b3c4d')).toBe(false)
   })
 
   it('allows worktree content changes inside the Mousse home only', () => {
