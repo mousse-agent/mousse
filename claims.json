@@ -65,11 +65,14 @@
       "machine": "Animatrix",
       "branch": "antigravity-turn-fixes",
       "paths": [
-        "src/mms/harness/acp/quirks.ts",
-        "src/mms/orchestrator/providerErrors.ts"
+        "src/mms/run/mcp/attachment.ts",
+        "src/mms/harness/acp/stopReason.ts",
+        "src/shared/pauseDisplay.ts",
+        "src/mms/harness/drivers/acp.ts",
+        "src/mms/harness/acp/presets/antigravity/AntigravityProviderService.ts"
       ],
       "claimedAt": "2026-11-20T10:56:43.121Z",
-      "expiresAt": "2026-11-20T12:56:43.121Z"
+      "expiresAt": "2026-11-20T13:11:09.414Z"
     },
     {
       "task": "fix-model-switch-mid-turn",
