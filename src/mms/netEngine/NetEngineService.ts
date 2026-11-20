@@ -441,7 +441,13 @@ export class NetEngineService implements EngineDirectoryPort {
       changed: () => this.changed(),
       now: () => Date.now() / 1000,
       park: (node, why) => this.started?.pairing.park(node, why),
-      trusted: () => this.started?.pairing.unpark()
+      trusted: (routeId, host) => {
+        // Only the pairings whose SSH route goes to that host: another host's key is still unchecked.
+        const started = this.started
+        for (const row of started?.peers.all() ?? [])
+          if (row.ssh && (row.ssh.routeId === routeId || (!!host && row.ssh.host === host)))
+            started!.pairing.unpark(row.localId)
+      }
     })
     return this.sshFlow
   }

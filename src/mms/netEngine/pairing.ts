@@ -190,10 +190,8 @@ export class EnginePairing {
     this.port.changed()
   }
   /** The owner acted (Retry, an address, a key trusted): it may be dialled again. */
-  unpark(node?: NodeId): void {
-    if (node === undefined) this.parked.clear()
-    else this.parked.delete(node)
-    this.port.changed()
+  unpark(node: NodeId): void {
+    if (this.parked.delete(node)) this.port.changed()
   }
 
   // ---------------------------------------------------------------- host: invitation and approval
