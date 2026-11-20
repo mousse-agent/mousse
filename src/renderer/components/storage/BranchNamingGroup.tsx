@@ -42,7 +42,9 @@ export function BranchNamingGroup({ value, onChange }: { value: BranchNamingSett
       data-testid="branch-naming-mode"
       title="Worktree branch naming"
       anchor="storage-branch-naming"
-      description={<span title={NAMING_TOOLTIP}><code className="storage-folder-path">{modeLine(settings)}</code></span>}
+      description={<span title={NAMING_TOOLTIP}>{settings.mode === 'static'
+        ? <code className="storage-folder-path">{modeLine(settings)}</code>
+        : modeLine(settings)}</span>}
       control={<Select ariaLabel="Worktree branch naming" value={settings.mode} options={MODE_OPTIONS} onChange={(mode) => save({ mode })} />}
     />
     {settings.mode === 'static' && <SettingsRow
