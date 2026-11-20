@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
- * Add project sits in the title bar, between the sidebar toggle and New thread. It adds the folder as a project, lists
- * it at once, opens its group in the sidebar and starts a thread in it. The Chats tab has no projects, so it has no
- * Add project.
+ * Add project sits in the title bar, between the sidebar toggle and New thread. It opens New project, whose Open a
+ * folder adds the folder as a project, lists it at once, opens its group in the sidebar and starts a thread in it. The
+ * Chats tab has no projects, so it has no Add project.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -16,6 +16,7 @@ vi.mock('../../src/renderer/components/WindowCaptionButtons', () => ({ WindowCap
 vi.mock('../../src/renderer/components/TitleBarNav', () => ({ TitleBarNav: () => null }))
 
 const { TitleBar } = await import('../../src/renderer/components/TitleBar')
+const { NewProjectDialog } = await import('../../src/renderer/components/NewProjectDialog')
 const { useAppStore } = await import('../../src/renderer/stores/appStore')
 const { useSidebarRevealStore } = await import('../../src/renderer/lib/sidebarReveal')
 
@@ -33,7 +34,7 @@ function preload(): unknown {
   })
 }
 
-const keys = ['projects', 'threads', 'activeThreadId', 'sidebarMode', 'threadsSidebarOpen', 'threadsSidebarView'] as const
+const keys = ['projects', 'threads', 'activeThreadId', 'sidebarMode', 'threadsSidebarOpen', 'threadsSidebarView', 'newProjectOpen'] as const
 const initial = Object.fromEntries(keys.map((key) => [key, useAppStore.getInitialState()[key]]))
 
 let host: HTMLDivElement
@@ -62,9 +63,16 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-const render = () => act(() => root.render(createElement(TitleBar)))
+const render = () => act(() => root.render(createElement('div', null, createElement(TitleBar), createElement(NewProjectDialog))))
 const startActions = () => [...host.querySelectorAll('.titlebar-start-actions button')].map((button) => button.getAttribute('aria-label'))
 const addProject = () => host.querySelector<HTMLButtonElement>('header button[aria-label="Add project"]')
+const dialog = () => host.querySelector('[role="dialog"][aria-label="New project"]')
+/** Add project, then New project's Open a folder. */
+const openFolder = async () => {
+  await act(async () => addProject()!.click())
+  const row = [...dialog()!.querySelectorAll<HTMLButtonElement>('[role="option"]')].find((option) => option.textContent?.includes('Open a folder'))!
+  await act(async () => row.click())
+}
 
 describe('Add project in the title bar', () => {
   it('sits between the sidebar toggle and New thread, with its name as the tooltip', () => {
@@ -73,10 +81,14 @@ describe('Add project in the title bar', () => {
     expect(addProject()!.title).toMatch(/^Add project/)
   })
 
-  it('adds the project, lists it at once, opens its group in the sidebar and starts a thread in it', async () => {
+  it('opens New project, whose Open a folder adds the project, lists it at once, opens its group in the sidebar and starts a thread in it', async () => {
     render()
     await act(async () => addProject()!.click())
+    expect(dialog()).not.toBeNull()
+    expect(projectsApi.open).not.toHaveBeenCalled()
+    await act(async () => [...dialog()!.querySelectorAll<HTMLButtonElement>('[role="option"]')].find((option) => option.textContent?.includes('Open a folder'))!.click())
     expect(projectsApi.open).toHaveBeenCalledTimes(1)
+    expect(dialog()).toBeNull()
     const state = useAppStore.getState()
     expect(state.projects.map((project) => project.id)).toEqual(['p1', 'p2'])
     expect(state.threadsSidebarView).toBe('projects')
@@ -85,12 +97,13 @@ describe('Add project in the title bar', () => {
     expect(state.activeThreadId).toBe('t-new')
   })
 
-  it('does nothing when the folder picker is cancelled', async () => {
+  it('adds nothing when the folder picker is cancelled, and New project stays open', async () => {
     projectsApi.open.mockResolvedValueOnce(null)
     render()
-    await act(async () => addProject()!.click())
+    await openFolder()
     expect(useAppStore.getState().projects.map((project) => project.id)).toEqual(['p1'])
     expect(threadsApi.create).not.toHaveBeenCalled()
+    expect(dialog()).not.toBeNull()
   })
 
   it('is not offered in the Chats tab', () => {

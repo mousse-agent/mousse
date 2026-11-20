@@ -23,6 +23,7 @@ import { WorkspaceLoading } from './components/WorkspaceLoading'
 import { LinuxWindowResizeHandles } from './components/LinuxWindowResizeHandles'
 import { TitleBar } from './components/TitleBar'
 import { CommandPalette } from './components/CommandPalette'
+import { NewProjectDialog } from './components/NewProjectDialog'
 import { SelectionReplyButton } from './components/SelectionReplyButton'
 import { ToastHost } from './components/ui/Toast'
 import { BugReportDialogHost } from './components/bugReports/BugReportDialog'
@@ -695,6 +696,7 @@ export default function App() {
       </div>
 
       <CommandPalette />
+      <NewProjectDialog />
       <SelectionReplyButton />
       <ThreadRenameDialog />
       {/* New bot opens from the Chats sidebar, which can show while the pane is on Projects (after a restart). */}

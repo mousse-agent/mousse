@@ -964,7 +964,10 @@ const api = {
   },
   projects: {
     list: (): Promise<Project[]> => ipcRenderer.invoke('projects:list'),
-    open: (): Promise<Project | null> => ipcRenderer.invoke('projects:open'),
+    /** Asks for a folder; or opens `path` as it is, or with `create` makes it first as a new empty Git project. */
+    open: (target?: { path: string; create?: boolean }): Promise<Project | null> => ipcRenderer.invoke('projects:open', target),
+    /** Asks where new and cloned projects go; null when cancelled. */
+    chooseFolder: (): Promise<string | null> => ipcRenderer.invoke('projects:chooseFolder'),
     remove: (projectId: string): Promise<void> =>
       ipcRenderer.invoke('projects:remove', projectId),
     rename: (projectId: string, name: string): Promise<Project> =>

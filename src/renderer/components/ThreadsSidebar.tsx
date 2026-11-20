@@ -23,7 +23,7 @@ import { useAppStore } from '../stores/appStore'
 import { workspaceModeFor } from '../stores/sidebarTabAgreement'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useChatsStore } from '../stores/chatsStore'
-import { addProjectAndStartThread, archiveThread, setThreadArchived, createAndSelectProjectThread, createAndSelectThread, hideThreads, selectThread } from '../lib/threadActions'
+import { archiveThread, setThreadArchived, createAndSelectProjectThread, createAndSelectThread, hideThreads, selectThread } from '../lib/threadActions'
 import { draftedThreadIds, draftedThreadsKey, unsentChatTitle, withUnsentChats } from '../lib/sidebarDrafts'
 import { dropPendingThreadRows, isPendingRowId, pruneRowKeys, servedPendingRows, usePendingThreadRows, withPendingRows } from '../lib/pendingThreadRows'
 import { runWithToast } from '../lib/actionToast'
@@ -759,7 +759,7 @@ export function ThreadsSidebar({ className = '' }: { className?: string }) {
 
 
 
-  const openProject = () => runWithToast('add the project', addProjectAndStartThread)
+  const openProject = () => useAppStore.getState().setNewProjectOpen(true)
 
   // `projectId` is the project that names its group, so it is also the group's id. A retry reuses the draft a
   // failed attempt may have made.

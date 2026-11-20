@@ -1,0 +1,84 @@
+/* New project: the search palette's surface, header, rows and footer (thread-search.css), as wide as the New thread
+   picker. Rows lead with an icon in a soft square; the highlight is a background only. */
+.thread-search-dialog.new-project-dialog {
+  width: min(720px, calc(100vw - 32px));
+}
+
+.new-project-computers {
+  flex-shrink: 0;
+}
+
+.new-project-results {
+  padding: 2px 6px 8px;
+}
+
+.new-project-row {
+  position: relative;
+}
+
+.new-project-row .thread-search-result.palette-result {
+  justify-content: flex-start;
+  gap: 10px;
+}
+
+.new-project-row .palette-result-end {
+  margin-left: auto;
+}
+
+/* Room for Change on a clone or a new project. */
+.new-project-row:has(.new-project-change) .thread-search-result.palette-result {
+  padding-right: 110px;
+}
+
+.new-project-row-icon {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--ui-hover);
+  color: var(--text-secondary);
+}
+
+.new-project-row-muted {
+  cursor: default;
+}
+
+.new-project-row-muted .thread-search-result-title {
+  color: var(--text-secondary);
+}
+
+.new-project-change {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  padding: 4px 8px;
+  border-radius: var(--ui-control-radius);
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: background 0.12s, color 0.12s;
+}
+
+.new-project-change:hover {
+  background: var(--ui-hover);
+  color: var(--text-primary);
+}
+
+/* A clone, a new project or an add while it runs: the one row, in the highlight. */
+.new-project-busy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  padding: 7px var(--ui-menu-row-x);
+  border-radius: var(--ui-menu-row-radius);
+  background: var(--ui-pressed);
+}
+
+.new-project-error {
+  padding: 8px 14px 0;
+  font-size: 12px;
+  color: var(--danger);
+}

@@ -99,6 +99,7 @@ import { stageBotAttachment, stageThreadAttachment } from './botAttachments'
 import { chooseBrowserViewFiles, type BrowserViewFilesDeps } from './browserViewFiles'
 import { botBrowserWindow, type BotBrowserWindowDeps } from './botBrowserWindow'
 import { stat } from 'node:fs/promises'
+import { expandFolderPath, makeProjectFolder } from './projectFolders'
 import { openExternalSafely } from '../safeExternalUrl'
 import { dispatchMcpAuthBrowser } from '../mcpAuthBrowser'
 import { MousseIdCallbacks, runtimeMousseIdOrigin } from '../mousseIdCallback'
@@ -2108,16 +2109,29 @@ export function registerGuiIpc(
     return res.projects
   })
 
-  registerHandler('projects:open', async () => {
-    const win = getWindow()
-    const result = win
-      ? await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
-      : await dialog.showOpenDialog({ properties: ['openDirectory'] })
-    if (result.canceled || result.filePaths.length === 0) return null
-    const res = await guiMms.request<{ project: unknown; projects: unknown[] }>(
-      'projects.open',
-      { path: result.filePaths[0] }
-    )
+  // With no folder, asks for one. A typed folder (New project) is opened as it is; with `create`, it is made first, as a
+  // new empty project, and becomes a Git repository.
+  registerHandler('projects:open', async (_e, target?: { path?: unknown; create?: unknown }) => {
+    let path: string
+    const create = target?.create === true
+    if (typeof target?.path === 'string') {
+      path = expandFolderPath(target.path)
+      if (create) await makeProjectFolder(path)
+    } else {
+      const win = getWindow()
+      const result = win
+        ? await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
+        : await dialog.showOpenDialog({ properties: ['openDirectory'] })
+      if (result.canceled || result.filePaths.length === 0) return null
+      path = result.filePaths[0]!
+    }
+    const res = await guiMms.request<{ project: { id: string }; projects: unknown[] }>('projects.open', { path })
+    if (create) {
+      // The project is there either way; without Git (not installed, say) it is a plain folder.
+      await guiMms.request('git.init', { projectId: res.project.id }).catch((error: unknown) => {
+        console.warn('the new project could not be made a Git repository', error instanceof Error ? error.message : String(error))
+      })
+    }
     broadcast('projects:updated', res.projects)
     const threads = await guiMms.request<{ threads: unknown[] }>('threads.list')
     broadcast('threads:updated', threadListPayload(threads))
@@ -3424,6 +3438,17 @@ export function registerGuiIpc(
   registerHandler('github:createRepository', async (_e, input: GitHubCreateRepositoryInput) => {
     const response = await guiMms.request<{ result: unknown }>('github.createRepository', input)
     return response.result
+  })
+  // New project's Change: where new and cloned projects go.
+  registerHandler('projects:chooseFolder', async () => {
+    const win = getWindow()
+    const options: Electron.OpenDialogOptions = {
+      title: 'Choose where new projects go',
+      buttonLabel: 'Use this folder',
+      properties: ['openDirectory', 'createDirectory']
+    }
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options)
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
   registerHandler('github:chooseCloneDestination', async () => {
     const win = getWindow()
