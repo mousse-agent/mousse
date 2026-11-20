@@ -304,6 +304,20 @@
       "expiresAt": "2026-11-20T14:06:10.409Z"
     },
     {
+      "task": "steer-into-starting-turn",
+      "session": "Animatrix-6d345f",
+      "machine": "Animatrix",
+      "branch": "steer-into-starting-turn",
+      "paths": [
+        "src/renderer/hooks/useThreadQueue.ts",
+        "src/renderer/components/QueuedMessages.tsx",
+        "src/renderer/lib/steersOnTheWay.ts",
+        "src/renderer/components/OrchestratorChat.tsx"
+      ],
+      "claimedAt": "2026-11-20T13:32:28.069Z",
+      "expiresAt": "2026-11-20T15:32:28.069Z"
+    },
+    {
       "task": "steer-joins-prompt-on-its-way",
       "session": "Animatrix-618a93",
       "machine": "Animatrix",
