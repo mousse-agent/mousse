@@ -489,6 +489,21 @@ export function OrchestratorChat() {
   // Prompts sent here and still on their way, by thread (their send answers when the turn ends). A message sent
   // meanwhile is queued behind them, even before the thread reports the turn running.
   const promptsOnTheWay = useRef(new Map<string, number>())
+  // The threads with a prompt on its way, for the composer: it works as during the reply from the send, so a steer made
+  // before the thread reports the turn running is a steer (it joins the turn once it runs), not a queued message.
+  const [promptThreadsOnTheWay, setPromptThreadsOnTheWay] = useState<ReadonlySet<string>>(() => new Set())
+  const notePromptOnTheWay = useCallback((threadId: string, change: 1 | -1) => {
+    const left = (promptsOnTheWay.current.get(threadId) ?? 0) + change
+    if (left > 0) promptsOnTheWay.current.set(threadId, left)
+    else promptsOnTheWay.current.delete(threadId)
+    setPromptThreadsOnTheWay((current) => {
+      if (current.has(threadId) === left > 0) return current
+      const next = new Set(current)
+      if (left > 0) next.add(threadId)
+      else next.delete(threadId)
+      return next
+    })
+  }, [])
   // Steers sent here and still on their way, by their request ids. One the running turn could not take yet is queued
   // and then sent now: it shows in the reply it joins, never for a moment in the queue too.
   const [steersOnTheWay, setSteersOnTheWay] = useState<ReadonlySet<string>>(() => new Set())
@@ -531,7 +546,7 @@ export function OrchestratorChat() {
   // here is on its way (shown last). Otherwise, while a turn is set up (a wake, the queue's next message, a prompt from
   // another window), it would land in the previous turn's finished reply: it waits first in the queue instead.
   const replyTakesSteer = useAppStore((s) => (s.activeThreadId ? turnTakesSteer(s.turnStates[s.activeThreadId]) : false))
-  const replyOpen = replyTakesSteer || (activeThreadId ? (promptsOnTheWay.current.get(activeThreadId) ?? 0) > 0 : false)
+  const replyOpen = replyTakesSteer || (activeThreadId ? promptThreadsOnTheWay.has(activeThreadId) : false)
   const replyOpenRef = useRef(replyOpen)
   replyOpenRef.current = replyOpen
   const queue = useThreadQueue({
@@ -1088,7 +1103,7 @@ export function OrchestratorChat() {
         if (optimisticMessageId !== firstPrompt.id) useAppStore.getState().dropMessage(targetThreadId, firstPrompt.id)
       }
       const promptThread = optimisticMessageId ? targetThreadId : null
-      if (promptThread) promptsOnTheWay.current.set(promptThread, onTheWay + 1)
+      if (promptThread) notePromptOnTheWay(promptThread, 1)
       // A steer queued first shows in the reply from now on, not only once it is sent now. One painted since the click
       // stays the same row; it goes if the message starts a turn of its own instead. While the transcript's last turn
       // is not the one it joins (a turn is still being set up), it shows in the queue, first, until a turn takes it.
@@ -1270,15 +1285,11 @@ export function OrchestratorChat() {
       } finally {
         if (steer) setSteersOnTheWay((current) => { const next = new Set(current); next.delete(requestId); return next })
         if (steerRow) queue.endComposerSteer(steerRow, false)
-        if (promptThread) {
-          const left = (promptsOnTheWay.current.get(promptThread) ?? 1) - 1
-          if (left > 0) promptsOnTheWay.current.set(promptThread, left)
-          else promptsOnTheWay.current.delete(promptThread)
-        }
+        if (promptThread) notePromptOnTheWay(promptThread, -1)
         stopWatchingStart?.()
       }
     },
-    [activeThreadId, profileId, chatMode, loading, turnActive, compactionRunning, setLoading, queue.threadId, queue.items.length, queue.steer, queue.beginComposerSteer, queue.endComposerSteer]
+    [activeThreadId, profileId, chatMode, loading, turnActive, compactionRunning, setLoading, notePromptOnTheWay, queue.threadId, queue.items.length, queue.steer, queue.beginComposerSteer, queue.endComposerSteer]
   )
 
   // The thread's subagents, and whether any still runs: the chat then shows "Waiting for subagents…".
@@ -1364,7 +1375,9 @@ export function OrchestratorChat() {
   const subagentsWorking = threadSubagents.some(isWorkingSubagent)
   // The composer works as the thread shows: while it is working or waiting (its subagents, a turn ending, a turn that
   // started elsewhere), it offers Queue and Steer and a send follows them, even when this window has no running turn.
-  const composerWorking = turnActive || loading || isThreadActivityActive(activeThreadActivity) || subagentsRunning
+  // A prompt sent here counts from the send: its turn may not be reported running for a moment yet.
+  const promptOnTheWay = activeThreadId !== null && promptThreadsOnTheWay.has(activeThreadId)
+  const composerWorking = turnActive || loading || promptOnTheWay || isThreadActivityActive(activeThreadActivity) || subagentsRunning
   const [compactingThread, setCompactingThread] = useState<string | null>(null)
   const handleCompactNow = useCallback(() => {
     const threadId = activeThreadId

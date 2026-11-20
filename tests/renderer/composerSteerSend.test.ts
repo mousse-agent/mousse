@@ -253,3 +253,31 @@ describe('a steer on its way into the reply', () => {
     expect(steeredShown()).toEqual([])
   })
 })
+
+describe('a steer made while a prompt is on its way', () => {
+  it('is a steer even before the thread reports the turn running: it joins that turn once it can, not the end of the queue', async () => {
+    // The thread had a turn before; the new one is not reported running yet (no turn state, no activity).
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    useAppStore.setState({ loading: false, turnStates: { 'thread-a': { phase: 'completed', turnId: 'run-1' } } as never })
+    orchestrator.isTurnActive = vi.fn(async () => false)
+    // The turn is still being set up: it takes no steer yet.
+    orchestrator.steer = vi.fn(async () => false)
+    const queueItem = { id: 'q-steer', threadId: 'thread-a', content: 'Use the id', state: 'pending', intent: 'normal', enqueuedAt: new Date().toISOString(), order: 0 }
+    orchestrator.sendToThread = vi.fn((_thread: string, request: { content: string }) =>
+      request.content === 'Use the id' ? Promise.resolve({ message: '', actions: [], queued: true, queueItem }) : new Promise(() => undefined))
+    await mount()
+    const bridge = (window as unknown as { mousse: Record<string, Record<string, unknown>> }).mousse
+    const promoteToSteer = vi.fn(async () => ({ ok: true }))
+    bridge.queue.promoteToSteer = promoteToSteer
+    bridge.queue.list = vi.fn(async () => [])
+
+    await send('Fix the login bug')
+    await send('Use the id', { ctrlKey: true })
+    await settle()
+
+    expect(orchestrator.steer).toHaveBeenCalledWith('Use the id', 'thread-a')
+    // Queued while the turn is set up and sent now by its id: it goes into the turn as soon as it runs.
+    expect(promoteToSteer).toHaveBeenCalledWith('thread-a', 'q-steer')
+    expect(steeredShown()).toEqual(['Use the id'])
+  })
+})
