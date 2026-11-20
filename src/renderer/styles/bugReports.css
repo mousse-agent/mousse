@@ -1,0 +1,190 @@
+/* Bug reports: an error's Report action, the report dialog, Settings' list of reports and the update's "fixes your bugs".
+   Filled, never bordered; sans throughout, but for the small reference id. */
+
+.bug-report-action,
+.bug-report-done {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--text-secondary) 12%, transparent);
+  color: var(--text-primary);
+  font: 500 12px/1 var(--font-sans);
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.bug-report-action:hover { background: color-mix(in srgb, var(--text-secondary) 20%, transparent); }
+.bug-report-action:focus-visible,
+.bug-report-done:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.bug-report-done {
+  background: rgba(var(--accent-rgb), 0.14);
+  color: color-mix(in oklch, var(--accent) 75%, var(--text-primary));
+}
+
+.bug-report-done:hover { background: rgba(var(--accent-rgb), 0.22); }
+
+.bug-report-ref {
+  color: var(--text-secondary);
+  font: 400 11px/1 var(--font-sans);
+  white-space: nowrap;
+}
+
+.bug-report-ref code {
+  font: 400 11px/1 var(--font-mono);
+  color: var(--text-secondary);
+  background: none;
+  padding: 0;
+}
+
+.bot-new-report { align-self: flex-start; margin-top: 6px; }
+
+/* The row of actions an error shows: Retry, Report, and the reference. */
+.bug-report-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+/* ----- The dialog ----- */
+
+.bug-report-overlay .modal { width: min(560px, calc(100vw - 48px)); }
+
+.bug-report-lede { margin: 0 0 12px; color: var(--text-secondary); font-size: 13px; }
+
+.bug-report-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.bug-report-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-secondary) 9%, transparent);
+  color: var(--text-primary);
+  font: 400 13px/1.45 var(--font-sans);
+}
+
+.bug-report-input:focus { outline: 2px solid rgba(var(--accent-rgb), 0.55); outline-offset: 0; }
+.bug-report-body { resize: vertical; min-height: 140px; max-height: 320px; }
+
+.bug-report-check {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.bug-report-check .bug-report-muted { grid-column: 2; font-size: 12px; }
+
+.bug-report-preview {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  max-height: 200px;
+  overflow: auto;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-secondary) 7%, transparent);
+  color: var(--text-secondary);
+  font: 400 12px/1.5 var(--font-sans);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bug-report-muted { color: var(--text-secondary); }
+.bug-report-error { color: var(--danger); margin: 0 0 8px; }
+
+.bug-report-who {
+  margin-right: auto;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.bug-report-outcome { display: flex; flex-direction: column; gap: 6px; padding: 4px 0; }
+.bug-report-outcome strong { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+.bug-report-outcome p { margin: 0; }
+.bug-report-outcome a { color: var(--accent); }
+
+/* ----- Rows like the sidebar's thread rows: Settings' reports and the update's fixed bugs ----- */
+
+.bug-report-rows { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+
+.bug-report-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 32px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  transition: background 0.15s, color 0.15s;
+}
+
+.bug-report-row:hover { background: rgba(var(--accent-rgb), 0.1); color: var(--text-primary); }
+
+.bug-report-row-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+a.bug-report-row-title:hover { text-decoration: underline; }
+
+.bug-report-row-meta {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.bug-report-state {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text-secondary) 12%, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.bug-report-state[data-state='fixed'] { background: color-mix(in srgb, var(--success, #5fbf8a) 18%, transparent); color: var(--success, #5fbf8a); }
+.bug-report-state[data-state='open'] { background: rgba(var(--accent-rgb), 0.14); color: color-mix(in oklch, var(--accent) 75%, var(--text-primary)); }
+
+.bug-report-row .settings-icon-btn { flex-shrink: 0; }
+
+.bug-report-fixed {
+  margin: 0 0 14px;
+  padding: 10px 6px 6px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--success, #5fbf8a) 8%, transparent);
+}
+
+.bug-report-fixed h4 {
+  margin: 0 0 6px;
+  padding: 0 9px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.bug-report-empty { margin: 0; padding: 6px 0; color: var(--text-secondary); font-size: 13px; }

@@ -387,9 +387,8 @@ it.each(['end', 'activity', 'off', 'changed'] as const)('releases held rows once
   } finally { reopened.close() }
 })
 
-it.each(['active', 'wake', 'now'] as const)('does not hold a night row with the %s exception', async exception => {
+it.each(['active', 'now'] as const)('does not hold a night row with the %s exception', async exception => {
   Object.assign(f.host, { quietHoursFor: () => ({ end: f.clock.now + 3600_000 }), ownerActive: () => exception === 'active' })
-  if (exception === 'wake') f.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ canWakeMe: true }), botId)
   f.bots.setTellingWindows(1)
   const events: any[] = []; f.bots.events.on('tell', e => events.push(e))
   let id: string
@@ -403,20 +402,26 @@ it.each(['active', 'wake', 'now'] as const)('does not hold a night row with the 
   expect(events.at(-1)?.sound).toBe(true)
 })
 
-it('keeps the same class and due time with no quiet-hours wish even when active or allowed to wake', () => {
+// An older build kept a Tells you level and a can-wake choice here; neither changes how a report is told any more.
+it('ignores a telling level and can-wake choice an older build stored', () => {
+  Object.assign(f.host, { quietHoursFor: () => ({ end: f.clock.now + 3600_000 }), ownerActive: () => false })
+  f.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ tellMe: 'needs_you', canWakeMe: true }), botId)
+  const report = f.bots.chat.post({ botId, author: 'bot', kind: 'run_report', text: 'Night report' })
+  expect(f.store.message(report.id)).toMatchObject({ tell: 'soon', tellAt: new Date(f.clock.now + 3600_000).toISOString() })
+})
+
+it('keeps the same class and due time with no quiet hours even when active', () => {
   Object.assign(f.host, { quietHoursFor: () => undefined, ownerActive: () => true })
-  f.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ canWakeMe: true }), botId)
   const report = f.bots.chat.post({ botId, author: 'bot', kind: 'run_report', text: 'Normal report' })
   expect(f.store.message(report.id)).toMatchObject({ tell: 'soon', tellAt: f.store.now() })
 })
 
-// Same reports during quiet hours with owner activity, and from a can-wake bot (by day: the first test above).
-it.each(['active at night', 'can wake at night'] as const)('folds five soon reports into one banner and one sound: %s', async scenario => {
+// Same reports during quiet hours with owner activity (by day: the first test above).
+it('folds five soon reports into one banner and one sound when active at night', async () => {
   Object.assign(f.host, {
     quietHoursFor: () => ({ end: f.clock.now + 3600_000 }),
-    ownerActive: () => scenario === 'active at night'
+    ownerActive: () => true
   })
-  if (scenario === 'can wake at night') f.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ canWakeMe: true }), botId)
   f.bots.setTellingWindows(1)
   const events: import('../../src/shared/bots/personal/telling').BotTelling[] = []
   f.bots.events.on('tell', event => events.push(event))

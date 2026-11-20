@@ -39,11 +39,6 @@ const bots = createWatchedBrowserStore<BotBrowserView, BotBrowserFrameEvent>({
   }
 })
 
-/** Whether this app can open a bot's browser in a window (an older app's bridge cannot). */
-export function canOpenBotBrowserWindow(): boolean {
-  return typeof window !== 'undefined' && typeof window.mousse?.personalBots?.browserWindow === 'function'
-}
-
 export const useBotBrowserStore = bots.useStore
 /** The store's hooks, for the general view (`WatchedBrowserPane`). */
 export const botBrowserKit = { useStore: bots.useStore, useWatch: bots.useWatch, useStream: bots.useStream }

@@ -99,6 +99,19 @@ describe('process failure handlers', () => {
     expect(deps.flushSync).toHaveBeenCalled()
   })
 
+  it('keeps running when a child program\'s pipe fails to start reading, and only then', async () => {
+    const pipeFailure = (stack: string) => Object.assign(new Error('read ENOTCONN'), { code: 'ENOTCONN', syscall: 'read', stack })
+    const spawnStack = 'Error: read ENOTCONN\n    at tryReadStart (node:net:776:20)\n    at new Socket (node:net:501:12)\n    at createSocket (node:internal/child_process:337:14)\n    at ChildProcess.spawn (node:internal/child_process:475:23)\n    at execFile (node:child_process:349:17)'
+    const { lines, deps, handlers } = setup()
+    handlers.onUncaughtException(pipeFailure(spawnStack))
+    expect(lines[0]).toContain('kept running')
+    expect(deps.shutdown).not.toHaveBeenCalled()
+    expect(deps.exit).not.toHaveBeenCalled()
+    // The same code from a socket the service owns is still fatal.
+    handlers.onUncaughtException(pipeFailure('Error: read ENOTCONN\n    at tryReadStart (node:net:776:20)\n    at Server.onconnection (node:net:2000:10)'))
+    await vi.waitFor(() => expect(deps.exit).toHaveBeenCalledWith(1))
+  })
+
   it('still exits when shutdown hangs', async () => {
     const { deps, handlers } = setup()
     deps.shutdown.mockImplementation(() => new Promise<void>(() => undefined))

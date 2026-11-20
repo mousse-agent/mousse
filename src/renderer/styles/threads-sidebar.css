@@ -105,7 +105,7 @@
   min-width: 0;
   gap: 2px;
   padding: 2px;
-  border: 1px solid rgba(var(--accent-pale-rgb), 0.09);
+  border: 0;
   border-radius: 10px;
   background: color-mix(in srgb, var(--text-secondary) 5%, transparent);
 }
@@ -541,8 +541,8 @@ html[data-theme='light'] .threads-sidebar-thread.threads-sidebar-card.project-ti
   background: linear-gradient(to left, color-mix(in srgb, var(--project-tint) var(--project-tint-strength), transparent), transparent);
 }
 
-/* The selected row keeps its plain raised look, so the selection reads first; its mark still shows the hue. */
-.threads-sidebar-thread.threads-sidebar-card.project-tinted.active::after,
+/* The selected row shows the selection band instead of its tint (specular.css), so the selection reads first; its
+   mark still shows the hue. A row whose subagent is open drops the tint the same way. */
 .threads-sidebar-thread.threads-sidebar-card.project-tinted.has-open-subagent::after,
 html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.project-tinted::after {
   content: none;
@@ -664,6 +664,7 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 .threads-sidebar-card-status-waiting { color: var(--status-waiting); }
 .threads-sidebar-card-status-done { color: var(--status-done); }
 .threads-sidebar-card-status-paused { color: var(--warning); }
+.threads-sidebar-card-status-failed { color: var(--danger); }
 
 .threads-sidebar-card-title {
   display: block;
@@ -687,6 +688,53 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 .threads-sidebar-thread-container:has(.threads-sidebar-card) .threads-sidebar-thread-actions {
   top: 7px;
   transform: none;
+}
+
+/* On a card the actions take the status's place: the status (and age) fades out as they fade in, over the same
+   150ms, and back when the pointer leaves. Archived cards too, which light their status on hover. */
+.threads-sidebar-card-status,
+.threads-sidebar-card-age {
+  transition: opacity 150ms ease;
+}
+
+.app .threads-sidebar:not(.menu-open) .threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions):is(:hover, :has(:focus-visible)) > .threads-sidebar-thread.threads-sidebar-card :is(.threads-sidebar-card-status, .threads-sidebar-card-age),
+.app .threads-sidebar-thread-container:has(> .threads-sidebar-thread-actions [aria-expanded='true']) > .threads-sidebar-thread.threads-sidebar-card :is(.threads-sidebar-card-status, .threads-sidebar-card-age) {
+  opacity: 0;
+}
+
+.threads-sidebar-thread-container:has(> .threads-sidebar-card) > .threads-sidebar-thread-actions {
+  gap: 3px;
+  transition: opacity 150ms ease;
+}
+
+.threads-sidebar-thread-container:has(> .threads-sidebar-card) .threads-sidebar-thread-action {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
+
+/* The hover actions are bare icons on the row: no strip behind them and no fill on the buttons, at rest or under the
+   pointer. The icon brightens instead; keyboard focus keeps a thin ring. */
+.app .threads-sidebar .threads-sidebar-thread-container > .threads-sidebar-thread-actions {
+  background: none;
+}
+
+.app .threads-sidebar .threads-sidebar-thread-action,
+.app .threads-sidebar .threads-sidebar-thread-action:is(:hover, :focus-visible, [aria-expanded='true']) {
+  background: transparent;
+}
+
+.app .threads-sidebar .threads-sidebar-thread-action:not(.danger):is(:hover, [aria-expanded='true']) {
+  color: var(--text-primary);
+}
+
+.app .threads-sidebar .threads-sidebar-thread-action:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--text-primary) 35%, transparent);
+  outline-offset: -1px;
+}
+
+.app .threads-sidebar .threads-sidebar-thread-action:not(.danger):focus-visible {
+  color: var(--text-primary);
 }
 
 .threads-sidebar-thread-feed {
@@ -785,6 +833,12 @@ html[data-theme='high-contrast'] .threads-sidebar-thread.threads-sidebar-card.pr
 
 .threads-sidebar-status-icon--paused {
   color: var(--warning);
+}
+
+/* A thread whose message did not start (its worktree could not be set up). */
+.threads-sidebar-status-icon--failed {
+  display: inline-flex;
+  color: var(--danger);
 }
 
 .threads-sidebar-thread-trailing {

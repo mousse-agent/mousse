@@ -10,7 +10,6 @@ import {
   Code2,
   Cookie,
   Crosshair,
-  Globe,
   Minus,
   MoreVertical,
   Plus,
@@ -31,6 +30,7 @@ import { KeepMounted, KeepMountedStack } from './KeepMounted'
 import { NO_LOADED_BROWSER_TABS, nextLoadedBrowserTabs, type LoadedBrowserTabs } from '../lib/loadedBrowserTabs'
 import {
   BrowserAccessControl,
+  BrowserAccessPanel,
   BrowserDeviceToolbar,
   BrowserNotice,
   BrowserStartPage,
@@ -742,11 +742,6 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
     >
       <KeepMountedStack>
       <KeepMounted active preserveLayout className="keep-mounted-pane browser-manual-surface">
-      {askingAccess && <div className="browser-agent-controls" data-mousse-decision="" role="region" aria-label="Agent browser access request">
-        <span>Allow access to all browser tabs?</span>
-        <button type="button" disabled={browserBusy} onClick={(event) => { if (isRepeatClick(event)) return; setConfirmingAccess(false); void changeAccess(true, pendingAccess?.requestId) }}>Allow</button>
-        <button type="button" disabled={browserBusy} onClick={() => { setConfirmingAccess(false); if (pendingAccess) void changeAccess(false, pendingAccess.requestId) }}>Deny</button>
-      </div>}
       {/* The thread agent's browser without a window, when it has one open: its line, and its view over the tabs. */}
       {activeThreadId && <ThreadBrowserRow threadId={activeThreadId} active={active} />}
       {!hasVisibleTabs && noticeView}
@@ -758,7 +753,6 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
             <button type="button" className="browser-toolbar-btn" disabled={!canGoForward} onClick={() => withWebview(getActiveWebview(), (wv) => wv.goForward(), undefined)} aria-label="Forward"><ArrowRight size={16} /></button>
             <button type="button" className="browser-toolbar-btn" onClick={() => withWebview(getActiveWebview(), (wv) => wv.reload(), undefined)} aria-label="Reload"><RefreshCw size={16} className={loading ? 'spin' : ''} /></button>
             <form className="browser-url-form" onSubmit={(event) => { event.preventDefault(); navigate() }}>
-              <Globe size={14} className="browser-url-icon" />
               <input className="browser-url-input" aria-label="Browser address" value={inputUrl} onFocus={() => { editingAddress.current = true }} onBlur={() => { editingAddress.current = false }} onChange={(event) => setInputUrl(event.target.value)} placeholder="Search or enter URL" spellCheck={false} />
             </form>
             <button
@@ -860,6 +854,13 @@ function ProfileBrowserPanel({ profileId, active }: { profileId: string; active:
           />
         ))}
       </KeepMounted>
+      <BrowserAccessPanel
+        open={askingAccess}
+        agentAsking={Boolean(pendingAccess)}
+        busy={browserBusy}
+        onAllow={(event) => { if (isRepeatClick(event)) return; setConfirmingAccess(false); void changeAccess(true, pendingAccess?.requestId) }}
+        onDeny={() => { setConfirmingAccess(false); if (pendingAccess) void changeAccess(false, pendingAccess.requestId) }}
+      />
       </KeepMounted>
       </KeepMountedStack>
       {activeThreadId && <ThreadBrowserLayer threadId={activeThreadId} />}

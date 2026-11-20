@@ -2,6 +2,8 @@ import { ALWAYS_OPTION_ID, PERMISSION_KEYS } from '../../../../shared/permission
 import type { PermissionMode } from '../../../../shared/permissionMode'
 import { isLocalOnlyThread, isNativeHelperThread, isSideChatThread, subagentDescendantsIn, visibleThreads } from '../../../../shared/threadLineage'
 import type { QueuedMessage, Thread, ThreadNativeHelper, UserQuestionAnswers } from '../../../../shared/types'
+import type { ModelOverride } from '../../../../shared/providerInstances'
+import type { ThreadPullRequestLink } from '../../../../shared/pullRequests'
 import { describeApprovalRefusal } from '../../approvalRights'
 import { QueueAccessError, QueueConflictError } from '../../../queue/ThreadMessageQueue'
 import { readRunResultText } from '../../delegation/hold'
@@ -19,6 +21,7 @@ import { ROUTED_AGENT_BODY_MAX } from '../../../../shared/bridge/routed'
 import { isQualifiedId, parseQualifiedId } from '../../../../shared/threadRef'
 import { RemoteThreadRefusal, SEARCH_MS, type RemoteComputerReach, type RemoteTarget, type RemoteWaitResult } from '../../../orchestrator/RemoteLaunchedThreads'
 import { cutEnd, messageRows, textOffsetProblem, type MessageRow } from './messageRows'
+import { lastCompletedAt, modelOf, pullRequestOf, recentTurns, RECENT_ANSWER_CHARS, RECENT_PROMPT_CHARS, RECENT_REMOTE_LOOKBACK, RECENT_REMOTE_MESSAGES, RECENT_STEP_CHARS, RECENT_TURNS_DEFAULT, RECENT_TURNS_MAX, SUMMARY_NEXT, type ViewRow } from './threadViews'
 import type { BotActivityContext, BotActivitySink } from '../../../bots/seams'
 import {
   checkedInHandler,
@@ -458,6 +461,41 @@ function messagesPage(envelope: Record<string, unknown>, rows: Iterable<MessageR
   }
 }
 
+/** A thread's messages here as the short views read them. */
+function rowsOf(all: ReadonlyArray<{ role: string; content?: unknown; timestamp?: unknown }>): ViewRow[] {
+  return all.map((message, index) => ({ index, role: message.role, text: typeof message.content === 'string' ? message.content : '', timestamp: message.timestamp }))
+}
+
+/** The views of `thread_read` an agent may ask for. */
+const READ_VIEWS: ReadonlySet<string> = new Set(['events', 'messages', 'summary', 'recent'])
+
+const isRecordValue = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+
+/**
+ * `thread_read` view `recent`: the last `turns` turns of `rows` (the newest messages of a thread of `total`), each its
+ * prompt, a line per step and its final answer, cut; and where the full messages of those turns start.
+ */
+function recentView(envelope: Record<string, unknown>, rows: readonly ViewRow[], total: number, turns: number): Record<string, unknown> {
+  let recent = recentTurns(rows, turns)
+  const build = (): Record<string, unknown> => {
+    const cut = recent.turns.some((turn) => turn.prompt?.cut || turn.answer?.cut || turn.stepsLeftOut)
+    // The oldest turn shown began before the messages read (a very long turn on another computer): say where to look.
+    const begunEarlier = recent.firstIndex > 0 && !recent.turns[0]?.prompt
+    return {
+      ...envelope,
+      total,
+      turns: recent.turns,
+      ...(total ? { fromIndex: recent.firstIndex } : {}),
+      hint: total
+        ? `These are the last ${recent.turns.length} turn(s), trimmed${cut ? ' (cut: true marks a cut text)' : ''}. Read them in full with view "messages" from afterIndex ${recent.firstIndex}; earlier turns are before that index.${begunEarlier ? ' The oldest of them began earlier: its prompt is before that index.' : ''}`
+        : 'The thread has no messages yet.'
+    }
+  }
+  // Fewer turns when they would not fit one response: the newest are kept.
+  while (recent.turns.length > 1 && jsonBytes(build()) > THREAD_READ_MAX_BYTES) recent = recentTurns(rows, recent.turns.length - 1)
+  return build()
+}
+
 /**
  * A page of `thread_read` view `events`: the events of `visible` that fit the byte cap, each bounded. `nextAfterSeq` pages
  * on even when a lineage view filtered events out of `page`; a page cut at the byte cap continues after its last event.
@@ -713,6 +751,24 @@ function chosenStandingRule(request: ApprovalRequestInfo, answers: UserQuestionA
 /** What became of an agent's message: a turn started with it, or it waits in the thread's queue behind the running turn. */
 function deliveryOf(sent: { queued: boolean }): 'started' | 'queued' {
   return sent.queued ? 'queued' : 'started'
+}
+
+/**
+ * What a caller that started work on a thread is told about its setup: nothing more once the thread's folder is set up;
+ * the reason and the link when setting up its worktree failed (the thread shows the same, with Retry); a line when it
+ * is still being set up. Only a run that started now is waited for, never the model's reply.
+ */
+async function setupOf(host: AppToolHost, threadId: string, sent: { runId?: string; queued?: boolean; replayed?: boolean } | undefined): Promise<Record<string, unknown>> {
+  if (!sent?.runId || sent.queued || sent.replayed || !host.waitForSetup) return {}
+  const setup = await host.waitForSetup(threadId, sent.runId)
+  if (setup.status === 'ready') return { setup: 'ready' }
+  if (setup.status === 'pending') return { setup: 'pending', setupNote: 'Its worktree is still being set up. If that fails, the thread shows why, with a Retry button.' }
+  const why = setup.failure ? `${setup.failure.reason}${setup.failure.detail ? ` Git said: ${setup.failure.detail}` : ''}` : (setup.error ?? 'Its run ended before the agent started.')
+  return {
+    setup: 'failed',
+    setupError: why,
+    setupNote: `The thread did not start: ${why} It shows this reason${setup.failure?.retryable ? ' and a Retry button that sends the same message again' : ''}: ${threadLink(threadId)}. Tell your owner in one line, with the link.`
+  }
 }
 
 /** The transcript row of a change the call made; the `agent.action` event is the record, so a row that fails to write is not an error. */
@@ -1213,11 +1269,68 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
   }
   /** `thread_read` of a thread this thread launched on another computer: the same pages, read there. */
   const readOnComputer = (threadId: string, args: Record<string, unknown>, ctx: ToolCallContext): Promise<ToolOutcome> => onComputer(async () => {
-    const view = args.view === undefined ? 'events' : args.view
-    if (view !== 'events' && view !== 'messages') throw new Error("view must be 'events' or 'messages'")
+    // A personal bot reads there as here, a summary by default.
+    const view = args.view === undefined ? (ctx.turn.bot ? 'summary' : 'events') : args.view
+    if (!READ_VIEWS.has(view as string)) throw new Error("view must be 'summary', 'recent', 'messages' or 'events'")
+    const turns = boundedInt(args.turns, 'turns', 1, RECENT_TURNS_MAX, RECENT_TURNS_DEFAULT)
     const target = remoteTarget(threadId, ctx, 'thread_read')
     const remote = host.remoteThreads!
     const envelope = { threadId: target.threadId, link: threadLink(target.threadId), computer: target.computer, view, scope: target.record ? 'launched' : 'computer' }
+    if (view === 'summary') {
+      const [{ thread, runs: runList }, count] = await Promise.all([
+        remote.summary(target),
+        remote.messages(target, { afterIndex: 0, limit: 1, textOffset: 0, textMax: 1 })
+      ])
+      const latest = runList[0]
+      const working = latest && typeof latest.status === 'string' && !TERMINAL_RUN_STATUSES.has(latest.status as RunRecord['status'])
+      return remoteData(ctx, `Thread ${target.threadId} on ${target.computer}`, {
+        ...envelope,
+        title: typeof thread.name === 'string' ? oneLine(thread.name) : '',
+        status: working ? (latest.status === 'paused' ? 'paused' : 'active') : 'idle',
+        ...(working && typeof latest.runId === 'string' ? { activeRunId: latest.runId } : {}),
+        model: modelOf(isRecordValue(thread.modelOverride) ? (thread.modelOverride as unknown as ModelOverride) : null),
+        lastCompletedAt: lastCompletedAt(runList),
+        pullRequest: pullRequestOf(isRecordValue(thread.pullRequest) ? (thread.pullRequest as unknown as ThreadPullRequestLink) : null),
+        messages: count.total,
+        updatedAt: typeof thread.updatedAt === 'string' ? thread.updatedAt : null,
+        ...listedFlags({ settledAt: typeof thread.settledAt === 'string' ? thread.settledAt : null, hidden: thread.hidden === true }),
+        hint: SUMMARY_NEXT
+      })
+    }
+    if (view === 'recent') {
+      const viewRow = (row: MessageRow): ViewRow => ({ index: row.index, role: row.role, text: row.text, timestamp: row.timestamp, ...(row.totalChars ? { totalChars: row.totalChars } : {}) })
+      const { total } = await remote.messages(target, { afterIndex: 0, limit: 1, textOffset: 0, textMax: 1 })
+      // Messages there from `from` to `to`, each only as far as a step line, page after page: a page there stops at its
+      // bytes, counting from its oldest message.
+      const readSpan = async (from: number, to: number): Promise<ViewRow[]> => {
+        const out: ViewRow[] = []
+        for (let at = from; at < to;) {
+          const page = await remote.messages(target, { afterIndex: at, limit: Math.min(to - at, THREAD_MESSAGES_MAX_LIMIT), textOffset: 0, textMax: RECENT_STEP_CHARS + 1 })
+          const got = page.messages.filter((row) => row.index >= at && row.index < to).map(viewRow)
+          if (!got.length) break
+          out.push(...got)
+          at = got.at(-1)!.index + 1
+        }
+        return out
+      }
+      // The newest messages, to find the turns in; a turn longer than that is read back to its prompt, so far.
+      let rows = await readSpan(Math.max(0, total - RECENT_REMOTE_MESSAGES), total)
+      const prompts = () => rows.filter((row) => row.role === 'user').length
+      while (rows.length && rows[0]!.index > 0 && prompts() < turns && total - rows[0]!.index < RECENT_REMOTE_LOOKBACK) {
+        const earlier = await readSpan(Math.max(0, rows[0]!.index - RECENT_REMOTE_MESSAGES), rows[0]!.index)
+        if (!earlier.length) break
+        rows = [...earlier, ...rows]
+      }
+      // Then the prompt and the answer of each of those turns, as far as the view shows them.
+      const shown = recentTurns(rows, turns).turns.flatMap((turn) => [
+        ...(turn.prompt ? [{ index: turn.prompt.index, max: RECENT_PROMPT_CHARS }] : []),
+        ...(turn.answer ? [{ index: turn.answer.index, max: RECENT_ANSWER_CHARS }] : [])
+      ])
+      const full = await Promise.all(shown.map(({ index, max }) => remote.messages(target, { afterIndex: index, limit: 1, textOffset: 0, textMax: max + 1 })))
+      const byIndex = new Map(full.flatMap((page) => page.messages.slice(0, 1)).map((row) => [row.index, viewRow(row)]))
+      rows = rows.map((row) => byIndex.get(row.index) ?? row)
+      return remoteData(ctx, `The last turns of thread ${target.threadId} on ${target.computer}`, recentView(envelope, rows, total, turns))
+    }
     if (view === 'messages') {
       const afterIndex = boundedInt(args.afterIndex, 'afterIndex', 0, Number.MAX_SAFE_INTEGER, 0)
       const limit = boundedInt(args.limit, 'limit', 1, THREAD_MESSAGES_MAX_LIMIT, THREAD_MESSAGES_DEFAULT_LIMIT)
@@ -1541,15 +1654,36 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     })
   })
   /**
-   * `thread_read` for a personal bot: `summary` (default), one line on the thread and its last reply; `messages`, the
-   * transcript; or `events`, its run events, both with an agent's pages and caps (#1365). Messages are the newest ones
+   * `thread_read` view `summary` of a thread here: what it is and where it stands (its subagents counted as the sidebar
+   * rolls them up), never its content.
+   */
+  const localSummary = (meta: Thread, messages: number) => {
+    const { status, activeRunId, waitingOnSubagents } = standingOf(meta.id, subagentDescendantsIn(host.listThreads?.() ?? [])(meta.id))
+    return {
+      title: oneLine(meta.name),
+      project: projectName(meta.projectId),
+      status,
+      activeRunId,
+      waitingOnSubagents,
+      model: modelOf(meta.modelOverride),
+      lastCompletedAt: lastCompletedAt(engine.listRuns(meta.id, { limit: 20 })),
+      pullRequest: pullRequestOf(meta.pullRequest),
+      messages,
+      updatedAt: meta.updatedAt,
+      ...listedFlags(meta)
+    }
+  }
+  /**
+   * `thread_read` for a personal bot: `summary` (default), what the thread is, with one line of its last reply; `recent`, its
+   * last turns, trimmed; `messages`, the transcript; or `events`, its run events, both with an agent's pages and caps (#1365). Messages are the newest ones
    * unless it pages from `afterIndex`. A subagent's thread is read too when the bot reaches the thread at the top of its
    * chain. Framed as data from that thread. The registry has already decided it may reach the thread (`botThreadScope`).
    */
   const botRead = (threadId: string, args: Record<string, unknown>, callerThreadId: string): ToolOutcome => {
     requireBotReach(host, engine, callerThreadId, threadId, { read: true })
     const view = args.view === undefined ? 'summary' : args.view
-    if (view !== 'summary' && view !== 'messages' && view !== 'events') throw new Error("view must be 'summary', 'messages' or 'events'")
+    if (view !== 'summary' && view !== 'recent' && view !== 'messages' && view !== 'events') throw new Error("view must be 'summary', 'recent', 'messages' or 'events'")
+    const turns = boundedInt(args.turns, 'turns', 1, RECENT_TURNS_MAX, RECENT_TURNS_DEFAULT)
     const meta = host.threadMeta?.(threadId)
     if (!meta || !host.threadMessages) return notAvailable('thread_read')
     const title = oneLine(meta.name)
@@ -1561,23 +1695,21 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
     }
     const all = host.threadMessages(threadId)
     if (view === 'summary') {
-      const { status, activeRunId, waitingOnSubagents } = standingOf(threadId, subagentDescendantsIn(host.listThreads?.() ?? [])(threadId))
+      const { status, activeRunId, waitingOnSubagents, ...about } = localSummary(meta, all.length)
       const lastReply = [...all].reverse().find((message) => message.role === 'assistant' && typeof message.content === 'string' && message.content.trim())
       return botData(`Thread «${title}»`, {
         threadId,
         link: threadLink(threadId),
-        title,
-        project: projectName(meta.projectId),
+        ...about,
         status: waitingOnSubagents ? 'waiting on subagents' : status === 'awaiting_input' ? 'waiting for your owner' : status === 'active' ? 'working' : 'idle',
         ...(activeRunId ? { activeRunId } : {}),
-        messages: all.length,
-        updatedAt: meta.updatedAt,
         ...(lastReply ? { lastReply: oneLine(lastReply.content as string) } : {}),
         ...(meta.createdByThreadId === undefined ? {} : { startedByYou: meta.createdByThreadId === callerThreadId }),
         ...(meta.lineage ? { lineage: { parentThreadId: meta.lineage.parentThreadId } } : {}),
-        hint: 'Read its messages with view "messages", or its run events (runs, tool calls, why a run failed) with view "events".'
+        hint: `${SUMMARY_NEXT} Its run events (runs, tool calls, why a run failed) are view "events".`
       })
     }
+    if (view === 'recent') return botData(`The last turns of thread «${title}»`, recentView({ threadId, link: threadLink(threadId), title, view }, rowsOf(all), all.length, turns))
     const limit = boundedInt(args.limit, 'limit', 1, THREAD_MESSAGES_MAX_LIMIT, args.afterIndex === undefined ? BOT_MESSAGES_DEFAULT : THREAD_MESSAGES_DEFAULT_LIMIT)
     const afterIndex = args.afterIndex === undefined ? Math.max(0, all.length - limit) : boundedInt(args.afterIndex, 'afterIndex', 0, Number.MAX_SAFE_INTEGER, 0)
     const textOffset = boundedInt(args.textOffset, 'textOffset', 0, Number.MAX_SAFE_INTEGER, 0)
@@ -1611,12 +1743,13 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
   return [
     {
       name: 'thread_read',
-      description: `Read a thread. view "events" (default): run events (runs, attempts, delegations, tool calls) of any thread. Page with afterSeq. view "messages": the transcript of any thread; page with afterIndex. Each message holds at most ${THREAD_MESSAGE_MAX_CHARS} characters: one marked truncated continues when you pass its index as afterIndex and its nextTextOffset as textOffset. A response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB: a page that reaches it has fewer items and capped: true, and nextAfterSeq or nextAfterIndex continues it. A run's final text is cut to ${THREAD_RESULT_MAX_CHARS} characters; read it in full in the messages. A personal bot reads its owner\'s threads, and the subagents below them, with the same pages and caps, and view "summary" (its default: one line on the thread and its last reply); its "messages" without afterIndex are the newest ones. ${REMOTE_REACH} It is read there, with the same pages and limits, and the ids in it are named the way this computer names them.`,
+      description: `Read a thread. To catch up on one, start small: view "summary" is what it is (title, project, model, status, when its last turn completed, its pull request, how many messages), none of its content; view "recent" is its last turns (turns: default ${RECENT_TURNS_DEFAULT}, up to ${RECENT_TURNS_MAX}), each its prompt, a line per step and its final answer, trimmed. view "events" (default): run events (runs, attempts, delegations, tool calls) of any thread. Page with afterSeq. view "messages": the full transcript of any thread; page with afterIndex. Each message holds at most ${THREAD_MESSAGE_MAX_CHARS} characters: one marked truncated continues when you pass its index as afterIndex and its nextTextOffset as textOffset. A response holds at most ${THREAD_READ_MAX_BYTES / 1024} KB: a page that reaches it has fewer items and capped: true, and nextAfterSeq or nextAfterIndex continues it. A run's final text is cut to ${THREAD_RESULT_MAX_CHARS} characters; read it in full in the messages. A personal bot reads its owner\'s threads, and the subagents below them, with the same views, pages and caps; "summary" is its default and adds one line of the thread's last reply, and its "messages" without afterIndex are the newest ones. ${REMOTE_REACH} It is read there, with the same pages and limits, and the ids in it are named the way this computer names them.`,
       inputSchema: {
         type: 'object',
         properties: {
           threadId: { type: 'string', description: 'Defaults to your thread.' },
-          view: { type: 'string', enum: ['events', 'messages', 'summary'], description: 'Defaults to events (summary for a personal bot).' },
+          view: { type: 'string', enum: ['summary', 'recent', 'messages', 'events'], description: 'Defaults to events (summary for a personal bot).' },
+          turns: { type: 'integer', minimum: 1, maximum: RECENT_TURNS_MAX, description: `recent: how many of the last turns (default ${RECENT_TURNS_DEFAULT}).` },
           afterSeq: { type: 'integer', minimum: 0, description: 'events: return events after this sequence number.' },
           afterIndex: { type: 'integer', minimum: 0, description: 'messages: return the messages after this many (nextAfterIndex of the previous page).' },
           textOffset: { type: 'integer', minimum: 0, description: 'messages: start the first message returned (the one at afterIndex) at this character, to read on in a message marked truncated (its nextTextOffset).' },
@@ -1635,12 +1768,23 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         // A personal bot ("use your threads"): a one-line summary by default, the transcript only when it asks, capped.
         if (ctx.turn.bot) return botRead(threadId, args, ctx.caller.threadId)
         const view = args.view === undefined ? 'events' : args.view
-        if (view !== 'events' && view !== 'messages') throw new Error("view must be 'events' or 'messages'")
+        if (!READ_VIEWS.has(view as string)) throw new Error("view must be 'summary', 'recent', 'messages' or 'events'")
         // A bot's threads are its chat: only the bot's own turn reads them.
         if (threadId !== ctx.caller.threadId) assertNotBotThread(host, threadId, 'thread_read')
         // The whole record is the caller's own, or any thread that exists; a relative the caller reaches only through its
         // lineage (a thread that is gone) gets the filtered lineage view.
         const full = scope === 'own' || scope === 'manage'
+        if (view === 'summary' || view === 'recent') {
+          if (!full) throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not available to this credential.`)
+          const turns = boundedInt(args.turns, 'turns', 1, RECENT_TURNS_MAX, RECENT_TURNS_DEFAULT)
+          const meta = host.threadMeta?.(threadId)
+          if (!meta || !host.threadMessages) return notAvailable(`thread_read ${view}`)
+          const all = host.threadMessages(threadId)
+          const envelope = { threadId, link: threadLink(threadId), view, scope }
+          if (view === 'recent') return json(recentView({ ...envelope, title: oneLine(meta.name) }, rowsOf(all), all.length, turns))
+          const { waitingOnSubagents, ...about } = localSummary(meta, all.length)
+          return json({ ...envelope, ...about, ...(waitingOnSubagents ? { waitingOnSubagents: true } : {}), hint: SUMMARY_NEXT })
+        }
         if (view === 'messages') {
           if (!full) throw new McpToolError('mousse_scope_denied', `Thread ${threadId} is not available to this credential.`)
           if (!host.threadMessages) return notAvailable('thread_read messages')
@@ -1946,9 +2090,9 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           // The ledger follows the thread and tells the bot: `notify` is then not a second wake.
           const job = sent.replayed ? undefined : botJob(threadId, title, host.threadMeta?.(threadId)?.projectId, args.content, ctx)
           const told = job ?? (notify && !sent.replayed ? await botNotify(threadId, title, args.content, ctx) : {})
-          return json({ threadId, title: title ?? null, ...sent, delivery: deliveryOf(sent), ...(notJoined ? { notJoined } : {}), ...told, note: 'It runs in that thread\'s own mode. Approvals and questions there wait for your owner, never for you.' })
+          return json({ threadId, title: title ?? null, ...sent, delivery: deliveryOf(sent), ...(notJoined ? { notJoined } : {}), ...told, ...await setupOf(host, threadId, sent), note: 'It runs in that thread\'s own mode. Approvals and questions there wait for your owner, never for you.' })
         }
-        return json({ threadId, ...sent, delivery: deliveryOf(sent), ...(notify ? watchSent(threadId, requestKey, actor, sent.runId, ctx) : {}) })
+        return json({ threadId, ...sent, delivery: deliveryOf(sent), ...(notify ? watchSent(threadId, requestKey, actor, sent.runId, ctx) : {}), ...await setupOf(host, threadId, sent) })
       }
     },
     {
@@ -2555,8 +2699,10 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
           // The ledger follows the thread and tells the bot: `notify` is then not a second wake.
           const job = firstSent ? botJob(created.threadId, created.title, created.projectId, args.firstMessage as string, ctx) : undefined
           const told = job ?? (notify && firstSent ? await botNotify(created.threadId, created.title, args.firstMessage as string, ctx) : {})
+          const setup = firstSent && created.firstMessage?.sent === true ? await setupOf(host, created.threadId, created.firstMessage) : {}
           return json({
             ...told,
+            ...setup,
             threadId: created.threadId,
             link: threadLink(created.threadId),
             title: created.title,
@@ -2583,7 +2729,8 @@ export function threadTools(host: AppToolHost, engine: RunEngine, bots?: () => B
         }
         // The first message's work is watched once it was sent; one that was not sent has nothing to watch yet (a retry sends it).
         const watched = notify && created.firstMessage?.sent === true ? watchSent(created.threadId, requestKey, actor, created.firstMessage.runId, ctx) : {}
-        return json({ ...created, link: threadLink(created.threadId), ...watched })
+        const setup = !created.replayed && created.firstMessage?.sent === true ? await setupOf(host, created.threadId, created.firstMessage) : {}
+        return json({ ...created, link: threadLink(created.threadId), ...watched, ...setup })
       }
     },
     {

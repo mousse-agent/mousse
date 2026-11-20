@@ -48,13 +48,30 @@ export function resolvePackagedCliLauncher(): string | null {
   return existsSync(candidate) ? candidate : null
 }
 
+/** `Mousse.app/Contents/Resources/mousse-cli` for an executable in `Mousse.app/Contents/MacOS`, when it is there. */
+export function macCliLauncher(execPath: string): string | null {
+  const macos = dirname(execPath)
+  if (basename(macos) !== 'MacOS') return null
+  const candidate = join(dirname(macos), 'Resources', 'mousse-cli')
+  return existsSync(candidate) ? candidate : null
+}
+
 /**
  * Path suitable for startup install / documentation (single executable path).
  * Prefer the packaged launcher; fall back to the current script or execPath.
  */
-export function resolveCliPathForInstall(scriptPath?: string): string {
+export function resolveCliPathForInstall(
+  scriptPath?: string,
+  host: { execPath?: string; platform?: NodeJS.Platform } = {}
+): string {
   const launcher = resolvePackagedCliLauncher()
   if (launcher) return launcher
+  // A macOS app keeps its launcher in Contents/Resources, beside Contents/MacOS/Mousse: without it the entry would
+  // start `Mousse service run`, which opens the app instead of running the service.
+  if ((host.platform ?? process.platform) === 'darwin') {
+    const macLauncher = macCliLauncher(host.execPath ?? process.execPath)
+    if (macLauncher) return macLauncher
+  }
 
   if (scriptPath && existsSync(scriptPath) && !isElectronMainProcess()) {
     return scriptPath

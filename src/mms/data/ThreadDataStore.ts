@@ -29,6 +29,7 @@ import type {
   SubagentWorkspaceBinding,
   Task,
   Thread,
+  ThreadSetupFailure,
   ThreadData,
   ThreadLineage,
   ThreadListVersion,
@@ -1690,6 +1691,45 @@ export class ThreadDataStore extends EventEmitter {
       const next: Thread = { ...base }
       if (lastReply) next.lastReply = lastReply
       else delete next.lastReply
+      return next
+    })
+    if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+    this.patchListCache(updated)
+    this.emit('list-changed', { id })
+    return true
+  }
+
+  /**
+   * Keeps or clears why the thread's last message could not start (`Thread.setupFailure`). Not activity: `updatedAt`
+   * stays. Writes and announces the list only when it changed; a missing thread is left alone.
+   */
+  setThreadSetupFailure(id: string, failure: ThreadSetupFailure | undefined): boolean {
+    const thread = this.getThread(id)
+    if (!thread || (!thread.setupFailure && !failure) || JSON.stringify(thread.setupFailure) === JSON.stringify(failure)) return false
+    const updated = this.writeThreadMeta(thread, (base) => {
+      const next: Thread = { ...base }
+      if (failure) next.setupFailure = failure
+      else delete next.setupFailure
+      return next
+    })
+    if (!updated.projectId) this.updateStandaloneIndexEntry(updated)
+    this.patchListCache(updated)
+    this.emit('updated', updated)
+    this.emit('list-changed', { id })
+    return true
+  }
+
+  /**
+   * Keeps how the thread's latest run ended (`Thread.lastRun`); undefined clears it. Not activity: `updatedAt` stays.
+   * Writes and announces the list only when it changed; a missing thread is left alone.
+   */
+  setThreadLastRun(id: string, lastRun: Thread['lastRun']): boolean {
+    const thread = this.getThread(id)
+    if (!thread || thread.lastRun === lastRun) return false
+    const updated = this.writeThreadMeta(thread, (base) => {
+      const next: Thread = { ...base }
+      if (lastRun) next.lastRun = lastRun
+      else delete next.lastRun
       return next
     })
     if (!updated.projectId) this.updateStandaloneIndexEntry(updated)

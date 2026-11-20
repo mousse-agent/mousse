@@ -110,7 +110,7 @@ describe('an open Settings page and a theme an agent changes', () => {
     await vi.waitFor(() => expect(toggle()).not.toBeNull())
     const before = toggle().getAttribute('aria-checked')
 
-    // A service write and its settings-changed event, as after telling_set, while this page stays open.
+    // A service write and its settings-changed event, as after a bot changed them, while this page stays open.
     await elsewhere({ notifications: { quietHours } } as MousseSettingsUpdate)
     expect(service.get().notifications.quietHours).toEqual(quietHours ?? undefined)
     await act(async () => { toggle().click() })

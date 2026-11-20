@@ -6,7 +6,9 @@
  * before and after the first caller is removed.
  *
  * Its control (`MOUSSE_NET_ENGINE_CONTROL=second-reader`) serves a stream with no binding to the caller and fails
- * it with `foreign_read`. `scripts/net-engine-check.mjs phase1a.private-streams` runs it and prints the marker.
+ * it with `foreign_read`. `scripts/net-engine-check.mjs phase1a.private-streams` runs it and prints the marker;
+ * with `--route relay` (three links in `MOUSSE_RELAY_TEST_LINKS`) the pairings are set up direct and every
+ * connection after setup goes through the relays.
  */
 import { createHash } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -31,11 +33,13 @@ describe('phase1a.private-streams', () => {
     second = await fabric.computer('second')
     ;({ callerOnOwner: firstOnOwner, ownerOnCaller: ownerOnFirst } = await fabric.pair(owner, first))
     ;({ ownerOnCaller: ownerOnSecond } = await fabric.pair(owner, second))
+    // The end of setup: in a relay run, everything from here goes through the relays.
+    await fabric.settle()
     fabric.shells(owner)
     await fabric.connect(first, ownerOnFirst)
     await fabric.connect(second, ownerOnSecond)
     await owner.dispatch('bridge.policy', { node: firstOnOwner, terminal: true }, true)
-  }, 120_000)
+  }, 300_000)
   afterAll(() => fabric.close(), 60_000)
 
   const fromFirst = (row: Crossed) => row.from === first.endpoint

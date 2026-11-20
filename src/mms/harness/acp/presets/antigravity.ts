@@ -98,12 +98,35 @@ export function antigravityStdout(onAuthUrl: (url: string) => void): Transform {
   })
 }
 
+/** The environment every Antigravity launch starts from: Mousse's own, without Google credentials or agent settings. */
+export function scrubbedAntigravityEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = { ...base }
+  // Windows treats environment keys as case-insensitive: aliases go too.
+  for (const key of Object.keys(env)) if (ISOLATED_KEYS.includes(key.toUpperCase())) delete env[key]
+  return env
+}
+
+/**
+ * Which agent runs: Google's 1.1.1 ACP server (`legacy`, beside its local harness, the verified install
+ * or a manual path) or the native Antigravity CLI (`native`, served as `agy acp`).
+ */
+export interface AntigravityRuntimeChoice { kind: 'legacy' | 'native'; binary: string }
+
+/** `agy acp` keeps its app data in `<gemini-dir>/<app-data-dir>`: the same folder the 1.1.1 server used. */
+export const ANTIGRAVITY_APP_DATA_DIR = 'antigravity-acp'
+
+/** The launch arguments of a runtime, before the user's own. */
+export function antigravityRuntimeArgs(kind: AntigravityRuntimeChoice['kind'], geminiHome: string, platform: NodeJS.Platform = process.platform): string[] {
+  if (kind === 'native') return ['acp', '--gemini-dir', geminiHome, '--app-data-dir', ANTIGRAVITY_APP_DATA_DIR]
+  return platform === 'linux' ? ['--uid='] : []
+}
+
 export interface AntigravityLaunchOptions {
   /** `<profileHome>/providers/antigravity`: the isolated home and the browser helper live here. */
   profileDir: string
   profileHome: string
-  /** The verified install or the manual agent path; undefined when there is none. */
-  binary(): string | undefined
+  /** The runtime to start; undefined when there is none. */
+  runtime(): AntigravityRuntimeChoice | undefined
   /** The user's extra launch arguments and variables. */
   args(): string[]
   env(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv
@@ -116,13 +139,13 @@ export interface AntigravityLaunchOptions {
  */
 export function antigravityConnectionFactory(options: AntigravityLaunchOptions): AcpConnectionFactory {
   return (request) => {
-    const binary = options.binary()
-    if (!binary) throw new Error('Install Google Antigravity or select its official ACP binary first')
-    const env = { ...process.env }
-    for (const key of Object.keys(env)) if (ISOLATED_KEYS.includes(key.toUpperCase())) delete env[key]
+    const runtime = options.runtime()
+    if (!runtime) throw new Error('Install Google Antigravity or select its official ACP binary first')
+    const { binary, kind } = runtime
+    const env = scrubbedAntigravityEnv(process.env)
     const geminiHome = join(options.profileDir, 'gemini-home')
     mkdirSync(geminiHome, { recursive: true, mode: 0o700 })
-    const acpDir = join(geminiHome, 'antigravity-acp')
+    const acpDir = join(geminiHome, ANTIGRAVITY_APP_DATA_DIR)
     mkdirSync(acpDir, { recursive: true, mode: 0o700 })
     writeFileSync(join(acpDir, 'settings.json'), JSON.stringify({ auth: { type: ANTIGRAVITY_AUTH_METHOD } }), { mode: 0o600 })
     for (const part of [['config', 'skills'], ['antigravity-cli', 'skills']]) {
@@ -141,8 +164,10 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
       chmodSync(browserHelper, 0o700)
     }
     env.GEMINI_HOME = geminiHome
-    env.AGY_ACP_FORCE_FILE_STORAGE = '1'
-    env.ANTIGRAVITY_HARNESS_PATH = join(dirname(binary), process.platform === 'win32' ? 'localharness_external.exe' : 'localharness_external')
+    if (kind === 'legacy') {
+      env.AGY_ACP_FORCE_FILE_STORAGE = '1'
+      env.ANTIGRAVITY_HARNESS_PATH = join(dirname(binary), process.platform === 'win32' ? 'localharness_external.exe' : 'localharness_external')
+    }
     if (process.platform !== 'win32') {
       const probe = spawnSync(browserHelper, ['https://example.invalid/mousse-browser-probe'], { encoding: 'utf8', timeout: 5_000 })
       if (probe.status !== 0 || probe.stdout || probe.stderr !== `${BROWSER_MARKER}https://example.invalid/mousse-browser-probe\n`) {
@@ -157,7 +182,7 @@ export function antigravityConnectionFactory(options: AntigravityLaunchOptions):
     mkdirSync(tempDir, { recursive: true, mode: 0o700 })
     if (process.platform === 'win32') { env.TEMP = tempDir; env.TMP = tempDir }
     else env.TMPDIR = tempDir
-    const args = [...(process.platform === 'linux' ? ['--uid='] : []), ...options.args()]
+    const args = [...antigravityRuntimeArgs(kind, geminiHome), ...options.args()]
     const child = spawn(binary, args, { env: options.env(env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     const acceptAuthUrl = (url: string) => {
       if (callbackTarget(url)) request.onAuthUrl?.(url)

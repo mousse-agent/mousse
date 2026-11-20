@@ -125,17 +125,6 @@ export const BOT_TOOLS: Tool[] = [
     })
   },
   {
-    name: 'telling_set',
-    description: 'Set how or when the owner wants to be told. Only in a turn their own message or tap started. Confirm the returned line in words; never save this wish as memory. For only urgent use tellMe needs_you and schedules true.',
-    parameters: Type.Object({
-      quietHours: Type.Optional(Type.Union([Type.Literal('off'), Type.Object({ from: Type.String(), to: Type.String() })])),
-      tellMe: Type.Optional(Type.Union([Type.Literal('needs_you'), Type.Literal('look'), Type.Literal('fyi'), Type.Literal('every')])),
-      schedules: Type.Optional(Type.Boolean()),
-      canWakeMe: Type.Optional(Type.Boolean()),
-      scheduleId: Type.Optional(Type.String())
-    })
-  },
-  {
     name: 'bot_schedule_add',
     description: `Run yourself on a schedule: each time, you get the prompt as your task. At most once a minute. A line you only need to say needs no run: use say instead of prompt. A schedule that should stop on a date takes until. Use onlyIfChanged to check a public page without a model run until its text changes. Returns the schedule's id and its label; confirm it to the owner in words.`,
     parameters: Type.Object({
@@ -715,18 +704,6 @@ export function botTools(deps?: () => BotAppToolDeps | undefined): MousseTool[] 
         }
       }
     },
-    ownTool(byName.get('telling_set')!, deps, {
-      class: 'mutation',
-      describe: () => 'Set when to tell you',
-      handler: async (args, ctx) => {
-        const call = botCall(deps, ctx)
-        if (isOutcome(call)) return call
-        if (call.memoryLane !== 'chat') return error('Only a turn your owner’s own message or tap started can change telling. Suggest it in your report instead.')
-        if (!call.deps.host.setTelling) return error('Telling preferences cannot be changed here.')
-        try { return { text: call.deps.host.setTelling(call.botId, call.activationId, args as import('../../../../shared/bots/personal/tellingSettings').TellingChange) } }
-        catch (cause) { return error(cause instanceof Error ? cause.message : String(cause)) }
-      }
-    }),
     ownTool(byName.get('bot_schedule_add')!, deps, {
       class: 'mutation',
       describe: () => 'Add a schedule',

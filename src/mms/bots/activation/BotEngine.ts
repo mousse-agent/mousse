@@ -12,8 +12,7 @@ import { callForBot, type BotMcp } from '../mcp/BotMcp'
 import { isQuietHours, settingCompactionPoint } from '../../../shared/settings'
 import { BotTellings } from '../chat/BotTellings'
 import type { SettingsStore } from '../../settings/SettingsStore'
-import { isTellMe, type TellMe } from '../../../shared/types'
-import { readBotTelling, tellingLine, type TellingChange } from '../../../shared/bots/personal/tellingSettings'
+import { type TellMe } from '../../../shared/types'
 import { tellingClass } from '../chat/telling'
 import { hasToolImages } from '../chat/toolImages'
 import { extractAppletParts } from '../../../shared/applets'
@@ -29,8 +28,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
-import { join } from 'node:path'
-import { askCallNote, askNoticeText, askText } from '../../../shared/bots/personal/askText'
+import { basename, join } from 'node:path'
+import { askNoticeText, askText } from '../../../shared/bots/personal/askText'
 import { lookFields } from '../../../shared/bots/personal/look'
 import { BOT_HELD_POWER_TEXT, subagentHold, type BotHeldPower, type BotRuntimeHold, type BotSubagentHold } from '../../../shared/bots/personal/subagentHold'
 import type { BotAuthority, BotCheck, BotCheckDenied, BotMcpTool, BotSubagents, BotSubagentView, BotThreadRole, BotThreads, NormalisedCall, WallReason } from '../../../shared/bots/personal/authority'
@@ -59,7 +58,7 @@ import {
   grantRequestOf
 } from '../../../shared/bots/personal/escalation'
 import { findServer, installationOf, mcpAskFor, type BotMcpHost, type BotMcpServer } from '../mcp/BotMcp'
-import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_IMAGE_TOOL, BOT_PROFILER_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_THEMES_PERMISSION, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, botGrantTool, isAbsolutePath, manifestProblem } from '../../../shared/bots/personal/manifest'
 import { checkMessage, wallMessage } from '../../../shared/bots/personal/walls'
 import type { ChargeResult, CountKind, CounterScope } from '../../../shared/harness/counters'
 import type { ReserveResult, SpendLimits, SpendRequest, SpendScope } from '../../../shared/harness/spend'
@@ -155,7 +154,7 @@ export const BOT_FILE_ASK_GONE_TEXT = 'A bot can no longer use files outside its
 
 // Unknown tools are deliberately effects: only these recorded calls can leave an unsent draft.
 const DRAFT_READ_ONLY_TOOLS = new Set([
-  'thread_list', 'thread_search', 'thread_read', 'thread_wait', 'terminal_read', 'memory_list', 'memory_search', 'memory_read',
+  'thread_list', 'thread_search', 'thread_read', 'thread_wait', 'terminal_read', 'memory_list', 'memory_search', 'memory_read', 'item_list',
   'read', 'list', 'search', 'ls', 'find', 'grep', 'Read', 'Glob', 'Grep',
   'bot_schedule_list', 'work_list', 'work_models', 'watch_list', 'reminder_list', 'bot_list', 'running_list',
   'mcp_servers', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'
@@ -260,7 +259,7 @@ export interface BotEngineHost {
    * The bots' schedules, in the shared scheduled-job store (`BotScheduleBook`): automations whose Who is the bot. The
    * one scheduler claims each occurrence and hands it to `runScheduledOccurrence`. Absent: no bot has schedules here.
    */
-  schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped' | 'ended' | 'setTelling' | 'pageCheckExists'>>
+  schedules?: Pick<BotScheduleBook, 'list' | 'get' | 'add' | 'remove' | 'removeAll' | 'labelOf'> & Partial<Pick<BotScheduleBook, 'skipped' | 'ended' | 'pageCheckExists'>>
   /** Per-schedule progress in bot memory; pending reports are published only on successful completion. */
   progress?: Pick<BotMemoryStore, 'stageProgress' | 'finishProgress' | 'progress'>
   /** The level a scheduled run's activation reported with `run_report` (`AutomationRuns`). */
@@ -901,19 +900,15 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.tellings.read()
         this.armDue()
       },
-      tellAt: (botId, tell, at, messageId) => actionNudgeId(messageId) ? new Date(this.followUpTime(botId, Date.parse(at))).toISOString() : tell === 'soon' && !this.ownerActive() && !this.canWake(botId, messageId) ? new Date(this.host.quietHoursFor?.(botId, Date.parse(at))?.end ?? Date.parse(at)).toISOString() : at,
+      tellAt: (botId, tell, at, messageId) => actionNudgeId(messageId) ? new Date(this.followUpTime(botId, Date.parse(at))).toISOString() : tell === 'soon' && !this.ownerActive() ? new Date(this.host.quietHoursFor?.(botId, Date.parse(at))?.end ?? Date.parse(at)).toISOString() : at,
       classify: (message, input) => {
         const actionId = actionNudgeId(message.id)
         if (actionId && botAsksFirst(this.host.settings?.get())) return this.actions.get(actionId)?.status === 'open' ? 'soon' : null
         const activation = message.activationId ? this.store.activation(message.activationId) : undefined
         const reminder = message.id.startsWith('bm_rem_') ? this.store.reminder(message.id.slice(3)) : undefined
-        const botId = this.store.message(message.id)!.botId
-        const tellMe = activation?.trigger.kind === 'schedule' ? undefined : readBotTelling(this.store.registry(botId)?.tellJson).tellMe
-        return tellingClass({ tellMe, level: activation ? this.host.runLevel?.(activation.id) : undefined, message, scheduleLine: input.scheduleLine, ownerTurn: !!activation && memoryLaneOf(activation) === 'chat',
+        return tellingClass({ message, scheduleLine: input.scheduleLine, ownerTurn: !!activation && memoryLaneOf(activation) === 'chat',
           reminder: !!reminder, reminderOwner: reminder?.ownerSet, quiet: this.quietReport(this.store.message(message.id)!.botId, message) })
       },
-      tellingSettings: (botId) => this.tellingSettings(botId),
-      telling: (botId) => this.tellingLine(botId),
       schedules: (botId) => this.schedulesOf(botId).map((schedule) => ({ scheduleId: schedule.scheduleId, label: schedule.label, ...(schedule.nextAt ? { nextAt: schedule.nextAt } : {}), jobId: schedule.jobId, paused: schedule.paused, name: schedule.name, prompt: schedule.prompt })),
       // The threads it started that still work: it is busy while it manages them.
       launched: (botId) => this.launchedThreads(botId),
@@ -2264,7 +2259,13 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         this.putThread({ threadId: thread.id, botId: row.botId, role: 'activation', key: definition.main.key, activationId: row.id })
         threadId = thread.id
       }
-      const scratch = join(this.store.directory, 'scratch', row.id)
+      const own = join(this.store.directory, 'scratch', row.id)
+      let scratch = this.scratchFor(row)
+      // The chat's folder starts empty, whatever an earlier turn that could not empty it left there; one that can't be
+      // emptied now leaves this turn a folder of its own.
+      if (scratch !== own) {
+        try { rmSync(scratch, { recursive: true, force: true }) } catch { scratch = own }
+      }
       mkdirSync(join(scratch, 'tmp'), { recursive: true, mode: 0o700 })
       mkdirSync(this.filesFolder(row.botId), { recursive: true, mode: 0o700 })
       const clientRequestId = `${row.id}:d1`
@@ -3873,12 +3874,11 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       const held = heldNow(permission)
       if (held) return { ok: false, refused: { text: held, askId: '' } }
       if (firstMessage) return { ok: false, refused: { text: BOT_ASK_NOT_YET_TEXT, askId: '' } }
-      const note = call.kind === 'app' ? askCallNote(call.tool, call.args) : undefined
       if (row.lane === 'run') {
         this.refused(row.id, permission)
-        return this.raiseAsk(row, input.mainN, 'gate', permission, wallMessage(decided.wall), undefined, note)
+        return this.raiseAsk(row, input.mainN, 'gate', permission, wallMessage(decided.wall))
       }
-      return { ok: false, wall: this.raiseWall(row.id, { dispatchN: input.mainN, kind: 'gate', permission, reason: wallMessage(decided.wall), ...(note ? { note } : {}) }) }
+      return { ok: false, wall: this.raiseWall(row.id, { dispatchN: input.mainN, kind: 'gate', permission, reason: wallMessage(decided.wall) }) }
     }
     const readOnly = threadsReadOnlyOf(row)
     const authority: BotAuthority = {
@@ -4319,7 +4319,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * consults stop with it). Asks never expire. The sixth wall of an activation ends it `blocked`
    * instead. The returned wall is what the refused call tells the model.
    */
-  raiseWall(activationId: string, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string; note?: string }): WallReason {
+  raiseWall(activationId: string, input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): WallReason {
     const current = this.store.activation(activationId)
     if (current && this.removedExecutingSchedule(current)) return this.endRemovedScheduleAtWall(current)
     if (current?.lane === 'run' && input.kind === 'budget') return this.budgetEnd(current, input)
@@ -4687,19 +4687,17 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** An ask in plain words for its card (`askText`), with the bot's current limits. */
-  private askCardText(row: BotActivationRow, permission: BotAskRequest, callNote?: string): { title: string; note: string } {
+  private askCardText(row: BotActivationRow, permission: BotAskRequest): { title: string; note: string } {
     if ('ask' in permission && permission.ask === 'let_alone') {
       const pending = this.alone.pending(row.botId, row.id, permission)
       if (pending) return { title: pending.title, note: 'Only this automation, this tool and this place. Anything else asks you first.' }
     }
     const budget = this.store.activeGrant(row.botId)?.manifest.budget
-    const text = askText(permission, budget ? { budget } : {})
-    // What the refused call would have done ("It would set: …") says more than the permission's own line.
-    return callNote ? { title: text.title, note: callNote } : text
+    return askText(permission, budget ? { budget } : {})
   }
 
   /** The bot's open ask for `fingerprint` becomes this activation's wall, or a new one is written. */
-  private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string; note?: string }): BotEscalationRow {
+  private openWall(row: BotActivationRow, asked: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): BotEscalationRow {
     const input = { ...asked, permission: this.limitAsk(row.botId, asked.permission) }
     const fingerprint = this.fingerprintOf(row.id, input.kind, input.permission)
     const open = this.store.openAsk(row.botId, fingerprint)
@@ -4707,7 +4705,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       if (open.activationId !== row.id || open.mode !== 'wall') this.store.moveAskToWall(open.id, row.id, input.dispatchN)
       return this.store.escalation(open.id)!
     }
-    const text = this.askCardText(row, input.permission, asked.note)
+    const text = this.askCardText(row, input.permission)
     const escalation = {
       id: `esc_${randomUUID()}`,
       botId: row.botId,
@@ -4729,7 +4727,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     return this.store.escalation(escalation.id)!
   }
 
-  private wallInTransaction(activationId: string, from: readonly BotActivationRow['status'][], input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string; note?: string }): { kind: 'wall'; escalation: BotEscalationRow } | { kind: 'blocked' } | { kind: 'none' } {
+  private wallInTransaction(activationId: string, from: readonly BotActivationRow['status'][], input: { dispatchN: number; kind: BotWallKind; permission: BotAskRequest; reason: string; toolCallId?: string }): { kind: 'wall'; escalation: BotEscalationRow } | { kind: 'blocked' } | { kind: 'none' } {
     const row = this.store.activation(activationId)
     if (!row || !from.includes(row.status)) return { kind: 'none' }
     if (this.store.countEscalations(activationId) >= MAX_BOT_WALLS) {
@@ -4789,7 +4787,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * owner said Not now to it in the last 24 hours: then no card is made, and the bot is told the owner
    * said not now (never that it asked). The bot is told it asked only when a card is there.
    */
-  private raiseAsk(row: BotActivationRow, dispatchN: number, kind: BotWallKind, asked: BotAskRequest, reason: string, toolCallId?: string, note?: string): BotCheck {
+  private raiseAsk(row: BotActivationRow, dispatchN: number, kind: BotWallKind, asked: BotAskRequest, reason: string, toolCallId?: string): BotCheck {
     const permission = this.limitAsk(row.botId, asked)
     const fingerprint = this.fingerprintOf(row.id, kind, permission)
     let raised: { askId: string; created: boolean } | { refused: string }
@@ -4803,7 +4801,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
         if (this.store.countNewAsks(row.botId, { activationId: row.id }) >= MAX_RUN_ASKS ||
           this.store.countNewAsks(row.botId, { since: new Date(this.now() - 24 * 60 * 60_000).toISOString() }) >= MAX_BOT_ASKS_PER_DAY)
           return { refused: BOT_ASK_ENOUGH_TEXT }
-        const text = this.askCardText(row, permission, note)
+        const text = this.askCardText(row, permission)
         const id = `esc_${randomUUID()}`
         this.store.insertEscalation({
           id, botId: row.botId, activationId: row.id, dispatchN, toolCallId: toolCallId ?? null, kind, permission, reason: reason.slice(0, 2000),
@@ -7163,6 +7161,25 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     for (const question of this.store.activationQuestions(row.id)) if (question.messageId) this.chat.republish(question.messageId)
   }
 
+  /**
+   * Where an activation's scratch folder goes. A chat turn takes the bot's one chat folder (`scratch/chat-<bot id,
+   * hashed>`), emptied between turns as any scratch is: what its runtime starts with then stays the same from turn to
+   * turn (on macOS and Linux its temporary folder, `TMPDIR`, is in there), so the process kept warm for the chat is
+   * reused. A run, and a chat turn that starts while an earlier one still holds that folder (paused or blocked), take one
+   * of their own.
+   */
+  private scratchFor(row: Pick<BotActivationRow, 'id' | 'botId' | 'lane'>): string {
+    const root = join(this.store.directory, 'scratch')
+    if (row.lane !== 'chat') return join(root, row.id)
+    const chat = join(root, `chat-${createHash('sha256').update(row.botId).digest('hex').slice(0, 16)}`)
+    return this.scratchHeld(chat, row.id) ? join(root, row.id) : chat
+  }
+
+  /** Whether an activation other than `except` that has not ended holds the scratch folder `path`. */
+  private scratchHeld(path: string, except: string): boolean {
+    return this.store.activationsWith(NOT_ENDED).some((other) => other.id !== except && other.scratch === path)
+  }
+
   /** The scratch folder goes when the activation has ended (it stays while it waits or is paused). */
   private cleanup(row: BotActivationRow): void {
     if (!ENDED_ACTIVATION_STATUSES.has(row.status)) return
@@ -7190,7 +7207,8 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     } catch (error) {
       console.warn('the bot browser could not let go of an activation', { activationId: row.id, error: error instanceof Error ? error.message : String(error) })
     }
-    if (!row.scratch) return
+    // The chat's folder (`scratchFor`) is left to the turn that holds it now; that turn's end empties it.
+    if (!row.scratch || this.scratchHeld(row.scratch, row.id)) return
     try {
       rmSync(row.scratch, { recursive: true, force: true })
     } catch (error) {
@@ -7203,8 +7221,10 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * chat says so in plain words (a runtime that cannot hold the bot is the bot's stuck error).
    */
   private block(row: BotActivationRow, code: string, reason: string): { refused: string; code: string } {
+    // The runtime's own reason follows, so the chat says what to change rather than only that something is wrong.
+    const why = reason.trim() ? failureWords(reason) : ''
     const stuck: BotStoredError | undefined = code === 'policy_unenforceable'
-      ? { code, error: { text: 'I can\'t run on the providers set up here.', action: { kind: 'open_providers', label: 'Open providers' } } }
+      ? { code, error: { text: why ? `I can't run on the providers set up here: ${why}` : 'I can\'t run on the providers set up here.', action: { kind: 'open_providers', label: 'Open providers' } } }
       : undefined
     // Nobody waits on a run to continue it: it ends failed, and counts toward the failure pause.
     if (row.lane === 'run') {
@@ -7516,7 +7536,14 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       this.known.delete(thread.threadId)
     }
     // P7: the scratch folders of ended activations.
-    for (const row of this.store.activationsWith(['done', 'failed', 'cancelled'])) if (row.scratch && existsSync(row.scratch)) this.cleanup(row)
+    // A bot's chat folder (`scratchFor`), which many ended turns name, is only emptied, once no turn holds it.
+    for (const row of this.store.activationsWith(['done', 'failed', 'cancelled'])) {
+      if (!row.scratch || !existsSync(row.scratch)) continue
+      if (basename(row.scratch) === row.id) this.cleanup(row)
+      else if (!this.scratchHeld(row.scratch, row.id)) {
+        try { rmSync(row.scratch, { recursive: true, force: true }) } catch { /* The next chat turn's start empties it. */ }
+      }
+    }
   }
 
   private async reconcileActivation(row: BotActivationRow, runs: RunEngine): Promise<void> {
@@ -8098,13 +8125,19 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   /**
    * The chat turn Resume answers again: the newest one, when a usage limit ended it and nothing in the chat lane runs
    * or waits. None when the bot can't run now (its approval, its thread in the trash): Resume still clears the pause.
+   * Its key keeps the owner's start (`chat:`, `answer:`), as `chat:after:` does, so the retry still holds the owner's
+   * threads and memory (`threadsActOf`, `memoryLaneOf`). A start that may act without the owner (a wake, a thread's
+   * notice, a question's default) follows the `resume:` (`resume:wake:<id>`), so the retry may act as its original
+   * could. Any other start (another bot's message) is `resume:` alone, which only reads the owner's threads.
    */
   private chatToRetry(botId: string): { row: BotActivationRow; key: string; admitted: ReturnType<BotEngine['admissible']> } | undefined {
     if (this.store.laneActivations(botId, 'chat', ['queued', 'running', 'waiting_grant']).length) return undefined
     const row = this.store.newestActivation(botId, 'chat')
     if (!row || row.status !== 'failed' || row.endReason !== 'usage_limit' || row.trigger.kind !== 'manual') return undefined
+    const owner = ['chat:', 'answer:'].find((start) => row.idempotencyKey.startsWith(start))
+    const key = owner ? `${owner}${RESUME_KEY_PREFIX}${row.id}` : `${RESUME_KEY_PREFIX}${actingChatStartOf(row.idempotencyKey) ?? ''}${row.id}`
     try {
-      return { row, key: `resume:${row.id}`, admitted: this.admissible(botId) }
+      return { row, key, admitted: this.admissible(botId) }
     } catch {
       return undefined
     }
@@ -8279,7 +8312,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
       done: (threadId, why) => this.completeSchedule(threadId, why),
       list: (botId) => this.listSchedules(botId)
     },
-    setTelling: (botId, activationId, change) => this.setTelling(botId, activationId, change),
     setProfile: (botId, profile) => this.setProfile(botId, profile),
     setModel: (botId, activationId, scope, choice) => this.setModel(botId, activationId, scope, choice),
     ownerWords: (botId, activationId) => this.ownerWords(botId, activationId),
@@ -8814,40 +8846,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     this.changed({ botId })
   }
 
-  tellingSettings(botId: string): import('../../../shared/bots/personal/tellingSettings').BotTellingPreferences {
-    const quietHours = this.host.settings?.get().notifications.quietHours
-    return { ...readBotTelling(this.store.registry(botId)?.tellJson), ...(quietHours ? { quietHours } : {}) }
-  }
-
-  tellingLine(botId: string): string | undefined {
-    const settings = this.tellingSettings(botId)
-    return tellingLine(settings, settings.quietHours)
-  }
-
-  setTelling(botId: string, activationId: string, change: TellingChange): string {
-    if (!this.timerOwnerSet(botId, activationId)) throw new BotEngineError('owner_only', 'Only a turn your owner’s own message or tap started can change telling. Suggest it in your report instead.')
-    if (change.tellMe !== undefined && !isTellMe(change.tellMe)) throw new BotEngineError('invalid_params', 'tellMe is needs_you, look, fyi or every.')
-    if (change.quietHours !== undefined && change.quietHours !== 'off' && !isQuietHours(change.quietHours)) throw new BotEngineError('invalid_params', 'Quiet hours need different from and to times in HH:MM (00:00 to 23:59), or off.')
-    if (change.canWakeMe !== undefined && typeof change.canWakeMe !== 'boolean' || change.schedules !== undefined && typeof change.schedules !== 'boolean') throw new BotEngineError('invalid_params', 'canWakeMe and schedules must be true or false.')
-    if (change.scheduleId !== undefined && (typeof change.scheduleId !== 'string' || !change.scheduleId || change.canWakeMe === undefined || change.tellMe !== undefined || change.schedules)) throw new BotEngineError('invalid_params', 'For one automation give scheduleId and canWakeMe only.')
-    if (change.quietHours !== undefined && !this.host.settings) throw new BotEngineError('unavailable', 'Quiet hours cannot be changed here.')
-    if ((change.schedules || change.scheduleId) && !this.host.schedules?.setTelling) throw new BotEngineError('unavailable', 'Automations cannot be changed here.')
-    if (change.schedules || change.scheduleId) this.host.schedules!.setTelling!(botId, { ...(change.schedules ? { tellMe: change.tellMe } : {}), ...(change.scheduleId ? { scheduleId: change.scheduleId, canWakeMe: change.canWakeMe } : {}) })
-    if (change.quietHours !== undefined) {
-      const settings = this.host.settings!.set({ notifications: { quietHours: change.quietHours === 'off' ? null : change.quietHours } })
-      this.host.settingsChanged?.(settings)
-    }
-    this.store.db.transaction(() => {
-      const previous = readBotTelling(this.store.registry(botId)?.tellJson)
-      this.store.run('UPDATE bot_registry SET tell_json = ? WHERE bot_id = ?', JSON.stringify({ ...previous, ...(change.tellMe !== undefined ? { tellMe: change.tellMe } : {}), ...(!change.scheduleId && change.canWakeMe !== undefined ? { canWakeMe: change.canWakeMe } : {}) }), botId)
-    })
-    this.changed({ botId })
-    this.quietHoursChanged()
-    const line = this.tellingLine(botId)
-    if (change.scheduleId) return [line, `That automation ${change.canWakeMe ? 'can' : 'cannot'} wake you.`].filter(Boolean).join('\n')
-    return line ?? 'No telling preferences set.'
-  }
-
   private timerOwnerSet(botId: string, from: string): boolean {
     const row = this.store.activation(from)
     return !!row && row.botId === botId && memoryLaneOf(row) === 'chat'
@@ -9318,18 +9316,6 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   private ownerActive(): boolean { return this.host.ownerActive?.() ?? false }
-  private canWake(botId: string, messageId: string): boolean {
-    if (readBotTelling(this.store.registry(botId)?.tellJson).canWakeMe === true) return true
-    const activationId = this.store.message(messageId)?.activationId
-    const trigger = activationId ? this.store.activation(activationId)?.trigger : undefined
-    if (trigger?.kind !== 'schedule') return false
-    if (trigger.completed) return trigger.completed.canWakeMe === true
-    if (trigger.removedTelling) return trigger.removedTelling.canWakeMe === true
-    try {
-      return (this.host.schedules?.get(botId, trigger.scheduleId)?.canWakeMe
-        ?? this.host.schedules?.ended?.(botId).find(schedule => schedule.scheduleId === trigger.scheduleId)?.canWakeMe) === true
-    } catch { return false } // An unavailable job store never prevents the report from being posted.
-  }
   private followUpTime(botId: string, at: number): number { return this.host.quietHoursFor?.(botId, at)?.end ?? at }
   noteOwnerActivity(): void { this.host.ownerActivity?.(); this.quietHoursChanged() }
   /** Only future tell_at on a soon row denotes a hold; no additional stored state. */
@@ -9338,7 +9324,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const now = this.now()
     for (const row of this.store.all("SELECT id, bot_id, at FROM bot_messages INDEXED BY bot_messages_tell_due WHERE tell IS NOT NULL AND tell = 'soon' AND told_at IS NULL AND (tell_at > at OR id GLOB 'bm_action_*_n[12]')")) {
       const botId = String(row.bot_id)
-      const end = (actionNudgeId(String(row.id)) || !this.ownerActive() && !this.canWake(botId, String(row.id))) ? this.host.quietHoursFor?.(botId, now)?.end : undefined
+      const end = (actionNudgeId(String(row.id)) || !this.ownerActive()) ? this.host.quietHoursFor?.(botId, now)?.end : undefined
       this.store.run('UPDATE bot_messages SET tell_at = ? WHERE id = ?', new Date(end ?? Math.max(now, Date.parse(String(row.at)) + 1)).toISOString(), String(row.id))
     }
     // Reconstruct the normal due time from the saved bubble/last nudge, so an old quiet-hours end
@@ -9828,7 +9814,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
   }
 
   /** Keep the deleted job's telling wishes for work whose final report is still pending. */
-  scheduleRemoved(botId: string, scheduleId: string, telling: { tellMe: TellMe; canWakeMe?: boolean }): void {
+  scheduleRemoved(botId: string, scheduleId: string, telling: { tellMe: TellMe }): void {
     new PageChecks(this.store).remove(botId, scheduleId)
     this.alone.prune(botId)
     this.store.db.transaction(() => {
@@ -10041,7 +10027,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
     const schedule = this.host.schedules?.get(row.botId, trigger.scheduleId)
     if (!schedule) return
     // Persist the intent before removing the shared job: retry after a crash can finish its removal.
-    this.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ ...trigger, completed: { why, name: schedule.name, tellMe: schedule.tellMe, ...(schedule.canWakeMe !== undefined ? { canWakeMe: schedule.canWakeMe } : {}) } }), row.id)
+    this.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ ...trigger, completed: { why, name: schedule.name, tellMe: schedule.tellMe } }), row.id)
     this.pendingScheduleRemovals.set(this.scheduleKey(row.botId, trigger.scheduleId), row.id)
     this.removeSchedule(row.botId, trigger.scheduleId)
     this.markCompletedScheduleRemoved(row)
@@ -10091,7 +10077,7 @@ export class BotEngine implements BotTurnDispatcher, BotThreads {
    * The bot renames itself or changes its description (`set_profile`), or the owner renames it or changes its look. A
    * description the owner wrote in About (`setOwnerPrompt`) is theirs: the bot can't change it.
    */
-  setProfile(botId: string, profile: { name?: string; description?: string; look?: { colour: string; accessory: string; kind?: string; eyes?: string } }): BotDefinition {
+  setProfile(botId: string, profile: { name?: string; description?: string; look?: { colour: string; accessory: string; kind?: string; eyes?: string; eyeColour?: string } }): BotDefinition {
     const name = profile.name?.trim()
     if (profile.name !== undefined && (!name || name.length > 60)) throw new BotEngineError('invalid_profile', 'A name is 1 to 60 characters.')
     const description = profile.description?.trim()
@@ -10572,6 +10558,7 @@ function heldAlready(authority: Pick<BotAuthority, 'tools' | 'appTools' | 'skill
     // profiler as its overview, Mousse's look as theme_read, scheduled jobs as their list, secrets as secret_request and
     // quick actions as create_quick_action (in both lanes).
     if (asked.tool === BOT_BROWSER_PERMISSION) return authority.appTools.has('browser_open')
+    if (asked.tool === BOT_COMPUTER_PERMISSION) return authority.appTools.has('computer_use')
     if (asked.tool === BOT_PROFILER_PERMISSION) return authority.appTools.has('profiler_overview')
     if (asked.tool === BOT_THEMES_PERMISSION) return authority.appTools.has('theme_read')
     if (asked.tool === BOT_SCHEDULES_PERMISSION) return authority.appTools.has('schedule_list')
@@ -10629,14 +10616,29 @@ export function memoryLaneOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKe
  */
 const ACTING_CHAT_KEYS = ['create:', 'wake:', 'question:', 'job:', THREAD_MESSAGE_KEY_PREFIX] as const
 
+/** The start of a chat turn Resume retried after a usage limit (`chatToRetry`). */
+const RESUME_KEY_PREFIX = 'resume:'
+
+/**
+ * Which of `ACTING_CHAT_KEYS` started the chat turn keyed `key`, also through the `resume:` of the turns Resume
+ * retried after a usage limit (`resume:wake:<id>`, `resume:resume:job:<id>`); undefined for any other start. The
+ * `resume:` in front keeps the start's own readers (a wake's chain, a job's notice, quiet notices) from taking the
+ * retry for the original.
+ */
+function actingChatStartOf(key: string): string | undefined {
+  let rest = key
+  while (rest.startsWith(RESUME_KEY_PREFIX)) rest = rest.slice(RESUME_KEY_PREFIX.length)
+  return ACTING_CHAT_KEYS.find((start) => rest.startsWith(start))
+}
+
 /**
  * Whether the activation may start, message, stop, archive or hide the owner's threads ("use your threads"): a chat
  * turn its owner's message or tapped answer started (`chat:`, `answer:`), the bot's first message, a wake, a question's
- * default answer or a thread's notice (`ACTING_CHAT_KEYS`), and every run (work, a reminder's work, a schedule). Not
- * another bot's message (`botmsg:`).
+ * default answer or a thread's notice (`ACTING_CHAT_KEYS`, also when Resume retried it), and every run (work, a
+ * reminder's work, a schedule). Not another bot's message (`botmsg:`).
  */
 export function threadsActOf(row: Pick<BotActivationRow, 'lane' | 'idempotencyKey'>): boolean {
-  return row.lane === 'run' || memoryLaneOf(row) === 'chat' || (row.lane === 'chat' && ACTING_CHAT_KEYS.some((key) => row.idempotencyKey.startsWith(key)))
+  return row.lane === 'run' || memoryLaneOf(row) === 'chat' || (row.lane === 'chat' && actingChatStartOf(row.idempotencyKey) !== undefined)
 }
 
 /** Why a turn holds the owner's threads to reading only (`BotAuthority.threadsReadOnly`); undefined when it may act. */
@@ -10777,44 +10779,68 @@ function chatTurnEndRow(row: Pick<BotActivationRow, 'id' | 'botId' | 'threadId'>
 /** What a chat turn says when its reply was cut off twice and the owner's message is still unanswered. */
 export const UNANSWERED_REPLY = 'My reply got cut off before it reached you. Could you send that again?'
 
-/** A turn's failure the provider reported (`providerFailureText`): its message, already redacted, after its code. */
-const PROVIDER_FAILURE = /^\[provider_[a-z_]+\]\s*(\S[\s\S]*)$/
-
-/**
- * Why an activation stopped, in plain words for its chat. A provider's failure says what the provider said (redacted
- * when the error was made, on one line and capped) and how many retries it had; Mousse's own failures keep a fixed line.
- */
 /** The line for work refused because the bot already has `MAX_QUEUED_ACTIVATIONS` waiting. */
 function queueFullWorkText(title: string): string {
   return `I had too much waiting, so I couldn't take on "${title}". Ask me again when I'm less busy.`
 }
 
-function failureText(reason: string): string {
-  // A runtime that can't run the bot's work says why in the bot's own words (a Codex whose tools Mousse hasn't checked).
-  if (isCodexBotRefusal(reason)) return reason
-  const provider = PROVIDER_FAILURE.exec(reason)
-  if (provider) {
-    const said = provider[1]!.replace(/\s+/g, ' ').trim()
-    return `The provider failed, so I stopped: ${said.length > CHAT_TURN_ERROR_CHARS ? `${said.slice(0, CHAT_TURN_ERROR_CHARS - 1)}…` : said}`
-  }
-  switch (reason) {
-    case 'bot_grant_revoked': return 'My permissions changed, so I stopped.'
-    case 'bot_context_failed': return 'I couldn\'t read my notes, so I stopped. Try again.'
-    case 'bot_context_not_cleared': return 'I couldn\'t start fresh, so I stopped. Try again.'
-    case 'bot_home_trashed': return 'My chat is in the trash. Restore it to keep going.'
-    case 'budget_denied': return 'I stopped here: I ran out of room for this.'
-    case 'asked_too_often': return 'I stopped: I asked too many times in one go.'
-    case 'bot_permissions_invalid': return 'My permissions are broken, so I stopped.'
-    case 'bots_unavailable': return 'Mousse isn\'t ready to run me yet. Try again in a moment.'
-    case 'unknown_calls':
-    case 'uncertain': return 'I was interrupted and can\'t tell what my last step did, so I stopped here.'
-    case 'restarted_twice': return 'Mousse restarted twice while I was working, so I stopped here.'
-    case 'queue_full': return 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.'
-    case 'no_progress': return 'I couldn\'t get anything done on this, so I stopped.'
-    // Older builds ended an activation after a count of turn-cap continuations; its record keeps the line.
-    case 'turn_cap_repeated': return 'I kept going without finishing, so I stopped here.'
-    default: return 'Something went wrong, so I stopped. Try again.'
-  }
+/** A failure with its code in front of its words, as a run records it (`[code] message`, `providerFailureText`). */
+const CODED_FAILURE = /^\[([a-z][a-z0-9_.-]*)\]\s*(\S[\s\S]*)$/i
+/** A code alone, with no words of its own (`bot_state_invalid`, a run's status). */
+const BARE_CODE = /^[a-z][a-z0-9_.-]*$/i
+
+/** Mousse's own failures, by code, each with its fixed line. */
+const FAILURE_LINES: Readonly<Record<string, string>> = {
+  bot_grant_revoked: 'My permissions changed, so I stopped.',
+  bot_context_failed: 'I couldn\'t read my notes, so I stopped. Try again.',
+  bot_context_not_cleared: 'I couldn\'t start fresh, so I stopped. Try again.',
+  bot_home_trashed: 'My chat is in the trash. Restore it to keep going.',
+  budget_denied: 'I stopped here: I ran out of room for this.',
+  asked_too_often: 'I stopped: I asked too many times in one go.',
+  bot_permissions_invalid: 'My permissions are broken, so I stopped.',
+  bots_unavailable: 'Mousse isn\'t ready to run me yet. Try again in a moment.',
+  unknown_calls: 'I was interrupted and can\'t tell what my last step did, so I stopped here.',
+  uncertain: 'I was interrupted and can\'t tell what my last step did, so I stopped here.',
+  restarted_twice: 'Mousse restarted twice while I was working, so I stopped here.',
+  queue_full: 'Too many messages were waiting, so I skipped this one. Send it again if it still matters.',
+  no_progress: 'I couldn\'t get anything done on this, so I stopped.',
+  // Older builds ended an activation after a count of turn-cap continuations; its record keeps the line.
+  turn_cap_repeated: 'I kept going without finishing, so I stopped here.',
+  // A run that ended without an error of its own: its status.
+  interrupted: 'I was interrupted before I finished. Try again.',
+  cancelled: 'My turn was cancelled before I finished. Try again.',
+  failed: 'My turn failed before I finished. Try again.',
+  // A bot turn Mousse could not start (`executeBotEffect`).
+  bot_prepare_failed: 'I couldn\'t get ready to work, so I stopped. Try again.',
+  bot_state_invalid: 'My chat wasn\'t ready for a new turn, so I stopped. Try again.'
+}
+
+/** One line of an error's words, capped (`CHAT_TURN_ERROR_CHARS`): enough to say what went wrong, never a whole stack. */
+function failureWords(text: string): string {
+  const said = text.replace(/\s+/g, ' ').trim()
+  return said.length > CHAT_TURN_ERROR_CHARS ? `${said.slice(0, CHAT_TURN_ERROR_CHARS - 1)}…` : said
+}
+
+/**
+ * Why an activation stopped, in plain words for its chat. A run records its error with its code in front
+ * (`[code] message`): a runtime that can't run the bot's work keeps its own sentence (a Codex whose tools Mousse hasn't
+ * checked); a provider's failure says what the provider said (redacted when the error was made, on one line and capped)
+ * and how many retries it had; Mousse's own failures keep a fixed line. Any other error says its own words, and a code
+ * with no words says its code: the chat never hides the reason behind a line that names none.
+ */
+export function failureText(reason: string): string {
+  const trimmed = reason.trim()
+  const coded = CODED_FAILURE.exec(trimmed)
+  const code = coded?.[1]
+  const said = coded ? coded[2]! : trimmed
+  if (isCodexBotRefusal(said)) return said
+  if (code?.startsWith('provider_')) return `The provider failed, so I stopped: ${failureWords(said)}`
+  const key = code ?? said
+  const line = Object.hasOwn(FAILURE_LINES, key) ? FAILURE_LINES[key] : undefined
+  if (line) return line
+  if (!said) return 'I hit an error, so I stopped. Try again.'
+  if (!coded && BARE_CODE.test(said)) return said.startsWith('provider_') ? 'The provider failed, so I stopped. Try again.' : `I hit an error (${said}), so I stopped. Try again.`
+  return `I hit an error, so I stopped: ${failureWords(said)}`
 }
 
 /** An ask in plain words where no card title was stored (rows of an older build). */

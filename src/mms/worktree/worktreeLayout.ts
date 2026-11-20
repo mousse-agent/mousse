@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process'
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { chmod, lstat, mkdir, readdir, readFile, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
+import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { registerOwnedGitRoot } from '../git/gitPolicy'
 import { repositoryKeyOf } from '../git/RepositoryIdentity'
@@ -36,6 +37,14 @@ import type { WorktreeFolderEntry } from '../../shared/settings'
  *
  * Drives that keep no file modes (exFAT, FAT, most SMB shares) are refused when chosen: a linked worktree reads its
  * repository's config, made on another disk, so every file there would read as changed, and macOS adds `._` files.
+ *
+ * **Windows: a short folder by default.** Mousse's own folder nests a worktree about 130 characters deep (and a dev
+ * runtime inside a checkout far deeper), so Git can hit Windows' 260-character path limit before it checks out a file.
+ * With no folder chosen, new worktrees on Windows go to a short folder of the profile's own instead,
+ * `%USERPROFILE%/.mousse-wt/<8 characters of the profile folder's digest>`, kept like a chosen folder (its marker, its
+ * trash, its cleanup) with shorter names in it. Its id comes from the profile folder too, so it is the same on every
+ * start. Worktrees made before stay in Mousse's own folder and keep working. `MOUSSE_WORKTREE_ROOT` names another base
+ * folder (on any system), or `off` keeps Mousse's own folder.
  */
 
 /** The trash folder inside a chosen worktree folder. */
@@ -48,6 +57,11 @@ export const REPOSITORY_FOLDER_MARKER = '.mousse-repository.json'
 export const SHORT_KEY_LENGTH = 12
 /** How many characters of the thread's id end its worktree's folder name in a chosen worktree folder. */
 export const THREAD_TAG_LENGTH = 6
+/** The folder in the person's home that holds each profile's short worktree folder (Windows). */
+export const SHORT_ROOT_FOLDER = '.mousse-wt'
+/** How many characters of the project's name and of the branch's slug name folders in a short worktree folder. */
+const SHORT_PROJECT_LENGTH = 16
+const SHORT_SLUG_LENGTH = 20
 /** A thread's worktree folder name in a chosen worktree folder; also what a retirement source accepts as a leaf. */
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,127}$/i
 /** Names a thread's folder never takes in a repository's folder: its agents' folder and its marker. */
@@ -81,6 +95,8 @@ export function threadTag(threadId: string): string {
 interface Chosen { current?: WorktreeFolderEntry; previous: WorktreeFolderEntry[] }
 /** By profile folder: the worktree folder it chose and the ones it chose before. */
 const chosen = new Map<string, Chosen>()
+/** By profile folder: its short worktree folder, where it has one ({@link shortWorktreeRoot}). */
+const shortRoots = new Map<string, WorktreeFolderEntry>()
 /** By verified repository folder: the chosen folder it is in, the repository it is for, and the undo of its ownership. */
 const repositoryFolders = new Map<string, { folder: string; repositoryId: string; undo: () => void }>()
 /** By chosen folder: the undo of its trash's ownership, while it is connected. */
@@ -93,8 +109,17 @@ const trashOwnership = new Map<string, () => void>()
  */
 export function setWorktreeFolders(profileHome: string, settings: { worktreeFolder: WorktreeFolderEntry | null; previousWorktreeFolders: readonly WorktreeFolderEntry[] }): void {
   const entry = (value: WorktreeFolderEntry): WorktreeFolderEntry => ({ path: resolve(value.path), id: value.id })
-  const current = settings.worktreeFolder ? entry(settings.worktreeFolder) : undefined
-  chosen.set(resolve(profileHome), { current, previous: settings.previousWorktreeFolders.map(entry).filter((folder) => !current || !same(folder.path, current.path)) })
+  // With no folder chosen, new worktrees go to the profile's short folder where it has one; once another is chosen,
+  // the short folder stays known like any folder chosen before, so its worktrees stay Mousse's.
+  const short = shortWorktreeRoot(profileHome)
+  if (short) shortRoots.set(resolve(profileHome), short)
+  else shortRoots.delete(resolve(profileHome))
+  const current = settings.worktreeFolder ? entry(settings.worktreeFolder) : short
+  const previous: WorktreeFolderEntry[] = []
+  for (const folder of [...settings.previousWorktreeFolders.map(entry), ...(short ? [short] : [])]) {
+    if ((!current || !same(folder.path, current.path)) && !previous.some((other) => same(other.path, folder.path))) previous.push(folder)
+  }
+  chosen.set(resolve(profileHome), { current, previous })
   forgetUnknown()
   void refreshWorktreeFolders().catch(() => undefined)
 }
@@ -102,6 +127,7 @@ export function setWorktreeFolders(profileHome: string, settings: { worktreeFold
 /** Forgets what the profile at `profileHome` chose (the profile closed). */
 export function forgetWorktreeFolders(profileHome: string): void {
   chosen.delete(resolve(profileHome))
+  shortRoots.delete(resolve(profileHome))
   forgetUnknown()
 }
 
@@ -110,6 +136,37 @@ function forgetUnknown(): void {
   const known = new Set(knownWorktreeFolders())
   for (const [path, entry] of repositoryFolders) if (!known.has(entry.folder)) { entry.undo(); repositoryFolders.delete(path) }
   for (const [folder, undo] of trashOwnership) if (!known.has(folder)) { undo(); trashOwnership.delete(folder) }
+}
+
+/**
+ * The short folder new worktrees of the profile at `profileHome` go to when none is chosen: on Windows (or wherever
+ * `MOUSSE_WORKTREE_ROOT` names a base folder), `<base>/<8 characters of the profile folder's digest>`, with an id from
+ * the same digest. Undefined elsewhere, and when `MOUSSE_WORKTREE_ROOT` is `off`.
+ */
+export function shortWorktreeRoot(profileHome: string): WorktreeFolderEntry | undefined {
+  const setting = process.env.MOUSSE_WORKTREE_ROOT?.trim()
+  if (setting === 'off') return undefined
+  if (setting ? !isAbsolute(setting) : process.platform !== 'win32') return undefined
+  const digest = createHash('sha256').update(`mousse-worktree-root:${fold(resolve(profileHome))}`).digest('hex')
+  return { path: join(setting ? resolve(setting) : join(homedir(), SHORT_ROOT_FOLDER), digest.slice(0, 8)), id: digest.slice(32) }
+}
+
+/** The short folder `folder` is, when it is a profile's ({@link shortWorktreeRoot}). */
+function shortRootOf(folder: string | undefined): WorktreeFolderEntry | undefined {
+  if (!folder) return undefined
+  for (const entry of shortRoots.values()) if (same(entry.path, folder)) return entry
+  return undefined
+}
+
+/**
+ * Makes a profile's short folder and its marker when they are missing: nobody chose it, so nothing else makes it. A
+ * folder there that holds another marker is left alone (and so is not connected).
+ */
+async function ensureShortRoot(entry: WorktreeFolderEntry): Promise<void> {
+  try {
+    await mkdir(entry.path, { recursive: true })
+    if (!await lstat(join(entry.path, WORKTREE_FOLDER_MARKER)).catch(() => undefined)) await writeFolderMarker(entry.path, entry.id)
+  } catch { /* Not connected: new worktrees go to Mousse's own folder. */ }
 }
 
 /** Every worktree folder any profile chose, now or before. */
@@ -196,6 +253,8 @@ async function repositoryMarkerOf(path: string, folderId: string): Promise<strin
 export async function folderConnected(folder: string): Promise<boolean> {
   const ids = idsOf(folder)
   let connected = false
+  const short = shortRootOf(folder)
+  if (short) await ensureShortRoot(short)
   try {
     await waitForFolderAccess([folder], { whenNotAnswering: 'fail' })
     let id = (await stat(folder)).isDirectory() ? await markerIdOf(folder) : undefined
@@ -257,8 +316,8 @@ export function defaultAgentWorktreeBase(home: string, repositoryId: string): st
 }
 
 /** A repository's folder name in a chosen worktree folder: `<project>-<short key>`, readable. */
-export function repositoryFolderName(projectName: string, repositoryId: string): string {
-  const name = projectName.normalize('NFKD').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 48).replace(/[._-]+$/, '')
+export function repositoryFolderName(projectName: string, repositoryId: string, maxName = 48): string {
+  const name = projectName.normalize('NFKD').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, maxName).replace(/[._-]+$/, '')
   return `${name || 'project'}-${repositoryId.slice(0, SHORT_KEY_LENGTH).toLowerCase()}`
 }
 
@@ -266,9 +325,9 @@ export function repositoryFolderName(projectName: string, repositoryId: string):
  * A thread's folder name in a chosen worktree folder: the slug of its branch `mousse/<slug>` (a branch named by ids, from
  * before branches were named after the first message, gives `thread`), then the thread's tag, `<slug>-<tag>`.
  */
-export function threadFolderName(branch: string | undefined, threadId: string): string {
+export function threadFolderName(branch: string | undefined, threadId: string, maxSlug = 64): string {
   const own = branch?.startsWith('mousse/') ? branch.slice('mousse/'.length) : undefined
-  const slug = own && !own.includes('/') ? own.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 64).replace(/[_-]+$/, '') : ''
+  const slug = own && !own.includes('/') ? own.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, maxSlug).replace(/[_-]+$/, '') : ''
   return `${SLUG.test(slug) ? slug : 'thread'}-${threadTag(threadId)}`
 }
 
@@ -291,7 +350,7 @@ async function repositoryFolderIn(folder: string, id: string, projectName: strin
     const path = join(folder, name)
     if (await repositoryMarkerOf(path, id) === repositoryId) return path
   }
-  const base = repositoryFolderName(projectName, repositoryId)
+  const base = repositoryFolderName(projectName, repositoryId, shortRootOf(folder) ? SHORT_PROJECT_LENGTH : undefined)
   for (let index = 1; index < 100; index++) {
     const made = join(folder, index === 1 ? base : `${base}-${index}`)
     try { await mkdir(made) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue; throw error }
@@ -342,7 +401,8 @@ export async function placeThreadWorktree(input: { home: string; folder?: string
     const id = await connectedId(input.folder)
     if (id) {
       const repositoryFolder = await repositoryFolderIn(input.folder, id, input.projectName, input.repositoryId)
-      return { path: await freeName(repositoryFolder, threadFolderName(input.branch, input.threadId), input.taken), folder: input.folder }
+      const name = threadFolderName(input.branch, input.threadId, shortRootOf(input.folder) ? SHORT_SLUG_LENGTH : undefined)
+      return { path: await freeName(repositoryFolder, name, input.taken), folder: input.folder }
     }
   }
   const path = defaultThreadWorktreePath(input.home, input.repositoryId, input.threadId, input.conversationBranchId)

@@ -1,7 +1,7 @@
-// Makes sure the Windows x64 build of node-datachannel (the WebRTC direct path for phones) is in
-// node_modules before packaging. npm installs only the host platform's prebuilt, so a Windows
-// build made on Linux would otherwise ship without it. The tarball must match the integrity
-// recorded in package-lock.json.
+// Makes sure the Windows build of node-datachannel (the WebRTC direct path for phones) is in
+// node_modules before packaging: x64, or arm64 when it is packaged on a Windows arm64 computer.
+// npm installs only the host platform's prebuilt, so a Windows build made on Linux would otherwise
+// ship without it. The tarball must match the integrity recorded in package-lock.json.
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const name = '@node-datachannel/win32-x64-msvc'
+const name = `@node-datachannel/win32-${process.platform === 'win32' && process.arch === 'arm64' ? 'arm64' : 'x64'}-msvc`
 const target = join(root, 'node_modules', name)
 const lock = JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8'))
 const locked = lock.packages?.[`node_modules/${name}`]

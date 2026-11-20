@@ -9,6 +9,7 @@ import {
   Copy,
   DeleteRegular,
   EditRegular,
+  Eye,
   EyeOff,
   Folder,
   FolderSearch,
@@ -76,6 +77,8 @@ interface ThreadsContextMenuProps {
   reveal?: ProjectOpener
   /** Projects only: copy the folder's path. */
   onCopyPath?: () => void
+  /** Threads only: copy the thread's reference (its link), which a chat it is pasted into turns into a thread pill. */
+  onCopyReference?: () => void
   /** Threads only: delete the thread `ms` from now, or null to keep it. */
   onSetExpiry?: (ms: number | null) => void
   /** Archived threads only: delete every archived thread of this computer, after a confirmation. */
@@ -88,6 +91,8 @@ interface ThreadsContextMenuProps {
   onUseFolderIcon?: () => void
   /** Projects with bot threads in the sidebar: hide them all (`Thread.hidden`). */
   onHideBotThreads?: () => void
+  /** Threads a bot started: hide this one from the sidebar (`Thread.hidden`). */
+  onHideThread?: () => void
 }
 
 const Separator = () => <div className="threads-context-menu-separator" role="separator" />
@@ -185,12 +190,14 @@ export function ThreadsContextMenu({
   openInEditor,
   reveal,
   onCopyPath,
+  onCopyReference,
   onSetExpiry,
   onDeleteAllArchived,
   onChangeIcon,
   onResetIcon,
   onUseFolderIcon,
-  onHideBotThreads
+  onHideBotThreads,
+  onHideThread
 }: ThreadsContextMenuProps) {
   return (
     <MenuFrame x={x} y={y} label={target.type === 'project' ? `Project ${target.name}` : `Thread ${target.name}`} onClose={onClose}>
@@ -249,6 +256,12 @@ export function ThreadsContextMenu({
           <span>{target.settled ? 'Unarchive' : 'Archive'}</span>
         </button>
       )}
+      {target.type === 'thread' && onHideThread && (
+        <button type="button" className="threads-context-menu-item" role="menuitem" title={BOT_THREADS_HIDE_HINT} onClick={onHideThread}>
+          <EyeOff />
+          <span>Hide</span>
+        </button>
+      )}
       {target.type === 'thread' && (
         <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onRegenerateTitle}>
           <ArrowSyncRegular />
@@ -259,6 +272,12 @@ export function ThreadsContextMenu({
         <EditRegular />
         <span>Rename</span>
       </button>
+      {target.type === 'thread' && onCopyReference && (
+        <button type="button" className="threads-context-menu-item" role="menuitem" title="Paste it into a chat to point its agent at this thread" onClick={onCopyReference}>
+          <Copy />
+          <span>Copy reference</span>
+        </button>
+      )}
       {target.type === 'project' && onChangeIcon && (
         <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onChangeIcon}>
           <Image />
@@ -363,6 +382,18 @@ export function ThreadsTabMenu({ x, y, onClose, onHideAllBotThreads }: { x: numb
       <button type="button" className="threads-context-menu-item" role="menuitem" title={BOT_THREADS_HIDE_HINT} onClick={onHideAllBotThreads}>
         <EyeOff />
         <span>Hide all bot threads</span>
+      </button>
+    </MenuFrame>
+  )
+}
+
+/** A bot's menu in the Bots list: hide or show its checklist in its chat. */
+export function BotRowMenu({ x, y, botName, checklistHidden, onClose, onToggleChecklist }: { x: number; y: number; botName: string; checklistHidden: boolean; onClose: () => void; onToggleChecklist: () => void }) {
+  return (
+    <MenuFrame x={x} y={y} label={`${botName} menu`} onClose={onClose}>
+      <button type="button" className="threads-context-menu-item" role="menuitem" onClick={onToggleChecklist}>
+        {checklistHidden ? <Eye /> : <EyeOff />}
+        <span>{checklistHidden ? 'Show checklist' : 'Hide checklist'}</span>
       </button>
     </MenuFrame>
   )

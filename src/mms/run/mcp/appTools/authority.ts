@@ -45,7 +45,7 @@ export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   'web_search', 'web_fetch', 'browser_observe', 'browser_find', 'browser_wait', 'browser_extract', 'browser_screenshot',
   'mousse_gui_screenshot', 'mousse_gui_console', 'mousse_gui_status',
   'bot_list', 'bot_schedule_list', 'work_models', 'work_list', 'watch_list', 'reminder_list', 'subagent_wait', 'subagent_result',
-  'memory_search', 'memory_read', 'memory_list',
+  'memory_search', 'memory_read', 'memory_list', 'item_list',
   'profiler_overview', 'profiler_service_breakdown', 'profiler_window_breakdown', 'profiler_gpu_hints', 'profiler_children',
   'profiler_sample_now', 'profiler_watch', 'profiler_heap_summary'
 ])

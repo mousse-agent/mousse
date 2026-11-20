@@ -3,9 +3,10 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { BotManifest, BotThreadSpec } from '../../../shared/bots/personal/definition'
-import { BOT_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_GROUP_PERMISSIONS, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_PERMISSION, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SCHEDULES_PERMISSION, BOT_SECRET_TOOLS, BOT_SECRETS_PERMISSION, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THEMES_PERMISSION, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_RETIRED_APP_TOOLS, BOT_APPLET_TOOL, BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL, BOT_GROUP_PERMISSIONS, BOT_MESSAGE_TOOLS, BOT_QUESTION_ANSWER_TOOL, BOT_QUESTION_TOOL, BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_COMPUTER_TOOLS, BOT_IMAGE_TOOL, BOT_BROWSER_TOOLS, BOT_MCP_LIST_TOOL, BOT_RUNNING_TOOL, BOT_PROFILER_CHAT_TOOLS, BOT_PROFILER_PERMISSION, BOT_PROFILER_TOOLS, BOT_QUICK_ACTION_TOOLS, BOT_QUICK_ACTIONS_PERMISSION, BOT_SCHEDULE_ACT_TOOLS, BOT_SCHEDULE_READ_TOOLS, BOT_SCHEDULES_PERMISSION, BOT_SECRET_TOOLS, BOT_SECRETS_PERMISSION, BOT_TASK_TOOLS, BOT_THEME_TOOLS, BOT_THEMES_PERMISSION, BOT_THREAD_ACT_TOOLS, BOT_THREAD_READ_TOOLS, BOT_THREADS_PERMISSION, BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS, canonicalManifest, intersectManifest, narrowManifest, BOT_SUBAGENT_APP_TOOLS, BOT_SUBAGENT_TOOLS } from '../../../shared/bots/personal/manifest'
 import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from '../../../shared/bots/personal/catalogue'
 import { BOT_MEMORY_TOOLS } from '../../../shared/bots/personal/memory'
+import { BOT_ITEM_TOOLS } from '../../../shared/bots/personal/items'
 import type { NeutralTool } from '../../../shared/harness/tools'
 import type { BindPolicy, HarnessCaps, HarnessError } from '../../../shared/harness/types'
 import { stableStringify } from '../../run/json'
@@ -201,7 +202,9 @@ export function systemTempDirs(): string[] {
 }
 
 export function compileBotThread(input: CompileInput): CompileResult {
-  const held = narrowManifest(input.revision ? intersectManifest(input.revision, input.grant) : input.grant, input.thread.narrow)
+  const narrowed = narrowManifest(input.revision ? intersectManifest(input.revision, input.grant) : input.grant, input.thread.narrow)
+  // A tool bots no longer have, still listed by a grant an older build approved, gives nothing.
+  const held = { ...narrowed, appTools: narrowed.appTools.filter((tool) => !BOT_RETIRED_APP_TOOLS.has(tool)) }
   // A subagent is the work, never more: what the work holds, less what is the bot's alone, and none of the bot's tools
   // but what a thread's subagent may use (the owner's threads, the profiler, its task list).
   const subagent = input.botTools?.subagent === true
@@ -234,6 +237,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
   // Granted skills come with the skill tools that list and load them; the browser is its tools, and the owner's threads
   // are the thread tools this turn may use (none unless the caller says which), as the profiler is its tools on a main turn.
   const browser = manifest.appTools.includes(BOT_BROWSER_PERMISSION)
+  const computer = manifest.appTools.includes(BOT_COMPUTER_PERMISSION)
   const threads = manifest.appTools.includes(BOT_THREADS_PERMISSION) ? shared?.threads : undefined
   const profiler = manifest.appTools.includes(BOT_PROFILER_PERMISSION) && shared?.profiler === true
   const themes = manifest.appTools.includes(BOT_THEMES_PERMISSION) && own?.themes === true
@@ -246,6 +250,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(themes ? BOT_THEME_TOOLS : []),
     ...(profiler ? (own?.frontDesk ? BOT_PROFILER_CHAT_TOOLS : BOT_PROFILER_TOOLS) : []),
     ...(browser ? BOT_BROWSER_TOOLS : []),
+    ...(computer ? BOT_COMPUTER_TOOLS : []),
     ...(threads ? BOT_THREAD_READ_TOOLS : []),
     ...(threads === 'all' ? BOT_THREAD_ACT_TOOLS : []),
     ...(schedules ? BOT_SCHEDULE_READ_TOOLS : []),
@@ -260,7 +265,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(own?.workWaiting ? ['work_wait'] : []),
     ...(own?.scheduled ? ['schedule_done'] : []),
     // Always on, like memory: the listing of the owner's MCP servers, so the bot can ask for the right one.
-    ...(own?.memory ? [...BOT_MEMORY_TOOLS, BOT_MCP_LIST_TOOL] : []),
+    ...(own?.memory ? [...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, BOT_MCP_LIST_TOOL] : []),
     // What runs in its folders, on every turn (chat, work, consults and subagents alike), so it reuses a running server
     // instead of starting another: it only reads.
     BOT_RUNNING_TOOL,
@@ -268,7 +273,7 @@ export function compileBotThread(input: CompileInput): CompileResult {
     ...(own?.images ? [BOT_IMAGE_TOOL] : []),
     ...(own?.applets ? [BOT_APPLET_TOOL] : []),
     ...(own?.questions ? [BOT_QUESTION_TOOL, ...(own.frontDesk ? [BOT_QUESTION_ANSWER_TOOL] : [])] : []),
-    ...(own?.cards ? [BOT_CARD_TOOL] : []),
+    ...(own?.cards ? [BOT_CARD_TOOL, BOT_REPORT_BUG_TOOL] : []),
     ...(own?.bots ? BOT_MESSAGE_TOOLS : []),
     // A run's main turn splits its job among subagents, on models from the same list the chat picks work's from.
     ...(own?.subagents && !own.frontDesk ? [...BOT_SUBAGENT_TOOLS, 'work_models'] : []),

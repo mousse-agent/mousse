@@ -24,7 +24,11 @@ import { disposeFixtures, memoryFixture } from './memory/memoryFixture'
 // thread_send then grew by about 2,000 (its note intent, attention, runId and interrupt, with the delivery states a note
 // reports) and thread_archive by about 360 (it unarchives, and archives another thread), so the chat lane on Codex and
 // Pi now says hello in about 55,100 characters and the run lane in about 53,900.
-const CEILING = { codexPi: 55_500, claude: 22_200 } as const
+// "Use the computer" (its catalogue group and its line in what the owner allows) adds about 100 to each.
+// The open items (their three lines of instructions with the stages, and item_save and item_list in full on every
+// provider), with report_bug and the thread-link line that came beside them, bring the chat lane to about 59,200 on
+// Codex and Pi and 25,550 on Claude Code.
+const CEILING = { codexPi: 59_250, claude: 25_550 } as const
 
 let fx: DelegationFixture | undefined
 afterEach(() => {

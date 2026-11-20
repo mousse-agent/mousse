@@ -1,6 +1,7 @@
 import { APPLET_GENERATION_GUIDANCE } from '../../appletGuidance'
 import { BROWSER_AUTOMATION_TOOLS } from '../../browser/automation'
 import { PROFILER_TOOL_NAMES } from '../../diagnostics/profiler'
+import { COMPUTER_TOOL_NAMES } from '../../computerUse'
 import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 
 /**
@@ -25,6 +26,9 @@ export const BOT_USE_TOOL = 'use_tool'
  */
 export const BOT_CORE_TOOLS: readonly string[] = [
   'memory_save', 'memory_search', 'memory_read',
+  // The open items: an ask is listed in the turn it is made and a status answer reads the list first, so neither tool
+  // is a lookup away.
+  'item_save', 'item_list',
   'work_start', 'work_note', 'work_list',
   'remind', 'wake',
   'escalate', 'ask_owner',
@@ -75,7 +79,6 @@ const WORK_GUIDANCE = [
 ].join('\n')
 
 const REMINDERS_GUIDANCE = [
-  'When the owner says how or when they want to be told, set it with telling_set and confirm in words; never save it as a memory.',
   "When the owner wants something done regularly, add it with bot_schedule_add and confirm it in words (\"I'll go through your inbox every weekday at 9:00\"). A line you only need to say needs no run: give say instead of prompt, only in a turn your owner's message or tap started. A schedule that should stop on a date takes until, a local date or date and time on this computer. Use bot_schedule_list and bot_schedule_remove to manage them. When a schedule has an end condition, state it in its prompt.",
   'reminder_list shows your one-off reminders and wakes; reminder_cancel cancels one.'
 ].join('\n')
@@ -102,6 +105,8 @@ const SHOWING_GUIDANCE = [
 const BOTS_GUIDANCE = "bot_list names your owner's other bots and says what each does; bot_send tells one of them something, in its own chat, where your owner reads it too. Use it when your owner asks you to tell another bot something (\"if it's a bug, tell Alpha\"), or when what you found belongs to that bot's job. Write the message so it stands on its own: the other bot has none of your chat or memory. Then tell your owner in a few words that you told it."
 
 const SCHEDULES_GUIDANCE = "Mousse's scheduled jobs: work done in your owner's threads or projects later or on a cadence (schedule_create, schedule_list, schedule_update, schedule_pause, schedule_run, schedule_delete). You see and change only the jobs you made. Something only you do at a time stays bot_schedule_add (reminders)."
+
+const COMPUTER_GUIDANCE = "Apps on this computer, through Cua Driver: computer_tools lists the driver's tools and its rules; computer_use runs one by name. Read a window narrowly first, act on the element tokens it returns, and check the result. Use it for what lives only in an app's window; a page belongs in your browser. It works only while your owner has Settings → Computer use on and the driver installed; when a call says it isn't, tell them so."
 
 const PROFILER_GUIDANCE = "Mousse's own monitor of its memory and CPU, by process, for when your owner asks why Mousse is slow or uses a lot of memory. It works only while your owner has the profiler and agent access on in Settings → Labs; when a call says it is off, tell them so. A watch over minutes (profiler_watch) is for your work."
 
@@ -133,6 +138,12 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
     guidance: BROWSER_GUIDANCE
   },
   {
+    id: 'computer',
+    line: 'apps on this computer: windows, clicks, typing (needs "use the computer")',
+    tools: [...COMPUTER_TOOL_NAMES],
+    guidance: COMPUTER_GUIDANCE
+  },
+  {
     id: 'work',
     line: 'stop work, pick a model for one piece of work, pass on an answer to work, subagents, a task checklist, consults',
     tools: ['work_stop', 'work_models', 'question_answer', 'subagent_start', 'subagent_send', 'subagent_wait', 'subagent_result', 'subagent_stop', 'create_task', 'list_tasks', 'update_task', 'consult'],
@@ -140,8 +151,8 @@ export const BOT_CATALOGUE: readonly BotCatalogueGroup[] = [
   },
   {
     id: 'reminders',
-    line: 'how and when your owner is told, your own schedules, your reminders and wakes',
-    tools: ['telling_set', 'bot_schedule_add', 'bot_schedule_list', 'bot_schedule_remove', 'reminder_list', 'reminder_cancel'],
+    line: 'your own schedules, your reminders and wakes',
+    tools: ['bot_schedule_add', 'bot_schedule_list', 'bot_schedule_remove', 'reminder_list', 'reminder_cancel'],
     guidance: REMINDERS_GUIDANCE
   },
   {

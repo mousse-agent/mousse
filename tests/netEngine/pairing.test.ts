@@ -3,6 +3,7 @@
  * new calls use when two connections come up (both orders of their hellos), the removal's prune and the start-up
  * sweep of tombstones, and Start over setting the engine aside with v1's network.
  */
+import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -34,9 +35,10 @@ describe('readTicket', () => {
     invitation = Buffer.alloc(16, 9)
   const route = Buffer.from('tcp://192.168.1.5:7000')
 
-  it('reads the host, the invitation, the expiry and the routes, with or without a link around it', () => {
+  it('reads the host, the invitation, the kind, the expiry, the routes and the hash, with or without a link around it', () => {
     const encoded = ticket([
       [1, Buffer.from([0x01])],
+      [2, Buffer.from([0x02])],
       [3, bytes(host)],
       [4, Buffer.concat([Buffer.from([0x50]), invitation])],
       [6, Buffer.from([0x1a, 0x6a, 0x00, 0x00, 0x00])],
@@ -46,10 +48,16 @@ describe('readTicket', () => {
       host: host.toString('hex'),
       invitation: invitation.toString('hex'),
       expiresAt: 0x6a000000,
-      routes: ['tcp://192.168.1.5:7000']
+      routes: ['tcp://192.168.1.5:7000'],
+      kind: 2,
+      // The key of a send link's flow and completion records (wire 10.2): SHA-256 of the CBOR bytes.
+      hash: createHash('sha256').update(Buffer.from(encoded, 'base64url')).digest('hex')
     }
-    expect(readTicket(encoded)).toEqual(expected)
-    expect(readTicket(`mousse://pair#${encoded}`)).toEqual(expected)
+    expect(readTicket(encoded)).toMatchObject(expected)
+    expect(readTicket(`mousse://pair#${encoded}`)).toMatchObject(expected)
+    // The ticket hash is of the ticket's bytes, whatever link is around it.
+    expect(readTicket(`mousse://pair#${encoded}`).hash).toBe(readTicket(encoded).hash)
+    expect(readTicket(encoded).fragment).toBe(encoded)
   })
 
   it('refuses what is not a ticket', () => {

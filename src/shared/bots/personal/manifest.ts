@@ -1,9 +1,11 @@
 import { BROWSER_AUTOMATION_TOOLS, type BrowserAutomationTool } from '../../browser/automation'
+import { COMPUTER_TOOL_NAMES } from '../../computerUse'
 import { PROFILER_TOOL_NAMES, type ProfilerToolName } from '../../diagnostics/profiler'
 import { isNeutralTool, type NeutralTool } from '../../harness/tools'
 import { foldersOf, workspaceOf, type BotBudget, type BotManifest, type BotPermissionLine } from './definition'
 import { BOT_LIST_TOOL, BOT_SEND_TOOL } from './botMessages'
 import { BOT_MEMORY_TOOLS } from './memory'
+import { BOT_ITEM_TOOLS } from './items'
 import { BOT_CATALOGUE_TOOL, BOT_USE_TOOL } from './catalogue'
 
 /**
@@ -20,7 +22,7 @@ const BUDGET_KEYS = ['maxTurns', 'maxToolCalls', 'maxInputTokens', 'maxOutputTok
  * so they are not permissions: every bot has them, they never raise an ask, and About never lists them.
  */
 export const BOT_OWN_APP_TOOLS: readonly string[] = [
-  'telling_set', 'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'set_profile', 'set_depth', 'use_model', 'escalate', ...BOT_MEMORY_TOOLS,
+  'bot_schedule_add', 'bot_schedule_remove', 'bot_schedule_list', 'set_profile', 'set_depth', 'use_model', 'escalate', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS,
   // An automation run's report on its own run (the Automations inbox); only a scheduled run has one to give.
   'run_report'
 ]
@@ -48,13 +50,13 @@ export const BOT_SUBAGENT_TOOLS: readonly string[] = ['subagent_start', 'subagen
  * and quick actions, each of which a thread's subagent is refused too (they ask the person or need a turn a person
  * started). The built-ins, the files folder, MCP tools and skills are the work's, unchanged.
  */
-export const BOT_SUBAGENT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', 'browser', 'threads', 'profiler']
+export const BOT_SUBAGENT_APP_TOOLS: readonly string[] = ['web_search', 'web_fetch', 'browser', 'computer', 'threads', 'profiler']
 
 /**
  * What a chat turn never does itself, though the grant may hold it: it can take long (the web, the browser, running
- * commands), so the chat hands it to work and stays free to talk. Work runs with the whole grant.
+ * commands, using the computer), so the chat hands it to work and stays free to talk. Work runs with the whole grant.
  */
-export const BOT_WORK_ONLY_TOOLS: readonly string[] = ['shell', 'web_search', 'web_fetch']
+export const BOT_WORK_ONLY_TOOLS: readonly string[] = ['shell', 'web_search', 'web_fetch', 'computer']
 
 /**
  * The bot's listing of its owner's MCP servers (`mcp_servers`): each server set up for the whole profile, by name and a
@@ -108,6 +110,13 @@ export const BOT_QUESTION_ANSWER_TOOL = 'question_answer'
 export const BOT_CARD_TOOL = 'show_card'
 
 /**
+ * Drafting a Mousse bug report (`report_bug`): the owner sees the draft in the report dialog and files it or not, so it
+ * grants nothing and is always on, like cards, on a bot's main turns; never a consult or a subagent. Settings → General's
+ * Report button switch turns it off for bots and threads alike.
+ */
+export const BOT_REPORT_BUG_TOOL = 'report_bug'
+
+/**
  * Messages to the owner's other bots (`bot_list`, `bot_send`, `botMessages.ts`): the message is information to the bot
  * that gets it and gives it no permission, so like memory the tools are always on and never grantable. A chat turn and
  * work the owner asked for get them; a scheduled run, a consult and a subagent never do.
@@ -129,6 +138,15 @@ export const BOT_BROWSER_PERMISSION = 'browser'
  * owner in its reply, and the owner takes over from the bot's browser view.
  */
 export const BOT_BROWSER_TOOLS: readonly BrowserAutomationTool[] = BROWSER_AUTOMATION_TOOLS.filter((tool) => tool !== 'browser_request_human')
+
+/**
+ * "Use the computer": see and operate apps on this computer through Cua Driver (`src/shared/computerUse.ts`), one
+ * permission for both computer tools. A thread the bot started gets them only while the bot holds it.
+ */
+export const BOT_COMPUTER_PERMISSION = 'computer'
+
+/** The computer tools a bot with "use the computer" gets. */
+export const BOT_COMPUTER_TOOLS: readonly string[] = COMPUTER_TOOL_NAMES
 
 /**
  * The automation tools (`automation_*`, v4): a bot granted them builds drafts the owner turns on, and lists, changes
@@ -261,7 +279,7 @@ export function isBotThreadTool(name: string): boolean {
  * `compileBotThread` turns it into the tools a turn may use. None is a tool's own name.
  */
 export const BOT_GROUP_PERMISSIONS: ReadonlySet<string> = new Set([
-  BOT_BROWSER_PERMISSION, BOT_THREADS_PERMISSION, BOT_PROFILER_PERMISSION, BOT_THEMES_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION
+  BOT_BROWSER_PERMISSION, BOT_COMPUTER_PERMISSION, BOT_THREADS_PERMISSION, BOT_PROFILER_PERMISSION, BOT_THEMES_PERMISSION, BOT_SCHEDULES_PERMISSION, BOT_SECRETS_PERMISSION, BOT_QUICK_ACTIONS_PERMISSION
 ])
 
 /**
@@ -274,6 +292,12 @@ export const BOT_GROUP_PERMISSIONS: ReadonlySet<string> = new Set([
 export const BOT_APP_TOOLS: ReadonlySet<string> = new Set([...BOT_DEFAULT_APP_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, ...BOT_GROUP_PERMISSIONS])
 
 /**
+ * Tools bots no longer have (`telling_set`: the Tells you setting). A grant an older build approved may still list one:
+ * it reads as well formed and gives nothing, and its digest stays the same, so no bot is asked to approve again.
+ */
+export const BOT_RETIRED_APP_TOOLS: ReadonlySet<string> = new Set(['telling_set'])
+
+/**
  * Every Mousse app tool a bot's turn can ever be offered (what `compileBotThread` may add to a turn): the grantable
  * tools, each group permission's tools in place of the permission, the skill tools, consult, the front desk's work and reminder
  * tools, the task list, and `make_image` with an Images row. A bot's thread lists only these, so its runtime never shows the model a tool no bot can hold.
@@ -282,6 +306,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   'schedule_done',
   ...[...BOT_APP_TOOLS].filter((tool) => !BOT_GROUP_PERMISSIONS.has(tool)),
   ...BOT_BROWSER_TOOLS,
+  ...BOT_COMPUTER_TOOLS,
   ...BOT_THEME_TOOLS,
   ...BOT_THREAD_TOOLS,
   ...BOT_PROFILER_TOOLS,
@@ -294,6 +319,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   'work_wait',
   ...BOT_SUBAGENT_TOOLS,
   ...BOT_MEMORY_TOOLS,
+  ...BOT_ITEM_TOOLS,
   BOT_MCP_LIST_TOOL,
   BOT_RUNNING_TOOL,
   BOT_IMAGE_TOOL,
@@ -301,6 +327,7 @@ const BOT_OFFERABLE_APP_TOOLS: ReadonlySet<string> = new Set([
   BOT_QUESTION_TOOL,
   BOT_QUESTION_ANSWER_TOOL,
   BOT_CARD_TOOL,
+  BOT_REPORT_BUG_TOOL,
   ...BOT_MESSAGE_TOOLS,
   'list_skills', 'load_skill', 'escalate', 'consult',
   // The tool catalogue (docs/plans/bot-context.md §15): looking up a group, and calling its tools on Codex and Pi.
@@ -319,7 +346,8 @@ const BROWSER_TOOLS: ReadonlySet<string> = new Set(BROWSER_AUTOMATION_TOOLS)
 const GROUPED_TOOLS: ReadonlyMap<string, string> = new Map([
   ...[...BOT_SCHEDULE_READ_TOOLS, ...BOT_SCHEDULE_ACT_TOOLS].map((tool) => [tool, BOT_SCHEDULES_PERMISSION] as const),
   ...BOT_SECRET_TOOLS.map((tool) => [tool, BOT_SECRETS_PERMISSION] as const),
-  ...BOT_QUICK_ACTION_TOOLS.map((tool) => [tool, BOT_QUICK_ACTIONS_PERMISSION] as const)
+  ...BOT_QUICK_ACTION_TOOLS.map((tool) => [tool, BOT_QUICK_ACTIONS_PERMISSION] as const),
+  ...BOT_COMPUTER_TOOLS.map((tool) => [tool, BOT_COMPUTER_PERMISSION] as const)
 ])
 
 const TASK_TOOL_SET: ReadonlySet<string> = new Set(BOT_TASK_TOOLS)
@@ -415,7 +443,7 @@ export function manifestProblem(value: unknown): string | undefined {
   const strings = (list: unknown) => Array.isArray(list) && list.every((item) => typeof item === 'string' && item.length > 0 && item.length <= 256)
   if (!Array.isArray(manifest.tools) || !manifest.tools.every((tool) => typeof tool === 'string' && isNeutralTool(tool))) return 'A built-in tool is not one Mousse knows.'
   if (!strings(manifest.appTools)) return 'An app tool name is invalid.'
-  const refusedApp = (manifest.appTools as string[]).find((tool) => !BOT_APP_TOOLS.has(tool))
+  const refusedApp = (manifest.appTools as string[]).find((tool) => !BOT_APP_TOOLS.has(tool) && !BOT_RETIRED_APP_TOOLS.has(tool))
   if (refusedApp !== undefined) return `A bot can't be given the Mousse tool ${refusedApp}: it would reach other threads, act in your name or ask you, outside the bot's permissions.`
   if (!strings(manifest.skills)) return 'A skill id is invalid.'
   if (!Array.isArray(manifest.mcp) || !manifest.mcp.every((pair) => pair && typeof pair === 'object' && typeof pair.serverId === 'string' && typeof pair.tool === 'string' && MCP_PART.test(pair.serverId) && MCP_PART.test(pair.tool))) return 'An MCP tool is invalid.'
@@ -533,6 +561,7 @@ function toolLine(tool: NeutralTool): BotPermissionLine {
 /** An app tool in plain words: the browser, the owner's threads, the profiler and themes by what they are, any other tool by its name. */
 function appToolLine(tool: string): BotPermissionLine {
   if (tool === BOT_BROWSER_PERMISSION) return { kind: 'app_tool', text: 'Use the browser' }
+  if (tool === BOT_COMPUTER_PERMISSION) return { kind: 'app_tool', text: 'Use the computer' }
   if (tool === BOT_THREADS_PERMISSION) return { kind: 'app_tool', text: 'Use your threads' }
   if (tool === BOT_PROFILER_PERMISSION) return { kind: 'app_tool', text: 'Use the profiler' }
   if (tool === BOT_THEMES_PERMISSION) return { kind: 'app_tool', text: 'Change how Mousse looks' }

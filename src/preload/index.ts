@@ -122,7 +122,9 @@ import type {
   SkillReadResult,
   SkillsRegistrySnapshot
 } from '../shared/integrations'
-import type { CliInstallEvent, UsageForResponse, UsageProxyKeyResult, UsageSlotsResponse, UseLimitResetResponse } from '../shared/providerAuth'
+import type { UsageHistoryRequest, UsageHistoryResponse } from '../shared/usageHistory'
+import type { LimitTrendRange, LimitTrendsResponse } from '../shared/limitTrends'
+import type { CliInstallEvent, ProviderUsage, UsageForResponse, UsageProxyKeyResult, UsageSlotsResponse, UseLimitResetResponse } from '../shared/providerAuth'
 import type { InstanceSnapshot, ModelRefreshResult, ProviderSnapshotsEvent } from '../shared/harness/status'
 import type { SetVendorSettingInput, VendorSettingsView } from '../shared/harness/vendorSettings'
 import type { MoveResult } from '../shared/harness/move'
@@ -385,6 +387,9 @@ const api = {
     getTurnSnapshot: (): Promise<TurnStateSnapshot> => ipcRenderer.invoke('turn:getSnapshot'),
     retryConnection: (threadId?: string): Promise<boolean> =>
       ipcRenderer.invoke('orchestrator:retryConnection', threadId),
+    /** Retry on a thread whose worktree could not be set up: sends the message it kept again, once. */
+    retrySetup: (threadId: string): Promise<{ ok: boolean; queued: boolean }> =>
+      ipcRenderer.invoke('orchestrator:retrySetup', threadId),
     onConnectionFailed: (cb: () => void): (() => void) => {
       const handler = () => cb()
       ipcRenderer.on('orchestrator:connection-failed', handler)
@@ -533,6 +538,9 @@ const api = {
       ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId, root),
     readAsset: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> =>
       ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId, root),
+    /** A preview's size and write time (`mtimeMs` absent from an older daemon), without reading it. */
+    assetStamp: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<{ size: number; mtimeMs?: number }> =>
+      ipcRenderer.invoke('fs:assetStamp', filePath, projectId, threadId, root),
     writeFile: (filePath: string, content: string, projectId?: string, threadId?: string | null, root?: string): Promise<void> =>
       ipcRenderer.invoke('fs:writeFile', filePath, content, projectId, threadId, root),
     /** This computer's drives (or root and volumes) and home folder, for the Files panel's path menu. */
@@ -1178,6 +1186,18 @@ const api = {
     getUsage: () => ipcRenderer.invoke('providers:getUsage'),
     /** Every provider the usage page shows, with its last reading, before any is read. */
     usageSlots: (): Promise<UsageSlotsResponse> => ipcRenderer.invoke('providers:usageSlots'),
+    /** Keeps a provider read every 5 minutes for a few minutes (a bot header's usage ring); answers with its last reading. */
+    watchUsage: (providerId: string): Promise<{ watched: boolean; cached?: ProviderUsage }> => ipcRenderer.invoke('providers:watchUsage', providerId),
+    /** Each usage reading the service keeps, whichever read made it. */
+    onUsage: (cb: (event: { usage: ProviderUsage }) => void): (() => void) => {
+      const handler = (_: unknown, event: { usage: ProviderUsage }) => cb(event)
+      ipcRenderer.on('providers:usage', handler)
+      return () => ipcRenderer.removeListener('providers:usage', handler)
+    },
+    /** How the 5-hour and weekly limits moved over the range, from the readings kept of them. */
+    limitTrends: (range: LimitTrendRange): Promise<LimitTrendsResponse> => ipcRenderer.invoke('providers:limitTrends', range),
+    /** Tokens and cost over time, read from the coding agents' own logs on this computer. */
+    usageHistory: (request: UsageHistoryRequest): Promise<UsageHistoryResponse> => ipcRenderer.invoke('usage:history', request),
     /** Uses one of a provider's limit-reset credits (the one named, or the next); it asks nothing itself. */
     useLimitReset: (request: { providerId: string; creditId?: string }): Promise<UseLimitResetResponse> =>
       ipcRenderer.invoke('providers:useLimitReset', request),
@@ -1350,6 +1370,11 @@ const api = {
       return () => ipcRenderer.removeListener('dictation:localModelStatus', handler)
     }
   },
+  /** Settings → Computer use. */
+  computerUse: {
+    /** The system's file picker for a Cua Driver file; null when the person cancels. */
+    chooseDriver: (): Promise<string | null> => ipcRenderer.invoke('computerUse:chooseDriver')
+  },
   /** The profiler's memory monitor (Settings → Labs, and its notice). */
   diagnostics: {
     /** An error in this window's page, for main's `logs/renderer-errors.log`. Nothing is answered. */
@@ -1449,7 +1474,15 @@ const api = {
       const handler = (_: Electron.IpcRendererEvent, change: { profileId?: string }) => cb(change)
       ipcRenderer.on('netEngine:changed', handler)
       return () => ipcRenderer.removeListener('netEngine:changed', handler)
-    }
+    },
+    /** A `mousse://pair` link reached Mousse: take it with `takePairLink`. */
+    onPairLink: (cb: () => void): (() => void) => {
+      const handler = () => cb()
+      ipcRenderer.on('netEngine:pairLink', handler)
+      return () => ipcRenderer.removeListener('netEngine:pairLink', handler)
+    },
+    /** The `mousse://pair` link waiting for a window, once (null when none). */
+    takePairLink: (): Promise<string | null> => ipcRenderer.invoke('netEngine:takePairLink')
   },
   /** In-app updates from GitHub Releases (src/main/updates). */
   updates: {

@@ -10,40 +10,53 @@
   overflow-y: auto;
   scrollbar-width: none;
   background: var(--vscode-activityBar-background, rgba(var(--surface-base-rgb), 0.65));
-  border-right: 1px solid rgba(var(--accent-pale-rgb), 0.08);
   -webkit-app-region: no-drag;
 }
 
 .navigation-rail::-webkit-scrollbar { display: none; }
 
+/* Rail items: Home, Search, Automations, Downloads, Usage, Settings and the profile share this one look, built on
+   theme tokens. The open page's item (aria-current="page") only takes the accent on its icon: no fill, no edge light.
+   An item whose menu or popover is open (aria-expanded="true") keeps the hover fill. Each rule weighs one class (its
+   states sit in :where()), enough to beat the plain button reset and no more, so a theme rule on
+   [data-mousse="rail-item"] restyles every item, in every state. */
 .navigation-rail-button {
   position: relative;
   display: grid;
   place-items: center;
-  width: 38px;
-  height: 38px;
+  width: 36px;
+  height: 36px;
   flex-shrink: 0;
-  border-radius: 8px;
+  border-radius: 9px;
+  background: transparent;
   color: var(--vscode-activityBar-inactiveForeground, var(--text-secondary));
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.15s, color 0.15s, transform var(--ui-dur);
 }
 
-.navigation-rail-button:hover:not(:disabled) {
+.navigation-rail-button:where(:hover:not(:disabled), [aria-expanded='true']) {
+  background: var(--ui-hover);
   color: var(--vscode-activityBar-foreground, var(--text-primary));
-  background: color-mix(in srgb, var(--text-secondary) 10%, transparent);
 }
 
-.navigation-rail-button.active {
+.navigation-rail-button:where(:active:not(:disabled)) {
+  transform: scale(0.95);
+}
+
+.navigation-rail-button:where([aria-current='page']) {
   color: var(--accent);
-  background: rgba(var(--accent-rgb), 0.08);
 }
 
-.navigation-rail-button:focus-visible {
+.navigation-rail-button:where(:focus-visible) {
   outline: none;
   background-image: var(--ui-focus-layer);
 }
 
-.navigation-rail-button:disabled { opacity: 0.35; cursor: not-allowed; }
+.navigation-rail-button:where(:disabled) { opacity: 0.35; cursor: not-allowed; }
+
+/* High contrast keeps a fill on the open page's item: a colour change alone is not enough there. */
+:where(html[data-theme='high-contrast']) .navigation-rail-button:where([aria-current='page']) {
+  background: var(--ui-selected);
+}
 
 /* Downloads, Usage and Settings sit at the bottom at any window height. */
 .navigation-rail-bottom {

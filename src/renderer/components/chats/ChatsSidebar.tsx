@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { ChevronRight, Globe, Lock, Plus } from '../../lib/icons'
 import type { ChatSummary } from '../../../shared/chats'
 import type { BotSummary } from '../../../shared/bots/personal/chat'
@@ -12,6 +12,8 @@ import { formatMessageTime } from '../../chat/components/agent-elements/utils/me
 import { Collapse } from '../ui/Collapse'
 import { useReplyPreviews } from '../../lib/replyPreviewSetting'
 import { OpenNetworkChatDialog } from './OpenNetworkChatDialog'
+import { BotRowMenu } from '../ThreadsContextMenu'
+import { setBotChecklistHidden, useBotChecklistHidden } from '../bots/botChecklistSetting'
 import '../../styles/chats.css'
 import '../../styles/bots.css'
 
@@ -47,9 +49,9 @@ const botActivityAt = (bot: BotSummary) => bot.last?.at ?? bot.createdAt
 /**
  * One bot in the Bots list: its face, its name and the time of its latest message, and under them what it does now in
  * coloured words (`botRowLine`). An idle bot shows its latest reply there instead, when reply previews are on, and its
- * face sleeps. Unread messages show as a count until its chat opens.
+ * face sleeps. Unread messages show as a count until its chat opens. A right-click opens its menu.
  */
-function BotRow({ bot, active, happyUntil, onOpen }: { bot: BotSummary; active: boolean; happyUntil: number | undefined; onOpen(): void }) {
+function BotRow({ bot, active, happyUntil, onOpen, onMenu }: { bot: BotSummary; active: boolean; happyUntil: number | undefined; onOpen(): void; onMenu(event: ReactMouseEvent<HTMLButtonElement>): void }) {
   const line = botRowLine(bot)
   const replyPreviews = useReplyPreviews()
   const preview = line.resting && replyPreviews ? bot.lastReply : undefined
@@ -57,7 +59,7 @@ function BotRow({ bot, active, happyUntil, onOpen }: { bot: BotSummary; active: 
   const unread = active ? 0 : bot.unread
   // Held from some of the owner's devices (About's Devices): a lock before its name.
   const walled = bot.reach !== undefined && bot.reach !== 'all'
-  return <button type="button" className="bot-row" aria-current={active || undefined} title={bot.stateText && bot.state !== 'idle' ? `${bot.name}: ${bot.stateText}` : bot.name} aria-label={`Message ${bot.name}`} onClick={onOpen}>
+  return <button type="button" className="bot-row" aria-current={active || undefined} title={bot.stateText && bot.state !== 'idle' ? `${bot.name}: ${bot.stateText}` : bot.name} aria-label={`Message ${bot.name}`} onClick={onOpen} onContextMenu={onMenu}>
     <BotFace look={bot.look} state={botFaceState(bot, happyUntil)} sleep={line.resting} size={36} view="head" />
     <span className="bot-row-text">
       <span className="bot-row-head">
@@ -73,6 +75,19 @@ function BotRow({ bot, active, happyUntil, onOpen }: { bot: BotSummary; active: 
   </button>
 }
 
+/** Where a bot's menu opens, and the row it returns the focus to. */
+interface BotMenuAt { botId: string; name: string; x: number; y: number; row: HTMLElement }
+
+/** A bot row's menu, kept outside the row's hover card. Closing it returns the focus to the row unless it moved on. */
+function BotRowMenuAt({ at, onClose }: { at: BotMenuAt; onClose(): void }) {
+  const hidden = useBotChecklistHidden(at.botId)
+  const close = () => {
+    onClose()
+    requestAnimationFrame(() => { if (!document.activeElement || document.activeElement === document.body) at.row.focus({ preventScroll: true }) })
+  }
+  return <BotRowMenu x={at.x} y={at.y} botName={at.name} checklistHidden={hidden} onClose={close} onToggleChecklist={() => { setBotChecklistHidden(at.botId, !hidden); close() }} />
+}
+
 export function ChatsSidebar() {
   const snapshot = useChatsStore((s) => s.snapshot)
   const activeId = useChatsStore((s) => s.activeChatId)
@@ -83,6 +98,15 @@ export function ChatsSidebar() {
   const bots = useBotsStore((s) => s.bots)
   const happy = useBotsStore((s) => s.happy)
   const [networkOpen, setNetworkOpen] = useState(false)
+  const [botMenu, setBotMenu] = useState<BotMenuAt | null>(null)
+  const openBotMenu = (bot: BotSummary) => (event: ReactMouseEvent<HTMLButtonElement>) => {
+    event.preventDefault()
+    const row = event.currentTarget
+    // From the keyboard there is no pointer: the menu opens under the row.
+    const rect = row.getBoundingClientRect()
+    const fromKeyboard = event.clientX === 0 && event.clientY === 0
+    setBotMenu({ botId: bot.id, name: bot.name, x: fromKeyboard ? rect.left + 12 : event.clientX, y: fromKeyboard ? rect.bottom : event.clientY, row })
+  }
   // The sidebar lists the bots itself: after a restart it shows without the chat pane.
   useBotsPolling()
   const newBot = () => useBotsStore.getState().openNewBot()
@@ -105,7 +129,7 @@ export function ChatsSidebar() {
     <section aria-label="Bots"><SectionHeading title="Bots" open={botsOpen} onToggle={toggleBots}><button aria-label="New bot" title="New bot" onClick={newBot}><Plus size={15} /></button></SectionHeading>
       <Collapse open={botsOpen} itemCount={shownBots.length}>
         {bots.length
-          ? <div className="bot-list">{shownBots.map((bot) => <BotHoverCard key={bot.id} bot={bot}><BotRow bot={bot} active={bot.id === activeBotId} happyUntil={happy[bot.id]} onOpen={() => void openBot(bot.id)} /></BotHoverCard>)}</div>
+          ? <div className="bot-list">{shownBots.map((bot) => <BotHoverCard key={bot.id} bot={bot}><BotRow bot={bot} active={bot.id === activeBotId} happyUntil={happy[bot.id]} onOpen={() => void openBot(bot.id)} onMenu={openBotMenu(bot)} /></BotHoverCard>)}</div>
           : <p className="chat-empty-hint">No bots yet. Press + to make one.</p>}
       </Collapse>
     </section>
@@ -116,5 +140,7 @@ export function ChatsSidebar() {
       <Collapse open={recentOpen} itemCount={recent.length}>{recent.map((entry) => entry.row())}</Collapse>
     </section>}
     {networkOpen && <OpenNetworkChatDialog onClose={() => setNetworkOpen(false)} />}
+    {/* A right-click on another row opens its menu as this one hears it and closes: only this menu's own closes it. */}
+    {botMenu && <BotRowMenuAt key={`${botMenu.botId}:${botMenu.x}:${botMenu.y}`} at={botMenu} onClose={() => setBotMenu((shown) => (shown === botMenu ? null : shown))} />}
   </div>
 }

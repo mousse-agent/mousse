@@ -6,6 +6,7 @@ import type { ProviderUsage } from '../../shared/providerAuth'
 import { Collapse, COLLAPSE_OPEN_MS, COLLAPSE_STAGGER_ITEMS, COLLAPSE_STAGGER_MS } from './ui/Collapse'
 import { UsageBar } from './UsageBar'
 import { UsageRowMenu, type UsageRowActions } from './UsageRowMenu'
+import { UsageProviderName } from '../lib/usageProviderName'
 
 /** Whether the list a row joins is open and done opening: only then does a joining row grow in itself. */
 const ListSettledContext = createContext(false)
@@ -33,7 +34,7 @@ export function UsageRowSlot({ children, hidden, loading }: { children: ReactNod
 /** A provider's row while its usage is still on the way: its name and a slim placeholder. */
 export function UsageRowSkeleton({ provider }: { provider: ProviderUsage }) {
   return <div className="usage-slim-row" data-testid="usage-row-loading" aria-busy="true">
-    <span className="usage-slim-name">{provider.label}</span>
+    <span className="usage-slim-name"><UsageProviderName provider={provider} /></span>
     <span className="usage-skeleton usage-skeleton-figure" aria-hidden="true" />
   </div>
 }
@@ -53,7 +54,7 @@ export function UsageCardSkeleton() {
 export function OtherUsageRow({ provider, computerName, menu }: { provider: ProviderUsage; computerName?: string; menu?: ReactNode }) {
   const figure = otherUsageFigure(provider)
   return <div className="usage-slim-row" data-testid="usage-other-row">
-    <span className="usage-slim-name">{provider.label}{computerName && <span className="settings-muted"> · {computerName}</span>}</span>
+    <span className="usage-slim-name"><UsageProviderName provider={provider} />{computerName && <span className="settings-muted"> · {computerName}</span>}</span>
     <span className="usage-slim-figure">
       {figure.remaining !== undefined && <span className="usage-slim-bar"><UsageBar remaining={figure.remaining} label={provider.label} size="cell" /></span>}
       <span className={figure.muted ? 'settings-muted' : figure.remaining !== undefined ? 'usage-level-text' : undefined} data-usage-level={figure.remaining !== undefined ? usageLevel(figure.remaining) : undefined} title={figure.muted ? provider.message : undefined}>{figure.text}</span>
@@ -66,7 +67,7 @@ export function OtherUsageRow({ provider, computerName, menu }: { provider: Prov
 export function AttentionRow({ provider, computerName, onReconnect, menu }: { provider: ProviderUsage; computerName?: string; onReconnect?: (instanceId: string) => void; menu?: ReactNode }) {
   const reason = attentionReason(provider)
   return <div className="usage-slim-row usage-attention-row" data-testid="usage-attention-row" tabIndex={-1}>
-    <span className="usage-slim-name">{provider.label}{computerName && <span className="settings-muted"> · {computerName}</span>}</span>
+    <span className="usage-slim-name"><UsageProviderName provider={provider} />{computerName && <span className="settings-muted"> · {computerName}</span>}</span>
     <span className="usage-slim-figure">
       <span className="settings-muted" title={provider.message}>{reason.text}</span>
       {reason.reconnect && onReconnect && !computerName && <button type="button" className="usage-text-btn" data-testid="usage-reconnect" onClick={() => onReconnect(usageInstanceId(provider))}>Reconnect</button>}

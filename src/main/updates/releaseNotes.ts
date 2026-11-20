@@ -42,15 +42,24 @@ export function releaseNoteItems(note: string | null | undefined): string[] {
   return parts.map(toText).filter((item) => item.length > 0 && !SKIPPED_ITEM.test(item))
 }
 
+/** The repository's pull requests that any of the releases' full notes link, listed items or not, ascending. */
+function linkedPullRequests(groups: ReadonlyArray<{ note: string | null }>, repositoryUrl: string): number[] {
+  const link = new RegExp(`${repositoryUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/pull/(\\d+)`, 'g')
+  const found = new Set<number>()
+  for (const group of groups) for (const match of (group.note ?? '').matchAll(link)) found.add(Number(match[1]))
+  return [...found].sort((a, b) => a - b)
+}
+
 /**
  * Release notes for the update popover: newest release first, at most 6 releases of at most 8
- * items each. Truncated items and releases stay reachable through each release's page.
+ * items each. Truncated items and releases stay reachable through each release's page; `pullRequests` still names
+ * every pull request they link, so the reports the update fixes are found in them too.
  */
 export function normalizeReleaseNotes(
   raw: RawReleaseNotes,
   latestVersion: string,
   repositoryUrl: string
-): { releaseNotes: UpdateReleaseNote[]; omittedReleaseCount: number } {
+): { releaseNotes: UpdateReleaseNote[]; omittedReleaseCount: number; pullRequests: number[] } {
   const groups = typeof raw === 'string' ? [{ version: latestVersion, note: raw }] : [...(raw ?? [])]
   const releaseNotes: UpdateReleaseNote[] = []
   for (const group of groups.slice(0, MAX_RELEASES)) {
@@ -62,5 +71,5 @@ export function normalizeReleaseNotes(
       url: `${repositoryUrl}/releases/tag/v${group.version}`
     })
   }
-  return { releaseNotes, omittedReleaseCount: Math.max(0, groups.length - MAX_RELEASES) }
+  return { releaseNotes, omittedReleaseCount: Math.max(0, groups.length - MAX_RELEASES), pullRequests: linkedPullRequests(groups, repositoryUrl) }
 }

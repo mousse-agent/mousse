@@ -349,6 +349,11 @@
     "digest": "2a27f073e7829290",
     "security": "926c4af141d1208d"
   },
+  "orchestrator.retrySetup": {
+    "version": 1,
+    "digest": "2a27f073e7829290",
+    "security": "926c4af141d1208d"
+  },
   "orchestrator.send": {
     "version": 8,
     "digest": "f0c64070d7cee134",

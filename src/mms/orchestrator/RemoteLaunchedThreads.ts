@@ -382,6 +382,18 @@ export class RemoteLaunchedThreads {
     return { messages, total: isRecord(value) && typeof value.total === 'number' ? value.total : messages.length }
   }
 
+  /** `thread_read` view `summary`: the thread record there (`threads.get`) and its newest runs (`runs.list`). */
+  async summary(target: RemoteTarget): Promise<{ thread: Record<string, unknown>; runs: Array<Record<string, unknown>> }> {
+    this.assertAllowed(target)
+    const [got, listed] = await Promise.all([
+      this.read(target, 'threads.get', {}, 'reading the thread'),
+      this.read(target, 'runs.list', { limit: 20 }, 'reading its runs')
+    ])
+    const thread = isRecord(got.value) && isRecord(got.value.thread) ? got.value.thread : {}
+    const runs = isRecord(listed.value) && Array.isArray(listed.value.runs) ? listed.value.runs.filter(isRecord) : []
+    return { thread, runs }
+  }
+
   // ------------------------------------------------------------------ waiting
 
   /**

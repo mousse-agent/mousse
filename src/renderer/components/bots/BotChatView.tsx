@@ -1,6 +1,6 @@
 import { usePastedBotSecret } from './usePastedBotSecret'
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
-import { ArrowDown, Brain, ChevronRight, CircleAlert, Loader2, Reply, Shield, X } from '../../lib/icons'
+import { ArrowDown, Brain, ChevronRight, CircleAlert, Loader2, PanelRightClose, PanelRightOpen, Reply, Shield, X } from '../../lib/icons'
 import { withAppletNames, type BotChatApplet, type BotChatMessage, type BotChatQuote, type BotError, type BotSummary } from '../../../shared/bots/personal/chat'
 import { BOT_COLOUR_HEX, DEFAULT_BOT_LOOK, normalizeBotLook } from '../../../shared/bots/personal/look'
 import { botMessageFrom, type BotMessageFrom } from '../../../shared/bots/personal/botMessages'
@@ -15,7 +15,7 @@ import { useMotionScale } from '../../lib/motion'
 import { watchOffscreen } from '../../lib/offscreenMotion'
 import { BotFace } from './face/BotFace'
 import { BotSteps } from './BotSteps'
-import { BOT_IMAGES, BotFilePane, BotFilesProvider, BotMarkdown, BotPathChip, fileActions } from './BotFiles'
+import { BOT_IMAGES, BotFilesProvider, BotMarkdown, BotPathChip, fileActions } from './BotFiles'
 import { BotAppletPane, BotMessageApplets } from './BotApplets'
 import { BotPictureActions, BotReplyMedia } from './BotReplyMedia'
 import { BotReactionBadge, BotReactionBar } from './BotReactions'
@@ -30,12 +30,17 @@ import { BotCards, galleryPaths } from './BotCards'
 import { BotActivitySticker, BotPresenceLine } from './BotPresence'
 import { askAnswerLine } from '../asks/AskCard'
 import { BotMenu } from './BotMenu'
-import { BotAboutPanel } from './BotAboutPanel'
 import { BotTasksButton } from './BotTasksButton'
+import { BotModelButton } from './BotModelButton'
+import { botRetryOf } from './botRetry'
+import { ReportButton } from '../bugReports/ReportButton'
+import { BotSidePanel, botFilesFolder, useBotSidePanel } from './BotSidePanel'
 import { BotMemoryDialog } from './BotMemoryDialog'
-import { BotBrowserPane, BotBrowserPreview } from './BotBrowser'
-import { useBotBrowser, useBotBrowserStore } from '../../stores/botBrowserStore'
+import { BotBrowserPreview } from './BotBrowser'
+import { useBotBrowser } from '../../stores/botBrowserStore'
 import { ChatComposer, type AttachedFile, type VoiceMessage } from '../ChatComposer'
+import type { ChatReference } from '../../../shared/chatReferences'
+import { botThreadReferenceRefusal } from '../../lib/threadReference'
 import { ComposerNoticeProvider, ComposerNoticeSlot, ComposerNoticeSource } from '../ComposerNotice'
 import { botGroupTime, placeMessages } from './messageGroups'
 import { botDoingLine, chatRows, withNotes, type BotChatRow, type OwnerMarks } from './botChatShape'
@@ -58,6 +63,18 @@ import { FindInThreadBar } from '../../chat/components/agent-elements/find/FindI
 const EMPTY: BotChatMessage[] = []
 const NO_FILES: AttachedFile[] = []
 const NO_VOICE: VoiceMessage[] = []
+const NO_REFERENCES: ChatReference[] = []
+
+/**
+ * A pill in a bot's composer (a pasted or dropped thread): one of the owner's threads the bot may read, never a private
+ * thread or a subagent. It is sent as the thread's link.
+ */
+function addBotReference(botId: string, reference: ChatReference): void {
+  if (reference.kind !== 'thread' || !reference.threadId) throw new Error('A bot chat takes threads, not other references.')
+  const refused = botThreadReferenceRefusal(reference.threadId)
+  if (refused) throw new Error(refused)
+  useBotsStore.getState().addReference(botId, reference)
+}
 const NO_SKILLS: never[] = []
 const NO_MARKS = new Map<string, OwnerMarks>()
 const NO_NOTES: BotLocalNote[] = []
@@ -72,12 +89,16 @@ const ignore = () => {}
 
 /**
  * The one red line of a bot's error, with its one way out (bot-ui §4.9). `settled`: what it said is over (a pause that
- * has ended, or an older line of one that still holds), so it reads quietly, without its button.
+ * has ended, or an older line of one that still holds), so it reads quietly, without its button. `onRetry`: a failed chat
+ * turn's Retry (`botRetryOf`), on the line itself. A line that is not a usage pause has the app's Report button too
+ * (Settings → General → Report button), with its words.
  */
-export function BotErrorLine({ error, onAction, settled }: { error: BotError; onAction(action: NonNullable<BotError['action']>): void; settled?: boolean }) {
+export function BotErrorLine({ error, onAction, settled, onRetry }: { error: BotError; onAction(action: NonNullable<BotError['action']>): void; settled?: boolean; onRetry?: () => void }) {
   return <div className={settled ? 'bot-error is-settled' : 'bot-error'} role="status">
     <CircleAlert size={15} aria-hidden /><span>{error.text}</span>
     {error.action && !settled && <button type="button" onClick={() => onAction(error.action!)}>{error.action.label}</button>}
+    {onRetry && !settled && <button type="button" onClick={onRetry}>Retry</button>}
+    {!settled && error.action?.kind !== 'resume' && <ReportButton error={{ title: 'Bot error', message: error.text, surface: 'bot chat' }} />}
   </div>
 }
 
@@ -194,11 +215,12 @@ export interface BotPinned { kind: 'ask' | 'error'; id?: string; text: string }
  * (its summary's, which Resume or a good run clears). Each points at its full message: the ask's own, and the newest
  * message with that error (or any error).
  */
-export function pinnedOf(messages: readonly BotChatMessage[], bot: Pick<BotSummary, 'name' | 'error'>): BotPinned[] {
+export function pinnedOf(messages: readonly BotChatMessage[], bot: Pick<BotSummary, 'name' | 'error' | 'state'>): BotPinned[] {
   const pinned: BotPinned[] = []
   const ask = messages.filter((message) => message.ask?.status === 'open').at(-1)
   if (ask) pinned.push({ kind: 'ask', id: ask.id, text: `${bot.name} wants to ${ask.ask!.title}` })
-  if (bot.error) {
+  // A usage pause that holds is already said on the paused line above the composer.
+  if (bot.error && !(bot.state === 'paused' && bot.error.action?.kind === 'resume')) {
     const errors = messages.filter((message) => message.error)
     const shown = errors.filter((message) => message.error!.text === bot.error!.text).at(-1) ?? errors.at(-1)
     pinned.push({ kind: 'error', ...(shown ? { id: shown.id } : {}), text: bot.error.text })
@@ -260,7 +282,7 @@ const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botNa
       {/* As in a messaging app: the pictures first, the words under them, then any other files. */}
       <div className="bot-you-content">
         {!!message.attachments?.length && <BotImageFiles files={message.attachments} />}
-        {message.text && <div className="bot-you-bubble">
+        {message.text && <div data-mousse="user-message" className="bot-you-bubble">
           <div className="bot-find-text" data-find-text data-message-id={message.id} data-part-index="0">
             <WithSentQuotes text={message.text} render={(part) => <Markdown content={part} className="bot-markdown" images={BOT_IMAGES} />} />
           </div>
@@ -277,7 +299,7 @@ const OwnerMessage = memo(function OwnerMessage({ botId, message, pending, botNa
 
 /** A bot message uses only the bot's id, name and look, so a change of its state does not render it again. */
 const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message === b.message && a.asked === b.asked && a.onAction === b.onAction && a.browser === b.browser &&
-  a.quote === b.quote && a.starts === b.starts && a.time === b.time && a.onReply === b.onReply && a.onApplet === b.onApplet && a.settled === b.settled &&
+  a.quote === b.quote && a.starts === b.starts && a.time === b.time && a.onReply === b.onReply && a.onApplet === b.onApplet && a.settled === b.settled && a.onRetry === b.onRetry &&
   a.bot.id === b.bot.id && a.bot.name === b.bot.name && a.live === b.live && a.follow === b.follow
 
 /**
@@ -288,7 +310,7 @@ const sameBotMessage = (a: BotMessageProps, b: BotMessageProps) => a.message ===
  * message, once posted, is drawn in this same bubble (`useReplyKeys`). `follow`: keeps the chat's end in view as the
  * bubble grows.
  */
-interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; settled?: boolean; browser?: ReactNode; quote: boolean; starts: boolean; time: boolean; onReply(message: BotChatMessage): void; asked?: BotChatMessage; onApplet(applet: BotChatApplet): void; live?: BotLive; follow?: () => void }
+interface BotMessageProps { bot: BotSummary; message: BotChatMessage; onAction(action: NonNullable<BotError['action']>): void; settled?: boolean; browser?: ReactNode; quote: boolean; starts: boolean; time: boolean; onReply(message: BotChatMessage): void; asked?: BotChatMessage; onApplet(applet: BotChatApplet): void; live?: BotLive; follow?: () => void; onRetry?: () => void }
 
 /**
  * A reply's tools hang off its bubble's right edge: beside a wide bubble they move left, inside the transcript. Measured
@@ -346,7 +368,7 @@ const senderName = (from: BotMessageFrom, sender: BotSummary | undefined) => sen
  * Reply show beside it on hover; its applets sit under it; an open ask is quick replies under it. A message another of
  * the owner's bots sent it reads as in a group chat: that bot's face beside the bubble, its name on top, its colour.
  */
-const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settled, browser, quote, starts, time, onReply, asked, onApplet, live, follow }: BotMessageProps) {
+const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settled, browser, quote, starts, time, onReply, asked, onApplet, live, follow, onRetry }: BotMessageProps) {
   const store = useBotsStore.getState
   // A bubble that was the chat's live turn eases to each new size: a line that wraps, then its posted message's foot.
   const wasLive = useRef(false)
@@ -408,7 +430,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
   // Another bot's message shows its words alone: who sent it is its name and face, not a header.
   const words = from ? from.message : media.text
   const line = <div className="bot-message-line">
-    <div ref={bubble} tabIndex={-1} className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !words && !lostChips.length && !cards ? ' is-media-only' : ''}`}>
+    <div ref={bubble} tabIndex={-1} data-mousse="assistant-message" className={`bot-bubble${pictures ? ' has-media' : ''}${pictures && !words && !lostChips.length && !cards ? ' is-media-only' : ''}`}>
       {from && <span className="bot-from-name">{senderName(from, sender)}</span>}
       {quoted && <BotReplyQuote botId={bot.id} quote={message.replyTo!} botName={bot.name} />}
       <BotReplyMedia images={shownImages} onMenuOpen={setMenuOpen} />
@@ -417,7 +439,7 @@ const BotMessage = memo(function BotMessage({ bot, message: row, onAction, settl
       {lostChips.length > 0 && <p className="bot-picture-chips">{lostChips.map((image) => <BotPathChip key={image.key} path={image.path!} />)}</p>}
       {openAsk && <p className="bot-bubble-ask"><Shield size={14} aria-hidden /><span>Wants to <strong>{openAsk.title}</strong></span></p>}
       {!!message.attachments?.length && <BotOtherFiles files={message.attachments} />}
-      {message.error && <BotErrorLine error={message.error} onAction={onAction} settled={settled} />}
+      {message.error && <BotErrorLine error={message.error} onAction={onAction} settled={settled} onRetry={onRetry} />}
       {stepsOpen && <BotSteps chips={steps} />}
       {(steps.length > 0 || time && (!message.action || message.action.status === 'open')) && <div className="bot-bubble-foot">
         {steps.length > 0 && <WorkedToggle ms={ms} open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)} />}
@@ -701,7 +723,7 @@ export const BOT_AFTER_REPLY_MS = 700
 function BotCutReply({ text, starts }: { text: string; starts: boolean }) {
   return <article className={`chat-participant-message from-agent bot-message bot-cut-reply${starts ? ' is-group-start' : ''}`}>
     <div className="bot-message-line">
-      <div className="bot-bubble">
+      <div data-mousse="assistant-message" className="bot-bubble">
         <BotMarkdown text={text} className="bot-markdown" />
         <div className="bot-bubble-foot"><span className="bot-cut-mark" title="This reply stopped before it was finished, and was not sent.">Stopped</span></div>
       </div>
@@ -836,9 +858,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   const storedDraft = useBotsStore((s) => s.drafts[bot.id] ?? '')
   const pasted = usePastedBotSecret(bot, storedDraft)
   const draft = pasted.draft
+  const references = useBotsStore((s) => s.references[bot.id]) ?? NO_REFERENCES
   const attachments = useBotsStore((s) => s.attachments[bot.id])
   const replying = useBotsStore((s) => s.replyingTo[bot.id])
-  const aboutOpen = useBotsStore((s) => s.aboutOpen)
   const memoryOpen = useBotsStore((s) => (s.memoryOpen?.botId === bot.id ? s.memoryOpen : null))
   // Another bot's error stays with that bot's chat.
   const error = useBotsStore((s) => (s.errorBotId === bot.id ? s.error : null))
@@ -865,11 +887,15 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // the words of replies whose turn stopped before they were finished (botLiveReplies.ts).
   const notes = useBotsStore((s) => s.notes[bot.id] ?? NO_NOTES)
   const cuts = useBotCutReplies(bot.id)
+  // A usage pause that still holds is said once, on the paused line above the composer (with its Resume); its chat line
+  // shows only once the pause is over, quietly, as what happened.
+  const resumeOn = useMemo(() => liveResumeLine(messages, { state: bot.state }), [messages, bot.state])
+  const pauseLine = resumeOn ? messages.find((message) => message.id === resumeOn)?.error?.text : undefined
   const { rows, marks } = useMemo(() => {
-    const shaped = chatRows(messages, bot.name, (message) => (message.ask ? askAnswerLine(message.ask, message.kind === 'notice') : undefined))
+    const shaped = chatRows(resumeOn ? messages.filter((message) => message.id !== resumeOn) : messages, bot.name, (message) => (message.ask ? askAnswerLine(message.ask, message.kind === 'notice') : undefined))
     const lines = cuts.length ? [...notes, ...cuts.map((cut) => ({ id: cut.id, at: cut.at, text: cut.text, cut: true as const }))].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)) : notes
     return { rows: withNotes(shaped.rows, lines), marks: shaped.marks }
-  }, [messages, bot.name, notes, cuts])
+  }, [messages, resumeOn, bot.name, notes, cuts])
   // The sent rows and the messages on their way, in one run of groups (a quiet line ends a group), with the day lines.
   const shown = useMemo<BotChatRow[]>(() => (pending.length ? [...rows, ...pending.map((message) => ({ kind: 'message' as const, message }))] : rows), [rows, pending])
   const places = useMemo(() => placeMessages(shown.map((row, index) => (row.kind === 'message' ? { author: senderOf(row.message), at: row.message.at, sending: index >= rows.length } : { author: row.cut ? 'bot' : 'system', at: row.at }))), [shown, rows.length])
@@ -899,27 +925,27 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }, [bot.id])
   // The message each reply answers, for how long its work took.
   const byId = useMemo(() => new Map(messages.map((message) => [message.id, message])), [messages])
-  // A file a chip opened, in the Files pane beside the chat. Opening one closes About and the browser's split view.
+  // The bot's own browser: the reply of the run whose tab it shows has a live preview, and Expand opens it in the side
+  // panel. Each watches the browser's pictures only while it is on screen.
+  const browser = useBotBrowser(bot.id)
+  // The side panel docked beside the chat pane: the browser, the bot's files, Agent settings (BotSidePanel.tsx).
+  const side = useBotSidePanel(bot.id)
+  const filesFolder = useMemo(() => botFilesFolder(messages, bot.id), [messages, bot.id])
+  // A file a chip opened, in the side panel's Files view.
   const [file, setFile] = useState<string | null>(null)
   // An applet opened beside the chat, from its name.
   const [appletOpen, setAppletOpen] = useState<BotChatApplet | null>(null)
   useEffect(() => { setAppletOpen(null) }, [bot.id])
-  const openApplet = useCallback((applet: BotChatApplet) => {
-    setAppletOpen(applet)
-    setFile(null)
-  }, [])
+  const openApplet = useCallback((applet: BotChatApplet) => setAppletOpen(applet), [])
   // An action on a file that the computer refused ("Can't find notes.md…") is said above the composer.
   const fileFailed = useCallback((text: string) => useBotsStore.setState({ error: text, errorBotId: bot.id }), [bot.id])
-  // A chip's click: a file shows in the pane, a folder opens in the file manager, one that is gone is said.
+  // A chip's click: a file shows in the side panel's Files view, a folder opens in the file manager, one that is gone
+  // is said.
+  const showSide = side.show
   const openFile = useCallback((path: string) => fileActions.open(path, (shown) => {
     setFile(shown)
-    useBotsStore.setState({ aboutOpen: false })
-    useBotBrowserStore.getState().closePane()
-  }, fileFailed), [fileFailed])
-  // The bot's own browser: the reply of the run whose tab it shows has a live preview, and Expand opens the split view.
-  // Each watches the browser's pictures only while it is on screen.
-  const browser = useBotBrowser(bot.id)
-  const paneOpen = useBotBrowserStore((s) => s.pane === bot.id)
+    showSide('files')
+  }, fileFailed), [fileFailed, showSide])
   const browserRun = browser?.activationId ?? browser?.activations.at(-1)
   const previewOn = browserRun ? messages.filter((message) => message.author === 'bot' && message.activationId === browserRun).at(-1)?.id : undefined
   const preview = browser && browserRun ? <BotBrowserPreview bot={bot} view={browser} /> : null
@@ -946,8 +972,10 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   // from here always goes to the end, as in a messenger.
   // Scrolled up, a new message from the bot leaves the reader where they are; Go to latest shows while scrolled up, and
   // says New message once one has come in. `heading`: on the way to the end after Go to latest, so the smooth scroll's
-  // own steps don't bring the button back. `top`: where the last scroll left it.
-  const anchor = useRef<{ firstId?: string; lastSeq?: number; height: number; atEnd: boolean; sent: number; heading?: boolean; top?: number }>({ height: 0, atEnd: true, sent: 0 })
+  // own steps don't bring the button back. `top`: where the last scroll left it. `landing`: Find is taking the reader to
+  // a match, which may first have to be drawn; until it is there, a scroll that still finds the end (a write of the
+  // reply's follow, a frame before) does not make the chat follow it again and pull the reader back.
+  const anchor = useRef<{ firstId?: string; lastSeq?: number; height: number; atEnd: boolean; sent: number; heading?: boolean; top?: number; landing?: boolean }>({ height: 0, atEnd: true, sent: 0 })
   const [unseen, setUnseen] = useState(false)
   const [away, setAway] = useState(false)
   useLayoutEffect(() => {
@@ -963,7 +991,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     if (held.firstId && firstShown !== held.firstId && !held.atEnd) element.scrollTop += element.scrollHeight - held.height
     else if (held.atEnd) element.scrollTop = element.scrollHeight
     if (!held.atEnd && held.lastSeq !== undefined && lastSeq !== undefined && lastSeq > held.lastSeq && messages.at(-1)?.author === 'bot') setUnseen(true)
-    anchor.current = { firstId: firstShown, lastSeq, height: element.scrollHeight, atEnd: held.atEnd, sent: pending.length, heading: held.heading, top: held.top }
+    anchor.current = { firstId: firstShown, lastSeq, height: element.scrollHeight, atEnd: held.atEnd, sent: pending.length, heading: held.heading, top: held.top, landing: held.landing }
   }, [firstShown, lastSeq, messages, pending.length, working, offline, replying?.id])
   useEffect(() => {
     anchor.current = { lastSeq: anchor.current.lastSeq, height: 0, atEnd: true, sent: anchor.current.sent }
@@ -981,7 +1009,15 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }
   // A pinned line hides while its full message is on screen, so it never shows twice.
   const pinned = useMemo(() => pinnedOf(messages, bot), [messages, bot])
-  const resumeOn = useMemo(() => liveResumeLine(messages, bot), [messages, bot])
+  // Retry sits on the newest failed chat turn only, while nothing the owner wrote came after it.
+  const retryOn = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]!
+      if (message.author === 'owner') return ''
+      if (message.kind === 'error' && botRetryOf(messages, message)) return message.id
+    }
+    return ''
+  }, [messages])
   const [onScreen, setOnScreen] = useState('')
   const measure = useCallback(() => {
     const element = transcript.current
@@ -1007,7 +1043,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     onNavigate: () => {
       anchor.current.atEnd = false
       anchor.current.heading = false
-    }
+      anchor.current.landing = true
+    },
+    onLanded: () => { anchor.current.landing = false }
   })
 
   const act = useCallback((action: NonNullable<BotError['action']>) => {
@@ -1018,6 +1056,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     else if (action.kind === 'pick_model') useBotsStore.setState({ aboutOpen: true, aboutFocus: 'runs-on' })
     else void store().resume(bot.id)
   }, [bot.id, store])
+  const retry = useCallback(() => { if (retryOn) void store().retry(bot.id, retryOn) }, [bot.id, retryOn, store])
   // Reply on a message: its quote goes above the composer, which takes the focus.
   const reply = useCallback((message: BotChatMessage) => {
     store().setReplyingTo(bot.id, quoteOf(message))
@@ -1054,7 +1093,8 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
     element.scrollTop = element.scrollHeight
     anchor.current.height = element.scrollHeight
   }, [])
-  const toggleAbout = () => useBotsStore.setState({ aboutOpen: !aboutOpen })
+  // The face and the name open Agent settings in the side panel, and close it there.
+  const toggleAbout = () => (side.open && side.view === 'settings' ? side.close() : side.show('settings'))
   const pictureActions = useCallback((image: LightboxImage) => <BotPictureActions image={image} />, [])
   // `/` commands: the list follows what is typed; after `/model` it offers the bot's slots and models, read once.
   const modelInfo = useBotsStore((s) => s.modelInfo[bot.id])
@@ -1068,9 +1108,11 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
   }), [modelInfo])
 
   return <BotFilesProvider botId={bot.id} open={openFile} failed={fileFailed}><ImageGalleryProvider images={chatImages} actions={pictureActions}>
+    {/* The chat pane: the conversation, and an applet beside it. The side panel docks outside it. */}
+    <div className="bot-chat-pane">
     {/* The bot's colour tints the quotes of its messages. */}
-    <section className={`chat-conversation bot-conversation${typing ? ' is-typing' : ''}`} data-applet-conversation style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
-      <header className="chat-conversation-header">
+    <section data-mousse="chat" className={`chat-conversation bot-conversation${typing ? ' is-typing' : ''}`} data-applet-conversation style={{ '--bot-colour': BOT_COLOUR_HEX[normalizeBotLook(bot.look).colour] } as CSSProperties}>
+      <header data-mousse="chat-header" className="chat-conversation-header">
         <button type="button" className="bot-header-about" aria-label={`About ${bot.name}`} onClick={toggleAbout}>
           <BotFace look={bot.look} state={botFaceState(bot, happy)} size={32} view="head" />
           <BotActivitySticker bot={bot} typing={typing} offline={offline} />
@@ -1079,15 +1121,20 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
           <button type="button" className="bot-header-name" tabIndex={-1} aria-hidden onClick={toggleAbout}><h1>{bot.name}</h1></button>
           <BotPresenceLine bot={bot} typing={typing} offline={offline} />
         </div>
-        <BotTasksButton tasks={bot.tasks} />
+        <BotTasksButton botId={bot.id} tasks={bot.tasks} />
+        {/* The provider it talks on, ringed by the usage left, and its model rows. */}
+        <BotModelButton bot={bot} />
+        <button type="button" className={`bot-header-panel${side.open ? ' is-open' : ''}`} aria-label={side.open ? 'Hide side panel' : 'Show side panel'} title={side.open ? 'Hide side panel' : 'Show side panel'} aria-expanded={side.open} onClick={side.toggle}>
+          {side.open ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
+        </button>
         {/* From the menu, whose item goes as it closes: Escape then gives the focus to the composer. */}
         <BotMenu bot={bot} {...(find.openFind ? { onFind: () => { composerField()?.focus({ preventScroll: true }); find.openFind!() } } : {})} />
       </header>
       {find.barProps && <div className="bot-find-anchor"><FindInThreadBar {...find.barProps} /></div>}
-      <div className="chat-transcript" data-applet-scroller ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
+      <div data-mousse="transcript" className="chat-transcript" data-applet-scroller ref={transcript} role="log" aria-label={`${bot.name} messages`} onScroll={(event) => {
         const element = event.currentTarget
         const down = element.scrollTop >= (anchor.current.top ?? 0)
-        anchor.current.atEnd = element.scrollHeight - element.scrollTop - element.clientHeight < 40
+        anchor.current.atEnd = !anchor.current.landing && element.scrollHeight - element.scrollTop - element.clientHeight < 40
         anchor.current.height = element.scrollHeight
         // Reaching the end, or any scroll back up (the reader took over), ends the way to the end.
         if (anchor.current.atEnd || element.scrollTop < (anchor.current.top ?? 0)) anchor.current.heading = false
@@ -1134,12 +1181,12 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             {message.author === 'owner'
               ? <OwnerMessage botId={bot.id} message={message} pending={sending} botName={bot.name} quote={quote} starts={place.starts} time={place.time} marks={(marks ?? NO_MARKS).get(message.id)} onReply={sending ? undefined : reply} />
               : <BotMessage bot={bot} message={message} onAction={act} settled={message.error?.action?.kind === 'resume' && message.id !== resumeOn} browser={message.id === previewOn ? preview : undefined} quote={quote} starts={place.starts} time={place.time} onReply={reply} onApplet={openApplet}
-                asked={message.replyTo ? byId.get(message.replyTo.id) : undefined} {...(replyKeys.keys.has(message.id) ? { follow: followEnd } : {})} />}
+                asked={message.replyTo ? byId.get(message.replyTo.id) : undefined} onRetry={message.id === retryOn ? retry : undefined} {...(replyKeys.keys.has(message.id) ? { follow: followEnd } : {})} />}
           </Fragment>
         }).concat(liveShown ? [<Fragment key={replyKeys.live}>{null}<BotMessage bot={bot} message={liveMessage} onAction={act} quote={false} starts={typingStarts} time={false} onReply={reply} onApplet={openApplet} live={live} follow={followEnd} /></Fragment>] : [])}
         {/* A run still working before its reply: the preview follows it here. */}
         {preview && !previewOn && <div className="bot-browser-live">{preview}</div>}
-        {bot.state === 'paused' && <p className="bot-paused-line" role="status">{bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused'}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
+        {bot.state === 'paused' && <p className="bot-paused-line" role="status">{(pauseLine ?? (bot.stateText.startsWith('Paused') ? bot.stateText : 'Paused')).replace(/\.$/, '')}. <button type="button" onClick={() => void store().resume(bot.id)}>Resume</button></p>}
       </div>
       <div className="chat-input-area bot-input-area" data-applet-composer>
         {(unseen || away) && <button type="button" className="bot-jump" onClick={toEnd}><ArrowDown size={14} aria-hidden />{unseen ? 'New message' : 'Go to latest'}</button>}
@@ -1162,6 +1209,10 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             onInputChange={pasted.change}
             attachedFiles={files}
             onAttachedFilesChange={(next) => store().setAttachments(bot.id, next)}
+            references={references}
+            onAddReference={(reference) => addBotReference(bot.id, reference)}
+            onRemoveReference={(id) => store().removeReference(bot.id, id)}
+            onReferenceError={(message) => useBotsStore.setState({ error: message, errorBotId: bot.id })}
             messageLimit={MAX_BOT_CHAT_TEXT}
             voiceMessages={NO_VOICE}
             onVoiceMessagesChange={ignore}
@@ -1180,10 +1231,9 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
         </ComposerNoticeProvider>
       </div>
     </section>
-    {file && <BotFilePane botId={bot.id} path={file} onClose={() => setFile(null)} />}
-    {paneOpen && browser && <BotBrowserPane bot={bot} view={browser} />}
     {appletOpen && <BotAppletPane botId={bot.id} applet={appletOpen} onClose={() => setAppletOpen(null)} />}
-    {aboutOpen && <BotAboutPanel bot={bot} />}
+    </div>
+    <BotSidePanel bot={bot} state={side} browser={browser} folder={filesFolder} file={file} onFile={setFile} />
     {memoryOpen && <BotMemoryDialog bot={bot} {...(memoryOpen.focus ? { focus: memoryOpen.focus } : {})} />}
   </ImageGalleryProvider></BotFilesProvider>
 }

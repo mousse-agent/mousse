@@ -1,4 +1,5 @@
 import { knownAppError, parseErrorInfo } from '../../shared/errors'
+import { normalizeDriverPath } from '../../shared/computerUse'
 /**
  * Runtime validators for protocol envelopes and method params.
  * Untrusted frame fields must not drive file/tool access before validation.
@@ -984,6 +985,7 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
     'botModel',
     'bots',
     'experimental',
+    'errorReports',
     'agents',
     'integrations'
   ])
@@ -1018,7 +1020,17 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
   if (walked.agentAccess !== undefined) assertAgentAccessPatch(walked.agentAccess)
   if (walked.permissions !== undefined) assertPermissionsPatch(walked.permissions)
   if (walked.runs !== undefined) assertRunsPatch(walked.runs)
+  if (walked.errorReports !== undefined) assertErrorReportsPatch(walked.errorReports)
   return walked
+}
+
+/** Error reports: two switches. */
+function assertErrorReportsPatch(value: unknown): void {
+  const patch = asPlainObject(value, 'partial.errorReports')
+  for (const [key, item] of Object.entries(patch)) {
+    if (key !== 'enabled' && key !== 'anonymous') throw new Error(`partial.errorReports.${key} is not allowed`)
+    if (typeof item !== 'boolean') throw new Error(`partial.errorReports.${key} must be a boolean`)
+  }
 }
 
 /** The default permission mode decides what new threads may do without asking, so an unknown mode is refused. */
@@ -1061,10 +1073,14 @@ function assertAgentAccessPatch(value: unknown): void {
   const patch = asPlainObject(value, 'partial.agentAccess')
   for (const key of Object.keys(patch)) {
     // `level`, `projectIds` and `projectsUnreadable` are the removed access level's: an older client may still send them, and they are dropped.
-    if (key !== 'level' && key !== 'projectIds' && key !== 'projectsUnreadable' && key !== 'answerApprovals' && key !== 'remoteSubagents' && key !== 'computers') throw new Error(`partial.agentAccess.${key} is not allowed`)
+    if (key !== 'level' && key !== 'projectIds' && key !== 'projectsUnreadable' && key !== 'answerApprovals' && key !== 'remoteSubagents' && key !== 'computers' && key !== 'computerUse' && key !== 'computerDriver') throw new Error(`partial.agentAccess.${key} is not allowed`)
   }
   if (patch.answerApprovals !== undefined && typeof patch.answerApprovals !== 'boolean') throw new Error('partial.agentAccess.answerApprovals must be a boolean')
   if (patch.remoteSubagents !== undefined && typeof patch.remoteSubagents !== 'boolean') throw new Error('partial.agentAccess.remoteSubagents must be a boolean')
+  if (patch.computerUse !== undefined && typeof patch.computerUse !== 'boolean') throw new Error('partial.agentAccess.computerUse must be a boolean')
+  // An empty string clears the chosen driver; anything else must be an absolute path.
+  if (patch.computerDriver !== undefined && patch.computerDriver !== '' && normalizeDriverPath(patch.computerDriver) === undefined)
+    throw new Error('partial.agentAccess.computerDriver must be an absolute path')
   if (patch.computers !== undefined) {
     if (!Array.isArray(patch.computers) || patch.computers.some((node) => typeof node !== 'string' || node.length === 0 || node.length > 256))
       throw new Error('partial.agentAccess.computers must be an array of computer ids')

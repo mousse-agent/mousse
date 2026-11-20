@@ -14,6 +14,9 @@ import { SETTINGS_SEARCH_INDEX } from '../../src/renderer/lib/settingsSearch'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
+/** The rows Labs always shows, in order. */
+const LABS_TOP = ['Mousse Plus (legacy)', 'Performance', 'Profiler']
+
 describe('Settings → Labs', () => {
   let root: Root
   let host: HTMLElement
@@ -52,7 +55,7 @@ describe('Settings → Labs', () => {
 
   it('shows Mousse Plus (legacy) on and the Profiler switch off, and asks the service nothing', () => {
     show()
-    expect(titles()).toEqual(['Mousse Plus (legacy)', 'Profiler'])
+    expect(titles()).toEqual(LABS_TOP)
     expect(toggle('Mousse Plus (legacy)')!.getAttribute('aria-checked')).toBe('true')
     expect(toggle('Profiler')!.getAttribute('aria-checked')).toBe('false')
     expect(memoryStatus).not.toHaveBeenCalled()
@@ -63,7 +66,7 @@ describe('Settings → Labs', () => {
     show()
     act(() => toggle('Profiler')!.click())
     expect(store.get().experimental.profiler.enabled).toBe(true)
-    expect(titles()).toEqual(['Mousse Plus (legacy)', 'Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler'])
+    expect(titles()).toEqual([...LABS_TOP, 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler'])
     expect(memoryStatus).toHaveBeenCalled()
     // Memory sits under the switch; the rest is in a closed Advanced disclosure.
     expect(host.querySelector('[data-settings-anchor="labs-profiler-memory"]')!.closest('details')).toBeNull()
@@ -79,7 +82,7 @@ describe('Settings → Labs', () => {
     act(() => toggle('Agents can read the profiler')!.click())
     expect(store.get().experimental.profiler.agentAccess).toBe(true)
     const tools = PROFILER_TOOL_NAMES.map((name) => PROFILER_TOOL_LABELS[name].label)
-    expect(titles()).toEqual(['Mousse Plus (legacy)', 'Profiler', 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler', ...tools])
+    expect(titles()).toEqual([...LABS_TOP, 'Memory', 'Memory notices', 'Heap snapshot', 'Agents can read the profiler', ...tools])
     for (const name of PROFILER_TOOL_NAMES) {
       expect(toggle(PROFILER_TOOL_LABELS[name].label)!.getAttribute('aria-checked')).toBe(name === 'profiler_heap_summary' ? 'false' : 'true')
       // What a tool is for is in its tooltip.
@@ -95,9 +98,20 @@ describe('Settings → Labs', () => {
 
     // Off hides everything again and keeps the choices below it.
     act(() => toggle('Profiler')!.click())
-    expect(titles()).toEqual(['Mousse Plus (legacy)', 'Profiler'])
+    expect(titles()).toEqual(LABS_TOP)
     expect(host.querySelector('details.settings-advanced')).toBeNull()
     expect(store.get().experimental.profiler).toMatchObject({ enabled: false, agentAccess: true, tools: { profiler_watch: false } })
+  })
+
+  it('Performance is off at first, says what it does, and stores the 2D hybrid bot faces choice', () => {
+    show()
+    expect(toggle('Performance')!.getAttribute('aria-checked')).toBe('false')
+    expect(host.querySelector('[data-settings-anchor="labs-hybrid-bot-faces"]')!.textContent).toContain('Bots use less GPU using 2D hybrid rendering')
+    act(() => toggle('Performance')!.click())
+    expect(store.get().experimental.hybridBotFaces).toBe(true)
+    expect(toggle('Performance')!.getAttribute('aria-checked')).toBe('true')
+    act(() => toggle('Performance')!.click())
+    expect(store.get().experimental.hybridBotFaces).toBe(false)
   })
 
   it('turns Mousse Plus (legacy) off and on for the profile, leaving the profiler alone', () => {
@@ -128,9 +142,9 @@ describe('Settings → Labs', () => {
 
   it('the settings search finds Mousse Plus (legacy) and the profiler on Labs, and the rows under the profiler once it is on', () => {
     const labs = SETTINGS_SEARCH_INDEX.filter((entry) => entry.section === 'labs')
-    expect(labs.map((entry) => entry.anchor)).toEqual(['labs-plus-legacy', 'labs-profiler', 'labs-profiler-memory', 'labs-memory-notices', 'labs-heap-snapshot', 'labs-profiler-agents'])
-    expect(labs[0]!.needs).toBeUndefined()
-    for (const entry of labs.slice(2)) expect(entry.needs?.anchor).toBe('labs-profiler')
+    expect(labs.map((entry) => entry.anchor)).toEqual(['labs-plus-legacy', 'labs-hybrid-bot-faces', 'labs-profiler', 'labs-profiler-memory', 'labs-memory-notices', 'labs-heap-snapshot', 'labs-profiler-agents'])
+    for (const entry of labs.slice(0, 3)) expect(entry.needs).toBeUndefined()
+    for (const entry of labs.slice(3)) expect(entry.needs?.anchor).toBe('labs-profiler')
     expect(SETTINGS_SEARCH_INDEX.some((entry) => entry.anchor.startsWith('general-memory'))).toBe(false)
   })
 })

@@ -1,7 +1,8 @@
 /*
  * A link to a Mousse thread, drawn as text in the sentence: a small icon, then the title at the surrounding weight.
  * A live thread reads in the accent, an archived or unreachable one in secondary text; the icon's colour carries the
- * status, and the tooltip names it. Hover tints the link faintly.
+ * status (`threadLinkStatus`, in the Threads tab's status colours, also for an archived thread), and the hover card
+ * names it. Hover tints the link faintly.
  */
 
 .thread-chip {
@@ -27,7 +28,15 @@
   display: inline-block;
   margin-right: 3px;
   vertical-align: -0.1em;
-  color: var(--accent);
+  color: color-mix(in srgb, var(--text-secondary) 80%, transparent);
+}
+
+.thread-chip[data-status='working'] .thread-chip-icon {
+  color: var(--status-running);
+}
+
+.thread-chip[data-status='waiting'] .thread-chip-icon {
+  color: var(--status-waiting);
 }
 
 .thread-chip[data-status='approval'] .thread-chip-icon,
@@ -37,20 +46,19 @@
 }
 
 .thread-chip[data-status='done'] .thread-chip-icon {
-  color: var(--success);
+  color: var(--status-done);
 }
 
-/* Archived, deleted, or on a computer that is not connected or not sharing: secondary text, and a quiet icon. */
-.thread-chip[data-status='archived'],
+.thread-chip[data-status='failed'] .thread-chip-icon {
+  color: var(--danger);
+}
+
+/* Archived, deleted, or on a computer that is not connected or not sharing: secondary text. */
+.thread-chip[data-archived],
 .thread-chip[data-state='missing'],
 .thread-chip[data-state='offline'],
 .thread-chip[data-state='not-shared'] {
   color: var(--text-secondary);
-}
-
-.thread-chip[data-status='archived'] .thread-chip-icon,
-.thread-chip[data-state='missing'] .thread-chip-icon {
-  color: color-mix(in srgb, var(--text-secondary) 80%, transparent);
 }
 
 .thread-chip[data-state='offline'] .thread-chip-icon,
@@ -60,4 +68,39 @@
 
 .thread-chip[data-state='missing'] .thread-chip-title {
   text-decoration: line-through;
+}
+
+/*
+ * A thread link's hover card: the Threads tab's card (`.threads-sidebar-card-*`) on a raised surface, above the link.
+ * The pointer passes through it, so it never takes a click from the link or the text around it.
+ */
+.thread-chip-card {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: start;
+  gap: 2px 8px;
+  width: min(300px, calc(100vw - 24px));
+  padding: 8px 10px 9px 8px;
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-menu-radius, 10px);
+  background: var(--ui-raised, var(--floating-surface));
+  box-shadow: var(--ui-specular), var(--ui-menu-drop);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* The whole title, up to three lines, not the row's one. */
+.thread-chip-card .threads-sidebar-card-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.thread-chip-card-note {
+  grid-column: 2;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.3;
 }

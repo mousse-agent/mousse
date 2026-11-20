@@ -37,7 +37,7 @@ type ChipKind =
   | 'work' | 'work_stop' | 'work_note' | 'remind' | 'unremind' | 'work_look' | 'wake' | 'watch' | 'unwatch' | 'bot_send' | 'bot_look'
   | 'threads_look' | 'profiler' | 'themes_look' | 'theme' | 'thread_wait' | 'thread_start' | 'thread_send' | 'thread_stop' | 'thread_archive' | 'thread_hide' | 'picture'
   | 'thread_steer' | 'thread_fork' | 'thread_merge' | 'approval' | 'queue' | 'jobs' | 'secret' | 'secret_run' | 'quick_action'
-  | 'subagent' | 'subagent_wait' | 'subagent_look'
+  | 'subagent' | 'subagent_wait' | 'subagent_look' | 'computer'
 
 interface Classified {
   kind: ChipKind
@@ -128,6 +128,12 @@ function classify(tool: string, input: unknown, ctx: BotChipContext): Classified
     case 'web_search': {
       const query = str(args.query)
       return { kind: 'search', icon: 'search', live: 'searching the web', ...(query ? { detail: shortChipText(query, 30) } : {}) }
+    }
+    case 'computer_tools':
+      return { kind: 'computer', icon: 'web', live: 'using the computer' }
+    case 'computer_use': {
+      const action = str(args.tool)
+      return { kind: 'computer', icon: 'web', live: 'using the computer', ...(action ? { detail: shortChipText(action, 30) } : {}) }
     }
     case 'web_fetch': {
       const domain = domainOf(args.url)
@@ -410,6 +416,7 @@ function groupChip(kind: ChipKind, icon: BotChipIcon, calls: readonly Classified
     case 'search': return chip('searched the web', n === 1 ? details[0] : String(n))
     case 'fetch': return chip(n === 1 ? 'read a page' : `read ${n} pages`, listed(details))
     case 'browse': return chip('used the browser', listed(details))
+    case 'computer': return chip('used the computer')
     case 'read': return chip('read files', listed(details))
     case 'change': return chip('changed files', listed(details))
     case 'save': return chip(n === 1 ? 'saved a file' : `saved ${n} files`, listed(details))

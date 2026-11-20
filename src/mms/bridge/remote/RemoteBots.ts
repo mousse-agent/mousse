@@ -130,7 +130,7 @@ const MEMORY_ID = /^m[0-9]{1,12}$/
 const MEMORY_REF = /^m[0-9]{1,12}(?:v[0-9]{1,9})?$/
 /** The store refuses words over its own limit; this keeps a huge payload out. */
 const MAX_MEMORY_EDIT = 4096
-const LOOK_KEYS = new Set(['colour', 'accessory', 'kind', 'eyes'])
+const LOOK_KEYS = new Set(['colour', 'accessory', 'kind', 'eyes', 'eyeColour'])
 /**
  * A remote message, in bytes. The desktop's limit is 64K characters; a remote one is smaller so the message the
  * send returns stays within one RPC reply.
@@ -195,7 +195,8 @@ function lookOf(value: unknown): boolean {
     text(look.colour, 40) &&
     text(look.accessory, 40) &&
     (look.kind === undefined || text(look.kind, 40)) &&
-    (look.eyes === undefined || text(look.eyes, 40))
+    (look.eyes === undefined || text(look.eyes, 40)) &&
+    (look.eyeColour === undefined || text(look.eyeColour, 40))
   )
 }
 

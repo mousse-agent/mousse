@@ -503,13 +503,12 @@ it('schedule_done explains why a later asks-first call cannot wait', async () =>
   expect(f.bots.actions.forWork(t.id)).toBeUndefined()
   expect(t.calls).toEqual([])
 })
-it.each(['name', 'tellMe', 'canWakeMe'] as const)('changing only %s preserves the approval binding', async field => {
+it.each(['name', 'tellMe'] as const)('changing only %s preserves the approval binding', async field => {
   const t = await scheduledCall()
   await t.call()
   await finish(f, t.run.payload)
   const a = f.bots.actions.forWork(t.id)!
-  if (field === 'name') f.book.update(f.scheduler.getJob(t.schedule.jobId)!, { name: 'New name' })
-  else f.book.setTelling(t.botId, { scheduleId: t.schedule.scheduleId, ...(field === 'tellMe' ? { tellMe: 'every' } : { canWakeMe: true }) })
+  f.book.update(f.scheduler.getJob(t.schedule.jobId)!, field === 'name' ? { name: 'New name' } : { tellMe: 'every' })
   await f.bots.actions.reconcile()
   expect(f.bots.actions.forWork(t.id)?.status).toBe('open')
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
@@ -791,7 +790,7 @@ it('removing a parked schedule withdraws its card and delivers its last words on
 })
 it.each(['needs_you', 'look', 'fyi', 'every'] as const)('a scheduled approval is told at least soon at Tell me %s', async tellMe => {
   const t = await scheduledCall()
-  f.book.setTelling(t.botId, { scheduleId: t.schedule.scheduleId, tellMe })
+  f.book.update(f.scheduler.getJob(t.schedule.jobId)!, { tellMe })
   await t.call()
   const a = f.bots.actions.forWork(t.id)!
   expect(f.store.message(a.message_id)?.tell).toBe('soon')

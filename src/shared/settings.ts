@@ -1,4 +1,6 @@
+import { normalizeErrorReportSettings, type ErrorReportSettings } from './bugReports'
 import { normalizeProfilerSettings, type ProfilerSettings } from './diagnostics/profiler'
+import { normalizeDriverPath } from './computerUse'
 import type { MousseIntegrationsSettings, SkillModelSettings } from './integrations'
 import { isExpiryPreset, type ExpiryPreset } from './threadExpiry'
 import { normalizeGoalTurnLimit } from './threadGoal'
@@ -343,6 +345,13 @@ export interface AgentAccessSettings {
    * chosen here.
    */
   computers: string[]
+  /**
+   * Computer use (Settings → Computer use): threads' agents may see and operate apps on this computer through Cua
+   * Driver. On unless turned off; a bot still needs "use the computer" (`src/shared/computerUse.ts`).
+   */
+  computerUse: boolean
+  /** The Cua Driver the person chose; absent: Mousse looks on the PATH and in the installer's folder. */
+  computerDriver?: string
 }
 
 const AGENT_ACCESS_LEVELS: readonly AgentAccessLevel[] = ['lineage', 'read', 'manage']
@@ -372,7 +381,9 @@ export function normalizeAgentAccessSettings(raw?: Partial<AgentAccessSettings> 
   return {
     answerApprovals: raw?.answerApprovals === true,
     remoteSubagents: raw?.remoteSubagents === true,
-    computers
+    computers,
+    computerUse: raw?.computerUse !== false,
+    ...((driver) => (driver ? { computerDriver: driver } : {}))(normalizeDriverPath(raw?.computerDriver))
   }
 }
 
@@ -446,6 +457,11 @@ export interface ExperimentalSettings {
    * self-hosted relays only, as while the new networking engine and Plus are built and tried.
    */
   plusLegacy: boolean
+  /**
+   * Performance (Settings → Labs), off unless turned on: moving bot faces are a body picture drawn once per state with
+   * flat 2D eyes animated over it, instead of the whole face drawn in 3D every frame.
+   */
+  hybridBotFaces: boolean
   /** The profiler (Settings → Labs). */
   profiler: ProfilerSettings
 }
@@ -455,6 +471,7 @@ export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings
     botAsksFirstOff: raw?.botAsksFirstOff === true,
     subagentWorktrees: raw?.subagentWorktrees === true,
     plusLegacy: raw?.plusLegacy !== false,
+    hybridBotFaces: raw?.hybridBotFaces === true,
     profiler: normalizeProfilerSettings(raw?.profiler)
   }
 }
@@ -511,6 +528,8 @@ export interface MousseSettings {
   runs: RunSettings
   experimental: ExperimentalSettings
   storage: StorageSettings
+  /** Settings → General → Error reports: the Report button and `report_bug`, and whose account files them. */
+  errorReports: ErrorReportSettings
   provider: {
     llmProvider: LlmProviderId
     /** The model as its agent lists it; the reasoning level is `effort` (absent = the model's default). */
@@ -929,6 +948,7 @@ export function getDefaultSettings(): MousseSettings {
     runs: normalizeRunSettings(),
     experimental: normalizeExperimentalSettings(),
     storage: normalizeStorageSettings(),
+    errorReports: normalizeErrorReportSettings(),
     provider: {
       llmProvider: '',
       model: ''

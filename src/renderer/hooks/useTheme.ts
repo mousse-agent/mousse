@@ -3,7 +3,8 @@ import { useAppStore } from '../stores/appStore'
 import type { AppearanceSettings, ThemeId } from '../../shared/settings'
 import { glassTokensFromIntensity, normalizeAppearance } from '../../shared/settings'
 import { buildAccentCssVars } from '../../shared/accentPalette'
-import { BLACKSPHERE_COLORS, BLACKSPHERE_TOKEN_COLORS, applyVsCodeColors, clearVsCodeColors, injectTokenColors, clearTokenColors } from '../../shared/vscodeTheme'
+import { BLACKSPHERE_COLORS, BLACKSPHERE_TOKEN_COLORS, applyVsCodeColors, clearVsCodeColors, cssVarName, injectTokenColors, clearTokenColors } from '../../shared/vscodeTheme'
+import { accentGrayTint, tintGray } from '../lib/grayTint'
 
 import { FIXED_SURFACE_THEMES } from '../../shared/themeSurfaces'
 import { setRenderMath } from '../markdown/math/renderMathSetting'
@@ -82,6 +83,28 @@ function applyFixedSurfaces(theme: ThemeId): void {
   if (!fixed) return
   for (const [name, value] of Object.entries(fixed)) {
     root.style.setProperty(name, value)
+  }
+}
+
+/**
+ * Mousse Dark's grays lean very slightly toward the accent (grayTint.ts), so they follow it: its fixed surfaces and its
+ * editor colours, which the steps above have just set neutral. Everything built on them (the pane, the composer, cards,
+ * popovers) is a mix of these and leans with them. A user theme keeps its own colours.
+ */
+const ACCENT_TINTED_THEMES: ReadonlySet<ThemeId> = new Set<ThemeId>(['blacksphere-plus'])
+
+function applyGrayTint(theme: ThemeId, accent: string, userTheme: boolean): void {
+  const tint = ACCENT_TINTED_THEMES.has(theme) && !userTheme ? accentGrayTint(accent) : null
+  if (!tint) return
+  const root = document.documentElement
+  const names = [
+    ...Object.keys(FIXED_SURFACE_THEMES[theme] ?? {}),
+    ...Object.keys(BLACKSPHERE_COLORS).flatMap((key) => [cssVarName(key), `--theme-vscode-${key.replace(/\./g, '-')}`])
+  ]
+  for (const name of names) {
+    if (/foreground/i.test(name)) continue
+    const value = root.style.getPropertyValue(name)
+    if (value) root.style.setProperty(name, tintGray(value, tint))
   }
 }
 
@@ -212,10 +235,12 @@ function applyAppearance(appearance: AppearanceSettings): void {
   const userTheme = activeUserTheme(normalized)
   applyTheme(normalized.theme)
   clearFixedSurfaces()
-  applyAccent(userTheme?.accent || normalized.accentColor)
+  const accent = userTheme?.accent || normalized.accentColor
+  applyAccent(accent)
   applyFixedSurfaces(normalized.theme)
   applyLightSurfaces(normalized.theme)
   applyVsCodeTheme(normalized.theme)
+  applyGrayTint(normalized.theme, accent, Boolean(userTheme))
   applyLayoutTokens(normalized.theme)
   applyAcrylic(normalized.acrylic, normalized.acrylicIntensity, normalized.theme)
   applyFontSettings(normalized)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ATTENTION_LADDER, attentionOfStatus, needsMeLabel, threadAttention, threadStatus, worstOf } from '../src/shared/threadAttention'
+import { ATTENTION_LADDER, attentionOfStatus, needsMeLabel, threadAttention, threadLinkStatus, threadStatus, worstOf } from '../src/shared/threadAttention'
 
 describe('threadStatus and threadAttention', () => {
   it('reads each activity as one rung of the ladder', () => {
@@ -28,6 +28,35 @@ describe('threadStatus and threadAttention', () => {
   it('ignores the approval flag for a thread that is not waiting', () => {
     expect(threadStatus('processing', true)).toBe('working')
     expect(threadStatus('completed', true)).toBe('done')
+  })
+})
+
+describe('threadLinkStatus', () => {
+  // [activity, latest turn phase this session, awaits approval, setup failed, kept outcome, status a thread link shows]
+  const rows = [
+    ['processing', 'failed', false, false, 'failed', 'working'],
+    ['waiting', 'completed', false, false, undefined, 'waiting'],
+    ['awaiting_input', 'failed', true, false, undefined, 'approval'],
+    ['awaiting_input', undefined, false, true, undefined, 'question'],
+    ['paused', 'paused', false, false, 'done', 'paused'],
+    ['completed', 'completed', false, false, undefined, 'done'],
+    // Quiet again: the latest run's outcome stays, whether the thread was seen or the run failed.
+    ['idle', 'completed', false, false, undefined, 'done'],
+    ['idle', 'failed', false, false, undefined, 'failed'],
+    [undefined, 'failed', false, false, undefined, 'failed'],
+    // This session's latest turn is newer than what the metadata kept.
+    ['idle', 'completed', false, false, 'failed', 'done'],
+    ['idle', 'stopped', false, false, 'done', 'quiet'],
+    // After a restart only the metadata knows.
+    [undefined, undefined, false, false, 'done', 'done'],
+    [undefined, undefined, false, false, 'failed', 'failed'],
+    ['idle', undefined, false, false, undefined, 'quiet'],
+    // A message that did not start is a failure once nothing else goes on.
+    ['idle', 'completed', false, true, 'done', 'failed'],
+    ['completed', 'completed', false, true, undefined, 'failed']
+  ] as const
+  it.each(rows)('activity %s, latest turn %s, approval %s, setup failed %s, kept %s: %s', (activity, phase, approval, setupFailed, lastRun, status) => {
+    expect(threadLinkStatus(activity, phase, approval, setupFailed, lastRun)).toBe(status)
   })
 })
 

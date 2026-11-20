@@ -21,6 +21,9 @@ interface Run {
 function harness(
   options: {
     proto?: number
+    /** The build the helper says it is in hello, and the one the app was packaged with. */
+    build?: string
+    expectedBuild?: string
     ignoreShutdown?: boolean
     failLaunch?: () => Error | undefined
     /** What a helper says on its way out as soon as it starts, before any hello. */
@@ -70,8 +73,10 @@ function harness(
       })
       await helper.hello()
       if (options.proto !== undefined) helper.info.proto = [options.proto, 0]
+      if (options.build !== undefined) helper.info.build = options.build
       return helper
     },
+    expectedBuild: () => options.expectedBuild,
     mismatch,
     wrongProfile
   })
@@ -194,6 +199,26 @@ describe('the helper supervisor', () => {
     expect(mismatch).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(600_000)
     expect(runs).toHaveLength(1)
+  })
+
+  // The packaged helper against the engine commit the app was packaged with (`stale-helper` in phase1b.desktop-builds).
+  it.each([
+    ['the pinned commit', '8ceac9c57b6b0c9c8df03d756332b064088f12a0+release', 'running'],
+    ['the pinned commit, abbreviated', '8ceac9c+release', 'running'],
+    ['another commit', '0000000+release', 'mismatch'],
+    ['the pinned commit with changes', '8ceac9c57b6b0c9c8df03d756332b064088f12a0-dirty+release', 'mismatch'],
+    ['a debug build', '8ceac9c57b6b0c9c8df03d756332b064088f12a0+debug', 'mismatch'],
+    ['no build', undefined, 'mismatch']
+  ])('an installed app runs its helper only when it is %s', async (_name, build, state) => {
+    const { supervisor, mismatch } = harness({
+      build: build ?? '',
+      expectedBuild: '8ceac9c57b6b0c9c8df03d756332b064088f12a0'
+    })
+    supervisor.start()
+    await settle()
+    expect(supervisor.status().state).toBe(state)
+    expect(mismatch).toHaveBeenCalledTimes(state === 'mismatch' ? 1 : 0)
+    await supervisor.stop()
   })
 
   it('sets an endpoint of another profile aside once its helper exits, and starts again', async () => {

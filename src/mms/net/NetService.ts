@@ -94,7 +94,7 @@ import type {
   PeerRef,
   TunnelLink
 } from './contracts'
-import { v1Caller } from './contracts'
+import { isEngineCaller, v1Caller, type RpcCaller } from './contracts'
 import { checkNodePolicy } from './checkNodePolicy'
 import type { SpaceJoinAdmissionPort } from './enrollment/quarantine'
 import { systemClock } from './clock'
@@ -151,11 +151,14 @@ import { isJoinVia } from '../../shared/net/via'
 import { isListedComputer } from '../../shared/net/listedComputer'
 import {
   PHONE_ENDPOINTS_METHOD,
+  PHONE_LAN_CARRIER,
   PHONE_WEBRTC_OFFER_METHOD,
   PHONE_WEBRTC_TRANSPORT,
   PhoneWebRtcAcceptor,
   classifyAddress,
+  directHostAddresses,
   nodeDataChannelFactory,
+  phoneLanAddresses,
   normalizeAddress,
   type AcceptedWebRtc,
   type PeerConnectionFactory
@@ -724,7 +727,9 @@ export class NetService {
         authorize: (_params, context) => {
           if (policy.isBlocked(context.caller.node)) throw new NetError('forbidden')
         },
-        handle: async (_params, context) => this.phoneEndpoints(context.carrier)
+        // Phone routes are for v1 phones only: an engine pairing is told of none.
+        handle: async (_params, context) =>
+          isEngineCaller(context.caller) ? { endpoints: [] } : this.phoneEndpoints(context.carrier, context.caller)
       })
       rpc.register({
         method: PHONE_WEBRTC_OFFER_METHOD,
@@ -827,7 +832,8 @@ export class NetService {
             throw new NetError('bad_request')
           return params
         },
-        handle: async (_params, context) => this.accessMine(v1Caller(context.caller))
+        // An engine pairing reaches it only through `authorizeEngine` (a live owner grant, the allowlist, the policy).
+        handle: async (_params, context) => this.accessMine(context.caller)
       })
       this.state = {
         db,
@@ -1356,18 +1362,7 @@ export class NetService {
           // "Let my other computers work on this computer's threads". Any computer sets it for itself; it
           // takes effect on the next routed call, so turning it off is also the kill switch.
           this.requireEnrolled()
-          if (params.enabled !== undefined) {
-            const was = this.config.workOnThreads !== false
-            this.config = { ...this.config, workOnThreads: params.enabled === true }
-            this.saveConfig()
-            // Off ends the private streams that are open, not only the next call.
-            if (was && params.enabled !== true) {
-              this.endPrivateServing(this.domain?.privateStreams?.release() ?? [])
-              // ...and the editor tunnels, which are shell access on this computer.
-              this.tunnels?.reconcile()
-            }
-            this.emit()
-          }
+          if (params.enabled !== undefined) this.setWorkOnThreads(params.enabled === true)
           return { enabled: this.config.workOnThreads !== false }
         }
         case 'bridge.shareBots': {
@@ -1659,6 +1654,80 @@ export class NetService {
   /** The engine service's policy for its callers on this runtime's dispatcher; unset, engine callers are refused. */
   setEngineAuthorizer(authorize: NetService['engineAuthorizer']): void {
     this.engineAuthorizer = authorize
+  }
+  /**
+   * The engine's editor tunnels (Phase 1b §9.2), while its service runs: an editor connection to one of its pairings
+   * opens there, through the same local methods (`mousse-cli net ssh-proxy`) and the same host-key pinning.
+   */
+  private engineEditor?: {
+    owns(node: NodeId): boolean
+    /** Its paired computers, for the editor aliases. */
+    computers(): LiveComputer[]
+    /** The engine's tunnels and the link to `node`; throws `TunnelError('offline')` when it is not connected. */
+    link(node: NodeId): { tunnels: EditorTunnels; link: TunnelLink }
+  }
+  setEngineEditor(editor: NetService['engineEditor']): void {
+    this.engineEditor = editor
+    // Its pairings get their aliases; a service that is stopping writes nothing more.
+    if (editor && !this.stopped) this.syncEditorSsh()
+  }
+  /** The engine's pairings changed (one added, renamed or removed): the editor aliases follow. */
+  engineComputersChanged(): void {
+    if (!this.stopped) this.syncEditorSsh()
+  }
+  /**
+   * Whether v1 networking is on for this profile (switched on, with Bridge or Spaces): its Devices group shows
+   * "Work on threads" then; otherwise the engine's group shows the same switch (`netEngine.workOnThreads`).
+   */
+  v1On(): boolean {
+    return (
+      !this.stopped &&
+      !this.disabled &&
+      this.config.enabled === true &&
+      (this.config.features?.netBridge === true || this.config.features?.netSpaces === true)
+    )
+  }
+  /**
+   * "Work on threads" (`bridge.workOnThreads`, and `netEngine.workOnThreads` while v1 is off): the one setting. Off ends what is open, not only the next call: the private streams,
+   * v1's editor tunnels and, through `onWorkOnThreadsOff`, the engine's.
+   */
+  setWorkOnThreads(enabled: boolean): void {
+    const was = this.config.workOnThreads !== false
+    this.config = { ...this.config, workOnThreads: enabled }
+    this.saveConfig()
+    if (was && !enabled) {
+      this.endPrivateServing(this.domain?.privateStreams?.release() ?? [])
+      // ...and the editor tunnels, which are shell access on this computer.
+      this.tunnels?.reconcile()
+      for (const listener of this.workOffListeners) {
+        try {
+          listener()
+        } catch {
+          // The engine's own reconcile cannot stop v1's.
+        }
+      }
+    }
+    this.emit()
+  }
+  /** Turning "Work on threads" off is heard by the engine too, which ends its editor tunnels. */
+  onWorkOnThreadsOff(listener: () => void): () => void {
+    this.workOffListeners.add(listener)
+    return () => this.workOffListeners.delete(listener)
+  }
+  private readonly workOffListeners = new Set<() => void>()
+  /** "Use this computer's SSH server": the engine's tunnels end at the system's SSH server too, not the endpoint. */
+  editorUsesSystemSsh(): boolean {
+    return this.config.editorSystemSsh === true
+  }
+  /** The engine's first tunnel from a device: the same notice as v1's. */
+  editorFirstOpened(node: NodeId): void {
+    for (const listener of this.editorFirstOpen) {
+      try {
+        listener(node)
+      } catch {
+        // A notice that cannot be shown never stops a tunnel.
+      }
+    }
   }
   /** "Work on threads from other devices" (on unless this computer turned it off), read by `checkNodePolicy`. */
   nodePolicyConfig(): { workOnThreads?: boolean } {
@@ -2133,16 +2202,49 @@ export class NetService {
     return this.webrtc?.counts() ?? { pending: 0, live: 0 }
   }
   /**
-   * What a phone learns about direct paths, only over a session that came through Mousse ID
-   * (the hosted relay, or the WebRTC path itself). Everyone else learns nothing.
+   * What a phone learns about direct paths, only over a session that came through Mousse ID (the
+   * hosted relay, or the WebRTC path itself) or the automatic LAN listener. Everyone else learns
+   * nothing. The LAN addresses go only to another device of this account, so it can open its next
+   * session on the local network with no relay; WebRTC is offered only where the relay carried the
+   * session or its signalling.
    */
-  private phoneEndpoints(carrier: string | undefined): {
+  private phoneEndpoints(
+    carrier: string | undefined,
+    caller: SyncSession['peer']
+  ): {
     endpoints: []
     webrtc?: { v: 1 }
+    lan?: { v: 1; addresses: string[] }
   } {
-    if (carrier !== HOSTED_RELAY_TRANSPORT && carrier !== PHONE_WEBRTC_TRANSPORT)
-      return { endpoints: [] }
-    return this.webrtcWanted() ? { endpoints: [], webrtc: { v: 1 } } : { endpoints: [] }
+    const relayed = carrier === HOSTED_RELAY_TRANSPORT || carrier === PHONE_WEBRTC_TRANSPORT
+    if (!relayed && carrier !== PHONE_LAN_CARRIER) return { endpoints: [] }
+    const lan = this.phoneLan(caller)
+    return {
+      endpoints: [],
+      ...(relayed && this.webrtcWanted() ? { webrtc: { v: 1 as const } } : {}),
+      ...(lan.length ? { lan: { v: 1 as const, addresses: lan } } : {})
+    }
+  }
+  /** The LAN listener's private IPv4 URLs, for a device of this account other than this one. */
+  private phoneLan(caller: SyncSession['peer']): string[] {
+    try {
+      const self = this.state?.identity.self(),
+        port = this.transport?.lanPort()
+      if (!self || !port || caller.user !== self.user || caller.node === self.node) return []
+      if (
+        this.stopped ||
+        this.disabled ||
+        !this.config.enabled ||
+        !this.featureEnabled('netBridge')
+      )
+        return []
+      return phoneLanAddresses(
+        port,
+        this.options.phoneWebRtc?.hostAddresses?.() ?? directHostAddresses()
+      )
+    } catch {
+      return []
+    }
   }
   private async phoneWebRtcOffer(
     sdp: string,
@@ -2437,7 +2539,12 @@ export class NetService {
       admitPeer: (peer) => {
         if (!this.admitted(peer)) throw notConnected()
       },
-      ...(inbound?.carrier ? { carrier: inbound.carrier } : {}),
+      // RPC handlers tell a session on the automatic LAN listener from one on a configured listener.
+      ...(inbound?.lanRemote
+        ? { carrier: PHONE_LAN_CARRIER }
+        : inbound?.carrier
+          ? { carrier: inbound.carrier }
+          : {}),
       onAuthenticated: () => {
         if (inbound?.sameUserOnly && session.peer.user !== rt.identity.self()?.user)
           throw new NetError('forbidden')
@@ -2960,7 +3067,7 @@ export class NetService {
    * per-device switches) without running anything, plus the checks a method makes in its handler: an editor
    * connection's (`deviceRefusal`) and the bots' (Share bots and the device's Bots switch).
    */
-  private accessMine(caller: SyncSession['peer']): BridgeAccessMine {
+  private accessMine(caller: RpcCaller): BridgeAccessMine {
     const rt = this.requireEnrolled(),
       policy = rt.policy.get(caller.node)
     const passes = (method: string): boolean => {
@@ -2978,7 +3085,11 @@ export class NetService {
       threads,
       work: threads && passes('routed.orchestrator.send'),
       terminal: threads && passes('routed.pty.create'),
-      editor: threads && passes('routed.editor.folder') && this.deviceRefusal(caller.node) === undefined,
+      // An engine pairing is not on v1's roster: its editor refusal is part of the engine's own authorization.
+      editor:
+        threads &&
+        passes('routed.editor.folder') &&
+        (isEngineCaller(caller) || this.deviceRefusal(caller.node) === undefined),
       bots: passes('bots.chat.list') && this.sharesBots() && policy.bots,
       maxPermissionMode: policy.maxPermissionMode,
       agentReach: policy.agentReach
@@ -3092,8 +3203,18 @@ export class NetService {
   private async editorLink(node: NodeId): Promise<{
     tunnels: EditorTunnels
     editor: EditorSshConfig | undefined
-    link: NetSyncSession
+    link: TunnelLink
   }> {
+    // An engine pairing: its own tunnels, with v1 on or off. The alias and the pinning are the same as v1's.
+    if (this.engineEditor?.owns(node)) {
+      const editor = this.editorSsh()
+      if (editor && !(await editor.aliasOf(node)))
+        throw new EditorSshError(
+          'unknown_computer',
+          'This computer has no editor alias for that computer yet.'
+        )
+      return { ...this.engineEditor.link(node), editor }
+    }
     this.assertFeature('netBridge')
     const rt = this.requireEnrolled(),
       tunnels = this.tunnels
@@ -4478,7 +4599,10 @@ export class NetService {
   }
   /** The other computers of this user, for the aliases an editor opens. Phones have no folders to open. */
   private liveComputers(): LiveComputer[] {
-    const view = this.nodes() as {
+    // The engine's pairings have aliases too. With v1 off, or not enrolled there, they are the only computers.
+    const engine = this.engineEditor?.computers() ?? []
+    if (this.engineEditor && (!this.config.enabled || this.disabled)) return engine
+    let view: {
       nodes: Array<{
         node: NodeId
         name: string
@@ -4488,19 +4612,28 @@ export class NetService {
         revoked: boolean
       }>
     }
+    try {
+      view = this.nodes() as typeof view
+    } catch (error) {
+      if (this.engineEditor) return engine
+      throw error
+    }
     // The same rule as the lists of threads. Only the authority records which devices are computers, so on any
     // other computer the rest are of unknown kind, and a computer is told by the grant only computers hold.
-    return view.nodes
-      .filter(
-        (entry) =>
-          !entry.self &&
-          !entry.revoked &&
-          isListedComputer(
-            entry.kind === 'computer' || entry.kind === 'phone' ? entry.kind : undefined,
-            entry.caps
-          )
-      )
-      .map((entry) => ({ node: entry.node, name: entry.name }))
+    return [
+      ...view.nodes
+        .filter(
+          (entry) =>
+            !entry.self &&
+            !entry.revoked &&
+            isListedComputer(
+              entry.kind === 'computer' || entry.kind === 'phone' ? entry.kind : undefined,
+              entry.caps
+            )
+        )
+        .map((entry) => ({ node: entry.node, name: entry.name })),
+      ...engine
+    ]
   }
   /**
    * Mousse's ssh settings for editors. Reading, undoing and acknowledging the notice work while
@@ -4513,7 +4646,8 @@ export class NetService {
       method === 'net.editor.alias'
     if (setup) {
       if (this.disabled) throw new NetError('disabled')
-      this.assertEnabled()
+      // The engine's pairings get aliases with v1 networking off.
+      if (!this.engineEditor) this.assertEnabled()
     }
     const editor = this.editorSsh()
     if (!editor) {

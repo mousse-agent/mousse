@@ -10,6 +10,7 @@ import { withPermission } from '../../src/shared/bots/personal/escalation'
 import { claudeLockedSandbox } from '../../src/mms/harness/claude/locked'
 import { addedPermissions, BOT_APP_TOOLS, BOT_DEFAULT_APP_TOOLS, botStarterManifest, canonicalManifest, describeManifest, intersectManifest, isAbsolutePath, isOwnBotAppTool, manifestProblem, manifestSubset, narrowManifest } from '../../src/shared/bots/personal/manifest'
 import { BOT_MEMORY_TOOLS } from '../../src/shared/bots/personal/memory'
+import { grantedPermissions } from '../../src/mms/bots/chat/projection'
 
 const manifest = (patch: Partial<BotManifest> = {}): BotManifest => ({
   tools: ['read', 'edit'],
@@ -214,11 +215,18 @@ describe('round 2: the locked Claude sandbox writes only to folders granted for 
   })
 })
 
+// The Tells you setting is gone, but grants approved before then still list its tool.
+it('a grant an older build approved with telling_set still reads as well formed and lists nothing for it', () => {
+  const old = { ...botStarterManifest(), appTools: [...botStarterManifest().appTools, 'telling_set'] }
+  expect(manifestProblem(old)).toBeUndefined()
+  expect(grantedPermissions(old)).toEqual(grantedPermissions(botStarterManifest()))
+})
+
 describe('default app tools (Bot Phase 1 §5.10)', () => {
-  it('every new bot gets the web, its schedules, profile, depth, model, escalate, run_report and the five memory tools', () => {
+  it('every new bot gets the web, its schedules, profile, depth, model, escalate, run_report, the five memory tools and its open items', () => {
     expect([...BOT_DEFAULT_APP_TOOLS].sort()).toEqual([
-      'bot_schedule_add', 'bot_schedule_list', 'bot_schedule_remove', 'escalate', 'memory_forget', 'memory_list', 'memory_read', 'memory_save', 'memory_search',
-      'run_report', 'set_depth', 'set_profile', 'telling_set', 'use_model', 'web_fetch', 'web_search'
+      'bot_schedule_add', 'bot_schedule_list', 'bot_schedule_remove', 'escalate', 'item_list', 'item_save', 'memory_forget', 'memory_list', 'memory_read', 'memory_save', 'memory_search',
+      'run_report', 'set_depth', 'set_profile', 'use_model', 'web_fetch', 'web_search'
     ])
     for (const tool of BOT_MEMORY_TOOLS) {
       expect(BOT_DEFAULT_APP_TOOLS).toContain(tool)

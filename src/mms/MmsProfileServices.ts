@@ -4,6 +4,9 @@ import { OwnerQuietHours } from './notifications/OwnerQuietHours'
 import { onSettingsSaved } from './settings/SettingsStore'
 import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
 import { SecretVault, secretThreadBusy } from './secrets/SecretVault'
+import { BugReportService } from './bugReports/BugReportService'
+import { createGhFallbackRunner, execRunner } from './git/ghRunner'
+import { userAction } from './git/gitPolicy'
 import { SecretRequests } from './secrets/SecretRequests'
 import { createSecretToolHost } from './secrets/secretToolHost'
 import { forgetWorktreeFolders, refreshWorktreeFolders, setWorktreeFolders } from './worktree/worktreeLayout'
@@ -15,6 +18,7 @@ import { MousseConfigStore } from './config/MousseConfigStore'
 import { MmsEventBus } from './events'
 import { SettingsStore } from './settings/SettingsStore'
 import { normalizeExperimentalSettings, type MousseSettingsUpdate } from '../shared/settings'
+import { normalizeErrorReportSettings } from '../shared/bugReports'
 import { rewriteMovedDefaults } from './settings/movedDefaults'
 import { ProviderAuthService } from './providers/ProviderAuthService'
 import { AppletStore } from './applets/AppletStore'
@@ -80,7 +84,7 @@ import { botThreadsForCatchUp } from './bots/memory/capture'
 import { BOT_PACK_REACTIONS, type BotSituation } from './bots/memory/contextPack'
 import { BOT_CHAT_DIGEST } from '../shared/bots/personal/memory'
 import { BOT_LAUNCHED_RECENT_MS } from '../shared/bots/personal/chat'
-import { BOT_THREADS_PERMISSION } from '../shared/bots/personal/manifest'
+import { BOT_COMPUTER_PERMISSION, BOT_THREADS_PERMISSION } from '../shared/bots/personal/manifest'
 import { createBotModelResolver, type BotModelChooser } from './bots/model/BotModelResolver'
 import { BOT_SUPERVISOR_MISSING, createBotProcessRegistry, type BotProcessRegistry } from './bots/supervisor/BotProcessRegistry'
 import { BotScheduleBook, botWhenOf } from './scheduled/botJobs'
@@ -127,6 +131,7 @@ import { mousseIdNetModule } from './net/plus'
 import { BridgeProfileService } from './bridge/BridgeProfileService'
 import { PeerDirectory } from './bridge/peers'
 import { NetEngineService } from './netEngine/NetEngineService'
+import { loginStartQuestion } from './netEngine/loginStart'
 import { ChatNetworkBindingService } from './chats/network/ChatNetworkBindingService'
 import type { SpaceProfileService } from './spaces/SpaceProfileService'
 import type { BotProfileService } from './bots/space/BotProfileService'
@@ -177,6 +182,7 @@ import { resolveThreadProjectPath } from './data/resolveActiveProjectPath'
 import { SpeechRelay } from './speech/SpeechRelay'
 import { systemClock } from './net/clock'
 import { trustExistingProjectsOnce } from './git/repoPrograms'
+import { LimitPoller } from './usageHistory/limitPoller'
 
 const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.delete'
@@ -405,6 +411,8 @@ export class MmsProfileServices {
   private readonly botStore: BotStore | null
   /** The daily purge of deleted bots past their 30 days, also while the schedulers are off. */
   private botSweepTimer: ReturnType<typeof setInterval> | null = null
+  /** The background read of the usage limits, for their trends (`limitPoller.ts`). */
+  private readonly limitPoller = new LimitPoller(this)
   /** Phase 5 (SPEC §15.1): durable bearer credentials of the Mousse MCP server. */
   readonly mcpCredentials: McpCredentials
   /** Phase 5: Mousse's tools for vendor runtimes over MCP Streamable HTTP on 127.0.0.1. */
@@ -823,7 +831,6 @@ export class MmsProfileServices {
       schedulesChanged: () => { this.scheduled?.wake() },
       // The shared store, through the book made once the scheduler exists below (nothing reads it before that).
       schedules: {
-        setTelling: (botId, change) => this.botSchedules.setTelling(botId, change),
         list: (botId) => this.botSchedules?.list(botId) ?? [],
         get: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId),
         add: (botId, input, createdBy, options) => this.botSchedules.add(botId, input, createdBy, options),
@@ -913,6 +920,7 @@ export class MmsProfileServices {
           situation: (botId) => this.botSituation(botId),
           scheduleCreatedAt: (botId, scheduleId) => this.botSchedules?.get(botId, scheduleId)?.createdAt,
           jobs: (botId, limit, since) => store.recentJobs(botId, limit, since),
+          jobOn: (botId, threadId) => store.latestJobOn(botId, threadId),
           reactions: (botId, since) => store.reactionsSince(botId, since, BOT_PACK_REACTIONS)
             .map((row) => ({ messageId: row.id, emoji: row.ownerReaction!.emoji, at: row.ownerReaction!.at, text: row.text, fromWork: row.kind === 'run_report' || (row.activationId !== null && store.activation(row.activationId)?.lane === 'run') })),
           // The digest of a fold (docs/plans/bot-context.md §14): one call with no tools on the bot's chat model.
@@ -980,7 +988,8 @@ export class MmsProfileServices {
     chat?.setReplyParts({ published: (threadId) => publishedApplets(this.threads.loadThreadData(threadId).messages) })
     if (chat) botBrowsers.setNotice((botId, text) => {
       try {
-        chat.post({ botId, author: 'bot', kind: 'notice', text })
+        // Once in a row: a hold that ends while the chat still shows the same line (another window gone, the app restarted) adds none.
+        chat.post({ botId, author: 'bot', kind: 'notice', text, unlessLatest: true })
       } catch (error) {
         console.warn('a bot browser notice could not be posted', { botId, error: error instanceof Error ? error.message : String(error) })
       }
@@ -1003,6 +1012,11 @@ export class MmsProfileServices {
       if (!row || row.deletedAt || row.pausedReason) return undefined
       if (!botStore.activeGrant(botId)?.manifest.appTools.includes(BOT_THREADS_PERMISSION)) return undefined
       return { name: personalBots.botName(botId) ?? botId }
+    } : null)
+    // A thread a bot started uses the computer only while the bot exists, is not paused and holds "use the computer".
+    this.orchestrator.setBotComputer(personalBots && botStore ? (botId) => {
+      const row = botStore.registry(botId)
+      return Boolean(row && !row.deletedAt && !row.pausedReason && botStore.activeGrant(botId)?.manifest.appTools.includes(BOT_COMPUTER_PERMISSION))
     } : null)
     this.orchestrator.setRunning(new RunningRegistry({
       terminals: () => ptys.runningTerminals(),
@@ -1148,7 +1162,7 @@ export class MmsProfileServices {
     this.scheduled.on('jobRemoved', (jobId: string) => botMemory?.removeProgressForJob(jobId))
     if (personalBots) {
       this.scheduled.on('jobRemoved', (_jobId: string, job: ScheduledJob) => {
-        if (job.bot) personalBots.scheduleRemoved(job.bot.botId, job.bot.scheduleId, { tellMe: tellMeOf(job), canWakeMe: job.bot.canWakeMe })
+        if (job.bot) personalBots.scheduleRemoved(job.bot.botId, job.bot.scheduleId, { tellMe: tellMeOf(job) })
       })
       this.scheduled.setBotRunner({ editSchedule: (botId, save) => personalBots.editSchedule(botId, save), findOccurrence: (input) => personalBots.findScheduledOccurrence(input), runOccurrence: (input) => personalBots.runScheduledOccurrence(input) })
       // Each tick also brings the inbox's bot runs up to date, so their items appear without the page open.
@@ -1300,6 +1314,23 @@ export class MmsProfileServices {
     })
     this.secretRequests = new SecretRequests(this.secretVault)
     const vault = this.secretVault
+    // Bug reports (Settings → General → Error reports): the Report button's and report_bug's filing.
+    const gh = createGhFallbackRunner(execRunner)
+    this.bugReports = new BugReportService({
+      installationHome: this.installationHome,
+      profileHome: homeDir,
+      settings: () => normalizeErrorReportSettings(this.settings.get().errorReports),
+      secret: (name) => (vault.has(name) ? vault.value(name) : undefined),
+      ghToken: async () => {
+        try {
+          const token = (await gh('gh', ['auth', 'token'], { timeoutMs: 10_000, userRequested: userAction('button', 'File a bug report') })).stdout.trim()
+          return token || undefined
+        } catch {
+          return undefined
+        }
+      }
+    })
+    this.orchestrator.setBugReports(this.bugReports)
     this.orchestrator.setSecrets({
       masker: (threadId) => vault.maskerFor(threadId),
       storeMasker: (threadId) => vault.maskerForStore(threadId),
@@ -1381,6 +1412,8 @@ export class MmsProfileServices {
     this.netEngine = new NetEngineService({
       profileDir: this.homeDir,
       profileId: this.profileId,
+      // Nothing is read until a window turns the switch on or reads the status.
+      loginStart: loginStartQuestion(shared.installationHome),
       net: this.net,
       bridge: () => this.bridgeService,
       // "<computer> (<profile>)", as the other computer's question names it (§5.1).
@@ -2081,6 +2114,8 @@ export class MmsProfileServices {
   secretRequests!: SecretRequests
   /** Emits `changed` when a secret is added, used, removed or expires (Settings → Secrets refreshes). */
   readonly secretsChanged = new EventEmitter()
+  /** Bug reports: filing, the reports filed from here, and agents' drafts waiting for the person. */
+  bugReports!: BugReportService
   private secretSweepTimer: ReturnType<typeof setInterval> | null = null
   automationDrafts!: AutomationDrafts
 
@@ -2359,9 +2394,11 @@ export class MmsProfileServices {
     this.scheduled.beginShutdown()
     if (this.botSweepTimer) clearInterval(this.botSweepTimer)
     this.botSweepTimer = null
+    this.limitPoller.stop()
     if (this.secretSweepTimer) clearInterval(this.secretSweepTimer)
     this.secretSweepTimer = null
     this.secretRequests?.dispose()
+    this.bugReports?.dispose()
     this.webhooksClosed = true
     if (this.webhookRetryTimer) clearTimeout(this.webhookRetryTimer)
     this.webhookRetryTimer = null
@@ -2410,7 +2447,6 @@ export class MmsProfileServices {
     const slots = engine.customSlots(botId).map((slot) => ({ name: slot.name, ...(slot.description ? { description: slot.description } : {}) }))
     return {
       ...(ownerName ? { ownerName } : {}), ...(openAsks.length ? { openAsks } : {}), ...(schedules.length ? { schedules } : {}),
-      telling: engine.tellingLine(botId),
       work, ...(reminders.length ? { reminders } : {}), ...(blocked.length ? { blocked } : {}), ...(questions.length ? { questions } : {}),
       ...(slots.length ? { slots } : {})
     }
@@ -2627,6 +2663,8 @@ export class MmsProfileServices {
       this.botSweepTimer = setInterval(() => { void bots.sweepDeleted().catch(() => []) }, BOT_SWEEP_EVERY_MS)
       this.botSweepTimer.unref?.()
     }
+    // Reads the usage limits every 15 minutes, its first read a full interval after start.
+    this.limitPoller.start()
   }
 
   private async startOwned(): Promise<void> {
@@ -2947,6 +2985,7 @@ export class MmsProfileServices {
         this.orchestrator.setBotDispatcher(null)
         this.orchestrator.setBotThreads(null)
         this.orchestrator.setBotSupervision(null)
+        this.orchestrator.setBotComputer(null)
         this.orchestrator.setBotAppTools(null)
       }],
       ['personal bots close', () => this.personalBots?.close()],

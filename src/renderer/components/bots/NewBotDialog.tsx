@@ -8,6 +8,7 @@ import { isPinned } from '../../../shared/bots/personal/modelSlots'
 import { botsClient, useBotsStore, type NewBotStep } from '../../stores/botsStore'
 import { useChatsStore } from '../../stores/chatsStore'
 import { WizardSteps } from '../ui/WizardSteps'
+import { ReportButton } from '../bugReports/ReportButton'
 import { BotDialogFrame } from './BotDialogs'
 import { BotComputerSelect, BotModelRows, BotModelSelect, offeredListing } from './BotRunsOn'
 import { BotLookPicker } from './face/BotLookPicker'
@@ -134,6 +135,7 @@ export function NewBotDialog({ initialDescription = '', onCreated, onClose }: { 
             onOneWork={() => { const rows = draft.slots ?? EMPTY_ROWS; setNewBotDraft({ slots: { ...rows, light: rows.medium, hard: rows.medium } }) }} /> : null}
         </div>}
         {error && <p role="alert" className="chat-error bot-new-error">{error}</p>}
+        {error && <ReportButton className="bot-new-report" error={{ title: 'New bot could not be created', message: error, surface: 'New bot dialog' }} />}
       </div>
       <div className="bot-new-foot">
         {index > 0 && <button type="button" className="bot-ghost-button" disabled={busy} onClick={() => goTo(steps[index - 1]!)}>Back</button>}

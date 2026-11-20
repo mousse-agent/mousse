@@ -3,7 +3,7 @@ import { act, createElement, type ReactElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BotFace, BotFaceStill, normalizeFaceProps, type BotFaceState } from '../../src/renderer/components/bots/face/BotFace'
-import { FaceMotion, HEAD_FOV, faceUniforms, hop, stillPose, type FaceUniforms } from '../../src/renderer/components/bots/face/facePoses'
+import { EYE_SCALE, FaceMotion, HEAD_FOV, faceUniforms, hop, stillPose, type FaceUniforms } from '../../src/renderer/components/bots/face/facePoses'
 import {
   createWebGlGpu,
   faceArtVersion,
@@ -27,6 +27,7 @@ import {
   type FaceGpu,
   type FaceRendererEnv
 } from '../../src/renderer/components/bots/face/faceRenderer'
+import { applyFaceMode } from '../../src/renderer/components/bots/face/faceMode'
 import { SavedFaceFrames, type FaceFrameBackend, type FaceFrameCodec, type SavedFrameImage, type SavedFrameRecord } from '../../src/renderer/components/bots/face/faceFrameStore'
 import { setAnimationSpeed } from '../../src/renderer/lib/motion'
 
@@ -516,6 +517,26 @@ const face = (overrides: Partial<Parameters<typeof BotFace>[0]> = {}) =>
 const flat = () => host.querySelector('svg.bot-face-still')
 const faceCanvas = () => host.querySelector<HTMLCanvasElement>('canvas.bot-face-canvas')
 
+describe('Settings → Labs → Performance', () => {
+  afterEach(() => act(() => applyFaceMode(null)))
+
+  it('turns every moving face into the 2D hybrid as the setting changes, and back; a still face stays as it was', () => {
+    const fake = fakeEnv({ status: () => 'ready' })
+    resetSharedFaceRenderer(() => fake.env)
+    warmFaceRenderer()
+    fake.tick(READY_POLL_MS)
+    render(createElement('div', null, face(), face({ state: 'working' }), face({ still: true })))
+    const hybrids = () => host.querySelectorAll('.bot-face-hybrid').length
+    expect(host.querySelectorAll('.bot-face')).toHaveLength(3)
+    expect(hybrids()).toBe(0)
+    act(() => applyFaceMode({ experimental: { hybridBotFaces: true } }))
+    expect(hybrids()).toBe(2)
+    expect(host.querySelectorAll('.bot-face')).toHaveLength(3)
+    act(() => applyFaceMode({ experimental: { hybridBotFaces: false } }))
+    expect(hybrids()).toBe(0)
+  })
+})
+
 describe('ready from launch', () => {
   it('starts the renderer only once the first frame has painted', () => {
     const fake = fakeEnv()
@@ -894,9 +915,18 @@ describe('BotFace props', () => {
   it('draws a Mousse in the fallback and passes its kind and eyes to the shader', () => {
     render(createElement(BotFaceStill, { look: { colour: 'purple', accessory: 'none', kind: 'mousse', eyes: 'star' }, state: 'idle', size: 48, view: 'head' }))
     expect(host.querySelector('svg')!.getAttribute('data-kind')).toBe('mousse')
-    expect(faceUniforms({ colour: 'purple', accessory: 'none', kind: 'mousse', eyes: 'star' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK).toEqual([1, 6, 1])
-    expect(faceUniforms({ colour: 'purple', accessory: 'none' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK).toEqual([0, 0, 1])
-    expect(faceUniforms({ colour: 'yellow', accessory: 'none', kind: 'mousse' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK).toEqual([1, 0, 0])
+    expect(faceUniforms({ colour: 'purple', accessory: 'none', kind: 'mousse', eyes: 'star' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([1, 6, 1])
+    expect(faceUniforms({ colour: 'purple', accessory: 'none' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([0, 0, 0])
+    expect(faceUniforms({ colour: 'yellow', accessory: 'none', kind: 'mousse' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([1, 0, 0])
+    // A picked eye colour wins over the one the colour gets, on either character.
+    expect(faceUniforms({ colour: 'purple', accessory: 'none', eyeColour: 'white' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([0, 0, 1])
+    expect(faceUniforms({ colour: 'yellow', accessory: 'none', kind: 'mousse', eyeColour: 'white' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([1, 0, 1])
+    expect(faceUniforms({ colour: 'purple', accessory: 'none', kind: 'mousse', eyeColour: 'black' }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK.slice(0, 3)).toEqual([1, 0, 0])
+    // The 3D eyes sit as far apart as the flat ones: wide eye shapes further out than the pill.
+    for (const kind of ['mouse', 'mousse'] as const) {
+      const spread = (eyes: 'star' | 'pill') => faceUniforms({ colour: 'coral', accessory: 'none', kind, eyes }, stillPose('idle'), { view: 'head', size: 40, samples: 1 }).uK[3]
+      expect(spread('star')).toBeGreaterThan(spread('pill'))
+    }
   })
 
   it('keeps unknown stored values drawable in the fallback', () => {
@@ -1021,7 +1051,7 @@ describe('reduced motion', () => {
     render(createElement(BotFace, { look: coral, state: 'needs_you', size: 40, view: 'head', still: true }))
     fake.tick()
     expect(fake.draws).toHaveLength(2)
-    expect(fake.draws[1]!.uniforms.uE2[2]).toBe(1.2)
+    expect(fake.draws[1]!.uniforms.uE2[2]).toBeCloseTo(1.2 * EYE_SCALE)
     expect(fake.pending()).toBe(0)
   })
 })

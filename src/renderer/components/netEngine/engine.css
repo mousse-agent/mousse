@@ -67,6 +67,7 @@
 
 .engine-paste {
   display: flex;
+  align-items: center;
   gap: var(--space-8);
 }
 
@@ -92,6 +93,85 @@
   list-style: none;
 }
 
+/* Send link (design 1b §5.1): the link with Copy, then the code to read out. */
+.engine-link {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.engine-link p,
+.engine-link-ended p,
+.engine-code-entry p {
+  margin: 0;
+}
+
+.engine-link-code {
+  font-family: var(--font-mono);
+  font-size: 28px;
+  letter-spacing: 0.08em;
+  text-align: center;
+  cursor: default;
+}
+
+.engine-link-ended,
+.engine-code-entry {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-8);
+}
+
+/* Enter link: six boxes for the code. */
+.engine-code-boxes {
+  display: flex;
+  gap: var(--space-6, 6px);
+}
+
+.engine-code-box {
+  width: 36px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 18px;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* 1b: route lists, Also share and Reach. */
+.engine-destinations {
+  margin: 0 0 var(--space-8);
+  overflow-wrap: anywhere;
+}
+
+.engine-share {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0 0 var(--space-8);
+  padding: 0;
+  border: 0;
+}
+
+.engine-share legend {
+  padding: 0;
+  margin-bottom: var(--space-4);
+}
+
+.engine-share-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.engine-address-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .engine-hosts label {
   display: flex;
   align-items: center;
@@ -106,4 +186,48 @@
 
 .engine-ask span {
   flex: 1;
+}
+
+.engine-address-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+}
+
+.engine-reach-control,
+.engine-reach-form,
+.engine-reach-command {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+  flex-wrap: wrap;
+}
+
+.engine-reach-form .settings-input {
+  min-width: 0;
+  width: 220px;
+}
+
+.engine-reach-tunnel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: 0 var(--space-12) var(--space-8);
+}
+
+.engine-reach-command code {
+  font-family: var(--font-mono);
+}
+
+.engine-profile-choice,
+.engine-ssh {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.engine-fingerprint {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
 }

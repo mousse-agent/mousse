@@ -7,6 +7,8 @@ import { Component, useState, type ReactNode } from 'react'
 import { createRoot, type RootOptions } from 'react-dom/client'
 import { describeThrown, reportRendererError } from '../services/rendererErrors'
 import { reloadWindow } from '../services/reloadWindow'
+import { ReportButton } from '../components/bugReports/ReportButton'
+import { BugReportDialogHost } from '../components/bugReports/BugReportDialog'
 
 function RenderFailed({ error }: { error: unknown }) {
   const [unsaved, setUnsaved] = useState(false)
@@ -21,7 +23,10 @@ function RenderFailed({ error }: { error: unknown }) {
         This window hit an error.{' '}
         <button type="button" className="root-render-failed-reload" onClick={() => void reload()}>Reload</button>
         {unsaved && <span className="root-render-failed-note"> Save or close unsaved files first.</span>}
+        {' '}<ReportButton error={{ title: 'This window hit an error', message: `${name}: ${message}`, ...(stack ? { stack } : {}), surface: 'window' }} />
       </p>
+      {/* The app behind this screen is gone, and its report dialog with it. */}
+      <BugReportDialogHost />
       <details className="root-render-failed-details">
         <summary>Details</summary>
         <pre>{stack && stack.includes(message) ? stack : `${name}: ${message}${stack ? `\n${stack}` : ''}`}</pre>

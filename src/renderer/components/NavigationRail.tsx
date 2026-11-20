@@ -41,12 +41,13 @@ export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [activePage])
 
+  // Every item is one `rail-item` with its name in data-mousse-item; the open page's item has aria-current="page".
   const shortcut = (page: RailPage, label: string, Icon: LucideIcon) => {
     const active = activePage === page
     const notice = page === 'settings' && reviewPending
     const title = notice ? 'Settings · new cleanup rules to review in Storage' : label
     return (
-      <button type="button" className={`navigation-rail-button${active ? ' active' : ''}`}
+      <button type="button" className="navigation-rail-button" data-mousse="rail-item" data-mousse-item={page}
         aria-label={label} title={active ? 'Back to threads · Esc' : title} aria-current={active ? 'page' : undefined}
         onClick={() => void toggleRailPage(page)}>
         <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
@@ -59,12 +60,12 @@ export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
     <nav data-mousse="rail" className="navigation-rail" aria-label="Mousse navigation"
       onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave} onPointerDown={onPointerDown}>
       {/* The workspace: active while no rail page is open; a click there leaves the open page. */}
-      <button type="button" className={`navigation-rail-button${activePage === null ? ' active' : ''}`}
+      <button type="button" className="navigation-rail-button" data-mousse="rail-item" data-mousse-item="home"
         aria-label="Home" title="Home" aria-current={activePage === null ? 'page' : undefined}
         onClick={() => void leaveRailPage()}>
         <House size={18} strokeWidth={1.8} aria-hidden="true" />
       </button>
-      <button type="button" className="navigation-rail-button"
+      <button type="button" className="navigation-rail-button" data-mousse="rail-item" data-mousse-item="search"
         aria-label="Search everything" title={searchTitle}
         onClick={() => openPalette('messages')}>
         <SearchEverything size={18} strokeWidth={1.8} aria-hidden="true" />
