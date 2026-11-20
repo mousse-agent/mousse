@@ -60,6 +60,18 @@
       "expiresAt": "2026-11-19T16:46:17.828Z"
     },
     {
+      "task": "antigravity-turn-fixes",
+      "session": "Animatrix-0b9a21",
+      "machine": "Animatrix",
+      "branch": "antigravity-turn-fixes",
+      "paths": [
+        "src/mms/harness/acp/quirks.ts",
+        "src/mms/orchestrator/providerErrors.ts"
+      ],
+      "claimedAt": "2026-11-20T10:56:43.121Z",
+      "expiresAt": "2026-11-20T12:56:43.121Z"
+    },
+    {
       "task": "fix-model-switch-mid-turn",
       "session": "Animatrix-6036c7",
       "machine": "Animatrix",
