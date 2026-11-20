@@ -1,5 +1,8 @@
 /** Versioned lifecycle authority. Paths and inventories are never caller-issued capabilities. */
 export const RESOURCE_LIFECYCLE_VERSION = 1 as const
+
+/** A delete the app stopped waiting for: the service may still finish it. */
+export const DELETE_TOO_LONG = 'The delete did not finish in time. It may still finish; if the thread is still in Archived, delete it again.'
 export const RETENTION_CLAIM_KINDS = [
   'current-result', 'undo', 'redo', 'recall', 'conversation-attachment',
   'pending-integration', 'conflict', 'recovery', 'trash-restore', 'user-pin'
