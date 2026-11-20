@@ -2504,7 +2504,9 @@ export class OrchestratorService extends EventEmitter {
     this.phaseBeforeInput.delete(threadId)
     const existing = this.turnStates.get(threadId)
     if (existing?.phase !== 'awaiting_input') return
-    if (!existing.turnId || !this.sessions.get(threadId)?.activeTurn) {
+    // Asked from a phase that was not a running turn's (a turn's end can leave its session's turn set a moment longer).
+    const askedInTurn = !before || isTurnActivePhase(before.phase)
+    if (!askedInTurn || !existing.turnId || !this.sessions.get(threadId)?.activeTurn) {
       if (!before || before.phase === 'completed' || before.phase === 'idle') {
         this.setTurnPhase(threadId, 'idle')
         return
