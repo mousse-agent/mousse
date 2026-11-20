@@ -376,11 +376,12 @@ export class NetEngineService implements EngineDirectoryPort {
   }
 
   /** New relay key: a new registration key takes over, the old one kept until the overlap ends (§B.4, §B.11). */
-  async rotateRelay(relay: string): Promise<void> {
+  /** New relay key, or with `cancel` its Cancel while the relay has not taken the new key. */
+  async rotateRelay(relay: string, cancel = false): Promise<void> {
     const helper = this.relayHelper()
     let answer: Record<string, unknown>
     try {
-      answer = await helper.request('relay.rotate', { relay })
+      answer = await helper.request('relay.rotate', cancel ? { relay, cancel: true } : { relay })
     } catch (error) {
       throw relayError(error)
     }

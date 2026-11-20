@@ -78,6 +78,8 @@ function validate(method: NetEngineLocalMethod, params: unknown): Record<string,
   )
     throw new DomainRpcError('bad_request', `${method} takes arrival "scan" or "link"`)
   if (method === 'netEngine.routes.config') reach(fields)
+  if (method === 'netEngine.relay.rotate' && fields.cancel !== undefined && typeof fields.cancel !== 'boolean')
+    throw new DomainRpcError('bad_request', `${method} takes cancel as true or false`)
   if (method === 'netEngine.ssh.connect' && !text(fields.selector) === !text(fields.newLabel))
     throw new DomainRpcError('bad_request', `${method} needs selector or newLabel, one of them`)
   return fields
@@ -206,7 +208,7 @@ export function registerNetEngineMethods(
               await engine.removeRelay(p.relay)
               return engine.status()
             case 'netEngine.relay.rotate':
-              await engine.rotateRelay(p.relay)
+              await engine.rotateRelay(p.relay, p.cancel === true)
               return engine.status()
             case 'netEngine.relay.allow':
             case 'netEngine.relay.disallow':

@@ -278,6 +278,10 @@ const clock = (at: number): string =>
     second: '2-digit'
   })
 
+/** New relay key waits while the relay holds as many keys as it allows, until `chainFullUntil` passes. */
+const chainFull = (relay: NetEngineRelay): boolean =>
+  !!relay.chainFull && (relay.chainFullUntil === undefined || relay.chainFullUntil > Date.now())
+
 /** When the old relay key stops, as the row says it. */
 const until = (at: number): string =>
   new Date(at).toLocaleString(undefined, {
@@ -330,12 +334,16 @@ function OwnRelayRows({ relays, onChanged }: { relays: NetEngineRelays; onChange
   const [removing, setRemoving] = useState<NetEngineRelay>()
   // "Retrying at <time>" turns to "Retrying…" once that time passes, without waiting for the next status.
   const [, setTick] = useState(0)
+  // So does "Try again after <time>" once New relay key can be used again.
   const nextRetry = Math.min(
-    ...relays.list.flatMap((relay) =>
-      relay.state === 'retrying' && relay.retryAt !== undefined && relay.retryAt > Date.now()
+    ...relays.list.flatMap((relay) => [
+      ...(relay.state === 'retrying' && relay.retryAt !== undefined && relay.retryAt > Date.now()
         ? [relay.retryAt]
-        : []
-    )
+        : []),
+      ...(relay.chainFullUntil !== undefined && relay.chainFullUntil > Date.now()
+        ? [relay.chainFullUntil]
+        : [])
+    ])
   )
   useEffect(() => {
     if (!Number.isFinite(nextRetry)) return
@@ -408,7 +416,14 @@ function OwnRelayRows({ relays, onChanged }: { relays: NetEngineRelays; onChange
                     </span>
                   </>
                 )}
-                {relay.newKeyPending ? (
+                {relay.cancelling ? (
+                  <>
+                    {' · '}
+                    <span className="settings-muted" title="The current key stays.">
+                      Cancelling…
+                    </span>
+                  </>
+                ) : relay.newKeyPending ? (
                   <>
                     {' · '}
                     <span
@@ -416,6 +431,29 @@ function OwnRelayRows({ relays, onChanged }: { relays: NetEngineRelays; onChange
                       title="The relay hasn't taken the new key yet. The current key keeps working."
                     >
                       New key pending
+                    </span>{' '}
+                    <button
+                      type="button"
+                      className="settings-btn"
+                      disabled={busy}
+                      title="Keep the current key."
+                      onClick={() =>
+                        void run('netEngine.relay.rotate', { relay: relay.id, cancel: true })
+                      }
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : chainFull(relay) ? (
+                  <>
+                    {' · '}
+                    <span
+                      className="settings-muted"
+                      title="The relay holds as many keys as it allows until the oldest one leaves."
+                    >
+                      {relay.chainFullUntil === undefined
+                        ? 'Too many key changes. Try again later'
+                        : `Too many key changes. Try again after ${until(relay.chainFullUntil)}`}
                     </span>
                   </>
                 ) : (
@@ -438,7 +476,9 @@ function OwnRelayRows({ relays, onChanged }: { relays: NetEngineRelays; onChange
                 <button
                   type="button"
                   className="settings-btn"
-                  disabled={busy || relay.state !== 'registered' || relay.newKeyPending}
+                  disabled={
+                    busy || relay.state !== 'registered' || relay.newKeyPending || chainFull(relay)
+                  }
                   title="Register with a new key; the old one keeps working for a while."
                   onClick={() => void run('netEngine.relay.rotate', { relay: relay.id })}
                 >

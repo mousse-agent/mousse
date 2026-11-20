@@ -1431,6 +1431,12 @@ function relayAnswer(message: Record<string, any>, relays: FakeRelays): Record<s
     case 'relay.rotate': {
       const relay = find(message.relay)
       if (!relay) return { error: 'no_relay', reason: 'No such relay' }
+      if (message.cancel === true) {
+        if (!relay.new_key_pending) return { error: 'not_rotating', reason: 'No new key is on its way' }
+        relay.cancelling = true
+        return { relay }
+      }
+      if (relay.chain_full) return { error: 'chain_full', reason: 'The relay holds as many keys as it allows' }
       if (relay.state !== 'registered') return { error: 'not_registered', reason: 'not connected' }
       const now = Math.floor(Date.now() / 1000)
       // The helper answers before the relay takes the new key; `rotating_until` comes later, in a `relay.state`.

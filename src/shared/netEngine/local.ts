@@ -174,6 +174,11 @@ export interface NetEngineRelay {
   rotatingUntil?: number
   /** A new relay key is asked for and the relay has not taken it yet. */
   newKeyPending?: boolean
+  /** That new key is being cancelled (`relay.rotate {cancel}`). */
+  cancelling?: boolean
+  /** The relay holds as many keys as it allows: New relay key waits until `chainFullUntil` (ms since 1970). */
+  chainFull?: boolean
+  chainFullUntil?: number
 }
 
 /** What a relay error word (`relay.enroll`'s refusal, a registration's end) means, as Settings says it. */
@@ -195,7 +200,10 @@ export const RELAY_REASON_TEXT: Readonly<Record<string, string>> = Object.freeze
   relay_closed: 'The relay closed the connection.',
   store_failed: "Couldn't save the relay.",
   no_relay: 'That relay was removed.',
-  not_registered: "The relay isn't connected; try again once it is."
+  not_registered: "The relay isn't connected; try again once it is.",
+  rotating: 'A new key is already on its way.',
+  not_rotating: 'No new key is on its way.',
+  chain_full: 'Too many key changes. Try again later.'
 })
 
 /** This computer's own relays, when its helper has relays. */
