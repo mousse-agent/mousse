@@ -72,6 +72,17 @@
       "expiresAt": "2026-11-20T13:29:05.831Z"
     },
     {
+      "task": "fix-image-worker-lint",
+      "session": "agibook-90d799",
+      "machine": "agibook",
+      "branch": "fix-image-worker-lint",
+      "paths": [
+        "src/renderer/lib/imageFitWorker.ts"
+      ],
+      "claimedAt": "2026-11-20T18:33:12.618Z",
+      "expiresAt": "2026-11-20T20:33:12.618Z"
+    },
+    {
       "task": "fix-model-switch-mid-turn",
       "session": "Animatrix-6036c7",
       "machine": "Animatrix",
