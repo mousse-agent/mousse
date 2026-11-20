@@ -100,10 +100,11 @@ describe('an open Settings page and a theme an agent changes', () => {
     expect(checked()).toEqual(['Light'])
   })
 
-  it('pauses the theme on every Settings page but Appearance, where themes are edited', async () => {
+  it('guards every Settings page but Appearance (theme CSS off, colors kept) and pauses none of them', async () => {
     const page = () => host.querySelector('[data-mousse="settings"]:not([hidden])')!
-    expect(page().hasAttribute('data-mousse-decision')).toBe(false)
+    expect(page().hasAttribute('data-mousse-guarded')).toBe(false)
     await act(async () => { window.dispatchEvent(new CustomEvent('mousse:settings-section', { detail: 'agents' })) })
-    expect(page().hasAttribute('data-mousse-decision')).toBe(true)
+    expect(page().hasAttribute('data-mousse-guarded')).toBe(true)
+    expect(page().hasAttribute('data-mousse-decision')).toBe(false)
   })
 })

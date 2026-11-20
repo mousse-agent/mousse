@@ -3,7 +3,7 @@
  * @property, @keyframes, @font-face, @import, image-set(), attribute selectors), go through the app's own
  * `applyThemeCss` and make no request at all, while the safe rules in the same CSS still apply. The control puts the
  * same CSS on the page unchecked and sees it reach the leak server, so a leak would show. While a decision (an
- * approval's buttons) is on the page, the whole theme, colors included, is off.
+ * approval's buttons) is on the page, the whole theme, colors included, is off; on a guarded page only its CSS is.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
@@ -16,6 +16,7 @@ import { expect, it } from 'vitest'
 type Evidence = {
   theme: { requested: string[]; leakHits: string[]; dropped: number; measured: Record<string, string> }
   decision: Record<'before' | 'during' | 'after', { sidebar: string; token: string; buttonAfter: string; paused: boolean }>
+  guarded: Record<'during' | 'decision' | 'after', { sidebar: string; token: string; buttonAfter: string; paused: boolean }>
   plain: { during: boolean; after: boolean; off: boolean }
   control: { requested: string[]; leakHits: string[] }
   pageErrors: string[]
@@ -67,6 +68,12 @@ it('applies the safe rules of a hostile theme and makes no request, pauses it wh
     expect(evidence.decision.during).toMatchObject({ token: '', buttonAfter: 'none', paused: true })
     expect(evidence.decision.during.sidebar).not.toBe('rgb(1, 2, 3)')
     expect(evidence.decision.after).toMatchObject({ sidebar: 'rgb(1, 2, 3)', token: '#010203', paused: false })
+    // On a guarded page (Settings, the Automations page) the theme's CSS is off, so it cannot relabel the page's own
+    // controls, and its colors stay; a decision on that page still pauses everything.
+    expect(evidence.guarded.during).toMatchObject({ token: '#010203', paused: false })
+    expect(evidence.guarded.during.sidebar).not.toBe('rgb(1, 2, 3)')
+    expect(evidence.guarded.decision).toMatchObject({ token: '', paused: true })
+    expect(evidence.guarded.after).toMatchObject({ sidebar: 'rgb(1, 2, 3)', token: '#010203', paused: false })
     // A user theme with nothing but a wallpaper pauses too (the wallpaper hides under data-user-theme-paused), and
     // with no user theme on nothing pauses.
     expect(evidence.plain).toEqual({ during: true, after: false, off: false })

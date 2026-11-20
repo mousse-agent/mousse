@@ -41,8 +41,9 @@ function themePreviewClass(themeId: ThemeId): string {
 
 /** A user theme's thumbnail: its base's swatches with its own colors over them. */
 function userThemePreviewStyle(theme: UserTheme): CSSProperties {
-  const bar = theme.colors['--surface-strong'] ?? theme.colors['--surface-base']
-  const side = theme.colors['--surface-strong'] ?? theme.colors['--surface-base']
+  // The frame is one color: --surface-base when the theme sets it (themeTokensCss), else an older theme's sidebar color.
+  const bar = theme.colors['--surface-base'] ?? theme.colors['--surface-strong']
+  const side = bar
   const main = theme.colors['--surface-base']
   return {
     ...(bar ? { '--preview-bar': bar } : {}),

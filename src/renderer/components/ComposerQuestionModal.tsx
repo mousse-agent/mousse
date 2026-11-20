@@ -165,6 +165,14 @@ export function approvalNotes(approval: PendingApprovalInfo): string[] {
   return notes
 }
 
+/**
+ * Whether answering grants or refuses something (an approval request, or any option that means allow or reject): then
+ * the theme pauses while it shows, so it cannot relabel the choices. A plain question from the agent keeps the theme.
+ */
+export function grantsAccess(pending: PendingUserQuestions): boolean {
+  return Boolean(pending.approval) || pending.questions.some((question) => question.options.some((option) => option.decision !== undefined))
+}
+
 /** The dialog's label: "Question", or how many there are ("3 questions"). The dots show the position. */
 export function questionDialogLabel(total: number): string {
   return total > 1 ? `${total} questions` : 'Question'
@@ -560,7 +568,7 @@ export function ComposerQuestionModal({ pending, onSubmit, onDismiss, onSkipAndS
           )}
         </div>
       </div>
-      <div className="composer-question-modal-footer" data-mousse-decision="">
+      <div className="composer-question-modal-footer" data-mousse-decision={grantsAccess(pending) ? '' : undefined}>
         <span className="composer-question-footer-start">
           <button type="button" className="composer-question-btn is-quiet" onClick={() => { cancelAdvance(); onDismiss() }}>
             Skip

@@ -63,7 +63,7 @@ const DECISIONS: Record<string, string> = {
   'a tool\'s approval footer': 'src/renderer/chat/components/agent-elements/tools/tool-approval-footer.tsx',
   'an agent-made quick action': 'src/renderer/chat/components/agent-elements/tools/quick-action-tool.tsx',
   'an approval in the composer\'s dock': 'src/renderer/components/ComposerNotice.tsx',
-  'a question or approval in the composer': 'src/renderer/components/ComposerQuestionModal.tsx',
+  'an approval in the composer (a plain question is not a decision)': 'src/renderer/components/ComposerQuestionModal.tsx',
   'Needs you asks (bots, workflows, first-creation)': 'src/renderer/components/asks/AskCard.tsx',
   'an automation\'s ask in the inbox': 'src/renderer/components/automations/inbox/AutomationsInbox.tsx',
   'a workflow run\'s approval': 'src/renderer/components/workflows/WorkflowRunPanel.tsx',
@@ -78,9 +78,7 @@ const DECISIONS: Record<string, string> = {
   'an SSH route approval': 'src/renderer/components/devices/ApproveSshRouteDialog.tsx',
   'an SSH host key to trust (every dialog that shows one)': 'src/renderer/components/devices/HostKeyConfirm.tsx',
   'trusting a repository\'s Git settings': 'src/renderer/components/ThreadsContextMenu.tsx',
-  'Settings pages other than Appearance': 'src/renderer/components/SettingsPage.tsx',
   'the composer\'s permission mode menu': 'src/renderer/components/ComposerPermissionPicker.tsx',
-  'the Automations page (permission modes, schedules)': 'src/renderer/components/AutomationsPage.tsx',
   'an automation draft, also in a chat': 'src/renderer/components/automations/DraftCard.tsx',
   'an agent definition (grants, scripts)': 'src/renderer/components/agentDefinitions/AgentEditor.tsx',
   'a device\'s limits': 'src/renderer/components/devices/DeviceLimitsDialog.tsx',
@@ -88,8 +86,17 @@ const DECISIONS: Record<string, string> = {
 }
 
 /**
+ * Pages that hold access controls in their own layout. Each carries `data-mousse-guarded` while open: the theme's CSS is
+ * off there (its colors stay), so it cannot relabel, hide or move those controls.
+ */
+const GUARDED: Record<string, string> = {
+  'Settings pages other than Appearance': 'src/renderer/components/SettingsPage.tsx',
+  'the Automations page (permission modes, schedules)': 'src/renderer/components/AutomationsPage.tsx'
+}
+
+/**
  * Files that use permission modes without a marker of their own, each reviewed: it chooses no mode, or it is only shown
- * on a page that is already paused. A new file that uses permission modes must be marked or added here with its reason.
+ * on a page that is already guarded. A new file that uses permission modes must be marked or added here with its reason.
  */
 const PERMISSION_MODE_REVIEWED: Record<string, string> = {
   'src/renderer/lib/permissionModeIcon.tsx': 'icons only',
@@ -97,10 +104,10 @@ const PERMISSION_MODE_REVIEWED: Record<string, string> = {
   'src/renderer/components/ComposerEffortPicker.tsx': 'hosts the menu; the choices are ComposerPermissionPicker',
   'src/renderer/components/OrchestratorChat.tsx': 'the handler, no control',
   'src/renderer/components/sideChats/SideChatsPanel.tsx': 'a side chat\'s handler, no control; the menu is ComposerPermissionPicker',
-  'src/renderer/components/settings/GeneralSettings.tsx': 'Settings → General, paused with the page',
-  'src/renderer/components/NetDevicesSection.tsx': 'Settings → Devices, paused with the page; names a device’s highest mode, no control',
-  'src/renderer/components/automations/AutomationDetail.tsx': 'only on the Automations page, paused with it',
-  'src/renderer/components/automations/inbox/EditDetailsPane.tsx': 'only on the Automations page, paused with it'
+  'src/renderer/components/settings/GeneralSettings.tsx': 'Settings → General, guarded with the page',
+  'src/renderer/components/NetDevicesSection.tsx': 'Settings → Devices, guarded with the page; names a device’s highest mode, no control',
+  'src/renderer/components/automations/AutomationDetail.tsx': 'only on the Automations page, guarded with it',
+  'src/renderer/components/automations/inbox/EditDetailsPane.tsx': 'only on the Automations page, guarded with it'
 }
 
 /** A button whose visible label is a decision word. */
@@ -111,11 +118,15 @@ describe('decisions pause the theme', () => {
     expect(readFileSync(file, 'utf8')).toContain('data-mousse-decision')
   })
 
+  it.each(Object.entries(GUARDED))('%s is marked data-mousse-guarded', (_what, file) => {
+    expect(readFileSync(file, 'utf8')).toContain('data-mousse-guarded')
+  })
+
   it('every file that uses permission modes is marked or reviewed', () => {
     // Forward slashes on every system, as the reviewed list is written.
     const unreviewed = sourceFiles('src/renderer').map((file) => file.split('\\').join('/')).filter((file) => file.endsWith('.tsx')).filter((file) => {
       const text = readFileSync(file, 'utf8')
-      return /shared\/permissionMode'/.test(text) && !text.includes('data-mousse-decision') && !(file in PERMISSION_MODE_REVIEWED)
+      return /shared\/permissionMode'/.test(text) && !text.includes('data-mousse-decision') && !text.includes('data-mousse-guarded') && !(file in PERMISSION_MODE_REVIEWED)
     })
     expect(unreviewed).toEqual([])
   })

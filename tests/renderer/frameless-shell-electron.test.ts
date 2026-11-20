@@ -38,6 +38,9 @@ type Scenario = {
     sidebarTopEdge: Rgb
     belowChatCorner: Rgb
     scrollFadeCenter: Rgb
+    titlebarCenter: Rgb
+    railCenter: Rgb
+    rightOfCard: Rgb
   }
 }
 
@@ -46,6 +49,7 @@ type Evidence = {
   builtInDark: Scenario
   highContrast: Scenario
   overlayDrawer: Scenario
+  frameColor: Scenario
 }
 
 it('feathers the colored docked sidebar cleanly and frames the right panel as floating tabs over a specular card', async () => {
@@ -88,6 +92,8 @@ it('feathers the colored docked sidebar cleanly and frames the right panel as fl
 
     const cssText = readFileSync(join(directory, 'css', 'styles.css'), 'utf8')
     const userTokensCss = themeTokensCss({ '--surface-strong': '#102619' })
+    // A theme asked for "a red background": the frame color, with a panel color beside it.
+    const frameTokensCss = themeTokensCss({ '--surface-base': '#200a07', '--surface-strong': '#1c0b09' })
 
     writeFileSync(join(directory, 'index.html'), `<!doctype html>
 <html data-theme="blacksphere-plus">
@@ -156,6 +162,7 @@ import path from 'node:path'
 
 const dir = process.env.MOUSSE_FRAMELESS_DIR
 const userTokensCss = ${JSON.stringify(userTokensCss)}
+const frameTokensCss = ${JSON.stringify(frameTokensCss)}
 
 app.disableHardwareAcceleration()
 app.whenReady().then(async () => {
@@ -196,6 +203,8 @@ app.whenReady().then(async () => {
         profRect: prof.getBoundingClientRect().toJSON(),
         chatRect: chat.getBoundingClientRect().toJSON(),
         cardRect: card.getBoundingClientRect().toJSON(),
+        titlebarRect: document.querySelector('.titlebar').getBoundingClientRect().toJSON(),
+        railRect: document.querySelector('.navigation-rail').getBoundingClientRect().toJSON(),
         sidebarBg: sbCs.backgroundColor,
         sidebarIsolation: sbCs.isolation,
         sidebarBeforeContent: sbBefore.content,
@@ -247,7 +256,10 @@ app.whenReady().then(async () => {
         sidebarRightEdge: px(r.right - 1, r.y + r.height / 2),
         sidebarTopEdge: px(r.x + r.width / 2, r.y),
         belowChatCorner: px(r.right - 2, info.chatRect.bottom + 4),
-        scrollFadeCenter: px(r.x + r.width / 2, info.scrollRect.bottom - 4)
+        scrollFadeCenter: px(r.x + r.width / 2, info.scrollRect.bottom - 4),
+        titlebarCenter: px(info.vw / 2, info.titlebarRect.y + info.titlebarRect.height / 2),
+        railCenter: px(info.railRect.x + info.railRect.width / 2, info.railRect.y + info.railRect.height / 2),
+        rightOfCard: px(info.cardRect.right + 4, info.cardRect.y + info.cardRect.height / 2)
       }
     }
   }
@@ -287,6 +299,15 @@ app.whenReady().then(async () => {
       document.getElementById('pane').className = 'sliding-threads-pane sliding-threads-pane--overlay'
       const sheet = new CSSStyleSheet()
       sheet.replaceSync(\${JSON.stringify(userTokensCss)})
+      document.adoptedStyleSheets = [sheet]
+    \`),
+    frameColor: await measure(\`
+      document.documentElement.setAttribute('data-theme', 'blacksphere-plus')
+      document.documentElement.setAttribute('data-user-theme', 'ember')
+      for (const name of ['--vscode-sideBar-background', '--vscode-titleBar-activeBackground', '--vscode-activityBar-background', '--surface-base']) document.documentElement.style.setProperty(name, '#000000')
+      document.getElementById('pane').className = 'sliding-threads-pane'
+      const sheet = new CSSStyleSheet()
+      sheet.replaceSync(\${JSON.stringify(frameTokensCss)})
       document.adoptedStyleSheets = [sheet]
     \`)
   }
@@ -345,6 +366,14 @@ app.whenReady().then(async () => {
     expect(evidence.overlayDrawer.sidebarIsolation).toBe('auto')
     expect(evidence.overlayDrawer.sidebarBeforeContent).toBe('none')
     expect(evidence.overlayDrawer.pixels.sidebarRightEdge[1] - evidence.overlayDrawer.pixels.sidebarRightEdge[0]).toBeGreaterThanOrEqual(15)
+
+    // 5. A theme's background (--surface-base) is the whole frame in one color, over Mousse Dark's own inline frame
+    //    colors: the title bar, the rail, the sidebar and the edges around the chat and panel cards.
+    const frame: Rgb = [32, 10, 7]
+    const near = (pixel: Rgb) => pixel.every((value, index) => Math.abs(value - frame[index]!) <= 2)
+    const pixels = evidence.frameColor.pixels
+    expect({ titlebar: near(pixels.titlebarCenter), rail: near(pixels.railCenter), sidebar: near(pixels.sidebarCenter), belowChat: near(pixels.belowChatCorner), rightOfCard: near(pixels.rightOfCard) }, JSON.stringify(pixels))
+      .toEqual({ titlebar: true, rail: true, sidebar: true, belowChat: true, rightOfCard: true })
   } finally {
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       child.kill('SIGTERM')
