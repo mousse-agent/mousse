@@ -198,8 +198,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     return unsub
   }, [settingsOpen, refreshProviderData])
 
-  // External theme and bot quiet-hours changes must reach the copy later saves start from.
-  // Keep the page's other notification choices while taking the saved quiet hours, including their removal.
+  // External theme changes must reach the copy later saves start from.
   useEffect(() => {
     if (!settingsOpen) return
     return window.mousse.settings.onChanged?.((next) => {
@@ -207,12 +206,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
       setSettings((current) => {
         if (!current) return current
         const { theme, userTheme, userThemes } = next.appearance!
-        const { quietHours: _quietHours, ...notifications } = current.notifications
-        return {
-          ...current,
-          appearance: { ...current.appearance, theme, userTheme, userThemes },
-          notifications: next.notifications ? { ...notifications, ...(next.notifications.quietHours ? { quietHours: next.notifications.quietHours } : {}) } : current.notifications
-        }
+        return { ...current, appearance: { ...current.appearance, theme, userTheme, userThemes } }
       })
     })
   }, [settingsOpen])

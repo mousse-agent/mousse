@@ -8,7 +8,7 @@ import { botFixture, createBot, finish, start, type BotFixture } from './botFixt
 const HOUR = 60 * 60_000
 let f: BotFixture
 afterEach(() => f?.close())
-async function held(on = true, options: { quietFor?: number } = {}) {
+async function held(on = true) {
   f = botFixture()
   const settings = getDefaultSettings()
   settings.experimental.botAsksFirstOff = !on
@@ -20,10 +20,6 @@ async function held(on = true, options: { quietFor?: number } = {}) {
   f.host.mcp = mcp
   await f.bots.reconcileOnStartup()
   const { botId } = await createBot(f, { reply: 'Hello' })
-  if (options.quietFor) {
-    const end = f.clock.now + options.quietFor
-    f.host.quietHoursFor = (_botId, at) => at < end ? { end } as never : undefined
-  }
   const grant = f.store.activeGrant(botId)!
   const manifest = { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send', ...(on ? { level: 'asks_first' as const } : {}) }] }
   f.store.approve(botId, botManifestDigest(manifest), manifest)
@@ -92,25 +88,6 @@ it('adds no rows, source, state writes or immediate timer when the switch is off
   expect(f.timers.slice(timers).some(timer => timer.ms === 0)).toBe(false)
 })
 
-
-it('keeps nudges out of quiet hours', async () => {
-  const t = await held(true, { quietFor: 3 * HOUR })
-  const created = f.clock.now
-  await tellOriginal()
-  expect(f.store.message(t.action.message_id)!.toldAt).toBeNull()
-  f.clock.now = created + HOUR
-  f.host.ownerActive = () => true
-  await f.bots.deliverDueReminders()
-  expect(t.nudges()).toHaveLength(0)
-  expect(f.bots.nextDueAt(t.botId)).toBe(new Date(created + 3 * HOUR).toISOString())
-  f.clock.now = created + 3 * HOUR
-  await f.bots.deliverDueReminders()
-  expect(t.nudges()).toHaveLength(0)
-  expect(f.bots.nextDueAt(t.botId)).toBe(new Date(created + 4 * HOUR).toISOString())
-  f.clock.now += HOUR
-  await f.bots.deliverDueReminders()
-  expect(t.nudges()).toHaveLength(1)
-})
 
 it('follows the question pause convention without a due-time spin or extra timer', async () => {
   const t = await held()
@@ -222,31 +199,6 @@ it('suppresses an untold settled nudge even after asks first is switched off', a
   f.bots.setTellingWindows(1)
   await f.bots.deliverDueReminders()
   expect(events).toHaveLength(0)
-})
-
-it('holds a failed nudge delivery if quiet hours start before its retry', async () => {
-  const t = await held(true)
-  await tellOriginal()
-  f.bots.markRead(t.botId, f.store.message(t.action.message_id)!.seq)
-  f.clock.now += HOUR
-  const fail = () => { throw new Error('banner temporarily unavailable') }
-  f.bots.events.on('tell', fail)
-  await f.bots.deliverDueReminders()
-  f.bots.events.off('tell', fail)
-  expect(t.nudges()).toHaveLength(1)
-  expect(f.store.message(`bm_${t.action.id}_n1`)!.toldAt).toBeNull()
-  const end = f.clock.now + HOUR
-  f.host.quietHoursFor = (_bot, at) => at < end ? { end } as never : undefined
-  f.host.ownerActive = () => true
-  f.clock.now += 60_000
-  const tells: any[] = []
-  f.bots.events.on('tell', event => tells.push(event))
-  await f.bots.deliverDueReminders()
-  expect(tells).toHaveLength(0)
-  expect(f.bots.nextDueAt(t.botId)).toBe(new Date(end).toISOString())
-  f.clock.now = end
-  await f.bots.deliverDueReminders()
-  expect(tells.at(-1)).toMatchObject({ body: 'Wants to send', kind: 'question' })
 })
 
 it('processes a due nudge when the wall clock advances after upkeep captured its time', async () => {

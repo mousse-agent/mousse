@@ -123,11 +123,8 @@ describe('the bot changelog entries', () => {
   })
 })
 
-// Quiet settings and the changelog are read together by old bots.
-it('quiet-hour advice agrees with settings and later entries', () => {
-  const advice = BOT_CHANGELOG.map(entry => entry.text).join('\n')
-  expect(advice).not.toMatch(/there are no quiet hours|never tell your owner you hold anything/i)
-  expect(BOT_CHANGELOG.find(entry => entry.id === 15)!.text).toMatch(/quiet hours now exist/i)
+// Old bots read every entry they have not seen, oldest first: a later entry never says what an earlier one removed.
+it('later entries never say a removed behaviour', () => {
   for (const entry of BOT_CHANGELOG) for (const gone of entry.gone ?? []) {
     for (const text of BOT_CHANGELOG.filter(later => later.id > entry.id).map(later => later.text)) expect(text).not.toMatch(gone)
   }

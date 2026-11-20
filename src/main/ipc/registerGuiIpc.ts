@@ -1,4 +1,3 @@
-import { appPresence } from '../mms/appPresence'
 import type { BotTelling } from '../../shared/bots/personal/telling'
 import { registerAppletIpc } from '../applets/registerAppletIpc'
 import { registerMemoryDiagnosticsIpc } from '../diagnostics/memoryIpc'
@@ -649,23 +648,11 @@ export function registerGuiIpc(
    * An automation's run ended (`scheduled.runEnded`). It notifies only when its Tell me lets it (the daemon decides),
    * through the person's choices for a finished thread, or for a question when the run failed. A click opens its thread.
    */
-  const reportPresence = appPresence({
-    windows: () => BrowserWindow.getAllWindows(),
-    idleSeconds: () => powerMonitor.getSystemIdleTime(),
-    audience: id => guiMms.presenceAudience?.(id),
-    send: (id, presence) => guiMms.sendPresence(id, presence)
-  })
-  const presenceTimer = setInterval(reportPresence, 10_000)
-  presenceTimer.unref()
-  app.on('browser-window-focus', reportPresence)
-  app.on('will-quit', () => { clearInterval(presenceTimer); app.removeListener('browser-window-focus', reportPresence) })
-
   const notifyAutomationRun = (data: unknown, win: BrowserWindow, activeThreadId: string | null, profileSettings: MousseSettings): void => {
     const run = (data ?? {}) as Partial<ScheduledRunEnded>
     if (run.notify !== true || typeof run.jobName !== 'string' || typeof run.outcome !== 'string') return
     const kind: ThreadNotificationKind = run.outcome === 'failed' || run.outcome === 'incomplete' ? 'idle' : 'completed'
     const channels = threadNotificationChannels(profileSettings.notifications, kind)
-    if (run.quietHours === true) channels.sound = false
     const plan = planThreadNotification({ ...channels, toast: false }, {
       windowFocused: win.isFocused(),
       viewingThread: Boolean(run.threadId && activeThreadId === run.threadId),
@@ -675,7 +662,7 @@ export function registerGuiIpc(
       if (plan.playSound) playThreadCompletionSound()
       return
     }
-    const content = { ...getThreadNotificationPresentation(kind, profileSettings), ...(run.quietHours === true ? { silent: true } : {}) }
+    const content = getThreadNotificationPresentation(kind, profileSettings)
     const useWindowsCompletionSound = process.platform === 'win32' && !content.silent
     const notification = new Notification({
       ...content,

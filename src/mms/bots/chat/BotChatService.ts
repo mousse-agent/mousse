@@ -452,7 +452,6 @@ export class BotChatService {
    * answered together. Sending the same request again answers a wall the first one never reached.
    */
   async chatSend(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage }> {
-    this.engine.noteOwnerActivity()
     return this.send(input)
   }
 
@@ -498,7 +497,6 @@ export class BotChatService {
     const question = this.questionToAnswer(input.botId, input.questionId)
     const choice = question.spec.choices.find((entry) => entry.label === input.choice)
     if (!choice) throw new BotEngineError('invalid_params', 'Pick one of the question\'s answers.')
-    this.engine.noteOwnerActivity()
     // A question the bot's work waits on: the tap answers the work, which goes on with it; no chat turn starts. Once the
     // work ended (it went on with its default), a late tap is an ordinary reply to the chat (below).
     if (question.lane === 'run') {

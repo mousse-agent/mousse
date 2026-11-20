@@ -109,7 +109,6 @@ it.each([false, true])('a live schedule still gets its wall card when another sc
 it.each(['needs_you', 'every'] as const)('owner removal keeps the schedule Tell me %s for its final report', async tellMe => {
   const s = await scheduled()
   f.book.update(f.scheduler.getJob(s.schedule.jobId)!, { tellMe })
-  f.host.quietHoursFor = () => ({ end: f.clock.now + 60_000 } as any)
   f.scheduler.deleteJob(s.schedule.jobId)
   await finish(f, s.payload, 'completed', { text: 'Checked the price.' })
   const report = chatOf(f, botId).find(row => row.activationId === s.row.id && row.kind === 'run_report')!

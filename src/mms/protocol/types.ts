@@ -1,4 +1,3 @@
-import { APP_PRESENCE_CAPABILITY } from '../notifications/OwnerQuietHours'
 import { KEEP_AWAKE_CAPABILITY } from '../../shared/keepAwake'
 import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
 /**
@@ -242,7 +241,6 @@ export type ProtocolEnvelope =
  */
 export const PROTOCOL_METHODS = [
   'applets.get', 'applets.state.get', 'applets.state.save', 'applets.export',
-  'app.presence',
   'health',
   'capabilities',
   'projects.list',
@@ -530,7 +528,6 @@ export const PROTOCOL_METHODS = [
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number]
 
 export const PROTOCOL_CAPABILITIES = [
-  APP_PRESENCE_CAPABILITY,
   KEEP_AWAKE_CAPABILITY,
   BOT_TELLING_CAPABILITY,
   MMS_PROTOCOL_CHUNK_CAPABILITY,

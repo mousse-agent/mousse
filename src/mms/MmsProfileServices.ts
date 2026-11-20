@@ -1,6 +1,5 @@
 import { workWaits } from './bots/store/BotStore'
 import { tellMeOf } from '../shared/types'
-import { OwnerQuietHours } from './notifications/OwnerQuietHours'
 import { onSettingsSaved } from './settings/SettingsStore'
 import { ResourceLifecycleError } from './lifecycle/ResourceLifecycleStore'
 import { SecretVault, secretThreadBusy } from './secrets/SecretVault'
@@ -281,7 +280,6 @@ function readThreadFacts(location: string, threadId: string): ThreadFacts | unde
 export class MmsProfileServices {
   readonly domains: DomainHandlerRegistry
   readonly config: MousseConfigStore
-  readonly ownerQuietHours: OwnerQuietHours
   readonly settings: SettingsStore
   readonly providerAuth: ProviderAuthService
   readonly antigravity: AntigravityProviderService
@@ -474,7 +472,6 @@ export class MmsProfileServices {
     })
     this.events = new MmsEventBus()
     this.settings = new SettingsStore(config)
-    this.ownerQuietHours = new OwnerQuietHours(() => this.settings.get().notifications.quietHours)
     // Before anything reads or moves a worktree: the folders this profile chose for them are Mousse's (`worktreeLayout`).
     setWorktreeFolders(homeDir, this.settings.get().storage)
     this.providerAuth = shared.providerAuth
@@ -892,9 +889,6 @@ export class MmsProfileServices {
       // "Use your threads" removed: what the bot sent that has not started leaves its owner's threads.
       threadsWithdrawn: (bot) => { this.orchestrator.withdrawBotThreadMessages(bot) },
       // A deleted bot's private temporary folder outside Mousse's data (Claude Code's commands on Linux) goes with it.
-      quietHoursFor: (botId, at) => this.ownerQuietHours.quietHoursFor(botId, at),
-      ownerActive: () => this.ownerQuietHours.active(),
-      ownerActivity: () => this.ownerQuietHours.report(),
       removeRuntimeTemp: (cwd) => removeClaudeBotTemp(cwd),
       // The owner's MCP servers set up for the whole profile, through Mousse (`BotMcp`).
       ...(this.orchestrator.botMcp() ? { mcp: this.orchestrator.botMcp()! } : {})
@@ -976,7 +970,7 @@ export class MmsProfileServices {
       }
     }
     this.personalBots = opened?.engine ?? null
-    this.platform.onDispose(onSettingsSaved(() => this.personalBots?.quietHoursChanged()))
+    this.platform.onDispose(onSettingsSaved(() => this.personalBots?.settingsChanged()))
     // A bot's browser that comes back to it on its own (the window that held it went away) says so in its chat.
     const chat = opened?.engine.chat
     // A bot's reply shows the applets its turn published in its thread, as a thread's reply does.

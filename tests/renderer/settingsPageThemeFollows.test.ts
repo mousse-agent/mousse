@@ -53,7 +53,7 @@ describe('an open Settings page and a theme an agent changes', () => {
   beforeEach(async () => {
     home = mkdtempSync(join(tmpdir(), 'mousse-theme-page-'))
     service = new SettingsStore(MousseConfigStore.load(home))
-    service.set({ notifications: { quietHours: { from: '22:00', to: '08:00' } }, experimental: { profiler: { enabled: true } } } as MousseSettingsUpdate)
+    service.set({ experimental: { profiler: { enabled: true } } } as MousseSettingsUpdate)
     changed = []
     const settings = {
       get: async () => service.get(),
@@ -98,25 +98,6 @@ describe('an open Settings page and a theme an agent changes', () => {
 
     await elsewhere({ appearance: { theme: 'light' } } as MousseSettingsUpdate)
     expect(checked()).toEqual(['Light'])
-  })
-
-  it.each([
-    ['general', null], ['general', { from: '23:00', to: '06:00' }],
-    ['labs', null], ['labs', { from: '23:00', to: '06:00' }]
-  ] as const)('keeps quiet hours through an open %s page toggle after service change %j', async (section, quietHours) => {
-    await act(async () => { window.dispatchEvent(new CustomEvent('mousse:settings-section', { detail: section })) })
-    const label = section === 'general' ? 'Notify for all threads on my other devices' : 'Memory notices'
-    const toggle = () => host.querySelector<HTMLButtonElement>(`[role="switch"][aria-label="${label}"]`)!
-    await vi.waitFor(() => expect(toggle()).not.toBeNull())
-    const before = toggle().getAttribute('aria-checked')
-
-    // A service write and its settings-changed event, as after a bot changed them, while this page stays open.
-    await elsewhere({ notifications: { quietHours } } as MousseSettingsUpdate)
-    expect(service.get().notifications.quietHours).toEqual(quietHours ?? undefined)
-    await act(async () => { toggle().click() })
-    const saved = service.get().notifications
-    expect(section === 'general' ? saved.allRemoteThreads : saved.memoryNotices).toBe(before !== 'true')
-    expect(saved.quietHours).toEqual(quietHours ?? undefined)
   })
 
   it('pauses the theme on every Settings page but Appearance, where themes are edited', async () => {
