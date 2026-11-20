@@ -9,6 +9,7 @@ import { userAction } from './git/gitPolicy'
 import { SecretRequests } from './secrets/SecretRequests'
 import { createSecretToolHost } from './secrets/secretToolHost'
 import { forgetWorktreeFolders, refreshWorktreeFolders, setWorktreeFolders } from './worktree/worktreeLayout'
+import { registerBranchNamer } from './workspace/branchNaming'
 import { AgentEpisodeStore } from './agents/AgentEpisodeStore'
 import { join } from 'path'
 import { EventEmitter } from 'node:events'
@@ -286,6 +287,7 @@ export class MmsProfileServices {
   readonly domains: DomainHandlerRegistry
   readonly config: MousseConfigStore
   readonly settings: SettingsStore
+  private forgetBranchNamer?: () => void
   readonly providerAuth: ProviderAuthService
   readonly antigravity: AntigravityProviderService
   readonly claudeSubscription: ClaudeSubscriptionProviderService
@@ -624,6 +626,11 @@ export class MmsProfileServices {
       this.projects,
       { questions: this.questions, modeRegistry: this.modeRegistry }
     )
+    // New worktree branches of this profile's threads are named by its title model, as Settings → Storage → Branches says.
+    this.forgetBranchNamer = registerBranchNamer(homeDir, {
+      settings: () => this.settings.get().branches,
+      ask: (request, signal) => this.orchestrator.askBranchName(request, signal)
+    })
     // MMS owns the canonical per-thread transcript and durable message queue for
     // every surface (GUI client, CLI client, remote sends). Electron never owns MMS.
     this.orchestrator.setThreadStore(this.threads)
@@ -3147,6 +3154,7 @@ export class MmsProfileServices {
     }
     // What this profile chose for worktrees is no longer Mousse's to act on through it.
     forgetWorktreeFolders(this.homeDir)
+    this.forgetBranchNamer?.()
     this.started = false
     this.stopped = true
   }

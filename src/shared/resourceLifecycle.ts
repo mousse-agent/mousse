@@ -142,6 +142,11 @@ export interface LifecyclePurgeItem {
   discardRequired?: boolean
   discardState?: 'pending' | 'cleared'
   branch?: string
+  /**
+   * A `ref` item that is a thread's worktree branch outside `refs/heads/mousse/`: the owner thread's journal shows Mousse
+   * made it (`threadBranchRecord`), so it is deleted as Mousse's own.
+   */
+  recordedBranch?: boolean
   sourcePath?: string
   rowId?: string
   indexDigest?: string

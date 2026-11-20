@@ -15,7 +15,7 @@ import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { WorktreeIdentity } from '../worktree/WorktreeIdentity'
 import { assertWorktreeFolderConnected, defaultWorkflowAgentWorktreeBase, disconnectedWorktreeFolder, driveNotConnectedText, isAgentWorktreePlace, isThreadWorktreePlace, isWorkflowAgentWorktreePlace, trashRootFor, trashRootOf } from '../worktree/worktreeLayout'
-import { ThreadJournal } from '../data/ThreadJournal'
+import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { claimOverlapsPath, getExternalResourceClaims, getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver } from './LifecycleClaims'
 import { canonicalPathAsync } from './canonicalPath'
 import { OwnershipFacts } from './ResourceInventory'
@@ -24,7 +24,10 @@ import { READ_ONLY_GIT_ENV } from '../git/readOnlyGit'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { gitRunError, LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitProcess'
 import { renameFolderAsync } from './renameFolder'
-import { isIdNamedMousseBranch, isMousseBranchName } from '../../shared/mousseBranches'
+import { isIdNamedMousseBranch, isMousseBranchName, isValidBranchName } from '../../shared/mousseBranches'
+import { withOwnedBranches } from '../git/gitPolicy'
+import { BRANCH_RELEASE_OPERATION, BRANCH_RESTORE_OPERATION, threadBranchRecord, type ThreadBranchRecord } from '../workspace/threadBranchRecords'
+import { randomUUID } from 'node:crypto'
 import { adminDigest, adminObjectIds, blobId, HEAD_REFLOG, readAdminFilesAsync, replayedAdminFile, storeAdmin, storeAdminBeforeRemoval, uncontainedTips, type StoredAdmin } from './worktreeAdminData'
 import { keepCopy, keepExistingCommit, keptCopyWindowMs } from '../actions/keptCopies'
 import { threadPreservedIndex } from '../actions/preservedFiles'
@@ -429,7 +432,7 @@ export class WorktreeRetirementService {
   load(path: string): WorktreeReconstructionManifest {
     assertLifecyclePath(this.store.root, path)
     const value = JSON.parse(readFileSync(path, 'utf8')) as WorktreeReconstructionManifest
-    if (value.schemaVersion !== 1 || value.profileId !== this.store.profileId || !samePath(path, this.pathFor(value.taskId, value.worktreePath)) || !isMousseBranchName(value.branch)) throw new Error('Invalid workspace reconstruction authority')
+    if (value.schemaVersion !== 1 || value.profileId !== this.store.profileId || !samePath(path, this.pathFor(value.taskId, value.worktreePath)) || !isValidBranchName(value.branch)) throw new Error('Invalid workspace reconstruction authority')
     const prefix = `refs/mousse/lifecycle/${this.store.profileId}/${value.taskId}/${hash(value.worktreePath).slice(0, 32)}`
     if (value.snapshotSha !== undefined && (value.snapshotRef !== `${prefix}/snapshot` || ![value.snapshotSha, value.snapshotTree].every((sha) => typeof sha === 'string' && /^[a-f0-9]{40,64}$/.test(sha)))) throw new Error('Malformed workspace reconstruction manifest')
     if (value.baseRef !== `${prefix}/base` || value.resultRef !== `${prefix}/result` || ![value.worktreePath, value.commonDir, value.gitDirectory, value.sourcePath].every(isAbsolute) || ![value.baseSha, value.resultSha, value.treeSha].every((sha) => /^[a-f0-9]{40,64}$/.test(sha)) || !/^[a-f0-9]{32}$/.test(value.repositoryId) || !Array.isArray(value.content) || !Array.isArray(value.auxiliary) || !['prepared', 'trashed', 'deleting', 'retired', 'materialized'].includes(value.state)) throw new Error('Malformed workspace reconstruction manifest')
@@ -448,7 +451,7 @@ export class WorktreeRetirementService {
       || !Array.isArray(clearing.copies) || !clearing.copies.every((copy) => keptEntry(copy) && /^[a-f0-9]{40,64}$/.test(copy.sha)) || clearing.changedAt !== undefined && typeof clearing.changedAt !== 'string')) throw new Error('Malformed workspace rebuild record')
     if (value.keptRefs !== undefined && (!Array.isArray(value.keptRefs) || !value.keptRefs.every((ref) => typeof ref === 'string' && ref.startsWith(`${prefix}/kept/`)))) throw new Error('Malformed workspace kept pins')
     if (value.adminRef !== undefined && (value.adminRef !== `${prefix}/admin` || ![value.adminTree, value.adminCommit].every((sha) => typeof sha === 'string' && /^[a-f0-9]{40,64}$/.test(sha)))) throw new Error('Malformed workspace Git data pin')
-    if (value.deletedBranches !== undefined && (!Array.isArray(value.deletedBranches) || !value.deletedBranches.every((entry) => isMousseBranchName(entry?.name) && /^[a-f0-9]{40,64}$/.test(entry?.sha)))) throw new Error('Malformed workspace branch record')
+    if (value.deletedBranches !== undefined && (!Array.isArray(value.deletedBranches) || !value.deletedBranches.every((entry) => isValidBranchName(entry?.name) && /^[a-f0-9]{40,64}$/.test(entry?.sha)))) throw new Error('Malformed workspace branch record')
     for (const entry of value.content) if (isAbsolute(entry.path) || entry.path.split(/[\\/]/).includes('..') || !['file', 'directory', 'link'].includes(entry.kind) || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0) throw new Error('Manifest content path is invalid')
     for (const entry of value.auxiliary) if (!MOUSSE_CONTROL_FILE_PATHS.includes(entry.path) || typeof entry.content !== 'string' || entry.content.length > 2 * 1024 * 1024) throw new Error('Manifest auxiliary payload is invalid')
     if (!/^[a-f0-9]{64}$/.test(value.checkoutFingerprint) || !value.rootIdentity || !Object.values(value.rootIdentity).every(Number.isFinite) || value.sparse && (typeof value.sparse.patterns !== 'string' || typeof value.sparse.cone !== 'boolean')) throw new Error('Manifest reconstruction state is invalid')
@@ -1165,34 +1168,76 @@ export class WorktreeRetirementService {
     }
   }
   /**
-   * Deletes the worktree's owned `mousse/*` branches whose tips the pins keep (a tip that is HEAD or the commit a pinned
-   * snapshot was taken on, or an ancestor of one), unless a worktree has the branch checked out. Those are the thread's
-   * own branch, and the branch HEAD was on when that is another of Mousse's id-named ones; a branch the agent made itself,
-   * whatever its name, is never touched. Each deletion is recorded so a restore brings the branch back.
+   * Deletes the worktree's owned branches whose tips the pins keep (a tip that is HEAD or the commit a pinned snapshot
+   * was taken on, or an ancestor of one), unless a worktree has the branch checked out. Each deletion is recorded so a
+   * restore brings the branch back.
+   *
+   * A thread's own branch (a manifest of its workspace.json) is deleted only while the thread's journal says Mousse owns
+   * it now (`threadBranchRecord`): not a name it released or gave up, nor one a rename left unsettled, whatever the
+   * manifest names. The release is journaled before the delete, so the name stops being Mousse's: a branch someone makes
+   * under it later is theirs. Without that record (a journal that cannot be read or written) the branch stays. Other
+   * owners' branches (agents', workflows', an id-named one HEAD was on) are deleted only under `mousse/`. A branch the
+   * agent made itself is never touched.
    */
   private async releaseBranches(manifest: WorktreeReconstructionManifest): Promise<void> {
     const checkedOut = new Set((await lifecycleReadAsync(manifest.commonDir, ['worktree', 'list', '--porcelain'])).split(/\r?\n/).filter((line) => line.startsWith('branch refs/heads/')).map((line) => line.slice('branch refs/heads/'.length)))
     const pins = [manifest.resultSha, manifest.snapshotSha].filter((sha): sha is string => Boolean(sha))
     const owned = [manifest.branch, ...(isIdNamedMousseBranch(manifest.headBranch) ? [manifest.headBranch] : [])]
+    const thread = this.threadBranchOwner(manifest)
     for (const name of new Set(owned)) {
-      if (!name || !isMousseBranchName(name) || checkedOut.has(name)) continue
+      if (!name || !isValidBranchName(name) || checkedOut.has(name)) continue
+      const threadBranch = Boolean(thread) && name === manifest.branch
+      if (threadBranch) {
+        const record = thread!.record
+        if (!record || !record.owned.has(name) || (record.pending && (record.pending.from === name || record.pending.to === name))) continue
+      } else if (!isMousseBranchName(name)) continue
       const tip = await this.tip(manifest, name)
       if (!tip) continue
       let kept = false
       for (const pin of pins) if (pin === tip || await gitSucceeds(manifest.commonDir, ['merge-base', '--is-ancestor', tip, pin])) { kept = true; break }
       if (!kept) continue
-      await lifecycleGitAsync(manifest.commonDir, ['update-ref', '--no-deref', '-d', `refs/heads/${name}`, tip])
+      if (threadBranch && !this.journalBranch(thread!.location, BRANCH_RELEASE_OPERATION, { branch: name, sha: tip, worktreePath: manifest.worktreePath })) continue
+      await withOwnedBranches([name], () => lifecycleGitAsync(manifest.commonDir, ['update-ref', '--no-deref', '-d', `refs/heads/${name}`, tip]))
       manifest.deletedBranches = [...(manifest.deletedBranches ?? []).filter((entry) => entry.name !== name), { name, sha: tip }]
     }
   }
-  /** Brings back the branches `releaseBranches` deleted, at their tips, where nothing has taken the name since. */
+  /**
+   * For a manifest of a thread's workspace.json: the thread's folder and its branch records (`record` undefined when its
+   * journal cannot be read). Undefined for any other owner (an agent's or a workflow's worktree).
+   */
+  private threadBranchOwner(manifest: WorktreeReconstructionManifest): { location: string; record?: ThreadBranchRecord } | undefined {
+    let location: string
+    try { location = this.store.require(manifest.taskId).location } catch { return basename(manifest.sourcePath) === 'workspace.json' ? { location: '' } : undefined }
+    if (basename(manifest.sourcePath) !== 'workspace.json') return undefined
+    try {
+      return { location, record: threadBranchRecord(new ThreadJournal(location, { readOnly: true }).list(), { worktreePath: manifest.worktreePath }) }
+    } catch {
+      return { location }
+    }
+  }
+  /** Journals a release or restore of the thread's branch; false when the journal cannot be written (the thread is trashed). */
+  private journalBranch(location: string, operationType: string, details: { branch: string; sha: string; worktreePath: string }): boolean {
+    if (!location) return false
+    try {
+      new ThreadJournal(location).append({ operationId: randomUUID(), operationType, state: 'completed', details })
+      return true
+    } catch {
+      return false
+    }
+  }
+  /**
+   * Brings back the branches `releaseBranches` deleted, at their tips, where nothing has taken the name since. A thread's
+   * own branch made again is journaled, so the name is Mousse's again; a name someone took meanwhile stays released.
+   */
   private async restoreBranches(manifest: WorktreeReconstructionManifest): Promise<void> {
     const missing: Array<{ name: string; sha: string }> = []
+    const thread = this.threadBranchOwner(manifest)
     for (const entry of manifest.deletedBranches ?? []) {
       if (await this.branchTaken(manifest, entry.name)) continue
       // A commit that is no longer in the repository cannot be a branch again; it is reported, never a reason to fail.
       if (!await gitSucceeds(manifest.commonDir, ['cat-file', '-e', `${entry.sha}^{commit}`])) { missing.push(entry); continue }
-      await lifecycleGitAsync(manifest.commonDir, ['update-ref', '--no-deref', `refs/heads/${entry.name}`, entry.sha, '0'.repeat(entry.sha.length)])
+      await withOwnedBranches([entry.name], () => lifecycleGitAsync(manifest.commonDir, ['update-ref', '--no-deref', `refs/heads/${entry.name}`, entry.sha, '0'.repeat(entry.sha.length)]))
+      if (thread && entry.name === manifest.branch) this.journalBranch(thread.location, BRANCH_RESTORE_OPERATION, { branch: entry.name, sha: entry.sha, worktreePath: manifest.worktreePath })
     }
     delete manifest.deletedBranches
     if (missing.length) manifest.branchesNotRestored = missing
@@ -1691,17 +1736,23 @@ export class WorktreeRetirementService {
     if (insideTask && dirname(sourcePath) === task.location && basename(sourcePath) === 'workspace.json') {
       const row = value as Record<string, unknown>
       const journal = new ThreadJournal(task.location, { readOnly: true }).list()
-      const provisions = journal.filter((entry) => {
+      const provisionFits = (entry: ThreadJournalRecord): boolean => {
         const intent = entry.expectedPreState as { branch?: string; worktreePath?: string } | undefined
-        // The worktree is at `threads/<task>/<conversation branch>`; its branch is `mousse/<slug>`, named once when it was
-        // made, or for a thread made before that, `mousse/thread/<task>/<conversation branch>`.
+        // The worktree is at `threads/<task>/<conversation branch>` (or in a worktree folder the person chose). Its branch is
+        // the one the provision made (a temporary name, any prefix), or for a thread made before that, `mousse/<slug>` or
+        // `mousse/thread/<task>/<conversation branch>`; a later rename by Mousse is in the journal too (`threadBranchRecord`).
         const leaf = typeof intent?.worktreePath === 'string' ? basename(intent.worktreePath) : undefined
-        const branchFits = typeof intent?.branch === 'string' && (intent.branch.startsWith('mousse/thread/') ? intent.branch === `mousse/thread/${task.taskId}/${leaf}` : !isIdNamedMousseBranch(intent.branch) && isMousseBranchName(intent.branch))
-        return entry.schemaVersion === 1 && entry.operationType === 'workspace-provision' && entry.state === 'planned' && branchFits && Boolean(leaf && /^[a-z0-9][a-z0-9_-]{0,127}$/i.test(leaf)) && typeof intent!.worktreePath === 'string' && samePath(intent!.worktreePath, input.worktreePath) && isThreadWorktreePlace(input.worktreePath, { home: installationHome, repositoryId: input.repositoryId!, threadId: task.taskId })
-      })
-      let branchOwned = provisions.some((entry) => (entry.expectedPreState as { branch?: string }).branch === input.branch)
-      if (!branchOwned && typeof row.conversationBranchId === 'string') {
-        const branchesPath = join(task.location, 'conversation-branches.json')
+        const branchFits = typeof intent?.branch === 'string' && (intent.branch.startsWith('mousse/thread/') ? intent.branch === `mousse/thread/${task.taskId}/${leaf}` : !isIdNamedMousseBranch(intent.branch) && isValidBranchName(intent.branch))
+        return entry.schemaVersion === 1 && branchFits && Boolean(leaf && /^[a-z0-9][a-z0-9_-]{0,127}$/i.test(leaf)) && typeof intent!.worktreePath === 'string' && samePath(intent!.worktreePath, input.worktreePath) && isThreadWorktreePlace(input.worktreePath, { home: installationHome, repositoryId: input.repositoryId!, threadId: task.taskId })
+      }
+      const branches = threadBranchRecord(journal, { worktreePath: input.worktreePath, acceptProvision: provisionFits })
+      const provisions = journal.filter((entry) => entry.operationType === 'workspace-provision' && entry.state === 'planned' && provisionFits(entry))
+      // Any name the worktree's branch has had by Mousse's records: the worktree is the thread's on it. Whether the branch
+      // itself may be deleted is decided again where it is deleted (`releaseBranches`): only one Mousse owns now.
+      let branchOwned = branches.known.has(input.branch)
+      const branchesPath = join(task.location, 'conversation-branches.json')
+      // Without conversation branches, no fork can own the branch either.
+      if (!branchOwned && typeof row.conversationBranchId === 'string' && existsSync(branchesPath)) {
         assertLifecyclePath(task.location, branchesPath)
         const stat = lstatSync(branchesPath)
         if (!stat.isFile() || stat.size > 32 * 1024 * 1024) throw new Error('Conversation branch authority is not a bounded record')
@@ -1746,7 +1797,7 @@ export class WorktreeRetirementService {
   }
   private async inspectIdentity(path: string, branch: string, expectedRepository?: string) {
     await assertLifecyclePathAsync(dirname(path), path)
-    if (!isAbsolute(path) || !(await lstat(join(path, '.git'))).isFile() || !isMousseBranchName(branch)) throw new Error('Only owned linked worktrees can retire')
+    if (!isAbsolute(path) || !(await lstat(join(path, '.git'))).isFile() || !isValidBranchName(branch)) throw new Error('Only owned linked worktrees can retire')
     // The branch is the owner's record of the thread's own branch; the agent may have switched to another, so it is not compared with HEAD's.
     if (!samePath(await realpathLikeSync(path), await lifecycleReadAsync(path, ['rev-parse', '--show-toplevel']))) throw new Error('Worktree root changed')
     const commonDir = await realpathLikeSync(resolve(path, await lifecycleReadAsync(path, ['rev-parse', '--git-common-dir'])))

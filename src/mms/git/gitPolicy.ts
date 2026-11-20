@@ -265,10 +265,24 @@ export function isOwnedPath(path: string): boolean {
   return ownedRoots().some((root) => contains(root, real))
 }
 
-/** `refs/mousse/*` and `mousse/*` branches, also on a remote. */
+/** `refs/mousse/*` and `mousse/*` branches, also on a remote, and the branches a {@link withOwnedBranches} scope names. */
 export function isOwnedRef(ref: string): boolean {
   const name = ref.replace(/^\+/, '')
-  return /^refs\/mousse\//i.test(name) || /^refs\/heads\/mousse\//i.test(name)
+  if (/^refs\/mousse\//i.test(name) || /^refs\/heads\/mousse\//i.test(name)) return true
+  return ownedBranchScope.getStore()?.has(name) === true
+}
+
+const ownedBranchScope = new AsyncLocalStorage<ReadonlySet<string>>()
+
+/**
+ * Runs `work` with `branches` (full names, without `refs/heads/`) counted as Mousse's, for Git commands it runs itself.
+ * Only for a branch Mousse's own records show it made: a thread's worktree branch, which `git worktree add -b` created
+ * (so no branch of that name was there before) and which Mousse may have renamed since. Whatever the name, the person's
+ * prefix or one the title model picked, the branch is then judged as a `mousse/` branch is.
+ */
+export function withOwnedBranches<T>(branches: readonly string[], work: () => T): T {
+  const outer = ownedBranchScope.getStore()
+  return ownedBranchScope.run(new Set([...(outer ?? []), ...branches.map((name) => `refs/heads/${name}`)]), work)
 }
 
 /**
@@ -431,6 +445,8 @@ interface Effect {
   /** It sends commits to a remote repository. */
   publishes?: boolean
   config?: boolean
+  /** The config it writes is only the sections of the branches in `refs` (a branch rename moves `branch.<name>.*`). */
+  branchConfig?: boolean
   /** A command Mousse never runs: it can delete what nothing else keeps. */
   banned?: string
   /** Its ref writes follow symbolic refs, so each ref is judged by where it finally points. */
@@ -590,7 +606,7 @@ function gitEffect(sub: string, rest: readonly string[], stdin: string | undefin
       // Deleting a symbolic branch deletes the symbolic ref itself, never its target.
       if (has(rest, '-d', '-D', '--delete')) return { refs: heads(names, has(rest, '-r', '--remotes') ? 'refs/remotes/' : 'refs/heads/') }
       // A rename or copy also moves the branch's config section.
-      if (has(rest, '-m', '-M', '--move', '-c', '-C', '--copy')) return { refs: heads(names), config: true, unlistedRefs: names.length < 2 }
+      if (has(rest, '-m', '-M', '--move', '-c', '-C', '--copy')) return { refs: heads(names), config: true, branchConfig: names.length === 2, unlistedRefs: names.length < 2 }
       if (!names.length || has(rest, '--list', '-l', '--show-current', '--contains', '--no-contains', '--merged', '--no-merged', '--points-at')) return READ
       return { refs: heads(names.slice(0, 1)), config: has(rest, '--track', '-t'), deref: true }
     }
@@ -837,7 +853,8 @@ export function decideGitCommand(request: GitCommandRequest): GitDecision {
   // In a snapshot store the index and HEAD are the store's; the files of its work tree are still the folder's.
   const repositoryOwned = cwdOwned || redirect.store !== undefined
   const problems: string[] = []
-  if (effect.config) problems.push('it writes the repository\'s config')
+  // A rename of branches Mousse owns moves only their own config sections.
+  if (effect.config && !(effect.branchConfig && effect.refs.length === 2 && effect.refs.every((ref) => isOwnedRef(ref)))) problems.push('it writes the repository\'s config')
   if (effect.remote) problems.push('it changes a remote')
   if (effect.publishes) problems.push('it pushes to a remote')
   if (effect.sparse) {

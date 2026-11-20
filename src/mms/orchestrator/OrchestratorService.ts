@@ -11701,11 +11701,27 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * The title model's answer when asked to name a thread's worktree branch (`branchNaming`): the same model, scope and
+   * gateway as chat titles. Undefined when no title model is chosen; the branch then keeps its temporary name. `signal`
+   * ends the request when the naming gives up waiting (`BRANCH_NAMING_TIMEOUT_MS`).
+   */
+  async askBranchName(request: { threadId: string; system: string; prompt: string }, signal?: AbortSignal): Promise<string | undefined> {
+    if (!this.hasTitleModel()) return undefined
+    return this.titleModelText(request.system, request.prompt, {
+      task: 'branch_name',
+      scope: this.threadScope(request.threadId),
+      sessionKey: request.threadId,
+      maxChars: 120,
+      ...(signal ? { signal } : {})
+    })
+  }
+
+  /**
    * One request with no tools on the title model the user chose, through the gateway's `oneShot`:
    * chat titles, pull request drafts and commit messages. The gateway resolves the selection in
    * `scope`, bounds the wait and never retries; the caller falls back when it throws.
    */
-  private async titleModelText(system: string, prompt: string, options: { task: OneShotTask; scope: ProviderScope | undefined; sessionKey: string; maxChars: number }): Promise<string> {
+  private async titleModelText(system: string, prompt: string, options: { task: OneShotTask; scope: ProviderScope | undefined; sessionKey: string; maxChars: number; signal?: AbortSignal }): Promise<string> {
     try {
       const { text } = await this.harness.oneShot({
         selection: this.settingsStore.get().title,
@@ -11715,7 +11731,8 @@ export class OrchestratorService extends EventEmitter {
         prompt,
         maxChars: options.maxChars,
         sessionKey: options.sessionKey,
-        task: options.task
+        task: options.task,
+        ...(options.signal ? { signal: options.signal } : {})
       })
       return text
     } catch (error) {

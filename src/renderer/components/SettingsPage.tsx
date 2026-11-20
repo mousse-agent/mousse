@@ -505,7 +505,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
               {anchorNote.text}
             </p>
           )}
-          {activeSection === 'storage' && <StorageSettings />}
+          {activeSection === 'storage' && <StorageSettings branches={settings.branches} onBranches={(branches) => updateSettings({ branches })} />}
           {activeSection === 'general' && (
             <GeneralSettings settings={settings} onUpdate={updateSettings} />
           )}

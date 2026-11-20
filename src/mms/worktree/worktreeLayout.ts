@@ -322,8 +322,8 @@ export function repositoryFolderName(projectName: string, repositoryId: string, 
 }
 
 /**
- * A thread's folder name in a chosen worktree folder: the slug of its branch `mousse/<slug>` (a branch named by ids, from
- * before branches were named after the first message, gives `thread`), then the thread's tag, `<slug>-<tag>`.
+ * A thread's folder name in a chosen worktree folder: the slug of its branch `mousse/<slug>` (none, as a new worktree on a
+ * temporary branch passes, or a branch named by ids, gives `thread`), then the thread's tag, `<slug>-<tag>`.
  */
 export function threadFolderName(branch: string | undefined, threadId: string, maxSlug = 64): string {
   const own = branch?.startsWith('mousse/') ? branch.slice('mousse/'.length) : undefined

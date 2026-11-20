@@ -1301,10 +1301,14 @@ function shasInWords(commits: string[]): string {
  * rewritten history. It is built from `original`, the turn's own action, since a Redo's target is the Undo's record,
  * whose commits are always empty. Commits are worded as history, and qualified when their branch has moved since.
  */
-export function* gitLeftInPlaceNoticeSteps(cwd: string, operation: 'Undo' | 'Redo' | 'Revert', original: GitLeftInPlaceSource): Steps<string | undefined> {
+export function* gitLeftInPlaceNoticeSteps(cwd: string, operation: 'Undo' | 'Redo' | 'Revert', original: GitLeftInPlaceSource, renamedTo: (branch: string) => string = (branch) => branch): Steps<string | undefined> {
   const { commits, git } = original
   const parts: string[] = []
-  const branch = git?.branchAfter
+  // Branches as they are named now: Mousse may have renamed the thread's branch since (`threadBranchRecord`), which is
+  // neither a switch nor a branch that is gone.
+  const named = (branch?: string): string | undefined => (branch ? renamedTo(branch) : branch)
+  const before = named(git?.branchBefore)
+  const branch = named(git?.branchAfter)
   const last = commits.at(-1)
   if (last) {
     const isAncestor = function* (ref: string): Steps<boolean> {
@@ -1322,9 +1326,9 @@ export function* gitLeftInPlaceNoticeSteps(cwd: string, operation: 'Undo' | 'Red
       ? `, so Git now shows ${commits.length === 1 ? 'its' : 'their'} changes as ${operation === 'Undo' ? 'undone' : 'reverted'}` : ''
     parts.push(`${subject} ${where}${shown}.`)
   }
-  if (git && git.branchBefore !== git.branchAfter && (git.branchBefore || git.branchAfter)) {
+  if (git && before !== branch && (before || branch)) {
     const name = (value?: string) => value ?? 'a detached HEAD'
-    parts.push(`This turn switched from ${name(git.branchBefore)} to ${name(git.branchAfter)}; ${operation} leaves the checkout where it is.`)
+    parts.push(`This turn switched from ${name(before)} to ${name(branch)}; ${operation} leaves the checkout where it is.`)
   }
   if (git?.rewroteHistory) parts.push(`This turn rewrote the history of ${branch ?? 'HEAD'} (a reset or rebase); ${operation} leaves that history as it is.`)
   if (!parts.length) return undefined
@@ -1333,8 +1337,8 @@ export function* gitLeftInPlaceNoticeSteps(cwd: string, operation: 'Undo' | 'Red
 }
 
 
-export function gitLeftInPlaceNoticeAsync(cwd: string, operation: 'Undo' | 'Redo' | 'Revert', original: GitLeftInPlaceSource): Promise<string | undefined> {
-  return runAsync(gitLeftInPlaceNoticeSteps(cwd, operation, original))
+export function gitLeftInPlaceNoticeAsync(cwd: string, operation: 'Undo' | 'Redo' | 'Revert', original: GitLeftInPlaceSource, renamedTo?: (branch: string) => string): Promise<string | undefined> {
+  return runAsync(gitLeftInPlaceNoticeSteps(cwd, operation, original, renamedTo))
 }
 
 /**

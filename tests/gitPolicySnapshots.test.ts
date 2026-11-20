@@ -14,6 +14,7 @@ import { WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from '../src/mms/l
 import { releaseExecutionLeaseHandle, waitAcquireExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
+import { registerBranchNamer } from '../src/mms/workspace/branchNaming'
 import { actionOptions, gitFoundationFixture } from './fixtures/gitFoundation'
 
 /**
@@ -95,15 +96,22 @@ describe('under MOUSSE_GIT_POLICY=refuse', () => {
     } finally { repositoryLease.release(); releaseExecutionLeaseHandle(taskLease) }
   })
 
-  it('a thread worktree named from its first message: naming, a taken name, retirement, trash expiry and a restore need nothing they are not allowed', async () => {
+  it('a thread worktree on the person\'s prefix, named by the title model: making, renaming, a taken name, retirement, trash expiry and a restore need nothing they are not allowed', async () => {
     const task = join(f.home, 'thread-data', 'task'), other = join(f.home, 'thread-data', 'other')
     for (const dir of [task, other]) mkdirSync(dir, { recursive: true })
     writeFileSync(join(task, 'meta.json'), JSON.stringify({ id: 'task' }))
+    const forget = registerBranchNamer(f.home, { settings: () => ({ mode: 'semantic', prefix: 'team', instructions: '' }), ask: async () => 'fix/login-button' })
     refuse()
-    // Named once, under refusal: the second thread with the same first message gets the next free name.
-    const metadata = await new ThreadWorkspaceManager(task).provision('task', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
-    const second = await new ThreadWorkspaceManager(other).provision('other', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
-    expect([metadata.branch, second.branch]).toEqual(['mousse/fix-the-login-button', 'mousse/fix-the-login-button-2'])
+    // Under refusal: made on `team/<id>` and renamed outside `mousse/`; the second thread's name is taken, so it keeps its own.
+    const manager = new ThreadWorkspaceManager(task), otherManager = new ThreadWorkspaceManager(other)
+    const made = await manager.provision('task', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
+    await manager.branchNaming
+    const second = await otherManager.provision('other', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
+    await otherManager.branchNaming
+    forget()
+    const metadata = manager.load()!
+    expect(made.branch).toMatch(/^team\/[0-9a-f]{8}$/)
+    expect([metadata.branch, otherManager.load()!.branch]).toEqual(['fix/login-button', second.branch])
     const store = new ResourceLifecycleStore({ profileId: 'p', profileHome: f.home }); store.registerTask({ taskId: 'task', location: task })
     registerThreadLifecycleGate(f.home, store)
     const taskLease = await waitAcquireExecutionLease(task), repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(f.repo))
@@ -115,7 +123,7 @@ describe('under MOUSSE_GIT_POLICY=refuse', () => {
       await service.retire(path)
       expect(await service.expireTrash(path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
       // Its branch went with the trash; the other thread's stays.
-      expect(plain(f.repo, 'branch', '--list', 'mousse/*', '--format=%(refname:short)')).toBe('mousse/fix-the-login-button-2')
+      expect(plain(f.repo, 'branch', '--list', 'fix/*', 'team/*', '--format=%(refname:short)')).toBe(second.branch)
       await service.reconstruct(path)
       expect(plain(metadata.worktreePath, 'branch', '--show-current')).toBe(metadata.branch)
       expect(f.read(metadata.worktreePath, 'uncommitted.txt')).toBe('kept\n')

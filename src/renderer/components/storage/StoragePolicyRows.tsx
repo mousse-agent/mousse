@@ -117,6 +117,8 @@ export interface StoragePolicyRowsProps {
   onResumeStorage: () => void
   /** The Worktree folder row, first in the Worktrees group. */
   worktreeFolder?: ReactNode
+  /** The Branches group, right after the Worktrees group. */
+  branches?: ReactNode
 }
 
 /** The Worktrees and Browser data groups. Every change saves at once. */
@@ -158,6 +160,8 @@ export function StoragePolicyRows(props: StoragePolicyRowsProps) {
         control={<Switch id="storage-merged-switch" checked={policy?.worktrees.removeMerged ?? false} disabled={busy || !policy} onChange={(next) => setWorktrees({ removeMerged: next })} />}
       />
     </SettingsGroup>
+
+    {props.branches}
 
     <SettingsGroup title="Browser data" icon={Globe} id="storage-browser">
       <SettingsRow

@@ -1005,6 +1005,7 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
     'bots',
     'experimental',
     'errorReports',
+    'branches',
     'agents',
     'integrations'
   ])
@@ -1040,7 +1041,20 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
   if (walked.permissions !== undefined) assertPermissionsPatch(walked.permissions)
   if (walked.runs !== undefined) assertRunsPatch(walked.runs)
   if (walked.errorReports !== undefined) assertErrorReportsPatch(walked.errorReports)
+  if (walked.branches !== undefined) assertBranchesPatch(walked.branches)
   return walked
+}
+
+/** Branch naming: a mode, a prefix and instructions; the daemon normalizes the prefix. */
+function assertBranchesPatch(value: unknown): void {
+  const patch = asPlainObject(value, 'partial.branches')
+  for (const [key, item] of Object.entries(patch)) {
+    if (key === 'mode') {
+      if (item !== 'static' && item !== 'semantic' && item !== 'custom') throw new Error('partial.branches.mode is not a naming mode')
+    } else if (key === 'prefix' || key === 'instructions') {
+      if (typeof item !== 'string') throw new Error(`partial.branches.${key} must be a string`)
+    } else throw new Error(`partial.branches.${key} is not allowed`)
+  }
 }
 
 /** Error reports: two switches. */

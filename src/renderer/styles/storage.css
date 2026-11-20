@@ -320,3 +320,13 @@
 .storage-folder-offline {
   color: var(--warning, var(--text-primary));
 }
+
+/* Settings → Storage → Branches: the naming instructions take the row's full width. */
+.settings-group-rows .settings-input.branch-naming-instructions {
+  width: 100%;
+  max-width: none;
+  min-height: 64px;
+  padding: var(--space-8);
+  resize: vertical;
+  font: inherit;
+}
