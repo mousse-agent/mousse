@@ -137,6 +137,17 @@
       "expiresAt": "2026-11-20T12:40:26.020Z"
     },
     {
+      "task": "keep-typing-after-send",
+      "session": "Animatrix-5a1927",
+      "machine": "Animatrix",
+      "branch": "keep-typing-after-send",
+      "paths": [
+        "src/renderer/components/OrchestratorChat.tsx"
+      ],
+      "claimedAt": "2026-11-20T19:45:51.405Z",
+      "expiresAt": "2026-11-20T21:45:51.405Z"
+    },
+    {
       "task": "mousse-id-one-devices-list",
       "session": "agibook-4b4072",
       "machine": "agibook",
