@@ -164,7 +164,7 @@ import { StoragePolicyStore } from './lifecycle/StoragePolicyStore'
 import { StorageSweepClock } from './lifecycle/sweepClock'
 import { threadDescendants, threadHasPendingWork } from './lifecycle/threadIdle'
 import { listPendingQueue } from './queue/ThreadMessageQueue'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { settleThreadMutationOwnership } from './queue/ThreadExecutionLease'
 import type { TaskLifecycleRecord } from '../shared/resourceLifecycle'
 import { UndoRetentionSweeper } from './actions/UndoRetentionSweeper'
@@ -184,6 +184,8 @@ import { SpeechRelay } from './speech/SpeechRelay'
 import { systemClock } from './net/clock'
 import { trustExistingProjectsOnce } from './git/repoPrograms'
 import { LimitPoller } from './usageHistory/limitPoller'
+import { forEachYielding, startupBackgroundTimed, startupPhase } from './startup/startupTiming'
+import { logInfo } from './log/diag'
 
 const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.delete'
@@ -435,6 +437,18 @@ export class MmsProfileServices {
   private webhooksClosed = false
   private started = false
   private stopped = false
+  /**
+   * The daemon leaves the start's slow passes (the lifecycle pass, the runtime pass, the search index's first sweep) for
+   * after it is ready (`startAfterReadyWork`); every other owner runs them during its start, as before.
+   */
+  private readonly deferStartupWork: boolean
+  /** Whether the daemon is ready, as its profile host knows it: a profile started after that begins its deferred work at once. */
+  private daemonReady: () => boolean = () => false
+  /** Settles once the start's lifecycle pass is done: deletes and cleanup runs wait for it (`untilStartupLifecycleDone`). */
+  private startupLifecycleDone: Promise<void> = Promise.resolve()
+  private finishStartupLifecycle: () => void = () => undefined
+  private deferredStartupWork?: Promise<void>
+  private startupWorkStopped = false
   private readonly requests = new OwnedWorkBarrier()
   private stopOperation?: Promise<void>
   private readonly ownerHandle: MmsOwnerHandle | null
@@ -464,6 +478,7 @@ export class MmsProfileServices {
   ) {
     this.config = config
     this.ownerHandle = ownerHandle
+    this.deferStartupWork = opts?.ownerKind === 'daemon'
     this.homeDir = homeDir
     this.installationHome = shared.installationHome
     this.domains = shared.domains
@@ -1960,14 +1975,17 @@ export class MmsProfileServices {
    * Deletes a thread and its subagent threads for good (`ThreadDeleter`): it must be archived, or be Mousse's own
    * delete (`internal`), and only a person in the app may discard unpublished work.
    */
-  deleteThreadForGood(taskId: string, options: DeleteOptions): Promise<TaskLifecycleRecord> {
+  async deleteThreadForGood(taskId: string, options: DeleteOptions): Promise<TaskLifecycleRecord> {
     this.threads.assertLifecycleMutationAvailable()
+    // After the start's lifecycle pass, which finishes the deletes a crash cut short and reads the same records.
+    await this.startupLifecycleDone
     return this.threadDeletes.delete(taskId, options)
   }
 
   /** `threads.delete` before its admission: see `ThreadDeleter.stopBeforeDelete`. */
   async stopThreadBeforeDelete(threadId: string, options: { human: boolean; discard: boolean }): Promise<void> {
     this.threads.assertLifecycleMutationAvailable()
+    await this.startupLifecycleDone
     try {
       await this.threadDeletes.stopBeforeDelete(threadId, options)
     } catch (error) {
@@ -2415,6 +2433,9 @@ export class MmsProfileServices {
 
   /** Close admission synchronously, before any teardown await can admit another request. */
   beginShutdown(): void {
+    // The start's deferred passes stop at their next step; what waits for the lifecycle pass goes on (and is refused).
+    this.startupWorkStopped = true
+    this.finishStartupLifecycle()
     void this.undoRetention.stop()
     void this.threadExpiry.stop()
     void this.pullRequestWatch.stop()
@@ -2514,20 +2535,40 @@ export class MmsProfileServices {
 
   async initialize(): Promise<void> {
     // The chosen worktree folders that are connected, with what Mousse made in them, before anything recovers or runs Git there.
-    await refreshWorktreeFolders()
+    await startupPhase('init.worktreeFolders', () => refreshWorktreeFolders())
+    if (this.deferStartupWork) {
+      // The daemon finishes the lifecycle pass after it is ready (`startAfterReadyWork`); deletes wait for it until then.
+      this.startupLifecycleDone = new Promise<void>((resolve) => { this.finishStartupLifecycle = resolve })
+    } else {
+      await this.recoverLifecycleAtStart()
+      startupPhase('init.agentEpisodes', () => { for (const thread of this.threads.listAllThreads()) this.interruptOrphanedEpisodes(thread.id) })
+      startupPhase('init.subagentLineage', () => this.repairSubagentLineage())
+    }
+    // The worktree manager opens its repository when an operation first needs it (`WorktreeManager.getRepository`);
+    // project-bound operations call RepositoryContext.open() themselves and fail clearly if their project is invalid.
+    this.config.startWatching(() => {
+      /* external edits reload sections; stores read on demand */
+    })
+  }
+
+  /**
+   * What a crash or a stop left of the trash: deletes cut short keep their work, interrupted trash and restore moves
+   * finish, the old trash comes back archived, and deletes still in the trash are finished or put back.
+   */
+  private async recoverLifecycleAtStart(): Promise<void> {
     // A delete an older version cut short keeps the thread's work before recovery resumes it; only an expiry's goes on.
-    const keeping = this.lifecycle.cleanup.keepWorkOfInterruptedDeletes()
+    const keeping = startupPhase('init.keepWorkOfInterruptedDeletes', () => this.lifecycle.cleanup.keepWorkOfInterruptedDeletes())
     if (keeping.kept.length) console.warn('deletes cut short keep their threads’ worktrees and refs', { threads: keeping.kept })
     // One that could not be set to keep the work is left pending, untouched, and never resumed as it began; the next start tries again.
     if (keeping.failed.length) console.warn('deletes cut short could not be set to keep their work; left pending until the next start', { failed: keeping.failed })
-    await this.lifecycle.recoverAll(keeping.skip)
+    await startupPhase('init.lifecycleRecovery', () => this.lifecycle.recoverAll(keeping.skip))
     // After the trash operations a crash left are finished: once, what was in the old trash comes back, archived.
     // Only then is a thread still in the trash a delete that was cut short, and it is finished.
     try {
-      const returned = await this.returnTrashToArchive()
+      const returned = await startupPhase('init.trashToArchive', () => this.returnTrashToArchive())
       if (returned.failed.length) console.warn('some threads in the trash could not be moved to Archived; trying again at the next start', { failed: returned.failed })
       // While the move is still bringing threads back, those are left to it; everything else is finished now.
-      const finished = await this.finishCutShortDeletes(new Set(returned.waiting))
+      const finished = await startupPhase('init.finishCutShortDeletes', () => this.finishCutShortDeletes(new Set(returned.waiting)))
       const kept = finished.filter((entry) => entry.outcome === 'kept')
       if (kept.length) console.warn('some threads in the trash could not be finished or put back; trying again at the next start', { kept })
       const givenUp = finished.filter((entry) => entry.outcome === 'archived' && entry.reason)
@@ -2540,16 +2581,61 @@ export class MmsProfileServices {
       const trash = this.lifecycle.cleanup.policy()
       if (trash.automaticPurge) this.lifecycle.cleanup.configure({ ...trash, automaticPurge: false }, true)
     } catch { /* An unreadable policy keeps the sweep off: it reads the same file and stops. */ }
-    for (const thread of this.threads.listAllThreads()) {
-      const episodes = new AgentEpisodeStore(this.threads.getThreadDir(thread.id))
-      if (existsSync(episodes.path)) episodes.interruptOrphans()
+  }
+
+  /** Named agents' episodes a restart cut short end as interrupted (`AgentEpisodeStore.interruptOrphans`). */
+  private interruptOrphanedEpisodes(threadId: string): void {
+    const episodes = new AgentEpisodeStore(this.threads.getThreadDir(threadId))
+    if (existsSync(episodes.path)) episodes.interruptOrphans()
+  }
+
+  /**
+   * Called once the daemon is ready (`MousseMainService.afterReady`), and by a profile that starts after that: the
+   * start's slow passes run now, in the background, each logged with how long it took. A request that needs one waits
+   * only for it: a delete or a cleanup run for the lifecycle pass (`untilStartupLifecycleDone`), a search for the
+   * index's first sweep, and a thread's first use for its own part of the runtime pass (`ThreadRuntimeManager`).
+   */
+  startAfterReadyWork(): void {
+    if (!this.deferStartupWork || !this.started || this.deferredStartupWork || this.startupWorkStopped) return
+    const work = this.runDeferredStartupWork()
+    this.deferredStartupWork = work
+    void work.catch(() => undefined)
+  }
+
+  /** Settles once the start's lifecycle pass is done (at once for an owner that does it during its start). */
+  untilStartupLifecycleDone(): Promise<void> {
+    return this.startupLifecycleDone
+  }
+
+  private async runDeferredStartupWork(): Promise<void> {
+    const stopping = (): boolean => this.startupWorkStopped
+    const log = (line: string): void => logInfo('startup', this.getInstallationHost() ? line : `profile ${this.profileId.slice(0, 8)}: ${line}`)
+    try {
+      await startupBackgroundTimed('lifecycle', async () => {
+        // Every lifecycle record is read and checked once, a few at a time, so the passes below do not hold up requests.
+        const store = this.threads.lifecycleStore
+        const tasks = join(store.root, 'tasks')
+        const ids = existsSync(tasks) ? readdirSync(tasks).filter((name) => name.endsWith('.json')).map((name) => name.slice(0, -5)) : []
+        await forEachYielding(ids, (id) => { try { store.get(id) } catch { /* Reported by the pass that needs it. */ } }, stopping)
+        if (!stopping()) await this.recoverLifecycleAtStart()
+      }, log)
+      // Before deletes go ahead: their inventory reads the agents' episodes, and the subagents they include are found by lineage.
+      if (!stopping()) await startupBackgroundTimed('agentEpisodes', () => forEachYielding(this.threads.listAllThreads(), (thread) => {
+        try { this.interruptOrphanedEpisodes(thread.id) } catch (error) {
+          console.warn('agent episodes a restart cut short could not be ended', { threadId: thread.id, error: error instanceof Error ? error.message : String(error) })
+        }
+      }, stopping), log)
+      if (!stopping()) await startupBackgroundTimed('subagentLineage', async () => this.repairSubagentLineage(), log)
+    } finally {
+      this.finishStartupLifecycle()
     }
-    this.repairSubagentLineage()
-    // The worktree manager opens its repository when an operation first needs it (`WorktreeManager.getRepository`);
-    // project-bound operations call RepositoryContext.open() themselves and fail clearly if their project is invalid.
-    this.config.startWatching(() => {
-      /* external edits reload sections; stores read on demand */
-    })
+    if (stopping()) return
+    // Headless-safe: reclaim abandoned claims and drain pending normal work without the GUI, a few threads at a time,
+    // alongside the passes below.
+    void startupBackgroundTimed('queueRecovery', () => this.orchestrator.recoverStartupQueues(), log)
+    // The storage service is the only scheduler; it runs the trash sweep inside its own run.
+    this.storageCleanup.start()
+    await startupBackgroundTimed('threadRuntimes', () => this.threadRuntimes.settleRestartedThreads(stopping), log)
   }
 
   /**
@@ -2707,6 +2793,13 @@ export class MmsProfileServices {
     }
     // Reads the usage limits every 15 minutes, its first read a full interval after start.
     this.limitPoller.start()
+    // A profile started after the daemon is ready (created, restored) runs its deferred passes now.
+    if (this.daemonReady()) this.startAfterReadyWork()
+  }
+
+  /** The profile host's answer to whether the daemon is ready (`ProfileHost.startAfterReadyWork`). */
+  setDaemonReady(ready: () => boolean): void {
+    this.daemonReady = ready
   }
 
   private async startOwned(): Promise<void> {
@@ -2717,18 +2810,17 @@ export class MmsProfileServices {
     // Runs the previous daemon left active cannot resume (SPEC §5); settle them before any turn,
     // and before anything that can send one (H4): scheduled jobs and the network both
     // start below, so none of their sends can create a run that boot recovery then interrupts.
-    this.orchestrator.recoverRunEngineOnBoot()
+    startupPhase('start.runEngineRecovery', () => this.orchestrator.recoverRunEngineOnBoot())
     // Personal bots settle what the crash left before any worker can change a bot run (PR 6 §5a).
     if (this.personalBots) {
       try {
-        await this.personalBots.reconcileOnStartup()
+        await startupPhase('start.botReconcile', () => this.personalBots!.reconcileOnStartup())
       } catch (error) {
         console.warn('the bot startup pass failed', { error: error instanceof Error ? error.message : String(error) })
       }
     }
     // Wake rows of a kind no longer written (an earlier pull request watch's) are settled before any worker can run one.
-    this.runEngine.inbox.withdrawRetiredRows()
-    this.startRunEngineWorkers()
+    startupPhase('start.runEngineWorkers', () => { this.runEngine.inbox.withdrawRetiredRows(); this.startRunEngineWorkers() })
     // Monitors the last run left ended with it: their threads are told, in the background.
     void this.monitors.recoverOnBoot().catch((error: unknown) => {
       console.warn('monitors left by the last run could not be reported', { error: error instanceof Error ? error.message : String(error) })
@@ -2736,47 +2828,52 @@ export class MmsProfileServices {
 
     if (this.config.getScheduledSection().enabled) {
       // Bot schedules are jobs in the same scheduler: with it off, nothing starts on its own.
-      this.scheduled.start()
+      startupPhase('start.scheduled', () => this.scheduled.start())
     }
-    await this.net.start()
+    await startupPhase('start.net', () => this.net.start())
     // The network engine starts after the daemon is ready, with its helper (`ProfileHost.startNetworkedProfiles`):
     // its database, identity bootstrap and tombstone sweep do not delay readiness. That is after v1 too, so a
     // profile that joined another computer's network finds v1 on.
     // After the net service has loaded its ports, so the listener can refuse one of them.
-    await this.listenScheduledWebhooksIfEnabled()
+    await startupPhase('start.webhooks', () => this.listenScheduledWebhooksIfEnabled())
 
-    await this.startMcpServer()
+    await startupPhase('start.mcpServer', () => this.startMcpServer())
     // Restore multi-tenant runtimes; mark non-reattachable PTY/agents interrupted.
-    this.threadRuntimes.restoreOnStartup()
-    // Threads kept in thread.db are searched through the profile's index; it is caught up now and every minute.
-    this.threads.startSearchIndexSweep()
+    // The daemon settles each thread on its first use, and the rest after ready (`startAfterReadyWork`).
+    startupPhase('start.threadRuntimes', () => this.deferStartupWork ? this.threadRuntimes.beginRestart() : this.threadRuntimes.restoreOnStartup())
+    // Threads kept in thread.db are searched through the profile's index; it is caught up now and every minute. The
+    // daemon's first sweep waits for the lifecycle pass after ready; a search waits for that sweep.
+    startupPhase('start.searchIndex', () => this.threads.startSearchIndexSweep(undefined, this.deferStartupWork ? { after: this.startupLifecycleDone } : {}))
     // Idle threads leave memory and reload from disk when next needed; the feature flag is the kill switch.
     this.orchestrator.residency?.setEnabled(() => this.config.get().features.releaseIdleThreads !== false)
-    this.orchestrator.residency?.start()
+    startupPhase('start.residency', () => this.orchestrator.residency?.start())
     // Threads still on JSON files move to thread.db in the background, one at a time.
-    this.threads.startBackgroundImport()
+    startupPhase('start.threadImport', () => this.threads.startBackgroundImport())
     // Wallpaper images no theme has used for a week go, in the background.
     void this.wallpapers.collect(this.usedWallpaperIds()).catch(() => 0)
     // Questions are memory-only — new process has none; document interrupted semantics.
-    this.questions.markInterruptedByDaemonRestart()
-    await this.platform.workflowRuns.startRecovery()
-    this.undoRetention.start()
-    this.pullRequestWatch.start()
+    startupPhase('start.questions', () => this.questions.markInterruptedByDaemonRestart())
+    await startupPhase('start.workflowRecovery', () => this.platform.workflowRuns.startRecovery())
+    startupPhase('start.undoRetention', () => this.undoRetention.start())
+    startupPhase('start.pullRequestWatch', () => this.pullRequestWatch.start())
     // A profile with no storage policy gets one now: what it had before for a profile in use, the recommended rules for a new one.
-    try { this.storagePolicy.initialize(() => this.threads.lifecycleStore.list().length > 0 || this.threads.listAllThreads().length > 0) }
+    try { startupPhase('start.storagePolicy', () => this.storagePolicy.initialize(() => this.threads.lifecycleStore.list().length > 0 || this.threads.listAllThreads().length > 0)) }
     catch { /* The policy is read again by every run; one that cannot be written is reported there. */ }
-    // The storage service is the only scheduler; it runs the trash sweep inside its own run.
-    this.storageCleanup.start()
-    this.storageUsage.start()
+    // The storage service is the only scheduler; it runs the trash sweep inside its own run. The daemon starts it
+    // once the lifecycle pass is done.
+    startupPhase('start.storage', () => { if (!this.deferStartupWork) this.storageCleanup.start(); this.storageUsage.start() })
 
     // Headless-safe: reclaim abandoned claims and drain pending normal work without the GUI.
     // Non-blocking; live peer ownership is never stolen.
-    this.orchestrator.scheduleStartupQueueRecovery()
+    // The daemon does this after ready, once the lifecycle pass is done (`startAfterReadyWork`).
+    if (!this.deferStartupWork) startupPhase('start.queueRecovery', () => this.orchestrator.scheduleStartupQueueRecovery())
 
-    this.events.emit({ channel: 'projects:updated', data: this.projects.listProjects() })
-    this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
-    this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
-    this.events.emit({ channel: 'scheduled:status', data: this.scheduled.getStatus() })
+    startupPhase('start.announce', () => {
+      this.events.emit({ channel: 'projects:updated', data: this.projects.listProjects() })
+      this.events.emit({ channel: 'threads:updated', data: this.threads.listAllThreads() })
+      this.events.emit({ channel: 'scheduled:updated', data: this.scheduled.listJobs() })
+      this.events.emit({ channel: 'scheduled:status', data: this.scheduled.getStatus() })
+    })
   }
 
   /**
@@ -2986,6 +3083,7 @@ export class MmsProfileServices {
     // constructing the array would let one synchronous throw prevent every
     // later owner from even receiving shutdown.
     const cleanups = [
+      () => this.deferredStartupWork,
       () => this.undoRetention.stop(),
       () => this.pullRequestWatch.stop(),
       () => this.storageCleanup.stop(),

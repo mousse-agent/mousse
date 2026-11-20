@@ -38,6 +38,8 @@ import { resolveDaemonHostInvocation } from '../daemonHost'
 import { dropForeignAppImageMounts } from '../appImageMounts'
 import { MmsProtocolServer } from '../../mms/protocol'
 import { prepareMemoryMonitor } from '../../mms/diagnostics/startMemoryMonitor'
+import { formatStartupTiming, startupPhase, startupTimingBegin, startupTimingEnd } from '../../mms/startup/startupTiming'
+import { logInfo } from '../../mms/log/diag'
 import {
   armDaemonExitDeadline,
   stopRunningDaemon,
@@ -108,6 +110,8 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
   const homeDir = canonicalizeHome(opts.homeDir)
   const startedAt = new Date().toISOString()
   const startedAtMs = performance.now()
+  // Each step until ready is timed and logged at ready (`[info:startup]`), so a slow start shows where its time went.
+  startupTimingBegin()
   const log = opts.onLog ?? ((msg: string) => process.stderr.write(`${msg}\n`))
 
   let resolveLifetime!: () => void
@@ -205,17 +209,17 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     if (await stoppedDuringStartup()) return state
 
     // Sole production owner construction path (kind: daemon).
-    const opened = await createDaemonOwner(
+    const opened = await startupPhase('create', () => createDaemonOwner(
       {
         homeDir,
         mode: 'text'
       },
       { start: false, ownerToken }
-    )
+    ))
     // A stop that came while the owner was being created skips the start. One that comes
     // during the start waits for it: teardown stops the owner only once it is on `state`.
     try {
-      if (!(await stoppedDuringStartup())) await opened.mms.start()
+      if (!(await stoppedDuringStartup())) await startupPhase('start', () => opened.mms.start())
     } finally {
       state.mms = opened.mms
     }
@@ -240,7 +244,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
         log(`memory monitor not started: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
-    const endpoint = await protocolServer.start()
+    const endpoint = await startupPhase('protocolServer', () => protocolServer.start())
     if (await stoppedDuringStartup()) return state
     if (opts.failAfter === 'protocol-start') {
       throw new Error('Injected protocol-start failure')
@@ -274,9 +278,12 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
       throw err
     }
 
+    const startupMs = performance.now() - startedAtMs
     log(
-      `Mousse MMS running (headless) — home: ${homeDir} pid: ${process.pid} owner=daemon endpoint=${endpoint} startup=${Math.round(performance.now() - startedAtMs)}ms`
+      `Mousse MMS running (headless) — home: ${homeDir} pid: ${process.pid} owner=daemon endpoint=${endpoint} startup=${Math.round(startupMs)}ms`
     )
+    const timing = startupTimingEnd()
+    if (timing) logInfo('startup', formatStartupTiming(timing, startupMs))
 
     memoryMonitor?.start()
     // Work that must not delay readiness starts now, in the background.
@@ -300,6 +307,7 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
     await shutdown('startup-failed', 1)
     return state
   } finally {
+    startupTimingEnd()
     releaseElectronQuit?.()
   }
 }

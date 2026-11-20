@@ -160,4 +160,27 @@ describe('thread runtimes are released', () => {
     expect(restarted.get(plain)).toBeUndefined()
     expect(restarted.get(withTask)?.tasks.list().map((task) => task.status)).toEqual(['interrupted'])
   })
+
+  it('after a restart, a thread used before the background pass reaches it is settled on that use, and the pass leaves its new work alone', async () => {
+    const used = store.createThread('Opened right after the restart', undefined, undefined, { started: true }).id
+    const later = store.createThread('Not opened', undefined, undefined, { started: true }).id
+    for (const id of [used, later]) {
+      runtimes.createTask(id, { description: 'cut short', status: 'in_progress' })
+      runtimes.persistAgentsTasks(id)
+    }
+
+    const restarted = new ThreadRuntimeManager()
+    restarted.attach({ threadStore: store, orchestrator: orch, ptyManager: new PtyManager(), questions: new UserQuestionService() })
+    // What the daemon does before it is ready: no thread is read yet.
+    restarted.beginRestart()
+    expect(restarted.get(used)).toBeUndefined()
+    expect(restarted.get(later)).toBeUndefined()
+    // The first read already shows what the restart cut short as interrupted.
+    expect(restarted.listTasks(used).map((task) => task.status)).toEqual(['interrupted'])
+    restarted.createTask(used, { description: 'started after the restart', status: 'in_progress' })
+    // The rest, after ready, in the background.
+    await restarted.settleRestartedThreads()
+    expect(restarted.listTasks(used).map((task) => task.status)).toEqual(['interrupted', 'in_progress'])
+    expect(restarted.get(later)?.tasks.list().map((task) => task.status)).toEqual(['interrupted'])
+  })
 })

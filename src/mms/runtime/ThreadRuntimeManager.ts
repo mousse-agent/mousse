@@ -14,6 +14,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { ThreadRuntime } from './ThreadRuntime'
 import type { UnseenDoneStore } from './UnseenDoneStore'
 import type { Agent, AgentStatus, Task, ThreadActivityState } from '../../shared/types'
+import { forEachYielding } from '../startup/startupTiming'
 
 const BUSY_AGENT_STATUSES: ReadonlySet<AgentStatus> = new Set([
   'starting',
@@ -70,6 +71,11 @@ export class ThreadRuntimeManager extends EventEmitter {
   private readonly lastUse = new Map<string, number>()
   /** The idle sweep's clock (`ThreadResidency.now`), so the sweep and the uses above are timed alike. */
   private now: () => number = Date.now
+  /**
+   * The threads listed when the service restarted whose agents and tasks from before the restart are not settled yet
+   * (`beginRestart`): each is settled once, on its first use or by the background pass, whichever comes first.
+   */
+  private restartPending: Set<string> | null = null
 
   attach(deps: {
     threadStore: ThreadDataStore
@@ -121,6 +127,8 @@ export class ThreadRuntimeManager extends EventEmitter {
     rt.agents.setPersistCallback(() => this.persistAgentsTasks(threadId))
     rt.tasks.setPersistCallback(() => this.persistAgentsTasks(threadId))
     rt.markHydrated()
+    // A thread used before the restart's pass reached it is settled now, before anything reads its agents.
+    if (this.restartPending?.has(threadId)) this.settleRestarted(threadId, rt)
     return rt
   }
 
@@ -450,15 +458,61 @@ export class ThreadRuntimeManager extends EventEmitter {
    * Startup: hydrate runtimes for threads with durable agents/tasks/queue work.
    * Marks non-reattachable PTY as interrupted (no live process after daemon restart).
    */
+  /** The restart's pass in one go: every listed thread is settled before this returns (`beginRestart`). */
   restoreOnStartup(): void {
+    this.beginRestart()
+    for (const threadId of [...(this.restartPending ?? [])]) this.settleRestarted(threadId)
+    this.restartPending = null
+  }
+
+  /**
+   * Begins the restart's pass. Agents and tasks a restart cut short are marked interrupted, for every thread listed
+   * now: on the thread's first use (`getOrHydrate`), or by `settleRestartedThreads`, whichever comes first. So the
+   * service is ready without reading every thread, and nothing sees an agent from before the restart as running.
+   * Done marks are restored now.
+   */
+  beginRestart(): void {
     if (!this.threadStore) return
-    for (const thread of this.threadStore.listAllThreads()) {
-      if (thread.settledAt) continue
-      const data = this.threadStore.loadThreadWorkState(thread.id)
-      // Only threads with work to look at: a runtime for every started thread is what the idle sweep later drops.
-      const hasWork = data.agents.length > 0 || data.tasks.length > 0 || data.queued > 0 || data.sessions > 0
-      if (!hasWork) continue
-      const rt = this.getOrHydrate(thread.id)
+    this.restartPending = new Set(this.threadStore.listAllThreads().filter((thread) => !thread.settledAt).map((thread) => thread.id))
+    for (const threadId of [...this.restartPending]) {
+      const rt = this.runtimes.get(threadId)
+      if (rt?.isHydrated) this.settleRestarted(threadId, rt)
+    }
+    // Done outlives the service: threads that finished unseen before the restart show Done again. A thread that
+    // is gone or archived since is no longer listed, so its mark is dropped.
+    for (const threadId of this.unseenDone?.list() ?? []) {
+      const thread = this.threadStore.getThread(threadId)
+      if (!thread || thread.settledAt) {
+        this.unseenDone?.delete(threadId)
+        continue
+      }
+      // Hydrated first: a runtime made here starts its turn state from its own (idle) activity.
+      const rt = this.getOrHydrate(threadId)
+      this.turnActivity.set(threadId, 'completed')
+      this.publishDerivedActivity(threadId, rt)
+    }
+  }
+
+  /** The rest of the restart's pass, in the background: the threads nothing used yet, a few at a time. */
+  async settleRestartedThreads(shouldStop: () => boolean = () => false): Promise<void> {
+    const pending = this.restartPending
+    if (!pending) return
+    await forEachYielding([...pending], (threadId) => this.settleRestarted(threadId), shouldStop)
+    if (this.restartPending === pending && !pending.size) this.restartPending = null
+  }
+
+  /** Marks interrupted what the restart cut short in one thread, once. `rt`: its runtime, already hydrated. */
+  private settleRestarted(threadId: string, rt?: ThreadRuntime): void {
+    if (!this.restartPending?.delete(threadId) || !this.threadStore) return
+    try {
+      if (!rt) {
+        if (!this.threadStore.getThread(threadId)) return
+        const data = this.threadStore.loadThreadWorkState(threadId)
+        // Only threads with work to look at: a runtime for every started thread is what the idle sweep later drops.
+        const hasWork = data.agents.length > 0 || data.tasks.length > 0 || data.queued > 0 || data.sessions > 0
+        if (!hasWork) return
+        rt = this.getOrHydrate(threadId)
+      }
       for (const agent of rt.agents.list()) {
         // Headless children are owned by the daemon process and cannot outlive a restart.
         const guiSessionCannotBeRestored = agent.executionMode === 'gui' || agent.executionMode === 'headless'
@@ -474,19 +528,9 @@ export class ThreadRuntimeManager extends EventEmitter {
           rt.tasks.updateStatus(task.id, 'interrupted')
         }
       }
-    }
-    // Done outlives the service: threads that finished unseen before the restart show Done again. A thread that
-    // is gone or archived since is no longer listed, so its mark is dropped.
-    for (const threadId of this.unseenDone?.list() ?? []) {
-      const thread = this.threadStore.getThread(threadId)
-      if (!thread || thread.settledAt) {
-        this.unseenDone?.delete(threadId)
-        continue
-      }
-      // Hydrated first: a runtime made here starts its turn state from its own (idle) activity.
-      const rt = this.getOrHydrate(threadId)
-      this.turnActivity.set(threadId, 'completed')
-      this.publishDerivedActivity(threadId, rt)
+    } catch (error) {
+      // A thread that cannot be read now (moving to the trash, say) is left as it is; it is not listed afterwards.
+      console.warn("a thread's work from before the restart could not be settled", { threadId, error: error instanceof Error ? error.message : String(error) })
     }
   }
 }
