@@ -31,6 +31,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { vi } from 'vitest'
 import { runNetEngineSsh } from '../../../src/cli/commands/netEngineSsh'
+import { setSharedShellPath } from '../../../src/mms/harness/shellPath'
+import { observeHarnessSpawns } from '../../../src/mms/harness/spawn'
 import { MousseMainService } from '../../../src/mms/MousseMainService'
 import type { DomainConnectionContext } from '../../../src/mms/protocol/domainRegistry'
 import { dispatchMethod } from '../../../src/mms/protocol/handlers'
@@ -188,6 +190,7 @@ export class Fabric {
   readonly routesSeen: Array<{ to: string; route: unknown }> = []
 
   constructor() {
+    withoutAgentClis()
     const expected = expectedRoute()
     // Every connection a helper reports goes to <out>/conn-up.jsonl, one JSON object per line: the kit judges the
     // route case from it (1b §14).
@@ -731,6 +734,55 @@ function denied(where: string): void {
   record('egress_attempted')
   const out = process.env.MOUSSE_NET_ENGINE_CHECK_OUT
   if (out) appendFileSync(join(out, 'egress'), `${where}\n`)
+}
+
+/** Agent CLIs a profile could find and start (each name as installed, `.exe`, `.cmd` and `.ps1` on Windows). */
+const AGENT_CLIS = [
+  'claude',
+  'codex',
+  'gemini',
+  'grok',
+  'cursor-agent',
+  'agy',
+  'antigravity',
+  'opencode',
+  'pi',
+  'qwen',
+  'copilot',
+  'amp',
+  'goose',
+  'droid'
+]
+
+let agentClisHidden = false
+
+/**
+ * A check never starts the user's installed agent CLIs: they reach the network (Codex syncs its plugins) and use
+ * the user's real install. Each profile finds none: PATH loses every folder holding one, the stored PATH the app
+ * would read (`shellPath`) is empty, and the user's folders the app also searches (`~/.local/bin`, the standalone
+ * installs under LOCALAPPDATA) point at an empty one. Any agent CLI started anyway fails the run with
+ * `egress_attempted`, the command kept in `<out>/egress`.
+ */
+function withoutAgentClis(): void {
+  if (agentClisHidden) return
+  agentClisHidden = true
+  const windows = process.platform === 'win32'
+  const names = AGENT_CLIS.flatMap((name) =>
+    windows ? [name, `${name}.exe`, `${name}.cmd`, `${name}.ps1`] : [name]
+  )
+  const separator = windows ? ';' : ':'
+  const key = Object.keys(process.env).find((name) => name.toUpperCase() === 'PATH') ?? 'PATH'
+  process.env[key] = (process.env[key] ?? '')
+    .split(separator)
+    .filter((folder) => folder && !names.some((name) => existsSync(join(folder, name))))
+    .join(separator)
+  setSharedShellPath({ entries: [], source: 'failed', error: 'a check run reads no stored PATH' })
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'engine-check-user-')))
+  for (const name of windows ? ['USERPROFILE', 'LOCALAPPDATA', 'APPDATA'] : ['HOME'])
+    process.env[name] = home
+  observeHarnessSpawns((spawned) =>
+    denied(`agent CLI (${spawned.instanceId}, ${spawned.purpose}): ${spawned.command}`)
+  )
 }
 
 /**
