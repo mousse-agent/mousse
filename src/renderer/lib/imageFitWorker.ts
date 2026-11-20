@@ -20,7 +20,7 @@ function hasAlpha(bitmap: ImageBitmap): boolean {
   return false
 }
 
-self.addEventListener('message', async (event: MessageEvent) => {
+async function handleMessage(event: MessageEvent): Promise<void> {
   const message = event.data as { op: string; id?: number; key?: number; blob?: Blob; width?: number; height?: number; type?: string; quality?: number }
   if (message.op === 'close') {
     decoded.get(message.key!)?.close()
@@ -57,4 +57,8 @@ self.addEventListener('message', async (event: MessageEvent) => {
   } catch {
     reply({ id, ok: false })
   }
+}
+
+self.addEventListener('message', (event: MessageEvent) => {
+  void handleMessage(event)
 })
