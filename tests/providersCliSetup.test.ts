@@ -359,7 +359,7 @@ describe('Usage from the agent editor', () => {
   }
 
   it('links a signed-in agent that reports usage to the Usage page, and shows no meter', () => {
-    for (const driver of ['claude', 'codex'] as const) {
+    for (const driver of ['claude', 'codex', 'antigravity'] as const) {
       const html = editor({ driver, auth: { canSignOut: true } })
       expect(html, driver).toContain('data-testid="prov-account-usage"')
       expect(buttons(html), driver).toEqual(expect.arrayContaining(['Usage', 'Sign out']))
