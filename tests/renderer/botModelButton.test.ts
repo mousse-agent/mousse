@@ -11,8 +11,6 @@ import { fakeBots, installPreload, summary, type FakeBots } from './fakeBotsClie
 import { clearPrivateBotDrafts } from '../../src/renderer/components/bots/privateBotDrafts'
 import { setAnimationSpeed } from '../../src/renderer/lib/motion'
 import type { ProviderUsage } from '../../src/shared/providerAuth'
-import { useProviderSnapshotsStore } from '../../src/renderer/lib/providerSnapshots'
-import { snapshot } from '../providerSnapshotFixture'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -49,7 +47,7 @@ const button = () => host.querySelector<HTMLButtonElement>('[data-mousse="chat-h
 const ring = () => button()?.querySelector('svg[data-usage-level]')
 const settle = async () => { for (let turn = 0; turn < 5; turn += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) }) }
 
-async function open(cached: ProviderUsage | undefined, signedInAntigravity = false) {
+async function open(cached: ProviderUsage | undefined) {
   fake = fakeBots()
   fake.client.model = vi.fn(async () => ({ model: SONNET, models: [], computer: 'this_computer', computers: [{ id: 'this_computer', name: 'Desk' }], providers, slots: rows })) as never
   pushed = []
@@ -57,9 +55,6 @@ async function open(cached: ProviderUsage | undefined, signedInAntigravity = fal
   installPreload(fake, { providers: {
     usageSlots: async () => ({ slots: [{ id: 'claude-subscription', label: 'Claude subscription', instanceId: 'claude', ...(cached ? { cached } : {}) }] }),
     watchUsage,
-    snapshots: async () => signedInAntigravity
-      ? [snapshot({ instanceId: 'antigravity', driver: 'antigravity', displayName: 'Google Antigravity' })]
-      : [],
     onUsage: (listener: (event: { usage: ProviderUsage }) => void) => { pushed.push(listener); return () => { pushed = pushed.filter((entry) => entry !== listener) } }
   } })
   setBotsClient(fake.client)
@@ -88,7 +83,6 @@ afterEach(() => {
   clearPrivateBotDrafts()
   useChatsStore.setState(chatsInitial)
   useBotsStore.setState(botsInitial)
-  useProviderSnapshotsStore.setState(useProviderSnapshotsStore.getInitialState())
   setAnimationSpeed('normal')
 })
 
@@ -120,15 +114,7 @@ it('opens the bot\'s four model rows, each on its model', async () => {
   const menu = host.querySelector<HTMLElement>('[role="dialog"][aria-label="Pip\'s models"]')!
   expect([...menu.querySelectorAll('.bot-model-row-label')].map((label) => label.textContent)).toEqual(['Talk', 'Light work', 'Medium work', 'Hard work'])
   expect(menu.textContent).toMatch(/Sonnet 5\.5.*Same as.*Sonnet 5\.5.*Opus 5\.5/)
-  expect(menu.textContent).not.toContain('Google Antigravity')
   await act(async () => { document.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) })
   await settle()
   expect(host.querySelector('[role="dialog"][aria-label="Pip\'s models"]')).toBeNull()
-})
-
-it('explains why a signed-in Google Antigravity entry is absent from the bot model choices', async () => {
-  await open(undefined, true)
-  await act(async () => button()!.click())
-  const menu = host.querySelector<HTMLElement>('[role="dialog"][aria-label="Pip\'s models"]')!
-  expect(menu.textContent).toContain('Google Antigravity is available for regular chats you send yourself.')
 })

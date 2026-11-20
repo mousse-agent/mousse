@@ -52,8 +52,6 @@ export interface DriverInfo {
    * CLI (`setup: existing`); the Add dialog asks which (Codex).
    */
   setups?: boolean
-  /** Runs only messages the owner sends from a Mousse window (a personal Google sign-in): bots cannot use it. */
-  ownerOnly?: boolean
 }
 
 /** The entry runs Mousse's own Codex download with Sign in with ChatGPT. */
@@ -91,8 +89,7 @@ export const DRIVER_INFO: Record<HarnessDriverKind, DriverInfo> = {
     customModels: false,
     executableHint: "agy, or Google's 1.1.1 ACP server",
     addHint: 'Mousse uses agy on this computer, or installs it after adding.',
-    signOutHint: 'Also signs out agy on this computer',
-    ownerOnly: true
+    signOutHint: 'Also signs out agy on this computer'
   },
   cursor: {
     label: 'Cursor',

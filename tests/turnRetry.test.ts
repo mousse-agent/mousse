@@ -26,7 +26,6 @@ describe('when a failed turn is sent again', () => {
     ['after a steer went in', unreachable, { steered: true }, false],
     ['after the runtime retried itself', unreachable, { runtimeRetried: true }, false],
     ["a bot's turn", unreachable, { bot: true }, false],
-    ['a turn on a personal sign-in', unreachable, { ownerOnly: true }, false],
     ['a refusal (400)', providerStatusError(400, 'bad request'), {}, false],
     ['a usage limit', usageLimitError({ provider: 'claude', estimated: true }), {}, false],
     ['an error Mousse made', new Error('internal'), {}, false],

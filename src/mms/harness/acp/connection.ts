@@ -54,7 +54,7 @@ export interface AcpClientHandlers {
 }
 
 /** Why a connection opens. */
-export type AcpPurpose = 'turn' | 'sign_in' | 'sign_out' | 'models' | 'handshake'
+export type AcpPurpose = 'turn' | 'sign_in' | 'sign_out' | 'models' | 'handshake' | 'one_shot'
 
 export interface AcpLaunchRequest {
   purpose: AcpPurpose

@@ -102,6 +102,11 @@ export interface AcpProcess extends AcpConnection {
   commands?: Set<string>
   /** The agent answered a steer's second prompt with an error: its later steers are cut and restarted (`AcpQuirks.nativeSteerFrom`). */
   nativeSteerRefused?: boolean
+  /**
+   * Set on a one-shot's process (`AcpSessions.oneShot`): every request of the agent to use a tool (a permission, a
+   * file read or write) is refused, and ends the request.
+   */
+  refuseTools?: (what: string) => void
 }
 
 /** Whether a steer goes into `process`'s running prompt as a second prompt, with no cancel (`AcpQuirks.nativeSteerFrom`). */
@@ -109,6 +114,12 @@ export function steersNatively(quirks: AcpQuirks, process: Pick<AcpProcess, 'inf
   if (!quirks.nativeSteerFrom || process.nativeSteerRefused) return false
   const version = compareVersions(process.info?.agentInfo?.version, quirks.nativeSteerFrom)
   return version === 0 || version === 1
+}
+
+/** A one-shot's file request: refused, and the request ends (`AcpProcess.refuseTools`). */
+function refuseFile(refuse: (what: string) => void, what: string): Promise<never> {
+  refuse(what)
+  return Promise.reject(new Error('This request runs no tools.'))
 }
 
 /** Session updates that show the agent working on the prompt in flight (not session bookkeeping). */
@@ -373,6 +384,11 @@ export class AcpSessions {
     const classify = this.options.classifyOption ?? classifyGenericOption
     const handlers: AcpClientHandlers = {
       requestPermission: async (request) => {
+        // A one-shot runs no tool: refused unasked, and the request ends.
+        if (active?.refuseTools) {
+          active.refuseTools(request.toolCall?.title ?? 'a tool')
+          return { outcome: { outcome: 'cancelled' } }
+        }
         // While a person is asked, the call is not a foreground tool: a person's steer answers it rather than waiting.
         const callId = request.toolCall?.toolCallId
         const awaiting = callId ? active?.turnToolAwaiting : undefined
@@ -384,8 +400,14 @@ export class AcpSessions {
         return answer
       },
       ...(quirks.clientFs ? {
-        readTextFile: (request) => readWorkspaceFile(scope, request),
-        writeTextFile: (request) => writeWorkspaceFile(questions, scope, request, label)
+        readTextFile: (request) => {
+          if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file read')
+          return readWorkspaceFile(scope, request)
+        },
+        writeTextFile: (request) => {
+          if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file write')
+          return writeWorkspaceFile(questions, scope, request, label)
+        }
       } : {}),
       // A sign-in link the agent sends as a URL elicitation goes to the sign-in; nothing else is answered.
       ...(this.options.urlElicitation ? { createElicitation: async (request: Parameters<NonNullable<AcpClientHandlers['createElicitation']>>[0]) => {
@@ -1217,6 +1239,75 @@ export class AcpSessions {
       current.turnToolAwaiting = undefined
       current.permissionMode = undefined
       this.turning.delete(current)
+    }
+  }
+
+  /**
+   * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a commit message. A
+   * fresh agent process and session of its own in `cwd` (an empty folder the caller made for it), with no MCP
+   * server and no client file system; the system text and the prompt go as one prompt. Every permission or file
+   * request is refused, and any tool call the agent reports ends the request as refused. The answer is the agent's
+   * text. One attempt, never saved or resumed; `signal` stops it, and the process ends afterwards.
+   */
+  async oneShot(input: { cwd: string; model: string; system: string; prompt: string; signal: AbortSignal; onActivity(): void }): Promise<string> {
+    const { label, quirks } = this.options
+    input.signal.throwIfAborted()
+    // xAI's tagged prompts end on a notice this request does not wait for.
+    if (quirks.xaiExtensions) throw harnessAppError({ code: 'unsupported', message: `${label} cannot run a single request.` })
+    await this.options.beforeLaunch?.('one_shot')
+    input.signal.throwIfAborted()
+    const active = this.launch('one_shot')
+    active.cwd = input.cwd
+    let refused: Error | undefined
+    active.refuseTools = (what) => {
+      refused ??= harnessAppError({ code: 'policy_unenforceable', message: `${label} tried to use a tool (${what}) in a request that runs none, so Mousse stopped it.` })
+      closeAcpConnection(active)
+    }
+    const abort = () => closeAcpConnection(active)
+    input.signal.addEventListener('abort', abort, { once: true })
+    let text = ''
+    try {
+      await this.initialize(active)
+      input.signal.throwIfAborted()
+      input.onActivity()
+      const session = await active.connection.agent.request(methods.agent.session.new, { cwd: input.cwd, mcpServers: [] })
+      active.sessionId = session.sessionId
+      input.signal.throwIfAborted()
+      input.onActivity()
+      // The session's model control, read without recording anything: this session is not the profile's.
+      if (!quirks.modelConfigId) active.modelControl = agentModels(session, active.info?.meta).control
+      await this.selectModel(active, input.model)
+      input.signal.throwIfAborted()
+      active.onUpdate = (update) => {
+        if (!update || typeof update !== 'object' || refused) return
+        const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; title?: string; name?: string }
+        // A tool is refused before anything else runs, a slow activity callback included.
+        if (event.sessionUpdate === 'tool_call' || event.sessionUpdate === 'tool_call_update') {
+          active.refuseTools?.(event.title ?? event.name ?? 'a tool')
+          return
+        }
+        input.onActivity()
+        if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') text += event.content.text ?? ''
+      }
+      const prompt = [input.system, input.prompt].filter((part) => part.trim()).join('\n\n')
+      const outcome = await active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId, prompt: [{ type: 'text', text: prompt }] })
+      // What the agent wrote just before it answered is still on its way (see `chat`).
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      if (refused) throw refused
+      input.signal.throwIfAborted()
+      const ended = promptStopOutcome(label, outcome)
+      if (ended === 'cancelled') throw agentCancelledError(label)
+      if (ended) throw ended
+      return text
+    } catch (error) {
+      if (refused) throw refused
+      if (input.signal.aborted) throw error
+      throw this.authRequiredError(active, error) ?? acpAgentError(error) ?? error
+    } finally {
+      // `refuseTools` stays: a request that arrives while the process ends is refused too.
+      input.signal.removeEventListener('abort', abort)
+      active.onUpdate = undefined
+      this.close(active)
     }
   }
 

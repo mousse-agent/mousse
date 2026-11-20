@@ -7,7 +7,8 @@ import type { LlmModelOption, LlmProviderOption } from '../../../../../shared/se
 import { ANTIGRAVITY_INSTANCE_ID } from '../../../../../shared/providerInstances'
 import type { UserQuestionService } from '../../../../orchestrator/UserQuestionService'
 import { atomicWriteJsonSync } from '../../../../data/AtomicFs'
-import { compareVersions, type RuntimeUsage } from '../../../driver'
+import { harnessAppError } from '../../../../../shared/harness/types'
+import { compareVersions, type OneShotSpec, type RuntimeUsage } from '../../../driver'
 import { agyStandalonePaths, cliNames, findOnPath } from '../../../env'
 import { isAuthRequired } from '../../auth'
 import type { AcpConnectionFactory } from '../../connection'
@@ -62,6 +63,8 @@ type ProfileSettings = {
   /** The `agy` whose limits reply reported a turn: its limits are not read again. */
   usageStopped?: { binary: string; version: string }
 }
+/** The notice `agy` sends as its reply when the model's quota is used up (seen on agy 1.5.13). */
+const AGY_QUOTA_NOTICE = /^\s*(⚠\s*)?Individual quota reached(\s|\.|$)/i
 const NOT_INSTALLED_MESSAGE = 'Install Antigravity first, then sign in'
 const SIGN_IN_REQUIRED_MESSAGE = 'Sign in to Antigravity in Settings before chatting'
 
@@ -468,6 +471,26 @@ export class AntigravityProviderService {
     input.signal?.throwIfAborted()
     if (!this.configured()) throw new Error('Antigravity is not signed in')
     return this.acp.chat(input)
+  }
+
+  /**
+   * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a commit message. Its
+   * own agent process and session in a new empty folder, removed afterwards (`AcpSessions.oneShot`).
+   */
+  async oneShot(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
+    signal.throwIfAborted()
+    if (!this.configured()) throw harnessAppError({ code: 'signed_out', message: SIGN_IN_REQUIRED_MESSAGE })
+    const cwd = join(this.profileDir, 'one-shot', randomUUID())
+    mkdirSync(cwd, { recursive: true, mode: 0o700 })
+    try {
+      const text = await this.acp.oneShot({ cwd, model: spec.model, system: spec.system, prompt: spec.prompt, signal, onActivity: () => spec.onActivity() })
+      // `agy` answers a model whose quota is used up with a notice as the reply ("⚠ Individual quota reached. …"): never an answer.
+      if (AGY_QUOTA_NOTICE.test(text)) throw harnessAppError({ code: 'rate_limited', message: `Antigravity's quota for this model is used up: ${text.trim().replace(/^⚠\s*/, '')}` })
+      return { text }
+    } finally {
+      // The ended process may hold the folder a moment longer on Windows: a leftover empty folder is harmless.
+      try { rmSync(cwd, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }) } catch { /* kept */ }
+    }
   }
 
   /** Explicit model-picker refresh; never run this from background health checks. */
