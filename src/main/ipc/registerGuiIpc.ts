@@ -2474,6 +2474,12 @@ export function registerGuiIpc(
       withThreadId({ messageId, index }, threadId)
     )
   )
+  registerHandler('threads:queueImage', async (_e, threadId: string, queueItemId: string, index: number) =>
+    guiMms.request<{ name: string; mimeType: string; data: string }>(
+      'thread.messageImage',
+      withThreadId({ queueItemId, index }, threadId)
+    )
+  )
 
   // What a window has in view may be older than what happened on the other computer once a call there is
   // not confirmed ("may have happened"): read it again.

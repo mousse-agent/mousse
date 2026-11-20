@@ -40,7 +40,7 @@ import { attachedFilesIn, formatAttachedFilesMarker } from '../../shared/attache
 import { QUEUE_DRAFT_MOVED_NOTICE, useThreadQueue, type RecoveredQueueDraft } from '../hooks/useThreadQueue'
 import { turnTakesSteer, withSteersOnTheWay } from '../lib/steersOnTheWay'
 import { nextSteerableQueueItem } from '../lib/queuedContent'
-import { restoreQueuedDraft } from '../lib/queuedDraftRecovery'
+import { lostImagesLine, restoreQueuedDraft } from '../lib/queuedDraftRecovery'
 import { historyTokens as historyTokensOf } from '../lib/promptCache'
 import { cachedContextUsage, contextUsageKey, rememberContextUsage } from '../lib/threadContextUsage'
 import {
@@ -52,7 +52,9 @@ import {
   type QuestionCardHandle
 } from './ComposerQuestionModal'
 import { filesToImagePayloads, isImageMimeType } from '../utils/imageAttachments'
-import { composerFilePaths, fileAttachments, MESSAGE_TOO_LONG, REMOTE_FILES_REFUSAL, REMOTE_PASTE_TOO_LONG } from '../lib/composerFilePaths'
+import { composerFilePaths, fileAttachments, prestageImages, MESSAGE_TOO_LONG, REMOTE_FILES_REFUSAL, REMOTE_PASTE_TOO_LONG } from '../lib/composerFilePaths'
+import { preparedSend } from '../lib/attachmentPreparation'
+import { useAttachmentPreparation } from '../hooks/useAttachmentPreparation'
 import { parseUserMessageContent } from '../utils/messageAttachments'
 import { MousseAgentChatShell } from '../chat/components/MousseAgentChatShell'
 import { createTurnActions, type TurnActions } from '../chat/components/agent-elements/turn-actions'
@@ -95,7 +97,7 @@ import { ThreadComputerBar } from './ThreadComputerBar'
 import { ThreadStartedByBar } from './ThreadStartedByBar'
 import { ThreadModeBar } from './ThreadModeBar'
 import { EarlierMessagesBar } from './EarlierMessagesBar'
-import { forgetMessageImageRequests, hydrateMessageImages } from '../lib/messageImages'
+import { forgetMessageImageRequests, hydrateMessageImages, missingImages } from '../lib/messageImages'
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
 import { SendRetryIds } from '../lib/sendRetryIds'
 import { composerAutoModel, composerSelection, fallbackModel, onProviderListingsChanged, pickerListsModel, pickerOffers, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
@@ -409,6 +411,11 @@ export function OrchestratorChat() {
     },
     []
   )
+  // Attached images are made ready as they are attached: their chips say how each goes, and Send uses what was prepared.
+  const preparation = useAttachmentPreparation(attachedFiles, Boolean(remoteNode))
+  // Every inline image also goes as its file: a pasted one is written now, so the send does not wait for it. A thread
+  // on another computer takes no files.
+  useEffect(() => { if (!remoteNode) prestageImages(attachedFiles, activeThreadId) }, [attachedFiles, activeThreadId, remoteNode])
   const setVoiceMessages = useCallback(
     (update: VoiceMessage[] | ((prev: VoiceMessage[]) => VoiceMessage[])) => {
       setVoiceMessagesState((prev) => {
@@ -509,7 +516,11 @@ export function OrchestratorChat() {
     mediaByThreadRef.current[key] = { files: [...current.files, ...files], voice: current.voice }
   }, [setAttachedFiles])
   const onQueueDraftToComposer = useCallback((threadId: string, recovered: RecoveredQueueDraft) => {
-    restoreQueuedDraft(threadId, recovered, addComposerFiles)
+    // Images that could not be fetched are said above the composer (or in a toast for a thread not shown), never dropped silently.
+    void restoreQueuedDraft(threadId, recovered, addComposerFiles, (count) => {
+      if (useAppStore.getState().activeThreadId === threadId) setSendError(lostImagesLine(count))
+      else showToast({ tone: 'error', message: lostImagesLine(count) })
+    })
   }, [addComposerFiles])
   // The transcript's last prompt: the queue keeps a message that starts its turn until that turn's prompt shows.
   let lastUserMessage: (typeof messages)[number] | undefined
@@ -587,15 +598,16 @@ export function OrchestratorChat() {
     activeThreadId,
     approvalPlaced ? approvalRowId : (shownMessages.find(isWaitingPermissionRequest)?.id ?? null)
   )
-  // The older images of a long thread of another computer come by name; their bytes are fetched as the thread is shown.
-  const shownRemote = Boolean(activeThread?.node)
+  // Images can come by name only (older ones of a long thread of another computer, or large ones of a message as it is
+  // written); their bytes are fetched as the thread shows them.
+  const imagesMissing = useMemo(() => missingImages(messages, 1).length > 0, [messages])
   // Opening a thread (also Retry, which opens it again) asks again for images that could not be fetched before.
   useEffect(() => {
     if (activeThreadId) forgetMessageImageRequests(activeThreadId)
   }, [activeThreadId, activeThread?.offline])
   useEffect(() => {
-    if (shownRemote && activeThreadId) void hydrateMessageImages(activeThreadId)
-  }, [shownRemote, activeThreadId, messages.length])
+    if (imagesMissing && activeThreadId) void hydrateMessageImages(activeThreadId)
+  }, [imagesMissing, activeThreadId, messages.length])
   const optimisticSubagentStarting = isSubagentStartingOptimistically({
     subagent: ownSubagent?.subagent,
     turnPhase: turnState?.phase,
@@ -1474,12 +1486,16 @@ export function OrchestratorChat() {
     const resolutionThread = activeThreadId
     const resolvedReferences = await resolveChatReferences(references)
     if (useAppStore.getState().profileId !== resolutionProfile || useAppStore.getState().activeThreadId !== resolutionThread) return
+    // The images as prepared when they were attached (nothing is fitted again here); one made smaller also goes as its
+    // original file. Send is disabled until they are ready, so this is null only after a change in the same moment.
+    const fitted = preparedSend(sentFiles, preparation.snapshot)
+    if (!fitted) return
     // Files other than images go as paths: a pasted one is written to a temporary file first.
-    const filePaths = await composerFilePaths(sentFiles, activeThreadId)
+    const filePaths = await composerFilePaths(fitted.files, activeThreadId)
     const pastedTexts = await Promise.all(inlinePastes.map(async (attached) => ({ name: attachedFileName(attached), text: await attached.file.text() })))
     if (useAppStore.getState().profileId !== resolutionProfile || useAppStore.getState().activeThreadId !== resolutionThread) return
     let text = removeInlineSkillToken(
-      buildComposerMessageContent(input, sentFiles, voiceMessages, browserElements, resolvedReferences, filePaths, pastedTexts),
+      buildComposerMessageContent(input, fitted.files, voiceMessages, browserElements, resolvedReferences, filePaths, pastedTexts),
       enabledSkills
     )
     // The service refuses a longer message with a raw error; say what to do instead.
@@ -1487,7 +1503,7 @@ export function OrchestratorChat() {
       setSendError(pastedTexts.length ? REMOTE_PASTE_TOO_LONG : MESSAGE_TOO_LONG)
       return
     }
-    const images = await filesToImagePayloads(attachedFiles.map((f) => f.file))
+    const images = fitted.images
     if (!stillVisible()) return
     const trimmed = text.trim()
 
@@ -1985,6 +2001,8 @@ export function OrchestratorChat() {
   // The first message shows in the transcript while its thread is made: the locked composer that still holds it (to
   // show it again if the send does not go ahead) looks empty meanwhile, so the message is not shown twice.
   const composerHeld = firstSendShown && workspacePending
+  // A file the message can't take is refused as it is attached, with a line naming it above the composer.
+  const attachRules = useMemo(() => ({ remote: Boolean(remoteNode), onRefused: setSendError }), [remoteNode])
   const newThreadKey = `${profileId}:${activeThreadId ?? '__blank__'}`
   const composerDevice: ComposerDeviceProps = {
     localName,
@@ -2111,6 +2129,9 @@ export function OrchestratorChat() {
               onInputChange={setInput}
               attachedFiles={composerHeld ? NO_ATTACHED_FILES : attachedFiles}
               onAttachedFilesChange={setAttachedFiles}
+              attachmentStatus={preparation.statuses}
+              sendBlocked={composerHeld ? null : preparation.blocked}
+              attachRules={attachRules}
               messageLimit={MMS_PROTOCOL_MAX_TEXT_LENGTH}
               voiceMessages={composerHeld ? NO_VOICE_MESSAGES : voiceMessages}
               onVoiceMessagesChange={setVoiceMessages}

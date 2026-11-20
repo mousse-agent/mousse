@@ -270,7 +270,7 @@ describe('queued messages in the conversation', () => {
     it('moves the unsaved edit to the composer when the message leaves the queue', async () => {
       await editA('one, but better')
       await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
-      expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, but better', markers: '' })
+      expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: 'one, but better', markers: '' }))
       expect(host.querySelector('textarea')).toBeNull()
       expect(host.querySelector('.composer-notice')?.textContent).toContain(QUEUE_DRAFT_MOVED_NOTICE)
     })
@@ -278,7 +278,7 @@ describe('queued messages in the conversation', () => {
     it('moves it too when the message is still listed but already sending', async () => {
       await editA('one, but better')
       await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one', { state: 'steering' }), queued('b', 'two')] }) })
-      expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, but better', markers: '' })
+      expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: 'one, but better', markers: '' }))
       expect(host.querySelector('textarea')).toBeNull()
     })
 
@@ -296,7 +296,7 @@ describe('queued messages in the conversation', () => {
       await click(button('a', 'Save'))
       await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
       await act(async () => { answer.reject(new Error("Error invoking remote method 'queue:edit': Error: Queue item a already started and can no longer be edited.")) })
-      expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, but better', markers: '' })
+      expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: 'one, but better', markers: '' }))
       const notices = [...host.querySelectorAll('.composer-notice')].map((entry) => entry.textContent)
       expect(notices).toHaveLength(1)
       expect(notices[0]).toContain(QUEUE_DRAFT_MOVED_NOTICE)
@@ -323,7 +323,7 @@ describe('queued messages in the conversation', () => {
       await click(button('a', 'Edit'))
       await type(row('a').querySelector('textarea')!, 'Look at that')
       await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
-      expect(toComposer).toHaveBeenCalledWith('t1', { text: 'Look at that', markers, images: [image] })
+      expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: 'Look at that', markers, images: [image] }))
     })
 
     it('gives the images back when the edit cleared the text of a message with images', async () => {
@@ -332,7 +332,7 @@ describe('queued messages in the conversation', () => {
       await click(button('a', 'Edit'))
       await type(row('a').querySelector('textarea')!, '')
       await act(async () => { push!({ threadId: 't1', items: [queued('b', 'two')] }) })
-      expect(toComposer).toHaveBeenCalledWith('t1', { text: '', markers: '', images: [image] })
+      expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: '', markers: '', images: [image] }))
       expect(host.querySelector('.composer-notice')?.textContent).toContain(QUEUE_DRAFT_MOVED_NOTICE)
     })
 
@@ -798,7 +798,7 @@ describe('a change that answers after the thread changed', () => {
     await type(row('a').querySelector('textarea')!, 'one, edited')
     await open('t2', t2)
     await act(async () => { push!({ threadId: 't1', items: [t1[1]!] }) })
-    expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, edited', markers: '' })
+    expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: 'one, edited', markers: '' }))
     // The note belongs to that thread: it shows there, not here.
     expect(host.querySelector('.composer-notice')).toBeNull()
     await open('t1', [t1[1]!])
@@ -813,7 +813,7 @@ describe('a change that answers after the thread changed', () => {
     await type(row('a').querySelector('textarea')!, 'one, edited')
     await open('t2', t2)
     await open('t1', [t1[1]!])
-    expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, edited', markers: '' })
+    expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: 'one, edited', markers: '' }))
     expect(host.querySelector('textarea')).toBeNull()
   })
 
@@ -839,7 +839,7 @@ describe('a change that answers after the thread changed', () => {
       await act(async () => { push!({ threadId: 't1', items: [t1[1]!] }) })
       expect(toComposer).not.toHaveBeenCalled()
       await act(async () => { answer.reject(new Error('Queue item a already started and can no longer be edited.')) })
-      expect(toComposer).toHaveBeenCalledWith('t1', { text: 'one, edited', markers: '' })
+      expect(toComposer).toHaveBeenCalledWith('t1', expect.objectContaining({ text: 'one, edited', markers: '' }))
       expect(useAppStore.getState().queueEditDrafts.t1).toBeUndefined()
     })
   }

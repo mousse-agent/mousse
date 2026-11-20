@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { guiChatRequestError, guiSendFailureAnswer } from '../src/main/mms/requestErrors'
 import { MmsProtocolError } from '../src/mms/protocol/client'
+import { FrameTooLargeError } from '../src/mms/protocol/framing'
 
 describe('GUI chat connection errors', () => {
   it.each(['ECONNRESET', 'EPIPE', 'ECONNREFUSED', 'ENOTCONN'])('explains %s without promising a rejected turn or safe replay', (code) => {
@@ -37,6 +38,17 @@ describe('GUI chat connection errors', () => {
     expect(error.message).toContain('may have arrived')
     expect(error.errorInfo).toEqual({ category: 'unavailable', retryable: true })
     expect(error.cause).toBe(cause)
+  })
+  it('answers a request too large to write with a plain line, as not taken, never an internal error', () => {
+    for (const cause of [
+      new FrameTooLargeError(5 * 1024 * 1024, 4 * 1024 * 1024),
+      new MmsProtocolError('request_too_large', 'This message is too large to send.', undefined, { category: 'invalid', retryable: false })
+    ]) {
+      const error = guiChatRequestError(cause)
+      expect(error.code).toBe('request_too_large')
+      expect(error.message).toMatch(/too large to send/)
+      expect(guiSendFailureAnswer(cause).answer.requestAcknowledged).toBe(false)
+    }
   })
   it('does not misclassify unrelated internal errors as a disconnect', () => {
     expect(guiChatRequestError(new Error('Other bug')).code).toBe('internal_error')

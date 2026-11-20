@@ -332,9 +332,9 @@ describe('MmsProtocolServer + LocalMmsClient', () => {
       requestTimeoutMs: 30_000
     })
     await client.connect()
-    // Force write to throw after pending is registered.
+    // Force the request's write to throw after pending is registered.
     const writeSpy = vi
-      .spyOn(client as unknown as { write: (v: unknown) => void }, 'write')
+      .spyOn(client as unknown as { writeRequest: (v: unknown) => void }, 'writeRequest')
       .mockImplementation(() => {
         throw new Error('write failed')
       })

@@ -56,6 +56,8 @@ import {
 } from '../platform/MmsWorkflowChat'
 import { DomainRpcError } from '../protocol/domainRegistry'
 import { CONTEXT_COMPACTION_TIME_LIMIT_MS } from '../protocol/types'
+import { withImageBudget } from '../protocol/transcriptPaging'
+import { imageDataChars, QUEUE_IMAGES_MAX_DATA_CHARS } from '../../shared/imageLimits'
 import { AgentExecutionService } from '../agentDefinitions/AgentExecutionService'
 import {
   createDefinitionRuntime,
@@ -10589,7 +10591,8 @@ export class OrchestratorService extends EventEmitter {
   private emitQueueUpdated(threadId: string, items: QueuedMessage[]): void {
     // A message an agent watches may have moved in its queue (an edit, a steer, a hand-back, a removal).
     this.settleNotices?.touch(threadId)
-    const pending = listPendingQueue(items).filter((item) => !item.internal)
+    // Every change sends the whole queue: images past a preview budget go by name and type (`withImageBudget`).
+    const pending = withImageBudget(listPendingQueue(items).filter((item) => !item.internal))
     this.emit('queue-updated', { threadId, items: pending })
   }
 
@@ -10670,9 +10673,17 @@ export class OrchestratorService extends EventEmitter {
     // Work that starts on behalf of a parent remembers the Stop generation it was queued at (the Stop fence).
     const stopGeneration = opts?.stopGeneration ?? (this.runEngine && isFencedSource(opts?.source) ? currentStopGeneration(this.runEngine.store, threadId) : undefined)
     let item: QueuedMessage
+    // The queue is saved whole on every change: what its messages' images hold together is bounded.
+    const assertImagesFit = (items: readonly QueuedMessage[]): void => {
+      if (!request.images?.length) return
+      if (imageDataChars(items) + imageDataChars([request]) > QUEUE_IMAGES_MAX_DATA_CHARS) {
+        throw knownAppError({ code: 'queue_images_full', message: 'Too many images are waiting in this thread. Send this once they have gone.' }, { category: 'unavailable', retryable: true })
+      }
+    }
     if (this.threadStore) {
       // Cross-process RMW: load disk, enqueue, save under mutation lock.
       const next = mutateDurableQueue(this.threadStore, threadId, (diskItems) => {
+        assertImagesFit(diskItems)
         const result = enqueueMessage(diskItems, {
           threadId,
           content: request.content,
@@ -10702,6 +10713,7 @@ export class OrchestratorService extends EventEmitter {
       this.emitQueueUpdated(threadId, session.queue)
       return item!
     }
+    assertImagesFit(session.queue)
     const result = enqueueMessage(session.queue, {
       threadId,
       content: request.content,

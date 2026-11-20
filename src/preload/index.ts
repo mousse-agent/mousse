@@ -1039,6 +1039,9 @@ const api = {
     /** One image of a message that arrived without its bytes. */
     messageImage: (threadId: string, messageId: string, index: number): Promise<{ name: string; mimeType: string; data: string }> =>
       ipcRenderer.invoke('threads:messageImage', threadId, messageId, index),
+    /** One image of a queued message that arrived without its bytes (a queue list sends large ones by name). */
+    queueImage: (threadId: string, queueItemId: string, index: number): Promise<{ name: string; mimeType: string; data: string }> =>
+      ipcRenderer.invoke('threads:queueImage', threadId, queueItemId, index),
     /** Deletes an archived thread and its subagent threads for good; a thread that is not archived is refused. */
     delete: (threadId: string): Promise<void> => storageInvoke('threads:delete', threadId),
     rename: (threadId: string, name: string): Promise<Thread> =>

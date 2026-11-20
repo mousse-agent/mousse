@@ -67,6 +67,8 @@ export interface RecoveredQueueDraft {
   /** The message's composer markers: attached files, voice messages, browser elements, references. */
   markers: string
   images?: ChatImageAttachment[]
+  /** The queued message it was an edit of: its images that came by name only are fetched by this id. */
+  itemId?: string
 }
 
 /** What holds the queue: a running compaction, and the size of the history it would replace. */
@@ -277,7 +279,7 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     // Changed is not the same as having text: an edit that cleared the text of a message with attachments still
     // gives the attachments back.
     if (text === base.text || (!text && !base.markers && !images)) return
-    toComposer.current?.(thread, { text, markers: base.markers, ...(images ? { images } : {}) })
+    toComposer.current?.(thread, { text, markers: base.markers, itemId: draft.itemId, ...(images ? { images } : {}) })
     store.setQueueDraftNotice(thread, true)
     // The notice says what happened; an error about the same message (its edit refused) adds nothing.
     if (thread === threadIdRef.current) setError(null)
