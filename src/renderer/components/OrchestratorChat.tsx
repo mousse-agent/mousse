@@ -1081,7 +1081,6 @@ export function OrchestratorChat() {
       // is not the one it joins (a turn is still being set up), it shows in the queue, first, until a turn takes it.
       const shownRow = typeof steer === 'object' ? steer.row : null
       const paintsSteer = Boolean(steer) && queuesNow && targetThreadId === queue.threadId && replyOpenRef.current
-      if (paintsSteer) setSteersOnTheWay((current) => new Set(current).add(requestId))
       if (shownRow && !paintsSteer) queue.endComposerSteer(shownRow, false)
       const steerRow = paintsSteer ? shownRow ?? queue.beginComposerSteer(request.content, images) : null
       if (optimisticMessageId) {
@@ -1148,7 +1147,7 @@ export function OrchestratorChat() {
         // The service's retry key: a send that may have arrived lends its id to the same message sent again.
         requestId = sendIds.current.begin(signature)
         const sentId = requestId
-        if (steer) setSteersOnTheWay((current) => new Set(current).add(sentId))
+        if (paintsSteer) setSteersOnTheWay((current) => new Set(current).add(sentId))
         // The daemon's item carries the same id: whichever arrives first, the queue shows one.
         if (optimisticQueueId) setOptimisticQueueItems((current) => current.map((item) => item.id === optimisticQueueId ? { ...item, clientRequestId: sentId } : item))
         const result = await (targetThreadId
