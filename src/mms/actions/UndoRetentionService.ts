@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import type { ChangeReceipt, ThreadAction } from '../../shared/threadActions'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { DEFAULT_UNDO_RETENTION_POLICY, type UndoRetentionEligibility, type UndoRetentionPolicy } from '../../shared/undoRetention'
-import { ThreadJournal } from '../data/ThreadJournal'
+import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { enableVersionedLifecycleWriter } from '../queue/ThreadLifecycleAdmission'
@@ -30,6 +30,45 @@ interface State {
   deadlines: Map<string, number>
 }
 
+function validateUndoRetentionPolicy(policy: UndoRetentionPolicy): void {
+  if (![policy.windowMs, policy.migrationGraceMs, policy.maxForwardStepMs].every((value) => Number.isSafeInteger(value) && value > 0) || !Number.isSafeInteger(policy.batchSize) || policy.batchSize < 1 || policy.batchSize > 1000) throw new Error('Invalid Undo retention policy.')
+}
+
+function stateFromJournal(records: readonly ThreadJournalRecord[]): State {
+  const state: State = { highWater: 0, suspended: false, policy: { ...DEFAULT_UNDO_RETENTION_POLICY }, expired: new Set(), pins: new Map(), deadlines: new Map() }
+  for (const record of records) {
+    if (record.operationType !== 'undo-retention') continue
+    const event = record.details as RetentionEvent
+    if (record.state !== 'completed' || event?.version !== 1 || !['adopt', 'clock', 'configure', 'expire', 'pin', 'refresh-pair'].includes(event.kind) || !Number.isSafeInteger(event.at) || event.at < 0
+      || (event.ids !== undefined && (!Array.isArray(event.ids) || event.ids.some((id) => typeof id !== 'string' || !/^(?:[a-f0-9-]{36}|action:[^\x00-\x1f]{1,256})$/i.test(id)) || new Set(event.ids).size !== event.ids.length))
+      || (['expire', 'pin', 'refresh-pair'].includes(event.kind) && !event.ids?.length)
+      || (event.kind === 'refresh-pair' && (event.ids?.length !== 2 || !Number.isSafeInteger(event.deadline) || event.deadline! < event.at))
+      || (event.kind === 'pin' && (typeof event.pinned !== 'boolean' || typeof event.reason !== 'string' || event.reason.length > 512))
+      || (event.suspended !== undefined && (typeof event.suspended !== 'boolean' || !['clock', 'configure'].includes(event.kind)))
+      || (['adopt', 'configure'].includes(event.kind) && !event.policy)
+      || (event.policy !== undefined && !['adopt', 'configure'].includes(event.kind))) throw new Error('Unknown Undo retention authority; cleanup and historical code operations are blocked.')
+    if (event.kind === 'adopt') {
+      if (state.adoptedAt !== undefined) throw new Error('Duplicate Undo retention adoption; history is blocked.')
+      state.adoptedAt = event.at
+    }
+    if (state.adoptedAt === undefined) throw new Error('Undo retention authority lacks policy adoption.')
+    if (event.policy) { validateUndoRetentionPolicy(event.policy); state.policy = event.policy }
+    state.highWater = Math.max(state.highWater, event.at)
+    if (event.suspended !== undefined) state.suspended = event.suspended
+    for (const id of event.ids ?? []) {
+      if (event.kind === 'expire') state.expired.add(id)
+      if (event.kind === 'pin') { if (event.pinned) state.pins.set(id, event.reason ?? 'Saved checkpoint'); else state.pins.delete(id) }
+      if (event.kind === 'refresh-pair' && event.deadline && !state.expired.has(id)) state.deadlines.set(id, event.deadline)
+    }
+  }
+  return state
+}
+
+/** Expired receipt/action ids projected from already-read journal records, with the same strict validation as `UndoRetentionService`. */
+export function expiredReceiptIdsFromJournal(records: readonly ThreadJournalRecord[]): ReadonlySet<string> {
+  return stateFromJournal(records).expired
+}
+
 /** Append-only capability authority. Old actions, snapshots and incidental Git reachability cannot revive expiry. */
 export class UndoRetentionService {
   private readonly journal: ThreadJournal
@@ -38,32 +77,7 @@ export class UndoRetentionService {
   }
 
   private state(): State {
-    const state: State = { highWater: 0, suspended: false, policy: { ...DEFAULT_UNDO_RETENTION_POLICY }, expired: new Set(), pins: new Map(), deadlines: new Map() }
-    for (const record of this.journal.list().filter((entry) => entry.operationType === 'undo-retention')) {
-      const event = record.details as RetentionEvent
-      if (record.state !== 'completed' || event?.version !== 1 || !['adopt', 'clock', 'configure', 'expire', 'pin', 'refresh-pair'].includes(event.kind) || !Number.isSafeInteger(event.at) || event.at < 0
-        || (event.ids !== undefined && (!Array.isArray(event.ids) || event.ids.some((id) => typeof id !== 'string' || !/^(?:[a-f0-9-]{36}|action:[^\x00-\x1f]{1,256})$/i.test(id)) || new Set(event.ids).size !== event.ids.length))
-        || (['expire', 'pin', 'refresh-pair'].includes(event.kind) && !event.ids?.length)
-        || (event.kind === 'refresh-pair' && (event.ids?.length !== 2 || !Number.isSafeInteger(event.deadline) || event.deadline! < event.at))
-        || (event.kind === 'pin' && (typeof event.pinned !== 'boolean' || typeof event.reason !== 'string' || event.reason.length > 512))
-        || (event.suspended !== undefined && (typeof event.suspended !== 'boolean' || !['clock', 'configure'].includes(event.kind)))
-        || (['adopt', 'configure'].includes(event.kind) && !event.policy)
-        || (event.policy !== undefined && !['adopt', 'configure'].includes(event.kind))) throw new Error('Unknown Undo retention authority; cleanup and historical code operations are blocked.')
-      if (event.kind === 'adopt') {
-        if (state.adoptedAt !== undefined) throw new Error('Duplicate Undo retention adoption; history is blocked.')
-        state.adoptedAt = event.at
-      }
-      if (state.adoptedAt === undefined) throw new Error('Undo retention authority lacks policy adoption.')
-      if (event.policy) { this.validatePolicy(event.policy); state.policy = event.policy }
-      state.highWater = Math.max(state.highWater, event.at)
-      if (event.suspended !== undefined) state.suspended = event.suspended
-      for (const id of event.ids ?? []) {
-        if (event.kind === 'expire') state.expired.add(id)
-        if (event.kind === 'pin') { if (event.pinned) state.pins.set(id, event.reason ?? 'Saved checkpoint'); else state.pins.delete(id) }
-        if (event.kind === 'refresh-pair' && event.deadline && !state.expired.has(id)) state.deadlines.set(id, event.deadline)
-      }
-    }
-    return state
+    return stateFromJournal(this.journal.list())
   }
 
   private append(event: Omit<RetentionEvent, 'version'>): void {
@@ -71,7 +85,7 @@ export class UndoRetentionService {
     this.journal.append({ operationId: randomUUID(), operationType: 'undo-retention', state: 'completed', details: { version: 1, ...event } })
   }
   private validatePolicy(policy: UndoRetentionPolicy): void {
-    if (![policy.windowMs, policy.migrationGraceMs, policy.maxForwardStepMs].every((value) => Number.isSafeInteger(value) && value > 0) || !Number.isSafeInteger(policy.batchSize) || policy.batchSize < 1 || policy.batchSize > 1000) throw new Error('Invalid Undo retention policy.')
+    validateUndoRetentionPolicy(policy)
   }
   private actions(): ThreadAction[] {
     const path = join(this.threadDirectory, 'actions.json')

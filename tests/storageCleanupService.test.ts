@@ -12,7 +12,8 @@ import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { buildResourceInventory } from '../src/mms/lifecycle/ResourceInventory'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
-import { cleanupMarkerPath, findNestedRepository, readCleanupMarker, StorageCleanupService } from '../src/mms/lifecycle/StorageCleanupService'
+import { readdir } from 'node:fs/promises'
+import { cleanupMarkerPath, findNestedRepository, onlyControlFiles, readCleanupMarker, StorageCleanupService } from '../src/mms/lifecycle/StorageCleanupService'
 import { StoragePolicyStore } from '../src/mms/lifecycle/StoragePolicyStore'
 import { StorageSweepClock } from '../src/mms/lifecycle/sweepClock'
 import { WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
@@ -678,6 +679,36 @@ describe('deleted threads and orphans', () => {
     const report = await f.service.run('manual')
     expect(report.items.filter((entry) => entry.rule === 'worktree-orphan')).toEqual([expect.objectContaining({ outcome: 'kept', reason: 'No thread uses this worktree', label: 'threads/ghost' })])
     expect(readFileSync(join(orphan, 'file.txt'), 'utf8')).toBe('who owns this')
+  }, 60_000)
+
+  it('skips the installation-wide ownership scan in orphanItems when every worktree folder is already claimed or empty, and still falls through for agent worktrees and malformed workspaces', async () => {
+    const f = fixture(); setPolicy(f, inactive())
+    const orphanScan = () => (f.service as unknown as { orphanItems(): Promise<StorageCleanupItem[]> }).orphanItems()
+    // 1. All worktree directories claimed by workspace.json -> 1 store.list() call only (no full ownership scan).
+    const listSpy = vi.spyOn(f.store, 'list')
+    expect(await orphanScan()).toEqual([])
+    expect(listSpy).toHaveBeenCalledTimes(1)
+    // 2. An empty leftover directory also skips the full ownership scan.
+    listSpy.mockClear()
+    const emptyLeftover = join(f.home, 'repositories', f.repositoryId, 'worktrees', 'threads', 'empty-leftover', 'main')
+    mkdirSync(emptyLeftover, { recursive: true })
+    expect(await orphanScan()).toEqual([])
+    expect(listSpy).toHaveBeenCalledTimes(1)
+    // 3. A directory claimed only via agents.json falls through to the full ownership scan and stays recognized as claimed.
+    const agentTree = join(f.home, 'repositories', f.repositoryId, 'worktrees', 'agents', 'agent-1')
+    git(f.repo, ['worktree', 'add', '-b', 'mousse/agent/agent-1', agentTree])
+    writeFileSync(join(f.location, 'agents.json'), JSON.stringify([{ id: 'agent-1', worktreePath: agentTree, branch: 'mousse/agent/agent-1', status: 'completed' }]))
+    listSpy.mockClear()
+    expect(await orphanScan()).toEqual([])
+    expect(listSpy.mock.calls.length).toBeGreaterThan(1)
+    // 4. A symlinked workspace.json is not fast-path trusted; orphanItems falls through and fails closed (throws).
+    rmSync(join(f.location, 'agents.json'))
+    rmSync(agentTree, { recursive: true, force: true })
+    git(f.repo, ['worktree', 'prune'])
+    const outside = join(f.root, 'outside-workspace.json')
+    renameSync(join(f.location, 'workspace.json'), outside)
+    symlinkSync(outside, join(f.location, 'workspace.json'), process.platform === 'win32' ? 'junction' : 'file')
+    await expect(orphanScan()).rejects.toThrow(/Shared ownership cannot be proven/)
   }, 60_000)
 })
 
@@ -1857,5 +1888,32 @@ describe('the hourly run does not hold up the daemon', () => {
     mkdirSync(join(f.worktree, 'node_modules', 'pkg'), { recursive: true }); writeFileSync(join(f.worktree, 'node_modules', 'pkg', 'index.js'), 'x')
     mkdirSync(join(f.worktree, 'node_modules', 'pkg', '.git'))
     expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'Has ignored files (node_modules/)' })
+  }, 60_000)
+
+  it('rules out non-control ignored directories without reading them, while still allowing Mousse control files', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-control-files-')); roots.push(root)
+    mkdirSync(join(root, 'node_modules', 'pkg'), { recursive: true }); writeFileSync(join(root, 'node_modules', 'pkg', 'index.js'), 'x')
+    mkdirSync(join(root, '.mousse'), { recursive: true }); writeFileSync(join(root, '.mousse', 'task-progress.json'), '{}')
+    const reads: string[] = []
+    const countedReaddir = ((path: Parameters<typeof readdir>[0], options?: Parameters<typeof readdir>[1]) => {
+      reads.push(String(path))
+      return readdir(path, options as never)
+    }) as typeof readdir
+    // Non-control directory: ruled out by name with zero directory reads.
+    expect(await onlyControlFiles(root, 'node_modules/', countedReaddir)).toBe(false)
+    expect(reads).toEqual([])
+    // Directory containing only Mousse control files: allowed (does not keep worktree).
+    expect(await onlyControlFiles(root, '.mousse/', countedReaddir)).toBe(true)
+    expect(reads).toEqual([join(root, '.mousse')])
+    // Unexpected subdirectory inside .mousse: rejected without descending into it.
+    reads.length = 0
+    mkdirSync(join(root, '.mousse', 'cache'), { recursive: true }); writeFileSync(join(root, '.mousse', 'cache', 'big.bin'), 'data')
+    expect(await onlyControlFiles(root, '.mousse/', countedReaddir)).toBe(false)
+    expect(reads).toEqual([join(root, '.mousse')])
+    // End-to-end: a worktree whose only ignored file is a Mousse control file is still retired.
+    const f = fixture(); setPolicy(f, inactive())
+    appendFileSync(join(f.repo, '.git', 'info', 'exclude'), '\n.mousse/\n')
+    mkdirSync(join(f.worktree, '.mousse'), { recursive: true }); writeFileSync(join(f.worktree, '.mousse', 'task-progress.json'), '{}')
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'removed' })
   }, 60_000)
 })

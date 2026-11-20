@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { buildResourceInventory } from '../src/mms/lifecycle/ResourceInventory'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
@@ -145,5 +145,43 @@ describe('legacy named-agent data left by older builds', () => {
     expect(claimsOn(`refs/heads/${branch}`)).toEqual(['pending-integration'])
     expect(claimsOn('refs/mousse/agents/legacy-writer/result')).toEqual(['pending-integration'])
     expect(resources.filter((item) => item.kind === 'agent-session').map((item) => item.claims.map((claim) => claim.kind))).toEqual([['recall']])
+  })
+})
+
+describe('bounded ownership scans across many threads', () => {
+  it('shares lifecycle records per pass, avoids duplicate child inventories, and still projects expired journal receipts', async () => {
+    const { home, store, location } = fixture()
+    const receiptId = '33333333-3333-4333-8333-333333333333'
+    const retainedRefs = [`refs/mousse/changes/${receiptId}/before`, `refs/mousse/changes/${receiptId}/after`]
+    const at = new Date().toISOString()
+    json(join(location, 'journal', '0000000000000001.json'), { schemaVersion: 1, sequence: 1, operationId: 'op-1', operationType: 'change-checkpoint', state: 'completed', createdAt: at, details: { receipt: { id: receiptId, kind: 'checkpoint', beforeSha: 'a'.repeat(40), afterSha: 'b'.repeat(40), retainedRefs, createdAt: at } } })
+    json(join(location, 'journal', '0000000000000002.json'), { schemaVersion: 1, sequence: 2, operationId: 'op-2', operationType: 'undo-retention', state: 'completed', createdAt: at, details: { version: 1, kind: 'adopt', at: 1000, policy: { windowMs: 1000, migrationGraceMs: 1000, maxForwardStepMs: 1000, batchSize: 10 } } })
+    json(join(location, 'journal', '0000000000000003.json'), { schemaVersion: 1, sequence: 3, operationId: 'op-3', operationType: 'undo-retention', state: 'completed', createdAt: at, details: { version: 1, kind: 'expire', at: 2000, ids: [receiptId] } })
+    // Add 8 peers plus 8 child subagents (17 total tasks): store.list() must stay O(rounds), not O(N * rounds).
+    for (let i = 0; i < 8; i++) {
+      const parentId = `peer-${i}`
+      const parentLoc = join(home, 'thread-data', 'standalone', parentId)
+      store.registerTask({ taskId: parentId, location: parentLoc, creating: true })
+      json(join(parentLoc, 'meta.json'), { id: parentId })
+      const childId = `child-${i}`
+      const childLoc = join(home, 'thread-data', 'standalone', childId)
+      store.registerTask({ taskId: childId, location: childLoc, parentTaskId: parentId, creating: true })
+      json(join(childLoc, 'meta.json'), { id: childId })
+    }
+    const listSpy = vi.spyOn(store, 'list')
+    const claims = await getExternalResourceClaims(store, new Set())
+    // At most one list() per round (initial ownerStores + collecting/final pass), never proportional to the 17 tasks.
+    expect(listSpy.mock.calls.length).toBeLessThanOrEqual(4)
+    // Every child location appears once (inventoried via its parent, not duplicated).
+    for (let i = 0; i < 8; i++) {
+      const childLoc = join(home, 'thread-data', 'standalone', `child-${i}`)
+      expect(claims.filter((claim) => claim.identity === childLoc)).toHaveLength(1)
+    }
+    // Single-pass journal read still expires the Undo claim on the receipt refs.
+    for (const ref of retainedRefs) {
+      const refClaim = claims.find((claim) => claim.kind === 'git-ref' && claim.identity === ref)
+      expect(refClaim).toBeDefined()
+      expect(refClaim!.claims).toEqual([])
+    }
   })
 })
