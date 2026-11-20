@@ -157,6 +157,20 @@ describe('queued messages in the conversation', () => {
     expect(labels[0]!.getAttribute('title')).toBe('Sends after the reply to your next message, or send it now')
   })
 
+  it('says why the queue waits while no reply runs: the last turn finishing, the next being set up, other work', async () => {
+    const label = () => [...host.querySelectorAll('.queued-message-state')].map((entry) => [entry.textContent, entry.getAttribute('title')])
+    await show([queued('a', 'one', { waitsFor: 'finish' }), queued('b', 'two', { waitsFor: 'finish' })])
+    expect(label()).toEqual([['Waits for the last turn to finish', 'The reply is complete; the turn is still saving its checkpoint']])
+    expect(row('b').querySelector('.queued-message-state')).not.toBeNull()
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one', { waitsFor: 'setup' }), queued('b', 'two', { waitsFor: 'setup' })] }) })
+    expect(label()).toEqual([['Next turn is starting', 'The next turn is being set up']])
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one', { waitsForLease: true })] }) })
+    expect(label()).toEqual([['Waits for the thread to be free', 'Other work on this thread is running']])
+    // The wait is over: back to "Queued".
+    await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one')] }) })
+    expect(label()).toEqual([['Queued', 'Sends when the current reply ends']])
+  })
+
   it('edits in place: Enter saves the new text and the message keeps its place', async () => {
     await show([queued('a', 'one'), queued('b', 'two'), queued('c', 'three')])
     await click(button('b', 'Edit'))
@@ -620,6 +634,14 @@ describe('the first queued message when its turn starts', () => {
     // Its prompt shows: it leaves the queue in the same render.
     render({ id: 'p2', queueItemId: 'a' })
     expect(ids()).toEqual(['b'])
+  })
+
+  it('says its turn is starting while it waits for its prompt, not what it waited for before', async () => {
+    await start([queued('a', 'one', { waitsFor: 'finish' })])
+    expect(row('a').querySelector('.queued-message-state')?.textContent).toBe('Waits for the last turn to finish')
+    // The last turn finished and the daemon took A for the next one, still being set up.
+    await act(async () => { push!({ threadId: 't1', items: [] }) })
+    expect(row('a').querySelector('.queued-message-state')?.textContent).toBe('Next turn is starting')
   })
 
   it('leaves when another prompt shows, or after a while when none does', async () => {
