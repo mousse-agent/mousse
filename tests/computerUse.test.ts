@@ -151,6 +151,14 @@ describe('what Settings is told about the driver', () => {
     expect(telemetryOff.mock.calls).toEqual([[exe]])
   })
 
+  it("knows at the first listing that no driver is there, so the tool list doesn't change at the next turn", async () => {
+    expect(driver({}).d.known()).toMatchObject({ state: 'missing' })
+    const present = driver({ files: [exe] })
+    expect(present.d.known()).toBeUndefined()
+    await present.d.status()
+    expect(present.d.known()).toMatchObject({ state: 'found', version: '0.38.0' })
+  })
+
   it('says missing with the install command, installs once for two clicks, then says installed', async () => {
     const { d, runInstaller } = driver({})
     expect(await d.status(true)).toMatchObject({ state: 'missing', installable: true, installCommand: expect.stringContaining('cua.ai/driver/install.sh') })
