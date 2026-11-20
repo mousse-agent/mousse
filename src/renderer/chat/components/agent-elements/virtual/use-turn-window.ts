@@ -12,6 +12,7 @@ import {
   nextScrollTop,
   pickReadingNode,
   reconcileWindow,
+  shiftWindow,
   stepSettle,
   windowSpacers,
   type AnchorEdge,
@@ -687,15 +688,31 @@ export function useTurnWindow(options: TurnWindowOptions): TurnWindowApi {
   engineRef.current ??= createEngine(() => optionsRef.current, setStored);
   const engine = engineRef.current;
 
+  // Whether the last commit was windowed (if not, it rendered every row).
+  const openedRef = useRef(false);
   const keysRef = useRef(options.keys);
   const versionRef = useRef(0);
+  const n = options.keys.length;
+  let current = stored;
   if (!sameKeys(keysRef.current, options.keys)) {
+    const prevKeys = keysRef.current;
     keysRef.current = options.keys;
     versionRef.current += 1;
+    // Turns that arrived above the mounted rows (an earlier page of a long thread) do not change which turns are
+    // mounted: the window moves with its rows, so the reading point stays in the document and the commit below holds
+    // it where it was on screen. A list that rendered every row had them all mounted.
+    if (options.enabled) {
+      const prevN = prevKeys.length;
+      const previous = openedRef.current ? stored : { start: Math.min(1, prevN), end: Math.max(Math.min(1, prevN), prevN - 1), n: prevN };
+      const moved = shiftWindow(previous, prevKeys, options.keys);
+      if (moved) {
+        current = moved;
+        setStored(moved);
+      }
+    }
   }
   const keysVersion = versionRef.current;
 
-  const n = options.keys.length;
   // The turn count of the last commit. A transcript that showed two turns or
   // fewer (empty while its thread loads) mounted no rows between the first and
   // the last, so it has no window to keep. When a long thread arrives in it,
@@ -704,11 +721,10 @@ export function useTurnWindow(options: TurnWindowOptions): TurnWindowApi {
   // grows past the threshold one turn at a time had every row mounted, and
   // keeps them for that commit so they are measured.
   const committedCountRef = useRef<number | null>(null);
-  let current = stored;
   if (
     options.enabled &&
     n > 2 &&
-    stored.n !== n &&
+    current.n !== n &&
     committedCountRef.current !== null &&
     committedCountRef.current <= 2
   ) {
@@ -722,7 +738,6 @@ export function useTurnWindow(options: TurnWindowOptions): TurnWindowApi {
     committedCountRef.current = n;
   });
 
-  const openedRef = useRef(false);
   const seenVersionRef = useRef(keysVersion);
   const { enabled } = options;
   useLayoutEffect(() => {

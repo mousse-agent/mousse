@@ -111,6 +111,7 @@ import {
   estimateTurnHeight,
   lastIndexAtOrBefore,
   resolveTurnKey,
+  rowShift,
   shouldGlide,
   windowRowItems,
   type RowItem,
@@ -1949,6 +1950,21 @@ export const MessageList = memo(function MessageList({
   const turnKeys = turns.map((turn, index) =>
     resolveTurnKey(turn, index, turnKeyAliasRef.current),
   );
+  // Turns arrived above the ones shown (an earlier page of a long thread) in a list that rendered every row: the row
+  // being read stays where it is on screen. The browser's own anchoring cannot be relied on, since the list may
+  // become windowed in this very commit, which switches it off. A windowed list moves its window with its rows and
+  // holds the reading line itself (virtual/use-turn-window.ts). Measured now, while the old rows are on screen.
+  const prevTurnKeysRef = useRef(turnKeys);
+  const prependHoldRef = useRef<FoldHold | null>(null);
+  if (
+    prevTurnKeysRef.current[0] !== turnKeys[0] &&
+    !windowedRef.current &&
+    followModeRef.current !== "following-end" &&
+    rowShift(prevTurnKeysRef.current, turnKeys) > 0
+  ) {
+    prependHoldRef.current = captureFoldHold(chatContainerRef.current, rowsRef.current);
+  }
+  prevTurnKeysRef.current = turnKeys;
   // Long threads mount only the turns near the viewport; short ones (and any
   // render without a window) keep every row.
   const windowed =
@@ -1989,6 +2005,17 @@ export const MessageList = memo(function MessageList({
     followEnd: () => followerRef.current?.follow(),
   });
   virtualizationRef.current = virtualization;
+  // After the window's own commit (above), so the spacers it writes are in place when the hold measures.
+  useLayoutEffect(() => {
+    const hold = prependHoldRef.current;
+    if (!hold) return;
+    prependHoldRef.current = null;
+    stopFoldHoldRef.current?.();
+    stopFoldHoldRef.current = runFoldHold(hold, {
+      following: () => followModeRef.current === "following-end",
+      onWrite: markProgrammaticScroll,
+    });
+  });
   // Find reads the message data, so it covers the turns that are not mounted.
   const findTurns = useMemo(
     () =>

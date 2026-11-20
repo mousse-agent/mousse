@@ -44,13 +44,21 @@ export async function loadEarlierUntil(threadId: string, messageId: string, maxP
 
 const LIST = '.an-message-list'
 
-/** Whether the transcript shows its top part: within a screen of its first loaded message. */
-const nearTop = (list: HTMLElement): boolean => list.scrollTop <= list.clientHeight
+/**
+ * Whether the transcript is near its top: within two screens of its first loaded message, so a steady scroll up gets
+ * the next page before it reaches the top.
+ */
+const nearTop = (list: HTMLElement): boolean => list.scrollTop <= 2 * list.clientHeight
+
+/** The loaded messages are shown and do not fill the view: there is nothing to scroll up, so the next page loads by itself. */
+const unfilled = (list: HTMLElement): boolean =>
+  list.querySelector('[data-turn-key]') !== null && list.scrollHeight - list.clientHeight < 1
 
 /**
- * The selected thread's older messages load as the reader scrolls its transcript up to the top, a page at a time;
- * nothing shows meanwhile. A scroll up at the very top moves nothing, so a wheel turned up there loads too, and a
- * page that still leaves the reader at the top is followed by the next one. Shows a line only when a page failed.
+ * The selected thread's older messages load as the reader scrolls its transcript up near the top, a page at a time;
+ * nothing shows meanwhile. A scroll up at the very top moves nothing, so a wheel turned up there loads too. A page
+ * that came in keeps the message being read where it is (the transcript holds it), and the next one loads only when
+ * the reader moves up again, or while the messages do not fill the view. Shows a line only when a page failed.
  */
 export function EarlierMessagesBar() {
   const threadId = useAppStore((state) => state.activeThreadId)
@@ -60,13 +68,14 @@ export function EarlierMessagesBar() {
   // A page that failed is not loaded again by scrolling; Retry still loads it.
   const failedAt = useRef<string | null>(null)
   const loading = useRef(false)
-  // The reader went up to the top for older messages: a page that leaves them there is followed by the next.
-  const readingUp = useRef(false)
+  // The reader moved the transcript (wheel, keys, touch, a scrollbar drag) since the last page came in. The view moves
+  // by itself when a page comes in, and a move nobody made asks for nothing: one turn of the wheel, one page at most.
+  const readerMoved = useRef(false)
 
   useEffect(() => {
     setError('')
     failedAt.current = null
-    readingUp.current = false
+    readerMoved.current = false
   }, [threadId])
 
   useEffect(() => {
@@ -80,9 +89,11 @@ export function EarlierMessagesBar() {
     const load = (): void => {
       if (loading.current || failedAt.current === earlier.before) return
       loading.current = true
-      readingUp.current = true
       void loadEarlierPage(threadId, earlier.before)
-        .then(() => setError(''))
+        .then(() => {
+          readerMoved.current = false
+          setError('')
+        })
         .catch((cause: unknown) => {
           failedAt.current = earlier.before
           setError(ipcErrorLine(cause) || 'Could not load earlier messages.')
@@ -91,34 +102,37 @@ export function EarlierMessagesBar() {
           loading.current = false
         })
     }
-    let lastTop = Number.POSITIVE_INFINITY
+    let lastTop = pane.querySelector<HTMLElement>(LIST)?.scrollTop ?? Number.POSITIVE_INFINITY
     const onScroll = (event: Event): void => {
       const list = event.target instanceof HTMLElement && event.target.matches(LIST) ? paneList(event.target) : null
       if (!list) return
       const movingUp = list.scrollTop < lastTop
       lastTop = list.scrollTop
-      if (!nearTop(list)) readingUp.current = false
-      else if (movingUp) load()
+      if (movingUp && readerMoved.current && nearTop(list)) load()
     }
     const onWheel = (event: WheelEvent): void => {
-      if (event.deltaY >= 0) return
       const list = paneList(event.target)
-      if (list && nearTop(list)) load()
+      if (!list || event.deltaY >= 0) return
+      readerMoved.current = true
+      if (nearTop(list)) load()
+    }
+    const onInput = (event: Event): void => {
+      if (paneList(event.target)) readerMoved.current = true
     }
     document.addEventListener('scroll', onScroll, true)
     document.addEventListener('wheel', onWheel, { capture: true, passive: true })
-    // A page just came in (this runs again with the next `earlier`) and the reader is still at the top: the next one.
-    let frame = 0
-    if (readingUp.current) {
-      frame = requestAnimationFrame(() => {
-        const list = pane.querySelector<HTMLElement>(LIST)
-        if (list && nearTop(list)) load()
-      })
-    }
+    for (const type of ['keydown', 'pointerdown', 'touchmove']) document.addEventListener(type, onInput, { capture: true, passive: true })
+    // A page just came in (this runs again with the next `earlier`), or the thread opened, and its messages do not fill
+    // the view: the reader cannot scroll up to ask for more.
+    const frame = requestAnimationFrame(() => {
+      const list = pane.querySelector<HTMLElement>(LIST)
+      if (list && unfilled(list)) load()
+    })
     return () => {
       cancelAnimationFrame(frame)
       document.removeEventListener('scroll', onScroll, true)
       document.removeEventListener('wheel', onWheel, true)
+      for (const type of ['keydown', 'pointerdown', 'touchmove']) document.removeEventListener(type, onInput, true)
     }
   }, [threadId, earlier])
 

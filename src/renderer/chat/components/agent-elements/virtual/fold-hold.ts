@@ -11,6 +11,9 @@ import { COLLAPSE_CLOSE_MS } from "../../../../components/ui/Collapse";
  *
  * `captureFoldHold` runs while the old rows are still on screen (during the render that ends the turn); `runFoldHold`
  * runs once they are replaced, and keeps the row in place until the fold has closed or the reader scrolls.
+ *
+ * Turns that arrive above the rows of a list that rendered every row (an earlier page of a long thread) are held the
+ * same way: nothing folds then, so the row being read is the one held.
  */
 export type FoldHold = {
   container: HTMLElement;
