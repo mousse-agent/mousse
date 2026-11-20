@@ -491,6 +491,34 @@ test('a thread record that names a branch outside mousse/, or another thread\'s 
   expect(git(f.repo, ['branch', '--list', 'feature/theirs', '--format=%(refname:short)'])).toBe('feature/theirs')
 })
 
+test('a branch Mousse deleted is no longer its own: a branch someone makes under that name later is theirs, and a restore leaves it alone', async () => {
+  const f = await threadFixture('renamed')
+  await f.service.prepare(f.input)
+  await f.service.retire(f.path)
+  expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  expect(git(f.repo, ['branch', '--list', f.branch])).toBe('')
+  // The person checks out a branch of the same name later and commits on it.
+  const theirs = git(f.repo, ['commit-tree', `${git(f.repo, ['rev-parse', 'HEAD'])}^{tree}`, '-p', 'HEAD', '-m', 'their own work'])
+  git(f.repo, ['branch', f.branch, theirs])
+  const manager = new ThreadWorkspaceManager(f.task)
+  expect(manager.branchRecord().owned.has(f.branch)).toBe(false)
+  // A restore cannot take the name back: the worktree comes back, the person's branch stays as it is, and it stays theirs.
+  await f.service.reconstruct(f.path)
+  expect(git(f.repo, ['rev-parse', f.branch])).toBe(theirs)
+  expect(manager.branchRecord().owned.has(f.branch)).toBe(false)
+})
+
+test('trash expiry deletes only a branch the thread\'s records own, whatever its retirement record names', async () => {
+  const f = await threadFixture('named')
+  // A branch of the person's at a commit the worktree's pins keep, checked out nowhere.
+  git(f.repo, ['branch', 'keep-me'])
+  await f.service.prepare(f.input)
+  await f.service.retire(f.path)
+  writeFileSync(f.path, JSON.stringify({ ...JSON.parse(readFileSync(f.path, 'utf8')), branch: 'keep-me' }))
+  expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  expect(git(f.repo, ['branch', '--list', 'keep-me', '--format=%(refname:short)'])).toBe('keep-me')
+})
+
 test('a rename a stop left unsettled: the worktree still retires, and neither name\'s branch is deleted', async () => {
   const f = await threadFixture('renamed')
   // Planned, never finished: Git still has the branch under its current name, and a person made the other one meanwhile.

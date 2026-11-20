@@ -9,6 +9,11 @@ import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleSt
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { registerBranchNamer } from '../src/mms/workspace/branchNaming'
+import { BRANCH_RENAME_OPERATION } from '../src/mms/workspace/threadBranchRecords'
+import { WORKTREE_TRASH_QUIET_MS, WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
+import { acquireRepositoryLease } from '../src/mms/git/RepositoryLease'
+import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
+import { releaseExecutionLeaseHandle, waitAcquireExecutionLease } from '../src/mms/queue/ThreadExecutionLease'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { archived } from './support/archived'
@@ -117,6 +122,67 @@ it.each([
     }
     expect(git(f.repo, 'branch', '--list', 'feature/theirs', '--format=%(refname:short)')).toBe('feature/theirs')
   } finally { f.dispose() }
+}, 120_000)
+
+/** A registered thread `task` in a fresh repository, with its worktree made on `prefix` and named `answer` (none: kept). */
+async function threadWithBranch(prefix: string, answer: string | undefined) {
+  const f = gitFoundationFixture()
+  const location = join(f.home, 'thread-data', 'task')
+  mkdirSync(location, { recursive: true }); writeFileSync(join(location, 'meta.json'), '{"id":"task"}')
+  const store = new ResourceLifecycleStore({ profileId: 'qualification', profileHome: f.home })
+  store.registerTask({ taskId: 'task', location }); registerThreadLifecycleGate(f.home, store)
+  const forget = registerBranchNamer(f.home, { settings: () => ({ mode: 'semantic', prefix, instructions: '' }), ask: async () => answer })
+  const manager = new ThreadWorkspaceManager(location)
+  const made = await manager.provision('task', 'main', f.repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
+  await manager.branchNaming
+  forget()
+  const coordinator = new ResourceLifecycleCoordinator(store, { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {} })
+  return { f, location, store, manager, made, coordinator }
+}
+
+it.each(['mousse', 'team'])('a thread whose branch rename was settled without knowing its outcome (prefix %s) is purged, and its branch stays', async (prefix) => {
+  const t = await threadWithBranch(prefix, undefined)
+  try {
+    const { made, manager } = t
+    const fromSha = git(t.f.repo, 'rev-parse', made.branch)
+    manager.journal.append({ operationId: 'rename-1', operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: { from: made.branch, to: 'fix/login-button', worktreePath: made.worktreePath, fromSha } })
+    manager.journal.append({ operationId: 'rename-1', operationType: BRANCH_RENAME_OPERATION, state: 'cancelled', details: { from: made.branch, to: 'fix/login-button', settled: true, disowned: true } })
+    await t.coordinator.trash({ taskId: 'task', operationId: 'branch-trash' })
+    const preview = await t.coordinator.cleanup.preview('task')
+    expect(preview.blockers).toEqual([])
+    expect(preview.retained).toContainEqual(expect.objectContaining({ identity: `refs/heads/${made.branch}` }))
+    expect(preview.items.some((item) => item.identity === `refs/heads/${made.branch}`)).toBe(false)
+    await t.coordinator.purge({ taskId: 'task', operationId: 'branch-purge', expectedGeneration: preview.generation, previewDigest: preview.digest })
+    expect(git(t.f.repo, 'rev-parse', made.branch)).toBe(fromSha)
+  } finally { t.f.dispose() }
+}, 120_000)
+
+it('a thread\'s branch that retirement deleted, made again by the person with their commits, survives the thread\'s purge', async () => {
+  const t = await threadWithBranch('team', 'fix/login-button')
+  try {
+    const { f, store, location, manager } = t
+    expect(manager.load()!.branch).toBe('fix/login-button')
+    const worktreePath = manager.load()!.worktreePath
+    // The worktree is retired and its trash expires: Mousse deletes the branch it made.
+    const taskLease = await waitAcquireExecutionLease(location), repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(f.repo))
+    try {
+      const service = new WorktreeRetirementService(store, { taskLease, repositoryLease })
+      await service.prepare({ taskId: 'task', worktreePath, branch: 'fix/login-button', sourcePath: join(location, 'workspace.json') })
+      const path = service.pathFor('task', worktreePath)
+      await service.retire(path)
+      expect(await service.expireTrash(path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+    } finally { repositoryLease.release(); releaseExecutionLeaseHandle(taskLease) }
+    expect(git(f.repo, 'branch', '--list', 'fix/login-button')).toBe('')
+    // Later the person makes a branch of that name with their own work.
+    const theirs = git(f.repo, 'commit-tree', `${f.baseSha}^{tree}`, '-p', f.baseSha, '-m', 'their own work')
+    git(f.repo, 'branch', 'fix/login-button', theirs)
+    await t.coordinator.trash({ taskId: 'task', operationId: 'branch-trash' })
+    const preview = await t.coordinator.cleanup.preview('task')
+    expect(preview.blockers).toEqual([])
+    expect(preview.items.some((item) => item.identity === 'refs/heads/fix/login-button')).toBe(false)
+    await t.coordinator.purge({ taskId: 'task', operationId: 'branch-purge', expectedGeneration: preview.generation, previewDigest: preview.digest })
+    expect(git(f.repo, 'rev-parse', 'fix/login-button')).toBe(theirs)
+  } finally { t.f.dispose() }
 }, 120_000)
 
 it('keeps an interrupted purge pending while its repository is offline and resumes only after the same repository returns', async () => {

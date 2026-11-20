@@ -660,15 +660,19 @@ export class ThreadWorkspaceManager {
       if (refusal) return refusal
       const current = this.load()!
       if (!await pathExists(current.worktreePath)) return 'the worktree is not there'
-      if (!(await tryGit(primary, ['rev-parse', '--verify', '--quiet', `refs/heads/${from}`])).ok) return 'the branch is gone'
+      const fromSha = (await tryGit(primary, ['rev-parse', '--verify', '--quiet', `refs/heads/${from}^{commit}`])).stdout
+      if (!fromSha) return 'the branch is gone'
+      // Pushed already (an upstream is set): the remote branch keeps the old name, and pushing or opening a pull request
+      // from the renamed one would fail, so it keeps its name.
+      if ((await tryGit(primary, ['config', '--get', `branch.${from}.remote`])).stdout) return 'the branch has an upstream'
       if (await this.branchNameTaken(primary, to)) return 'the name is taken'
       const operationId = randomUUID()
-      const intent = this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: { from, to, worktreePath: current.worktreePath } })
+      const intent = this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: { from, to, worktreePath: current.worktreePath, fromSha } })
       try {
         await withOwnedBranches([from, to], () => git(primary, ['branch', '-m', '--', from, to]))
       } catch (error) {
         // Git refused (a name another branch's folder holds, for one), or failed part way: the repository says which.
-        const settled = await this.settlePendingRename(primary, current.worktreePath, { from, to, operationId })
+        const settled = await this.settlePendingRename(primary, current.worktreePath, { from, to, operationId, fromSha })
         if (settled === 'renamed') return 'renamed'
         return `Git did not rename it: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`
       }
@@ -681,11 +685,13 @@ export class ThreadWorkspaceManager {
   }
 
   /**
-   * Settles a rename a stop left without an outcome, from the repository: done when the worktree is on `to` (or `to` is
-   * there and `from` is not), not done when it is on `from` (or `from` is there and `to` is not). Either way workspace.json
-   * is made to agree. When the repository cannot tell (both names there, or neither, and the worktree on neither),
-   * Mousse gives up both names: it never deletes or renames either branch afterwards. Takes the repository's lease unless
-   * the caller holds it.
+   * Settles a rename a stop left without an outcome, from the repository. Done when the worktree is on `to` (or `to` is
+   * there and `from` is not), and `to` is at the commit `from` was at when the rename was planned, or a later one on it.
+   * Git renames the branch before it moves the worktree's HEAD, so a stop between the two leaves HEAD on `from`, which no
+   * longer exists: HEAD is pointed at `to` before the rename is recorded as done. Not done when the worktree is on `from`
+   * (or `from` is there and `to` is not). Either way workspace.json is made to agree. When the repository cannot tell
+   * (both names there, or neither, and the worktree on neither; or `to` holds other commits), Mousse gives up both names:
+   * it never deletes or renames either branch afterwards. Takes the repository's lease unless the caller holds it.
    */
   async settleBranchRename(options: { holdingRepositoryLease?: boolean; signal?: AbortSignal } = {}): Promise<void> {
     const metadata = this.load()
@@ -705,16 +711,29 @@ export class ThreadWorkspaceManager {
     }
   }
 
-  private async settlePendingRename(primary: string, worktreePath: string, pending: { from: string; to: string; operationId: string }): Promise<'renamed' | 'not-renamed' | 'unknown'> {
-    const { from, to, operationId } = pending
-    const exists = async (name: string): Promise<boolean> => (await tryGit(primary, ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`])).ok
-    const [hasFrom, hasTo] = [await exists(from), await exists(to)]
-    const head = await pathExists(worktreePath) ? (await tryGit(worktreePath, ['symbolic-ref', '-q', 'HEAD'])).stdout : ''
-    const outcome = head === `refs/heads/${to}` && hasTo ? 'renamed'
+  private async settlePendingRename(primary: string, worktreePath: string, pending: { from: string; to: string; operationId: string; fromSha?: string }): Promise<'renamed' | 'not-renamed' | 'unknown'> {
+    const { from, to, operationId, fromSha } = pending
+    const tipOf = async (name: string): Promise<string> => (await tryGit(primary, ['rev-parse', '--verify', '--quiet', `refs/heads/${name}^{commit}`])).stdout
+    const [fromTip, toTip] = [await tipOf(from), await tipOf(to)]
+    const [hasFrom, hasTo] = [Boolean(fromTip), Boolean(toTip)]
+    const there = await pathExists(worktreePath)
+    const head = there ? (await tryGit(worktreePath, ['symbolic-ref', '-q', 'HEAD'])).stdout : ''
+    let outcome: 'renamed' | 'not-renamed' | 'unknown' = head === `refs/heads/${to}` && hasTo ? 'renamed'
       : head === `refs/heads/${from}` && hasFrom ? 'not-renamed'
         : hasTo && !hasFrom ? 'renamed'
           : hasFrom && !hasTo ? 'not-renamed'
             : 'unknown'
+    // `to` is the renamed branch only while it holds what `from` held: someone else's branch of that name is not.
+    if (outcome === 'renamed' && fromSha && toTip !== fromSha && !(await tryGit(primary, ['merge-base', '--is-ancestor', fromSha, toTip])).ok) outcome = 'unknown'
+    if (outcome === 'renamed' && there && head === `refs/heads/${from}`) {
+      try {
+        await withOwnedBranches([to], () => git(worktreePath, ['symbolic-ref', 'HEAD', `refs/heads/${to}`]))
+      } catch (error) {
+        rethrowGitPolicyError(error)
+        // HEAD could not be moved: nothing is recorded, and the next turn settles it again.
+        return 'unknown'
+      }
+    }
     if (outcome === 'renamed') {
       this.recordBranchName(from, to)
       this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'completed', details: { from, to, settled: true } })

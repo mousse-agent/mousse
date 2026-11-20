@@ -9,6 +9,7 @@ import { isThreadOwnBranch } from '../src/mms/workspace/WorkflowWorkspace'
 import { registerBranchNamer, requestBranchName, type BranchNamer } from '../src/mms/workspace/branchNaming'
 import { BRANCH_RENAME_OPERATION } from '../src/mms/workspace/threadBranchRecords'
 import type { BranchNamingSettings } from '../src/shared/settings'
+import { gitLeftInPlaceNoticeAsync } from '../src/mms/actions/snapshots'
 
 // Each test runs Git dozens of times; starting a process on Windows takes several times longer. Nothing here waits on a timer.
 if (process.platform === 'win32') vi.setConfig({ testTimeout: 90_000 })
@@ -97,6 +98,19 @@ describe('a thread worktree starts on a temporary branch and is named in the bac
     expect(manager.branchRecord().owned.has('mousse/login-button')).toBe(false)
   })
 
+  it('a temporary branch that was pushed already (it has an upstream) keeps its name', async () => {
+    let answer!: (text: string) => void
+    namer({}, () => new Promise<string>((done) => { answer = done }))
+    const manager = new ThreadWorkspaceManager(threadDir('one'))
+    const made = await manager.provision('thread-one', 'main', repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
+    git(repo, 'config', `branch.${made.branch}.remote`, 'origin')
+    git(repo, 'config', `branch.${made.branch}.merge`, `refs/heads/${made.branch}`)
+    answer('login-button')
+    await manager.branchNaming
+    expect(manager.load()!.branch).toBe(made.branch)
+    expect(branches(repo)).toEqual(['main', made.branch])
+  })
+
   it('a title model that takes too long is not waited for', async () => {
     namer({}, () => new Promise(() => undefined))
     expect(await requestBranchName(threadDir('one'), 'thread-one', 'Fix the login button', 20)).toBeUndefined()
@@ -146,14 +160,37 @@ describe('the person\'s naming settings', () => {
   })
 })
 
+describe('what Undo says about Git work after the branch was renamed', () => {
+  it('a turn that started on the temporary name neither switched branches nor left commits on a branch that is gone', async () => {
+    let answer!: (text: string) => void
+    namer({ mode: 'semantic' }, () => new Promise<string>((done) => { answer = done }))
+    const manager = new ThreadWorkspaceManager(threadDir('one'))
+    const made = await manager.provision('thread-one', 'main', repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
+    // The first turn commits on the temporary branch; the name arrives afterwards.
+    writeFileSync(join(made.worktreePath, 'fix.txt'), 'fixed\n'); git(made.worktreePath, 'add', '.'); git(made.worktreePath, 'commit', '-qm', 'fix')
+    const commit = git(made.worktreePath, 'rev-parse', 'HEAD')
+    answer('fix/login-button')
+    await manager.branchNaming
+    expect(manager.load()!.branch).toBe('fix/login-button')
+    const renamedTo = manager.branchRecord().renamedTo
+    // Recorded before the rename: the commit's branch is the temporary name.
+    const before = await gitLeftInPlaceNoticeAsync(made.worktreePath, 'Undo', { commits: [commit], git: { branchBefore: made.branch, branchAfter: made.branch, rewroteHistory: false } }, renamedTo)
+    expect(before).toContain('stays on fix/login-button')
+    expect(before).not.toContain('no longer exists')
+    // Recorded across the rename: the start has the temporary name, the end the new one; that is no switch.
+    expect(await gitLeftInPlaceNoticeAsync(made.worktreePath, 'Undo', { commits: [], git: { branchBefore: made.branch, branchAfter: 'fix/login-button', rewroteHistory: false } }, renamedTo)).toBeUndefined()
+  })
+})
+
 describe('a rename a stop interrupted is settled from the repository', () => {
   /** A ready worktree on a temporary branch, and a planned rename to `fix/login-button` as the journal records it first. */
   async function interrupted() {
     const dir = threadDir('one')
     const manager = new ThreadWorkspaceManager(dir)
     const made = await manager.provision('thread-one', 'main', repo)
-    manager.journal.append({ operationId: 'rename-1', operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: { from: made.branch, to: 'fix/login-button', worktreePath: made.worktreePath } })
-    return { dir, manager, made, from: made.branch, to: 'fix/login-button' }
+    const fromSha = git(repo, 'rev-parse', made.branch)
+    manager.journal.append({ operationId: 'rename-1', operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: { from: made.branch, to: 'fix/login-button', worktreePath: made.worktreePath, fromSha } })
+    return { dir, manager, made, from: made.branch, to: 'fix/login-button', fromSha }
   }
 
   // Each row: what happened before the stop, then what Mousse owns once the next turn settles it.
@@ -163,6 +200,11 @@ describe('a rename a stop interrupted is settled from the repository', () => {
     ['Git renamed the branch and workspace.json names it', (f: Awaited<ReturnType<typeof interrupted>>) => {
       git(repo, 'branch', '-m', f.from, f.to)
       writeFileSync(join(f.dir, 'workspace.json'), JSON.stringify({ ...workspace(f.dir), branch: f.to }))
+    }, 'to'],
+    // `git branch -m` renames the ref before it moves the worktree's HEAD: a stop between leaves HEAD on a branch that is gone.
+    ['Git renamed the ref but not yet the worktree\'s HEAD', (f: Awaited<ReturnType<typeof interrupted>>) => {
+      git(repo, 'update-ref', `refs/heads/${f.to}`, f.fromSha)
+      git(repo, 'update-ref', '-d', `refs/heads/${f.from}`)
     }, 'to']
   ] as const)('%s', async (_case, before, owner) => {
     const f = await interrupted()
@@ -174,9 +216,26 @@ describe('a rename a stop interrupted is settled from the repository', () => {
     const name = owner === 'from' ? f.from : f.to
     expect(context.branch).toBe(name)
     expect(workspace(f.dir).branch).toBe(name)
+    // The worktree is on the branch, never on one that is gone.
+    expect(git(f.made.worktreePath, 'symbolic-ref', 'HEAD')).toBe(`refs/heads/${name}`)
+    expect(git(f.made.worktreePath, 'rev-parse', 'HEAD')).toBe(f.fromSha)
     const record = f.manager.branchRecord()
     expect(record.pending).toBeUndefined()
     expect([...record.owned]).toEqual([name])
+  })
+
+  it('a branch of the new name that holds other commits is not the renamed one: Mousse gives up both names and moves nothing', async () => {
+    const f = await interrupted()
+    // The old name is gone and someone's branch has the new one, on a commit the old branch never held.
+    git(repo, 'update-ref', '-d', `refs/heads/${f.from}`)
+    git(repo, 'branch', f.to, git(repo, 'commit-tree', `${f.fromSha}^{tree}`, '-m', 'theirs'))
+    const theirs = git(repo, 'rev-parse', f.to)
+    await f.manager.settleBranchRename()
+    const record = f.manager.branchRecord()
+    expect(record.pending).toBeUndefined()
+    expect(record.owned.size).toBe(0)
+    expect(git(repo, 'rev-parse', f.to)).toBe(theirs)
+    expect(workspace(f.dir).branch).toBe(f.from)
   })
 
   it('when the repository cannot tell (both names there, the worktree on neither), Mousse gives up both names', async () => {

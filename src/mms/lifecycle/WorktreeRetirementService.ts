@@ -26,7 +26,8 @@ import { gitRunError, LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitPro
 import { renameFolderAsync } from './renameFolder'
 import { isIdNamedMousseBranch, isMousseBranchName, isValidBranchName } from '../../shared/mousseBranches'
 import { withOwnedBranches } from '../git/gitPolicy'
-import { threadBranchRecord } from '../workspace/threadBranchRecords'
+import { BRANCH_RELEASE_OPERATION, BRANCH_RESTORE_OPERATION, threadBranchRecord, type ThreadBranchRecord } from '../workspace/threadBranchRecords'
+import { randomUUID } from 'node:crypto'
 import { adminDigest, adminObjectIds, blobId, HEAD_REFLOG, readAdminFilesAsync, replayedAdminFile, storeAdmin, storeAdminBeforeRemoval, uncontainedTips, type StoredAdmin } from './worktreeAdminData'
 import { keepCopy, keepExistingCommit, keptCopyWindowMs } from '../actions/keptCopies'
 import { threadPreservedIndex } from '../actions/preservedFiles'
@@ -1168,47 +1169,75 @@ export class WorktreeRetirementService {
   }
   /**
    * Deletes the worktree's owned branches whose tips the pins keep (a tip that is HEAD or the commit a pinned snapshot
-   * was taken on, or an ancestor of one), unless a worktree has the branch checked out. Those are the thread's own branch,
-   * which `prepare` proved Mousse made (`verifySource`), whatever its name, and the branch HEAD was on when that is another
-   * of Mousse's id-named ones; a branch the agent made itself, whatever its name, is never touched. Each deletion is
-   * recorded so a restore brings the branch back.
+   * was taken on, or an ancestor of one), unless a worktree has the branch checked out. Each deletion is recorded so a
+   * restore brings the branch back.
+   *
+   * A thread's own branch (a manifest of its workspace.json) is deleted only while the thread's journal says Mousse owns
+   * it now (`threadBranchRecord`): not a name it released or gave up, nor one a rename left unsettled, whatever the
+   * manifest names. The release is journaled before the delete, so the name stops being Mousse's: a branch someone makes
+   * under it later is theirs. Without that record (a journal that cannot be read or written) the branch stays. Other
+   * owners' branches (agents', workflows', an id-named one HEAD was on) are deleted only under `mousse/`. A branch the
+   * agent made itself is never touched.
    */
   private async releaseBranches(manifest: WorktreeReconstructionManifest): Promise<void> {
     const checkedOut = new Set((await lifecycleReadAsync(manifest.commonDir, ['worktree', 'list', '--porcelain'])).split(/\r?\n/).filter((line) => line.startsWith('branch refs/heads/')).map((line) => line.slice('branch refs/heads/'.length)))
     const pins = [manifest.resultSha, manifest.snapshotSha].filter((sha): sha is string => Boolean(sha))
     const owned = [manifest.branch, ...(isIdNamedMousseBranch(manifest.headBranch) ? [manifest.headBranch] : [])]
-    const unsettled = this.unsettledRenameNames(manifest)
+    const thread = this.threadBranchOwner(manifest)
     for (const name of new Set(owned)) {
-      if (!name || !isValidBranchName(name) || checkedOut.has(name) || unsettled.has(name)) continue
+      if (!name || !isValidBranchName(name) || checkedOut.has(name)) continue
+      const threadBranch = Boolean(thread) && name === manifest.branch
+      if (threadBranch) {
+        const record = thread!.record
+        if (!record || !record.owned.has(name) || (record.pending && (record.pending.from === name || record.pending.to === name))) continue
+      } else if (!isMousseBranchName(name)) continue
       const tip = await this.tip(manifest, name)
       if (!tip) continue
       let kept = false
       for (const pin of pins) if (pin === tip || await gitSucceeds(manifest.commonDir, ['merge-base', '--is-ancestor', tip, pin])) { kept = true; break }
       if (!kept) continue
+      if (threadBranch && !this.journalBranch(thread!.location, BRANCH_RELEASE_OPERATION, { branch: name, sha: tip, worktreePath: manifest.worktreePath })) continue
       await withOwnedBranches([name], () => lifecycleGitAsync(manifest.commonDir, ['update-ref', '--no-deref', '-d', `refs/heads/${name}`, tip]))
       manifest.deletedBranches = [...(manifest.deletedBranches ?? []).filter((entry) => entry.name !== name), { name, sha: tip }]
     }
   }
   /**
-   * The names of a thread branch rename a stop left unsettled (`threadBranchRecord`): which of them is Mousse's is not
-   * known, so neither is deleted. A journal that cannot be read leaves only `mousse/` names deletable, as before.
+   * For a manifest of a thread's workspace.json: the thread's folder and its branch records (`record` undefined when its
+   * journal cannot be read). Undefined for any other owner (an agent's or a workflow's worktree).
    */
-  private unsettledRenameNames(manifest: WorktreeReconstructionManifest): Set<string> {
+  private threadBranchOwner(manifest: WorktreeReconstructionManifest): { location: string; record?: ThreadBranchRecord } | undefined {
+    let location: string
+    try { location = this.store.require(manifest.taskId).location } catch { return basename(manifest.sourcePath) === 'workspace.json' ? { location: '' } : undefined }
+    if (basename(manifest.sourcePath) !== 'workspace.json') return undefined
     try {
-      const pending = threadBranchRecord(new ThreadJournal(this.store.require(manifest.taskId).location, { readOnly: true }).list(), { worktreePath: manifest.worktreePath }).pending
-      return new Set(pending ? [pending.from, pending.to] : [])
+      return { location, record: threadBranchRecord(new ThreadJournal(location, { readOnly: true }).list(), { worktreePath: manifest.worktreePath }) }
     } catch {
-      return new Set(isMousseBranchName(manifest.branch) ? [] : [manifest.branch])
+      return { location }
     }
   }
-  /** Brings back the branches `releaseBranches` deleted, at their tips, where nothing has taken the name since. */
+  /** Journals a release or restore of the thread's branch; false when the journal cannot be written (the thread is trashed). */
+  private journalBranch(location: string, operationType: string, details: { branch: string; sha: string; worktreePath: string }): boolean {
+    if (!location) return false
+    try {
+      new ThreadJournal(location).append({ operationId: randomUUID(), operationType, state: 'completed', details })
+      return true
+    } catch {
+      return false
+    }
+  }
+  /**
+   * Brings back the branches `releaseBranches` deleted, at their tips, where nothing has taken the name since. A thread's
+   * own branch made again is journaled, so the name is Mousse's again; a name someone took meanwhile stays released.
+   */
   private async restoreBranches(manifest: WorktreeReconstructionManifest): Promise<void> {
     const missing: Array<{ name: string; sha: string }> = []
+    const thread = this.threadBranchOwner(manifest)
     for (const entry of manifest.deletedBranches ?? []) {
       if (await this.branchTaken(manifest, entry.name)) continue
       // A commit that is no longer in the repository cannot be a branch again; it is reported, never a reason to fail.
       if (!await gitSucceeds(manifest.commonDir, ['cat-file', '-e', `${entry.sha}^{commit}`])) { missing.push(entry); continue }
       await withOwnedBranches([entry.name], () => lifecycleGitAsync(manifest.commonDir, ['update-ref', '--no-deref', `refs/heads/${entry.name}`, entry.sha, '0'.repeat(entry.sha.length)]))
+      if (thread && entry.name === manifest.branch) this.journalBranch(thread.location, BRANCH_RESTORE_OPERATION, { branch: entry.name, sha: entry.sha, worktreePath: manifest.worktreePath })
     }
     delete manifest.deletedBranches
     if (missing.length) manifest.branchesNotRestored = missing
@@ -1718,10 +1747,9 @@ export class WorktreeRetirementService {
       }
       const branches = threadBranchRecord(journal, { worktreePath: input.worktreePath, acceptProvision: provisionFits })
       const provisions = journal.filter((entry) => entry.operationType === 'workspace-provision' && entry.state === 'planned' && provisionFits(entry))
-      // A rename a stop left unsettled: the worktree is still the thread's under either name, but neither branch is deleted
-      // while it is unsettled (`releaseBranches`).
-      const pending = branches.pending
-      let branchOwned = branches.owned.has(input.branch) || Boolean(pending && (input.branch === pending.from || input.branch === pending.to))
+      // Any name the worktree's branch has had by Mousse's records: the worktree is the thread's on it. Whether the branch
+      // itself may be deleted is decided again where it is deleted (`releaseBranches`): only one Mousse owns now.
+      let branchOwned = branches.known.has(input.branch)
       const branchesPath = join(task.location, 'conversation-branches.json')
       // Without conversation branches, no fork can own the branch either.
       if (!branchOwned && typeof row.conversationBranchId === 'string' && existsSync(branchesPath)) {

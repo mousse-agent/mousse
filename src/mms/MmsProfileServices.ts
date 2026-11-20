@@ -614,7 +614,7 @@ export class MmsProfileServices {
     // New worktree branches of this profile's threads are named by its title model, as Settings → Storage → Branches says.
     this.forgetBranchNamer = registerBranchNamer(homeDir, {
       settings: () => this.settings.get().branches,
-      ask: (request) => this.orchestrator.askBranchName(request)
+      ask: (request, signal) => this.orchestrator.askBranchName(request, signal)
     })
     // MMS owns the canonical per-thread transcript and durable message queue for
     // every surface (GUI client, CLI client, remote sends). Electron never owns MMS.

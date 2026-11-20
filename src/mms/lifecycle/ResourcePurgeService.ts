@@ -20,9 +20,9 @@ import { assertFrozenEntryUnchanged, lockedText, proveFrozenContentEntryAsync, w
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { claimOverlapsPath, getExternalResourceClaims, getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver, type ClaimTarget } from './LifecycleClaims'
 import { withFileLock } from '../scheduled/fileLock'
-import { isAcceptableThreadBranchName, isMousseOwnedRef } from '../../shared/mousseBranches'
+import { isMousseOwnedRef } from '../../shared/mousseBranches'
 import { ThreadJournal } from '../data/ThreadJournal'
-import { threadBranchRecord } from '../workspace/threadBranchRecords'
+import { threadBranchRecord, type ThreadBranchRecord } from '../workspace/threadBranchRecords'
 import { isKeptFilesItem, keptOnDelete, unverifiedHolds } from '../../shared/resourceLifecycle'
 import { isOwnedSnapshotStore, withOwnedBranches } from '../git/gitPolicy'
 import { threadStoreKeptFilesAsync } from '../actions/SnapshotRefReleaseService'
@@ -645,16 +645,22 @@ export class ResourcePurgeService {
         // Already planned from the project folder's own repository.
         if (plannedRefs.has(resource.identity)) continue
         try {
-          const recorded = isMousseOwnedRef(resource.identity) ? undefined : this.recordedThreadBranch(resource.ownerTaskId, resource.identity)
-          // A thread branch whose rename a stop left unsettled: which name is Mousse's is not known, so it stays.
-          if (recorded === 'unsettled') { preview.retained.push({ identity: resource.identity, reason: 'A rename of this branch is not settled; the branch stays' }); continue }
-          const recordedBranch = recorded === 'owned'
-          if (!isMousseOwnedRef(resource.identity) && !recordedBranch) throw new Error('Source ref is not Mousse-owned')
           const commonDir = resource.repositoryId ? repositories.get(resource.repositoryId) : repositories.size === 1 ? [...repositories.values()][0] : undefined
+          const thread = this.threadWorkspaceBranch(resource.ownerTaskId, resource.identity)
+          if (thread) {
+            // The thread's own worktree branch: judged by the thread's records and by what its tip holds, whatever its name.
+            const verdict = await this.threadBranchVerdict(resource.ownerTaskId, thread, resource.identity, commonDir)
+            if ('retained' in verdict) { preview.retained.push({ identity: resource.identity, reason: verdict.retained }); continue }
+            if ('blocker' in verdict) throw new Error(verdict.blocker)
+            if (!verdict.expectedValue || !commonDir) continue
+            preview.items.push({ id: resource.id, kind: 'ref', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir, expectedValue: verdict.expectedValue, ...(isMousseOwnedRef(resource.identity) ? {} : { recordedBranch: true }), status: 'pending' })
+            continue
+          }
+          if (!isMousseOwnedRef(resource.identity)) throw new Error('Source ref is not Mousse-owned')
           if (!commonDir) throw new Error('Repository is unavailable; ref existence cannot be established')
           const expectedValue = await readDirectLifecycleRefAsync(commonDir, resource.identity)
           if (!expectedValue) continue
-          preview.items.push({ id: resource.id, kind: 'ref', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir, expectedValue, ...(recordedBranch ? { recordedBranch: true } : {}), status: 'pending' })
+          preview.items.push({ id: resource.id, kind: 'ref', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir, expectedValue, status: 'pending' })
         } catch (error) { preview.blockers.push((error as Error).message) }
         continue
       }
@@ -705,24 +711,70 @@ export class ResourcePurgeService {
     return { ...repository, ...(isAbsolute(item.identity) ? { path: await canonicalPathAsync(item.identity) } : {}) }
   }
   /**
-   * Whether `ref` is a branch the owner thread's journal shows Mousse made for its worktree, by its current name
-   * (`threadBranchRecord`): a temporary name with the person's prefix, or one the title model gave it. `unsettled` while
-   * a rename of the thread's branch has no outcome recorded.
+   * When `ref` is the branch the owner thread's workspace.json names for its worktree: that record and the thread's
+   * branch records (`threadBranchRecord`; none when the journal cannot be read). Undefined for any other ref.
    */
-  private recordedThreadBranch(taskId: string, ref: string): 'owned' | 'unsettled' | undefined {
-    if (!ref.startsWith('refs/heads/') || !isAcceptableThreadBranchName(ref.slice('refs/heads/'.length))) return undefined
+  private threadWorkspaceBranch(taskId: string, ref: string): { workspace: { worktreePath: string; retainedRef?: string; headSha?: string }; record?: ThreadBranchRecord } | undefined {
+    if (!ref.startsWith('refs/heads/')) return undefined
+    let workspace: { threadId?: unknown; worktreePath?: unknown; branch?: unknown; retainedRef?: unknown; headSha?: unknown }
+    let location: string
     try {
-      const task = this.store.require(taskId)
-      const workspacePath = join(task.location, 'workspace.json')
-      assertLifecyclePath(task.location, workspacePath)
-      const workspace = JSON.parse(readFileSync(workspacePath, 'utf8')) as { threadId?: unknown; worktreePath?: unknown; branch?: unknown }
-      if (workspace.threadId !== taskId || typeof workspace.worktreePath !== 'string' || `refs/heads/${workspace.branch}` !== ref) return undefined
-      const record = threadBranchRecord(new ThreadJournal(task.location, { readOnly: true }).list(), { worktreePath: workspace.worktreePath })
-      if (record.pending) return 'unsettled'
-      return record.owned.has(ref.slice('refs/heads/'.length)) ? 'owned' : undefined
+      location = this.store.require(taskId).location
+      const workspacePath = join(location, 'workspace.json')
+      assertLifecyclePath(location, workspacePath)
+      workspace = JSON.parse(readFileSync(workspacePath, 'utf8'))
+    } catch { return undefined }
+    if (workspace.threadId !== taskId || typeof workspace.worktreePath !== 'string' || `refs/heads/${workspace.branch}` !== ref) return undefined
+    const own = { worktreePath: workspace.worktreePath, ...(typeof workspace.retainedRef === 'string' ? { retainedRef: workspace.retainedRef } : {}), ...(typeof workspace.headSha === 'string' ? { headSha: workspace.headSha } : {}) }
+    try {
+      return { workspace: own, record: threadBranchRecord(new ThreadJournal(location, { readOnly: true }).list(), { worktreePath: workspace.worktreePath }) }
     } catch {
-      return undefined
+      return { workspace: own }
     }
+  }
+  /**
+   * Whether a purge deletes the thread's own worktree branch. Only one Mousse owns now by the thread's records: a name a
+   * rename left unsettled, that Mousse released (retirement deleted it, so a branch of that name now is someone else's)
+   * or gave up stays, as a retained item. An owned one is deleted only when its tip is kept by the thread's own pins (its
+   * retained snapshot, its retirement record's result or snapshot, the commit its worktree started at, or an ancestor of
+   * one) and no worktree but the thread's has it checked out, the rule retirement deletes a branch by; otherwise it
+   * stays. A name the records never gave the worktree is refused, unless it is under `mousse/` as older records' are.
+   */
+  private async threadBranchVerdict(taskId: string, thread: NonNullable<ReturnType<ResourcePurgeService['threadWorkspaceBranch']>>, ref: string, commonDir: string | undefined): Promise<{ retained: string } | { blocker: string } | { expectedValue?: string }> {
+    const name = ref.slice('refs/heads/'.length)
+    const { record, workspace } = thread
+    if (!record) return { retained: "The thread's branch records cannot be read; the branch stays" }
+    if (record.pending && (record.pending.from === name || record.pending.to === name)) return { retained: 'A rename of this branch is not settled; the branch stays' }
+    if (!record.owned.has(name)) {
+      if (record.known.has(name)) return { retained: 'Mousse no longer owns this branch name; the branch stays' }
+      if (!isMousseOwnedRef(ref)) return { blocker: 'Source ref is not Mousse-owned' }
+    }
+    if (!commonDir) return { blocker: 'Repository is unavailable; ref existence cannot be established' }
+    const tip = await readDirectLifecycleRefAsync(commonDir, ref)
+    if (!tip) return {}
+    const pins: string[] = []
+    if (workspace.retainedRef?.startsWith('refs/mousse/')) {
+      const pinned = await readDirectLifecycleRefAsync(commonDir, workspace.retainedRef).catch(() => undefined)
+      if (pinned) pins.push(pinned)
+    }
+    try {
+      const manifestPath = this.retirement.pathFor(taskId, workspace.worktreePath)
+      if (existsSync(manifestPath)) {
+        const manifest = this.retirement.load(manifestPath)
+        pins.push(...[manifest.resultSha, manifest.snapshotSha].filter((sha): sha is string => Boolean(sha)))
+      }
+    } catch { /* No retirement record: the other pins decide. */ }
+    if (workspace.headSha && /^[0-9a-f]{40,64}$/.test(workspace.headSha)) pins.push(workspace.headSha)
+    let kept = false
+    for (const pin of pins) if (pin === tip || await lifecycleReadAsync(commonDir, ['merge-base', '--is-ancestor', tip, pin]).then(() => true, () => false)) { kept = true; break }
+    if (!kept) return { retained: 'This branch holds commits the thread does not; the branch stays' }
+    const own = comparablePath(resolve(workspace.worktreePath))
+    let path: string | undefined
+    for (const line of (await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain'])).split(/\r?\n/)) {
+      if (line.startsWith('worktree ')) path = line.slice('worktree '.length)
+      else if (line === `branch ${ref}` && path && comparablePath(resolve(path)) !== own) return { retained: 'This branch is checked out outside the thread; the branch stays' }
+    }
+    return { expectedValue: tip }
   }
   private sign(preview: LifecyclePurgePreview): LifecyclePurgePreview { preview.digest = digest({ ...preview, digest: '' }); return preview }
   private order(item: LifecyclePurgeItem, tasks: TaskLifecycleRecord[]): number { return item.kind === 'worktree' ? 0 : item.kind === 'ref' ? 1 : tasks.some((task) => task.location === item.identity) ? 3 : 2 }
