@@ -13,6 +13,7 @@ import { DEVICE_SCOPE, useProviderSnapshots } from '../../lib/providerSnapshots'
 import { usageLevel } from '../../lib/subscriptionUsage'
 import { botsClient, useBotsStore } from '../../stores/botsStore'
 import { errorText } from '../../services/personalBotsClient'
+import { DRIVER_INFO } from '../providers/providerView'
 import { SettingsModelPicker } from '../settings/SettingsModelPicker'
 import { borrowedRow, borrowedRowTitle, botRowTitle, offeredListing, PICK_A_MODEL, sameAsLabel, severalEntries } from './BotRunsOn'
 import { nextReading, usageReading, type BotUsageReading } from './botUsageRing'
@@ -112,7 +113,7 @@ function UsageRing({ left }: { left: number }) {
 
 function BotAntigravityNote() {
   const { snapshots } = useProviderSnapshots(DEVICE_SCOPE)
-  if (!snapshots?.some((entry) => entry.driver === 'antigravity' && entry.enabled.effective && entry.auth.state === 'signed_in')) return null
+  if (!snapshots?.some((entry) => DRIVER_INFO[entry.driver]?.ownerOnly && entry.enabled.effective && entry.auth.state === 'signed_in')) return null
   return <p className="bot-model-note">Google Antigravity is available for regular chats you send yourself.</p>
 }
 
