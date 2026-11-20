@@ -87,6 +87,8 @@ In detail:
 
 Turn start no longer requires a clean worktree, no longer moves uncommitted changes aside, and no longer compares the branch name or HEAD. `ThreadWorkspaceManager.verify` reports a workspace ready when the worktree exists and no Mousse operation is waiting for recovery (`recovery_required`, `prepared`, `git_applied`, `context_pending`).
 
+A turn's start (from the workspace check to the start check) and its end (around the checkpoint) each read the worktree's top, Git folder, in-progress markers, HEAD and branch once, in one `rev-parse` and, when the branch is needed, one `symbolic-ref` (`src/mms/git/repositoryFacts.ts`). Every caller in that window (workspace check, lock identity, snapshot, checkpoint, receipt) uses those answers. What was read before the repository's lease is read again once it is held, and nothing carries over to the next window, so HEAD at the end and a `.git` replaced between turns are always read fresh. Hidden stores and synchronous callers ask Git themselves.
+
 What still stops a turn: an operation Mousse left unfinished (an interrupted restore or checkpoint), until recovery settles it. Recovery runs before the next turn and admits `recovery_required` too, so a thread an older version left waiting unlocks on its own. A refused publish leaves nothing unfinished.
 
 ## Checkpoint
