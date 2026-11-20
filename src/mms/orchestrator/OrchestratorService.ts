@@ -2894,6 +2894,28 @@ export class OrchestratorService extends EventEmitter {
       })
     })
     const onEvent = (event: ThreadEvent): void => {
+      // A newly delegated child run begins in `queued` while its turn waits to be claimed or sets up its worktree.
+      // Report its turn state immediately so opening the subagent from Nest shows Working / Starting… instead of an
+      // empty chat. Settle it if the run ends before the turn executor ever moves it out of `queued`.
+      if (event.type === 'run.created') {
+        const run = event.payload as Partial<RunRecord> | undefined
+        if (run?.source === 'delegation' && run.status === 'queued' && typeof run.runId === 'string' && !isTurnActivePhase(this.turnStates.get(event.threadId)?.phase ?? 'idle')) {
+          this.setTurnPhase(event.threadId, 'queued', { turnId: run.runId })
+        }
+      }
+      if (event.type === 'run.status') {
+        const run = event.payload as Partial<RunRecord> | undefined
+        const current = this.turnStates.get(event.threadId)
+        if (run?.status && TERMINAL_RUN_STATUSES.has(run.status) && current?.phase === 'queued' && current.turnId === run.runId) {
+          if (run.status === 'completed') this.setTurnPhase(event.threadId, 'completed', { turnId: run.runId })
+          else if (run.status === 'failed' || run.status === 'uncertain') {
+            const error = typeof run.outcome?.error === 'string' ? run.outcome.error : undefined
+            this.setTurnPhase(event.threadId, 'failed', { turnId: run.runId, ...(error ? { error } : {}) })
+          } else {
+            this.setTurnPhase(event.threadId, 'idle')
+          }
+        }
+      }
       // Running delegated tasks wake the parent when they finish; until then its thread is Waiting.
       if (event.type === 'delegation.status') {
         this.runtimeManager?.setPendingDelegations(event.threadId,
@@ -7538,6 +7560,7 @@ export class OrchestratorService extends EventEmitter {
       // Never for a private thread: `delegateRemoteTask` refuses it before the engine gets here.
       if (this.isLocalOnly(parentThread.id)) throw new Error(PRIVATE_THREAD_REMOTE_REFUSAL)
       const child = this.threadStore.createThread(title, parentThread.projectId, undefined, {
+        started: true,
         lineage: lineageForChild(parentThread),
         ownerThreadId: parentThread.id,
         workspaceBinding: { policy: request.workspace === 'shared' ? 'shared' : 'isolated' },
@@ -7567,6 +7590,7 @@ export class OrchestratorService extends EventEmitter {
     // With "Give each subagent its own worktree" on, the child's worktree starts at the parent's HEAD as it is now.
     const startSha = request.workspace === 'isolated' && this.subagentWorktreesOn() ? this.parentHeadNow(request.parentThreadId) : undefined
     const child = this.threadStore.createThread(title, parentThread.projectId, undefined, {
+      started: true,
       lineage: lineageForChild(parentThread),
       ownerThreadId: parentThread.id,
       // `access` is kept whether or not the parent has a folder: a read-only child stays read-only without one.
