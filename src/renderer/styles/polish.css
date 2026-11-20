@@ -1283,8 +1283,8 @@ html[data-frosted-composer='true'] .chat:not(.chat--empty) .an-message-list {
 html[data-frosted-composer='true'] .app .chat:not(.chat--empty) .chat-input-area .composer,
 html[data-frosted-composer='true'] .chat:not(.chat--empty) .chat-jump {
   background-color: rgba(var(--surface-soft-rgb), var(--frosted-composer-alpha, 0.6));
-  -webkit-backdrop-filter: blur(var(--frosted-composer-blur, 16px)) saturate(var(--frosted-composer-saturate, 1.12));
-  backdrop-filter: blur(var(--frosted-composer-blur, 16px)) saturate(var(--frosted-composer-saturate, 1.12));
+  -webkit-backdrop-filter: blur(var(--frosted-composer-blur, 6px)) saturate(var(--frosted-composer-saturate, 1.12));
+  backdrop-filter: blur(var(--frosted-composer-blur, 6px)) saturate(var(--frosted-composer-saturate, 1.12));
 }
 
 /* On the glass, hover still deepens the fill and brings the text to full colour. */
