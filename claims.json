@@ -105,7 +105,7 @@
         "tests/net/bridge/remote/remote.test.ts"
       ],
       "claimedAt": "2026-11-20T17:24:45.519Z",
-      "expiresAt": "2026-11-20T19:24:45.519Z"
+      "expiresAt": "2026-11-20T20:32:51.083Z"
     },
     {
       "task": "fix-quit-lingering-service",
