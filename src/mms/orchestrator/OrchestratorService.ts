@@ -2,6 +2,7 @@ import { profilerService } from '../diagnostics/profilerService'
 import type { BugReportService } from '../bugReports/BugReportService'
 import { turnTimingMark } from '../diagnostics/turnTiming'
 import { inTurnBoundary, turnBoundaryMark, turnBoundaryReplyDone, turnBoundaryStarted } from '../diagnostics/turnBoundary'
+import { closeRepositoryFacts, forgetRepositoryFacts, openRepositoryFacts, withRepositoryFactsScope } from '../git/repositoryFacts'
 import { describeQuestionAnswers } from './questionAnswers'
 import type { OpenQuestionCloseReason } from '../run/OpenQuestions'
 import { latestReplyPreview } from '../../shared/threadPreview'
@@ -13964,7 +13965,8 @@ export class OrchestratorService extends EventEmitter {
     // Where the turn's start and end spend their time, logged for every thread (`turnBoundary.ts`).
     let requestedAt: string | undefined
     try { requestedAt = runId ? this.runEngine?.getRun(runId)?.requestedAt : undefined } catch { /* Measured without it. */ }
-    return inTurnBoundary({ threadId, ...(runId ? { runId } : {}), ...(requestedAt ? { requestedAt } : {}) }, async () => {
+    // What the turn's start and end ask Git about its folder, asked once for all their callers (`repositoryFacts.ts`).
+    return inTurnBoundary({ threadId, ...(runId ? { runId } : {}), ...(requestedAt ? { requestedAt } : {}) }, () => withRepositoryFactsScope(async () => {
       // A subagent that may edit its parent's folder records that folder as its turn starts and ends: its result is
       // measured from those, never from the parent's own turn records, which say nothing once the parent's turn has ended.
       const writer = runId ? this.sharedWriterOf(runId) : undefined
@@ -13982,7 +13984,7 @@ export class OrchestratorService extends EventEmitter {
         // records it here, so a later look at its result still has it.
         if (writer && runId && !this.sharedFolderEnded.delete(runId)) await this.recordSharedFolder(writer, runId, 'end')
       }
-    })
+    }))
   }
 
   /** Runs whose turn already recorded the shared folder's end (`recordSharedFolder`), until their `executeTurn` returns. */
@@ -14201,6 +14203,9 @@ export class OrchestratorService extends EventEmitter {
       }, heldLease, setupSignal)
     }
     turnTimingMark(session.threadId, 'recovery')
+    // From the workspace check to the start check, the turn's callers share one read of its folder; recovery, which may
+    // move HEAD, is over.
+    openRepositoryFacts()
     const request = normalizeSendRequest(input)
     // The folder a turn is recorded in when it has no worktree: a project without Git, or a thread with no project.
     let snapshotFolder: SnapshotFolder | undefined
@@ -14234,6 +14239,8 @@ export class OrchestratorService extends EventEmitter {
             await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, setupStep)
             const pending = opts?.agent ? agentMessageWords(request.content, agentOriginOf(opts.agent)) : request.content
             await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, pending), setupStep)
+            // A fork or subagent worktree made just now is read afresh (`repositoryFacts.ts`).
+            forgetRepositoryFacts()
             session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.placementOf(session.threadId), this.restoreNotifier(session.threadId))
               .resolve(request.mode, 'main', setupSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, pending), setupStep)
           } catch (error) {
@@ -14271,6 +14278,7 @@ export class OrchestratorService extends EventEmitter {
 
     if (request.workflowInvocationId) {
       this.endSetupStep(session.threadId)
+      closeRepositoryFacts()
       return await this.executeWorkflowChatTurn(session, request, opts)
     }
 
@@ -14355,6 +14363,7 @@ export class OrchestratorService extends EventEmitter {
       ? await new ThreadActionService(this.resolveThreadDir(session.threadId)!).checkTurnStart(checkpointCwd, turnStartSha)
       : undefined
     turnBoundaryMark(session.threadId, 'startCheck')
+    closeRepositoryFacts()
     // A run started again after a restart (reconciler rule 5) whose message the transcript already has, tagged with
     // its run, does not take it in a second time: the turn runs on it.
     if (!reuseLastUser && !queueItemId && opts?.runId && this.runEngine && session.messages.some((message) => message.role === 'user' && message.turnId === opts.runId)) {
@@ -14534,9 +14543,14 @@ export class OrchestratorService extends EventEmitter {
             : undefined
         }
       }
+      // The end reads the folder afresh, once for all its callers (`repositoryFacts.ts`): HEAD and the branch are where
+      // the agent left them.
       const action = conversationDirectory
         ? new ConversationActionService(conversationDirectory).settle(turnId, session.messages.length, checkpointOptions.nativeContextBoundary, state, conversationToolsUsed, session.executionLease!, snapshotsOff, snapshotsNotCovered)
-        : await new ThreadActionService(threadDir).checkpointExistingTurn(checkpointOptions, turnStartSha!, state)
+        : await (async () => {
+          openRepositoryFacts()
+          try { return await new ThreadActionService(threadDir).checkpointExistingTurn(checkpointOptions, turnStartSha!, state) } finally { closeRepositoryFacts() }
+        })()
       turnBoundaryMark(session.threadId, 'receipt')
       for (let index = turnPresentationStart; index < session.messages.length; index += 1) {
         session.messages[index] = {

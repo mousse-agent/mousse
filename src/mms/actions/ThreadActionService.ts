@@ -19,6 +19,7 @@ import { coverageNotice, describeGitAsync, namedGapsAsync, sameTreeAsync, Snapsh
 import { activeHiddenStore } from '../git/hiddenStore'
 import { inThreadSnapshotScope, inThreadSnapshotScopeAsync, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 import { turnBoundaryStep } from '../diagnostics/turnBoundary'
+import { repositoryFacts } from '../git/repositoryFacts'
 
 export interface RunThreadActionOptions {
   threadId: string
@@ -485,7 +486,7 @@ export class ThreadActionService {
     action: ThreadAction,
     state: 'completed' | 'stopped' | 'failed'
   ): Promise<void> {
-    workspacePath = await gitAsync(workspacePath, ['rev-parse', '--show-toplevel'])
+    workspacePath = (await repositoryFacts(workspacePath))?.top ?? await gitAsync(workspacePath, ['rev-parse', '--show-toplevel'])
     action.state = 'checkpointing'
     this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'prepared', expectedPreState: { startSha: action.startSha }, details: { action, actionState: state } })
     const threadId = (await new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshotAsync())?.threadId

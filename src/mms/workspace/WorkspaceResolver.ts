@@ -7,6 +7,7 @@ import { PROJECT_FOLDER_REASON, type ThreadPlacement } from './threadPlacement'
 import { isProjectFolderWorkspace, ThreadWorkspaceManager } from './ThreadWorkspaceManager'
 import { startedInSnapshotStore } from './SnapshotWorkspace'
 import { assertWorktreeFolderConnected } from '../worktree/worktreeLayout'
+import { forgetRepositoryFacts } from '../git/repositoryFacts'
 
 /** A thread that records its turns in its folder's hidden store, whatever the folder has become since (`unavailableReason`). */
 export const SNAPSHOT_STORE_REASON = 'snapshot-store'
@@ -106,7 +107,10 @@ export class WorkspaceResolver {
       const verified = await manager.verify(existing)
       if (verified.lifecycle === 'missing' && manager.hasReconstructionManifest(existing)) {
         onStep?.('restore')
-        return manager.executionContext(this.projectPath, await manager.restore(this.projectPath, signal, heldThreadLease, this.notify))
+        const restored = await manager.restore(this.projectPath, signal, heldThreadLease, this.notify)
+        // The worktree was rebuilt: what the turn read of it before is read again (`repositoryFacts.ts`).
+        forgetRepositoryFacts()
+        return manager.executionContext(this.projectPath, restored)
       }
       if (verified.lifecycle !== 'ready') {
         // An operation of Mousse's own on the worktree that did not finish pauses the thread until it is recovered.
@@ -146,6 +150,7 @@ export class WorkspaceResolver {
     // Read before the worktree exists: what the project folder holds that the new worktree, cut from HEAD, will not.
     const startNote = await uncommittedLeftBehindNote(this.projectPath)
     await manager.provision(this.threadId, conversationBranchId, this.projectPath, signal, heldThreadLease, undefined, { nameFrom })
+    forgetRepositoryFacts()
     const note = [startNote, manager.placementNote].filter(Boolean).join(' ')
     return { ...await manager.executionContext(this.projectPath), ...(note ? { startNote: note } : {}) }
   }
