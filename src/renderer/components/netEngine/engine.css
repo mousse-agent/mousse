@@ -19,9 +19,6 @@
   vertical-align: -1px;
 }
 
-.engine-row-id {
-  font-family: var(--font-mono);
-}
 
 .engine-dialog {
   display: flex;
@@ -30,9 +27,85 @@
   min-width: 280px;
 }
 
+/* Add device, all in one: the code, its time left and link, then the paste field and More ways. */
+.engine-dialog-home {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  width: min(420px, 100%);
+}
+
+.engine-dialog-home .engine-qr .engine-paste {
+  align-self: stretch;
+}
+
+.engine-qr-timer {
+  font-variant-numeric: tabular-nums;
+}
+
+.engine-dialog-home .settings-input {
+  height: var(--settings-control-h, 28px);
+  padding: 0 var(--space-8);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  font-size: var(--settings-fs-small, 12.5px);
+}
+
 .engine-dialog-choices {
   display: flex;
+  flex-direction: column;
   gap: var(--space-8);
+}
+
+/* Buttons in the Devices dialogs share the row control size, as they do in Settings rows. */
+:is(.devices-dialog-actions, .engine-paste, .engine-choice, .engine-link-ended) > .settings-btn {
+  height: var(--settings-control-h, 28px);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small, 12.5px);
+}
+
+/* One way to add a device: its name over a one-line hint. */
+.engine-choice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.engine-choice > .settings-btn {
+  min-width: 120px;
+}
+
+.engine-choice-hint {
+  color: var(--text-muted);
+  font-size: var(--font-size-small, 12px);
+}
+
+.engine-more-ways {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.engine-more-ways > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  cursor: pointer;
+  color: var(--text-muted);
+  list-style: none;
+}
+
+.engine-more-ways > summary::-webkit-details-marker {
+  display: none;
+}
+
+.engine-more-ways[open] > summary .settings-advanced-chevron {
+  transform: rotate(90deg);
+}
+
+.engine-more-ways > .engine-choice + .engine-choice {
+  margin-top: var(--space-8);
 }
 
 .engine-qr {
@@ -196,8 +269,7 @@
 }
 
 .engine-reach-control,
-.engine-reach-form,
-.engine-reach-command {
+.engine-reach-form {
   display: inline-flex;
   align-items: center;
   gap: var(--space-8);
@@ -207,17 +279,6 @@
 .engine-reach-form .settings-input {
   min-width: 0;
   width: 220px;
-}
-
-.engine-reach-tunnel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-  padding: 0 var(--space-12) var(--space-8);
-}
-
-.engine-reach-command code {
-  font-family: var(--font-mono);
 }
 
 .engine-profile-choice,
@@ -230,4 +291,33 @@
 .engine-fingerprint {
   font-family: var(--font-mono);
   overflow-wrap: anywhere;
+}
+
+/* A device's routes in its open row, and Add route under them. The chosen kind has a background, no edge. */
+.engine-route-live {
+  color: var(--text-primary);
+}
+
+.engine-route-add {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-12) var(--space-12) calc(var(--space-12) + var(--space-24, 24px));
+}
+
+.engine-route-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.engine-route-kinds > .settings-btn,
+.engine-route-add .engine-paste > .settings-btn {
+  height: var(--settings-control-h, 28px);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small, 12.5px);
+}
+
+.engine-route-kinds > .settings-btn.engine-route-kind-on {
+  background: var(--ui-selected, var(--ui-hover));
 }

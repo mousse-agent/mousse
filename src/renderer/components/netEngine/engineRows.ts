@@ -1,5 +1,6 @@
 import type { NetEngineDevice } from '../../../shared/netEngine/local'
-import { connectedVia, parseRoute, relayText, routeClass, routeText } from '../../../shared/netEngine/routes'
+import type { RouteClass } from '../../../shared/netEngine/routes'
+import { parseRoute, relayText, routeClass, routeText } from '../../../shared/netEngine/routes'
 
 /** What a device's row offers (design §5.2): Access opens the preset control under it. */
 export type EngineRowAction = 'access' | 'address' | 'retry' | 'remove'
@@ -14,9 +15,27 @@ export interface EngineRowView {
   actions: EngineRowAction[]
 }
 
-/** The neutral message for a certificate outside its window: it cannot tell a wrong clock from an old certificate. */
-export const CLOCK_MESSAGE =
-  "The certificate is outside its validity window; check this device's clock."
+/** A route's class as Settings names it, in plain words. */
+export const ROUTE_WORDS: Readonly<Record<RouteClass, string>> = Object.freeze({
+  lan: 'Same network',
+  tailnet: 'Tailscale',
+  public: 'Internet',
+  tunnel: 'Internet',
+  ssh: 'SSH'
+})
+
+/** How a device is connected now, for its row ("same network", "via Tailscale"). */
+const HOW: Readonly<Record<RouteClass, string>> = Object.freeze({
+  lan: 'same network',
+  tailnet: 'via Tailscale',
+  public: 'over the internet',
+  tunnel: 'over the internet',
+  ssh: 'over SSH'
+})
+
+/** The clock case (a certificate outside its window): it cannot tell a wrong clock from an old pairing. */
+export const clockMessage = (name: string): string =>
+  `The clock on this computer or ${name} looks wrong. Check the date and time.`
 
 /** The notice when another profile under this OS account has the new networking on too. */
 export const SHARED_ACCOUNT_LINE = "Profiles in this account can read each other's files and keys."
@@ -51,8 +70,9 @@ export const relayOfferLine = (name: string, destination: string): string =>
 export function unreachableDetail(device: NetEngineDevice, way: 'in' | 'out'): string {
   const name = device.name
   const added = device.addresses?.map((address) => parseRoute(address)).find(Boolean)
-  const cls = device.route ?? (added ? routeClass(added) : 'lan')
+  const cls = device.route ?? (added ? routeClass(added) : device.source === 'ssh' || device.ssh ? 'ssh' : 'lan')
   if (cls === 'tailnet') return 'Keep Tailscale on and online on both computers, then Retry.'
+  if (cls === 'ssh') return `Check you can sign in to ${name} over SSH, then Retry.`
   if (cls !== 'lan')
     return way === 'in'
       ? 'Check the address this computer shares, then Retry.'
@@ -112,8 +132,8 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
     }
   if (device.certificateWindow)
     return {
-      line: CLOCK_MESSAGE,
-      detail: `A wrong clock here or on ${name}, or an old certificate, gives this. Check both clocks, then Retry.`,
+      line: clockMessage(name),
+      detail: `Set both clocks to the right time, then Retry.`,
       warn: true,
       actions: ['retry', 'remove']
     }
@@ -148,7 +168,7 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
     }
   if (device.state === 'offline')
     return {
-      line: 'Offline',
+      line: `Can't reach it · open Mousse on ${name}`,
       detail: `Mousse is closed on ${name}, or it is on another network.`,
       actions: ['access', 'address', 'retry', 'remove']
     }
@@ -165,16 +185,17 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
 }
 
 /**
- * Where a device is found: the class of the route it is connected on (1b §7 `conn.up.route`), "Through relay
- * host:port" on a relay (Phase 3), else "LAN" or the address added for it.
+ * How a device is connected, in plain words: the class of the route it is connected on (1b §7 `conn.up.route`),
+ * "through relay host:port" on a relay (Phase 3), else "same network". The addresses go in the tooltip.
  */
 export function engineWhere(device: NetEngineDevice): string {
-  if (device.route) return connectedVia(device.route, device.via)
-  const first = device.addresses?.[0]
-  if (!first) return 'LAN'
-  const address = routeText(first)
-  return device.addresses!.length > 1 ? `${address} +${device.addresses!.length - 1}` : address
+  if (device.route === 'relay') return device.via ? `through relay ${device.via}` : 'through a relay'
+  return device.route ? HOW[device.route] : HOW.lan
 }
+
+/** Every address kept for a device, for the tooltip on how it is connected. */
+export const engineAddresses = (device: NetEngineDevice): string | undefined =>
+  device.addresses?.map(routeText).join(', ') || undefined
 
 /**
  * Reads a scanned or pasted pairing link: the ticket after `#`, and the host's name from `?n=` when the link has
@@ -196,4 +217,107 @@ export function readPairingLink(text: string): { ticket: string; host?: string }
       host = undefined
     }
   return { ticket: value, ...(host ? { host } : {}) }
+}
+
+/** The class of a stored route (`tcp://`, `wss://`, `ssh://`), or undefined for one that doesn't read. */
+export function classOf(route: string): RouteClass | undefined {
+  const parsed = parseRoute(route)
+  if (!parsed) return undefined
+  const cls = routeClass(parsed)
+  return cls === 'forbidden' ? undefined : cls
+}
+
+/** A route's kind as the expanded row names it. */
+export const ROUTE_KIND: Readonly<Record<RouteClass | 'relay', string>> = Object.freeze({
+  lan: 'Same network',
+  tailnet: 'Tailscale',
+  public: 'Internet',
+  tunnel: 'Tunnel',
+  ssh: 'SSH',
+  relay: 'Relay'
+})
+
+/** One route a device has, as its expanded row lists it. */
+export interface DeviceRoute {
+  key: string
+  cls: RouteClass | 'relay'
+  /** The address, shortened when long. */
+  address?: string
+  /** The whole address, for the tooltip when it was shortened. */
+  full?: string
+  state: 'in use' | 'available' | 'failed'
+  /** Why it failed, for the tooltip. */
+  reason?: string
+  /** How to remove it, where the owner added it. */
+  remove?: { method: 'netEngine.address.remove' | 'netEngine.relay.disallow'; params: Record<string, string> }
+}
+
+/** Addresses longer than this are shortened, with the whole one in the tooltip. */
+const ADDRESS_SHOWN = 32
+
+const shown = (text: string): { address: string; full?: string } =>
+  text.length > ADDRESS_SHOWN ? { address: `${text.slice(0, ADDRESS_SHOWN - 1)}…`, full: text } : { address: text }
+
+/**
+ * Every route a device has, the one in use first (whatever the engine reports: a relay first, a direct route once
+ * it takes over), then the ones it can fall back to, then the ones that failed. Failures come from the row's own
+ * state (it can't be reached, its SSH sign-in was refused), with the row's reason.
+ */
+export function deviceRoutes(device: NetEngineDevice): DeviceRoute[] {
+  const routes: DeviceRoute[] = []
+  if (device.direction !== 'out' && device.source !== 'ssh')
+    routes.push({ key: 'local', cls: 'lan', address: 'Found automatically', state: 'available' })
+  for (const address of device.addresses ?? []) {
+    routes.push({
+      key: address,
+      cls: classOf(address) ?? 'public',
+      ...shown(routeText(address)),
+      state: 'available',
+      remove: { method: 'netEngine.address.remove', params: { node: device.node, address } }
+    })
+  }
+  if (device.ssh || device.source === 'ssh')
+    routes.push({ key: 'ssh', cls: 'ssh', ...(device.ssh ? shown(device.ssh) : {}), state: 'available' })
+  for (const destination of device.relay?.allowed ?? [])
+    routes.push({
+      key: destination,
+      cls: 'relay',
+      ...shown(relayText(destination)),
+      state: 'available',
+      remove: { method: 'netEngine.relay.disallow', params: { node: device.node, destination } }
+    })
+
+  // The route in use: the engine names its class (and a relay's host), not the address.
+  if (device.route && device.online) {
+    const used =
+      device.route === 'relay'
+        ? (routes.find((route) => route.cls === 'relay' && (!device.via || relayText(route.key) === device.via)) ??
+          routes.find((route) => route.cls === 'relay'))
+        : (routes.find((route) => route.cls === device.route && route.key !== 'local') ??
+          routes.find((route) => route.cls === device.route))
+    if (used) used.state = 'in use'
+    else
+      routes.unshift({
+        key: `in-use-${device.route}`,
+        cls: device.route,
+        ...(device.via ? shown(device.via) : {}),
+        state: 'in use'
+      })
+  }
+
+  // Failures the row knows about.
+  const view = engineRow(device)
+  const reason = view.detail ?? view.line
+  const unreachable =
+    device.unreachable === 'out' ||
+    device.state === 'offline' ||
+    !!device.certificateWindow ||
+    (device.state === 'finishing' && !!device.stuck)
+  for (const route of routes) {
+    if (route.state === 'in use') continue
+    if (device.sshParked && route.cls === 'ssh') Object.assign(route, { state: 'failed', reason })
+    else if (unreachable) Object.assign(route, { state: 'failed', reason })
+  }
+  const order = { 'in use': 0, available: 1, failed: 2 }
+  return routes.sort((a, b) => order[a.state] - order[b.state])
 }

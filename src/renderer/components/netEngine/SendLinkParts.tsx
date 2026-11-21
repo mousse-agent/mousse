@@ -12,10 +12,9 @@ import type {
   NetEngineLinkJoin,
   NetEngineStatus
 } from '../../../shared/netEngine/local'
-import { destinationText, ROUTE_CLASS_LABEL } from '../../../shared/netEngine/routes'
+import { ROUTE_WORDS, unreachableDetail } from './engineRows'
 import { CopyButton } from '../settings/IconButtons'
 import { errorText, useDaemonCall } from '../devices/useDaemonCall'
-import { unreachableDetail } from './engineRows'
 
 /**
  * What the inviting window shows once the other computer joined: connected, or finishing the other direction until
@@ -410,7 +409,11 @@ export function JoinRoutes({
           className="settings-muted engine-destinations"
           title="Connect lets this computer dial these addresses."
         >
-          {preview.destinations.map(destinationText).join(', ')}
+          {preview.destinations
+            .map((item) =>
+              item.cls === 'relay' ? `Through relay ${item.label}` : `${item.label} (${ROUTE_WORDS[item.cls]})`
+            )
+            .join(', ')}
         </p>
       )}
       {!!preview.shareable?.length && (
@@ -425,7 +428,7 @@ export function JoinRoutes({
                 checked={share.includes(item.route)}
                 onChange={(event) => onShare(item.route, event.target.checked)}
               />
-              {ROUTE_CLASS_LABEL[item.cls]} {item.label}
+              {ROUTE_WORDS[item.cls]} {item.label}
             </label>
           ))}
         </fieldset>

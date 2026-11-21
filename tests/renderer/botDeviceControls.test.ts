@@ -14,7 +14,7 @@ import { fakeBots, installPreload, summary, type FakeBots } from './fakeBotsClie
 const { BotAboutPanel } = await import('../../src/renderer/components/bots/BotAboutPanel')
 const { BotMenu } = await import('../../src/renderer/components/bots/BotMenu')
 const { setBotsClient, useBotsStore } = await import('../../src/renderer/stores/botsStore')
-const { NetDevicesSection } = await import('../../src/renderer/components/NetDevicesSection')
+const { EngineDevicesSection } = await import('../../src/renderer/components/netEngine/EngineDevicesSection')
 
 let root: Root
 let host: HTMLElement
@@ -161,6 +161,14 @@ describe('Make private in the bot\'s menu', () => {
   })
 })
 
+/** Opens a device's Access from its row menu (Hide access closes it). */
+const openAccess = async (name: string) => {
+  await act(async () => document.querySelector<HTMLElement>(`[aria-label="Actions for ${name}"]`)!.click())
+  const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((entry) => /^(Hide access|Access)$/.test(entry.textContent?.trim() ?? ''))!
+  await act(async () => item.click())
+  for (let i = 0; i < 5; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
+}
+
 describe('Settings → Devices → Bots on this computer', () => {
   const nodes = [
     { node: 'nod_self', name: 'Desk', caps: ['read', 'chat', 'write', 'settings'], keyEpoch: 1, expiresAt: 0, kind: 'computer', self: true, revoked: false, state: 'open' },
@@ -169,6 +177,7 @@ describe('Settings → Devices → Bots on this computer', () => {
   ]
   const request = vi.fn(async (method: string, params?: { node?: string; bots?: boolean }) => {
     switch (method) {
+      case 'netEngine.status': return { enabled: false, on: false, helper: { state: 'off' }, devices: [], approvals: [] }
       case 'net.status': return { enabled: true, keystore: 'unlocked', protected: true, self: { node: 'nod_self', isAuthority: true }, transports: [], peers: [], routes: [], workOnThreads: true, shareBots: true }
       case 'net.transport.list': return { manifests: [], records: {}, settings: {} }
       case 'net.ssh.list': return { records: [] }
@@ -192,10 +201,10 @@ describe('Settings → Devices → Bots on this computer', () => {
   const toggle = () => host.querySelector<HTMLElement>('[role="switch"][aria-label="Bots on this computer for Pocket"]')
 
   it('a phone has the switch, on at first; off is saved for that device alone and reads Off', async () => {
-    await act(async () => root.render(createElement(NetDevicesSection)))
+    await act(async () => root.render(createElement(EngineDevicesSection)))
     await flush()
     // The switch is in each device's detail, one open at a time.
-    const details = (name: string) => click(host.querySelector(`[aria-label="Show details for ${name}"]`))
+    const details = (name: string) => openAccess(name)
     // A service from before the switch sends none for a device, and shows no switch for it.
     await details('Old laptop')
     expect(host.querySelector('[aria-label="Bots on this computer for Old laptop"]')).toBeNull()

@@ -1256,6 +1256,9 @@ export class NetEngineService implements EngineDirectoryPort {
           ...(started.pairing.certificateWindow(node) ? { certificateWindow: true } : {}),
           ...(started.pairing.sshParked(node) ? { sshParked: started.pairing.sshParked(node) } : {}),
           ...(row.addresses?.length ? { addresses: row.addresses } : {}),
+          ...(row.ssh && !row.ssh.removed && (row.ssh.target || row.ssh.host)
+            ? { ssh: row.ssh.target || (row.ssh.user ? `${row.ssh.user}@${row.ssh.host}` : row.ssh.host!) }
+            : {}),
           ...(route ? { route } : {}),
           ...(via ? { via } : {}),
           ...(row.offered?.length ? { offered: row.offered } : {}),
