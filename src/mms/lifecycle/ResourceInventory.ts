@@ -15,6 +15,7 @@ import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { canonicalPathAsync, comparablePath, gitCommonDirAsync } from './canonicalPath'
 import { checkRepoPrograms } from '../git/repoPrograms'
+import { repositoryKeyOf } from '../git/RepositoryIdentity'
 import { findListedWorktreeAsync } from './worktreeRegistry'
 import { readThreadLifecycleRecordsSync, readThreadRecordSync, threadRecordFile, threadRecordPath } from '../data/threadRecords'
 import { THREAD_DB_FILE } from '../data/threadDb/threadDbEngine'
@@ -251,10 +252,11 @@ export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts:
 /**
  * Reads again, into `facts`, what they say about the repository a change is about to be made in, for the check under
  * its lease: every real path (a link or junction above a path can be retargeted while every file below it stays the
- * same), every checkout's repository, whether each checkout is there, and the worktree facts of this repository's
- * worktrees (by recorded repository, or by being one it registers). Only the last may start Git, and only for a
- * worktree of this repository that Git must answer for. Facts about other repositories stay as discovered: this lease
- * never kept those from changing.
+ * same), every checkout's repository, whether each checkout is there, and every fact about this repository's
+ * worktrees (by recorded repository, by being one it registers, or by where its `.git` leads now): identity, layout,
+ * trust, registration and, for one that is gone, its pins. Nothing read before the lease is kept for those: the
+ * worktree facts are read from scratch, Git included where Git must answer. Facts about other repositories stay as
+ * discovered: this lease never kept those from changing.
  */
 export async function rereadRepositoryFacts(facts: OwnershipFacts, repository: { repositoryIds: Array<string | undefined>; registeredWorktrees: string[] }): Promise<void> {
   const aliases = [...facts.read.entries()].filter(([, need]) => need.kind === 'canonical' || need.kind === 'common-dir' || need.kind === 'present')
@@ -270,8 +272,11 @@ export async function rereadRepositoryFacts(facts: OwnershipFacts, repository: {
   const worktrees: OwnershipNeed[] = []
   for (const [key, need] of [...facts.read]) {
     if (need.kind !== 'worktree') continue
+    // Of this repository by its record, by being a worktree it registers, or by where its `.git` leads now.
     const real = facts.canonical.get(need.path) ?? await canonicalPathAsync(need.path)
-    if (!(need.repository && ids.has(need.repository)) && !registered.has(comparablePath(real))) continue
+    const recorded = Boolean(need.repository && ids.has(need.repository)) || registered.has(comparablePath(real))
+    const common = recorded ? undefined : await gitCommonDirAsync(need.path)
+    if (!recorded && !(common && ids.has(repositoryKeyOf(common)))) continue
     facts.read.delete(key)
     facts.worktrees.delete(worktreeKey(need.store, need.path, need.branch, need.repository))
     worktrees.push(need)

@@ -5,9 +5,11 @@
  * - a turn that asks for the repository during a long release gets it between batches;
  * - a claim written by another thread after discovery (a fork copying the receipt) still keeps the ref;
  * - a thread registered after discovery makes the release discover again, not decide on a stand-in;
+ * - a peer checkout changed after discovery so Git no longer opens it as laid out (`core.worktree`) is read again at
+ *   the final check, from scratch, and keeps the refs;
  * - a stop between the recorded intent and the delete leaves the refs, and the next run finishes the release.
  */
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
@@ -113,4 +115,21 @@ it('a stop between the recorded intent and the delete keeps the refs, and the ne
   expect(finished.releasedRefs.sort()).toEqual(receipts.flatMap((receipt) => receipt.retainedRefs).sort())
   for (const receipt of receipts) for (const ref of receipt.retainedRefs) expect(refExists(ref)).toBe(false)
   expect((await release.release(workspace.worktreePath)).releasedRefs).toEqual([])
+})
+
+it('a peer checkout that Git stops verifying after discovery is read again at the final check and keeps the refs', async () => {
+  const { store, workspace, receipts, release } = await fixture()
+  const receipt = receipts[0]!
+  // A peer thread in the same repository, verified when ownership is discovered.
+  const peer = unverifiableThread(store, { id: 'peer', name: 'Fix prices', repo: f.repo, how: 'intact' })
+  const discovery = await discoverOwnershipFacts(store)
+  // Then its own config moves its top level elsewhere: Git no longer opens it as the registered worktree.
+  git(f.repo, 'config', 'extensions.worktreeConfig', 'true')
+  mkdirSync(join(f.root, 'elsewhere'))
+  const gitDir = readFileSync(join(peer.worktree, '.git'), 'utf8').trim().slice('gitdir: '.length)
+  writeFileSync(join(gitDir, 'config.worktree'), `[core]\n\tworktree = ${join(f.root, 'elsewhere').replace(/\\/g, '/')}\n`)
+  const result = await release.release(workspace.worktreePath, { discovery })
+  expect(result.releasedRefs).toEqual([])
+  expect(result.retained).toEqual([{ receiptId: receipt.id, reason: expect.stringContaining(peer.worktree) }])
+  for (const ref of receipt.retainedRefs) expect(refExists(ref)).toBe(true)
 })
