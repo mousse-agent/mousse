@@ -35,15 +35,43 @@ afterEach(() => {
 
 type Ask = { kind?: string; path?: string; paths?: string[] }
 
-/** An agent whose one prompt sends `asks` as permission requests and `writes` as client file writes, in order. */
-function agentSending(asks: Ask[], writes: string[] = []) {
-  const outcomes: unknown[] = []
-  const writeErrors: string[] = []
+/** The real agy 1.5.13 after a denied request: it ends the prompt with no reply. A later prompt gets an answer. */
+function agentStoppingAtDenial(ask: Ask) {
+  const prompts: string[] = []
   const agent = inProcessAgent((app: AgentApp) => {
     app
       .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] }))
       .onRequest(methods.agent.session.new, () => ({ sessionId: 'native-1' }) as never)
       .onRequest(methods.agent.session.prompt, async (c) => {
+        const text = c.params.prompt.map((block) => (block as { text?: string }).text ?? '').join('\n')
+        prompts.push(text)
+        if (prompts.length > 1) {
+          await c.client.notify(methods.client.session.update, { sessionId: c.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Wrote what I could; the other file was refused.' } } })
+          return { stopReason: 'end_turn' }
+        }
+        await c.client.request(methods.client.session.requestPermission, {
+          sessionId: c.params.sessionId,
+          toolCall: { toolCallId: 'call-0', title: 'File secret.txt', kind: (ask.kind ?? 'edit') as 'edit', locations: (ask.path ? [ask.path] : []).map((path) => ({ path })) },
+          options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }, { optionId: 'deny', name: 'Deny', kind: 'reject_once' }]
+        })
+        return { stopReason: 'end_turn' }
+      })
+  })
+  return { ...agent, prompts }
+}
+
+/** An agent whose one prompt sends `asks` as permission requests and `writes` as client file writes, in order. */
+function agentSending(asks: Ask[], writes: string[] = []) {
+  const outcomes: unknown[] = []
+  const writeErrors: string[] = []
+  let promptCount = 0
+  const agent = inProcessAgent((app: AgentApp) => {
+    app
+      .onRequest(methods.agent.initialize, () => ({ protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, authMethods: [] }))
+      .onRequest(methods.agent.session.new, () => ({ sessionId: 'native-1' }) as never)
+      .onRequest(methods.agent.session.prompt, async (c) => {
+        // Only the first prompt works; a follow-up (after a refusal) just ends.
+        if (++promptCount > 1) return { stopReason: 'end_turn' }
         for (const [index, ask] of asks.entries()) {
           const paths = ask.paths ?? (ask.path ? [ask.path] : [])
           const answer = await c.client.request(methods.client.session.requestPermission, {
@@ -63,7 +91,7 @@ function agentSending(asks: Ask[], writes: string[] = []) {
         return { stopReason: 'end_turn' }
       })
   })
-  return { ...agent, outcomes, writeErrors }
+  return { ...agent, outcomes, writeErrors, prompts: () => promptCount }
 }
 
 /** A bot authority that allows calls whose every path is inside `allowed` (a stand-in for its roots and grant). */
@@ -82,7 +110,7 @@ function botAllowing(allowed: string) {
 }
 
 /** One bot turn on Antigravity's caps through the ACP adapter and the real session core. */
-async function botTurn(agent: ReturnType<typeof agentSending>, bot: Pick<BotAuthority, 'check'>, cwd: string) {
+async function botTurn(agent: Pick<ReturnType<typeof agentSending>, 'connect'>, bot: Pick<BotAuthority, 'check'>, cwd: string) {
   const saved = new Map<string, SavedAcpSession>()
   const questions = new UserQuestionService()
   const asked = vi.spyOn(questions, 'requestAnswers')
@@ -158,5 +186,23 @@ describe('a bot on Antigravity', () => {
     expect(existsSync(denied)).toBe(false)
     expect(agent.writeErrors).toHaveLength(1)
     expect(asked).not.toHaveBeenCalled()
+  })
+
+  it('tells the agent what was refused when it stops at a denial, and the turn ends with its reply', async () => {
+    const cwd = tempDir()
+    const agent = agentStoppingAtDenial({ kind: 'edit', path: join(tmpdir(), 'elsewhere', 'secret.txt') })
+    const { bot } = botAllowing(cwd)
+    const { result } = await botTurn(agent, bot, cwd)
+    expect(agent.prompts).toHaveLength(2)
+    expect(agent.prompts[1]).toContain('File secret.txt: Outside the bot folder.')
+    expect(JSON.stringify(result)).toContain('Wrote what I could')
+  })
+
+  it('sends no follow-up when nothing was refused', async () => {
+    const cwd = tempDir()
+    const agent = agentStoppingAtDenial({ kind: 'edit', path: join(cwd, 'notes.md') })
+    const { bot } = botAllowing(cwd)
+    await botTurn(agent, bot, cwd)
+    expect(agent.prompts).toHaveLength(1)
   })
 })

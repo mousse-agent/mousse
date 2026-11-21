@@ -111,6 +111,23 @@ export interface AcpProcess extends AcpConnection {
   refuseTools?: (what: string) => void
   /** The running turn is a bot's: its authority answers every permission and file request, and nobody is asked. */
   turnBot?: Pick<BotAuthority, 'check'>
+  /** What the bot's authority refused in the prompt running now, for the follow-up that tells the agent (`BOT_REFUSAL_FOLLOW_UPS`). */
+  botRefusals?: string[]
+}
+
+/**
+ * How many times one bot turn tells the agent what the bot's authority refused and lets it go on. Antigravity ends its
+ * prompt after a denied request, with no reply; the follow-up names the refusal and asks it to finish the rest.
+ */
+export const BOT_REFUSAL_FOLLOW_UPS = 3
+
+/** The follow-up prompt after refusals in a bot's turn. */
+export function botRefusalFollowUp(refusals: readonly string[]): string {
+  return [
+    "Mousse refused these tool calls because this bot isn't allowed to make them:",
+    ...refusals.map((refusal) => `- ${refusal}`),
+    "Don't retry them. Carry on with the rest of the request without them, and say in your reply what you could not do."
+  ].join('\n')
 }
 
 /** Whether a steer goes into `process`'s running prompt as a second prompt, with no cancel (`AcpQuirks.nativeSteerFrom`). */
@@ -118,6 +135,16 @@ export function steersNatively(quirks: AcpQuirks, process: Pick<AcpProcess, 'inf
   if (!quirks.nativeSteerFrom || process.nativeSteerRefused) return false
   const version = compareVersions(process.info?.agentInfo?.version, quirks.nativeSteerFrom)
   return version === 0 || version === 1
+}
+
+/** A client file request in a bot's turn, held to its authority; a refusal is noted for the follow-up (`botRefusals`). */
+function botFileCheck(process: AcpProcess, access: 'read' | 'write', path: string): void {
+  try {
+    checkBotFileRequest(process.turnBot!, { access, path })
+  } catch (error) {
+    ;(process.botRefusals ??= []).push(`${access === 'read' ? 'reading' : 'writing'} ${path}: ${error instanceof Error ? error.message : String(error)}`)
+    throw error
+  }
 }
 
 /** A one-shot's file request: refused, and the request ends (`AcpProcess.refuseTools`). */
@@ -396,7 +423,10 @@ export class AcpSessions {
           return { outcome: { outcome: 'cancelled' } }
         }
         // A bot's turn: its authority answers, nobody is asked.
-        if (active?.turnBot) return answerBotPermission(active.turnBot, request, classify)
+        if (active?.turnBot) {
+          const bot = active
+          return answerBotPermission(bot.turnBot!, request, classify, (reason) => (bot.botRefusals ??= []).push(`${request.toolCall?.title ?? 'a tool'}: ${reason}`))
+        }
         // While a person is asked, the call is not a foreground tool: a person's steer answers it rather than waiting.
         const callId = request.toolCall?.toolCallId
         const awaiting = callId ? active?.turnToolAwaiting : undefined
@@ -410,13 +440,13 @@ export class AcpSessions {
       ...(quirks.clientFs ? {
         readTextFile: (request) => {
           if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file read')
-          if (active?.turnBot) checkBotFileRequest(active.turnBot, { access: 'read', path: request.path })
+          if (active?.turnBot) botFileCheck(active, 'read', request.path)
           return readWorkspaceFile(scope, request)
         },
         writeTextFile: (request) => {
           if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file write')
           if (active?.turnBot) {
-            checkBotFileRequest(active.turnBot, { access: 'write', path: request.path })
+            botFileCheck(active, 'write', request.path)
             return writeWorkspaceFile(questions, scope, request, label, true)
           }
           return writeWorkspaceFile(questions, scope, request, label)
@@ -773,6 +803,7 @@ export class AcpSessions {
       // Read per request, so a change applies from the next turn without restarting the agent.
       next.permissionMode = input.permissionMode ?? 'ask'
       next.turnBot = input.botAuthority
+      next.botRefusals = undefined
       this.turning.add(next)
       current = next
     }
@@ -1108,6 +1139,7 @@ export class AcpSessions {
       let attachments = imageBlocks
       // A native steer's prompt the agent took in: the loop waits on it next, and sends nothing.
       let adopted: Promise<unknown> | undefined
+      let botFollowUps = 0
       for (;;) {
         input.signal?.throwIfAborted()
         if (steerFailure) throw steerFailure
@@ -1213,7 +1245,17 @@ export class AcpSessions {
         input.onBoundary?.()
         collectSteer()
         if (steerFailure) throw steerFailure
-        if (!pendingSteers.length) break
+        if (!pendingSteers.length) {
+          // A bot's turn whose authority refused something: the agent is told and goes on (it may have stopped there).
+          const refusals = active.turnBot ? active.botRefusals?.splice(0) ?? [] : []
+          if (!refusals.length || botFollowUps >= BOT_REFUSAL_FOLLOW_UPS) break
+          botFollowUps += 1
+          blocks = [botRefusalFollowUp(refusals)]
+          commandTurn = false
+          attachments = []
+          if (text) text += '\n\n'
+          continue
+        }
         const steers = pendingSteers.splice(0)
         carried.push(...steers)
         blocks = [steers.map((entry) => entry.text).join('\n')]
@@ -1253,6 +1295,7 @@ export class AcpSessions {
       current.turnToolAwaiting = undefined
       current.permissionMode = undefined
       current.turnBot = undefined
+      current.botRefusals = undefined
       this.turning.delete(current)
     }
   }
