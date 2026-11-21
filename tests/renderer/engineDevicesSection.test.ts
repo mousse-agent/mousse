@@ -408,6 +408,77 @@ describe('routes (1b §1.3, §1.5)', () => {
     expect(d.called('netEngine.address.use')).toEqual([{ node: 'n1' }])
   })
 
+  it('waits for the Cloudflare route to be verified before creating a pairing link', async () => {
+    const d = daemon({
+      reach: { lan: false, tailnet: false, public: [], tunnels: [], wsPort: 47101 },
+      sendLink: true,
+      cloudflare: { state: 'off' }
+    }, {
+      'netEngine.invite': ({ kind }) => ({
+        invitation: kind === 'link' ? 'cloudflare-link' : 'qr',
+        uri: 'mousse://pair?n=Studio#AAAAAAAAAAAAAAAAAAAAAAAA',
+        ...(kind === 'link' ? { code: '123456', attemptsLeft: 3 } : {})
+      })
+    })
+    await mount()
+    await click(button('Add device'))
+    await click(button(/^Over the internet/))
+    expect(document.body.textContent).toContain('You’ll need a domain managed by Cloudflare.')
+    await click(button('Connect Cloudflare'))
+    expect(d.called('netEngine.cloudflare.connect')).toEqual([{}])
+
+    for (const state of ['preparing', 'sign_in', 'connecting'] as const) {
+      await d.change({ cloudflare: { state } })
+      expect(d.called('netEngine.invite')).not.toContainEqual({ kind: 'link' })
+      if (state === 'sign_in') {
+        await click(button('Close'))
+        await click(button('Continue setup'))
+        expect(button('Cancel')).toBeDefined()
+      }
+    }
+
+    await d.change({ cloudflare: { state: 'connected', hostname: 'mousse.example.net' } })
+    expect(d.called('netEngine.invite')).toContainEqual({ kind: 'link' })
+    expect(document.body.textContent).toContain('123 456')
+  })
+
+  it('asks before forgetting a Cloudflare connection', async () => {
+    const d = daemon({
+      reach: { lan: false, tailnet: false, public: [], tunnels: [], wsPort: 47101 },
+      cloudflare: { state: 'failed', canForget: true }
+    })
+    await mount()
+    await click(button('Set up'))
+    await click(button('Forget connection…'))
+    expect(d.called('netEngine.cloudflare.forget')).toEqual([])
+    await click(button('Forget connection'))
+    expect(d.called('netEngine.cloudflare.forget')).toEqual([{}])
+  })
+
+  it('copies the local tunnel origin before saving a URL and sends a pairing link after setup', async () => {
+    const reach = { lan: false, tailnet: false, public: [], tunnels: [], wsPort: 47101 }
+    const d = daemon({ reach, sendLink: true })
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    try {
+      await mount()
+      const moreWays = [...host.querySelectorAll('summary')].find((item) =>
+        item.textContent?.includes('More ways')
+      )
+      await click(moreWays)
+      await click(button('Copy local origin'))
+      expect(writeText).toHaveBeenCalledWith('http://127.0.0.1:47101')
+      expect(d.called('netEngine.routes.config')).toEqual([])
+      expect(button('Send pairing link')).toBeUndefined()
+
+      await d.change({ reach: { ...reach, tunnels: ['wss://x.example/mousse-net/1'] } })
+      await click(button('Send pairing link'))
+      expect(d.called('netEngine.invite')).toContainEqual({ kind: 'link' })
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard')
+    }
+  })
+
   it('saves Reach through the daemon, tests a route, and says a failed test may be the network', async () => {
     const d = daemon(
       {

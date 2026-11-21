@@ -1454,6 +1454,7 @@ export class MmsProfileServices {
     })
     this.netEngine = new NetEngineService({
       profileDir: this.homeDir,
+      installationHome: shared.installationHome,
       profileId: this.profileId,
       // Nothing is read until a window turns the switch on or reads the status.
       loginStart: loginStartQuestion(shared.installationHome),

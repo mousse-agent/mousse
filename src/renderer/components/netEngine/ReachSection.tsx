@@ -12,6 +12,8 @@ import { Modal } from '../ui/Modal'
 import { classifyIp, parseRoute, routeText } from '../../../shared/netEngine/routes'
 import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
 import { useDaemonCall } from '../devices/useDaemonCall'
+import { CopyButton } from '../settings/IconButtons'
+import { CloudflareReachRow } from './CloudflareSetup'
 
 /** What Test says when the helper could not reach its own route (1b §1.5). */
 export const TEST_FAILED = "Couldn't confirm from this network"
@@ -39,11 +41,15 @@ function advertised(status: NetEngineStatus, cls: 'lan' | 'tailnet'): string | u
 export function ReachSection({
   status,
   onChanged,
+  onSendLink,
+  onCloudflareSetup,
   moreWays,
   trailing
 }: {
   status: NetEngineStatus
   onChanged: () => void
+  onSendLink: () => void
+  onCloudflareSetup: () => void
   moreWays?: ReactNode
   trailing?: ReactNode
 }) {
@@ -65,9 +71,18 @@ export function ReachSection({
       }
     >
       {reach ? (
-        <RouteRows status={status} reach={reach} onChanged={onChanged} moreWays={moreWays} />
+        <RouteRows
+          status={status}
+          reach={reach}
+          onChanged={onChanged}
+          onSendLink={onSendLink}
+          moreWays={moreWays}
+        />
       ) : (
         moreWays && <SettingsAdvanced label="More ways">{moreWays}</SettingsAdvanced>
+      )}
+      {status.on && status.cloudflare && (
+        <CloudflareReachRow connection={status.cloudflare} onSetup={onCloudflareSetup} />
       )}
       {relays && <OwnRelayRows relays={relays} onChanged={onChanged} />}
       {trailing}
@@ -80,11 +95,13 @@ function RouteRows({
   status,
   reach,
   onChanged,
+  onSendLink,
   moreWays
 }: {
   status: NetEngineStatus
   reach: NetEngineReach
   onChanged: () => void
+  onSendLink: () => void
   moreWays?: ReactNode
 }) {
   const { busy, error, call } = useDaemonCall()
@@ -94,6 +111,7 @@ function RouteRows({
   const [tunnel, setTunnel] = useState('')
   const publicNow = reach.public[0] ?? ''
   const tunnelNow = reach.tunnels[0] ?? ''
+  const tunnelOrigin = reach.wsPort ? `http://127.0.0.1:${reach.wsPort}` : undefined
   useEffect(() => setForward(publicNow ? routeText(publicNow) : ''), [publicNow])
   useEffect(() => setForwardTo(reach.forwardTo ?? ''), [reach.forwardTo])
   useEffect(() => setTunnel(tunnelNow ? tunnelUrl(tunnelNow) : ''), [tunnelNow])
@@ -227,29 +245,48 @@ function RouteRows({
         }
       />
       <SettingsRow
-        title="Your own tunnel"
+        title="Use an existing tunnel"
         description={
-          <form className="engine-reach-form" onSubmit={submitTunnel}>
-            <input
-              className="settings-input"
-              value={tunnel}
-              placeholder="https://name.example.com"
-              aria-label="Tunnel address"
-              title="Over the internet: the https:// address of a tunnel you run, such as Cloudflare"
-              onChange={(event) => setTunnel(event.target.value)}
-            />
-            <button
-              type="submit"
-              className="settings-btn"
-              disabled={busy || tunnel.trim() === (tunnelNow ? tunnelUrl(tunnelNow) : '')}
-            >
-              Save
-            </button>
-            {testButton(tunnelNow || undefined)}
-            {result(tunnelNow || undefined)}
-          </form>
+          tunnelOrigin && (
+            <span className="engine-row-line">
+              Local origin <code>{tunnelOrigin}</code>
+              <CopyButton text={tunnelOrigin} label="Copy local origin" />
+            </span>
+          )
         }
-      />
+        control={
+          tunnelNow && status.sendLink && (
+            <button
+              type="button"
+              className="settings-btn"
+              disabled={busy}
+              onClick={onSendLink}
+            >
+              Send pairing link
+            </button>
+          )
+        }
+      >
+        <form className="engine-reach-form" onSubmit={submitTunnel}>
+          <input
+            className="settings-input"
+            value={tunnel}
+            placeholder="https://name.example.com"
+            aria-label="Tunnel address"
+            title="Over the internet: the https:// address of a tunnel you run, such as Cloudflare"
+            onChange={(event) => setTunnel(event.target.value)}
+          />
+          <button
+            type="submit"
+            className="settings-btn"
+            disabled={busy || tunnel.trim() === (tunnelNow ? tunnelUrl(tunnelNow) : '')}
+          >
+            Save
+          </button>
+          {testButton(tunnelNow || undefined)}
+          {result(tunnelNow || undefined)}
+        </form>
+      </SettingsRow>
       {moreWays}
       </SettingsAdvanced>
       {error && (

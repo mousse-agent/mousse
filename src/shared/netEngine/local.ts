@@ -33,6 +33,9 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.join.preview',
   'netEngine.routes.config',
   'netEngine.routes.test',
+  'netEngine.cloudflare.connect',
+  'netEngine.cloudflare.stop',
+  'netEngine.cloudflare.forget',
   // Phase 1b: Add over SSH (§3.4)
   'netEngine.ssh.resolve',
   'netEngine.ssh.probe',
@@ -315,7 +318,7 @@ export interface NetEngineReach {
   tunnels: string[]
   /** The kept TCP port. */
   port?: number
-  /** The loopback port a tunnel client forwards to, while a tunnel is set. */
+  /** The loopback port a tunnel client forwards to, when the helper has opened it. */
   wsPort?: number
   /** Addresses the helper could not bind yet (it retries them). */
   unbound?: string[]
@@ -335,6 +338,14 @@ export interface NetEngineJoinPreview {
   destinations: TicketDestination[]
   /** This computer's tailnet and public routes and tunnels: pairback sends one only when ticked. */
   shareable: Array<{ route: string; label: string; cls: RouteClass }>
+}
+
+export interface NetEngineCloudflare {
+  state: 'off' | 'preparing' | 'sign_in' | 'connecting' | 'connected' | 'reconnecting' | 'failed'
+  hostname?: string
+  canForget?: boolean
+  loginUrl?: string
+  message?: string
 }
 
 export interface NetEngineStatus {
@@ -374,6 +385,7 @@ export interface NetEngineStatus {
   workOnThreads?: boolean
   /** This computer's own routes, when its helper speaks protocol 1.1. */
   reach?: NetEngineReach
+  cloudflare?: NetEngineCloudflare
   /** The helper speaks protocol 1.1, so Send link and Enter link work. */
   sendLink?: boolean
   /** Send links this computer shows. */

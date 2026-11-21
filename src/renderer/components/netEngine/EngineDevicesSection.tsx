@@ -152,7 +152,7 @@ export function EngineDevicesSection() {
   const { devices: nodes } = useComputers(!!status?.on || v1Ready)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [adding, setAdding] = useState(false)
+  const [adding, setAdding] = useState<'choose' | 'link' | 'cloudflare'>()
   const [addingPhone, setAddingPhone] = useState(false)
   const [selected, setSelected] = useState<string>()
   const [picked, setPicked] = useState<string>()
@@ -251,7 +251,7 @@ export function EngineDevicesSection() {
   // Add device turns networking on first; nothing listens until then.
   const addDevice = async () => {
     if (status && !status.enabled && !notInBuild) await action('netEngine.enable', {})
-    setAdding(true)
+    setAdding('choose')
   }
   const canAddPhone = mousseId && !phoneBlocked
   const canAdd = !notInBuild || canAddPhone
@@ -863,6 +863,8 @@ export function EngineDevicesSection() {
         <ReachSection
           status={status}
           onChanged={read}
+          onSendLink={() => setAdding('link')}
+          onCloudflareSetup={() => setAdding('cloudflare')}
           moreWays={
             oldWays ? (
               <>
@@ -882,15 +884,16 @@ export function EngineDevicesSection() {
       {adding && (
         <AddEngineDeviceDialog
           status={status}
+          initial={adding}
           onAddPhone={
             canAddPhone
               ? () => {
-                  setAdding(false)
+                  setAdding(undefined)
                   setAddingPhone(true)
                 }
               : undefined
           }
-          onClose={() => setAdding(false)}
+          onClose={() => setAdding(undefined)}
         />
       )}
       {addingPhone && <AddPhoneDialog onClose={() => setAddingPhone(false)} />}
