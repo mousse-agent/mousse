@@ -290,12 +290,15 @@
       "machine": "Animatrix",
       "branch": "send-path-latency",
       "paths": [
-        "src/mms/harness/vendors/claude/liveSession.ts",
-        "src/mms/harness/vendors/codex/CodexProviderService.ts",
-        "src/mms/orchestrator/OrchestratorService.ts"
+        "src/mms/integrations/skills/SkillsRegistry.ts",
+        "src/mms/profiles/pathSafety.ts",
+        "src/mms/integrations/nativePaths.ts",
+        "src/mms/run/mcp/appTools",
+        "src/mms/orchestrator/OrchestratorService.ts",
+        "src/mms/harness/vendors/claude/integrations.ts"
       ],
       "claimedAt": "2026-11-21T06:52:15.912Z",
-      "expiresAt": "2026-11-21T08:52:15.912Z"
+      "expiresAt": "2026-11-21T12:22:03.057Z"
     },
     {
       "task": "sidebar-branch-without-git-reads",
