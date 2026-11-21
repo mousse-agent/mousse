@@ -38,6 +38,7 @@ import type {
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { DEFAULT_BRANCH_PREFIX, isAcceptableThreadBranchName } from '../../shared/mousseBranches'
 import { branchNamingFor, requestBranchName, temporaryBranchName } from './branchNaming'
+import type { NamingOrigin } from '../harness/driver'
 import { BRANCH_RECORD_OPERATIONS, BRANCH_RENAME_OPERATION, threadBranchRecord, type ThreadBranchRecord } from './threadBranchRecords'
 import { threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { settlesItself } from '../../shared/resourceLifecycle'
@@ -54,9 +55,9 @@ function gitSync(cwd: string, args: string[]): string {
 }
 
 /** Git for the workspace's own commands, without blocking the daemon: the same check, command and answer as `execFileSync`. */
-async function git(cwd: string, args: string[], userRequested?: UserAction): Promise<string> {
+async function git(cwd: string, args: string[], userRequested?: UserAction, beforeStart?: () => void): Promise<string> {
   const argv = await withoutRepoProgramsAsync(cwd, args, { userRequested })
-  const ran = await runGitProcess(argv, { cwd, env: repoProgramEnv() })
+  const ran = await runGitProcess(argv, { cwd, env: repoProgramEnv(), beforeStart })
   if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
   return ran.stdout.trim()
 }
@@ -634,18 +635,26 @@ export class ThreadWorkspaceManager {
     return threadBranchRecord(this.journal.ofTypes(...BRANCH_RECORD_OPERATIONS), metadata && !isProjectFolderWorkspace(metadata) ? { worktreePath: metadata.worktreePath } : {})
   }
 
-  /** The background naming `provision` started for the branch it made, settled once it renamed it or kept its name. */
+  /** Names an original temporary branch when the first message has been accepted, including after a cancelled setup. */
+  nameTemporaryBranch(threadId: string, branch: string, text: string, signal: AbortSignal): void {
+    this.nameBranchLater(threadId, branch, text, signal, 'send')
+  }
+
+  /** The background naming of the branch, settled once it has its new name or keeps its name. */
   branchNaming?: Promise<void>
 
   /** Asks the title model for a name for the new worktree's branch and renames it, in the background; never throws. */
-  private nameBranchLater(threadId: string, branch: string, text: string, signal?: AbortSignal): void {
-    this.branchNaming = (async () => {
+  private nameBranchLater(threadId: string, branch: string, text: string, signal?: AbortSignal, namingOrigin?: NamingOrigin): void {
+    this.branchNaming = Promise.resolve().then(async () => {
       if (signal?.aborted) return
-      const name = await requestBranchName(this.threadDirectory, threadId, text)
+      if (namingOrigin === 'send' && (threadFolderIsLocalOnly(this.threadDirectory) || !this.branchRecord().temporary.has(branch))) return
+      const name = await requestBranchName(this.threadDirectory, threadId, text, undefined, signal, namingOrigin)
       if (!name || name === branch || signal?.aborted) return
       const outcome = await this.renameOwnBranch(branch, name, signal)
       if (outcome !== 'renamed') console.info('[branches] the worktree branch keeps its temporary name', { threadId, reason: outcome })
-    })().catch((error) => console.warn('[branches] the worktree branch could not be renamed', { threadId, error: error instanceof Error ? error.message : String(error) }))
+    }).catch((error) => {
+      if (!signal?.aborted) console.warn('[branches] the worktree branch could not be renamed', { threadId, error: error instanceof Error ? error.message : String(error) })
+    })
   }
 
   /** Why the thread's branch `from` may not be renamed now, or undefined when it may. Reads only Mousse's records. */
@@ -705,7 +714,7 @@ export class ThreadWorkspaceManager {
       const operationId = randomUUID()
       const intent = this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: { from, to, worktreePath: current.worktreePath, fromSha } })
       try {
-        await withOwnedBranches([from, to], () => git(primary, ['branch', '-m', '--', from, to]))
+        await withOwnedBranches([from, to], () => git(primary, ['branch', '-m', '--', from, to], undefined, () => signal?.throwIfAborted()))
       } catch (error) {
         // Git refused (a name another branch's folder holds, for one), or failed part way: the repository says which.
         const settled = await this.settlePendingRename(primary, current.worktreePath, { from, to, operationId, fromSha })
@@ -721,13 +730,10 @@ export class ThreadWorkspaceManager {
   }
 
   /**
-   * Settles a rename a stop left without an outcome, from the repository. Done when the worktree is on `to` (or `to` is
-   * there and `from` is not), and `to` is at the commit `from` was at when the rename was planned, or a later one on it.
-   * Git renames the branch before it moves the worktree's HEAD, so a stop between the two leaves HEAD on `from`, which no
-   * longer exists: HEAD is pointed at `to` before the rename is recorded as done. Not done when the worktree is on `from`
-   * (or `from` is there and `to` is not). Either way workspace.json is made to agree. When the repository cannot tell
-   * (both names there, or neither, and the worktree on neither; or `to` holds other commits), Mousse gives up both names:
-   * it never deletes or renames either branch afterwards. Takes the repository's lease unless the caller holds it.
+   * Settles a rename a stop left without an outcome. A destination branch must carry Git's reflog entry for this
+   * rename, even if it is already checked out or has the expected tip. If Git moved the ref and logged the rename
+   * before it could update HEAD, recovery finishes the HEAD update. When the outcome is uncertain, both names are
+   * given up. Takes the repository's lease unless the caller holds it.
    */
   async settleBranchRename(options: { holdingRepositoryLease?: boolean; signal?: AbortSignal } = {}): Promise<void> {
     const metadata = this.load()
@@ -751,20 +757,22 @@ export class ThreadWorkspaceManager {
     const { from, to, operationId, fromSha } = pending
     // Exact-case ref lookup so a case-only sibling on Windows/macOS is never mistaken for `to` or `from`.
     const refs = await this.headRefs(primary)
-    const [fromTip, toTip] = [refs.get(`refs/heads/${from}`) ?? '', refs.get(`refs/heads/${to}`) ?? '']
-    const [hasFrom, hasTo] = [Boolean(fromTip), Boolean(toTip)]
-    const there = await pathExists(worktreePath)
-    const head = there ? (await tryGit(worktreePath, ['symbolic-ref', '-q', 'HEAD'])).stdout : ''
-    let outcome: 'renamed' | 'not-renamed' | 'unknown' = head === `refs/heads/${to}` && hasTo ? 'renamed'
-      : head === `refs/heads/${from}` && hasFrom ? 'not-renamed'
-        : hasTo && !hasFrom ? 'renamed'
-          : hasFrom && !hasTo ? 'not-renamed'
-            : 'unknown'
-    // `to` is the renamed branch only while it holds what `from` held: someone else's branch of that name is not.
-    if (outcome === 'renamed' && fromSha && toTip !== fromSha && !(await tryGit(primary, ['merge-base', '--is-ancestor', fromSha, toTip])).ok) outcome = 'unknown'
-    if (outcome === 'renamed' && there && head === `refs/heads/${from}`) {
+    const fromRef = `refs/heads/${from}`
+    const toRef = `refs/heads/${to}`
+    const fromTip = refs.get(fromRef)
+    const toTip = refs.get(toRef)
+    let outcome: 'renamed' | 'not-renamed' | 'unknown' = fromTip && !toTip ? 'not-renamed' : 'unknown'
+    if (!fromTip && toTip && (!fromSha || toTip === fromSha || (await tryGit(primary, ['merge-base', '--is-ancestor', fromSha, toTip])).ok)) {
+      const log = await tryGit(primary, ['reflog', 'show', '--format=%gs', toRef, '--'])
+      // The last rename or copy must be the planned rename. Checkout and commit history alone leave the ref ambiguous.
+      const lastMove = log.stdout.split(/\r?\n/).find((message) => /^Branch: (renamed|copied) /.test(message))
+      if (log.ok && lastMove === `Branch: renamed ${fromRef} to ${toRef}`) outcome = 'renamed'
+    }
+    const head = outcome === 'renamed' && await pathExists(worktreePath)
+      ? (await tryGit(worktreePath, ['symbolic-ref', '-q', 'HEAD'])).stdout : ''
+    if (outcome === 'renamed' && head === fromRef) {
       try {
-        await withOwnedBranches([to], () => git(worktreePath, ['symbolic-ref', 'HEAD', `refs/heads/${to}`]))
+        await withOwnedBranches([to], () => git(worktreePath, ['symbolic-ref', 'HEAD', toRef]))
       } catch (error) {
         rethrowGitPolicyError(error)
         // HEAD could not be moved: nothing is recorded, and the next turn settles it again.
@@ -773,9 +781,9 @@ export class ThreadWorkspaceManager {
     }
     if (outcome === 'renamed') {
       this.recordBranchName(from, to)
-      this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'completed', details: { from, to, settled: true } })
+      this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'completed', details: { from, to, settled: true, proof: 'rename-reflog' } })
     } else {
-      this.recordBranchName(to, from)
+      if (outcome === 'not-renamed') this.recordBranchName(to, from)
       this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: outcome === 'unknown' ? 'cancelled' : 'failed', details: { from, to, settled: true, ...(outcome === 'unknown' ? { disowned: true } : {}) } })
     }
     return outcome

@@ -258,10 +258,10 @@ describe('a rename a stop interrupted is settled from the repository', () => {
       git(repo, 'branch', '-m', f.from, f.to)
       writeFileSync(join(f.dir, 'workspace.json'), JSON.stringify({ ...workspace(f.dir), branch: f.to }))
     }, 'to'],
-    // `git branch -m` renames the ref before it moves the worktree's HEAD: a stop between leaves HEAD on a branch that is gone.
-    ['Git renamed the ref but not yet the worktree\'s HEAD', (f: Awaited<ReturnType<typeof interrupted>>) => {
-      git(repo, 'update-ref', `refs/heads/${f.to}`, f.fromSha)
-      git(repo, 'update-ref', '-d', `refs/heads/${f.from}`)
+    // A crash after Git renamed the ref and wrote its reflog can leave the checkout on the old name.
+    ['Git recorded the rename but HEAD still names the old ref', (f: Awaited<ReturnType<typeof interrupted>>) => {
+      git(repo, 'branch', '-m', f.from, f.to)
+      git(f.made.worktreePath, 'symbolic-ref', 'HEAD', `refs/heads/${f.from}`)
     }, 'to']
   ] as const)('%s', async (_case, before, owner) => {
     const f = await interrupted()
@@ -279,6 +279,19 @@ describe('a rename a stop interrupted is settled from the repository', () => {
     const record = f.manager.branchRecord()
     expect(record.pending).toBeUndefined()
     expect([...record.owned]).toEqual([name])
+  })
+
+  it.each([false, true])('keeps a user-created destination at the same commit (checked out: %s)', async (checkedOut) => {
+    const f = await interrupted()
+    git(repo, 'update-ref', '-d', `refs/heads/${f.from}`)
+    git(repo, 'branch', f.to, f.fromSha)
+    if (checkedOut) git(f.made.worktreePath, 'symbolic-ref', 'HEAD', `refs/heads/${f.to}`)
+    const head = git(f.made.worktreePath, 'symbolic-ref', 'HEAD')
+    await f.manager.settleBranchRename()
+    expect(f.manager.branchRecord().pending).toBeUndefined()
+    expect([...f.manager.branchRecord().owned]).toEqual([])
+    expect(git(repo, 'rev-parse', f.to)).toBe(f.fromSha)
+    expect(git(f.made.worktreePath, 'symbolic-ref', 'HEAD')).toBe(head)
   })
 
   it('a branch of the new name that holds other commits is not the renamed one: Mousse gives up both names and moves nothing', async () => {

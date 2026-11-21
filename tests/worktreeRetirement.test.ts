@@ -445,6 +445,7 @@ async function threadFixture(kind: 'named' | 'renamed' | 'id-named') {
     mkdirSync(join(worktree, '..'), { recursive: true })
     new ThreadJournal(task).append({ operationId: 'provision', operationType: 'workspace-provision', state: 'planned', expectedPreState: { branch, worktreePath: worktree } })
     git(repo, ['worktree', 'add', '-b', branch, worktree])
+    new ThreadJournal(task).append({ operationId: 'provision', operationType: 'workspace-provision', state: 'completed', details: { branch } })
     writeFileSync(join(task, 'workspace.json'), JSON.stringify({ schemaVersion: 1, threadId: 'task', conversationBranchId: 'main', worktreePath: worktree, branch, baseSha: git(repo, ['rev-parse', 'HEAD']) }))
   }
   const taskLease = await waitAcquireExecutionLease(task), repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(repo))

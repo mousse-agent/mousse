@@ -461,7 +461,7 @@ describe('Claude Subscription native provider', () => {
       return { started, query, release: () => release() }
     }
     const ask = (service: ClaudeSubscriptionProviderService, task: 'title' | 'branch_name' | 'pull_request', prompt: string, model = 'haiku') =>
-      service.oneShot({ model, task, system: `Instructions for ${task}.`, prompt, onActivity: () => {} }, new AbortController().signal)
+      service.oneShot({ model, task, namingOrigin: 'send', system: `Instructions for ${task}.`, prompt, onActivity: () => {} }, new AbortController().signal)
 
     it('once a title answered, the next request takes the process started ahead and starts none of its own', async () => {
       const { started, query } = processes()
@@ -481,6 +481,20 @@ describe('Claude Subscription native provider', () => {
       expect(await ask(service, 'pull_request', 'Draft it')).toEqual({ text: 'answer from 3: Draft it' })
       expect(started[3]).toMatchObject({ streamed: false, options: { systemPrompt: 'Instructions for pull_request.' } })
       expect(started[2]!.close).not.toHaveBeenCalled()
+    })
+
+    it('a title regeneration starts no spare, even after using a spare left by Send', async () => {
+      const { started, query } = processes()
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      const regenerate = () => service.oneShot({ model: 'haiku', task: 'title', namingOrigin: 'regenerate', system: 'Instructions for title.', prompt: 'Regenerate', onActivity: () => {} }, new AbortController().signal)
+      try {
+        await expect(regenerate()).resolves.toMatchObject({ text: expect.stringContaining('Regenerate') })
+        expect(started.map(({ streamed }) => streamed)).toEqual([false])
+        await ask(service, 'title', 'First Send')
+        expect(started.map(({ streamed }) => streamed)).toEqual([false, false, true])
+        await expect(regenerate()).resolves.toEqual({ text: 'answer from 2: Regenerate' })
+        expect(started).toHaveLength(3)
+      } finally { await service.stop() }
     })
 
     it('a request on another launch closes the waiting process and starts its own', async () => {
@@ -599,6 +613,44 @@ describe('Claude Subscription native provider', () => {
       }
       expect(started[1]!.close).toHaveBeenCalledOnce()
     })
+
+    it.runIf(process.platform === 'win32').each(['logout', 'stop'] as const)('%s waits for a detached Windows descendant after the query closes its parent', async (method) => {
+      let parent: ChildProcess | undefined
+      let descendant: number | undefined
+      const realChild = (index: number) => {
+        if (index !== 1) return undefined
+        parent = spawn(nodeExecutable, ['-e', `
+          const { spawn } = require('node:child_process')
+          const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true })
+          child.once('spawn', () => { console.log(child.pid); child.unref() })
+          setInterval(() => {}, 1000)
+        `], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+        parent.stdout!.once('data', (data: Buffer) => { descendant = Number(data.toString().trim()) })
+        return parent
+      }
+      const { started, query } = processes(() => 'answer', realChild)
+      const { service } = fixture((input) => {
+        const startedQuery = query(input)
+        if (parent && started.length === 2) {
+          started[1]!.close.mockImplementation(() => parent!.kill())
+          input.options.abortController?.signal.addEventListener('abort', () => parent!.kill(), { once: true })
+        }
+        return startedQuery
+      }, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      try {
+        await ask(service, 'title', 'First Send')
+        await vi.waitFor(() => expect(descendant).toBeGreaterThan(0), { timeout: 10_000 })
+        expect(process.kill(descendant!, 0)).toBe(true)
+        await service[method]()
+        expect(() => process.kill(descendant!, 0)).toThrow(expect.objectContaining({ code: 'ESRCH' }))
+      } finally {
+        if (descendant) try { process.kill(descendant, 'SIGKILL') } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+        }
+        if (parent?.exitCode === null && parent.signalCode === null) parent.kill('SIGKILL')
+        await service.stop()
+      }
+    }, 30_000)
 
     it('stopping the provider ends the waiting process with its process tree', async () => {
       const children: ChildProcess[] = []

@@ -57,7 +57,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
-import { privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type OneShotTask } from './driver'
+import { privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type NamingOrigin, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, ownedLaunchEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
 import { ClaudeSettingsError, claudeSettingsPath, readClaudeSettingsFile, writeClaudeSetting } from './vendors/claude/claudeSettingsFile'
 import { SharedSettingsConsentStore } from './sharedSettingsConsent'
@@ -393,6 +393,7 @@ export interface OneShotRequest {
   sessionKey?: string
   /** What the request is for (a refusal names it); absent reads as `title`. */
   task?: OneShotTask
+  namingOrigin?: NamingOrigin
   signal?: AbortSignal
 }
 
@@ -1647,6 +1648,7 @@ export class Harness implements HarnessGateway {
         prompt: request.prompt,
         ...(request.sessionKey ? { sessionKey: request.sessionKey } : {}),
         ...(request.task ? { task: request.task } : {}),
+        ...(request.namingOrigin ? { namingOrigin: request.namingOrigin } : {}),
         onActivity: restart
       }, signal)
       return { text: text.slice(0, Math.max(0, request.maxChars)) }

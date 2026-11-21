@@ -157,6 +157,44 @@ it.each(['mousse', 'team'])('a thread whose branch rename was settled without kn
   } finally { t.f.dispose() }
 }, 120_000)
 
+it.each([
+  { state: 'failed', legacy: false },
+  { state: 'failed', legacy: true },
+  { state: 'planned', legacy: true }
+])('permanent purge preserves a replacement branch at the same commit after a $state provision (legacy: $legacy)', async ({ state, legacy }) => {
+  const { f, store, location, manager, made, coordinator } = await threadWithBranch('mousse', undefined)
+  try {
+    // Keep the checkout available for the reconstruction proof without checking out the planned name.
+    git(made.worktreePath, 'switch', '--detach')
+    const taskLease = await waitAcquireExecutionLease(location)
+    const repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(f.repo))
+    try {
+      const retirement = new WorktreeRetirementService(store, { taskLease, repositoryLease })
+      await retirement.prepare({ taskId: 'task', worktreePath: made.worktreePath, branch: made.branch, sourcePath: join(location, 'workspace.json') })
+      await retirement.retire(retirement.pathFor('task', made.worktreePath))
+    } finally { repositoryLease.release(); releaseExecutionLeaseHandle(taskLease) }
+
+    // The checkout has a reconstruction manifest, but its only provision record has no success record.
+    // Git lets the user take its name at the same tip.
+    renameSync(join(location, 'journal'), join(f.root, 'original-journal'))
+    const journal = new ThreadWorkspaceManager(location).journal
+    journal.append({ operationId: 'unproven', operationType: 'workspace-provision', state: 'planned', expectedPreState: { branch: made.branch, worktreePath: made.worktreePath, ...(legacy ? {} : { requiresCompletion: true }) } })
+    if (state === 'failed') journal.append({ operationId: 'unproven', operationType: 'workspace-provision', state: 'failed' })
+    if (git(f.repo, 'branch', '--list', made.branch)) git(f.repo, 'branch', '-D', made.branch)
+    git(f.repo, 'branch', made.branch, made.headSha)
+    expect(git(f.repo, 'rev-parse', made.branch)).toBe(made.headSha)
+    expect(manager.load()!.branch).toBe(made.branch)
+
+    await coordinator.trash({ taskId: 'task', operationId: 'collision-trash' })
+    const preview = await coordinator.cleanup.preview('task')
+    expect(preview.blockers).toEqual([])
+    expect(preview.retained).toContainEqual(expect.objectContaining({ identity: `refs/heads/${made.branch}` }))
+    const purged = await coordinator.purge({ taskId: 'task', operationId: 'collision-purge', expectedGeneration: preview.generation, previewDigest: preview.digest })
+    expect(purged.state).toBe('purged')
+    expect(git(f.repo, 'rev-parse', made.branch)).toBe(made.headSha)
+  } finally { f.dispose() }
+}, 120_000)
+
 it('a thread\'s branch that retirement deleted, made again by the person with their commits, survives the thread\'s purge', async () => {
   const t = await threadWithBranch('team', 'fix/login-button')
   try {

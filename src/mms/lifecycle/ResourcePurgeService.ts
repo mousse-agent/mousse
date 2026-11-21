@@ -740,17 +740,13 @@ export class ResourcePurgeService {
    * or gave up stays, as a retained item. An owned one is deleted only when its tip is kept by the thread's own pins (its
    * retained snapshot, its retirement record's result or snapshot, the commit its worktree started at, or an ancestor of
    * one) and no worktree but the thread's has it checked out, the rule retirement deletes a branch by; otherwise it
-   * stays. A name the records never gave the worktree is refused, unless it is under `mousse/` as older records' are.
+   * stays. A name the records cannot prove Mousse owns stays as well.
    */
   private async threadBranchVerdict(taskId: string, thread: NonNullable<ReturnType<ResourcePurgeService['threadWorkspaceBranch']>>, ref: string, commonDir: string | undefined, worktreeLists = new WorktreeListPass()): Promise<{ retained: string } | { blocker: string } | { expectedValue?: string }> {
     const name = ref.slice('refs/heads/'.length)
-    const { record, workspace } = thread
-    if (!record) return { retained: "The thread's branch records cannot be read; the branch stays" }
-    if (record.pending && (record.pending.from === name || record.pending.to === name)) return { retained: 'A rename of this branch is not settled; the branch stays' }
-    if (!record.owned.has(name)) {
-      if (record.known.has(name)) return { retained: 'Mousse no longer owns this branch name; the branch stays' }
-      if (!isMousseOwnedRef(ref)) return { blocker: 'Source ref is not Mousse-owned' }
-    }
+    const retained = this.threadBranchRetention(thread.record, name)
+    if (retained) return { retained }
+    const { workspace } = thread
     if (!commonDir) return { blocker: 'Repository is unavailable; ref existence cannot be established' }
     const tip = await readDirectLifecycleRefAsync(commonDir, ref)
     if (!tip) return {}
@@ -779,6 +775,12 @@ export class ResourcePurgeService {
     }
     return { expectedValue: tip }
   }
+  private threadBranchRetention(record: ThreadBranchRecord | undefined, name: string): string | undefined {
+    if (!record) return "The thread's branch records cannot be read; the branch stays"
+    if (record.pending && (record.pending.from === name || record.pending.to === name)) return 'A rename of this branch is not settled; the branch stays'
+    if (!record.owned.has(name)) return 'Mousse has no proof it owns this branch name; the branch stays'
+  }
+
   private sign(preview: LifecyclePurgePreview): LifecyclePurgePreview { preview.digest = digest({ ...preview, digest: '' }); return preview }
   private order(item: LifecyclePurgeItem, tasks: TaskLifecycleRecord[]): number { return item.kind === 'worktree' ? 0 : item.kind === 'ref' ? 1 : tasks.some((task) => task.location === item.identity) ? 3 : 2 }
 
@@ -835,6 +837,16 @@ export class ResourcePurgeService {
       const reservation = record.cleanupOwner!.token
       for (const item of record.purge.items) {
         if (item.status !== 'pending') continue
+        // A purge resumed from an older preview may include a thread branch whose ownership was never proved.
+        const thread = item.kind === 'ref' ? this.threadWorkspaceBranch(item.ownerTaskId, item.identity) : undefined
+        const retained = thread && this.threadBranchRetention(thread.record, item.identity.slice('refs/heads/'.length))
+        if (retained) {
+          record = this.store.update(input.taskId, (current) => {
+            current.purge!.items.find((entry) => entry.id === item.id)!.status = 'retained'
+            current.purge!.retained.push({ identity: item.identity, reason: retained })
+          })
+          continue
+        }
         // Peer source records are re-read at each step. Partial failure never weakens another owner's claim.
         const target = await this.claimTarget(item)
         const peers = await this.peers(new Set(record.purge!.ownedTaskIds))

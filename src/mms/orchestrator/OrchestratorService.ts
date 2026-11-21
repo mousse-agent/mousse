@@ -43,7 +43,7 @@ import {
   type AgentAccessLevel
 } from '../../shared/settings'
 import { parseThreadNaming, threadNamingRequest, type ThreadNaming } from './threadNaming'
-import { branchNamingPrompt } from '../workspace/branchNaming'
+import { branchNamingPrompt, type BranchNameRequest } from '../workspace/branchNaming'
 import { piInstanceId, piProviderIdOf, PROVIDER_INSTANCE_ERROR_CODES, type ModelOverride } from '../../shared/providerInstances'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import { promptCacheGoneCold } from '../../shared/promptCacheCold'
@@ -139,7 +139,7 @@ import { toolArgsDigest } from '../run/tools/argsDigest'
 import { closeStaleActivity, cutOffActivityOf, formatRestartNote, isOpenActivityRow, RESTART_INTERRUPTED_TEXT, RESTART_UNSENT_TEXT } from '../run/restartNote'
 import { ThreadResidency } from './ThreadResidency'
 import { isDeepStrictEqual } from 'node:util'
-import type { ContinuationInfo, OneShotTask, ProviderTaskEnd } from '../harness/driver'
+import type { ContinuationInfo, NamingOrigin, OneShotTask, ProviderTaskEnd } from '../harness/driver'
 import { ACTIVITY_DESCRIPTION_CHARS, BACKGROUND_SUMMARY, taskEndSummary, type AgentActivityItem } from '../../shared/agentActivity'
 import { createHarnessGateway, type AdapterHost, type BindInput, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type ToolHost, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
@@ -8353,7 +8353,7 @@ export class OrchestratorService extends EventEmitter {
     return text || this.threadStore?.getThread(threadId)?.name
   }
 
-  private async seedForkWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease'], onStep?: (step: TurnSetupStep) => void): Promise<void> {
+  private async seedForkWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease'], nameFrom?: string, onStep?: (step: TurnSetupStep) => void): Promise<void> {
     const engine = this.runEngine
     const fork = engine?.transfers.listPending(threadId, 'fork')[0]
     if (!engine || !fork || fork.payload.seed) return
@@ -8382,7 +8382,7 @@ export class OrchestratorService extends EventEmitter {
         // HEAD then) and the snapshot's files are written over it, so no snapshot commit becomes the fork's branch.
         const seedHead = checkpoint ? (await snapshotOriginAsync(sourceWorkspace?.worktreePath ?? projectPath, checkpoint.endSha)).head : undefined
         onStep?.('worktree')
-        await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, checkpoint ? seedHead : typeof seed.sha === 'string' ? seed.sha : undefined, { ...(checkpoint ? { snapshot: checkpoint.endSha } : {}), nameFrom: this.branchNameSource(threadId), onNotice: this.restoreNotifier(threadId) })
+        await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, checkpoint ? seedHead : typeof seed.sha === 'string' ? seed.sha : undefined, { ...(checkpoint ? { snapshot: checkpoint.endSha } : {}), nameFrom, onNotice: this.restoreNotifier(threadId) })
       }
     } catch (error) {
       seed = { kind: 'failed', error: error instanceof Error ? error.message : String(error) }
@@ -11694,7 +11694,7 @@ export class OrchestratorService extends EventEmitter {
     const heuristic = heuristicTitle(context.request) || fitTitle(cleanTitleText(context.request).text)
     if (!this.hasTitleModel()) return heuristic
     try {
-      return (await this.generateTitleText(context, threadId)) ?? heuristic
+      return (await this.generateTitleText(context, threadId, undefined, 'regenerate')) ?? heuristic
     } catch (error) {
       this.warnTitleFailure(threadId, error)
       return heuristic
@@ -11721,13 +11721,14 @@ export class OrchestratorService extends EventEmitter {
    * model or an instance that cannot run a single request (an agent without one-shots, a Bedrock model) is refused
    * by its typed error, never swapped for another provider.
    */
-  private async generateTitleText(context: TitleContext, threadId: string | undefined, signal?: AbortSignal): Promise<string | null> {
+  private async generateTitleText(context: TitleContext, threadId: string | undefined, signal?: AbortSignal, namingOrigin?: NamingOrigin): Promise<string | null> {
     const text = await this.titleModelText(titleSystemPrompt(this.settingsStore.get().title.prompt), buildTitlePrompt(context), {
       task: 'title',
       scope: threadId ? this.threadScope(threadId) : undefined,
       sessionKey: threadId ?? `title:${context.request.slice(0, 200)}`,
       maxChars: 120,
-      signal
+      signal,
+      namingOrigin
     })
     return normalizeTitle(text)
   }
@@ -11742,7 +11743,7 @@ export class OrchestratorService extends EventEmitter {
    * naming settings. No second request is made then, unless that answer had no branch line; a failed one stays failed.
    * Any other request (the setup stopped and another message came, the settings changed) drops it and asks on its own.
    */
-  async askBranchName(request: { threadId: string; system: string; prompt: string }, signal?: AbortSignal): Promise<string | undefined> {
+  async askBranchName(request: BranchNameRequest, signal?: AbortSignal): Promise<string | undefined> {
     if (!this.hasTitleModel() || signal?.aborted) return undefined
     const settings = this.branchNamingSettingsKey()
     const pending = this.threadNamings?.get(request.threadId)
@@ -11766,7 +11767,8 @@ export class OrchestratorService extends EventEmitter {
       scope: this.threadScope(request.threadId),
       sessionKey: request.threadId,
       maxChars: 100,
-      signal
+      signal,
+      namingOrigin: request.namingOrigin
     })
     return signal?.aborted || this.branchNamingSettingsKey() !== settings ? undefined : answer
   }
@@ -11794,7 +11796,7 @@ export class OrchestratorService extends EventEmitter {
     const naming = new Promise<void>((resolve) => setImmediate(resolve))
       .then(() => {
         signal?.throwIfAborted()
-        return this.titleModelText(system, prompt, { task: 'title', scope: this.threadScope(threadId), sessionKey: threadId, maxChars: 400, signal })
+        return this.titleModelText(system, prompt, { task: 'title', scope: this.threadScope(threadId), sessionKey: threadId, maxChars: 400, signal, namingOrigin: 'send' })
       })
       .then(parseThreadNaming)
     // The branch request this answer stands for, as `branchNameSource` and `requestBranchName` will write it.
@@ -11819,7 +11821,7 @@ export class OrchestratorService extends EventEmitter {
    * chat titles, pull request drafts and commit messages. The gateway resolves the selection in
    * `scope`, bounds the wait and never retries; the caller falls back when it throws.
    */
-  private async titleModelText(system: string, prompt: string, options: { task: OneShotTask; scope: ProviderScope | undefined; sessionKey: string; maxChars: number; signal?: AbortSignal }): Promise<string> {
+  private async titleModelText(system: string, prompt: string, options: { task: OneShotTask; scope: ProviderScope | undefined; sessionKey: string; maxChars: number; signal?: AbortSignal; namingOrigin?: NamingOrigin }): Promise<string> {
     // The title prompt is the title's own instruction (`generateTitleText`), not part of the selection.
     const { prompt: _titlePrompt, ...selection } = this.settingsStore.get().title
     try {
@@ -11832,6 +11834,7 @@ export class OrchestratorService extends EventEmitter {
         maxChars: options.maxChars,
         sessionKey: options.sessionKey,
         task: options.task,
+        ...(options.namingOrigin ? { namingOrigin: options.namingOrigin } : {}),
         ...(options.signal ? { signal: options.signal } : {})
       })
       return text
@@ -12032,8 +12035,8 @@ export class OrchestratorService extends EventEmitter {
    * except for a private thread's, which is asked for its title alone.
    * A model that fails or names nothing leaves it provisional until the pass after the first reply.
    */
-  private nameThreadOnFirstSend(threadId: string, userContent: string, images: number, setupSignal?: AbortSignal): void {
-    if (!this.threadStore || threadId === '__unbound__' || setupSignal?.aborted) return
+  private nameThreadOnFirstSend(threadId: string, userContent: string, images: number, setupSignal?: AbortSignal, namingSignal = setupSignal): void {
+    if (!this.threadStore || threadId === '__unbound__' || namingSignal?.aborted) return
     const thread = this.threadStore.getThread(threadId)
     if (!thread || !isDefaultThreadName(thread.name) || thread.titleSource === 'user') return
     let shown: Thread | undefined
@@ -12055,16 +12058,16 @@ export class OrchestratorService extends EventEmitter {
     // A private thread's branch is never named from its messages: it is asked for its title alone.
     const naming = thread.localOnly
       ? new Promise<void>((resolve) => setImmediate(resolve)).then(async () => {
-        setupSignal?.throwIfAborted()
-        return { title: await this.generateTitleText({ request: userContent, images }, threadId, setupSignal) }
+        namingSignal?.throwIfAborted()
+        return { title: await this.generateTitleText({ request: userContent, images }, threadId, namingSignal, 'send') }
       })
-      : this.startThreadNaming(threadId, userContent, images, setupSignal)
+      : this.startThreadNaming(threadId, userContent, images, namingSignal)
     void this.queueTitleWork(threadId, async () => {
       try {
         const { title } = await naming
-        if (title && shown && !setupSignal?.aborted) shown = this.writeThreadTitle(threadId, shown, title, 'auto')
+        if (title && shown && !namingSignal?.aborted) shown = this.writeThreadTitle(threadId, shown, title, 'auto')
       } catch (error) {
-        if (setupSignal?.aborted) return
+        if (namingSignal?.aborted) return
         this.warnTitleFailure(threadId, error)
         this.emit('thread-title-generation-failed', { threadId, error: error instanceof Error ? error.message : String(error) })
       }
@@ -14374,8 +14377,12 @@ export class OrchestratorService extends EventEmitter {
     // A Stop while the turn is still being set up ends the setup's waits and discards the name of the cancelled send.
     const setupStop = new AbortController()
     session.setupStop = setupStop
-    // The thread is named from the message before the worktree and snapshot. A workflow's invocation names nothing.
-    if (startedAtAdmission && (typeof input === 'string' || !input.workflowInvocationId)) this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent), setupStop.signal)
+    const setupSignal = opts?.externalSignal ? AbortSignal.any([opts.externalSignal, setupStop.signal]) : setupStop.signal
+    const turnAbort = new AbortController()
+    const namingSignal = AbortSignal.any([setupSignal, turnAbort.signal])
+    // Ask before the worktree and snapshot. Stop can cancel naming during either setup or the active turn.
+    const namingFirstSend = startedAtAdmission && (typeof input === 'string' || !input.workflowInvocationId)
+    if (namingFirstSend) this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent), setupStop.signal, namingSignal)
     this.noteQueueWait(session)
     const turnId = opts?.runId ?? uuidv4()
     // The turn a settle started may start from the last turn's end (`TurnHandoff`). It is taken now, used or not, and
@@ -14385,7 +14392,6 @@ export class OrchestratorService extends EventEmitter {
     const setupBegan = performance.now()
     let handoff: TurnHandoff | undefined
     const setupStep = (step: TurnSetupStep): void => { if (!handoff) this.beginSetupStep(session.threadId, turnId, step) }
-    const setupSignal = opts?.externalSignal ? AbortSignal.any([opts.externalSignal, setupStop.signal]) : setupStop.signal
     // A turn that cannot start now runs later, in its place: a claimed item goes back where it was
     // (never a replacement at the tail); anything else is queued with its run.
     const requeueUnstarted = (behindLease = false): OrchestratorResponse => {
@@ -14526,6 +14532,7 @@ export class OrchestratorService extends EventEmitter {
     const request = normalizeSendRequest(input)
     // The folder a turn is recorded in when it has no worktree: a project without Git, or a thread with no project.
     let snapshotFolder: SnapshotFolder | undefined
+    let firstBranchNameFrom: string | undefined
     // Resolve the task binding before dispatch. Provisioning failures must not
     // turn an isolated code request into a write to the registered checkout.
     if (session.sharedWorkspace) {
@@ -14565,13 +14572,18 @@ export class OrchestratorService extends EventEmitter {
           session.projectCwd = session.workspace.projectPath
         } else if (projectPath && threadDir) {
           try {
-            await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, setupStep)
             const pending = opts?.agent ? agentMessageWords(request.content, agentOriginOf(opts.agent)) : request.content
-            await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, pending), setupStep)
+            const nameFrom = this.branchNameSource(session.threadId, session.messages, pending)
+            // A worktree can be ready while the first message is still waiting for its snapshot.
+            const namingFirstBranch = namingFirstSend && !session.messages.some((message) => message.role === 'user' && !message.inherited)
+            if (namingFirstBranch) firstBranchNameFrom = nameFrom
+            const acceptedNameFrom = namingFirstBranch ? undefined : nameFrom
+            await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, namingFirstBranch ? undefined : this.branchNameSource(session.threadId), setupStep)
+            await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, acceptedNameFrom, setupStep)
             // A fork or subagent worktree made just now is read afresh (`repositoryFacts.ts`).
             forgetRepositoryFacts()
             session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.placementOf(session.threadId), this.restoreNotifier(session.threadId))
-              .resolve(request.mode, 'main', setupSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, pending), setupStep)
+              .resolve(request.mode, 'main', setupSignal, session.executionLease ?? undefined, acceptedNameFrom, setupStep)
           } catch (error) {
             // Never a silent blank thread: the chat, the sidebar row and whoever sent it are told why (`Thread.setupFailure`).
             if (!setupSignal.aborted && !this.lifecycle.signal.aborted) this.recordSetupFailure(session.threadId, threadDir, request, error, { runId: opts?.runId, retryable: !reuseLastUser && !request.workflowInvocationId && !(typeof input !== 'string' && input.continuationOfRunId) })
@@ -14715,7 +14727,8 @@ export class OrchestratorService extends EventEmitter {
     }
 
     // A thread the admission did not name (the transcript changed during the setup) is named now.
-    if (!reuseLastUser && displayUserMessage && !startedAtAdmission) this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent))
+    setupSignal.throwIfAborted()
+    if (!reuseLastUser && displayUserMessage && !startedAtAdmission) this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent), setupStop.signal, namingSignal)
 
     // The mode the turn runs in is known before its message is admitted, so a change reaches the
     // agent with that message and the message records the mode. A bot's turn runs under its grant, never a thread
@@ -14823,7 +14836,7 @@ export class OrchestratorService extends EventEmitter {
     }
     turnBoundaryMark(session.threadId, 'beginTurn')
     const turn: ActiveTurnControl = {
-      abort: new AbortController(),
+      abort: turnAbort,
       pendingSteer: [] as SteerEntry[],
       ...(engineRunId ? { runId: engineRunId } : {})
     }
@@ -14911,6 +14924,11 @@ export class OrchestratorService extends EventEmitter {
     session.setupStop = null
     this.noteQueueWait(session)
     this.applyRequestedAbort(session, turn)
+    const branch = session.workspace?.lifecycle === 'ready' ? session.workspace.branch : undefined
+    if (claimAccepted && firstBranchNameFrom && branch && !namingSignal.aborted) {
+      const directory = this.resolveThreadDir(session.threadId)
+      if (directory) new ThreadWorkspaceManager(directory).nameTemporaryBranch(session.threadId, branch, firstBranchNameFrom, namingSignal)
+    }
     // The thread runs again: what a Stop held in its queue goes on after this turn, as after any turn that ends.
     if (!turn.abort.signal.aborted) this.releaseStopHold(session)
     // A person's turn lets the settle notices held for them go on after it too.

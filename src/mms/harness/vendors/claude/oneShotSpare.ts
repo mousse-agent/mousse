@@ -6,7 +6,7 @@ import type { OneShotTask } from '../../driver'
  * A Claude Code process started ahead for a naming one-shot (a thread's title and branch name), so the request does not
  * wait for a process to start: about a second on Windows, more on a cold disk. The process is started with its input
  * open (the Agent SDK's streaming input) and waits; the request pushes its one message, reads the answer, and the
- * process is closed. The next one is started once that request answered, and one left waiting is closed after
+ * process is closed. A Send or New Thread request can leave a spare, and one left waiting is closed after
  * `ONE_SHOT_SPARE_IDLE_MS`. A process answers one request only, so no request sees another's text.
  */
 
@@ -73,6 +73,6 @@ export interface OneShotSpare {
   controller: AbortController
   /** The query, once the SDK started it; rejects when it could not be. */
   query: Promise<Query>
-  close: () => void
+  close: (reason?: unknown) => void
   timer: ReturnType<typeof setTimeout>
 }

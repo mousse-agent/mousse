@@ -8,12 +8,15 @@
  * gets the turn); two sent one after the other (their order, during the setup and after it).
  */
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ThreadActionService } from '../../src/mms/actions/ThreadActionService'
 import { acquireRepositoryLease, type RepositoryLeaseHandle } from '../../src/mms/git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../../src/mms/git/RepositoryIdentity'
+import { ThreadWorkspaceManager } from '../../src/mms/workspace/ThreadWorkspaceManager'
 import { registerBranchNamer } from '../../src/mms/workspace/branchNaming'
 import { findUnstartedThread } from '../../src/shared/threadTitle'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
@@ -28,19 +31,20 @@ describe("a new chat's thread while its first turn is set up", () => {
   let unregisterNamer: (() => void) | undefined
 
   afterEach(async () => {
+    vi.restoreAllMocks()
     held?.release()
     held = undefined
     unregisterNamer?.()
     unregisterNamer = undefined
-    await daemon?.stop().catch(() => undefined)
+    await daemon?.shutdown()
     daemon = undefined
     if (previousHome === undefined) delete process.env.MOUSSE_HOME
     else process.env.MOUSSE_HOME = previousHome
-    if (home) rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    if (home) await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     home = undefined
   })
 
-  const world = () => {
+  const world = (reply: () => string | Promise<string> = () => 'Done') => {
     home = mkdtempSync(join(tmpdir(), 'mousse-started-at-admission-'))
     previousHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = home
@@ -49,7 +53,7 @@ describe("a new chat's thread while its first turn is set up", () => {
     const git = (...args: string[]) => execFileSync('git', args, { cwd: projectDir, stdio: 'ignore' })
     git('init', '-q'); git('config', 'user.email', 'test@example.test'); git('config', 'user.name', 'Test')
     writeFileSync(join(projectDir, 'README.md'), 'hello\n'); git('add', '.'); git('commit', '-qm', 'init')
-    const pi = piAdapter(() => 'Done')
+    const pi = piAdapter(reply)
     const d = (daemon = phase6Daemon(home, [pi]))
     unregisterNamer = registerBranchNamer(home, {
       settings: () => d.settings.branches,
@@ -153,6 +157,74 @@ describe("a new chat's thread while its first turn is set up", () => {
     expect(w.d.store.getThread(draft.id)!.name).toBe('Fix checkout retries')
     await waitFor(() => w.localBranches().includes('mousse/checkout-retries'), 'the branch to get the new name', 40_000)
     expect(w.localBranches()).not.toContain('mousse/stale-release')
+  })
+
+  it('keeps the temporary branch when the naming answer arrives during snapshot setup before Stop', async () => {
+    const w = world()
+    const draft = w.emptyThread()
+    w.d.settings.title = { ...w.d.settings.title, ...PI }
+    const naming = Promise.withResolvers<{ text: string }>()
+    const oneShot = vi.fn(() => naming.promise)
+    ;(w.d.orch as unknown as { harness: { oneShot: unknown } }).harness.oneShot = oneShot
+    const snapshot = Promise.withResolvers<void>()
+    const renaming = vi.spyOn(ThreadWorkspaceManager.prototype, 'renameOwnBranch')
+    const recordOutsideChanges = ThreadActionService.prototype.recordOutsideChanges
+    const checkpoint = vi.spyOn(ThreadActionService.prototype, 'recordOutsideChanges').mockImplementation(async function (this: ThreadActionService, options) {
+      await snapshot.promise
+      options.signal?.throwIfAborted()
+      return recordOutsideChanges.call(this, options)
+    })
+    await w.d.orch.send('Plan the release for Friday', false, { threadId: draft.id, clientRequestId: 'first', awaitMode: 'ack' })
+    await waitFor(() => checkpoint.mock.calls.length === 1 && oneShot.mock.calls.length === 1, 'snapshot setup and the naming request')
+    const before = w.localBranches()
+    expect(before).toContainEqual(expect.stringMatching(/^mousse\/[0-9a-f]{8}$/))
+    try {
+      naming.resolve({ text: 'Title: Friday release plan\nBranch: friday-release' })
+      await waitFor(() => w.d.store.getThread(draft.id)?.name === 'Friday release plan', 'the naming answer to be received')
+      // If a rename started, let its real Git operation finish while the snapshot is still paused.
+      await Promise.allSettled(renaming.mock.results.map(({ value }) => value))
+      expect(w.localBranches()).toEqual(before)
+      const stopped = w.d.orch.stopThread(draft.id, 'user', { clientRequestId: 'stop-first' })
+      await waitFor(() => checkpoint.mock.calls[0]![0].signal?.aborted === true, 'Stop to reach snapshot setup')
+      snapshot.resolve()
+      expect((await stopped).ok).toBe(true)
+      await waitFor(() => w.idle(draft.id), 'the cancelled send to settle')
+      expect(w.d.store.getThread(draft.id)?.name).toBe('New Chat')
+      expect(w.pi.turns).toHaveLength(0)
+      expect(w.localBranches()).toEqual(before)
+
+      oneShot.mockResolvedValue({ text: 'Title: Checkout retries\nBranch: checkout-retries' })
+      await w.d.orch.send('Fix checkout retries', false, { threadId: draft.id, clientRequestId: 'retry', awaitMode: 'ack' })
+      await waitFor(() => w.pi.turns.length === 1 && w.idle(draft.id), 'the accepted Send to finish', 40_000)
+      await waitFor(() => w.localBranches().includes('mousse/checkout-retries'), 'the branch to use the accepted first message', 40_000)
+      expect(w.localBranches()).not.toContain('mousse/friday-release')
+    } finally { snapshot.resolve() }
+  })
+
+  it('ignores a naming answer that arrives after Stop reaches a running provider', async () => {
+    const reply = Promise.withResolvers<string>()
+    const w = world(() => reply.promise)
+    const draft = w.emptyThread()
+    w.d.settings.title = { ...w.d.settings.title, ...PI }
+    const naming = Promise.withResolvers<{ text: string }>()
+    const oneShot = vi.fn(() => naming.promise)
+    ;(w.d.orch as unknown as { harness: { oneShot: unknown } }).harness.oneShot = oneShot
+    const interrupt = vi.spyOn(w.pi, 'interrupt')
+    const renaming = vi.spyOn(ThreadWorkspaceManager.prototype, 'renameOwnBranch')
+    try {
+      await w.d.orch.send('Plan the release for Friday', false, { threadId: draft.id, clientRequestId: 'first', awaitMode: 'ack' })
+      await waitFor(() => w.pi.turns.length === 1 && oneShot.mock.calls.length === 1, 'the running provider and naming request', 40_000)
+      const before = w.localBranches()
+      const stopped = w.d.orch.stopThread(draft.id, 'user', { clientRequestId: 'stop-first' })
+      await waitFor(() => interrupt.mock.calls.length > 0, 'Stop to reach the running provider')
+      naming.resolve({ text: 'Title: Stale release title\nBranch: stale-release' })
+      reply.resolve('Done')
+      expect((await stopped).ok).toBe(true)
+      await waitFor(() => w.idle(draft.id) && w.d.store.getThread(draft.id)?.titleSource === 'auto', 'the stopped turn and naming to settle')
+      expect(w.d.store.getThread(draft.id)?.name).toBe('Plan the release for Friday')
+      await Promise.allSettled(renaming.mock.results.map(({ value }) => value))
+      expect(w.localBranches()).toEqual(before)
+    } finally { naming.resolve({ text: '' }); reply.resolve('Done') }
   })
 
   it('keeps two threads started one after the other in the order they were sent, during their setup and after it', async () => {

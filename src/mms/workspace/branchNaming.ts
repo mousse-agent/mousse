@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { isAbsolute, relative, resolve } from 'node:path'
+import type { NamingOrigin } from '../harness/driver'
 import { SEMANTIC_BRANCH_KINDS, branchNameFromModel, withBranchPrefix } from '../../shared/mousseBranches'
 import { normalizeBranchNamingSettings, type BranchNamingSettings } from '../../shared/settings'
 
@@ -20,10 +21,17 @@ export const BRANCH_NAMING_TIMEOUT_MS = 30_000
 /** The most of the first message the title model sees. */
 const NAMING_TEXT_MAX = 2_000
 
+export interface BranchNameRequest {
+  threadId: string
+  system: string
+  prompt: string
+  namingOrigin?: NamingOrigin
+}
+
 export interface BranchNamer {
   settings(): BranchNamingSettings
   /** The title model's answer to `prompt`, or undefined when there is no title model. Throws on a failed request. */
-  ask(request: { threadId: string; system: string; prompt: string }, signal: AbortSignal): Promise<string | undefined>
+  ask(request: BranchNameRequest, signal: AbortSignal): Promise<string | undefined>
 }
 
 const namers = new Map<string, BranchNamer>()
@@ -84,23 +92,27 @@ export function branchNamingPrompt(text: string, settings: BranchNamingSettings)
  * Asks the thread's profile for a branch name for `text`, under {@link BRANCH_NAMING_TIMEOUT_MS}. Undefined when there is
  * no namer or title model, the request fails or takes too long, or the answer names nothing usable.
  */
-export async function requestBranchName(threadDirectory: string, threadId: string, text: string, timeoutMs = BRANCH_NAMING_TIMEOUT_MS): Promise<string | undefined> {
+export async function requestBranchName(threadDirectory: string, threadId: string, text: string, timeoutMs = BRANCH_NAMING_TIMEOUT_MS, cancellation?: AbortSignal, namingOrigin?: NamingOrigin): Promise<string | undefined> {
   const namer = namerFor(threadDirectory)
-  if (!namer || !text.trim()) return undefined
+  if (!namer || !text.trim() || cancellation?.aborted) return undefined
   const settings = branchNamingFor(threadDirectory)
   const { system, prompt } = branchNamingPrompt(text, settings)
-  const controller = new AbortController()
-  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new AbortController()
+  const signal = cancellation ? AbortSignal.any([cancellation, timeout.signal]) : timeout.signal
+  let onAbort!: () => void
+  const aborted = new Promise<undefined>((resolve) => {
+    onAbort = () => resolve(undefined)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+  const timer = setTimeout(() => timeout.abort(), timeoutMs)
   try {
-    const answer = await Promise.race([
-      namer.ask({ threadId, system, prompt }, controller.signal),
-      new Promise<undefined>((done) => { timer = setTimeout(() => { controller.abort(); done(undefined) }, timeoutMs) })
-    ])
-    return branchNameFromModel(answer, settings.mode, settings.prefix)
+    const answer = await Promise.race([namer.ask({ threadId, system, prompt, ...(namingOrigin ? { namingOrigin } : {}) }, signal), aborted])
+    return signal.aborted ? undefined : branchNameFromModel(answer, settings.mode, settings.prefix)
   } catch (error) {
-    console.warn('[branches] the title model could not name the branch', { threadId, error: error instanceof Error ? error.message : String(error) })
+    if (!signal.aborted) console.warn('[branches] the title model could not name the branch', { threadId, error: error instanceof Error ? error.message : String(error) })
     return undefined
   } finally {
-    if (timer) clearTimeout(timer)
+    signal.removeEventListener('abort', onAbort)
+    clearTimeout(timer)
   }
 }
