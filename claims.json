@@ -252,19 +252,6 @@
       "expiresAt": "2026-11-20T12:53:30.178Z"
     },
     {
-      "task": "sidebar-branch-reliable",
-      "session": "Animatrix-cfefc0",
-      "machine": "Animatrix",
-      "branch": "sidebar-branch-reliable",
-      "paths": [
-        "src/renderer/hooks/useThreadBranch.ts",
-        "src/renderer/stores/gitStatusStore.ts",
-        "src/mms/git/GitService.ts"
-      ],
-      "claimedAt": "2026-11-21T04:14:08.470Z",
-      "expiresAt": "2026-11-21T06:14:08.470Z"
-    },
-    {
       "task": "starting-thread-is-own-thread",
       "session": "Animatrix-96ddcc",
       "machine": "Animatrix",
