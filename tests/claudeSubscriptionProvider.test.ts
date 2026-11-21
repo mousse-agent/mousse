@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -29,9 +30,9 @@ beforeEach(() => {
   homes.push(claudeHome)
   vi.stubEnv('CLAUDE_CONFIG_DIR', claudeHome)
 })
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllEnvs()
-  for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
+  for (const home of homes.splice(0)) await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 })
 function fixture(
   query: (input: { options: Options; prompt: unknown }) => Query,
