@@ -26,6 +26,7 @@ import { gitRunError, LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitPro
 import { renameFolderAsync } from './renameFolder'
 import { isIdNamedMousseBranch, isMousseBranchName, isValidBranchName } from '../../shared/mousseBranches'
 import { withOwnedBranches } from '../git/gitPolicy'
+import { branchReflogIdentity } from '../git/branchReflogIdentity'
 import { BRANCH_RECORD_OPERATIONS, BRANCH_RELEASE_OPERATION, BRANCH_RESTORE_OPERATION, threadBranchRecord, type ThreadBranchRecord } from '../workspace/threadBranchRecords'
 import { randomUUID } from 'node:crypto'
 import { adminDigest, adminObjectIds, blobId, HEAD_REFLOG, readAdminFilesAsync, replayedAdminFile, storeAdmin, storeAdminBeforeRemoval, uncontainedTips, type StoredAdmin } from './worktreeAdminData'
@@ -35,7 +36,7 @@ import { CLEANUP_ROUNDS } from '../worktree/verifiedCleanup'
 import { withDrivers } from '../git/gitEnv'
 import { restoreCommands, restoreShell, type RestoreKind, type RestoreShell } from '../actions/restoreCommands'
 import { retentionWindowText } from '../../shared/undoRetention'
-import { gitSucceeds, lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
+import { branchCheckedOutAsync, createLoggedBranchAsync, deleteVerifiedBranchAsync, gitSucceeds, lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
 import { assertFolderUnchanged, assertFoldersUnchanged, caseInsensitiveAt, deleteVerifiedAsync, FolderChanged, folderSignatureAsync, identityOf, lockedText, lstatAll, recordFoldersAboveAsync, sameEntry, samePath, statOrThrow, unregisterDeletedAsync, walkOwnedContentAsync, worktreeLockAsync, worktreeRegisteredAsync, type ContentEntry, type DeletePlace, type FolderSignature, type HeldCheck, type LateWrites } from './verifiedDelete'
 import { readThreadRecordSync, threadRecordFile, threadRecordFolder, threadRecordName } from '../data/threadRecords'
 
@@ -1172,12 +1173,9 @@ export class WorktreeRetirementService {
    * was taken on, or an ancestor of one), unless a worktree has the branch checked out. Each deletion is recorded so a
    * restore brings the branch back.
    *
-   * A thread's own branch (a manifest of its workspace.json) is deleted only while the thread's journal says Mousse owns
-   * it now (`threadBranchRecord`): not a name it released or gave up, nor one a rename left unsettled, whatever the
-   * manifest names. The release is journaled before the delete, so the name stops being Mousse's: a branch someone makes
-   * under it later is theirs. Without that record (a journal that cannot be read or written) the branch stays. Other
-   * owners' branches (agents', workflows', an id-named one HEAD was on) are deleted only under `mousse/`. A branch the
-   * agent made itself is never touched.
+   * Mousse verifies a thread branch's journaled reflog identity while Git holds its ref lock. The release is journaled
+   * before the delete, so a branch someone creates under that name afterwards remains theirs. Branches in agent and
+   * workflow manifests still use their reserved Mousse names.
    */
   private async releaseBranches(manifest: WorktreeReconstructionManifest): Promise<void> {
     const checkedOut = new Set((await lifecycleReadAsync(manifest.commonDir, ['worktree', 'list', '--porcelain'])).split(/\r?\n/).filter((line) => line.startsWith('branch refs/heads/')).map((line) => line.slice('branch refs/heads/'.length)))
@@ -1186,18 +1184,24 @@ export class WorktreeRetirementService {
     const thread = this.threadBranchOwner(manifest)
     for (const name of new Set(owned)) {
       if (!name || !isValidBranchName(name) || checkedOut.has(name)) continue
-      const threadBranch = Boolean(thread) && name === manifest.branch
-      if (threadBranch) {
-        const record = thread!.record
-        if (!record || !record.owned.has(name) || (record.pending && (record.pending.from === name || record.pending.to === name))) continue
+      const ref = `refs/heads/${name}`
+      const record = thread?.record
+      const reflogId = record?.reflogIds.get(name)
+      if (thread) {
+        if (!record?.owned.has(name) || !reflogId || record.pending?.from === name || record.pending?.to === name) continue
       } else if (!isMousseBranchName(name)) continue
       const tip = await this.tip(manifest, name)
       if (!tip) continue
       let kept = false
       for (const pin of pins) if (pin === tip || await gitSucceeds(manifest.commonDir, ['merge-base', '--is-ancestor', tip, pin])) { kept = true; break }
       if (!kept) continue
-      if (threadBranch && !this.journalBranch(thread!.location, BRANCH_RELEASE_OPERATION, { branch: name, sha: tip, worktreePath: manifest.worktreePath })) continue
-      await withOwnedBranches([name], () => lifecycleGitAsync(manifest.commonDir, ['update-ref', '--no-deref', '-d', `refs/heads/${name}`, tip]))
+      const deleted = await withOwnedBranches([name], () => deleteVerifiedBranchAsync(manifest.commonDir, ref, tip, async () => {
+        if (await branchCheckedOutAsync(manifest.commonDir, ref)) return false
+        if (!thread) return true
+        if (branchReflogIdentity(manifest.commonDir, ref)?.id !== reflogId) return false
+        return this.journalBranch(thread.location, BRANCH_RELEASE_OPERATION, { branch: name, sha: tip, worktreePath: manifest.worktreePath })
+      }))
+      if (!deleted) continue
       manifest.deletedBranches = [...(manifest.deletedBranches ?? []).filter((entry) => entry.name !== name), { name, sha: tip }]
     }
   }
@@ -1216,7 +1220,7 @@ export class WorktreeRetirementService {
     }
   }
   /** Journals a release or restore of the thread's branch; false when the journal cannot be written (the thread is trashed). */
-  private journalBranch(location: string, operationType: string, details: { branch: string; sha: string; worktreePath: string }): boolean {
+  private journalBranch(location: string, operationType: string, details: { branch: string; sha: string; worktreePath: string; reflogId?: string }): boolean {
     if (!location) return false
     try {
       new ThreadJournal(location).append({ operationId: randomUUID(), operationType, state: 'completed', details })
@@ -1236,8 +1240,13 @@ export class WorktreeRetirementService {
       if (await this.branchTaken(manifest, entry.name)) continue
       // A commit that is no longer in the repository cannot be a branch again; it is reported, never a reason to fail.
       if (!await gitSucceeds(manifest.commonDir, ['cat-file', '-e', `${entry.sha}^{commit}`])) { missing.push(entry); continue }
-      await withOwnedBranches([entry.name], () => lifecycleGitAsync(manifest.commonDir, ['update-ref', '--no-deref', `refs/heads/${entry.name}`, entry.sha, '0'.repeat(entry.sha.length)]))
-      if (thread && entry.name === manifest.branch) this.journalBranch(thread.location, BRANCH_RESTORE_OPERATION, { branch: entry.name, sha: entry.sha, worktreePath: manifest.worktreePath })
+      const ref = `refs/heads/${entry.name}`
+      const message = `mousse: restore ${randomUUID()}`
+      await withOwnedBranches([entry.name], () => createLoggedBranchAsync(manifest.commonDir, ref, entry.sha, message))
+      if (thread) {
+        const reflogId = branchReflogIdentity(manifest.commonDir, ref, { message, creation: true })?.id
+        if (reflogId) this.journalBranch(thread.location, BRANCH_RESTORE_OPERATION, { branch: entry.name, sha: entry.sha, worktreePath: manifest.worktreePath, reflogId })
+      }
     }
     delete manifest.deletedBranches
     if (missing.length) manifest.branchesNotRestored = missing

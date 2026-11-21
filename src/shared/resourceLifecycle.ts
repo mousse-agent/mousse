@@ -142,11 +142,12 @@ export interface LifecyclePurgeItem {
   discardRequired?: boolean
   discardState?: 'pending' | 'cleared'
   branch?: string
-  /**
-   * A `ref` item that is a thread's worktree branch outside `refs/heads/mousse/`: the owner thread's journal shows Mousse
-   * made it (`threadBranchRecord`), so it is deleted as Mousse's own.
-   */
+  /** The proven thread branch's worktree and reflog version, frozen before the worktree is removed. */
+  branchProvenance?: { worktreePath: string; reflogVersion: string }
+  /** Legacy flag used to parse older purge ledgers. It does not authorize deletion. */
   recordedBranch?: boolean
+  /** Why a pending item was kept on execution. Kept outside the frozen preview digest. */
+  retainedReason?: string
   sourcePath?: string
   rowId?: string
   indexDigest?: string

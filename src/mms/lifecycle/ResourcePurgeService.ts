@@ -15,8 +15,9 @@ import { projectFolderPurgeRefs, threadKeptFilesRefs } from './projectFolderRefs
 import { measureTree } from './diskMeasure'
 import { assertLifecyclePath, assertLifecyclePathAsync, ResourceLifecycleStore } from './ResourceLifecycleStore'
 import { lockReasonSync, WorktreeRetirementService } from './WorktreeRetirementService'
-import { lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
+import { branchCheckedOutAsync, deleteVerifiedBranchAsync, lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
 import { READ_ONLY_GIT_ENV } from '../git/readOnlyGit'
+import { branchReflogIdentity } from '../git/branchReflogIdentity'
 import { assertFrozenEntryUnchanged, lockedText, proveFrozenContentEntryAsync, walkOwnedContentAsync } from './verifiedDelete'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { claimOverlapsPath, getExternalResourceClaims, getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver, type ClaimTarget } from './LifecycleClaims'
@@ -655,7 +656,15 @@ export class ResourcePurgeService {
             if ('retained' in verdict) { preview.retained.push({ identity: resource.identity, reason: verdict.retained }); continue }
             if ('blocker' in verdict) throw new Error(verdict.blocker)
             if (!verdict.expectedValue || !commonDir) continue
-            preview.items.push({ id: resource.id, kind: 'ref', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir, expectedValue: verdict.expectedValue, ...(isMousseOwnedRef(resource.identity) ? {} : { recordedBranch: true }), status: 'pending' })
+            const reflog = branchReflogIdentity(commonDir, resource.identity)
+            const name = resource.identity.slice('refs/heads/'.length)
+            if (!reflog || reflog.id !== thread.record?.reflogIds.get(name)) { preview.retained.push({ identity: resource.identity, reason: 'The branch no longer matches its recorded identity; the branch stays' }); continue }
+            const branchProvenance = { worktreePath: thread.workspace.worktreePath, reflogVersion: reflog.version }
+            preview.items.push({ id: resource.id, kind: 'ref', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir, expectedValue: verdict.expectedValue, branchProvenance, status: 'pending' })
+            continue
+          }
+          if (resource.identity.startsWith('refs/heads/')) {
+            preview.retained.push({ identity: resource.identity, reason: 'Mousse has no proof it owns this branch; the branch stays' })
             continue
           }
           if (!isMousseOwnedRef(resource.identity)) throw new Error('Source ref is not Mousse-owned')
@@ -728,10 +737,16 @@ export class ResourcePurgeService {
     } catch { return undefined }
     if (workspace.threadId !== taskId || typeof workspace.worktreePath !== 'string' || `refs/heads/${workspace.branch}` !== ref) return undefined
     const own = { worktreePath: workspace.worktreePath, ...(typeof workspace.retainedRef === 'string' ? { retainedRef: workspace.retainedRef } : {}), ...(typeof workspace.headSha === 'string' ? { headSha: workspace.headSha } : {}) }
+    return { workspace: own, record: this.readThreadBranchRecord(taskId, workspace.worktreePath) }
+  }
+
+  private readThreadBranchRecord(taskId: string, worktreePath: string): ThreadBranchRecord | undefined {
     try {
-      return { workspace: own, record: threadBranchRecord(new ThreadJournal(location, { readOnly: true }).ofTypes(...BRANCH_RECORD_OPERATIONS), { worktreePath: workspace.worktreePath }) }
+      const { location } = this.store.require(taskId)
+      assertLifecyclePath(location, join(location, 'journal'))
+      return threadBranchRecord(new ThreadJournal(location, { readOnly: true }).ofTypes(...BRANCH_RECORD_OPERATIONS), { worktreePath })
     } catch {
-      return { workspace: own }
+      return undefined
     }
   }
   /**
@@ -740,17 +755,13 @@ export class ResourcePurgeService {
    * or gave up stays, as a retained item. An owned one is deleted only when its tip is kept by the thread's own pins (its
    * retained snapshot, its retirement record's result or snapshot, the commit its worktree started at, or an ancestor of
    * one) and no worktree but the thread's has it checked out, the rule retirement deletes a branch by; otherwise it
-   * stays. A name the records never gave the worktree is refused, unless it is under `mousse/` as older records' are.
+   * stays. A name the records cannot prove Mousse owns stays as well.
    */
   private async threadBranchVerdict(taskId: string, thread: NonNullable<ReturnType<ResourcePurgeService['threadWorkspaceBranch']>>, ref: string, commonDir: string | undefined, worktreeLists = new WorktreeListPass()): Promise<{ retained: string } | { blocker: string } | { expectedValue?: string }> {
     const name = ref.slice('refs/heads/'.length)
-    const { record, workspace } = thread
-    if (!record) return { retained: "The thread's branch records cannot be read; the branch stays" }
-    if (record.pending && (record.pending.from === name || record.pending.to === name)) return { retained: 'A rename of this branch is not settled; the branch stays' }
-    if (!record.owned.has(name)) {
-      if (record.known.has(name)) return { retained: 'Mousse no longer owns this branch name; the branch stays' }
-      if (!isMousseOwnedRef(ref)) return { blocker: 'Source ref is not Mousse-owned' }
-    }
+    const retained = this.threadBranchRetention(thread.record, name)
+    if (retained) return { retained }
+    const { workspace } = thread
     if (!commonDir) return { blocker: 'Repository is unavailable; ref existence cannot be established' }
     const tip = await readDirectLifecycleRefAsync(commonDir, ref)
     if (!tip) return {}
@@ -779,6 +790,12 @@ export class ResourcePurgeService {
     }
     return { expectedValue: tip }
   }
+  private threadBranchRetention(record: ThreadBranchRecord | undefined, name: string): string | undefined {
+    if (!record) return "The thread's branch records cannot be read; the branch stays"
+    if (record.pending && (record.pending.from === name || record.pending.to === name)) return 'A rename of this branch is not settled; the branch stays'
+    if (!record.owned.has(name) || !record.reflogIds.has(name)) return 'Mousse has no proof it owns this branch; the branch stays'
+  }
+
   private sign(preview: LifecyclePurgePreview): LifecyclePurgePreview { preview.digest = digest({ ...preview, digest: '' }); return preview }
   private order(item: LifecyclePurgeItem, tasks: TaskLifecycleRecord[]): number { return item.kind === 'worktree' ? 0 : item.kind === 'ref' ? 1 : tasks.some((task) => task.location === item.identity) ? 3 : 2 }
 
@@ -835,14 +852,27 @@ export class ResourcePurgeService {
       const reservation = record.cleanupOwner!.token
       for (const item of record.purge.items) {
         if (item.status !== 'pending') continue
+        const retain = (reason: string): void => {
+          record = this.store.update(input.taskId, (current) => {
+            const progress = current.purge!.items.find((entry) => entry.id === item.id)!
+            progress.status = 'retained'
+            progress.retainedReason = reason
+          })
+        }
+        // Older ledgers cannot establish which incarnation of a branch the preview reviewed.
+        if (item.kind === 'ref' && item.identity.startsWith('refs/heads/') && !item.branchProvenance) {
+          retain('The purge recorded no proof of branch ownership; the branch stays')
+          continue
+        }
         // Peer source records are re-read at each step. Partial failure never weakens another owner's claim.
         const target = await this.claimTarget(item)
         const peers = await this.peers(new Set(record.purge!.ownedTaskIds))
         if (peers.some((peer) => peer.identity === item.identity || target.path !== undefined && claimOverlapsPath(peer, target.path))) throw new Error(`New shared owner retains ${item.identity}`)
         const unverified = unverifiedOwnerOver(peers, target)
         if (unverified) throw new Error(`${unverified.reason} ${item.identity} is kept.`)
-        await this.remove(item, new Set(record.purge!.ownedTaskIds), () => this.store.update(input.taskId, (current) => { current.purge!.items.find((entry) => entry.id === item.id)!.discardState = 'cleared' }), () => this.assertReservation(input.taskId, reservation, record.generation), { taskId: input.taskId, token: reservation, generation: record.generation })
-        record = this.store.update(input.taskId, (current) => { const progress = current.purge!.items.find((entry) => entry.id === item.id)!; progress.status = 'removed'; delete current.purge!.error; delete current.blockedReason })
+        const retained = await this.remove(item, new Set(record.purge!.ownedTaskIds), () => this.store.update(input.taskId, (current) => { current.purge!.items.find((entry) => entry.id === item.id)!.discardState = 'cleared' }), () => this.assertReservation(input.taskId, reservation, record.generation), { taskId: input.taskId, token: reservation, generation: record.generation })
+        if (retained) retain(retained)
+        else record = this.store.update(input.taskId, (current) => { const progress = current.purge!.items.find((entry) => entry.id === item.id)!; progress.status = 'removed'; delete current.purge!.error; delete current.blockedReason })
         await this.hooks.onBoundary?.(record)
       }
       for (const taskId of record.purge!.ownedTaskIds) {
@@ -867,7 +897,7 @@ export class ResourcePurgeService {
       throw descriptor
     } finally { active.delete(key) }
   }
-  private async remove(item: LifecyclePurgeItem, ownedIds: Set<string>, onDiscardCleared: () => unknown, assertReservation: () => void, reservation: { taskId: string; token: string; generation: number }): Promise<void> {
+  private async remove(item: LifecyclePurgeItem, ownedIds: Set<string>, onDiscardCleared: () => unknown, assertReservation: () => void, reservation: { taskId: string; token: string; generation: number }): Promise<string | void> {
     assertReservation()
     if (item.kind === 'scheduled-row') {
       const path = item.sourcePath!
@@ -936,10 +966,31 @@ export class ResourcePurgeService {
         const current = await readDirectLifecycleRefAsync(commonDir, item.identity)
         if (!current) return
         if (current !== item.expectedValue) throw new Error('Owned ref changed after purge preview')
-        const input = `start\ndelete ${item.identity} ${item.expectedValue!}\nprepare\ncommit\n`
-        // The central check runs first, then the ownership check right before the transaction starts, with nothing awaited in between.
-        const remove = () => lifecycleGitAsync(commonDir, ['update-ref', '--no-deref', '--stdin'], input, undefined, undefined, unclaimed)
-        await (item.recordedBranch ? withOwnedBranches([item.identity.slice('refs/heads/'.length)], remove) : remove())
+        if (item.identity.startsWith('refs/heads/')) {
+          const name = item.identity.slice('refs/heads/'.length)
+          const proof = item.branchProvenance
+          if (!proof) return 'The purge recorded no proof of branch ownership; the branch stays'
+          let reason = 'The branch reflog changed since the purge preview; the branch stays'
+          const deleted = await withOwnedBranches([name], () => deleteVerifiedBranchAsync(commonDir, item.identity, current, async () => {
+            // Git can switch another worktree onto the branch even while this transaction holds the ref lock.
+            if (await branchCheckedOutAsync(commonDir, item.identity)) {
+              reason = 'This branch is checked out; the branch stays'
+              return false
+            }
+            unclaimed()
+            const record = this.readThreadBranchRecord(item.ownerTaskId, proof.worktreePath)
+            const retained = this.threadBranchRetention(record, name)
+            if (retained) { reason = retained; return false }
+            const reflog = branchReflogIdentity(commonDir, item.identity)
+            if (!reflog || reflog.id !== record?.reflogIds.get(name) || reflog.version !== proof.reflogVersion) return false
+            reason = 'This branch was in use or its checkouts could not be verified; the branch stays'
+            return true
+          }))
+          if (!deleted) return reason
+          return
+        }
+        const input = `start\ndelete ${item.identity} ${current}\nprepare\ncommit\n`
+        await lifecycleGitAsync(commonDir, ['update-ref', '--no-deref', '--stdin'], input, undefined, undefined, unclaimed)
       }
     } finally { lease.release() }
   }

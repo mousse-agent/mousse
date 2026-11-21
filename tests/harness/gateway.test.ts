@@ -71,6 +71,30 @@ const full = (source = instances(), extra: { models?: Partial<Record<ProviderDri
   return { harness, adapters }
 }
 
+it.each(['active', 'retired'])('reports a failing %s provider runtime stop during shutdown', async (state) => {
+  const failure = new Error('Windows Job accounting failed')
+  const stop = vi.fn<() => Promise<void>>().mockRejectedValueOnce(failure).mockResolvedValue(undefined)
+  const peerStop = vi.fn(async () => {})
+  const claude = adapterDriver(fake('claude'), { runtime: { stop } })
+  const codex = adapterDriver(fake('codex'), { runtime: { stop: peerStop } })
+  const harness = testHarness({ drivers: [claude, codex], instances: instances(), profileHome: home() })
+  harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'm' }, { purpose: 'turn' })
+  harness.resolveStored({ instanceId: 'codex', llmProvider: '', model: 'm' }, { purpose: 'turn' })
+  if (state === 'retired') {
+    await harness.instances.configure('claude', { env: { CHANGED: '1' } })
+    expect(stop).toHaveBeenCalled()
+  }
+
+  await expect(harness.stop()).rejects.toMatchObject({ errors: [failure] })
+  const beforeRetry = stop.mock.calls.length
+  expect(peerStop).toHaveBeenCalledOnce()
+  await expect(harness.stop()).resolves.toBeUndefined()
+  expect(stop).toHaveBeenCalledTimes(beforeRetry + 1)
+  await expect(harness.stop()).resolves.toBeUndefined()
+  expect(stop).toHaveBeenCalledTimes(beforeRetry + 1)
+  expect(peerStop).toHaveBeenCalledOnce()
+})
+
 describe('harness gateway: resolution (absorbs AdapterRegistry)', () => {
   it('resolves each seeded instance to its driver', () => {
     const { harness } = full(instances(undefined, ['openai']))

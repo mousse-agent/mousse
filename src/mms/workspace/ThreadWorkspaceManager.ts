@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto'
+import { createLoggedBranchAsync, deleteVerifiedBranchAsync, verifiedRefTransactionAsync } from '../lifecycle/lifecycleGit'
 import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 import { findListedWorktreeAsync, WorktreeListPass } from '../lifecycle/worktreeRegistry'
 import { assertFolderUnchanged, folderSignatureAsync, walkOwnedContentAsync } from '../lifecycle/verifiedDelete'
 import { getThreadLifecycleGate } from '../queue/ThreadLifecycleAdmission'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
-import { access, mkdir, readdir, realpath, rename, rm } from 'node:fs/promises'
+import { constants, existsSync, readFileSync, realpathSync } from 'node:fs'
+import { access, copyFile, mkdir, readdir, realpath, rename, rm } from 'node:fs/promises'
 import { nonInteractiveGitEnv } from '../git/gitEnv'
 import { assertGitAllowedAsync, rethrowGitPolicyError, withOwnedBranches, type UserAction } from '../git/gitPolicy'
 import { safeWorktreeGit } from '../worktree/WorktreeManager'
@@ -36,9 +37,11 @@ import type {
   WorkspaceExecutionContext
 } from '../../shared/workspace'
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '../git/repoPrograms'
+import { branchReflogIdentity } from '../git/branchReflogIdentity'
 import { DEFAULT_BRANCH_PREFIX, isAcceptableThreadBranchName } from '../../shared/mousseBranches'
 import { branchNamingFor, requestBranchName, temporaryBranchName } from './branchNaming'
-import { BRANCH_RECORD_OPERATIONS, BRANCH_RENAME_OPERATION, threadBranchRecord, type ThreadBranchRecord } from './threadBranchRecords'
+import type { NamingOrigin } from '../harness/driver'
+import { BRANCH_CREATE_OPERATION, BRANCH_RECORD_OPERATIONS, BRANCH_RENAME_OPERATION, threadBranchRecord, type PendingBranchRename, type ThreadBranchRecord } from './threadBranchRecords'
 import { threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { timeGitSync } from '../diagnostics/turnBoundary'
@@ -177,7 +180,7 @@ async function pinUntrustedWorktree(primaryCheckoutPath: string, worktreePath: s
  * stays pinned. `enableWorktreeConfig` (see `provision`) turns the setting on once the safety checks have passed;
  * `userRequested` is the user's Start thread from pull request, which that change to the repository's config needs.
  */
-async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string, plan: WorktreeCheckoutPlan, enableWorktreeConfig?: () => void, userRequested?: UserAction): Promise<void> {
+async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string, plan: WorktreeCheckoutPlan, enableWorktreeConfig?: () => void, userRequested?: UserAction, beforeAdd?: () => Promise<void>): Promise<void> {
   // A repository whose filters cannot be switched off is refused here, before its configuration is changed.
   const safety = await untrustedSafety(primaryCheckoutPath)
   if (enableWorktreeConfig && await enablePerWorktreeConfig(primaryCheckoutPath, userRequested)) enableWorktreeConfig()
@@ -189,8 +192,10 @@ async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: s
     const ran = await runGitProcess(argv, { cwd, env: repoProgramEnv({ ...process.env, ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' }), ...(input === undefined ? {} : { input }) })
     if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
   }
+  await beforeAdd?.()
   // In a sparse checkout the safety is pinned before any file is written.
-  await addWorktree({ cwd: primaryCheckoutPath, worktreePath, add: addArguments, plan, prefix: [...safety, ...LONG_PATHS], run, afterAdd: () => pinUntrustedWorktree(primaryCheckoutPath, worktreePath, safety) })
+  await addWorktree({ cwd: primaryCheckoutPath, worktreePath, add: addArguments, plan, prefix: [...safety, ...LONG_PATHS], run,
+    afterAdd: () => pinUntrustedWorktree(primaryCheckoutPath, worktreePath, safety) })
 }
 
 /** Only for {@link ThreadWorkspaceManager.resolveRepository}. */
@@ -454,7 +459,7 @@ export class ThreadWorkspaceManager {
         operationId,
         operationType: 'workspace-provision',
         state: 'planned',
-        expectedPreState: { head, branch, retainedRef, worktreePath }
+        expectedPreState: { head, branch, retainedRef, worktreePath, requiresCompletion: true, requiresBranchIdentity: true }
       })
       atomicWriteJsonSync(this.workspacePath, {
         schemaVersion: 1,
@@ -475,9 +480,19 @@ export class ThreadWorkspaceManager {
         lastVerifiedAt: new Date().toISOString(),
         ...(options.untrusted ? { untrusted: true as const } : {})
       } satisfies ThreadWorkspaceMetadata)
-      // Mousse makes this branch (`-b` fails when the name is taken), whatever prefix the person chose.
-      if (options.untrusted) await withOwnedBranches([branch], () => addUntrustedWorktree(repository.primaryCheckoutPath, ['-b', branch, worktreePath, head], worktreePath, checkoutPlan, options.enableWorktreeConfig, options.userRequested))
-      else await withOwnedBranches([branch], () => addWorktree({ cwd: repository.primaryCheckoutPath, worktreePath, add: ['-b', branch, worktreePath, head], plan: checkoutPlan, prefix: LONG_PATHS }))
+      const createBranch = async (): Promise<void> => {
+        const ref = `refs/heads/${branch}`
+        const message = `mousse: provision ${operationId}`
+        await createLoggedBranchAsync(repository.primaryCheckoutPath, ref, head, message)
+        const reflogId = branchReflogIdentity(repository.gitCommonDirectory, ref, { message, creation: true })?.id
+        if (reflogId) this.journal.append({ operationId: randomUUID(), operationType: BRANCH_CREATE_OPERATION, state: 'completed', details: { provisionId: operationId, reflogId } })
+      }
+      const add = [worktreePath, branch]
+      if (options.untrusted) await withOwnedBranches([branch], () => addUntrustedWorktree(repository.primaryCheckoutPath, add, worktreePath, checkoutPlan, options.enableWorktreeConfig, options.userRequested, createBranch))
+      else await withOwnedBranches([branch], async () => {
+        await createBranch()
+        await addWorktree({ cwd: repository.primaryCheckoutPath, worktreePath, add, plan: checkoutPlan, prefix: LONG_PATHS })
+      })
       if (options.snapshot) {
         // A fresh checkout holds Git's form of every file, so nothing is kept here unless something wrote into it meanwhile.
         const moved = await moveFilesToSnapshotAsync(worktreePath, await git(worktreePath, ['rev-parse', 'HEAD^{tree}']), options.snapshot, { owner: this.threadDirectory, action: 'Starting the worktree' })
@@ -516,7 +531,7 @@ export class ThreadWorkspaceManager {
         state: 'completed',
         details: { intentSequence: intent.sequence, head, branch, retainedRef }
       })
-      if (nameFrom) this.nameBranchLater(threadId, branch, nameFrom)
+      if (nameFrom) this.nameBranchLater(threadId, branch, nameFrom, signal)
       return metadata
     } catch (error) {
       this.journal.append({
@@ -536,9 +551,9 @@ export class ThreadWorkspaceManager {
    * A provision whose `git worktree add` failed (a path too long, a full disk) leaves its record `provisioning` and no
    * worktree. Only when that is verified (the last provision is `failed` for this very path and branch, nothing is at
    * the path, and Git registers no worktree there) the record is cleared, so the thread's next message makes the
-   * worktree again instead of waiting for recovery. The branch the failed add made goes too, but only while it is still
-   * at the commit the add started from and nothing has it checked out. Returns whether the record was cleared; anything
-   * else stays as it is, for recovery. Called with the thread's lease held (`WorkspaceResolver.resolve`).
+   * worktree again instead of waiting for recovery. A failed add cannot prove who made the branch, even if it has the
+   * expected name and commit. Keep the ref and let the retry pick a free name. Called with the thread's lease held
+   * (`WorkspaceResolver.resolve`).
    */
   async reconcileFailedProvision(projectPath: string, signal?: AbortSignal): Promise<boolean> {
     const metadata = this.load()
@@ -551,20 +566,14 @@ export class ThreadWorkspaceManager {
     const expected = intent?.expectedPreState as { worktreePath?: string; branch?: string; head?: string } | undefined
     const fold = (value: string): string => process.platform === 'win32' || process.platform === 'darwin' ? resolve(value).toLowerCase() : resolve(value)
     if (!expected?.worktreePath || fold(expected.worktreePath) !== fold(metadata.worktreePath) || expected.branch !== metadata.branch) return false
-    if (await pathExists(metadata.worktreePath)) return false
     const repository = await this.resolveRepositoryAsync(projectPath)
     const repositoryLease = await acquireWorkspaceRepositoryLease(await resolveRepositoryIdentityAsync(repository.gitTopLevel, { requireMutationCapability: true }), signal)
     try {
-      const listed = (await tryGit(repository.primaryCheckoutPath, ['worktree', 'list', '--porcelain'])).stdout.split(/\r?\n/)
-      if (listed.some((line) => line.startsWith('worktree ') && fold(line.slice('worktree '.length)) === fold(metadata.worktreePath))) return false
-      const ref = `refs/heads/${metadata.branch}`
-      const tip = (await tryGit(repository.primaryCheckoutPath, ['rev-parse', '--verify', '--quiet', ref])).stdout
-      if (tip && expected.head && tip === expected.head && !listed.includes(`branch ${ref}`)) {
-        // Left behind is harmless (the next worktree takes another name), so a refusal here changes nothing.
-        try { await withOwnedBranches([metadata.branch], () => git(repository.primaryCheckoutPath, ['update-ref', '-d', ref, tip])) } catch { /* The branch stays. */ }
-      }
+      if (await pathExists(metadata.worktreePath)) return false
+      const listed = await tryGit(repository.primaryCheckoutPath, ['worktree', 'list', '--porcelain'])
+      if (!listed.ok || listed.stdout.split(/\r?\n/).some((line) => line.startsWith('worktree ') && fold(line.slice('worktree '.length)) === fold(metadata.worktreePath))) return false
       await rm(this.workspacePath, { force: true })
-      this.journal.append({ operationId: last.operationId, operationType: 'workspace-provision', state: 'cancelled', details: { reconciled: 'worktree add failed; nothing was made' } })
+      this.journal.append({ operationId: last.operationId, operationType: 'workspace-provision', state: 'cancelled', details: { reconciled: 'worktree add failed; no worktree exists' } })
       return true
     } finally {
       repositoryLease.release()
@@ -587,14 +596,42 @@ export class ThreadWorkspaceManager {
     throw new Error('Mousse could not find a free branch name for the worktree.')
   }
 
-  /** Whether a branch of this name is there, or branches under it. */
+  /** Every local branch ref in the repository (`refs/heads/... -> commit sha`), exact case as Git stores it. */
+  private async headRefs(checkoutPath: string): Promise<Map<string, string>> {
+    const out = (await tryGit(checkoutPath, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads'])).stdout
+    const refs = new Map<string, string>()
+    for (const line of out.split(/\r?\n/)) {
+      const space = line.lastIndexOf(' ')
+      if (space > 0) refs.set(line.slice(0, space), line.slice(space + 1))
+    }
+    return refs
+  }
+
+  /** Whether a branch of this name is there, or branches under it (case-insensitively on Windows and macOS). */
   private async branchNameTaken(checkoutPath: string, name: string): Promise<boolean> {
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      const target = `refs/heads/${name}`.toLowerCase()
+      const prefix = `${target}/`
+      for (const ref of (await this.headRefs(checkoutPath)).keys()) {
+        const lower = ref.toLowerCase()
+        if (lower === target || lower.startsWith(prefix)) return true
+      }
+      return false
+    }
     return (await tryGit(checkoutPath, ['for-each-ref', '--count=1', '--format=%(refname)', `refs/heads/${name}`])).stdout !== ''
   }
 
   /** Whether `prefix` or one of its parent folders is a branch, so no branch can be made under it. */
   private async folderOfNameTaken(checkoutPath: string, prefix: string): Promise<boolean> {
     const parts = prefix ? prefix.split('/') : []
+    if (!parts.length) return false
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      const refs = new Set([...(await this.headRefs(checkoutPath)).keys()].map((ref) => ref.toLowerCase()))
+      for (let index = 1; index <= parts.length; index++) {
+        if (refs.has(`refs/heads/${parts.slice(0, index).join('/')}`.toLowerCase())) return true
+      }
+      return false
+    }
     for (let index = 1; index <= parts.length; index++) {
       if ((await tryGit(checkoutPath, ['rev-parse', '--verify', '--quiet', `refs/heads/${parts.slice(0, index).join('/')}`])).ok) return true
     }
@@ -603,7 +640,7 @@ export class ThreadWorkspaceManager {
 
   /** Whether a rename of the worktree's branch has no outcome recorded; reads only the journal's index of latest records. */
   branchRenamePending(): boolean {
-    for (const entry of this.journal.latestByOperation().values()) if (entry.operationType === BRANCH_RENAME_OPERATION && entry.state === 'planned') return true
+    for (const entry of this.journal.latestByOperation().values()) if (entry.operationType === BRANCH_RENAME_OPERATION && (entry.state === 'planned' || entry.state === 'git_applied')) return true
     return false
   }
 
@@ -612,17 +649,26 @@ export class ThreadWorkspaceManager {
     return threadBranchRecord(this.journal.ofTypes(...BRANCH_RECORD_OPERATIONS), metadata && !isProjectFolderWorkspace(metadata) ? { worktreePath: metadata.worktreePath } : {})
   }
 
-  /** The background naming `provision` started for the branch it made, settled once it renamed it or kept its name. */
+  /** Names an original temporary branch when the first message has been accepted, including after a cancelled setup. */
+  nameTemporaryBranch(threadId: string, branch: string, text: string, signal: AbortSignal): void {
+    this.nameBranchLater(threadId, branch, text, signal, 'send')
+  }
+
+  /** The background naming of the branch, settled once it has its new name or keeps its name. */
   branchNaming?: Promise<void>
 
   /** Asks the title model for a name for the new worktree's branch and renames it, in the background; never throws. */
-  private nameBranchLater(threadId: string, branch: string, text: string): void {
-    this.branchNaming = (async () => {
-      const name = await requestBranchName(this.threadDirectory, threadId, text)
-      if (!name || name === branch) return
-      const outcome = await this.renameOwnBranch(branch, name)
+  private nameBranchLater(threadId: string, branch: string, text: string, signal?: AbortSignal, namingOrigin?: NamingOrigin): void {
+    this.branchNaming = Promise.resolve().then(async () => {
+      if (signal?.aborted) return
+      if (namingOrigin === 'send' && (threadFolderIsLocalOnly(this.threadDirectory) || !this.branchRecord().temporary.has(branch))) return
+      const name = await requestBranchName(this.threadDirectory, threadId, text, undefined, signal, namingOrigin)
+      if (!name || name === branch || signal?.aborted) return
+      const outcome = await this.renameOwnBranch(branch, name, signal)
       if (outcome !== 'renamed') console.info('[branches] the worktree branch keeps its temporary name', { threadId, reason: outcome })
-    })().catch((error) => console.warn('[branches] the worktree branch could not be renamed', { threadId, error: error instanceof Error ? error.message : String(error) }))
+    }).catch((error) => {
+      if (!signal?.aborted) console.warn('[branches] the worktree branch could not be renamed', { threadId, error: error instanceof Error ? error.message : String(error) })
+    })
   }
 
   /** Why the thread's branch `from` may not be renamed now, or undefined when it may. Reads only Mousse's records. */
@@ -635,18 +681,16 @@ export class ThreadWorkspaceManager {
     const record = this.branchRecord(metadata)
     if (record.pending) return 'another rename is not settled'
     if (!record.owned.has(from)) return 'Mousse did not make this branch'
+    if (!record.reflogIds.has(from)) return 'Mousse has no recorded branch identity'
     return undefined
   }
 
   /**
-   * Renames the thread's worktree branch from `from` to `to` with `git branch -m`, which fails when `to` is taken and
-   * renames the branch the worktree has checked out; the worktree's folder keeps its name. Only a branch Mousse's records
-   * show it made (`branchRecord`), only while the workspace is ready on it, and under the repository's lease (waited for
-   * at most 30 seconds). Returns 'renamed', or why the branch keeps its name.
+   * Renames the verified branch under its Git ref lock. Git cannot delete a branch through the same transaction that
+   * changes its worktree's symbolic HEAD. Keep the original branch locked while Git creates the destination and changes
+   * HEAD together, then delete the original. If interrupted in between, both tips remain reachable.
    *
-   * Each step leaves a state a stop can be settled from: the journal's planned record first (Mousse still owns only
-   * `from`), then Git's rename, then workspace.json, then the completed record that moves ownership to `to`. A stop in
-   * between is settled from the repository (`settleBranchRename`).
+   * The journal moves ownership only after Git's result is verified. See `settleBranchRename` for interrupted renames.
    */
   async renameOwnBranch(from: string, to: string, signal?: AbortSignal): Promise<string> {
     if (!isAcceptableThreadBranchName(to) || to === from) return 'the name is not usable'
@@ -670,22 +714,74 @@ export class ThreadWorkspaceManager {
       if (refusal) return refusal
       const current = this.load()!
       if (!await pathExists(current.worktreePath)) return 'the worktree is not there'
-      const fromSha = (await tryGit(primary, ['rev-parse', '--verify', '--quiet', `refs/heads/${from}^{commit}`])).stdout
-      if (!fromSha) return 'the branch is gone'
+      const fromRef = `refs/heads/${from}`
+      if ((await tryGit(current.worktreePath, ['symbolic-ref', '-q', 'HEAD'])).stdout !== fromRef) return 'the worktree is on another branch'
+      const tip = (await this.headRefs(primary)).get(fromRef)
+      if (!tip) return 'the branch is gone'
       // Pushed already (an upstream is set): the remote branch keeps the old name, and pushing or opening a pull request
       // from the renamed one would fail, so it keeps its name.
       if ((await tryGit(primary, ['config', '--get', `branch.${from}.remote`])).stdout) return 'the branch has an upstream'
       if (await this.branchNameTaken(primary, to)) return 'the name is taken'
+      if (signal?.aborted) return 'naming was cancelled'
+      const commonDir = repository.gitCommonDirectory
+      const original = branchReflogIdentity(commonDir, fromRef)
+      if (!original || original.id !== this.branchRecord(current).reflogIds.get(from)) return 'the branch no longer matches its recorded identity'
       const operationId = randomUUID()
-      const intent = this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: { from, to, worktreePath: current.worktreePath, fromSha } })
+      const plan = { from, to, worktreePath: current.worktreePath, fromReflogId: original.id }
+      const intent = this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: plan })
+      const pending = { ...plan, operationId, sequence: intent.sequence }
+      const toRef = `refs/heads/${to}`
+      const message = `mousse: rename ${operationId}`
+      const sourceConfig = `branch.${from}`
+      const destinationConfig = `branch.${to}`
+      let toReflogId: string | undefined
+      let reason = 'the branch or its worktree changed'
       try {
-        await withOwnedBranches([from, to], () => git(primary, ['branch', '-m', '--', from, to]))
+        await withOwnedBranches([from, to], () => deleteVerifiedBranchAsync(primary, fromRef, tip, async () => {
+          signal?.throwIfAborted()
+          if (branchReflogIdentity(commonDir, fromRef)?.version !== original.version) return false
+          const listing = await git(primary, ['worktree', 'list', '--porcelain', '-z'])
+          if (listing.split('\0').filter((field) => field === `branch ${fromRef}`).length !== 1) return false
+          const keys = (await git(primary, ['config', '--local', '--list', '--name-only'])).split(/\r?\n/)
+          const sections = new Set(keys.map((key) => key.slice(0, key.lastIndexOf('.'))))
+          if (sections.has(destinationConfig)) {
+            reason = 'the destination has branch configuration'
+            return false
+          }
+          if (keys.includes(`${sourceConfig}.remote`)) {
+            reason = 'the branch has an upstream'
+            return false
+          }
+          const moved = await verifiedRefTransactionAsync(current.worktreePath,
+            `create ${toRef} ${tip}\nsymref-update HEAD ${toRef} ref ${fromRef}\n`, async () => {
+              signal?.throwIfAborted()
+              if (branchReflogIdentity(commonDir, fromRef)?.version !== original.version) return false
+              // Git's create/delete transaction does not transfer a reflog. Keep its history while both refs are locked.
+              const toLog = join(commonDir, 'logs', toRef)
+              await mkdir(dirname(toLog), { recursive: true })
+              await copyFile(join(commonDir, 'logs', fromRef), toLog, constants.COPYFILE_EXCL)
+              return true
+            }, message)
+          if (!moved) return false
+          toReflogId = branchReflogIdentity(commonDir, toRef, { message })?.id
+          if (!toReflogId) return false
+          if (sections.has(sourceConfig)) {
+            return verifiedRefTransactionAsync(primary, `verify ${toRef} ${tip}\n`, async () => {
+              if (branchReflogIdentity(commonDir, toRef)?.id !== toReflogId) return false
+              await git(primary, ['config', '--local', '--rename-section', sourceConfig, destinationConfig])
+              return true
+            })
+          }
+          return true
+        }))
       } catch (error) {
-        // Git refused (a name another branch's folder holds, for one), or failed part way: the repository says which.
-        const settled = await this.settlePendingRename(primary, current.worktreePath, { from, to, operationId, fromSha })
-        if (settled === 'renamed') return 'renamed'
-        return `Git did not rename it: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`
+        reason = error instanceof Error ? error.message.split('\n')[0] : String(error)
       }
+      if (!toReflogId) {
+        await this.settlePendingRename(primary, commonDir, pending)
+        return `Git did not rename it: ${reason}`
+      }
+      this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'git_applied', details: { reflogId: original.id, toReflogId } })
       this.recordBranchName(from, to)
       this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'completed', details: { intentSequence: intent.sequence, from, to } })
       return 'renamed'
@@ -695,13 +791,9 @@ export class ThreadWorkspaceManager {
   }
 
   /**
-   * Settles a rename a stop left without an outcome, from the repository. Done when the worktree is on `to` (or `to` is
-   * there and `from` is not), and `to` is at the commit `from` was at when the rename was planned, or a later one on it.
-   * Git renames the branch before it moves the worktree's HEAD, so a stop between the two leaves HEAD on `from`, which no
-   * longer exists: HEAD is pointed at `to` before the rename is recorded as done. Not done when the worktree is on `from`
-   * (or `from` is there and `to` is not). Either way workspace.json is made to agree. When the repository cannot tell
-   * (both names there, or neither, and the worktree on neither; or `to` holds other commits), Mousse gives up both names:
-   * it never deletes or renames either branch afterwards. Takes the repository's lease unless the caller holds it.
+   * Settles a rename a stop left without an outcome. The destination must match the reflog identity the rename
+   * verified and recorded. When the outcome is uncertain, both names
+   * are given up. Takes the repository's lease unless the caller holds it.
    */
   async settleBranchRename(options: { holdingRepositoryLease?: boolean; signal?: AbortSignal } = {}): Promise<void> {
     const metadata = this.load()
@@ -711,47 +803,52 @@ export class ThreadWorkspaceManager {
     if (!pending || this.hasReconstructionManifest(metadata)) return
     if (!metadata.integrationTarget?.checkoutPath) return
     const repository = await this.resolveRepositoryAsync(metadata.integrationTarget.checkoutPath)
-    if (!repository.capability.gitBacked) return
+    if (!repository.capability.gitBacked || repository.repositoryId !== metadata.repositoryId) return
     const lease = options.holdingRepositoryLease ? undefined : await acquireWorkspaceRepositoryLease(await resolveRepositoryIdentityAsync(repository.gitTopLevel, { requireMutationCapability: true }), options.signal)
     try {
       const again = this.branchRecord(this.load()).pending
-      if (again?.operationId === pending.operationId) await this.settlePendingRename(repository.primaryCheckoutPath, pending.worktreePath, pending)
+      if (again?.operationId === pending.operationId) await this.settlePendingRename(repository.primaryCheckoutPath, repository.gitCommonDirectory, again)
     } finally {
       lease?.release()
     }
   }
 
-  private async settlePendingRename(primary: string, worktreePath: string, pending: { from: string; to: string; operationId: string; fromSha?: string }): Promise<'renamed' | 'not-renamed' | 'unknown'> {
-    const { from, to, operationId, fromSha } = pending
-    const tipOf = async (name: string): Promise<string> => (await tryGit(primary, ['rev-parse', '--verify', '--quiet', `refs/heads/${name}^{commit}`])).stdout
-    const [fromTip, toTip] = [await tipOf(from), await tipOf(to)]
-    const [hasFrom, hasTo] = [Boolean(fromTip), Boolean(toTip)]
-    const there = await pathExists(worktreePath)
-    const head = there ? (await tryGit(worktreePath, ['symbolic-ref', '-q', 'HEAD'])).stdout : ''
-    let outcome: 'renamed' | 'not-renamed' | 'unknown' = head === `refs/heads/${to}` && hasTo ? 'renamed'
-      : head === `refs/heads/${from}` && hasFrom ? 'not-renamed'
-        : hasTo && !hasFrom ? 'renamed'
-          : hasFrom && !hasTo ? 'not-renamed'
-            : 'unknown'
-    // `to` is the renamed branch only while it holds what `from` held: someone else's branch of that name is not.
-    if (outcome === 'renamed' && fromSha && toTip !== fromSha && !(await tryGit(primary, ['merge-base', '--is-ancestor', fromSha, toTip])).ok) outcome = 'unknown'
-    if (outcome === 'renamed' && there && head === `refs/heads/${from}`) {
+  private async settlePendingRename(primary: string, commonDir: string, pending: PendingBranchRename): Promise<void> {
+    const { from, to, worktreePath, operationId, fromReflogId, gitApplied, toReflogId } = pending
+    // Exact-case ref lookup so a case-only sibling on Windows/macOS is never mistaken for `to` or `from`.
+    const refs = await this.headRefs(primary)
+    const fromRef = `refs/heads/${from}`
+    const toRef = `refs/heads/${to}`
+    const fromTip = refs.get(fromRef)
+    const toTip = refs.get(toRef)
+    const recordedId = this.branchRecord().reflogIds.get(from)
+    const proven = recordedId !== undefined && recordedId === fromReflogId
+    const renamed = proven && gitApplied && (toReflogId || !fromTip) && toTip &&
+      branchReflogIdentity(commonDir, toRef)?.id === (toReflogId ?? recordedId)
+    const unchanged = proven && !gitApplied && fromTip && !toTip && branchReflogIdentity(commonDir, fromRef)?.id === recordedId
+    const outcome = renamed ? 'renamed' : unchanged ? 'not-renamed' : 'unknown'
+    const head = outcome === 'renamed' && await pathExists(worktreePath)
+      ? (await tryGit(worktreePath, ['symbolic-ref', '-q', 'HEAD'])).stdout : ''
+    if (outcome === 'renamed' && toTip && !fromTip && head === fromRef) {
       try {
-        await withOwnedBranches([to], () => git(worktreePath, ['symbolic-ref', 'HEAD', `refs/heads/${to}`]))
+        // Legacy renames could record success before fixing a stale HEAD. Compare its target before replacing it.
+        const repaired = await withOwnedBranches([from, to], () => verifiedRefTransactionAsync(worktreePath,
+          `verify ${toRef} ${toTip}\nsymref-update HEAD ${toRef} ref ${fromRef}\n`,
+          () => branchReflogIdentity(commonDir, toRef)?.id === (toReflogId ?? recordedId)))
+        if (!repaired) return
       } catch (error) {
         rethrowGitPolicyError(error)
         // HEAD could not be moved: nothing is recorded, and the next turn settles it again.
-        return 'unknown'
+        return
       }
     }
     if (outcome === 'renamed') {
       this.recordBranchName(from, to)
       this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'completed', details: { from, to, settled: true } })
     } else {
-      this.recordBranchName(to, from)
+      if (outcome === 'not-renamed') this.recordBranchName(to, from)
       this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: outcome === 'unknown' ? 'cancelled' : 'failed', details: { from, to, settled: true, ...(outcome === 'unknown' ? { disowned: true } : {}) } })
     }
-    return outcome
   }
 
   /** Points workspace.json at `to` when it names `from`; every other field stays as written. */

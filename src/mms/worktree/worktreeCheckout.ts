@@ -95,7 +95,7 @@ export async function addWorktree(input: {
   plan: WorktreeCheckoutPlan
   prefix?: readonly string[]
   run?: WorktreeGit
-  afterAdd?: () => Promise<void>
+  afterAdd?: () => void | Promise<void>
 }): Promise<void> {
   const run = input.run ?? worktreeGit
   const prefix = input.prefix ?? []

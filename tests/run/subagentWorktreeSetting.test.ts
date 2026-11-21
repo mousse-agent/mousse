@@ -5,7 +5,8 @@
  * `refs/mousse/delegations/`, and never merged into the parent.
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -56,7 +57,7 @@ describe('Give each subagent its own worktree', () => {
     for (const stop of stops.splice(0).reverse()) await stop().catch(() => undefined)
     if (previousHome === undefined) delete process.env.MOUSSE_HOME
     else process.env.MOUSSE_HOME = previousHome
-    if (home) rmSync(home, { recursive: true, force: true })
+    if (home) await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     home = undefined
   })
 
@@ -86,7 +87,7 @@ describe('Give each subagent its own worktree', () => {
       return 'Done.'
     })
     const d = phase6Daemon(home, [parent, child])
-    stops.push(d.stop)
+    stops.push(d.shutdown)
     // Branches start on a temporary name and are renamed from what this namer is given (see `branchNaming`).
     const forgetNamer = echoBranchNamer(home)
     stops.push(async () => forgetNamer())

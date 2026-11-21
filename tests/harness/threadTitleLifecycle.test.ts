@@ -5,7 +5,8 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { OrchestratorService } from '../../src/mms/orchestrator/OrchestratorService'
-import { getDefaultSettings } from '../../src/shared/settings'
+import { branchNamingPrompt } from '../../src/mms/workspace/branchNaming'
+import { getDefaultSettings, normalizeBranchNamingSettings, type MousseSettings } from '../../src/shared/settings'
 import type { ChatMessage, Thread } from '../../src/shared/types'
 
 const MODEL = { instanceId: 'pi:openai', llmProvider: 'openai', model: 'gpt-small' }
@@ -14,17 +15,19 @@ interface Harness {
   orch: {
     nameThreadOnFirstSend(threadId: string, content: string, images: number): void
     nameThreadAfterTurn(threadId: string, completed: boolean): void
+    askBranchName(request: { threadId: string; system: string; prompt: string }, signal?: AbortSignal): Promise<string | undefined>
     titleWork: Map<string, Promise<void>>
   }
   thread: () => Thread
   rename: (name: string) => void
   oneShot: ReturnType<typeof vi.fn>
+  settings: MousseSettings
   messages: ChatMessage[]
   settle: () => Promise<void>
 }
 
-function setup(options: { model?: boolean; name?: string; answers?: Array<string | Error> } = {}): Harness {
-  let thread: Thread = { id: 't1', name: options.name ?? 'New Chat', createdAt: '', updatedAt: '' }
+function setup(options: { model?: boolean; name?: string; answers?: Array<string | Error>; localOnly?: boolean } = {}): Harness {
+  let thread: Thread = { id: 't1', name: options.name ?? 'New Chat', createdAt: '', updatedAt: '', ...(options.localOnly ? { localOnly: true as const } : {}) }
   const answers = [...(options.answers ?? [])]
   const oneShot = vi.fn(async () => {
     const next = answers.shift() ?? 'Unexpected call'
@@ -56,6 +59,7 @@ function setup(options: { model?: boolean; name?: string; answers?: Array<string
     thread: () => thread,
     rename: (name) => { thread = { ...thread, name, titleSource: 'user' } },
     oneShot,
+    settings,
     messages,
     settle
   }
@@ -140,5 +144,108 @@ describe('naming a thread', () => {
     expect(h.thread().name).toBe('Nightly review')
     expect(h.thread().titleSource).toBeUndefined()
     expect(h.oneShot).not.toHaveBeenCalled()
+  })
+})
+
+describe('one request names the thread and its branch', () => {
+  /** The branch request the worktree's naming makes for `text` (`requestBranchName`), under the settings now. */
+  const branchRequest = (h: Harness, text = 'Please fix the OAuth loop') => ({ threadId: 't1', ...branchNamingPrompt(text, normalizeBranchNamingSettings(h.settings.branches)) })
+
+  it('the first send asks once for both; the worktree branch takes that answer, with no second request', async () => {
+    const h = setup({ answers: ['Title: OAuth callback loop\nBranch: oauth-callback-loop'] })
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    // Asked for before the answer came: it waits for it.
+    const branch = h.orch.askBranchName(branchRequest(h))
+    await h.settle()
+    expect(h.thread()).toMatchObject({ name: 'OAuth callback loop', titleSource: 'auto' })
+    expect(await branch).toBe('oauth-callback-loop')
+    expect(h.oneShot).toHaveBeenCalledTimes(1)
+    const request = h.oneShot.mock.calls[0]![0]
+    expect(request.system).toContain('Branch: <the branch name>')
+    expect(request.prompt).toContain('Request: Please fix the OAuth loop')
+  })
+
+  it('an answer with a title alone names the thread, and the branch is then asked for on its own', async () => {
+    const h = setup({ answers: ['OAuth callback loop', 'oauth-loop'] })
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    await h.settle()
+    expect(h.thread().name).toBe('OAuth callback loop')
+    expect(await h.orch.askBranchName(branchRequest(h))).toBe('oauth-loop')
+    expect(h.oneShot).toHaveBeenCalledTimes(2)
+  })
+
+  it('a naming request that failed is not made again for the branch', async () => {
+    const h = setup({ answers: [new Error('offline'), 'oauth-loop'] })
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    await h.settle()
+    expect(await h.orch.askBranchName(branchRequest(h))).toBeUndefined()
+    expect(h.oneShot).toHaveBeenCalledTimes(1)
+  })
+
+  it('a branch naming that gives up waiting gets nothing', async () => {
+    const h = setup({ answers: [] })
+    h.oneShot.mockImplementationOnce(() => new Promise(() => undefined))
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    const stop = new AbortController()
+    const branch = h.orch.askBranchName(branchRequest(h), stop.signal)
+    stop.abort()
+    expect(await branch).toBeUndefined()
+  })
+
+  it('a thread with no first-send request (it was named already) asks for its branch on its own', async () => {
+    const h = setup({ name: 'Nightly review', answers: ['nightly-review'] })
+    h.orch.nameThreadOnFirstSend('t1', 'run the review', 0)
+    expect(await h.orch.askBranchName(branchRequest(h, 'run the review'))).toBe('nightly-review')
+    expect(h.oneShot).toHaveBeenCalledTimes(1)
+    expect(h.oneShot.mock.calls[0]![0].task).toBe('branch_name')
+  })
+
+  // The first answer applies to the same message, branch settings and title model.
+  it.each([
+    ['the setup stopped and another message started the worktree', (h: Harness) => branchRequest(h, 'Add dark mode to the settings page')],
+    ['the naming mode changed', (h: Harness) => { h.settings.branches = { ...h.settings.branches, mode: 'semantic' }; return branchRequest(h) }],
+    ['the title model changed', (h: Harness) => { h.settings.title = { ...h.settings.title, model: 'another-model' }; return branchRequest(h) }]
+  ] as const)('%s: the first answer is dropped and the branch is asked for on its own', async (_case, change) => {
+    const h = setup({ answers: ['Title: OAuth callback loop\nBranch: oauth-callback-loop', 'fix/dark-mode-settings'] })
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    await h.settle()
+    expect(await h.orch.askBranchName(change(h))).toBe('fix/dark-mode-settings')
+    expect(h.oneShot).toHaveBeenCalledTimes(2)
+    expect(h.oneShot.mock.calls[1]![0].task).toBe('branch_name')
+  })
+
+  it('a switch to Automatic names no branch, from the first answer or a new request', async () => {
+    const h = setup({ answers: ['Title: OAuth callback loop\nBranch: oauth-callback-loop'] })
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    await h.settle()
+    h.settings.title = getDefaultSettings().title
+    expect(await h.orch.askBranchName(branchRequest(h))).toBeUndefined()
+    expect(h.oneShot).toHaveBeenCalledTimes(1)
+  })
+
+  it('switching to Automatic while the first naming request is pending keeps the temporary branch', async () => {
+    const h = setup()
+    let answer!: (value: { text: string }) => void
+    h.oneShot.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve }))
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    const branch = h.orch.askBranchName(branchRequest(h))
+    await vi.waitFor(() => expect(answer).toBeDefined())
+    h.settings.title = getDefaultSettings().title
+    answer({ text: 'Title: OAuth callback loop\nBranch: oauth-callback-loop' })
+    expect(await branch).toBeUndefined()
+    expect(h.oneShot).toHaveBeenCalledTimes(1)
+    await h.settle()
+  })
+
+  it("a private thread is asked for its title alone: no branch request, and none of the person's branch instructions", async () => {
+    const h = setup({ localOnly: true, answers: ['OAuth callback loop'] })
+    h.settings.branches = { mode: 'custom', prefix: 'mousse', instructions: 'Start every branch with ticket ABC-123' }
+    h.orch.nameThreadOnFirstSend('t1', 'Please fix the OAuth loop', 0)
+    await h.settle()
+    expect(h.thread().name).toBe('OAuth callback loop')
+    const request = h.oneShot.mock.calls[0]![0]
+    expect(request.system).not.toMatch(/branch/i)
+    expect(request.system).not.toContain('ABC-123')
+    expect(request.prompt).not.toMatch(/branch/i)
   })
 })

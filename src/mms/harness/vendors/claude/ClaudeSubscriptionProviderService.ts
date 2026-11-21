@@ -23,6 +23,7 @@ import type { ChatImageAttachment } from '../../../../shared/types'
 import { providerTakesImage } from '../../../../shared/imageLimits'
 import { normalizePermissionMode, permissionModeAllows, type PermissionLimits, type PermissionMode as ThreadPermissionMode } from '../../../../shared/permissionMode'
 import { applyEffortToModelId, parseThinkingSuffixFromModelId, supportedEffortOf } from '../../../../shared/modelVariants'
+import { ONE_SHOT_SPARE_IDLE_MS, ONE_SHOT_SPARE_SYSTEM, OneShotInput, oneShotLaunchKey, oneShotSpareMessage, oneShotUsesSpare, type OneShotSpare } from './oneShotSpare'
 import { AppError } from '../../../../shared/errors'
 import { PROVIDER_TURN_CAP } from '../../../../shared/harness/types'
 import type { ProviderToolEvent } from '../../../../shared/agentActivity'
@@ -73,6 +74,7 @@ import {
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
 import { CancelInProgress, claudeQueryProcess, DEFAULT_LIVE_TIMINGS, LiveSession, noteClaudeQuerySpawn, type ClaudeProcess, type LiveRun, type LiveTimings } from './liveSession'
 import { reapProcessTree, type SpawnedRoot } from '../../stopProcesses'
+import { spawnWindowsJobProcess, type WindowsJobProcess } from '../../windowsJobProcess'
 import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
 import { providerApiError, providerReportedError, providerStatusError, readUsageLimit } from '../../../orchestrator/providerErrors'
 import type { ProviderRetries } from '../../../../shared/providerRetry'
@@ -1012,6 +1014,14 @@ export class ClaudeSubscriptionProviderService {
   private readonly queries = new Map<string, Query>()
   /** One-shot queries that answered and are still exiting, by thread: the thread's next start waits for its exit. */
   private readonly oneShotExits = new Map<string, { query: Query; exited: Promise<void> }>()
+  /** The Claude Code process started ahead for the next title or branch name (`oneShotSpare.ts`). */
+  private oneShotSpare: OneShotSpare | undefined
+  /** The account and launch one-shots run under: a sign-out, a reconnect or a stop starts a new one (`oneShot`). */
+  private oneShotGeneration = 0
+  private latestOneShotKey: string | undefined
+  /** Title/branch one-shot process trees being ended (`reapOneShot`); `logout` waits for them. */
+  private readonly oneShotReaping = new Set<Promise<void>>()
+  private readonly oneShotClosers = new Set<(reason?: unknown) => void>()
   /** Live queries by thread: the Claude processes that outlive a turn. Null disables them (one query per turn). */
   private readonly live = new Map<string, LiveSession<TurnContext>>()
   private readonly liveConfig: LiveTimings | null
@@ -1284,45 +1294,231 @@ export class ClaudeSubscriptionProviderService {
    * commit message on the chosen model (`oneShotOptions`): one turn, no tools, no saved session (it
    * never shows in the user's `claude --resume`), and nothing of the user's setup that could run a
    * command. It never retries.
+   *
+   * A title or branch name (`oneShotUsesSpare`) runs on a process started ahead when one is waiting with the same launch
+   * (`oneShotSpare.ts`), with its instructions in its message. Only New Thread or Send can leave a spare behind.
+   * Both belong to the account and launch they were started under (`oneShotGeneration`): after a sign-out, a reconnect or
+   * a stop, the request ends and nothing is started for it again. A process started ahead that ended before it said
+   * anything, under the same account, is not a request: the request then starts its own.
    */
   async oneShot(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
     signal.throwIfAborted()
-    if (this.checkDue()) await this.status()
-    signal.throwIfAborted()
-    if (!this.configured())
-      throw new AppError({ code: 'claude_subscription_sign_in_required', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
-    const controller = new AbortController()
-    this.controllers.add(controller)
-    const abort = (): void => controller.abort(signal.reason)
-    signal.addEventListener('abort', abort, { once: true })
-    let query: Query | undefined
-    try {
-      // A one-shot runs at the standard speed.
-      const model = claudeSpeedOf(spec.model).model
-      const { baseId } = parseThinkingSuffixFromModelId(model)
-      // A level the model does not offer runs at the model's default; Ultracode is a turn setting, not a level.
-      const level = spec.effort ?? supportedEffortOf(model, this.listedByClaude() ? this.models() : [], CLAUDE_EFFORTS)
-      const effort = level && CLAUDE_EFFORTS.has(level) ? level as Options['effort'] : undefined
-      query = await this.createQuery(spec.prompt, {
-        ...this.oneShotOptions(controller),
-        model: baseId,
-        ...(effort ? { effort } : {}),
-        systemPrompt: spec.system
-      })
-      for await (const message of query) {
-        spec.onActivity()
-        if (message.type !== 'result') continue
-        const failure = resultFailure(message)
-        if (failure) throw failure
-        return { text: message.subtype === 'success' ? message.result : '' }
-      }
+    const generation = this.oneShotGeneration
+    const requireCurrent = (): void => {
       signal.throwIfAborted()
-      throw new Error('Claude Code ended without an answer.')
-    } finally {
-      query?.close()
-      signal.removeEventListener('abort', abort)
-      this.controllers.delete(controller)
+      if (generation !== this.oneShotGeneration) {
+        throw new Error('Claude Code was signed out or stopped before it answered.')
+      }
     }
+    if (this.checkDue()) await this.status()
+    requireCurrent()
+    if (!this.configured()) {
+      this.dropOneShotSpare()
+      throw new AppError({ code: 'claude_subscription_sign_in_required', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
+    }
+    const { model, effort } = this.oneShotModel(spec)
+    const spared = oneShotUsesSpare(spec.task)
+    const controller = new AbortController()
+    const options: Options = { ...this.oneShotOptions(controller), model, ...(effort ? { effort } : {}), systemPrompt: spared ? ONE_SHOT_SPARE_SYSTEM : spec.system }
+    if (!spared) return this.runOneShot(spec.prompt, options, controller, spec, signal)
+    // The terminal can switch accounts between status checks without changing any launch setting.
+    const account = this.accountSubject()
+    if (!account) {
+      this.latestOneShotKey = undefined
+      this.dropOneShotSpare()
+      return this.runOneShot(spec.prompt, { ...options, systemPrompt: spec.system }, controller, spec, signal)
+    }
+    const requireSameAccount = (): void => {
+      requireCurrent()
+      if (this.signedOut() || this.accountSubject() !== account || this.cliProbe?.result.kind !== 'signed_in') {
+        throw new Error('The Claude Code sign-in changed before it answered.')
+      }
+    }
+    const message = oneShotSpareMessage(spec.system, spec.prompt)
+    const key = oneShotLaunchKey(options, account)
+    this.latestOneShotKey = key
+    const spare = this.takeOneShotSpare(key)
+    let answer = spare ? await this.answerOnSpare(spare, message, spec, signal, requireSameAccount) : undefined
+    if (!answer) {
+      if (spare) requireSameAccount()
+      answer = await this.runOneShot(message, options, controller, spec, signal)
+    }
+    requireSameAccount()
+    if (this.latestOneShotKey === key && (spec.namingOrigin === 'new_thread' || spec.namingOrigin === 'send')) this.startOneShotSpare(key, generation, options)
+    return answer
+  }
+  /**
+   * The model and reasoning level a one-shot runs on, at the standard speed. A level the model does not offer runs at the
+   * model's default; Ultracode is a turn setting, not a level. A title or branch name whose selection names no level runs
+   * at the lowest the model offers (`low`), and at the model's default when it does not offer it: the title model stays
+   * the one chosen, and its answer comes sooner.
+   */
+  private oneShotModel(spec: Pick<OneShotSpec, 'model' | 'effort' | 'task'>): { model: string; effort?: Options['effort'] } {
+    const model = claudeSpeedOf(spec.model).model
+    const { baseId, effort: suffix } = parseThinkingSuffixFromModelId(model)
+    const listed = this.listedByClaude() ? this.models() : []
+    let level = spec.effort ?? supportedEffortOf(model, listed, CLAUDE_EFFORTS)
+    if (!level && !suffix && oneShotUsesSpare(spec.task)) {
+      const offered = (listed.find((entry) => entry.id === baseId) ?? listed.find((entry) => entry.id === model))?.efforts
+      if (offered?.includes('low')) level = 'low'
+    }
+    const effort = level && CLAUDE_EFFORTS.has(level) ? level as Options['effort'] : undefined
+    return { model: baseId, ...(effort ? { effort } : {}) }
+  }
+  /** One request on a process of its own, started now, with `prompt` as its input. */
+  private async runOneShot(prompt: string, options: Options, controller: AbortController, spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
+    signal.throwIfAborted()
+    const { query, close } = this.openOneShot(prompt, options, controller, oneShotUsesSpare(spec.task))
+    const abort = (): void => close(signal.reason)
+    if (signal.aborted) abort()
+    else signal.addEventListener('abort', abort, { once: true })
+    try {
+      const started = await query
+      signal.throwIfAborted()
+      controller.signal.throwIfAborted()
+      const answer = await this.readOneShot(started, spec, controller.signal)
+      signal.throwIfAborted()
+      controller.signal.throwIfAborted()
+      return answer
+    } finally {
+      close()
+      signal.removeEventListener('abort', abort)
+    }
+  }
+  /** The answer a one-shot's query gives: its result's text, or its failure. */
+  private async readOneShot(query: Query, spec: OneShotSpec, signal: AbortSignal, heard?: () => void): Promise<{ text: string }> {
+    // A loop's implicit iterator return may close the SDK transport before its process tree is inventoried.
+    const messages = query[Symbol.asyncIterator]()
+    for (let next = await messages.next(); !next.done; next = await messages.next()) {
+      const message = next.value
+      heard?.()
+      spec.onActivity()
+      if (message.type !== 'result') continue
+      const failure = resultFailure(message)
+      if (failure) throw failure
+      return { text: message.subtype === 'success' ? message.result : '' }
+    }
+    signal.throwIfAborted()
+    throw new Error('Claude Code ended without an answer.')
+  }
+  /**
+   * The request on a process started ahead. Undefined when the process ended (or could not start) before it said
+   * anything: the request has not been made, and the caller decides whether it may start its own. The process is closed
+   * afterwards either way.
+   */
+  private async answerOnSpare(spare: OneShotSpare, message: string, spec: OneShotSpec, signal: AbortSignal, requireSameAccount: () => void): Promise<{ text: string } | undefined> {
+    const abort = (): void => spare.close(signal.reason)
+    if (signal.aborted) abort()
+    else signal.addEventListener('abort', abort, { once: true })
+    let heard = false
+    try {
+      const query = await spare.query
+      if (spare.controller.signal.aborted || signal.aborted) return undefined
+      requireSameAccount()
+      spare.input.push(message)
+      return await this.readOneShot(query, spec, spare.controller.signal, () => { heard = true })
+    } catch (error) {
+      if (heard || signal.aborted) throw error
+      return undefined
+    } finally {
+      signal.removeEventListener('abort', abort)
+      this.closeOneShotSpare(spare)
+    }
+  }
+  /** The process started ahead for `key` under the current account, taken; any other is closed. */
+  private takeOneShotSpare(key: string): OneShotSpare | undefined {
+    const spare = this.oneShotSpare
+    if (!spare) return undefined
+    this.oneShotSpare = undefined
+    if (spare.key === key && spare.generation === this.oneShotGeneration) {
+      clearTimeout(spare.timer)
+      return spare
+    }
+    this.closeOneShotSpare(spare)
+    return undefined
+  }
+  /** Closes the process waiting ahead, if it is `spare` (or any, without one). */
+  private dropOneShotSpare(spare = this.oneShotSpare): void {
+    if (!spare || this.oneShotSpare !== spare) return
+    this.oneShotSpare = undefined
+    this.closeOneShotSpare(spare)
+  }
+  /**
+   * Starts a process ahead for the next naming request on the launch `options` describes (the request that just answered
+   * read them; nothing is read again), unless one is waiting for it already or the account changed since `generation`.
+   */
+  private startOneShotSpare(key: string, generation: number, options: Options): void {
+    if (this.stopped || generation !== this.oneShotGeneration) return
+    if (this.oneShotSpare?.key === key && this.oneShotSpare.generation === generation) return
+    this.dropOneShotSpare()
+    const controller = new AbortController()
+    const input = new OneShotInput()
+    const { query, close } = this.openOneShot(input, { ...options, abortController: controller }, controller, true, () => input.end())
+    const spare: OneShotSpare = { key, generation, input, controller, query, close, timer: setTimeout(() => this.dropOneShotSpare(spare), ONE_SHOT_SPARE_IDLE_MS) }
+    spare.timer.unref?.()
+    // One that could not start is dropped; a request that took it meanwhile starts its own.
+    query.catch(() => this.dropOneShotSpare(spare))
+    this.oneShotSpare = spare
+  }
+  /** Ends a process started ahead and every process it started. */
+  private closeOneShotSpare(spare: OneShotSpare): void {
+    clearTimeout(spare.timer)
+    spare.close()
+  }
+  /**
+   * Owns pending and running one-shots. Register cleanup as soon as a query is closed or aborted, so logout
+   * and shutdown wait even when the SDK has not returned the query yet.
+   */
+  private openOneShot(prompt: string | OneShotInput, options: Options, controller: AbortController, naming: boolean, end?: () => void): { query: Promise<Query>; close: (reason?: unknown) => void } {
+    let job: WindowsJobProcess | undefined
+    let closing = false
+    if (naming && process.platform === 'win32') {
+      const stderr = options.stderr
+      options = { ...options, spawnClaudeCodeProcess: (target) => {
+        if (closing || job) throw new Error('The Windows naming process is already started or closed')
+        job = spawnWindowsJobProcess(target)
+        const child = job.child
+        child.on('message', (pid) => {
+          if (typeof pid === 'number') trackChildProcess({ pid, once: (_event, listener) => child.once('exit', listener) }, 'claude')
+        })
+        child.stderr.setEncoding('utf8').on('data', (data: string) => stderr?.(data))
+        return child
+      } }
+    }
+    const query = this.createQuery(prompt, options)
+    const report = (error: unknown): void => console.warn('[claude-subscription] a one-shot process could not be ended', { error: error instanceof Error ? error.message : String(error) })
+    const close = (reason?: unknown): void => {
+      if (!this.oneShotClosers.delete(close)) return
+      closing = true
+      const abort = (): void => { controller.abort(reason); end?.() }
+      let stopped: Promise<void>
+      if (job) {
+        // The job is ours even if the query has not returned, or its process already exited. Its stop never uses stdin.
+        stopped = job.stop()
+        abort()
+        void query.then((started) => started.close()).catch(report)
+      } else {
+        stopped = query.then((started) => this.reapOneShot(started, abort), abort).catch(report)
+      }
+      const reaping = stopped.finally(() => this.oneShotReaping.delete(reaping))
+      void reaping.catch(report)
+      this.oneShotReaping.add(reaping)
+    }
+    this.oneShotClosers.add(close)
+    return { query, close }
+  }
+  /** Inventories the tree before SDK shutdown can close its root. */
+  private async reapOneShot(query: Query, abort: () => void): Promise<void> {
+    const target = claudeQueryProcess(query)
+    const close = (): void => {
+      try { query.close() } catch { /* The reaper still ends the process. */ }
+      finally { abort() }
+    }
+    if (!target) { close(); return }
+    const reap = this.dependencies.reap
+    if (reap) close()
+    const outcome = reap ? await reap(target.pid, target.root) : await reapProcessTree(target.pid, { graceMs: CLAUDE_STOP_GRACE_MS, root: target.root, close })
+    if (outcome === 'killed' || outcome === 'survived') console.warn('[claude-subscription] a one-shot process did not exit when closed', { pid: target.pid, outcome })
   }
   /**
    * The options of a one-shot. Claude Code loads no settings files (`settingSources: []`), so no hook,
@@ -1607,7 +1803,9 @@ export class ClaudeSubscriptionProviderService {
     if (!this.binary()) return false
     const result = await this.probe(env, signal)
     signal?.throwIfAborted()
+    const previousAccount = this.account()?.subject ?? null
     this.cliProbe = { at: Date.now(), result }
+    if (result.kind !== 'signed_in' || (this.account()?.subject ?? null) !== previousAccount) this.dropOneShotSpare()
     return result.kind === 'signed_in'
   }
   /** A live check is due: the last terminal sign-in result is missing or stale. */
@@ -1620,7 +1818,9 @@ export class ClaudeSubscriptionProviderService {
     if (!this.binary() || this.stopped) return
     const result = await this.probe(this.environment())
     if (this.stopped) return
+    const previousAccount = this.account()?.subject ?? null
     this.cliProbe = { at: Date.now(), result }
+    if (result.kind !== 'signed_in' || (this.account()?.subject ?? null) !== previousAccount) this.dropOneShotSpare()
     if (result.kind === 'signed_in' && !this.listedByClaude() && !this.modelDiscoveryStarted) {
       this.modelDiscoveryStarted = true
       void this.refreshModels(this.dir).catch(
@@ -1637,12 +1837,11 @@ export class ClaudeSubscriptionProviderService {
   async status(options: { force?: boolean } = {}): Promise<ClaudeSubscriptionStatus> {
     if (options.force) {
       await this.probing
-      this.cliProbe = undefined
       if (this.settingsError) this.loadSettings()
     }
     // Persist the migration to the terminal sign-in.
     if (!this.policyStored && !this.stopped) this.save()
-    if (this.checkDue()) {
+    if (this.checkDue() || (options.force && !this.stopped && !this.settingsError && !this.signedOut())) {
       this.probing ??= this.refreshStatus()
         .catch(() => {
           /* reported as not checked yet */
@@ -2272,7 +2471,16 @@ export class ClaudeSubscriptionProviderService {
       return 'Claude Subscription is disconnected. Reconnect it in Settings → Providers.'
     return this.dependencies.signedOutMessage?.() ?? `Claude Code isn't signed in. Run \`${this.signInCommand()}\` in a terminal, then try again.`
   }
-  private abortInFlight(): void {
+  /** Ends one-shots before the account is removed or the profile shuts down. */
+  async stopOneShots(): Promise<void> {
+    this.oneShotGeneration++
+    this.dropOneShotSpare()
+    for (const close of this.oneShotClosers) close()
+    await Promise.all([...this.oneShotReaping])
+  }
+
+  private abortInFlight(): Promise<void> {
+    const oneShotsStopped = this.stopOneShots()
     for (const controller of this.controllers) controller.abort()
     for (const threadId of this.activeThreads) this.questions.dismissAllForThread(threadId)
     for (const session of this.loginSessions) session.abort.abort()
@@ -2280,6 +2488,7 @@ export class ClaudeSubscriptionProviderService {
     this.queries.clear()
     this.closeLive()
     this.readyToCommit.clear()
+    return oneShotsStopped
   }
   commitConversation(threadId: string, history: string): void {
     // The turn committed, so the background-task notifications it consumed are done.
@@ -3958,7 +4167,7 @@ export class ClaudeSubscriptionProviderService {
     this.settings.sessions = {}
     // Everything running stops first, whatever saving does next: a turn, a warm process and its
     // helpers, a sign-in. A failed save is reported after.
-    this.abortInFlight()
+    await this.abortInFlight()
     this.save()
   }
   /**
@@ -3975,12 +4184,13 @@ export class ClaudeSubscriptionProviderService {
    * the home reads signed in.
    */
   async reconnect(): Promise<boolean> {
-    this.abortInFlight()
+    await this.abortInFlight()
     this.cliProbe = undefined
     return this.authenticated()
   }
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true
+    const oneShotsStopped = this.stopOneShots()
     for (const controller of this.controllers) controller.abort()
     for (const session of this.loginSessions) session.abort.abort()
     for (const [threadId, query] of this.queries) {
@@ -3992,6 +4202,7 @@ export class ClaudeSubscriptionProviderService {
     for (const threadId of this.live.keys()) this.questions.dismissAllForThread(threadId)
     this.closeLive()
     this.readyToCommit.clear()
+    await oneShotsStopped
   }
 }
 

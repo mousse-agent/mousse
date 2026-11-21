@@ -1,10 +1,14 @@
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CLAUDE_AUTH_STATUS_TTL_MS, ClaudeSubscriptionProviderService, claudeModelOptions } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
+import { ONE_SHOT_SPARE_SYSTEM } from '../src/mms/harness/vendors/claude/oneShotSpare'
+const nodeExecutable = process.execPath
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { ProfileDatabase } from '../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox } from '../src/mms/run/EffectOutbox'
@@ -26,9 +30,9 @@ beforeEach(() => {
   homes.push(claudeHome)
   vi.stubEnv('CLAUDE_CONFIG_DIR', claudeHome)
 })
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllEnvs()
-  for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
+  for (const home of homes.splice(0)) await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 })
 function fixture(
   query: (input: { options: Options; prompt: unknown }) => Query,
@@ -420,6 +424,329 @@ describe('Claude Subscription native provider', () => {
     const signedOut = fixture(query, false)
     await expect(signedOut.service.oneShot({ model: 'sonnet', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'claude_subscription_sign_in_required' })
     expect(query).not.toHaveBeenCalled()
+  })
+  describe('titles and branch names run on a Claude Code process started ahead', () => {
+    beforeEach(() => {
+      writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'test-account' } }))
+    })
+
+    /**
+     * Claude Code as the SDK starts it: a string prompt is read at once; a streamed one (a process started ahead) when its
+     * message comes. How process `index` behaves: it answers (the default); it ends without a word (`silent`); it waits
+     * until it is stopped (`hang`); or it answers once `release` is called, whatever stops it meanwhile (`late`). With
+     * `child`, its process is a real one (a node process that never exits on its own), as the SDK's handle shows it.
+     */
+    type Behaviour = 'answer' | 'silent' | 'hang' | 'late'
+    const processes = (behaviour: (index: number) => Behaviour = () => 'answer', child?: (index: number) => ChildProcess | undefined) => {
+      const started: Array<{ options: Options; streamed: boolean; close: ReturnType<typeof vi.fn> }> = []
+      let release!: () => void
+      const released = new Promise<void>((resolve) => { release = resolve })
+      const query = ({ options, prompt }: { options: Options; prompt: unknown }) => {
+        const index = started.length
+        const close = vi.fn()
+        started.push({ options, streamed: typeof prompt !== 'string', close })
+        const kind = behaviour(index)
+        const stopped = new Promise<void>((resolve) => options.abortController?.signal.addEventListener('abort', () => resolve(), { once: true }))
+        const generator = (async function* () {
+          if (kind === 'silent') return
+          let text = typeof prompt === 'string' ? prompt : ''
+          if (typeof prompt !== 'string') for await (const message of prompt as AsyncIterable<{ message: { content: string } }>) { text = message.message.content; break }
+          if (kind === 'hang') { await stopped; throw new Error('aborted') }
+          if (kind === 'late') await released
+          yield { type: 'stream_event', event: {} }
+          yield { ...result, result: `answer from ${index}: ${text.split('\n').pop()}` }
+        })()
+        const process = child?.(index)
+        return Object.assign(generator, { close, ...(process ? { transport: { process } } : {}) }) as unknown as Query
+      }
+      return { started, query, release: () => release() }
+    }
+    const ask = (service: ClaudeSubscriptionProviderService, task: 'title' | 'branch_name' | 'pull_request', prompt: string, model = 'haiku') =>
+      service.oneShot({ model, task, namingOrigin: 'send', system: `Instructions for ${task}.`, prompt, onActivity: () => {} }, new AbortController().signal)
+
+    it('once a title answered, the next request takes the process started ahead and starts none of its own', async () => {
+      const { started, query } = processes()
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku', efforts: ['low', 'high'] }])
+      await service.status()
+      // The first request after start starts its own: nothing was started ahead of it.
+      expect(await ask(service, 'title', 'Request: fix the login redirect')).toEqual({ text: 'answer from 0: Request: fix the login redirect' })
+      expect(started[0]).toMatchObject({ streamed: false, options: { model: 'haiku', effort: 'low', systemPrompt: ONE_SHOT_SPARE_SYSTEM, tools: [], maxTurns: 1, persistSession: false, settingSources: [] } })
+      expect(started).toHaveLength(2)
+      expect(started[1]).toMatchObject({ streamed: true, options: { model: 'haiku', effort: 'low', systemPrompt: ONE_SHOT_SPARE_SYSTEM } })
+
+      expect(await ask(service, 'branch_name', 'The task: fix the login redirect')).toEqual({ text: 'answer from 1: The task: fix the login redirect' })
+      expect(started[1]!.close).toHaveBeenCalled()
+      expect(started).toHaveLength(3)
+
+      // Any other one-shot starts its own process, with its own instructions as the system prompt.
+      expect(await ask(service, 'pull_request', 'Draft it')).toEqual({ text: 'answer from 3: Draft it' })
+      expect(started[3]).toMatchObject({ streamed: false, options: { systemPrompt: 'Instructions for pull_request.' } })
+      expect(started[2]!.close).not.toHaveBeenCalled()
+    })
+
+    it('a title regeneration starts no spare, even after using a spare left by Send', async () => {
+      const { started, query } = processes()
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      const regenerate = () => service.oneShot({ model: 'haiku', task: 'title', namingOrigin: 'regenerate', system: 'Instructions for title.', prompt: 'Regenerate', onActivity: () => {} }, new AbortController().signal)
+      try {
+        await expect(regenerate()).resolves.toMatchObject({ text: expect.stringContaining('Regenerate') })
+        expect(started.map(({ streamed }) => streamed)).toEqual([false])
+        await ask(service, 'title', 'First Send')
+        expect(started.map(({ streamed }) => streamed)).toEqual([false, false, true])
+        await expect(regenerate()).resolves.toEqual({ text: 'answer from 2: Regenerate' })
+        expect(started).toHaveLength(3)
+      } finally { await service.stop() }
+    })
+
+    it('a request on another launch closes the waiting process and starts its own', async () => {
+      const { started, query } = processes()
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }, { id: 'sonnet', label: 'Sonnet' }])
+      await service.status()
+      await ask(service, 'title', 'Request: x')
+      expect(await ask(service, 'title', 'Request: y', 'sonnet')).toEqual({ text: 'answer from 2: Request: y' })
+      expect(started[1]!.close).toHaveBeenCalled()
+      expect(started[2]).toMatchObject({ streamed: false, options: { model: 'sonnet' } })
+      expect(started[3]).toMatchObject({ streamed: true, options: { model: 'sonnet' } })
+    })
+
+    it('a process started ahead that ended before it said anything is not a request: the request starts its own', async () => {
+      const { started, query } = processes((index) => (index === 1 ? 'silent' : 'answer'))
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      await service.status()
+      await ask(service, 'title', 'Request: x')
+      expect(await ask(service, 'title', 'Request: y')).toEqual({ text: 'answer from 2: Request: y' })
+      expect(started[2]).toMatchObject({ streamed: false })
+    })
+
+    it('a sign-out while a request waits on the process started ahead ends it, and nothing is started or sent again', async () => {
+      const { started, query } = processes((index) => (index === 1 ? 'hang' : 'answer'))
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      await service.status()
+      await ask(service, 'title', 'Request: x')
+      const pending = ask(service, 'title', 'Request: y')
+      await vi.waitFor(() => expect(started).toHaveLength(2))
+      await service.logout()
+      await expect(pending).rejects.toThrow()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(started).toHaveLength(2)
+      expect(started[1]!.close).toHaveBeenCalled()
+    })
+
+    it('a request that answers after a sign-out starts no process ahead for the next one', async () => {
+      const { started, query, release } = processes((index) => (index === 0 ? 'late' : 'answer'))
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      await service.status()
+      const pending = ask(service, 'title', 'Request: x')
+      await vi.waitFor(() => expect(started).toHaveLength(1))
+      await service.reconnect().catch(() => undefined)
+      release()
+      await pending.catch(() => undefined)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(started).toHaveLength(1)
+    })
+
+    it.each(['OAuth status recheck', 'OAuth without recheck', 'API key without recheck'] as const)(
+      'switching accounts via %s starts a fresh naming process',
+      async (change) => {
+        const { started, query } = processes()
+        const { service, home, setLaunch } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+        const configDir = join(home, 'claude-config')
+        mkdirSync(configDir)
+        const connect = (account: string) => {
+          if (change === 'API key without recheck') {
+            setLaunch({ env: { CLAUDE_CONFIG_DIR: configDir, ANTHROPIC_API_KEY: `test-key-${account}` } })
+          } else {
+            setLaunch({ env: { CLAUDE_CONFIG_DIR: configDir } })
+            writeFileSync(join(configDir, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: account, organizationUuid: 'org-1' } }))
+          }
+        }
+
+        try {
+          connect('alice')
+          await service.status()
+          await ask(service, 'title', 'Request: first')
+          expect(started).toHaveLength(2)
+          connect('bob')
+          if (change === 'OAuth status recheck') {
+            await service.status({ force: true })
+            expect(started[1]!.close).toHaveBeenCalledOnce()
+          }
+          expect(await ask(service, 'title', 'Request: second')).toEqual({ text: 'answer from 2: Request: second' })
+          expect(started[1]!.close).toHaveBeenCalledOnce()
+          expect(started[2]).toMatchObject({ streamed: false })
+          expect(started[3]).toMatchObject({ streamed: true })
+        } finally {
+          await service.stop()
+        }
+      }
+    )
+
+    it('runs each naming request on a fresh process when the account cannot be identified', async () => {
+      const { started, query } = processes()
+      const { service, home, setLaunch } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      setLaunch({ env: { CLAUDE_CONFIG_DIR: join(home, 'unknown-account') } })
+      await expect(ask(service, 'title', 'Request: first')).resolves.toEqual({ text: 'answer from 0: Request: first' })
+      await expect(ask(service, 'title', 'Request: second')).resolves.toEqual({ text: 'answer from 1: Request: second' })
+      expect(started.map(({ streamed }) => streamed)).toEqual([false, false])
+    })
+
+    it.each(['logout', 'stop'] as const)('%s waits until the waiting process tree has exited', async (method) => {
+      let releaseReap!: () => void
+      const reapDone = new Promise<void>((resolve) => { releaseReap = resolve })
+      let startedReaping!: () => void
+      const reapStarted = new Promise<void>((resolve) => { startedReaping = resolve })
+      const reap = vi.fn(async () => { startedReaping(); await reapDone; return 'exited' as const })
+      const fakeProc = { pid: 99999 } as unknown as ChildProcess
+      const { started, query } = processes(() => 'answer', (index) => (index === 1 ? fakeProc : undefined))
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }], { reap })
+      await service.status()
+      await ask(service, 'title', 'Request: x')
+      expect(started).toHaveLength(2)
+      const finishing = service[method]()
+      try {
+        await reapStarted
+        expect(reap).toHaveBeenCalledWith(99999, expect.anything())
+        const nextTick = new Promise<'waiting'>((resolve) => setImmediate(() => resolve('waiting')))
+        expect(await Promise.race([finishing.then(() => 'finished'), nextTick])).toBe('waiting')
+      } finally {
+        releaseReap()
+        await finishing
+      }
+      expect(started[1]!.close).toHaveBeenCalledOnce()
+    })
+
+    it.runIf(process.platform === 'win32').each(['logout', 'stop'] as const)('%s waits for a detached Windows descendant after the query closes its parent', async (method) => {
+      let parent: ChildProcess | undefined
+      let descendant: number | undefined
+      const realChild = (index: number) => {
+        if (index !== 1) return undefined
+        parent = spawn(nodeExecutable, ['-e', `
+          const { spawn } = require('node:child_process')
+          const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true })
+          child.once('spawn', () => { console.log(child.pid); child.unref() })
+          setInterval(() => {}, 1000)
+        `], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+        parent.stdout!.once('data', (data: Buffer) => { descendant = Number(data.toString().trim()) })
+        return parent
+      }
+      const { started, query } = processes(() => 'answer', realChild)
+      const { service } = fixture((input) => {
+        const startedQuery = query(input)
+        if (parent && started.length === 2) {
+          started[1]!.close.mockImplementation(() => parent!.kill())
+          input.options.abortController?.signal.addEventListener('abort', () => parent!.kill(), { once: true })
+        }
+        return startedQuery
+      }, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      try {
+        await ask(service, 'title', 'First Send')
+        await vi.waitFor(() => expect(descendant).toBeGreaterThan(0), { timeout: 10_000 })
+        expect(process.kill(descendant!, 0)).toBe(true)
+        await service[method]()
+        expect(() => process.kill(descendant!, 0)).toThrow(expect.objectContaining({ code: 'ESRCH' }))
+      } finally {
+        if (descendant) try { process.kill(descendant, 'SIGKILL') } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+        }
+        if (parent?.exitCode === null && parent.signalCode === null) parent.kill('SIGKILL')
+        await service.stop()
+      }
+    }, 30_000)
+
+    it.runIf(process.platform === 'win32').each(['logout', 'stop'] as const)('%s empties the Windows job after a late detached child outlives its parent', async (method) => {
+      let root: ChildProcess | undefined
+      let descendant: number | undefined
+      const { started, query } = processes(() => 'answer', () => root)
+      const { service, home } = fixture((input) => {
+        if (started.length === 1) {
+          const args = ['-e', `
+            const { spawn } = require('node:child_process')
+            const { existsSync, writeFileSync } = require('node:fs')
+            writeFileSync('parent-pid', String(process.pid))
+            const timer = setInterval(() => {
+              if (!existsSync('start-child')) return
+              clearInterval(timer)
+              const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true })
+              child.on('spawn', () => {
+                writeFileSync('descendant-pid', String(child.pid))
+                process.exit(0)
+              })
+            }, 10)
+          `]
+          const target = { cwd: home, env: process.env }
+          root = (input.options.spawnClaudeCodeProcess
+            ? input.options.spawnClaudeCodeProcess({ command: nodeExecutable, args, ...target, signal: new AbortController().signal })
+            : spawn(nodeExecutable, args, { ...target, windowsHide: true })) as ChildProcess
+        }
+        return query(input)
+      }, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      const hasExited = (pid: number) => {
+        try { process.kill(pid, 0); return false } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+          return true
+        }
+      }
+      try {
+        await ask(service, 'title', 'First Send')
+        await vi.waitFor(() => expect(existsSync(join(home, 'parent-pid'))).toBe(true), { timeout: 10_000 })
+        const parent = Number(readFileSync(join(home, 'parent-pid'), 'utf8'))
+        expect(hasExited(parent)).toBe(false)
+        writeFileSync(join(home, 'start-child'), '')
+        await vi.waitFor(() => expect(hasExited(parent)).toBe(true), { timeout: 10_000 })
+        descendant = Number(readFileSync(join(home, 'descendant-pid'), 'utf8'))
+        expect(hasExited(descendant)).toBe(false)
+        await service[method]()
+        expect(hasExited(descendant)).toBe(true)
+        expect(hasExited(root!.pid!)).toBe(true)
+      } finally {
+        await service.stop()
+        if (descendant && !hasExited(descendant)) {
+          process.kill(descendant, 'SIGKILL')
+          await vi.waitFor(() => expect(hasExited(descendant!)).toBe(true))
+        }
+        if (root?.pid && !hasExited(root.pid)) {
+          root.kill('SIGKILL')
+          await vi.waitFor(() => expect(hasExited(root!.pid!)).toBe(true))
+        }
+      }
+    }, 30_000)
+
+    it('stopping the provider ends the waiting process with its process tree', async () => {
+      const children: ChildProcess[] = []
+      const realChild = (index: number) => {
+        if (index !== 1) return undefined
+        const process = spawn(nodeExecutable, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+        children.push(process)
+        return process
+      }
+      const { started, query } = processes(() => 'answer', realChild)
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      try {
+        await service.status()
+        await ask(service, 'title', 'Request: x')
+        await vi.waitFor(() => expect(started).toHaveLength(2))
+        const exited = new Promise<number | null>((resolve) => children[0]!.once('exit', (code) => resolve(code)))
+        // The query's own close is a stand-in that ends nothing: shutdown waits for the real process to end.
+        await service.stop()
+        expect(children[0]!.exitCode !== null || children[0]!.signalCode !== null).toBe(true)
+        await expect(exited).resolves.not.toBe(undefined)
+      } finally {
+        for (const process of children) if (process.exitCode === null && process.signalCode === null) process.kill('SIGKILL')
+      }
+    }, 30_000)
+
+    it.each([
+      ['offers low', [{ id: 'haiku', label: 'Haiku', efforts: ['low', 'medium'] }], 'haiku', 'low'],
+      ['does not offer low', [{ id: 'haiku', label: 'Haiku', efforts: ['medium', 'high'] }], 'haiku', undefined],
+      ['lists no levels', [{ id: 'haiku', label: 'Haiku' }], 'haiku', undefined],
+      ['was chosen with a level', [{ id: 'haiku', label: 'Haiku', efforts: ['low', 'high'] }], 'haiku:high', 'high']
+    ] as const)('a title on a model that %s runs at the right level', async (_case, models, model, effort) => {
+      const { started, query } = processes()
+      const { service } = fixture(query, true, undefined, [...models])
+      await service.status()
+      await ask(service, 'title', 'Request: x', model)
+      expect(started[0]!.options.effort).toBe(effort)
+    })
   })
   it('resumes a saved session only on the instance that created it', async () => {
     const inputs: Array<{ options: Options; prompt: unknown }> = []
@@ -1417,8 +1744,8 @@ describe('older Claude models', () => {
 it('keeps standalone workspaces profile-owned even for non-path thread IDs', () => {
   const { service, home } = fixture(() => fakeQuery())
   const path = service.standaloneWorkspace('../../outside')
-  expect(path).toMatch(new RegExp('/workspaces/[a-f0-9]{64}$'))
-  expect(path.startsWith(home)).toBe(true)
+  expect(basename(path)).toMatch(/^[a-f0-9]{64}$/)
+  expect(dirname(path)).toBe(join(home, 'providers', 'claude-subscription', 'workspaces'))
   expect(service.standaloneWorkspace('../../outside')).toBe(path)
 })
 

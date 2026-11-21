@@ -15,6 +15,8 @@ import { retentionWindowText } from '../src/shared/undoRetention'
 import { fixtureGit as git, ownedHome } from './support/fixtureGit'
 import { ThreadJournal } from '../src/mms/data/ThreadJournal'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
+import * as gitProcess from '../src/mms/git/runGitProcess'
+import { branchReflogIdentity } from '../src/mms/git/branchReflogIdentity'
 import { unverifiableThread } from './support/unverifiableThread'
 import { registerBranchNamer } from '../src/mms/workspace/branchNaming'
 import { BRANCH_RENAME_OPERATION } from '../src/mms/workspace/threadBranchRecords'
@@ -445,6 +447,7 @@ async function threadFixture(kind: 'named' | 'renamed' | 'id-named') {
     mkdirSync(join(worktree, '..'), { recursive: true })
     new ThreadJournal(task).append({ operationId: 'provision', operationType: 'workspace-provision', state: 'planned', expectedPreState: { branch, worktreePath: worktree } })
     git(repo, ['worktree', 'add', '-b', branch, worktree])
+    new ThreadJournal(task).append({ operationId: 'provision', operationType: 'workspace-provision', state: 'completed', details: { branch } })
     writeFileSync(join(task, 'workspace.json'), JSON.stringify({ schemaVersion: 1, threadId: 'task', conversationBranchId: 'main', worktreePath: worktree, branch, baseSha: git(repo, ['rev-parse', 'HEAD']) }))
   }
   const taskLease = await waitAcquireExecutionLease(task), repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(repo))
@@ -453,9 +456,11 @@ async function threadFixture(kind: 'named' | 'renamed' | 'id-named') {
   return { repo, task, worktree, branch, service, input: { taskId: 'task', worktreePath: worktree, branch, sourcePath: join(task, 'workspace.json') }, path: service.pathFor('task', worktree), releaseLeases: () => { repositoryLease.release(); releaseExecutionLeaseHandle(taskLease) } }
 }
 
-test.each(['named', 'renamed', 'id-named'] as const)('a thread worktree whose branch is %s is owned: it retires, its branch goes at trash expiry, and a restore brings both back', async (kind) => {
+test.each(['named', 'renamed'] as const)('a thread worktree whose branch is %s is owned: it retires, its branch goes at trash expiry, and a restore brings both back', async (kind) => {
   const f = await threadFixture(kind)
-  expect(f.branch).toMatch(kind === 'named' ? /^mousse\/[0-9a-f]{8}$/ : kind === 'renamed' ? /^fix\/login-button$/ : /^mousse\/thread\/task\/main$/)
+  const manager = new ThreadWorkspaceManager(f.task)
+  const originalId = manager.branchRecord().reflogIds.get(f.branch)
+  expect(f.branch).toMatch(kind === 'named' ? /^mousse\/[0-9a-f]{8}$/ : /^fix\/login-button$/)
   await f.service.prepare(f.input)
   const trashed = await f.service.retire(f.path)
   expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
@@ -463,6 +468,58 @@ test.each(['named', 'renamed', 'id-named'] as const)('a thread worktree whose br
   expect(git(f.repo, ['branch', '--list', f.branch])).toBe('')
   await f.service.reconstruct(f.path)
   expect(git(f.worktree, ['branch', '--show-current'])).toBe(f.branch)
+  const restoredId = branchReflogIdentity(join(f.repo, '.git'), 'refs/heads/' + f.branch)?.id
+  expect(restoredId).toBeDefined()
+  expect(restoredId).not.toBe(originalId)
+  expect(manager.branchRecord().reflogIds.get(f.branch)).toBe(restoredId)
+})
+
+test.each(['recreated', 'legacy'] as const)('trash expiry preserves a %s branch without matching recorded identity', async (kind) => {
+  const f = await threadFixture(kind === 'legacy' ? 'id-named' : 'named')
+  const ref = 'refs/heads/' + f.branch
+  const tip = git(f.repo, ['rev-parse', ref])
+  if (kind === 'recreated') {
+    git(f.repo, ['update-ref', '-d', ref, tip])
+    git(f.repo, ['branch', f.branch, tip])
+  }
+  const identity = branchReflogIdentity(join(f.repo, '.git'), ref)?.id
+  expect(identity).toBeDefined()
+  expect(new ThreadWorkspaceManager(f.task).branchRecord().reflogIds.get(f.branch)).not.toBe(identity)
+  await f.service.prepare(f.input)
+  await f.service.retire(f.path)
+  expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  expect(existsSync(f.worktree)).toBe(false)
+  expect(git(f.repo, ['rev-parse', ref])).toBe(tip)
+  expect(branchReflogIdentity(join(f.repo, '.git'), ref)?.id).toBe(identity)
+})
+
+test('restore does not claim a branch replaced immediately after Git creates it', async () => {
+  const f = await threadFixture('named')
+  const ref = 'refs/heads/' + f.branch
+  const tip = git(f.repo, ['rev-parse', ref])
+  await f.service.prepare(f.input)
+  await f.service.retire(f.path)
+  expect(await f.service.expireTrash(f.path, { now: Date.now() + 2 * WORKTREE_TRASH_QUIET_MS })).toEqual({ removed: true })
+  const run = gitProcess.runGitProcess
+  let replaced = false
+  const interception = vi.spyOn(gitProcess, 'runGitProcess').mockImplementation(async (argv, options) => {
+    const result = await run(argv, options)
+    if (!replaced && result.status === 0 && argv.includes('update-ref') && argv.includes(ref) && argv.includes(tip)) {
+      git(f.repo, ['update-ref', '-d', ref, tip])
+      git(f.repo, ['branch', f.branch, tip])
+      replaced = true
+    }
+    return result
+  })
+  try {
+    await f.service.reconstruct(f.path)
+    expect(replaced).toBe(true)
+    const branches = new ThreadWorkspaceManager(f.task).branchRecord()
+    expect(branches.reflogIds.has(f.branch)).toBe(false)
+    expect(branches.owned.has(f.branch)).toBe(false)
+    expect(git(f.repo, ['rev-parse', ref])).toBe(tip)
+    expect(git(f.worktree, ['rev-parse', 'HEAD'])).toBe(tip)
+  } finally { interception.mockRestore() }
 })
 
 test('a thread\'s agent-made branches are never touched, a mousse/ one included, unless it is an id-named one of Mousse\'s', async () => {

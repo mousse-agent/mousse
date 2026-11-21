@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { MmsProfileServices } from '../src/mms/MmsProfileServices'
+import * as claudeDriver from '../src/mms/harness/drivers/claudeCode'
 import { ProviderAuthService } from '../src/mms/providers/ProviderAuthService'
 import { LocalMmsClient, MmsProtocolServer } from '../src/mms/protocol'
 import { MousseConfigStore } from '../src/mms/config/MousseConfigStore'
@@ -63,6 +64,42 @@ describe('profile drain and durable scheduler ownership', () => {
       expect(host.getLive(profile.id)).toBeUndefined()
     } finally {
       await main.stop()
+    }
+  }, 20_000)
+
+  it('retries a failed provider runtime stop before closing the profile watcher and database', async () => {
+    vi.spyOn(ProviderAuthService.prototype, 'init').mockResolvedValue(undefined)
+    const failure = new Error('Provider stop failed once')
+    const driver = claudeDriver.claudeCodeDriver
+    const stop = vi.fn<(stopRuntime: () => void | Promise<void>) => Promise<void>>()
+      .mockRejectedValueOnce(failure)
+      .mockImplementation(async (stopRuntime) => { await stopRuntime() })
+    vi.spyOn(claudeDriver, 'claudeCodeDriver').mockImplementation((options) => {
+      const actual = driver(options)
+      return { ...actual, create(context) {
+        const runtime = actual.create(context)
+        return { ...runtime, stop: () => stop(() => runtime.stop()) }
+      } }
+    })
+    const root = ownedRoot(), home = join(root, 'home')
+    const main = await MousseMainService.create({ homeDir: home, repoRoot: root, requireOwnership: false })
+    const host = main.getInstallationHost()!, profile = host.manager.create({ displayName: 'Provider retry', slug: 'provider-retry' })
+    const services = await host.getProfileServices(profile.id)
+    services.harness.resolveStored({ instanceId: 'claude', llmProvider: '', model: 'm' }, { purpose: 'turn' })
+    const watcher = vi.spyOn(services.config, 'stopWatching')
+    const db = services.runEngine.store.db
+    try {
+      await expect(services.stop()).rejects.toMatchObject({ errors: [{ errors: [failure] }] })
+      expect(stop).toHaveBeenCalledTimes(1)
+      expect(watcher).not.toHaveBeenCalled()
+      expect(db.userVersion()).toBeGreaterThan(0)
+
+      await services.stop()
+      expect(stop).toHaveBeenCalledTimes(2)
+      expect(watcher).toHaveBeenCalledOnce()
+      expect(() => db.userVersion()).toThrow(/not open/)
+    } finally {
+      await main.stop().catch(() => { services.config.stopWatching(); db.close() })
     }
   }, 20_000)
 

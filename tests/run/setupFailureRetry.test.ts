@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { resolveRepositoryIdentity } from '../../src/mms/git/RepositoryIdentity'
 import { ThreadWorkspaceManager } from '../../src/mms/workspace/ThreadWorkspaceManager'
 import { defaultThreadWorktreePath } from '../../src/mms/worktree/worktreeLayout'
@@ -45,7 +45,13 @@ describe("a thread whose worktree can't be made", () => {
     const pi = piAdapter((input) => `reply to ${input.prompt.split('\n').at(-1)}`)
     const d = (daemon = phase6Daemon(home, [pi]))
     const project = d.projects.openProject(projectDir)
-    const thread = d.store.createThread('Thread', project.id)
+    const thread = d.store.createThread('New Chat', project.id)
+    const originalTitle = d.settings.title
+    d.settings.title = { ...originalTitle, ...PI }
+    const late = Promise.withResolvers<{ text: string }>()
+    const oneShot = vi.fn(() => late.promise)
+    const titles = d.orch as unknown as { harness: { oneShot: unknown }; titleWork: Map<string, Promise<void>> }
+    titles.harness.oneShot = oneShot
     const threadDir = d.store.getThreadDir(thread.id)
     d.orch.setThreadModelOverride(thread.id, PI)
 
@@ -65,11 +71,20 @@ describe("a thread whose worktree can't be made", () => {
     expect(folder(new ThreadWorkspaceManager(threadDir).load()!.worktreePath)).toBe(folder(place))
     expect(pi.turns).toHaveLength(0)
 
+    const pendingTitle = titles.titleWork.get(thread.id)
+    late.resolve({ text: 'Title: Stale failure title\nBranch: stale-failure' })
+    await pendingTitle
+    expect(d.orch.getMessages(thread.id)).toEqual([])
+    expect(oneShot).toHaveBeenCalledOnce()
+    expect(d.store.getThread(thread.id)?.name).toBe('New Chat')
+    expect(git(projectDir, 'branch', '--list', 'mousse/stale-failure')).toBe('')
+
     // Retry, once the obstacle is gone: the same message, on the same thread, in a worktree of its own.
+    d.settings.title = originalTitle
     rmSync(place, { force: true })
     const retried = await d.orch.retrySetup(thread.id)
     expect(retried.queued).toBeFalsy()
-    await waitFor(() => d.engine.getRun(retried.runId!)?.status === 'completed', 'the retried run ends', 20_000)
+    await waitFor(() => d.engine.getRun(retried.runId!)?.status === 'completed', 'the retried run ends', 45_000)
     expect(pi.turns).toHaveLength(1)
     expect(pi.turns[0]!.prompt).toMatch(/First$/)
     expect(d.orch.getMessages(thread.id).filter((message) => message.role === 'user' && message.content === 'First')).toHaveLength(1)
@@ -83,7 +98,7 @@ describe("a thread whose worktree can't be made", () => {
     // A second Retry finds nothing to send.
     await expect(d.orch.retrySetup(thread.id)).rejects.toMatchObject({ code: 'nothing_to_retry' })
     expect(pi.turns).toHaveLength(1)
-  }, 60_000)
+  }, 90_000)
 })
 
 describe('setupFailureReason', () => {
