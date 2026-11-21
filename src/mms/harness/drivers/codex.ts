@@ -617,7 +617,7 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
             if (owned.get(context.instanceId) === user) owned.delete(context.instanceId)
             // A sign-in terminal this runtime started ends with the instance, not with a config change.
             activeRun?.cancel()
-            user.service.stop()
+            void user.service.stop()
             const timer = setTimeout(resolve, CODEX_STOP_WAIT_MS)
             timer.unref?.()
             void user.service.processesExited().then(() => resolve(), () => resolve())

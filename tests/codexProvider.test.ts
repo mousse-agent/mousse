@@ -10,6 +10,8 @@ import { LoginSession } from '../src/mms/providers/LoginSession'
 import type { CodexLaunch, CodexProcess } from '../src/mms/harness/vendors/codex/CodexAppServerClient'
 import {
   CODEX_ACCOUNT_TTL_MS,
+  CODEX_IDLE_CLOSE_MS,
+  CODEX_MAX_IDLE_THREADS,
   CODEX_MODEL_PROVIDER,
   CodexProviderService,
   CodexTurnFailure,
@@ -1281,6 +1283,63 @@ describe('CodexProviderService options (managed Codex)', () => {
     expect(server.launches).toHaveLength(1)
     expect(server.launches[0].env.CODEX_HOME).toBe(join(home, 'harness', 'codex-2', 'home'))
     expect(server.methods()).toContain('config/read')
+  })
+
+  describe('the process kept between turns', () => {
+    const update = (server: ReturnType<typeof turnServer>, authMode: string) =>
+      server.processes.at(-1)!.stdout.write(JSON.stringify({ method: 'account/updated', params: { authMode, planType: 'plus' } }) + '\n')
+
+    it('a sign-in switched to another ChatGPT account: the next turn reads the account again, reuses no thread opened under the old one, and the process is replaced once idle', async () => {
+      const server = turnServer({ provider: () => MANAGED })
+      let subject = 'chatgpt:client:first'
+      const service = managed(server, { account: { read: async () => ({ kind: 'signed_in', planType: 'plus', email: null, subject }) } })
+      await chat(service)
+      service.commitConversation('t', 'h')
+      // The same account reported again keeps the loaded thread.
+      update(server, 'chatgpt')
+      await chat(service, { history: 'h' })
+      service.commitConversation('t', 'h2')
+      expect(server.requests('thread/resume')).toHaveLength(0)
+
+      subject = 'chatgpt:client:second'
+      update(server, 'chatgpt')
+      await chat(service, { history: 'h2' })
+      // Opened again under the new account, not continued on the thread the old one loaded.
+      expect(server.requests('thread/resume')).toHaveLength(1)
+      await vi.waitFor(() => expect(server.processes[0].signalCode).toBe('SIGTERM'))
+      service.commitConversation('t', 'h3')
+      await chat(service, { history: 'h3' })
+      expect(server.launches).toHaveLength(2)
+    })
+
+    it(`keeps at most ${CODEX_MAX_IDLE_THREADS} threads loaded with no turn on them, letting the least recently used go first`, async () => {
+      const server = turnServer({ provider: () => MANAGED })
+      const service = managed(server)
+      // t0..t7 fill the count; t0 is used again, so t1 and t2 are the oldest when t8 and t9 come.
+      for (let index = 0; index < CODEX_MAX_IDLE_THREADS; index++) await chat(service, { threadId: `t${index}` })
+      service.commitConversation('t0', 'h')
+      await chat(service, { threadId: 't0', history: 'h' })
+      for (const threadId of ['t8', 't9']) await chat(service, { threadId })
+      expect(server.requests('thread/resume')).toHaveLength(0)
+      const unloaded = () => server.requests('thread/unsubscribe').map((message) => (message.params as { threadId: string }).threadId)
+      await vi.waitFor(() => expect(unloaded()).toEqual(['thr-2', 'thr-3']))
+      expect(server.launches).toHaveLength(1)
+    })
+
+    it('one process serves turns on different threads for the whole idle window, and closes once it has passed', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+      const server = turnServer({ provider: () => MANAGED })
+      const service = managed(server)
+      await chat(service, { threadId: 'a' })
+      await vi.advanceTimersByTimeAsync(10 * 60_000)
+      await chat(service, { threadId: 'b' })
+      await vi.advanceTimersByTimeAsync(10 * 60_000)
+      await chat(service, { threadId: 'a' })
+      expect(server.launches).toHaveLength(1)
+      expect(server.processes[0].signalCode).toBeNull()
+      await vi.advanceTimersByTimeAsync(CODEX_IDLE_CLOSE_MS + 1)
+      expect(server.processes[0].signalCode).toBe('SIGTERM')
+    })
   })
 })
 

@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { idleCloseFromEnv } from '../../idleCloseFromEnv'
 import type { ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
@@ -136,10 +137,18 @@ const TREE_PROBE_THREAD_ID = '00000000-0000-0000-0000-000000000000'
 const TREE_REQUEST_MS = 10_000
 /** Pages of `thread/list` read per snapshot before the listing is taken as broken. */
 const TREE_MAX_PAGES = 100
-/** The app-server process is closed once it has been unused this long after a turn... */
-export const CODEX_IDLE_CLOSE_MS = 60_000
+/**
+ * The app-server process is closed once it has been unused this long after a turn (`MOUSSE_CODEX_IDLE_CLOSE_MS` sets it):
+ * one process serves every thread, and starting it again costs the next Send a second or more...
+ */
+export const CODEX_IDLE_CLOSE_MS = idleCloseFromEnv('MOUSSE_CODEX_IDLE_CLOSE_MS', 15 * 60_000)
 /** ...or after a sign-in check or model listing that started it. */
 export const CODEX_CHECK_CLOSE_MS = 5_000
+/**
+ * Threads the process keeps loaded with no turn on them, most recently used first; an older one is let go
+ * (`thread/unsubscribe`) when a turn ends, and its next turn resumes it.
+ */
+export const CODEX_MAX_IDLE_THREADS = 8
 /**
  * A chat held open only by its native helpers is released when none of them has reported anything
  * for this long (the helpers are stopped, the run ends with its own text and a note)...
@@ -201,6 +210,11 @@ type SavedLimits = { snapshot: RateLimitSnapshot; at: number; account: string }
 type AccountProbe = CodexAccountReading
 
 /** A one-way key of the account a limits snapshot belongs to: the account itself is never written. */
+/** The account a signed-in reading names (as `account()` derives it), `''` when it names none. */
+function accountSubject(result: Extract<AccountProbe, { kind: 'signed_in' }>): string {
+  return result.subject ?? (result.email ? `chatgpt:${result.email}` : '')
+}
+
 function limitsOwner(subject: string | undefined): string | undefined {
   return subject ? createHash('sha256').update(`codex-limits\u0000${subject}`).digest('hex') : undefined
 }
@@ -1166,6 +1180,10 @@ export class CodexProviderService {
     conn: CodexConnection
     ready: Promise<CodexConnection>
     verified: boolean
+    /** The account this process last reported (`accountSubject`): its loaded threads were opened under it. */
+    subject?: string
+    /** Another account was reported since its threads were opened: none is reused, and it closes once nothing uses it. */
+    retired?: boolean
     generation: number
     /** Resolves when the process has exited (or never started). */
     exited: Promise<void>
@@ -1414,8 +1432,27 @@ export class CodexProviderService {
   /** `account/read` on `conn`; a ChatGPT answer marks that process as verified. */
   private async readAccount(conn: CodexConnection, signal?: AbortSignal): Promise<AccountProbe> {
     const result = classifyAccount(await conn.request('account/read', { refreshToken: false }, { timeoutMs: 15_000, signal }), this.options.ownSignIn)
-    if (this.app?.conn === conn) this.app.verified = result.kind === 'signed_in'
+    this.noteAccount(conn, result)
     return result
+  }
+
+  /**
+   * What `conn`'s process said about its account. A ChatGPT answer verifies it. One naming another account than the
+   * process reported before (a sign-in switched to another ChatGPT account) retires it: no thread loaded under the old
+   * account is reused, and the process is replaced as soon as nothing uses it.
+   */
+  private noteAccount(conn: CodexConnection, result: AccountProbe): void {
+    const app = this.app
+    if (app?.conn !== conn) return
+    app.verified = result.kind === 'signed_in'
+    if (result.kind !== 'signed_in') return
+    const subject = accountSubject(result)
+    if (app.subject !== undefined && app.subject !== subject) {
+      app.retired = true
+      this.loaded.clear()
+      this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
+    }
+    app.subject = subject
   }
 
   /**
@@ -1428,7 +1465,7 @@ export class CodexProviderService {
     signal.throwIfAborted()
     if (this.app?.conn === conn && this.app.verified) return conn
     const result = this.options.account ? await this.options.account.read(signal) : await this.readAccount(conn, signal)
-    if (this.options.account && this.app?.conn === conn) this.app.verified = result.kind === 'signed_in'
+    if (this.options.account) this.noteAccount(conn, result)
     this.probeResult = { at: Date.now(), result }
     if (result.kind !== 'signed_in')
       throw new AppError({ code: 'codex_not_connected', message: this.signInMessage(), errorInfo: { category: 'unavailable', retryable: false } })
@@ -2116,13 +2153,20 @@ export class CodexProviderService {
     if (failures.length) throw new Error(`Codex could not be stopped: ${failures.join('; ')}.`)
   }
 
-  stop(): void {
+  /**
+   * Stops the service for good. Resolves once every process it started has exited, a tree that outlived the grace
+   * killed (`stopProcesses`), so a daemon that stops never leaves one running; one that could not be stopped is logged.
+   */
+  async stop(): Promise<void> {
     this.stopped = true
     for (const preparing of this.preparing) preparing.abort(new Error('Codex provider is stopped'))
     if (this.idleClose) clearTimeout(this.idleClose.timer)
     this.idleClose = undefined
     this.abortInFlight()
     this.app?.conn.close()
+    await this.stopProcesses([...this.processes]).catch((error: unknown) => {
+      console.warn('[codex] a Codex process could not be stopped', error instanceof Error ? error.message : String(error))
+    })
   }
 
   private abortInFlight(reason = 'Codex was disconnected'): void {
@@ -2256,7 +2300,7 @@ export class CodexProviderService {
    */
   private closeWhenIdle(delay: number, retry = false): void {
     if (!this.app || this.stopped) return
-    const stale = this.app.generation !== this.launchGeneration
+    const stale = this.app.generation !== this.launchGeneration || this.app.retired === true
     const at = Date.now() + (stale && !retry ? 0 : (this.dependencies.idleCloseMs ?? delay))
     if (this.idleClose && this.idleClose.at >= at && !stale) return
     if (this.idleClose) clearTimeout(this.idleClose.timer)
@@ -2303,11 +2347,11 @@ export class CodexProviderService {
       }
     const account = notificationParams(notification, 'account/updated')
     if (account) {
-      // A terminal `codex login --api-key` or logout reaches the shared process; re-check.
-      if (account.authMode !== 'chatgpt') {
-        this.probeResult = undefined
-        if (this.app) this.app.verified = false
-      }
+      // A terminal `codex login` (another ChatGPT account included), `--api-key` or logout reaches the shared process:
+      // the next turn reads the account again before it gets the process (`noteAccount`), and the listing re-checks.
+      if (this.app) this.app.verified = false
+      if (account.authMode !== 'chatgpt') this.probeResult = undefined
+      else if (this.probeResult) this.probeResult = { ...this.probeResult, at: 0 }
       return
     }
     // Account-wide, not tied to a thread: every open run keeps the latest, for a usage limit it may hit.
@@ -2897,7 +2941,23 @@ export class CodexProviderService {
     if (this.turns.get(run.codexThreadId) === run) this.turns.delete(run.codexThreadId)
     run.tree = undefined
     run.settled()
+    this.unloadIdleThreads()
     this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
+  }
+
+  /**
+   * Lets go of loaded threads with no turn on them beyond the `CODEX_MAX_IDLE_THREADS` most recently used, so a
+   * process kept open between turns does not grow with every thread it served. The newest are kept: one being opened
+   * for a turn right now is the newest.
+   */
+  private unloadIdleThreads(): void {
+    const conn = this.app?.conn
+    if (!conn) return
+    const idle = [...this.loaded.keys()].filter((id) => !this.turns.has(id) && !this.oneShots.has(id) && !this.compactions.has(id))
+    for (const id of idle.slice(0, Math.max(0, idle.length - CODEX_MAX_IDLE_THREADS))) {
+      this.loaded.delete(id)
+      void conn.request('thread/unsubscribe', { threadId: id }, { timeoutMs: 5_000 }).catch(() => undefined)
+    }
   }
 
   /**
@@ -3001,6 +3061,9 @@ export class CodexProviderService {
         return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox }
       }
       if (loaded && loaded.mcpToken === mcpToken && loaded.relayKey === relayKey && loaded.cwd === cwd && loaded.childKey === childKey) {
+        // The most recently used now (`unloadIdleThreads` lets the oldest go first).
+        this.loaded.delete(saved.codexThreadId)
+        this.loaded.set(saved.codexThreadId, loaded)
         // A loaded thread keeps the developer instructions it was opened with: changed ones go into the prompt.
         const instructionsStale = instructionsHash !== undefined && loaded.instructionsHash !== instructionsHash
         loaded.instructionsHash = instructionsHash
@@ -3398,6 +3461,7 @@ export class CodexProviderService {
       input.signal?.removeEventListener('abort', forward)
       this.controllers.delete(controller)
       this.activeThreads.delete(input.threadId)
+      this.unloadIdleThreads()
       this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
       // A stopped turn stays registered (for routing) until its sweep ends or the process dies.
       run?.mute()

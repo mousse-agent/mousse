@@ -110,9 +110,11 @@ export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
  * Code reconnects a server whose header changed and adds the tools it gains, but keeps offering the model the ones it
  * lost.
  * A bot's chat turn adds what its process was started with (`claudeBotLaunchKey`): a change of any of it, the model
- * and effort included, needs a new process.
+ * and effort included, needs a new process. So does another account: a process holds the sign-in it started with.
  */
-const HARD_PARTS = ['instance', 'folder', 'instructions', 'Mousse server or its tools', 'read-only policy', 'bot launch']
+const HARD_PARTS = ['instance', 'folder', 'instructions', 'Mousse server or its tools', 'read-only policy', 'bot launch', 'account']
+/** Where the account is in the key (`HARD_PARTS`). */
+const ACCOUNT_PART = HARD_PARTS.indexOf('account')
 
 /** Removes the folder of a bot process's settings file (`claudeLockedSettingsFile`) once nothing reads it. Never throws. */
 function removeSettingsFolder(folder: string): void {
@@ -2419,15 +2421,19 @@ export class ClaudeSubscriptionProviderService {
     const { pid, root } = target
     // The process is known by its handle and the time it was started, so a pid given to another program meanwhile is never killed.
     const reap = this.dependencies.reap ?? ((at: number, known?: SpawnedRoot) => reapProcessTree(at, { graceMs: CLAUDE_STOP_GRACE_MS, ...(known ? { root: known } : {}) }))
-    void reap(pid, root).then(
+    // Tracked until it settles: `stop` waits for every one.
+    const reaping: Promise<void> = reap(pid, root).then(
       (outcome) => {
         if (outcome === 'killed') console.warn('[claude-subscription] Claude Code did not exit after Stop; its processes were killed', { threadId, pid })
         if (outcome === 'survived')
           this.notifyHost(() => this.liveHost?.notice?.(threadId, `Stop could not end Claude Code's process for this chat (process ${pid}). It, or a command it started, may still be running.`))
       },
       (error: unknown) => console.warn('[claude-subscription] could not end a stopped Claude Code process', { threadId, pid, error: error instanceof Error ? error.message : String(error) })
-    )
+    ).finally(() => this.reaping.delete(reaping))
+    this.reaping.add(reaping)
   }
+  /** Process trees being ended (`reapClosed`). */
+  private readonly reaping = new Set<Promise<void>>()
   /** Threads that hold a live Claude process (diagnostics and tests). */
   liveThreadIds(): string[] {
     return [...this.live].filter(([, live]) => !live.dead).map(([threadId]) => threadId)
@@ -2442,6 +2448,16 @@ export class ClaudeSubscriptionProviderService {
     return [...this.live.values()].filter(
       (live) => !live.dead && !live.busy && live.pendingRuns === 0 && live.obligations.size === 0 && !this.activeThreads.has(live.threadId)
     )
+  }
+  /**
+   * No cap on busy or pinned processes; only idle ones past a generous count (`maxIdleSessions`) close early, least
+   * recently used first. Checked when a process is started and whenever one goes idle.
+   */
+  private trimIdleLive(): void {
+    const cap = this.liveConfig?.maxIdleSessions
+    if (cap === undefined || this.stopped) return
+    let excess = this.idleLive().length - cap
+    while (excess-- > 0 && this.evictIdleLive()) { /* the oldest is closed */ }
   }
   /** Closes the least recently used idle process with no background work; false when every one is needed. */
   private evictIdleLive(): boolean {
@@ -2557,10 +2573,17 @@ export class ClaudeSubscriptionProviderService {
       live.close('closed')
       this.live.delete(threadId)
     }
+    // Idle processes started under another account are closed: no turn can reuse one, and each holds the old sign-in.
+    if (!bot) {
+      const account = JSON.stringify(key.hard[ACCOUNT_PART] ?? null)
+      for (const idle of this.idleLive())
+        if (!idle.meta.bot && JSON.stringify((idle.meta.hardParts as readonly unknown[] | undefined)?.[ACCOUNT_PART] ?? null) !== account) {
+          idle.close('idle')
+          this.live.delete(idle.threadId)
+        }
+    }
     if (this.live.size >= timings.maxSessions && !this.evictIdleLive()) return undefined
-    // No cap on busy or pinned processes; only idle ones past a generous count close early, oldest first.
-    let excess = this.idleLive().length - timings.maxIdleSessions
-    while (excess-- > 0) this.evictIdleLive()
+    this.trimIdleLive()
     const created = new LiveSession<TurnContext>(
       threadId,
       {
@@ -2574,7 +2597,9 @@ export class ClaudeSubscriptionProviderService {
           created.meta.cleanup = undefined
           cleanup?.()
         },
-        reap: (target) => this.reapClosed(threadId, target)
+        reap: (target) => this.reapClosed(threadId, target),
+        // Claude's own turn (a background result) ended too: the count of idle processes is checked again.
+        idle: () => queueMicrotask(() => this.trimIdleLive())
       },
       bot ? { ...timings, idleCloseMs: bot.idleCloseMs } : timings
     )
@@ -3373,7 +3398,9 @@ export class ClaudeSubscriptionProviderService {
         // Not the token: a new one for the same tools is given to the running process (`renewMousseServer`).
         input.mcp ? [input.mcp.url, input.mcp.tools ?? null] : null,
         readOnlyChild,
-        botWarm ? claudeBotLaunchKey(botWarm, claudeLockedOptions(lockedTurn!, { env, mousseTools: Boolean(input.mcp) }), flags) : null
+        botWarm ? claudeBotLaunchKey(botWarm, claudeLockedOptions(lockedTurn!, { env, mousseTools: Boolean(input.mcp) }), flags) : null,
+        // The account of this turn's sign-in reading (`claudeAccountSubject`, read from the files with no extra work).
+        this.account()?.subject ?? null
       ]
       const reusable = input.continuation ? undefined : this.reusableLive(input.threadId, hard, resume, historyNow)
       /** The prompt, with the history in front when no session holds it: none resumed, cut or kept warm. */
@@ -3871,6 +3898,7 @@ export class ClaudeSubscriptionProviderService {
       this.queries.delete(input.threadId)
       this.controllers.delete(controller)
       this.activeThreads.delete(input.threadId)
+      this.trimIdleLive()
       const settingsFolder = lockedSettingsFolder
       const release = (): void => {
         releaseBotTemp?.()
@@ -3979,7 +4007,11 @@ export class ClaudeSubscriptionProviderService {
     this.cliProbe = undefined
     return this.authenticated()
   }
-  stop(): void {
+  /**
+   * Stops the service for good. Resolves once every Claude Code process it kept open has exited, a tree that outlived
+   * the grace killed with everything it started (`reapClosed`), so a daemon that stops never leaves one running.
+   */
+  async stop(): Promise<void> {
     this.stopped = true
     for (const controller of this.controllers) controller.abort()
     for (const session of this.loginSessions) session.abort.abort()
@@ -3990,8 +4022,12 @@ export class ClaudeSubscriptionProviderService {
     this.queries.clear()
     for (const { query } of this.oneShotExits.values()) query.close()
     for (const threadId of this.live.keys()) this.questions.dismissAllForThread(threadId)
+    // Taken before the close: what each process is, for the kill after the grace.
+    const open = [...this.live].filter(([, live]) => !live.dead).map(([threadId, live]) => ({ threadId, live, target: live.process() }))
     this.closeLive()
+    for (const { threadId, live, target } of open) if (!live.reaped) this.reapClosed(threadId, target)
     this.readyToCommit.clear()
+    await Promise.all([...this.reaping])
   }
 }
 

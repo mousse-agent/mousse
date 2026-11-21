@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { idleCloseFromEnv } from '../../idleCloseFromEnv'
 import type { Query, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { observeRateLimit, RejectedWindows } from './usageLimit'
 import type { SpawnedRoot } from '../../stopProcesses'
@@ -18,8 +19,12 @@ import type { SpawnedRoot } from '../../stopProcesses'
  * the query and drives the runs.
  */
 
-/** How long a thread with no background work keeps its idle process before it is closed. */
-export const LIVE_IDLE_CLOSE_MS = 3 * 60_000
+/**
+ * How long a thread with no background work keeps its idle process before it is closed. A new process costs about a
+ * second before it takes the prompt (two at p90), so a reply written after reading the last answer should still find it
+ * open; at most `LIVE_MAX_IDLE_SESSIONS` stay open idle. `MOUSSE_CLAUDE_IDLE_CLOSE_MS` sets it.
+ */
+export const LIVE_IDLE_CLOSE_MS = idleCloseFromEnv('MOUSSE_CLAUDE_IDLE_CLOSE_MS', 15 * 60_000)
 /** With background work pending: how long the thread may be silent before the release is reconsidered. */
 export const LIVE_IDLE_RELEASE_MS = 30 * 60_000
 /**
@@ -652,6 +657,8 @@ export interface LiveSessionHooks {
   notice?(text: string): void
   /** The process ended or was released. */
   ended(reason: 'closed' | 'idle' | 'idle-cap' | 'died'): void
+  /** A run ended and nothing else runs on the process: it waits for the next turn. */
+  idle?(): void
   /**
    * The session sent the process SIGTERM itself (`terminate`): the owner kills it with everything it started if it is
    * still running after the grace, as after Stop.
@@ -2181,7 +2188,9 @@ export class LiveSession<Turn = unknown> {
   }
 
   private afterRunEnded(): void {
-    if (!this.busy && !this.dead) this.armIdle()
+    if (this.busy || this.dead) return
+    this.armIdle()
+    this.hooks.idle?.()
   }
 
   /** Provider activity restarts the idle clock. It does not move the cap on how long work may stay owed. */

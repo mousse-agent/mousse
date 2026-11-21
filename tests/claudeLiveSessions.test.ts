@@ -14,7 +14,7 @@ import {
   type ClaudeLiveHost,
   type ClaudeSubscriptionChatInput
 } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
-import { BackgroundObligations, LiveSession, UNSURE_MEMORY_MS, type LiveTimings } from '../src/mms/harness/vendors/claude/liveSession'
+import { BackgroundObligations, LIVE_IDLE_CLOSE_MS, LiveSession, UNSURE_MEMORY_MS, type LiveTimings } from '../src/mms/harness/vendors/claude/liveSession'
 import { STOP_GRACE_MS } from '../src/mms/harness/stopProcesses'
 import { FakeClaudeCli, lifecycle, messageStart, notification, resultFrame, roster, SESSION, taskStarted, textDelta, toolResult, toolStart } from './run/fakeClaudeCli'
 
@@ -1231,7 +1231,57 @@ describe('a model or effort change (issue #359)', () => {
   })
 })
 
+describe('a daemon that stops', () => {
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'EPERM'
+    }
+  }
+
+  it('waits until each open Claude Code process has exited, with the process it started, though it ignores the close', async () => {
+    // A real process standing in for Claude Code: it ignores SIGTERM and runs a helper of its own.
+    const code = [
+      "const { spawn } = require('node:child_process')",
+      "const helper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })",
+      'process.stdout.write(String(helper.pid) + "\\n")',
+      "process.on('SIGTERM', () => {})",
+      'setInterval(() => {}, 1000)'
+    ].join(';')
+    const claude = spawn(process.execPath, ['-e', code], { stdio: ['ignore', 'pipe', 'ignore'] })
+    const helper = await new Promise<number>((resolve) => claude.stdout!.once('data', (chunk: Buffer) => resolve(Number(chunk.toString().trim()))))
+    try {
+      const cli = new FakeClaudeCli()
+      const query = (input: Parameters<FakeClaudeCli['query']>[0]) => Object.assign(cli.query(input), { transport: { process: { pid: claude.pid } } })
+      const f = fixture({}, cli, undefined, { query })
+      await f.turn()
+      expect(alive(claude.pid!)).toBe(true)
+      await f.service.stop()
+      expect(alive(claude.pid!)).toBe(false)
+      await vi.waitFor(() => expect(alive(helper)).toBe(false), { timeout: 1_000, interval: 20 })
+    } finally {
+      claude.kill('SIGKILL')
+      try { process.kill(helper, 'SIGKILL') } catch { /* gone */ }
+    }
+  }, 15_000)
+})
+
 describe('idle release and the cap on live processes', () => {
+  it('a reply ten minutes after the last turn finds the thread\'s process still open; one after the idle window does not', async () => {
+    vi.useFakeTimers()
+    // The default timings: what a thread gets.
+    const f = fixture()
+    await f.turn({ history: 'h' }, 'h')
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    expect(f.cli.last.closed).toBe(false)
+    await f.turn({ history: 'h' }, 'h')
+    expect(f.cli.processes).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(LIVE_IDLE_CLOSE_MS + 1)
+    expect(f.cli.last.closed).toBe(true)
+  })
+
   it('closes an idle thread with no background work after the idle timeout, and the next turn resumes the session', async () => {
     vi.useFakeTimers()
     const f = fixture({ idleCloseMs: 1000 })
@@ -1291,7 +1341,25 @@ describe('idle release and the cap on live processes', () => {
     expect(f.cli.processes).toHaveLength(threads.length)
   })
 
-  it('closes idle processes past the idle count, oldest first, and never a busy one or one holding background work', async () => {
+  it('a process started under another account is never reused, and idle ones started under it close', async () => {
+    const account = (id: string) => writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: id, organizationUuid: 'org' } }))
+    account('first')
+    const f = fixture()
+    await f.turn({ threadId: 'a', history: 'h' }, 'h')
+    await f.turn({ threadId: 'b', history: 'h' }, 'h')
+    await f.turn({ threadId: 'a', history: 'h' }, 'h')
+    expect(f.cli.processes).toHaveLength(2)
+    const [first, other] = f.cli.processes
+
+    account('second')
+    await f.turn({ threadId: 'a', history: 'h' }, 'h')
+    expect(f.cli.processes).toHaveLength(3)
+    expect(first.closed).toBe(true)
+    expect(other.closed).toBe(true)
+    expect(f.service.liveThreadIds()).toEqual(['a'])
+  })
+
+  it('keeps no more idle processes than the idle count: the least recently used closes as soon as another goes idle, never a busy one or one holding background work', async () => {
     const f = fixture({ maxIdleSessions: 1 })
     await f.turn({ threadId: 'a' })
     // b holds background work, c has a turn in flight.
@@ -1307,15 +1375,12 @@ describe('idle release and the cap on live processes', () => {
     await vi.waitFor(() => expect(busy.inputs).toHaveLength(1))
 
     f.cli.reply = (message, process) => process.answer(String(message.uuid), 'live')
-    // One idle process (a) is within the count.
+    // Two idle (a, d) once d's turn ends: the oldest closes then, not at the next start.
     expect(await f.turn({ threadId: 'd' })).toBe('live')
-    expect(oldest.closed).toBe(false)
-    // Two idle (a, d): the oldest closes when e starts, then d when f starts.
-    expect(await f.turn({ threadId: 'e' })).toBe('live')
     expect(oldest.closed).toBe(true)
-    expect(f.service.liveThreadIds().sort()).toEqual(['b', 'c', 'd', 'e'])
-    expect(await f.turn({ threadId: 'f' })).toBe('live')
-    expect(f.service.liveThreadIds().sort()).toEqual(['b', 'c', 'e', 'f'])
+    expect(f.service.liveThreadIds().sort()).toEqual(['b', 'c', 'd'])
+    expect(await f.turn({ threadId: 'e' })).toBe('live')
+    expect(f.service.liveThreadIds().sort()).toEqual(['b', 'c', 'e'])
     expect(pinned.closed).toBe(false)
     expect(busy.closed).toBe(false)
     busy.answer(busy.uuid(0), 'busy done')

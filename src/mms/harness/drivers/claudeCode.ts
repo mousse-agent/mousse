@@ -629,7 +629,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
             if (owned.get(context.instanceId) === user) owned.delete(context.instanceId)
             // A sign-in terminal this runtime started ends with the instance, not with a config change.
             activeRun?.cancel()
-            user.service.stop()
+            void user.service.stop()
           })
         }
       }
