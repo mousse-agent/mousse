@@ -18,6 +18,7 @@ import { isActive } from '../git/gitOperationLogic'
 import { pullResultNotice } from '../git/gitSyncLogic'
 import type { PullRequestDetail, ThreadPullRequestLink } from '../../../shared/pullRequests'
 import { useRetiredWorktreeNote } from './useRetiredWorktreeNote'
+import { GIT_FOLDER_SLOW_MS, useStillPending } from './useStillPending'
 import { gitScopeFor } from '../../lib/activeProject'
 import type { GitInProgress, GitPullRequestLookup, GitPullStrategy, GitUpstreamCheck } from '../../../shared/types'
 import { useGitActionRunner } from '../git/useGitActionRunner'
@@ -477,9 +478,12 @@ export function GitSectionView({
 export function GitSection({ threadId }: SideCardSectionContext) {
   const { location, git, path, projectId, ownThreadId, link, lookup: pullRequest, detail, detailError } = useActiveThreadPullRequest(threadId)
   const { loading } = location
+  // A folder lookup that has not answered for a while (a drive asleep, a busy service) ends "Checking…"; the answer still shows.
+  const pathSlow = useStillPending(loading, threadId ?? '', GIT_FOLDER_SLOW_MS)
   const collapse = {
     hasProject: projectId !== null,
     pathPending: loading,
+    pathSlow,
     hasPath: path !== null,
     loaded: git.loaded,
     status: git.status
