@@ -25,10 +25,16 @@ async function smallText(path: string, limit = 64 * 1024): Promise<string | unde
 }
 
 /**
+ * Repository extensions that change nothing about where a worktree is: `worktreeConfig` (a worktree's own
+ * `config.worktree`, read separately), `objectFormat`, and `relativeWorktrees` (set once any worktree is added with
+ * relative paths; each worktree's own files still say which kind it is, and only absolute ones are read here).
+ */
+const LAYOUT_NEUTRAL_EXTENSIONS = new Set(['worktreeconfig', 'objectformat', 'relativeworktrees'])
+
+/**
  * Whether a Git config file's text leaves a linked worktree where `git worktree add` puts it: no `core.worktree` (or
- * any key named `worktree`), no `include`/`includeIf` that could add one, and no repository extension other than the
- * two that change nothing about where a worktree is (`worktreeConfig`, `objectFormat`). Anything else, including text
- * this cannot read, is left to Git.
+ * any key named `worktree`), no `include`/`includeIf` that could add one, and no repository extension other than
+ * {@link LAYOUT_NEUTRAL_EXTENSIONS}. Anything else, including text this cannot read, is left to Git.
  */
 function configKeepsLayout(text: string): boolean {
   let section = ''
@@ -45,7 +51,7 @@ function configKeepsLayout(text: string): boolean {
     const key = /^([A-Za-z][A-Za-z0-9-]*)\s*(=|$)/.exec(line)?.[1]?.toLowerCase()
     if (!key) return false
     if (key === 'worktree') return false
-    if (section === 'extensions' && key !== 'worktreeconfig' && key !== 'objectformat') return false
+    if (section === 'extensions' && !LAYOUT_NEUTRAL_EXTENSIONS.has(key)) return false
   }
   return true
 }

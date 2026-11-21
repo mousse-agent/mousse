@@ -9,12 +9,15 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { verifyWorktreeFact } from '../src/mms/lifecycle/ResourceInventory'
 import { findListedWorktreeAsync } from '../src/mms/lifecycle/worktreeRegistry'
 import { verifyPinsAsync } from '../src/mms/lifecycle/worktreeFacts'
 import type { WorktreeReconstructionManifest } from '../src/mms/lifecycle/WorktreeRetirementService'
+
+// Each case runs Git dozens of times to build its layouts; starting a process on Windows is slow.
+vi.setConfig({ testTimeout: 120_000 })
 
 const FIXTURE_ENV = { ...process.env, GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }
 const roots: string[] = []
@@ -55,7 +58,8 @@ async function gitStarts<T>(root: string, run: () => Promise<T>): Promise<{ valu
   process.env.GIT_TRACE2_EVENT = trace
   try {
     const value = await run()
-    return { value, starts: readdirSync(trace).flatMap((file) => readFileSync(join(trace, file), 'utf8').split('\n').filter((line) => line.includes('"event":"start"'))).length }
+    const started = readdirSync(trace).flatMap((file) => readFileSync(join(trace, file), 'utf8').split('\n').filter((line) => line.includes('"event":"start"')))
+    return { value, starts: started.length, argv: started.map((line) => (JSON.parse(line) as { argv?: string[] }).argv?.slice(1).join(' ')) }
   } finally { delete process.env.GIT_TRACE2_EVENT }
 }
 
@@ -129,9 +133,9 @@ it('gives Git’s answer for every layout, without Git for the standard one', as
   for (const row of rows) {
     const expected = row.repository ?? id
     const slow = await gitAnswer(row.path, expected)
-    const { value, starts } = await gitStarts(root, () => verifyWorktreeFact(store, row.path, undefined, expected))
+    const { value, starts, argv } = await gitStarts(root, () => verifyWorktreeFact(store, row.path, undefined, expected))
     expect({ row: row.name, verified: value === undefined }).toEqual({ row: row.name, verified: slow })
-    expect({ row: row.name, git: starts > 0 }).toEqual({ row: row.name, git: row.git })
+    expect({ row: row.name, git: starts > 0, ...(starts > 0 === row.git ? {} : { argv }) }).toEqual({ row: row.name, git: row.git })
   }
   // The rows that must differ do: the stranded worktree and the misled one are not verified, the plain one is.
   expect(await verifyWorktreeFact(store, stranded, undefined, fourthId)).toMatch(/identity changed/)
