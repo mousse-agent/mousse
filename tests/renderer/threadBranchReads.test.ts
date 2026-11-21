@@ -2,7 +2,7 @@
 /**
  * Thread cards name their branch from one `git.heads` call for every card shown, never a Git status read. They read
  * again together on window focus, for the thread whose run ended (and every project), and for a thread whose branch
- * Mousse changed (`git.headsChanged`). A read that fails keeps what the cards show.
+ * Mousse changed (`git.headsChanged`). A read that fails keeps what the cards show, and is read again a while later.
  */
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -154,4 +154,19 @@ it('a card that first shows names what it named at the last launch, then what is
   await settle()
   expect(sorted(calls[0]!)).toEqual({ threadIds: ['t1', 't2'], projectIds: ['p1', 'p2'] })
   expect(shown()).toEqual(['mousse/fix-build', 'mousse/docs', 'develop'])
+})
+
+it('a card whose read failed is read again a while later, so it never stays without its branch', async () => {
+  answer = async (request) => ({ ...(await fromBranches(request)), threads: { ...(await fromBranches(request)).threads, t1: { error: 'The drive at E:\ is not answering.' } } })
+  showCards()
+  await settle()
+  expect(shown()).toEqual(['', 'mousse/docs', 'develop'])
+
+  answer = fromBranches
+  await act(async () => { await vi.advanceTimersByTimeAsync(hook.FAILED_READ_AGAIN_MS) })
+  await settle()
+  expect(sorted(calls.at(-1)!)).toEqual({ threadIds: ['t1'], projectIds: [] })
+  expect(shown()[0]).toBe('mousse/fix-build')
+  await act(async () => { await vi.advanceTimersByTimeAsync(120_000) })
+  expect(calls).toHaveLength(2)
 })

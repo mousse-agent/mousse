@@ -2227,8 +2227,9 @@ export interface GitStatusSnapshot {
 export type GitFolderHead = { repo: boolean; branch: string | null; detachedAt?: string } | { error: string }
 
 /**
- * What a thread's card names (`git.heads`): its project's branch when it works in its project's folder or has no
- * worktree yet (`project`); else its own worktree's branch, null when detached (`detachedAt`). `folder` is the folder
+ * What a thread's card names (`git.heads`): its project's branch when it works in its project's folder (`project`);
+ * else its own worktree's branch, null when detached (`detachedAt`) or before Mousse records the worktree
+ * (`lifecycle: 'unprovisioned'`). `folder` is the folder
  * the thread works in, set only while its worktree is on disk and ready; without it the branch is the one Mousse
  * recorded, and `lifecycle` says why (`provisioning` while it is made; `ready` but not on disk once a storage rule
  * retired it), or `unavailable` says its drive is not answering. `generation` counts the worktree's rebuilds: Git

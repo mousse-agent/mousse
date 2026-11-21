@@ -4795,7 +4795,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         }),
         ...ids('threadIds').map(async (threadId) => {
           if (!ctx.mms.threads.getThread(threadId)) { threads[threadId] = { error: 'Thread not found' }; return }
-          threads[threadId] = await threadHead(ctx.mms.threads.getThreadDir(threadId))
+          threads[threadId] = await threadHead(ctx.mms.threads.getThreadDir(threadId), threadPlacement(ctx.mms.threads.getThread(threadId)))
         })
       ])
       return { projects, threads } satisfies GitHeadsResult

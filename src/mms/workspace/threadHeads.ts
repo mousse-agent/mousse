@@ -122,13 +122,16 @@ const sameFolder = (a: string, b: string): boolean =>
   process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b)
 
 /**
- * What a thread's card names: its project's branch (`project`) when it works in its project's folder or has no worktree
- * yet; else its worktree's branch, with the folder it works in when the worktree is on disk and ready. Reads files
- * only: it never sets a worktree up or brings one back.
+ * What a thread's card names: its project's branch (`project`) when it works in its project's folder; else its own
+ * worktree's branch, with the folder it works in when the worktree is on disk and ready. A worktree thread names no
+ * branch until Mousse records its worktree (`unprovisioned`), then the branch it records for it while it is made.
+ * Reads files only: it never sets a worktree up or brings one back.
  */
-export async function threadHead(threadDirectory: string): Promise<GitThreadHead> {
+export async function threadHead(threadDirectory: string, placement: 'worktree' | 'project-folder' = 'worktree'): Promise<GitThreadHead> {
   const record = await readRecord(threadDirectory)
-  if (!record || record.kind === 'project-folder') return { project: true }
+  if (record?.kind === 'project-folder' || (!record && placement === 'project-folder')) return { project: true }
+  // A thread that gets its own worktree, before it is made: no branch of its own yet, and never its project's.
+  if (!record) return { own: true, branch: null, generation: 0, lifecycle: 'unprovisioned' }
   const recorded = { own: true as const, branch: record.branch || null, generation: record.generation ?? 0, lifecycle: record.lifecycle }
   if (record.lifecycle !== 'ready') return recorded
   // A drive that does not answer: the branch Mousse recorded, and no folder to work in for now.

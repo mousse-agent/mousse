@@ -2,7 +2,8 @@
  * `git.heads`, the call behind the sidebar's thread cards: every card's branch without a Git process, and a push
  * (`git.headsChanged`) when Mousse makes a thread's worktree or renames its branch.
  *
- * Threads: one in its own worktree, one in its project's folder, one with no worktree yet, one whose worktree is not on
+ * Threads: one in its own worktree (heard of when its worktree is planned, made and renamed), one in its project's folder,
+ * one whose worktree is not made yet, one whose worktree is not on
  * disk (retired), one unknown; projects: a repository, and one unknown.
  */
 import * as childProcess from 'node:child_process'
@@ -79,14 +80,24 @@ const heads = (params: unknown) => dispatchMethod({ mms: main, globalSequence: (
 
 it('names every card’s branch without a Git process, and pushes a change when Mousse makes a worktree', { timeout: 180_000 }, async () => {
   const pushed: unknown[] = []
-  main.events.on('protocol:event', (event: { type?: string; data?: unknown }) => { if (event.type === 'git.headsChanged') pushed.push(event.data) })
+  /** What the card of the thread with its own worktree read each time it heard of a change. */
+  const readOnPush: Array<Promise<GitHeadsResult>> = []
   const own = main.threads.createThread('Own', projectId, repo, {})
+  main.events.on('protocol:event', (event: { type?: string; data?: { threadIds?: string[] } }) => {
+    if (event.type !== 'git.headsChanged') return
+    pushed.push(event.data)
+    if (event.data?.threadIds?.includes(own.id)) readOnPush.push(heads({ threadIds: [own.id] }))
+  })
   const folder = main.threads.createThread('Folder', projectId, repo, { worktreeEnabled: false })
   const fresh = main.threads.createThread('Fresh', projectId, repo, {})
+  // Before its first turn, a thread that gets its own worktree has no branch yet, and never its project's.
+  expect((await heads({ threadIds: [own.id] })).threads[own.id]).toEqual({ own: true, branch: null, generation: 0, lifecycle: 'unprovisioned' })
   await main.orchestrator.send({ content: 'go', mode: 'agent' }, false, { threadId: own.id })
   await main.orchestrator.send({ content: 'go', mode: 'agent' }, false, { threadId: folder.id })
   const workspace = new ThreadWorkspaceManager(main.threads.getThreadDir(own.id)).load()!
-  expect(pushed).toContainEqual({ threadIds: [own.id] })
+  // Heard once its worktree is planned and again once it is made: each time the card reads the branch Mousse recorded.
+  expect(readOnPush.length).toBeGreaterThanOrEqual(2)
+  for (const read of await Promise.all(readOnPush)) expect(read.threads[own.id]).toMatchObject({ own: true, branch: workspace.branch })
 
   // Mousse renames the thread's branch (the title model's name): the card hears it and reads the new name.
   pushed.length = 0
@@ -104,7 +115,7 @@ it('names every card’s branch without a Git process, and pushes a change when 
   expect(answer.projects['no-such-project']).toEqual({ error: 'Project not found' })
   expect(answer.threads[own.id]).toEqual({ own: true, branch: 'agent-branch', folder: workspace.worktreePath, generation: workspace.generation ?? 0, lifecycle: 'ready' })
   expect(answer.threads[folder.id]).toEqual({ project: true })
-  expect(answer.threads[fresh.id]).toEqual({ project: true })
+  expect(answer.threads[fresh.id]).toEqual({ own: true, branch: null, generation: 0, lifecycle: 'unprovisioned' })
   expect(answer.threads['no-such-thread']).toEqual({ error: 'Thread not found' })
 
   // Not on disk (a storage rule retired it): the branch Mousse recorded, and no folder to work in.

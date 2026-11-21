@@ -9,7 +9,8 @@ import {
   GitPullRequestClosed
 } from '../../lib/icons'
 import { openSurface } from '../../lib/surfaces'
-import { useActiveThreadPullRequest } from '../../hooks/useActiveThreadPullRequest'
+import { useActiveThreadPullRequest, type ActiveThreadPullRequest } from '../../hooks/useActiveThreadPullRequest'
+import { useAppStore } from '../../stores/appStore'
 import { useTransientError } from '../../hooks/useTransientError'
 import { abortGitInProgress, continueGitInProgress, GIT_STATUS_SLOW_ERROR, initGitRepository, pullGit, pushGitBranch, type GitStatusView } from '../../stores/gitStatusStore'
 import { cancelGitOperation, useGitOperation } from '../../stores/gitOperationStore'
@@ -484,15 +485,37 @@ export function GitSectionView({
   )
 }
 
+/** Nothing of a folder: what the section shows while another thread is being opened. */
+function nothingShown(source: ActiveThreadPullRequest): ActiveThreadPullRequest {
+  return {
+    ...source,
+    location: { ...source.location, path: null, key: null, loading: true, workspaceThreadId: null, workspaceGeneration: undefined, unavailable: undefined },
+    git: { status: null, commits: [], branches: null, diffStats: null, loading: true, loaded: false, error: null, refresh: source.git.refresh },
+    path: null,
+    ownThreadId: null,
+    folderThreadId: null,
+    link: null,
+    branch: null,
+    lookup: null,
+    detail: null,
+    detailError: null,
+    linked: false
+  }
+}
+
 /** The branch, how many files changed and the thread's pull requests, for the folder the thread works on. */
 export function GitSection({ threadId }: SideCardSectionContext) {
-  const { location, git, path, projectId, ownThreadId, link, lookup: pullRequest, detail, detailError } = useActiveThreadPullRequest(threadId)
+  const source = useActiveThreadPullRequest(threadId)
+  // A thread being opened is chosen in the sidebar while the chat still shows the one before (`openingThreadId`). The
+  // section shows nothing of the thread before: it says "Checking…" until the chosen thread's own folder answers.
+  const switching = useAppStore((s) => s.openingThreadId !== null && s.openingThreadId !== threadId)
+  const { location, git, path, projectId, ownThreadId, link, lookup: pullRequest, detail, detailError } = switching ? nothingShown(source) : source
   const { loading } = location
   // The folder lookup and the first status read together have a budget (a drive asleep, a busy service): past it the
   // section says so and offers Retry, and an answer that comes later still shows.
   const [attempt, setAttempt] = useState(0)
   // A first status read the store gave up on (`GIT_STATUS_SLOW_ERROR`) counts as not answering too.
-  const pathSlow = useStillPending(loading || (path !== null && !git.loaded), `${threadId ?? ''}:${attempt}`, GIT_LOOKUP_BUDGET_MS) || git.error === GIT_STATUS_SLOW_ERROR
+  const pathSlow = useStillPending(!switching && (loading || (path !== null && !git.loaded)), `${threadId ?? ''}:${attempt}`, GIT_LOOKUP_BUDGET_MS) || git.error === GIT_STATUS_SLOW_ERROR
   const collapse = {
     hasProject: projectId !== null,
     pathPending: loading,

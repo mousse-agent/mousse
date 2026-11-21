@@ -119,15 +119,37 @@ function flush() {
   void api.heads({ threadIds: [...threadIds], projectIds: [...projectIds] }).then((result) => {
     const now = Date.now()
     const changes: Record<string, BranchRead> = {}
+    const failed: string[] = []
     for (const { key, threadId, projectId } of reads) {
       if ((shownRead.get(key) ?? 0) > count) continue
       const read = threadId ? fromThread(result.threads[threadId]) : fromProject(result.projects[projectId])
-      if (!read) continue
+      if (!read) { failed.push(key); continue }
       shownRead.set(key, count)
       changes[key] = { ...read, readAt: now }
     }
     if (Object.keys(changes).length) useBranchReads.setState(changes)
-  }, () => undefined)
+    readAgainLater(failed)
+  }, () => readAgainLater(reads.map(({ key }) => key)))
+}
+
+/** How long after a read that failed (a drive that did not answer, a service restarting) its cards are read again. */
+export const FAILED_READ_AGAIN_MS = 15_000
+let again: ReturnType<typeof setTimeout> | undefined
+const againKeys = new Set<string>()
+
+/**
+ * Reads the cards whose read failed again a while later, while they still show: a card never stays without its branch
+ * until the next focus. Git's files only, and a drive that is not answering answers at once, so this costs nothing.
+ */
+function readAgainLater(keys: readonly string[]) {
+  for (const key of keys) againKeys.add(key)
+  if (again !== undefined || !againKeys.size) return
+  again = setTimeout(() => {
+    again = undefined
+    const due = [...againKeys].filter((key) => watched.has(key))
+    againKeys.clear()
+    request(due)
+  }, FAILED_READ_AGAIN_MS)
 }
 
 function attach() {
