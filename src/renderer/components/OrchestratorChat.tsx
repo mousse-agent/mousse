@@ -115,7 +115,7 @@ import { SetupFailureNotice } from '../chat/components/SetupFailureNotice'
 import { CommandInfoNotice, GoalNotice } from '../chat/components/GoalNotice'
 import { composerThreadActions } from '../lib/composerThreadActions'
 import { addPendingThreadRow, afterNextPaint, claimPendingThreadRow, dropPendingThreadRows, holdNewChat, isPendingRowId, pendingThreadRow, typedAfterSend, type PendingThreadRow } from '../lib/pendingThreadRows'
-import { type ComposerWorkspace, composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
+import { type ComposerWorkspace, composerWorkspaceFor, isComposerWorkspaceLocked, isNewEmptyThread, isWorkspacePending, newThreadWorktree, rememberedChoiceOf, withoutPicks, workspaceWithExpiry, workspaceWithPrivate } from '../lib/newThread'
 import { ComposerProjectPicker, ComposerThreadSettings, type ComposerDeviceProps } from './ComposerWorkspaceToolbar'
 import { ChatBrowserAccess } from './chats/ChatBrowserAccess'
 import { extractChatReferences, type ChatReference } from '../../shared/chatReferences'
@@ -293,6 +293,15 @@ export function OrchestratorChat() {
   // A new chat whose thread a send still has to make (none yet, or the empty one shown is of another project or
   // computer): it shows what its project remembers from the last pick there, and a pick waits with the draft.
   const createsThread = newChat && composerCreatesThread(activeThread, workspace)
+  // A new chat on its own empty thread of this computer: the checkout it shows is given to that thread at once, so the
+  // service prepares its worktree while the message is typed, or removes the prepared one when the project folder is
+  // picked. The send applies the pick as before.
+  const shownCheckout = newChat && activeThreadId && activeThread && !createsThread && !activeThread.node && workspace.projectId && !workspaceLocked ? workspace.worktreeEnabled : undefined
+  const threadCheckout = activeThread ? activeThread.worktreeEnabled ?? newThreadWorktree(projects, activeThread.projectId) : undefined
+  useEffect(() => {
+    if (shownCheckout === undefined || !activeThreadId || shownCheckout === threadCheckout) return
+    void window.mousse.threads.setWorktreeEnabled(activeThreadId, shownCheckout).catch(() => undefined)
+  }, [activeThreadId, shownCheckout, threadCheckout])
   const remembered = createsThread && !workspace.node ? rememberedChoiceOf(projects, workspace.projectId) : undefined
   const permissionMode = createsThread
     ? pickedMode ?? remembered?.permissionMode ?? defaultPermissionMode

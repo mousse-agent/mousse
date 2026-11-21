@@ -119,6 +119,9 @@ import { resolveThreadProjectPath } from '../data/resolveActiveProjectPath'
 import { ThreadJournal } from '../data/ThreadJournal'
 import { PROJECT_FOLDER_PUBLISH_REASON, PROJECT_FOLDER_REASON, threadPlacement } from '../workspace/threadPlacement'
 import { isProjectFolderWorkspace, ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { isPreparing, prepareThreadWorkspace, releasePreparedWorkspace } from '../workspace/workspacePreparation'
+import { isThreadStarted } from '../../shared/threadTitle'
+import { uncommittedLeftBehindNote } from '../workspace/WorkspaceResolver'
 import { clearStaleLeftMerges, liveCheckpointTest, recoveryErrorText, threadRecovery } from '../workspace/workspaceRecovery'
 import { resolveEditorFolder } from '../workspace/editorFolder'
 import type { NodeId } from '../../shared/net/ids'
@@ -210,6 +213,23 @@ function withoutLocalOnlyKeys<T>(ctx: HandlerContext, byThread: Record<string, T
   const hidden = localOnlyThreadIds(ctx.mms.threads.listAllThreads())
   if (!hidden.size) return byThread
   return Object.fromEntries(Object.entries(byThread).filter(([threadId]) => !hidden.has(threadId)))
+}
+
+/** Prepares the selected checkout while a window shows an empty local project thread. */
+function prepareShownNewThread(ctx: HandlerContext, threadId: string): void {
+  const thread = ctx.mms.threads.getThread(threadId)
+  if (!thread?.projectId || isThreadStarted(thread) || thread.settledAt || thread.lineage || thread.runsOn || thread.native || thread.hidden || thread.scheduledJobId) return
+  const project = ctx.mms.projects.getProject(thread.projectId)
+  const worktree = thread.worktreeEnabled ?? project?.newThread?.worktreeEnabled ?? ctx.mms.settings.get().runs.newThreadWorktree
+  if (!project?.path || !worktree || ctx.mms.orchestrator.isActiveTurnRunning(threadId)) return
+  try {
+    prepareThreadWorkspace({
+      threadId, threadDirectory: ctx.mms.threads.getThreadDir(threadId), projectPath: project.path,
+      startNote: () => uncommittedLeftBehindNote(project.path)
+    })
+  } catch (error) {
+    console.warn('[worktree-prep] not started', { threadId, error: error instanceof Error ? error.message : String(error) })
+  }
 }
 
 /** Remembers a person's pick in a thread for its project's next new thread (`Project.newThread`), and tells windows. */
@@ -1982,6 +2002,8 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A thread of this computer a window shows stays loaded in memory (`ThreadResidency`).
       if (!parseQualifiedId(threadId)) {
         if (ctx.connection?.clientType === 'gui') ctx.mms.orchestrator.setThreadViewed(ctx.connection.id, threadId, focused, ctx.connection.lifetime)
+        // A window opened a new thread: its worktree is prepared while the first message is typed.
+        if (focused && ctx.connection?.clientType === 'gui' && !ctx.connection.bridgeCaller) prepareShownNewThread(ctx, threadId)
         return { routed: false, focused: false }
       }
       return ctx.mms.threadRouter?.focus(ctx, threadId, focused) ?? { routed: false, focused: false }
@@ -2582,13 +2604,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A checkout the person picked is remembered for the project; one a send records as it was shown is not.
       const pickedCheckout = asOptionalBoolean(p.picked, 'picked') === true
       if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
-      // Refuse once an isolated workspace exists — the toggle is new-chat only.
-      const workspace = new ThreadWorkspaceManager(ctx.mms.threads.getThreadDir(threadId)).load()
-      if (workspace?.lifecycle === 'ready' || workspace?.lifecycle === 'provisioning') {
+      // Refuse once an isolated workspace exists — the toggle is new-chat only. A worktree prepared for the new thread that
+      // no message claimed does not lock it: turning the worktree off removes it while it is untouched.
+      const directory = ctx.mms.threads.getThreadDir(threadId)
+      const manager = new ThreadWorkspaceManager(directory)
+      if (!enabled && (manager.load()?.prepared || isPreparing(directory))) await releasePreparedWorkspace(directory)
+      const workspace = manager.load()
+      const unclaimed = Boolean(workspace?.prepared) || isPreparing(directory)
+      if (!(enabled && unclaimed) && (workspace?.lifecycle === 'ready' || workspace?.lifecycle === 'provisioning')) {
         throw new DomainRpcError('worktree_locked', 'Worktree mode is locked once a workspace is provisioned.')
       }
       const thread = ctx.mms.threads.setThreadWorktreeEnabled(threadId, enabled)
       if (pickedCheckout) rememberPick(ctx, threadId, { worktreeEnabled: enabled })
+      // Turned on in a window's new thread: its worktree is prepared while the first message is typed.
+      if (enabled && ctx.connection?.clientType === 'gui' && !ctx.connection.bridgeCaller) prepareShownNewThread(ctx, threadId)
       const { threads, version } = ctx.mms.threads.listAllThreadsVersioned()
       ctx.emitEvent?.('threads.updated', { threads })
       return { thread, threads: listedThreadsFor(ctx, threads), version }

@@ -2902,6 +2902,7 @@ export class MmsProfileServices {
     // Idle threads leave memory and reload from disk when next needed; the feature flag is the kill switch.
     this.orchestrator.residency?.setEnabled(() => this.config.get().features.releaseIdleThreads !== false)
     startupPhase('start.residency', () => this.orchestrator.residency?.start())
+    this.orchestrator.startPreparedWorkspaceCleanup()
     // Threads still on JSON files move to thread.db in the background, one at a time.
     startupPhase('start.threadImport', () => this.threads.startBackgroundImport())
     // Wallpaper images no theme has used for a week go, in the background.

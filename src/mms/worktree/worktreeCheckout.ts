@@ -1,5 +1,6 @@
-import { readFile } from 'node:fs/promises'
-import { isAbsolute, resolve } from 'node:path'
+import { readFile, realpath, stat } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { isAbsolute, parse, resolve } from 'node:path'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
 
@@ -21,8 +22,15 @@ export const SPARSE_CHECKOUT_SETTING = 'mousse.sparseCheckout'
 export interface WorktreeCheckoutPlan {
   /** Global `-c` options for the commands that write the worktree's files. */
   settings: readonly string[]
+  /** Hash of the checkout and filter configuration used when preparing a draft. */
+  configuration?: string
   /** The project's sparse-checkout patterns, when it names a file of them. */
   sparse?: { file: string; patterns: string; cone: boolean }
+}
+
+/** The sparse layout that determines which files a draft's checkout contains. */
+export function checkoutLayoutKey(plan: WorktreeCheckoutPlan): string {
+  return createHash('sha256').update(JSON.stringify([plan.configuration, plan.sparse?.cone, plan.sparse?.patterns])).digest('hex')
 }
 
 /** Runs one Git command; `input` is its standard input. Throws when Git fails. */
@@ -49,11 +57,14 @@ function patternLines(text: string): string[] {
  * before anything is made, when the project names a pattern file that is missing or empty, or Git cannot keep the
  * sparse checkout to the new worktree alone. `sparse: false` leaves the pattern file out (a full checkout).
  */
-export async function worktreeCheckoutPlan(top: string, run: WorktreeGit = worktreeGit, options: { sparse?: boolean } = {}): Promise<WorktreeCheckoutPlan> {
+export async function worktreeCheckoutPlan(top: string, run: WorktreeGit = worktreeGit, options: { sparse?: boolean; matchPreparation?: boolean } = {}): Promise<WorktreeCheckoutPlan> {
   const config = new Map<string, string>()
+  const layout = 'checkout\\.workers|mousse\\.sparsecheckout|extensions\\.worktreeconfig'
+  const affectsBytes = 'core\\.(autocrlf|eol|symlinks|sparsecheckout|sparsecheckoutcone)$|filter\\.|lfs\\.'
   try {
     // `-z`: each entry is "key\nvalue\0", so a path with spaces or a newline reads whole.
-    const out = String(await run(top, ['config', '-z', '--get-regexp', '^(checkout\\.workers|mousse\\.sparsecheckout|extensions\\.worktreeconfig)$']))
+    const keys = options.matchPreparation ? `^(${layout}$|${affectsBytes})` : `^(${layout})$`
+    const out = String(await run(top, ['config', '-z', '--get-regexp', keys]))
     for (const entry of out.split('\0')) {
       const newline = entry.indexOf('\n')
       if (newline > 0) config.set(entry.slice(0, newline).toLowerCase(), entry.slice(newline + 1))
@@ -63,8 +74,11 @@ export async function worktreeCheckoutPlan(top: string, run: WorktreeGit = workt
     if ((error as { status?: unknown }).status !== 1) throw error
   }
   const settings = config.has('checkout.workers') ? [] : ['-c', 'checkout.workers=0']
+  const configuration = options.matchPreparation
+    ? { configuration: createHash('sha256').update(JSON.stringify([...config].sort())).digest('hex') }
+    : {}
   const named = config.get('mousse.sparsecheckout')?.trim()
-  if (!named || options.sparse === false) return { settings }
+  if (!named || options.sparse === false) return { settings, ...configuration }
   const file = isAbsolute(named) ? named : resolve(top, named)
   let text: string
   try {
@@ -80,14 +94,91 @@ export async function worktreeCheckoutPlan(top: string, run: WorktreeGit = workt
   const cone = !lines.some((line) => PATTERN_CHARACTERS.test(line))
   // Cone mode takes folders: a leading or trailing slash is dropped.
   const patterns = (cone ? lines.map((line) => line.replace(/^\/+|\/+$/g, '')).filter(Boolean) : lines).join('\n') + '\n'
-  return { settings, sparse: { file, patterns, cone } }
+  return { settings, ...configuration, sparse: { file, patterns, cone } }
 }
 
 /**
- * `git worktree add <add...>` from `cwd`, writing the files as `plan` says. `prefix` goes before every command (a
- * pull request's safety settings, the long-paths setting). `afterAdd` runs once the worktree is registered: before
- * its files are written in a sparse checkout, right after them otherwise.
+ * How many worktrees may write their files at once on one volume (`MOUSSE_CHECKOUTS_PER_DISK`, default 1). Each checkout
+ * already writes with one worker per core, so two at once on one disk only slow each other down: on a hard disk the
+ * second of two starts finished later than when they took turns. A start waits only for checkouts on the volume its own
+ * worktree is on. Partitions of one physical disk count as separate volumes.
  */
+export const CHECKOUTS_PER_DISK_DEFAULT = 1
+
+function checkoutsPerDisk(): number {
+  const named = Number(process.env.MOUSSE_CHECKOUTS_PER_DISK)
+  return Number.isInteger(named) && named >= 1 && named <= 16 ? named : CHECKOUTS_PER_DISK_DEFAULT
+}
+
+/** The volume a path is on: its drive or share on Windows, the file system's top folder elsewhere. */
+async function checkoutVolumeOf(path: string): Promise<string> {
+  if (process.platform !== 'win32') return String((await stat(path)).dev)
+  return parse(await realpath(path)).root.toLowerCase()
+}
+
+const checkoutQueues = new Map<string, { running: number; waiting: Array<() => void> }>()
+
+/**
+ * Runs `work` once fewer than `MOUSSE_CHECKOUTS_PER_DISK` checkouts run on the volume of `path`, first come first
+ * served. `volumeOf` maps a path to its volume.
+ */
+export async function withCheckoutSlot<T>(path: string, work: () => Promise<T>): Promise<T> {
+  const key = await checkoutVolumeOf(path)
+  let queue = checkoutQueues.get(key)
+  if (!queue) checkoutQueues.set(key, queue = { running: 0, waiting: [] })
+  const slots = queue
+  if (slots.running >= checkoutsPerDisk()) await new Promise<void>((resolve) => slots.waiting.push(resolve))
+  else slots.running++
+  try {
+    return await work()
+  } finally {
+    // The slot passes straight to the next waiter, so a start that arrives meanwhile cannot take it out of turn.
+    const next = slots.waiting.shift()
+    if (next) next()
+    else if (--slots.running === 0) checkoutQueues.delete(key)
+  }
+}
+
+/**
+ * Registers a worktree with `git worktree add --no-checkout <add...>` from `cwd`: its branch, its folder and Git's
+ * record of it, but none of its files. It is quick, so it is the only step that needs the repository's lease.
+ * `afterAdd` runs once it is registered, before any file is written.
+ */
+export async function registerWorktree(input: {
+  cwd: string
+  add: readonly string[]
+  prefix?: readonly string[]
+  run?: WorktreeGit
+  afterAdd?: () => Promise<void>
+}): Promise<void> {
+  const run = input.run ?? worktreeGit
+  await run(input.cwd, [...(input.prefix ?? []), 'worktree', 'add', '--no-checkout', ...input.add])
+  await input.afterAdd?.()
+}
+
+/**
+ * Writes the files of a worktree {@link registerWorktree} made, as `plan` says: the sparse-checkout patterns first when
+ * the project names them, then the checkout of HEAD, in a slot of its volume ({@link withCheckoutSlot}). It needs no
+ * repository lease: only this worktree's own index, settings and folder are written.
+ */
+export async function populateWorktree(input: {
+  worktreePath: string
+  plan: WorktreeCheckoutPlan
+  prefix?: readonly string[]
+  run?: WorktreeGit
+  beforeCheckout?: () => Promise<void>
+}): Promise<void> {
+  const run = input.run ?? worktreeGit
+  const prefix = input.prefix ?? []
+  const { settings, sparse } = input.plan
+  await withCheckoutSlot(input.worktreePath, async () => {
+    await input.beforeCheckout?.()
+    if (sparse) await run(input.worktreePath, [...prefix, 'sparse-checkout', 'set', sparse.cone ? '--cone' : '--no-cone', '--stdin'], sparse.patterns)
+    await run(input.worktreePath, [...prefix, ...settings, 'checkout', 'HEAD'])
+  })
+}
+
+/** Makes a worktree for callers that own both steps (agents, workflow agents and rebuilds). */
 export async function addWorktree(input: {
   cwd: string
   worktreePath: string
@@ -97,16 +188,12 @@ export async function addWorktree(input: {
   run?: WorktreeGit
   afterAdd?: () => Promise<void>
 }): Promise<void> {
-  const run = input.run ?? worktreeGit
-  const prefix = input.prefix ?? []
-  const { settings, sparse } = input.plan
-  if (!sparse) {
-    await run(input.cwd, [...prefix, ...settings, 'worktree', 'add', ...input.add])
+  if (!input.plan.sparse) {
+    const run = input.run ?? worktreeGit
+    await run(input.cwd, [...(input.prefix ?? []), ...input.plan.settings, 'worktree', 'add', ...input.add])
     await input.afterAdd?.()
     return
   }
-  await run(input.cwd, [...prefix, 'worktree', 'add', '--no-checkout', ...input.add])
-  await input.afterAdd?.()
-  await run(input.worktreePath, [...prefix, 'sparse-checkout', 'set', sparse.cone ? '--cone' : '--no-cone', '--stdin'], sparse.patterns)
-  await run(input.worktreePath, [...prefix, ...settings, 'checkout', 'HEAD'])
+  await registerWorktree(input)
+  await populateWorktree(input)
 }
