@@ -139,6 +139,11 @@ export class EnginePairing {
   private readonly retries = new Map<NodeId, ReturnType<typeof setTimeout>>()
   /** Send links this computer shows, by invitation: the code to read out and the tries left (§5.1). */
   private readonly linkInvites = new Map<string, NetEngineLinkInvite>()
+  /**
+   * Each shown link's tries before the attempt now running: the helper takes a try when an attempt starts and shows
+   * the next code then, so a right code gives the try back.
+   */
+  private readonly triesBefore = new Map<string, number>()
   /** Send link joins running here, by invitation: whether the helper waits for the code (§5.3). */
   private readonly linkJoins = new Map<string, NetEngineLinkJoin>()
   /** Rows whose Send link did not finish and has no outcome to recover: "Pairing didn't finish" (§5.4). */
@@ -237,6 +242,7 @@ export class EnginePairing {
 
   async cancelInvite(invitation: string): Promise<void> {
     this.linkInvites.delete(invitation)
+    this.triesBefore.delete(invitation)
     await this.helper().request('invite.cancel', { invitation })
     for (const [request, approval] of this.approvals)
       if (approval.invitation === invitation) this.approvals.delete(request)
@@ -727,6 +733,9 @@ export class EnginePairing {
     if (shown) {
       const node = peers.byEndpoint(identity)?.localId
       if (node) shown.node = node
+      // Used: the right code's try comes back, and no next code is shown.
+      shown.attemptsLeft = this.triesBefore.get(shown.invitation) ?? shown.attemptsLeft
+      shown.code = ''
       this.port.changed()
     }
   }
@@ -956,7 +965,10 @@ export class EnginePairing {
           const shown = this.linkInvites.get(String(event.invitation))
           if (!shown) return
           if (typeof event.code === 'string') shown.code = event.code
-          if (typeof event.attempts_left === 'number') shown.attemptsLeft = event.attempts_left
+          if (typeof event.attempts_left === 'number') {
+            this.triesBefore.set(shown.invitation, shown.attemptsLeft)
+            shown.attemptsLeft = event.attempts_left
+          }
           this.port.changed()
           return
         }

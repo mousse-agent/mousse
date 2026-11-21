@@ -151,6 +151,14 @@ export class FakeNetwork {
    * (1b: routes with approvals, `routes.config`, `routes.test`, `conn.up.route`).
    */
   minor = 0
+  /**
+   * Whether connections carry calls both ways (wire minor 3): `conn.up {both}`; the dialled side may open streams
+   * on the dialler's connection, which its helper passes on as `stream.incoming` with the dialler's own live grant
+   * for the dialled side (refused without one). Off: such opens answer `one_way`.
+   */
+  bothWays = false
+  /** Identities no one can dial (a computer that only dials out, behind its firewall); they still dial others. */
+  readonly outboundOnly = new Set<string>()
   /** What each identity's helper listens on besides what it advertises (its loopback listener, say). */
   readonly listening = new Map<string, string[]>()
   /** Each identity's kept TCP port (`hello.port`). */
@@ -341,7 +349,8 @@ export class FakeNetwork {
     if (!this.peers.get(from.identity)?.has(identity))
       throw Object.assign(new Error('not paired with that identity'), { code: 'no_peer' })
     const to = this.helpers.get(identity)
-    if (!to || !to.alive) throw Object.assign(new Error('unreachable'), { code: 'unreachable' })
+    if (!to || !to.alive || this.outboundOnly.has(identity))
+      throw Object.assign(new Error('unreachable'), { code: 'unreachable' })
     const grant = this.grants.get(identity)?.get(from.identity)
     if (grant === undefined) throw Object.assign(new Error('not allowed'), { code: 'forbidden' })
     const route = this.route(from.identity, identity, candidates)
@@ -398,6 +407,16 @@ export class FakeNetwork {
     theirs.other = mine
     conn.ends.add(mine)
     conn.ends.add(theirs)
+    if (conn.a === to) {
+      // The dialled side calls its dialler: served under the dialler's own live grant for it, else refused.
+      const grant = this.grants.get(to.identity)?.get(from.identity)
+      if (grant === undefined) {
+        setImmediate(() => this.reset(theirs, 'refused'))
+        return mine
+      }
+      to.incoming(theirs, conn.id[to.identity]!, label, cls, { grant, role: 'owner' })
+      return mine
+    }
     to.incoming(theirs, conn.id[to.identity]!, label, cls)
     return mine
   }
@@ -681,6 +700,7 @@ export class FakeHelper {
       dir,
       ...fields,
       deadline: 0,
+      both: this.network.bothWays,
       ...(conn.route ? { route: conn.route } : {})
     })
   }
@@ -710,8 +730,14 @@ export class FakeHelper {
     return end
   }
   /** @internal The other side opened a stream: the app hears of it and may write once it has credit. */
-  incoming(end: End, conn: number, label: string, cls: string): void {
-    this.event({ ev: 'stream.incoming', conn, handle: end.handle, label, class: cls })
+  incoming(
+    end: End,
+    conn: number,
+    label: string,
+    cls: string,
+    served?: { grant: number | string; role: string }
+  ): void {
+    this.event({ ev: 'stream.incoming', conn, handle: end.handle, label, class: cls, ...served })
     this.send(creditFrame(end.handle, STREAM_CREDIT))
   }
   /** @internal Bytes for this side's app, under the credit it granted; FIN after them. */
@@ -929,8 +955,20 @@ export class FakeHelper {
     const record = this.network.flowsOf(this).get(waiting.hash)!
     this.codeWaits.delete(invitation)
     if (!host?.alive) return waiting.reply({ error: 'no_route', reason: 'the host went away' })
-    if (code === waiting.invite.code && !waiting.changed)
+    if (code === waiting.invite.code && !waiting.changed) {
+      // As the engine's host does, a try is taken when an attempt starts, and the next code shows, before the result.
+      waiting.invite.attemptsLeft -= 1
+      if (waiting.invite.attemptsLeft > 0) {
+        waiting.invite.code = newCode()
+        host.event({
+          ev: 'invite.code',
+          invitation: waiting.invite.invitation,
+          code: waiting.invite.code,
+          attempts_left: waiting.invite.attemptsLeft
+        })
+      }
       return this.linkPaired(host, waiting.invite, record, waiting.reply, waiting.candidates)
+    }
     // A pinned join trusted as journaled (the defect): a failed key confirmation ends as "already paired".
     if (waiting.pinned && this.network.defects.has('journal-pins-link'))
       return waiting.reply({ identity: host.identity, name: host.identity, role: 'owner', already: true })
@@ -1388,6 +1426,9 @@ export class FakeHelper {
         case 'stream.open': {
           const conn = this.conns.get(Number(message.conn))
           if (!conn || !conn.up) return reply({ error: 'peer_offline' })
+          // Toward the dialler only on a both-ways connection (minor 3).
+          if (conn.b === this && !this.network.bothWays)
+            return reply({ error: 'one_way', reason: 'the caller on this connection does not take calls on it' })
           const end = this.network.open(this, conn, String(message.label), String(message.class))
           reply({ handle: end.handle })
           this.send(creditFrame(end.handle, STREAM_CREDIT))

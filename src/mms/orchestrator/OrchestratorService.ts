@@ -8924,8 +8924,13 @@ export class OrchestratorService extends EventEmitter {
       store: engine.store,
       thread: (threadId) => this.threadStore?.getThread(threadId),
       hasPendingQuestion: (threadId) => this.questions.listPendingForThread(threadId).length > 0,
-      remote: (threadId) => this.threadStore?.getThread(threadId)?.runsOn ? this.remoteSubagents?.overlay(threadId) : undefined
+      remote: (threadId) => this.remoteSubagentOverlay(threadId)
     }, parentThreadId)
+  }
+
+  /** What a remote subagent's stand-in thread shows from its computer (`subagents.list` and the agent tools alike). */
+  remoteSubagentOverlay(threadId: string) {
+    return this.threadStore?.getThread(threadId)?.runsOn ? this.remoteSubagents?.overlay(threadId) : undefined
   }
 
   private titleOf(threadId: string): string | undefined {
