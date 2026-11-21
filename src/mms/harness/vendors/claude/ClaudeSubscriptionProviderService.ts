@@ -54,7 +54,7 @@ import {
   type StoredCliConfig
 } from '../../cliConfig'
 import { resolveWindowsShim } from '../../resolveWindowsShim'
-import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeChoosesCacheTtl, claudeEffectiveVariable, claudeSignInEnvironment, claudeTurnVariable } from './accountSubject'
+import { claudeAccountSubject, claudeAutoModeDisabled, claudeBypassDisabled, claudeChoosesCacheTtl, claudeEffectiveVariable, claudeSignInEnvironment, claudeTurnCredentialKey, claudeTurnVariable } from './accountSubject'
 import {
   ClaudeMetricsCollector,
   ClaudeNativeEditCounter,
@@ -113,9 +113,10 @@ export const CLAUDE_SUBSCRIPTION_PROVIDER_ID = 'claude-subscription'
  * A bot's chat turn adds what its process was started with (`claudeBotLaunchKey`): a change of any of it, the model
  * and effort included, needs a new process. So does another account: a process holds the sign-in it started with.
  */
-const HARD_PARTS = ['instance', 'folder', 'instructions', 'Mousse server or its tools', 'read-only policy', 'bot launch', 'account']
+const HARD_PARTS = ['instance', 'folder', 'instructions', 'Mousse server or its tools', 'read-only policy', 'bot launch', 'account', 'turn credentials']
 /** Where the account is in the key (`HARD_PARTS`). */
 const ACCOUNT_PART = HARD_PARTS.indexOf('account')
+const TURN_CREDENTIALS_PART = HARD_PARTS.indexOf('turn credentials')
 
 /** Removes the folder of a bot process's settings file (`claudeLockedSettingsFile`) once nothing reads it. Never throws. */
 function removeSettingsFolder(folder: string): void {
@@ -1849,11 +1850,7 @@ export class ClaudeSubscriptionProviderService {
           if (this.stopped) throw new Error('Claude provider is stopped')
           const child = spawnProviderProcess(command, args, { cwd, env, signal })
           const tree = windowsProviderTree(child)!
-          this.windowsTrees.add(tree)
-          void tree.exited.then(() => this.windowsTrees.delete(tree), (error: unknown) => {
-            this.windowsTrees.delete(tree)
-            console.warn('[claude-subscription] Windows provider drain failed', String(error))
-          })
+          this.trackWindowsTree(tree)
           child.stderr.on('data', (chunk: Buffer) => stderr?.(chunk.toString()))
           child.stderr.once('close', () => tail?.end())
           if (child.pid !== undefined) onSpawned(child.pid, tree)
@@ -2491,6 +2488,15 @@ export class ClaudeSubscriptionProviderService {
   /** Process trees being ended (`reapClosed`). */
   private readonly reaping = new Set<Promise<void>>()
   private readonly windowsTrees = new Set<WindowsProviderTree>()
+
+  private trackWindowsTree(tree: WindowsProviderTree): void {
+    this.windowsTrees.add(tree)
+    void tree.exited.then(() => this.windowsTrees.delete(tree), (error: unknown) => {
+      this.windowsTrees.delete(tree)
+      console.warn('[claude-subscription] Windows provider drain failed', String(error))
+    })
+  }
+
   /** Threads that hold a live Claude process (diagnostics and tests). */
   liveThreadIds(): string[] {
     return [...this.live].filter(([, live]) => !live.dead).map(([threadId]) => threadId)
@@ -2533,7 +2539,7 @@ export class ClaudeSubscriptionProviderService {
    */
   private reusableLive(threadId: string, hard: readonly unknown[], resume: string | undefined, historyNow: string): LiveSession<TurnContext> | undefined {
     const live = this.live.get(threadId)
-    if (!hard[ACCOUNT_PART] || !live || live.dead || live.sessionId === undefined) return undefined
+    if (!hard[ACCOUNT_PART] || !hard[TURN_CREDENTIALS_PART] || !live || live.dead || live.sessionId === undefined) return undefined
     if (JSON.stringify(hard) !== JSON.stringify(live.meta.hardParts)) return undefined
     // The history this request carries must be the one the process holds: the saved fingerprint says
     // so, or, after a turn that did not finish, the boundary that turn left (`expectedKey`). A history
@@ -3403,7 +3409,17 @@ export class ClaudeSubscriptionProviderService {
       const signIn = await this.readSignIn(env, controller.signal, owner)
       if (signIn.result.kind !== 'signed_in')
         throw new AppError({ code: 'claude_subscription_sign_in_required', message: signIn.result.message, errorInfo: { category: 'unavailable', retryable: false } })
+      const extraArgs = locked ? {} : claudeExtraArgs(storedCliArgs(this.launchSettings()))
+      const turnCredentials = () => locked ? 'locked' :
+        'settings' in extraArgs || 'setting-sources' in extraArgs ? undefined :
+        claudeTurnCredentialKey(input.cwd, this.dependencies.settingSources, turnSettings)
+      const credentialKey = turnCredentials()
       const assertSignIn = () => {
+        if (credentialKey !== turnCredentials()) {
+          const previous = this.live.get(input.threadId)
+          if (previous) this.closeLiveSession(input.threadId, previous)
+          throw new Error('The Claude Code sign-in changed before the turn could be sent. Try again.')
+        }
         if (owner && (signIn.epoch !== this.signInEpoch || this.signedOut()))
           throw new Error('The Claude Code sign-in changed before the turn could be sent. Try again.')
       }
@@ -3443,7 +3459,8 @@ export class ClaudeSubscriptionProviderService {
         input.mcp ? [input.mcp.url, input.mcp.tools ?? null] : null,
         readOnlyChild,
         botWarm ? claudeBotLaunchKey(botWarm, claudeLockedOptions(lockedTurn!, { env, mousseTools: Boolean(input.mcp) }), flags) : null,
-        signIn.identity ?? null
+        signIn.identity ?? null,
+        credentialKey ?? null
       ]
       const reusable = input.continuation ? undefined : this.reusableLive(input.threadId, hard, resume, historyNow)
       /** The prompt, with the history in front when no session holds it: none resumed, cut or kept warm. */
@@ -3550,11 +3567,18 @@ export class ClaudeSubscriptionProviderService {
       // A locked turn: the locked profile over everything above, and nothing that would widen it.
       const lockedOptions = (settingsFolder: string, sdkController: AbortController, turnOf: () => TurnContext): Options => {
         const base = buildOptions(sdkController, turnOf, false)
+        const spawnLocked = locked!.ownerEntry ? undefined : claudeLockedSpawn({
+          onProcess: locked!.onProcess,
+          onWindowsTree: (tree) => this.trackWindowsTree(tree)
+        })
         const own = claudeLockedOptions(lockedTurn!, {
           env,
           mousseTools: Boolean(input.mcp),
           // On the owner's entry the process is the turn's own and the SDK's: the turn's signal ends it.
-          ...(locked!.ownerEntry ? {} : { spawn: claudeLockedSpawn(locked!.onProcess ? { onProcess: locked!.onProcess } : {}) })
+          ...(spawnLocked ? { spawn: (options) => {
+            if (this.stopped) throw new Error('Claude provider is stopped')
+            return spawnLocked(options)
+          } } : {})
         })
         const settings = { ...(typeof base.settings === 'object' ? base.settings : {}), ...(own.settings as SdkSettings) }
         const options: Options = { ...base, ...own, settings: claudeLockedSettingsFile(settings, settingsFolder) }
@@ -3579,8 +3603,10 @@ export class ClaudeSubscriptionProviderService {
       if (input.continuation) {
         // Claude started this turn itself: it joins the one already in flight and pushes no prompt.
         live = this.live.get(input.threadId)
-        const wake = signIn.identity && live && !live.dead && live.meta.hardParts?.[ACCOUNT_PART] === signIn.identity
-          ? live.claimContinuation(input.continuationId) : undefined
+        const sameCredentials = signIn.identity && credentialKey && live &&
+          live.meta.hardParts?.[ACCOUNT_PART] === signIn.identity && live.meta.hardParts[TURN_CREDENTIALS_PART] === credentialKey
+        if (live && !sameCredentials) this.closeLiveSession(input.threadId, live)
+        const wake = sameCredentials && live && !live.dead ? live.claimContinuation(input.continuationId) : undefined
         if (!live || !wake) throw new Error('Claude has no turn of its own to continue for this thread')
         liveRun = wake
         live.current = turn
@@ -3612,7 +3638,11 @@ export class ClaudeSubscriptionProviderService {
         try {
           // A bot's chat turn on the owner's entry runs on its warm process (`botWarm`); every other bot turn is one query.
           // The warm process's settings file lives as long as it does, in a folder of its own.
-          live = (locked && !botWarm) || !signIn.identity ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
+          if (!credentialKey) {
+            const previous = this.live.get(input.threadId)
+            if (previous) this.closeLiveSession(input.threadId, previous)
+          }
+          live = (locked && !botWarm) || !signIn.identity || !credentialKey ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
             created.current = turn
             if (!botWarm) return buildOptions(created.lifetime, () => created.current ?? turn, true)
             const folder = mkdtempSync(join(tmpdir(), 'mousse-claude-settings-'))

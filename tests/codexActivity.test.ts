@@ -270,6 +270,7 @@ describe('the activity fixture through the Codex adapter', () => {
   const questions = new UserQuestionService()
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'mousse-codex-activity-'))
+    writeFileSync(join(home, 'auth.json'), JSON.stringify({ tokens: { account_id: 'fixture-workspace', access_token: 'fixture-token' } }))
     mkdirSync(join(home, 'work'))
   })
   afterEach(() => {
@@ -285,7 +286,7 @@ describe('the activity fixture through the Codex adapter', () => {
     chmodSync(binary, 0o755)
     mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
     writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }] }))
-    const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { launch: () => ({ binaryPath: binary }) })
+    const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: binary }) })
     services.push(service)
     const tools: StreamingLlmToolEvent[] = []
     const sink = new Proxy({}, { get: (_target, name) => (name === 'tool' ? (event: StreamingLlmToolEvent) => tools.push(event) : () => undefined) }) as TurnSink
@@ -385,6 +386,7 @@ describe('Codex activity against a scripted app-server', () => {
   beforeEach(() => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     home = mkdtempSync(join(tmpdir(), 'mousse-codex-activity-s-'))
+    writeFileSync(join(home, 'auth.json'), JSON.stringify({ tokens: { account_id: 'fixture-workspace', access_token: 'fixture-token' } }))
     const binary = join(home, 'codex')
     writeFileSync(binary, '#!/bin/sh\nexit 0\n')
     chmodSync(binary, 0o755)
@@ -458,7 +460,7 @@ describe('Codex activity against a scripted app-server', () => {
   }
 
   function create(s: ReturnType<typeof server>, dependencies: Record<string, unknown> = {}): CodexProviderService {
-    const service = new CodexProviderService(home, questions, { launch: s.launch, ...dependencies }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+    const service = new CodexProviderService(home, questions, { launch: s.launch, ...dependencies }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(service)
     return service
   }

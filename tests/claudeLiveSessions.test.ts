@@ -137,6 +137,37 @@ describe('a live Claude query', () => {
     void home
   })
 
+  it.each(['settings.json', 'settings.local.json'])('replaces the warm process when %s changes its API key', async (file) => {
+    const { cli, turn, service, home } = fixture()
+    const folder = join(home, '.claude')
+    mkdirSync(folder)
+    const settings = join(folder, file)
+    const saveKey = (key: string) => writeFileSync(settings, JSON.stringify({ env: { ANTHROPIC_API_KEY: key } }))
+    try {
+      saveKey('first-fixture-key')
+      await turn({ prompt: 'first' })
+      const first = cli.last
+      await turn({ prompt: 'same key' })
+      expect(cli.last).toBe(first)
+
+      saveKey('second-fixture-key')
+      await turn({ prompt: 'new key' })
+      expect(cli.last).not.toBe(first)
+      expect(first.closed).toBe(true)
+      expect(first.inputs).toHaveLength(2)
+
+      writeFileSync(settings, JSON.stringify({ apiKeyHelper: 'fixture-credential-helper' }))
+      const second = cli.last
+      await turn({ prompt: 'helper' })
+      expect(second.closed).toBe(true)
+      const helper = cli.last
+      await turn({ prompt: 'helper again' })
+      expect(cli.last).not.toBe(helper)
+    } finally {
+      await service.stop()
+    }
+  })
+
   it('a turn aborted before Claude started its prompt cancels the queued prompt and keeps the process', async () => {
     const { cli, chat } = fixture()
     silent(cli)

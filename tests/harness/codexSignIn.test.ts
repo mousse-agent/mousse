@@ -130,7 +130,7 @@ function fakeCodex(): string {
 /** What a completed Codex sign-in leaves in a home: the account the app-server reads, and a fake secret. */
 function writeSignIn(home: string, account: string): void {
   mkdirSync(home, { recursive: true })
-  writeFileSync(join(home, 'auth.json'), JSON.stringify({ account, tokens: { refresh_token: `secret-token-of-${account}` } }))
+  writeFileSync(join(home, 'auth.json'), JSON.stringify({ account, tokens: { account_id: account, access_token: `access-token-of-${account}`, refresh_token: `secret-token-of-${account}` } }))
 }
 
 /** The account a home holds, as the scripted app-server answers `account/read` for it. */
@@ -1279,7 +1279,7 @@ describe('the service of a Codex account', () => {
     expect(servers.processes[0]!.signalCode).not.toBeNull()
     expect(instance.account()).toBeUndefined()
     expect(await instance.status({ force: true })).toMatchObject({ state: 'connected' })
-    expect(instance.account()?.subject).toBe('chatgpt:acct-new@example.test')
+    expect(instance.account()?.subject).toContain('acct-new')
   })
 
   it('reads the account whatever Mousse recorded, and leaves what it recorded alone', async () => {

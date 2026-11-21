@@ -23,7 +23,7 @@ import type { DriverContext, DriverRuntime } from '../../src/mms/harness/driver'
 import { instanceEnv } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { spawnCodexAppServer, type CodexLaunch, type CodexProcess } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
-import { CODEX_MAX_IDLE_THREADS, CodexTurnFailure, type CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
+import { CODEX_MAX_LOADED_THREADS, CodexTurnFailure, type CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
 import { codexHarnessError } from '../../src/mms/harness/drivers/codex/adapter'
 import { FakeIssuer, plainCodec } from './chatgpt/fakeIssuer'
 import { signIn } from './chatgpt/signInFlow'
@@ -346,17 +346,17 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
   it('reaps the old app-server at the idle cap when its acknowledged unload is delayed', async () => {
     const { turn, processes } = await setup()
     const ids: string[] = []
-    for (let index = 0; index < CODEX_MAX_IDLE_THREADS; index += 1) {
+    for (let index = 0; index < CODEX_MAX_LOADED_THREADS; index += 1) {
       const { result } = await turn('idle-' + index, 'Hello ' + index)
       ids.push(result.codexThreadId)
     }
     expect(processes).toHaveLength(1)
     expect(new Set(await loadedThreads(processes[0]!))).toEqual(new Set(ids))
-    await turn('overflow', 'Send one more.')
+    const overflow = await turn('overflow', 'Send one more.')
     expect(processes[0]!.exitCode !== null || processes[0]!.signalCode !== null).toBe(true)
     const { result } = await turn('next', 'On the replacement.')
     expect(processes).toHaveLength(2)
-    expect(await loadedThreads(processes[1]!)).toEqual([result.codexThreadId])
+    expect(new Set(await loadedThreads(processes[1]!))).toEqual(new Set([overflow.result.codexThreadId, result.codexThreadId]))
   })
 
   it('switches to a new server and submits copied history under the new account', async () => {

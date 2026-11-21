@@ -3,6 +3,7 @@ import { idleCloseFromEnv } from '../../idleCloseFromEnv'
 import type { ChildProcess } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { AppError, redactSecrets } from '../../../../shared/errors'
 import { CODEX_INSTANCE_ID } from '../../../../shared/providerInstances'
@@ -145,11 +146,8 @@ const TREE_MAX_PAGES = 100
 export const CODEX_IDLE_CLOSE_MS = idleCloseFromEnv('MOUSSE_CODEX_IDLE_CLOSE_MS', 15 * 60_000)
 /** ...or after a sign-in check or model listing that started it. */
 export const CODEX_CHECK_CLOSE_MS = 5_000
-/**
- * Threads the process keeps loaded with no turn on them, most recently used first; an older one is let go
- * (`thread/unsubscribe`) when a turn ends, and its next turn resumes it.
- */
-export const CODEX_MAX_IDLE_THREADS = 8
+/** Mousse-opened threads, including current turns and opens whose replies have yet to arrive. */
+export const CODEX_MAX_LOADED_THREADS = 8
 /**
  * A chat held open only by its native helpers is released when none of them has reported anything
  * for this long (the helpers are stopped, the run ends with its own text and a note)...
@@ -381,14 +379,61 @@ export const CODEX_STOP_KILL_AFTER_MS = 3_000
 /** `stopAll`: after the tree kill, how long the exit may take before the stop fails. */
 export const CODEX_STOP_EXIT_DEADLINE_MS = 5_000
 
+function missingCodexThread(error: unknown): boolean {
+  return error instanceof CodexRpcError && error.code === -32600 && /^(?:no rollout found for thread id\b|thread not found:)/i.test(error.message)
+}
+
+function terminalAuthState(home: string) {
+  const read = (name: string) => {
+    try {
+      return readFileSync(join(home, name), 'utf8')
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : undefined
+    }
+  }
+  const auth = read('auth.json')
+  const config = read('config.toml')
+  const fingerprint = createHash('sha256').update(JSON.stringify([auth ?? null, config ?? null, auth === undefined, config === undefined])).digest('hex')
+  let accessToken: string | undefined
+  let subject: string | undefined
+  try {
+    const stored = auth ? JSON.parse(auth) as { auth_mode?: unknown; tokens?: { account_id?: unknown; access_token?: unknown } } : undefined
+    if (stored?.auth_mode === undefined || stored.auth_mode === 'chatgpt') {
+      const { account_id, access_token } = stored?.tokens ?? {}
+      if (typeof access_token === 'string' && access_token) accessToken = access_token
+      if (accessToken && typeof account_id === 'string' && account_id.trim()) subject = 'chatgpt:terminal-workspace:' + account_id
+    }
+  } catch {
+    // Invalid or unavailable credentials cannot identify the terminal account.
+  }
+  return { fingerprint, observable: Boolean(accessToken) && config !== undefined, subject }
+}
+
+interface TerminalAuth {
+  home: string
+  atLaunch: ReturnType<typeof terminalAuthState>
+  /** A config override may select a different auth store than the default file. */
+  checkStore: boolean
+  fileStore?: Promise<boolean>
+  coldOnly?: boolean
+  admitted?: boolean
+}
+
+class TerminalCredentialsChanged extends Error {
+  constructor() { super('The Codex terminal sign-in changed. Try again.') }
+}
+
 interface CodexApp {
   conn: CodexConnection
   ready: Promise<CodexConnection>
   /** The account this process last reported (`accountSubject`): its loaded threads were opened under it. */
   subject?: string
+  threadOwner?: string
+  terminal?: TerminalAuth
   /** A thread opened without reusable configuration, possibly without an id. */
   recycleRequired: boolean
   threadUsers: Set<Set<string>>
+  opening: Set<Set<string>>
   unloading: Map<string, Promise<void>>
   capacityWaiters: Set<() => void>
   generation: number
@@ -1419,18 +1464,28 @@ export class CodexProviderService {
 
   private checkDue(force = false): boolean {
     if (this.stopped || this.settingsError || this.signedOut()) return false
-    return force || !this.probeResult || Date.now() - this.probeResult.at >= CODEX_ACCOUNT_TTL_MS
+    const terminal = this.app?.terminal
+    return force || Boolean(terminal && terminalAuthState(terminal.home).fingerprint !== terminal.atLaunch.fingerprint) || !this.probeResult || Date.now() - this.probeResult.at >= CODEX_ACCOUNT_TTL_MS
   }
 
   private async probe(): Promise<AccountProbe> {
-    const generation = this.authGeneration
-    try {
-      const conn = this.options.account ? this.app?.conn : await this.connection()
-      return await this.readAccount(conn)
-    } catch (error) {
-      const result = this.accountReadError(error)
-      if (generation === this.authGeneration && !this.stopped) this.probeResult = { at: Date.now(), result }
-      return result
+    for (let attempt = 0; ; attempt += 1) {
+      const generation = this.authGeneration
+      try {
+        const conn = this.options.account ? this.app?.conn : await this.connection()
+        const result = await this.readAccount(conn)
+        const app = this.app
+        if (app && app.conn === conn && app.terminal?.coldOnly && !app.threadUsers.size) {
+          void this.drainProcess(app.conn)
+          this.probeResult = { at: Date.now(), result }
+        }
+        return result
+      } catch (error) {
+        if (error instanceof TerminalCredentialsChanged && attempt === 0) continue
+        const result = this.accountReadError(error)
+        if (generation === this.authGeneration && !this.stopped) this.probeResult = { at: Date.now(), result }
+        return result
+      }
     }
   }
 
@@ -1443,11 +1498,25 @@ export class CodexProviderService {
 
   private async readAccount(conn?: CodexConnection, signal?: AbortSignal): Promise<AccountProbe> {
     const generation = this.authGeneration
+    const app = this.app
+    const terminal = app?.conn === conn ? app?.terminal : undefined
     let result: AccountProbe
+    let nativeSubject: string | undefined
     try {
       result = this.options.account
         ? await this.options.account.read(signal)
         : classifyAccount(await conn!.request('account/read', { refreshToken: false }, { timeoutMs: 15_000, signal }), this.options.ownSignIn)
+      if (terminal && result.kind === 'signed_in') {
+        if (terminal.checkStore) {
+          terminal.fileStore ??= conn!.request('config/read', { cwd: this.dir }, { timeoutMs: 5_000 })
+            .then(({ config }) => Boolean(config) && (config.cli_auth_credentials_store == null || config.cli_auth_credentials_store === 'file'))
+            .catch(() => false)
+        }
+        terminal.coldOnly = !terminal.atLaunch.observable || (terminal.fileStore !== undefined && !await terminal.fileStore)
+        if (!terminal.coldOnly && terminal.atLaunch.subject)
+          nativeSubject = JSON.stringify([terminal.atLaunch.subject, result.email?.trim().toLowerCase() ?? null])
+        if (nativeSubject) result = { ...result, subject: nativeSubject }
+      } else if (result.kind === 'signed_in') nativeSubject = result.subject
     } catch (error) {
       signal?.throwIfAborted()
       result = this.accountReadError(error)
@@ -1455,12 +1524,15 @@ export class CodexProviderService {
     signal?.throwIfAborted()
     if (generation !== this.authGeneration || this.stopped || (conn && this.app?.conn !== conn))
       throw new Error('The Codex sign-in changed during its check. Try again.')
+    if (conn) this.assertTerminalCredentials(conn)
     const subject = result.kind === 'signed_in' ? accountSubject(result) : undefined
     if (result.kind === 'signed_in' && !subject)
       result = { kind: 'error', message: 'Codex did not identify its ChatGPT account. Recheck the sign-in and try again.' }
-    const app = this.app
     if (app && (!subject || (app.subject && app.subject !== subject))) this.retireAccount(app.conn)
-    else if (app && app.conn === conn) app.subject = subject
+    else if (app && app.conn === conn) {
+      app.subject = subject
+      app.threadOwner = codexAccountOwner(nativeSubject)
+    }
     this.probeResult = { at: Date.now(), result }
     return result
   }
@@ -1476,28 +1548,54 @@ export class CodexProviderService {
     void this.drainProcess(conn)
   }
 
+  private assertTerminalCredentials(conn: CodexConnection): void {
+    const app = this.app
+    if (app?.conn === conn && app.terminal &&
+        terminalAuthState(app.terminal.home).fingerprint !== app.terminal.atLaunch.fingerprint) {
+      this.retireAccount(conn)
+      throw new TerminalCredentialsChanged()
+    }
+  }
+
   private assertAccount(conn: CodexConnection): string {
     conn.signal.throwIfAborted()
     const app = this.app
     if (app?.conn !== conn || !app.subject)
       throw new Error('The Codex sign-in changed before the request could be sent. Try again.')
+    this.assertTerminalCredentials(conn)
     return app.subject
   }
 
+  private threadOwner(conn: CodexConnection): string | undefined {
+    this.assertAccount(conn)
+    return this.app!.threadOwner
+  }
+
   /** Verify the server that will receive input, including a replacement after an observed account switch. */
-  private async verifiedConnection(signal: AbortSignal): Promise<CodexConnection> {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      await this.awaitThreadCapacity(signal)
+  private async verifiedConnection(signal: AbortSignal, reserved: Set<string>, savedId?: string) {
+    let replacements = 0
+    for (;;) {
       const conn = await abortable(this.connection(), signal)
-      const result = await this.readAccount(conn, signal)
-      if (result.kind !== 'signed_in')
-        throw new AppError({ code: 'codex_not_connected', message: result.message, errorInfo: { category: 'unavailable', retryable: false } })
-      if (this.app?.conn === conn) {
-        this.assertAccount(conn)
-        return conn
+      try {
+        const result = await this.readAccount(conn, signal)
+        if (result.kind !== 'signed_in')
+          throw new AppError({ code: 'codex_not_connected', message: result.message, errorInfo: { category: 'unavailable', retryable: false } })
+        const app = this.app
+        if (app?.conn === conn) {
+          this.assertAccount(conn)
+          // No await between checking capacity and claiming the slot.
+          if (this.hasThreadCapacity(app)) {
+            if (savedId && this.loaded.has(savedId) && !app.unloading.has(savedId)) reserved.add(savedId)
+            return { conn, release: this.holdThreads(app, reserved) }
+          }
+          await this.awaitThreadCapacity(app, signal, savedId)
+          continue
+        }
+      } catch (error) {
+        if (!(error instanceof TerminalCredentialsChanged)) throw error
       }
+      if (++replacements === 2) throw new Error('The Codex sign-in changed before the request could be sent. Try again.')
     }
-    throw new Error('The Codex sign-in changed before the request could be sent. Try again.')
   }
 
   /**
@@ -1796,10 +1894,12 @@ export class CodexProviderService {
       if (!this.configured()) return false
       // The saved thread may have changed while this waited (a sign-out, a new account).
       if (this.settings.threads?.[threadId] !== saved) return false
-      const conn = await this.verifiedConnection(signal)
-      if (saved.account !== codexAccountOwner(this.assertAccount(conn)) || this.app!.unloading.has(codexThreadId)) return false
-      const reserved = new Set([codexThreadId])
-      releaseThreads = this.holdThreads(conn, reserved)
+      const reserved = new Set<string>()
+      const admission = await this.verifiedConnection(signal, reserved, codexThreadId)
+      const { conn } = admission
+      releaseThreads = admission.release
+      const owner = this.threadOwner(conn)
+      if (!owner || saved.account !== owner || this.app!.unloading.has(codexThreadId)) return false
       const wasLoaded = this.loaded.has(codexThreadId)
       if (!wasLoaded) {
         const resumed = await this.requestThread(conn, 'thread/resume', {
@@ -1903,9 +2003,10 @@ export class CodexProviderService {
       if (this.checkDue()) await abortable(this.status(), signal)
       if (!this.configured())
         throw new AppError({ code: 'codex_not_connected', message: this.signInMessage(), errorInfo: { category: 'unavailable', retryable: false } })
-      conn = await this.verifiedConnection(signal)
       const reserved = new Set<string>()
-      releaseThreads = this.holdThreads(conn, reserved)
+      const admission = await this.verifiedConnection(signal, reserved)
+      conn = admission.conn
+      releaseThreads = admission.release
       const effort = spec.effort ?? supportedEffortOf(spec.model, this.settings.models ?? [], EFFORTS)
       const token = this.directOneShots() ? await abortable(this.chatGptToken(conn, signal), signal) : undefined
       if (token) {
@@ -2050,20 +2151,14 @@ export class CodexProviderService {
     return turn?.status === 'interrupted' || turn?.status === 'failed'
   }
 
-  /**
-   * The account of the last live sign-in check, when it was a ChatGPT sign-in: the plan for display
-   * and `subject`, the account's email as Codex reports it, which the gateway only hashes (never
-   * shown or stored). No subject when Codex reports no email.
-   */
+  /** The last verified ChatGPT account. The gateway hashes its subject for account routing. */
   account(): { label?: string; subject?: string } | undefined {
     const result = this.probeResult?.result
     if (result?.kind !== 'signed_in') return undefined
-    if (result.label !== undefined || result.subject !== undefined)
-      return { ...(result.label ? { label: result.label } : {}), ...(result.subject ? { subject: result.subject } : {}) }
     const email = result.email?.trim().toLowerCase()
-    // Codex reports the plan in lower case (`plus`, `pro`); the page names it as ChatGPT does.
-    const plan = result.planType ? `${result.planType[0]!.toUpperCase()}${result.planType.slice(1)}` : ''
-    return { label: plan ? `ChatGPT ${plan}` : 'ChatGPT', ...(email ? { subject: `chatgpt:${email}` } : {}) }
+    const plan = result.planType ? result.planType[0]!.toUpperCase() + result.planType.slice(1) : ''
+    const subject = result.subject ?? (email ? 'chatgpt:' + email : undefined)
+    return { label: result.label ?? (plan ? 'ChatGPT ' + plan : 'ChatGPT'), ...(subject ? { subject } : {}) }
   }
 
   /**
@@ -2199,8 +2294,7 @@ export class CodexProviderService {
     await Promise.all(live.map(async (entry) => {
       if (entry.process.windowsTree) {
         try {
-          if (!(await exitWithin(entry.process.windowsTree.stop(), killAfterMs + deadlineMs)))
-            failures.push('the Windows process tree did not drain in time')
+          await entry.process.windowsTree.stop()
         } catch (error) {
           failures.push(error instanceof Error ? error.message : String(error))
         }
@@ -2246,7 +2340,15 @@ export class CodexProviderService {
   private connection(): Promise<CodexConnection> {
     if (this.stopped) return Promise.reject(new Error('Codex provider is stopped'))
     if (this.draining) return this.draining.then(() => this.connection())
-    if (this.app && !this.app.conn.signal.aborted) return this.app.ready
+    if (this.app && !this.app.conn.signal.aborted) {
+      try {
+        this.assertTerminalCredentials(this.app.conn)
+        return this.app.ready
+      } catch (error) {
+        if (error instanceof TerminalCredentialsChanged) return this.connection()
+        return Promise.reject(error)
+      }
+    }
     const target = this.launchTarget()
     if (!target) return Promise.reject(new Error('Codex CLI not found. Install the Codex CLI first.'))
     const prepare = this.options.prepareLaunch
@@ -2275,14 +2377,25 @@ export class CodexProviderService {
   /** Starts the app-server process and initializes it. */
   private launch(target: CliLaunch, extras?: CodexLaunchExtras): Promise<CodexConnection> {
     let process: CodexProcess
+    let terminal: TerminalAuth | undefined
     try {
       mkdirSync(this.dir, { recursive: true, mode: 0o700 })
+      const userArgs = storedCliArgs(this.launchSettings())
+      const env = withEnforced({ ...this.environment(), ...extras?.env }, this.options.telemetry?.()?.env)
+      if (!this.options.account) {
+        const home = env.CODEX_HOME ? resolve(this.dir, env.CODEX_HOME) : join(homedir(), '.codex')
+        terminal = {
+          home,
+          atLaunch: terminalAuthState(home),
+          checkStore: existsSync(join(home, 'config.toml')) || userArgs.some((arg) => /profile|cli_auth_credentials_store/.test(arg))
+        }
+      }
       process = (this.dependencies.launch ?? spawnCodexAppServer)({
         binary: target.command,
         ...(target.args.length ? { entryArgs: target.args } : {}),
-        // The telemetry switch last: a later `-c` wins over the entry's own and Mousse's.
-        args: [...storedCliArgs(this.launchSettings()), ...(extras?.args ?? []), ...(this.options.telemetry?.()?.args ?? [])],
-        env: withEnforced({ ...this.environment(), ...extras?.env }, this.options.telemetry?.()?.env),
+        // The telemetry switch last: a later -c wins over the entry's own and Mousse's.
+        args: [...userArgs, ...(extras?.args ?? []), ...(this.options.telemetry?.()?.args ?? [])],
+        env,
         cwd: this.dir
       })
     } catch (error) {
@@ -2333,7 +2446,7 @@ export class CodexProviderService {
         return conn
       })
     ready.catch(() => conn.close())
-    this.app = { conn, ready, generation: this.launchGeneration, statuses, recycleRequired: false, threadUsers: new Set(), unloading: new Map(), capacityWaiters: new Set() }
+    this.app = { conn, ready, generation: this.launchGeneration, statuses, terminal, recycleRequired: false, threadUsers: new Set(), opening: new Set(), unloading: new Map(), capacityWaiters: new Set() }
     return ready
   }
 
@@ -3030,18 +3143,19 @@ export class CodexProviderService {
     if (this.turns.get(run.codexThreadId) === run) this.turns.delete(run.codexThreadId)
     run.tree = undefined
     run.settled()
-    void this.unloadIdleThreads()?.catch(() => undefined)
+    void this.recycleAfterLastTurn()?.catch(() => undefined)
     this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
   }
 
-  private holdThreads(conn: CodexConnection, reserved: Set<string>): () => Promise<void> | undefined {
-    this.assertAccount(conn)
-    const app = this.app!
+  private holdThreads(app: CodexApp, reserved: Set<string>): () => Promise<void> | undefined {
     app.threadUsers.add(reserved)
+    app.opening.add(reserved)
+    if (app.terminal) app.terminal.admitted = true
     return () => {
       app.threadUsers.delete(reserved)
+      app.opening.delete(reserved)
       if (this.app === app) {
-        const draining = this.unloadIdleThreads()
+        const draining = this.recycleAfterLastTurn()
         this.wakeCapacityWaiters(app)
         return draining
       }
@@ -3057,10 +3171,11 @@ export class CodexProviderService {
       const result = pinnedProvider(this.modelProvider, await conn.request(method, params, { signal }))
       this.assertAccount(conn)
       reserved.add(result.thread.id)
+      this.app!.opening.delete(reserved)
       return result
     } catch (error) {
       // An aborted or failed RPC may have opened a thread even if no id came back.
-      if (this.app?.conn === conn) this.app.recycleRequired = true
+      if (this.app?.conn === conn && !(method === 'thread/resume' && missingCodexThread(error))) this.app.recycleRequired = true
       throw error
     }
   }
@@ -3073,7 +3188,7 @@ export class CodexProviderService {
     const pending = Promise.resolve().then(async () => {
       const result = await conn.request('thread/unsubscribe', { threadId }, { timeoutMs: 5_000 })
       if (result.status === 'notLoaded') this.threadUnloaded(app, threadId)
-    }).catch(() => undefined)
+    }).catch(() => undefined).finally(() => this.wakeCapacityWaiters(app))
     app.unloading.set(threadId, pending)
     return pending
   }
@@ -3090,8 +3205,10 @@ export class CodexProviderService {
     return [...new Set([...this.loaded.keys(), ...app.unloading.keys()])].filter((id) => !this.turns.has(id) && !reserved.has(id))
   }
 
-  private exceedsThreadCapacity(app: CodexApp): boolean {
-    return app.recycleRequired || this.idleThreadIds(app).length > CODEX_MAX_IDLE_THREADS
+  private hasThreadCapacity(app: CodexApp): boolean {
+    if (app.recycleRequired || (app.terminal?.coldOnly && app.terminal.admitted)) return false
+    const ids = new Set([...this.loaded.keys(), ...app.unloading.keys(), ...[...app.threadUsers].flatMap((held) => [...held])])
+    return ids.size + app.opening.size < CODEX_MAX_LOADED_THREADS
   }
 
   private wakeCapacityWaiters(app: CodexApp): void {
@@ -3099,42 +3216,35 @@ export class CodexProviderService {
     app.capacityWaiters.clear()
   }
 
-  private async awaitThreadCapacity(signal: AbortSignal): Promise<void> {
-    for (;;) {
-      if (this.draining) await abortable(this.draining, signal)
-      const app = this.app
-      if (!app || !this.exceedsThreadCapacity(app)) return
-      const draining = this.unloadIdleThreads()
-      if (draining) {
-        await abortable(draining, signal)
-        continue
-      }
-      let wake!: () => void
-      const available = new Promise<void>((resolve) => { wake = resolve })
-      app.capacityWaiters.add(wake)
-      try {
-        await abortable(available, signal)
-      } finally {
-        app.capacityWaiters.delete(wake)
-      }
+  private async awaitThreadCapacity(app: CodexApp, signal: AbortSignal, savedId?: string): Promise<void> {
+    let unsubscribing: Promise<void> | undefined
+    if (!app.recycleRequired && !app.terminal?.coldOnly && !app.unloading.size) {
+      const victim = this.idleThreadIds(app).find((id) => id !== savedId)
+      if (victim) unsubscribing = this.unloadThread(app.conn, victim)
+    }
+    if (unsubscribing) await abortable(unsubscribing, signal)
+    if (this.app !== app || this.hasThreadCapacity(app)) return
+    if (!app.threadUsers.size && !this.turns.size) {
+      await abortable(this.drainProcess(app.conn), signal)
+      return
+    }
+    let wake!: () => void
+    const available = new Promise<void>((resolve) => { wake = resolve })
+    app.capacityWaiters.add(wake)
+    try {
+      await abortable(available, signal)
+    } finally {
+      app.capacityWaiters.delete(wake)
     }
   }
 
-  private unloadIdleThreads(): Promise<void> | undefined {
+  private recycleAfterLastTurn(): Promise<void> | undefined {
     const app = this.app
-    if (!app) return
-    const idle = this.idleThreadIds(app)
-    const pending = idle.filter((id) => app.unloading.has(id)).length
-    const victims = idle.filter((id) => !app.unloading.has(id)).slice(0, Math.max(0, idle.length - pending - CODEX_MAX_IDLE_THREADS))
-    for (const id of victims) void this.unloadThread(app.conn, id)
-    // Successful unsubscribe can leave the thread loaded. At a safe idle boundary recycle
-    // the process if unloads are unconfirmed or a failed open might have left an unknown thread.
-    if (this.exceedsThreadCapacity(app) && app.threadUsers.size === 0 && this.turns.size === 0) {
-      return Promise.resolve().then(() => {
-        if (this.app === app && this.exceedsThreadCapacity(app) && app.threadUsers.size === 0 && this.turns.size === 0)
-          return this.drainProcess(app.conn)
-      })
-    }
+    if (!app || !(app.recycleRequired || app.terminal?.coldOnly) || app.threadUsers.size || this.turns.size) return
+    // Let a queued unsubscribe reach the server before closing the connection.
+    return Promise.resolve().then(() => {
+      if (this.app === app && !app.threadUsers.size && !this.turns.size) return this.drainProcess(app.conn)
+    })
   }
 
   /**
@@ -3150,7 +3260,6 @@ export class CodexProviderService {
     const cwd = resolve(input.cwd)
     const instructionsHash = input.developerInstructions ? historyKey(input.developerInstructions).slice(0, 32) : undefined
     const saved = this.settings.threads?.[input.threadId]
-    if (saved && !this.app?.unloading.has(saved.codexThreadId)) reserved.add(saved.codexThreadId)
     const mcpToken = input.mcp?.token ?? null
     // The MCP relay and its catalogue revision: Codex lists a server's tools when it loads a thread.
     const relayKey = input.mcp?.relay ? `${input.mcp.relay.url}|${input.mcp.relay.revision}` : null
@@ -3214,8 +3323,8 @@ export class CodexProviderService {
       ...(input.developerInstructions ? { developerInstructions: input.developerInstructions } : {})
     }
     // A Codex thread belongs to the instance that started it; another instance starts fresh.
-    const owner = codexAccountOwner(this.assertAccount(conn))
-    const resumable = saved && saved.account === owner && !this.app!.unloading.has(saved.codexThreadId) &&
+    const owner = this.threadOwner(conn)
+    const resumable = saved && owner && saved.account === owner && !this.app!.unloading.has(saved.codexThreadId) &&
       (saved.instanceId ?? CODEX_INSTANCE_ID) === (input.instanceId ?? CODEX_INSTANCE_ID) && saved.cwd === cwd && saved.historyKey === historyKey(input.history ?? '')
     if (resumable) {
       const previous = this.turns.get(saved.codexThreadId)
@@ -3237,7 +3346,7 @@ export class CodexProviderService {
         return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox }
       }
       if (loaded && loaded.mcpToken === mcpToken && loaded.relayKey === relayKey && loaded.cwd === cwd && loaded.childKey === childKey) {
-        // The most recently used now (`unloadIdleThreads` lets the oldest go first).
+        // The most recently used now. New admissions evict the oldest first.
         this.loaded.delete(saved.codexThreadId)
         this.loaded.set(saved.codexThreadId, loaded)
         // A loaded thread keeps the developer instructions it was opened with: changed ones go into the prompt.
@@ -3266,7 +3375,7 @@ export class CodexProviderService {
       } catch (error) {
         signal.throwIfAborted()
         conn.signal.throwIfAborted()
-        if (!(error instanceof CodexRpcError)) throw error
+        if (!missingCodexThread(error)) throw error
         const fresh = await this.requestThread(conn, 'thread/start', params, signal, reserved)
         this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
         return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox, resumeLost: true }
@@ -3317,17 +3426,17 @@ export class CodexProviderService {
         if (!codexTakesImage(image)) throw new Error(`Codex cannot send image ${image.name}; use JPEG, PNG, GIF or WebP under 10 MiB`)
         return codexImageInput(image)
       })
-      const conn = await this.verifiedConnection(signal)
-      scope = this.scope
       const savedId = this.settings.threads?.[input.threadId]?.codexThreadId
-      const reserved = new Set(savedId && !this.app?.unloading.has(savedId) ? [savedId] : [])
-      releaseThreads = this.holdThreads(conn, reserved)
+      const reserved = new Set<string>()
+      const { conn, release } = await this.verifiedConnection(signal, reserved, savedId)
+      releaseThreads = release
+      scope = this.scope
       await abortable(this.ensureTreeMode(conn), signal)
       const thread = await this.openThread(conn, input, signal, reserved)
       const codexThreadId = thread.codexThreadId
       unopened = { conn, id: codexThreadId }
       signal.throwIfAborted()
-      const account = codexAccountOwner(this.assertAccount(conn))
+      const account = this.threadOwner(conn)
       // The thread is not resumable until the turn commits its history.
       this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, account, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID, ...botInstructionsKey(input) } }
       this.save()

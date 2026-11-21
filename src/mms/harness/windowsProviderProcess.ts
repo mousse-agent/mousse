@@ -1,10 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { createServer, type Socket } from 'node:net'
 import { win32 } from 'node:path'
 
 // The supervisor owns the job handle and stays outside it. The kernel assigns the provider to the
 // job in CreateProcessW, before it can run, including when the supervisor itself is interrupted.
-// Provider stdout/stderr are inherited directly. The supervisor relays stdin so EOF also tells
-// it when Mousse closes its side or dies.
+// The provider inherits the protocol streams. A dedicated control pipe tells the supervisor to
+// drain the job even if the provider ignores stdin, or Mousse itself exits.
 const SUPERVISOR = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -14,11 +16,10 @@ try {
   Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
-using System.IO;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
-using Microsoft.Win32.SafeHandles;
 
 public static class MousseProviderJob {
   [StructLayout(LayoutKind.Sequential)]
@@ -82,8 +83,6 @@ public static class MousseProviderJob {
   [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
   static extern bool CreateProcessW(string application, StringBuilder command, IntPtr processSecurity, IntPtr threadSecurity,
     bool inherit, uint flags, IntPtr environment, string cwd, ref StartupInfoEx startup, out ProcessInfo process);
-  [DllImport("kernel32", SetLastError = true)]
-  static extern bool CreatePipe(out IntPtr read, out IntPtr write, IntPtr security, uint size);
   [DllImport("kernel32")]
   static extern IntPtr GetCurrentProcess();
   [DllImport("kernel32")]
@@ -111,7 +110,7 @@ public static class MousseProviderJob {
     return result;
   }
 
-  static ProcessInfo Start(string command, IntPtr job, IntPtr reader) {
+  static ProcessInfo Start(string command, IntPtr job) {
     var startup = new StartupInfoEx();
     startup.Startup.Size = Marshal.SizeOf(typeof(StartupInfoEx));
     startup.Startup.Flags = 0x100; // STARTF_USESTDHANDLES
@@ -124,7 +123,7 @@ public static class MousseProviderJob {
     try {
       Check(InitializeProcThreadAttributeList(startup.Attributes, 2, 0, ref size));
       initialized = true;
-      startup.Startup.Input = Inheritable(reader);
+      startup.Startup.Input = Inheritable(GetStdHandle(-10));
       startup.Startup.Output = Inheritable(GetStdHandle(-11));
       startup.Startup.Error = Inheritable(GetStdHandle(-12));
       Marshal.WriteIntPtr(jobList, job);
@@ -150,40 +149,32 @@ public static class MousseProviderJob {
     }
   }
 
-  public static int Run(string command) {
-    IntPtr job = CreateJobObjectW(IntPtr.Zero, IntPtr.Zero);
-    Check(job != IntPtr.Zero);
-    try {
-      var limits = new JobLimits();
-      limits.Basic.Flags = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE. Breakaway stays disabled.
-      Check(SetInformationJobObject(job, 9, ref limits, Marshal.SizeOf(typeof(JobLimits))));
-      IntPtr reader, writer;
-      Check(CreatePipe(out reader, out writer, IntPtr.Zero, 0));
-      using (var providerInput = new SafeFileHandle(writer, true)) {
-        ProcessInfo child;
+  public static int Run(string command, string pipeName) {
+    using (var control = new NamedPipeClientStream(".", pipeName, PipeDirection.In)) {
+      control.Connect(5000);
+      IntPtr job = CreateJobObjectW(IntPtr.Zero, IntPtr.Zero);
+      Check(job != IntPtr.Zero);
+      try {
+        var limits = new JobLimits();
+        limits.Basic.Flags = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE. Breakaway stays disabled.
+        Check(SetInformationJobObject(job, 9, ref limits, Marshal.SizeOf(typeof(JobLimits))));
+        var stopped = new ManualResetEvent(false);
+        var listener = new Thread(() => {
+          try {
+            control.ReadByte();
+          } catch (System.IO.IOException) {
+            // Losing the owner of the control pipe is also a stop.
+          } catch (ObjectDisposedException) {
+            // The provider exited first.
+          } finally {
+            stopped.Set();
+          }
+        });
+        listener.IsBackground = true;
+        listener.Start();
+        ProcessInfo child = Start(command, job);
         try {
-          child = Start(command, job, reader);
-        } finally {
-          CloseHandle(reader);
-        }
-        try {
-          var eof = new ManualResetEvent(false);
-          var input = new Thread(() => {
-            try {
-              using (var pipe = new FileStream(providerInput, FileAccess.Write, 1, false))
-                Console.OpenStandardInput().CopyTo(pipe);
-            } catch (IOException) {
-              // The provider closed its input.
-            } catch (ObjectDisposedException) {
-              // The supervisor is draining the job.
-            } finally {
-              providerInput.Dispose();
-              eof.Set();
-            }
-          });
-          input.IsBackground = true;
-          input.Start();
-          uint ended = WaitForMultipleObjects(2, new[] { child.Process, eof.SafeWaitHandle.DangerousGetHandle() }, false, 0xffffffff);
+          uint ended = WaitForMultipleObjects(2, new[] { child.Process, stopped.SafeWaitHandle.DangerousGetHandle() }, false, 0xffffffff);
           if (ended == 1) ended = WaitForSingleObject(child.Process, 1500);
           uint exitCode = 1;
           if (ended == 0) Check(GetExitCodeProcess(child.Process, out exitCode));
@@ -195,9 +186,9 @@ public static class MousseProviderJob {
         } finally {
           CloseHandle(child.Process);
         }
+      } finally {
+        CloseHandle(job);
       }
-    } finally {
-      CloseHandle(job);
     }
   }
 
@@ -224,7 +215,7 @@ public static class MousseProviderJob {
   }
 }
 '@
-  exit [MousseProviderJob]::Run($launch.command)
+  exit [MousseProviderJob]::Run($launch.command, $launch.pipeName)
 } catch {
   [Console]::Error.WriteLine($_.Exception.Message)
   exit 253
@@ -258,23 +249,42 @@ export function spawnProviderProcess(
   options.signal?.throwIfAborted()
   const root = process.env.SystemRoot || 'C:\\Windows'
   const powershell = win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-  const launch = JSON.stringify({ command: [command, ...args].map(quoteWindowsArgument).join(' ') })
-  const child = spawn(powershell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(SUPERVISOR, 'utf16le').toString('base64')], {
-    cwd: options.cwd,
-    env: { ...(options.env ?? process.env), MOUSSE_WINDOWS_PROVIDER_LAUNCH: launch },
-    windowsHide: true,
-    stdio: 'pipe'
+  const pipeName = 'mousse-provider-' + randomUUID()
+  const launch = JSON.stringify({ command: [command, ...args].map(quoteWindowsArgument).join(' '), pipeName })
+  let socket: Socket | undefined
+  let stopRequested = false
+  const control = createServer((connection) => {
+    connection.on('error', () => connection.destroy())
+    if (socket || stopRequested) connection.destroy()
+    else socket = connection
   })
+  control.listen('\\\\.\\pipe\\' + pipeName)
+  let child: ChildProcessWithoutNullStreams
+  try {
+    child = spawn(powershell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(SUPERVISOR, 'utf16le').toString('base64')], {
+      cwd: options.cwd,
+      env: { ...(options.env ?? process.env), MOUSSE_WINDOWS_PROVIDER_LAUNCH: launch },
+      windowsHide: true,
+      stdio: 'pipe'
+    })
+  } catch (error) {
+    control.close()
+    throw error
+  }
+  const killSupervisor = child.kill.bind(child)
+  control.once('error', () => killSupervisor('SIGKILL'))
   let stopping: Promise<void> | undefined
   const stop = () => {
-    child.stdin.destroy()
-    let timer: ReturnType<typeof setTimeout> | undefined
-    stopping ??= Promise.race([
-      exited,
-      new Promise<void>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('The Windows provider job did not drain (supervisor PID ' + child.pid + ').')), 8_000)
-      })
-    ]).finally(() => clearTimeout(timer))
+    if (!stopping) {
+      stopRequested = true
+      child.stdin.destroy()
+      socket?.destroy()
+      const timer = setTimeout(() => {
+        // The kernel closes the last job handle and ends the tree even if the supervisor is stuck.
+        killSupervisor('SIGKILL')
+      }, 8_000)
+      stopping = exited.finally(() => clearTimeout(timer))
+    }
     return stopping
   }
   const abort = () => { void stop().catch(() => undefined) }
@@ -285,8 +295,13 @@ export function spawnProviderProcess(
       else resolve()
     })
   })
-  const removeAbort = () => options.signal?.removeEventListener('abort', abort)
-  void exited.then(removeAbort, removeAbort)
+  const cleanup = () => {
+    stopRequested = true
+    socket?.destroy()
+    control.close()
+    options.signal?.removeEventListener('abort', abort)
+  }
+  void exited.then(cleanup, cleanup)
   options.signal?.addEventListener('abort', abort, { once: true })
   child.kill = () => {
     abort()

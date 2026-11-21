@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { isClaudeSignInVariable } from '../../claude/apiKey'
 
 /** Variables whose value is the credential Claude Code sends: the value identifies it. */
@@ -147,6 +147,45 @@ export function claudeAccountSubject(env: NodeJS.ProcessEnv, options: AccountSub
   const route = value('ANTHROPIC_BASE_URL')
   if (route) parts.push(`route:${sha(route)}`)
   return parts.join('|')
+}
+
+/**
+ * The credential and route overrides a regular turn may load on top of its instance's sign-in.
+ * Keep every candidate in the key, since project trust and settings precedence can change which
+ * one Claude uses. A helper or an indirect credential cannot be identified from settings alone.
+ */
+export function claudeTurnCredentialKey(
+  cwd: string,
+  sources: readonly string[] = ['project', 'local'],
+  inline?: object
+): string | undefined {
+  const files: string[] = []
+  for (let folder = resolve(cwd); ; folder = dirname(folder)) {
+    if (sources.includes('project')) files.push(join(folder, '.claude', 'settings.json'))
+    if (sources.includes('local')) files.push(join(folder, '.claude', 'settings.local.json'))
+    if (dirname(folder) === folder) break
+  }
+  const settings: unknown[] = [inline]
+  for (const file of files) {
+    try {
+      settings.push(JSON.parse(readFileSync(file, 'utf8')))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return undefined
+    }
+  }
+  const credentials: unknown[] = []
+  for (const entry of settings) {
+    if (!isRecord(entry)) continue
+    if (entry.apiKeyHelper || entry.awsCredentialExport || entry.awsAuthRefresh || entry.gcpAuthRefresh || entry.forceLoginOrgUUID || entry.forceLoginMethod) return undefined
+    if (!isRecord(entry.env)) continue
+    const overrides = Object.entries(entry.env).filter(([key]) =>
+      isClaudeSignInVariable(key) || SIGN_IN_SUPPORT_VARIABLE.test(key) ||
+      CLOUD_SIGN_IN_VARIABLES.some(({ names }) => names instanceof RegExp ? names.test(key) : names.has(key)))
+    if (overrides.some(([key, value]) => typeof value !== 'string' ||
+        (key !== 'ANTHROPIC_BASE_URL' && !CLAUDE_DIRECT_CREDENTIALS.includes(key)))) return undefined
+    if (overrides.length) credentials.push(overrides.sort(([a], [b]) => a.localeCompare(b)))
+  }
+  return sha(JSON.stringify(credentials))
 }
 
 /**

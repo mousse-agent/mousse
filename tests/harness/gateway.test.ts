@@ -77,6 +77,7 @@ describe('provider shutdown', () => {
     let finishRetired!: () => void
     const active = new Promise<void>((resolve) => { finishActive = resolve })
     const retiring = new Promise<void>((resolve) => { finishRetired = resolve })
+    const retire = vi.fn(() => retiring)
     const both = vi.fn()
     const config = instances({
       'claude:work': { driver: 'claude', enabled: true },
@@ -90,16 +91,17 @@ describe('provider shutdown', () => {
         ...driver.create(context),
         stop: () => {
           if (context.instanceId === 'claude:work') return active
-          if (context.instanceId === 'claude:other') return retiring
+          if (context.instanceId === 'claude:other') return retire()
         }
       }) }]
     })
     for (const instanceId of ['claude:work', 'claude:other'])
       harness.resolveStored({ instanceId, model: 'sonnet' }, { purpose: 'turn' })
     await harness.instances.remove('claude:other')
+    expect(retire).toHaveBeenCalledTimes(1)
     const stopped = harness.stop().then(both)
     finishActive()
-    await active
+    await new Promise<void>((resolve) => setImmediate(resolve))
     expect(both).not.toHaveBeenCalled()
     finishRetired()
     await stopped

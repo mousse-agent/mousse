@@ -25,6 +25,7 @@ const services: CodexProviderService[] = []
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'mousse-codex-shared-'))
+  writeFileSync(join(home, 'auth.json'), JSON.stringify({ tokens: { account_id: 'shared-workspace', access_token: 'fixture-token' } }))
   binary = join(home, 'codex')
   writeFileSync(binary, '#!/bin/sh\nexit 0\n')
   chmodSync(binary, 0o755)
@@ -125,7 +126,7 @@ function sharedServer() {
 function create(server: ReturnType<typeof sharedServer>): CodexProviderService {
   mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
   writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary }))
-  const service = new CodexProviderService(home, questions, { launch: server.launch }, { launch: () => ({ binaryPath: binary }), signedOut: () => false })
+  const service = new CodexProviderService(home, questions, { launch: server.launch }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: binary }), signedOut: () => false })
   services.push(service)
   return service
 }

@@ -299,7 +299,7 @@ export interface ConfigReadParams {
 }
 type McpServerEntry = { enabled?: boolean | null } | null
 export interface ConfigReadResponse {
-  /** The effective config; Mousse reads only the entries under `mcp_servers`. */
+  /** The effective config, including the auth store mode and MCP servers. */
   config: { mcp_servers?: Record<string, McpServerEntry> | null } & Record<string, unknown>
   /** Each layer (user, system, project) with why it is switched off, when it is; requires `includeLayers`. */
   layers?: Array<{ name?: { type: string; dotCodexFolder?: string }; disabledReason: string | null; config?: { mcp_servers?: Record<string, McpServerEntry> | null } | null }> | null

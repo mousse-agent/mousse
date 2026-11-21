@@ -252,6 +252,7 @@ describe('Codex children', () => {
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'mousse-codex-child-'))
+    writeFileSync(join(home, 'auth.json'), JSON.stringify({ tokens: { account_id: 'fixture-workspace', access_token: 'fixture-token' } }))
     const binary = join(home, 'codex')
     writeFileSync(binary, '#!/bin/sh\nexit 0\n')
     chmodSync(binary, 0o755)
@@ -345,7 +346,7 @@ describe('Codex children', () => {
   const create = (s: ReturnType<typeof server>) => {
     mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
     writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: join(home, 'codex') }))
-    const service = new CodexProviderService(home, questions, { launch: s.launch }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+    const service = new CodexProviderService(home, questions, { launch: s.launch }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(service)
     return service
   }
@@ -368,7 +369,7 @@ describe('Codex children', () => {
     await chat(service, { child: SHARED })
     service.commitConversation('child', '')
     service.stop()
-    const restarted = new CodexProviderService(home, questions, { launch: s.launch }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+    const restarted = new CodexProviderService(home, questions, { launch: s.launch }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(restarted)
     await chat(restarted, { child: SHARED })
     expect(s.requests('thread/resume')[0].params).toMatchObject({ sandbox: 'read-only', approvalPolicy: 'on-request' })
@@ -739,7 +740,7 @@ describe('Codex children', () => {
       const withCaps = (s: ReturnType<typeof server>, caps: { helperIdleCapMs?: number; helperPinCapMs?: number }) => {
         mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
         writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: join(home, 'codex') }))
-        const service = new CodexProviderService(home, questions, { launch: s.launch, ...caps }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+        const service = new CodexProviderService(home, questions, { launch: s.launch, ...caps }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: join(home, 'codex') }) })
         services.push(service)
         return service
       }
@@ -994,7 +995,7 @@ describe('Codex children', () => {
     const createFast = (s: Server, deps: Partial<ConstructorParameters<typeof CodexProviderService>[2]> = {}) => {
       mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
       writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: join(home, 'codex') }))
-      const service = new CodexProviderService(home, questions, { launch: s.launch, helperTiming: FAST, helperSweepMs: 900, ...deps }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+      const service = new CodexProviderService(home, questions, { launch: s.launch, helperTiming: FAST, helperSweepMs: 900, ...deps }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: join(home, 'codex') }) })
       services.push(service)
       return service
     }
