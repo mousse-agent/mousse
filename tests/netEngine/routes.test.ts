@@ -223,14 +223,14 @@ describe('a connection over a relay (Phase 3 own relays, Phase 4 the paid relay)
     [
       'the paid relay, typing',
       { kind: 'relay', class: 'relay', destination: 'relay://r1.plus.example:443', relay: 'ab'.repeat(32) },
-      'Through relay r1.plus.example:443'
+      'through relay r1.plus.example:443'
     ],
     [
       'the paid relay, copies',
       { kind: 'relay', class: 'relay_bulk', destination: 'relay://r1.plus.example:443', relay: 'ab'.repeat(32) },
-      'Through relay r1.plus.example:443'
+      'through relay r1.plus.example:443'
     ],
-    ['a relay this computer does not name', { kind: 'relay', class: 'relay', destination: null }, 'Through a relay']
+    ['a relay this computer does not name', { kind: 'relay', class: 'relay', destination: null }, 'through a relay']
   ])('reads %s as a relay, never as LAN', (_name, route, line) => {
     expect(readRoute(route)?.kind).toBe('relay')
     expect(label(route)).toBe(line)

@@ -127,6 +127,7 @@ export const SETTINGS_SEARCH_INDEX: readonly SettingsSearchEntry[] = [
   { title: 'Share bots with other devices', section: 'connections', anchor: 'devices-bots', keywords: ['bots', 'phone', 'mobile', 'sharing', 'personal bots', 'mousse bot'], needs: { anchor: 'devices-list', reason: 'Appears while devices paired before this version are connected.' } },
   { title: 'Unlock to reach older devices', section: 'connections', anchor: 'devices-passphrase', keywords: ['unlock', 'passphrase', 'network keys'], needs: { anchor: 'devices-list', reason: 'Appears only while the passphrase is needed after a restart.' } },
   { title: 'My devices', section: 'connections', anchor: 'devices-list', keywords: ['networking', 'network', 'pair', 'add device', 'qr', 'scan', 'link', 'computers'] },
+  { title: 'Mousse Plus', section: 'connections', anchor: 'devices-plus', keywords: ['plus', 'relay', 'sign in', 'hosts'] },
   { title: 'Reach this computer', section: 'connections', anchor: 'devices-engine-reach', keywords: ['same network', 'wi-fi', 'lan', 'tailscale', 'port forward', 'tunnel', 'relay', 'internet'] },
   { title: 'Let my editor reach my other devices', section: 'connections', anchor: 'devices-editors', keywords: ['editors', 'ssh', 'computers'] },
   { title: 'Tailscale Serve', section: 'connections', anchor: 'devices-tailscale-serve' },
