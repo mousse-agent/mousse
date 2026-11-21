@@ -612,7 +612,7 @@ test('a broken thread whose repository moved without its worktrees repaired keep
   writeFileSync(join(f.location, 'journal', '0000000000000003.json'), entry(3))
   writeFileSync(join(f.location, 'conversation-branches.json'), JSON.stringify([{ id: 'saved', retainedRef: broken.retainedRef }]))
   renameSync(old, f.repo)
-  expect(readFileSync(join(broken.worktree, '.git'), 'utf8')).toContain(old)
+  expect(relative(old, adminOf(broken.worktree))).toMatch(/^\.git[\\/]worktrees[\\/]/)
   const theirs = () => git(f.repo, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/threads/broken/', 'refs/heads/mousse/thread/broken/', 'refs/mousse/changes/'])
   const ours = () => git(f.repo, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/threads/task/', 'refs/heads/mousse/thread/task/'])
   const before = theirs(), oursBefore = ours()
