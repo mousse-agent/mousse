@@ -69,6 +69,7 @@ import { LegacyAddonRows, legacyAddonsOn, LegacyRelayRows, legacyRelaysSet, Lega
 import { takeOfferedPairLink, useOfferedPairLink } from './PairLinkHost'
 import { CodeEntry } from './SendLinkParts'
 import { ReachSection } from './ReachSection'
+import '../../styles/devices.css'
 import './engine.css'
 
 /** Reads `netEngine.status` for this window's profile, again whenever the daemon says it changed. */
