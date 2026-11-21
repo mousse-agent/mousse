@@ -20,6 +20,8 @@ vi.mock('electron', async () => {
     whenReady: () => { startup.featuresWhenReady ??= startup.switches.get('enable-features'); return Promise.resolve() },
     requestSingleInstanceLock: () => true,
     quit: vi.fn(), isPackaged: false, name: 'Mousse', getVersion: () => 'test',
+    // The warm start file's folder: none, so the window opens without one.
+    getPath: (name: string) => `${process.env.TMP ?? '/tmp'}/mousse-startup-test-${name}-missing`,
     commandLine: {
       getSwitchValue: (name: string) => startup.switches.get(name) ?? '',
       appendSwitch: (name: string, value = '') => { startup.switches.set(name, value) }
