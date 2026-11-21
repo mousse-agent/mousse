@@ -1,5 +1,6 @@
 import { lstat, readdir, readFile, stat } from 'fs/promises'
 import { dirname, join, relative, sep } from 'path'
+import type { EffectiveAgentGrantEntry } from '../../../shared/agents/types'
 import type {
   IntegrationDiagnostic,
   SkillDescriptor,
@@ -16,6 +17,7 @@ import {
 } from '../profileContext'
 import { getManagedSkillRevisionRoot, getManagedSkillStatePath, getNativeSkillRootCandidates, getProjectIdentityAsync } from '../nativePaths'
 import { sha256Bytes, shortHash } from '../revision'
+import { importSkillPath, skillPackageRevision } from './skillImport'
 import { splitSkillMarkdown } from './yamlFrontmatter'
 import { assertOwnedPathAsync } from '../../profiles/pathSafety'
 import {
@@ -44,7 +46,14 @@ interface ScannedSource {
   fetchedAt: number
 }
 
-type ManagedSkillState = { enabled?: boolean; archived?: boolean; revision?: string; installationId?: string }
+type ManagedSkillState = {
+  enabled?: boolean
+  archived?: boolean
+  revision?: string
+  contentHash?: string
+  installationId?: string
+  provenance?: string
+}
 
 export class SkillsRegistry {
   /** One snapshot per project, most recently used last; expired entries are dropped. */
@@ -52,10 +61,9 @@ export class SkillsRegistry {
   /** Shared (user-wide) Skills folders, scanned once for every project. */
   private sharedScans = new Map<string, ScannedSource>()
   /**
-   * Shared scans still running. The first turns of threads started together each discover at once,
-   * before any scan has finished; they wait for the same one instead of each walking the folders.
+   * Shared scans still running. Foreground callers share a scan, but can start one while a background refresh is held.
    */
-  private sharedScanning = new Map<string, Promise<ScannedSource>>()
+  private sharedScanning = new Map<string, { scan: Promise<ScannedSource>; background: boolean }>()
   /** Changes on invalidation, so a scan that started before it is not kept. */
   private sharedGeneration = 0
   private sharedScanOrder = 0
@@ -90,7 +98,11 @@ export class SkillsRegistry {
     return this.discover({ ...options, refresh: true })
   }
 
-  async discover(options: SkillsDiscoveryOptions = {}): Promise<SkillsRegistrySnapshot> {
+  discover(options: SkillsDiscoveryOptions = {}): Promise<SkillsRegistrySnapshot> {
+    return this.discoverForProject(options, false)
+  }
+
+  private async discoverForProject(options: SkillsDiscoveryOptions, background: boolean): Promise<SkillsRegistrySnapshot> {
     const cacheKey = this.cacheKey(options.projectPath)
     this.dropExpired(Date.now())
     if (!options.refresh) {
@@ -103,7 +115,7 @@ export class SkillsRegistry {
       const last = options.stale ? this.lastSnapshots.get(cacheKey) : undefined
       if (last) {
         if (!this.revalidating.has(cacheKey)) {
-          const scan = this.discover({ ...options, stale: false }).catch(() => undefined).finally(() => {
+          const scan = this.discoverForProject({ ...options, stale: false }, true).catch(() => undefined).finally(() => {
             if (this.revalidating.get(cacheKey) === scan) this.revalidating.delete(cacheKey)
           })
           this.revalidating.set(cacheKey, scan)
@@ -115,10 +127,10 @@ export class SkillsRegistry {
     const generation = this.sharedGeneration
     const scan = (this.scansStarted.get(cacheKey) ?? 0) + 1
     this.scansStarted.set(cacheKey, scan)
-    const result = await this.discoverUncached(options, generation)
+    const result = await this.discoverUncached(options, generation, background)
     // Invalidation revokes the snapshot even for the caller already waiting for it.
     if (!result || generation !== this.sharedGeneration) {
-      return this.discover({ ...options, refresh: false, stale: false })
+      return this.discoverForProject({ ...options, refresh: false, stale: false }, background)
     }
     const { snapshot, scannedAt } = result
     if (scan < (this.scansPublished.get(cacheKey) ?? 0)) return snapshot
@@ -152,7 +164,8 @@ export class SkillsRegistry {
 
   private async discoverUncached(
     options: SkillsDiscoveryOptions,
-    generation: number
+    generation: number,
+    background: boolean
   ): Promise<{ snapshot: SkillsRegistrySnapshot; scannedAt: number } | undefined> {
     let scannedAt = Date.now()
     const projectPath = options.projectPath ?? this.context.projectPath
@@ -182,7 +195,7 @@ export class SkillsRegistry {
       if (source.scope === 'global') {
         // Shared folders read the same for every project; each snapshot gets its own copies,
         // because managed state and duplicate marking below change them per snapshot.
-        const scanned = await this.scanSharedSource(source, options.refresh === true, generation)
+        const scanned = await this.scanSharedSource(source, options.refresh === true, generation, background)
         scannedAt = Math.min(scannedAt, scanned.fetchedAt)
         skills.push(...scanned.skills.map((skill) => ({ ...skill })))
         diagnostics.push(...scanned.diagnostics)
@@ -211,26 +224,28 @@ export class SkillsRegistry {
     }
   }
 
-  private async scanSharedSource(source: SkillSourceDescriptor, refresh: boolean, generation: number): Promise<ScannedSource> {
+  private async scanSharedSource(source: SkillSourceDescriptor, refresh: boolean, generation: number, background: boolean): Promise<ScannedSource> {
     const key = `${source.source}:${source.profileId ?? ''}:${source.path}`
     const cached = this.sharedScans.get(key)
     if (cached && !refresh && Date.now() - cached.fetchedAt < SkillsRegistry.DISCOVERY_TTL_MS) return cached
     const running = refresh ? undefined : this.sharedScanning.get(key)
-    if (running) return running
+    if (running && (background || !running.background)) return running.scan
     const order = ++this.sharedScanOrder
     this.latestSharedScan.set(key, order)
     const scan = this.scanSource(source).then((scanned) => {
       if (generation !== this.sharedGeneration) return scanned
-      // A forced refresh can overtake a shared scan started by a different project.
+      // A newer foreground scan can overtake a shared scan started by a different project.
       if (order !== this.latestSharedScan.get(key)) {
-        return this.sharedScanning.get(key) ?? this.sharedScans.get(key) ?? scanned
+        const newer = this.sharedScanning.get(key)
+        if (newer && (background || !newer.background)) return newer.scan
+        return this.sharedScans.get(key) ?? scanned
       }
       this.sharedScans.set(key, scanned)
       return scanned
     })
-    this.sharedScanning.set(key, scan)
+    this.sharedScanning.set(key, { scan, background })
     void scan.finally(() => {
-      if (this.sharedScanning.get(key) === scan) this.sharedScanning.delete(key)
+      if (this.sharedScanning.get(key)?.scan === scan) this.sharedScanning.delete(key)
     }).catch(() => {})
     return scan
   }
@@ -278,25 +293,47 @@ export class SkillsRegistry {
   }
 
   /** The turn's descriptor identifies the file. The file and its installation decide whether it may still be used. */
-  async readSkillForModel(skill: SkillDescriptor): Promise<SkillReadResult> {
+  async readSkillForModel(skill: SkillDescriptor, grant?: EffectiveAgentGrantEntry): Promise<SkillReadResult> {
     const skillPath = skill.managed
       ? await assertOwnedPathAsync(this.context.profileRoot, skill.skillPath, 'managed skill file')
       : skill.skillPath
-    const result = await this.readSkillFile({ ...skill, skillPath })
+    const bytes = await readFile(skillPath)
+    const result = this.parseSkillFile({ ...skill, skillPath }, bytes.toString('utf-8'))
     const diagnostics = skillFrontmatterDiagnostics(result.frontmatter ?? {})
     if (diagnostics.length) throw new Error(diagnostics.map((item) => item.message).join('; '))
-    if (skill.managed) {
-      const state = managedStateFor(await this.readManagedState(), skill)
-      // Loose packages can be discovered without a state entry. An installation that had an entry must still have one.
-      if (state ? state.enabled !== true || state.archived : skill.enabled !== undefined) {
-        throw new Error(`Skill installation is no longer available: ${skill.installationId ?? skill.id}`)
-      }
+    const state = skill.managed ? managedStateFor(await this.readManagedState(), skill) : undefined
+    // Loose packages can be discovered without a state entry. An installation that had an entry must still have one.
+    if (skill.managed && (state ? state.enabled !== true || state.archived : skill.enabled !== undefined)) {
+      throw new Error(`Skill installation is no longer available: ${skill.installationId ?? skill.id}`)
     }
+    if (grant) await this.checkSkillGrant(result.skill, grant, sha256Bytes(bytes), state)
     return result
   }
 
+  private async checkSkillGrant(skill: SkillDescriptor, grant: EffectiveAgentGrantEntry, hash: string, state?: ManagedSkillState): Promise<void> {
+    if (grant.revision && grant.revision !== (state?.revision ?? skill.revision)) {
+      throw new Error(`Granted skill revision is unavailable: ${grant.id}@${grant.revision}.`)
+    }
+    if ((!grant.hash || grant.hash === hash) && await this.matchesSkillContent(skill, hash, state)) return
+    throw new Error(`Granted skill changed after agent resolution: ${grant.id}.`)
+  }
+
+  private async matchesSkillContent(skill: SkillDescriptor, hash: string, state?: ManagedSkillState): Promise<boolean> {
+    const expected = state?.contentHash ?? skill.contentHash
+    if (expected === hash) return true
+    // Older imports stored the package revision as the file hash. Verify the package and the exact file we read.
+    if (!state?.contentHash || state.contentHash !== state.revision || !['folder', 'zip'].includes(state.provenance ?? '')) return false
+    const installed = await importSkillPath(dirname(skill.skillPath))
+    if (installed.skillContentHash !== hash || skillPackageRevision(installed) !== state.revision) return false
+    const current = managedStateFor(await this.readManagedState(), skill)
+    return current?.enabled === true && !current.archived && current.revision === state.revision && current.contentHash === state.contentHash
+  }
+
   private async readSkillFile(skill: SkillDescriptor): Promise<SkillReadResult> {
-    const content = await readFile(skill.skillPath, 'utf-8')
+    return this.parseSkillFile(skill, await readFile(skill.skillPath, 'utf-8'))
+  }
+
+  private parseSkillFile(skill: SkillDescriptor, content: string): SkillReadResult {
     const parsed = splitSkillMarkdown(content)
     if (parsed.error) throw new Error(parsed.error)
     return {
@@ -398,7 +435,8 @@ export class SkillsRegistry {
     skillPath: string
   ): Promise<{ skill?: SkillDescriptor; diagnostics: IntegrationDiagnostic[] }> {
     const diagnostics: IntegrationDiagnostic[] = []
-    const content = await readFile(skillPath, 'utf-8')
+    const bytes = await readFile(skillPath)
+    const content = bytes.toString('utf-8')
     const frontmatter = splitSkillMarkdown(content)
 
     if (frontmatter.error) {
@@ -427,7 +465,7 @@ export class SkillsRegistry {
     const rootPath = dirname(skillPath)
     const relativeRoot = normalizePath(relative(source.path, rootPath))
     const id = `${source.source}:${relativeRoot || name}`
-    const contentHash = sha256Bytes(content)
+    const contentHash = sha256Bytes(bytes)
     const managed = source.managed === true || (source.managed === undefined && isNativeSkillSource(source.source))
     return {
       diagnostics,

@@ -27,7 +27,7 @@ import type {
 import type { NeutralTool } from '../../shared/harness/tools'
 import type { CliProviderConfigPatch } from '../../shared/providerAuth'
 import type { ModelOverride } from '../../shared/providerInstances'
-import type { McpRelayRuntime } from '../../shared/integrations'
+import type { McpRelayRuntime, SkillsRegistrySnapshot } from '../../shared/integrations'
 import type { AgentAccessLevel, LlmProviderOption } from '../../shared/settings'
 import type { ChatMode } from '../../shared/types'
 import { findListedModel, modelChoiceOf } from '../../shared/modelChoice'
@@ -580,6 +580,7 @@ export interface TurnAppContext {
    * MCP bearer cannot be issued is refused before the runtime starts, never run without them.
    */
   requiredTools?: readonly string[]
+  skillsSnapshot?: SkillsRegistrySnapshot
   /** The session text and turn preamble, given whether the server and the MCP relay were attached. */
   instructions(mcpAttached: boolean, relayAttached?: boolean): { sessionInstructions: string; turnPreamble: string }
   /**
@@ -2103,6 +2104,7 @@ export class Harness implements HarnessGateway {
         turnToken: app.turnToken,
         sessionInstructions: texts.sessionInstructions,
         turnPreamble: texts.turnPreamble,
+        ...(app.skillsSnapshot ? { skillsSnapshot: app.skillsSnapshot } : {}),
         ...(binding.policy.tools ? { toolPolicy: binding.policy.tools } : {}),
         userMcp: record.driver.userMcp ?? 'native',
         // `never`: nobody answers, so every permission request is denied without asking.

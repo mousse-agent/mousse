@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import type { McpServerConfig, MousseIntegrationsSettings, SkillDescriptor } from '../../../../shared/integrations'
+import type { McpServerConfig, MousseIntegrationsSettings, SkillDescriptor, SkillsRegistrySnapshot } from '../../../../shared/integrations'
 import type { McpToolCallResult } from '../../../../shared/integrations/results'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
 import { resolveEffectiveMcpServers, resolveEffectiveSkills } from '../../../integrations/catalog/EffectiveIntegrationResolver'
@@ -49,7 +49,7 @@ export interface ClaudeTurnIntegrations {
 }
 
 export interface ClaudeIntegrationSource {
-  resolve(projectPath?: string): Promise<ClaudeTurnIntegrations>
+  resolve(projectPath?: string, skillsSnapshot?: SkillsRegistrySnapshot): Promise<ClaudeTurnIntegrations>
 }
 
 /** Name of the generated plugin; Claude lists its skills as `mousse:<skill>`. */
@@ -130,7 +130,7 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
     env?: () => NodeJS.ProcessEnv
   }) {}
 
-  async resolve(projectPath?: string): Promise<ClaudeTurnIntegrations> {
+  async resolve(projectPath?: string, skillsSnapshot?: SkillsRegistrySnapshot): Promise<ClaudeTurnIntegrations> {
     const settings = this.deps.settings.get().integrations
     // A Claude Subscription thread is the main agent, as on every other chat provider.
     const actor: IntegrationActor = { kind: 'main' }
@@ -144,8 +144,8 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
     }
 
     try {
-      // Use the same discovery policy as chat turn preparation, even when Claude's cwd is a separate worktree.
-      const snapshot = await this.deps.skillsRegistry.discover({ projectPath, stale: true })
+      // Use the project's prepared snapshot even when Claude's cwd is a separate worktree.
+      const snapshot = skillsSnapshot ?? await this.deps.skillsRegistry.discover({ projectPath, stale: true })
       const skills = resolveEffectiveSkills({ snapshot, settings: settings.skills, actor }).filter((skill) => !claudeLoadsSkill(skill, this.deps.env?.()))
       if (skills.length > 0) result.pluginPath = await this.buildPlugin(skills, result.warnings)
     } catch (error) {

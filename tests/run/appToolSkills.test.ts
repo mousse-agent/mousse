@@ -22,6 +22,7 @@ import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer } from '../../src/mms/run/testkit/codexAppServerReplay'
 import { parseTranscript, ReplayTransport, type TranscriptFrame } from '../../src/mms/run/testkit/ReplayTransport'
+import { definitionActor } from '../../src/mms/agentDefinitions/definitionTurnRecord'
 import { getDefaultSettings } from '../../src/shared/settings'
 import type { SkillDescriptor } from '../../src/shared/integrations'
 import { appToolRegistry, appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
@@ -108,6 +109,70 @@ describe('list_skills and load_skill over MCP', () => {
     expect(skills.reads).toEqual(['inst-review', 'inst-deploy', 'inst-gone'])
   })
 
+  it('revokes an inherited Settings selection during a definition turn and keeps its explicit grant', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-app-skill-grant-'))
+    try {
+      const context = createLegacySingleProfileContext({ profileRoot: root })
+      const skills = new SkillsRegistry(context)
+      const lifecycle = new SkillLifecycleService(skills, context)
+      const install = (name: string) => lifecycle.create({ name, description: name, scope: 'global', instructions: 'Granted instructions.' })
+      const inherited = await install('inherited-review')
+      const source = join(root, 'source.md')
+      const markdown = '---\nname: explicit-review\ndescription: Explicit review\n---\nExplicit instructions.\n'
+      writeFileSync(source, markdown)
+      const explicit = await lifecycle.importPackage({ scope: 'global', sourcePath: source })
+      const settings = getDefaultSettings().integrations.skills
+      settings.enabledSkills = [inherited.installationId]
+      settings.enableForAgents.mousse = true
+      const grants = {
+        skills: [
+          { id: inherited.installationId, revision: inherited.revision, source: 'inherited' as const },
+          { id: explicit.installationId, revision: explicit.revision, source: 'explicit' as const }
+        ],
+        builtinTools: [{ id: 'load_skill', source: 'explicit' as const }],
+        mcpTools: [],
+        denied: []
+      }
+
+      fx = delegationFixture()
+      const run = await fx.runningRun('thread-a')
+      const { registry, turns } = appToolRegistry(fx.engine, fakeAppToolHost({ skills: () => skills, skillSettings: () => settings }).host)
+      turns.register(appTurn({
+        threadId: 'thread-a', runId: run.runId, actor: definitionActor(grants),
+        enabledSkills: [inherited.skill, explicit.skill],
+        definition: {
+          grants,
+          policy: {
+            profileId: context.profileId, threadId: 'thread-a', runId: run.runId, definitionId: 'definition', definitionRevision: 'rev-1', source: 'editor',
+            workspace: { mode: 'thread_worktree', canonicalRoots: [root] },
+            script: { enabled: false, allowFilesystem: false, allowNetwork: false, executionMode: 'workspace', interpreters: [] },
+            approval: { askUser: true, policy: 'inherit', unattendedBehavior: 'pause' },
+            memoryScope: 'off', includeCurrentThread: false, includeProjectInstructions: false, attachmentPolicy: 'none',
+            fallbacks: { enabled: false, retryOn: [], allowHigherCost: false, retryCount: 0, backoffMs: 0 },
+            fallbackModels: []
+          }
+        }
+      }))
+      server = new MousseMcpServer({ credentials: new McpCredentials(fx.store), registry })
+      await server.start()
+      const mcp = server.bearerForTurn({ threadId: 'thread-a', instanceId: 'codex', runId: run.runId, modeCeiling: 'default', binding: 'drained_turn', generation: 'g' })!
+      const load = (skill: string) => callTool(mcp, 'load_skill', { skill })
+
+      expect((await load('inherited-review')).text).toContain('Granted instructions.')
+      settings.enabledSkills = []
+      const revoked = await load('inherited-review')
+      expect(refusalOf(revoked)).toBeDefined()
+      expect(revoked.text).not.toContain('Granted instructions.')
+      expect((await load('explicit-review')).text).toContain('Explicit instructions.')
+      writeFileSync(explicit.skill.skillPath, markdown.replace('Explicit instructions.', 'Tampered instructions.'))
+      const tampered = await load('explicit-review')
+      expect(refusalOf(tampered)).toBeDefined()
+      expect(tampered.text).not.toContain('Tampered instructions.')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('are not listed when the host has no skills registry', async () => {
     fx = delegationFixture()
     await fx.runningRun('thread-a')
@@ -141,6 +206,7 @@ describe('an explicit /skill in a vendor turn', () => {
     await d.send('Thanks, that is all')
     const section = `## Loaded Skill Instructions\n### review\n${BODY.review}`
     expect(vendor.bridges[0].turnPreamble).toContain(section)
+    expect(vendor.bridges[0].skillsSnapshot?.skills).toContainEqual(REVIEW)
     expect(vendor.bridges[1].turnPreamble).toContain(section)
     expect(vendor.bridges[2].turnPreamble).not.toContain('## Loaded Skill Instructions')
     // The prompt itself is the user's text; the skill travels in the preamble.

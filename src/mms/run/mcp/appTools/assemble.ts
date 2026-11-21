@@ -10,7 +10,7 @@ import { withoutWebhookData } from '../../../scheduled/promptPlaceholders'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
 import type { ModeRegistry } from '../../../modes/ModeRegistry'
 import { mousseOrchestrationInstructions } from '../instructions'
-import { normalizeSkillName, skillGrantMismatch } from './skills'
+import { normalizeSkillName } from './skills'
 import { truncateForModel, type ModeFacts } from './types'
 
 /**
@@ -45,6 +45,7 @@ export function modeFactsFor(modeRegistry: ModeRegistry, mode: ChatMode, project
 }
 
 export interface SkillsContext {
+  snapshot?: SkillsRegistrySnapshot
   enabledSkills: SkillDescriptor[]
   loadedSkills: Array<{ name: string; content: string; revision?: string }>
 }
@@ -82,14 +83,23 @@ export async function prepareSkills(input: {
     const resolved = await Promise.all(enabledSkills.map(async (skill) => {
       const grant = grants.skills.find((entry) => entry.id === skill.id || entry.id === skill.installationId)
       if (!grant) return undefined
-      const result = await readOrSkip(registry, skill.installationId ?? skill.id, projectPath, snapshot)
-      if (!result) return undefined
-      const mismatch = skillGrantMismatch(grant, result.content)
-      if (mismatch) throw new Error(mismatch)
-      return { skill: result.skill, loaded: { name: result.skill.name, content: truncateForModel(result.content) } }
+      try {
+        const result = await registry.readSkillForModel(skill, grant)
+        const current = resolveEffectiveSkills({
+          snapshot: { ...snapshot, skills: [result.skill] },
+          settings: input.settings(),
+          actor: input.actor,
+          grantSource: grant.source
+        })
+        if (!current.length) return undefined
+        return { skill: result.skill, loaded: { name: result.skill.name, content: truncateForModel(result.content) } }
+      } catch (error) {
+        console.warn('a granted skill could not be read for the turn', { skill: grant.id, error: error instanceof Error ? error.message : String(error) })
+        return undefined
+      }
     }))
     const available = resolved.filter((entry) => entry !== undefined)
-    return { enabledSkills: available.map((entry) => entry.skill), loadedSkills: available.map((entry) => entry.loaded) }
+    return { snapshot, enabledSkills: available.map((entry) => entry.skill), loadedSkills: available.map((entry) => entry.loaded) }
   }
   const modeSkills = await loadSkillForMode(registry, mode, projectPath, snapshot)
   const explicitSkills = await loadExplicitSkills(registry, input.userContent, enabledSkills, projectPath, snapshot)
@@ -97,7 +107,7 @@ export async function prepareSkills(input: {
     ...modeSkills,
     ...explicitSkills.filter((skill) => !modeSkills.some((loaded) => loaded.name === skill.name))
   ]
-  return { enabledSkills, loadedSkills }
+  return { snapshot, enabledSkills, loadedSkills }
 }
 
 function filterEnabledSkills(

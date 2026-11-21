@@ -3,7 +3,7 @@
  * its input (`setMcpServers`, #358), the ACP `session/new|resume` `mcpServers` (HTTP or the stdio
  * bridge). Nothing is attached without `AdapterHost.mcp`.
  */
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
@@ -96,7 +96,7 @@ describe('Claude subscription attachment', () => {
     const adapter = new ClaudeSubscriptionAdapter(() => client, () => ({ resolve }))
     await adapter.startTurn(input({ cwd: '/project' }), sink(), control, host(MCP))
     await adapter.startTurn(input({ cwd: null }), sink(), control, host(null))
-    expect(resolve.mock.calls).toEqual([['/project'], [undefined]])
+    expect(resolve.mock.calls).toEqual([['/project', undefined], [undefined, undefined]])
     expect(seen.map((chat) => chat.integrations)).toEqual([integrations, integrations])
     // A failing registry does not block the turn.
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
@@ -107,11 +107,13 @@ describe('Claude subscription attachment', () => {
     warn.mockRestore()
   })
 
-  it('reaches the provider with its Skills plugin while a real registry refresh is held', async () => {
+  it.each(['warm', 'cold', 'prepared'] as const)('starts a %s Claude turn while a real shared Skills refresh is held', async (cache) => {
     const root = tempHome('mousse-claude-skill-refresh-')
     const project = join(root, 'project')
+    const turnProject = cache === 'warm' ? project : join(root, 'other-project')
     const skillRoot = join(root, 'integrations', 'skills', 'check')
     mkdirSync(project)
+    mkdirSync(turnProject, { recursive: true })
     mkdirSync(skillRoot, { recursive: true })
     const skillPath = join(skillRoot, 'SKILL.md')
     writeFileSync(skillPath, '---\nname: check\ndescription: Check the change\n---\nReview the diff.\n')
@@ -127,10 +129,12 @@ describe('Claude subscription attachment', () => {
     let read: ReturnType<typeof vi.spyOn> | undefined
     let pending: Promise<unknown> | undefined
     try {
-      await skills.discover({ projectPath: project })
+      const snapshot = await skills.discover({ projectPath: project })
+      let held = false
       read = vi.spyOn(reader, 'readSkillDescriptor').mockImplementation(async (source, path) => {
         const result = await original(source, path)
-        if (path === skillPath) {
+        if (path === skillPath && !held) {
+          held = true
           entered.resolve()
           await release.promise
         }
@@ -139,7 +143,6 @@ describe('Claude subscription attachment', () => {
       now.mockReturnValue(start + 31_000)
       await skills.discover({ projectPath: project, stale: true })
       await entered.promise
-      const refresh = skills.discover({ projectPath: project })
       const integrations = new ClaudeIntegrationResolver({
         skillsRegistry: skills,
         mcpRegistry: { discover: async () => ({ servers: [], sources: [], diagnostics: [] }) },
@@ -154,17 +157,24 @@ describe('Claude subscription attachment', () => {
         standaloneWorkspace: () => root,
         configured: () => true
       }), () => integrations)
-      const turn = adapter.startTurn(input({ cwd: project }), sink(), control, host(null))
-      pending = Promise.allSettled([refresh, turn])
+      const adapterHost = host(null)
+      if (cache === 'prepared') adapterHost.bridge!.skillsSnapshot = snapshot
+      const discover = vi.spyOn(skills, 'discover')
+      const turn = adapter.startTurn(input({ cwd: turnProject }), sink(), control, adapterHost)
+      pending = Promise.allSettled([turn])
       // The timeout only detects a deadlock while the read is held.
       const reached = vi.fn()
       void provider.promise.then(reached)
       await vi.waitFor(() => expect(reached).toHaveBeenCalled(), { timeout: 2_000 })
-      expect((await provider.promise).integrations?.pluginPath).toBeTruthy()
+      const plugin = (await provider.promise).integrations?.pluginPath
+      expect(plugin).toBeTruthy()
+      expect(readFileSync(join(plugin!, 'skills', 'check', 'SKILL.md'), 'utf-8')).toContain('Review the diff.')
       expect((await turn).text).toBe('ok')
+      if (cache === 'prepared') expect(discover).not.toHaveBeenCalled()
     } finally {
       release.resolve()
       await pending
+      await skills.discover({ projectPath: project })
       read?.mockRestore()
       now.mockRestore()
     }

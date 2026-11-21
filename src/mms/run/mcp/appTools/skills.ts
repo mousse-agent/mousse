@@ -1,7 +1,5 @@
 import { checkMessage } from '../../../../shared/bots/personal/walls'
 import { Type, type Tool } from '@earendil-works/pi-ai'
-import { sha256Hex } from '../../../../shared/agents/hashes'
-import type { EffectiveAgentGrantEntry } from '../../../../shared/agents/types'
 import { resolveEffectiveSkills } from '../../../integrations/catalog/EffectiveIntegrationResolver'
 import type { SkillDescriptor } from '../../../../shared/integrations'
 import type { AppToolHost } from './host'
@@ -24,14 +22,6 @@ export const SKILL_TOOLS: Tool[] = [
 
 export function normalizeSkillName(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9_-]/g, '-')
-}
-
-export function skillGrantMismatch(grant: EffectiveAgentGrantEntry, content: string): string | undefined {
-  const expected = grant.hash || grant.revision
-  if (!expected || sha256Hex(content) === expected) return undefined
-  return grant.hash
-    ? `Granted skill changed after agent resolution: ${grant.id}.`
-    : `Granted skill revision is unavailable: ${grant.id}@${grant.revision}.`
 }
 
 export function toSkillSummary(skill: SkillDescriptor): Record<string, unknown> {
@@ -89,22 +79,21 @@ export function skillTools(host: AppToolHost): MousseTool[] {
       if (!registry) return { text: `Skill not found: ${requested}`, isError: true }
       ctx.markEffect?.()
       const unavailable = { text: `Skill ${skill.name} is no longer available.`, isError: true }
+      const definition = ctx.turn.definition
+      const grant = definition?.grants.skills.find((entry) => entry.id === skill.id || entry.id === skill.installationId)
+      if (definition && !grant) return unavailable
       let result: Awaited<ReturnType<typeof registry.readSkillForModel>>
       try {
-        result = await registry.readSkillForModel(skill)
+        result = await registry.readSkillForModel(skill, grant)
       } catch {
         return unavailable
       }
       // Disk I/O gave the owner time to change Settings or the bot's permission.
       const settings = host.skillSettings?.()
       const snapshot = { skills: [result.skill], sources: [], diagnostics: [] }
-      if (!settings || !resolveEffectiveSkills({ snapshot, settings, actor: ctx.turn.actor }).length) return unavailable
+      if (!settings || !resolveEffectiveSkills({ snapshot, settings, actor: ctx.turn.actor, grantSource: grant?.source }).length) return unavailable
       const current = check(result.skill)
       if (current && !current.ok) return { text: checkMessage(current), isError: true }
-      if (ctx.turn.definition) {
-        const grant = ctx.turn.definition.grants.skills.find((entry) => entry.id === skill.id || entry.id === skill.installationId)
-        if (!grant || skillGrantMismatch(grant, result.content)) return unavailable
-      }
       if (result.skill['disable-model-invocation'])
         return { text: `Skill ${skill.name} can only be loaded by explicit user invocation.`, isError: true }
       ctx.timeline?.record({
