@@ -28,6 +28,7 @@ import { CommandPalette } from './components/CommandPalette'
 import { NewProjectDialog } from './components/NewProjectDialog'
 import { SelectionReplyButton } from './components/SelectionReplyButton'
 import { ToastHost } from './components/ui/Toast'
+import { PairLinkHost } from './components/netEngine/PairLinkHost'
 import { BugReportDialogHost } from './components/bugReports/BugReportDialog'
 import { useBugReportStore } from './stores/bugReportStore'
 import { ThreadRenameDialog } from './components/ThreadRenameDialog'
@@ -736,6 +737,8 @@ export default function App() {
       {/* New bot opens from the Chats sidebar, which can show while the pane is on Projects (after a restart). */}
       {profileReady && newBotOpen && <Suspense fallback={null}><NewBotDialogHost /></Suspense>}
 
+      {/* A `mousse://pair` link that opened Mousse: the profile that joins, then Enter link. */}
+      {profileReady && <PairLinkHost />}
       <ToastHost />
       <BugReportDialogHost />
 

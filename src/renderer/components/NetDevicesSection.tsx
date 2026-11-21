@@ -24,6 +24,7 @@ import { DeviceAccessRows } from './devices/DeviceAccessRows'
 import { DeviceBotsRow } from './devices/DeviceBotsRow'
 import { DevicePresetRow } from './devices/DevicePresetRow'
 import { DeviceAccessSummary } from './devices/DeviceAccessSummary'
+import { WorkHereRow } from './devices/WorkHereRow'
 import { pendingEditorAsk, useEditorAskStore } from '../stores/editorAskStore'
 import { allowDetail, connectedHere, connectStep, heldDevices, joinErrorWords, netErrorWords, startOverRefusal, bindSettings, workOnThreadsDisclosure, canWorkOnThreads, deviceLine, deviceListLine, isComputer, isIncompatible, keeperAway, KEEPER_DETAIL, listedDevices, passLapsed, readDevices, routeDetails, serveSettings, sshRecordFor, updateInstructions, worksOnThreads, WORKS_ON_THREADS, type Device } from '../lib/netDevices'
 import { describePermissionMode } from '../../shared/permissionMode'
@@ -474,16 +475,7 @@ export function NetDevicesSection() {
       />
     ),
     self && status?.enabled && unlocked && status.workOnThreads !== undefined && (
-      // Its own switch, apart from Networking: the short title is for scanning, the switch keeps the permission's full name.
-      <SettingsRow
-        key="self-inbound"
-        indent
-        title="Let my other devices work here"
-        description={workOnThreads
-          ? 'On · devices with Works on threads can open and change this device’s threads, within the limits set for each device'
-          : 'Off · no other device can open or change this device’s threads'}
-        control={<Switch checked={workOnThreads} label="Let my other devices work on this device's threads" disabled={busy} onChange={(next) => void action('bridge.workOnThreads', { enabled: next })} />}
-      />
+      <WorkHereRow key="self-inbound" indent on={workOnThreads} busy={busy} onChange={(next) => void action('bridge.workOnThreads', { enabled: next })} />
     ),
     self && status?.enabled && unlocked && status.shareBots !== undefined && (
       <SettingsRow

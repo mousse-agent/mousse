@@ -1,18 +1,27 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import jsQR from 'jsqr'
-import { DEFAULT_SCAN_INTERVAL_MS, type NetEngineStatus } from '../../../shared/netEngine/local'
+import {
+  DEFAULT_SCAN_INTERVAL_MS,
+  type NetEngineJoinPreview,
+  type NetEngineStatus
+} from '../../../shared/netEngine/local'
 import { qrSvgPath } from '../../lib/plusQr'
 import { CopyButton } from '../settings/IconButtons'
 import { Modal } from '../ui/Modal'
 import { useDaemonCall } from '../devices/useDaemonCall'
 import { readPairingLink } from './engineRows'
+import { EnterLinkPanel, JoinRoutes, SendLinkPanel } from './SendLinkParts'
+import { SshAddSteps } from './SshAddSteps'
 
 type Step =
   | { kind: 'choose' }
   | { kind: 'show' }
   | { kind: 'scan' }
+  | { kind: 'ssh' }
   | { kind: 'confirm'; ticket: string; host: string }
   | { kind: 'joining'; host: string }
+  | { kind: 'link' }
+  | { kind: 'enter' }
 
 /** The other computer, before it says its own name. */
 const UNNAMED_HOST = 'the other computer'
@@ -26,11 +35,14 @@ export function AddEngineDeviceDialog({
   status,
   onClose,
   initial = 'choose',
+  initialLink,
   camera = defaultCamera
 }: {
   status: NetEngineStatus | undefined
   onClose: () => void
-  initial?: 'choose' | 'show' | 'scan'
+  initial?: 'choose' | 'show' | 'scan' | 'link' | 'enter' | 'ssh'
+  /** A `mousse://pair` link that opened Mousse: Enter link reads it at once. */
+  initialLink?: string
   /** Opens a camera stream; tests and computers without one answer undefined. */
   camera?: () => Promise<MediaStream | undefined>
 }) {
@@ -76,9 +88,27 @@ export function AddEngineDeviceDialog({
     }
   }
 
+  // Confirm: the ticket's destinations and this computer's routes it may also share (1b §1.3).
+  const [preview, setPreview] = useState<{ ticket: string; value: NetEngineJoinPreview }>()
+  const [share, setShare] = useState<string[]>([])
+  const confirmTicket = step.kind === 'confirm' ? step.ticket : undefined
+  useEffect(() => {
+    if (!confirmTicket) return
+    let live = true
+    void window.mousse.platformRequest
+      .request<NetEngineJoinPreview>('netEngine.join.preview', { ticket: confirmTicket })
+      .then((value) => {
+        if (live) setPreview({ ticket: confirmTicket, value })
+      })
+      .catch(() => undefined)
+    return () => {
+      live = false
+    }
+  }, [confirmTicket])
+
   const join = async (ticket: string, host: string) => {
     setStep({ kind: 'joining', host })
-    if (await call('netEngine.join', { ticket })) onClose()
+    if (await call('netEngine.join', { ticket, ...(share.length ? { share } : {}) })) onClose()
     else setStep({ kind: 'confirm', ticket, host })
   }
 
@@ -90,7 +120,18 @@ export function AddEngineDeviceDialog({
     return true
   }
 
-  const title = step.kind === 'show' ? 'Show QR' : step.kind === 'scan' ? 'Scan' : 'Add device'
+  const title =
+    step.kind === 'show'
+      ? 'Show QR'
+      : step.kind === 'scan'
+        ? 'Scan'
+        : step.kind === 'link'
+          ? 'Send link'
+          : step.kind === 'enter'
+            ? 'Enter link'
+            : step.kind === 'ssh'
+              ? 'Add over SSH'
+              : 'Add device'
   return (
     <Modal open title={title} onClose={onClose}>
       <div className="engine-dialog" data-step={step.kind}>
@@ -110,8 +151,53 @@ export function AddEngineDeviceDialog({
             >
               Scan
             </button>
+            {status?.sendLink && (
+              <>
+                <button
+                  type="button"
+                  className="settings-btn"
+                  title="For a computer that is not next to you"
+                  onClick={() => setStep({ kind: 'link' })}
+                >
+                  Send link
+                </button>
+                <button
+                  type="button"
+                  className="settings-btn"
+                  onClick={() => setStep({ kind: 'enter' })}
+                >
+                  Enter link
+                </button>
+              </>
+            )}
+            {status?.reach && (
+              <button
+                type="button"
+                className="settings-btn"
+                title="Use another computer you can reach over SSH. One way: this computer uses it."
+                onClick={() => setStep({ kind: 'ssh' })}
+              >
+                Over SSH
+              </button>
+            )}
           </div>
         )}
+
+        {step.kind === 'link' && (
+          <SendLinkPanel
+            status={status}
+            onInvitation={(invitation) => {
+              // Closing the dialog ends the link's invitation while it is open.
+              inviteRef.current = invitation
+            }}
+          />
+        )}
+
+        {step.kind === 'enter' && (
+          <EnterLinkPanel status={status} initialLink={initialLink} onJoined={onClose} />
+        )}
+
+        {step.kind === 'ssh' && <SshAddSteps onDone={onClose} />}
 
         {step.kind === 'show' &&
           (joined ? (
@@ -176,6 +262,17 @@ export function AddEngineDeviceDialog({
               Connect to {step.host}? {capitalize(step.host)} will also be able to use this
               computer.
             </p>
+            {preview && preview.ticket === step.ticket && (
+              <JoinRoutes
+                preview={preview.value}
+                share={share}
+                onShare={(route, on) =>
+                  setShare((list) =>
+                    on ? [...list, route] : list.filter((item) => item !== route)
+                  )
+                }
+              />
+            )}
             <div className="devices-dialog-actions">
               <button
                 type="button"

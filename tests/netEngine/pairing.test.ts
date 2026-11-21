@@ -3,11 +3,13 @@
  * new calls use when two connections come up (both orders of their hellos), the removal's prune and the start-up
  * sweep of tombstones, and Start over setting the engine aside with v1's network.
  */
+import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { newId, type NodeId, type StreamId } from '../../src/shared/net'
+import { NetError } from '../../src/shared/net/errors'
 import { NetDatabase } from '../../src/mms/net/store/database'
 import { EnginePairing } from '../../src/mms/netEngine/pairing'
 import { EngineSessions } from '../../src/mms/netEngine/sessions'
@@ -34,9 +36,10 @@ describe('readTicket', () => {
     invitation = Buffer.alloc(16, 9)
   const route = Buffer.from('tcp://192.168.1.5:7000')
 
-  it('reads the host, the invitation, the expiry and the routes, with or without a link around it', () => {
+  it('reads the host, the invitation, the kind, the expiry, the routes and the hash, with or without a link around it', () => {
     const encoded = ticket([
       [1, Buffer.from([0x01])],
+      [2, Buffer.from([0x02])],
       [3, bytes(host)],
       [4, Buffer.concat([Buffer.from([0x50]), invitation])],
       [6, Buffer.from([0x1a, 0x6a, 0x00, 0x00, 0x00])],
@@ -46,10 +49,16 @@ describe('readTicket', () => {
       host: host.toString('hex'),
       invitation: invitation.toString('hex'),
       expiresAt: 0x6a000000,
-      routes: ['tcp://192.168.1.5:7000']
+      routes: ['tcp://192.168.1.5:7000'],
+      kind: 2,
+      // The key of a send link's flow and completion records (wire 10.2): SHA-256 of the CBOR bytes.
+      hash: createHash('sha256').update(Buffer.from(encoded, 'base64url')).digest('hex')
     }
-    expect(readTicket(encoded)).toEqual(expected)
-    expect(readTicket(`mousse://pair#${encoded}`)).toEqual(expected)
+    expect(readTicket(encoded)).toMatchObject(expected)
+    expect(readTicket(`mousse://pair#${encoded}`)).toMatchObject(expected)
+    // The ticket hash is of the ticket's bytes, whatever link is around it.
+    expect(readTicket(`mousse://pair#${encoded}`).hash).toBe(readTicket(encoded).hash)
+    expect(readTicket(encoded).fragment).toBe(encoded)
   })
 
   it('refuses what is not a ticket', () => {
@@ -144,6 +153,23 @@ describe('client selection', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(sessions.online(node)).toBe(false)
     expect(ready.at(-1)).toBe(`closed ${node}`)
+  })
+})
+
+describe('serving', () => {
+  it('counts only a connection made with the grant asked for (an SSH row connects on its own grant)', async () => {
+    const callerOnOwner = newId('node') as NodeId
+    const sessions = new EngineSessions({
+      host: {} as never,
+      client: {} as never,
+      name: () => 'owner',
+      hooks: { onClientReady: () => undefined, onClientClosed: () => undefined }
+    })
+    const link = fakeLink({ ownerOnCaller: newId('node') as NodeId, callerOnOwner, grant: '1', endpoint: 'owner' })
+    await sessions.attach(link.inbound)
+    expect(sessions.serving(callerOnOwner)).toBe(true)
+    expect(sessions.serving(callerOnOwner, '1')).toBe(true)
+    expect(sessions.serving(callerOnOwner, '2')).toBe(false)
   })
 })
 
@@ -291,6 +317,192 @@ describe('removal racing the pairing', () => {
     pairing.stop()
     await steps
   })
+})
+
+describe('an SSH login only the owner can fix (1b §1.4)', () => {
+  it('parks the pairing on dial.failed with no retry, and only the owner unparks it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'engine-park-'))
+    const db = new NetDatabase({ profileDir: dir })
+    cleanups.push(
+      () => rmSync(dir, { recursive: true, force: true }),
+      () => db.close()
+    )
+    const peers = new EnginePeerStore(db)
+    const endpoint = 'cd'.repeat(32)
+    const row = peers.add({
+      endpoint,
+      fingerprint: 'sha256:x',
+      grant: '',
+      name: 'Host',
+      state: 'connected',
+      pairedAt: Date.now()
+    })
+    const dials: string[] = []
+    const pairing = new EnginePairing({
+      peers,
+      sessions: { online: () => false } as never,
+      helper: () => ({ info: {}, claim: () => undefined, dial: async (id: string) => void dials.push(id), request: async () => ({}) }) as never,
+      teardown: () => undefined,
+      changed: () => undefined
+    })
+    cleanups.push(() => pairing.stop())
+    const failed = (why: string, retry: number | null) =>
+      pairing.event({ ev: 'dial.failed', identity: endpoint, why, reason: 'text', retry_ms: retry })
+
+    // A failure the helper retries itself does not park.
+    failed('auth_denied', 1_000)
+    failed('timeout', null)
+    expect(pairing.sshParked(row.localId)).toBeUndefined()
+    for (const why of ['auth_denied', 'host_key_changed', 'host_key_unknown'] as const) {
+      failed(why, null)
+      expect(pairing.sshParked(row.localId)).toBe(why)
+    }
+    // Recovery dials every pairing but the parked one.
+    await pairing.recover()
+    expect(dials).toEqual([])
+    pairing.unpark(row.localId)
+    expect(pairing.sshParked(row.localId)).toBeUndefined()
+    await pairing.recover()
+    expect(dials).toEqual([endpoint])
+  })
+})
+
+describe('a host removed here while its join ran', () => {
+  it('stays removed: the join answers "Removed while joining." and nothing dials the host', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'engine-forgotten-'))
+    const db = new NetDatabase({ profileDir: dir })
+    cleanups.push(
+      () => rmSync(dir, { recursive: true, force: true }),
+      () => db.close()
+    )
+    const peers = new EnginePeerStore(db)
+    const host = Buffer.alloc(32, 7)
+    const route = Buffer.from('tcp://192.168.1.5:7000')
+    // A kind-1 ticket: host, invitation, one private route (CBOR, as the helper writes it).
+    const ticket = Buffer.concat([
+      Buffer.from([0xa4, 0x01, 0x01, 0x03, 0x58, host.byteLength]),
+      host,
+      Buffer.from([0x04, 0x50]),
+      Buffer.alloc(16, 9),
+      Buffer.from([0x07, 0x81, 0x60 | route.byteLength]),
+      route
+    ]).toString('base64url')
+    const dials: string[] = []
+    const forgotten = new NetError('internal', 'gone', { details: { helper: 'forgotten' } })
+    const pairing = new EnginePairing({
+      peers,
+      sessions: { online: () => false } as never,
+      helper: () =>
+        ({
+          info: {},
+          speaks: () => true,
+          claim: () => undefined,
+          dial: async (id: string) => void dials.push(id),
+          request: async (op: string) => {
+            if (op === 'join') throw forgotten
+            return {}
+          }
+        }) as never,
+      teardown: () => undefined,
+      changed: () => undefined
+    })
+    cleanups.push(() => pairing.stop())
+    await expect(pairing.join(ticket)).rejects.toMatchObject({ message: 'Removed while joining.' })
+    // A start repeats a consented join: the answer ends it with no dial in its place.
+    const row = peers.byEndpoint(host.toString('hex'))!
+    expect(row.state).toBe('consented')
+    pairing.stop()
+    const again = new EnginePairing({
+      peers,
+      sessions: { online: () => false } as never,
+      helper: () =>
+        ({
+          info: {},
+          speaks: () => true,
+          claim: () => undefined,
+          dial: async (id: string) => void dials.push(id),
+          request: async (op: string) => {
+            if (op === 'join') throw forgotten
+            return {}
+          }
+        }) as never,
+      teardown: () => undefined,
+      changed: () => undefined
+    })
+    cleanups.push(() => again.stop())
+    await again.advance(row.localId)
+    expect(dials).toEqual([])
+  })
+})
+
+describe('the service around SSH rows (1b §1.4, §3.6)', () => {
+  const peersOf = (computer: { mms: { netEngine: unknown } }) =>
+    (computer.mms.netEngine as unknown as { require(): { peers: EnginePeerStore } }).require().peers
+
+  it('unparks, when a host key is trusted, only the pairings whose SSH route goes to that host', async () => {
+    const fabric = new Fabric()
+    cleanups.push(() => fabric.close())
+    // A 1.1 helper: SSH routes.
+    fabric.network.minor = 1
+    const a = await fabric.computer('a')
+    const resolved = await a.dispatch('netEngine.ssh.resolve', { target: 'me@b.test' }, true)
+    const peers = peersOf(a)
+    const sshRow = (endpoint: string, routeId: string, host: string) =>
+      peers.add({
+        endpoint,
+        fingerprint: 'sha256:x',
+        grant: '',
+        name: host,
+        state: 'ssh_granted',
+        source: 'ssh',
+        ssh: { requestId: endpoint.slice(0, 32), routeId, host },
+        pairedAt: Date.now()
+      })
+    const toB = sshRow('b1'.repeat(32), resolved.routeId, 'b.test')
+    const toC = sshRow('c1'.repeat(32), 'otherroute', 'c.test')
+    const pairing = a.mms.netEngine.pairing()
+    pairing.park(toB.localId, 'host_key_unknown')
+    pairing.park(toC.localId, 'host_key_unknown')
+    await a.dispatch(
+      'netEngine.ssh.trust',
+      { routeId: resolved.routeId, sha256: 'SHA256:fake-b.test', host: 'b.test' },
+      true
+    )
+    expect(pairing.sshParked(toB.localId)).toBeUndefined()
+    expect(pairing.sshParked(toC.localId)).toBe('host_key_unknown')
+  }, 60_000)
+
+  it('connects an SSH row only on a connection with its grant, and serves no call for a row with no grant', async () => {
+    const fabric = new Fabric()
+    cleanups.push(() => fabric.close())
+    const owner = await fabric.computer('owner'),
+      caller = await fabric.computer('caller')
+    const { callerOnOwner } = await fabric.pair(owner, caller)
+    const peers = peersOf(owner)
+    // B's row for A as an SSH add leaves it before A's first inbound, holding a grant other than the one A dials with.
+    peers.update(callerOnOwner, {
+      source: 'ssh',
+      state: 'ssh_granted',
+      grant: '999',
+      ssh: { requestId: 'ab'.repeat(16) }
+    })
+    await fabric.restartHelper(caller)
+    const sessions = (owner.mms.netEngine as unknown as { require(): { sessions: EngineSessions } })
+      .require().sessions
+    await vi.waitFor(() => expect(sessions.serving(callerOnOwner)).toBe(true), { timeout: 15_000 })
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(peers.get(callerOnOwner)?.state).toBe('ssh_granted')
+
+    // A row with no grant: a connection that has none either is no caller.
+    peers.update(callerOnOwner, { source: null, state: 'connected', grant: '', ssh: null })
+    const row = peers.get(callerOnOwner)!
+    const callerOf = (owner.mms.netEngine as unknown as { callerOf(connection: unknown): unknown }).callerOf.bind(
+      owner.mms.netEngine
+    )
+    expect(() => callerOf({ peer: callerOnOwner, direction: 'inbound', grant: row.grant })).toThrow(
+      expect.objectContaining({ code: 'forbidden' })
+    )
+  }, 120_000)
 })
 
 describe('Start over', () => {

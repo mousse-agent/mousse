@@ -153,9 +153,16 @@ export class WorkspaceResolver {
       return { threadId: this.threadId, workspacePath: this.projectPath, projectPath: this.projectPath, primaryPath: this.projectPath, lifecycle: 'unprovisioned', capability: repository.capability }
     }
     onStep?.('worktree')
-    // Read before the worktree exists: what the project folder holds that the new worktree, cut from HEAD, will not.
-    const startNote = await uncommittedLeftBehindNote(this.projectPath)
-    await manager.provision(this.threadId, conversationBranchId, this.projectPath, signal, heldThreadLease, undefined, { nameFrom })
+    // What the project folder holds that the new worktree, cut from HEAD, will not. Read beside the worktree's making, not
+    // before it: the worktree is a folder of its own, so the read sees the same either way, and the files wait on nothing.
+    const startNoteRead = uncommittedLeftBehindNote(this.projectPath)
+    try {
+      await manager.provision(this.threadId, conversationBranchId, this.projectPath, signal, heldThreadLease, undefined, { nameFrom })
+    } catch (error) {
+      await startNoteRead
+      throw error
+    }
+    const startNote = await startNoteRead
     forgetRepositoryFacts()
     const note = [startNote, manager.placementNote].filter(Boolean).join(' ')
     return { ...await manager.executionContext(this.projectPath), ...(note ? { startNote: note } : {}) }

@@ -8,11 +8,9 @@ import { SERVICE_HELP } from '../help'
 import {
   detectStartupPlatform,
   getMmsStartupStatus,
-  installMmsStartup,
   uninstallMmsStartup
 } from '../serviceLocator'
-import { resolveCliPathForInstall } from '../cliLaunch'
-import { HEADLESS_DISPLAY_SWITCHES } from '../../shared/headlessSwitches'
+import { installServiceEntry } from '../serviceInstall'
 import {
   canonicalizeHome,
   DAEMON_OWNER_TOKEN_ENV,
@@ -33,6 +31,7 @@ import {
   resolveOwnerStatus
 } from '../../mms/ownership/MmsOwnerLease'
 import { installDaemonDiagnostics } from '../daemonDiagnostics'
+import { capDaemonStartupOutput } from '../startupLog'
 import { installElectronDaemonQuit } from '../electronDaemonLifetime'
 import { resolveDaemonHostInvocation } from '../daemonHost'
 import { dropForeignAppImageMounts } from '../appImageMounts'
@@ -326,6 +325,8 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
 }
 
 async function runForeground(homeFlag?: string): Promise<void> {
+  // Started by the app, whose startup log takes stdout and stderr for the daemon's whole life: keep it bounded.
+  capDaemonStartupOutput()
   // Before anything starts a program: the app that started the service may quit and take its mount with it.
   dropForeignAppImageMounts()
   // The window client that started this daemon chose its owner token (`DAEMON_OWNER_TOKEN_ENV`).
@@ -492,18 +493,10 @@ async function installService(
 ): Promise<void> {
   const homeDir = canonicalizeHome(resolveMousseHome(homeFlag))
 
-  await installMmsStartup({
-    cliPath: resolveCliPathForInstall(process.argv[1] ?? fileURLToPath(import.meta.url)),
+  await installServiceEntry({
     homeDir,
-    // The service shows no windows, so Chromium's sandbox protects nothing it uses; an unpacked
-    // headless build has no setuid helper and would not start without the opt-out.
-    ...(headless
-      ? {
-          environment: { ELECTRON_DISABLE_SANDBOX: '1' },
-          // No display either: the daemon would stop at "Missing X server or $DISPLAY".
-          execArguments: HEADLESS_DISPLAY_SWITCHES
-        }
-      : {})
+    headless,
+    scriptPath: process.argv[1] ?? fileURLToPath(import.meta.url)
   })
   const status = await getMmsStartupStatus()
   writeOutput(mode, { ...status, installed: true })

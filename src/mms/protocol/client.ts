@@ -31,6 +31,7 @@ import {
   type ProtocolResponse
 } from './types'
 import { resolveLocalEndpoint } from './endpoint'
+import { engineLimits } from '../netEngine/limits'
 import {
   ClientCommandReceiver,
   type AttachedBrowserCommandHandler
@@ -82,6 +83,10 @@ export function requestTimeoutFor(method: string): number {
   if (method === 'usage.history' || method === 'bridge.hub.usageHistory') return MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS
   // Answers when the compaction ended: up to the service's own time limit for it.
   if (method === 'threads.compact') return MMS_PROTOCOL_COMPACT_TIMEOUT_MS
+  // A pairing join waits for the other computer's Yes, or for its owner to type the code: up to the engine's join
+  // deadline (`MOUSSE_NET_ENGINE_JOIN_DEADLINE_MS`), then the answer.
+  if (method === 'netEngine.join' || method === 'netEngine.retry')
+    return engineLimits().joinDeadlineMs + MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS
   return MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS
 }
 

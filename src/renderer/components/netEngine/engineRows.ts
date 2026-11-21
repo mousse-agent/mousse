@@ -1,4 +1,5 @@
 import type { NetEngineDevice } from '../../../shared/netEngine/local'
+import { connectedVia, relayText, routeText } from '../../../shared/netEngine/routes'
 
 /** What a device's row offers (design §5.2): Access opens the preset control under it. */
 export type EngineRowAction = 'access' | 'address' | 'retry' | 'remove'
@@ -22,16 +23,73 @@ export const SHARED_ACCOUNT_LINE = "Profiles in this account can read each other
 export const SHARED_ACCOUNT_DETAIL =
   'Each profile keeps its own pairings and removals, but any app running as this account can read both profiles’ files and keys. Use separate accounts on this computer to keep them private.'
 
+/** A device whose relay info (its signed manifest, Phase 3 §B.11) expired. */
+export const RELAY_STALE_LINE = 'Relay info out of date'
+export const RELAY_STALE_DETAIL = (name: string): string =>
+  `The relay addresses ${name} sent have expired. They're tried last until it sends new ones.`
+
+/**
+ * A device past this computer's relay limit (§B.5): its caller key is not listed with the relay. The limit is the
+ * one the helper names (`callers_max`).
+ */
+export const relayLimitLine = (callersMax?: number): string =>
+  callersMax === undefined
+    ? 'Not reachable through the relay (over its limit)'
+    : `Not reachable through the relay (limit ${callersMax})`
+export const relayLimitDetail = (callersMax?: number): string =>
+  `Your relays list the first ${callersMax ?? 'few hundred'} paired devices. LAN and other addresses still work.`
+
+/** The one line a device's row shows for a relay route waiting for the owner's Allow (§B.11). */
+export const relayOfferLine = (name: string, destination: string): string =>
+  `${name} can be reached through relay ${relayText(destination)}. Allow?`
+
 /** A device's row as Settings → Devices shows it (design §5.2, with the clock case of §8). */
 export function engineRow(device: NetEngineDevice): EngineRowView {
   const name = device.name
   if (device.state === 'removing') return { line: 'Removing…', actions: [] }
+  // A Send link it consented to that did not finish (design 1b §5.4).
+  if (device.unfinished)
+    return device.linkValid
+      ? {
+          line: "Pairing didn't finish",
+          detail: 'Retry asks for the code again. Or ask for a new link.',
+          warn: true,
+          actions: ['retry', 'remove']
+        }
+      : {
+          line: "Pairing didn't finish",
+          detail: 'The link has expired. Remove this, then ask for a new link.',
+          warn: true,
+          actions: ['remove']
+        }
   if (device.notAccepted)
     return {
       line: `${name} no longer accepts this computer`,
       detail: `${name} removed this computer. Remove it here, then pair again to use it.`,
       warn: true,
       actions: ['remove']
+    }
+  // An SSH login only the owner can fix: nothing signs in again until Retry (1b §1.4).
+  if (device.sshParked === 'auth_denied')
+    return {
+      line: `SSH sign-in to ${name} was refused`,
+      detail: 'Mousse uses your SSH keys or agent, never a password. Fix the key, then Retry.',
+      warn: true,
+      actions: ['retry', 'remove']
+    }
+  if (device.sshParked === 'host_key_changed')
+    return {
+      line: `${name}'s SSH key changed`,
+      detail: `Check the new key with Add over SSH, then Retry. Mousse won't sign in until then.`,
+      warn: true,
+      actions: ['retry', 'remove']
+    }
+  if (device.sshParked === 'host_key_unknown')
+    return {
+      line: `Check ${name}'s SSH key`,
+      detail: `Check and trust its key with Add over SSH, then Retry.`,
+      warn: true,
+      actions: ['retry', 'remove']
     }
   if (device.certificateWindow)
     return {
@@ -76,14 +134,27 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
       detail: `Mousse is closed on ${name}, or it is on another network.`,
       actions: ['access', 'address', 'retry', 'remove']
     }
+  // Added over SSH: one way only (1b §3.6).
+  if (device.direction === 'out')
+    return { line: 'Uses ' + name, detail: 'Added over SSH', actions: ['address', 'remove'] }
+  if (device.direction === 'in')
+    return {
+      line: name + ' uses this computer',
+      detail: 'Added over SSH from ' + name,
+      actions: ['access', 'remove']
+    }
   return { line: 'Connected', actions: ['access', 'address', 'remove'] }
 }
 
-/** Where a device is found: "LAN", or the address added for it. */
+/**
+ * Where a device is found: the class of the route it is connected on (1b §7 `conn.up.route`), "Through relay
+ * host:port" on a relay (Phase 3), else "LAN" or the address added for it.
+ */
 export function engineWhere(device: NetEngineDevice): string {
+  if (device.route) return connectedVia(device.route, device.via)
   const first = device.addresses?.[0]
   if (!first) return 'LAN'
-  const address = first.replace(/^tcp:\/\//, '')
+  const address = routeText(first)
   return device.addresses!.length > 1 ? `${address} +${device.addresses!.length - 1}` : address
 }
 

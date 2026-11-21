@@ -24,6 +24,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { resolveDaemonHostInvocation } from '../../cli/daemonHost'
+import { rotateStartupLogSync, STARTUP_LOG_CAP_ENV, STARTUP_LOG_FILE, STARTUP_LOG_MAX_BYTES } from '../../cli/startupLog'
 import { daemonCommand } from './daemonCommand'
 import {
   canonicalizeHome,
@@ -1210,7 +1211,7 @@ export class GuiMmsController extends EventEmitter {
     if (!record) {
       throw linkError('service_start_timeout',
         `MMS daemon failed to become ready within ${GUI_DAEMON_START_TIMEOUT_MS}ms. ` +
-          `Startup details were written to ${join(this.homeDir, 'mms-startup.log')}`
+          `Startup details were written to ${join(this.homeDir, STARTUP_LOG_FILE)}`
       )
     }
     return record
@@ -1245,7 +1246,8 @@ export class GuiMmsController extends EventEmitter {
     })
     mkdirSync(this.homeDir, { recursive: true })
     const ownerToken = createOwnerToken()
-    const logPath = join(this.homeDir, 'mms-startup.log')
+    const logPath = join(this.homeDir, STARTUP_LOG_FILE)
+    rotateStartupLogSync(logPath)
     const logFd = openSync(logPath, 'a')
     let child: ChildProcess
     try {
@@ -1255,7 +1257,9 @@ export class GuiMmsController extends EventEmitter {
         {
           detached: true,
           stdio: ['ignore', logFd, logFd],
-          env: { ...env, MOUSSE_HOME: this.homeDir, [DAEMON_OWNER_TOKEN_ENV]: ownerToken },
+          env: { ...env, MOUSSE_HOME: this.homeDir, [DAEMON_OWNER_TOKEN_ENV]: ownerToken,
+            [STARTUP_LOG_CAP_ENV]: String(STARTUP_LOG_MAX_BYTES)
+          },
           windowsHide: true
         }
       )
@@ -1281,7 +1285,7 @@ export class GuiMmsController extends EventEmitter {
       if (child.exitCode !== null || child.signalCode !== null) {
         let detail = ''
         try {
-          const log = readFileSync(join(this.homeDir, 'mms-startup.log'), 'utf8').trim()
+          const log = readFileSync(join(this.homeDir, STARTUP_LOG_FILE), 'utf8').trim()
           detail = log ? ` Last startup output: ${log.slice(-2_000)}` : ''
         } catch {
           /* best effort diagnostics */

@@ -16,6 +16,8 @@ The nightly compares `master` with the commit of the newest nightly release. Wit
 
 The newest 10 nightlies are kept; older ones and their tags are deleted.
 
+Every desktop build exists for x64 and arm64: Windows (`Mousse.Setup.<version>.exe` and `Mousse.Setup.<version>-arm64.exe`), Linux (`Mousse-<version>.AppImage` and `Mousse-<version>-arm64.AppImage`) and macOS. Each packages on a runner of its own architecture, and carries the network helper built for it (see [the engine's desktop builds](net/engine-desktop-builds.md)).
+
 macOS gets two disk images: `arm64` for Apple silicon and `x64` for Intel Macs. Without a Developer ID certificate they are ad-hoc signed and not notarized, so macOS blocks the first launch: open Mousse once, then choose **Open Anyway** in System Settings → Privacy & Security. Its `mousse-cli` is inside the app at `Mousse.app/Contents/Resources/mousse-cli`.
 
 ## The app version
@@ -57,8 +59,10 @@ Release files the updater reads, attached by `package.yml` and checked there:
 
 | Release | Windows | Linux |
 |---|---|---|
-| Stable | `latest.yml`, `Mousse.Setup.<version>.exe(.blockmap)` | `latest-linux.yml`, `Mousse-<version>.AppImage` |
-| Nightly | `nightly.yml`, same installer files | `nightly-linux.yml`, same AppImage |
+| Stable | `latest.yml`, `Mousse.Setup.<version>.exe(.blockmap)` | `latest-linux.yml`, `Mousse-<version>.AppImage`; on arm64 `latest-linux-arm64.yml`, `Mousse-<version>-arm64.AppImage` |
+| Nightly | `nightly.yml`, same installer files | `nightly-linux.yml`, same AppImage; on arm64 `nightly-linux-arm64.yml` |
+
+Windows on arm64 has no feed of its own: its installer is attached, and the feed names the x64 one.
 
 To try the updater from a checkout, serve a folder with a `latest.yml` (or `nightly.yml`) and its installer over HTTP and start `npm run dev` with `MOUSSE_UPDATE_FEED_URL=http://127.0.0.1:<port>/`. On Windows, checking and downloading work in a development build; on Linux, downloading needs a real AppImage. Do not install from a development build.
 

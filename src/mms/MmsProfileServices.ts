@@ -136,6 +136,7 @@ import { mousseIdNetModule } from './net/plus'
 import { BridgeProfileService } from './bridge/BridgeProfileService'
 import { PeerDirectory } from './bridge/peers'
 import { NetEngineService } from './netEngine/NetEngineService'
+import { loginStartQuestion } from './netEngine/loginStart'
 import { ChatNetworkBindingService } from './chats/network/ChatNetworkBindingService'
 import type { SpaceProfileService } from './spaces/SpaceProfileService'
 import type { BotProfileService } from './bots/space/BotProfileService'
@@ -1459,6 +1460,8 @@ export class MmsProfileServices {
     this.netEngine = new NetEngineService({
       profileDir: this.homeDir,
       profileId: this.profileId,
+      // Nothing is read until a window turns the switch on or reads the status.
+      loginStart: loginStartQuestion(shared.installationHome),
       net: this.net,
       bridge: () => this.bridgeService,
       // "<computer> (<profile>)", as the other computer's question names it (§5.1).
