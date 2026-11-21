@@ -20,8 +20,8 @@ checkout stays in Mousse's worktrees:
 The file holds one path per line (`#` starts a comment). Plain folder names use Git's faster cone
 mode; a line with a pattern character (`*`, `?`, `[`, `!`, `\`) switches to Git's pattern mode.
 Your own checkout of the project stays whole. A missing or empty file, or per-worktree settings
-turned off, stops the new worktree before anything is made; a worktree restored from its snapshot
-comes back whole instead.
+turned off, stops the new worktree before anything is made. If the file goes away later, a worktree
+restored from its snapshot comes back whole.
 
 ## Packaging
 
