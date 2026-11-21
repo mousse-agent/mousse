@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { WindowsProviderTree } from '../../windowsProviderProcess'
 import { idleCloseFromEnv } from '../../idleCloseFromEnv'
 import type { Query, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { observeRateLimit, RejectedWindows } from './usageLimit'
@@ -94,10 +95,11 @@ export const DEFAULT_LIVE_TIMINGS: LiveTimings = {
 }
 
 /** A query's Claude Code as the SDK reported it at spawn: its pid and when Mousse heard of it (`noteClaudeQuerySpawn`). */
-const SPAWNED = new WeakMap<object, () => { pid: number; spawnedAt: number } | undefined>()
+type ClaudeSpawn = { pid: number; spawnedAt: number; windowsTree?: WindowsProviderTree }
+const SPAWNED = new WeakMap<object, () => ClaudeSpawn | undefined>()
 
 /** Records where the spawn of `query`'s Claude Code is read from once it has started. */
-export function noteClaudeQuerySpawn(query: object, spawned: () => { pid: number; spawnedAt: number } | undefined): void {
+export function noteClaudeQuerySpawn(query: object, spawned: () => ClaudeSpawn | undefined): void {
   SPAWNED.set(query, spawned)
 }
 
@@ -130,7 +132,7 @@ export function claudeQueryProcess(query: unknown): ClaudeProcess | undefined {
     pid,
     ...(typeof handle?.kill === 'function' ? { terminate: () => { try { handle.kill!('SIGTERM'); return true } catch { return false } } } : {}),
     root: {
-      ...(noted?.pid === pid ? { spawnedAt: noted.spawnedAt } : {}),
+      ...(noted?.pid === pid ? { spawnedAt: noted.spawnedAt, windowsTree: noted.windowsTree } : {}),
       exited: () => (knowsExit ? handle!.exitCode !== null || handle!.signalCode !== null : undefined),
       ...(typeof handle?.kill === 'function' ? { kill: () => { try { handle.kill!('SIGKILL') } catch { /* gone meanwhile */ } } } : {})
     }
@@ -746,7 +748,7 @@ export class LiveSession<Turn = unknown> {
   sessionId: string | undefined
   dead = false
   /** What the owner keyed this query on (model, folder, instructions...); the service compares it. */
-  meta: Record<string, unknown> = {}
+  meta: Record<string, unknown> & { hardParts?: readonly unknown[] } = {}
   private query: Query | undefined
   private readonly runs: LiveRun[] = []
   private continuation: LiveRun | undefined
@@ -2184,7 +2186,10 @@ export class LiveSession<Turn = unknown> {
       clearTimeout(this.capTimer)
       this.capTimer = undefined
     }
-    if (!this.busy) this.armIdle()
+    if (!this.busy) {
+      this.armIdle()
+      if (!active) this.hooks.idle?.()
+    }
   }
 
   private afterRunEnded(): void {

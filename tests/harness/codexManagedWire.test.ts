@@ -12,6 +12,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSy
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join, resolve } from 'node:path'
+import { createInterface } from 'node:readline'
 import { zstdDecompressSync, gunzipSync } from 'node:zlib'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { ChatGptAuth } from '../../src/mms/harness/chatgpt/chatgptAuth'
@@ -21,8 +22,8 @@ import { createManagedCodexRuntime, MANAGED_MODEL_PROVIDER } from '../../src/mms
 import type { DriverContext, DriverRuntime } from '../../src/mms/harness/driver'
 import { instanceEnv } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
-import { spawnCodexAppServer, type CodexLaunch } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
-import { CodexTurnFailure, type CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
+import { spawnCodexAppServer, type CodexLaunch, type CodexProcess } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
+import { CODEX_MAX_IDLE_THREADS, CodexTurnFailure, type CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
 import { codexHarnessError } from '../../src/mms/harness/drivers/codex/adapter'
 import { FakeIssuer, plainCodec } from './chatgpt/fakeIssuer'
 import { signIn } from './chatgpt/signInFlow'
@@ -167,7 +168,7 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
   let proxy: RefusingProxy
   let broker: ChatGptTokenBroker
   let dirs: string[] = []
-  const stops: Array<() => void> = []
+  const stops: Array<() => Promise<void>> = []
 
   beforeAll(async () => {
     if (!new CodexInstallation({ installationHome: pinHome }).installed()) throw new Error('The pinned Codex is missing: run `npm run codex:pin`.')
@@ -185,7 +186,7 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
   })
   afterEach(async () => {
     if (process.env.MOUSSE_CODEX_WIRE_LOG) writeFileSync(`${process.env.MOUSSE_CODEX_WIRE_LOG}.requests.json`, JSON.stringify(openai.requests, null, 2))
-    for (const stop of stops.splice(0)) stop()
+    await Promise.all(stops.splice(0).map((stop) => stop()))
     await broker?.close()
     for (const dir of dirs.splice(0)) {
       try {
@@ -241,6 +242,7 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
     }
     broker = new ChatGptTokenBroker()
     const launches: CodexLaunch[] = []
+    const processes: CodexProcess[] = []
     let auth!: ChatGptAuth
     const runtime = createManagedCodexRuntime(context, {
       installation: new CodexInstallation({ installationHome: pinHome }),
@@ -253,15 +255,15 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
           const spec = { ...launch, args: [...launch.args, ...(options.extraArgs ?? [])] }
           launches.push(spec)
           const child = spawnCodexAppServer(spec)
+          processes.push(child)
           if (process.env.MOUSSE_CODEX_WIRE_LOG) child.stderr?.on('data', (chunk: Buffer) => appendFileSync(process.env.MOUSSE_CODEX_WIRE_LOG!, chunk))
           return child
         },
         requestTimeoutMs: 60_000
       }
     })
-    stops.push(() => {
-      runtime.stop()
-      questions.shutdown()
+    stops.push(async () => {
+      try { await runtime.stop() } finally { questions.shutdown() }
     })
     const service = (runtime.adapter as unknown as { service: () => CodexProviderService }).service()
     await signIn(issuer, auth, { subject: 'wire-user', email: 'wire@example.com' }, { method: 'chatgpt-new-account' })
@@ -273,7 +275,7 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
         .chat({ threadId, instanceId, cwd: workspace, model: options.model ?? 'gpt-wire', prompt, mcp: null, ...(options.history ? { history: options.history } : {}), onText: (delta) => text.push(delta) })
         .then((result) => ({ result, text: text.join('') }))
     }
-    return { runtime, service, auth, launches, turn, instanceId, dir, userHome }
+    return { runtime, service, auth, launches, processes, turn, instanceId, dir, userHome }
   }
 
   /** What a failed turn carries, and the harness error a managed entry maps it to. */
@@ -317,6 +319,61 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
     expect(second.result.codexThreadId).toBe(first.result.codexThreadId)
     const resumed = JSON.stringify(openai.responses().at(-1)!.body!.input)
     expect(resumed).toContain('lantern')
+  })
+
+  /** Observe the physical loaded set on the same connection, with a request id the service never uses. */
+  async function loadedThreads(process: CodexProcess): Promise<string[]> {
+    const lines = createInterface({ input: process.stdout })
+    const id = 'observe-loaded-threads'
+    try {
+      return await new Promise<string[]>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Codex did not answer thread/loaded/list')), 5000)
+        lines.on('line', (line) => {
+          const message = JSON.parse(line) as { id?: string; result?: { data: string[] }; error?: unknown }
+          if (message.id !== id) return
+          clearTimeout(timeout)
+          if (message.result) resolve(message.result.data)
+          else reject(new Error(JSON.stringify(message.error)))
+        })
+        process.stdin.write(JSON.stringify({ id, method: 'thread/loaded/list', params: { limit: 100 } }) + '\n')
+      })
+    } finally {
+      lines.close()
+      process.stdout.resume()
+    }
+  }
+
+  it('reaps the old app-server at the idle cap when its acknowledged unload is delayed', async () => {
+    const { turn, processes } = await setup()
+    const ids: string[] = []
+    for (let index = 0; index < CODEX_MAX_IDLE_THREADS; index += 1) {
+      const { result } = await turn('idle-' + index, 'Hello ' + index)
+      ids.push(result.codexThreadId)
+    }
+    expect(processes).toHaveLength(1)
+    expect(new Set(await loadedThreads(processes[0]!))).toEqual(new Set(ids))
+    await turn('overflow', 'Send one more.')
+    expect(processes[0]!.exitCode !== null || processes[0]!.signalCode !== null).toBe(true)
+    const { result } = await turn('next', 'On the replacement.')
+    expect(processes).toHaveLength(2)
+    expect(await loadedThreads(processes[1]!)).toEqual([result.codexThreadId])
+  })
+
+  it('switches to a new server and submits copied history under the new account', async () => {
+    const { turn, service, processes, auth } = await setup()
+    const first = await turn('switch', 'First account request.')
+    const history = 'user: First account request.\nassistant: ' + first.text
+    service.commitConversation('switch', history)
+    const originalBearer = openai.responses().at(-1)?.authorization
+    await signIn(issuer, auth, { subject: 'wire-other', email: 'other@example.com' }, { method: 'chatgpt-new-account', clientId: 'oaiapp_two' })
+    expect(processes[0]!.exitCode !== null || processes[0]!.signalCode !== null).toBe(true)
+    const second = await turn('switch', 'Continue.', { history })
+    expect(processes).toHaveLength(2)
+    expect(second.result.codexThreadId).not.toBe(first.result.codexThreadId)
+    const request = openai.responses().at(-1)
+    expect(request?.authorization).not.toBe(originalBearer)
+    expect(JSON.stringify(request?.body?.input)).toContain('Previous conversation')
+    expect(JSON.stringify(request?.body?.input)).toContain('First account request.')
   })
 
   it('a 401 runs the helper again, the broker renews the token, and the retry carries the new one', async () => {
@@ -387,7 +444,7 @@ describe.skipIf(skip)('managed Codex on the wire (pinned binary, fake ChatGPT)',
       const { text } = await turn(`wire-models-${name}`, 'Hi.')
       const models = openai.requests.filter((request) => request.path.endsWith('/models'))
       observed[name] = { answered: text.includes('Hello'), modelRequests: models.length, modelBearer: models.map((request) => /^Bearer at-\d+$/.test(request.authorization ?? '')) }
-      for (const stop of stops.splice(0)) stop()
+      await Promise.all(stops.splice(0).map((stop) => stop()))
       await broker.close()
       openai.requests.length = 0
     }

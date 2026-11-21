@@ -25,6 +25,7 @@ beforeEach(() => {
   const claudeHome = mkdtempSync(join(tmpdir(), 'claude-config-test-'))
   homes.push(claudeHome)
   vi.stubEnv('CLAUDE_CONFIG_DIR', claudeHome)
+  writeFileSync(join(claudeHome, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'test-account' } }))
 })
 afterEach(() => {
   vi.unstubAllEnvs()
@@ -1357,6 +1358,58 @@ describe('idle release and the cap on live processes', () => {
     expect(first.closed).toBe(true)
     expect(other.closed).toBe(true)
     expect(f.service.liveThreadIds()).toEqual(['a'])
+  })
+
+  it('enforces the idle cap when the last background notification is committed', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const f = fixture({ maxIdleSessions: 1 })
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }))
+      process.answer(String(message.uuid), 'started')
+    }
+    await f.turn({ threadId: 'pinned' })
+    const pinned = f.cli.last
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'ordinary reply')
+    await f.turn({ threadId: 'idle' })
+    const idle = f.cli.last
+    vi.setSystemTime(Date.now() + 1)
+    pinned.emit(notification('bash-1'), textDelta('background reply'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    const continuation = f.chat({ threadId: 'pinned', continuation: true, prompt: '' })
+    pinned.emit(resultFrame({ text: 'background reply', origin: 'task-notification' }))
+    await expect(continuation).resolves.toBe('background reply')
+    expect([pinned.closed, idle.closed]).toEqual([false, false])
+    f.service.commitConversation('pinned', 'committed background reply')
+    await Promise.resolve()
+    expect([pinned.closed, idle.closed]).toEqual([false, true])
+  })
+
+  it('rechecks identity before taking a background continuation', async () => {
+    const f = fixture()
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }))
+      process.answer(String(message.uuid), 'started')
+    }
+    await f.turn()
+    const old = f.cli.last
+    old.emit(notification('bash-1'), textDelta('old account background reply'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'other' } }))
+    const onText = vi.fn()
+    await expect(f.chat({ continuation: true, prompt: '', onText })).rejects.toThrow()
+    expect(onText).not.toHaveBeenCalled()
+    expect(old.closed).toBe(true)
+  })
+
+  it('a status check that finds a terminal sign-out closes idle processes before Send is refused', async () => {
+    let loggedIn = true
+    const f = fixture({}, undefined, undefined, { runAuth: async () => JSON.stringify({ loggedIn, authMethod: 'claude.ai' }) })
+    await f.turn({ threadId: 'a' })
+    await f.turn({ threadId: 'b' })
+    loggedIn = false
+    await expect(f.service.status({ force: true })).resolves.toMatchObject({ state: 'signed_out' })
+    expect(f.cli.processes.map((process) => process.closed)).toEqual([true, true])
+    await expect(f.chat({ threadId: 'a' })).rejects.toThrow()
   })
 
   it('keeps no more idle processes than the idle count: the least recently used closes as soon as another goes idle, never a busy one or one holding background work', async () => {

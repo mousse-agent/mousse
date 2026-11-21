@@ -71,6 +71,42 @@ const full = (source = instances(), extra: { models?: Partial<Record<ProviderDri
   return { harness, adapters }
 }
 
+describe('provider shutdown', () => {
+  it('waits for added runtimes, including one already being retired', async () => {
+    let finishActive!: () => void
+    let finishRetired!: () => void
+    const active = new Promise<void>((resolve) => { finishActive = resolve })
+    const retiring = new Promise<void>((resolve) => { finishRetired = resolve })
+    const both = vi.fn()
+    const config = instances({
+      'claude:work': { driver: 'claude', enabled: true },
+      'claude:other': { driver: 'claude', enabled: true }
+    })
+    const driver = adapterDriver(fake('claude'))
+    const harness = testHarness({
+      profileHome: home(),
+      instances: config,
+      drivers: [{ ...driver, multiInstance: true, create: (context) => ({
+        ...driver.create(context),
+        stop: () => {
+          if (context.instanceId === 'claude:work') return active
+          if (context.instanceId === 'claude:other') return retiring
+        }
+      }) }]
+    })
+    for (const instanceId of ['claude:work', 'claude:other'])
+      harness.resolveStored({ instanceId, model: 'sonnet' }, { purpose: 'turn' })
+    await harness.instances.remove('claude:other')
+    const stopped = harness.stop().then(both)
+    finishActive()
+    await active
+    expect(both).not.toHaveBeenCalled()
+    finishRetired()
+    await stopped
+    expect(both).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('harness gateway: resolution (absorbs AdapterRegistry)', () => {
   it('resolves each seeded instance to its driver', () => {
     const { harness } = full(instances(undefined, ['openai']))

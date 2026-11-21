@@ -455,6 +455,7 @@ describe('sign in from the app', () => {
 
   it('stops every app-server of the home before the sign-in starts, and starts a new one to read the result', async () => {
     const w = world()
+    writeSignIn(w.homeOf(WORK), 'acct-old')
     await w.harness.instances.recheck(WORK)
     expect(w.servers.running()).toBeGreaterThan(0)
     const launched = w.servers.launches.length
@@ -1268,7 +1269,8 @@ describe('the service of a Codex account', () => {
   it('reconnect ends the process that knew the old account, forgets the models, and reads the new one', async () => {
     const dir = tempDir('mousse-codex-service')
     const { instance, servers } = service(dir, fakeCodex())
-    expect(await instance.authState()).toBe('signed_out')
+    writeSignIn(join(dir, 'home'), 'acct-old')
+    expect(await instance.authState()).toBe('signed_in')
     expect(servers.running()).toBe(1)
     writeSignIn(join(dir, 'home'), 'acct-new')
     // The running process answers for the account it started with; a reconnect starts another.

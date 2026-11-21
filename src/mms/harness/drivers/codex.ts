@@ -64,9 +64,6 @@ export function codexSignInSteps(home: string): string {
 /** How long a sign-in may take before Mousse ends it: a little after the one-time code expires (15 minutes). */
 export const CODEX_SIGN_IN_TIMEOUT_MS = 16 * 60_000
 
-/** How long removing an entry waits for its app-servers to exit before it goes on without them. */
-export const CODEX_STOP_WAIT_MS = 10_000
-
 /** How long a terminal that printed its success may take to exit before it is ended (it is writing its files). */
 export const CODEX_SUCCESS_GRACE_MS = 5_000
 
@@ -265,9 +262,10 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
     const runtime = createManagedCodexRuntime(context, { userCodex })
     return {
       ...runtime,
-      stop: () => {
-        reader?.stop()
-        return runtime.stop?.()
+      stop: async () => {
+        const results = await Promise.allSettled([reader?.stop(), runtime.stop?.()])
+        const failed = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        if (failed.length) throw new AggregateError(failed.map((result) => result.reason), 'Codex runtimes could not be stopped')
       }
     }
   }
@@ -602,27 +600,16 @@ export function codexDriver(options: CodexDriverOptions): HarnessDriver {
       },
       signIn: privateHome ? signInInTerminal : (session, cwd) => service.login(session, cwd),
       signOut: privateHome ? signOutOfHome : () => service.logout(),
-      // Settles once the app-servers of the service have exited (Windows keeps files of a running
-      // process locked, and the gateway deletes a removed entry's files only then); a process that
-      // does not exit does not hold the removal for ever.
-      stop: () => {
-        if (stopped) return Promise.resolve()
+      stop: async () => {
+        if (stopped) return
         stopped = true
         user.users -= 1
-        // A config change retires this runtime just before it builds the next one, which takes the
-        // service over: it stops only when no runtime took it by then.
-        return new Promise<void>((resolve) => {
-          queueMicrotask(() => {
-            if (user.users > 0) return resolve()
-            if (owned.get(context.instanceId) === user) owned.delete(context.instanceId)
-            // A sign-in terminal this runtime started ends with the instance, not with a config change.
-            activeRun?.cancel()
-            void user.service.stop()
-            const timer = setTimeout(resolve, CODEX_STOP_WAIT_MS)
-            timer.unref?.()
-            void user.service.processesExited().then(() => resolve(), () => resolve())
-          })
-        })
+        // A replacement runtime can take over the service in the same tick.
+        await Promise.resolve()
+        if (user.users > 0) return
+        if (owned.get(context.instanceId) === user) owned.delete(context.instanceId)
+        activeRun?.cancel()
+        await user.service.stop()
       }
     }
   }

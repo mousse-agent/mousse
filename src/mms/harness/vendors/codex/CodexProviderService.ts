@@ -55,6 +55,7 @@ import {
   notificationParams,
   type AccountReadResponse,
   type CodexNotification,
+  type CodexRequestMap,
   type CodexServerRequest,
   type CodexServerRequestMap,
   type CodexModel,
@@ -183,6 +184,8 @@ export function codexModelOption(model: CodexModel): LlmModelOption {
 type SavedThread = {
   codexThreadId: string
   cwd: string
+  /** Hashed ChatGPT identity. Legacy threads rebuild from Mousse history. */
+  account?: string
   /** Provider instance that owns the Codex thread; absent means the default `codex` instance. */
   instanceId?: string
   /** Fingerprint of the canonical history the thread holds; set after the turn commits, or after a stopped turn is fingerprinted. */
@@ -203,19 +206,19 @@ type Settings = {
   /** ISO time `models` was last listed by Codex. */
   modelsRefreshedAt?: string
   threads?: Record<string, SavedThread>
-  /** The plan limits Codex last reported, kept across restarts; `account` is a hash of the account (`limitsOwner`). */
+  /** The plan limits Codex last reported, kept across restarts; `account` is a hash of the account (`codexAccountOwner`). */
   rateLimits?: SavedLimits
 }
 type SavedLimits = { snapshot: RateLimitSnapshot; at: number; account: string }
 type AccountProbe = CodexAccountReading
 
-/** A one-way key of the account a limits snapshot belongs to: the account itself is never written. */
 /** The account a signed-in reading names (as `account()` derives it), `''` when it names none. */
 function accountSubject(result: Extract<AccountProbe, { kind: 'signed_in' }>): string {
   return result.subject ?? (result.email ? `chatgpt:${result.email}` : '')
 }
 
-function limitsOwner(subject: string | undefined): string | undefined {
+/** A one-way ownership key. The subject itself is never written to disk. */
+function codexAccountOwner(subject: string | undefined): string | undefined {
   return subject ? createHash('sha256').update(`codex-limits\u0000${subject}`).digest('hex') : undefined
 }
 
@@ -377,6 +380,27 @@ export type CodexServiceDependencies = {
 export const CODEX_STOP_KILL_AFTER_MS = 3_000
 /** `stopAll`: after the tree kill, how long the exit may take before the stop fails. */
 export const CODEX_STOP_EXIT_DEADLINE_MS = 5_000
+
+interface CodexApp {
+  conn: CodexConnection
+  ready: Promise<CodexConnection>
+  /** The account this process last reported (`accountSubject`): its loaded threads were opened under it. */
+  subject?: string
+  /** A thread opened without reusable configuration, possibly without an id. */
+  recycleRequired: boolean
+  threadUsers: Set<Set<string>>
+  unloading: Map<string, Promise<void>>
+  capacityWaiters: Set<() => void>
+  generation: number
+  /** What this process last said about every thread (a broadcast, whichever thread a run holds). */
+  statuses: ThreadStatuses
+  /**
+   * Whether this process lists a thread's descendants by ancestor (`thread/list`, experimental); unset
+   * until the capability probe has answered. `off` is final for the process: master's direct-helper tracking.
+   */
+  tree?: 'on' | 'off'
+  treeProbe?: Promise<void>
+}
 
 /** A launched app-server, tracked from spawn to its actual exit. */
 interface LiveProcess {
@@ -1175,29 +1199,11 @@ export class CodexProviderService {
   /** Another service of this instance writes the settings now (its home changed); this one never writes them again. */
   private settingsFrozen = false
   private stopped = false
-  /** `verified`: this process answered `account/read` with a ChatGPT account. */
-  private app?: {
-    conn: CodexConnection
-    ready: Promise<CodexConnection>
-    verified: boolean
-    /** The account this process last reported (`accountSubject`): its loaded threads were opened under it. */
-    subject?: string
-    /** Another account was reported since its threads were opened: none is reused, and it closes once nothing uses it. */
-    retired?: boolean
-    generation: number
-    /** Resolves when the process has exited (or never started). */
-    exited: Promise<void>
-    /** What this process last said about every thread (a broadcast, whichever thread a run holds). */
-    statuses: ThreadStatuses
-    /**
-     * Whether this process lists a thread's descendants by ancestor (`thread/list`, experimental); unset
-     * until the capability probe has answered. `off` is final for the process: master's direct-helper tracking.
-     */
-    tree?: 'on' | 'off'
-    treeProbe?: Promise<void>
-  }
+  private app?: CodexApp
   /** Bumped when the launch settings change; a process from an older generation is replaced once idle. */
   private launchGeneration = 0
+  private authGeneration = 0
+  private draining?: Promise<void>
   private probeResult?: { at: number; result: AccountProbe }
   private probing?: Promise<void>
   private modelDiscoveryStarted = false
@@ -1417,59 +1423,81 @@ export class CodexProviderService {
   }
 
   private async probe(): Promise<AccountProbe> {
+    const generation = this.authGeneration
     try {
-      if (this.options.account) return await this.options.account.read()
-      const conn = await this.connection()
+      const conn = this.options.account ? this.app?.conn : await this.connection()
       return await this.readAccount(conn)
     } catch (error) {
-      return {
-        kind: 'error',
-        message: this.redact(`Codex did not report its sign-in (${error instanceof Error ? error.message : String(error)}). Update the Codex CLI and recheck.`)
-      }
+      const result = this.accountReadError(error)
+      if (generation === this.authGeneration && !this.stopped) this.probeResult = { at: Date.now(), result }
+      return result
     }
   }
 
-  /** `account/read` on `conn`; a ChatGPT answer marks that process as verified. */
-  private async readAccount(conn: CodexConnection, signal?: AbortSignal): Promise<AccountProbe> {
-    const result = classifyAccount(await conn.request('account/read', { refreshToken: false }, { timeoutMs: 15_000, signal }), this.options.ownSignIn)
-    this.noteAccount(conn, result)
+  private accountReadError(error: unknown): AccountProbe {
+    return {
+      kind: 'error',
+      message: this.redact('Codex did not report its sign-in (' + (error instanceof Error ? error.message : String(error)) + '). Try again.')
+    }
+  }
+
+  private async readAccount(conn?: CodexConnection, signal?: AbortSignal): Promise<AccountProbe> {
+    const generation = this.authGeneration
+    let result: AccountProbe
+    try {
+      result = this.options.account
+        ? await this.options.account.read(signal)
+        : classifyAccount(await conn!.request('account/read', { refreshToken: false }, { timeoutMs: 15_000, signal }), this.options.ownSignIn)
+    } catch (error) {
+      signal?.throwIfAborted()
+      result = this.accountReadError(error)
+    }
+    signal?.throwIfAborted()
+    if (generation !== this.authGeneration || this.stopped || (conn && this.app?.conn !== conn))
+      throw new Error('The Codex sign-in changed during its check. Try again.')
+    const subject = result.kind === 'signed_in' ? accountSubject(result) : undefined
+    if (result.kind === 'signed_in' && !subject)
+      result = { kind: 'error', message: 'Codex did not identify its ChatGPT account. Recheck the sign-in and try again.' }
+    const app = this.app
+    if (app && (!subject || (app.subject && app.subject !== subject))) this.retireAccount(app.conn)
+    else if (app && app.conn === conn) app.subject = subject
+    this.probeResult = { at: Date.now(), result }
     return result
   }
 
-  /**
-   * What `conn`'s process said about its account. A ChatGPT answer verifies it. One naming another account than the
-   * process reported before (a sign-in switched to another ChatGPT account) retires it: no thread loaded under the old
-   * account is reused, and the process is replaced as soon as nothing uses it.
-   */
-  private noteAccount(conn: CodexConnection, result: AccountProbe): void {
-    const app = this.app
-    if (app?.conn !== conn) return
-    app.verified = result.kind === 'signed_in'
-    if (result.kind !== 'signed_in') return
-    const subject = accountSubject(result)
-    if (app.subject !== undefined && app.subject !== subject) {
-      app.retired = true
-      this.loaded.clear()
-      this.closeWhenIdle(CODEX_CHECK_CLOSE_MS)
-    }
-    app.subject = subject
+  /** Closing synchronously rejects in-flight RPCs and fences every new write to the old process. */
+  private retireAccount(conn: CodexConnection): void {
+    if (this.app?.conn !== conn) return
+    this.authGeneration += 1
+    this.scope += 1
+    this.readyToCommit.clear()
+    this.interruptedThreads.clear()
+    this.probeResult = undefined
+    void this.drainProcess(conn)
   }
 
-  /**
-   * The app-server process, once it has itself reported a ChatGPT account. A process that has not
-   * (a replacement after a crash, or one whose account changed) is checked before any thread or
-   * turn reaches it.
-   */
+  private assertAccount(conn: CodexConnection): string {
+    conn.signal.throwIfAborted()
+    const app = this.app
+    if (app?.conn !== conn || !app.subject)
+      throw new Error('The Codex sign-in changed before the request could be sent. Try again.')
+    return app.subject
+  }
+
+  /** Verify the server that will receive input, including a replacement after an observed account switch. */
   private async verifiedConnection(signal: AbortSignal): Promise<CodexConnection> {
-    const conn = await this.connection()
-    signal.throwIfAborted()
-    if (this.app?.conn === conn && this.app.verified) return conn
-    const result = this.options.account ? await this.options.account.read(signal) : await this.readAccount(conn, signal)
-    if (this.options.account) this.noteAccount(conn, result)
-    this.probeResult = { at: Date.now(), result }
-    if (result.kind !== 'signed_in')
-      throw new AppError({ code: 'codex_not_connected', message: this.signInMessage(), errorInfo: { category: 'unavailable', retryable: false } })
-    return conn
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await this.awaitThreadCapacity(signal)
+      const conn = await abortable(this.connection(), signal)
+      const result = await this.readAccount(conn, signal)
+      if (result.kind !== 'signed_in')
+        throw new AppError({ code: 'codex_not_connected', message: result.message, errorInfo: { category: 'unavailable', retryable: false } })
+      if (this.app?.conn === conn) {
+        this.assertAccount(conn)
+        return conn
+      }
+    }
+    throw new Error('The Codex sign-in changed before the request could be sent. Try again.')
   }
 
   /**
@@ -1484,8 +1512,7 @@ export class CodexProviderService {
       this.probing ??= (async () => {
         const result = await this.probe()
         if (this.stopped) return
-        this.probeResult = { at: Date.now(), result }
-        if (result.kind === 'signed_in' && !this.settings.models?.length && !this.modelDiscoveryStarted) {
+        if (this.probeResult?.result === result && result.kind === 'signed_in' && !this.settings.models?.length && !this.modelDiscoveryStarted) {
           this.modelDiscoveryStarted = true
           void this.refreshModels().catch(() => {
             /* "Refresh models" lists them later */
@@ -1680,7 +1707,7 @@ export class CodexProviderService {
     } catch (error) {
       // Only the signed-in account's own last snapshot stands in: never another account's limits.
       const last = this.lastLimits
-      if (signal?.aborted || !last || last.account !== limitsOwner(this.account()?.subject)) throw error
+      if (signal?.aborted || !last || last.account !== codexAccountOwner(this.account()?.subject)) throw error
       return { snapshot: last.snapshot, at: last.at, live: false }
     } finally {
       this.listing -= 1
@@ -1694,7 +1721,7 @@ export class CodexProviderService {
    */
   reportedRateLimits(subject: string | undefined = this.account()?.subject): { snapshot: RateLimitSnapshot; at: number } | undefined {
     const last = this.lastLimits
-    const owner = limitsOwner(subject)
+    const owner = codexAccountOwner(subject)
     return last && owner && last.account === owner ? { snapshot: last.snapshot, at: last.at } : undefined
   }
 
@@ -1705,7 +1732,7 @@ export class CodexProviderService {
 
   /** Keeps the account's latest limits, on disk too, so the usage page has them after a restart. */
   private rememberLimits(snapshot: RateLimitSnapshot, subject: string | undefined): void {
-    const account = limitsOwner(subject)
+    const account = codexAccountOwner(subject)
     const saved = this.settings.rateLimits
     // A turn's update has no reset credits: the same account keeps the ones the last read reported.
     const previous = this.lastLimits?.account === account ? this.lastLimits?.snapshot.rateLimitResetCredits : undefined
@@ -1751,6 +1778,9 @@ export class CodexProviderService {
     // Held from here, before anything is awaited: no turn of the thread starts while it compacts.
     this.activeThreads.add(threadId)
     const codexThreadId = saved.codexThreadId
+    let releaseThreads: (() => Promise<void> | undefined) | undefined
+    let compactOnly: { conn: CodexConnection; id: string } | undefined
+    let compactUnload: Promise<void> | undefined
     try {
       // A stopped turn of the thread is still being interrupted, or still settling on the server: the compaction
       // starts after, so none of that turn's events can be taken for the compaction's.
@@ -1767,15 +1797,21 @@ export class CodexProviderService {
       // The saved thread may have changed while this waited (a sign-out, a new account).
       if (this.settings.threads?.[threadId] !== saved) return false
       const conn = await this.verifiedConnection(signal)
+      if (saved.account !== codexAccountOwner(this.assertAccount(conn)) || this.app!.unloading.has(codexThreadId)) return false
+      const reserved = new Set([codexThreadId])
+      releaseThreads = this.holdThreads(conn, reserved)
       const wasLoaded = this.loaded.has(codexThreadId)
-      if (!wasLoaded)
-        await conn.request('thread/resume', {
+      if (!wasLoaded) {
+        const resumed = await this.requestThread(conn, 'thread/resume', {
           threadId: codexThreadId,
           excludeTurns: true,
           cwd: saved.cwd,
           modelProvider: this.modelProvider,
           config: { model_provider: this.modelProvider }
-        }, { signal })
+        }, signal, reserved)
+        compactOnly = { conn, id: resumed.thread.id }
+        if (resumed.thread.id !== codexThreadId) return false
+      }
       // Codex runs the compaction as a turn of its own: its `turn/completed` says how it went.
       let done!: (turn: CodexTurn) => void
       let fail!: (reason: unknown) => void
@@ -1786,6 +1822,7 @@ export class CodexProviderService {
       try {
         if (signal.aborted) throw stopReason(signal)
         // Not tied to the signal: once sent, a stop has to interrupt what Codex started.
+        this.assertAccount(conn)
         compaction.sent = true
         const start = conn.request('thread/compact/start', { threadId: codexThreadId })
         try {
@@ -1804,14 +1841,18 @@ export class CodexProviderService {
           }
           start.catch(() => undefined)
           if (!(await this.interruptCompaction(conn, codexThreadId, compaction, start, completed))) this.forgetConversation(threadId)
-          if (!wasLoaded) await conn.request('thread/unsubscribe', { threadId: codexThreadId }, { timeoutMs: 5_000 }).catch(() => undefined)
           throw stopReason(signal)
         }
       } finally {
         this.compactions.delete(codexThreadId)
       }
-      // Loaded only for this: the next turn resumes it with its own settings.
-      if (!wasLoaded) await conn.request('thread/unsubscribe', { threadId: codexThreadId }, { signal, timeoutMs: 5_000 }).catch(() => undefined)
+      if (compactOnly) {
+        compactUnload = this.unloadThread(conn, compactOnly.id)
+        await abortable(compactUnload, signal).catch((error: unknown) => {
+          this.forgetConversation(threadId)
+          throw error
+        })
+      }
       // Stopped while the thread was let go: the compaction is not taken, and the thread it compacted is dropped.
       if (signal.aborted) {
         this.forgetConversation(threadId)
@@ -1824,6 +1865,15 @@ export class CodexProviderService {
       throw error
     } finally {
       this.activeThreads.delete(threadId)
+      if (compactOnly) {
+        const { conn, id } = compactOnly
+        if (!compactUnload) void this.unloadThread(conn, id)
+        // A subsequent chat needs to resume the compacted thread with its own launch config.
+        // A still-loaded compaction thread would silently keep the temporary config.
+        if (this.app?.conn === conn && this.app.unloading.has(id)) this.app.recycleRequired = true
+      }
+      await releaseThreads?.()
+      this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
     }
   }
 
@@ -1848,11 +1898,14 @@ export class CodexProviderService {
     let turnId: string | undefined
     let ended = false
     let lost: (() => void) | undefined
+    let releaseThreads: (() => Promise<void> | undefined) | undefined
     try {
       if (this.checkDue()) await abortable(this.status(), signal)
       if (!this.configured())
         throw new AppError({ code: 'codex_not_connected', message: this.signInMessage(), errorInfo: { category: 'unavailable', retryable: false } })
       conn = await this.verifiedConnection(signal)
+      const reserved = new Set<string>()
+      releaseThreads = this.holdThreads(conn, reserved)
       const effort = spec.effort ?? supportedEffortOf(spec.model, this.settings.models ?? [], EFFORTS)
       const token = this.directOneShots() ? await abortable(this.chatGptToken(conn, signal), signal) : undefined
       if (token) {
@@ -1861,6 +1914,7 @@ export class CodexProviderService {
         if (!listed)
           throw harnessAppError({ code: 'model_unavailable', message: `Codex does not list ${baseId}. Refresh models or choose another title model in Settings → Agents.` })
         // Always the listed model, `default` included, with its own default effort when none is chosen.
+        this.assertAccount(conn)
         return await runCodexDirectOneShot({ model: listed.model || listed.id, effort: effort ?? listed.defaultReasoningEffort, token, spec }, signal, this.dependencies.directStream)
       }
       const cwd = this.standaloneWorkspace('one-shot')
@@ -1876,7 +1930,7 @@ export class CodexProviderService {
       // profile's config names, which was never checked.
       const pinned = listed.model || listed.id
       const model = { model: pinned }
-      const started = pinnedProvider(this.modelProvider, await conn.request('thread/start', {
+      const started = await this.requestThread(conn, 'thread/start', {
         cwd,
         approvalPolicy: 'never',
         sandbox: 'read-only',
@@ -1885,7 +1939,7 @@ export class CodexProviderService {
         config: { ...locked, model_provider: this.modelProvider },
         baseInstructions: spec.system,
         ephemeral: true
-      }, { signal }))
+      }, signal, reserved)
       const threadId = started.thread.id
       codexThreadId = threadId
       // A thread Codex opened on another model than the checked one never runs a turn.
@@ -1920,6 +1974,7 @@ export class CodexProviderService {
         const end = notificationParams(notification, 'turn/completed')
         if (end && (turnId === undefined || end.turn.id === turnId)) done(end.turn)
       })
+      this.assertAccount(conn)
       const turn = await conn.request('turn/start', {
         threadId,
         input: [textInput(spec.prompt)],
@@ -1948,9 +2003,10 @@ export class CodexProviderService {
       if (conn && codexThreadId && !conn.signal.aborted) {
         // A stopped request ends its turn on Codex's side too; then the thread is let go.
         if (!ended && turnId) await conn.request('turn/interrupt', { threadId: codexThreadId, turnId }, { timeoutMs: 5_000 }).catch(() => undefined)
-        await conn.request('thread/unsubscribe', { threadId: codexThreadId }, { timeoutMs: 5_000 }).catch(() => undefined)
+        this.unloadThread(conn, codexThreadId)
       }
       this.activeThreads.delete(key)
+      await releaseThreads?.()
       this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
     }
   }
@@ -2037,7 +2093,7 @@ export class CodexProviderService {
 
   /**
    * What Codex says of the account in this instance's environment now, whatever Mousse recorded (a
-   * disconnect included) and without touching the recorded state. A process that is already running
+   * disconnect included). A process that is already running
    * answers for the account it started with: callers that just changed the sign-in stop every
    * process first (`stopAll`). `unknown`: it did not answer.
    */
@@ -2112,11 +2168,11 @@ export class CodexProviderService {
    * process, which checks its account again.
    */
   async stopAll(reason: string): Promise<void> {
+    this.authGeneration += 1
     this.launchEpoch += 1
     for (const preparing of this.preparing) preparing.abort(new Error(reason))
     this.abortInFlight(reason)
     this.probeResult = undefined
-    if (this.app) this.app.verified = false
     // A launch being prepared never starts (the epoch moved on), and a spawned process is tracked
     // from its spawn: one still initializing is closed with the rest at once, never awaited.
     await this.stopProcesses([...this.processes])
@@ -2141,6 +2197,15 @@ export class CodexProviderService {
     for (const entry of live) entry.conn.close()
     const failures: string[] = []
     await Promise.all(live.map(async (entry) => {
+      if (entry.process.windowsTree) {
+        try {
+          if (!(await exitWithin(entry.process.windowsTree.stop(), killAfterMs + deadlineMs)))
+            failures.push('the Windows process tree did not drain in time')
+        } catch (error) {
+          failures.push(error instanceof Error ? error.message : String(error))
+        }
+        return
+      }
       if (await exitWithin(entry.exited, killAfterMs)) return
       try {
         (this.dependencies.killTree ?? defaultKillTree)(entry.process)
@@ -2164,9 +2229,9 @@ export class CodexProviderService {
     this.idleClose = undefined
     this.abortInFlight()
     this.app?.conn.close()
-    await this.stopProcesses([...this.processes]).catch((error: unknown) => {
-      console.warn('[codex] a Codex process could not be stopped', error instanceof Error ? error.message : String(error))
-    })
+    const results = await Promise.allSettled([this.stopProcesses([...this.processes]), this.draining])
+    const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (failures.length) throw new AggregateError(failures.map((failure) => failure.reason), 'Codex processes could not be stopped')
   }
 
   private abortInFlight(reason = 'Codex was disconnected'): void {
@@ -2180,6 +2245,7 @@ export class CodexProviderService {
 
   private connection(): Promise<CodexConnection> {
     if (this.stopped) return Promise.reject(new Error('Codex provider is stopped'))
+    if (this.draining) return this.draining.then(() => this.connection())
     if (this.app && !this.app.conn.signal.aborted) return this.app.ready
     const target = this.launchTarget()
     if (!target) return Promise.reject(new Error('Codex CLI not found. Install the Codex CLI first.'))
@@ -2227,7 +2293,7 @@ export class CodexProviderService {
     // The Codex package this process runs: a bot's commands must be able to read it (`codexPackageOf`).
     this.packages.set(conn, codexPackageOf(target.path))
     // A spawn `error` with no pid means the process never started; otherwise only `exit` counts.
-    const exited = new Promise<void>((done) => {
+    const exited = process.windowsTree?.exited ?? new Promise<void>((done) => {
       if (process.exitCode !== null || process.signalCode !== null) return done()
       process.once('exit', () => done())
       process.once('error', () => {
@@ -2236,11 +2302,14 @@ export class CodexProviderService {
     })
     const live: LiveProcess = { process, conn, exited, done: false }
     this.processes.add(live)
-    void exited.then(() => {
+    const onExit = () => {
       live.done = true
       this.processes.delete(live)
-      // Its leases (token broker, install files) end only now, when nothing of it runs.
       extras?.onExit()
+    }
+    void exited.then(onExit, (error: unknown) => {
+      console.warn('[codex] server drain failed', this.redact(String(error)))
+      onExit()
     })
     // A connection that ended on its own (output closed) leaves a process nobody can use: it is
     // closed too, and still tracked until it exits.
@@ -2248,24 +2317,23 @@ export class CodexProviderService {
       if (!live.done) conn.close()
     }, { once: true })
     const statuses = new ThreadStatuses()
-    conn.onNotification((notification) => this.route(notification, statuses))
+    conn.onNotification((notification) => this.route(conn, notification, statuses))
     conn.setServerRequestHandler((request) => this.serve(request))
     conn.signal.addEventListener('abort', () => this.lost(conn, conn.signal.reason), { once: true })
     const clientInfo = this.options.clientInfo ?? { name: 'mousse', title: 'Mousse' }
-    const ready = conn
-      .request('initialize', {
+    const ready = Promise.resolve().then(() => conn.request('initialize', {
         clientInfo: { ...clientInfo, version: mousseVersion() },
         // Experimental API: `thread/list` filters by ancestor. It also stops the server dropping experimental
         // notifications and keeps extra fields on approval requests; Mousse ignores both.
         capabilities: { experimentalApi: true, requestAttestation: false }
-      })
+      }))
       .then((result) => {
         this.versions.set(conn, codexVersionOf(result?.userAgent))
         conn.notify('initialized')
         return conn
       })
     ready.catch(() => conn.close())
-    this.app = { conn, ready, verified: false, generation: this.launchGeneration, exited, statuses }
+    this.app = { conn, ready, generation: this.launchGeneration, statuses, recycleRequired: false, threadUsers: new Set(), unloading: new Map(), capacityWaiters: new Set() }
     return ready
   }
 
@@ -2276,6 +2344,22 @@ export class CodexProviderService {
   /** Something is using the process: a check, a model listing, or a turn. */
   private busy(): boolean {
     return Boolean(this.probing || this.listing || this.activeThreads.size || this.turns.size)
+  }
+
+  /** Keep replacement launches behind the old server's actual exit. */
+  private drainProcess(conn: CodexConnection): Promise<void> {
+    const entry = [...this.processes].find((process) => process.conn === conn)
+    if (!entry) {
+      conn.close()
+      return Promise.resolve()
+    }
+    const draining = Promise.resolve().then(() => this.stopProcesses([entry]))
+    this.draining = draining
+    void draining.then(() => {
+      if (this.draining === draining) this.draining = undefined
+    }, (error: unknown) => console.warn('[codex] server drain failed', this.redact(String(error))))
+    conn.close()
+    return draining
   }
 
   /** Detaches and closes the process; `lost` then treats the exit as expected. */
@@ -2289,7 +2373,9 @@ export class CodexProviderService {
     this.orphans.clear()
     // Its commands end with the process.
     this.forgetCommands()
-    app.conn.close()
+    if ([...this.processes].some((entry) => entry.conn === app.conn && entry.process.windowsTree)) {
+      void this.drainProcess(app.conn)
+    } else app.conn.close()
   }
 
   /**
@@ -2300,7 +2386,7 @@ export class CodexProviderService {
    */
   private closeWhenIdle(delay: number, retry = false): void {
     if (!this.app || this.stopped) return
-    const stale = this.app.generation !== this.launchGeneration || this.app.retired === true
+    const stale = this.app.generation !== this.launchGeneration
     const at = Date.now() + (stale && !retry ? 0 : (this.dependencies.idleCloseMs ?? delay))
     if (this.idleClose && this.idleClose.at >= at && !stale) return
     if (this.idleClose) clearTimeout(this.idleClose.timer)
@@ -2322,7 +2408,11 @@ export class CodexProviderService {
   /** The process is gone: every chat on it fails; the next use starts a new one. */
   private lost(conn: CodexConnection, reason: unknown): void {
     if (this.app?.conn !== conn) return
+    const app = this.app
     this.app = undefined
+    if (this.idleClose) clearTimeout(this.idleClose.timer)
+    this.idleClose = undefined
+    this.wakeCapacityWaiters(app)
     this.loaded.clear()
     this.orphans.clear()
     this.forgetCommands()
@@ -2336,7 +2426,15 @@ export class CodexProviderService {
     for (const compaction of this.compactions.values()) compaction.fail(reason ?? new Error('Codex stopped'))
   }
 
-  private route(notification: CodexNotification, statuses: ThreadStatuses): void {
+  private route(conn: CodexConnection, notification: CodexNotification, statuses: ThreadStatuses): void {
+    const app = this.app
+    if (app?.conn !== conn || conn.signal.aborted) return
+    if (notification.method === 'account/updated') {
+      this.retireAccount(conn)
+      return
+    }
+    const closed = notificationParams(notification, 'thread/closed')
+    if (closed) this.threadUnloaded(app, closed.threadId)
     // Recorded here, in the order the process sent them and before any response resolves.
     statuses.note(notification)
     this.noteCommand(notification)
@@ -2345,15 +2443,6 @@ export class CodexProviderService {
         held.tree?.noteWake(notification)
         held.poke()
       }
-    const account = notificationParams(notification, 'account/updated')
-    if (account) {
-      // A terminal `codex login` (another ChatGPT account included), `--api-key` or logout reaches the shared process:
-      // the next turn reads the account again before it gets the process (`noteAccount`), and the listing re-checks.
-      if (this.app) this.app.verified = false
-      if (account.authMode !== 'chatgpt') this.probeResult = undefined
-      else if (this.probeResult) this.probeResult = { ...this.probeResult, at: 0 }
-      return
-    }
     // Account-wide, not tied to a thread: every open run keeps the latest, for a usage limit it may hit.
     const limits = notificationParams(notification, 'account/rateLimits/updated')
     if (limits) {
@@ -2941,22 +3030,110 @@ export class CodexProviderService {
     if (this.turns.get(run.codexThreadId) === run) this.turns.delete(run.codexThreadId)
     run.tree = undefined
     run.settled()
-    this.unloadIdleThreads()
+    void this.unloadIdleThreads()?.catch(() => undefined)
     this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
   }
 
-  /**
-   * Lets go of loaded threads with no turn on them beyond the `CODEX_MAX_IDLE_THREADS` most recently used, so a
-   * process kept open between turns does not grow with every thread it served. The newest are kept: one being opened
-   * for a turn right now is the newest.
-   */
-  private unloadIdleThreads(): void {
-    const conn = this.app?.conn
-    if (!conn) return
-    const idle = [...this.loaded.keys()].filter((id) => !this.turns.has(id) && !this.oneShots.has(id) && !this.compactions.has(id))
-    for (const id of idle.slice(0, Math.max(0, idle.length - CODEX_MAX_IDLE_THREADS))) {
-      this.loaded.delete(id)
-      void conn.request('thread/unsubscribe', { threadId: id }, { timeoutMs: 5_000 }).catch(() => undefined)
+  private holdThreads(conn: CodexConnection, reserved: Set<string>): () => Promise<void> | undefined {
+    this.assertAccount(conn)
+    const app = this.app!
+    app.threadUsers.add(reserved)
+    return () => {
+      app.threadUsers.delete(reserved)
+      if (this.app === app) {
+        const draining = this.unloadIdleThreads()
+        this.wakeCapacityWaiters(app)
+        return draining
+      }
+    }
+  }
+
+  private async requestThread<M extends 'thread/start' | 'thread/resume' | 'thread/fork'>(
+    conn: CodexConnection, method: M, params: CodexRequestMap[M]['params'], signal: AbortSignal, reserved: Set<string>
+  ): Promise<CodexRequestMap[M]['result']> {
+    this.assertAccount(conn)
+    signal.throwIfAborted()
+    try {
+      const result = pinnedProvider(this.modelProvider, await conn.request(method, params, { signal }))
+      this.assertAccount(conn)
+      reserved.add(result.thread.id)
+      return result
+    } catch (error) {
+      // An aborted or failed RPC may have opened a thread even if no id came back.
+      if (this.app?.conn === conn) this.app.recycleRequired = true
+      throw error
+    }
+  }
+
+  private unloadThread(conn: CodexConnection, threadId: string): Promise<void> {
+    const app = this.app
+    if (app?.conn !== conn) return Promise.resolve()
+    const existing = app.unloading.get(threadId)
+    if (existing) return existing
+    const pending = Promise.resolve().then(async () => {
+      const result = await conn.request('thread/unsubscribe', { threadId }, { timeoutMs: 5_000 })
+      if (result.status === 'notLoaded') this.threadUnloaded(app, threadId)
+    }).catch(() => undefined)
+    app.unloading.set(threadId, pending)
+    return pending
+  }
+
+  private threadUnloaded(app: CodexApp, threadId: string): void {
+    if (this.app !== app) return
+    app.unloading.delete(threadId)
+    this.loaded.delete(threadId)
+    this.wakeCapacityWaiters(app)
+  }
+
+  private idleThreadIds(app: CodexApp): string[] {
+    const reserved = new Set([...app.threadUsers].flatMap((ids) => [...ids]))
+    return [...new Set([...this.loaded.keys(), ...app.unloading.keys()])].filter((id) => !this.turns.has(id) && !reserved.has(id))
+  }
+
+  private exceedsThreadCapacity(app: CodexApp): boolean {
+    return app.recycleRequired || this.idleThreadIds(app).length > CODEX_MAX_IDLE_THREADS
+  }
+
+  private wakeCapacityWaiters(app: CodexApp): void {
+    for (const wake of app.capacityWaiters) wake()
+    app.capacityWaiters.clear()
+  }
+
+  private async awaitThreadCapacity(signal: AbortSignal): Promise<void> {
+    for (;;) {
+      if (this.draining) await abortable(this.draining, signal)
+      const app = this.app
+      if (!app || !this.exceedsThreadCapacity(app)) return
+      const draining = this.unloadIdleThreads()
+      if (draining) {
+        await abortable(draining, signal)
+        continue
+      }
+      let wake!: () => void
+      const available = new Promise<void>((resolve) => { wake = resolve })
+      app.capacityWaiters.add(wake)
+      try {
+        await abortable(available, signal)
+      } finally {
+        app.capacityWaiters.delete(wake)
+      }
+    }
+  }
+
+  private unloadIdleThreads(): Promise<void> | undefined {
+    const app = this.app
+    if (!app) return
+    const idle = this.idleThreadIds(app)
+    const pending = idle.filter((id) => app.unloading.has(id)).length
+    const victims = idle.filter((id) => !app.unloading.has(id)).slice(0, Math.max(0, idle.length - pending - CODEX_MAX_IDLE_THREADS))
+    for (const id of victims) void this.unloadThread(app.conn, id)
+    // Successful unsubscribe can leave the thread loaded. At a safe idle boundary recycle
+    // the process if unloads are unconfirmed or a failed open might have left an unknown thread.
+    if (this.exceedsThreadCapacity(app) && app.threadUsers.size === 0 && this.turns.size === 0) {
+      return Promise.resolve().then(() => {
+        if (this.app === app && this.exceedsThreadCapacity(app) && app.threadUsers.size === 0 && this.turns.size === 0)
+          return this.drainProcess(app.conn)
+      })
     }
   }
 
@@ -2967,11 +3144,13 @@ export class CodexProviderService {
   private async openThread(
     conn: CodexConnection,
     input: CodexChatInput,
-    signal: AbortSignal
+    signal: AbortSignal,
+    reserved: Set<string>
   ): Promise<{ codexThreadId: string; model: string | undefined; continued: boolean; instructionsStale?: boolean; botSandbox?: CodexBotSandbox; resumeLost?: true }> {
     const cwd = resolve(input.cwd)
     const instructionsHash = input.developerInstructions ? historyKey(input.developerInstructions).slice(0, 32) : undefined
     const saved = this.settings.threads?.[input.threadId]
+    if (saved && !this.app?.unloading.has(saved.codexThreadId)) reserved.add(saved.codexThreadId)
     const mcpToken = input.mcp?.token ?? null
     // The MCP relay and its catalogue revision: Codex lists a server's tools when it loads a thread.
     const relayKey = input.mcp?.relay ? `${input.mcp.relay.url}|${input.mcp.relay.revision}` : null
@@ -3035,8 +3214,9 @@ export class CodexProviderService {
       ...(input.developerInstructions ? { developerInstructions: input.developerInstructions } : {})
     }
     // A Codex thread belongs to the instance that started it; another instance starts fresh.
-    const resumable = saved && (saved.instanceId ?? CODEX_INSTANCE_ID) === (input.instanceId ?? CODEX_INSTANCE_ID) &&
-      saved.cwd === cwd && saved.historyKey === historyKey(input.history ?? '')
+    const owner = codexAccountOwner(this.assertAccount(conn))
+    const resumable = saved && saved.account === owner && !this.app!.unloading.has(saved.codexThreadId) &&
+      (saved.instanceId ?? CODEX_INSTANCE_ID) === (input.instanceId ?? CODEX_INSTANCE_ID) && saved.cwd === cwd && saved.historyKey === historyKey(input.history ?? '')
     if (resumable) {
       const previous = this.turns.get(saved.codexThreadId)
       if (previous) {
@@ -3051,12 +3231,8 @@ export class CodexProviderService {
       // new Codex thread under the new text, with the history given in its prompt.
       const opened = loaded?.instructionsHash ?? saved.instructionsHash
       if (input.bot && instructionsHash !== undefined && opened !== undefined && opened !== instructionsHash) {
-        if (loaded) {
-          this.loaded.delete(saved.codexThreadId)
-          await conn.request('thread/unsubscribe', { threadId: saved.codexThreadId }, { signal, timeoutMs: 5_000 }).catch(() => undefined)
-          signal.throwIfAborted()
-        }
-        const fresh = pinnedProvider(this.modelProvider, await conn.request('thread/start', params, { signal }))
+        if (loaded) this.unloadThread(conn, saved.codexThreadId)
+        const fresh = await this.requestThread(conn, 'thread/start', params, signal, reserved)
         this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
         return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox }
       }
@@ -3073,15 +3249,13 @@ export class CodexProviderService {
         // The attachment, cwd or child policy changed while the thread is loaded. A resume would
         // keep the old config, so fork it: Codex loads the history into a new thread with the new
         // config, and the old thread is released.
-        const forked = pinnedProvider(this.modelProvider, await conn.request('thread/fork', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
-        this.loaded.delete(saved.codexThreadId)
+        const forked = await this.requestThread(conn, 'thread/fork', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, signal, reserved)
         this.loaded.set(forked.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
-        await conn.request('thread/unsubscribe', { threadId: saved.codexThreadId }, { signal, timeoutMs: 5_000 }).catch(() => undefined)
-        signal.throwIfAborted()
+        this.unloadThread(conn, saved.codexThreadId)
         return { codexThreadId: forked.thread.id, model: forked.model, continued: true, botSandbox }
       }
       try {
-        const resumed = pinnedProvider(this.modelProvider, await conn.request('thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, { signal }))
+        const resumed = await this.requestThread(conn, 'thread/resume', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, signal, reserved)
         this.loaded.set(resumed.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
         // A resume answered with another thread holds none of the conversation: the history goes in the prompt.
         if (resumed.thread.id !== saved.codexThreadId) {
@@ -3093,12 +3267,12 @@ export class CodexProviderService {
         signal.throwIfAborted()
         conn.signal.throwIfAborted()
         if (!(error instanceof CodexRpcError)) throw error
-        const fresh = pinnedProvider(this.modelProvider, await conn.request('thread/start', params, { signal }))
+        const fresh = await this.requestThread(conn, 'thread/start', params, signal, reserved)
         this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
         return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox, resumeLost: true }
       }
     }
-    const fresh = pinnedProvider(this.modelProvider, await conn.request('thread/start', params, { signal }))
+    const fresh = await this.requestThread(conn, 'thread/start', params, signal, reserved)
     this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
     return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox }
   }
@@ -3113,8 +3287,10 @@ export class CodexProviderService {
     const forward = (): void => controller.abort(input.signal?.reason)
     input.signal?.addEventListener('abort', forward, { once: true })
     const signal = controller.signal
-    const scope = this.scope
+    let scope = this.scope
     let run: TurnRun | undefined
+    let releaseThreads: (() => Promise<void> | undefined) | undefined
+    let unopened: { conn: CodexConnection; id: string } | undefined
     let steerTimer: ReturnType<typeof setInterval> | undefined
     // Hands back drained steers and cut messages Codex does not have (set once the turn's steer handling exists).
     let handBack: () => void = () => {}
@@ -3142,18 +3318,25 @@ export class CodexProviderService {
         return codexImageInput(image)
       })
       const conn = await this.verifiedConnection(signal)
+      scope = this.scope
+      const savedId = this.settings.threads?.[input.threadId]?.codexThreadId
+      const reserved = new Set(savedId && !this.app?.unloading.has(savedId) ? [savedId] : [])
+      releaseThreads = this.holdThreads(conn, reserved)
       await abortable(this.ensureTreeMode(conn), signal)
-      const thread = await this.openThread(conn, input, signal)
-      signal.throwIfAborted()
+      const thread = await this.openThread(conn, input, signal, reserved)
       const codexThreadId = thread.codexThreadId
+      unopened = { conn, id: codexThreadId }
+      signal.throwIfAborted()
+      const account = codexAccountOwner(this.assertAccount(conn))
       // The thread is not resumable until the turn commits its history.
-      this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID, ...botInstructionsKey(input) } }
+      this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, account, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID, ...botInstructionsKey(input) } }
       this.save()
       input.onSession?.({ codexThreadId })
       const current = new TurnRun(codexThreadId, input.threadId, input.mode ?? 'default', signal, input, (id) => this.strays.get(id))
       run = current
       current.conn = conn
       this.turns.set(codexThreadId, current)
+      unopened = undefined
       const { baseId } = parseThinkingSuffixFromModelId(input.model)
       // A level the model does not offer (saved for another model) runs at the model's default.
       const effort = supportedEffortOf(input.model, this.settings.models ?? [], EFFORTS)
@@ -3218,6 +3401,7 @@ export class CodexProviderService {
             return
           }
           try {
+            this.assertAccount(conn)
             await conn.request('turn/steer', { threadId: codexThreadId, expectedTurnId: current.turnId, input: steerInput([entry]) }, { signal })
           } catch (error) {
             // A Stop or a dead process: the entry stays in flight, and the chat's end hands it back.
@@ -3337,6 +3521,7 @@ export class CodexProviderService {
         // Stop may have landed before this run existed (its handler then had nothing to
         // interrupt); a turn started now could never be stopped.
         signal.throwIfAborted()
+        this.assertAccount(conn)
         current.turnId = undefined
         const completion = current.nextCompletion()
         completion.catch(() => undefined)
@@ -3431,7 +3616,7 @@ export class CodexProviderService {
       this.release(current)
       current.closeTools('no_result')
       if (scope === this.scope) {
-        this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID, ...botInstructionsKey(input) } }
+        this.settings.threads = { ...this.settings.threads, [input.threadId]: { codexThreadId, account, cwd: resolve(input.cwd), instanceId: input.instanceId ?? CODEX_INSTANCE_ID, ...botInstructionsKey(input) } }
         this.save()
         this.readyToCommit.add(input.threadId)
       }
@@ -3461,7 +3646,8 @@ export class CodexProviderService {
       input.signal?.removeEventListener('abort', forward)
       this.controllers.delete(controller)
       this.activeThreads.delete(input.threadId)
-      this.unloadIdleThreads()
+      if (unopened) this.unloadThread(unopened.conn, unopened.id)
+      await releaseThreads?.()
       this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
       // A stopped turn stays registered (for routing) until its sweep ends or the process dies.
       run?.mute()

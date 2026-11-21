@@ -72,6 +72,7 @@ import {
 } from './mcpRegistration'
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
 import { CancelInProgress, claudeQueryProcess, DEFAULT_LIVE_TIMINGS, LiveSession, noteClaudeQuerySpawn, type ClaudeProcess, type LiveRun, type LiveTimings } from './liveSession'
+import { spawnProviderProcess, windowsProviderTree, type WindowsProviderTree } from '../../windowsProviderProcess'
 import { reapProcessTree, type SpawnedRoot } from '../../stopProcesses'
 import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
 import { providerApiError, providerReportedError, providerStatusError, readUsageLimit } from '../../../orchestrator/providerErrors'
@@ -450,7 +451,7 @@ type Dependencies = {
    * Replaces `claude auth status` for an instance whose sign-in Mousse holds itself (an API key):
    * what the instance runs on, read without starting Claude Code.
    */
-  probe?: (env: NodeJS.ProcessEnv) => AuthProbe
+  probe?: (env: NodeJS.ProcessEnv) => AuthProbe | Promise<AuthProbe>
   /** The entry pays per token whatever Claude Code reports (an API-key entry): its prompt cache is kept for an hour only by the user's choice. */
   paysPerToken?: boolean
   /** What a turn says when the instance is not signed in (default: run the sign-in command). */
@@ -516,6 +517,12 @@ export type AuthProbe =
   | { kind: 'signed_in'; account?: ClaudeAccount }
   | { kind: 'signed_out'; message: string }
   | { kind: 'error'; message: string }
+
+function signInIdentity(result: AuthProbe | undefined): string | undefined {
+  if (result?.kind !== 'signed_in') return undefined
+  const { subject, credential } = result.account ?? {}
+  return subject && credential && credential !== 'unknown' ? JSON.stringify({ subject, credential }) : undefined
+}
 
 /** How long a live `claude auth status` result stands before it is checked again. */
 export const CLAUDE_AUTH_STATUS_TTL_MS = 5 * 60_000
@@ -1034,6 +1041,10 @@ export class ClaudeSubscriptionProviderService {
   private readonly activeThreads = new Set<string>()
   /** Last live `claude auth status` check. */
   private cliProbe?: { at: number; result: AuthProbe }
+  private signInRead = 0
+  private signInObserved = 0
+  private signInEpoch = 0
+  private signInAccount?: string
   private probing?: Promise<void>
   private modelDiscoveryStarted = false
   /** The loaded settings already record the terminal sign-in; otherwise `status()` saves the migration. */
@@ -1142,11 +1153,11 @@ export class ClaudeSubscriptionProviderService {
   }
   /**
    * What `claude auth status` says in this instance's environment now, whatever Mousse recorded (a
-   * disconnect included) and without touching the recorded state. `unknown`: it did not answer.
+   * disconnect included). `unknown`: it did not answer.
    */
   async authState(): Promise<'signed_in' | 'signed_out' | 'unknown'> {
     if (!this.binary()) return 'unknown'
-    const result = await this.probe(this.environment())
+    const { result } = await this.readSignIn(this.environment())
     return result.kind === 'signed_in' ? 'signed_in' : result.kind === 'signed_out' ? 'signed_out' : 'unknown'
   }
   /** The terminal command that signs this instance in. */
@@ -1466,6 +1477,7 @@ export class ClaudeSubscriptionProviderService {
       kind: 'error',
       message: 'Claude Code did not report its sign-in status. Update the Claude Code CLI and recheck.'
     }
+    const subjectBefore = claudeAccountSubject(env)
     let output: string
     try {
       output = await this.runClaude(['auth', 'status'], env, signal)
@@ -1492,6 +1504,8 @@ export class ClaudeSubscriptionProviderService {
     const plan = text(status.subscriptionType)
     const label = plan ? `Claude ${plan[0].toUpperCase()}${plan.slice(1)}` : method && (CLAUDE_AUTH_METHOD_LABELS[method] ?? method)
     const subject = claudeAccountSubject(env)
+    if (subject !== subjectBefore)
+      return { kind: 'error', message: 'The Claude Code sign-in changed during its check. Try again.' }
     const apiProvider = text(status.apiProvider)
     const credential = claudeCredentialKind({ ...(method ? { authMethod: method } : {}), ...(apiProvider ? { apiProvider } : {}) })
     return { kind: 'signed_in', account: { ...(label ? { label } : {}), ...(subject ? { subject } : {}), credential } }
@@ -1607,10 +1621,37 @@ export class ClaudeSubscriptionProviderService {
   /** Checks the sign-in with the environment the caller captured for its turn. */
   private async authenticated(signal?: AbortSignal, env = this.environment()): Promise<boolean> {
     if (!this.binary()) return false
-    const result = await this.probe(env, signal)
+    return (await this.readSignIn(env, signal)).result.kind === 'signed_in'
+  }
+
+  private async readSignIn(env: NodeJS.ProcessEnv, signal?: AbortSignal, owner = true) {
+    const read = ++this.signInRead
+    let result = await this.probe(env, signal)
     signal?.throwIfAborted()
-    this.cliProbe = { at: Date.now(), result }
-    return result.kind === 'signed_in'
+    const identity = signInIdentity(result)
+    if (owner && !this.stopped) {
+      if (read < this.signInObserved) {
+        // An overlapping sign-out makes even the newer reading unsafe. Recheck before sending
+        // anything else and retire the processes that still hold credentials.
+        if (result.kind === 'signed_out') {
+          this.signInEpoch += 1
+          this.signInAccount = undefined
+          this.cliProbe = undefined
+          this.closeLive()
+        } else if (!identity || identity !== this.signInAccount) {
+          result = { kind: 'error', message: 'The Claude Code sign-in changed during its check. Try again.' }
+        }
+      } else {
+        this.signInObserved = read
+        if (identity !== this.signInAccount || result.kind !== 'signed_in') this.signInEpoch += 1
+        this.signInAccount = identity
+        this.cliProbe = { at: Date.now(), result }
+        for (const live of this.live.values()) {
+          if (!identity || live.meta.hardParts?.[ACCOUNT_PART] !== identity) this.closeLiveSession(live.threadId, live)
+        }
+      }
+    }
+    return { result, identity, epoch: this.signInEpoch }
   }
   /** A live check is due: the last terminal sign-in result is missing or stale. */
   private checkDue(): boolean {
@@ -1620,9 +1661,8 @@ export class ClaudeSubscriptionProviderService {
   }
   private async refreshStatus(): Promise<void> {
     if (!this.binary() || this.stopped) return
-    const result = await this.probe(this.environment())
+    const { result } = await this.readSignIn(this.environment())
     if (this.stopped) return
-    this.cliProbe = { at: Date.now(), result }
     if (result.kind === 'signed_in' && !this.listedByClaude() && !this.modelDiscoveryStarted) {
       this.modelDiscoveryStarted = true
       void this.refreshModels(this.dir).catch(
@@ -1763,11 +1803,12 @@ export class ClaudeSubscriptionProviderService {
     // tree (`reapClosed`). When it was reported anchors the process's creation time, so a later kill never reaches
     // another program given the pid since. The callback is the SDK's own, not in its published types. Mousse's own
     // spawn (the startup channel) reports it the same way.
-    let spawned: { pid: number; spawnedAt: number } | undefined
+    let spawned: { pid: number; spawnedAt: number; windowsTree?: WindowsProviderTree } | undefined
     let created: Query | undefined
     const reported = (options as { onProcessSpawned?: (pid: number) => void }).onProcessSpawned
-    const onSpawned = (pid: number) => {
-      spawned = { pid, spawnedAt: Date.now() }
+    const onSpawned = (pid: number, windowsTree?: WindowsProviderTree) => {
+      if (spawned?.pid === pid) return
+      spawned = { pid, spawnedAt: Date.now(), windowsTree }
       // Counted for the memory monitor until the SDK's process exits.
       trackChildProcess(pid, 'claude')
       queueMicrotask(() => { if (created) untrackClaudeOnExit(created, pid) })
@@ -1800,6 +1841,26 @@ export class ClaudeSubscriptionProviderService {
     const sdk = await import('@anthropic-ai/claude-agent-sdk')
     options.abortController?.signal.throwIfAborted()
     if (this.stopped) throw new Error('Claude provider is stopped')
+    if (process.platform === 'win32' && !given.spawnClaudeCodeProcess) {
+      const stderr = given.stderr
+      given = {
+        ...given,
+        spawnClaudeCodeProcess: ({ command, args, cwd, env, signal }) => {
+          if (this.stopped) throw new Error('Claude provider is stopped')
+          const child = spawnProviderProcess(command, args, { cwd, env, signal })
+          const tree = windowsProviderTree(child)!
+          this.windowsTrees.add(tree)
+          void tree.exited.then(() => this.windowsTrees.delete(tree), (error: unknown) => {
+            this.windowsTrees.delete(tree)
+            console.warn('[claude-subscription] Windows provider drain failed', String(error))
+          })
+          child.stderr.on('data', (chunk: Buffer) => stderr?.(chunk.toString()))
+          child.stderr.once('close', () => tail?.end())
+          if (child.pid !== undefined) onSpawned(child.pid, tree)
+          return child
+        }
+      }
+    }
     created = sdk.query({ prompt, options: { ...given, onProcessSpawned: onSpawned } as Options })
     noteClaudeQuerySpawn(created, () => spawned)
     return created
@@ -2275,6 +2336,9 @@ export class ClaudeSubscriptionProviderService {
     return this.dependencies.signedOutMessage?.() ?? `Claude Code isn't signed in. Run \`${this.signInCommand()}\` in a terminal, then try again.`
   }
   private abortInFlight(): void {
+    this.signInEpoch += 1
+    this.signInObserved = this.signInRead + 1
+    this.signInAccount = undefined
     for (const controller of this.controllers) controller.abort()
     for (const threadId of this.activeThreads) this.questions.dismissAllForThread(threadId)
     for (const session of this.loginSessions) session.abort.abort()
@@ -2367,18 +2431,10 @@ export class ClaudeSubscriptionProviderService {
   private botKeepsWarm(turn: ClaudeLockedTurn): boolean {
     return Boolean(this.liveConfig && turn.ownerEntry && turn.authority.warm)
   }
-  /**
-   * The last sign-in reading said signed in and is under `CLAUDE_AUTH_STATUS_TTL_MS` old: a bot's process, new or warm,
-   * gets its prompt without waiting for this turn's own reading, which still runs and ends the turn if it says signed out.
-   */
-  private signInFresh(): boolean {
-    const reading = this.cliProbe
-    return reading?.result.kind === 'signed_in' && Date.now() - reading.at < CLAUDE_AUTH_STATUS_TTL_MS && !this.signedOut()
-  }
-  /** Closes a bot's warm process and ends everything it started (`reapClosed`). */
-  private closeBotLive(threadId: string, live: LiveSession<TurnContext>): void {
+  /** Closes a live process and ends everything it started. */
+  private closeLiveSession(threadId: string, live: LiveSession<TurnContext>, reason: 'closed' | 'idle' | 'idle-cap' = 'closed'): void {
     const target = live.process()
-    live.close('closed')
+    live.close(reason)
     if (this.live.get(threadId) === live) this.live.delete(threadId)
     if (!live.reaped) this.reapClosed(threadId, target)
   }
@@ -2390,7 +2446,7 @@ export class ClaudeSubscriptionProviderService {
     const live = this.live.get(threadId)
     if (!live || live.dead || !live.meta.bot) return false
     if (this.activeThreads.has(threadId) || live.busy) live.meta.closeAfterTurn = true
-    else this.closeBotLive(threadId, live)
+    else this.closeLiveSession(threadId, live)
     return true
   }
 
@@ -2434,12 +2490,13 @@ export class ClaudeSubscriptionProviderService {
   }
   /** Process trees being ended (`reapClosed`). */
   private readonly reaping = new Set<Promise<void>>()
+  private readonly windowsTrees = new Set<WindowsProviderTree>()
   /** Threads that hold a live Claude process (diagnostics and tests). */
   liveThreadIds(): string[] {
     return [...this.live].filter(([, live]) => !live.dead).map(([threadId]) => threadId)
   }
   private closeLive(reason: 'closed' | 'idle' | 'idle-cap' = 'closed'): void {
-    for (const live of [...this.live.values()]) live.close(reason)
+    for (const live of this.live.values()) this.closeLiveSession(live.threadId, live, reason)
     this.live.clear()
     this.liveCommits.clear()
   }
@@ -2464,8 +2521,7 @@ export class ClaudeSubscriptionProviderService {
     let victim: LiveSession<TurnContext> | undefined
     for (const live of this.idleLive()) if (!victim || live.lastUsed < victim.lastUsed) victim = live
     if (!victim) return false
-    victim.close('idle')
-    this.live.delete(victim.threadId)
+    this.closeLiveSession(victim.threadId, victim, 'idle')
     return true
   }
   /**
@@ -2477,7 +2533,7 @@ export class ClaudeSubscriptionProviderService {
    */
   private reusableLive(threadId: string, hard: readonly unknown[], resume: string | undefined, historyNow: string): LiveSession<TurnContext> | undefined {
     const live = this.live.get(threadId)
-    if (!live || live.dead || live.sessionId === undefined) return undefined
+    if (!hard[ACCOUNT_PART] || !live || live.dead || live.sessionId === undefined) return undefined
     if (JSON.stringify(hard) !== JSON.stringify(live.meta.hardParts)) return undefined
     // The history this request carries must be the one the process holds: the saved fingerprint says
     // so, or, after a turn that did not finish, the boundary that turn left (`expectedKey`). A history
@@ -2570,17 +2626,7 @@ export class ClaudeSubscriptionProviderService {
           errorInfo: { category: 'unavailable', retryable: false }
         })
       }
-      live.close('closed')
-      this.live.delete(threadId)
-    }
-    // Idle processes started under another account are closed: no turn can reuse one, and each holds the old sign-in.
-    if (!bot) {
-      const account = JSON.stringify(key.hard[ACCOUNT_PART] ?? null)
-      for (const idle of this.idleLive())
-        if (!idle.meta.bot && JSON.stringify((idle.meta.hardParts as readonly unknown[] | undefined)?.[ACCOUNT_PART] ?? null) !== account) {
-          idle.close('idle')
-          this.live.delete(idle.threadId)
-        }
+      this.closeLiveSession(threadId, live)
     }
     if (this.live.size >= timings.maxSessions && !this.evictIdleLive()) return undefined
     this.trimIdleLive()
@@ -2683,7 +2729,7 @@ export class ClaudeSubscriptionProviderService {
     // A bot's warm process never runs a turn nobody gave it: it is stopped, and the process with it.
     if (live.meta.bot) {
       live.discardContinuation(run)
-      this.closeBotLive(live.threadId, live)
+      this.closeLiveSession(live.threadId, live)
       return
     }
     const host = this.liveHost
@@ -3352,19 +3398,17 @@ export class ClaudeSubscriptionProviderService {
     const releaseBotTemp = botTemp ? holdClaudeBotTemp(botTemp.dir) : undefined
     // The folder of the turn's settings file (`claudeLockedSettingsFile`), removed when it ends.
     let lockedSettingsFolder: string | undefined
-    /**
-     * The sign-in check (`claude auth status`). A bot's turn starts Claude Code while it runs, and its prompt waits for it
-     * (on a warm process, only when the last reading is old); any other turn waits for it here. A signed-out reading fails the turn with how to sign in.
-     */
-    let signIn: Promise<void> | undefined
     try {
-      signIn = this.authenticated(controller.signal, env).then((signedIn) => {
-        if (!signedIn)
-          throw new AppError({ code: 'claude_subscription_sign_in_required', message: this.signInRequiredMessage(), errorInfo: { category: 'unavailable', retryable: false } })
-      })
-      // A bot's process starts while the reading runs: one that says signed out ends it before it is given the prompt.
-      signIn.catch(() => { if (locked) cancel() })
-      if (!locked) await signIn
+      const owner = !locked || locked.ownerEntry === true
+      const signIn = await this.readSignIn(env, controller.signal, owner)
+      if (signIn.result.kind !== 'signed_in')
+        throw new AppError({ code: 'claude_subscription_sign_in_required', message: signIn.result.message, errorInfo: { category: 'unavailable', retryable: false } })
+      const assertSignIn = () => {
+        if (owner && (signIn.epoch !== this.signInEpoch || this.signedOut()))
+          throw new Error('The Claude Code sign-in changed before the turn could be sent. Try again.')
+      }
+      assertSignIn()
+      if (locked) turnTimingMark(input.threadId, 'signIn')
       controller.signal.throwIfAborted()
       input.signal?.throwIfAborted()
       const chosen = claudeSpeedOf(input.model)
@@ -3399,8 +3443,7 @@ export class ClaudeSubscriptionProviderService {
         input.mcp ? [input.mcp.url, input.mcp.tools ?? null] : null,
         readOnlyChild,
         botWarm ? claudeBotLaunchKey(botWarm, claudeLockedOptions(lockedTurn!, { env, mousseTools: Boolean(input.mcp) }), flags) : null,
-        // The account of this turn's sign-in reading (`claudeAccountSubject`, read from the files with no extra work).
-        this.account()?.subject ?? null
+        signIn.identity ?? null
       ]
       const reusable = input.continuation ? undefined : this.reusableLive(input.threadId, hard, resume, historyNow)
       /** The prompt, with the history in front when no session holds it: none resumed, cut or kept warm. */
@@ -3536,7 +3579,8 @@ export class ClaudeSubscriptionProviderService {
       if (input.continuation) {
         // Claude started this turn itself: it joins the one already in flight and pushes no prompt.
         live = this.live.get(input.threadId)
-        const wake = live && !live.dead ? live.claimContinuation(input.continuationId) : undefined
+        const wake = signIn.identity && live && !live.dead && live.meta.hardParts?.[ACCOUNT_PART] === signIn.identity
+          ? live.claimContinuation(input.continuationId) : undefined
         if (!live || !wake) throw new Error('Claude has no turn of its own to continue for this thread')
         liveRun = wake
         live.current = turn
@@ -3561,13 +3605,14 @@ export class ClaudeSubscriptionProviderService {
           })
         }
         metrics.beginQuery(live.sessionId, saved?.usageBaseline)
+        assertSignIn()
         liveRun.attach(observe)
       } else {
         const key = { hard, soft: this.launchKey(env, integrations, launchSettings, input.mcp?.relay ?? null), mode: permissionMode, flags, historyNow, entrypoint: env.CLAUDE_CODE_ENTRYPOINT }
         try {
           // A bot's chat turn on the owner's entry runs on its warm process (`botWarm`); every other bot turn is one query.
           // The warm process's settings file lives as long as it does, in a folder of its own.
-          live = locked && !botWarm ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
+          live = (locked && !botWarm) || !signIn.identity ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
             created.current = turn
             if (!botWarm) return buildOptions(created.lifetime, () => created.current ?? turn, true)
             const folder = mkdtempSync(join(tmpdir(), 'mousse-claude-settings-'))
@@ -3605,14 +3650,6 @@ export class ClaudeSubscriptionProviderService {
         try {
           controller.signal.throwIfAborted()
           if (live) {
-            // A bot's process, new or already running, gets its prompt at once while the last reading said signed in
-            // (`signInFresh`); otherwise only once this turn's check did. That reading still runs, and a signed-out one
-            // ends the turn and with it the process.
-            if (locked) {
-              if (!this.signInFresh()) await signIn
-              controller.signal.throwIfAborted()
-              turnTimingMark(input.threadId, 'signIn')
-            }
             live.current = turn
             // The permission mode follows the composer: a live query switches it for this turn.
             if (live.meta.permissionMode !== permissionMode) {
@@ -3624,6 +3661,7 @@ export class ClaudeSubscriptionProviderService {
             // A cancel under way (another turn was cut off) would sweep this prompt up; wait for it.
             for (;;) {
               try {
+                assertSignIn()
                 promptId = live.push(liveRun, userMessage(live.sessionId ?? resume ?? branch?.id ?? ''))
                 turnTimingMark(input.threadId, 'prompt')
                 break
@@ -3701,14 +3739,9 @@ export class ClaudeSubscriptionProviderService {
         startSteering()
         promptId = randomUUID()
         // The same for a bot's one-shot query: no wait while the last reading said signed in (`signInFresh`).
-        const checked = locked && this.signInFresh() ? undefined : signIn
         const threadId = input.threadId
         let nextPrompt: AsyncIterable<SDKUserMessage> = (async function* (): AsyncGenerator<SDKUserMessage> {
-          try {
-            await checked
-          } catch {
-            return
-          }
+          assertSignIn()
           turnTimingMark(threadId, 'prompt')
           yield* messages()
         })()
@@ -3826,6 +3859,7 @@ export class ClaudeSubscriptionProviderService {
           carried = { id: guidanceId, steers: sending }
           const guidance = steerContent(sending.map((steer) => steer.text).join('\n'), sending.flatMap((steer) => steer.images ?? []))
           nextPrompt = (async function* (): AsyncGenerator<SDKUserMessage> {
+            assertSignIn()
             yield {
               type: 'user',
               message: { role: 'user', content: guidance },
@@ -3844,8 +3878,7 @@ export class ClaudeSubscriptionProviderService {
       }
       input.signal?.throwIfAborted()
       controller.signal.throwIfAborted()
-      // A turn whose sign-in check failed ends with that, whatever Claude Code did without its prompt.
-      await signIn
+      assertSignIn()
       const sessionId = frames.sessionId
       if (!success || !sessionId) throw new Error('Claude Code ended before completing the turn')
       this.settings.sessions = {
@@ -3858,8 +3891,6 @@ export class ClaudeSubscriptionProviderService {
       input.onSession?.({ sessionId, ...(promptId ? { promptId } : {}) })
       return frames.text
     } catch (error) {
-      // The sign-in check's failure is the turn's: Claude Code may have ended without the prompt it held back.
-      await signIn
       if (readUsageLimit(error)) usageLimited = true
       // Claude Code could not open the cut (its file or entry is gone) and started nothing.
       if (branch && !frames.text && cutRefused(error)) throw new CutRefused(error instanceof Error ? error.message : String(error), branch.fork)
@@ -3885,7 +3916,7 @@ export class ClaudeSubscriptionProviderService {
       } else query?.close()
       // A bot's warm process outlives only a turn that finished: one that failed, was stopped or reached its deadline ends
       // with its process, and the next turn starts a fresh one. So does one asked to close meanwhile (`releaseBotProcess`).
-      if (live?.meta.bot && (!success || live.meta.closeAfterTurn)) this.closeBotLive(input.threadId, live)
+      if (live?.meta.bot && (!success || live.meta.closeAfterTurn)) this.closeLiveSession(input.threadId, live)
       // No steer is collected after the abort above: a one-shot turn's steers Claude Code never read go back now.
       returnUnreadOneShotSteers()
       // After the cancel above has started: a steer Claude Code has not read is accepted or handed back before the turn
@@ -4022,12 +4053,12 @@ export class ClaudeSubscriptionProviderService {
     this.queries.clear()
     for (const { query } of this.oneShotExits.values()) query.close()
     for (const threadId of this.live.keys()) this.questions.dismissAllForThread(threadId)
-    // Taken before the close: what each process is, for the kill after the grace.
-    const open = [...this.live].filter(([, live]) => !live.dead).map(([threadId, live]) => ({ threadId, live, target: live.process() }))
     this.closeLive()
-    for (const { threadId, live, target } of open) if (!live.reaped) this.reapClosed(threadId, target)
     this.readyToCommit.clear()
-    await Promise.all([...this.reaping])
+    const drain = [...this.windowsTrees].map((tree) => tree.stop())
+    const results = await Promise.allSettled([...this.reaping, ...drain])
+    const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (failures.length) throw new AggregateError(failures.map((failure) => failure.reason), 'Claude processes could not be stopped')
   }
 }
 
