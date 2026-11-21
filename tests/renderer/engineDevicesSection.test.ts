@@ -77,7 +77,7 @@ function daemon(
       case 'netEngine.status':
         return state.status
       case 'netEngine.invite':
-        return { invitation: 'inv1', uri: 'mousse://pair?n=Studio#AAAAAAAAAAAAAAAAAAAAAAAA' }
+        return { invitation: 'inv1', uri: 'mousse://pair?n=Studio#AAAAAAAAAAAAAAAAAAAAAAAA', expiresAt: Math.floor(Date.now() / 1000) + 300 }
       case 'bridge.nodes':
         return {
           nodes: [
@@ -232,7 +232,8 @@ describe('Settings → Devices, new networking', () => {
     daemon({
       devices: [
         device({ node: 'n1', addresses: ['tcp://192.168.1.20:47100'] }),
-        device({ node: 'n2', name: 'Laptop', shortId: 'ffee0011', unreachable: 'out', online: false })
+        device({ node: 'n2', name: 'Laptop', shortId: 'ffee0011', unreachable: 'out', online: false }),
+        device({ node: 'n3', name: 'Mini', shortId: '04a223d6', state: 'finishing', stuck: true, route: 'tailnet' })
       ]
     })
     await mount()
@@ -240,26 +241,46 @@ describe('Settings → Devices, new networking', () => {
     expect(rowText('n1')).not.toContain('a1b2c3d4')
     expect(rowOf('n1')!.querySelector('[title="Id a1b2c3d4"]')).toBeTruthy()
     expect(rowText('n2')).toContain("This computer can't reach Laptop")
-    expect(await menuItems('Laptop')).toEqual(['Retry', 'Remove…'])
+    // Two lines: the name, then the state; no id and no separator left hanging.
+    expect(rowText('n3')).not.toMatch(/04a223d6|· ·|·\s*$/)
+    expect(rowOf('n3')!.querySelector('[title*="Check Tailscale is on for both"]')).toBeTruthy()
+    expect(await menuItems('Laptop')).toEqual(['Routes', 'Retry', 'Remove…'])
   })
 
   it('opens Access under the row, marking the row, from the row menu', async () => {
     daemon({ devices: [device({ node: 'n1' })] })
     await mount()
-    expect(await menuItems('Studio')).toEqual(['Access', 'Addresses…', 'Remove…'])
+    expect(await menuItems('Studio')).toEqual(['Access', 'Remove…'])
     await click(button('Access'))
     expect(rowOf('n1')!.classList.contains('engine-row-selected')).toBe(true)
     expect(host.textContent).toContain('Access from this device')
   })
 
-  it('adds an address and removes a computer through the daemon', async () => {
-    const d = daemon({ devices: [device({ node: 'n1' })] })
+  it('opens a row to its routes, the one in use first, adds a Tailscale fallback that the add allows, and removes a route', async () => {
+    const d = daemon({
+      devices: [device({ node: 'n1', route: 'lan', online: true, addresses: ['tcp://192.168.1.20:47100', 'wss://studio.example.com/mousse-net/1'] })]
+    })
     await mount()
     await menuItems('Studio')
-    await click(button('Addresses…'))
-    await type(document.querySelector<HTMLInputElement>('input[aria-label="Address and port"]')!, '192.168.1.20:47100')
+    await click(button('Access'))
+    const routes = () =>
+      [...host.querySelectorAll<HTMLElement>('[aria-label="Routes to Studio"] [data-route-state]')].map((row) =>
+        (row.textContent ?? '').replace(/\s+/g, ' ').trim()
+      )
+    expect(routes()[0]).toMatch(/^Same network\s*192\.168\.1\.20:47100 · In use/)
+    expect(routes()).toContainEqual(expect.stringMatching(/^Tunnel\s*studio\.example\.com · Available/))
+
+    await click(button('Add route'))
+    expect(button('Tailscale')!.getAttribute('aria-checked')).toBe('true')
+    await type(document.querySelector<HTMLInputElement>('input[aria-label="Tailscale address"]')!, '100.101.7.9')
+    expect(button('Add')!.title).toBe('Adding it allows it.')
     await click(button('Add'))
-    expect(d.called('netEngine.address.add')).toEqual([{ node: 'n1', address: '192.168.1.20:47100' }])
+    // The port comes from the address it already has; the owner's add is the route's approval.
+    expect(d.called('netEngine.address.add')).toEqual([{ node: 'n1', address: '100.101.7.9:47100' }])
+
+    await click(button('Actions for Tunnel studio.example.com'))
+    await click(button('Remove route'))
+    expect(d.called('netEngine.address.remove')).toEqual([{ node: 'n1', address: 'wss://studio.example.com/mousse-net/1' }])
 
     await menuItems('Studio')
     await click(button('Remove…'))
@@ -282,12 +303,14 @@ describe('Add device', () => {
     const d = daemon()
     await mount()
     await click(button('Add device'))
-    await click(button('Show a code'))
+    // The code shows at once, with its time left and the link to share under it.
     expect(d.called('netEngine.invite')).toHaveLength(1)
     expect(document.querySelector('[aria-label="Pairing QR code"]')).toBeTruthy()
+    expect(document.querySelector('[role="timer"]')?.textContent).toMatch(/^Expires in [45]:\d\d$/)
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Link to share"]')?.value).toContain('mousse://pair')
 
     await d.change({ approvals: [{ request: 'r1', invitation: 'inv1', name: 'Laptop (Work)', device: 'ffee0011' }] })
-    expect(document.body.textContent).toContain('Is Laptop (Work) next to you?')
+    expect(document.body.textContent).toContain('Is Laptop (Work) yours?')
     await click(button('Yes'))
     expect(d.called('netEngine.approve')).toEqual([{ request: 'r1', yes: true }])
 
@@ -299,7 +322,6 @@ describe('Add device', () => {
     const d = daemon()
     await mount()
     await click(button('Add device'))
-    await click(button('Show a code'))
     await click(button('Close'))
     expect(d.called('netEngine.invite.cancel')).toEqual([{ invitation: 'inv1' }])
   })

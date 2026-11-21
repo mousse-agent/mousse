@@ -201,7 +201,8 @@ describe('Send link (§5.1)', () => {
     const d = daemon()
     const update = await dialog(d)
     await click(button('Send a link'))
-    expect(d.called('netEngine.invite')).toEqual([{ kind: 'link' }])
+    // The dialog's own code first, then the link.
+    expect(d.called('netEngine.invite')).toEqual([{}, { kind: 'link' }])
     expect(field('Link').value).toBe(LINK)
     expect(button('Copy link')).toBeTruthy()
     expect(text()).toContain('123 456')
@@ -209,21 +210,21 @@ describe('Send link (§5.1)', () => {
     expect(text()).toContain('Send the link in a chat. Read the code to them another way.')
 
     // A wrong code: a new code and one try fewer.
-    await update({ links: [{ invitation: 'inv1', code: '654321', attemptsLeft: 2 }] })
+    await update({ links: [{ invitation: 'inv2', code: '654321', attemptsLeft: 2 }] })
     expect(text()).toContain('654 321')
     expect(text()).toContain('2 tries left')
 
     await update({
-      links: [{ invitation: 'inv1', code: '654321', attemptsLeft: 0, ended: 'attempts_exhausted' }]
+      links: [{ invitation: 'inv2', code: '654321', attemptsLeft: 0, ended: 'attempts_exhausted' }]
     })
     expect(text()).toContain('Three wrong codes. This link no longer works.')
     await click(button('New link'))
-    expect(d.called('netEngine.invite')).toHaveLength(2)
+    expect(d.called('netEngine.invite')).toHaveLength(3)
   })
 
   it('is offered only when the helper speaks Send link', async () => {
     await dialog(daemon({ sendLink: undefined }))
-    expect(button('Show a code')).toBeTruthy()
+    expect(document.querySelector('[aria-label="Pairing QR code"]')).toBeTruthy()
     expect(button('Send a link')).toBeUndefined()
     expect(button('Enter link')).toBeUndefined()
   })
@@ -236,7 +237,6 @@ describe('Scan or paste a sent link (§5.3)', () => {
       { shareable: [{ route: 'tcp://203.0.113.7:7443', label: '203.0.113.7:7443', cls: 'public' }] }
     )
     const update = await dialog(d)
-    await click(button('Scan or paste'))
     await type(field('Pairing link'), LINK)
     await submit(field('Pairing link'))
     expect(text()).toContain(

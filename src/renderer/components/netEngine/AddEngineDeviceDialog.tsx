@@ -16,7 +16,6 @@ import { SshAddSteps } from './SshAddSteps'
 
 type Step =
   | { kind: 'choose' }
-  | { kind: 'show' }
   | { kind: 'scan' }
   | { kind: 'ssh' }
   | { kind: 'confirm'; ticket: string; host: string }
@@ -28,10 +27,11 @@ type Step =
 const UNNAMED_HOST = 'the other computer'
 
 /**
- * Add device (design §5.1, §7): Show a code here and answer the other computer's request in this dialog; Scan or
- * paste the other computer's code or link (a sent link goes on to its code, a shown one to Connect); or Send a
- * link. More ways holds Over SSH and, where the build has phones, Add a phone. Closing it ends the invitation it
- * showed; a window that closes or switches profile ends it on the daemon's side.
+ * Add device (design §5.1, §7), all in one: this computer's code shows at once with the time it has left (a new
+ * one follows when it runs out) and its link to copy under it; the other computer's request is answered here.
+ * Under that, a field takes the other computer's link (a sent link goes on to its code, a shown one to Connect).
+ * More ways holds Scan their code, Send a link, Over SSH and, where the build has phones, Add a phone. Closing it
+ * ends the invitations it made; a window that closes or switches profile ends them on the daemon's side.
  */
 export function AddEngineDeviceDialog({
   status,
@@ -51,30 +51,54 @@ export function AddEngineDeviceDialog({
   /** Opens a camera stream; tests and computers without one answer undefined. */
   camera?: () => Promise<MediaStream | undefined>
 }) {
-  const [step, setStep] = useState<Step>({ kind: initial })
+  const [step, setStep] = useState<Step>({ kind: initial === 'show' ? 'choose' : initial })
   const { busy, error, setError, call } = useDaemonCall()
-  const [invite, setInvite] = useState<{ invitation: string; uri: string }>()
+  const [invite, setInvite] = useState<{ invitation: string; uri: string; expiresAt?: number }>()
   const [approved, setApproved] = useState<string>()
+  // The code this dialog shows, and a Send link it made: closing ends whichever is still open.
   const inviteRef = useRef<string | undefined>(undefined)
+  const linkRef = useRef<string | undefined>(undefined)
+  // A build without the helper offers only what the old networking still does (Add a phone).
+  const engine = status && status.helper.state !== 'not_in_build' ? status : undefined
+  const hasEngine = !!engine
 
-  // Show QR: one invitation for as long as the code shows.
+  // The code shows at once, one invitation at a time; when it runs out a new one takes its place.
   useEffect(() => {
-    if (step.kind !== 'show' || invite) return
-    void call<{ invitation: string; uri: string }>('netEngine.invite', {}).then((answer) => {
-      if (!answer) return
-      inviteRef.current = answer.value.invitation
-      setInvite(answer.value)
-    })
-  }, [step.kind, invite, call])
+    if (step.kind !== 'choose' || !hasEngine || invite || approved) return
+    void call<{ invitation: string; uri: string; expiresAt?: number }>('netEngine.invite', {}).then(
+      (answer) => {
+        if (!answer) return
+        inviteRef.current = answer.value.invitation
+        setInvite(answer.value)
+      }
+    )
+  }, [step.kind, hasEngine, invite, approved, call])
 
-  // Closing the dialog ends the invitation it showed.
+  // The time left, to the second.
+  const expiresAt = invite?.expiresAt === undefined ? undefined : toMs(invite.expiresAt)
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (expiresAt === undefined) return
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [expiresAt])
+  const approvalOpen =
+    !!invite && !!status?.approvals.some((item) => item.invitation === invite.invitation)
+  useEffect(() => {
+    if (expiresAt === undefined || now < expiresAt || approvalOpen || approved) return
+    inviteRef.current = undefined
+    setInvite(undefined)
+  }, [now, expiresAt, approvalOpen, approved])
+
+  // Closing the dialog ends the invitations it made.
   useEffect(
     () => () => {
-      const invitation = inviteRef.current
-      if (invitation)
-        void window.mousse.platformRequest
-          .request('netEngine.invite.cancel', { invitation })
-          .catch(() => undefined)
+      for (const invitation of [inviteRef.current, linkRef.current])
+        if (invitation)
+          void window.mousse.platformRequest
+            .request('netEngine.invite.cancel', { invitation })
+            .catch(() => undefined)
     },
     []
   )
@@ -137,13 +161,11 @@ export function AddEngineDeviceDialog({
     return true
   }
 
-  // A build without the helper offers only what the old networking still does (Add a phone).
-  const engine = status && status.helper.state !== 'not_in_build' ? status : undefined
   const title =
-    step.kind === 'show'
-      ? 'Show a code'
-      : step.kind === 'scan' || step.kind === 'enter'
-        ? 'Scan or paste'
+    step.kind === 'scan'
+      ? 'Scan their code'
+      : step.kind === 'enter'
+        ? 'Paste their link'
         : step.kind === 'link'
           ? 'Send a link'
           : step.kind === 'ssh'
@@ -153,34 +175,89 @@ export function AddEngineDeviceDialog({
     <Modal open title={title} onClose={onClose}>
       <div className="engine-dialog" data-step={step.kind}>
         {step.kind === 'choose' && (
-          <div className="engine-dialog-choices">
-            {engine && (
-              <Choice
-                label="Show a code"
-                hint="The other computer scans it"
-                onClick={() => setStep({ kind: 'show' })}
-              />
-            )}
-            {engine && (
-              <Choice
-                label="Scan or paste"
-                hint="The other computer's code or link"
-                onClick={() => setStep({ kind: 'scan' })}
-              />
-            )}
-            {engine?.sendLink && (
-              <Choice
-                label="Send a link"
-                hint="For a computer that isn't next to you"
-                onClick={() => setStep({ kind: 'link' })}
-              />
-            )}
-            {((status?.on && status.reach) || onAddPhone) && (
+          <div className="engine-dialog-home">
+            {engine &&
+              (joined ? (
+                <p role="status" className="settings-muted">
+                  {joined.state === 'connected'
+                    ? `${joined.name} is connected.`
+                    : `${joined.name} can use this computer; finishing the other direction…`}
+                </p>
+              ) : approved ? (
+                <p role="status" className="settings-muted">
+                  Adding {approved}…
+                </p>
+              ) : approval ? (
+                <div className="engine-approval" role="group" aria-label="Pairing request">
+                  <p>Is {approval.name || 'this computer'} yours?</p>
+                  <div className="devices-dialog-actions">
+                    <button
+                      type="button"
+                      className="settings-btn"
+                      disabled={busy}
+                      onClick={() => void answer(false)}
+                    >
+                      No
+                    </button>
+                    <button
+                      type="button"
+                      className="settings-btn primary"
+                      disabled={busy}
+                      title={`${approval.name || 'It'} gets the same access as your other computers, and this computer gets the same there.`}
+                      onClick={() => void answer(true)}
+                    >
+                      Yes
+                    </button>
+                  </div>
+                </div>
+              ) : invite ? (
+                <div className="engine-qr">
+                  <QrCode text={invite.uri} />
+                  {expiresAt !== undefined && (
+                    <p
+                      className="settings-muted engine-qr-timer"
+                      role="timer"
+                      title="The code works once. A new one shows when it runs out."
+                    >
+                      Expires in {clock(expiresAt - now)}
+                    </p>
+                  )}
+                  <div className="engine-paste">
+                    <input
+                      className="settings-input"
+                      readOnly
+                      value={invite.uri}
+                      aria-label="Link to share"
+                      title="Scan the code on the other computer, or send it this link."
+                      onFocus={(event) => event.currentTarget.select()}
+                    />
+                    <CopyButton text={invite.uri} label="Copy link" />
+                  </div>
+                </div>
+              ) : (
+                !error && <p className="settings-muted">Making a code…</p>
+              ))}
+            {engine && !approval && !approved && <PasteField onText={read} />}
+            {(engine || onAddPhone) && (
               <details className="engine-more-ways">
                 <summary>
                   <ChevronRight size={14} aria-hidden="true" className="settings-advanced-chevron" />
                   More ways
                 </summary>
+                {engine && (
+                  <Choice
+                    label="Scan their code"
+                    hint="With this computer's camera"
+                    onClick={() => setStep({ kind: 'scan' })}
+                  />
+                )}
+                {engine?.sendLink && (
+                  <Choice
+                    label="Send a link"
+                    hint="With a code to read out, for a computer far away"
+                    onClick={() => setStep({ kind: 'link' })}
+                  />
+                )}
                 {status?.on && status.reach && (
                   <Choice
                     label="Over SSH"
@@ -201,7 +278,7 @@ export function AddEngineDeviceDialog({
             status={status}
             onInvitation={(invitation) => {
               // Closing the dialog ends the link's invitation while it is open.
-              inviteRef.current = invitation
+              linkRef.current = invitation
             }}
           />
         )}
@@ -215,55 +292,6 @@ export function AddEngineDeviceDialog({
         )}
 
         {step.kind === 'ssh' && <SshAddSteps onDone={onClose} />}
-
-        {step.kind === 'show' &&
-          (joined ? (
-            <p role="status" className="settings-muted">
-              {joined.state === 'connected'
-                ? `${joined.name} is connected.`
-                : `${joined.name} can use this computer; finishing the other direction…`}
-            </p>
-          ) : approved ? (
-            <p role="status" className="settings-muted">
-              Adding {approved}…
-            </p>
-          ) : approval ? (
-            <div className="engine-approval" role="group" aria-label="Pairing request">
-              <p>Is {approval.name || 'this computer'} next to you?</p>
-              <div className="devices-dialog-actions">
-                <button
-                  type="button"
-                  className="settings-btn"
-                  disabled={busy}
-                  onClick={() => void answer(false)}
-                >
-                  No
-                </button>
-                <button
-                  type="button"
-                  className="settings-btn primary"
-                  disabled={busy}
-                  title={`${approval.name || 'It'} gets the same access as your other computers, and this computer gets the same there.`}
-                  onClick={() => void answer(true)}
-                >
-                  Yes
-                </button>
-              </div>
-            </div>
-          ) : invite ? (
-            <div className="engine-qr">
-              <QrCode text={invite.uri} />
-              <p
-                className="settings-muted"
-                title="The code works once, for a few minutes, on the same network."
-              >
-                Scan this on the other computer.
-              </p>
-              <CopyButton text={invite.uri} label="Copy link" />
-            </div>
-          ) : (
-            !error && <p className="settings-muted">Making a code…</p>
-          ))}
 
         {step.kind === 'scan' && (
           <Scanner
@@ -320,6 +348,49 @@ export function AddEngineDeviceDialog({
 }
 
 const capitalize = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1)
+
+/** An expiry in seconds (the helper's) or milliseconds, as milliseconds. */
+const toMs = (at: number): number => (at < 1e12 ? at * 1000 : at)
+
+/** Time left as `m:ss`, never below zero. */
+export const clock = (ms: number): string => {
+  const seconds = Math.max(0, Math.ceil(ms / 1000))
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+}
+
+/** The other computer's link: a sent one goes on to its code, a shown one to Connect. */
+function PasteField({ onText }: { onText: (text: string) => boolean }) {
+  const [pasted, setPasted] = useState('')
+  const [notLink, setNotLink] = useState(false)
+  const paste = (event: FormEvent) => {
+    event.preventDefault()
+    setNotLink(!onText(pasted))
+  }
+  return (
+    <>
+      <form className="engine-paste" onSubmit={paste}>
+        <input
+          className="settings-input"
+          value={pasted}
+          placeholder="Or paste their link"
+          aria-label="Pairing link"
+          onChange={(event) => {
+            setPasted(event.target.value)
+            setNotLink(false)
+          }}
+        />
+        <button type="submit" className="settings-btn" disabled={!pasted.trim()}>
+          Continue
+        </button>
+      </form>
+      {notLink && (
+        <p role="alert" className="chat-error">
+          This isn’t a link from Mousse.
+        </p>
+      )}
+    </>
+  )
+}
 
 /** One way to add a device: its name, and a one-line hint under it. */
 function Choice({ label, hint, onClick }: { label: string; hint: string; onClick: () => void }) {

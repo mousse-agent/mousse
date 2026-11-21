@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
-import { AlertTriangle, Laptop, Monitor, MonitorSmartphone, Plus, RefreshCw, Smartphone, X } from '../../lib/icons'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { Laptop, Monitor, MonitorSmartphone, Plus, RefreshCw, Smartphone } from '../../lib/icons'
 import type {
   NetEngineDevice,
   NetEngineRemoval,
@@ -69,6 +69,7 @@ import { LegacyAddonRows, legacyAddonsOn, LegacyRelayRows, legacyRelaysSet, Lega
 import { takeOfferedPairLink, useOfferedPairLink } from './PairLinkHost'
 import { CodeEntry } from './SendLinkParts'
 import { ReachSection } from './ReachSection'
+import { RoutesPanel } from './RoutesPanel'
 import '../../styles/devices.css'
 import './engine.css'
 
@@ -155,7 +156,6 @@ export function EngineDevicesSection() {
   const [addingPhone, setAddingPhone] = useState(false)
   const [selected, setSelected] = useState<string>()
   const [picked, setPicked] = useState<string>()
-  const [addressFor, setAddressFor] = useState<NetEngineDevice>()
   const [removing, setRemoving] = useState<NetEngineDevice>()
   const [revoking, setRevoking] = useState<Device>()
   const [limits, setLimits] = useState<Device>()
@@ -282,7 +282,7 @@ export function EngineDevicesSection() {
       kind === 'access'
         ? [accessItem(device.node)]
         : kind === 'address'
-          ? [{ label: 'Addresses…', action: 'engine-address', onSelect: () => setAddressFor(device) }]
+          ? []
           : kind === 'retry'
             ? [
                 {
@@ -307,6 +307,13 @@ export function EngineDevicesSection() {
               ]
     )
     if (!view.actions.includes('remove')) items.push(...relayItems)
+    // Its routes show in the open row; a device with no Access panel opens for them alone.
+    if (!view.actions.includes('access'))
+      items.unshift({
+        label: selected === device.node ? 'Hide routes' : 'Routes',
+        action: 'device-routes',
+        onSelect: () => toggle(device.node)
+      })
     return {
       key: device.node,
       name: device.name,
@@ -407,11 +414,6 @@ export function EngineDevicesSection() {
         description={
           <span className="engine-row-line">
             <span className={view.warn ? 'settings-status-warn' : undefined} title={view.detail}>
-              {view.warn && (
-                <>
-                  <AlertTriangle size={12} aria-hidden="true" />{' '}
-                </>
-              )}
               {view.line}
             </span>
             {view.how && (
@@ -497,6 +499,15 @@ export function EngineDevicesSection() {
         />
       )),
       selected === device.node && (
+        <RoutesPanel
+          key={`${device.node}-routes`}
+          device={device}
+          busy={busy}
+          action={action}
+          onChanged={reloadAll}
+        />
+      ),
+      selected === device.node && engineRow(device).actions.includes('access') && (
         <AccessPanel
           key={`${device.node}-access`}
           name={device.name}
@@ -908,15 +919,6 @@ export function EngineDevicesSection() {
           )
         })()}
 
-      {addressFor && status && (
-        <AddressesDialog
-          device={status.devices.find((device) => device.node === addressFor.node) ?? addressFor}
-          ownRoutes={status.routes ?? []}
-          anyKind={!!status.reach}
-          onClose={() => setAddressFor(undefined)}
-          onAdded={read}
-        />
-      )}
 
       {everywhere && (
         <RemoveEverywhereDialog
@@ -1064,87 +1066,6 @@ export function EngineDevicesSection() {
   )
 }
 
-/** Addresses: the other computer is dialled at these too, beside what the local network finds. */
-function AddressesDialog({
-  device,
-  ownRoutes,
-  anyKind,
-  onClose,
-  onAdded
-}: {
-  device: NetEngineDevice
-  ownRoutes: string[]
-  /** The helper takes every owner kind (protocol 1.1): tailnet, internet, a name, a tunnel URL. */
-  anyKind: boolean
-  onClose: () => void
-  onAdded: () => void
-}) {
-  const [text, setText] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  const own = ownRoutes.map(routeText).join(', ')
-  const run = async (method: PlatformRequestMethod, params: unknown): Promise<boolean> => {
-    setBusy(true)
-    setError('')
-    try {
-      await window.mousse.platformRequest.request(method, params)
-      onAdded()
-      return true
-    } catch (cause) {
-      setError(errorText(cause))
-      return false
-    } finally {
-      setBusy(false)
-    }
-  }
-  const submit = async (event: FormEvent) => {
-    event.preventDefault()
-    if (await run('netEngine.address.add', { node: device.node, address: text })) onClose()
-  }
-  return (
-    <Modal open title={`Addresses for ${device.name}`} onClose={onClose}>
-      <form className="devices-dialog" onSubmit={(event) => void submit(event)}>
-        {!!device.addresses?.length && (
-          <ul className="engine-address-list" aria-label="Addresses">
-            {device.addresses.map((address) => (
-              <li key={address}>
-                <span title={address}>{routeText(address)}</span>
-                <button
-                  type="button"
-                  className="settings-icon-btn"
-                  aria-label={`Remove ${routeText(address)}`}
-                  disabled={busy}
-                  onClick={() => void run('netEngine.address.remove', { node: device.node, address })}
-                >
-                  <X size={14} aria-hidden="true" />
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-        <input
-          className="settings-input"
-          value={text}
-          autoFocus
-          placeholder={anyKind ? '100.101.7.2:47100 or https://…' : '192.168.1.20:47100'}
-          aria-label="Address and port"
-          title={own ? `Where ${device.name} can find it, such as this computer's own: ${own}` : undefined}
-          onChange={(event) => setText(event.target.value)}
-        />
-        {error && (
-          <p role="alert" className="chat-error">
-            {error}
-          </p>
-        )}
-        <div className="devices-dialog-actions">
-          <button type="submit" className="settings-btn primary" disabled={busy || !text.trim()}>
-            Add
-          </button>
-        </div>
-      </form>
-    </Modal>
-  )
-}
 
 /** Removals by the device removed, in the order they were made. */
 function removalGroups(

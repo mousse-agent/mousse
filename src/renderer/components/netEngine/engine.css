@@ -27,6 +27,31 @@
   min-width: 280px;
 }
 
+/* Add device, all in one: the code, its time left and link, then the paste field and More ways. */
+.engine-dialog-home {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  width: min(420px, 100%);
+}
+
+.engine-dialog-home .engine-qr .engine-paste {
+  align-self: stretch;
+}
+
+.engine-qr-timer {
+  font-variant-numeric: tabular-nums;
+}
+
+.engine-dialog-home .settings-input {
+  height: var(--settings-control-h, 28px);
+  padding: 0 var(--space-8);
+  border: 1px solid var(--ui-line-strong);
+  border-radius: var(--ui-control-radius);
+  background: transparent;
+  font-size: var(--settings-fs-small, 12.5px);
+}
+
 .engine-dialog-choices {
   display: flex;
   flex-direction: column;
@@ -266,4 +291,33 @@
 .engine-fingerprint {
   font-family: var(--font-mono);
   overflow-wrap: anywhere;
+}
+
+/* A device's routes in its open row, and Add route under them. The chosen kind has a background, no edge. */
+.engine-route-live {
+  color: var(--text-primary);
+}
+
+.engine-route-add {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-12) var(--space-12) calc(var(--space-12) + var(--space-24, 24px));
+}
+
+.engine-route-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.engine-route-kinds > .settings-btn,
+.engine-route-add .engine-paste > .settings-btn {
+  height: var(--settings-control-h, 28px);
+  border-radius: var(--ui-control-radius);
+  font-size: var(--settings-fs-small, 12.5px);
+}
+
+.engine-route-kinds > .settings-btn.engine-route-kind-on {
+  background: var(--ui-selected, var(--ui-hover));
 }

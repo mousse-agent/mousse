@@ -1,6 +1,6 @@
 import type { NetEngineDevice } from '../../../shared/netEngine/local'
 import type { RouteClass } from '../../../shared/netEngine/routes'
-import { relayText, routeText } from '../../../shared/netEngine/routes'
+import { parseRoute, relayText, routeClass, routeText } from '../../../shared/netEngine/routes'
 
 /** What a device's row offers (design §5.2): Access opens the preset control under it. */
 export type EngineRowAction = 'access' | 'address' | 'retry' | 'remove'
@@ -121,8 +121,7 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
     return device.stuck
       ? {
           line: 'Finishing pairing…',
-          detail:
-            'Pairing is taking longer than it should. Keep both computers on the same network, then Retry.',
+          detail: `Pairing is taking longer than it should. ${capitalized(reachAdvice(device))}, then Retry.`,
           warn: true,
           actions: ['retry', 'remove']
         }
@@ -130,14 +129,14 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
   if (device.unreachable === 'in')
     return {
       line: `${name} can't reach this computer`,
-      detail: `Let Mousse through this computer's firewall, and keep both on the same network.`,
+      detail: `Let Mousse through this computer's firewall, and ${reachAdvice(device)}.`,
       warn: true,
       actions: ['retry', 'remove']
     }
   if (device.unreachable === 'out')
     return {
       line: `This computer can't reach ${name}`,
-      detail: `Let Mousse through the firewall on ${name}, and keep both on the same network.`,
+      detail: `Let Mousse through the firewall on ${name}, and ${reachAdvice(device)}.`,
       warn: true,
       actions: ['retry', 'remove']
     }
@@ -198,4 +197,137 @@ export function readPairingLink(text: string): { ticket: string; host?: string }
       host = undefined
     }
   return { ticket: value, ...(host ? { host } : {}) }
+}
+
+const capitalized = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1)
+
+/** The class of a stored route (`tcp://`, `wss://`, `ssh://`), or undefined for one that doesn't read. */
+export function classOf(route: string): RouteClass | undefined {
+  const parsed = parseRoute(route)
+  if (!parsed) return undefined
+  const cls = routeClass(parsed)
+  return cls === 'forbidden' ? undefined : cls
+}
+
+/** The way a device is reached, for advice: the route in use, else one added for it, else the local network. */
+function reachedBy(device: NetEngineDevice): RouteClass | 'relay' {
+  if (device.route) return device.route
+  if (device.source === 'ssh' || device.ssh) return 'ssh'
+  for (const address of device.addresses ?? []) {
+    const cls = classOf(address)
+    if (cls && cls !== 'lan') return cls
+  }
+  return 'lan'
+}
+
+/** What to check so a device can be reached again, in words that fit the way it is reached. */
+export function reachAdvice(device: NetEngineDevice): string {
+  switch (reachedBy(device)) {
+    case 'tailnet':
+      return 'check Tailscale is on for both'
+    case 'ssh':
+      return `check you can sign in to ${device.name} over SSH`
+    case 'relay':
+      return 'check both can reach the relay'
+    case 'public':
+    case 'tunnel':
+      return `check the address added for ${device.name} still reaches it`
+    default:
+      return 'keep both computers on the same network'
+  }
+}
+
+/** A route's kind as the expanded row names it. */
+export const ROUTE_KIND: Readonly<Record<RouteClass | 'relay', string>> = Object.freeze({
+  lan: 'Same network',
+  tailnet: 'Tailscale',
+  public: 'Internet',
+  tunnel: 'Tunnel',
+  ssh: 'SSH',
+  relay: 'Relay'
+})
+
+/** One route a device has, as its expanded row lists it. */
+export interface DeviceRoute {
+  key: string
+  cls: RouteClass | 'relay'
+  /** The address, shortened when long. */
+  address?: string
+  /** The whole address, for the tooltip when it was shortened. */
+  full?: string
+  state: 'in use' | 'available' | 'failed'
+  /** Why it failed, for the tooltip. */
+  reason?: string
+  /** How to remove it, where the owner added it. */
+  remove?: { method: 'netEngine.address.remove' | 'netEngine.relay.disallow'; params: Record<string, string> }
+}
+
+/** Addresses longer than this are shortened, with the whole one in the tooltip. */
+const ADDRESS_SHOWN = 32
+
+const shown = (text: string): { address: string; full?: string } =>
+  text.length > ADDRESS_SHOWN ? { address: `${text.slice(0, ADDRESS_SHOWN - 1)}…`, full: text } : { address: text }
+
+/**
+ * Every route a device has, the one in use first (whatever the engine reports: a relay first, a direct route once
+ * it takes over), then the ones it can fall back to, then the ones that failed. Failures come from the row's own
+ * state (it can't be reached, its SSH sign-in was refused), with the row's reason.
+ */
+export function deviceRoutes(device: NetEngineDevice): DeviceRoute[] {
+  const routes: DeviceRoute[] = []
+  if (device.direction !== 'out' && device.source !== 'ssh')
+    routes.push({ key: 'local', cls: 'lan', address: 'Found automatically', state: 'available' })
+  for (const address of device.addresses ?? []) {
+    routes.push({
+      key: address,
+      cls: classOf(address) ?? 'public',
+      ...shown(routeText(address)),
+      state: 'available',
+      remove: { method: 'netEngine.address.remove', params: { node: device.node, address } }
+    })
+  }
+  if (device.ssh || device.source === 'ssh')
+    routes.push({ key: 'ssh', cls: 'ssh', ...(device.ssh ? shown(device.ssh) : {}), state: 'available' })
+  for (const destination of device.relay?.allowed ?? [])
+    routes.push({
+      key: destination,
+      cls: 'relay',
+      ...shown(relayText(destination)),
+      state: 'available',
+      remove: { method: 'netEngine.relay.disallow', params: { node: device.node, destination } }
+    })
+
+  // The route in use: the engine names its class (and a relay's host), not the address.
+  if (device.route && device.online) {
+    const used =
+      device.route === 'relay'
+        ? (routes.find((route) => route.cls === 'relay' && (!device.via || relayText(route.key) === device.via)) ??
+          routes.find((route) => route.cls === 'relay'))
+        : (routes.find((route) => route.cls === device.route && route.key !== 'local') ??
+          routes.find((route) => route.cls === device.route))
+    if (used) used.state = 'in use'
+    else
+      routes.unshift({
+        key: `in-use-${device.route}`,
+        cls: device.route,
+        ...(device.via ? shown(device.via) : {}),
+        state: 'in use'
+      })
+  }
+
+  // Failures the row knows about.
+  const view = engineRow(device)
+  const reason = view.detail ?? view.line
+  const unreachable =
+    device.unreachable === 'out' ||
+    device.state === 'offline' ||
+    !!device.certificateWindow ||
+    (device.state === 'finishing' && !!device.stuck)
+  for (const route of routes) {
+    if (route.state === 'in use') continue
+    if (device.sshParked && route.cls === 'ssh') Object.assign(route, { state: 'failed', reason })
+    else if (unreachable) Object.assign(route, { state: 'failed', reason })
+  }
+  const order = { 'in use': 0, available: 1, failed: 2 }
+  return routes.sort((a, b) => order[a.state] - order[b.state])
 }
