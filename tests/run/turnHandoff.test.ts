@@ -16,7 +16,7 @@
  * worktree, a Stop, a failure and a crash; the project folder; the placements that never start this way.
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -26,11 +26,13 @@ import type { ProviderDriverKind } from '../../src/shared/providerInstances'
 import { ChangeReceiptService } from '../../src/mms/actions/ChangeReceiptService'
 import { ThreadActionService } from '../../src/mms/actions/ThreadActionService'
 import { recordExactTrees } from '../../src/mms/actions/snapshots'
+import { readLinkedCheckout } from '../../src/mms/git/worktreeHeadFiles'
 import { UndoService } from '../../src/mms/actions/UndoService'
 import { EffectWorker, type EffectExecutor } from '../../src/mms/run/EffectWorker'
 import { Reconciler } from '../../src/mms/run/Reconciler'
 import { TERMINAL_RUN_STATUSES, type EffectRecord } from '../../src/mms/run/types'
 import { ThreadWorkspaceManager } from '../../src/mms/workspace/ThreadWorkspaceManager'
+import { recordCheckoutIdentity } from '../../src/mms/workspace/checkoutIdentity'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 import { pressed } from '../support/userRequest'
 
@@ -234,6 +236,61 @@ describe('a turn in the thread\'s own worktree', () => {
     expect(own.changedPaths.map((change) => change.path).sort()).toEqual(['README.md', 'later.txt'])
     await undo()
     expect(filesOf(worktreeOf())).toEqual(before)
+  })
+
+  it('captures a fresh start when the retained snapshot object is missing, so Undo keeps pre-turn edits', async () => {
+    const { threadDir, starts, actionOf, worktreeOf, turn, undo } = await setup()
+    await turn('write one')
+    const worktree = worktreeOf()
+    const { retainedRef, snapshotSha, headSha } = new ThreadWorkspaceManager(threadDir).load()!
+    const baseline = snapshotSha!
+    const common = git(worktree, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    const loose = join(common, 'objects', baseline.slice(0, 2), baseline.slice(2))
+    expect(baseline).not.toBe(headSha)
+    expect(git(worktree, 'cat-file', '-t', baseline)).toBe('commit')
+    const checkout = await readLinkedCheckout(worktree)
+    expect(checkout).toBeDefined()
+    renameSync(loose, join(common, 'moved-snapshot'))
+    expect(await readLinkedCheckout(worktree)).toEqual(checkout)
+    expect(readFileSync(join(common, retainedRef), 'utf8').trim()).toBe(baseline)
+    expect(git(worktree, 'rev-parse', '--verify', 'HEAD^{commit}')).toBe(headSha)
+    expect(() => git(worktree, 'cat-file', '-t', baseline)).toThrow()
+
+    writeFileSync(join(worktree, 'outside.txt'), 'saved before Send\n')
+    const before = filesOf(worktree)
+    const index = join(git(worktree, 'rev-parse', '--absolute-git-dir'), 'index')
+    const beforeIndex = readFileSync(index)
+    const next = await turn('write two')
+    const started = starts.find((line) => line.runId === next)!
+    expect(started.phases.ownWorktree).toBeUndefined()
+    expect(started.phases.snapshotIndex).toBeDefined()
+    expect(actionOf(next)?.changedPaths.map((change) => change.path)).toEqual(['two.txt'])
+    await undo()
+    expect(filesOf(worktree)).toEqual(before)
+    expect(git(worktree, 'rev-parse', 'HEAD')).toBe(headSha)
+    expect(readFileSync(index)).toEqual(beforeIndex)
+  })
+
+  it('uses a packed retained snapshot with zero Git starts after the repack is validated', async () => {
+    const { adapter, threadDir, starts, actionOf, worktreeOf, turn, gitCount, undo } = await setup()
+    const first = await turn('write one')
+    const worktree = worktreeOf()
+    const baseline = actionOf(first)!.endSha
+    const common = git(worktree, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    git(worktree, '-c', 'pack.indexVersion=2', 'repack', '-ad')
+    expect(existsSync(join(common, 'objects', baseline.slice(0, 2), baseline.slice(2)))).toBe(false)
+    expect(git(worktree, 'cat-file', '-t', baseline)).toBe('commit')
+    // Pack changes require Git to revalidate the checkout before the next fast start.
+    await recordCheckoutIdentity(threadDir, worktree)
+
+    const before = filesOf(worktree)
+    const atSend = gitCount()
+    const next = await turn('write two')
+    expect(adapter.gitAtReceipt[1]).toBe(atSend)
+    expect(starts.find((line) => line.runId === next)?.phases.ownWorktree).toBeDefined()
+    expect(actionOf(next)?.startSha).toBe(baseline)
+    await undo()
+    expect(filesOf(worktree)).toEqual(before)
   })
 
   it('a notice that came in during the turn wakes the thread at its settle, and the wake starts from its end with no Git', async () => {

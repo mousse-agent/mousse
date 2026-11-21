@@ -309,6 +309,7 @@ import { ensureSnapshotWorkspaceAsync, loadSnapshotWorkspaceMetadataAsync, setSn
 import { threadPlacement, type ThreadPlacement } from '../workspace/threadPlacement'
 import { isProjectFolderWorkspace, ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { readLinkedCheckout } from '../git/worktreeHeadFiles'
+import { hasLocalWorktreeCommits } from '../git/worktreeObjectFiles'
 import { recordCheckoutIdentity, sameCheckout } from '../workspace/checkoutIdentity'
 import { findWorktreeOwner } from '../scheduled/validateJobOptions'
 import { jobPermissionRequest } from '../scheduled/jobPermission'
@@ -13919,7 +13920,7 @@ export class OrchestratorService extends EventEmitter {
    * there (the baseline): the snapshot from provisioning, the end of the last turn, Undo or restore. Nothing in Git
    * runs for it, and an edit made there between turns counts as this turn's. Every start
    * after the first, a queued message's and a wake's included, is checked here the same way, from Git's files:
-   * - the retained ref still exists and points at the baseline;
+   * - the retained ref still points at the baseline, and both the baseline and HEAD are in the object store;
    * - the folder and both Git directories are still the ones Mousse recorded (`checkoutIdentity.ts`);
    * - HEAD is where the baseline left it: the same commit, on the same branch or detached as it was.
    * A thread working in the person's own checkout (the project folder) never starts this way, nor does a record that is
@@ -13952,6 +13953,7 @@ export class OrchestratorService extends EventEmitter {
     if (checkout.head.headRef && !branch) return undefined
     if (checkout.head.head !== expected.head || branch !== expected.branch) return undefined
     if (!await sameCheckout(threadDir, record.worktreePath, checkout.identity, latest ? undefined : baseline)) return undefined
+    if (!await hasLocalWorktreeCommits(checkout.identity.commonDir, baseline, expected.head)) return undefined
     // A Mousse operation waiting for recovery stops the turn before its message is accepted, as the start check would.
     new ChangeReceiptService(threadDir).assertNoPendingOperation()
     return baseline

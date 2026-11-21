@@ -10,11 +10,12 @@
  * a worktree removed and added again at the same path is another checkout (`readLinkedCheckout`'s identity).
  */
 import { execFileSync } from 'node:child_process'
-import { appendFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { readLinkedCheckout, readWorktreeHead } from '../src/mms/git/worktreeHeadFiles'
+import { hasLocalWorktreeCommits } from '../src/mms/git/worktreeObjectFiles'
 import { recordCheckoutIdentity, sameCheckout } from '../src/mms/workspace/checkoutIdentity'
 
 const roots: string[] = []
@@ -274,5 +275,59 @@ describe('HEAD read from Git\'s files', () => {
     const again = await readLinkedCheckout(worktree)
     expect(again?.head).toEqual(first?.head)
     expect(again?.identity).not.toEqual(first!.identity)
+  })
+})
+
+describe('commit objects read from Git files', () => {
+  const replaceGitFile = (path: string, contents: string | Buffer) => {
+    // Git makes object files read-only, including on Windows.
+    chmodSync(path, 0o644)
+    writeFileSync(path, contents)
+  }
+
+  it.each([
+    ['an empty loose commit', (path: string) => replaceGitFile(path, '')],
+    ['a corrupt loose commit', (path: string) => replaceGitFile(path, 'invalid zlib stream')],
+    ['a missing root tree', (_path: string, tree: string) => renameSync(tree, tree + '.moved')],
+    ['a corrupt root tree', (_path: string, tree: string) => replaceGitFile(tree, 'invalid zlib stream')]
+  ] as const)('leaves %s to Git', async (_name, change) => {
+    const repo = repository()
+    const common = join(repo, '.git')
+    const head = git(repo, 'rev-parse', 'HEAD')
+    const tree = git(repo, 'rev-parse', 'HEAD^{tree}')
+    const loose = (oid: string) => join(common, 'objects', oid.slice(0, 2), oid.slice(2))
+    expect(await hasLocalWorktreeCommits(common, head)).toBe(true)
+    change(loose(head), loose(tree))
+    expect(await hasLocalWorktreeCommits(common, head)).toBe(false)
+  })
+
+  it.each([
+    ['a missing pack', (_index: string, pack: string) => renameSync(pack, pack + '.moved')],
+    ['an unsupported index version', (index: string) => {
+      const bytes = readFileSync(index)
+      bytes.writeUInt32BE(3, 4)
+      replaceGitFile(index, bytes)
+    }],
+    ['a truncated pack', (_index: string, pack: string) => replaceGitFile(pack, readFileSync(pack).subarray(0, 12))]
+  ] as const)('leaves %s to Git even though the ref still names the commit', async (_name, change) => {
+    const repo = repository()
+    const common = join(repo, '.git')
+    const head = git(repo, 'rev-parse', 'HEAD')
+    git(repo, '-c', 'pack.indexVersion=2', 'repack', '-ad')
+    const packDir = join(common, 'objects', 'pack')
+    const index = join(packDir, readdirSync(packDir).find((name) => name.endsWith('.idx'))!)
+    expect(await hasLocalWorktreeCommits(common, head)).toBe(true)
+    change(index, index.slice(0, -4) + '.pack')
+    expect(await hasLocalWorktreeCommits(common, head)).toBe(false)
+  })
+
+  it('leaves an object store with alternates to Git', async () => {
+    const repo = repository()
+    const worktree = join(repo, '..', 'wt')
+    git(repo, 'worktree', 'add', '-q', '--detach', worktree)
+    const other = repository()
+    writeFileSync(join(repo, '.git', 'objects', 'info', 'alternates'), join(other, '.git', 'objects').replace(/\\/g, '/') + '\n')
+    expect(gitHead(worktree).head).toBeDefined()
+    expect(await readLinkedCheckout(worktree)).toBeUndefined()
   })
 })
