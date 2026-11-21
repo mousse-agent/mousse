@@ -91,7 +91,7 @@
         "src/mms/harness/gateway.ts"
       ],
       "claimedAt": "2026-11-21T05:55:00.275Z",
-      "expiresAt": "2026-11-21T07:55:00.275Z"
+      "expiresAt": "2026-11-21T12:22:49.289Z"
     },
     {
       "task": "fix-acp-out-of-turn-requests",
