@@ -190,6 +190,7 @@ import { trustExistingProjectsOnce } from './git/repoPrograms'
 import { LimitPoller } from './usageHistory/limitPoller'
 import { forEachYielding, startupBackgroundTimed, startupPhase } from './startup/startupTiming'
 import { logInfo } from './log/diag'
+import { onThreadBranchChanged } from './workspace/threadHeads'
 
 const STORAGE_LIFECYCLE_METHODS = new Set([
   'threads.delete'
@@ -1128,6 +1129,10 @@ export class MmsProfileServices {
       this.threadRuntimes.on('tasks.updated', onTasks)
       this.platform.onDispose(() => { this.threadRuntimes.off('tasks.updated', onTasks) })
     }
+    // Mousse made a thread's worktree or renamed its branch: windows read that card's branch again (`git.heads`).
+    this.platform.onDispose(onThreadBranchChanged((threadId) => {
+      if (this.threads.getThread(threadId)) this.events.broadcast('protocol:event', { type: 'git.headsChanged', data: { threadIds: [threadId] } })
+    }))
     // Minimum MMS-owned persistence so headless turns survive without the GUI.
     // Load-merges agents/tasks/mousse sessions; never writes messageQueue (queue API only).
     this.orchestrator.setPersistCallback((threadId) => {

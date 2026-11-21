@@ -79,6 +79,8 @@ export interface ThreadWorkspaceMetadata {
   lastVerifiedAt: string
   workspaceId?: string
   generation?: number
+  /** The checkout is being restored. Cleared in the same write that publishes its new generation. */
+  rebuilding?: true
   provenance?: WorkspaceProvenance
   integrationTarget?: { checkoutPath: string; baseSha: string }
   /**

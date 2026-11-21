@@ -1,14 +1,23 @@
 import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
 
+export interface FileTabTarget {
+  path: string
+  /** Present only when the file was opened outside the thread's folder. */
+  root?: string
+}
+
 export interface FileWorkspaceSnapshot {
   openPaths: string[]
   activePath: string | null
+  targets?: Record<string, FileTabTarget>
 }
 
 interface FileWorkspaceState {
   workspaces: Record<string, FileWorkspaceSnapshot>
-  openFile: (scope: string, path: string) => void
+  openFile: (scope: string, path: string, target?: FileTabTarget, fromBrowsedFolder?: boolean) => void
+  rememberTarget: (scope: string, path: string, target: FileTabTarget) => void
+  mergeFileAlias: (scope: string, alias: string, path: string) => void
   activateFile: (scope: string, path: string) => void
   /** Hides the preview: the files stay open, and picking one shows it again. */
   deactivateFile: (scope: string) => void
@@ -28,6 +37,7 @@ export function fileWorkspaceScope(
 
 export function openFileInSnapshot(snapshot: FileWorkspaceSnapshot, path: string): FileWorkspaceSnapshot {
   return {
+    ...snapshot,
     openPaths: snapshot.openPaths.includes(path) ? snapshot.openPaths : [...snapshot.openPaths, path],
     activePath: path
   }
@@ -39,7 +49,16 @@ export function closeFileInSnapshot(snapshot: FileWorkspaceSnapshot, path: strin
   const openPaths = snapshot.openPaths.filter((candidate) => candidate !== path)
   let activePath = snapshot.activePath
   if (activePath === path) activePath = openPaths[Math.min(index, openPaths.length - 1)] ?? null
-  return { openPaths, activePath }
+  const { targets } = snapshot
+  if (!targets || !Object.hasOwn(targets, path)) return { ...snapshot, openPaths, activePath }
+  const nextTargets = { ...targets }
+  delete nextTargets[path]
+  return { openPaths, activePath, targets: nextTargets }
+}
+
+export function fileTabTarget(workspace: FileWorkspaceSnapshot | undefined, path: string): FileTabTarget | undefined {
+  const targets = workspace?.targets
+  return targets && Object.hasOwn(targets, path) ? targets[path] : undefined
 }
 
 function current(state: FileWorkspaceState, scope: string): FileWorkspaceSnapshot {
@@ -49,9 +68,28 @@ function current(state: FileWorkspaceState, scope: string): FileWorkspaceSnapsho
 export const useFileWorkspaceStore = create<FileWorkspaceState>()(persist(
   (set) => ({
     workspaces: {},
-    openFile: (scope, path) => set((state) => ({
-      workspaces: { ...state.workspaces, [scope]: openFileInSnapshot(current(state, scope), path) }
-    })),
+    openFile: (scope, path, target, fromBrowsedFolder) => set((state) => {
+      const workspace = current(state, scope)
+      const next = openFileInSnapshot(workspace, path)
+      const previous = fileTabTarget(workspace, path)
+      if (target && (!workspace.openPaths.includes(path) || (fromBrowsedFolder && target.root && !previous?.root))) {
+        next.targets = { ...workspace.targets, [path]: target }
+      }
+      return { workspaces: { ...state.workspaces, [scope]: next } }
+    }),
+    rememberTarget: (scope, path, target) => set((state) => {
+      const workspace = current(state, scope)
+      if (!workspace.openPaths.includes(path) || Object.hasOwn(workspace.targets ?? {}, path)) return state
+      const next = { ...workspace, targets: { ...workspace.targets, [path]: target } }
+      return { workspaces: { ...state.workspaces, [scope]: next } }
+    }),
+    mergeFileAlias: (scope, alias, path) => set((state) => {
+      const workspace = current(state, scope)
+      if (!workspace.openPaths.includes(alias) || !workspace.openPaths.includes(path)) return state
+      const next = closeFileInSnapshot(workspace, alias)
+      if (workspace.activePath === alias) next.activePath = path
+      return { workspaces: { ...state.workspaces, [scope]: next } }
+    }),
     activateFile: (scope, path) => set((state) => {
       const workspace = current(state, scope)
       if (!workspace.openPaths.includes(path)) return state

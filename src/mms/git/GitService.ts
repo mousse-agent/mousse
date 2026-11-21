@@ -1,7 +1,7 @@
 import { AppError, createErrorProvider } from '../../shared/errors'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { access, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises'
+import { access, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -19,6 +19,9 @@ import { applyChoices, SELECTION_INDEX_PREFIX, sweepSelectionIndexes, clearMarke
 import { addedBlob, fileDigest, findRevert, linkDigest, modeBits, notPutBack, pathDigest, recordRestored, recordRevert, revertsOf, revertSummary, REVERTED_LIST_MAX, sameFolder, UNKNOWN_DIGEST, writeProven, writeProvenUndoable, type FoundRevert, type PathDigest, type ProvenWrite, type RevertedPath, type RevertRecord, type Replacement } from './gitRevert'
 import { PRESERVED_REFS } from '../../shared/resourceLifecycle'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
+import { inProgressMarkers, readFolderHead } from './gitHead'
+import { activeHiddenStore } from './hiddenStore'
+import { parsePorcelainStatus, STATUS_ARGS } from './statusPorcelain'
 import { OperationStream } from './gitOperationStream'
 import { onlyExcludedIgnored } from './excludedIgnored'
 import { englishMessagesEnv, runGit, type GitLine, type GitRun, type GitRunOptions } from './gitProcess'
@@ -210,6 +213,26 @@ const IN_PROGRESS_KIND: Record<(typeof IN_PROGRESS_GIT_MARKERS)[number], GitInPr
   'rebase-apply': 'rebase'
 }
 const IN_PROGRESS_ORDER: readonly GitInProgress[] = ['rebase', 'merge', 'cherry-pick', 'revert']
+
+/** How long after it started a status read is still joined by a caller asking for the same folder. */
+const STATUS_SHARE_MS = 2_000
+
+/** How a status read is shared (`GitService.getStatus`). */
+export interface StatusReadOptions {
+  /** Never join a read already running: Retry asks again for real. */
+  fresh?: boolean
+  /** Reads share only with reads of the same key, besides the folder: a worktree's generation, so a rebuilt one at the same path never takes the old one's read. */
+  shareKey?: string
+}
+
+/** Whether the repository keeps a remote in the old files Git still reads (`remotes/`, `branches/`). */
+async function hasLegacyRemotes(commonDir: string): Promise<boolean> {
+  const listed = await Promise.all(['remotes', 'branches'].map((name) => readdir(join(commonDir, name)).then((entries) => entries.length > 0, () => false)))
+  return listed.some(Boolean)
+}
+
+/** The status of a folder that is not in a repository. */
+const NOT_A_REPOSITORY: GitStatusSnapshot = { isRepo: false, branch: null, upstream: null, tracking: 'none', ahead: 0, behind: 0, changes: [] }
 /** Characters of changed paths a numstat names one by one; past it, it diffs the whole tree (Windows caps a command line at 32K). */
 const NUMSTAT_PATHS_MAX_CHARS = 12_000
 /** Files whose stat data alone may have changed that a whole-tree numstat still compares itself; more are sorted out first. */
@@ -435,6 +458,17 @@ function indexLockedError(lock: string, outcome: string): AppError {
   return new AppError({ code: fixed.code, message: `Git's index is locked (${lock}): another Git command is running, or one stopped without removing its lock. ${outcome} Try again once it has finished.`, errorInfo: fixed.errorInfo, details: { path: lock } })
 }
 
+/** Whether the status directory exists. Access errors belong in the status error, rather than reporting a missing worktree. */
+async function statusFolderExists(path: string): Promise<boolean> {
+  try {
+    if (!(await stat(path)).isDirectory()) throw new Error('The Git folder is not a directory.')
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+}
+
 /** Whether `path` is there, as `existsSync` answers, without blocking. */
 function pathExists(path: string): Promise<boolean> {
   return access(path).then(() => true, () => false)
@@ -558,6 +592,8 @@ export class GitService {
   private readonly mutations = new Map<string, Promise<void>>()
   /** Actions that can be followed and cancelled, by the id their client chose. */
   private readonly operations = new Map<string, { controller: AbortController; owner?: string; cancellable: boolean }>()
+  /** The status read running for each folder, which every caller asking within `STATUS_SHARE_MS` of its start shares. */
+  private readonly statusReads = new Map<string, { read: Promise<GitStatusSnapshot>; at: number }>()
 
   constructor(private readonly options: {
     /** Overrides how long a commit may stay silent; for tests. */
@@ -712,7 +748,14 @@ export class GitService {
     await waitForFolderAccess([resolve(cwd)], options.strict ? { whenNotAnswering: 'fail' } : undefined)
     if (!await pathExists(cwd)) return false
     // A repository whose programs Mousse cannot turn off is refused here, with its reason, before the reads below turn failures into defaults.
-    await checkRepoPrograms(cwd)
+    const facts = await checkRepoPrograms(cwd)
+    // Git's files answer for the layouts they tell (`gitHead`), without a Git process; not where Git is pointed at a
+    // hidden store instead of the folder's own repository, nor where the config sets the work tree elsewhere.
+    const head = !facts || facts.workTreeSet ? undefined : await readFolderHead(cwd).catch((error: unknown) => {
+      if (options.strict) throw error
+      return undefined
+    })
+    if (head) return head.repo
     // simple-git answers false itself when Git says the folder is not a repository; what it throws is a failure.
     const check = this.gitFor(cwd).checkIsRepo()
     return options.strict ? check : check.catch(() => false)
@@ -722,10 +765,63 @@ export class GitService {
    * The folder's branch, changes and upstream. A failed read throws rather than answering "not a repository" or "no
    * branch", so a window keeps the branch it showed instead of dropping it.
    */
-  async getStatus(cwd: string): Promise<GitStatusSnapshot> {
+  getStatus(cwd: string, options: StatusReadOptions = {}): Promise<GitStatusSnapshot> {
+    // Callers that ask while a read of the folder runs (the side card, the Git panel and the toolbar ask together) share it.
+    // A read that has run longer than STATUS_SHARE_MS (a drive that stopped answering) is not joined, and a fresh one
+    // (Retry) never is: it starts its own, which later callers share.
+    const key = `${resolve(cwd)}|${options.shareKey ?? ''}`
+    const running = this.statusReads.get(key)
+    if (running && !options.fresh && Date.now() - running.at < STATUS_SHARE_MS) return running.read
+    const entry = { read: this.readStatus(cwd), at: Date.now() }
+    entry.read = entry.read.finally(() => { if (this.statusReads.get(key) === entry) this.statusReads.delete(key) })
+    this.statusReads.set(key, entry)
+    return entry.read
+  }
+
+  /**
+   * {@link getStatus}, read once, with one Git process: `git status --porcelain=v2 --branch` gives the branch, the
+   * upstream with how far it is ahead or behind, and every change. Whether the folder is a repository, its Git folder,
+   * the markers of a stopped merge or rebase and whether it has a remote come from Git's files (`gitHead`). A layout the
+   * file reader leaves to Git is read the way it always was ({@link readStatusWithGit}).
+   */
+  private async readStatus(cwd: string): Promise<GitStatusSnapshot> {
+    await waitForFolderAccess([resolve(cwd)], { whenNotAnswering: 'fail' })
+    if (!await statusFolderExists(cwd)) return { ...NOT_A_REPOSITORY, missing: true }
+    // A repository whose programs Mousse cannot turn off is refused here, with its reason. The same config listing, as
+    // Git parses it and cached per folder, tells whether a remote is named and whether the work tree is set elsewhere.
+    const facts = await checkRepoPrograms(cwd)
+    // A hidden store's scope, or a work tree the config sets elsewhere (`core.worktree`, a bare repository): Git reads it.
+    const head = !facts || facts.workTreeSet ? undefined : await readFolderHead(cwd)
+    if (!head || !facts) return this.readStatusWithGit(cwd)
+    if (!head.repo) return NOT_A_REPOSITORY
+    const [read, markers, legacyRemotes] = await Promise.all([
+      this.runGit(head.top, [...STATUS_ARGS]),
+      inProgressMarkers(head.gitDir),
+      facts.remotes ? false : hasLegacyRemotes(head.commonDir)
+    ])
+    if (!read.ok) throw failure('git_failed', read)
+    const status = parsePorcelainStatus(read.stdout, head.branch)
+    // Remotes kept the old way (`remotes/`, `branches/` files) are left to `git remote`.
+    const hasRemote = facts.remotes || (legacyRemotes && await this.gitFor(cwd).raw(['remote']).then((value) => Boolean(value.trim())).catch(() => false))
+    const inProgress = IN_PROGRESS_ORDER.find((kind) => [...markers].some((marker) => IN_PROGRESS_KIND[marker] === kind)) ?? null
+    return {
+      isRepo: true,
+      branch: status.branch,
+      upstream: status.upstream,
+      tracking: !status.born ? 'unborn' : !status.branch ? 'detached' : status.upstream ? 'tracked' : 'none',
+      ahead: status.ahead,
+      behind: status.behind,
+      changes: rawEntries(status.entries).flatMap(mapStatus),
+      inProgress,
+      hasRemote
+    }
+  }
+
+  /** {@link getStatus} with Git alone, for a layout Git's files do not tell (`readFolderHead` answers undefined). */
+  private async readStatusWithGit(cwd: string): Promise<GitStatusSnapshot> {
     const isRepo = await this.isRepo(cwd, { strict: true })
     if (!isRepo) {
-      return { isRepo: false, branch: null, upstream: null, tracking: 'none', ahead: 0, behind: 0, changes: [], ...(await pathExists(cwd) ? {} : { missing: true }) }
+      return { ...NOT_A_REPOSITORY, ...(await statusFolderExists(cwd) ? {} : { missing: true }) }
     }
 
     const git = this.gitFor(cwd)

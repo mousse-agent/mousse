@@ -1,3 +1,4 @@
+import type { AgentGrantSource } from '../../../shared/agents/types'
 import type {
   McpServerConfig,
   McpToolDescriptor,
@@ -17,12 +18,14 @@ export function resolveEffectiveSkills(args: {
   snapshot: SkillsRegistrySnapshot
   settings: MousseIntegrationsSettings['skills']
   actor: IntegrationActor
+  grantSource?: AgentGrantSource
 }): SkillDescriptor[] {
   const { snapshot, settings, actor } = args
   if (!policyEnabledForActor(settings, actor)) return []
 
-  const explicitActorGrant = Boolean(actor.skillIds?.length)
-  const selected = new Set(actor.skillIds?.length ? actor.skillIds : settings.enabledSkills)
+  // Inherited grants remain subject to the profile's live selection, even when the turn has a grant list.
+  const explicitActorGrant = args.grantSource !== 'inherited' && Boolean(actor.skillIds?.length)
+  const selected = new Set(explicitActorGrant ? actor.skillIds : settings.enabledSkills)
   if (selected.size === 0) return []
 
   return snapshot.skills.filter((skill) => {

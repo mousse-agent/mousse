@@ -1,7 +1,7 @@
 import { AppError } from '../../shared/errors'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
-import { lstat } from 'node:fs/promises'
+import { lstat, open, readFile, readdir } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
@@ -137,8 +137,12 @@ export class ResourceLifecycleStore {
       return
     }
     assertLifecyclePath(this.root, path)
-    const manifest = this.readJson(path) as { schemaVersion?: number; minimumWriterVersion?: number; profileId?: string }
-    if (manifest.schemaVersion !== RESOURCE_LIFECYCLE_VERSION || ![1, 2].includes(manifest.minimumWriterVersion ?? 0) || manifest.profileId !== this.profileId) throw new ResourceLifecycleError('unsupported', 'Lifecycle storage requires a compatible writer and matching profile')
+    this.validateManifest(this.readJson(path))
+  }
+
+  private validateManifest(value: unknown): void {
+    const manifest = value as { schemaVersion?: number; minimumWriterVersion?: number; profileId?: string }
+    if (manifest?.schemaVersion !== RESOURCE_LIFECYCLE_VERSION || ![1, 2].includes(manifest.minimumWriterVersion ?? 0) || manifest.profileId !== this.profileId) throw new ResourceLifecycleError('unsupported', 'Lifecycle storage requires a compatible writer and matching profile')
   }
 
   /** {@link assertCompatible}, skipped while the manifest is the file last found compatible. */
@@ -199,6 +203,46 @@ export class ResourceLifecycleStore {
     // Parsed again for each caller, which may change its copy.
     return text === undefined ? undefined : JSON.parse(text) as TaskLifecycleRecord
   }
+  /** Reads a task without blocking the service while its storage volume answers. */
+  async getAsync(taskId: string): Promise<TaskLifecycleRecord | undefined> {
+    const manifest = join(this.root, 'manifest.json')
+    const missing = (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined
+      throw error
+    }
+    const signatureAt = async (path: string) => {
+      const info = await lstat(path, { bigint: true }).catch(missing)
+      return info?.isFile() ? cacheSignature(info) ?? null : info ? null : undefined
+    }
+    const manifestSignature = await signatureAt(manifest)
+    if (!manifestSignature || manifestSignature !== this.compatibleManifest) {
+      await assertLifecyclePathAsync(this.profileHome, manifest)
+      const text = await readFile(manifest, 'utf8').catch(missing)
+      if (text !== undefined) this.validateManifest(JSON.parse(text))
+      else if ((await readdir(join(this.root, 'tasks')).catch(missing))?.length) throw new ResourceLifecycleError('ambiguous', 'Lifecycle manifest missing for existing records')
+      this.compatibleManifest = manifestSignature ?? undefined
+    }
+    const path = this.recordPath(taskId)
+    const signature = await signatureAt(path)
+    const checked = this.checkedFiles.get(path)
+    if (signature && checked?.signature === signature) return JSON.parse(checked.text) as TaskLifecycleRecord
+    await assertLifecyclePathAsync(this.root, path)
+    const file = await open(path, 'r').catch(missing)
+    if (!file) return undefined
+    try {
+      const actual = cacheSignature(await file.stat({ bigint: true }))
+      const text = await file.readFile('utf8')
+      const value = JSON.parse(text) as TaskLifecycleRecord
+      const paths: Array<[string, string]> = []
+      this.validateRecord(value, taskId, (root, path) => { paths.push([root, path]) })
+      for (const [root, path] of paths) await assertLifecyclePathAsync(root, path)
+      if (actual) this.checkedFiles.set(path, { signature: actual, text })
+      return value
+    } finally {
+      await file.close()
+    }
+  }
+
   list(): TaskLifecycleRecord[] {
     this.assertCompatibleCached()
     const path = join(this.root, 'tasks')
@@ -433,11 +477,15 @@ export class ResourceLifecycleStore {
     const meta = this.readJson(metaPath) as { id?: string }
     if (meta.id !== taskId) throw new ResourceLifecycleError('ambiguous', 'Task metadata identity does not match lifecycle owner')
   }
-  assertTaskLocation(path: string): void {
+  private taskLocationRoot(path: string): string {
     const roots = [...this.allowedTaskRoots, join(this.profileHome, 'trash', 'threads')]
     const root = roots.find((candidate) => contains(candidate, path) && !pathsEqual(candidate, path))
     if (!root) throw new ResourceLifecycleError('ambiguous', 'Task location is outside registered roots')
-    assertLifecyclePath(root, path)
+    return root
+  }
+
+  assertTaskLocation(path: string): void {
+    assertLifecyclePath(this.taskLocationRoot(path), path)
   }
 
   /** Short, cross-process, reentrant only for synchronous callbacks. Never held while draining. */
@@ -570,11 +618,12 @@ export class ResourceLifecycleStore {
     if (kind === 'write' && record.state === 'draining' && scope?.root === this.root && scope.taskId === record.taskId && scope.operationId === record.operations.at(-1)?.id && record.operations.at(-1)?.phase === 'fenced') return
     throw new ResourceLifecycleError('unavailable', `Task is ${record.state}; admission is fenced`)
   }
-  private validateRecord(record: TaskLifecycleRecord, taskId: string): void {
+  private validateRecord(record: TaskLifecycleRecord, taskId: string, checkPath = assertLifecyclePath): void {
+    const checkTaskPath = (path: string) => checkPath(this.taskLocationRoot(path), path)
     if (record?.schemaVersion !== 1 || record.minimumWriterVersion !== 1) throw new ResourceLifecycleError('unsupported', 'Unknown task lifecycle schema or writer version')
     if (record.profileId !== this.profileId || record.taskId !== taskId || !Number.isSafeInteger(record.generation) || record.generation < 1 || !Array.isArray(record.locations) || !Array.isArray(record.operations) || !['active', 'draining', 'trash-moving', 'trashed', 'restore-moving', 'blocked', 'purge-started', 'purged'].includes(record.state)) throw new ResourceLifecycleError('ambiguous', 'Invalid task lifecycle owner')
     if (!record.locations.some((path) => pathsEqual(path, record.location))) throw new ResourceLifecycleError('ambiguous', 'Lifecycle location is not registered')
-    for (const location of new Set([record.originalLocation, ...record.locations])) this.assertTaskLocation(location)
+    for (const location of new Set([record.originalLocation, ...record.locations])) checkTaskPath(location)
     if (record.parentTaskId === taskId) throw new ResourceLifecycleError('ambiguous', 'Task cannot own itself')
     if (record.cleanupOwner && (!Number.isSafeInteger(record.cleanupOwner.pid) || record.cleanupOwner.pid <= 0 || typeof record.cleanupOwner.processInstanceId !== 'string' || !/^[a-f0-9-]{36}$/i.test(record.cleanupOwner.token))) throw new ResourceLifecycleError('ambiguous', 'Invalid cleanup ownership reservation')
     if (record.state === 'purge-started' && !record.purge) throw new ResourceLifecycleError('ambiguous', 'Irreversible purge is missing its recovery ledger')
@@ -589,12 +638,12 @@ export class ResourceLifecycleStore {
         const recordedBranch = item.recordedBranch === true && item.identity.startsWith('refs/heads/') && isAcceptableThreadBranchName(item.identity.slice('refs/heads/'.length))
         if (item.kind === 'ref' && (!(isMousseOwnedRef(item.identity) || recordedBranch) || !/^[a-f0-9]{40,64}$/.test(item.expectedValue ?? '') || !isAbsolute(item.commonDir ?? ''))) throw new ResourceLifecycleError('ambiguous', 'Invalid purge reference intent')
         if (item.kind === 'path') {
-          assertLifecyclePath(this.profileHome, item.identity)
+          checkPath(this.profileHome, item.identity)
           if (!item.content || !item.rootIdentity) throw new ResourceLifecycleError('ambiguous', 'Purge path lacks its frozen content proof')
         }
         if (item.content) for (const entry of item.content) if (!['file', 'directory', 'link'].includes(entry.kind) || isAbsolute(entry.path) || entry.path.includes('\0') || entry.path.split(/[\\/]/).includes('..') || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0) throw new ResourceLifecycleError('ambiguous', 'Purge content intent is invalid')
         if (item.kind === 'worktree' && (!isAbsolute(item.identity) || !isAbsolute(item.commonDir ?? '') || !item.manifestPath && !(item.content && item.discardRequired && item.branch && item.indexDigest))) throw new ResourceLifecycleError('ambiguous', 'Purge checkout lacks exact reconstruction or discard proof')
-        if (item.manifestPath) assertLifecyclePath(this.root, item.manifestPath)
+        if (item.manifestPath) checkPath(this.root, item.manifestPath)
         if (item.kind === 'scheduled-row' && ![join(this.profileHome, 'mousse.conf'), join(this.profileHome, 'scheduled', 'jobs-runtime.json')].includes(item.sourcePath ?? '')) throw new ResourceLifecycleError('ambiguous', 'Purge configuration intent is invalid')
       }
       if (purge.worktreeMoves !== undefined && (!Array.isArray(purge.worktreeMoves) || purge.worktreeMoves.some((id) => !purge.items.some((item) => item.id === id && item.kind === 'worktree' && item.manifestPath)))) throw new ResourceLifecycleError('ambiguous', 'Invalid purge worktree relocation')
@@ -605,7 +654,7 @@ export class ResourceLifecycleStore {
     for (const operation of record.operations) {
       if (!operation.id || ids.has(operation.id) || !['trash', 'restore'].includes(operation.kind) || !['fenced', 'drained', 'move-prepared', 'moved', 'indexed', 'completed', 'rejected'].includes(operation.phase) || !Number.isSafeInteger(operation.expectedGeneration)) throw new ResourceLifecycleError('unsupported', 'Unknown lifecycle operation')
       ids.add(operation.id)
-      this.assertTaskLocation(operation.from); this.assertTaskLocation(operation.to)
+      checkTaskPath(operation.from); checkTaskPath(operation.to)
       if (!record.locations.some((path) => pathsEqual(path, operation.from)) || !record.locations.some((path) => pathsEqual(path, operation.to)) || operation.expectedGeneration < 1 || operation.expectedGeneration > record.generation || pathsEqual(operation.from, operation.to)) throw new ResourceLifecycleError('ambiguous', 'Lifecycle operation location or generation is not owned')
       if ((operation.kind === 'trash' && !pathsEqual(operation.from, record.originalLocation)) || (operation.kind === 'restore' && !pathsEqual(operation.to, record.originalLocation))) throw new ResourceLifecycleError('ambiguous', 'Lifecycle operation direction is invalid')
       if (operation.phase === 'completed') {
