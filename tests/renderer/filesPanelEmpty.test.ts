@@ -229,7 +229,7 @@ describe('the folder the Files tree shows', () => {
     expect(tree().dataset.listRoot).toBe('')
   })
 
-  it('keeps pending edits in the project tab when the thread gets a worktree with an identical file', async () => {
+  it('opens the worktree copy in a separate tab and keeps pending edits in the project tab', async () => {
     const threadId = 'provisioning-autosave'
     const project = '/home/me/work/notes'
     const worktree = '/worktrees/notes'
@@ -269,8 +269,19 @@ describe('the folder the Files tree shows', () => {
     await act(async () => { expect.soft(await reloadWindow(reload)).toBe('unsaved') })
     expect(disk.get(worktree + '/notes.txt')).toBe('same bytes')
     expect(disk.get(project + '/notes.txt')).toBe('same bytes')
-    expect(editor.value).toBe('my project edit')
     expect(reload).not.toHaveBeenCalled()
+
+    disk.set(worktree + '/notes.txt', 'worktree contents')
+    await act(async () => host.querySelector<HTMLButtonElement>('.main-view-tab-select[title="Files"]')!.click())
+    expect(tree().dataset.root).toBe(worktree)
+    await act(async () => tree().click())
+    expect(host.querySelector<HTMLTextAreaElement>('.editor-stub')?.value).toBe('worktree contents')
+
+    const tab = (folder: string) => host.querySelector<HTMLButtonElement>(`.main-view-tab-select[title^="${folder}/notes.txt"]`)!
+    expect(tab(worktree).getAttribute('aria-current')).toBe('page')
+    const projectTab = tab(project)
+    await act(async () => projectTab.click())
+    expect(host.querySelector<HTMLTextAreaElement>('.editor-stub')?.value).toBe('my project edit')
   })
 
   it('keeps where the person went for each thread, and follows the folder of a thread they did not move in', async () => {

@@ -250,6 +250,19 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   useCommand('files.textSearch', () => openSearch('text'), panelShowing)
 
   const fileKey = useCallback((path: string) => `${scope}\0${path}`, [scope])
+  const tabPathFor = useCallback((file: string, root: string, targetScope: string, localProject: boolean) => {
+    const path = normalizeWorkspacePath(file, root)
+    if (!localProject || !root) return path
+    const absolute = isAbsolutePath(path) ? path : joinFolder(root, path)
+    if (!isAbsolutePath(path) && pathInside(absolute, root) === null) return path
+    // Older workspaces can still have a relative tab. Reuse it only if it points at this checkout.
+    const paths = useFileWorkspaceStore.getState().workspaces[targetScope]?.openPaths ?? []
+    return paths.find((openPath) => {
+      const target = filesRef.current[`${targetScope}\0${openPath}`]?.target
+      const location = isAbsolutePath(openPath) ? openPath : target?.path ?? joinFolder(root, openPath)
+      return samePath(location, absolute)
+    }) ?? absolute
+  }, [])
   const selectedKey = selectedPath ? fileKey(selectedPath) : null
   const selected = selectedKey ? files[selectedKey] : undefined
   selectedKeyRef.current = selectedKey
@@ -317,9 +330,10 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     // A local project thread can switch from its project folder to its first worktree. Keep the file's
     // absolute path within its thread-scoped request so the daemon's existing containment check refuses
     // a save if the thread now points somewhere else. Explicitly browsed folders keep their own root.
-    if (!existing && !isAbsolutePath(path) && workspaceRoot === '') return
-    const target = existing?.target ?? (!isAbsolutePath(path) && workspaceRoot
-      ? { path: joinFolder(workspaceRoot, path) }
+    const relative = !isAbsolutePath(path)
+    if (!existing && relative && workspaceRoot === '') return
+    const target = existing?.target ?? (workspaceRoot && (relative || pathInside(path, workspaceRoot) !== null)
+      ? { path: relative ? joinFolder(workspaceRoot, path) : path }
       : fileLocation(path))
     const kind = viewKindForPath(path)
     replaceFiles((current) => ({ ...current, [key]: {
@@ -352,14 +366,15 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   }, [activeThreadId, ensureQueue, filesRoot, patchFile, profileId, projectId, remote, replaceFiles, scope])
 
   useEffect(() => {
+    if (!remote && projectId && !filesRoot) return
     for (const path of openPaths) void loadFile(path)
-  }, [loadFile, openPaths])
+  }, [filesRoot, loadFile, openPaths, projectId, remote])
 
   const openInPanel = useCallback((file: string) => {
-    const path = normalizeWorkspacePath(file, filesRoot)
+    const path = tabPathFor(file, filesRoot, scope, !remote && Boolean(projectId))
     openFile(scope, path)
     void loadFile(path)
-  }, [filesRoot, loadFile, openFile, scope])
+  }, [filesRoot, loadFile, openFile, projectId, remote, scope, tabPathFor])
 
   const openSearchedLine = useCallback((match: FileGrepMatch) => {
     // The listener below turns the position into a Monaco reveal; the column is UTF-16, as Monaco counts.
@@ -478,8 +493,9 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       }
       const targetRoot = await window.mousse.app.getFilesRoot(targetThreadId)
       if (!stillCurrent()) return
-      const path = normalizeWorkspacePath(detail.path, targetRoot)
       const targetScope = fileWorkspaceScope(ownerProfileId, targetThreadId, targetProjectId)
+      const localProject = Boolean(targetProjectId && !targetThread?.node && typeof window.mousse.fs.listDrives === 'function')
+      const path = tabPathFor(detail.path, targetRoot, targetScope, localProject)
       const currentStore = useAppStore.getState()
       currentStore.openSurfaceKind('files')
       useFileWorkspaceStore.getState().openFile(targetScope, path)
@@ -490,13 +506,12 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
         setPositions((current) => ({ ...current, [key]: position }))
         setPreview((current) => ({ ...current, [key]: false }))
       }
-      const workspaceRoot = targetProjectId && !targetThread?.node && typeof window.mousse.fs.listDrives === 'function' ? targetRoot : null
-      await loadFile(path, targetScope, targetThreadId, ownerProfileId, false, workspaceRoot)
+      await loadFile(path, targetScope, targetThreadId, ownerProfileId, false, localProject ? targetRoot : null)
     }
     // File links reach this tab through services/fileLinks, including the ones that arrived before it mounted (or
     // while its chunk failed to load).
     return registerFileLinkOpener(openLink)
-  }, [loadFile])
+  }, [loadFile, tabPathFor])
 
   useEffect(() => {
     const pending = pendingPosition.current
@@ -758,8 +773,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   const imageSize = selected?.kind === 'image' && selectedKey ? imageSizes[selectedKey] : undefined
   const selectedLocation = selected && !selected.target.root && isAbsolutePath(selected.target.path)
     ? selected.target.path : selectedPath
-  const crumbPath = selectedPath && filesRoot && !isAbsolutePath(selectedPath) && selectedLocation &&
-    samePath(selectedLocation, joinFolder(filesRoot, selectedPath)) ? selectedPath : selectedLocation
+  const crumbPath = selectedLocation ? normalizeWorkspacePath(selectedLocation, filesRoot) : null
   const crumbs = crumbPath ? fileCrumbs(crumbPath, filesRoot) : []
 
   if (!showing) return null
@@ -814,7 +828,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       {!selectedPath && <ResizablePanelSidebar className="files-sidebar" defaultWidth={240} fill>
         {browser}
       </ResizablePanelSidebar>}
-      {selectedPath && <div className="files-editor" role="region" aria-label={selectedPath} onKeyDown={(event) => {
+      {selectedPath && <div className="files-editor" role="region" aria-label={crumbPath ?? selectedPath} onKeyDown={(event) => {
         // Escape closes the preview, except where a text field or the code editor uses it.
         if (event.key !== 'Escape' || event.defaultPrevented || typingTarget(event.target)) return
         event.preventDefault()
