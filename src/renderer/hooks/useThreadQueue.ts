@@ -35,7 +35,7 @@ export interface UseThreadQueueOptions {
   threadId: string | null
   /** Messages just sent while a reply runs, shown until the daemon lists them. */
   optimisticItems?: QueuedMessage[]
-  onOptimisticItemReconciled?: (id: string) => void
+  onQueueObserved?: (threadId: string, items: QueuedMessage[]) => void
   /** A compaction holds the queue until it ends; null when nothing does. */
   hold?: QueueHold | null
   /**
@@ -170,12 +170,15 @@ export function sameQueuedSend(item: QueuedMessage, optimistic: QueuedMessage): 
  */
 const EMPTY_QUEUE: QueuedMessage[] = []
 
-export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticItemReconciled, hold = null, onDraftToComposer, lastPromptId = null, lastPromptQueueItemId = null, hiddenRequestIds, replyOpen = true, turnActive = false, turnSettingUp = false }: UseThreadQueueOptions): ThreadQueue {
+export function useThreadQueue({ threadId, optimisticItems = [], onQueueObserved, hold = null, onDraftToComposer, lastPromptId = null, lastPromptQueueItemId = null, hiddenRequestIds, replyOpen = true, turnActive = false, turnSettingUp = false }: UseThreadQueueOptions): ThreadQueue {
   const replyOpenRef = useRef(replyOpen)
   replyOpenRef.current = replyOpen
   const [loadedItems, setItems] = useState<QueuedMessage[]>([])
   const recentQueues = useRef(new Map<string, QueuedMessage[]>())
+  const queueObserved = useRef(onQueueObserved)
+  queueObserved.current = onQueueObserved
   const rememberQueue = useCallback((id: string, list: QueuedMessage[]) => {
+    queueObserved.current?.(id, list)
     const cache = recentQueues.current
     cache.delete(id)
     cache.set(id, list)
@@ -310,11 +313,11 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
     setError(null)
     setNotice(null)
     setBusyIds({})
-    // Prefer the select snapshot's queue:updated so we don't race thread.snapshot with queue.list. An update of
-    // another thread only matters to an edit open there.
+    // Prefer the select snapshot's queue:updated so we don't race thread.snapshot with queue.list.
+    // Pushes for hidden threads also reconcile sends whose acknowledgements have yet to arrive.
     let settled = false
     const unsub = window.mousse.queue.onUpdated(({ threadId: updatedId, items: next }) => {
-      if (updatedId === threadId || recentQueues.current.has(updatedId)) rememberQueue(updatedId, next)
+      rememberQueue(updatedId, next)
       if (updatedId !== threadId) {
         if (updatedId === useAppStore.getState().openingThreadId) openingList.current = { threadId: updatedId, items: next }
         if (useAppStore.getState().queueEditDrafts[updatedId]) hiddenLists.current.set(updatedId, next)
@@ -360,13 +363,6 @@ export function useThreadQueue({ threadId, optimisticItems = [], onOptimisticIte
   useEffect(() => {
     if (threadId && itemsThread === threadId) reconcileEdit(threadId, items)
   }, [threadId, itemsThread, items, shownEdit, reconcileEdit])
-
-  useEffect(() => {
-    if (!onOptimisticItemReconciled) return
-    for (const optimistic of optimisticItems) {
-      if (items.some((item) => sameQueuedSend(item, optimistic))) onOptimisticItemReconciled(optimistic.id)
-    }
-  }, [items, optimisticItems, onOptimisticItemReconciled])
 
   const markBusy = useCallback((itemId: string, busy: boolean) => {
     setBusyIds((current) => {

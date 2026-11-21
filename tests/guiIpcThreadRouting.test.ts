@@ -1,4 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 type Handler = (event: unknown, ...args: unknown[]) => unknown
 const handlers = vi.hoisted(() => new Map<string, (event: unknown, ...args: unknown[]) => unknown>())
@@ -23,6 +26,10 @@ import { registerGuiIpc, type GuiIpcServices } from '../src/main/ipc/registerGui
 import { PresentationState } from '../src/main/mms/PresentationState'
 import { MmsProtocolError } from '../src/mms/protocol/client'
 import { isQualifiedId, qualifyId } from '../src/shared/threadRef'
+import type { TurnState } from '../src/shared/types'
+import { useAppStore } from '../src/renderer/stores/appStore'
+import { selectThread } from '../src/renderer/lib/threadActions'
+import { phase6Daemon, piAdapter, PI } from './run/phase6Fixture'
 
 const NODE = 'nod_0123456789abcdefghjkmnpqrs'
 const REMOTE = qualifyId(NODE, 'thread-1')
@@ -551,3 +558,53 @@ describe('a window leaving a deleted thread', () => {
     expect(made).toBe(1)
   })
 })
+
+it('selects a cold admitted thread through sidebar IPC while the transcript and setup are pending', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'mousse-starting-selection-'))
+  vi.stubEnv('MOUSSE_HOME', home)
+  const d = phase6Daemon(home, [piAdapter(() => 'Done')])
+  let finishSetup!: () => void
+  let finishRead!: () => void
+  const setup = new Promise<'stopped'>((resolve) => { finishSetup = () => resolve('stopped') })
+  const reading = new Promise<void>((resolve) => { finishRead = resolve })
+  const previous = useAppStore.getState()
+  try {
+    const cold = d.store.createThread('Cold', undefined)
+    d.orch.setThreadModelOverride(cold.id, PI)
+    const warm = { ...cold, id: 'warm-thread', startedAt: cold.createdAt }
+    useAppStore.setState({ activeThreadId: warm.id, threads: [warm, { ...cold, startedAt: cold.createdAt }], turnStates: {}, messages: [] })
+    d.orch.on('turn-state', (state: TurnState) => useAppStore.getState().setTurnState(state))
+    vi.spyOn(d.orch, 'waitForThreadFolders').mockReturnValueOnce(setup)
+    const result = await d.orch.send('First', false, { source: 'gui', threadId: cold.id, clientRequestId: 'first', awaitMode: 'ack' })
+    expect(useAppStore.getState().turnStates[cold.id]).toMatchObject({ phase: 'queued', turnId: result.runId })
+    expect(useAppStore.getState().turnStates[cold.id]?.step).toBeUndefined()
+
+    let entered!: (threadId: string) => void
+    const requested = new Promise<string>((resolve) => { entered = resolve })
+    snapshotThread.mockImplementationOnce(async (threadId) => {
+      entered(threadId)
+      await reading
+      return { messages: [], queue: [], claimed: [], activeTurn: { active: false, running: true }, connectionFailed: false }
+    })
+    vi.stubGlobal('window', { mousse: { threads: { select: (id: string) => invoke('threads:select', id) } } })
+    const selecting = selectThread(cold.id)
+    expect(await requested).toBe(cold.id)
+    expect(presentation.getActiveThreadId()).toBe(cold.id)
+    expect(useAppStore.getState()).toMatchObject({ activeThreadId: cold.id, openingThreadId: null, transcriptPending: true })
+
+    const followUp = await d.orch.send('Follow-up', false, { source: 'gui', threadId: cold.id, clientRequestId: 'steer', steer: true, steerRunId: result.runId })
+    expect(followUp.queueItem).toMatchObject({ content: 'Follow-up', sendsNext: true, steerOnStart: { runId: result.runId } })
+    await d.orch.stopThread(cold.id, 'user')
+
+    finishRead()
+    await selecting
+  } finally {
+    finishSetup()
+    finishRead()
+    await d.shutdown()
+    useAppStore.setState(previous)
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+}, 30_000)

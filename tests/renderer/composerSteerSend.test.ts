@@ -65,20 +65,27 @@ async function settle(rounds = 10): Promise<void> {
   for (let i = 0; i < rounds; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
 }
 
-async function mount(): Promise<void> {
+async function mount(configure?: () => void): Promise<void> {
   stubBridge()
+  configure?.()
   const { OrchestratorChat } = await import('../../src/renderer/components/OrchestratorChat')
   await act(async () => root.render(createElement(OrchestratorChat)))
   await settle()
 }
 
-async function send(text: string, init: KeyboardEventInit = {}): Promise<void> {
-  const input = host.querySelector<HTMLTextAreaElement>('.composer-input')!
+const composerInput = () => host.querySelector<HTMLTextAreaElement>('.composer-input')!
+
+async function typeDraft(text: string): Promise<void> {
+  const input = composerInput()
   await act(async () => {
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, text)
     input.dispatchEvent(new Event('input', { bubbles: true }))
   })
-  await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, ...init })) })
+}
+
+async function send(text: string, init: KeyboardEventInit = {}): Promise<void> {
+  await typeDraft(text)
+  await act(async () => { composerInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, ...init })) })
   await settle()
 }
 
@@ -390,4 +397,85 @@ it('starts A and B independently and keeps ordinary and Steer sends with A befor
   })
   expect(rows().map((row) => row.dataset.queuedId)).toEqual(['saved-0', 'saved-1'])
   expect(rows().filter((row) => row.textContent?.includes('Sends next'))).toHaveLength(1)
+})
+
+describe('follow-ups while switching between starting threads', () => {
+  const now = new Date().toISOString()
+  const rows = () => [...host.querySelectorAll<HTMLElement>('[data-queued-id]')]
+  const updateQueue = async (threadId: string, items: QueuedMessage[]) => {
+    await act(async () => { for (const listener of listeners['queue.onUpdated'] ?? []) listener({ threadId, items }) })
+  }
+  const openThreads = async (queueList?: typeof window.mousse.queue.list) => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const { selectThread } = await import('../../src/renderer/lib/threadActions')
+    const threads = ['thread-a', 'thread-b'].map((id, order) => ({ id, name: id, order, createdAt: now, startedAt: now, updatedAt: now }))
+    useAppStore.setState({
+      threads, composerDrafts: {},
+      turnStates: Object.fromEntries(threads.map(({ id }) => [id, { threadId: id, phase: 'queued', turnId: 'run-' + id, updatedAt: now }]))
+    })
+    let answer!: (response: OrchestratorResponse) => void
+    let refuse!: (error: Error) => void
+    const sendToThread = vi.fn((_threadId: string, _request: OrchestratorSendRequest) =>
+      new Promise<OrchestratorResponse>((resolve, reject) => { answer = resolve; refuse = reject })
+    )
+    orchestrator.isTurnActive = vi.fn(async () => true)
+    orchestrator.sendToThread = sendToThread
+    await mount(() => { if (queueList) window.mousse.queue.list = queueList })
+    window.mousse.threads.select = vi.fn(async () => undefined)
+    return { sendToThread, select: (id: string) => act(async () => { await selectThread(id) }), answer: (response: OrchestratorResponse) => answer(response), refuse: (error: Error) => refuse(error) }
+  }
+
+  it.each([{ name: 'Send', steer: false }, { name: 'Steer', steer: true }])('keeps a consumed $name gone when stale replies arrive across A, B, A', async ({ steer }) => {
+    const reads: Array<{ id: string; answer: (items: QueuedMessage[]) => void }> = []
+    const w = await openThreads((id) =>
+      new Promise<QueuedMessage[]>((answer) => reads.push({ id, answer }))
+    )
+    await send('From A', { ctrlKey: steer })
+    await vi.waitFor(() => expect(w.sendToThread).toHaveBeenCalledOnce())
+    const request = w.sendToThread.mock.calls[0]![1]
+    expect(request.steer).toBe(steer || undefined)
+    expect(rows()).toHaveLength(1)
+    await vi.waitFor(() => expect(reads[0]?.id).toBe('thread-a'))
+
+    await w.select('thread-b')
+    await vi.waitFor(() => expect(reads[1]?.id).toBe('thread-b'))
+    const saved: QueuedMessage = {
+      id: 'a-saved', threadId: 'thread-a', clientRequestId: request.requestId, content: 'From A',
+      state: 'pending', intent: 'normal', enqueuedAt: now, order: 0
+    }
+    await updateQueue('thread-a', [saved])
+    await updateQueue('thread-a', [])
+    expect(rows()).toHaveLength(0)
+
+    await w.select('thread-a')
+    await act(async () => {
+      reads[0]!.answer([saved])
+      reads[1]!.answer([])
+      w.answer({ message: '', actions: [], queued: true, queueItem: saved })
+    })
+    expect(rows()).toHaveLength(0)
+  })
+
+  it('restores a refused Steer and its attachment to A while B remains open', async () => {
+    const w = await openThreads()
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: () => 'blob:refused', revokeObjectURL: () => undefined }))
+    const shot = new File([new Uint8Array([137, 80, 78, 71])], 'refused.png', { type: 'image/png' })
+    const paste = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(paste, 'clipboardData', { value: { items: [{ kind: 'file', getAsFile: () => shot }], files: [], getData: () => '' } })
+    await act(async () => { composerInput().dispatchEvent(paste) })
+    await settle()
+    await send('Refused A', { ctrlKey: true })
+    await vi.waitFor(() => expect(w.sendToThread).toHaveBeenCalledOnce())
+    expect(w.sendToThread.mock.calls[0]![1].images).toHaveLength(1)
+    await typeDraft('Newer A')
+    await w.select('thread-b')
+    await typeDraft('Draft B')
+    await act(async () => w.refuse(Object.assign(new Error('Queue closed'), { code: 'queue_closed' })))
+    expect(composerInput().value).toBe('Draft B')
+    expect(host.querySelector('[aria-label="Remove refused.png"]')).toBeNull()
+    await w.select('thread-a')
+    expect(composerInput().value).toBe('Refused A\n\nNewer A')
+    expect(host.querySelector('[aria-label="Remove refused.png"]')).not.toBeNull()
+    expect(rows()).toHaveLength(0)
+  })
 })

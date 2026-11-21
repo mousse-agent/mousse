@@ -390,6 +390,12 @@ export function enqueueMessage(
     ...(input.waitsForLease && (input.intent ?? 'normal') === 'normal' ? { waitsForLease: true as const } : {})
   }
 
+  return insertQueuedMessage(items, item)
+}
+
+/** Inserts a prepared item at the time it reaches the queue, preserving the order of messages sent to the same turn. */
+export function insertQueuedMessage(items: QueuedMessage[], saved: QueuedMessage): { items: QueuedMessage[]; item: QueuedMessage } {
+  const item = { ...saved, order: saved.steerOnStart ? nextOrder(items) : saved.order }
   const next = sortQueue([...items, item])
   if (!item.steerOnStart) return { items: next, item }
   const pending = listPendingQueue(next).filter((entry) => !entry.internal)
