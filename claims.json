@@ -2,18 +2,6 @@
   "version": 1,
   "claims": [
     {
-      "task": "continuation-tools-wait-for-run",
-      "session": "Animatrix-7c6ffa",
-      "machine": "Animatrix",
-      "branch": "continuation-tools-wait-for-run",
-      "paths": [
-        "src/mms/orchestrator/OrchestratorService.ts",
-        "tests/run/claudeContinuations.test.ts"
-      ],
-      "claimedAt": "2026-11-20T12:28:00.992Z",
-      "expiresAt": "2026-11-20T14:28:00.992Z"
-    },
-    {
       "task": "devices-declutter",
       "session": "Animatrix-69a682",
       "machine": "Animatrix",
@@ -57,7 +45,7 @@
         "src/shared/workspace.ts"
       ],
       "claimedAt": "2026-11-21T10:14:56.694Z",
-      "expiresAt": "2026-11-21T16:13:14.386Z"
+      "expiresAt": "2026-11-21T16:34:35.440Z"
     },
     {
       "task": "faster-thread-titles",
@@ -89,21 +77,6 @@
       ],
       "claimedAt": "2026-11-20T20:50:53.551Z",
       "expiresAt": "2026-11-20T22:50:53.551Z"
-    },
-    {
-      "task": "fix-slow-daemon-startup",
-      "session": "Animatrix-0ed74a",
-      "machine": "Animatrix",
-      "branch": "fix-slow-daemon-startup",
-      "paths": [
-        "src/mms/MmsProfileServices.ts",
-        "src/mms/runtime/ThreadRuntimeManager.ts",
-        "src/cli/commands/service.ts",
-        "src/mms/startup/startupTiming.ts",
-        "src/mms/data/ThreadDataStore.ts"
-      ],
-      "claimedAt": "2026-11-20T12:26:00.038Z",
-      "expiresAt": "2026-11-20T14:26:00.038Z"
     },
     {
       "task": "git-restart-scaling",
@@ -149,21 +122,6 @@
       ],
       "claimedAt": "2026-11-20T12:55:33.822Z",
       "expiresAt": "2026-11-20T15:55:33.822Z"
-    },
-    {
-      "task": "plain-error-reasons",
-      "session": "Avarnics-Mac-mini.local-4a3dd2",
-      "machine": "Avarnics-Mac-mini.local",
-      "branch": "plain-error-reasons",
-      "paths": [
-        "src/main/ipc/registerGuiIpc.ts",
-        "src/shared/errors.ts",
-        "src/mms/protocol/server.ts",
-        "src/renderer/lib/plusSignIn.ts",
-        "src/renderer/lib/actionToast.ts"
-      ],
-      "claimedAt": "2026-11-20T12:33:21.627Z",
-      "expiresAt": "2026-11-20T14:33:21.627Z"
     },
     {
       "task": "provider-idle-window",
