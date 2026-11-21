@@ -182,6 +182,20 @@
       "expiresAt": "2026-11-21T01:26:45.041Z"
     },
     {
+      "task": "git-spawn-off-daemon-loop",
+      "session": "Animatrix-2dabf9",
+      "machine": "Animatrix",
+      "branch": "git-spawn-off-daemon-loop",
+      "paths": [
+        "src/mms/git/gitSpawn.ts",
+        "src/mms/git/runGitProcess.ts",
+        "src/mms/git/gitProcess.ts",
+        "src/mms/git/gitExecutable.ts"
+      ],
+      "claimedAt": "2026-11-21T05:08:34.813Z",
+      "expiresAt": "2026-11-21T07:08:34.813Z"
+    },
+    {
       "task": "mousse-id-one-devices-list",
       "session": "agibook-4b4072",
       "machine": "agibook",
