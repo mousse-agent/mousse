@@ -11,6 +11,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { commonDirFromFiles } from '../src/mms/git/gitDirFiles'
 import { branchOfHeadFile, clearFolderHeadCache, folderBranch, headFileReads, readFolderHead } from '../src/mms/git/gitHead'
 
 let root: string
@@ -110,4 +111,32 @@ it.each([
   ['garbage', undefined]
 ])('HEAD %j names %j', (text, branch) => {
   expect(branchOfHeadFile(text)).toBe(branch)
+})
+
+describe('a folder’s Git common directory from its .git (the folder-access check)', () => {
+  it('names what Git names for a main checkout, a folder inside it and a linked worktree; null outside any repository', async () => {
+    const main = repository()
+    const inner = join(main, 'src')
+    mkdirSync(inner)
+    const worktree = join(root, 'wt')
+    git(main, 'worktree', 'add', '-q', '-b', 'mousse/thread-1', worktree)
+    for (const folder of [main, inner, worktree]) {
+      const fromGit = git(folder, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+      expect(await commonDirFromFiles(folder), folder).toBe(join(fromGit))
+    }
+    const plain = join(root, 'plain')
+    mkdirSync(plain)
+    expect(await commonDirFromFiles(plain)).toBeNull()
+  })
+
+  it('leaves to Git a .git that is a link, a .git file it cannot read, and a folder inside a Git folder', async () => {
+    const main = repository()
+    const linked = join(root, 'linked')
+    mkdirSync(linked)
+    symlinkSync(join(main, '.git'), join(linked, '.git'), 'junction')
+    const odd = join(root, 'odd')
+    mkdirSync(odd)
+    writeFileSync(join(odd, '.git'), 'not a gitdir line')
+    for (const folder of [linked, odd, join(main, '.git', 'refs')]) expect(await commonDirFromFiles(folder), folder).toBeUndefined()
+  })
 })
