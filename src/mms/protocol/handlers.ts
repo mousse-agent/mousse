@@ -2663,7 +2663,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, [
         'threadId', 'content', 'forceQueue', 'source', 'mode', 'images', 'requestId', 'workflowInvocationId',
-        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused', 'conversationBranchId', 'expect',
+        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused', 'conversationBranchId', 'expect', 'steer', 'steerRunId',
         ROUTED_SEND_WINDOW_KEY
       ])
       const threadId = asString(p.threadId, 'threadId', 256)
@@ -2674,6 +2674,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A parent's follow-up to a subagent on this computer: a paused thread refuses it, as for a parent here.
       const refuseWhilePaused = asOptionalBoolean(p.refuseWhilePaused, 'refuseWhilePaused') === true
       const forceQueue = asOptionalBoolean(p.forceQueue, 'forceQueue') === true
+      // A person's Steer (a window here, or the CLI): it joins the busy thread's turn instead of waiting for it.
+      const steer = asOptionalBoolean(p.steer, 'steer') === true && (isPerson(ctx.connection) || ctx.connection?.clientType === 'cli')
+      const steerRunId = steer ? asOptionalString(p.steerRunId, 256) : undefined
       const source = admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol')
       const mode = asOptionalChatMode(p.mode, 'mode')
       const images = asOptionalChatImages(p.images, 'images')
@@ -2726,6 +2729,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         forceQueue,
         clientRequestId,
         awaitMode,
+        ...(steer ? { steer: true, steerRunId } : {}),
         actor: questionAnswerer(ctx),
         // A turn from another computer never runs looser than that computer's limit here, however the thread is set.
         ...(limit ? { permissionMode: limit } : {}),

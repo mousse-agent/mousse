@@ -75,6 +75,8 @@ export type RunCommand =
        * repeated `clientRequestId` with other text is refused instead of answered with another message's run.
        */
       prompt?: string
+      /** Turn a person's Steer was sent to, recorded with the send's receipt. */
+      steerRunId?: string
       /**
        * SPEC §17.3: the send denies the thread's saved approval requests with `feedback` as the
        * reason, inside its own admission, and hands the whole delivery group to the run it creates.
@@ -2086,7 +2088,8 @@ export class RunEngine extends EventEmitter {
         sequence,
         ...(endedPause ? { endedPause } : {}),
         ...(heldByPause ? { heldByPause } : {}),
-        ...(command.prompt !== undefined ? { promptDigest: promptDigest(command.prompt) } : {})
+        ...(command.prompt !== undefined ? { promptDigest: promptDigest(command.prompt) } : {}),
+        ...(command.steerRunId ? { steerRunId: command.steerRunId } : {})
       })
       return { status: 'accepted', runId: run.runId, sequence, replayed: false, ...(endedPause ? { endedPause } : {}), ...(heldByPause ? { heldByPause } : {}) }
     })

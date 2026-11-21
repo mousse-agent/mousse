@@ -550,6 +550,15 @@ export interface OrchestratorSendRequest {
    * outcome comes through turn and run events. Absent: the send answers with the turn's result, as it always has.
    */
   await?: 'ack'
+  /**
+   * Steer: the message is meant for the turn that runs or is being set up, not for after it. When the thread is busy
+   * the service queues it and sends it into that turn at once, or, while the turn is set up, keeps it first to join
+   * the turn as it runs (`QueuedMessage.steerOnStart`). Decided with the send's admission, so it holds whatever the
+   * window shows by the time the send answers. This computer's threads only.
+   */
+  steer?: boolean
+  /** Run visible at the click, when known. A later run must not take this Steer. */
+  steerRunId?: string
 }
 
 /** The model, permission mode and (when known) settings revision a send is bound to (`OrchestratorSendRequest.expect`). */
@@ -1144,6 +1153,8 @@ export interface OrchestratorResponse {
   queueItem?: QueuedMessage
   /** With `queued`: the thread is paused by a usage limit, and the message waits behind the pause (which stays). */
   heldByPause?: boolean
+  /** With `queued`: the send's Steer (`OrchestratorSendRequest.steer`) was applied to the queued message by the service. */
+  steerApplied?: boolean
   workflowRun?: import('./workflowChat').WorkflowChatRun
   /** Run Engine run created for this send (docs/run-engine/SPEC.md §6). */
   runId?: string
@@ -1279,6 +1290,19 @@ export interface QueuedMessage {
    * that moves the item out of `steering` drops the field.
    */
   steerNow?: { runId: string; holdGeneration: number; requestId: string }
+  /**
+   * Steered (Steer, or Send now) while its run was still being set up: the item waits first in the queue and joins that
+   * run (`runId`) once, as soon as it runs. The saved target also identifies a steer returned unread to the queue.
+   * An explicit Send now into a different run clears it.
+   */
+  steerOnStart?: { runId: string }
+  /**
+   * Set only on the lists the service sends (never saved). `sendsNext`: the item waits to join the run being set up
+   * (`steerOnStart`). `steerMissed`: it was steered, but its run ended before it could join; it is an ordinary queued
+   * message again, first in the queue.
+   */
+  sendsNext?: true
+  steerMissed?: true
   /**
    * Who the item is from when it is not a person. `schedule`: set on the occurrence of a scheduled job
    * that found its thread busy; the run drains with the job's model and origin, and the ids travel on to

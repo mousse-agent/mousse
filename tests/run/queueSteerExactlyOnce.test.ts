@@ -23,7 +23,7 @@ import { QueueCommands } from '../../src/mms/run/QueueCommands'
 import { RunEngine, steerNowCommandKey } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import type { ActivityPatch } from '../../src/shared/agentActivity'
-import type { ChatImageAttachment, ChatMessage } from '../../src/shared/types'
+import type { ChatImageAttachment, ChatMessage, QueuedMessage } from '../../src/shared/types'
 import { phase6Daemon, waitFor, type Phase6Daemon } from './phase6Fixture'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
@@ -679,6 +679,7 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     const c = (await w.send('C')).queueItem!
     expect(w.d.orch.promoteQueueItem(w.thread.id, c.id)).toEqual({ ok: true })
     expect(w.pending()).toEqual(['C', 'A'])
+    expect(w.d.orch.queueSnapshot(w.thread.id).items.map((item) => [item.content, item.sendsNext])).toEqual([['C', true], ['A', undefined]])
     // Stop lands while the turn is set up, then the setup ends.
     await w.d.orch.stopThread(w.thread.id, 'user')
     release()
@@ -689,9 +690,108 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     expect(w.adapter.prompts).toEqual([])
     expect(w.adapter.steers).toEqual([])
     expect(w.d.orch.listQueue(w.thread.id).map((item) => [item.content, item.state])).toEqual([['C', 'pending'], ['A', 'pending']])
+    // The fallback is said: C is no longer on its way into a turn, it is a queued message that was not steered.
+    expect(w.d.orch.queueSnapshot(w.thread.id).items.map((item) => [item.content, item.sendsNext, item.steerMissed])).toEqual([['C', undefined, true], ['A', undefined, undefined]])
     expect(w.shownUserMessages().filter((text) => text === 'C')).toEqual([])
     folders.mockRestore()
     void a
+  })
+
+  describe('Steer sent with its message while the turn is still being set up', () => {
+    /** A first turn held in its setup (the wait for its folders) until `release`, with the run it will be. */
+    const settingUp = async (w: ReturnType<typeof world>) => {
+      let release!: () => void
+      const held = new Promise<'ready'>((resolve) => { release = () => resolve('ready') })
+      const folders = vi.spyOn(w.d.orch as unknown as { waitForThreadFolders: () => Promise<string> }, 'waitForThreadFolders').mockReturnValueOnce(held)
+      w.adapter.holdPrompts.add('first')
+      const first = w.send('first')
+      await waitFor(() => Boolean(w.d.orch.getOrCreateSession(w.thread.id).admissionRunId), 'turn admitted')
+      const runId = w.d.orch.getOrCreateSession(w.thread.id).admissionRunId!
+      return { first, runId, release: () => { release(); folders.mockRestore() } }
+    }
+    /** What a connection sends: the protocol's `orchestrator.send`. A window here is a GUI connection. */
+    const fromConnection = (w: ReturnType<typeof world>, clientType: 'gui' | 'mcp', params: Record<string, unknown>) =>
+      dispatchMethod({ mms: { orchestrator: w.d.orch, threads: w.d.store }, globalSequence: () => 0, connection: { id: `${clientType}-1`, clientType, capabilities: new Set() } } as unknown as HandlerContext,
+        'orchestrator.send', { threadId: w.thread.id, mode: 'agent', ...params }) as Promise<{ queued?: boolean; steerApplied?: boolean; queueItem?: { id: string; content: string; sendsNext?: true } }>
+    const fromWindow = (w: ReturnType<typeof world>, params: Record<string, unknown>) => fromConnection(w, 'gui', params)
+
+    it('waits first, shows as sending next on every read, is saved with its run, and joins that run once as it runs', async () => {
+      const w = world()
+      const { first, runId, release } = await settingUp(w)
+      await w.send('A')
+      const announcements: QueuedMessage[] = []
+      w.d.orch.on('queue-updated', ({ items }: { items: QueuedMessage[] }) => {
+        const steer = items.find((item) => item.clientRequestId === 'steer-s')
+        if (steer) announcements.push(steer)
+      })
+      const request = { content: 'S', clientRequestId: 'steer-s', steer: true, steerRunId: runId }
+      const steered = await fromWindow(w, request)
+      expect(steered).toMatchObject({ queued: true, steerApplied: true, queueItem: { content: 'S', sendsNext: true } })
+      expect(announcements[0]).toMatchObject({ sendsNext: true, steerOnStart: { runId } })
+      expect(w.d.engine.store.getReceipt('steer-s')).toMatchObject({ threadId: w.thread.id, result: { steerRunId: runId } })
+      expect(await fromWindow(w, request)).toMatchObject({ queued: true, steerApplied: true, queueItem: { id: steered.queueItem!.id } })
+      // Every read says so (a window that opens the thread later), and the run it joins is saved with it.
+      expect(w.d.orch.queueSnapshot(w.thread.id).items.map((item) => [item.content, item.sendsNext])).toEqual([['S', true], ['A', undefined]])
+      expect(w.queue().find((item) => item.content === 'S')?.steerOnStart).toEqual({ runId })
+      // A second Send now on it changes nothing.
+      expect(w.d.orch.promoteQueueItem(w.thread.id, steered.queueItem!.id)).toEqual({ ok: true })
+
+      release()
+      await waitFor(() => w.adapter.steers.includes('S'), 'steer joined the turn')
+      expect(w.adapter.prompts).toEqual(['first'])
+      w.adapter.release('first')
+      await first
+      await w.idle('queue drained')
+      expect(w.adapter.prompts).toEqual(['first', 'A'])
+      expectEachOnce(w.adapter, ['first', 'S', 'A'])
+    })
+
+    it('a message sent without Steer meanwhile stays an ordinary queued message, behind it', async () => {
+      const w = world()
+      const { first, release } = await settingUp(w)
+      const plain = await fromWindow(w, { content: 'plain', clientRequestId: 'plain-1' })
+      const steered = await fromWindow(w, { content: 'S', clientRequestId: 'steer-s', steer: true })
+      expect(plain).toMatchObject({ queued: true, queueItem: { content: 'plain' } })
+      expect(plain.steerApplied).toBeUndefined()
+      expect(steered.steerApplied).toBe(true)
+      expect(w.d.orch.queueSnapshot(w.thread.id).items.map((item) => [item.content, item.sendsNext])).toEqual([['S', true], ['plain', undefined]])
+      release()
+      await waitFor(() => w.adapter.steers.includes('S'), 'steer joined the turn')
+      w.adapter.release('first')
+      await first
+      await w.idle('queue drained')
+      expect(w.adapter.steers).toEqual(['S'])
+      expect(w.adapter.prompts).toEqual(['first', 'plain'])
+    })
+
+    it('is taken only by the run it was sent for: another run that meets it leaves it queued, said as not steered', async () => {
+      const w = world()
+      const { first, release } = await settingUp(w)
+      const steered = await fromWindow(w, { content: 'S', clientRequestId: 'steer-s', steer: true, steerRunId: 'previous-run' })
+      expect(steered).toMatchObject({ queued: true, queueItem: { steerMissed: true } })
+      expect(steered.steerApplied).toBeUndefined()
+      release()
+      await waitFor(() => w.adapter.prompts.includes('first'), 'first turn runs')
+      expect(w.adapter.steers).toEqual([])
+      expect(w.d.orch.queueSnapshot(w.thread.id).items.map((item) => [item.content, item.steerMissed])).toEqual([['S', true]])
+      w.adapter.release('first')
+      await first
+      await w.idle('queue drained')
+      expectEachOnce(w.adapter, ['first', 'S'])
+    })
+
+    it('a connection that is not a person (an agent) cannot steer with its message', async () => {
+      const w = world()
+      const { first, release } = await settingUp(w)
+      const sent = await fromConnection(w, 'mcp', { content: 'S', clientRequestId: 'steer-s', steer: true })
+      expect(sent.queued).toBe(true)
+      expect(sent.steerApplied).toBeUndefined()
+      release()
+      w.adapter.release('first')
+      await first
+      await w.idle('queue drained')
+      expect(w.adapter.steers).toEqual([])
+    })
   })
 
   it('Steer once a stopped turn has ended sends the message now: it runs first, then the rest in order', async () => {
