@@ -330,16 +330,14 @@ function ownerStores(current: ResourceLifecycleStore, reads: OwnershipReads): Ar
       for (const location of record.locations) set.add(resolve(location))
     }
     const recordNames = (id: string, path: string): boolean => locationsById.get(id)?.has(resolve(path)) ?? false
-    // Folders already checked for links during this synchronous scan (`assertLifecyclePath`), by root.
-    const checked = new Set<string>()
     const scanOwners = (root: string, path: string, depth = 0): void => {
       if (!existsSync(path)) return
-      assertLifecyclePath(root, path, checked)
+      assertLifecyclePath(root, path)
       if (++visited > OWNER_SCAN_LIMIT || depth > 4) throw new Error('Unregistered storage layout exceeds bounded ownership discovery.')
       if (!lstatSync(path).isDirectory()) return
       const meta = join(path, 'meta.json')
       if (existsSync(meta)) {
-        assertLifecyclePath(root, meta, checked)
+        assertLifecyclePath(root, meta)
         const value = JSON.parse(readFileSync(meta, 'utf8')) as { id?: string }
         if (!value.id || !recordNames(value.id, path) && !(movedFrom(store) && leftByMove(listed, value.id, path, store))) throw new Error(untrackedThread(path))
         return // Historical generations inside a known task are not separate live owners.

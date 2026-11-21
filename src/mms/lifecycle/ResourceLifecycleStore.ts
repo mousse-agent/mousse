@@ -53,24 +53,14 @@ function contains(root: string, path: string): boolean {
   const rel = relative(resolve(root), resolve(path))
   return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`))
 }
-/**
- * No lifecycle authority or movable directory may be accessed through a link.
- *
- * `checked`: folders already checked during one synchronous read (an ownership pass reads thousands of records under
- * the same few folders), keyed by root. `path` itself is always checked; the walk up stops at a folder checked before
- * under the same root, since everything from it up to the root was checked with it. Never kept across an await, and
- * never passed for the check right before a change (a move or a delete), which walks every folder each time.
- */
-export function assertLifecyclePath(root: string, path: string, checked?: Set<string>): void {
+/** No lifecycle authority or movable directory may be accessed through a link. */
+export function assertLifecyclePath(root: string, path: string): void {
   if (!isAbsolute(path) || path.includes('\0') || !contains(root, path)) throw new ResourceLifecycleError('ambiguous', 'Lifecycle path escapes its owned root')
   const resolvedRoot = resolve(root)
   let current = resolve(path)
-  const walked: string[] = []
   while (true) {
-    if (walked.length && checked?.has(`${resolvedRoot}\0${current}`)) break
     try { if (lstatSync(current).isSymbolicLink()) throw new ResourceLifecycleError('ambiguous', 'Lifecycle path is a link') }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-    walked.push(current)
     // Each component is checked with lstat; canonicalizing both paths here
     // repeats whole filesystem walks and cannot add authority after links are rejected.
     if (relative(resolvedRoot, current) === '') break
@@ -78,7 +68,6 @@ export function assertLifecyclePath(root: string, path: string, checked?: Set<st
     if (parent === current) throw new ResourceLifecycleError('ambiguous', 'Lifecycle root is not an ancestor')
     current = parent
   }
-  if (checked) for (const folder of walked) checked.add(`${resolvedRoot}\0${folder}`)
 }
 
 /** {@link assertLifecyclePath} without blocking: the same checks, each component read with an async `lstat`. */

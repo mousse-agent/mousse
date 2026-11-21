@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
-import { lstat, readFile, stat } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { lstat, readFile } from 'node:fs/promises'
 import { realpath as realpathCallback } from 'node:fs'
-import { basename, dirname, isAbsolute, join } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { READ_ONLY_GIT_ENV } from '../git/readOnlyGit'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
@@ -9,13 +10,14 @@ import { gitDirectoryEnvAsync } from '../git/gitEnv'
 import { runGitProcess } from '../git/runGitProcess'
 import { lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
 import { assertLifecyclePathAsync } from './ResourceLifecycleStore'
+import { comparablePath } from './canonicalPath'
 import type { WorktreeReconstructionManifest } from './WorktreeRetirementService'
 
 /** `realpathSync` without blocking, spelled as the repository ids Mousse records are spelled (`RepositoryIdentity`). */
 const realpathLike = promisify(realpathCallback)
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex')
 
-/** A small file's text, or undefined when it is missing, too big or unreadable. */
+/** A small regular file's text (never through a link), or undefined when it is missing, too big or unreadable. */
 async function smallText(path: string, limit = 64 * 1024): Promise<string | undefined> {
   try {
     const info = await lstat(path)
@@ -24,75 +26,223 @@ async function smallText(path: string, limit = 64 * 1024): Promise<string | unde
   } catch { return undefined }
 }
 
-/**
- * Repository extensions that change nothing about where a worktree is: `worktreeConfig` (a worktree's own
- * `config.worktree`, read separately), `objectFormat`, and `relativeWorktrees` (set once any worktree is added with
- * relative paths; each worktree's own files still say which kind it is, and only absolute ones are read here).
- */
-const LAYOUT_NEUTRAL_EXTENSIONS = new Set(['worktreeconfig', 'objectformat', 'relativeworktrees'])
+/** Whether `path` is a real folder, not a link, junction or other reparse point Node reports as one. */
+async function plainFolder(path: string): Promise<boolean> {
+  try { const info = await lstat(path); return info.isDirectory() && !info.isSymbolicLink() } catch { return false }
+}
+
+type ConfigValues = Map<string, string[]>
 
 /**
- * Whether a Git config file's text leaves a linked worktree where `git worktree add` puts it: no `core.worktree` (or
- * any key named `worktree`), no `include`/`includeIf` that could add one, and no repository extension other than
- * {@link LAYOUT_NEUTRAL_EXTENSIONS}. Anything else, including text this cannot read, is left to Git.
+ * A Git config file read only when it is plainly written: `[section]` or `[section "sub"]` headers, `key = value`
+ * lines, comments. Undefined for anything this cannot read exactly as Git would (a continued line, a stray character,
+ * an `include` or `includeIf` that could bring in more): the caller then asks Git. Keys are `section.key`, lower case;
+ * subsections are kept out of the keys this module looks at.
  */
-function configKeepsLayout(text: string): boolean {
+function plainConfig(text: string): ConfigValues | undefined {
+  const values: ConfigValues = new Map()
   let section = ''
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim()
     if (!line || line.startsWith('#') || line.startsWith(';')) continue
+    if (line.endsWith('\\')) return undefined
     if (line.startsWith('[')) {
-      const header = /^\[\s*([A-Za-z0-9.-]+)(\s+"[^"]*")?\s*\]\s*([#;].*)?$/.exec(line)
-      if (!header) return false
-      section = header[1]!.toLowerCase()
-      if (section === 'include' || section === 'includeif') return false
+      const header = /^\[\s*([A-Za-z0-9.-]+)(\s+"[^"\\]*")?\s*\]\s*([#;].*)?$/.exec(line)
+      if (!header) return undefined
+      section = header[2] ? `${header[1]!.toLowerCase()} "sub"` : header[1]!.toLowerCase()
+      if (header[1]!.toLowerCase() === 'include' || header[1]!.toLowerCase() === 'includeif') return undefined
       continue
     }
-    const key = /^([A-Za-z][A-Za-z0-9-]*)\s*(=|$)/.exec(line)?.[1]?.toLowerCase()
-    if (!key) return false
-    if (key === 'worktree') return false
-    if (section === 'extensions' && !LAYOUT_NEUTRAL_EXTENSIONS.has(key)) return false
+    const entry = /^([A-Za-z][A-Za-z0-9-]*)\s*(?:=\s*(.*?))?\s*$/.exec(line)
+    if (!entry || !section) return undefined
+    const key = `${section}.${entry[1]!.toLowerCase()}`
+    const value = (entry[2] ?? 'true').replace(/\s*[#;].*$/, '')
+    if (/["\\]/.test(value)) return undefined
+    values.set(key, [...values.get(key) ?? [], value])
+  }
+  return values
+}
+
+const FALSE_WORDS = new Set(['false', 'no', 'off', '0'])
+const BOOLEAN_WORDS = new Set(['true', 'yes', 'on', '1', ...FALSE_WORDS])
+/**
+ * Repository extensions that change nothing about where a worktree is or whether Git opens it: `worktreeConfig` (a
+ * worktree's own `config.worktree`, read here too), `objectFormat`, and `relativeWorktrees` (set once any worktree is
+ * added with relative paths; each worktree's own files still say which kind it is, and only absolute ones are read).
+ */
+const LAYOUT_NEUTRAL_EXTENSIONS = new Set(['worktreeconfig', 'objectformat', 'relativeworktrees'])
+
+/**
+ * The repository's own `config`, when Git would open a linked worktree of it exactly as laid out: format version 0 or
+ * 1, `core.bare` absent or false, no key named `worktree` anywhere, and no extension but
+ * {@link LAYOUT_NEUTRAL_EXTENSIONS} with a value Git knows. The object format, or undefined to leave it to Git.
+ */
+function repositoryConfig(text: string): { objectFormat: 'sha1' | 'sha256' } | undefined {
+  const values = plainConfig(text)
+  if (!values) return undefined
+  let objectFormat: 'sha1' | 'sha256' = 'sha1'
+  for (const [key, list] of values) {
+    const [section, name] = [key.slice(0, key.lastIndexOf('.')), key.slice(key.lastIndexOf('.') + 1)]
+    if (name === 'worktree') return undefined
+    if (key === 'core.bare' && !list.every((value) => FALSE_WORDS.has(value.toLowerCase()))) return undefined
+    if (key === 'core.repositoryformatversion' && !list.every((value) => value === '0' || value === '1')) return undefined
+    if (section === 'extensions') {
+      if (!LAYOUT_NEUTRAL_EXTENSIONS.has(name)) return undefined
+      if (name === 'objectformat') {
+        if (list.length !== 1 || !['sha1', 'sha256'].includes(list[0]!.toLowerCase())) return undefined
+        objectFormat = list[0]!.toLowerCase() as 'sha1' | 'sha256'
+      } else if (!list.every((value) => BOOLEAN_WORDS.has(value.toLowerCase()))) return undefined
+    }
+    if (section.startsWith('extensions ')) return undefined
+  }
+  return { objectFormat }
+}
+
+/** A worktree's own `config.worktree`, when it changes nothing Git uses to open it: no `bare`, `worktree`, format version or extension. */
+function worktreeConfigKeepsLayout(text: string): boolean {
+  const values = plainConfig(text)
+  if (!values) return false
+  for (const key of values.keys()) {
+    const name = key.slice(key.lastIndexOf('.') + 1)
+    if (name === 'worktree' || name === 'bare' || name === 'repositoryformatversion' || key.startsWith('extensions')) return false
   }
   return true
 }
 
+/** A worktree's `HEAD` as Git accepts it: `ref: refs/...`, or a commit id of the repository's object format. */
+function validHead(text: string, objectFormat: 'sha1' | 'sha256'): boolean {
+  const line = text.replace(/\n$/, '')
+  if (/^ref: refs\/[^\s\0]+$/.test(line)) return true
+  return new RegExp(`^[0-9a-f]{${objectFormat === 'sha256' ? 64 : 40}}$`).test(line)
+}
+
+/** A linked worktree in the standard layout: the real common directory, and the worktree's own Git folder. */
+export interface StandardWorktree { commonDir: string; gitDir: string }
+
 /**
- * The real Git common directory of the linked worktree at `path`, read from the files Git itself reads, with no Git
- * process: `<path>/.git` names the worktree's Git folder, whose `commondir` leads to the repository. Only the layout
- * `git worktree add` writes by default is recognised, and every part of it must match:
+ * The linked worktree at `path`, read from the files Git itself reads, with no Git process, when it has exactly the
+ * layout `git worktree add` writes and Git would open it as laid out. Every part must match:
  * - `.git` is a regular file holding one line, `gitdir: <absolute path>`;
- * - that folder is `<common>/worktrees/<id>`, with a `HEAD` file and a `commondir` of exactly `../..`;
- * - no `config.worktree` there, or one that `configKeepsLayout`; and the repository's `config` `configKeepsLayout`.
+ * - that folder is `<common>/worktrees/<id>`, reached without a link, junction or other reparse point anywhere on its
+ *   path, and the folders `<common>`, `worktrees` and `<id>` are plain folders;
+ * - its `HEAD` is a regular file Git accepts, its `commondir` is exactly `../..`, and its back-pointer `gitdir` names
+ *   this worktree's `.git`, absolutely;
+ * - its `config.worktree`, if any, sets nothing Git uses to open it (`worktreeConfigKeepsLayout`), and the repository's
+ *   `config` is readable and plain (`repositoryConfig`).
  *
- * Undefined for anything else (relative paths written by `worktree.useRelativePaths`, a `core.worktree`, an include, an
- * unknown extension, a file this cannot read): the caller asks Git, as before, every time. Git started by Mousse never
- * inherits `GIT_DIR`, `GIT_COMMON_DIR` or `GIT_WORK_TREE` (`gitEnv`), so those cannot make Git's answer differ.
- *
- * One deliberate difference: Git refuses a repository it considers to have dubious ownership (`safe.directory`), and
- * this does not check owners. A worktree there reads as verified here where Git would leave it unverified; every change
- * Mousse makes in that repository runs Git, which refuses it, so no delete there rests on the difference.
+ * Undefined for anything else, unreadable files included: the caller asks Git, every time. This reader may only be
+ * more careful than Git, never less: whatever Git would or might refuse goes to Git. Whether Git trusts the checkout's
+ * owner (`safe.directory`) is a separate question, answered by {@link trustedCheckoutsAsync} before this is relied on.
+ * Git started by Mousse never inherits `GIT_DIR`, `GIT_COMMON_DIR` or `GIT_WORK_TREE` (`gitEnv`), so those cannot make
+ * Git's answer differ.
  */
-export async function standardLinkedWorktreeAsync(path: string): Promise<{ commonDir: string } | undefined> {
+export async function standardLinkedWorktreeAsync(path: string): Promise<StandardWorktree | undefined> {
   const pointer = await smallText(join(path, '.git'), 4096)
   const named = pointer === undefined ? undefined : /^gitdir: ([^\r\n]+)\r?\n?$/.exec(pointer)?.[1]
   if (!named || !isAbsolute(named)) return undefined
   let gitDir: string
   try { gitDir = await realpathLike(named) } catch { return undefined }
+  // A link or junction anywhere on the way makes the real path differ from the written one.
+  if (comparablePath(gitDir) !== comparablePath(resolve(named))) return undefined
+  const common = dirname(dirname(gitDir))
   if (basename(dirname(gitDir)) !== 'worktrees') return undefined
-  const [head, commondir, back, worktreeConfig] = await Promise.all([
-    stat(join(gitDir, 'HEAD')).catch(() => undefined),
+  const folders = await Promise.all([gitDir, dirname(gitDir), common].map(plainFolder))
+  if (!folders.every(Boolean)) return undefined
+  const [head, commondir, back, worktreeConfig, config] = await Promise.all([
+    smallText(join(gitDir, 'HEAD'), 4096),
     smallText(join(gitDir, 'commondir'), 4096),
     smallText(join(gitDir, 'gitdir'), 4096),
-    lstat(join(gitDir, 'config.worktree')).then(() => smallText(join(gitDir, 'config.worktree')).then((text) => text ?? null), () => undefined)
+    lstat(join(gitDir, 'config.worktree')).then(() => smallText(join(gitDir, 'config.worktree')).then((text) => text ?? null), (error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? undefined : null),
+    smallText(join(common, 'config'))
   ])
-  if (!head?.isFile() || commondir?.replace(/\r?\n$/, '') !== '../..') return undefined
-  // Git lists the worktree by this back-pointer (`worktreeRegistry`); one written relative goes to Git as a whole.
-  if (!back || !isAbsolute(back.trim())) return undefined
-  if (worktreeConfig === null || worktreeConfig !== undefined && !configKeepsLayout(worktreeConfig)) return undefined
-  const common = dirname(dirname(gitDir))
-  const config = await smallText(join(common, 'config'))
-  if (config === undefined || !configKeepsLayout(config)) return undefined
-  try { return { commonDir: await realpathLike(common) } } catch { return undefined }
+  const repository = config === undefined ? undefined : repositoryConfig(config)
+  if (!repository || head === undefined || !validHead(head, repository.objectFormat)) return undefined
+  if (commondir?.replace(/\r?\n$/, '') !== '../..') return undefined
+  const backPath = back?.replace(/\s+$/, '')
+  if (!backPath || !isAbsolute(backPath) || comparablePath(resolve(backPath)) !== comparablePath(resolve(path, '.git'))) return undefined
+  if (worktreeConfig === null || worktreeConfig !== undefined && !worktreeConfigKeepsLayout(worktreeConfig)) return undefined
+  return { commonDir: common, gitDir }
+}
+
+/** The paths Git checks the owner of for a linked worktree: its folder, its `.git` file and its Git folder. */
+const ownedPaths = (checkout: { path: string; gitDir: string }): string[] => [checkout.path, join(checkout.path, '.git'), checkout.gitDir]
+
+/** Which of `paths` are owned by the user this process runs as, read in one step; unreadable ones are not. */
+async function ownedByMeAsync(paths: readonly string[]): Promise<Set<string>> {
+  const owned = new Set<string>()
+  if (!paths.length) return owned
+  if (process.platform !== 'win32') {
+    const uid = process.getuid?.()
+    if (uid === undefined) return owned
+    await Promise.all(paths.map(async (path) => { try { if ((await lstat(path)).uid === uid) owned.add(path) } catch { /* unreadable: not proven */ } }))
+    return owned
+  }
+  // Windows: one PowerShell for every path, comparing each owner's SID with this process's user's.
+  const shell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const script = '$u=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; foreach ($p in $input) { try { if ((Get-Acl -LiteralPath $p).GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $u) { "1`t$p" } else { "0`t$p" } } catch { "0`t$p" } }'
+  const output = await new Promise<string>((done) => {
+    let text = ''
+    try {
+      const child = spawn(shell, ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] })
+      const timer = setTimeout(() => child.kill(), 30_000)
+      child.stdout.setEncoding('utf8').on('data', (chunk: string) => { text += chunk })
+      child.on('error', () => { clearTimeout(timer); done('') })
+      child.on('close', () => { clearTimeout(timer); done(text) })
+      child.stdin.end(paths.join('\n') + '\n', 'utf8')
+    } catch { done('') }
+  })
+  for (const line of output.split(/\r?\n/)) if (line.startsWith('1\t')) owned.add(line.slice(2))
+  return owned
+}
+
+/**
+ * The `safe.directory` entries Git honours (system, global and command-line config only), in order, an empty value
+ * clearing those before it. Read with one Git process; undefined when they can't be read.
+ */
+async function safeDirectoriesAsync(cwd: string): Promise<string[] | undefined> {
+  try {
+    const args = ['config', '--show-scope', '-z', '--get-all', 'safe.directory']
+    const ran = await runGitProcess(await withoutRepoProgramsAsync(cwd, args), { cwd, env: repoProgramEnv({ ...process.env, ...READ_ONLY_GIT_ENV }), timeout: 30_000 })
+    if (ran.error || ran.status !== 0 && ran.status !== 1) return undefined
+    const fields = ran.stdout.split('\0')
+    let entries: string[] = []
+    for (let index = 0; index + 1 < fields.length; index += 2) {
+      if (!['system', 'global', 'command'].includes(fields[index]!)) continue
+      const value = fields[index + 1]!
+      entries = value === '' ? [] : [...entries, value]
+    }
+    return entries
+  } catch { return undefined }
+}
+
+/** A path as Git spells it for `safe.directory`: forward slashes, no trailing slash. */
+const gitSpelling = (path: string): string => path.replace(/\\/g, '/').replace(/\/+$/, '')
+
+/**
+ * Which checkouts Git would trust, proven without opening each with Git: the worktree folder, its `.git` file and its
+ * Git folder are all owned by the user Mousse runs as (as Git requires), or `safe.directory` is `*` or names the
+ * worktree's real path exactly. A checkout not proven trusted here is checked with Git. `GIT_TEST_ASSUME_DIFFERENT_OWNER`,
+ * Git's own switch for treating every owner as different, is honoured the same way.
+ */
+export async function trustedCheckoutsAsync(checkouts: ReadonlyArray<{ path: string; gitDir: string }>): Promise<Set<string>> {
+  const trusted = new Set<string>()
+  if (!checkouts.length) return trusted
+  const assumeOther = /^(1|true|yes|on)$/i.test(process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER ?? '')
+  const owned = assumeOther ? new Set<string>() : await ownedByMeAsync(checkouts.flatMap(ownedPaths))
+  const rest: Array<{ path: string; gitDir: string }> = []
+  for (const checkout of checkouts) {
+    if (ownedPaths(checkout).every((path) => owned.has(path))) trusted.add(checkout.path)
+    else rest.push(checkout)
+  }
+  if (!rest.length) return trusted
+  const entries = await safeDirectoriesAsync(rest[0]!.path)
+  if (!entries) return trusted
+  for (const checkout of rest) {
+    let real: string
+    try { real = gitSpelling(await realpathLike(checkout.path)) } catch { continue }
+    if (entries.some((entry) => entry === '*' || !entry.includes('*') && !entry.startsWith('%(') && !entry.startsWith('~') && gitSpelling(entry) === real)) trusted.add(checkout.path)
+  }
+  return trusted
 }
 
 /** What reading one ref found: its commit, absent (`sha` unset), or why it can't be read. */
