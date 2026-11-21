@@ -118,6 +118,8 @@ export const LISTING_MAX_BUFFER = 256 * 1024 * 1024
 export interface GitProcessObserver {
   beforeSpawn(): void
   spawned(pid: number, at: number): void
+  /** A checkout slot stopped Git, and Git and every process it started have exited. */
+  stopped?(): void
 }
 
 /**
@@ -142,7 +144,7 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
       const file = gitFile()
       const { status, stdoutBytes, stderr, failure } = await timeGitRun(() => slot.run({
         file, argv, cwd: options.cwd, env: gitEnvFor(options.env), input: options.input, limit
-      }, signal))
+      }, signal, () => options.observer?.stopped?.()))
       signal?.throwIfAborted()
       const error = failure && Object.assign(new Error(failure.message), { code: failure.code })
       return { status, stdoutBytes, stdout: stdoutBytes.toString('utf8'), stderr, ...(error ? { error } : {}) }

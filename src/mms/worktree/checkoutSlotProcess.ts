@@ -18,13 +18,16 @@ interface CheckoutResult {
   stdoutBytes: Buffer
   stderr: string
   failure?: { message: string; code?: string }
+  /** The slot stopped Git, and Git and every process it started have exited. */
+  stopped?: boolean
 }
 
 interface CheckoutSlot {
   directory: string
   pid: number
   startedAt: number
-  run(command: CheckoutCommand, signal?: AbortSignal): Promise<CheckoutResult>
+  /** `onStopped` runs when the slot stopped Git and Git and every process it started have exited. */
+  run(command: CheckoutCommand, signal?: AbortSignal, onStopped?: () => void): Promise<CheckoutResult>
 }
 
 const activeSlot = new AsyncLocalStorage<CheckoutSlot>()
@@ -94,7 +97,7 @@ async function stopWindowsTree(child, startedAt) {
   // A reused PID must never become a target for taskkill.
   const slack = ${SPAWN_ANCHOR_SLACK_MS} * 10000
   const anchor = (startedAt + 11644473600000) * 10000
-  if (root?.[2] && Math.abs(root[2] - anchor) > slack) return
+  if (root?.[2] && Math.abs(root[2] - anchor) > slack) return false
   const owned = new Map([[pid, root?.[2]]])
   if (table) {
     for (let grew = true; grew;) {
@@ -123,19 +126,22 @@ async function stopWindowsTree(child, startedAt) {
     }
     await delay(50)
   }
+  // Without a process table, only Git itself is known to have exited.
+  return Boolean(table)
 }
 
 async function stopProcessGroup(pid) {
-  try { process.kill(-pid, 'SIGKILL') } catch (error) { if (error.code === 'ESRCH') return }
+  try { process.kill(-pid, 'SIGKILL') } catch (error) { if (error.code === 'ESRCH') return true }
   while (isLive(-pid)) {
     // A defunct process holds no files and can remain visible until its new parent reaps it.
     const rows = await runTool('ps', ['-A', '-o', 'pgid=,stat='])
     if (rows && !rows.split(/\r?\n/).some(row => {
       const [group, status] = row.trim().split(/\s+/)
       return Number(group) === pid && !status?.startsWith('Z')
-    })) return
+    })) return true
     await delay(50)
   }
+  return true
 }
 
 function run({ file, argv, cwd, env, input, limit }) {
@@ -153,9 +159,9 @@ function run({ file, argv, cwd, env, input, limit }) {
   child.stderr.on('data', chunk => { errSize += chunk.length; if (errSize > limit) tooLarge(); else stderr.push(chunk) })
   child.on('error', error => { failure = { message: error.message, code: error.code } })
   child.on('close', async status => {
-    await stopping
+    const stopped = await stopping === true
     cancel = undefined
-    report({ status, stdoutBytes: Buffer.concat(stdout), stderr: Buffer.concat(stderr).toString('utf8'), failure })
+    report({ status, stdoutBytes: Buffer.concat(stdout), stderr: Buffer.concat(stderr).toString('utf8'), failure, stopped })
   })
   if (input !== undefined) {
     child.stdin.on('error', () => {})
@@ -224,7 +230,7 @@ export async function runInCheckoutSlot<T>(directory: string, paths: string[], w
     signal?.removeEventListener('abort', abort)
     return await activeSlot.run({
       directory: resolve(directory), pid: owner.pid!, startedAt,
-      run: async (command, commandSignal) => {
+      run: async (command, commandSignal, onStopped) => {
         const cancellation = signal && commandSignal && signal !== commandSignal
           ? AbortSignal.any([signal, commandSignal])
           : commandSignal ?? signal
@@ -236,6 +242,7 @@ export async function runInCheckoutSlot<T>(directory: string, paths: string[], w
           owner.send(command, (error) => { if (error) stopped.abort(error) })
           // Keep both leases until the slot owner confirms the writer and its descendants have stopped.
           const [message] = await result
+          if ((message as CheckoutResult).stopped) onStopped?.()
           cancellation?.throwIfAborted()
           return message as CheckoutResult
         } finally {

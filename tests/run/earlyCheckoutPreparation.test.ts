@@ -89,9 +89,73 @@ describe('the first turn in a new worktree', () => {
     }
     const focus = (threadId: string, focused = true) => dispatchMethod(ctx, 'threads.focus', { threadId, focused })
     const toggle = (threadId: string, enabled: boolean, picked = false) => dispatchMethod(ctx, 'threads.setWorktreeEnabled', { threadId, enabled, picked })
-    const send = (threadId: string, mode: ChatMode = 'agent') => d.orch.send({ content: 'Read the tracked file', mode }, false, { threadId, clientRequestId: threadId, awaitMode: 'ack' })
+    const send = (threadId: string, mode: ChatMode = 'agent', clientRequestId = threadId) => d.orch.send({ content: 'Read the tracked file', mode }, false, { threadId, clientRequestId, awaitMode: 'ack' })
     const call = (method: string, params: Record<string, unknown>) => dispatchMethod(ctx, method, params)
     return { d, git, repo, thread, pi, focus, toggle, send, call }
+  }
+
+  /**
+   * A trusted smudge filter on every file. Git writes .gitattributes and .gitignore through it first. Its first run for
+   * keep/tracked.txt starts a child and both wait until `proceed` exists, so Git holds the worktree's index.lock
+   * meanwhile. Every other run passes the file through at once.
+   */
+  function stallingCheckout(w: ReturnType<typeof world>) {
+    const started = join(home!, 'stalled-checkout-pids')
+    const proceed = join(home!, 'release-stalled-checkout')
+    const filter = join(home!, 'stalled-checkout.cjs')
+    writeFileSync(filter, [
+      'const fs = require("node:fs")',
+      'const { spawn } = require("node:child_process")',
+      'const [started, proceed, path, parent] = process.argv.slice(2)',
+      'const wait = (finish) => { const timer = setInterval(() => { if (fs.existsSync(proceed)) { clearInterval(timer); finish() } }, 15) }',
+      'if (parent) {',
+      '  fs.writeFileSync(started, JSON.stringify([Number(parent), process.pid]))',
+      '  wait(() => {})',
+      '} else {',
+      '  const bytes = fs.readFileSync(0)',
+      '  if (path !== "keep/tracked.txt" || fs.existsSync(started)) process.stdout.write(bytes)',
+      '  else {',
+      '    spawn(process.execPath, [__filename, started, proceed, path, String(process.pid)], { stdio: "ignore" }).unref()',
+      '    wait(() => process.stdout.write(bytes))',
+      '  }',
+      '}'
+    ].join('\n'))
+    writeFileSync(join(w.repo, '.gitattributes'), '* filter=stall\n')
+    w.git(w.repo, 'add', '.gitattributes')
+    w.git(w.repo, 'commit', '-qm', 'attributes')
+    const quote = (path: string) => '"' + path.replaceAll('\\', '/') + '"'
+    w.git(w.repo, 'config', 'filter.stall.smudge', [process.execPath, filter, started, proceed].map(quote).join(' ') + ' %f')
+    expect(trustRepositoryPrograms(w.repo)?.filters['filter.stall.smudge']).toBeTruthy()
+    let pids: number[] | undefined
+    return {
+      proceed,
+      /** Waits for the filter and its child to start. */
+      async running() {
+        await waitFor(() => {
+          try { pids = JSON.parse(readFileSync(started, 'utf8')) as number[]; return true } catch { return false }
+        }, 'the checkout filter and its child to start', 30_000)
+      },
+      /** The filter's processes still running. */
+      async live() {
+        const entries = await readProcessEntries()
+        expect(entries).toBeDefined()
+        return entries!.filter((entry) => pids!.includes(entry.pid) && !entry.zombie).map((entry) => entry.pid)
+      }
+    }
+  }
+
+  /** Whether the disk slot is free now: a slot user of the same disk starts within a few seconds. */
+  async function diskSlotFree(path: string): Promise<boolean> {
+    const used = checkout.withCheckoutSlot(path, async () => true)
+    pending.push(used)
+    return await Promise.race([used, new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), 5_000) })])
+  }
+
+  /** Whether nothing holds the thread's lease. */
+  function leaseFree(directory: string): boolean {
+    const lease = tryAcquireExecutionLease(directory, { source: 'test after Stop' })
+    if (lease) releaseExecutionLeaseHandle(lease)
+    return Boolean(lease)
   }
 
   it('registers a second worktree while the first checkout holds the disk slot', async () => {
@@ -674,47 +738,15 @@ describe('the first turn in a new worktree', () => {
   it('stops a live checkout and its descendants before the disk slot and thread lease are reused', async () => {
     const w = world()
     const draft = w.thread()
-    const started = join(home!, 'stalled-checkout-pids')
-    const proceed = join(home!, 'release-stalled-checkout')
-    const filter = join(home!, 'stalled-checkout.cjs')
-    writeFileSync(filter, [
-      'const fs = require("node:fs")',
-      'const { spawn } = require("node:child_process")',
-      'const [started, proceed, parent] = process.argv.slice(2)',
-      'const wait = (finish) => { const timer = setInterval(() => { if (fs.existsSync(proceed)) { clearInterval(timer); finish() } }, 15) }',
-      'if (parent) {',
-      '  fs.writeFileSync(started, JSON.stringify([Number(parent), process.pid]))',
-      '  wait(() => {})',
-      '} else {',
-      '  const bytes = fs.readFileSync(0)',
-      '  if (fs.existsSync(started)) process.stdout.write(bytes)',
-      '  else {',
-      '    spawn(process.execPath, [__filename, started, proceed, String(process.pid)], { stdio: "ignore" }).unref()',
-      '    wait(() => process.stdout.write(bytes))',
-      '  }',
-      '}'
-    ].join('\n'))
-    writeFileSync(join(w.repo, '.gitattributes'), 'keep/tracked.txt filter=stall\n')
-    w.git(w.repo, 'add', '.gitattributes')
-    w.git(w.repo, 'commit', '-qm', 'attributes')
-    const quote = (path: string) => '"' + path.replaceAll('\\', '/') + '"'
-    w.git(w.repo, 'config', 'filter.stall.smudge', [process.execPath, filter, started, proceed].map(quote).join(' '))
-    expect(trustRepositoryPrograms(w.repo)?.filters['filter.stall.smudge']).toBeTruthy()
+    const stall = stallingCheckout(w)
+    const { proceed, live } = stall
 
     const abort = new AbortController()
     unblock = () => { writeFileSync(proceed, ''); abort.abort() }
     const active = draft.manager.provision(draft.id, 'main', w.repo, abort.signal)
     const stopped = active.then(() => 'completed', (error: Error) => error.name)
     pending.push(stopped)
-    let pids: number[] | undefined
-    await waitFor(() => {
-      try { pids = JSON.parse(readFileSync(started, 'utf8')) as number[]; return true } catch { return false }
-    }, 'the checkout filter and its child to start')
-    const live = async () => {
-      const entries = await readProcessEntries()
-      expect(entries).toBeDefined()
-      return entries!.filter((entry) => pids!.includes(entry.pid) && !entry.zombie).map((entry) => entry.pid)
-    }
+    await stall.running()
     expect(await live()).toHaveLength(2)
     expect(tryAcquireExecutionLease(draft.directory, { source: 'test while checkout is active' })).toBeNull()
 
@@ -734,6 +766,71 @@ describe('the first turn in a new worktree', () => {
     expect(readFileSync(join(waiting, 'keep', 'tracked.txt'), 'utf8')).toBe('keep')
     expect(existsSync(proceed)).toBe(false)
   }, 35_000)
+
+  it('lets the next Send finish a checkout that Stop ended while Git held the index lock', async () => {
+    const w = world()
+    const thread = w.thread()
+    const stall = stallingCheckout(w)
+    unblock = () => { writeFileSync(stall.proceed, '') }
+    await w.send(thread.id)
+    await stall.running()
+    expect(await stall.live()).toHaveLength(2)
+    const stopped = thread.manager.load()!
+    const lock = join(w.git(stopped.worktreePath, 'rev-parse', '--absolute-git-dir'), 'index.lock')
+    expect(existsSync(lock)).toBe(true)
+    // Git wrote these before the stalled file. They stay untracked, because Git never wrote the index.
+    expect(readFileSync(join(stopped.worktreePath, '.gitattributes'), 'utf8')).toContain('filter=stall')
+    expect(readFileSync(join(stopped.worktreePath, '.gitignore'), 'utf8')).toBe('ignored.txt\n')
+
+    await w.d.orch.stopThread(thread.id, 'user')
+    await waitFor(() => leaseFree(thread.directory), 'the stopped turn to let go of the thread', 30_000)
+    expect(await stall.live()).toEqual([])
+    expect(await diskSlotFree(w.repo)).toBe(true)
+    expect(existsSync(lock)).toBe(false)
+    expect(thread.manager.load()?.lifecycle).toBe('provisioning')
+    expect(w.pi.turns).toHaveLength(0)
+
+    await w.send(thread.id, 'agent', 'retry')
+    await waitFor(() => w.pi.turns.length === 1, 'the retried prompt to reach the provider', 50_000)
+    expect(w.pi.turns[0]).toMatchObject({ threadId: thread.id, cwd: stopped.worktreePath })
+    expect(thread.manager.load()).toMatchObject({ lifecycle: 'ready', branch: stopped.branch })
+    expect(readFileSync(join(stopped.worktreePath, 'keep', 'tracked.txt'), 'utf8')).toBe('keep')
+    expect(w.git(stopped.worktreePath, 'status', '--porcelain')).toBe('')
+    expect(existsSync(stall.proceed)).toBe(false)
+  }, 90_000)
+
+  it('stops the checkout a draft is preparing when Stop ends the Send waiting for it', async () => {
+    const w = world()
+    const draft = w.thread()
+    const stall = stallingCheckout(w)
+    unblock = () => { writeFileSync(stall.proceed, '') }
+    await w.focus(draft.id)
+    await stall.running()
+    const prepared = draft.manager.load()!
+    expect(prepared.prepared).toBeDefined()
+
+    await w.send(draft.id)
+    await waitFor(() => {
+      const state = w.d.orch.getTurnState(draft.id)
+      return state.step?.kind === 'preparing' && state.step.what === 'worktree'
+    }, 'the turn to wait for the draft’s worktree')
+    expect(await stall.live()).toHaveLength(2)
+    expect(readFileSync(join(prepared.worktreePath, '.gitignore'), 'utf8')).toBe('ignored.txt\n')
+
+    await w.d.orch.stopThread(draft.id, 'user')
+    // Stop returns once the checkout has exited and let go of what it held.
+    expect(await stall.live()).toEqual([])
+    expect(leaseFree(draft.directory)).toBe(true)
+    expect(await diskSlotFree(w.repo)).toBe(true)
+    expect(w.pi.turns).toHaveLength(0)
+
+    await w.send(draft.id, 'agent', 'retry')
+    await waitFor(() => w.pi.turns.length === 1, 'the retried prompt to reach the provider', 50_000)
+    expect(w.pi.turns[0]).toMatchObject({ threadId: draft.id, cwd: prepared.worktreePath })
+    expect(readFileSync(join(prepared.worktreePath, 'keep', 'tracked.txt'), 'utf8')).toBe('keep')
+    expect(w.git(prepared.worktreePath, 'status', '--porcelain')).toBe('')
+    expect(existsSync(stall.proceed)).toBe(false)
+  }, 90_000)
 
   it('preserves the disk slot after a crash until the surviving Git writer finishes', async () => {
     const w = world()

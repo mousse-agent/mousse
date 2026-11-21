@@ -306,7 +306,7 @@ import { disconnectedWorktreeFolder, driveNotConnectedText, waitForWorktreeFolde
 import { resolveProjectWorkingDirectory } from '../data/projectWorkingDirectory'
 import { lineageForChild } from '../data/subagentLineage'
 import { SNAPSHOT_STORE_REASON, WorkspaceResolver, modeMutatesFiles, unprovisionedContext } from '../workspace/WorkspaceResolver'
-import { isPreparing, PREPARED_WORKTREE_MAX_AGE_MS, prepareThreadWorkspace, releasePreparedWorkspace, settledPreparation } from '../workspace/workspacePreparation'
+import { isPreparing, PREPARED_WORKTREE_MAX_AGE_MS, prepareThreadWorkspace, releasePreparedWorkspace, settledPreparation, stopPreparation } from '../workspace/workspacePreparation'
 import { ensureSnapshotWorkspaceAsync, loadSnapshotWorkspaceMetadataAsync, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 import { threadPlacement, type ThreadPlacement } from '../workspace/threadPlacement'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
@@ -2318,6 +2318,8 @@ export class OrchestratorService extends EventEmitter {
   private measured?: { threadId: string; version?: string; session: ThreadSession }
   /** Threads running a scheduled occurrence's turn now (`isScheduledTurn`). */
   private readonly scheduledTurnThreads = new Set<string>()
+  /** Thread folders whose turn setup waits for the worktree its draft is preparing, by thread id (`endTurnSetups`). */
+  private readonly preparationWaits = new Map<string, string>()
   private readonly transcripts = new WeakMap<ThreadSession, TranscriptAssembler>()
   /** The streaming assembler of each native helper's mirror session (`nativeMirrors`): no turn runs there. */
   private readonly mirrorTranscripts = new WeakMap<ThreadSession, TranscriptAssembler>()
@@ -4180,13 +4182,19 @@ export class OrchestratorService extends EventEmitter {
   /**
    * Ends the setup of the turns of `threadIds` that are still being set up (`ThreadSession.setupStop`): a Stop of a
    * thread whose start waits for its repository or worktree ends that wait, and the turn ends before it started. Only a
-   * Stop does this; an internal abort lets the setup finish and stops the turn as it begins.
+   * Stop does this; an internal abort lets the setup finish and stops the turn as it begins. A worktree the draft was
+   * preparing for that turn stops too; the result settles once its checkout has exited and let go of the disk slot and lease.
    */
-  private endTurnSetups(threadIds: Iterable<string>): void {
+  private endTurnSetups(threadIds: Iterable<string>): Promise<unknown> {
+    const preparations: Promise<void>[] = []
     for (const id of threadIds) {
       const session = this.boundSession.threadId === id ? this.boundSession : this.sessions.get(id)
-      if (session && !session.activeTurn) session.setupStop?.abort(new DOMException('Thread stopped', 'AbortError'))
+      if (!session || session.activeTurn || !session.setupStop) continue
+      session.setupStop.abort(new DOMException('Thread stopped', 'AbortError'))
+      const preparing = this.preparationWaits.get(id)
+      if (preparing) preparations.push(stopPreparation(preparing))
     }
+    return Promise.all(preparations)
   }
 
   /** The thread's project folder, or undefined (no project, unbound session). */
@@ -4225,10 +4233,11 @@ export class OrchestratorService extends EventEmitter {
     if (!engine) {
       // Without a run engine there is only the local turn and its queue.
       const ended = this.endFolderWaits([threadId])
-      this.endTurnSetups([threadId])
+      const setupsEnded = this.endTurnSetups([threadId])
       const monitorsStopped = this.stopMonitors([threadId], reason) > 0
       const aborted = this.abortActiveTurn(threadId, { clearQueue: opts.clearQueue })
       if (aborted) this.showStopped(threadId, stoppedBy)
+      await setupsEnded
       return { ok: aborted || ended || compactionStopped || monitorsStopped, status: 'stopped', replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
     }
     const result = engine.stopSubtree({ threadId, reason, ...opts })
@@ -4237,9 +4246,10 @@ export class OrchestratorService extends EventEmitter {
     // waiting to be set up (its repository held by another operation).
     // And what they left running in the background (monitors, background commands, keep_working holds).
     let monitorsStopped = 0
+    let setupsEnded: Promise<unknown> | undefined
     if (!result.replayed) {
       this.endFolderWaits(result.threads)
-      this.endTurnSetups(result.threads)
+      setupsEnded = this.endTurnSetups(result.threads)
       monitorsStopped = this.stopMonitors(result.threads, reason)
     }
     // The Stop is recorded (every thread of the subtree has a higher generation): a pull request watch on any of them ends now.
@@ -4301,6 +4311,7 @@ export class OrchestratorService extends EventEmitter {
       // And the threads they launched on other computers, there (kept until it is delivered).
       this.stopRemoteLaunches(result.threads, reason === 'deleted' || reason === 'expired' ? reason : 'stopped')
     }
+    await setupsEnded
     const stoppedAnything = aborted || compactionStopped || monitorsStopped > 0 || worked.some(Boolean) || result.activeRuns.length + result.cancelledRuns.length + result.delegations.length > 0
     return { ok: stoppedAnything, ...result }
   }
@@ -14395,11 +14406,19 @@ export class OrchestratorService extends EventEmitter {
     // for what is left of it here, then claims it (`WorkspaceResolver`), instead of queueing behind the lease.
     if (recoveryDirectory && !session.executionLease && isPreparing(recoveryDirectory)) {
       setupStep('worktree')
-      const preparation = await settledPreparation(recoveryDirectory, setupSignal)
+      this.preparationWaits.set(session.threadId, recoveryDirectory)
+      let preparation: Awaited<ReturnType<typeof settledPreparation>>
+      try {
+        preparation = await settledPreparation(recoveryDirectory, setupSignal)
+      } finally {
+        this.preparationWaits.delete(session.threadId)
+      }
       turnTimingMark(session.threadId, 'prepared')
       if (preparation) console.info('[worktree-prep] waited at Send', { threadId: session.threadId, ...preparation })
       if (setupSignal.aborted) {
         if (this.lifecycle.signal.aborted || this.isShutdownAbort(opts?.externalSignal?.reason)) return requeueUnstarted()
+        // A Stop also stopped the checkout (`endTurnSetups`): the turn ends once it has exited.
+        if (setupStop.signal.aborted) await stopPreparation(recoveryDirectory)
         return this.endTurnBeforeStart(session, opts?.runId, queueItemId, claimOwnerToken)
       }
     }

@@ -18,13 +18,14 @@ import { ThreadWorkspaceManager } from './ThreadWorkspaceManager'
  *
  * A preparation holds the thread's lease from start to end, so nothing else writes the thread meanwhile, and a turn
  * of the thread waits for it here ({@link settledPreparation}) before it takes the lease. Preparations run in this
- * process only; one a quit interrupted is finished by the first turn (`resumeInterruptedProvision`).
+ * process only; one a quit or a Stop interrupted ({@link stopPreparation}) is finished by the next turn (`resumeInterruptedProvision`).
  */
 
 /** A prepared worktree that no message claimed for this long is eligible for removal. */
 export const PREPARED_WORKTREE_MAX_AGE_MS = 24 * 60 * 60_000
 
-const running = new Map<string, Promise<void>>()
+/** Each preparation stops on its own (a Stop of the turn waiting for it) or with the profile. */
+const running = new Map<string, { done: Promise<void>; stop: AbortController }>()
 
 function keyOf(threadDirectory: string): string {
   const path = resolve(threadDirectory)
@@ -55,7 +56,8 @@ export function prepareThreadWorkspace(input: { threadId: string; threadDirector
   const lease = tryAcquireExecutionLease(input.threadDirectory, { source: 'workspace-prepare' })
   if (!lease) return 'busy'
   const startedAt = performance.now()
-  const signal = lifecycle?.signal
+  const stop = new AbortController()
+  const signal = lifecycle ? AbortSignal.any([lifecycle.signal, stop.signal]) : stop.signal
   const work = async () => {
     const heartbeat = setInterval(() => heartbeatExecutionLease(lease), 10_000)
     heartbeat.unref()
@@ -79,9 +81,21 @@ export function prepareThreadWorkspace(input: { threadId: string; threadDirector
     }
   }
   const start = () => Promise.resolve().then(work)
-  const promise = lifecycle ? lifecycle.run('workspace-prepare', start, threadScope(input.threadId)) : start()
-  running.set(key, promise)
+  const done = lifecycle ? lifecycle.run('workspace-prepare', start, threadScope(input.threadId)) : start()
+  running.set(key, { done, stop })
   return 'started'
+}
+
+/**
+ * Stops the thread's preparation, if one is running, and resolves once it has ended: its Git checkout and that
+ * checkout's child processes have exited, and the disk slot and the thread's lease are free. The next turn finishes
+ * the checkout (`resumeInterruptedProvision`).
+ */
+export async function stopPreparation(threadDirectory: string): Promise<void> {
+  const entry = running.get(keyOf(threadDirectory))
+  if (!entry) return
+  entry.stop.abort(new DOMException('Thread stopped', 'AbortError'))
+  await entry.done.catch(() => {})
 }
 
 /** Whether the thread's worktree is being prepared now. */
@@ -91,10 +105,11 @@ export function isPreparing(threadDirectory: string): boolean {
 
 /**
  * Waits for the thread's preparation, if one is running, and says how long that took (`waitedMs`). Undefined when none
- * was running. A turn calls it before it takes the thread's lease; `signal` ends the wait (a Stop), not the preparation.
+ * was running. A turn calls it before it takes the thread's lease; `signal` ends only the wait. {@link stopPreparation}
+ * ends the preparation.
  */
 export async function settledPreparation(threadDirectory: string, signal?: AbortSignal): Promise<{ waitedMs: number } | undefined> {
-  const entry = running.get(keyOf(threadDirectory))
+  const entry = running.get(keyOf(threadDirectory))?.done
   if (!entry) return undefined
   const began = performance.now()
   if (!signal) await entry

@@ -48,7 +48,7 @@ import { timeGitSync } from '../diagnostics/turnBoundary'
 import { branchOfHeadRef, forgetRepositoryFacts, repositoryFacts } from '../git/repositoryFacts'
 import { gitEnvFor, gitFile } from '../git/gitExecutable'
 import { readRepoTrustAtAsync, repoTrustPathAsync } from '../git/repoTrust'
-import { checkoutProcessRecordAbsent, checkoutRegistrationIdentity, checkoutWriterGone, readCheckoutProcess, recoverCheckoutIndex, saveCheckoutProcess, trackCheckoutGit, type CheckoutProcessRecord } from './checkoutProcess'
+import { checkoutProcessRecordAbsent, checkoutRegistrationIdentity, checkoutWriterGone, clearUnindexedCheckoutFiles, readCheckoutProcess, recoverCheckoutIndex, saveCheckoutProcess, trackCheckoutGit, type CheckoutProcessRecord } from './checkoutProcess'
 
 /** A worktree prepared for a new thread and never claimed was removed (`ThreadWorkspaceManager.releasePrepared`). */
 export const PREPARED_RELEASE_OPERATION = 'workspace-prepared-release'
@@ -691,7 +691,8 @@ export class ThreadWorkspaceManager {
 
   /**
    * Finishes an interrupted registration or checkout when the journal identifies the exact branch, commit and layout.
-   * The thread's lease excludes other Mousse writers. Git preserves local edits when retrying the checkout.
+   * The thread's lease excludes other Mousse writers. Git preserves local edits when retrying the checkout. Files a
+   * stopped checkout wrote before Git recorded its index are cleared first when they hold the commit's content.
    */
   async resumeInterruptedProvision(projectPath: string, heldThreadLease: ThreadLeaseHandle, signal?: AbortSignal): Promise<boolean> {
     assertHeldThreadLease(this.threadDirectory, heldThreadLease)
@@ -728,7 +729,11 @@ export class ThreadWorkspaceManager {
       await populateWorktree({
         worktreePath: metadata.worktreePath, plan: expected.checkoutPlan, prefix: LONG_PATHS, signal,
         run: trackCheckoutGit(this.threadDirectory, processRecord, worktreeGit, signal),
-        beforeCheckout: async () => { if (!await validate()) throw new Error('The worktree registration changed before checkout recovery.') },
+        beforeCheckout: async () => {
+          const checked = await validate()
+          if (!checked) throw new Error('The worktree registration changed before checkout recovery.')
+          await clearUnindexedCheckoutFiles(metadata.worktreePath, checked, async (args, input) => String(await worktreeGit(metadata.worktreePath, [...LONG_PATHS, ...args], input)))
+        },
         beforeWorktreeFiles: metadata.prepared ? async () => { effectiveCheckout = await checkoutInputsKey(metadata.worktreePath) } : undefined
       })
       if (!await validate() || effectiveCheckout !== undefined && effectiveCheckout !== await checkoutInputsKey(metadata.worktreePath)) return false

@@ -1,5 +1,5 @@
 import { lstatSync } from 'node:fs'
-import { lstat, readFile } from 'node:fs/promises'
+import { lstat, readFile, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { gitCancellationScope, type GitProcessObserver } from '../git/runGitProcess'
@@ -63,6 +63,40 @@ export async function recoverCheckoutIndex(adminDir: string, record: CheckoutPro
   return lstat(join(adminDir, 'index.lock')).then(() => false, (error: NodeJS.ErrnoException) => error.code === 'ENOENT')
 }
 
+/** The lock files a checkout writer takes in the worktree's own Git directory (`sparse-checkout set`, then `checkout`). */
+const WRITER_LOCKS = ['index.lock', join('info', 'sparse-checkout.lock'), 'config.worktree.lock']
+
+/**
+ * A stopped Git cannot remove its lock files. Called once the stopped writer and its descendants have exited: no lock
+ * was there when it started (`beforeSpawn`), and the thread's lease and the disk slot kept every other Mousse writer out.
+ */
+async function removeStoppedWriterLocks(adminDir: string): Promise<void> {
+  for (const lock of WRITER_LOCKS) {
+    await unlink(join(adminDir, lock)).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error })
+  }
+}
+
+/**
+ * A checkout stopped before Git wrote the worktree's index leaves the files it already wrote untracked, and Git
+ * refuses to write over them. Removes those whose content Git reads as exactly the commit's, so the checkout can start
+ * again. A file with other content stays, and the checkout keeps refusing.
+ */
+export async function clearUnindexedCheckoutFiles(worktreePath: string, adminDir: string, git: (args: string[], input?: string) => Promise<string>): Promise<void> {
+  if (await lstat(join(adminDir, 'index')).then(() => true, (error: NodeJS.ErrnoException) => error.code !== 'ENOENT')) return
+  const written: Array<{ path: string; oid: string }> = []
+  for (const entry of (await git(['ls-tree', '-r', '-z', '--full-tree', 'HEAD'])).split('\0')) {
+    const match = /^\d+ blob (\w+)\t([^\n]+)$/.exec(entry)
+    if (!match) continue
+    const file = await lstat(join(worktreePath, match[2]!)).catch(() => undefined)
+    if (file?.isFile()) written.push({ path: match[2]!, oid: match[1]! })
+  }
+  if (!written.length) return
+  const oids = (await git(['hash-object', '--stdin-paths'], written.map((file) => file.path).join('\n') + '\n')).split(/\r?\n/)
+  for (const [i, file] of written.entries()) {
+    if (oids[i] === file.oid) await unlink(join(worktreePath, file.path))
+  }
+}
+
 /** Record each command before spawn and keep the writer fenced until its process tree has settled. */
 export function trackCheckoutGit(directory: string, record: CheckoutProcessRecord, git: WorktreeGit, signal?: AbortSignal): WorktreeGit {
   return async (cwd, args, input) => {
@@ -71,14 +105,19 @@ export function trackCheckoutGit(directory: string, record: CheckoutProcessRecor
       saveCheckoutProcess(directory, next)
       record.writer = writer
     }
+    // The checkout slot stopped this writer and saw it and its descendants exit. The slot process itself, the recorded
+    // PID, is still alive until the slot is let go.
+    let stopped = false
     const observer: GitProcessObserver = {
       beforeSpawn: () => {
-        if (record.registration && lstatSync(join(record.registration.adminDir, 'index.lock'), { throwIfNoEntry: false })) {
+        const adminDir = record.registration?.adminDir
+        if (adminDir && WRITER_LOCKS.some((lock) => lstatSync(join(adminDir, lock), { throwIfNoEntry: false }))) {
           throw new Error('The worktree index is already locked.')
         }
         setWriter({ kind: 'starting' })
       },
-      spawned: (pid, at) => setWriter({ kind: 'running', pid, at })
+      spawned: (pid, at) => setWriter({ kind: 'running', pid, at }),
+      stopped: () => { stopped = true }
     }
     const scope = signal ? gitCancellationScope(signal) : undefined
     let succeeded = false
@@ -91,7 +130,15 @@ export function trackCheckoutGit(directory: string, record: CheckoutProcessRecor
       await scope?.survivorsGone()
       const writer = record.writer
       if (succeeded && record.writer) setWriter(undefined)
-      else if (writer?.kind === 'running' && await checkoutWriterGone(record)) setWriter({ kind: 'stopped', at: writer.at })
+      else if (writer?.kind === 'running' && (stopped || await checkoutWriterGone(record))) {
+        // A Git that failed by itself removed its own locks. One the slot stopped could not.
+        if (stopped && record.registration) {
+          await removeStoppedWriterLocks(record.registration.adminDir).catch((error: unknown) => {
+            console.warn('[worktree] a stopped checkout left a Git lock file', { error: error instanceof Error ? error.message : String(error) })
+          })
+        }
+        setWriter({ kind: 'stopped', at: writer.at })
+      }
     }
   }
 }
