@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstatSync, type Stats } from 'node:fs'
 import { lstat, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, parse, resolve, sep } from 'node:path'
+import { dirname, join, parse, resolve, sep } from 'node:path'
 import type { GitRecord, ThreadAction } from '../../shared/threadActions'
 import { onlyExcludedIgnored } from '../git/excludedIgnored'
 import { englishMessagesEnv } from '../git/gitProcess'
@@ -363,6 +363,8 @@ interface PrivateFiles {
   last: string
   /** The repository's `info/attributes` (absent for a hidden store, whose own does not convert). */
   infoAttributes?: string
+  /** The worktree's own index, next to Mousse's folder in its Git directory (absent for a hidden store, which has none). */
+  worktreeIndex?: string
 }
 
 /** `rev-parse --show-toplevel`, from the turn's shared facts when they are open (`repositoryFacts.ts`). */
@@ -382,7 +384,7 @@ function* privateFiles(top: string, facts?: RepositoryFacts): Steps<PrivateFiles
   const [mousse, info] = facts ? [facts.mousseDir, facts.infoAttributes] : (yield* gitStep(top, ['rev-parse', '--git-path', 'mousse', '--git-path', 'info/attributes'])).split(/\r?\n/)
   const directory = resolve(top, mousse!)
   yield* disk.mkdir(directory)
-  return { directory, index: join(directory, 'snapshot-index'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), stalled: join(directory, FILTER_STALLED), last: join(directory, 'snapshot-last.json'), infoAttributes: resolve(top, info!) }
+  return { directory, index: join(directory, 'snapshot-index'), exactIndex: join(directory, EXACT_INDEX), filteredIndex: join(directory, FILTERED_INDEX), verdicts: join(directory, FILTER_VERDICTS), stalled: join(directory, FILTER_STALLED), last: join(directory, 'snapshot-last.json'), infoAttributes: resolve(top, info!), worktreeIndex: join(facts?.gitDir ?? dirname(directory), 'index') }
 }
 
 /** The file name of the exact tree's persistent private index, next to the snapshot's own (`gitPolicy.ts` knows it). */
@@ -451,7 +453,7 @@ function* followTrackedFiles(top: string, env: NodeJS.ProcessEnv, head: string |
  * brings it in line with the files HEAD and the real index track (`followTrackedFiles`), so a file that is ignored but
  * was force-added and committed later is in it.
  */
-function* indexTree(top: string, index: string, head: string | undefined): Steps<{ tree: string; gaps: CoverageGap[] }> {
+function* indexTree(top: string, index: string, head: string | undefined, worktreeIndex?: string): Steps<{ tree: string; gaps: CoverageGap[] }> {
   // A hidden store first leaves out what it does not keep (files over the size limit) and refuses a folder it cannot
   // snapshot at all; what it leaves out is named with the rest.
   const store = activeHiddenStore(top)
@@ -467,8 +469,25 @@ function* indexTree(top: string, index: string, head: string | undefined): Steps
     if (result.ok || !onlyExcludedIgnored(result.stderr, [...(hidden ? [] : [MOUSSE_DIRECTORY]), ...left.map((gap) => gap.path)])) return result
     return { ...result, ok: true }
   }
-  const indexOnce = function* (): Steps<{ tree: string; gaps: CoverageGap[] }> {
-    if (!(yield* disk.exists(index))) yield* gitStep(top, head ? ['read-tree', head] : ['read-tree', '--empty'], env)
+  const indexOnce = function* (seed: boolean): Steps<{ tree: string; gaps: CoverageGap[] }> {
+    if (!(yield* disk.exists(index))) {
+      // HEAD's tree, as `read-tree` gives it, but with the stat data of the worktree's own index wherever that index has
+      // HEAD's blob (`read-tree -m` of one tree): `add -A` then reads only the files changed since, not every file of a
+      // worktree just made. Without that index, or one Git cannot merge into (a conflict, a format it needs more for),
+      // the plain `read-tree` below.
+      if (seed && head && worktreeIndex && (yield* seedableIndex(worktreeIndex))) {
+        try {
+          yield* disk.copyFile(worktreeIndex, index)
+          // Its time as well: Git reads an entry no older than its index file as possibly changed, as it would there.
+          yield* disk.copyTimes(worktreeIndex, index)
+          yield* gitStep(top, ['read-tree', '-m', head], env)
+        } catch {
+          yield* disk.remove(index)
+          yield* disk.remove(`${index}.lock`)
+        }
+      }
+      if (!(yield* disk.exists(index))) yield* gitStep(top, head ? ['read-tree', head] : ['read-tree', '--empty'], env)
+    }
     // What can be read is recorded; what cannot (an unreadable file or folder, a nested repository with no commit) is
     // left out and named. Git stops at the first file it cannot read, so each one found is left out and it runs again.
     const gaps: CoverageGap[] = [...(hidden?.leftOut ?? [])]
@@ -508,12 +527,26 @@ function* indexTree(top: string, index: string, head: string | undefined): Steps
     return { tree: yield* gitStep(top, ['write-tree'], env), gaps }
   }
   try {
-    return yield* indexOnce()
+    return yield* indexOnce(true)
   } catch {
     // The caller holds the mutation locks, so a lock file left by a crash is nobody's.
     yield* disk.remove(index)
     yield* disk.remove(`${index}.lock`)
-    return yield* indexOnce()
+    return yield* indexOnce(false)
+  }
+}
+
+/**
+ * Whether the worktree's own index can seed the private one: a version 2 index (Git's default), whose entries carry no
+ * extended flags. A sparse checkout's skip-worktree bits and `add -N`'s intent-to-add ones need version 3 or 4, and
+ * `read-tree -m` would keep them; such an index, or one that cannot be read, is not used.
+ */
+function* seedableIndex(path: string): Steps<boolean> {
+  try {
+    const header = yield* disk.readHead(path, 8)
+    return header.length === 8 && header.toString('latin1', 0, 4) === 'DIRC' && header.readUInt32BE(4) === 2
+  } catch {
+    return false
   }
 }
 
@@ -636,13 +669,18 @@ function* conversionSteps(top: string, files: PrivateFiles, paths: readonly stri
   // `key\nvalue`, or `key` alone for a bare key, ended by NUL.
   const config = yield* tryGitStep(top, ['config', '--null', '--list'], undefined, LISTING)
   let converts = false
+  // The listing names every scope in Git's order (system, global, local, worktree, command), and the last value of a key
+  // is the one Git uses: Git for Windows sets `core.autocrlf=true` system-wide, and a person's `false` after it turns it off.
+  let autocrlf: string | undefined
   for (const item of config.ok ? config.stdout.split('\0').filter(Boolean) : []) {
     const newline = item.indexOf('\n')
     const key = (newline < 0 ? item : item.slice(0, newline)).toLowerCase()
-    if (key !== 'core.autocrlf' && key !== 'core.eol') continue
-    // A bare `autocrlf` key reads as true; `core.eol` counts whatever it says.
-    if (key !== 'core.autocrlf' || !/^(false|no|off|0)$/i.test(newline < 0 ? '' : item.slice(newline + 1).trim())) converts = true
+    // A bare key reads as true.
+    if (key === 'core.autocrlf') autocrlf = newline < 0 ? 'true' : item.slice(newline + 1).trim()
+    // `core.eol` counts whatever it says.
+    else if (key === 'core.eol') converts = true
   }
+  if (autocrlf !== undefined && !/^(false|no|off|0)$/i.test(autocrlf)) converts = true
   const infoAttributes = files.infoAttributes ? yield* nonEmpty(files.infoAttributes) : false
   const modern = yield* readsAttrSource(top)
   const filtered = new Set<string>()
@@ -1081,7 +1119,7 @@ export function* worktreeTreeSteps(cwd: string): Steps<string> {
 export function* worktreeTreesSteps(cwd: string, options: { exact?: boolean } = {}): Steps<{ tree: string; exactTree?: string }> {
   const top = yield* topOf(cwd)
   const files = yield* privateFiles(top)
-  const { tree } = yield* indexTree(top, files.index, yield* headOf(top))
+  const { tree } = yield* indexTree(top, files.index, yield* headOf(top), files.worktreeIndex)
   if (options.exact === false || activeHiddenStore(top)) return { tree }
   const exact = yield* exactTreeSteps(top, files, tree, yield* headOf(top))
   return { tree, ...(exact && 'tree' in exact ? { exactTree: exact.tree } : {}) }
@@ -1113,7 +1151,7 @@ export function* takeSnapshotSteps(cwd: string, input: SnapshotInput): Steps<Sna
   const head = facts ? facts.head : yield* headOf(top)
   // Where a turn's snapshot spends its time (`turnBoundary.ts`): nothing when no turn boundary is measured.
   turnBoundaryStep('snapshotHead')
-  const { tree, gaps: coverageGaps } = yield* indexTree(top, files.index, head)
+  const { tree, gaps: coverageGaps } = yield* indexTree(top, files.index, head, files.worktreeIndex)
   turnBoundaryStep('snapshotIndex')
   const hidden = activeHiddenStore(top) !== undefined
   const branch = hidden ? undefined : facts ? branchOfHeadRef(yield* step(() => undefined, () => facts.headRef())) : (yield* tryGitStep(top, ['branch', '--show-current'])).stdout || undefined

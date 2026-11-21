@@ -1,5 +1,5 @@
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync, type Stats } from 'node:fs'
-import { access, copyFile, lstat, mkdir, readdir, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises'
+import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync, type Stats } from 'node:fs'
+import { access, copyFile, lstat, mkdir, open, readdir, readFile, readlink, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises'
 
 /**
  * Code that reads and changes a folder through Git and the disk, written once and run two ways. Each call that can
@@ -70,5 +70,15 @@ export const files = {
   /** Removes a file, if it is there. */
   remove: (path: string): Steps<void> => step(() => rmSync(path, { force: true }), () => rm(path, { force: true })),
   copyFile: (from: string, to: string): Steps<void> => step(() => copyFileSync(from, to), () => copyFile(from, to)),
+  /** The first `bytes` of a file, or fewer when it is shorter. */
+  readHead: (path: string, bytes: number): Steps<Buffer> => step(() => {
+    const fd = openSync(path, 'r')
+    try { const buffer = Buffer.alloc(bytes); return buffer.subarray(0, readSync(fd, buffer, 0, bytes, 0)) } finally { closeSync(fd) }
+  }, async () => {
+    const handle = await open(path, 'r')
+    try { const buffer = Buffer.alloc(bytes); return buffer.subarray(0, (await handle.read(buffer, 0, bytes, 0)).bytesRead) } finally { await handle.close() }
+  }),
+  /** Gives `to` the access and modification times of `from`. */
+  copyTimes: (from: string, to: string): Steps<void> => step(() => { const at = statSync(from); utimesSync(to, at.atime, at.mtime) }, async () => { const at = await stat(from); await utimes(to, at.atime, at.mtime) }),
   writeText: (path: string, text: string): Steps<void> => step(() => writeFileSync(path, text), () => writeFile(path, text))
 }
