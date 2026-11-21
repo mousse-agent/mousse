@@ -330,6 +330,51 @@ describe('the handover', () => {
     expect(icon()).toBe(ICON)
   })
 
+  it('shows Done and the project\'s finished count from the first frame with a file shaped like a real one', async () => {
+    // As main writes it on a real profile (November 2026): projects with detected icons, the Projects tree, threads
+    // with their last run, subagent threads that finished unseen, an archived one, and only settled states kept.
+    const realProject = (id: string, name: string, order: number) => ({ id, name, path: `E:\\code\\${name}`, createdAt: T, order, detectedIconPath: 'favicon.svg', iconDetectedAt: T, iconDetector: 2 })
+    const model = { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus', name: 'Claude Opus 5.5', effort: 'high' }
+    const realThread = (id: string, name: string, projectId: string, order: number, extra: object = {}) => ({
+      id, name, projectId, createdAt: T, updatedAt: T, startedAt: T, order, settingsRevision: 1, modelOverride: model, worktreeEnabled: false, titleSource: 'final', lastReply: `${name}: finished.`, ...extra
+    })
+    const subagent = (id: string, name: string, parent: string, order: number) => realThread(id, name, 'p-mousse', order, { lineage: { parentThreadId: parent, rootThreadId: parent, relationship: 'subagent' }, workspaceBinding: { policy: 'isolated' }, permissionMode: 'full' })
+    const projects = [realProject('p-site', 'site', 0), realProject('p-mousse', 'mousse', 1)]
+    const threads = [
+      realThread('t-open', 'Measure turn checkpoint time', 'p-mousse', -9, { lastRun: 'done' }),
+      realThread('t-steer', 'Why steering messages disappear', 'p-mousse', -8, { lastRun: 'done', worktreeEnabled: true, permissionMode: 'full' }),
+      realThread('t-queue', 'Steer queued message fix', 'p-mousse', -7, { lastRun: 'done' }),
+      realThread('t-lead', 'Limits review lead', 'p-mousse', -6),
+      subagent('t-sub-1', 'Limits e2e tester', 't-lead', -5),
+      subagent('t-sub-2', 'Worktree pause fixer', 't-lead', -4),
+      realThread('t-old', 'Archived audit', 'p-mousse', -3, { settledAt: T, lastRun: 'done' }),
+      realThread('t-site', 'Pricing page copy', 'p-site', 0)
+    ]
+    // Main keeps only Done and Input: here every Done the service had, the subagents' included.
+    const settled = { 't-steer': 'completed', 't-queue': 'completed', 't-sub-1': 'completed', 't-sub-2': 'completed' } as const
+    window.localStorage.setItem(`mousse-profile-${WARM_PROFILE}-workspace`, JSON.stringify({ threadsSidebarView: 'projects', lastThreadListView: 'projects' }))
+    stubBridge({ ...warmView, threads: threads as never, projects: projects as never, activeThreadId: 't-open', activity: settled })
+    // The service's snapshot names every thread it has a runtime for, idle ones too.
+    extraAnswers = { 'threads.getActivity': () => Promise.resolve({ ...settled, 't-open': 'idle', 't-lead': 'idle', 't-old': 'idle', 't-site': 'idle' }) }
+    const App = await load()
+    act(() => root.render(createElement(App)))
+
+    const done = () => [...host.querySelectorAll('[data-mousse="sidebar"] .threads-sidebar-card-status-done')].map((mark) => mark.closest('[data-thread-id]')?.getAttribute('data-thread-id')).sort().join(',')
+    const finished = () => [...host.querySelectorAll('[data-mousse="sidebar"] .threads-sidebar-project-finished')].map((count) => count.textContent).join(',')
+    const shown = () => ({ done: done(), finished: finished() })
+    // The first render, before anything settles.
+    const first = shown()
+    expect(first.done).toBe('t-queue,t-steer')
+    expect(first.finished).toBe('2')
+    await settle()
+    expect(shown()).toEqual(first)
+
+    const frames = await framesOf(shown, () => connect(WARM_PROFILE, { threads, messages: freshMessages, projects, threadId: 't-open' }))
+    expect(useAppStore.getState().workspaceReady).toBe(true)
+    expect(frames.filter((frame) => frame.done !== first.done || frame.finished !== first.finished)).toEqual([])
+    expect(shown()).toEqual(first)
+  })
+
   describe('the transcript\'s place', () => {
     // jsdom lays nothing out: each turn is 300px tall, one after another, in a 600px list.
     const TURN = 300
