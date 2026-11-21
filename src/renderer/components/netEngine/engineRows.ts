@@ -1,5 +1,6 @@
 import type { NetEngineDevice } from '../../../shared/netEngine/local'
-import { ROUTE_CLASS_LABEL, routeText } from '../../../shared/netEngine/routes'
+import type { RouteClass } from '../../../shared/netEngine/routes'
+import { routeText } from '../../../shared/netEngine/routes'
 
 /** What a device's row offers (design §5.2): Access opens the preset control under it. */
 export type EngineRowAction = 'access' | 'address' | 'retry' | 'remove'
@@ -14,9 +15,27 @@ export interface EngineRowView {
   actions: EngineRowAction[]
 }
 
-/** The neutral message for a certificate outside its window: it cannot tell a wrong clock from an old certificate. */
-export const CLOCK_MESSAGE =
-  "The certificate is outside its validity window; check this device's clock."
+/** A route's class as Settings names it, in plain words. */
+export const ROUTE_WORDS: Readonly<Record<RouteClass, string>> = Object.freeze({
+  lan: 'Same network',
+  tailnet: 'Tailscale',
+  public: 'Internet',
+  tunnel: 'Internet',
+  ssh: 'SSH'
+})
+
+/** How a device is connected now, for its row ("same network", "via Tailscale"). */
+const HOW: Readonly<Record<RouteClass, string>> = Object.freeze({
+  lan: 'same network',
+  tailnet: 'via Tailscale',
+  public: 'over the internet',
+  tunnel: 'over the internet',
+  ssh: 'over SSH'
+})
+
+/** The clock case (a certificate outside its window): it cannot tell a wrong clock from an old pairing. */
+export const clockMessage = (name: string): string =>
+  `The clock on this computer or ${name} looks wrong. Check the date and time.`
 
 /** The notice when another profile under this OS account has the new networking on too. */
 export const SHARED_ACCOUNT_LINE = "Profiles in this account can read each other's files and keys."
@@ -73,8 +92,8 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
     }
   if (device.certificateWindow)
     return {
-      line: CLOCK_MESSAGE,
-      detail: `A wrong clock here or on ${name}, or an old certificate, gives this. Check both clocks, then Retry.`,
+      line: clockMessage(name),
+      detail: `Set both clocks to the right time, then Retry.`,
       warn: true,
       actions: ['retry', 'remove']
     }
@@ -110,7 +129,7 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
     }
   if (device.state === 'offline')
     return {
-      line: 'Offline',
+      line: `Can't reach it · open Mousse on ${name}`,
       detail: `Mousse is closed on ${name}, or it is on another network.`,
       actions: ['access', 'address', 'retry', 'remove']
     }
@@ -127,16 +146,16 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
 }
 
 /**
- * Where a device is found: the class of the route it is connected on (1b §7 `conn.up.route`), else "LAN" or the
- * address added for it.
+ * How a device is connected, in plain words: the class of the route it is connected on (1b §7 `conn.up.route`),
+ * else "same network". The addresses go in the tooltip.
  */
 export function engineWhere(device: NetEngineDevice): string {
-  if (device.route) return ROUTE_CLASS_LABEL[device.route]
-  const first = device.addresses?.[0]
-  if (!first) return 'LAN'
-  const address = routeText(first)
-  return device.addresses!.length > 1 ? `${address} +${device.addresses!.length - 1}` : address
+  return device.route ? HOW[device.route] : HOW.lan
 }
+
+/** Every address kept for a device, for the tooltip on how it is connected. */
+export const engineAddresses = (device: NetEngineDevice): string | undefined =>
+  device.addresses?.map(routeText).join(', ') || undefined
 
 /**
  * Reads a scanned or pasted pairing link: the ticket after `#`, and the host's name from `?n=` when the link has

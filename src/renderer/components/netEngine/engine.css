@@ -19,9 +19,6 @@
   vertical-align: -1px;
 }
 
-.engine-row-id {
-  font-family: var(--font-mono);
-}
 
 .engine-dialog {
   display: flex;
@@ -32,7 +29,40 @@
 
 .engine-dialog-choices {
   display: flex;
+  flex-direction: column;
   gap: var(--space-8);
+}
+
+/* One way to add a device: its name over a one-line hint. */
+.engine-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2, 2px);
+  height: auto;
+  padding: var(--space-8) var(--space-12);
+  text-align: left;
+}
+
+.engine-choice-hint {
+  color: var(--text-muted);
+  font-size: var(--font-size-small, 12px);
+}
+
+.engine-more-ways {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.engine-more-ways > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  margin-bottom: var(--space-8);
+}
+
+.engine-more-ways > .engine-choice + .engine-choice {
+  margin-top: var(--space-8);
 }
 
 .engine-qr {
@@ -163,8 +193,7 @@
 }
 
 .engine-reach-control,
-.engine-reach-form,
-.engine-reach-command {
+.engine-reach-form {
   display: inline-flex;
   align-items: center;
   gap: var(--space-8);
@@ -174,17 +203,6 @@
 .engine-reach-form .settings-input {
   min-width: 0;
   width: 220px;
-}
-
-.engine-reach-tunnel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-  padding: 0 var(--space-12) var(--space-8);
-}
-
-.engine-reach-command code {
-  font-family: var(--font-mono);
 }
 
 .engine-profile-choice,

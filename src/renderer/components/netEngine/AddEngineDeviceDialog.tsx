@@ -21,21 +21,23 @@ type Step =
   | { kind: 'confirm'; ticket: string; host: string }
   | { kind: 'joining'; host: string }
   | { kind: 'link' }
-  | { kind: 'enter' }
+  | { kind: 'enter'; link?: string }
 
 /** The other computer, before it says its own name. */
 const UNNAMED_HOST = 'the other computer'
 
 /**
- * Add device for the new networking (design §5.1, §7): Show QR here and answer the other computer's request in
- * this dialog, or Scan the other computer's code and confirm. Closing it ends the invitation it showed; a window
- * that closes or switches profile ends it on the daemon's side.
+ * Add device (design §5.1, §7): Show a code here and answer the other computer's request in this dialog; Scan or
+ * paste the other computer's code or link (a sent link goes on to its code, a shown one to Connect); or Send a
+ * link. More ways holds Over SSH and, where the build has phones, Add a phone. Closing it ends the invitation it
+ * showed; a window that closes or switches profile ends it on the daemon's side.
  */
 export function AddEngineDeviceDialog({
   status,
   onClose,
   initial = 'choose',
   initialLink,
+  onAddPhone,
   camera = defaultCamera
 }: {
   status: NetEngineStatus | undefined
@@ -43,6 +45,8 @@ export function AddEngineDeviceDialog({
   initial?: 'choose' | 'show' | 'scan' | 'link' | 'enter' | 'ssh'
   /** A `mousse://pair` link that opened Mousse: Enter link reads it at once. */
   initialLink?: string
+  /** Opens Add a phone (the old networking's phones, Mousse ID builds); absent where phones can't be added. */
+  onAddPhone?: () => void
   /** Opens a camera stream; tests and computers without one answer undefined. */
   camera?: () => Promise<MediaStream | undefined>
 }) {
@@ -112,73 +116,78 @@ export function AddEngineDeviceDialog({
     else setStep({ kind: 'confirm', ticket, host })
   }
 
+  // One paste field for both kinds: a sent link goes on to its code, a shown one (a QR) to Connect.
   const read = (text: string): boolean => {
     const link = readPairingLink(text)
     if (!link) return false
     setError('')
-    setStep({ kind: 'confirm', ticket: link.ticket, host: link.host ?? UNNAMED_HOST })
+    const confirm = () =>
+      setStep({ kind: 'confirm', ticket: link.ticket, host: link.host ?? UNNAMED_HOST })
+    if (!status?.sendLink) {
+      confirm()
+      return true
+    }
+    void window.mousse.platformRequest
+      .request<NetEngineJoinPreview>('netEngine.join.preview', { ticket: link.ticket })
+      .then(
+        (value) => (value?.kind === 2 ? setStep({ kind: 'enter', link: link.ticket }) : confirm()),
+        confirm
+      )
     return true
   }
 
+  // A build without the helper offers only what the old networking still does (Add a phone).
+  const engine = status && status.helper.state !== 'not_in_build' ? status : undefined
   const title =
     step.kind === 'show'
-      ? 'Show QR'
-      : step.kind === 'scan'
-        ? 'Scan'
+      ? 'Show a code'
+      : step.kind === 'scan' || step.kind === 'enter'
+        ? 'Scan or paste'
         : step.kind === 'link'
-          ? 'Send link'
-          : step.kind === 'enter'
-            ? 'Enter link'
-            : step.kind === 'ssh'
-              ? 'Add over SSH'
-              : 'Add device'
+          ? 'Send a link'
+          : step.kind === 'ssh'
+            ? 'Add over SSH'
+            : 'Add device'
   return (
     <Modal open title={title} onClose={onClose}>
       <div className="engine-dialog" data-step={step.kind}>
         {step.kind === 'choose' && (
           <div className="engine-dialog-choices">
-            <button
-              type="button"
-              className="settings-btn"
-              onClick={() => setStep({ kind: 'show' })}
-            >
-              Show QR
-            </button>
-            <button
-              type="button"
-              className="settings-btn"
-              onClick={() => setStep({ kind: 'scan' })}
-            >
-              Scan
-            </button>
-            {status?.sendLink && (
-              <>
-                <button
-                  type="button"
-                  className="settings-btn"
-                  title="For a computer that is not next to you"
-                  onClick={() => setStep({ kind: 'link' })}
-                >
-                  Send link
-                </button>
-                <button
-                  type="button"
-                  className="settings-btn"
-                  onClick={() => setStep({ kind: 'enter' })}
-                >
-                  Enter link
-                </button>
-              </>
+            {engine && (
+              <Choice
+                label="Show a code"
+                hint="The other computer scans it"
+                onClick={() => setStep({ kind: 'show' })}
+              />
             )}
-            {status?.reach && (
-              <button
-                type="button"
-                className="settings-btn"
-                title="Use another computer you can reach over SSH. One way: this computer uses it."
-                onClick={() => setStep({ kind: 'ssh' })}
-              >
-                Over SSH
-              </button>
+            {engine && (
+              <Choice
+                label="Scan or paste"
+                hint="The other computer's code or link"
+                onClick={() => setStep({ kind: 'scan' })}
+              />
+            )}
+            {engine?.sendLink && (
+              <Choice
+                label="Send a link"
+                hint="For a computer that isn't next to you"
+                onClick={() => setStep({ kind: 'link' })}
+              />
+            )}
+            {((status?.on && status.reach) || onAddPhone) && (
+              <details className="engine-more-ways">
+                <summary>More ways</summary>
+                {status?.on && status.reach && (
+                  <Choice
+                    label="Over SSH"
+                    hint="This computer uses another one you reach over SSH"
+                    onClick={() => setStep({ kind: 'ssh' })}
+                  />
+                )}
+                {onAddPhone && (
+                  <Choice label="Add a phone" hint="With the Mousse phone app" onClick={onAddPhone} />
+                )}
+              </details>
             )}
           </div>
         )}
@@ -194,7 +203,11 @@ export function AddEngineDeviceDialog({
         )}
 
         {step.kind === 'enter' && (
-          <EnterLinkPanel status={status} initialLink={initialLink} onJoined={onClose} />
+          <EnterLinkPanel
+            status={status}
+            initialLink={step.link ?? initialLink}
+            onJoined={onClose}
+          />
         )}
 
         {step.kind === 'ssh' && <SshAddSteps onDone={onClose} />}
@@ -303,6 +316,16 @@ export function AddEngineDeviceDialog({
 }
 
 const capitalize = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1)
+
+/** One way to add a device: its name, and a one-line hint under it. */
+function Choice({ label, hint, onClick }: { label: string; hint: string; onClick: () => void }) {
+  return (
+    <button type="button" className="settings-btn engine-choice" onClick={onClick}>
+      <span className="engine-choice-label">{label}</span>
+      <span className="engine-choice-hint">{hint}</span>
+    </button>
+  )
+}
 
 function QrCode({ text }: { text: string }) {
   const { size, path } = useMemo(() => qrSvgPath(text), [text])
@@ -421,7 +444,7 @@ function Scanner({
       </form>
       {notLink && (
         <p role="alert" className="chat-error">
-          This isn’t a pairing link.
+          This isn’t a link from Mousse.
         </p>
       )}
     </div>

@@ -11,7 +11,7 @@ import type {
   NetEngineLinkJoin,
   NetEngineStatus
 } from '../../../shared/netEngine/local'
-import { ROUTE_CLASS_LABEL } from '../../../shared/netEngine/routes'
+import { ROUTE_WORDS } from './engineRows'
 import { CopyButton } from '../settings/IconButtons'
 import { errorText, useDaemonCall } from '../devices/useDaemonCall'
 
@@ -374,7 +374,7 @@ export function JoinRoutes({
           title="Connect lets this computer dial these addresses."
         >
           {preview.destinations
-            .map((item) => `${item.label} (${ROUTE_CLASS_LABEL[item.cls]})`)
+            .map((item) => `${item.label} (${ROUTE_WORDS[item.cls]})`)
             .join(', ')}
         </p>
       )}
@@ -390,7 +390,7 @@ export function JoinRoutes({
                 checked={share.includes(item.route)}
                 onChange={(event) => onShare(item.route, event.target.checked)}
               />
-              {ROUTE_CLASS_LABEL[item.cls]} {item.label}
+              {ROUTE_WORDS[item.cls]} {item.label}
             </label>
           ))}
         </fieldset>

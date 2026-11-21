@@ -19,7 +19,6 @@ import { useLocalProjects } from '../hooks/useLocalProjects'
 import { onProviderListingsChanged } from '../lib/providerSnapshots'
 import { ProvidersSettings } from './providers/ProvidersSettings'
 import { SpeechSettings } from '../speech/SpeechSettings'
-import { NetDevicesSection } from './NetDevicesSection'
 import { EngineDevicesSection } from './netEngine/EngineDevicesSection'
 import { ActivitySection } from './ActivitySection'
 import { accountSection, takePendingSettingsAnchor, takePendingSettingsSection } from '../lib/settingsNavigation'
@@ -579,7 +578,6 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
           {activeSection === 'connections' && (
           <section id="connections" className="settings-section">
             <EngineDevicesSection />
-            <NetDevicesSection />
           </section>
           )}
         </div>

@@ -1,9 +1,8 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Globe } from '../../lib/icons'
 import type { NetEngineReach, NetEngineStatus } from '../../../shared/netEngine/local'
 import { classifyIp, parseRoute, routeText } from '../../../shared/netEngine/routes'
-import { SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
-import { CopyButton } from '../settings/IconButtons'
+import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from '../settings/SettingsRow'
 import { useDaemonCall } from '../devices/useDaemonCall'
 
 /** What Test says when the helper could not reach its own route (1b §1.5). */
@@ -22,12 +21,24 @@ function advertised(status: NetEngineStatus, cls: 'lan' | 'tailnet'): string | u
 }
 
 /**
- * Settings → Reach (1b §1.5): how other computers reach this one. LAN and Tailnet are switches; a port forward and
- * a tunnel each take an address. Each has Test. A change that needs new listeners restarts the helper (about a
- * second offline); the others show in the next invitation.
+ * Settings → Reach this computer (1b §1.5): how other computers reach this one. Same network and Tailscale are
+ * switches; a port forward and your own tunnel sit under More ways and each take an address. Each has Test. A
+ * change that needs new listeners restarts the helper (about a second offline); the others show in the next
+ * invitation. `moreWays` adds rows at the end of More ways and `trailing` at the end of the group; either one
+ * shows the group while the engine is off.
  */
-export function ReachSection({ status, onChanged }: { status: NetEngineStatus; onChanged: () => void }) {
-  const reach = status.reach
+export function ReachSection({
+  status,
+  onChanged,
+  moreWays,
+  trailing
+}: {
+  status: NetEngineStatus
+  onChanged: () => void
+  moreWays?: ReactNode
+  trailing?: ReactNode
+}) {
+  const reach = status.on ? status.reach : undefined
   const { busy, error, call } = useDaemonCall()
   const [test, setTest] = useState<TestState>()
   const [forward, setForward] = useState('')
@@ -38,7 +49,18 @@ export function ReachSection({ status, onChanged }: { status: NetEngineStatus; o
   useEffect(() => setForward(publicNow ? routeText(publicNow) : ''), [publicNow])
   useEffect(() => setForwardTo(reach?.forwardTo ?? ''), [reach?.forwardTo])
   useEffect(() => setTunnel(tunnelNow ? tunnelUrl(tunnelNow) : ''), [tunnelNow])
-  if (!reach) return null
+  if (!reach)
+    return moreWays || trailing ? (
+      <SettingsGroup
+        anchor="devices-engine-reach"
+        title="Reach this computer"
+        icon={Globe}
+        className="devices-group engine-reach"
+      >
+        {moreWays && <SettingsAdvanced label="More ways">{moreWays}</SettingsAdvanced>}
+        {trailing}
+      </SettingsGroup>
+    ) : null
 
   const save = async (change: Partial<NetEngineReach>) => {
     setTest(undefined)
@@ -88,26 +110,25 @@ export function ReachSection({ status, onChanged }: { status: NetEngineStatus; o
     const value = tunnel.trim()
     void save({ tunnels: value ? [value] : [] })
   }
-  const local = reach.wsPort !== undefined ? `http://127.0.0.1:${reach.wsPort}` : undefined
 
   return (
     <SettingsGroup
       anchor="devices-engine-reach"
-      title="Reach"
+      title="Reach this computer"
       icon={Globe}
       className="devices-group engine-reach"
       description={
         reach.unbound?.length ? (
           <span className="settings-status-warn" title={reach.unbound.join(', ')}>
-            Some addresses aren't up yet.
+            Some ways in aren't ready yet.
           </span>
         ) : undefined
       }
     >
       <SettingsRow
-        title="LAN"
+        title="Same Wi-Fi or network"
         description={
-          <span title="Computers on this network find this one by itself.">
+          <span title="Computers on the same Wi-Fi or network find this one by themselves.">
             {lan ? routeText(lan) : 'This network'} {result(lan)}
           </span>
         }
@@ -116,7 +137,7 @@ export function ReachSection({ status, onChanged }: { status: NetEngineStatus; o
             {reach.lan && testButton(lan)}
             <Switch
               checked={reach.lan}
-              label="LAN"
+              label="Same Wi-Fi or network"
               disabled={busy}
               onChange={(next) => void save({ lan: next })}
             />
@@ -124,9 +145,9 @@ export function ReachSection({ status, onChanged }: { status: NetEngineStatus; o
         }
       />
       <SettingsRow
-        title="Tailnet"
+        title="Tailscale"
         description={
-          <span title="Paired computers on your tailnet can reach this one at its tailnet address.">
+          <span title="Your computers signed in to the same Tailscale can reach this one.">
             {tailnet ? routeText(tailnet) : 'Off'} {result(tailnet)}
           </span>
         }
@@ -135,13 +156,14 @@ export function ReachSection({ status, onChanged }: { status: NetEngineStatus; o
             {reach.tailnet && testButton(tailnet)}
             <Switch
               checked={reach.tailnet}
-              label="Tailnet"
+              label="Tailscale"
               disabled={busy}
               onChange={(next) => void save({ tailnet: next })}
             />
           </span>
         }
       />
+      <SettingsAdvanced label="More ways">
       <SettingsRow
         title="Port forward"
         description={
@@ -153,8 +175,8 @@ export function ReachSection({ status, onChanged }: { status: NetEngineStatus; o
               aria-label="Public address and port"
               title={
                 reach.port !== undefined
-                  ? `Forward this port on your router to this computer: ${reach.port}`
-                  : 'Forward a port on your router to this computer.'
+                  ? `Over the internet: set your router to send ${reach.port} to this computer, then type your public address here.`
+                  : 'Over the internet: set your router to send connections to this computer, then type your public address here.'
               }
               onChange={(event) => setForward(event.target.value)}
             />
@@ -164,7 +186,7 @@ export function ReachSection({ status, onChanged }: { status: NetEngineStatus; o
                 value={forwardTo}
                 placeholder="192.168.1.20"
                 aria-label="Forwarded to"
-                title={`Port forward also opens this computer on your LAN at ${forwardTo || 'this address'}.`}
+                title={`Port forward also opens this computer on your network at ${forwardTo || 'this address'}.`}
                 onChange={(event) => setForwardTo(event.target.value)}
               />
             )}
@@ -181,15 +203,15 @@ export function ReachSection({ status, onChanged }: { status: NetEngineStatus; o
         }
       />
       <SettingsRow
-        title="Tunnel"
+        title="Your own tunnel"
         description={
           <form className="engine-reach-form" onSubmit={submitTunnel}>
             <input
               className="settings-input"
               value={tunnel}
               placeholder="https://name.example.com"
-              aria-label="Tunnel URL"
-              title={local ? `Point your tunnel at ${local}` : 'Your tunnel’s public https:// address.'}
+              aria-label="Tunnel address"
+              title="Over the internet: the https:// address of a tunnel you run, such as Cloudflare"
               onChange={(event) => setTunnel(event.target.value)}
             />
             <button
@@ -204,27 +226,15 @@ export function ReachSection({ status, onChanged }: { status: NetEngineStatus; o
           </form>
         }
       />
-      {local && (
-        <div className="engine-reach-tunnel" aria-label="Tunnel commands">
-          <TunnelCommand text={`cloudflared tunnel --url ${local}`} />
-          <TunnelCommand text={`tailscale funnel ${reach.wsPort}`} />
-        </div>
-      )}
+      {moreWays}
+      </SettingsAdvanced>
+      {trailing}
       {error && (
         <p role="alert" className="chat-error devices-error">
           {error}
         </p>
       )}
     </SettingsGroup>
-  )
-}
-
-function TunnelCommand({ text }: { text: string }) {
-  return (
-    <span className="engine-reach-command">
-      <code>{text}</code>
-      <CopyButton text={text} label="Copy command" />
-    </span>
   )
 }
 

@@ -241,7 +241,7 @@ export function Switch({
   )
 }
 
-/** The one "Advanced" disclosure a page may have, for rarely changed settings. */
+/** The one "Advanced" disclosure a page may have, for rarely changed settings; `label` names another (More ways). */
 export function SettingsAdvanced({ label = 'Advanced', children }: { label?: string; children: ReactNode }) {
   return (
     <details className={`settings-advanced ${COLLAPSE_DETAILS_CLASS}`}>

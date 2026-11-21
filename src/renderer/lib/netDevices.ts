@@ -1,12 +1,10 @@
 import type { NetStatus, NodeCapability, NodeId } from '../../shared/net'
-import type { AgentReach, BridgeAccessMine, BridgeAccessThere, BridgeNodeConnection, BridgeNodePolicy, NetAddonRecords, NetLinkCheck, NetStartOverCheck, PlusStatus, SshRecordView } from '../../shared/net/local'
+import type { AgentReach, BridgeAccessMine, BridgeNodeConnection, BridgeNodePolicy, NetAddonRecords, PlusStatus, SshRecordView } from '../../shared/net/local'
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
-import { parseVersion } from '../../shared/net/version'
 import { describePermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { accessPreset, accessPresetOf } from '../../shared/net/accessPresets'
-import { NODE_DELEGATION_TTL_MS } from '../../shared/net/limits'
 
 /** One route this computer knows for a device and how its last attempt went. */
 export interface DeviceRouteHealth {
@@ -55,6 +53,8 @@ export interface Device {
   routeHeld?: boolean
   /** The device keeps the list: it signs every device's pass and its renewals. Absent from a daemon that predates it. */
   keeper?: boolean
+  /** An engine pairing (the new networking), not one of the old networking's devices. */
+  source?: 'engine'
 }
 
 /** The device is connected here (a daemon from before the record connects every device). */
@@ -129,22 +129,6 @@ export function joinErrorWords(error: { code?: unknown; details?: unknown; messa
       return 'This computer is already set up with its own devices, so it can’t join another set.'
   }
   return String(error.message ?? error.code ?? 'The connection failed.')
-}
-
-/** Why this computer can't start over now, naming what stands in the way; undefined when it can. */
-export function startOverRefusal(check: NetStartOverCheck): string | undefined {
-  const names = (list?: string[]) => (list ?? []).join(', ')
-  switch (check.refused) {
-    case 'space_host':
-      return `This computer hosts ${names(check.hosted)}. Its members would lose it, so this computer can’t start over.`
-    case 'mousse_id':
-      return 'This computer is signed in to Mousse ID. Sign out first, then start over.'
-    case 'live_devices':
-      return check.keeper
-        ? `${names(check.live)} still rely on this computer. Remove them first, then start over.`
-        : `This computer still belongs with ${names(check.live)}. Remove it there first, then start over.`
-  }
-  return undefined
 }
 
 /** Words for a capability in the device line; `settings` is "work on threads". */
@@ -264,46 +248,6 @@ export function allowDetail(name: string, side: 'maker' | 'joiner'): string {
   return side === 'maker' ? `${access} Your other computers signed in to Mousse ID connect it on their own.` : access
 }
 
-/** Why a connect link can't be used here, from `net.link.check`; undefined for a link that can. */
-export function linkRefusal(check: NetLinkCheck): string | undefined {
-  if (check.row !== 'refused') return undefined
-  switch (check.reason) {
-    case 'connect_only':
-      return 'This link only connects devices already in its list. Make the link on the computer that keeps that list.'
-    case 'own_link':
-      return 'This link was made on this computer. Paste it on the other one.'
-    case 'other_list':
-      return 'This computer is in another list. Two lists can’t be merged.'
-    case 'join_unfinished':
-      return 'Finish or give up the connection under way first.'
-    case 'live_devices':
-      if (check.startOver?.keeper) return 'This computer keeps other devices connected. Make the link here and paste it on the other computer.'
-  }
-  return check.startOver ? startOverRefusal(check.startOver) ?? 'This link can’t be used here.' : 'This link can’t be used here.'
-}
-
-/**
- * Why making or pasting a connect link failed, with the one thing to do next. `side` is where it failed: a link
- * pasted here names the fix on the computer that made it.
- */
-export function linkErrorWords(error: { code?: unknown; details?: unknown; message?: unknown }, side: 'make' | 'paste'): string {
-  const reason = (error.details as { reason?: unknown } | undefined)?.reason
-  switch (reason) {
-    case 'stale':
-      return 'This link was used or replaced. Make a new link.'
-    case 'link_unreachable':
-      return 'Couldn’t reach the computer that made this link. On it, allow Mousse through the firewall, or connect both computers with Tailscale or SSH.'
-    case 'no_listener':
-      return 'No other computer can reach this one. Allow Mousse through the firewall, or turn on Tailscale or SSH.'
-    case 'passphrase':
-      return 'The system keychain refused. Choose a passphrase for this computer’s keys.'
-    case 'refused':
-      return 'The computer that made this link refused it. Make a new link there.'
-  }
-  if (side === 'paste' && error.code === 'peer_key_mismatch') return 'Another computer answered for this link. Make a new link.'
-  return side === 'paste' ? joinErrorWords(error) : String(error.message ?? error.code ?? 'The link couldn’t be made.')
-}
-
 /**
  * The preset name of what a connected computer may do here ("Work on threads", "Custom"), or undefined where the
  * detail shows no preset: a phone, a device not connected here, blocked, without Works on threads, or a daemon that
@@ -340,27 +284,6 @@ export function deviceListLine(device: Device, now: number, { signedOut = false 
   if (device.sshOffer) parts.push('offers an SSH route')
   return parts.join(' · ')
 }
-
-const DAY_MS = 86_400_000
-/** The keeper unseen this long gets a warning on its row: passes last `NODE_DELEGATION_TTL_MS` (7 days) without it. */
-export const KEEPER_AWAY_WARN_MS = 3 * DAY_MS
-/** The tooltip on the keeper's words. */
-export const KEEPER_DETAIL = `Signs every device's pass. Passes last ${NODE_DELEGATION_TTL_MS / DAY_MS} days and renew while this device is reachable.`
-
-/**
- * The warning on the keeper's row when this computer has not reached it for days: every pass it signed runs out unless
- * it renews them. Undefined while it is reachable, recently seen, never seen, or this computer is the keeper.
- */
-export function keeperAway(keeper: Device, devices: Device[], now: number): string | undefined {
-  if (keeper.self || keeper.state === 'open' || keeper.lastSeenAt === undefined) return undefined
-  const away = now - keeper.lastSeenAt
-  if (away < KEEPER_AWAY_WARN_MS) return undefined
-  const ends = devices.filter((device) => device.node !== keeper.node && !device.revoked && device.expiresAt > now).map((device) => device.expiresAt)
-  const end = ends.length ? `passes end ${passEndLabel(Math.min(...ends))}` : 'passes have ended'
-  return `Not reachable for ${Math.floor(away / DAY_MS)} days · ${end}`
-}
-/** "Wed, Nov 25" in the person's own format. */
-export const passEndLabel = (at: number): string => new Date(at).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
 
 /** What one device may do on one computer, in either direction. */
 export type DeviceAccess = Pick<BridgeAccessMine, 'threads' | 'work' | 'terminal' | 'editor' | 'bots'> & {
@@ -420,15 +343,6 @@ export function accessWords(access: DeviceAccess, { phone = false }: { phone?: b
   return { line: parts.length ? parts.join(' · ') : 'Nothing', detail }
 }
 
-/** A `bridge.access.there` answer, or undefined for anything else (a daemon here from before the call). */
-export function readAccessThere(value: unknown): BridgeAccessThere | undefined {
-  const answer = value as BridgeAccessThere | undefined
-  if (answer?.state === 'known' && answer.access && typeof answer.access === 'object') return answer
-  if (answer?.state === 'not_connected' || answer?.state === 'refused') return answer
-  if (answer?.state === 'unknown' && (answer.reason === 'offline' || answer.reason === 'older')) return answer
-  return undefined
-}
-
 /** Hover text: the connection in use and every known route with its last result. */
 export function routeDetails(device: Device): string {
   const lines: string[] = []
@@ -444,65 +358,6 @@ export function routeDetails(device: Device): string {
     lines.push(`${routeLabel(health.route.transport)}: ${result}`)
   }
   return lines.join('\n')
-}
-
-export interface UpdateInstructions {
-  summary: string
-  /** A shell command to run on the device, when one exists for its platform. */
-  command?: string
-}
-
-const RELEASES = 'https://github.com/mousse-agent/mousse/releases'
-
-/** The steps for a headless Linux x86_64 host: verify the download, install the service, restart it. */
-function headlessLinuxScript(version: string): string {
-  const file = `mousse-cli-${version}-linux-x86_64.AppImage`
-  return [
-    'set -e',
-    `mkdir -p ~/.local/share/mousse/cli/${version} && cd ~/.local/share/mousse/cli/${version}`,
-    `curl -fLO ${RELEASES}/download/v${version}/${file}`,
-    `curl -fLO ${RELEASES}/download/v${version}/SHA256SUMS-${version}.txt`,
-    `sha256sum -c --ignore-missing SHA256SUMS-${version}.txt`,
-    `chmod +x ${file}`,
-    `./${file} --appimage-extract > /dev/null`,
-    // The packaged CLI needs the Chromium sandbox off on a host without a SUID helper, both when
-    // it runs here and when systemd starts it.
-    'export ELECTRON_DISABLE_SANDBOX=1',
-    './squashfs-root/mousse-cli service install',
-    'mkdir -p ~/.config/systemd/user/mousse-mms.service.d',
-    "printf '[Service]\\nEnvironment=ELECTRON_DISABLE_SANDBOX=1\\n' > ~/.config/systemd/user/mousse-mms.service.d/sandbox.conf",
-    'systemctl --user daemon-reload',
-    'systemctl --user restart mousse-mms'
-  ].join('\n')
-}
-
-/**
- * What to do to bring `device` to `target` (this device's version). Only a headless Linux x86_64
- * host gets a command; every other platform gets words that match how it really updates.
- */
-export function updateInstructions(device: Device, target: string): UpdateInstructions {
-  const name = device.name
-  if (!parseVersion(target)) return { summary: `Update Mousse on ${name} to match this device. Releases are on ${RELEASES}.` }
-  const page = `${RELEASES}/tag/v${target}`
-  switch (device.platform) {
-    case 'linux':
-      if (device.arch === 'x64')
-        return {
-          summary: `For ${name} running the headless mousse-cli as a service, run this on it. It checks the download against the published checksums, installs it, and restarts the service, which interrupts threads running there. If ${name} runs the Mousse desktop app instead, open the app there: a copy started from its AppImage updates itself.`,
-          command: headlessLinuxScript(target)
-        }
-      return {
-        summary: `If ${name} runs the Mousse desktop app, open the app there: a copy started from its AppImage updates itself. There is no headless download for ${device.arch ? `${device.arch} ` : 'this kind of '}Linux hosts yet; releases are on ${page}.`
-      }
-    case 'darwin': {
-      const dmg = device.arch === 'arm64' ? `Mousse-${target}-arm64.dmg` : device.arch === 'x64' ? `Mousse-${target}-x64.dmg` : `Mousse-${target}-arm64.dmg (Apple silicon) or Mousse-${target}-x64.dmg (Intel)`
-      return { summary: `Mousse for macOS can't update itself yet. On ${name}, download ${dmg} from ${page} and replace the app.` }
-    }
-    case 'win32':
-      return { summary: `Mousse for Windows updates itself: open Mousse on ${name} and let it install ${target}. To do it by hand, run Mousse.Setup.${target}.exe from ${page}.` }
-    default:
-      return { summary: `Update Mousse on ${name} to ${target}. Installers and the headless CLI are on ${page}.` }
-  }
 }
 
 /** The remote machine record that set up or approved a device, if any. */
