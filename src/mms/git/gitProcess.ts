@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { gitChildSpawned, spawnGit } from './gitSpawn'
 import { StringDecoder } from 'node:string_decoder'
 import { mousseGitEnv } from './gitEnv'
 import { timeGitChild } from '../diagnostics/turnBoundary'
@@ -161,7 +162,7 @@ export function runGit(cwd: string, args: readonly string[], options: GitRunOpti
       return
     }
     options.beforeStart?.()
-    const child = timeGitChild(() => spawn(gitFile(), args, {
+    const child = timeGitChild(() => spawnGit(gitFile(), args, {
       cwd,
       env: gitEnvFor(mousseGitEnv({ ...process.env, ...englishMessagesEnv(), ...options.env })),
       stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
@@ -227,17 +228,19 @@ export function runGit(cwd: string, args: readonly string[], options: GitRunOpti
       if (stopping) return
       stopping = true
       if (silence) clearTimeout(silence)
+      // The process may still be starting on the Git worker: its pid is known once it has.
+      const started = gitChildSpawned(child)
       if (process.platform === 'win32') {
         // `/T` walks the process tree, `/F` is the only way to end a console-less process.
-        treeKilled = new Promise<void>((done) => {
+        treeKilled = started.then(() => new Promise<void>((done) => {
           if (!child.pid) return done()
           const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
           killer.on('error', () => done())
           killer.on('close', () => done())
-        })
+        }))
       } else {
         // Let Git remove its lock files, then end the whole group.
-        killGroup('SIGTERM')
+        void started.then(() => killGroup('SIGTERM'))
         escalate = setTimeout(() => killGroup('SIGKILL'), KILL_GRACE_MS)
       }
       // A grandchild holding the pipes must not hold the repository lease.

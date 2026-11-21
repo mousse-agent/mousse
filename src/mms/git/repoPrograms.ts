@@ -12,6 +12,7 @@ import { isTrustedRepoEntry, readRepoTrust, readRepoTrustAt, readRepoTrustAtAsyn
 import { waitForFolderAccess } from '../files/folderAccess'
 import { timeGitChild, timeGitSync } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile, simpleGitWithProgram } from './gitExecutable'
+import { spawnGit } from './gitSpawn'
 
 /**
  * Git commands Mousse runs on a user's repository start no program the repository configures.
@@ -335,7 +336,7 @@ async function bareGitAsync(cwd: string, args: string[], signal?: AbortSignal, c
   const env = repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...await untilAborted(gitDirectoryEnvAsync(cwd), signal), ...(ceiling ? { GIT_CEILING_DIRECTORIES: ceiling } : {}) })
   signal?.throwIfAborted()
   return new Promise((settle, reject) => {
-    const child = timeGitChild(() => spawn(gitFile(), PROBE_ARGS(args), { cwd, windowsHide: true, env: gitEnvFor(env), stdio: ['ignore', 'pipe', 'ignore'], signal }))
+    const child = timeGitChild(() => spawnGit(gitFile(), PROBE_ARGS(args), { cwd, windowsHide: true, env: gitEnvFor(env), stdio: ['ignore', 'pipe', 'ignore'], signal }))
     const chunks: Buffer[] = []
     let size = 0
     let stopped: 'time' | 'size' | undefined

@@ -44,7 +44,7 @@ const APPROVED_GIT_SPAWNERS: Record<string, string> = {
 /** The one place a `gh` process starts; everything else passes `'gh'` to an `ExecutableRunner`. */
 const GH_SPAWNER = 'src/mms/git/ghRunner.ts'
 
-const SPAWNERS = new Set(['spawn', 'spawnSync', 'execFile', 'execFileSync', 'exec', 'execSync', 'fork', 'spawnGit', 'execFileAsync', 'nodeSpawn'])
+const SPAWNERS = new Set(['spawn', 'spawnSync', 'execFile', 'execFileSync', 'exec', 'execSync', 'fork', 'spawnGit', 'execFileGit', 'execFileGitAsync', 'execFileAsync', 'nodeSpawn'])
 /** Calls that take `'gh'` without starting it themselves: the runner checks it. */
 const RUNNERS = new Set(['runExecutable', 'base', 'run', 'runner'])
 

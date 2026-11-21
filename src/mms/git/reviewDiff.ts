@@ -4,6 +4,7 @@ import { lstat, open, readlink, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative } from 'node:path'
 import { leavesFolder } from '../files/pathGuard'
 import { checkRepoPrograms, guardedSimpleGit, NO_DIFF_PROGRAMS } from './repoPrograms'
+import { execFileGit } from './gitSpawn'
 import {
   EMPTY_TREE_SHA,
   REVIEW_MAX_COUNTED_UNTRACKED,
@@ -116,7 +117,7 @@ export function parseNumstatZ(output: string): NumstatEntry[] {
 
 function hashEmptyTree(cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = timeGitChild(() => execFile(gitFile(), guarded(cwd, ['hash-object', '-t', 'tree', '--stdin']), { cwd, env: gitEnvFor(gitEnv(cwd)), encoding: 'utf8' }, (error, stdout) => {
+    const child = timeGitChild(() => execFileGit(gitFile(), guarded(cwd, ['hash-object', '-t', 'tree', '--stdin']), { cwd, env: gitEnvFor(gitEnv(cwd)), encoding: 'utf8' }, (error, stdout) => {
       if (error) reject(error)
       else resolve(stdout.trim())
     }))

@@ -4,6 +4,7 @@ import { readFrozenEntryAsync, type FrozenEntryProof } from '../lifecycle/verifi
 import { gitEnv, guardedAsync } from './git'
 import { timeGitChild } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile } from '../git/gitExecutable'
+import { gitChildSpawned, spawnGit } from '../git/gitSpawn'
 
 /**
  * Which files on disk a restore can remove without a copy: those whose bytes are exactly what Git writes back from their
@@ -67,11 +68,13 @@ async function streamGitAsync(top: string, args: string[], input: string, onData
   const argv = await guardedAsync(top, args, { stdin: input, ...(env ? { env } : {}) })
   const group = deadline !== undefined && process.platform !== 'win32'
   return await new Promise<Streamed>((settle, fail) => {
-    const child = timeGitChild(() => spawn(gitFile(), argv, { cwd: top, env: gitEnvFor(gitEnv(top, env)), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], ...(group ? { detached: true } : {}) }))
+    const child = timeGitChild(() => spawnGit(gitFile(), argv, { cwd: top, env: gitEnvFor(gitEnv(top, env)), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], ...(group ? { detached: true } : {}) }))
     const errors: Buffer[] = []
     let failed: Error | undefined
     let stopped = false
-    const stopAll = (): void => {
+    // The process may still be starting on the Git worker: its pid is known once it has.
+    const stopAll = (): void => { void gitChildSpawned(child).then(stopStarted) }
+    const stopStarted = (): void => {
       if (child.pid === undefined) return
       // Git first, so it never reports the filters it started as failed; then everything else in its group.
       if (group) { child.kill('SIGKILL'); try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ } }

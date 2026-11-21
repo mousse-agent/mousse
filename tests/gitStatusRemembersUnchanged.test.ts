@@ -2,7 +2,11 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+// These tests read what Git is given (its environment, its runs) at `node:child_process`; Git then has to start on
+// this thread, as it does with the helper off. What the helper passes on is checked in gitSpawnWorker.test.ts.
+process.env.MOUSSE_GIT_SPAWN_WORKER = '0'
+afterAll(() => { delete process.env.MOUSSE_GIT_SPAWN_WORKER })
 
 // Counts the `hash-object` runs the status read makes, without changing what they do. `systemAttributes`, when set,
 // is the answer to `git var GIT_ATTR_SYSTEM`: the real file is the installation's, which a test must not write.

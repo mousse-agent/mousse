@@ -28,6 +28,7 @@ import { isKeptFilesItem, keptOnDelete, unverifiedHolds } from '../../shared/res
 import { isOwnedSnapshotStore, withOwnedBranches } from '../git/gitPolicy'
 import { threadStoreKeptFilesAsync } from '../actions/SnapshotRefReleaseService'
 import { threadRecordName } from '../data/threadRecords'
+import { inBackgroundGitLane } from '../git/gitSpawn'
 
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const within = (root: string, path: string): boolean => { const rel = relative(resolve(root), resolve(path)); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) }
@@ -217,7 +218,7 @@ export class ResourcePurgeService {
   start(): void {
     if (this.timer) return
     this.stopping = false
-    this.timer = setInterval(() => { void this.requestSweep().catch(() => { /* Invalid policy/source remains visible through inventory; no cleanup occurred. */ }) }, 60_000)
+    this.timer = setInterval(() => { void inBackgroundGitLane(() => this.requestSweep()).catch(() => { /* Invalid policy/source remains visible through inventory; no cleanup occurred. */ }) }, 60_000)
     this.timer.unref()
   }
   async stop(): Promise<void> { this.stopping = true; if (this.timer) clearInterval(this.timer); this.timer = undefined; await this.sweepPromise?.catch(() => undefined) }

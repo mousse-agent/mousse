@@ -5,12 +5,13 @@ import { access, mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promis
 import { promisify } from 'node:util'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
-import { execFile, execFileSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from './repoPrograms'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { timeGitChild, timeGitSync } from '../diagnostics/turnBoundary'
 import { repositoryFacts } from './repositoryFacts'
 import { gitEnvFor, gitFile } from './gitExecutable'
+import { execFileGit } from './gitSpawn'
 
 export type RepositoryMutationCapability =
   | { allowed: true }
@@ -246,7 +247,7 @@ export function resolveRepositoryIdentity(cwd: string, options: ResolveRepositor
 function gitAsync(cwd: string, ...args: string[]): Promise<string | null> {
   return withoutRepoProgramsAsync(cwd, args).then(
     (argv) => new Promise<string | null>((settle) => {
-      timeGitChild(() => execFile(gitFile(), argv, { cwd, env: gitEnvFor(repoProgramEnv()), encoding: 'utf8', windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout) => settle(error ? null : stdout.trim())))
+      timeGitChild(() => execFileGit(gitFile(), argv, { cwd, env: gitEnvFor(repoProgramEnv()), encoding: 'utf8', windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout) => settle(error ? null : stdout.trim())))
     }),
     () => null
   )

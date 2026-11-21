@@ -1,7 +1,11 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+// These tests read what Git is given (its environment, its runs) at `node:child_process`; Git then has to start on
+// this thread, as it does with the helper off. What the helper passes on is checked in gitSpawnWorker.test.ts.
+process.env.MOUSSE_GIT_SPAWN_WORKER = '0'
+afterAll(() => { delete process.env.MOUSSE_GIT_SPAWN_WORKER })
 
 const spawned: Array<{ args: readonly string[]; env: NodeJS.ProcessEnv | undefined }> = []
 vi.mock('node:child_process', async (importOriginal) => {

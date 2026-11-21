@@ -1,6 +1,6 @@
-import { execFile } from 'node:child_process'
 import { statSync } from 'node:fs'
 import { win32 } from 'node:path'
+import { execFileGit } from './gitSpawn'
 
 /**
  * The Git program Mousse starts, and the environment it starts it with.
@@ -97,7 +97,7 @@ function isDirectory(path: string): boolean {
 
 function runExecPath(file: string): Promise<string | undefined> {
   return new Promise((settle) => {
-    execFile(file, ['--exec-path'], { windowsHide: true, encoding: 'utf8', timeout: 15_000, cwd: win32.dirname(file) }, (error, stdout) => settle(error ? undefined : stdout.trim()))
+    execFileGit(file, ['--exec-path'], { windowsHide: true, encoding: 'utf8', timeout: 15_000, cwd: win32.dirname(file) }, (error, stdout) => settle(error ? undefined : stdout.trim()))
   })
 }
 

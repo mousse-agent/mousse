@@ -1,6 +1,7 @@
 import type { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../queue/ThreadExecutionLease'
+import { inBackgroundGitLane } from '../git/gitSpawn'
 import { UndoRetentionService } from './UndoRetentionService'
 import { ReceiptRefReleaseService } from './ReceiptRefReleaseService'
 import { releaseSnapshotRefs } from './SnapshotRefReleaseService'
@@ -44,9 +45,9 @@ export class UndoRetentionSweeper {
   constructor(private readonly store: ResourceLifecycleStore, private readonly options: UndoRetentionSweeperOptions = { intervalMs: 60 * 60 * 1000, tasksPerBatch: 20, firstPassAfterMs: 2 * 60 * 1000 }) {}
   start(): void {
     if (this.timer || this.abort.signal.aborted) return
-    this.timer = setInterval(() => { void this.tick() }, this.options.intervalMs)
+    this.timer = setInterval(() => { void inBackgroundGitLane(() => this.tick()) }, this.options.intervalMs)
     this.timer.unref()
-    this.first = setTimeout(() => { void this.tick() }, this.options.firstPassAfterMs ?? 0)
+    this.first = setTimeout(() => { void inBackgroundGitLane(() => this.tick()) }, this.options.firstPassAfterMs ?? 0)
     this.first.unref()
   }
   stop(): Promise<void> {

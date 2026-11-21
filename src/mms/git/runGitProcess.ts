@@ -1,10 +1,10 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { spawn } from 'node:child_process'
-import { createReadStream, existsSync, rmSync, statSync } from 'node:fs'
+import { existsSync, rmSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { StoppedGitTree } from './stoppedGitTree'
 import { timeGitChild } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile } from './gitExecutable'
+import { gitChildSpawned, gitChildStartedAt, spawnGit } from './gitSpawn'
 export { gitStopProbe, StoppedGitTree } from './stoppedGitTree'
 
 /** What a Git process left: as `spawnSync` reports it. */
@@ -140,7 +140,10 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
     const lockedBefore = indexLock !== undefined && existsSync(indexLock)
     // When the command was started: its creation time must match this, so a pid reused later is never taken for it.
     const spawnedAt = Date.now()
-    const child = timeGitChild(() => spawn(gitFile(), argv, { cwd: options.cwd, env: gitEnvFor(options.env), windowsHide: true, detached: ownGroup, stdio: [options.input !== undefined || options.inputFile !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] }))
+    const child = timeGitChild(() => spawnGit(gitFile(), argv, {
+      cwd: options.cwd, env: gitEnvFor(options.env), windowsHide: true, detached: ownGroup, stdio: [options.input !== undefined || options.inputFile !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      ...(options.inputFile !== undefined ? { inputFile: options.inputFile, onInputFileError: (readError: Error) => { error ??= readError } } : {})
+    }))
     const out: Buffer[] = []
     const err: Buffer[] = []
     let outSize = 0
@@ -151,7 +154,10 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
       error = Object.assign(new Error(`spawnSync git ${code}`), { code, syscall: 'spawnSync git' })
       child.kill()
     }
-    const timer = options.timeout ? setTimeout(() => stop('ETIMEDOUT'), options.timeout) : undefined
+    // The time limit counts from when Git started: background Git may first wait for its disk (see `spawnGit`).
+    let timer: NodeJS.Timeout | undefined
+    const timeLimit = options.timeout
+    if (timeLimit) void gitChildSpawned(child).then(() => { if (!settled) timer = setTimeout(() => stop('ETIMEDOUT'), timeLimit) })
     // A command stopped part way may leave the lock of the private index it was writing. Only a lock that was not there
     // when it started, and was made since, is removed, and only once nothing of the command is left: under the
     // repository's lease nothing else writes that index meanwhile.
@@ -181,7 +187,8 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
       // run ends at this deadline whatever the kill or a look at the process list is still doing.
       const deadline = Date.now() + GIT_STOP_TIMING.exitWaitMs
       // Kills once and notes what the command had; then only watches. Never rejects.
-      const stopping = child.pid ? StoppedGitTree.stop(child, spawnedAt).then(async (tree) => ({ tree, gone: await goneBy(tree, deadline) })) : Promise.resolve(undefined)
+      // The process may still be starting on the Git worker: it is known (pid, and when it really started) once it has.
+      const stopping = gitChildSpawned(child).then(() => child.pid ? StoppedGitTree.stop(child, gitChildStartedAt(child, spawnedAt)).then(async (tree) => ({ tree, gone: await goneBy(tree, deadline) })) : undefined)
       const atDeadline = sleep(GIT_STOP_TIMING.exitWaitMs).then(() => 'deadline' as const)
       void (async () => {
         const first = await Promise.race([stopping, atDeadline])
@@ -219,10 +226,8 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
       child.stdin!.on('error', () => undefined)
       child.stdin!.end(options.input)
     } else if (options.inputFile !== undefined) {
+      // Streamed by whatever started Git (spawnGit); a read failure closes Git's input, kills it, and is the run's error.
       child.stdin!.on('error', () => undefined)
-      const file = createReadStream(options.inputFile)
-      file.on('error', (readError) => { error ??= readError; child.stdin!.destroy(); child.kill() })
-      file.pipe(child.stdin!)
     }
   })
 }

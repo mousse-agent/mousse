@@ -34,6 +34,7 @@ import { checkRepoPrograms, guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, 
 import { parseRawDiff, readWorkingTreeStatus, unchangedWorktreePaths, type StatusEntry } from './workingTreeStatus'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { GitPolicyError, withUserRequest, type UserAction } from './gitPolicy'
+import { spawnGit } from './gitSpawn'
 import type {
   GitBranchInfo,
   GitBranchOptions,
@@ -449,7 +450,7 @@ async function readBoundedGit(cwd: string, args: readonly string[], maxBytes: nu
     return ''
   }
   return new Promise((resolvePromise) => {
-    const child = timeGitChild(() => spawn(gitFile(), guarded, {
+    const child = timeGitChild(() => spawnGit(gitFile(), guarded, {
       cwd,
       env: gitEnvFor(repoProgramEnv({ ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0', ...env })),
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -2013,7 +2014,7 @@ ${run.output}`))
   private async runBytes(cwd: string, args: readonly string[], options: { env?: Record<string, string>; input?: Buffer; userAction?: boolean } = {}): Promise<{ ok: boolean; stdout: Buffer; stderr: string }> {
     const guarded = await withoutRepoProgramsAsync(cwd, args, { env: options.env, ...(options.userAction ? { userAction: true } : {}) })
     return new Promise((resolvePromise) => {
-      const child = timeGitChild(() => spawn(gitFile(), guarded, {
+      const child = timeGitChild(() => spawnGit(gitFile(), guarded, {
         cwd,
         env: gitEnvFor(repoProgramEnv({ ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0', ...options.env })),
         stdio: ['pipe', 'pipe', 'pipe'],

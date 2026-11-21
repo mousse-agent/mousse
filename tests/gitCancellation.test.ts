@@ -128,8 +128,8 @@ describe('gitCancellationScope', () => {
     let lingering = true
     gitStopProbe.alive = () => lingering
     const controller = new AbortController()
-    setTimeout(() => controller.abort(), 500)
-    const ran = await withGitMutationLocks(threadDirectory, cwd, 'test', () => runGitProcess(SLOW, { cwd, env: process.env }), undefined, undefined, controller.signal)
+    // Stopped once the slow command is on its way: a fixed delay from here could stop the work before Git starts.
+    const ran = await withGitMutationLocks(threadDirectory, cwd, 'test', () => runGitProcess(SLOW, { cwd, env: process.env, beforeStart: () => { setTimeout(() => controller.abort(), 300) } }), undefined, undefined, controller.signal)
     // The operation ended, so a stopped turn ends; the repository stays locked.
     expect(ran.error?.code).toBe('ABORT_ERR')
     await expect(acquireRepositoryLease(identity, { retryDelayMs: 5, maxWaitMs: 300 })).rejects.toBeInstanceOf(RepositoryLeaseBusyError)
@@ -147,8 +147,8 @@ describe('gitCancellationScope', () => {
     gitStopProbe.alive = () => lingering
     const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const controller = new AbortController()
-    setTimeout(() => controller.abort(), 500)
-    const ran = await withGitMutationLocks(threadDirectory, cwd, 'test', () => runGitProcess(SLOW, { cwd, env: process.env }), undefined, undefined, controller.signal)
+    // Stopped once the slow command is on its way: a fixed delay from here could stop the work before Git starts.
+    const ran = await withGitMutationLocks(threadDirectory, cwd, 'test', () => runGitProcess(SLOW, { cwd, env: process.env, beforeStart: () => { setTimeout(() => controller.abort(), 300) } }), undefined, undefined, controller.signal)
     expect(ran.error?.code).toBe('ABORT_ERR')
     // The watch starts once the stop's look at the process list is done, which can take a while on a busy machine.
     await vi.waitFor(() => expect(logged).toHaveBeenCalledWith(expect.stringContaining('until it ends or Mousse restarts'), expect.anything()), { timeout: 10_000 })
