@@ -7755,13 +7755,15 @@ export class OrchestratorService extends EventEmitter {
    * parent's HEAD recorded when it was started, under the Mousse home, whatever the turn's mode. Its `mousse/` branch is named
    * from its task (`nameFrom`), as any thread's is from its first message.
    */
-  private async seedSubagentWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease'], nameFrom?: string, onStep?: (step: TurnSetupStep) => void): Promise<void> {
+  /** Makes a subagent's worktree at its start, if it has none yet; returns the commit it was checked out at when it made one. */
+  private async seedSubagentWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease'], nameFrom?: string, onStep?: (step: TurnSetupStep) => void): Promise<string | undefined> {
     const startSha = this.threadStore?.getThread(threadId)?.workspaceBinding?.startSha
-    if (!startSha) return
+    if (!startSha) return undefined
     const manager = new ThreadWorkspaceManager(threadDir)
-    if (manager.load()) return
+    if (manager.load()) return undefined
     onStep?.('worktree')
     await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, startSha, { nameFrom })
+    return manager.madeAt
   }
 
   /** The parent's workspace path a `shared` child observes, or null when the parent has none. */
@@ -14467,11 +14469,13 @@ export class OrchestratorService extends EventEmitter {
           try {
             await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, setupStep)
             const pending = opts?.agent ? agentMessageWords(request.content, agentOriginOf(opts.agent)) : request.content
-            await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, pending), setupStep)
+            const subagentMadeAt = await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, pending), setupStep)
             // A fork or subagent worktree made just now is read afresh (`repositoryFacts.ts`).
             forgetRepositoryFacts()
             session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.placementOf(session.threadId), this.restoreNotifier(session.threadId))
               .resolve(request.mode, 'main', setupSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, pending), setupStep)
+            // A subagent's worktree made just now at its start: the turn records its start from that commit (`madeAt`).
+            if (subagentMadeAt && !session.workspace.madeAt && session.workspace.headSha === subagentMadeAt) session.workspace = { ...session.workspace, madeAt: subagentMadeAt }
           } catch (error) {
             // Never a silent blank thread: the chat, the sidebar row and whoever sent it are told why (`Thread.setupFailure`).
             if (!setupSignal.aborted && !this.lifecycle.signal.aborted) this.recordSetupFailure(session.threadId, threadDir, request, error, { runId: opts?.runId, retryable: !reuseLastUser && !request.workflowInvocationId && !(typeof input !== 'string' && input.continuationOfRunId) })
@@ -14583,7 +14587,9 @@ export class OrchestratorService extends EventEmitter {
           const recorded = await new ThreadActionService(directory).recordOutsideChanges({
             threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
             heldThreadLease: session.executionLease ?? undefined, signal: setupSignal,
-            presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
+            presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary,
+            // A worktree this turn has just made: its start is the commit it was checked out at, without reading its files.
+            ...(session.workspace?.madeAt ? { madeAt: session.workspace.madeAt } : {})
           })
           turnStartSha = recorded.startSha
           recordedStartCheck = recorded.startCheck

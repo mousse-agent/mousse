@@ -16,7 +16,7 @@ import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoord
 import { gitWorkCancelled } from '../git/runGitProcess'
 import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
 import { changedPathsAsync, git, gitAsync, tryGitAsync } from './git'
-import { coverageNotice, describeGitAsync, namedGapsAsync, sameTreeAsync, SnapshotRefusedError, snapshotUncoveredAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { checkoutSnapshotAsync, coverageNotice, describeGitAsync, namedGapsAsync, sameTreeAsync, SnapshotRefusedError, snapshotUncoveredAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 import { activeHiddenStore } from '../git/hiddenStore'
 import { inThreadSnapshotScope, inThreadSnapshotScopeAsync, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 import { turnBoundaryStep } from '../diagnostics/turnBoundary'
@@ -57,6 +57,8 @@ export interface OutsideChangesOptions extends Pick<RunThreadActionOptions, 'thr
   presentationMessageStart?: number
   /** The conversation position the next turn starts from. Defaults to the latest action's. */
   nativeContextBoundary?: NativeContextBoundary
+  /** The commit Git just checked the worktree out at, in this turn's setup (`WorkspaceExecutionContext.madeAt`). */
+  madeAt?: string
 }
 
 export { IN_PROGRESS_GIT_MARKERS }
@@ -214,8 +216,14 @@ export class ThreadActionService {
     const metadata = await new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshotAsync()
     const latest = this.latest(options.conversationBranchId)
     let snapshot: Snapshot
+    // A worktree this turn has just made, which nothing has recorded or run in yet, holds its commit's files: its start is
+    // that commit's tree, and there is nothing outside to record. Anything else is read from the files.
+    const madeAt = options.madeAt && !latest && !metadata?.snapshotSha && metadata?.headSha === options.madeAt ? options.madeAt : undefined
+    let checkedOut = false
     try {
-      snapshot = await takeSnapshotAsync(options.workspacePath, { reason: 'before the next action', threadId: options.threadId })
+      const fromCheckout = madeAt ? await checkoutSnapshotAsync(options.workspacePath, madeAt, { reason: 'before the next action', threadId: options.threadId }).catch(() => undefined) : undefined
+      checkedOut = fromCheckout !== undefined
+      snapshot = fromCheckout ?? await takeSnapshotAsync(options.workspacePath, { reason: 'before the next action', threadId: options.threadId })
     } catch (error) {
       // No snapshot now never stops the turn. The last recorded one stands in only as a placeholder: it is marked as not
       // this turn's start, so the checkpoint records the turn from its end (nothing attributed, no files for Undo to restore).
@@ -232,7 +240,7 @@ export class ThreadActionService {
     try { unrecorded = JSON.parse(readFileSync(join(this.threadDirectory, UNRECORDED_END_FILE), 'utf8')) as UnrecordedEnd } catch { unrecorded = undefined }
     rmSync(join(this.threadDirectory, UNRECORDED_END_FILE), { force: true })
     // A snapshot that reused the latest one has just checked it is there: it is not asked again.
-    if (!known || (known !== snapshot.sha && !(await tryGitAsync(options.workspacePath, ['cat-file', '-e', `${known}^{commit}`])).ok) || await sameTreeAsync(options.workspacePath, known, snapshot.sha)) {
+    if (checkedOut || !known || (known !== snapshot.sha && !(await tryGitAsync(options.workspacePath, ['cat-file', '-e', `${known}^{commit}`])).ok) || await sameTreeAsync(options.workspacePath, known, snapshot.sha)) {
       await receipts.adoptSnapshot(options.workspacePath, snapshot)
       return { startSha: snapshot.sha, startCheck: { workspacePath: options.workspacePath, startSha: snapshot.sha } }
     }
