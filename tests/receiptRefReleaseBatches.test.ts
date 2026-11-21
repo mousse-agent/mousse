@@ -12,7 +12,7 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { buildSync } from 'esbuild'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -21,6 +21,8 @@ import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifec
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { ChangeReceiptService } from '../src/mms/actions/ChangeReceiptService'
+import { UndoService } from '../src/mms/actions/UndoService'
+import { UndoRetentionSweeper } from '../src/mms/actions/UndoRetentionSweeper'
 import { UndoRetentionService } from '../src/mms/actions/UndoRetentionService'
 import { RELEASE_BATCH_SIZE, ReceiptRefReleaseService } from '../src/mms/actions/ReceiptRefReleaseService'
 import { acquireRepositoryLease, getRepositoryLeasePath, repositoryLeaseWanted } from '../src/mms/git/RepositoryLease'
@@ -31,6 +33,9 @@ import { actionOptions, CRASH_CHILD_REQUIRE, git, gitFoundationFixture } from '.
 import { unverifiableThread } from './support/unverifiableThread'
 import { ProfileManager } from '../src/mms/profiles/ProfileManager'
 import { createInstallationPaths } from '../src/mms/profiles/paths'
+import { seedLegacyNamedEpisode } from './fixtures/legacy-named-agent'
+import * as inventory from '../src/mms/lifecycle/ResourceInventory'
+import * as reservations from '../src/mms/actions/undoRefClaims'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 
 // Each case makes several checkpoints, each a few Git processes; process starts are slow on Windows.
@@ -38,7 +43,7 @@ vi.setConfig({ testTimeout: 180_000 })
 
 let f: ReturnType<typeof gitFoundationFixture>
 beforeEach(() => { f = gitFoundationFixture() })
-afterEach(() => f.dispose())
+afterEach(() => { vi.restoreAllMocks(); f.dispose() })
 
 async function fixture(receipts = 1) {
   writeFileSync(join(f.thread, 'meta.json'), JSON.stringify({ id: 'task' }))
@@ -288,4 +293,150 @@ it('a peer checkout that Git stops verifying after discovery is read again at th
   expect(result.releasedRefs).toEqual([])
   expect(result.retained).toEqual([{ receiptId: receipt.id, reason: expect.stringContaining(peer.worktree) }])
   for (const ref of receipt.retainedRefs) expect(refExists(ref)).toBe(true)
+})
+
+it('keeps the refs when a previously verified peer now points at this repository without registration', async () => {
+  const { store, workspace, receipts, release } = await fixture()
+  const peer = unverifiableThread(store, { id: 'moved-peer', name: 'Moved peer', repo: join(f.root, 'different-repo'), how: 'intact' })
+  const discovery = await discoverOwnershipFacts(store)
+  const target = resolveRepositoryIdentity(f.repo)
+  unlinkSync(join(peer.worktree, '.git'))
+  writeFileSync(join(peer.worktree, '.git'), 'gitdir: ' + join(target.commonDir, 'worktrees', 'not-registered') + '\n')
+  expect(git(f.repo, 'worktree', 'list', '--porcelain')).not.toContain('moved-peer')
+  const result = await release.release(workspace.worktreePath, { discovery })
+  expect(result.retained[0]).toMatchObject({ receiptId: receipts[0]!.id, reason: expect.stringContaining('Moved peer') })
+  expect(receipts[0]!.retainedRefs.every(refExists)).toBe(true)
+})
+
+it('defers copy and restore while the repository of a live Undo claim is unavailable', async () => {
+  const { store, workspace, receipts } = await fixture()
+  const location = join(f.home, 'thread-data', 'standalone', 'restored')
+  const staged = join(f.root, 'staged-restore')
+  mkdirSync(staged)
+  mkdirSync(dirname(location), { recursive: true })
+  writeFileSync(join(staged, 'meta.json'), '{"id":"restored"}')
+  const saveWorkspace = (dir: string, available: boolean) => writeFileSync(join(dir, 'workspace.json'), JSON.stringify({
+    ...workspace, threadId: 'restored',
+    worktreePath: available ? workspace.worktreePath : join(f.root, 'unavailable-worktree'),
+    integrationTarget: { ...workspace.integrationTarget, checkoutPath: available ? f.repo : join(f.root, 'unavailable-primary') }
+  }))
+  const receipt = receipts[0]!
+  saveWorkspace(staged, false)
+  new ThreadJournal(staged).append({ operationId: 'copied', operationType: 'change-checkpoint', state: 'completed', details: { receipt } })
+  renameSync(staged, location)
+  expect(() => store.registerTask({ taskId: 'restored', location })).toThrow(/repository of the copied Undo history/)
+  expect(store.get('restored')).toBeUndefined()
+  saveWorkspace(location, true)
+  store.registerTask({ taskId: 'restored', location })
+  registerThreadLifecycleGate(f.home, store)
+  const coordinator = new ResourceLifecycleCoordinator(store, {
+    drain: async () => undefined, settleMutationOwnership: async () => undefined, projectIndex: () => undefined
+  })
+  const trashed = await coordinator.trash({ taskId: 'restored', operationId: 'trash', keepWork: true })
+  saveWorkspace(trashed.location, false)
+  await expect(coordinator.restore({ taskId: 'restored', operationId: 'restore' })).rejects.toThrow(/repository of the restored Undo history/)
+  expect(store.require('restored').location).toBe(trashed.location)
+  expect(existsSync(location)).toBe(false)
+  expect(receipt.retainedRefs.every(refExists)).toBe(true)
+})
+
+it('a copied expired receipt still takes the lease when a named agent can recall it', async () => {
+  const { store, workspace, receipts, release } = await fixture()
+  const location = join(f.home, 'thread-data', 'standalone', 'recall-copy')
+  const staged = join(f.root, 'staged-recall')
+  mkdirSync(staged)
+  mkdirSync(dirname(location), { recursive: true })
+  writeFileSync(join(staged, 'meta.json'), '{"id":"recall-copy"}')
+  writeFileSync(join(staged, 'workspace.json'), JSON.stringify({ ...workspace, threadId: 'recall-copy' }))
+  const receipt = receipts[0]!
+  const journal = new ThreadJournal(staged)
+  journal.append({ operationId: 'copied', operationType: 'change-checkpoint', state: 'completed', details: { receipt } })
+  for (const entry of new ThreadJournal(f.thread).ofTypes('undo-retention')) {
+    journal.append({ operationId: entry.operationId, operationType: entry.operationType, state: entry.state, details: entry.details })
+  }
+  seedLegacyNamedEpisode(staged, { name: 'Reviewer', episodeId: 'review-episode', worktreePath: workspace.worktreePath, receiptId: receipt.id, resultSha: receipt.afterSha })
+  renameSync(staged, location)
+  const held = await acquireRepositoryLease(resolveRepositoryIdentity(f.repo))
+  try {
+    expect(() => store.registerTask({ taskId: 'recall-copy', location })).toThrow(/lease is busy/i)
+    expect(store.get('recall-copy')).toBeUndefined()
+  } finally { held.release() }
+  store.registerTask({ taskId: 'recall-copy', location })
+  expect((await release.release(workspace.worktreePath)).releasedRefs).toEqual([])
+  expect(receipt.retainedRefs.every(refExists)).toBe(true)
+})
+
+it.each(['reserve', 'unlink'])('isolates a failed reservation %s from a sibling release', async (phase) => {
+  const { workspace, receipts, release } = await fixture(2)
+  const [stuck, sibling] = receipts
+  const prepare = reservations.prepareUndoRefRelease
+  const finish = reservations.finishUndoRefRelease
+  if (phase === 'reserve') vi.spyOn(reservations, 'prepareUndoRefRelease').mockImplementation((repo, id, operation, retryAfter) => {
+    if (id === stuck!.id) throw new Error('Simulated reservation write failure')
+    return prepare(repo, id, operation, retryAfter)
+  })
+  else vi.spyOn(reservations, 'finishUndoRefRelease').mockImplementation((repo, id, operation) => {
+    if (id === stuck!.id) throw new Error('Simulated reservation unlink failure')
+    return finish(repo, id, operation)
+  })
+  const result = await release.release(workspace.worktreePath)
+  expect(result.releasedRefs).toEqual(sibling!.retainedRefs)
+  expect(result.retained[0]).toMatchObject({ receiptId: stuck!.id, reason: expect.stringMatching(/reservation (write|unlink) failure/) })
+  expect(sibling!.retainedRefs.some(refExists)).toBe(false)
+  expect(stuck!.retainedRefs.every(refExists)).toBe(phase === 'reserve')
+  if (phase === 'unlink') expect(reservations.pendingUndoRefRelease(resolveRepositoryIdentity(f.repo), stuck!.id)).toBeDefined()
+  vi.restoreAllMocks()
+  expect((await release.release(workspace.worktreePath)).releasedRefs).toEqual(stuck!.retainedRefs)
+})
+
+it('checkpoints and undoes a new turn while a different receipt release is backed off', async () => {
+  const { workspace, receipts, release } = await fixture()
+  const stuck = receipts[0]!
+  const identity = resolveRepositoryIdentity(f.repo)
+  const lock = join(identity.commonDir, stuck.retainedRefs[0]! + '.lock')
+  writeFileSync(lock, '')
+  try {
+    expect((await release.release(workspace.worktreePath)).releasedRefs).toEqual([])
+    expect(reservations.pendingUndoRefRelease(identity, stuck.id)?.retryAfter).toBeTypeOf('number')
+    await new UndoRetentionService(f.thread).configure(workspace.worktreePath, { windowMs: 60 * 60_000 }, true, true)
+    const actions = new ThreadActionService(f.thread)
+    await actions.runCheckpointedAction(actionOptions(workspace.worktreePath, 'new-turn'), () => {
+      writeFileSync(join(workspace.worktreePath, 'value.txt'), 'new turn\n')
+    })
+    expect(f.read(workspace.worktreePath)).toBe('new turn\n')
+    await new UndoService(f.thread).undoLatest('main', workspace.worktreePath)
+    expect(f.read(workspace.worktreePath)).toBe('change 0\n')
+    expect(stuck.retainedRefs.every(refExists)).toBe(true)
+    expect(() => reservations.assertUndoRefMayBeClaimed(identity, stuck.id)).toThrow(/pending release/)
+  } finally { unlinkSync(lock) }
+})
+
+it('releases the repository lease at its hold deadline even when ownership refresh stalls', async () => {
+  const { store, workspace, receipts, advance } = await fixture()
+  const discovery = await discoverOwnershipFacts(store)
+  const identity = resolveRepositoryIdentity(f.repo)
+  let refreshing = false
+  vi.spyOn(inventory, 'rereadRepositoryFacts').mockImplementation(() => {
+    refreshing = true
+    return new Promise<void>(() => undefined)
+  })
+  const result = await new ReceiptRefReleaseService(store, 'task', () => advance(0), 12_000).release(workspace.worktreePath, { discovery })
+  expect(refreshing).toBe(true)
+  expect(result.retained[0]?.reason).toMatch(/lease deadline/)
+  expect(result.releasedRefs).toEqual([])
+  const lease = await acquireRepositoryLease(identity, { maxWaitMs: 1 })
+  lease.release()
+  expect(receipts[0]!.retainedRefs.every(refExists)).toBe(true)
+})
+
+it('reports the existing release backlog while the retention clock is suspended', async () => {
+  const { store, workspace, receipts } = await fixture()
+  const journal = new ThreadJournal(f.thread)
+  const events = journal.ofTypes('undo-retention')
+  const at = (events.at(-1)!.details as { at: number }).at
+  journal.append({ operationId: randomUUID(), operationType: 'undo-retention', state: 'completed', details: { version: 1, kind: 'clock', at, suspended: true } })
+  const sweeper = new UndoRetentionSweeper(store)
+  await sweeper.tick()
+  expect(sweeper.outcomes.get('task')).toMatchObject({ reason: 'Clock review required', releasedRefs: 0, oldestPendingReleaseAgeMs: expect.any(Number) })
+  expect(receipts[0]!.retainedRefs.every(refExists)).toBe(true)
 })

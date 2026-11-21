@@ -56,9 +56,9 @@ export async function withGitMutationLocks<T>(
   /**
    * Ends the operation's Git commands too (see `gitCancellationScope`). The repository's lock goes only once nothing they
    * started is left: when a stopped command left processes, the operation still ends, and the lock is kept until they
-   * are gone, however long that takes.
+   * are gone, however long that takes. A factory starts the deadline after acquiring the repository lease.
    */
-  workSignal?: AbortSignal,
+  workSignal?: AbortSignal | (() => AbortSignal),
   /** Background cleanup can give up a busy repository and try again on its next pass. */
   repositoryWaitMs?: number
 ): Promise<T> {
@@ -80,7 +80,8 @@ export async function withGitMutationLocks<T>(
     const repositoryLease = await acquireRepositoryLease(repository, { signal, maxWaitMs: repositoryWaitMs })
     // What the turn read of its folder before this lease is read again under it: HEAD may have moved while it waited.
     forgetRepositoryFacts()
-    const scope = workSignal ? gitCancellationScope(workSignal) : undefined
+    const cancelWork = typeof workSignal === 'function' ? workSignal() : workSignal
+    const scope = cancelWork ? gitCancellationScope(cancelWork) : undefined
     try {
       const held = new Set([...(heldRepositories ?? []), repository.key])
       const work = async (): Promise<T> => store ? inHiddenStore(store, () => operation(repository)) : operation(repository)

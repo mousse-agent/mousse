@@ -296,6 +296,7 @@ import {
 } from '../git/commitSuggestion'
 import { readPullRequestTemplate } from '../git/pullRequestTemplate'
 import { RepositoryIdentityError } from '../git/RepositoryIdentity'
+import { pinForkCheckpoint, readForkCheckpointPin, retireForkCheckpoint } from '../workspace/forkCheckpointPin'
 import type { LineEditStatsStore } from '../stats/LineEditStatsStore'
 import type { ProjectManager } from '../data/ProjectManager'
 import type { ThreadDataStore } from '../data/ThreadDataStore'
@@ -3038,6 +3039,11 @@ export class OrchestratorService extends EventEmitter {
         creation.kind === 'delegation' ? this.createChildThread(creation.request) : this.createForkThread(creation),
       deleteThread: (threadId) => this.discardCreatedThread(threadId),
       forkPointSeed: (sourceThreadId, sourceRunId) => this.forkPointSeed(sourceThreadId, sourceRunId),
+      pinForkCheckpoint: (threadId, sourceThreadId, sourceRunId) => this.pinForkCheckpoint(threadId, sourceThreadId, sourceRunId),
+      retireForkCheckpoint: async (threadId) => {
+        const threadDir = this.resolveThreadDir(threadId)
+        if (threadDir) await retireForkCheckpoint(threadId, threadDir)
+      },
       titleConflicts: (parentThreadId, title) => this.subagentTitleConflicts(parentThreadId, title),
       threadLive: (threadId) => this.titleOf(threadId) !== undefined,
       buildChildTurnPayload: ({ childThreadId, childRunId, prompt, request }): TurnStartPayload => ({
@@ -8333,6 +8339,20 @@ export class OrchestratorService extends EventEmitter {
     return this.forkCheckpoint(sourceDir, sourceRunId) ? 'checkpoint' : 'missing'
   }
 
+  private async pinForkCheckpoint(threadId: string, sourceThreadId: string, sourceRunId: string): Promise<boolean> {
+    if (this.placementOf(threadId) === 'project-folder') return false
+    const threadDir = this.resolveThreadDir(threadId)
+    const sourceDir = this.resolveThreadDir(sourceThreadId)
+    const workspace = sourceDir ? new ThreadWorkspaceManager(sourceDir).load() : undefined
+    const checkpoint = sourceDir ? this.forkCheckpoint(sourceDir, sourceRunId) : undefined
+    if (!threadDir || workspace?.lifecycle !== 'ready' || !checkpoint?.endSha) {
+      throw new DomainRpcError('fork_point_unavailable', 'The selected fork checkpoint is no longer available.')
+    }
+    const checkoutPath = workspace.integrationTarget?.checkoutPath ?? workspace.worktreePath
+    await pinForkCheckpoint(threadId, threadDir, checkoutPath, workspace.repositoryId, { id: checkpoint.id, endSha: checkpoint.endSha, receiptId: checkpoint.receiptId })
+    return true
+  }
+
   /** Where the thread works (`threadPlacement`): every path here that could make its worktree asks this first. */
   private placementOf(threadId: string): ThreadPlacement {
     return threadPlacement(this.threadStore?.getThread(threadId))
@@ -8351,11 +8371,33 @@ export class OrchestratorService extends EventEmitter {
   private async seedForkWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease'], onStep?: (step: TurnSetupStep) => void): Promise<void> {
     const engine = this.runEngine
     const fork = engine?.transfers.listPending(threadId, 'fork')[0]
-    if (!engine || !fork || fork.payload.seed) return
     const manager = new ThreadWorkspaceManager(threadDir)
+    const retirePin = () => retireForkCheckpoint(threadId, threadDir).catch((error: unknown) => {
+      console.warn('Fork checkpoint could not be retired', { threadId, error })
+    })
+    if (!engine || !fork) return
+    const pinned = fork.payload.pinnedCheckpoint === true
+    if (fork.payload.seed) {
+      if (pinned) await retirePin()
+      return
+    }
     let seed: Record<string, unknown>
     try {
-      if (manager.load()) seed = { kind: 'existing_workspace' }
+      const existing = manager.load()
+      if (pinned) {
+        const pin = readForkCheckpointPin(threadDir)
+        if (!pin) throw new Error('The accepted fork checkpoint is no longer available.')
+        if (existing?.lifecycle === 'ready') {
+          if (existing.snapshotSha !== pin.sha) throw new Error('The existing workspace does not contain the accepted fork checkpoint.')
+        } else {
+          onStep?.('worktree')
+          const ready = await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, pin.head, {
+            snapshot: pin.sha, forkCheckpoint: true, nameFrom: this.branchNameSource(threadId), onNotice: this.restoreNotifier(threadId)
+          })
+          if (ready.lifecycle !== 'ready' || ready.snapshotSha !== pin.sha) throw new Error('The accepted fork checkpoint was not provisioned.')
+        }
+        seed = { kind: 'checkpoint', sha: pin.sha, actionId: pin.actionId }
+      } else if (existing) seed = { kind: 'existing_workspace' }
       else if (this.placementOf(threadId) === 'project-folder') seed = { kind: 'project_folder' }
       else if (!(await manager.resolveRepositoryAsync(projectPath)).capability.gitBacked) seed = { kind: 'not_git_backed' }
       else {
@@ -8383,11 +8425,13 @@ export class OrchestratorService extends EventEmitter {
         })
       }
     } catch (error) {
+      if (pinned) throw error
       seed = { kind: 'failed', error: error instanceof Error ? error.message : String(error) }
       console.warn('fork workspace seed failed; the fork provisions from the primary checkout', { threadId, error: seed.error })
     }
     try {
       engine.transfers.patchPayload(fork.transferId, { seed })
+      if (pinned) await retirePin()
     } catch (error) {
       console.warn('fork seed could not be recorded', { threadId, error: error instanceof Error ? error.message : String(error) })
     }

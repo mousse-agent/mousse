@@ -23,6 +23,7 @@ import { getMousseHomeDir } from '../data/paths'
 import { assertWorktreeFolderConnected, chosenFolderHolding, chosenWorktreeFolder, defaultWorktreeBase, notConnectedPlacementNote, placeThreadWorktree, worktreeRegistrationOf, worktreeRegistrationOfSync } from '../worktree/worktreeLayout'
 import { acquireRepositoryLease, describeLeaseHolder, olderBuildText, RepositoryLeaseBusyError, stoppedGitText, type RepositoryLeaseHandle } from '../git/RepositoryLease'
 import { resolveRepositoryIdentity, resolveRepositoryIdentityAsync, type RepositoryIdentity } from '../git/RepositoryIdentity'
+import { requireForkCheckpoint, readForkCheckpointPin } from './forkCheckpointPin'
 import { requireLiveUndoRef } from '../actions/undoRefClaims'
 import {
   releaseExecutionLeaseHandle,
@@ -406,7 +407,7 @@ export class ThreadWorkspaceManager {
      * `onWorktreeMade`: runs once the worktree is made and its files written, still under the repository's lease and
      * before anything else can fail: what Mousse wrote there, as a caller that may have to remove it again reads it.
      */
-    options: { untrusted?: boolean; enableWorktreeConfig?: () => void; userRequested?: UserAction; snapshot?: string; snapshotReceiptId?: string; nameFrom?: string; onNotice?: (notice: { id: string; text: string }) => unknown; onWorktreeMade?: (worktreePath: string) => void | Promise<void> } = {}
+    options: { untrusted?: boolean; enableWorktreeConfig?: () => void; userRequested?: UserAction; snapshot?: string; snapshotReceiptId?: string; forkCheckpoint?: true; nameFrom?: string; onNotice?: (notice: { id: string; text: string }) => unknown; onWorktreeMade?: (worktreePath: string) => void | Promise<void> } = {}
   ): Promise<ThreadWorkspaceMetadata> {
     const existing = this.load()
     if (existing?.lifecycle === 'ready') return this.verify(existing)
@@ -425,6 +426,11 @@ export class ThreadWorkspaceManager {
       const provisioned = this.load()
       if (provisioned?.lifecycle === 'ready') return this.verify(provisioned)
       if (provisioned) throw new Error(`Workspace provisioning requires recovery: ${provisioned.lifecycle}`)
+      if (options.forkCheckpoint) {
+        const pin = readForkCheckpointPin(this.threadDirectory)
+        if (!pin || pin.sha !== options.snapshot || pin.head !== startSha) throw new Error('The accepted fork checkpoint changed.')
+        await requireForkCheckpoint(threadId, repository.primaryCheckoutPath, identity.key, pin)
+      }
       if (options.snapshot && options.snapshotReceiptId) await requireLiveUndoRef(identity, repository.primaryCheckoutPath, options.snapshotReceiptId, 'after', options.snapshot)
       // How the files are written (`worktreeCheckout.ts`), read with HEAD: a missing sparse-checkout pattern file refuses
       // the worktree here, before anything is made.

@@ -113,6 +113,7 @@ export class UndoRetentionSweeper {
         const released = result.suspended || !workspace.snapshotOnly ? undefined : await releaseSnapshotRefs(task.location, { signal: this.abort.signal, heldThreadLease: lease })
         const reasons = result.suspended ? ['Clock review required'] : [...(released?.retained.map((item) => item.reason) ?? []), ...(preserved.reason ? [preserved.reason] : [])]
         this.outcomes.set(task.taskId, { at: new Date().toISOString(), expired: result.expired.length, releasedRefs: released?.releasedRefs.length ?? 0,
+          ...(result.suspended && !workspace.snapshotOnly ? { oldestPendingReleaseAgeMs: new ReceiptRefReleaseService(this.store, task.taskId).oldestPendingReleaseAgeMs() } : {}),
           ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}), ...(reasons.length ? { reason: reasons.join('; ') } : {}) })
       } catch (error) {
         this.outcomes.set(task.taskId, { at: new Date().toISOString(), ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}),

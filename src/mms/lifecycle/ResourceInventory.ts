@@ -10,6 +10,7 @@ import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
 import { lifecycleReadAsync, WorktreeRetirementService, type WorktreeReconstructionManifest } from './WorktreeRetirementService'
 import { standardLinkedWorktreeAsync, trustedCheckoutsAsync, verifyPinsAsync, worktreeGitVersion, type StandardWorktree } from './worktreeFacts'
 import { expiredReceiptIdsFromJournal } from '../actions/UndoRetentionService'
+import { namedEpisodeClaims } from '../agents/namedEpisodeClaims'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { settlesItself } from '../../shared/resourceLifecycle'
@@ -59,7 +60,7 @@ export class OwnershipFacts {
 
   /** A copy whose facts can be read again or added to without changing these. */
   copy(): OwnershipFacts {
-    const copy = new OwnershipFacts()
+    const copy = new OwnershipFacts(this.admission)
     for (const [key, value] of this.present) copy.present.set(key, value)
     for (const [key, value] of this.worktrees) copy.worktrees.set(key, value)
     for (const [key, value] of this.legacy) copy.legacy.set(key, value)
@@ -171,8 +172,10 @@ export function finalReads(facts: OwnershipFacts, missed?: (what: string) => voi
       if (facts.canonical.has(path)) return facts.canonical.get(path)!
       throw new Error(changed(path))
     },
-    // Not read: the repository can't be told, which the caller treats as any repository.
-    commonDir: (path) => facts.commonDirs.get(path) ?? undefined
+    commonDir: (path) => {
+      if (!facts.commonDirs.has(path)) throw new Error(changed(path))
+      return facts.commonDirs.get(path) ?? undefined
+    }
   }
 }
 
@@ -200,7 +203,7 @@ type WorktreeFactContext = ReturnType<typeof worktreeFactContext>
 const needKey = (need: OwnershipNeed): string => need.kind === 'worktree' ? `worktree\0${worktreeKey(need.store, need.path, need.branch, need.repository)}` : need.kind === 'legacy' ? `legacy\0${need.root}` : `${need.kind}\0${need.path}`
 
 /** Reads the facts in `needs` into `facts`, without blocking, a few at a time. */
-export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts: OwnershipFacts): Promise<void> {
+export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts: OwnershipFacts, admission = facts.admission): Promise<void> {
   // Each fact once, though several records may name it.
   const unique = new Map<string, OwnershipNeed>()
   for (const need of needs) {
@@ -209,7 +212,7 @@ export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts:
     facts.read.set(key, need)
   }
   const queue = [...unique.values()]
-  const context = worktreeFactContext(facts.admission)
+  const context = worktreeFactContext(admission)
   // Absent worktrees whose manifest was found: their pins are read afterwards, together per repository (`verifyPinsAsync`).
   const pinned: Array<{ key: string; path: string; manifest: WorktreeReconstructionManifest }> = []
   // Worktrees in the standard layout: whether Git trusts them is read afterwards for all of them at once.
@@ -275,13 +278,14 @@ export async function rereadRepositoryFacts(facts: OwnershipFacts, repository: {
     // Of this repository by its record, by being a worktree it registers, or by where its `.git` leads now.
     const real = facts.canonical.get(need.path) ?? await canonicalPathAsync(need.path)
     const recorded = Boolean(need.repository && ids.has(need.repository)) || registered.has(comparablePath(real))
-    const common = recorded ? undefined : await gitCommonDirAsync(need.path)
+    const common = facts.commonDirs.has(need.path) ? facts.commonDirs.get(need.path) : await gitCommonDirAsync(need.path)
+    facts.commonDirs.set(need.path, common ?? null)
     if (!recorded && !(common && ids.has(repositoryKeyOf(common)))) continue
     facts.read.delete(key)
     facts.worktrees.delete(worktreeKey(need.store, need.path, need.branch, need.repository))
     worktrees.push(need)
   }
-  await readOwnershipFacts(worktrees, facts)
+  await readOwnershipFacts(worktrees, facts, true)
   const legacy = [...facts.legacy.keys()]
   for (const root of legacy) facts.legacy.delete(root)
   await readOwnershipFacts(legacy.map((root) => ({ kind: 'legacy', root })), facts)
@@ -690,28 +694,12 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
     if (named) {
       try {
         const state = new AgentEpisodeStore(task.location).read()
-        const receipts = reads.collectingOnly?.() ? [] : new ThreadJournal(task.location, { readOnly: true }).list().map((entry) => object(object(entry.details)?.receipt)).filter((entry): entry is JsonObject => Boolean(entry))
-        const contextEpisodes = new Set<string>(), resolvedContext = new Set<string>()
-        const identities = new Map(state.identities.map((identity) => [identity.id, identity]))
-        for (const episode of [...state.episodes].reverse()) {
-          if (resolvedContext.has(episode.agentId) || identities.get(episode.agentId)?.state === 'retired' || !['completed', 'failed', 'interrupted'].includes(episode.state)) continue
-          if (![episode.agentId, episode.id].every((id) => /^[a-z0-9][a-z0-9_-]{2,127}$/i.test(id))) throw new Error('Invalid context publication identity')
-          const publication = source(join(task.location, 'agent-contexts', episode.agentId, `${episode.id}.json`))
-          if (publication) {
-            const value = object(publication.data), snapshot = object(value?.snapshot)
-            if (value?.schemaVersion !== 1 || value.agentId !== episode.agentId || value.episodeId !== episode.id || value.expectedContextGeneration !== episode.contextGeneration || snapshot?.agentId !== episode.agentId || snapshot.runState === 'running' || !['completed', 'failed', 'interrupted'].includes(String(value.status)) || !object(value.result)) throw new Error('Invalid context publication')
-            contextEpisodes.add(episode.id); resolvedContext.add(episode.agentId)
-          } else if (episode.request?.contextMode === 'fresh') resolvedContext.add(episode.agentId)
-        }
+        const receipts = reads.collectingOnly?.() ? [] : new ThreadJournal(task.location, { readOnly: true }).receipts()
+        const episodeClaims = namedEpisodeClaims(state, receipts, (agentId, episodeId) => source(join(task.location, 'agent-contexts', agentId, episodeId + '.json'))?.data)
         for (const identity of state.identities.filter((identity) => identity.state !== 'retired')) {
           resource('agent-session', `${task.taskId}/${identity.id}`, named.source.id, 'recall', 'Named agent identity retains context and its latest result', task.taskId)
         }
-        for (const episode of state.episodes) {
-          const identity = identities.get(episode.agentId)!
-          const recall = identity.state !== 'retired' && (episode.id === identity.lastEpisodeId || episode.id === identity.activeEpisodeId || contextEpisodes.has(episode.id))
-          const disposition = state.integrations?.find((entry) => entry.episodeId === episode.id)
-          const integrated = disposition && receipts.some((receipt) => receipt.id === disposition.receiptId && receipt.operationId === disposition.operationId && receipt.kind === 'integration' && receipt.afterSha === disposition.integrationSha && rows(receipt.contributions).some((contribution) => contribution.actorId === episode.agentId && contribution.resultSha === disposition.resultSha))
-          const pending = episode.policy.workspace === 'isolated' && episode.policy.access === 'write' && !integrated && episode.result?.resultSha !== episode.binding.baseSha
+        for (const { episode, recall, pending } of episodeClaims) {
           const claim: RetentionClaimKind | undefined = pending ? 'pending-integration' : recall ? 'recall' : undefined
           if ((recall || pending) && episode.result?.receiptId) namedReceiptClaims.add(episode.result.receiptId)
           if (episode.policy.workspace === 'isolated') {

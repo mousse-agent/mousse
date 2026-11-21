@@ -15,6 +15,7 @@ import { ChangeReceiptService } from './ChangeReceiptService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { UndoRetentionService } from './UndoRetentionService'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
+import { untilAborted } from '../git/gitPolicy'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { finishUndoRefRelease, pendingUndoRefRelease, prepareUndoRefRelease } from './undoRefClaims'
@@ -28,6 +29,7 @@ export interface ReceiptRefReleaseResult { releasedRefs: string[]; retained: Arr
 /** Receipts released in one Git transaction, at most. */
 export const RELEASE_BATCH_SIZE = 10
 const RELEASE_LEASE_WAIT_MS = 5_000
+const RELEASE_HOLD_MS = 15_000
 const RELEASE_RETRY_DELAY_MS = 10 * 60_000
 /** How many times a release discovers ownership again after a record changed while it waited for the lease. */
 export const RELEASE_EVIDENCE_RETRIES = 3
@@ -39,7 +41,7 @@ type ReleaseHooks = { afterPrepared?: () => void; afterGit?: () => void; afterCh
 
 /** Phase 3b: only expired, exclusive immutable receipt refs. Never runs Git GC or deletes user refs. */
 export class ReceiptRefReleaseService {
-  constructor(private readonly store: ResourceLifecycleStore, private readonly taskId: string, private readonly now: () => number = Date.now) {}
+  constructor(private readonly store: ResourceLifecycleStore, private readonly taskId: string, private readonly now: () => number = Date.now, private readonly holdMs = RELEASE_HOLD_MS) {}
 
   /**
    * Whether a release would find receipts to release now: expired and not released, or a release left prepared. Reads
@@ -87,7 +89,7 @@ export class ReceiptRefReleaseService {
    * listing, and then, with nothing awaited until the Git transaction starts, ownership is checked from the records
    * themselves, the intents are recorded, and one transaction deletes every eligible ref by its expected commit. The
    * refs are checked individually for absence before the intents complete. Each lease hold runs one transaction of
-   * at most `RELEASE_BATCH_SIZE` receipts. A failed transaction is retried one receipt per hold, so a busy ref
+   * at most `RELEASE_BATCH_SIZE` receipts and a wall-clock deadline. A failed transaction is retried one receipt per hold, so a busy ref
    * cannot hold up other receipts. A record that changed while the release waited lets go, discovers again and
    * retries, at most `RELEASE_EVIDENCE_RETRIES` times; the rest waits for the next run.
    */
@@ -106,11 +108,28 @@ export class ReceiptRefReleaseService {
     let retries = 0
     for (;;) {
       let end: HoldEnd
+      let timeout: AbortSignal | undefined
+      let workSignal: AbortSignal | undefined
+      let deadline = Infinity
+      const deadlineReached = new Error('Receipt release reached its repository lease deadline and will continue on a later run.')
+      const check = () => {
+        options.signal?.throwIfAborted()
+        if (timeout?.aborted || performance.now() >= deadline) throw deadlineReached
+      }
+      const bounded = <T>(work: Promise<T>) => untilAborted(work, workSignal)
       try {
-        end = await withGitMutationLocks(task.location, workspacePath, 'undo-ref-release', (leasedRepository) => this.hold(task.location, workspacePath, leasedRepository, admission, facts, limit, handled, isolate, result, options), options.signal, options.heldThreadLease, undefined, RELEASE_LEASE_WAIT_MS)
+        end = await withGitMutationLocks(task.location, workspacePath, 'undo-ref-release', (leasedRepository) =>
+          this.hold(task.location, workspacePath, leasedRepository, admission, facts.copy(), limit, handled, isolate, result, options, check, bounded),
+        options.signal, options.heldThreadLease, () => {
+          deadline = performance.now() + this.holdMs
+          timeout = AbortSignal.timeout(this.holdMs)
+          workSignal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout
+          return workSignal
+        }, RELEASE_LEASE_WAIT_MS)
       } catch (error) {
-        if (!(error instanceof RepositoryLeaseBusyError)) throw error
-        result.retained.push({ receiptId: '', reason: error.message })
+        options.signal?.throwIfAborted()
+        if (!(error instanceof RepositoryLeaseBusyError) && error !== deadlineReached && !timeout?.aborted) throw error
+        result.retained.push({ receiptId: '', reason: timeout?.aborted ? deadlineReached.message : (error as Error).message })
         break
       }
       if (end === 'finished' || handled.size >= limit) break
@@ -127,10 +146,11 @@ export class ReceiptRefReleaseService {
   }
 
   /** One hold of the repository lease, with at most one delete transaction. */
-  private async hold(location: string, workspacePath: string, leasedRepository: RepositoryIdentity, admission: ReturnType<ResourceLifecycleStore['captureAdmission']>, facts: OwnershipFacts, limit: number, handled: Set<string>, isolate: Set<string>, result: ReceiptRefReleaseResult, options: ReleaseHooks): Promise<HoldEnd> {
+  private async hold(location: string, workspacePath: string, leasedRepository: RepositoryIdentity, admission: ReturnType<ResourceLifecycleStore['captureAdmission']>, facts: OwnershipFacts, limit: number, handled: Set<string>, isolate: Set<string>, result: ReceiptRefReleaseResult, options: ReleaseHooks, check: () => void, bounded: <T>(work: Promise<T>) => Promise<T>): Promise<HoldEnd> {
+    check()
     const task = this.store.require(this.taskId)
     this.store.assertAdmission(admission)
-    const identity = await resolveRepositoryIdentityAsync(workspacePath, { requireMutationCapability: true })
+    const identity = await bounded(resolveRepositoryIdentityAsync(workspacePath, { requireMutationCapability: true }))
     if (identity.key !== leasedRepository.key || identity.metadataDir !== leasedRepository.metadataDir) throw new Error('Receipt release repository changed while waiting for its lease.')
     const workspace = new ThreadWorkspaceManager(location).load()
     if (!workspace || workspace.repositoryId !== identity.key || workspace.lifecycle !== 'ready') throw new Error('Receipt release repository does not match the authoritative task workspace.')
@@ -159,13 +179,13 @@ export class ReceiptRefReleaseService {
       if (candidates.length >= room) break
     }
     if (!candidates.length) return 'finished'
-    const repository = await repositoryTargetAsync(identity.commonDir, identity.key)
-    const end = await this.batch(task, journal, workspacePath, identity, repository, facts, expired, candidates, handled, isolate, result, options)
+    const repository = await bounded(repositoryTargetAsync(identity.commonDir, identity.key))
+    const end = await this.batch(task, journal, workspacePath, identity, repository, facts, expired, candidates, handled, isolate, result, options, check, bounded)
     if (end !== 'next') return end
     return eligible.some((id) => !handled.has(id)) ? 'yield' : 'finished'
   }
 
-  private async batch(task: ReturnType<ResourceLifecycleStore['require']>, journal: ThreadJournal, workspacePath: string, identity: Awaited<ReturnType<typeof resolveRepositoryIdentityAsync>>, repository: Awaited<ReturnType<typeof repositoryTargetAsync>>, facts: OwnershipFacts, expired: ReadonlySet<string>, candidates: Candidate[], handled: Set<string>, isolate: Set<string>, result: ReceiptRefReleaseResult, options: ReleaseHooks): Promise<'next' | 'finished' | { changed: string }> {
+  private async batch(task: ReturnType<ResourceLifecycleStore['require']>, journal: ThreadJournal, workspacePath: string, identity: Awaited<ReturnType<typeof resolveRepositoryIdentityAsync>>, repository: Awaited<ReturnType<typeof repositoryTargetAsync>>, facts: OwnershipFacts, expired: ReadonlySet<string>, candidates: Candidate[], handled: Set<string>, isolate: Set<string>, result: ReceiptRefReleaseResult, options: ReleaseHooks, check: () => void, bounded: <T>(work: Promise<T>) => Promise<T>): Promise<'next' | 'finished' | { changed: string }> {
     const retain = (candidate: Candidate, reason: string): void => {
       handled.add(candidate.intent?.receiptId ?? candidate.receipt?.id ?? candidate.operationId)
       result.retained.push({ receiptId: candidate.receipt?.id ?? candidate.intent?.receiptId ?? '', reason })
@@ -187,7 +207,7 @@ export class ReceiptRefReleaseService {
         named.push({ candidate, intent })
       } catch (error) { retain(candidate, (error as Error).message) }
     }
-    const listed = await readDirectRefsAsync(workspacePath, named.flatMap(({ intent }) => intent.refs.map((ref) => ref.name)))
+    const listed = await bounded(readDirectRefsAsync(workspacePath, named.flatMap(({ intent }) => intent.refs.map((ref) => ref.name))))
     for (const { candidate, intent } of named) {
       try {
         const present: Array<{ name: string; sha: string }> = []
@@ -196,7 +216,7 @@ export class ReceiptRefReleaseService {
           if (found?.error) throw new Error(found.error)
           // A successful exact ref enumeration proves absence. Git errors and symbolic references cannot be
           // interpreted as an interrupted delete.
-          const current = found?.sha ?? await readDirectLifecycleRefAsync(workspacePath, ref.name)
+          const current = found?.sha ?? await bounded(readDirectLifecycleRefAsync(workspacePath, ref.name))
           if (current === undefined) {
             if (!candidate.intent) throw new Error(`Receipt reference is unexpectedly absent: ${ref.name}`)
             continue // interrupted transaction may already have removed it
@@ -205,14 +225,16 @@ export class ReceiptRefReleaseService {
           present.push(ref)
         }
         ready.push({ candidate, intent, present })
-      } catch (error) { retain(candidate, (error as Error).message) }
+      } catch (error) { check(); retain(candidate, (error as Error).message) }
     }
+    check()
     if (!ready.length) return 'next'
     const transaction = (items: typeof ready): string => ['start', ...items.flatMap(({ present }) => present.map((ref) => `delete ${ref.name} ${ref.sha}`)), 'prepare', 'commit', ''].join('\n')
     const deletes = ready.some(({ present }) => present.length)
     // Checked (by the central Git check) before ownership is read, so that from there to the start of the transaction nothing waits.
-    const argv = deletes ? await withoutRepoProgramsAsync(workspacePath, ['update-ref', '--no-deref', '--stdin'], { stdin: transaction(ready) }) : undefined
-    await rereadRepositoryFacts(facts, repository)
+    const argv = deletes ? await bounded(withoutRepoProgramsAsync(workspacePath, ['update-ref', '--no-deref', '--stdin'], { stdin: transaction(ready) })) : undefined
+    await bounded(rereadRepositoryFacts(facts, repository))
+    check()
     // From here to Git's start, no asynchronous work runs. Other processes that publish claims share this lease.
     const missed: string[] = []
     const inventory = buildResourceInventoryFromFacts(this.store, task, facts, {}, (what) => missed.push(what))
@@ -237,47 +259,57 @@ export class ReceiptRefReleaseService {
       }
     }
     for (const { candidate, reason } of refused) retain(candidate, reason)
-    const approved = ready.filter(({ intent }) => !handled.has(intent.receiptId))
-    if (!approved.length) return 'next'
-    for (const { candidate, intent } of approved) {
-      if (!candidate.intent) journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'prepared', details: intent })
-      prepareUndoRefRelease(identity, intent.receiptId, candidate.operationId)
+    const approved: typeof ready = []
+    for (const item of ready) {
+      check()
+      const { candidate, intent } = item
+      if (handled.has(intent.receiptId)) continue
+      try {
+        if (!candidate.intent) journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'prepared', details: intent })
+        prepareUndoRefRelease(identity, intent.receiptId, candidate.operationId)
+        approved.push(item)
+      } catch (error) { retain(candidate, (error as Error).message) }
     }
+    if (!approved.length) return 'next'
     try {
       options.afterPrepared?.()
+      check()
       if (argv && approved.some(({ present }) => present.length)) {
         const ran = await runGitProcess(argv, { cwd: workspacePath, env: repoProgramEnv(), input: transaction(approved), timeout: 30_000 })
+        check()
         if (ran.error || ran.status !== 0) {
           if (approved.length > 1) for (const { intent } of approved) isolate.add(intent.receiptId)
           else {
             const { candidate, intent } = approved[0]!
-            prepareUndoRefRelease(identity, intent.receiptId, candidate.operationId, this.now() + RELEASE_RETRY_DELAY_MS)
-            retain(candidate, gitRunError(argv, ran).message)
+            let reason = gitRunError(argv, ran).message
+            try { prepareUndoRefRelease(identity, intent.receiptId, candidate.operationId, this.now() + RELEASE_RETRY_DELAY_MS) }
+            catch (error) { reason += ` (${(error as Error).message})` }
+            retain(candidate, reason)
           }
           return 'next'
         }
       }
       options.afterGit?.()
     } catch (error) {
+      check()
       for (const { candidate } of approved) retain(candidate, error instanceof Error ? error.message : String(error))
       return 'finished'
     }
-    const after = await readDirectRefsAsync(workspacePath, approved.flatMap(({ intent }) => intent.refs.map((ref) => ref.name)))
+    const after = await bounded(readDirectRefsAsync(workspacePath, approved.flatMap(({ intent }) => intent.refs.map((ref) => ref.name))))
     for (const { candidate, intent } of approved) {
+      check()
       try {
         for (const ref of intent.refs) {
           const found = after.get(ref.name)
           if (found?.error) throw new Error(found.error)
-          if ((found?.sha ?? await readDirectLifecycleRefAsync(workspacePath, ref.name)) !== undefined) throw new Error(`Receipt reference survived the release transaction: ${ref.name}`)
+          if ((found?.sha ?? await bounded(readDirectLifecycleRefAsync(workspacePath, ref.name))) !== undefined) throw new Error(`Receipt reference survived the release transaction: ${ref.name}`)
         }
-      } catch (error) {
-        retain(candidate, (error as Error).message)
-        continue
-      }
-      finishUndoRefRelease(identity, intent.receiptId, candidate.operationId)
-      journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'completed', details: intent })
-      handled.add(intent.receiptId)
-      result.releasedRefs.push(...intent.refs.map((ref) => ref.name))
+        check()
+        finishUndoRefRelease(identity, intent.receiptId, candidate.operationId)
+        journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'completed', details: intent })
+        handled.add(intent.receiptId)
+        result.releasedRefs.push(...intent.refs.map((ref) => ref.name))
+      } catch (error) { check(); retain(candidate, (error as Error).message) }
     }
     return 'next'
   }

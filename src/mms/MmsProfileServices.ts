@@ -53,6 +53,7 @@ import { migrateWorktreeDefaultSetting, settleNewThreadPickerDefault } from './d
 import { ThreadDataStore } from './data/ThreadDataStore'
 import { backfillSubagentLineage } from './data/subagentLineage'
 import { OrchestratorService } from './orchestrator/OrchestratorService'
+import { retireForkCheckpoint } from './workspace/forkCheckpointPin'
 import { ProfileDatabase } from './run/db/ProfileDatabase'
 import { McpCredentials } from './run/mcp/McpCredentials'
 import { MousseMcpServer } from './run/mcp/MousseMcpServer'
@@ -1583,13 +1584,15 @@ export class MmsProfileServices {
       },
       quiesceDisk: () => { this.threads.quiesceAllThreadStorage(); return this.storageUsage.pause() },
       beforePurgeRemoval: async (record) => {
+        const owned = this.lifecycleOwnedTasks(record.taskId)
+        for (const task of owned) await retireForkCheckpoint(task.taskId, task.location)
         // A delete that keeps the thread's work keeps its snapshots too: nothing is released, and no store is collected.
         if (record.purge?.keptWork) return
         // What a deleted thread holds in a snapshot store goes on every pass, while the receipts that name it still exist.
         // Releasing again is harmless; a failure (a file another process holds) stops the pass, so the purge resumes and
         // tries again instead of leaving the refs or the store behind for good.
         const failures: string[] = []
-        for (const task of this.lifecycleOwnedTasks(record.taskId)) {
+        for (const task of owned) {
           try { await releaseThreadSnapshots(task.location, undefined, { discardAuthorized: Boolean(record.purge?.discardAuthorized) }) } catch (error) { failures.push(`${task.taskId}: ${error instanceof Error ? error.message : String(error)}`) }
         }
         if (failures.length) throw new Error(`The snapshots of a deleted thread could not be released yet; the delete will try again. ${failures.join('; ')}`)

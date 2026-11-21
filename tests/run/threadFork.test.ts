@@ -6,7 +6,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PI_TEST_CAPABILITIES } from '../support/piStub'
 import type { AdapterHost, ProviderAdapter, TurnControl, TurnInput, TurnResult, TurnSink } from '../../src/mms/harness/adapter'
 import { CommandRejection } from '../../src/mms/run/db/RunStoreError'
@@ -14,7 +14,11 @@ import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
 import { RunEngine, type ForkPointSeed, type RunTerminalStatus } from '../../src/mms/run/RunEngine'
 import { RunStore } from '../../src/mms/run/RunStore'
 import { ThreadWorkspaceManager } from '../../src/mms/workspace/ThreadWorkspaceManager'
-import { gitFoundationFixture } from '../fixtures/gitFoundation'
+import { ChangeReceiptService } from '../../src/mms/actions/ChangeReceiptService'
+import { ReceiptRefReleaseService } from '../../src/mms/actions/ReceiptRefReleaseService'
+import { ThreadActionService } from '../../src/mms/actions/ThreadActionService'
+import { UndoRetentionService } from '../../src/mms/actions/UndoRetentionService'
+import { git, gitFoundationFixture } from '../fixtures/gitFoundation'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
 /**
@@ -154,7 +158,7 @@ describe('thread fork (SPEC §16.2)', () => {
     expect(d.orch.getThreadModelOverride(forked.threadId)).toEqual({ ...PI, instanceId: 'pi:openai', name: 'GPT-Replay' })
   })
 
-  it('resolves portably on the first message, in the fork\'s own worktree seeded from the source checkpoint', async () => {
+  it('resolves portably on the first message, from the accepted checkpoint even after its source receipt is released', async () => {
     foundation = gitFoundationFixture()
     const f = foundation
     const pi = piAdapter((input) => {
@@ -170,7 +174,34 @@ describe('thread fork (SPEC §16.2)', () => {
     const sourceWorktree = new ThreadWorkspaceManager(d.store.getThreadDir(source.id)).load()!.worktreePath
     expect(f.read(sourceWorktree)).toBe('two\n')
 
+    const beforeFork = git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/threads/')
+    const checkpoint = d.engine.store.db.checkpoint.bind(d.engine.store.db)
+    const fault = vi.spyOn(d.engine.store.db, 'checkpoint').mockImplementation((point) => {
+      if (point === 'fork.beforeCommit') {
+        expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/threads/')).toContain('/fork-checkpoint')
+        throw new Error('Fork transaction interrupted')
+      }
+      checkpoint(point)
+    })
+    try {
+      await expect(d.engine.forkThread({ sourceThreadId: source.id, atRunOrdinal: 1, clientRequestId: 'fork-cancelled' })).rejects.toThrow('Fork transaction interrupted')
+    } finally { fault.mockRestore() }
+    expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/mousse/threads/')).toBe(beforeFork)
     const forked = await d.engine.forkThread({ sourceThreadId: source.id, atRunOrdinal: 1, clientRequestId: 'fork-at-1' })
+    const sourceDir = d.store.getThreadDir(source.id)
+    const sourceAction = new ThreadActionService(sourceDir).list().find((action) => action.turnId === forked.sourceRunId)!
+    const receipt = new ChangeReceiptService(sourceDir).list().find((candidate) => candidate.id === sourceAction.receiptId)!
+    const pin = 'refs/mousse/threads/' + forked.threadId + '/fork-checkpoint'
+    expect(git(f.repo, 'rev-parse', pin)).toBe(receipt.afterSha)
+    let now = Date.now()
+    const retention = new UndoRetentionService(sourceDir, () => now)
+    await retention.configure(sourceWorktree, { windowMs: 1, migrationGraceMs: 1, maxForwardStepMs: 60_000 }, true)
+    now += 10_000
+    await retention.sweep(sourceWorktree)
+    const released = await new ReceiptRefReleaseService(d.store.lifecycleStore, source.id, () => now).release(sourceWorktree)
+    expect(released.releasedRefs).toEqual(expect.arrayContaining(receipt.retainedRefs))
+    expect(git(f.repo, 'for-each-ref', '--format=%(refname)', receipt.retainedRefs[1]!)).toBe('')
+    expect(git(f.repo, 'rev-parse', pin)).toBe(receipt.afterSha)
     const response = await d.orch.send({ content: 'What is in value.txt?', mode: 'agent' }, false, { threadId: forked.threadId, clientRequestId: 'fork-first' })
     expect(response.message).toBe('done: What is in value.txt?')
 
@@ -189,12 +220,13 @@ describe('thread fork (SPEC §16.2)', () => {
     expect(turn.cwd?.startsWith(forkWorkspace.worktreePath)).toBe(true)
     expect(readFileSync(join(forkWorkspace.worktreePath, 'value.txt'), 'utf8')).toBe('one\n')
     expect(f.read(sourceWorktree)).toBe('two\n')
+    expect(git(f.repo, 'for-each-ref', '--format=%(refname)', pin)).toBe('')
 
     const transfer = d.engine.transfers.get(forked.transferId)!
     expect(transfer).toMatchObject({ status: 'consumed', payload: { forkStrategy: 'portable', strategy: 'full_summary', seed: { kind: 'checkpoint' } } })
     expect(d.engine.handoffs.listForThread(forked.threadId)).toMatchObject([{ strategy: 'full_summary', status: 'delivered', coveredFromOrdinal: 1, coveredToOrdinal: 1 }])
     expect(d.orch.getMessages(forked.threadId).find((message) => message.kind === 'context_handoff')?.contextHandoff).toMatchObject({ transfer: 'fork', strategy: 'full_summary' })
-  }, 60_000)
+  }, 150_000)
 
   it('a native-fork-capable adapter whose forkSession returns null falls back to the portable handoff', async () => {
     const pi = piAdapter((input) => `reply to ${input.prompt}`, { fork: 'native' }, 'session-1')

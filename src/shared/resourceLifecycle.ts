@@ -118,10 +118,11 @@ export type KeepCopyOperation = (typeof KEEP_COPY_OPERATIONS)[number]
 
 /**
  * Operations that settle themselves and change no file before they are settled: an expiry of kept files only records
- * which refs went, and a keep removes nothing before its copy is recorded. One left unfinished pauses nothing.
+ * which refs went, and a keep removes nothing before its copy is recorded. Receipt release fences only the receipt
+ * it reserves and resumes through the retention sweep. These operations leave foreground work available.
  */
 export function settlesItself(operationType: string): boolean {
-  return operationType === PRESERVED_EXPIRY_OPERATION || (KEEP_COPY_OPERATIONS as readonly string[]).includes(operationType)
+  return operationType === 'undo-ref-release' || operationType === PRESERVED_EXPIRY_OPERATION || (KEEP_COPY_OPERATIONS as readonly string[]).includes(operationType)
 }
 
 /** Whether a purge item is files a restore or an abort kept (a `refs/mousse/preserved/` ref), which may be the only copy of a file. */
