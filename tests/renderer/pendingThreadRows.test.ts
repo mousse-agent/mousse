@@ -362,10 +362,14 @@ describe('in the sidebar', () => {
     expect(host.querySelector('[data-thread-id^="pending:"]')).toBeNull()
   })
 
-  it('offers nothing on the reused empty thread until the service starts it, and takes no drop', () => {
+  it('opens the reused empty thread, and offers nothing else on it until the service starts it, and takes no drop', () => {
     addRow({ reuses: true })
     const row = rows()[0]!
     expect(row.dataset.threadId).toBe('d1')
+    // Left for another thread while its worktree is made, it opens again from its row.
+    act(() => useAppStore.setState({ activeThreadId: 'a' }))
+    act(() => row.click())
+    expect(actions.selectThread).toHaveBeenCalledWith('d1')
     expect(row.draggable).toBe(false)
     expect(row.parentElement!.querySelector('.threads-sidebar-thread-actions')).toBeNull()
     act(() => { row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })

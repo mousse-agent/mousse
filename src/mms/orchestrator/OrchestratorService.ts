@@ -14263,6 +14263,15 @@ export class OrchestratorService extends EventEmitter {
       this.goalTurnEpochs.set(session.threadId, { ...(opts?.runId ? { runId: opts.runId } : {}), ...(epoch ? { epoch } : {}) })
       if (opts?.runId && epoch) this.goalRunEpochs.set(opts.runId, epoch)
     }
+    // A run started again after a restart (reconciler rule 5) whose message the transcript already has, tagged with
+    // its run, does not take it in a second time: the turn runs on it.
+    const rerunOfSavedMessage = (): boolean =>
+      !queueItemId && Boolean(opts?.runId) && Boolean(this.runEngine) && session.messages.some((message) => message.role === 'user' && message.turnId === opts?.runId)
+    // A person's message starts its thread, on top of its group, as its turn is admitted: not once the worktree and
+    // snapshot are set up, which can take a while. Until then a new chat's empty thread would still be an unstarted
+    // draft: its row would not open, and New thread would open it again instead of a fresh one. Internal wakes stay hidden.
+    const startedAtAdmission = !reuseLastUser && displayUserMessage && !rerunOfSavedMessage()
+    if (startedAtAdmission) this.touchUserActivityAndNotify(session.threadId)
     // A Stop while the turn is still being set up ends the setup's waits (`endTurnSetups`); `startTurn` then ends the
     // turn before it started.
     const setupStop = new AbortController()
@@ -14599,13 +14608,9 @@ export class OrchestratorService extends EventEmitter {
       : undefined
     turnBoundaryMark(session.threadId, 'startCheck')
     closeRepositoryFacts()
-    // A run started again after a restart (reconciler rule 5) whose message the transcript already has, tagged with
-    // its run, does not take it in a second time: the turn runs on it.
-    if (!reuseLastUser && !queueItemId && opts?.runId && this.runEngine && session.messages.some((message) => message.role === 'user' && message.turnId === opts.runId)) {
-      reuseLastUser = true
-    }
-    // Keep user commits visible in the sidebar. Internal orchestration wakes stay hidden.
-    if (!reuseLastUser && displayUserMessage) {
+    if (!reuseLastUser && rerunOfSavedMessage()) reuseLastUser = true
+    // Keep user commits visible in the sidebar, if the admission did not (the transcript changed during the setup).
+    if (!reuseLastUser && displayUserMessage && !startedAtAdmission) {
       this.touchUserActivityAndNotify(session.threadId)
     }
 
