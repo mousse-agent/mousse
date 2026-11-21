@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
@@ -7,6 +6,7 @@ import { mousseGitEnv } from '../git/gitEnv'
 import { assertGitAllowed } from '../git/gitPolicy'
 import { timeGitChild } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile } from '../git/gitExecutable'
+import { execFileGit } from '../git/gitSpawn'
 
 /**
  * What a repository reads that can run programs and that lies in the working tree, as real paths:
@@ -37,7 +37,7 @@ function runGit(root: string, args: string[]): Promise<GitRun> {
     // Run in the folder rather than with `-C`, which the central check refuses; a missing folder is Git's "not a repository".
     if (!existsSync(root)) return resolveRun({ status: 128, stdout: '', missing: false })
     assertGitAllowed({ cwd: root, args })
-    timeGitChild(() => execFile(
+    timeGitChild(() => execFileGit(
       gitFile(),
       args,
       {

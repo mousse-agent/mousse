@@ -88,6 +88,8 @@ export interface TaskLifecycleRecord {
   originalLocation: string
   location: string
   parentTaskId?: string
+  /** Inherited history is staged while the run store still has to accept and publish the fork. */
+  pendingFork?: true
   /** Independent retention severs execution ownership after the original parent is purged. */
   formerParentTaskId?: string
   /** Historical paths remain fenced after moves; IDs are never recycled. */
@@ -118,10 +120,11 @@ export type KeepCopyOperation = (typeof KEEP_COPY_OPERATIONS)[number]
 
 /**
  * Operations that settle themselves and change no file before they are settled: an expiry of kept files only records
- * which refs went, and a keep removes nothing before its copy is recorded. One left unfinished pauses nothing.
+ * which refs went, and a keep removes nothing before its copy is recorded. Receipt release fences only the receipt
+ * it reserves and resumes through the retention sweep. These operations leave foreground work available.
  */
 export function settlesItself(operationType: string): boolean {
-  return operationType === PRESERVED_EXPIRY_OPERATION || (KEEP_COPY_OPERATIONS as readonly string[]).includes(operationType)
+  return operationType === 'undo-ref-release' || operationType === PRESERVED_EXPIRY_OPERATION || (KEEP_COPY_OPERATIONS as readonly string[]).includes(operationType)
 }
 
 /** Whether a purge item is files a restore or an abort kept (a `refs/mousse/preserved/` ref), which may be the only copy of a file. */
@@ -142,11 +145,12 @@ export interface LifecyclePurgeItem {
   discardRequired?: boolean
   discardState?: 'pending' | 'cleared'
   branch?: string
-  /**
-   * A `ref` item that is a thread's worktree branch outside `refs/heads/mousse/`: the owner thread's journal shows Mousse
-   * made it (`threadBranchRecord`), so it is deleted as Mousse's own.
-   */
+  /** The proven thread branch's worktree and reflog version, frozen before the worktree is removed. */
+  branchProvenance?: { worktreePath: string; reflogVersion: string }
+  /** Legacy flag used to parse older purge ledgers. It does not authorize deletion. */
   recordedBranch?: boolean
+  /** Why a pending item was kept on execution. Kept outside the frozen preview digest. */
+  retainedReason?: string
   sourcePath?: string
   rowId?: string
   indexDigest?: string
@@ -199,6 +203,10 @@ export interface LifecyclePurgeProgress extends LifecyclePurgePreview {
   completedAt?: string
   error?: string
   discardAuthorized: boolean
+  /** Worktree item IDs with a committed intent to move to their manifest's deterministic trash path. */
+  worktreeMoves?: string[]
+  /** Repository-wide Undo release reservations were settled before deleting thread data. */
+  receiptReleasesSettled?: true
   /** The thread's expiry deleted it (`Thread.expiresAt`), not a person: it is never listed in Recently deleted. */
   expired?: true
   /**

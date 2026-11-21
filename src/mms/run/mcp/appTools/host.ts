@@ -10,6 +10,7 @@ import type { ThreadEvent } from '../../types'
 import type { ChatMessage, ThreadActivityState, CreateScheduledJobInput, PendingUserQuestions, QueuedMessage, ScheduledJob, Thread, ThreadSetupFailure, UserQuestion, UserQuestionAnswers, UserQuestionAttachments } from '../../../../shared/types'
 import type { ScheduledJobOptionsInput } from '../../../scheduled/validateJobOptions'
 import type { DevGuiTools } from '../../../devgui/DevGuiTools'
+import type { MousseIntegrationsSettings } from '../../../../shared/integrations'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
 import type { ThreadSearchOptions } from '../../../data/ThreadDataStore'
 import type { QuickActionTools } from '../../../orchestrator/QuickActionTools'
@@ -370,6 +371,8 @@ export interface AppToolHost extends DelegationToolsHost {
   engine?: RunEngine
   browserRuntime?(): BrowserRuntimePort | undefined
   skills?(): SkillsRegistry | undefined
+  /** The profile's Skills settings, read when a model asks for a skill. */
+  skillSettings?(): MousseIntegrationsSettings['skills']
   quickActions?: QuickActionTools
   /** `running_list`: what runs now for the caller's folder (quick actions, background commands, servers), as text. */
   running?(turn: AppToolTurn): Promise<string>

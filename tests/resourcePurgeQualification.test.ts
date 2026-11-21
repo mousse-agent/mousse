@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
 import type { Thread } from '../src/shared/types'
@@ -116,7 +117,7 @@ it.each([
       expect(preview.blockers).toEqual(expect.arrayContaining([expect.stringMatching(/not Mousse-owned|no longer owns/)]))
     } else {
       expect(preview.blockers).toEqual([])
-      expect(preview.items).toContainEqual(expect.objectContaining({ kind: 'ref', identity: 'refs/heads/fix/login-button', recordedBranch: true }))
+      expect(preview.items).toContainEqual(expect.objectContaining({ kind: 'ref', identity: 'refs/heads/fix/login-button' }))
       await coordinator.purge({ taskId: 'task', operationId: 'branch-purge', expectedGeneration: preview.generation, previewDigest: preview.digest })
       expect(git(f.repo, 'for-each-ref', '--format=%(refname)', 'refs/heads/fix/', 'refs/heads/team/')).toBe('')
     }
@@ -157,6 +158,44 @@ it.each(['mousse', 'team'])('a thread whose branch rename was settled without kn
   } finally { t.f.dispose() }
 }, 120_000)
 
+it.each([
+  { state: 'failed', legacy: false },
+  { state: 'failed', legacy: true },
+  { state: 'planned', legacy: true }
+])('permanent purge preserves a replacement branch at the same commit after a $state provision (legacy: $legacy)', async ({ state, legacy }) => {
+  const { f, store, location, manager, made, coordinator } = await threadWithBranch('mousse', undefined)
+  try {
+    // Keep the checkout available for the reconstruction proof without checking out the planned name.
+    git(made.worktreePath, 'switch', '--detach')
+    const taskLease = await waitAcquireExecutionLease(location)
+    const repositoryLease = await acquireRepositoryLease(resolveRepositoryIdentity(f.repo))
+    try {
+      const retirement = new WorktreeRetirementService(store, { taskLease, repositoryLease })
+      await retirement.prepare({ taskId: 'task', worktreePath: made.worktreePath, branch: made.branch, sourcePath: join(location, 'workspace.json') })
+      await retirement.retire(retirement.pathFor('task', made.worktreePath))
+    } finally { repositoryLease.release(); releaseExecutionLeaseHandle(taskLease) }
+
+    // The checkout has a reconstruction manifest, but its only provision record has no success record.
+    // Git lets the user take its name at the same tip.
+    renameSync(join(location, 'journal'), join(f.root, 'original-journal'))
+    const journal = new ThreadWorkspaceManager(location).journal
+    journal.append({ operationId: 'unproven', operationType: 'workspace-provision', state: 'planned', expectedPreState: { branch: made.branch, worktreePath: made.worktreePath, ...(legacy ? {} : { requiresCompletion: true }) } })
+    if (state === 'failed') journal.append({ operationId: 'unproven', operationType: 'workspace-provision', state: 'failed' })
+    if (git(f.repo, 'branch', '--list', made.branch)) git(f.repo, 'branch', '-D', made.branch)
+    git(f.repo, 'branch', made.branch, made.headSha)
+    expect(git(f.repo, 'rev-parse', made.branch)).toBe(made.headSha)
+    expect(manager.load()!.branch).toBe(made.branch)
+
+    await coordinator.trash({ taskId: 'task', operationId: 'collision-trash' })
+    const preview = await coordinator.cleanup.preview('task')
+    expect(preview.blockers).toEqual([])
+    expect(preview.retained).toContainEqual(expect.objectContaining({ identity: `refs/heads/${made.branch}` }))
+    const purged = await coordinator.purge({ taskId: 'task', operationId: 'collision-purge', expectedGeneration: preview.generation, previewDigest: preview.digest })
+    expect(purged.state).toBe('purged')
+    expect(git(f.repo, 'rev-parse', made.branch)).toBe(made.headSha)
+  } finally { f.dispose() }
+}, 120_000)
+
 it('a thread\'s branch that retirement deleted, made again by the person with their commits, survives the thread\'s purge', async () => {
   const t = await threadWithBranch('team', 'fix/login-button')
   try {
@@ -183,6 +222,57 @@ it('a thread\'s branch that retirement deleted, made again by the person with th
     await t.coordinator.purge({ taskId: 'task', operationId: 'branch-purge', expectedGeneration: preview.generation, previewDigest: preview.digest })
     expect(git(f.repo, 'rev-parse', 'fix/login-button')).toBe(theirs)
   } finally { t.f.dispose() }
+}, 120_000)
+
+it.each(['replaced', 'legacy', 'unchanged'] as const)('resumes purge after worktree removal with a %s branch', async (scenario) => {
+  const { f, store, made } = await threadWithBranch('mousse', undefined)
+  const ref = `refs/heads/${made.branch}`
+  const hooks = { drain: async () => {}, settleMutationOwnership: async () => {}, projectIndex: () => {}, projectPurged: () => {} }
+  try {
+    const interrupted = new ResourceLifecycleCoordinator(store, { ...hooks, onPhase: (record, phase) => {
+      if (phase === 'purge-started' && record.purge?.items.some((item) => item.kind === 'worktree' && item.status === 'removed')) {
+        throw new Error('worktree removed, branch still pending')
+      }
+    } })
+    await interrupted.trash({ taskId: 'task', operationId: 'resume-trash' })
+    const preview = await interrupted.cleanup.preview('task')
+    await expect(interrupted.purge({ taskId: 'task', operationId: 'resume-purge', expectedGeneration: preview.generation, previewDigest: preview.digest }))
+      .rejects.toMatchObject({ cause: expect.objectContaining({ message: 'worktree removed, branch still pending' }) })
+    expect(existsSync(made.worktreePath)).toBe(false)
+    expect(store.require('task').purge!.items.find((item) => item.identity === ref)?.status).toBe('pending')
+
+    if (scenario === 'legacy') {
+      store.update('task', (task) => {
+        const branch = task.purge!.items.find((item) => item.identity === ref)!
+        delete branch.branchProvenance
+        const original = { ...preview, digest: '', items: preview.items.map((item) => {
+          if (item.identity !== ref) return item
+          const legacy = { ...item }
+          delete legacy.branchProvenance
+          return legacy
+        }) }
+        task.purge!.digest = createHash('sha256').update(JSON.stringify(original)).digest('hex')
+      })
+    }
+    unlinkSync(join(store.require('task').location, 'workspace.json'))
+    if (scenario === 'replaced') {
+      git(f.repo, 'branch', '-D', made.branch)
+      git(f.repo, 'branch', made.branch, made.headSha)
+    }
+    expect(git(f.repo, 'rev-parse', ref)).toBe(made.headSha)
+
+    const restartedStore = new ResourceLifecycleStore({ profileId: 'qualification', profileHome: f.home })
+    registerThreadLifecycleGate(f.home, restartedStore)
+    const recovered = await new ResourceLifecycleCoordinator(restartedStore, hooks).recover('task')
+    expect(recovered.state).toBe('purged')
+    if (scenario === 'unchanged') {
+      expect(git(f.repo, 'branch', '--list', made.branch)).toBe('')
+    } else {
+      expect(git(f.repo, 'rev-parse', ref)).toBe(made.headSha)
+      expect(recovered.purge!.items).toContainEqual(expect.objectContaining({ identity: ref, status: 'retained', retainedReason: expect.any(String) }))
+    }
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.baseSha)
+  } finally { f.dispose() }
 }, 120_000)
 
 it('keeps an interrupted purge pending while its repository is offline and resumes only after the same repository returns', async () => {

@@ -1,6 +1,6 @@
+import { execFileGitSync, spawnGitSync, withGitDiskAdmission } from '../git/gitSpawn'
 import { type AppError, knownAppError } from '../../shared/errors'
 import type { PendingChangesDetails } from '../../shared/workspace'
-import { execFileSync, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import { filterRefusal, repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '../git/repoPrograms'
@@ -77,7 +77,7 @@ export const LISTING: GitReadOptions = { maxBuffer: LISTING_MAX_BUFFER }
  */
 export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string, options?: GitReadOptions): string {
   try {
-    return timeGitSync(() => execFileSync(gitFile(), guarded(cwd, args, { ...(env ? { env } : {}), ...(input !== undefined ? { stdin: input } : {}) }), {
+    return timeGitSync(() => execFileGitSync(gitFile(), guarded(cwd, args, { ...(env ? { env } : {}), ...(input !== undefined ? { stdin: input } : {}) }), {
       cwd,
       env: gitEnvFor(gitEnv(cwd, env)),
       encoding: 'utf8',
@@ -94,13 +94,15 @@ export function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?
 
 /** {@link git} without blocking the daemon: the same check, command and answer, and an error carrying Git's `stderr` and `status`. */
 export async function gitAsync(cwd: string, args: string[], env?: NodeJS.ProcessEnv, input?: string, options?: GitReadOptions): Promise<string> {
-  const argv = await guardedAsync(cwd, args, { ...(env ? { env } : {}), ...(input !== undefined ? { stdin: input } : {}) })
-  const ran = await runGitProcess(argv, { cwd, env: gitEnv(cwd, env), input, maxBuffer: options?.maxBuffer ?? (input !== undefined ? LISTING_MAX_BUFFER : DEFAULT_MAX_BUFFER) })
-  if (!ran.error && ran.status === 0) return ran.stdout.trim()
-  const error = Object.assign(new Error(`Command failed: git ${argv.join(' ')}${ran.stderr ? `\n${ran.stderr}` : ''}`, ran.error ? { cause: ran.error } : undefined), { status: ran.status, stdout: ran.stdout, stderr: ran.stderr })
-  const refusal = filterRefusal(ran.stderr)
-  if (refusal) throw new Error(refusal, { cause: error })
-  throw error
+  return withGitDiskAdmission(cwd, async () => {
+    const argv = await guardedAsync(cwd, args, { ...(env ? { env } : {}), ...(input !== undefined ? { stdin: input } : {}) })
+    const ran = await runGitProcess(argv, { cwd, env: gitEnv(cwd, env), input, maxBuffer: options?.maxBuffer ?? (input !== undefined ? LISTING_MAX_BUFFER : DEFAULT_MAX_BUFFER), beforeStart: options?.beforeStart })
+    if (!ran.error && ran.status === 0) return ran.stdout.trim()
+    const error = Object.assign(new Error(`Command failed: git ${argv.join(' ')}${ran.stderr ? `\n${ran.stderr}` : ''}`, ran.error ? { cause: ran.error } : undefined), { status: ran.status, stdout: ran.stdout, stderr: ran.stderr })
+    const refusal = filterRefusal(ran.stderr)
+    if (refusal) throw new Error(refusal, { cause: error })
+    throw error
+  })
 }
 
 /**
@@ -108,7 +110,7 @@ export async function gitAsync(cwd: string, args: string[], env?: NodeJS.Process
  * with nothing awaited before what it guards (Abort's last check right before Git starts). Throws when Git fails.
  */
 export function listZSync(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string[] {
-  const result = timeGitSync(() => spawnSync(gitFile(), guarded(cwd, args, { ...(env ? { env } : {}) }), { cwd, encoding: 'utf8', env: gitEnvFor(gitEnv(cwd, env)), maxBuffer: LISTING_MAX_BUFFER }))
+  const result = timeGitSync(() => spawnGitSync(gitFile(), guarded(cwd, args, { ...(env ? { env } : {}) }), { cwd, encoding: 'utf8', env: gitEnvFor(gitEnv(cwd, env)), maxBuffer: LISTING_MAX_BUFFER }))
   if (result.error || result.status !== 0) throw new Error(`Command failed: git ${args.join(' ')}${result.stderr ? `\n${result.stderr.trim()}` : ''}`)
   return result.stdout.split('\0').filter(Boolean)
 }
@@ -122,7 +124,7 @@ export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv, opt
     rethrowGitPolicyError(error)
     return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
   }
-  const result = timeGitSync(() => spawnSync(gitFile(), safe, { cwd, encoding: 'utf8', env: gitEnvFor(gitEnv(cwd, env)), maxBuffer: options?.maxBuffer ?? DEFAULT_MAX_BUFFER }))
+  const result = timeGitSync(() => spawnGitSync(gitFile(), safe, { cwd, encoding: 'utf8', env: gitEnvFor(gitEnv(cwd, env)), maxBuffer: options?.maxBuffer ?? DEFAULT_MAX_BUFFER }))
   const stderr = result.stderr.trim()
   // Output cut off at the limit is a failure, even when Git exited 0 before it was stopped (`spawnSync` reports both).
   const ok = !result.error && result.status === 0
@@ -131,18 +133,20 @@ export function tryGit(cwd: string, args: string[], env?: NodeJS.ProcessEnv, opt
 
 /** {@link tryGit} without blocking the daemon. */
 export async function tryGitAsync(cwd: string, args: string[], env?: NodeJS.ProcessEnv, options?: GitReadOptions): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  let safe: string[]
-  try {
-    safe = await guardedAsync(cwd, args, { env })
-  } catch (error) {
-    rethrowGitPolicyError(error)
-    return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
-  }
-  const result = await runGitProcess(safe, { cwd, env: gitEnv(cwd, env), maxBuffer: options?.maxBuffer ?? DEFAULT_MAX_BUFFER, ...(options?.beforeStart ? { beforeStart: options.beforeStart } : {}) })
-  const stderr = result.stderr.trim()
-  // As in `tryGit`: output cut off at the limit is a failure.
-  const ok = !result.error && result.status === 0
-  return { ok, stdout: result.stdout.trim(), stderr: (!ok && filterRefusal(stderr)) || stderr }
+  return withGitDiskAdmission(cwd, async () => {
+    let safe: string[]
+    try {
+      safe = await guardedAsync(cwd, args, { env })
+    } catch (error) {
+      rethrowGitPolicyError(error)
+      return { ok: false, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
+    }
+    const result = await runGitProcess(safe, { cwd, env: gitEnv(cwd, env), maxBuffer: options?.maxBuffer ?? DEFAULT_MAX_BUFFER, ...(options?.beforeStart ? { beforeStart: options.beforeStart } : {}) })
+    const stderr = result.stderr.trim()
+    // As in `tryGit`: output cut off at the limit is a failure.
+    const ok = !result.error && result.status === 0
+    return { ok, stdout: result.stdout.trim(), stderr: (!ok && filterRefusal(stderr)) || stderr }
+  })
 }
 
 /**
@@ -151,16 +155,18 @@ export async function tryGitAsync(cwd: string, args: string[], env?: NodeJS.Proc
  * a listing passes {@link LISTING}.
  */
 export async function tryGitRawAsync(cwd: string, args: string[], input?: string, options?: GitReadOptions): Promise<{ ok: boolean; status: number | null; stdout: string; stderr: string }> {
-  let safe: string[]
-  try {
-    safe = await guardedAsync(cwd, args, input !== undefined ? { stdin: input } : undefined)
-  } catch (error) {
-    rethrowGitPolicyError(error)
-    return { ok: false, status: null, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
-  }
-  const result = await runGitProcess(safe, { cwd, env: gitEnv(cwd), ...(input !== undefined ? { input } : {}), maxBuffer: options?.maxBuffer ?? DEFAULT_MAX_BUFFER })
-  const ok = !result.error && result.status === 0
-  return { ok, status: result.error ? null : result.status, stdout: result.stdout, stderr: (!ok && filterRefusal(result.stderr.trim())) || result.stderr }
+  return withGitDiskAdmission(cwd, async () => {
+    let safe: string[]
+    try {
+      safe = await guardedAsync(cwd, args, input !== undefined ? { stdin: input } : undefined)
+    } catch (error) {
+      rethrowGitPolicyError(error)
+      return { ok: false, status: null, stdout: '', stderr: error instanceof Error ? error.message : String(error) }
+    }
+    const result = await runGitProcess(safe, { cwd, env: gitEnv(cwd), ...(input !== undefined ? { input } : {}), maxBuffer: options?.maxBuffer ?? DEFAULT_MAX_BUFFER })
+    const ok = !result.error && result.status === 0
+    return { ok, status: result.error ? null : result.status, stdout: result.stdout, stderr: (!ok && filterRefusal(result.stderr.trim())) || result.stderr }
+  })
 }
 
 /** {@link git} as a step: see `steps.ts`. */
@@ -178,11 +184,11 @@ export function tryGitStep(cwd: string, args: string[], env?: NodeJS.ProcessEnv,
  * programs, the exit status, the output exactly as written, and Git's messages.
  */
 export function ownGitRunner(top: string): DiscardGit {
-  return async (args, options = {}) => {
+  return async (args, options = {}) => withGitDiskAdmission(top, async () => {
     const argv = await guardedAsync(top, args, { ...(options.env ? { env: options.env } : {}), ...(options.input !== undefined ? { stdin: options.input } : {}) })
     const ran = await runGitProcess(argv, { cwd: top, env: gitEnv(top, options.env), ...(options.input !== undefined ? { input: options.input } : {}), maxBuffer: LISTING_MAX_BUFFER })
     return { status: ran.error ? null : ran.status, stdout: ran.stdout, stderr: (filterRefusal(ran.stderr.trim()) || ran.stderr) }
-  }
+  })
 }
 
 /** How many changed files a message names before it says "and N more". */

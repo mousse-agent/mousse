@@ -7,7 +7,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Project, Thread } from '../../src/shared/types'
+import type { GitHeadsRequest, GitHeadsResult, Project, Thread } from '../../src/shared/types'
 import type { ThreadPullRequestLink } from '../../src/shared/pullRequests'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -60,7 +60,13 @@ beforeEach(() => {
   setReplyPreviews(true)
   const call = (name: string) => (name.startsWith('on') ? () => () => {} : async () => undefined)
   const group = () => new Proxy({}, { get: (_target, key: string) => call(key) })
-  ;(window as unknown as { mousse: unknown }).mousse = new Proxy({ platform: 'darwin' } as Record<string, unknown>, { get: (target, key: string) => target[key] ?? group() })
+  const heads = async ({ threadIds = [] }: GitHeadsRequest): Promise<GitHeadsResult> => ({
+    projects: { [project.id]: { repo: true, branch: 'master' } },
+    threads: Object.fromEntries(threadIds.map((id) => [id, { own: true as const, branch: 'mousse/' + id, generation: 0, lifecycle: 'provisioning' }]))
+  })
+  ;(window as unknown as { mousse: unknown }).mousse = new Proxy({ platform: 'darwin', git: { heads } } as Record<string, unknown>, {
+    get: (target, key: string) => target[key] ?? group()
+  })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -85,11 +91,8 @@ const preview = (id: string) => row(id).querySelector('.threads-sidebar-reply-pr
 const count = (id: string) => row(id).querySelector('[role="img"][aria-label$="pull request"], [role="img"][aria-label$="pull requests"]')
 
 it('a Projects tree row shows its branch under the title: its own worktree\'s, or its project folder\'s', async () => {
-  const bridge = (window as unknown as { mousse: Record<string, unknown> }).mousse
-  bridge.git = { status: async () => ({ isRepo: true, branch: 'master' }) }
-  bridge.workspace = { getStatus: async (id: string) => ({ metadata: { branch: `mousse/${id}` }, execution: { lifecycle: 'creating' } }) }
   show('projects')
-  await act(async () => { for (let pass = 0; pass < 5; pass++) await Promise.resolve() })
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
   const branch = (id: string) => row(id).querySelector('.threads-sidebar-thread-sub .threads-sidebar-branch-name')?.textContent ?? null
   const ownWorktree = (id: string) => row(id).querySelector('.threads-sidebar-thread-sub .threads-sidebar-branch-icon') !== null
   expect(branch('a')).toBe('mousse/a')
@@ -115,8 +118,6 @@ it('a thread rested on opens its card beside it with the whole title, the projec
   vi.useFakeTimers()
   try {
     useAppStore.setState({ appInfo: { platform: 'darwin', repoRoot: '/', llmProvider: 'claude', deviceName: 'Studio' } })
-    const bridge = (window as unknown as { mousse: Record<string, unknown> }).mousse
-    bridge.git = { status: async () => ({ isRepo: true, branch: 'master' }) }
     show('projects')
     const card = () => document.querySelector('.threads-sidebar-hover-card')
     act(() => { row('d').dispatchEvent(new PointerEvent('pointerover', { bubbles: true, pointerType: 'mouse' })) })

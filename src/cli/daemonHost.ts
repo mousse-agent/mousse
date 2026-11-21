@@ -1,7 +1,6 @@
 /**
  * Credential-capable host for the packaged MMS daemon.
  * Headless Electron dual-mode preserves safeStorage and the node-pty ABI.
- * koffi remains Electron-local and is not required for daemon host selection.
  */
 
 import { createRequire } from 'module'

@@ -37,6 +37,7 @@ files:
   - '!**/node_modules/node-pty/**/*.test.js'
 asarUnpack:
   - out/net-native/**
+  - node_modules/@koromix/**
   - out/browser-worker/**
   - out/pi-runtime/**
   - node_modules/node-pty/build/Release/**
@@ -45,6 +46,7 @@ asarUnpack:
   - node_modules/node-pty/prebuilds/linux-x64/**
   - node_modules/node-pty/third_party/**
   - node_modules/@node-datachannel/**
+  - node_modules/@koromix/koffi-win32-*/**
   - node_modules/@cursor/sdk-*/**
   - out/main/cursorHost.js
   - out/main/threadDbWorker.js

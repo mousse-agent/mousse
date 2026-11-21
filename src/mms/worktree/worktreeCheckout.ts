@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { isAbsolute, resolve } from 'node:path'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
+import { withGitDiskAdmission } from '../git/gitSpawn'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
 
 /**
@@ -29,12 +30,12 @@ export interface WorktreeCheckoutPlan {
 export type WorktreeGit = (cwd: string, args: string[], input?: string) => Promise<unknown>
 
 /** Git for these commands: the repository's own programs never run (`withoutRepoProgramsAsync`). */
-export const worktreeGit: WorktreeGit = async (cwd, args, input) => {
+export const worktreeGit: WorktreeGit = (cwd, args, input) => withGitDiskAdmission(cwd, async () => {
   const argv = await withoutRepoProgramsAsync(cwd, args, input === undefined ? undefined : { stdin: input })
   const ran = await runGitProcess(argv, { cwd, env: repoProgramEnv(), ...(input === undefined ? {} : { input }) })
   if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
   return ran.stdout
-}
+})
 
 /** Plain paths only (no pattern characters): Git's cone mode, which takes folders and is the faster one. */
 const PATTERN_CHARACTERS = /[*?[\]\\!]/
@@ -95,7 +96,7 @@ export async function addWorktree(input: {
   plan: WorktreeCheckoutPlan
   prefix?: readonly string[]
   run?: WorktreeGit
-  afterAdd?: () => Promise<void>
+  afterAdd?: () => void | Promise<void>
 }): Promise<void> {
   const run = input.run ?? worktreeGit
   const prefix = input.prefix ?? []

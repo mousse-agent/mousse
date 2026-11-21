@@ -26,6 +26,7 @@ import { gitRunError, LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitPro
 import { renameFolderAsync } from './renameFolder'
 import { isIdNamedMousseBranch, isMousseBranchName, isValidBranchName } from '../../shared/mousseBranches'
 import { withOwnedBranches } from '../git/gitPolicy'
+import { branchReflogIdentity } from '../git/branchReflogIdentity'
 import { BRANCH_RECORD_OPERATIONS, BRANCH_RELEASE_OPERATION, BRANCH_RESTORE_OPERATION, threadBranchRecord, type ThreadBranchRecord } from '../workspace/threadBranchRecords'
 import { randomUUID } from 'node:crypto'
 import { adminDigest, adminObjectIds, blobId, HEAD_REFLOG, readAdminFilesAsync, replayedAdminFile, storeAdmin, storeAdminBeforeRemoval, uncontainedTips, type StoredAdmin } from './worktreeAdminData'
@@ -35,7 +36,8 @@ import { CLEANUP_ROUNDS } from '../worktree/verifiedCleanup'
 import { withDrivers } from '../git/gitEnv'
 import { restoreCommands, restoreShell, type RestoreKind, type RestoreShell } from '../actions/restoreCommands'
 import { retentionWindowText } from '../../shared/undoRetention'
-import { gitSucceeds, lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
+import { branchCheckedOutAsync, createLoggedBranchAsync, deleteVerifiedBranchAsync, gitSucceeds, lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
+import { verifyPinsAsync } from './worktreeFacts'
 import { assertFolderUnchanged, assertFoldersUnchanged, caseInsensitiveAt, deleteVerifiedAsync, FolderChanged, folderSignatureAsync, identityOf, lockedText, lstatAll, recordFoldersAboveAsync, sameEntry, samePath, statOrThrow, unregisterDeletedAsync, walkOwnedContentAsync, worktreeLockAsync, worktreeRegisteredAsync, type ContentEntry, type DeletePlace, type FolderSignature, type HeldCheck, type LateWrites } from './verifiedDelete'
 import { readThreadRecordSync, threadRecordFile, threadRecordFolder, threadRecordName } from '../data/threadRecords'
 
@@ -431,7 +433,10 @@ export class WorktreeRetirementService {
   }
   load(path: string): WorktreeReconstructionManifest {
     assertLifecyclePath(this.store.root, path)
-    const value = JSON.parse(readFileSync(path, 'utf8')) as WorktreeReconstructionManifest
+    return this.parseManifest(path, readFileSync(path, 'utf8'))
+  }
+  private parseManifest(path: string, text: string): WorktreeReconstructionManifest {
+    const value = JSON.parse(text) as WorktreeReconstructionManifest
     if (value.schemaVersion !== 1 || value.profileId !== this.store.profileId || !samePath(path, this.pathFor(value.taskId, value.worktreePath)) || !isValidBranchName(value.branch)) throw new Error('Invalid workspace reconstruction authority')
     const prefix = `refs/mousse/lifecycle/${this.store.profileId}/${value.taskId}/${hash(value.worktreePath).slice(0, 32)}`
     if (value.snapshotSha !== undefined && (value.snapshotRef !== `${prefix}/snapshot` || ![value.snapshotSha, value.snapshotTree].every((sha) => typeof sha === 'string' && /^[a-f0-9]{40,64}$/.test(sha)))) throw new Error('Malformed workspace reconstruction manifest')
@@ -525,18 +530,26 @@ export class WorktreeRetirementService {
   async retire(manifestPath: string, options: {
     purging?: boolean
     /**
-     * The caller's own checks, run synchronously right before the worktree moves (or, for a purge of one already in the
-     * trash, right before Git deletes it), after the ownership and claims checks and with nothing awaited in between. It
-     * refuses by throwing; nothing has moved then.
+     * The caller can gather fresh evidence, then return a synchronous admission check to run just before a move or delete.
      */
-    beforeMove?: () => void
+    beforeMove?: (path: string) => void | Promise<() => void>
+    purgeRelocation?: { started: boolean; record: () => void }
   } = {}): Promise<WorktreeReconstructionManifest> {
     const manifest = this.load(manifestPath)
+    if (options.purgeRelocation?.started) manifest.trashPath ??= this.trashPathFor(manifest)
     // On a drive that is not connected nothing moves and nothing is taken for gone; it waits for the drive.
     await assertWorktreeFolderConnected(manifest.worktreePath, manifest.trashPath, manifest.deleting?.path)
     await this.checkOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
     await this.verifyPins(manifest)
     const save = (): void => { if (!options.purging) atomicWriteJsonSync(manifestPath, manifest) }
+    const admitRemoval = (path: string) => async (): Promise<() => void> => {
+      const lease = await this.readRepositoryLease()
+      const admit = await options.beforeMove?.(path)
+      return () => {
+        this.store.withGate(manifest.taskId, () => this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId, lease))
+        admit?.()
+      }
+    }
     await this.settleTrashRegistration(manifest)
     if (!await exists(manifest.worktreePath)) {
       if (await this.registered(manifest)) throw new Error('Missing worktree remains registered; recovery is required')
@@ -544,14 +557,20 @@ export class WorktreeRetirementService {
       // Permanent deletion: what waits in the trash goes too, and what is left of a delete the trash expiry started.
       // Ownership is checked again right before each removal starts.
       if (options.purging && manifest.trashPath) {
-        const lease = await this.readRepositoryLease()
-        const owned = (): void => {
-          this.store.withGate(manifest.taskId, () => this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId, lease))
-          options.beforeMove?.()
+        if (manifest.deleting && await exists(manifest.deleting.path))
+          await this.removeConfirmed(manifest.deleting.path, admitRemoval(manifest.deleting.path))
+        const trashPath = manifest.trashPath
+        if (await exists(trashPath)) await this.removeTrashed(manifest, admitRemoval(trashPath))
+        else if (await worktreeRegisteredAsync(manifest.commonDir, trashPath)) {
+          await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', trashPath], undefined, undefined, undefined, async () => {
+            const admit = await admitRemoval(trashPath)()
+            return () => {
+              admit()
+              // This removal only unregisters a missing checkout. Even an ignored file in a replacement is kept.
+              if (lstatSync(trashPath, { throwIfNoEntry: false })) throw new Error('The worktree trash path reappeared; its files are kept')
+            }
+          })
         }
-        if (manifest.deleting && await exists(manifest.deleting.path)) await this.removeConfirmed(manifest.deleting.path, owned)
-        if (await exists(manifest.trashPath)) await this.removeTrashed(manifest, owned)
-        else if (await worktreeRegisteredAsync(manifest.commonDir, manifest.trashPath)) await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', manifest.trashPath], undefined, undefined, undefined, owned)
         delete manifest.deleting
       }
       manifest.state = manifest.trashPath && await exists(manifest.trashPath) ? 'trashed' : 'retired'; save(); return manifest
@@ -589,10 +608,11 @@ export class WorktreeRetirementService {
     // Right before the move, with nothing awaited between these checks and its start: the checkouts other records name
     // are read again now, then the leases, the reservation, the source and every claim are checked from the records, and
     // last the caller's own checks run. A claim on a checkout not read here fails closed.
-    const facts = new OwnershipFacts()
-    // Only the facts are wanted: a refusal is made again, from the records, by the check below.
-    await getExternalResourceClaims(this.store, excludedNow(), facts).catch(() => undefined)
     const lease = await this.readRepositoryLease()
+    const facts = new OwnershipFacts(true)
+    const prepare = options.beforeMove?.(manifest.worktreePath)
+    const admit = prepare ? await prepare : undefined
+    await getExternalResourceClaims(this.store, excludedNow(), facts)
     this.store.withGate(manifest.taskId, () => {
       this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId, lease)
       this.verifySource(manifest, options.purging)
@@ -600,14 +620,16 @@ export class WorktreeRetirementService {
       const late = shares(getExternalResourceClaimsFromFacts(this.store, current, facts), current)
       if (late) throw new Error(late)
     })
-    options.beforeMove?.()
+    admit?.()
     // The destination is fixed by the manifest, so a crash after the move finds the folder there.
-    manifest.trashPath = trashPath; save()
+    manifest.trashPath = trashPath
+    if (options.purging) options.purgeRelocation?.record()
+    else save()
     try { await renameFolderAsync(manifest.worktreePath, trashPath) }
     catch (error) { throw new Error(`The worktree could not be moved to the trash; files in it may be in use (${(error as Error).message.split(/\r?\n/)[0]})`) }
     await this.settleTrashRegistration(manifest)
     if (await this.registered(manifest)) throw new Error('Git still registers the worktree at its old path')
-    if (options.purging) { await this.removeTrashed(manifest); manifest.state = 'retired'; return manifest }
+    if (options.purging) { await this.removeTrashed(manifest, admitRemoval(trashPath)); manifest.state = 'retired'; return manifest }
     manifest.state = 'trashed'; manifest.trashedAt = new Date().toISOString(); save()
     await this.releaseBranches(manifest); save()
     return manifest
@@ -1108,17 +1130,28 @@ export class WorktreeRetirementService {
    * A permanent deletion the person confirmed, only: deletes the folder in the trash through Git, so its registration
    * goes with it. The trash expiry never uses this; it deletes against a proof (`deleteRenamed`).
    */
-  private async removeTrashed(manifest: WorktreeReconstructionManifest, beforeStart?: () => void): Promise<void> {
+  private async removeTrashed(manifest: WorktreeReconstructionManifest, beforeStart?: () => void | Promise<() => void>): Promise<void> {
     const trashPath = manifest.trashPath!
     await assertLifecyclePathAsync(trashRootOf(trashPath, this.store.profileHome), trashPath)
     // Whether the checks before Git passed: a refusal there deletes nothing, by Git or otherwise.
     let cleared = false
-    try { await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', '--force', trashPath], undefined, undefined, undefined, () => { beforeStart?.(); cleared = true }) }
+    try { await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', '--force', trashPath], undefined, undefined, undefined, async () => {
+      const check = await beforeStart?.()
+      return () => {
+        check?.()
+        const root = lstatSync(trashPath)
+        const original = manifest.rootIdentity
+        if (!root.isDirectory() || root.dev !== original.dev || root.ino !== original.ino || root.birthtimeMs !== original.birthtimeMs) {
+          throw new Error('The worktree in the trash was replaced; its files are kept')
+        }
+        cleared = true
+      }
+    }) }
     catch (error) {
       if (!cleared) throw error
       // Git deleted `.git` and unregistered it, then stopped at a file in use: what is left is no checkout any more.
       if (!await exists(trashPath) || await exists(join(trashPath, '.git')) || await worktreeRegisteredAsync(manifest.commonDir, trashPath)) throw error
-      await this.removeConfirmed(trashPath)
+      await this.removeConfirmed(trashPath, beforeStart)
     }
     if (await exists(trashPath) || await worktreeRegisteredAsync(manifest.commonDir, trashPath)) throw new Error('Git did not remove the worktree from the trash')
   }
@@ -1127,10 +1160,10 @@ export class WorktreeRetirementService {
    * never followed, a worktree's `.git` file last. Every entry and every folder from the trash down is identified when
    * the folder is walked; right before each removal, each folder down to it must be the very one walked, and no link, and
    * the entry the very one walked, or nothing more is removed (as in `deleteRenamed`, a deliberate swap between that check
-   * and the system call remains possible in principle). `beforeStart` runs right before the first removal. A file in use
+   * and the system call remains possible in principle). `beforeStart` refreshes admission before each removal. A file in use
    * stops it; the next pass of the permanent deletion carries on.
    */
-  private async removeConfirmed(root: string, beforeStart?: () => void): Promise<void> {
+  private async removeConfirmed(root: string, beforeStart?: () => void | Promise<() => void>): Promise<void> {
     const trash = trashRootOf(root, this.store.profileHome)
     await assertLifecyclePathAsync(trash, root)
     const folders = new Map<string, string>()
@@ -1153,8 +1186,9 @@ export class WorktreeRetirementService {
       paths.push({ path: dotGit, folder: false, identity: identityOf(gitStat) })
     }
     paths.push({ path: root, folder: true, identity: folders.get(resolve(root))! })
-    beforeStart?.()
     for (const entry of paths) {
+      const admission = beforeStart?.()
+      if (admission) (await admission)()
       try {
         assertFoldersUnchanged(trash, dirname(entry.path), folders)
         const stat = lstatSync(entry.path)
@@ -1172,12 +1206,9 @@ export class WorktreeRetirementService {
    * was taken on, or an ancestor of one), unless a worktree has the branch checked out. Each deletion is recorded so a
    * restore brings the branch back.
    *
-   * A thread's own branch (a manifest of its workspace.json) is deleted only while the thread's journal says Mousse owns
-   * it now (`threadBranchRecord`): not a name it released or gave up, nor one a rename left unsettled, whatever the
-   * manifest names. The release is journaled before the delete, so the name stops being Mousse's: a branch someone makes
-   * under it later is theirs. Without that record (a journal that cannot be read or written) the branch stays. Other
-   * owners' branches (agents', workflows', an id-named one HEAD was on) are deleted only under `mousse/`. A branch the
-   * agent made itself is never touched.
+   * Mousse verifies a thread branch's journaled reflog identity while Git holds its ref lock. The release is journaled
+   * before the delete, so a branch someone creates under that name afterwards remains theirs. Branches in agent and
+   * workflow manifests still use their reserved Mousse names.
    */
   private async releaseBranches(manifest: WorktreeReconstructionManifest): Promise<void> {
     const checkedOut = new Set((await lifecycleReadAsync(manifest.commonDir, ['worktree', 'list', '--porcelain'])).split(/\r?\n/).filter((line) => line.startsWith('branch refs/heads/')).map((line) => line.slice('branch refs/heads/'.length)))
@@ -1186,18 +1217,24 @@ export class WorktreeRetirementService {
     const thread = this.threadBranchOwner(manifest)
     for (const name of new Set(owned)) {
       if (!name || !isValidBranchName(name) || checkedOut.has(name)) continue
-      const threadBranch = Boolean(thread) && name === manifest.branch
-      if (threadBranch) {
-        const record = thread!.record
-        if (!record || !record.owned.has(name) || (record.pending && (record.pending.from === name || record.pending.to === name))) continue
+      const ref = `refs/heads/${name}`
+      const record = thread?.record
+      const reflogId = record?.reflogIds.get(name)
+      if (thread) {
+        if (!record?.owned.has(name) || !reflogId || record.pending?.from === name || record.pending?.to === name) continue
       } else if (!isMousseBranchName(name)) continue
       const tip = await this.tip(manifest, name)
       if (!tip) continue
       let kept = false
       for (const pin of pins) if (pin === tip || await gitSucceeds(manifest.commonDir, ['merge-base', '--is-ancestor', tip, pin])) { kept = true; break }
       if (!kept) continue
-      if (threadBranch && !this.journalBranch(thread!.location, BRANCH_RELEASE_OPERATION, { branch: name, sha: tip, worktreePath: manifest.worktreePath })) continue
-      await withOwnedBranches([name], () => lifecycleGitAsync(manifest.commonDir, ['update-ref', '--no-deref', '-d', `refs/heads/${name}`, tip]))
+      const deleted = await withOwnedBranches([name], () => deleteVerifiedBranchAsync(manifest.commonDir, ref, tip, async () => {
+        if (await branchCheckedOutAsync(manifest.commonDir, ref)) return false
+        if (!thread) return true
+        if (branchReflogIdentity(manifest.commonDir, ref)?.id !== reflogId) return false
+        return this.journalBranch(thread.location, BRANCH_RELEASE_OPERATION, { branch: name, sha: tip, worktreePath: manifest.worktreePath })
+      }))
+      if (!deleted) continue
       manifest.deletedBranches = [...(manifest.deletedBranches ?? []).filter((entry) => entry.name !== name), { name, sha: tip }]
     }
   }
@@ -1216,7 +1253,7 @@ export class WorktreeRetirementService {
     }
   }
   /** Journals a release or restore of the thread's branch; false when the journal cannot be written (the thread is trashed). */
-  private journalBranch(location: string, operationType: string, details: { branch: string; sha: string; worktreePath: string }): boolean {
+  private journalBranch(location: string, operationType: string, details: { branch: string; sha: string; worktreePath: string; reflogId?: string }): boolean {
     if (!location) return false
     try {
       new ThreadJournal(location).append({ operationId: randomUUID(), operationType, state: 'completed', details })
@@ -1236,8 +1273,13 @@ export class WorktreeRetirementService {
       if (await this.branchTaken(manifest, entry.name)) continue
       // A commit that is no longer in the repository cannot be a branch again; it is reported, never a reason to fail.
       if (!await gitSucceeds(manifest.commonDir, ['cat-file', '-e', `${entry.sha}^{commit}`])) { missing.push(entry); continue }
-      await withOwnedBranches([entry.name], () => lifecycleGitAsync(manifest.commonDir, ['update-ref', '--no-deref', `refs/heads/${entry.name}`, entry.sha, '0'.repeat(entry.sha.length)]))
-      if (thread && entry.name === manifest.branch) this.journalBranch(thread.location, BRANCH_RESTORE_OPERATION, { branch: entry.name, sha: entry.sha, worktreePath: manifest.worktreePath })
+      const ref = `refs/heads/${entry.name}`
+      const message = `mousse: restore ${randomUUID()}`
+      await withOwnedBranches([entry.name], () => createLoggedBranchAsync(manifest.commonDir, ref, entry.sha, message))
+      if (thread) {
+        const reflogId = branchReflogIdentity(manifest.commonDir, ref, { message, creation: true })?.id
+        if (reflogId) this.journalBranch(thread.location, BRANCH_RESTORE_OPERATION, { branch: entry.name, sha: entry.sha, worktreePath: manifest.worktreePath, reflogId })
+      }
     }
     delete manifest.deletedBranches
     if (missing.length) manifest.branchesNotRestored = missing
@@ -1689,15 +1731,19 @@ export class WorktreeRetirementService {
     if (!existsSync(path)) return false
     try { return this.load(path).rebuilding !== undefined } catch { return false }
   }
+  /** The same check for passive reads that must leave the event loop free while the drive answers. */
+  async rebuildUnfinishedAsync(taskId: string, worktreePath: string): Promise<boolean> {
+    const path = this.pathFor(taskId, worktreePath)
+    try {
+      await access(path)
+      await assertLifecyclePathAsync(this.store.root, path)
+      return this.parseManifest(path, await readFile(path, 'utf8')).rebuilding !== undefined
+    } catch { return false }
+  }
+  /** Throws unless the manifest's pins still hold (`verifyPinsAsync`: one ref listing and one object read, not Git per ref). */
   async verifyPins(manifest: WorktreeReconstructionManifest): Promise<void> {
-    await assertLifecyclePathAsync(dirname(manifest.commonDir), manifest.commonDir)
-    if (hash((await realpathLikeSync(manifest.commonDir)).toLowerCase()).slice(0, 32) !== manifest.repositoryId) throw new Error('Repository identity is unavailable or changed')
-    for (const [ref, sha] of [[manifest.baseRef, manifest.baseSha], [manifest.resultRef, manifest.resultSha], ...(manifest.snapshotRef ? [[manifest.snapshotRef, manifest.snapshotSha!]] : []), ...(manifest.adminRef ? [[manifest.adminRef, manifest.adminCommit!]] : [])]) if (await readDirectLifecycleRefAsync(manifest.commonDir, ref) !== sha) throw new Error('Reconstruction pin changed or is unavailable')
-    if (manifest.adminCommit && await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.adminCommit}^{tree}`]) !== manifest.adminTree) throw new Error('Retained Git data of the worktree changed')
-    const prefix = manifest.resultRef.slice(0, -'/result'.length)
-    for (const layer of manifest.keptFiles ?? []) if (layer.sha && await readDirectLifecycleRefAsync(manifest.commonDir, `${prefix}/kept/${layer.sha}`) !== layer.sha) throw new Error('A pin of the kept files changed or is unavailable')
-    if (await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.resultSha}^{tree}`]) !== manifest.treeSha) throw new Error('Retained result tree changed')
-    if (manifest.snapshotSha && await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.snapshotSha}^{tree}`]) !== manifest.snapshotTree) throw new Error('Retained snapshot tree changed')
+    const error = (await verifyPinsAsync([manifest])).get(manifest)
+    if (error) throw error
   }
   /**
    * The commit a branch points at, never following a symbolic ref: a branch that is a symbolic ref (or unreadable) is

@@ -2193,12 +2193,19 @@ export interface FileStat {
   modifiedAt: string
 }
 
+export interface FileText {
+  content: string
+  /** Native file spelling, when available from the daemon. */
+  canonicalPath?: string
+}
+
 export interface FileAsset {
   data: Uint8Array
   mimeType: string
   size: number
   /** When the file was last written, as read; absent from an older daemon. */
   mtimeMs?: number
+  canonicalPath?: string
 }
 
 export type GitChangeStatus =
@@ -2242,6 +2249,45 @@ export interface GitStatusSnapshot {
   missing?: boolean
   /** How long a Discard here keeps a copy of what it removes: its owner's Undo window. Set by the daemon. */
   discardKeptForMs?: number
+}
+
+/**
+ * A folder's branch as a thread card names it (`git.heads`): read from Git's files, or why it could not be (`error`).
+ * A detached HEAD has no branch and names its commit (`detachedAt`, '' when not known); a failed read is an `error`.
+ */
+export type GitFolderHead = { repo: boolean; branch: string | null; detachedAt?: string } | { error: string }
+
+/**
+ * What a thread's card names (`git.heads`): its project's branch when it works in its project's folder (`project`);
+ * else its own worktree's branch, null when detached (`detachedAt`) or before Mousse records the worktree
+ * (`lifecycle: 'unprovisioned'`). `folder` is the folder
+ * the thread works in, set only while its worktree is on disk and ready; without it the branch is the one Mousse
+ * recorded, and why: `lifecycle` (`provisioning` while it is made), `missing` (a ready worktree not on disk, retired by
+ * a storage rule), or `unavailable` (its drive is not answering, or it could not be read). `generation` counts the
+ * worktree's rebuilds: Git state read for an older one is not this one's.
+ */
+export type GitThreadHead =
+  | { project: true }
+  | { own: true; branch: string | null; detachedAt?: string; folder?: string; generation: number; lifecycle: string; missing?: true; unavailable?: string }
+  | { error: string }
+
+export interface GitHeadsRequest {
+  threadIds?: string[]
+  projectIds?: string[]
+  /** A Retry's own number: a new one is never answered by a request already in flight. */
+  attempt?: number
+}
+
+export interface GitHeadsResult {
+  /** The connected service needs Git reads to answer this batch. Skip background polling on such services. */
+  legacy?: true
+  projects: Record<string, GitFolderHead>
+  threads: Record<string, GitThreadHead>
+}
+
+/** Mousse changed these threads' branches (made a worktree, renamed its branch): their cards read them again. */
+export interface GitHeadsChangedEvent {
+  threadIds: string[]
 }
 
 export interface GitCommit {
@@ -2438,7 +2484,17 @@ export interface GitScope {
   projectId: string | null
   /** Set only when the folder is the thread's own ready worktree. */
   workspaceThreadId: string | null
+  /**
+   * That worktree's generation (`git.heads`): what was read of an older one is kept apart, and the service refuses a
+   * read whose worktree has been rebuilt since (`workspace_changed`).
+   */
+  workspaceGeneration?: number
+  /** A Retry's own number, on a read: a new one is never answered by a read already in flight, here or in the service. */
+  attempt?: number
 }
+
+/** What the service says (`workspace_changed`) to a read whose thread worktree was rebuilt since the window looked it up. */
+export const WORKSPACE_CHANGED_MESSAGE = "This thread's worktree was rebuilt since it was looked up. Look it up again."
 
 /** The copy a Discard kept before it removed anything (`git.discard`'s `kept`). */
 export interface GitKeptCopy {
