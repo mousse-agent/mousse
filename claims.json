@@ -184,7 +184,7 @@
         "tests/renderer/filesPanelEmpty.test.ts"
       ],
       "claimedAt": "2026-11-21T04:52:44.669Z",
-      "expiresAt": "2026-11-21T16:19:45.584Z"
+      "expiresAt": "2026-11-21T17:45:57.263Z"
     },
     {
       "task": "starting-thread-is-own-thread",
