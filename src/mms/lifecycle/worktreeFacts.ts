@@ -71,24 +71,27 @@ const BOOLEAN_WORDS = new Set(['true', 'yes', 'on', '1', ...FALSE_WORDS])
  * worktree's own `config.worktree`, read here too), `objectFormat`, and `relativeWorktrees` (set once any worktree is
  * added with relative paths; each worktree's own files still say which kind it is, and only absolute ones are read).
  */
-const LAYOUT_NEUTRAL_EXTENSIONS = new Set(['worktreeconfig', 'objectformat', 'relativeworktrees'])
+const EXTENSION_GIT_MINOR = new Map([['worktreeconfig', 20], ['objectformat', 29], ['relativeworktrees', 48]])
 
 /**
  * The repository's own `config`, when Git would open a linked worktree of it exactly as laid out: format version 0 or
  * 1, `core.bare` absent or false, no key named `worktree` anywhere, and no extension but
- * {@link LAYOUT_NEUTRAL_EXTENSIONS} with a value Git knows. The object format, or undefined to leave it to Git.
+ * {@link EXTENSION_GIT_MINOR} with a value Git knows. The object format, or undefined to leave it to Git.
  */
-function repositoryConfig(text: string): { objectFormat: 'sha1' | 'sha256' } | undefined {
+function repositoryConfig(text: string): { objectFormat: 'sha1' | 'sha256'; extensionGitMinor: number } | undefined {
   const values = plainConfig(text)
   if (!values) return undefined
   let objectFormat: 'sha1' | 'sha256' = 'sha1'
+  let extensionGitMinor = 0
   for (const [key, list] of values) {
     const [section, name] = [key.slice(0, key.lastIndexOf('.')), key.slice(key.lastIndexOf('.') + 1)]
     if (name === 'worktree') return undefined
     if (key === 'core.bare' && !list.every((value) => FALSE_WORDS.has(value.toLowerCase()))) return undefined
     if (key === 'core.repositoryformatversion' && !list.every((value) => value === '0' || value === '1')) return undefined
     if (section === 'extensions') {
-      if (!LAYOUT_NEUTRAL_EXTENSIONS.has(name)) return undefined
+      const minimum = EXTENSION_GIT_MINOR.get(name)
+      if (!minimum) return undefined
+      extensionGitMinor = Math.max(extensionGitMinor, minimum)
       if (name === 'objectformat') {
         if (list.length !== 1 || !['sha1', 'sha256'].includes(list[0]!.toLowerCase())) return undefined
         objectFormat = list[0]!.toLowerCase() as 'sha1' | 'sha256'
@@ -96,7 +99,7 @@ function repositoryConfig(text: string): { objectFormat: 'sha1' | 'sha256' } | u
     }
     if (section.startsWith('extensions ')) return undefined
   }
-  return { objectFormat }
+  return { objectFormat, extensionGitMinor }
 }
 
 /** A worktree's own `config.worktree`, when it changes nothing Git uses to open it: no `bare`, `worktree`, format version or extension. */
@@ -120,6 +123,13 @@ function validHead(text: string, objectFormat: 'sha1' | 'sha256'): boolean {
 /** A linked worktree in the standard layout: the real common directory, and the worktree's own Git folder. */
 export interface StandardWorktree { commonDir: string; gitDir: string }
 
+/** Version of the Git we would ask to open a worktree with a newer repository extension. */
+export async function worktreeGitVersion(cwd: string): Promise<number> {
+  const git = await runGitProcess(['--version'], { cwd, env: repoProgramEnv(), timeout: 5_000 })
+  const version = /^git version (\d+)\.(\d+)\./.exec(git.stdout)
+  return !git.error && git.status === 0 && version ? Number(version[1]) * 1_000 + Number(version[2]) : 0
+}
+
 /**
  * The linked worktree at `path`, read from the files Git itself reads, with no Git process, when it has exactly the
  * layout `git worktree add` writes and Git would open it as laid out. Every part must match:
@@ -137,7 +147,7 @@ export interface StandardWorktree { commonDir: string; gitDir: string }
  * Git started by Mousse never inherits `GIT_DIR`, `GIT_COMMON_DIR` or `GIT_WORK_TREE` (`gitEnv`), so those cannot make
  * Git's answer differ.
  */
-export async function standardLinkedWorktreeAsync(path: string): Promise<StandardWorktree | undefined> {
+export async function standardLinkedWorktreeAsync(path: string, gitVersion: () => Promise<number>): Promise<StandardWorktree | undefined> {
   const pointer = await smallText(join(path, '.git'), 4096)
   const named = pointer === undefined ? undefined : /^gitdir: ([^\r\n]+)\r?\n?$/.exec(pointer)?.[1]
   if (!named || !isAbsolute(named)) return undefined
@@ -163,6 +173,7 @@ export async function standardLinkedWorktreeAsync(path: string): Promise<Standar
   const backPath = back?.replace(/\s+$/, '')
   if (!backPath || !isAbsolute(backPath) || comparablePath(resolve(backPath)) !== comparablePath(resolve(path, '.git'))) return undefined
   if (worktreeConfig === null || worktreeConfig !== undefined && !worktreeConfigKeepsLayout(worktreeConfig)) return undefined
+  if (repository.extensionGitMinor && await gitVersion() < 2_000 + repository.extensionGitMinor) return undefined
   return { commonDir: common, gitDir }
 }
 

@@ -15,7 +15,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { verifyWorktreeFact } from '../src/mms/lifecycle/ResourceInventory'
 import { getExternalResourceClaims, unverifiedOwnerOver } from '../src/mms/lifecycle/LifecycleClaims'
-import { verifyPinsAsync } from '../src/mms/lifecycle/worktreeFacts'
+import { standardLinkedWorktreeAsync, verifyPinsAsync } from '../src/mms/lifecycle/worktreeFacts'
 import type { WorktreeReconstructionManifest } from '../src/mms/lifecycle/WorktreeRetirementService'
 import { unverifiableThread } from './support/unverifiableThread'
 
@@ -119,6 +119,17 @@ it('gives Git’s answer for every layout, without Git only for the standard one
     expect({ name, verified: value === undefined }).toEqual({ name, verified: oracle })
     expect({ name, git: starts > 0 }).toEqual({ name, git: !READER_ANSWERS.has(name) })
   }
+})
+
+it('leaves even an absolute worktree to Git when Git may refuse a repository extension', async () => {
+  if (!relativePathsSupported()) return
+  const root = tempRoot()
+  const { main } = repository(root, 'repo')
+  const absolute = join(root, 'absolute')
+  git(main, 'worktree', 'add', '-q', '-b', 'absolute', absolute)
+  git(main, 'worktree', 'add', '-q', '--relative-paths', '-b', 'relative', join(root, 'relative'))
+  expect(await standardLinkedWorktreeAsync(absolute, async () => 2_047)).toBeUndefined()
+  expect(await standardLinkedWorktreeAsync(absolute, async () => 2_048)).toBeDefined()
 })
 
 it('the hold at the delete decision is Git’s answer for each layout Git may refuse', async () => {

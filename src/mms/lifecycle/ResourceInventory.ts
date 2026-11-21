@@ -8,7 +8,7 @@ import type { LifecycleResource, ResourceInventorySnapshot, ResourceSource, Rete
 import { assertLifecyclePath, ResourceLifecycleStore, validateResourceInventory } from './ResourceLifecycleStore'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
 import { lifecycleReadAsync, WorktreeRetirementService, type WorktreeReconstructionManifest } from './WorktreeRetirementService'
-import { standardLinkedWorktreeAsync, trustedCheckoutsAsync, verifyPinsAsync, type StandardWorktree } from './worktreeFacts'
+import { standardLinkedWorktreeAsync, trustedCheckoutsAsync, verifyPinsAsync, worktreeGitVersion, type StandardWorktree } from './worktreeFacts'
 import { expiredReceiptIdsFromJournal } from '../actions/UndoRetentionService'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
@@ -182,11 +182,13 @@ async function manifestOwnersAsync(store: ResourceLifecycleStore, tasks: readonl
 interface WorktreeFactContext {
   tasksFor(store: ResourceLifecycleStore): TaskLifecycleRecord[]
   manifestOwners(store: ResourceLifecycleStore): Promise<Map<string, string[]>>
+  gitVersion(cwd: string): Promise<number>
 }
 
 function worktreeFactContext(): WorktreeFactContext {
   const tasks = new Map<ResourceLifecycleStore, TaskLifecycleRecord[]>()
   const manifests = new Map<ResourceLifecycleStore, Promise<Map<string, string[]>>>()
+  let gitVersion: Promise<number> | undefined
   const tasksFor = (store: ResourceLifecycleStore): TaskLifecycleRecord[] => {
     let list = tasks.get(store)
     if (!list) { list = store.list(); tasks.set(store, list) }
@@ -194,6 +196,7 @@ function worktreeFactContext(): WorktreeFactContext {
   }
   return {
     tasksFor,
+    gitVersion: (cwd) => (gitVersion ??= worktreeGitVersion(cwd)),
     manifestOwners: (store) => {
       let owners = manifests.get(store)
       if (!owners) { owners = manifestOwnersAsync(store, tasksFor(store)); manifests.set(store, owners) }
@@ -291,7 +294,7 @@ async function inspectWorktreeFact(store: ResourceLifecycleStore, path: string, 
       return { manifest }
     }
     if ((await lstat(path)).isSymbolicLink() || !(await lstat(join(path, '.git'))).isFile()) throw new Error('Not a regular linked Git worktree')
-    const standard = await standardLinkedWorktreeAsync(path)
+    const standard = await standardLinkedWorktreeAsync(path, () => context.gitVersion(path))
     if (standard) return { standard }
   } catch (error) {
     return `Unverified worktree ${path}: ${(error as Error).message}`
