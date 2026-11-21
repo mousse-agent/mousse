@@ -796,23 +796,33 @@ export class ThreadWorkspaceManager {
     // The project folder is the person's own: there is no worktree to bring back.
     const current = this.load()
     if (isProjectFolderWorkspace(current)) return this.verify(current)
-    const metadata = this.load()
-    if (!metadata) throw new Error('Thread workspace metadata is missing')
-    // A worktree on a drive that is not connected is there, out of reach: it waits for the drive, and is never rebuilt
-    // in its place (which would make its folder again on the disk the drive is mounted on).
-    await assertWorktreeFolderConnected(metadata.worktreePath)
-    const verified = await this.verify(metadata)
-    const unfinishedProvision = [...this.journal.latestByOperation().values()].some((entry) => entry.operationType === 'workspace-provision' && !['completed', 'cancelled'].includes(entry.state))
-    if (verified.lifecycle === 'ready' && metadata.lifecycle === 'ready' && !unfinishedProvision) return verified
-    const leftover = verified.lifecycle === 'recovery_required' && await this.partlyRemoved(metadata)
-    if (verified.lifecycle !== 'missing' && verified.lifecycle !== 'ready' && !leftover) throw new Error(`Workspace recovery is blocked: ${verified.lifecycle}`)
-    const repository = await this.resolveRepositoryAsync(projectPath)
-    if (repository.repositoryId !== metadata.repositoryId) throw new Error('Workspace recovery repository identity changed.')
+    if (!current) throw new Error('Thread workspace metadata is missing')
+    // A disconnected drive must return before anything is rebuilt at its mount point.
+    await assertWorktreeFolderConnected(current.worktreePath)
+    const unfinishedProvision = () => [...this.journal.latestByOperation().values()]
+      .some((entry) => entry.operationType === 'workspace-provision' && !['completed', 'cancelled'].includes(entry.state))
+    const initial = await this.verify(current)
+    if (initial.lifecycle === 'ready' && current.lifecycle === 'ready' && !unfinishedProvision()) {
+      const latest = this.load()
+      if (latest && !latest.rebuilding && latest.generation === current.generation && latest.worktreePath === current.worktreePath) return initial
+    }
+
     let threadLease: ThreadLeaseHandle | undefined
     let repositoryLease: RepositoryLeaseHandle | undefined
     try {
       if (heldThreadLease) assertHeldThreadLease(this.threadDirectory, heldThreadLease)
       threadLease = heldThreadLease ?? await waitAcquireExecutionLease(this.threadDirectory, { source: 'workspace-restore', signal })
+      // Recheck under the lease. A restore that waited for another one sees the generation it already published.
+      const metadata = this.load()
+      if (!metadata) throw new Error('Thread workspace metadata is missing')
+      if (isProjectFolderWorkspace(metadata)) return this.verify(metadata)
+      await assertWorktreeFolderConnected(metadata.worktreePath)
+      const verified = await this.verify(metadata)
+      if (verified.lifecycle === 'ready' && metadata.lifecycle === 'ready' && !unfinishedProvision()) return verified
+      const leftover = (verified.lifecycle === 'recovery_required' || metadata.rebuilding) && await this.partlyRemoved(metadata)
+      if (verified.lifecycle !== 'missing' && verified.lifecycle !== 'ready' && !leftover) throw new Error(`Workspace recovery is blocked: ${verified.lifecycle}`)
+      const repository = await this.resolveRepositoryAsync(projectPath)
+      if (repository.repositoryId !== metadata.repositoryId) throw new Error('Workspace recovery repository identity changed.')
       repositoryLease = await acquireWorkspaceRepositoryLease(await resolveRepositoryIdentityAsync(repository.gitTopLevel, { requireMutationCapability: true }), signal)
       if (verified.lifecycle === 'ready') {
         const ready = await this.verify(metadata)
@@ -822,7 +832,10 @@ export class ThreadWorkspaceManager {
         this.finishProvisionRecovery(ready)
         return ready
       }
-      if (leftover && await this.partlyRemoved(metadata)) await this.setAsidePartlyRemoved(metadata)
+      // The manifest tracks reconstruction of the files. The workspace record fences readers through verification and
+      // clears the fence atomically with the generation update, including when there is only a retained snapshot.
+      const beginRebuild = () => atomicWriteJsonSync(this.workspacePath, { ...metadata, rebuilding: true })
+      const { rebuilding: _rebuilding, ...next } = { ...metadata, generation: (metadata.generation ?? 0) + 1 }
       const gate = getThreadLifecycleGate(this.threadDirectory)
       if (gate instanceof ResourceLifecycleStore && this.hasReconstructionManifest(metadata)) {
         const retirement = new WorktreeRetirementService(gate, { taskLease: threadLease, repositoryLease })
@@ -834,8 +847,10 @@ export class ThreadWorkspaceManager {
         if (metadata.untrusted) await assertPerWorktreeConfig(repository.gitTopLevel)
         // The worktree's own configuration went with the worktree: for someone else's commits it is put back before anything is checked out.
         const safety = metadata.untrusted ? await untrustedSafety(repository.gitTopLevel) : undefined
+        beginRebuild()
+        if (leftover && await this.partlyRemoved(metadata)) await this.setAsidePartlyRemoved(metadata)
         const rebuilt = await retirement.reconstruct(manifestPath, safety ? { prepare: (path) => pinUntrustedWorktree(repository.gitTopLevel, path, safety), env: { ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' } } : undefined)
-        const restored = await this.verify({ ...metadata, generation: (metadata.generation ?? 0) + 1 })
+        const restored = await this.verify(next)
         if (restored.lifecycle !== 'ready') throw new Error('Reconstructed task workspace failed verification')
         atomicWriteJsonSync(this.workspacePath, restored)
         noteThreadBranchChanged(restored.threadId)
@@ -848,6 +863,9 @@ export class ThreadWorkspaceManager {
       }
       // The files come from the retained snapshot, and the worktree starts at the HEAD the snapshot was taken on: on the
       // branch it was on, or on the thread's own, when that branch still is at that commit; detached there otherwise.
+      if (metadata.rebuilding && await pathExists(metadata.worktreePath)) {
+        throw new Error('An interrupted restore left files at the worktree path. Move them somewhere safe and remove the old worktree registration before retrying.')
+      }
       const retained = await git(repository.gitTopLevel, ['rev-parse', '--verify', `${metadata.retainedRef}^{commit}`])
       const origin = await snapshotOriginAsync(repository.gitTopLevel, retained)
       const head = origin.head ?? await git(repository.gitTopLevel, ['rev-parse', '--verify', `${metadata.branch}^{commit}`])
@@ -856,6 +874,7 @@ export class ThreadWorkspaceManager {
       for (const name of [origin.branch, metadata.branch]) if (name && await tip(name) === head) { branch = name; break }
       // A restore is never refused for the pattern file: without it, the worktree comes back whole.
       const checkoutPlan = await worktreeCheckoutPlan(repository.gitTopLevel).catch(() => worktreeCheckoutPlan(repository.gitTopLevel, undefined, { sparse: false }))
+      beginRebuild()
       await mkdir(dirname(metadata.worktreePath), { recursive: true })
       const add = async (target: string[]): Promise<void> => {
         if (metadata.untrusted) await addUntrustedWorktree(repository.gitTopLevel, target, metadata.worktreePath, checkoutPlan)
@@ -869,7 +888,8 @@ export class ThreadWorkspaceManager {
       if (movedNotice) {
         try { await onNotice?.({ id: `worktree-restore-${randomUUID()}`, text: movedNotice }) } catch (error) { console.warn('restore notice could not be delivered', { threadId: metadata.threadId, error: error instanceof Error ? error.message : String(error) }) }
       }
-      const restored = await this.verify({ ...metadata, generation: (metadata.generation ?? 0) + 1 })
+      const restored = await this.verify(next)
+      if (restored.lifecycle !== 'ready') throw new Error('Restored task workspace failed verification')
       atomicWriteJsonSync(this.workspacePath, restored)
       this.finishProvisionRecovery(restored)
       noteThreadBranchChanged(restored.threadId)
@@ -995,7 +1015,8 @@ export class ThreadWorkspaceManager {
   /** Whether the worktree's record has a rebuild that did not finish: the folder at its path is then not the worktree. */
   rebuildUnfinished(metadata: ThreadWorkspaceMetadata): boolean {
     const gate = getThreadLifecycleGate(this.threadDirectory)
-    return !isProjectFolderWorkspace(metadata) && gate instanceof ResourceLifecycleStore && new WorktreeRetirementService(gate).rebuildUnfinished(metadata.threadId, metadata.worktreePath)
+    return !isProjectFolderWorkspace(metadata) && (metadata.rebuilding === true ||
+      gate instanceof ResourceLifecycleStore && new WorktreeRetirementService(gate).rebuildUnfinished(metadata.threadId, metadata.worktreePath))
   }
 
   /** `inFlight`: for status reads only, as in {@link hasPendingOperation}. */

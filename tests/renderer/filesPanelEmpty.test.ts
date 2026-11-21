@@ -1,14 +1,19 @@
 // @vitest-environment jsdom
+import { posix } from 'node:path'
 import { act, createElement, Fragment } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { reloadWindow } from '../../src/renderer/services/reloadWindow'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { useFileWorkspaceStore } from '../../src/renderer/stores/filesStore'
 import type { GitThreadHead, Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-vi.mock('@monaco-editor/react', () => ({ default: () => createElement('div', { className: 'editor-stub' }) }))
+vi.mock('@monaco-editor/react', () => ({
+  default: ({ value, onChange }: { value: string; onChange: (value: string) => void }) =>
+    createElement('textarea', { className: 'editor-stub', value, onChange: (event) => onChange(event.currentTarget.value) })
+}))
 vi.mock('../../src/renderer/components/editors/MarkdownDocumentEditor', () => ({ MarkdownDocumentEditor: () => null }))
 // The tree stub offers one file to open and shows which folder it lists.
 vi.mock('../../src/renderer/components/FileTree', () => ({
@@ -175,13 +180,16 @@ describe('the folder the Files tree shows', () => {
 
   it.each([
     { kind: 'standalone', projectId: undefined, folder: '/home/me' },
-    { kind: 'non-Git project', projectId: 'p1', folder: '/home/me/work/notes' }
-  ])('browses a started $kind thread whose Git checkout is unprovisioned', async ({ projectId, folder }) => {
+    { kind: 'non-Git project', projectId: 'p1', folder: '/home/me/work/notes' },
+    { kind: 'project-folder', projectId: 'p1', folder: '/home/me/work/notes', worktreeEnabled: false }
+  ])('browses a started $kind thread without a worktree', async ({ projectId, folder, worktreeEnabled }) => {
     threadFolders.t1 = folder
-    threadHeads.t1 = { own: true, branch: null, generation: 0, lifecycle: 'unprovisioned' }
+    threadHeads.t1 = worktreeEnabled === false
+      ? { project: true }
+      : { own: true, branch: null, generation: 0, lifecycle: 'unprovisioned' }
     useAppStore.setState({
       activeThreadId: 't1',
-      threads: [{ ...startedThread('t1'), projectId }],
+      threads: [{ ...startedThread('t1'), projectId, worktreeEnabled }],
       projects: projectId ? [{ id: projectId, name: 'Notes', path: folder }] as never : []
     })
     await act(async () => root.render(createElement(Fragment, null, createElement(MainViewTabs), createElement(FilesPanel))))
@@ -219,6 +227,50 @@ describe('the folder the Files tree shows', () => {
     await act(async () => headsChanged?.({ threadIds: [threadId] }))
     expect(tree().dataset.root).toBe('/worktrees/notes')
     expect(tree().dataset.listRoot).toBe('')
+  })
+
+  it('keeps pending edits in the project tab when the thread gets a worktree with an identical file', async () => {
+    const threadId = 'provisioning-autosave'
+    const project = '/home/me/work/notes'
+    const worktree = '/worktrees/notes'
+    const disk = new Map([[project + '/notes.txt', 'same bytes'], [worktree + '/notes.txt', 'same bytes']])
+    threadFolders[threadId] = project
+    threadHeads[threadId] = { own: true, branch: null, generation: 0, lifecycle: 'provisioning' }
+    useAppStore.setState({
+      activeThreadId: threadId,
+      threads: [{ ...startedThread(threadId), projectId: 'p1', worktreeEnabled: true }],
+      projects: [{ id: 'p1', name: 'Notes', path: project }] as never
+    })
+    // The daemon resolves a relative path against the checkout in use when each call arrives.
+    const target = (path: string, root?: string) => {
+      const folder = root ?? threadFolders[threadId]!
+      const absolute = posix.resolve(folder, path)
+      if (!absolute.startsWith(folder + '/')) throw new Error('Path is outside the project root')
+      return absolute
+    }
+    window.mousse.fs.readFile = async (path, _project, _thread, root) => disk.get(target(path, root))!
+    window.mousse.fs.writeFile = async (path, content, _project, _thread, root) => { disk.set(target(path, root), content) }
+
+    await act(async () => root.render(createElement(Fragment, null, createElement(MainViewTabs), createElement(FilesPanel))))
+    await flush()
+    expect(tree().dataset.root).toBe(project)
+    await act(async () => tree().click())
+    const editor = host.querySelector<HTMLTextAreaElement>('.editor-stub')!
+    expect(editor.value).toBe('same bytes')
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(editor, 'my project edit')
+      editor.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+
+    threadFolders[threadId] = worktree
+    threadHeads[threadId] = { own: true, branch: 'notes', generation: 0, lifecycle: 'ready', folder: worktree }
+    await act(async () => headsChanged?.({ threadIds: [threadId] }))
+    const reload = vi.fn()
+    await act(async () => { expect.soft(await reloadWindow(reload)).toBe('unsaved') })
+    expect(disk.get(worktree + '/notes.txt')).toBe('same bytes')
+    expect(disk.get(project + '/notes.txt')).toBe('same bytes')
+    expect(editor.value).toBe('my project edit')
+    expect(reload).not.toHaveBeenCalled()
   })
 
   it('keeps where the person went for each thread, and follows the folder of a thread they did not move in', async () => {

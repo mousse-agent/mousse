@@ -147,7 +147,8 @@ export async function threadHead(profileHome: string, locate: () => Promise<Thre
     const state = await onDrive<{ record?: ThreadWorkspaceMetadata; project: boolean; rebuilding: boolean } | ReturnType<typeof error>>(known.directory, async () => {
       const record = await readWorkspaceRecord(known.directory)
       const project = record ? record.kind === 'project-folder' : (known.placement ?? await readPlacement(known.directory)) === 'project-folder'
-      const rebuilding = !project && record?.lifecycle === 'ready' && await retirement.rebuildUnfinishedAsync(record.threadId, record.worktreePath)
+      const rebuilding = !project && record?.lifecycle === 'ready' &&
+        (record.rebuilding === true || await retirement.rebuildUnfinishedAsync(record.threadId, record.worktreePath))
       return { record, project, rebuilding }
     }, error, deadline, fresh)
     if ('error' in state) return state
@@ -180,7 +181,7 @@ export async function threadHead(profileHome: string, locate: () => Promise<Thre
     return await onDrive<GitThreadHead>(known.directory, async () => {
       if (await retirement.rebuildUnfinishedAsync(record.threadId, record.worktreePath)) return missing
       const current = await readWorkspaceRecord(known.directory)
-      if (current?.lifecycle !== 'ready' || (current.generation ?? 0) !== recorded.generation || current.worktreePath !== record.worktreePath) return missing
+      if (current?.lifecycle !== 'ready' || current.rebuilding || (current.generation ?? 0) !== recorded.generation || current.worktreePath !== record.worktreePath) return missing
       return head
     }, unavailable, deadline, fresh)
   } catch (failure) {

@@ -1168,7 +1168,7 @@ async function readGit<T>(ctx: HandlerContext, p: Record<string, unknown>, read:
   const retirement = new WorktreeRetirementService(ctx.mms.threads.lifecycleStore)
   const requireReady = (workspace: ThreadWorkspaceMetadata | undefined) => {
     const generation = workspace?.generation ?? 0
-    if (!workspace || isProjectFolderWorkspace(workspace) || workspace.lifecycle !== 'ready' || generation !== p.workspaceGeneration) {
+    if (!workspace || isProjectFolderWorkspace(workspace) || workspace.lifecycle !== 'ready' || workspace.rebuilding || generation !== p.workspaceGeneration) {
       throw new DomainRpcError('workspace_changed', WORKSPACE_CHANGED_MESSAGE, { threadId, generation })
     }
     return workspace

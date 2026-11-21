@@ -36,9 +36,12 @@ const REVALIDATE_MS = 2_000
 
 type SaveState = 'saved' | 'dirty' | 'saving' | 'error' | 'conflict'
 
+type FileTarget = ReturnType<typeof fileLocation>
+
 interface OpenFileState {
   profileId: string
   path: string
+  target: FileTarget
   threadId: string | null
   kind: FileViewKind
   content: string
@@ -76,18 +79,14 @@ function refreshRecovered(file: OpenFileState): Partial<OpenFileState> {
   return file.saveState === 'error' ? { refreshFailed: false } : { refreshFailed: false, error: null }
 }
 
-// A file opened while the tree shows a folder outside the thread's is named by its absolute path and read from its own folder.
-function readText(path: string, threadId: string | null): Promise<string> {
-  const at = fileLocation(path)
-  return window.mousse.fs.readFile(at.path, undefined, threadId, at.root)
+function readText(target: FileTarget, threadId: string | null): Promise<string> {
+  return window.mousse.fs.readFile(target.path, undefined, threadId, target.root)
 }
-function readAssetAt(path: string, threadId: string | null) {
-  const at = fileLocation(path)
-  return window.mousse.fs.readAsset(at.path, undefined, threadId, at.root)
+function readAssetAt(target: FileTarget, threadId: string | null) {
+  return window.mousse.fs.readAsset(target.path, undefined, threadId, target.root)
 }
-function writeText(path: string, content: string, threadId: string | null): Promise<void> {
-  const at = fileLocation(path)
-  return window.mousse.fs.writeFile(at.path, content, undefined, threadId, at.root)
+function writeText(target: FileTarget, content: string, threadId: string | null): Promise<void> {
+  return window.mousse.fs.writeFile(target.path, content, undefined, threadId, target.root)
 }
 
 /** Whether a key press belongs to a text field or the code editor, which keep their own Escape and Ctrl+L. */
@@ -250,29 +249,6 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   useCommand('files.quickOpen', () => openSearch('files'), panelShowing)
   useCommand('files.textSearch', () => openSearch('text'), panelShowing)
 
-  const openSearchedFile = useCallback((path: string, closeAfter: boolean) => {
-    openFile(scope, normalizeWorkspacePath(path, filesRoot))
-    if (closeAfter) closeSearch()
-  }, [closeSearch, filesRoot, openFile, scope])
-  const openSearchedLine = useCallback((match: FileGrepMatch) => {
-    // The listener below turns the position into a Monaco reveal; the column is UTF-16, as Monaco counts.
-    window.dispatchEvent(new CustomEvent('mousse:open-file', { detail: openLineDetail(match, activeThreadId) }))
-  }, [activeThreadId])
-  // Search looks in the folder the path bar shows: through the project's index when that folder is in it, else by walking it.
-  const search = useFilesSearch({
-    open: searchOpen, openRequest: searchRequest, scopeKey: scope, projectId, threadId: activeThreadId,
-    browseRoot, listRoot, indexRoot: projectId && filesRoot ? filesRoot : null
-  })
-  const searchRoot = search.state.meta?.root || filesRoot
-  // A picked result opens beside the results, which stay for the next pick. Its path is relative to the folder searched.
-  const searchHandlers = useMemo(() => ({
-    onAction: search.onAction,
-    onOpenFile: (path: string) => openSearchedFile(joinFolder(searchRoot, path), false),
-    onOpenLine: openSearchedLine,
-    onClose: closeSearch
-  }), [closeSearch, openSearchedFile, openSearchedLine, search.onAction, searchRoot])
-  const searchShowsResults = searchOpen && search.state.query.trim() !== ''
-
   const fileKey = useCallback((path: string) => `${scope}\0${path}`, [scope])
   const selectedKey = selectedPath ? fileKey(selectedPath) : null
   const selected = selectedKey ? files[selectedKey] : undefined
@@ -294,18 +270,18 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     })
   }, [replaceFiles])
 
-  const ensureQueue = useCallback((key: string, path: string, threadId: string | null, ownerProfileId = profileId) => {
+  const ensureQueue = useCallback((key: string, target: FileTarget, threadId: string | null, ownerProfileId = profileId) => {
     let queue = queues.current.get(key)
     if (queue) return queue
     const isCurrent = () => useAppStore.getState().profileId === ownerProfileId && Boolean(filesRef.current[key])
     queue = new SerializedAutosave({
       read: () => {
         if (useAppStore.getState().profileId !== ownerProfileId) throw new Error('File save belongs to an inactive profile')
-        return readText(path, threadId)
+        return readText(target, threadId)
       },
       write: (content) => {
         if (useAppStore.getState().profileId !== ownerProfileId) throw new Error('File save belongs to an inactive profile')
-        return writeText(path, content, threadId)
+        return writeText(target, content, threadId)
       },
       onSaved: (savedContent) => {
         if (!isCurrent()) return
@@ -332,50 +308,83 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     targetScope = scope,
     threadId = activeThreadId,
     ownerProfileId = profileId,
-    retryInitial = false
+    retryInitial = false,
+    workspaceRoot: string | null = !remote && projectId ? filesRoot : null
   ) => {
     const key = `${targetScope}\0${path}`
     const existing = filesRef.current[key]
     if (existing?.loading || (existing && !(retryInitial && existing.initialLoadFailed))) return
+    // A local project thread can switch from its project folder to its first worktree. Keep the file's
+    // absolute path within its thread-scoped request so the daemon's existing containment check refuses
+    // a save if the thread now points somewhere else. Explicitly browsed folders keep their own root.
+    if (!existing && !isAbsolutePath(path) && workspaceRoot === '') return
+    const target = existing?.target ?? (!isAbsolutePath(path) && workspaceRoot
+      ? { path: joinFolder(workspaceRoot, path) }
+      : fileLocation(path))
     const kind = viewKindForPath(path)
     replaceFiles((current) => ({ ...current, [key]: {
-      profileId: ownerProfileId, path, threadId, kind, content: '', savedContent: '', binary: false,
+      profileId: ownerProfileId, path, target, threadId, kind, content: '', savedContent: '', binary: false,
       loading: true, saveState: 'saved', error: null, initialLoadFailed: false
     } }))
     const sequence = (loadSequences.current.get(key) ?? 0) + 1
     loadSequences.current.set(key, sequence)
     try {
       if (isAssetView(kind)) {
-        const asset = await readAssetAt(path, threadId)
+        const asset = await readAssetAt(target, threadId)
         if (loadSequences.current.get(key) !== sequence) return
         const bytes = Uint8Array.from(asset.data)
         const assetUrl = URL.createObjectURL(new Blob([bytes.buffer], { type: asset.mimeType }))
         if (useAppStore.getState().profileId !== ownerProfileId) { URL.revokeObjectURL(assetUrl); return }
         patchFile(key, { loading: false, binary: true, assetUrl, assetSignature: assetSignature(asset.data, asset.mimeType), initialLoadFailed: false })
       } else {
-        const content = await readText(path, threadId)
+        const content = await readText(target, threadId)
         if (loadSequences.current.get(key) !== sequence) return
         const binary = isBinaryContent(content)
         if (useAppStore.getState().profileId !== ownerProfileId) return
         patchFile(key, { loading: false, binary, content: binary ? '' : content, savedContent: binary ? '' : content, initialLoadFailed: false })
-        if (!binary) ensureQueue(key, path, threadId, ownerProfileId)
+        if (!binary) ensureQueue(key, target, threadId, ownerProfileId)
       }
     } catch (error) {
       if (loadSequences.current.get(key) === sequence && useAppStore.getState().profileId === ownerProfileId) {
         patchFile(key, { loading: false, error: message(error), saveState: 'error', initialLoadFailed: true })
       }
     }
-  }, [activeThreadId, ensureQueue, patchFile, profileId, replaceFiles, scope])
+  }, [activeThreadId, ensureQueue, filesRoot, patchFile, profileId, projectId, remote, replaceFiles, scope])
 
   useEffect(() => {
     for (const path of openPaths) void loadFile(path)
   }, [loadFile, openPaths])
 
+  const openInPanel = useCallback((file: string) => {
+    const path = normalizeWorkspacePath(file, filesRoot)
+    openFile(scope, path)
+    void loadFile(path)
+  }, [filesRoot, loadFile, openFile, scope])
+
+  const openSearchedLine = useCallback((match: FileGrepMatch) => {
+    // The listener below turns the position into a Monaco reveal; the column is UTF-16, as Monaco counts.
+    window.dispatchEvent(new CustomEvent('mousse:open-file', { detail: openLineDetail(match, activeThreadId) }))
+  }, [activeThreadId])
+  // Search looks in the folder the path bar shows: through the project's index when that folder is in it, else by walking it.
+  const search = useFilesSearch({
+    open: searchOpen, openRequest: searchRequest, scopeKey: scope, projectId, threadId: activeThreadId,
+    browseRoot, listRoot, indexRoot: projectId && filesRoot ? filesRoot : null
+  })
+  const searchRoot = search.state.meta?.root || filesRoot
+  // A picked result opens beside the results, which stay for the next pick. Its path is relative to the folder searched.
+  const searchHandlers = useMemo(() => ({
+    onAction: search.onAction,
+    onOpenFile: (path: string) => openInPanel(joinFolder(searchRoot, path)),
+    onOpenLine: openSearchedLine,
+    onClose: closeSearch
+  }), [closeSearch, openInPanel, openSearchedLine, search.onAction, searchRoot])
+  const searchShowsResults = searchOpen && search.state.query.trim() !== ''
+
   const flushPath = useCallback(async (key: string | null) => {
     if (!key) return
     const file = filesRef.current[key]
     if (!file || file.profileId !== useAppStore.getState().profileId || file.saveState === 'conflict' || file.initialLoadFailed || file.binary || file.loading) return
-    const queue = queues.current.get(key) ?? ensureQueue(key, file.path, file.threadId, file.profileId)
+    const queue = queues.current.get(key) ?? ensureQueue(key, file.target, file.threadId, file.profileId)
     if (file.content !== file.savedContent) {
       saveBlockers.current.delete(key)
       patchFile(key, { saveState: 'saving', error: null })
@@ -401,7 +410,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
         const sequence = loadSequences.current.get(key) ?? 0
         const pollProfileId = profileId
         if (isAssetView(file.kind)) {
-          void readAssetAt(path, file.threadId).then((asset) => {
+          void readAssetAt(file.target, file.threadId).then((asset) => {
             const current = filesRef.current[key]
             const signature = assetSignature(asset.data, asset.mimeType)
             if (!current || loadSequences.current.get(key) !== sequence || useAppStore.getState().profileId !== pollProfileId) return
@@ -418,7 +427,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
         }
         if (file.binary) continue
         const savedAtReadStart = file.savedContent
-        void readText(path, file.threadId).then((diskContent) => {
+        void readText(file.target, file.threadId).then((diskContent) => {
           const current = filesRef.current[key]
           // A save completed after this read began; its result is newer than this poll.
           if (!current || loadSequences.current.get(key) !== sequence || useAppStore.getState().profileId !== pollProfileId || current.savedContent !== savedAtReadStart || queues.current.get(key)?.isBusy()) return
@@ -459,9 +468,8 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
         projectThreadId = thread.id
       }
       const targetThreadId = detail.threadId ?? projectThreadId ?? store.activeThreadId
-      const targetProjectId = detail.projectId
-        ?? useAppStore.getState().threads.find((thread) => thread.id === targetThreadId)?.projectId
-        ?? null
+      const targetThread = useAppStore.getState().threads.find((thread) => thread.id === targetThreadId)
+      const targetProjectId = detail.projectId ?? targetThread?.projectId ?? null
       if (targetThreadId && targetThreadId !== store.activeThreadId) {
         expectedThreadId = targetThreadId
         useAppStore.getState().switchToThread(targetThreadId)
@@ -482,12 +490,13 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
         setPositions((current) => ({ ...current, [key]: position }))
         setPreview((current) => ({ ...current, [key]: false }))
       }
-      await loadFile(path, targetScope, targetThreadId, ownerProfileId)
+      const workspaceRoot = targetProjectId && !targetThread?.node && typeof window.mousse.fs.listDrives === 'function' ? targetRoot : null
+      await loadFile(path, targetScope, targetThreadId, ownerProfileId, false, workspaceRoot)
     }
     // File links reach this tab through services/fileLinks, including the ones that arrived before it mounted (or
     // while its chunk failed to load).
     return registerFileLinkOpener(openLink)
-  }, [filesRoot, loadFile])
+  }, [loadFile])
 
   useEffect(() => {
     const pending = pendingPosition.current
@@ -572,7 +581,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     patchFile(selectedKey, conflicted
       ? { content: value }
       : { content: value, saveState: current.saveState === 'error' ? 'error' : 'dirty' })
-    if (!conflicted) ensureQueue(selectedKey, current.path, current.threadId)
+    if (!conflicted) ensureQueue(selectedKey, current.target, current.threadId)
       .schedule({ content: value, baseline: current.savedContent })
   }, [ensureQueue, patchFile, selectedKey])
 
@@ -747,7 +756,11 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   }
   const showsSource = ready && rendered !== true && !isAssetView(selected!.kind)
   const imageSize = selected?.kind === 'image' && selectedKey ? imageSizes[selectedKey] : undefined
-  const crumbs = selectedPath ? fileCrumbs(selectedPath, filesRoot) : []
+  const selectedLocation = selected && !selected.target.root && isAbsolutePath(selected.target.path)
+    ? selected.target.path : selectedPath
+  const crumbPath = selectedPath && filesRoot && !isAbsolutePath(selectedPath) && selectedLocation &&
+    samePath(selectedLocation, joinFolder(filesRoot, selectedPath)) ? selectedPath : selectedLocation
+  const crumbs = crumbPath ? fileCrumbs(crumbPath, filesRoot) : []
 
   if (!showing) return null
 
@@ -776,8 +789,8 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     {/* Hidden, not unmounted, while results show: the tree keeps its open folders. */}
     <div className="files-browse" hidden={searchShowsResults}>
       <FileTree key={`${navKey}|${browseRoot}`} memory={treeMemories.current.get(`${navKey}|${browseRoot}`)} filesRoot={browseRoot} listRoot={listRoot} threadId={activeThreadId}
-        selectedPath={treePathOf(selectedPath)} refreshKey={refreshKey}
-        onSelectFile={(path) => openFile(scope, normalizeWorkspacePath(joinFolder(browseRoot, path), filesRoot))} />
+        selectedPath={treePathOf(selectedLocation)} refreshKey={refreshKey}
+        onSelectFile={(path) => openInPanel(joinFolder(browseRoot, path))} />
     </div>
   </div>
 
@@ -809,7 +822,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       }}>
         {/* One row: where the file is, then its controls as small icon buttons. */}
         <div className="panel-toolbar files-editor-toolbar">
-          <div className="files-crumbs" title={isAbsolutePath(selectedPath) || !filesRoot ? selectedPath : absoluteFilesPath(selectedPath, filesRoot)}>
+          <div className="files-crumbs" title={selectedLocation && !isAbsolutePath(selectedLocation) && filesRoot ? absoluteFilesPath(selectedLocation, filesRoot) : selectedLocation ?? undefined}>
             {crumbs.map((crumb, index) => <Fragment key={index}>
               {index > 0 && <ChevronRight size={12} className="files-crumb-sep" aria-hidden="true" />}
               <span className={`files-crumb${index === crumbs.length - 1 ? ' current' : ''}`}>{crumb}</span>
@@ -850,7 +863,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
               const disk = selected.diskContent
               saveBlockers.current.delete(selectedKey)
               patchFile(selectedKey, { savedContent: disk, diskContent: undefined, saveState: 'dirty', error: null })
-              ensureQueue(selectedKey, selected.path, selected.threadId).schedule({ content: selected.content, baseline: disk })
+              ensureQueue(selectedKey, selected.target, selected.threadId).schedule({ content: selected.content, baseline: disk })
             }}>Keep mine</button>
           </div>}
         </div>}

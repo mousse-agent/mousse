@@ -8,12 +8,13 @@
  */
 import * as childProcess from 'node:child_process'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { AssistantMessage } from '../src/shared/transcript'
 import type { GitHeadsResult } from '../src/shared/types'
+import * as snapshots from '../src/mms/actions/snapshots'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import type { ProviderAdapter, TurnInput, TurnResult, TurnSink } from '../src/mms/harness/adapter'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
@@ -155,7 +156,11 @@ it('rejects malformed Git scopes before asking for access to a folder', async ()
   expect(wait).not.toHaveBeenCalled()
 })
 
-it('hides a half-built checkout and refuses Git reads on both sides of the rebuild', { timeout: 120_000 }, async () => {
+it.each([
+  'during manifest checkout creation',
+  'after manifest reconstruction returns, before generation publication',
+  'during retained-snapshot restore'
+])('hides the checkout and refuses old-generation Git reads %s', { timeout: 120_000 }, async (pause) => {
   const request = (method: string, params: unknown) => dispatchMethod({
     mms: main,
     globalSequence: () => 0,
@@ -182,27 +187,54 @@ it('hides a half-built checkout and refuses Git reads on both sides of the rebui
   const finishRebuild = Promise.withResolvers<void>()
   try {
     await Promise.race([reading.promise, pending])
-    main.storageCleanup.setClockForTests(() => Date.now() + 40 * 86_400_000)
-    await request('storage.configure', { policy: {
-      schemaVersion: 1,
-      worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: false },
-      browser: { captureDays: null }
-    } })
-    await request('storage.cleanup.run', {})
+    const retained = pause === 'during retained-snapshot restore'
+    if (retained) {
+      writeFileSync(join(workspace.worktreePath, 'value.txt'), 'retained edit\n')
+      const snapshot = await snapshots.takeSnapshotAsync(workspace.worktreePath, { reason: 'test restore' })
+      git(repo, 'update-ref', workspace.retainedRef, snapshot.sha)
+      git(repo, 'worktree', 'remove', '--force', workspace.worktreePath)
+      expect(manager.hasReconstructionManifest()).toBe(false)
+    } else {
+      main.storageCleanup.setClockForTests(() => Date.now() + 40 * 86_400_000)
+      await request('storage.configure', { policy: {
+        schemaVersion: 1,
+        worktrees: { removeWithDeletedThreads: true, inactiveDays: 30, removeMerged: false },
+        browser: { captureDays: null }
+      } })
+      await request('storage.cleanup.run', {})
+      expect(manager.hasReconstructionManifest()).toBe(true)
+    }
     expect(existsSync(workspace.worktreePath)).toBe(false)
 
-    const created = Promise.withResolvers<void>()
-    const reconstruct = WorktreeRetirementService.prototype.reconstruct
-    vi.spyOn(WorktreeRetirementService.prototype, 'reconstruct').mockImplementationOnce(function (this: WorktreeRetirementService, path) {
-      return reconstruct.call(this, path, { env: {}, prepare: async () => {
-        created.resolve()
-        await finishRebuild.promise
-      } })
-    })
+    const atPause = Promise.withResolvers<void>()
+    const waitHere = async () => {
+      atPause.resolve()
+      await finishRebuild.promise
+    }
+    if (retained) {
+      const move = snapshots.moveFilesToSnapshotAsync
+      vi.spyOn(snapshots, 'moveFilesToSnapshotAsync').mockImplementationOnce(async (...args) => {
+        await waitHere()
+        return move(...args)
+      })
+    } else if (pause === 'during manifest checkout creation') {
+      const reconstruct = WorktreeRetirementService.prototype.reconstruct
+      vi.spyOn(WorktreeRetirementService.prototype, 'reconstruct').mockImplementationOnce(function (this: WorktreeRetirementService, path) {
+        return reconstruct.call(this, path, { env: {}, prepare: waitHere })
+      })
+    } else {
+      const verify = ThreadWorkspaceManager.prototype.verify
+      vi.spyOn(ThreadWorkspaceManager.prototype, 'verify').mockImplementation(async function (this: ThreadWorkspaceManager, metadata, options) {
+        if (metadata?.threadId === thread.id && metadata.generation === scope.workspaceGeneration + 1) await waitHere()
+        return verify.call(this, metadata, options)
+      })
+    }
     restoring = request('workspace.restore', { threadId: thread.id })
-    await Promise.race([created.promise, restoring.then(() => { throw new Error('Reconstruction did not wait after worktree creation') })])
+    await Promise.race([atPause.promise, restoring.then(() => { throw new Error('Restore did not reach the requested pause') })])
     expect(existsSync(join(workspace.worktreePath, '.git'))).toBe(true)
-    expect(existsSync(join(workspace.worktreePath, 'value.txt'))).toBe(false)
+    const file = join(workspace.worktreePath, 'value.txt')
+    if (pause === 'during manifest checkout creation') expect(existsSync(file)).toBe(false)
+    else expect(readFileSync(file, 'utf8')).toBe('base\n')
     expect(manager.load()).toMatchObject({ generation: scope.workspaceGeneration, lifecycle: 'ready' })
 
     expect.soft((await heads({ threadIds: [thread.id] })).threads[thread.id]).toMatchObject({ missing: true })
@@ -218,6 +250,9 @@ it('hides a half-built checkout and refuses Git reads on both sides of the rebui
     await restoring
   }
 
+  if (pause === 'during retained-snapshot restore') {
+    expect(readFileSync(join(workspace.worktreePath, 'value.txt'), 'utf8')).toBe('retained edit\n')
+  }
   const generation = scope.workspaceGeneration + 1
   expect((await heads({ threadIds: [thread.id] })).threads[thread.id]).toMatchObject({ folder: workspace.worktreePath, generation })
   await expect(request('git.status', { ...scope, workspaceGeneration: generation })).resolves.toMatchObject({ status: { isRepo: true } })

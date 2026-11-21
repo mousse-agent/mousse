@@ -133,10 +133,15 @@ describe('a folder the Files panel browses outside the thread', () => {
     await expect(call(window(), 'files.writeDirect', { root: browsed, path: 'x.txt', content: 'x' })).rejects.toMatchObject({ code: 'folder_not_answering' })
   })
 
-  it('leaves a save without a browsed folder as it was', async () => {
+  it('accepts scoped relative and absolute saves and refuses an absolute path outside the current folder', async () => {
     const project = mms.projects.openProject(browsed)
     await call(window(), 'files.writeDirect', { projectId: project.id, path: 'notes/plain.txt', content: 'x' })
-    expect(readFileSync(join(browsed, 'notes', 'plain.txt'), 'utf8')).toBe('x')
+    const path = join(browsed, 'notes', 'plain.txt')
+    expect(await call(window(), 'files.read', { projectId: project.id, path })).toMatchObject({ content: 'x' })
+    await call(window(), 'files.writeDirect', { projectId: project.id, path, content: 'edited' })
+    const other = mms.projects.openProject(home)
+    await expect(call(window(), 'files.writeDirect', { projectId: other.id, path, content: 'elsewhere' })).rejects.toThrow(/outside/)
+    expect(readFileSync(path, 'utf8')).toBe('edited')
   })
 
   it('lists this computer’s drives or volumes and its home folder for a window', async () => {
