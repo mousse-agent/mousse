@@ -362,8 +362,8 @@ describe('a turn in the thread\'s own worktree', () => {
     git(projectDir, 'config', 'core.autocrlf', 'false')
     const first = await turn('lf README.md')
     const phases = starts.find((line) => line.runId === first)!.phases
-    expect(Boolean(phases.ownWorktree)).toBe(hasBaseline)
-    expect(Boolean(phases.snapshotIndex)).toBe(!hasBaseline)
+    expect(phases.ownWorktree).toBeUndefined()
+    expect(phases.snapshotIndex).toBeDefined()
     expect(readFileSync(file)).toEqual(Buffer.from('hello\n'))
     const head = git(worktree, 'rev-parse', 'HEAD')
     const index = git(worktree, 'ls-files', '-s')
