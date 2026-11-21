@@ -260,7 +260,7 @@ export function EngineDevicesSection() {
           indent
           title={relayOfferLine(device.name, destination)}
           control={
-            <span className="engine-reach-control">
+            <span className="engine-reach-control" data-mousse-decision="">
               <button
                 type="button"
                 className="settings-btn"
