@@ -36,7 +36,7 @@ import type {
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { DEFAULT_BRANCH_PREFIX, isAcceptableThreadBranchName } from '../../shared/mousseBranches'
 import { branchNamingFor, requestBranchName, temporaryBranchName } from './branchNaming'
-import { BRANCH_RENAME_OPERATION, threadBranchRecord, type ThreadBranchRecord } from './threadBranchRecords'
+import { BRANCH_RECORD_OPERATIONS, BRANCH_RENAME_OPERATION, threadBranchRecord, type ThreadBranchRecord } from './threadBranchRecords'
 import { threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { timeGitSync } from '../diagnostics/turnBoundary'
@@ -540,7 +540,7 @@ export class ThreadWorkspaceManager {
       .filter((entry) => entry.operationType === 'workspace-provision')
       .sort((a, b) => b.sequence - a.sequence)[0]
     if (last?.state !== 'failed') return false
-    const intent = this.journal.list().find((entry) => entry.operationId === last.operationId && entry.expectedPreState)
+    const intent = this.journal.history(last.operationId).find((entry) => entry.expectedPreState)
     const expected = intent?.expectedPreState as { worktreePath?: string; branch?: string; head?: string } | undefined
     const fold = (value: string): string => process.platform === 'win32' || process.platform === 'darwin' ? resolve(value).toLowerCase() : resolve(value)
     if (!expected?.worktreePath || fold(expected.worktreePath) !== fold(metadata.worktreePath) || expected.branch !== metadata.branch) return false
@@ -602,7 +602,7 @@ export class ThreadWorkspaceManager {
 
   /** The branches Mousse's records show it made for this thread's worktree, by their current names (`threadBranchRecord`). */
   branchRecord(metadata = this.load()): ThreadBranchRecord {
-    return threadBranchRecord(this.journal.list(), metadata && !isProjectFolderWorkspace(metadata) ? { worktreePath: metadata.worktreePath } : {})
+    return threadBranchRecord(this.journal.ofTypes(...BRANCH_RECORD_OPERATIONS), metadata && !isProjectFolderWorkspace(metadata) ? { worktreePath: metadata.worktreePath } : {})
   }
 
   /** The background naming `provision` started for the branch it made, settled once it renamed it or kept its name. */
@@ -903,7 +903,7 @@ export class ThreadWorkspaceManager {
   private finishProvisionRecovery(metadata: ThreadWorkspaceMetadata): void {
     for (const operation of this.journal.latestByOperation().values()) {
       if (operation.operationType !== 'workspace-provision' || ['completed', 'cancelled'].includes(operation.state)) continue
-      const intent = this.journal.list().find((entry) => entry.operationId === operation.operationId && entry.expectedPreState)
+      const intent = this.journal.history(operation.operationId).find((entry) => entry.expectedPreState)
       const expected = intent?.expectedPreState as { worktreePath?: string; branch?: string } | undefined
       if (expected?.worktreePath !== metadata.worktreePath || expected.branch !== metadata.branch) continue
       this.journal.append({ operationId: operation.operationId, operationType: 'workspace-provision', state: 'completed', details: { recovered: true, head: metadata.headSha, branch: metadata.branch, retainedRef: metadata.retainedRef } })
@@ -916,7 +916,7 @@ export class ThreadWorkspaceManager {
    */
   hasPendingOperation(inFlight?: InFlightTest): boolean {
     // A publish waiting to be settled concerns the primary checkout only, so it does not hold up the thread.
-    return [...this.journal.latestByOperation().values()].some((entry) => ['prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state) && !['publish', 'change-publish'].includes(entry.operationType) && !settlesItself(entry.operationType) && !inFlight?.(entry))
+    return this.journal.unsettled().some((entry) => ['prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state) && !['publish', 'change-publish'].includes(entry.operationType) && !settlesItself(entry.operationType) && !inFlight?.(entry))
   }
 
   /**

@@ -178,11 +178,11 @@ export class UndoService {
   async recoverPending(workspacePath: string, restoreContext: RestoreActionContext, heldThreadLease?: ThreadLeaseHandle, signal?: AbortSignal): Promise<void> {
     const interrupted = (entry: { operationType: string; state: string }) => ['undo', 'redo', 'change-undo', 'change-redo'].includes(entry.operationType) && ['prepared', 'git_applied', 'context_pending'].includes(entry.state)
     // Nothing to finish takes no lock: a worktree the agent removed or emptied does not stop the next turn here.
-    if (![...this.journal.latestByOperation().values()].some(interrupted)) return
+    if (!this.journal.unsettled().some(interrupted)) return
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'context-recovery', async () => {
-      for (const record of this.journal.latestByOperation().values()) {
+      for (const record of this.journal.unsettled()) {
         if (!interrupted(record)) continue
-        const entries = this.journal.list().filter((item) => item.operationId === record.operationId)
+        const entries = this.journal.history(record.operationId)
         const prepared = entries.find((item) => item.state === 'prepared')
         const intent = prepared?.details as UndoIntent | undefined
         if (!intent?.target) throw new Error('Undo recovery intent is missing.')

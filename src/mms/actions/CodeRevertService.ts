@@ -101,12 +101,12 @@ export class CodeRevertService {
   async recoverPending(workspacePath: string, heldThreadLease?: ThreadLeaseHandle, signal?: AbortSignal): Promise<void> {
     const interrupted = (entry: { operationType: string; state: string }) => ['code-revert', 'change-revert'].includes(entry.operationType) && ['prepared', 'git_applied'].includes(entry.state)
     // Nothing to finish takes no lock: a worktree the agent removed or emptied does not stop the next turn here.
-    if (![...this.journal.latestByOperation().values()].some(interrupted)) return
+    if (!this.journal.unsettled().some(interrupted)) return
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'code-revert-recovery', async () => {
       const receipts = new ChangeReceiptService(this.threadDirectory)
-      for (const entry of this.journal.latestByOperation().values()) {
+      for (const entry of this.journal.unsettled()) {
         if (!interrupted(entry)) continue
-        const intent = this.journal.list().find((item) => item.operationId === entry.operationId && item.state === 'prepared')
+        const intent = this.journal.history(entry.operationId).find((item) => item.state === 'prepared')
         const expected = intent?.expectedPreState as { startSha: string; actionId: string } | undefined
         const details = intent?.details as RevertIntent | undefined
         if (!expected || !details?.target) throw new Error('Code revert recovery intent is missing.')

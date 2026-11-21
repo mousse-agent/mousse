@@ -77,6 +77,9 @@ function releasedBranch(entry: ThreadJournalRecord, at: string | undefined): str
   return at && fold(details.worktreePath) !== at ? undefined : details.branch
 }
 
+/** The operation types `threadBranchRecord` reads; a caller may pass only the records of these (`ThreadJournal.ofTypes`). */
+export const BRANCH_RECORD_OPERATIONS = [PROVISION_OPERATION, BRANCH_RENAME_OPERATION, BRANCH_RELEASE_OPERATION, BRANCH_RESTORE_OPERATION] as const
+
 /**
  * Folds a thread's journal into the branches Mousse owns for it. `worktreePath` limits it to one worktree's records;
  * `acceptProvision` lets a caller add its own checks on a provision's planned record (the retirement service checks
