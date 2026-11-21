@@ -409,7 +409,11 @@ describe('routes (1b §1.3, §1.5)', () => {
   })
 
   it('waits for the Cloudflare route to be verified before creating a pairing link', async () => {
-    const d = daemon({ sendLink: true, cloudflare: { state: 'off' } }, {
+    const d = daemon({
+      reach: { lan: false, tailnet: false, public: [], tunnels: [], wsPort: 47101 },
+      sendLink: true,
+      cloudflare: { state: 'off' }
+    }, {
       'netEngine.invite': ({ kind }) => ({
         invitation: kind === 'link' ? 'cloudflare-link' : 'qr',
         uri: 'mousse://pair?n=Studio#AAAAAAAAAAAAAAAAAAAAAAAA',
@@ -426,6 +430,11 @@ describe('routes (1b §1.3, §1.5)', () => {
     for (const state of ['preparing', 'sign_in', 'connecting'] as const) {
       await d.change({ cloudflare: { state } })
       expect(d.called('netEngine.invite')).not.toContainEqual({ kind: 'link' })
+      if (state === 'sign_in') {
+        await click(button('Close'))
+        await click(button('Continue setup'))
+        expect(button('Cancel')).toBeDefined()
+      }
     }
 
     await d.change({ cloudflare: { state: 'connected', hostname: 'mousse.example.net' } })

@@ -24,7 +24,7 @@ export function CloudflareSetup({ connection }: { connection: NetEngineCloudflar
         <p role="status" className="settings-muted">{STATE_TEXT[state]}</p>
       )}
       {(error || message) && <p role="alert" className="chat-error">{error || message}</p>}
-      <div className="devices-dialog-actions">
+      <div className="devices-dialog-actions" style={{ gap: 'var(--space-8)', marginTop: 'var(--space-8)' }}>
         {state === 'sign_in' && loginUrl && (
           <button type="button" className="settings-btn" onClick={() => void window.mousse.providers?.openLoginUrl?.(loginUrl)}>
             Open Cloudflare
@@ -59,6 +59,7 @@ export function CloudflareReachRow({
   const { busy, error, call } = useDaemonCall()
   const { state, hostname, message } = connection
   const canConnect = state === 'off' || state === 'failed'
+  const signingIn = state === 'sign_in'
   return (
     <SettingsRow
       title="Cloudflare Tunnel"
@@ -74,9 +75,9 @@ export function CloudflareReachRow({
           type="button"
           className="settings-btn"
           disabled={busy}
-          onClick={canConnect ? onSetup : () => void call('netEngine.cloudflare.stop', {})}
+          onClick={canConnect || signingIn ? onSetup : () => void call('netEngine.cloudflare.stop', {})}
         >
-          {state === 'connected' ? 'Stop' : canConnect ? 'Set up' : 'Cancel'}
+          {state === 'connected' ? 'Stop' : signingIn ? 'Continue setup' : canConnect ? 'Set up' : 'Cancel'}
         </button>
       }
     />
