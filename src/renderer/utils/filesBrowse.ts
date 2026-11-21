@@ -19,7 +19,7 @@ export function isAbsolutePath(path: string): boolean {
 }
 
 function isWindowsStyle(path: string): boolean {
-  return DRIVE.test(path) || path.startsWith('\\\\') || (path.includes('\\') && !path.startsWith('/'))
+  return DRIVE.test(path) || UNC.test(path) || path.startsWith('\\\\') || (path.includes('\\') && !path.startsWith('/'))
 }
 
 /** The segments of an absolute folder path, the root first; `.` and `..` are resolved. Empty for a relative path. */
@@ -93,9 +93,11 @@ export function pathInside(path: string, root: string): string | null {
 
 /** `relative` (`/`-separated, as the tree names entries) inside the folder `root`, spelled as `root` is. */
 export function joinFolder(root: string, relative: string): string {
-  if (!relative) return normalizeFolderPath(root)
+  const folder = normalizeFolderPath(root)
+  if (!relative) return folder
   const sep = isWindowsStyle(root) ? '\\' : '/'
-  return normalizeFolderPath(`${normalizeFolderPath(root)}${sep}${relative.replace(/[\\/]+/g, sep)}`)
+  const prefix = folder.endsWith(sep) ? folder : folder + sep
+  return normalizeFolderPath(prefix + relative.replace(/[\\/]+/g, sep))
 }
 
 /**

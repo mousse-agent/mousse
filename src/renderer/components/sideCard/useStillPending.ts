@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
 
-/** How long the Git section looks up a thread's folder before it stops saying "Checking…". */
-export const GIT_FOLDER_SLOW_MS = 15_000
+/**
+ * How long the Git section looks up a thread's folder and reads its first status, together, before it stops saying
+ * "Checking…" and offers Retry: under the 3 s after which a drive that does not answer counts as stalled.
+ */
+export const GIT_LOOKUP_BUDGET_MS = 2_500
 
 /**
  * Whether `pending` has stayed true for `ms` since it last became true or `scope` last changed. It turns false again

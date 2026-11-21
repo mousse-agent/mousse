@@ -5,7 +5,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { LOOSE_MOUSSE_REFS_TO_PACK } from '../src/mms/actions/packMousseRefs'
 import { UndoRetentionSweeper } from '../src/mms/actions/UndoRetentionSweeper'
@@ -16,7 +16,7 @@ import { folderAccess } from '../src/mms/files/folderAccess'
 import type { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 
-const STUCK = '/Volumes/stuck'
+const STUCK = resolve('/Volumes/stuck')
 
 let f: ReturnType<typeof gitFoundationFixture>
 let sweep: ReturnType<typeof vi.spyOn>
@@ -29,7 +29,8 @@ beforeEach(() => {
     commonDir: async () => null,
     keyOf: (path) => path.startsWith(STUCK) ? STUCK : '/',
     stuckAfterMs: 20,
-    platform: 'darwin'
+    realpath: async (path) => path,
+    platform: process.platform
   })
   sweep = vi.spyOn(UndoRetentionService.prototype, 'sweep').mockResolvedValue({ expired: [] } as never)
   vi.spyOn(ReceiptRefReleaseService.prototype, 'release').mockResolvedValue({ releasedRefs: [], retained: [] } as never)
@@ -44,7 +45,7 @@ function sweeper(worktreePath: string, options = { intervalMs: 60 * 60 * 1000, t
 }
 
 it('skips a thread whose folder is on a volume that is not answering, and sweeps it once it answers', async () => {
-  const stuck = sweeper(`${STUCK}/worktrees/thread-1`)
+  const stuck = sweeper(join(STUCK, 'worktrees', 'thread-1'))
   await stuck.tick()
   expect(sweep).not.toHaveBeenCalled()
   expect(stuck.outcomes.get('thread-1')?.reason).toMatch(/not answering/)

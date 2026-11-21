@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFileGitSync } from '../git/gitSpawn'
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs'
 import { access, mkdir, realpath } from 'node:fs/promises'
@@ -106,7 +106,7 @@ const occupancyTails = new Map<string, Promise<unknown>>()
 
 /** Only for {@link isWorkflowRevisionCurrent}, which the workflow engine asks synchronously. */
 function gitSync(cwd: string, args: string[]): string {
-  return timeGitSync(() => execFileSync(gitFile(), withoutRepoPrograms(cwd, args), { cwd, env: gitEnvFor(repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })).trim()
+  return timeGitSync(() => execFileGitSync(gitFile(), withoutRepoPrograms(cwd, args), { cwd, env: gitEnvFor(repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })).trim()
 }
 
 /** Git without blocking the daemon: the same check, command and answer as `execFileSync`. */

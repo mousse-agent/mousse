@@ -18,7 +18,7 @@ import { createCodexProviderService, type CodexProviderService } from '../../src
 import { CodexAdapter } from '../../src/mms/harness/drivers/codex/adapter'
 import type { AdapterHost, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import type { McpAttachment } from '../../src/mms/run/mcp/MousseMcpServer'
-import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer } from '../../src/mms/run/testkit/codexAppServerReplay'
+import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer, replayCodexEnv } from '../../src/mms/run/testkit/codexAppServerReplay'
 import { parseTranscript, ReplayTransport, type TranscriptFrame } from '../../src/mms/run/testkit/ReplayTransport'
 
 const MCP = { url: 'http://127.0.0.1:4567/mcp', token: 'tok-secret' }
@@ -114,8 +114,9 @@ const threadParams = (extra: Record<string, unknown> = {}) => ({
   approvalPolicy: 'untrusted', sandbox: 'read-only', model: 'gpt-x', modelProvider: 'openai', config: { model_provider: 'openai' }, ...extra
 })
 const threadResult = (thread = T) => ({ thread: { id: thread }, model: 'gpt-x', modelProvider: 'openai', cwd: '/w' })
-const turnStartOn = (id: number, thread: string, prompt: string, turn: string): TranscriptFrame[] => [
+const turnStartOn = (id: number, thread: string, prompt: string, turn: string, beforeReply: TranscriptFrame[] = []): TranscriptFrame[] => [
   out({ id, method: 'turn/start', params: { summary: 'auto', threadId: thread, input: text(prompt), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+  ...beforeReply,
   inn({ id, result: { turn: { id: turn, status: 'inProgress', error: null } } })
 ]
 const reply = (thread: string, turn: string, value: string): TranscriptFrame[] => [
@@ -165,7 +166,7 @@ describe('Codex', () => {
     chmodSync(binary, 0o755)
     mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
     writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }] }))
-    const created = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { launch: () => ({ binaryPath: binary }) })
+    const created = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { env: replayCodexEnv(home), launch: () => ({ binaryPath: binary }) })
     services.push(created)
     return created
   }
@@ -193,8 +194,7 @@ describe('Codex', () => {
       out({ id: 6, method: 'thread/fork', params: { threadId: T, excludeTurns: true, ...threadParams({ config: mcpConfig(true) }) } }),
       inn({ id: 6, result: threadResult('thr-2') }),
       out({ id: 7, method: 'thread/unsubscribe', params: { threadId: T } }),
-      inn({ id: 7, result: { status: 'unsubscribed' } }),
-      ...turnStartOn(8, 'thr-2', 'two', 'turn-2'),
+      ...turnStartOn(8, 'thr-2', 'two', 'turn-2', [inn({ id: 7, result: { status: 'unsubscribed' } })]),
       ...reply('thr-2', 'turn-2', 'two'),
       // Same relay and revision: the forked thread continues as loaded.
       ...turnStartOn(9, 'thr-2', 'three', 'turn-3'),
@@ -203,8 +203,7 @@ describe('Codex', () => {
       out({ id: 10, method: 'thread/fork', params: { threadId: 'thr-2', excludeTurns: true, ...threadParams({ config: mcpConfig(true) }) } }),
       inn({ id: 10, result: threadResult('thr-3') }),
       out({ id: 11, method: 'thread/unsubscribe', params: { threadId: 'thr-2' } }),
-      inn({ id: 11, result: { status: 'unsubscribed' } }),
-      ...turnStartOn(12, 'thr-3', 'four', 'turn-4'),
+      ...turnStartOn(12, 'thr-3', 'four', 'turn-4', [inn({ id: 11, result: { status: 'unsubscribed' } })]),
       ...reply('thr-3', 'turn-4', 'four')
     ])
     const codex = service(replay)

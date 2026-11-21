@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { folderAccess } from '../src/mms/files/folderAccess'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { LocalMmsClient } from '../src/mms/protocol/client'
 import { MmsProtocolServer } from '../src/mms/protocol/server'
@@ -9,6 +10,7 @@ import { FILE_WORKSPACE_BINDING_CAPABILITY } from '../src/mms/protocol/types'
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { FILE_ASSET_PIECE_BYTES, FILES_WRITE_DIRECT_MAX_BYTES, SAVE_TOO_LARGE_MESSAGE } from '../src/shared/fileAssets'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
+import { ownedTemp } from './support/tmp'
 
 /**
  * The Files and Git panels name a thread or a project; the daemon resolves its folder. These tests talk to a
@@ -35,6 +37,7 @@ describe('files and Git reads by thread, through the daemon', () => {
     await script.connect()
   }, 30_000)
   afterEach(async () => {
+    folderAccess.reset()
     vi.restoreAllMocks()
     await window?.close()
     await script?.close()
@@ -91,6 +94,27 @@ describe('files and Git reads by thread, through the daemon', () => {
         await expect(script.request('files.list', { threadId: thread.id, root: elsewhere })).rejects.toThrow(/this computer/)
       } finally {
         rmSync(elsewhere, { recursive: true, force: true })
+      }
+    })
+
+    it('reads an explicitly browsed folder while the named project drive is stalled', async () => {
+      const p = project()
+      const threadId = mms.threads.createThread('Project drive stalled', p.id).id
+      const elsewhere = ownedTemp('mousse-browse-healthy-')
+      try {
+        writeFileSync(elsewhere.child('outside.txt'), 'healthy drive')
+        folderAccess.reset({
+          keyOf: (path) => path === p.path ? 'checkout-drive' : 'healthy-drive',
+          probe: async (path) => { if (path === p.path) await new Promise(() => undefined) },
+          commonDir: async () => null,
+          stuckAfterMs: 20
+        })
+        const scope = { threadId, projectId: p.id }
+        await expect(window.request('files.root', scope)).rejects.toMatchObject({ code: 'folder_not_answering' })
+        await expect(window.request('files.read', { ...scope, root: elsewhere.path, path: 'outside.txt' }))
+          .resolves.toMatchObject({ content: 'healthy drive' })
+      } finally {
+        await elsewhere.close()
       }
     })
 
@@ -272,10 +296,12 @@ describe('files and Git reads by thread, through the daemon', () => {
       await expect(window.request('git.status', {})).rejects.toThrow()
       await expect(window.request('git.status', { projectId: 'no-such-project' })).rejects.toMatchObject({ code: 'project_not_found' })
       await expect(window.request('git.diffStats', { projectId: project().id, threadId: 'x' })).rejects.toThrow()
-      // A folder sent as `cwd` is not a parameter of any of them; the project decides.
+      // A legacy `cwd` is ignored, even for the drive check before the Git read.
       const p = project()
+      const waitForFolders = vi.spyOn(mms.orchestrator, 'waitForThreadFolders')
       const status = await window.request<{ status: { isRepo: boolean } }>('git.status', { projectId: p.id, cwd: f.root })
       expect(status.status.isRepo).toBe(true)
+      expect(waitForFolders).toHaveBeenCalledWith(undefined, [p.path], expect.anything(), { whenNotAnswering: 'fail' })
     })
   })
 })

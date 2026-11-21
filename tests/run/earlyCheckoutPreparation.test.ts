@@ -24,6 +24,13 @@ import { findCleanupRecord } from '../../src/mms/worktree/verifiedCleanup'
 import { defaultThreadWorktreePath } from '../../src/mms/worktree/worktreeLayout'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
+/** The checkout child as an ES module with its packages from the installation: Git starts through `gitSpawn`, which reads `import.meta.url`. */
+const CHECKOUT_CHILD_BUILD = {
+  format: 'esm' as const, packages: 'external' as const, banner: {
+    js: 'import { createRequire as fixtureRequire } from "node:module"; const require = fixtureRequire(import.meta.url); const __dirname = import.meta.dirname; const __filename = import.meta.filename;'
+  }
+}
+
 function gate() {
   let open!: () => void
   const wait = new Promise<void>((resolve) => { open = resolve })
@@ -705,7 +712,7 @@ describe('the first turn in a new worktree', () => {
     const w = world()
     const draft = w.thread()
     await checkout.withCheckoutSlot(w.repo, async () => undefined)
-    const program = await crashChild('tests/run/checkoutChild.ts', { external: ['electron', 'node-pty', 'koffi'] })
+    const program = await crashChild('tests/run/checkoutChild.ts', CHECKOUT_CHILD_BUILD)
     const ready = join(home!, 'slot-ready')
     const proceed = join(home!, 'slot-proceed')
     const child = spawn(process.execPath, [program, 'slot', w.repo, ready, proceed], { env: process.env, windowsHide: true, stdio: 'ignore' })
@@ -853,7 +860,7 @@ describe('the first turn in a new worktree', () => {
     const pathForGit = (path: string) => path.replaceAll('\\', '/')
     w.git(w.repo, 'config', 'filter.slow.smudge', `"${pathForGit(process.execPath)}" "${pathForGit(filter)}"`)
     expect(trustRepositoryPrograms(w.repo)?.filters['filter.slow.smudge']).toBeTruthy()
-    const program = await crashChild('tests/run/checkoutChild.ts', { external: ['electron', 'node-pty', 'koffi'] })
+    const program = await crashChild('tests/run/checkoutChild.ts', CHECKOUT_CHILD_BUILD)
     const child = spawn(process.execPath, [program, 'provision', draft.id, draft.directory, w.repo], { env: process.env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
     const exited = once(child, 'exit')
     const errors: Buffer[] = []

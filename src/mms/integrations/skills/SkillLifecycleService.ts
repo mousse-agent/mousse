@@ -33,7 +33,7 @@ import {
 import { sha256Bytes } from '../revision'
 import { inspectRelativePath } from '../pathSafety'
 import { exportSkillDirectory, exportSkillMarkdown } from './skillExport'
-import { importSkillPath, importSkillZip, type ImportedSkillPackage } from './skillImport'
+import { importSkillPath, importSkillZip, skillPackageRevision } from './skillImport'
 import { SkillsRegistry } from './SkillsRegistry'
 import { renderSkillTemplate } from './skillTemplate'
 import { isValidSkillName, skillFrontmatterDiagnostics, stringValue } from './skillValidation'
@@ -205,7 +205,7 @@ export class SkillLifecycleService {
       await this.pinCurrentRevision(existing, dest)
     }
     await this.stageAndPromote(dest, imported.files)
-    const hash = packageHash(imported)
+    const revision = skillPackageRevision(imported)
     const installationId = this.installationId(input.scope, name, input.projectPath)
     const previous = state.installations[installationId]
     await this.putState({
@@ -214,8 +214,8 @@ export class SkillLifecycleService {
       scope: input.scope,
       enabled: input.enable !== false,
       archived: false,
-      revision: hash,
-      contentHash: hash,
+      revision,
+      contentHash: imported.skillContentHash,
       projectPath: input.projectPath,
       provenance: input.zipBytes ? 'zip' : 'folder',
       createdAt: previous?.createdAt ?? new Date().toISOString(),
@@ -426,13 +426,6 @@ export class SkillLifecycleService {
     }
     return entry
   }
-}
-
-function packageHash(imported: ImportedSkillPackage): string {
-  const parts = imported.files
-    .map((file) => `${file.relativePath}:${sha256Bytes(file.bytes)}`)
-    .sort()
-  return sha256Bytes(parts.join('\n'))
 }
 
 export function skillDiagnosticsSummary(diagnostics: IntegrationDiagnostic[]): string {

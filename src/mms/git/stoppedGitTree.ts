@@ -1,10 +1,7 @@
 /**
- * The processes of a Git command that was stopped (`runGitProcess` under a cancellation).
- *
- * They are killed once, at the stop, through what Mousse owns for certain: off Windows the command's own process group
- * (Mousse made it, and its id cannot be given to another group while a member of it lives), on Windows `taskkill /T`
- * from the command and the command's own process handle, both while the command still runs. Nothing is killed after
- * that.
+ * POSIX Git cancellation kills the command's own process group and watches survivors. Windows Git cancellation
+ * uses the command's Job Object in gitSpawn.ts. Windows still uses the process inventory here for lease
+ * diagnostics and process trees started outside the Git launcher.
  *
  * The command is known by its pid and when it was created, which must fall within {@link SPAWN_ANCHOR_SLACK_MS} of when
  * Mousse started it (the anchor): a pid the system gave to another program since is never taken for it. A creation time
@@ -18,13 +15,8 @@
  * exited, become a zombie, or its pid belongs to another process. Processes started later are not looked for. A look
  * that cannot list the processes in time counts them as still there, so the repository's lock is never let go on a
  * guess.
- *
- * On Windows one window is left: Git can end, and Windows give its pid to another program, between the check that the
- * command still runs (and has the anchored creation time) and `taskkill` opening the pid, a few milliseconds later.
- * Closing it needs a process handle held through the kill, or a Job Object, which Node offers neither of; a native
- * helper could (follow-up).
  */
-import { execFile, spawn, type ChildProcess } from 'node:child_process'
+import { execFile, type ChildProcess } from 'node:child_process'
 
 /** One process: its parent, its process group (off Windows), when it was created (opaque; equal means the same process), and whether it is a zombie. */
 export interface ProcessEntry {
@@ -115,28 +107,11 @@ export function readProcessStart(pid: number): Promise<number | null> {
   })
 }
 
-/**
- * The one kill, at the stop, while the command runs and so is certainly the process Mousse started: off Windows its
- * process group (it leads it); on Windows `taskkill /T` from it (not waited for) and its own handle.
- */
-function killAtStop(child: ChildProcess, rootDisproved: boolean): void {
+/** Kill the process group once, while Git still leads it. */
+function killAtStop(child: ChildProcess): void {
   const pid = child.pid
   if (!pid || child.exitCode !== null || child.signalCode !== null) return
-  // On Windows the pid `taskkill` opens must still be the command's: Mousse's handle shows it running, and the list just
-  // read did not show another creation time for it (`rootDisproved`; a list or a creation time that could not be read
-  // disproves nothing, and the handle is trusted as before). What is left is the window named at the top of this file.
-  if (process.platform === 'win32' && rootDisproved) return
-  if (gitStopProbe.kill) { gitStopProbe.kill(pid, process.platform !== 'win32'); return }
-  if (process.platform === 'win32') {
-    // `taskkill /T` walks the tree from the command, so the command must still run while it does: its own handle is used
-    // only after `taskkill` ended, if it is still running then.
-    const own = (): void => { if (child.exitCode === null && child.signalCode === null) child.kill() }
-    const kill = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
-    kill.on('error', own)
-    kill.on('exit', own)
-    kill.unref()
-    return
-  }
+  if (gitStopProbe.kill) { gitStopProbe.kill(pid, true); return }
   try { process.kill(-pid, 'SIGKILL') } catch { child.kill('SIGKILL') }
 }
 
@@ -191,35 +166,19 @@ export class StoppedGitTree {
     this.tracked.set(root, undefined)
   }
 
-  /** Whether `entry` has a creation time, and it is not the command's. */
-  private disproved(entry: ProcessEntry): boolean {
-    return startDisproved(entry, this.spawnedAt)
-  }
-
   /** The pids of the command's processes being watched (the command's own until its processes were listed). */
   pids(): number[] {
     return this.known ? [...this.tracked.keys()] : [this.root]
   }
 
   /**
-   * Kills the command once, then notes the processes it had at the stop. On Windows they are listed before the kill
-   * (a list after it would miss the children of a parent already gone); off Windows the group is killed at once and its
-   * members are listed after. A list that cannot be read is tried again by the next look.
+   * Kills the POSIX group once, then notes its surviving members. A failed list is tried again by the next look.
    */
   static async stop(child: ChildProcess, spawnedAt: number): Promise<StoppedGitTree> {
     const tree = new StoppedGitTree(child.pid!, spawnedAt)
-    if (process.platform === 'win32') {
-      const table = await readProcessEntries()
-      // Not killed when the list shows another creation time for the command's pid; killed otherwise, as Mousse's handle
-      // shows it running.
-      const listed = table?.find((entry) => entry.pid === child.pid)
-      killAtStop(child, listed !== undefined && tree.disproved(listed))
-      if (table) tree.note(table)
-    } else {
-      killAtStop(child, false)
-      const table = await readProcessEntries()
-      if (table) tree.note(table)
-    }
+    killAtStop(child)
+    const table = await readProcessEntries()
+    if (table) tree.note(table)
     return tree
   }
 
@@ -235,13 +194,6 @@ export class StoppedGitTree {
     this.known = true
     this.tracked.clear()
     for (const [pid, started] of anchoredTree(table, this.root, this.spawnedAt)) this.tracked.set(pid, started)
-  }
-
-  /** A cheap look without listing (Windows): whether a watched pid is still there. True can be a reused pid; a list confirms. */
-  quickAlive(): boolean {
-    if (gitStopProbe.alive) return gitStopProbe.alive(this)
-    const there = (target: number): boolean => { try { process.kill(target, 0); return true } catch { return false } }
-    return this.pids().some(there)
   }
 
   /**

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { GitScope, GitStatusSnapshot } from '../src/shared/types'
 import { folderKey } from '../src/renderer/lib/activeProject'
-import { GIT_STATUS_SLOW_MS, refreshGitStatus, retainGitPath, stageGitPaths, useGitStatusStore } from '../src/renderer/stores/gitStatusStore'
+import { GIT_STALE_FLIGHT_MS, GIT_STATUS_SLOW_MS, refreshGitStatus, retainGitPath, stageGitPaths, useGitStatusStore } from '../src/renderer/stores/gitStatusStore'
 
 const status = (branch: string): GitStatusSnapshot => ({ isRepo: true, branch, upstream: null, tracking: 'none', ahead: 0, behind: 0, changes: [] })
 const projectScope = (projectId: string): GitScope => ({ projectId, workspaceThreadId: null })
@@ -95,13 +95,45 @@ describe('Git state by thread or project', () => {
     const refreshed = refreshGitStatus(key, { scope: project })
 
     await vi.waitFor(() => expect(useGitStatusStore.getState().entries[key]?.status?.branch).toBe('main'))
-    expect(useGitStatusStore.getState().entries[key]).toMatchObject({ loaded: true, loading: false, diffStats: null, branches: { current: 'main' } })
+    await vi.waitFor(() => expect(useGitStatusStore.getState().entries[key]).toMatchObject({ loaded: true, loading: false, diffStats: null, branches: { current: 'main' } }))
 
     failDiffStats(new Error('diff failed'))
     answerLog([])
     await refreshed
     // A failed detail read leaves what the folder showed; the status stays without an error.
     expect(useGitStatusStore.getState().entries[key]).toMatchObject({ diffStats: null, error: null, commits: [] })
+  })
+
+  it('reads the status alone first: the commits, branches and diff counts wait until it has answered', async () => {
+    const project = projectScope('p1')
+    const key = folderKey(project)!
+    const { git } = installGit(() => 'main')
+    let answerStatus: (value: GitStatusSnapshot) => void = () => undefined
+    git.status.mockImplementation(() => new Promise((resolve) => { answerStatus = resolve }))
+    const refreshed = refreshGitStatus(key, { scope: project })
+    await Promise.resolve()
+    expect(git.status).toHaveBeenCalledTimes(1)
+    expect([git.log, git.branches, git.diffStats].map((read) => read.mock.calls.length)).toEqual([0, 0, 0])
+    answerStatus(status('main'))
+    await refreshed
+    expect([git.log, git.branches, git.diffStats].map((read) => read.mock.calls.length)).toEqual([1, 1, 1])
+  })
+
+  it('Retry past a read that hung reads again at once, and the hung read answering later changes nothing', async () => {
+    vi.useFakeTimers()
+    const project = projectScope('p1')
+    const key = folderKey(project)!
+    const { git } = installGit(() => 'main')
+    let answerHung: (value: GitStatusSnapshot) => void = () => undefined
+    git.status.mockImplementationOnce(() => new Promise((resolve) => { answerHung = resolve }))
+    void refreshGitStatus(key, { scope: project })
+    await vi.advanceTimersByTimeAsync(GIT_STALE_FLIGHT_MS)
+    await refreshGitStatus(key, { scope: project, force: true })
+    expect(git.status).toHaveBeenCalledTimes(2)
+    expect(useGitStatusStore.getState().entries[key]?.status?.branch).toBe('main')
+    answerHung(status('stale'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(useGitStatusStore.getState().entries[key]?.status?.branch).toBe('main')
   })
 
   it('reads again through the same scope after an action, and when the window is focused again', async () => {

@@ -92,6 +92,12 @@ describe('chat title model', () => {
     expect(oneShot).not.toHaveBeenCalled()
   })
 
+  it('passes the Regenerate action through to the selected provider', async () => {
+    const { orch, oneShot } = titleOrchestrator(await titleProfile(), OPENAI_BIG)
+    expect(await orch.generateThreadTitle([{ role: 'user', content: 'Fix the login redirect' }])).toBe('A title')
+    expect(oneShot).toHaveBeenCalledWith(expect.objectContaining({ task: 'title', namingOrigin: 'regenerate' }), expect.any(AbortSignal))
+  })
+
   it('a chosen model runs exactly as chosen; a legacy record resolves to its instance', async () => {
     const profile = await titleProfile()
     const chosen = titleOrchestrator(profile, OPENAI_BIG)

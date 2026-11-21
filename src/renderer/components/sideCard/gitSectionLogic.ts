@@ -270,8 +270,10 @@ export interface GitCollapseInput {
   hasProject: boolean
   /** The folder is still being resolved. */
   pathPending: boolean
-  /** The folder has been looked up for so long that the section stops saying "Checking…". */
+  /** The folder and its first status have been read for so long that the section stops saying "Checking…". */
   pathSlow?: boolean
+  /** Why the thread's own worktree cannot be read now (`ActiveProject.unavailable`). */
+  unavailable?: string
   hasPath: boolean
   /** The first fetch has finished. */
   loaded: boolean
@@ -280,6 +282,8 @@ export interface GitCollapseInput {
 
 /** Shown while the folder or its status is still being read. */
 export const GIT_CHECKING_LABEL = 'Checking…'
+/** Shown once the folder or its status has not answered in time, or its drive is not answering; Retry reads again. */
+export const GIT_NOT_ANSWERING_LABEL = 'Not answering'
 
 /**
  * The single muted line shown under the Git heading instead of the section's controls when there is
@@ -287,13 +291,20 @@ export const GIT_CHECKING_LABEL = 'Checking…'
  */
 export function gitCollapsedLabel(input: GitCollapseInput): string | null {
   if (!input.hasProject) return 'No project'
-  if (input.pathPending) return input.pathSlow ? 'Unavailable' : GIT_CHECKING_LABEL
+  if (input.pathPending) return input.pathSlow ? GIT_NOT_ANSWERING_LABEL : GIT_CHECKING_LABEL
+  // Its drive not answering, or a worktree a storage rule put away (`WORKTREE_NOT_ON_DISK`): said, never brought back.
+  if (input.unavailable) return /not answering/i.test(input.unavailable) ? GIT_NOT_ANSWERING_LABEL : input.unavailable
   if (!input.hasPath) return 'No project folder'
-  if (!input.loaded) return GIT_CHECKING_LABEL
-  if (!input.status) return 'Unavailable'
+  if (!input.loaded) return input.pathSlow ? GIT_NOT_ANSWERING_LABEL : GIT_CHECKING_LABEL
+  if (!input.status) return input.pathSlow ? GIT_NOT_ANSWERING_LABEL : 'Unavailable'
   if (input.status.missing === true) return 'Folder not found'
   if (!input.status.isRepo) return 'Not a repository'
   return null
+}
+
+/** Whether the section offers Retry: what it shows is a read that did not answer or failed, not an answer. */
+export function gitCanRetry(label: string | null): boolean {
+  return label === GIT_NOT_ANSWERING_LABEL || label === 'Unavailable'
 }
 
 /**

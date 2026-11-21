@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { isDefaultThreadName, isThreadStarted } from '../../shared/threadTitle'
 import { cleanTitleText, fitTitle, heuristicTitle } from '../../shared/threadTitleText'
-import type { Thread, ThreadActivitySnapshot } from '../../shared/types'
+import { isThreadActivityActive, type Thread, type ThreadActivitySnapshot } from '../../shared/types'
 import { workspacePendingKey } from './newThread'
 
 /**
@@ -216,7 +216,7 @@ export function withPendingRows(
     }
     const real = out[index]!
     keys.set(real.id, row.key)
-    if (!real.startedAt) unmade.add(real.id)
+    if (!real.startedAt && !isThreadActivityActive(activity[real.id] ?? 'idle')) unmade.add(real.id)
     out[index] = {
       ...real,
       ...(real.startedAt ? {} : { startedAt: row.thread.startedAt, order: row.thread.order }),
@@ -274,6 +274,11 @@ export function afterNextPaint(fallbackMs = 50): Promise<void> {
  */
 const newChatHolds = new Map<string, symbol>()
 
+/** A draft with a first send in progress cannot be reopened by New Thread. */
+export function newChatHeld(profileId: string, threadId: string): boolean {
+  return newChatHolds.has(workspacePendingKey(profileId, threadId))
+}
+
 /** Holds the new chat shown as `threadId` for a first send; null while it is held already. The returned release is idempotent. */
 export function holdNewChat(profileId: string, threadId: string | null): (() => void) | null {
   const key = workspacePendingKey(profileId, threadId)
@@ -297,8 +302,8 @@ export const usePendingThreadRows = create<PendingThreadRowsState>(() => ({ rows
  * Threads a send is starting from the new-chat composer: its own thread from the click on, never an empty draft that
  * New thread opens again, even before the service lists it started.
  */
-export function startingThreadIds(rows: readonly PendingThreadRow[] = usePendingThreadRows.getState().rows): ReadonlySet<string> {
-  return new Set(rows.flatMap((row) => (row.threadId ? [row.threadId] : [])))
+export function startingThreadIds(profileId: string): ReadonlySet<string> {
+  return new Set(usePendingThreadRows.getState().rows.flatMap((row) => row.profileId === profileId && row.threadId ? [row.threadId] : []))
 }
 
 /** Lists a pending row now. */

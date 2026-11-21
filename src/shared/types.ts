@@ -550,6 +550,15 @@ export interface OrchestratorSendRequest {
    * outcome comes through turn and run events. Absent: the send answers with the turn's result, as it always has.
    */
   await?: 'ack'
+  /**
+   * Steer: the message is meant for the turn that runs or is being set up, not for after it. When the thread is busy
+   * the service queues it and sends it into that turn at once, or, while the turn is set up, keeps it first to join
+   * the turn as it runs (`QueuedMessage.steerOnStart`). Decided with the send's admission, so it holds whatever the
+   * window shows by the time the send answers. This computer's threads only.
+   */
+  steer?: boolean
+  /** Run visible at the click, when known. A later run must not take this Steer. */
+  steerRunId?: string
 }
 
 /** The model, permission mode and (when known) settings revision a send is bound to (`OrchestratorSendRequest.expect`). */
@@ -1144,6 +1153,8 @@ export interface OrchestratorResponse {
   queueItem?: QueuedMessage
   /** With `queued`: the thread is paused by a usage limit, and the message waits behind the pause (which stays). */
   heldByPause?: boolean
+  /** With `queued`: the send's Steer (`OrchestratorSendRequest.steer`) was applied to the queued message by the service. */
+  steerApplied?: boolean
   workflowRun?: import('./workflowChat').WorkflowChatRun
   /** Run Engine run created for this send (docs/run-engine/SPEC.md §6). */
   runId?: string
@@ -1279,6 +1290,19 @@ export interface QueuedMessage {
    * that moves the item out of `steering` drops the field.
    */
   steerNow?: { runId: string; holdGeneration: number; requestId: string }
+  /**
+   * Steered (Steer, or Send now) while its run was still being set up: the item waits first in the queue and joins that
+   * run (`runId`) once, as soon as it runs. The saved target also identifies a steer returned unread to the queue.
+   * An explicit Send now into a different run clears it.
+   */
+  steerOnStart?: { runId: string }
+  /**
+   * Set only on the lists the service sends (never saved). `sendsNext`: the item waits to join the run being set up
+   * (`steerOnStart`). `steerMissed`: it was steered, but its run ended before it could join; it is an ordinary queued
+   * message again, first in the queue.
+   */
+  sendsNext?: true
+  steerMissed?: true
   /**
    * Who the item is from when it is not a person. `schedule`: set on the occurrence of a scheduled job
    * that found its thread busy; the run drains with the job's model and origin, and the ids travel on to
@@ -2169,12 +2193,19 @@ export interface FileStat {
   modifiedAt: string
 }
 
+export interface FileText {
+  content: string
+  /** Native file spelling, when available from the daemon. */
+  canonicalPath?: string
+}
+
 export interface FileAsset {
   data: Uint8Array
   mimeType: string
   size: number
   /** When the file was last written, as read; absent from an older daemon. */
   mtimeMs?: number
+  canonicalPath?: string
 }
 
 export type GitChangeStatus =
@@ -2218,6 +2249,45 @@ export interface GitStatusSnapshot {
   missing?: boolean
   /** How long a Discard here keeps a copy of what it removes: its owner's Undo window. Set by the daemon. */
   discardKeptForMs?: number
+}
+
+/**
+ * A folder's branch as a thread card names it (`git.heads`): read from Git's files, or why it could not be (`error`).
+ * A detached HEAD has no branch and names its commit (`detachedAt`, '' when not known); a failed read is an `error`.
+ */
+export type GitFolderHead = { repo: boolean; branch: string | null; detachedAt?: string } | { error: string }
+
+/**
+ * What a thread's card names (`git.heads`): its project's branch when it works in its project's folder (`project`);
+ * else its own worktree's branch, null when detached (`detachedAt`) or before Mousse records the worktree
+ * (`lifecycle: 'unprovisioned'`). `folder` is the folder
+ * the thread works in, set only while its worktree is on disk and ready; without it the branch is the one Mousse
+ * recorded, and why: `lifecycle` (`provisioning` while it is made), `missing` (a ready worktree not on disk, retired by
+ * a storage rule), or `unavailable` (its drive is not answering, or it could not be read). `generation` counts the
+ * worktree's rebuilds: Git state read for an older one is not this one's.
+ */
+export type GitThreadHead =
+  | { project: true }
+  | { own: true; branch: string | null; detachedAt?: string; folder?: string; generation: number; lifecycle: string; missing?: true; unavailable?: string }
+  | { error: string }
+
+export interface GitHeadsRequest {
+  threadIds?: string[]
+  projectIds?: string[]
+  /** A Retry's own number: a new one is never answered by a request already in flight. */
+  attempt?: number
+}
+
+export interface GitHeadsResult {
+  /** The connected service needs Git reads to answer this batch. Skip background polling on such services. */
+  legacy?: true
+  projects: Record<string, GitFolderHead>
+  threads: Record<string, GitThreadHead>
+}
+
+/** Mousse changed these threads' branches (made a worktree, renamed its branch): their cards read them again. */
+export interface GitHeadsChangedEvent {
+  threadIds: string[]
 }
 
 export interface GitCommit {
@@ -2414,7 +2484,17 @@ export interface GitScope {
   projectId: string | null
   /** Set only when the folder is the thread's own ready worktree. */
   workspaceThreadId: string | null
+  /**
+   * That worktree's generation (`git.heads`): what was read of an older one is kept apart, and the service refuses a
+   * read whose worktree has been rebuilt since (`workspace_changed`).
+   */
+  workspaceGeneration?: number
+  /** A Retry's own number, on a read: a new one is never answered by a read already in flight, here or in the service. */
+  attempt?: number
 }
+
+/** What the service says (`workspace_changed`) to a read whose thread worktree was rebuilt since the window looked it up. */
+export const WORKSPACE_CHANGED_MESSAGE = "This thread's worktree was rebuilt since it was looked up. Look it up again."
 
 /** The copy a Discard kept before it removed anything (`git.discard`'s `kept`). */
 export interface GitKeptCopy {

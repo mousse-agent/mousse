@@ -33,6 +33,7 @@ import { WorktreeManager } from '../worktree/WorktreeManager'
 import { CLEANUP_QUIET_MS, cleanupRecordFor, DELETING_NAME, listCleanupRecords, onlyInFolderAsync, resumeCleanupAsync, type CleanupRecord } from '../worktree/verifiedCleanup'
 import { forgetKeptWorktree, listKeptWorktrees, type KeptWorktree } from './keptWorktrees'
 import { dispatchKeptFilesOwner, projectKeptFilesOwners, registerDispatchKeptFilesFolder } from '../actions/keptCopies'
+import { inBackgroundGitLane } from '../git/gitSpawn'
 
 const DAY_MS = 86_400_000
 const FIRST_RUN_DELAY_MS = 5 * 60_000
@@ -308,8 +309,8 @@ export class StorageCleanupService {
     this.deps.clock.start()
     this.firstRun = setTimeout(() => {
       this.firstRun = undefined
-      void this.run('schedule').catch(() => undefined)
-      this.interval = setInterval(() => { void this.run('schedule').catch(() => undefined) }, RUN_INTERVAL_MS)
+      void inBackgroundGitLane(() => this.run('schedule')).catch(() => undefined)
+      this.interval = setInterval(() => { void inBackgroundGitLane(() => this.run('schedule')).catch(() => undefined) }, RUN_INTERVAL_MS)
       this.interval.unref()
     }, FIRST_RUN_DELAY_MS)
     this.firstRun.unref()
@@ -331,7 +332,7 @@ export class StorageCleanupService {
     if (this.afterPolicyChange) clearTimeout(this.afterPolicyChange)
     this.afterPolicyChange = setTimeout(() => {
       this.afterPolicyChange = undefined
-      void this.run('schedule').catch(() => undefined)
+      void inBackgroundGitLane(() => this.run('schedule')).catch(() => undefined)
     }, POLICY_CHANGE_DELAY_MS)
     this.afterPolicyChange.unref()
   }
@@ -702,7 +703,7 @@ export class StorageCleanupService {
     const shared = this.deps.otherWork?.(workspace.worktreePath, record.taskId)
     if (shared) return { keep: shared, remember: false }
     if (isExecutionLeaseHeld(record.location)) return { keep: 'Thread is in use', remember: false }
-    if (workspace.lifecycle !== 'ready') return { keep: 'Workspace is not ready', remember: true, fingerprint }
+    if (workspace.lifecycle !== 'ready' || workspace.rebuilding) return { keep: 'Workspace is not ready', remember: true, fingerprint }
     let facts: Awaited<ReturnType<StorageCleanupService['inspectCheckout']>>
     try { facts = await this.inspectCheckout(record, workspace) } catch (error) { return { keep: (error as Error).message, remember: false } }
     if ('keep' in facts) return { keep: facts.keep, remember: true, fingerprint }
@@ -897,7 +898,7 @@ export class StorageCleanupService {
     const policy = snapshot.policy
     const workspace = readWorkspaceFile(record.location)
     if (!workspace) return undefined
-    if (workspace.lifecycle !== 'ready') return { keep: 'Workspace is not ready' }
+    if (workspace.lifecycle !== 'ready' || workspace.rebuilding) return { keep: 'Workspace is not ready' }
     const path = workspace.worktreePath
     const offline = await disconnectedWorktreeFolder(path)
     if (offline) return { keep: driveNotConnectedText(offline) }

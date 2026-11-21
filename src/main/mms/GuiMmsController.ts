@@ -1,7 +1,7 @@
 import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
 import { KEEP_AWAKE_CAPABILITY } from '../../shared/keepAwake'
 import { ERROR_INFO_CAPABILITY } from '../../shared/errors'
-import { connectGuiClient, readThreadEditorFile, writeThreadEditorFile } from './guiDaemonCompatibility'
+import { connectGuiClient, daemonSupports, readThreadEditorFile, writeThreadEditorFile } from './guiDaemonCompatibility'
 /**
  * Production Electron-side MMS client lifecycle.
  * Discovers/spawns the standalone daemon, connects via LocalMmsClient, reconnects
@@ -556,7 +556,7 @@ export class GuiMmsController extends EventEmitter {
     this.attachedBrowserHost = host
   }
 
-  async readThreadEditorFile(params: Record<string, unknown>, expectedRoot?: string): Promise<{ content: string; workspaceRoot?: string }> {
+  async readThreadEditorFile(params: Record<string, unknown>, expectedRoot?: string): Promise<{ content: string; canonicalPath?: string; workspaceRoot?: string }> {
     return readThreadEditorFile(await this.clientForCurrentSender(), params, expectedRoot)
   }
 
@@ -565,7 +565,7 @@ export class GuiMmsController extends EventEmitter {
   }
 
   /** `timeoutMs` overrides the client's per-method default for this call. */
-  async request<T = unknown>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
+  async request<T = unknown>(method: string, params?: unknown, timeoutMs?: number, options?: { fresh?: boolean }): Promise<T> {
     const sender = this.senderAls.getStore()
     const transition = method === 'profiles.bind' && sender
     if (transition) {
@@ -575,7 +575,7 @@ export class GuiMmsController extends EventEmitter {
     try {
       const client = await this.clientForCurrentSender()
       if (transition) await this.attachedBrowserHost?.releaseWindow(sender)
-      const result = await client.request<T>(method, params, timeoutMs)
+      const result = await client.request<T>(method, params, timeoutMs, options)
       if (transition) {
         const session = this.windowSessions.get(sender.id)
         const bound = result as unknown as {profile?:{id?:string};epoch?:number}
@@ -597,6 +597,11 @@ export class GuiMmsController extends EventEmitter {
         else this.profileTransitions.delete(sender.id)
       }
     }
+  }
+
+  /** Whether the service this window talks to has `method` (one the app can do without; see `daemonSupports`). */
+  async supports(method: string): Promise<boolean> {
+    return daemonSupports(await this.clientForCurrentSender(), method)
   }
 
   getWindowBinding(): TrustedProfileBinding | null {

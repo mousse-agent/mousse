@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { isAbsolute, resolve } from 'node:path'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
+import { withGitDiskAdmission } from '../git/gitSpawn'
 import { gitRunError, runGitProcess, type GitProcessObserver } from '../git/runGitProcess'
 
 import { withCheckoutSlot } from './checkoutSlots'
@@ -85,12 +86,12 @@ export async function checkoutInputsKey(cwd: string): Promise<string> {
 }
 
 /** Git for these commands: the repository's own programs never run (`withoutRepoProgramsAsync`). */
-export const worktreeGit: WorktreeGit = async (cwd, args, input, observer) => {
+export const worktreeGit: WorktreeGit = (cwd, args, input, observer) => withGitDiskAdmission(cwd, async () => {
   const argv = await withoutRepoProgramsAsync(cwd, args, input === undefined ? undefined : { stdin: input })
   const ran = await runGitProcess(argv, { cwd, env: repoProgramEnv(), observer, ...(input === undefined ? {} : { input }) })
   if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
   return ran.stdout
-}
+})
 
 /** Plain paths only (no pattern characters): Git's cone mode, which takes folders and is the faster one. */
 const PATTERN_CHARACTERS = /[*?[\]\\!]/
@@ -154,7 +155,7 @@ export async function registerWorktree(input: {
   add: readonly string[]
   prefix?: readonly string[]
   run?: WorktreeGit
-  afterAdd?: () => Promise<void>
+  afterAdd?: () => void | Promise<void>
   observer?: GitProcessObserver
 }): Promise<void> {
   const run = input.run ?? worktreeGit
@@ -197,7 +198,7 @@ export async function addWorktree(input: {
   plan: WorktreeCheckoutPlan
   prefix?: readonly string[]
   run?: WorktreeGit
-  afterAdd?: () => Promise<void>
+  afterAdd?: () => void | Promise<void>
 }): Promise<void> {
   if (!input.plan.sparse) {
     const run = input.run ?? worktreeGit

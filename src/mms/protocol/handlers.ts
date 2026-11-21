@@ -8,6 +8,7 @@ import { listKeptWorktrees } from '../lifecycle/keptWorktrees'
 import { chooseWorktreeFolder, recordedWorktreePaths, worktreeFolderStatus } from '../worktree/worktreeFolderSetting'
 import { userAction, withGitAccess, withUserRequest, type UserAction } from '../git/gitPolicy'
 import { gitAccessOf, USER_REQUEST_LABELS } from './gitAccess'
+import { folderHead, readWorkspaceRecord, threadHead } from '../workspace/threadHeads'
 import { projectIconFor, readIconFile, resolveStoredIconPath } from '../data/projectIcon'
 import { WALLPAPER_PIECE_MAX_BYTES, WallpaperRefused } from '../appearance/WallpaperStore'
 import { isWallpaperBucket, WALLPAPER_MAX_BYTES, WALLPAPER_UPLOAD_MAX_BASE64, WALLPAPER_UPLOAD_MAX_BYTES } from '../../shared/themes/wallpaperImage'
@@ -17,8 +18,9 @@ import { validateAppletAppearance } from '../../shared/appletAppearance'
 import { appletJsonBytes, APPLET_STATE_LIMIT } from '../../shared/applets'
 import { ConversationActionService } from '../actions/ConversationActionService'
 import { assertHeldThreadLease, withGitMutationLocks } from '../actions/GitOperationCoordinator'
-import { tryAcquireExecutionLease, waitAcquireExecutionLease, type ThreadLeaseHandle, heartbeatExecutionLease, releaseExecutionLeaseHandle, getExecutionLeasePath, leaseBusyMessage, readLeaseOwner } from '../queue/ThreadExecutionLease'
+import { tryAcquireExecutionLease, waitAcquireExecutionLease, type ThreadLeaseHandle, heartbeatExecutionLease, releaseExecutionLeaseHandle, getExecutionLeasePath, isExecutionLeaseHeld, leaseBusyMessage, readLeaseOwner } from '../queue/ThreadExecutionLease'
 import { clearCleanupMarker, readCleanupMarker } from '../lifecycle/StorageCleanupService'
+import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 import { enableVersionedLifecycleWriter, withThreadLifecyclePath } from '../queue/ThreadLifecycleAdmission'
 import { ThreadTerminalWriters } from '../terminals/threadTerminalWriter'
 import { assertEpisodePath } from '../agents/WorkspaceAccessPolicy'
@@ -48,7 +50,8 @@ import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
 import { lifecycleForReply } from '../../shared/resourceLifecycle'
-import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, NewThreadChoice, OrchestratorSendInput, OrchestratorSendRequest, ScheduledJob, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitHeadsResult, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, NewThreadChoice, OrchestratorSendInput, OrchestratorSendRequest, ScheduledJob, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
+import { WORKSPACE_CHANGED_MESSAGE } from '../../shared/types'
 import { privateThreadOf } from '../automations/sharedAutomations'
 import { AGENT_JOB_LIMIT_RANGES, AGENT_JOB_LIMIT_SETTINGS, type AgentJobLimitKey } from '../../shared/agentJobLimits'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
@@ -1177,6 +1180,76 @@ async function ensureWorkspaceMaterialized(ctx: HandlerContext, threadId: string
 }
 const restoresInFlight = new Map<string, Promise<void>>()
 
+/** The most threads, and the most projects, one `git.heads` call names: more than a sidebar shows. */
+const GIT_HEADS_MAX = 2_000
+
+// The thread or project supplies the folder even if an older caller also sends cwd.
+const GIT_READ_SCOPE = ['threadId', 'projectId', 'workspaceGeneration', 'attempt', 'cwd'] as const
+/** The Git reads whose parameters are checked before their folder is waited for or looked at, and the keys each takes. */
+const GIT_READ_KEYS: Record<string, readonly string[]> = {
+  'git.heads': ['threadIds', 'projectIds', 'attempt'],
+  'git.status': GIT_READ_SCOPE,
+  'git.diff': [...GIT_READ_SCOPE, 'path', 'staged'],
+  'git.log': [...GIT_READ_SCOPE, 'limit'],
+  'git.branches': GIT_READ_SCOPE,
+  'git.diffStats': GIT_READ_SCOPE
+}
+
+/** Refuses a malformed Git read before anything touches a folder: no drive is waited for on its account. */
+function checkGitReadParams(method: string, params: unknown): void {
+  if (!Object.hasOwn(GIT_READ_KEYS, method)) return
+  const keys = GIT_READ_KEYS[method]!
+  if (params !== undefined && !isObject(params)) throw new DomainRpcError('invalid_params', `${method} expects an object`)
+  const p = isObject(params) ? params : {}
+  rejectUnknownKeys(p, keys)
+  asOptionalBoundedInt(p.attempt, 'attempt', { min: 0, max: Number.MAX_SAFE_INTEGER })
+  if (method === 'git.heads') {
+    for (const field of ['threadIds', 'projectIds']) if (p[field] !== undefined) asStringArray(p[field], field, { unique: true, maxItems: GIT_HEADS_MAX, maxItemLen: 256 })
+    return
+  }
+  const threadId = asOptionalString(p.threadId, 256)
+  const projectId = asOptionalString(p.projectId, 256)
+  if (Boolean(threadId) === Boolean(projectId)) throw new DomainRpcError('invalid_params', 'Specify either threadId or projectId')
+  const generation = asOptionalBoundedInt(p.workspaceGeneration, 'workspaceGeneration', { min: 0, max: Number.MAX_SAFE_INTEGER })
+  if (generation !== undefined && !threadId) throw new DomainRpcError('invalid_params', 'workspaceGeneration names a thread worktree: give threadId')
+  if (method === 'git.log') asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 100 })
+  if (method === 'git.diff') {
+    asString(p.path, 'path', 4096)
+    asOptionalBoolean(p.staged, 'staged')
+  }
+}
+
+/**
+ * Checks the workspace generation and its rebuild record before and after the read. A half-built checkout can
+ * already exist at the same path while the workspace record still names the previous generation.
+ */
+async function readGit<T>(ctx: HandlerContext, p: Record<string, unknown>, read: (root: string, shareKey?: string) => Promise<T>): Promise<T> {
+  if (typeof p.workspaceGeneration !== 'number' || typeof p.threadId !== 'string') return read(projectRootContext(ctx, p))
+  const threadId = p.threadId
+  const known = await ctx.mms.threads.peekThreadLocation(threadId)
+  const retirement = new WorktreeRetirementService(ctx.mms.threads.lifecycleStore)
+  const requireReady = (workspace: ThreadWorkspaceMetadata | undefined) => {
+    const generation = workspace?.generation ?? 0
+    if (!workspace || isProjectFolderWorkspace(workspace) || workspace.lifecycle !== 'ready' || workspace.rebuilding || generation !== p.workspaceGeneration) {
+      throw new DomainRpcError('workspace_changed', WORKSPACE_CHANGED_MESSAGE, { threadId, generation })
+    }
+    return workspace
+  }
+  const check = async () => {
+    const workspace = requireReady(known && await readWorkspaceRecord(known.directory))
+    if (await retirement.rebuildUnfinishedAsync(workspace.threadId, workspace.worktreePath)) {
+      throw new DomainRpcError('workspace_changed', WORKSPACE_CHANGED_MESSAGE, { threadId, generation: workspace.generation ?? 0 })
+    }
+    // A rebuild can finish while its manifest is being checked. Read the generation again afterward.
+    return requireReady(await readWorkspaceRecord(known!.directory))
+  }
+  const workspace = await check()
+  const root = new ThreadWorkspaceManager(known!.directory).workingFolder(workspace.worktreePath, workspace)
+  const result = await read(root, `${threadId}:${p.workspaceGeneration}`)
+  await check()
+  return result
+}
+
 /** `ensureWorkspaceMaterialized` for a request that names a thread; an unknown thread fails later with its usual error. */
 async function materializeRequestedWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
   const threadId = asOptionalString(params.threadId, 256)
@@ -1831,6 +1904,7 @@ export async function dispatchMethod(
 }
 
 async function dispatchAdmitted(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
+  if (method === 'git.heads') checkGitReadParams(method, params)
   // Deleting an archived thread stops what still runs in it first, once nothing that would refuse the delete is found:
   // the send waiting for its turn is a request the delete's admission would otherwise wait for, and refuse. Another
   // computer's delete is refused anyway. A thread of another computer (a qualified id) is routed to its owner, which
@@ -1846,7 +1920,8 @@ async function dispatchAdmitted(ctx: HandlerContext, method: string, params: unk
     // Read only: a listed thread, or one with a lifecycle record (live, in the trash, a subagent's, a bot's). An id found
     // in neither is counted as the profile's; nothing is scanned, migrated or registered for it before admission. An id
     // no lifecycle record can have (another computer's qualified thread id) is never a thread here.
-    const isThread = (id: string): boolean => isLifecycleIdentity(id) && Boolean(ctx.mms.threads?.peekThread?.(id) || ctx.mms.threads?.lifecycleStore?.get(id))
+    // Git's sidebar batch uses only the memory cache here. Its asynchronous lifecycle lookup has its own deadline.
+    const isThread = (id: string): boolean => isLifecycleIdentity(id) && Boolean(ctx.mms.threads?.peekThread?.(id) || (method !== 'git.heads' && ctx.mms.threads?.lifecycleStore?.get(id)))
     return ctx.mms.runOwnedRequest(method, () => dispatchOwnedMethod(ctx, method, params), requestWorkScope(params, isThread))
   }
   return dispatchOwnedMethod(ctx, method, params)
@@ -1963,8 +2038,8 @@ const FOLDER_METHODS = new Set([
   'pty.create', 'editor.folder', 'github.cloneRepository', 'github.createRepository', 'mcp.getConfigSources',
   'mcp.listServers', 'mcp.writeCursorConfig', 'storage.cleanup.plan', 'storage.cleanup.run'
 ])
-/** Methods under those prefixes that only signal work already in memory. */
-const FOLDER_FREE_METHODS = new Set(['git.cancelOperation', 'pullRequests.watchStatus'])
+/** Methods that skip the generic folder wait. The sidebar batch sets its own volume deadlines. */
+const FOLDER_FREE_METHODS = new Set(['git.cancelOperation', 'git.heads', 'pullRequests.watchStatus'])
 
 /** Methods that start a turn: like the turn, they wait for a volume that is not answering instead of failing. */
 const WAIT_WHEN_NOT_ANSWERING = new Set(['orchestrator.send', 'orchestrator.retry', 'orchestrator.retrySetup'])
@@ -1978,9 +2053,9 @@ function readsFolder(method: string): boolean {
  * Waits for the folders a request works in. A Stop of its thread or the profile's shutdown ends the wait
  * with an error, so neither waits on a pending macOS permission prompt.
  */
-async function waitForRequestFolders(ctx: HandlerContext, method: string, params: unknown): Promise<void> {
+async function waitForRequestFolders(ctx: HandlerContext, method: string, params: unknown, browsedRoot?: string): Promise<void> {
   if (!readsFolder(method)) return
-  const folders = requestFolders(ctx, params)
+  const folders = browsedRoot ? [browsedRoot] : requestFolders(ctx, params, !Object.hasOwn(GIT_READ_KEYS, method))
   if (folders.length === 0) return
   const threadId = isObject(params) && typeof params.threadId === 'string' ? params.threadId : undefined
   const shutdown = ctx.mms.requestShutdownSignal
@@ -2006,7 +2081,7 @@ async function waitForRequestFolders(ctx: HandlerContext, method: string, params
 const FOLDER_PARAMS = ['path', 'cwd', 'root', 'projectPath', 'workspacePath', 'folder', 'directory'] as const
 
 /** The project folders a request names: its thread's project, its project, or a folder path. */
-function requestFolders(ctx: HandlerContext, params: unknown): string[] {
+function requestFolders(ctx: HandlerContext, params: unknown, allowPath: boolean): string[] {
   if (!isObject(params)) return []
   const folders: string[] = []
   try {
@@ -2021,7 +2096,8 @@ function requestFolders(ctx: HandlerContext, params: unknown): string[] {
   } catch {
     // An unknown thread or project is the handler's to report.
   }
-  for (const key of FOLDER_PARAMS) {
+  // Scoped Git reads may inspect a path only after it passes containment checks in the named folder.
+  for (const key of allowPath ? FOLDER_PARAMS : []) {
     const value = params[key]
     if (typeof value === 'string' && isAbsolute(value)) folders.push(value)
   }
@@ -2035,6 +2111,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     const routed = await ctx.mms.threadRouter.dispatch(ctx, method, params)
     if (routed) return routed.result
   }
+  if (method !== 'git.heads') checkGitReadParams(method, params)
   if (isObject(params) && typeof params.threadId === 'string' &&
       !['threads.delete', 'threads.inventory', 'threads.focus',
         // Answers "not found" for a thread being deleted, so a window that shows it knows to leave it.
@@ -2045,11 +2122,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.mms.threads?.lifecycleStore?.get(params.threadId)) {
     ctx.mms.threads.assertThreadAdmission(params.threadId)
   }
-  // A browsed folder is checked before its volume is waited for, so one that is refused (a network share, a
-  // device path, a caller that is not this computer's window) is never touched.
-  if (BROWSED_ROOT_METHODS.has(method) && isObject(params)) browsedFilesRoot(ctx, params)
+  // An explicit browsed root replaces the checkout for this call. Validate access before probing its volume.
+  const browsedRoot = BROWSED_ROOT_METHODS.has(method) && isObject(params) ? browsedFilesRoot(ctx, params) : undefined
   // Before any synchronous work in the folder: a pending macOS permission prompt then holds only this request.
-  await waitForRequestFolders(ctx, method, params)
+  await waitForRequestFolders(ctx, method, params, browsedRoot)
   if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
   switch (method) {
     case 'threads.focus': {
@@ -2766,7 +2842,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, [
         'threadId', 'content', 'forceQueue', 'source', 'mode', 'images', 'requestId', 'workflowInvocationId',
-        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused', 'conversationBranchId', 'expect',
+        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused', 'conversationBranchId', 'expect', 'steer', 'steerRunId',
         ROUTED_SEND_WINDOW_KEY
       ])
       const threadId = asString(p.threadId, 'threadId', 256)
@@ -2777,6 +2853,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A parent's follow-up to a subagent on this computer: a paused thread refuses it, as for a parent here.
       const refuseWhilePaused = asOptionalBoolean(p.refuseWhilePaused, 'refuseWhilePaused') === true
       const forceQueue = asOptionalBoolean(p.forceQueue, 'forceQueue') === true
+      // A person's Steer (a window here, or the CLI): it joins the busy thread's turn instead of waiting for it.
+      const steer = asOptionalBoolean(p.steer, 'steer') === true && (isPerson(ctx.connection) || ctx.connection?.clientType === 'cli')
+      const steerRunId = steer ? asOptionalString(p.steerRunId, 256) : undefined
       const source = admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol')
       const mode = asOptionalChatMode(p.mode, 'mode')
       const images = asOptionalChatImages(p.images, 'images')
@@ -2815,9 +2894,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const window = ctx.connection?.clientType === 'gui'
           ? (ctx.connection.capabilities.has(FIRST_SEND_BINDING_CAPABILITY) ? 'binds' : 'older')
           : ctx.connection?.clientType === 'bridge' ? routedWindow : undefined
-        if (window === 'binds')
+        // A Stop before the first prompt leaves binding pending. The engine can still replay an admitted Steer
+        // after checking its prompt and any explicit target against the receipt.
+        const receipt = window && steer && clientRequestId ? ctx.mms.runEngine.store.getReceipt(clientRequestId) : undefined
+        const receiptRunId = receipt?.threadId === threadId && receipt.commandKind === 'send' && receipt.status === 'accepted'
+          ? (receipt.result as { steerRunId?: string } | null)?.steerRunId
+          : undefined
+        if (receiptRunId === undefined && window === 'binds')
           throw new DomainRpcError('first_send_unbound', "This chat's first message has to be sent with the settings it shows. Send it again.", { threadId })
-        if (window === 'older')
+        if (receiptRunId === undefined && window === 'older')
           throw new DomainRpcError('first_send_unbound', 'Update Mousse to send the first message in this chat.', { threadId, update: true })
       }
       const bound = p.expect === undefined ? undefined : boundTurnSettings(ctx, threadId, p.expect, limit)
@@ -2829,6 +2914,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         forceQueue,
         clientRequestId,
         awaitMode,
+        ...(steer ? { steer: true, steerRunId } : {}),
         actor: questionAnswerer(ctx),
         // A turn from another computer never runs looser than that computer's limit here, however the thread is set.
         ...(limit ? { permissionMode: limit } : {}),
@@ -2839,6 +2925,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ...(refuseWhilePaused ? { refuseWhilePaused } : {}),
         ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})
       }))
+    }
+    case 'orchestrator.sendAccepted': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'clientRequestId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const clientRequestId = asString(p.clientRequestId, 'clientRequestId', 128)
+      const receipt = ctx.mms.runEngine.store.getReceipt(clientRequestId)
+      return { accepted: receipt?.threadId === threadId && receipt.commandKind === 'send' && receipt.status === 'accepted' }
     }
     case 'orchestrator.abort': {
       const p = isObject(params) ? params : {}
@@ -4232,20 +4326,25 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const lookup = threadLookupContext(ctx, p)
       const manager = new ThreadWorkspaceManager(lookup.threadDirectory)
       const stored = manager.load()
+      // Before the live writer makes the checkout, the absent folder is part of provisioning.
+      const provisioning = stored?.lifecycle === 'provisioning' && isExecutionLeaseHeld(lookup.threadDirectory)
       // A turn still recording its end-of-turn checkpoint under its live lease is not waiting on recovery.
       const inFlight = liveCheckpointTest(lookup.threadDirectory)
-      const metadata = stored && lookup.projectPath ? await manager.verify(stored, { inFlight }) : stored
+      const metadata = stored && lookup.projectPath && !provisioning ? await manager.verify(stored, { inFlight }) : stored
       // Never restores: the hover card and the active-project lookup call this for passive reads.
-      const marker = stored && !await access(stored.worktreePath).then(() => true, () => false) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
+      const marker = stored && !provisioning && !await access(stored.worktreePath).then(() => true, () => false) ? readCleanupMarker(ctx.mms.threads.lifecycleStore, lookup.threadId) : undefined
       // What the thread waits on, for the banner and the CLI; absent while nothing does. A thread recording into a hidden
       // store (no Git of its own) is read through `loadOrSnapshotAsync`, so it shows the banner too.
-      const recovery = await threadRecovery(lookup.threadDirectory, lookup.projectPath, { inFlight })
+      const recovery = provisioning ? undefined : await threadRecovery(lookup.threadDirectory, lookup.projectPath, { inFlight })
+      const execution = lookup.projectPath
+        ? await manager.executionContext(lookup.projectPath, metadata)
+        : manager.unboundExecutionContext(lookup.threadId)
       return {
         metadata,
         ...(recovery ? { recovery } : {}),
-        execution: lookup.projectPath
-          ? await manager.executionContext(lookup.projectPath, metadata)
-          : manager.unboundExecutionContext(lookup.threadId),
+        execution: !stored && lookup.projectPath && threadPlacement(lookup.thread) === 'project-folder'
+          ? { ...execution, placement: 'project-folder' }
+          : execution,
         journalGeneration: lookup.currentGeneration,
         ...(marker ? { retiredByCleanup: { at: marker.retiredAt, rule: marker.rule } } : {})
       }
@@ -4666,15 +4765,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       // What still waits after this attempt, in plain words: recovery reports the truth, not only that it ran.
       const left = await threadRecovery(operation.threadDirectory, operation.projectPath)
-      const stillWaiting = !left ? undefined
+      const stillWaiting = !left
+        ? releaseRetained && `old Undo history could not be released yet: ${releaseRetained}`
         : publish.some((item) => item.state === 'pending') && left.kind === 'publish' ? "the project folder can't be read, so Mousse can't tell yet whether the Publish reached its branch"
-        : releaseRetained && left.operationType === 'undo-ref-release' ? `old Undo history could not be released yet: ${releaseRetained}`
         : left.kind === 'merge' ? 'a merge from an earlier version is still in progress; abort it, or finish it with Git'
         : left.operationType ? `recovery could not finish the ${left.operationType} operation: ${left.reason}` : left.reason
       return {
         ok: true,
-        settled: !left,
-        ...(left ? { recovery: left, stillWaiting } : {}),
+        settled: !left && !releaseRetained,
+        ...(left ? { recovery: left } : {}),
+        ...(stillWaiting ? { stillWaiting } : {}),
         ...(cancelledIntegrations.length ? { cancelledIntegrations } : {})
       }
     }
@@ -4738,20 +4838,23 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'files.list': {
       const p = isObject(params) ? params : {}
       return await fileCall(ctx, async () => {
-        const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
+        const root = browsedRoot ?? await filesRootContext(ctx, p)
         return { entries: await ctx.mms.fileService.listDir(root, containedPath(ctx, root, p.path), guardFor(ctx)) }
       })
     }
     case 'files.read': {
       const p = isObject(params) ? params : {}
       return await fileCall(ctx, async () => {
-        const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
+        const root = browsedRoot ?? await filesRootContext(ctx, p)
         const expectedRoot = asOptionalString(p.expectedRoot, 4096)
-        const bindRoot = isLocalWindow(ctx) && !ctx.connection?.bridgeCaller && (p.bindRoot === true || expectedRoot !== undefined)
+        const localWindow = isLocalWindow(ctx) && !ctx.connection?.bridgeCaller
+        const bindRoot = localWindow && (p.bindRoot === true || expectedRoot !== undefined)
         const workspaceRoot = bindRoot ? await realpathNative(root) : undefined
         assertFileWorkspace(expectedRoot, workspaceRoot)
-        const path = requiredContainedPath(ctx, workspaceRoot ?? root, p.path)
-        return { path, content: await ctx.mms.fileService.readFile(workspaceRoot ?? root, path, guardFor(ctx)), ...(workspaceRoot ? { workspaceRoot } : {}) }
+        // Held inside the folder as the window spells it (a tab names its file by that path); read from its real path.
+        const path = requiredContainedPath(ctx, root, p.path)
+        const includeCanonicalPath = p.includeCanonicalPath === true && localWindow
+        return { path, ...await ctx.mms.fileService.readFileDetails(workspaceRoot ?? root, path, guardFor(ctx), includeCanonicalPath), ...(workspaceRoot ? { workspaceRoot } : {}) }
       })
     }
     case 'files.readAsset': {
@@ -4760,10 +4863,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const offset = asOptionalBoundedInt(p.offset, 'offset', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? 0
       const length = asOptionalBoundedInt(p.length, 'length', { min: 1, max: FILE_ASSET_PIECE_BYTES }) ?? FILE_ASSET_PIECE_BYTES
       return await fileCall(ctx, async () => {
-        const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
+        const root = browsedRoot ?? await filesRootContext(ctx, p)
         const path = requiredContainedPath(ctx, root, p.path)
-        const piece = await ctx.mms.fileService.readAssetRange(root, path, offset, length, guardFor(ctx))
-        return { path, mimeType: piece.mimeType, size: piece.size, mtimeMs: piece.mtimeMs, offset, data: Buffer.from(piece.data).toString('base64') }
+        const includeCanonicalPath = offset === 0 && p.includeCanonicalPath === true && isLocalWindow(ctx) && !ctx.connection?.bridgeCaller
+        const { data, ...piece } = await ctx.mms.fileService.readAssetRange(root, path, offset, length, guardFor(ctx), includeCanonicalPath)
+        return { path, ...piece, offset, data: Buffer.from(data).toString('base64') }
       })
     }
     case 'files.writeDirect': {
@@ -4780,20 +4884,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (saveExceedsRequest(p.content)) throw new DomainRpcError('file_too_large', SAVE_TOO_LARGE_MESSAGE)
       const content = p.content
       return await fileCall(ctx, async () => {
-        const browsed = browsedFilesRoot(ctx, p)
         const expectedRoot = asOptionalString(p.expectedRoot, 4096)
         const threadId = asOptionalString(p.threadId, 256)
-        if (!browsed && threadId && expectedRoot === undefined) {
+        if (!browsedRoot && threadId && expectedRoot === undefined) {
           if (!ctx.mms.threads.getThread(threadId)) throw new DomainRpcError('thread_not_found', 'Thread not found', { threadId })
           throw new DomainRpcError('workspace_binding_required', 'Reopen this file in a current Mousse window before saving.')
         }
         // The file was read from the thread's worktree, so a retired one comes back before it is written.
-        if (!browsed) await materializeRequestedWorkspace(ctx, p)
-        const root = browsed ?? await localFilesRoot(ctx, p)
+        if (!browsedRoot) await materializeRequestedWorkspace(ctx, p)
+        const root = browsedRoot ?? await localFilesRoot(ctx, p)
         const workspaceRoot = expectedRoot === undefined ? undefined : await realpathNative(root)
         assertFileWorkspace(expectedRoot, workspaceRoot)
-        const path = requiredContainedPath(ctx, workspaceRoot ?? root, p.path)
-        if (browsed) {
+        // Held inside the folder as the window spells it (a tab names its file by that path); written at its real path.
+        const path = requiredContainedPath(ctx, root, p.path)
+        if (browsedRoot) {
           // A folder the person browsed to is any folder of this computer: Git's own files, the Mousse data
           // folders and the folders of the user's sign-ins and keys are never saved into from there.
           const refusal = browsedSaveRefusal(resolve(root, path), [ctx.mms.getHomeDir(), ctx.mms.getProfileHomeDir()])
@@ -4906,36 +5010,53 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         timeoutMs: asOptionalBoundedInt(p.timeoutMs, 'timeoutMs', { min: 100, max: 10_000 }) ?? 1_000
       }) satisfies FileGrepResponse
     }
+    case 'git.heads': {
+      // The branches the sidebar's thread cards name, from Git's files: no Git process, no worktree set up or brought
+      // back, nothing waited for but each folder's own drive. One folder that cannot be read answers why; the rest answer.
+      // Checked before anything else (`checkGitReadParams`). `attempt` only makes a Retry's request its own.
+      const p = isObject(params) ? params : {}
+      const ids = (field: string) => p[field] === undefined ? [] : asStringArray(p[field], field, { unique: true, maxItems: GIT_HEADS_MAX, maxItemLen: 256 })
+      const projects: GitHeadsResult['projects'] = Object.create(null)
+      const threads: GitHeadsResult['threads'] = Object.create(null)
+      await Promise.all([
+        ...ids('projectIds').map(async (projectId) => {
+          const project = ctx.mms.projects.getProject(projectId)
+          projects[projectId] = project ? await folderHead(project.path) : { error: 'Project not found' }
+        }),
+        ...ids('threadIds').map(async (threadId) => {
+          const retirement = new WorktreeRetirementService(ctx.mms.threads.lifecycleStore)
+          threads[threadId] = await threadHead(ctx.mms.getProfileHomeDir(), async () => {
+            const known = await ctx.mms.threads.peekThreadLocation(threadId)
+            return known && { directory: known.directory, placement: known.thread ? threadPlacement(known.thread) : undefined }
+          }, retirement, typeof p.attempt === 'number')
+        })
+      ])
+      return { projects, threads } satisfies GitHeadsResult
+    }
+    // The Git panel's reads never set a worktree up or bring a retired one back: a folder not on disk reads as missing.
     case 'git.status': {
       const p = isObject(params) ? params : {}
-      await materializeRequestedWorkspace(ctx, p)
-      const root = projectRootContext(ctx, p)
-      const status = await ctx.mms.gitService.getStatus(root)
+      const status = await readGit(ctx, p, (root, shareKey) => ctx.mms.gitService.getStatus(root, { shareKey, fresh: typeof p.attempt === 'number' }))
       // How long a Discard here keeps its copy, for the confirmation to say: the owner's Undo window.
       const owner = discardOwnerFor(ctx, p)
       return { status: owner ? { ...status, discardKeptForMs: keptCopyWindowMs(owner) } : status }
     }
     case 'git.diff': {
       const p = isObject(params) ? params : {}
-      await materializeRequestedWorkspace(ctx, p)
-      const root = projectRootContext(ctx, p)
-      return { diff: await ctx.mms.gitService.getDiff(root, requiredContainedPath(ctx, root, p.path, 'inspect'), asOptionalBoolean(p.staged, 'staged') === true) }
+      return { diff: await readGit(ctx, p, (root) => ctx.mms.gitService.getDiff(root, requiredContainedPath(ctx, root, p.path, 'inspect'), p.staged === true)) }
     }
     case 'git.log': {
       const p = isObject(params) ? params : {}
       const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 100 }) ?? 30
-      await materializeRequestedWorkspace(ctx, p)
-      return { commits: await ctx.mms.gitService.getLog(projectRootContext(ctx, p), limit) }
+      return { commits: await readGit(ctx, p, (root) => ctx.mms.gitService.getLog(root, limit)) }
     }
     case 'git.branches': {
       const p = isObject(params) ? params : {}
-      await materializeRequestedWorkspace(ctx, p)
-      return { branches: await ctx.mms.gitService.getBranches(projectRootContext(ctx, p)) }
+      return { branches: await readGit(ctx, p, (root) => ctx.mms.gitService.getBranches(root)) }
     }
     case 'git.diffStats': {
       const p = isObject(params) ? params : {}
-      await materializeRequestedWorkspace(ctx, p)
-      return { stats: await ctx.mms.gitService.getDiffStats(projectRootContext(ctx, p)) }
+      return { stats: await readGit(ctx, p, (root) => ctx.mms.gitService.getDiffStats(root)) }
     }
     case 'git.checkUpstream': {
       const p = isObject(params) ? params : {}
