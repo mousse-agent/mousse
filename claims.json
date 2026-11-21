@@ -352,6 +352,21 @@
       ],
       "claimedAt": "2026-11-20T21:12:08.192Z",
       "expiresAt": "2026-11-20T23:12:08.192Z"
+    },
+    {
+      "task": "worktree-checks-without-git",
+      "session": "Animatrix-a7b4de",
+      "machine": "Animatrix",
+      "branch": "worktree-checks-without-git",
+      "paths": [
+        "src/mms/lifecycle/worktreeFacts.ts",
+        "src/mms/lifecycle/ResourceInventory.ts",
+        "src/mms/lifecycle/LifecycleClaims.ts",
+        "src/mms/lifecycle/ResourceLifecycleStore.ts",
+        "src/mms/lifecycle/WorktreeRetirementService.ts"
+      ],
+      "claimedAt": "2026-11-21T05:51:04.012Z",
+      "expiresAt": "2026-11-21T07:51:04.012Z"
     }
   ]
 }
