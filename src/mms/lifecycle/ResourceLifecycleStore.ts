@@ -10,6 +10,7 @@ import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { canonicalizeAbsolutePath } from '../profiles/pathSafety'
 import { RESOURCE_LIFECYCLE_VERSION, RETENTION_CLAIM_KINDS, type LifecycleAdmission, type ResourceInventorySnapshot, type TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import { isAcceptableThreadBranchName, isMousseOwnedRef } from '../../shared/mousseBranches'
+import { withCopiedUndoClaims } from './threadUndoClaims'
 
 export class ResourceLifecycleError extends AppError {
   constructor(code: 'busy' | 'stale' | 'unavailable' | 'ambiguous' | 'unsupported', message: string, cause?: unknown) {
@@ -240,7 +241,7 @@ export class ResourceLifecycleStore {
     if (input.parentTaskId) identity(input.parentTaskId)
     const location = resolve(input.location)
     this.assertTaskLocation(location)
-    return this.withGate('_registry', () => {
+    const register = () => this.withGate('_registry', () => {
       this.initialize()
       return this.withGate(input.taskId, () => {
         const existing = this.get(input.taskId)
@@ -261,6 +262,7 @@ export class ResourceLifecycleStore {
         return record
       })
     })
+    return input.creating || this.get(input.taskId) ? register() : withCopiedUndoClaims(location, register)
   }
 
   /**
@@ -296,7 +298,7 @@ export class ResourceLifecycleStore {
     this.assertTaskLocation(input.originalLocation); this.assertTaskLocation(input.location)
     const trashRoot = join(this.profileHome, 'trash', 'threads')
     if (!contains(trashRoot, input.location) || pathsEqual(trashRoot, input.location)) throw new ResourceLifecycleError('ambiguous', 'Legacy trash is outside its owned container')
-    return this.withGate('_registry', () => {
+    const adopt = () => this.withGate('_registry', () => {
       this.initialize()
       return this.withGate(input.taskId, () => {
         const existing = this.get(input.taskId)
@@ -320,6 +322,7 @@ export class ResourceLifecycleStore {
         return record
       })
     })
+    return this.get(input.taskId) ? adopt() : withCopiedUndoClaims(input.location, adopt)
   }
 
   /**

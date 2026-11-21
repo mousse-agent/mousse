@@ -1,12 +1,11 @@
 import { randomUUID } from 'node:crypto'
-import { performance } from 'node:perf_hooks'
 import type { ChangeReceipt } from '../../shared/threadActions'
 import { ThreadJournal } from '../data/ThreadJournal'
-import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
-import { repositoryLeaseWanted } from '../git/RepositoryLease'
+import { resolveRepositoryIdentityAsync, type RepositoryIdentity } from '../git/RepositoryIdentity'
+import { RepositoryLeaseBusyError } from '../git/RepositoryLease'
 import { buildResourceInventoryFromFacts, rereadRepositoryFacts, type OwnershipFacts } from '../lifecycle/ResourceInventory'
 import { getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver } from '../lifecycle/LifecycleClaims'
-import { discoverOwnershipFacts, factsFor } from '../lifecycle/ownershipDiscovery'
+import { discoverOwnershipFacts } from '../lifecycle/ownershipDiscovery'
 import { readDirectLifecycleRefAsync } from '../lifecycle/WorktreeRetirementService'
 import { readDirectRefsAsync } from '../lifecycle/worktreeFacts'
 import type { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
@@ -18,26 +17,25 @@ import { UndoRetentionService } from './UndoRetentionService'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
 import { settlesItself } from '../../shared/resourceLifecycle'
+import { finishUndoRefRelease, pendingUndoRefRelease, prepareUndoRefRelease } from './undoRefClaims'
 
 /** The ownership inventory showed a blocker: the whole release stops, as when it shows one before the first receipt. */
 class OwnershipBlocked extends Error {}
 
 interface ReleaseIntent { version: 1; receiptId: string; repositoryId: string; refs: Array<{ name: string; sha: string }> }
-export interface ReceiptRefReleaseResult { releasedRefs: string[]; retained: Array<{ receiptId: string; reason: string }>; reclaimedGitBytes: null }
+export interface ReceiptRefReleaseResult { releasedRefs: string[]; retained: Array<{ receiptId: string; reason: string }>; reclaimedGitBytes: null; oldestPendingReleaseAgeMs: number | null }
 
 /** Receipts released in one Git transaction, at most. */
 export const RELEASE_BATCH_SIZE = 10
-/**
- * How long one hold of the repository lease may run before the release lets go between batches and takes the lease
- * again, so a turn that wants the repository waits for at most about one batch.
- */
-export const RELEASE_HOLD_BUDGET_MS = 1_000
+const RELEASE_LEASE_WAIT_MS = 5_000
+const RELEASE_RETRY_DELAY_MS = 10 * 60_000
 /** How many times a release discovers ownership again after a record changed while it waited for the lease. */
 export const RELEASE_EVIDENCE_RETRIES = 3
 
 type Candidate = { receipt: ChangeReceipt | undefined; operationId: string; intent: ReleaseIntent | undefined }
 /** How one hold of the repository lease ended. */
 type HoldEnd = 'finished' | 'yield' | { changed: string }
+type ReleaseHooks = { afterPrepared?: () => void; afterGit?: () => void; afterCheck?: () => void }
 
 /** Phase 3b: only expired, exclusive immutable receipt refs. Never runs Git GC or deletes user refs. */
 export class ReceiptRefReleaseService {
@@ -58,6 +56,28 @@ export class ReceiptRefReleaseService {
     } catch { return true }
   }
 
+  /** Age since logical expiry, or since preparation for older intents without a recorded expiry. */
+  oldestPendingReleaseAgeMs(): number | null {
+    const journal = new ThreadJournal(this.store.require(this.taskId).location, { readOnly: true })
+    const latest = journal.latestByOperation()
+    const completed = new Set([...latest.values()].filter((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'completed').map((entry) => (entry.details as ReleaseIntent).receiptId))
+    const receipts = new Set(journal.receipts().map((receipt) => receipt.id))
+    const pendingAt = new Map<string, number>()
+    for (const entry of journal.ofTypes('undo-retention')) {
+      const event = entry.details as { kind?: string; at?: number; ids?: string[] }
+      if (event?.kind !== 'expire' || !Number.isFinite(event.at) || !Array.isArray(event.ids)) continue
+      for (const id of event.ids) if (receipts.has(id) && !completed.has(id) && !pendingAt.has(id)) pendingAt.set(id, event.at!)
+    }
+    for (const entry of latest.values()) {
+      if (entry.operationType !== 'undo-ref-release' || entry.state !== 'prepared') continue
+      const id = (entry.details as ReleaseIntent).receiptId
+      if (!pendingAt.has(id)) pendingAt.set(id, Date.parse(entry.createdAt))
+    }
+    let oldest = Infinity
+    for (const at of pendingAt.values()) if (Number.isFinite(at)) oldest = Math.min(oldest, at)
+    return Number.isFinite(oldest) ? Math.max(0, this.now() - oldest) : null
+  }
+
   /**
    * Releases the thread's expired receipt refs, in batches, each under a short hold of the repository lease.
    *
@@ -66,74 +86,86 @@ export class ReceiptRefReleaseService {
    * repository is read again (its worktrees, every real path, the repository's own identity), the refs are read in one
    * listing, and then, with nothing awaited until the Git transaction starts, ownership is checked from the records
    * themselves, the intents are recorded, and one transaction deletes every eligible ref by its expected commit. The
-   * refs are read back and the intents completed. A batch stops at `RELEASE_BATCH_SIZE` receipts; between batches the
-   * lease is let go once it has been held for `RELEASE_HOLD_BUDGET_MS` or someone in this process waits for it, and taken
-   * again. A record that changed while the release waited (a fact the check was not given) lets go, discovers again and
+   * refs are checked individually for absence before the intents complete. Each lease hold runs one transaction of
+   * at most `RELEASE_BATCH_SIZE` receipts. A failed transaction is retried one receipt per hold, so a busy ref
+   * cannot hold up other receipts. A record that changed while the release waited lets go, discovers again and
    * retries, at most `RELEASE_EVIDENCE_RETRIES` times; the rest waits for the next run.
    */
-  async release(workspacePath: string, options: { limit?: number; signal?: AbortSignal; heldThreadLease?: ThreadLeaseHandle; discovery?: OwnershipFacts; afterPrepared?: () => void; afterGit?: () => void; afterCheck?: () => void } = {}): Promise<ReceiptRefReleaseResult> {
+  async release(workspacePath: string, options: ReleaseHooks & { limit?: number; signal?: AbortSignal; heldThreadLease?: ThreadLeaseHandle; discovery?: OwnershipFacts } = {}): Promise<ReceiptRefReleaseResult> {
     const task = this.store.require(this.taskId)
     if (task.state !== 'active') throw new Error('Receipt release requires an active task owner.')
     const admission = this.store.captureAdmission(task.taskId, task.location)
     const limit = options.limit ?? 20
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('Invalid receipt release batch size.')
-    const result: ReceiptRefReleaseResult = { releasedRefs: [], retained: [], reclaimedGitBytes: null }
+    const result: ReceiptRefReleaseResult = { releasedRefs: [], retained: [], reclaimedGitBytes: null, oldestPendingReleaseAgeMs: null }
     if (!this.hasWork()) return result
     // Before the repository lease: what every other profile and thread claims, and this thread's own checkouts.
     let facts = options.discovery ? options.discovery.copy() : await discoverOwnershipFacts(this.store)
-    await factsFor(this.store, facts, new Set([task.taskId]), [task])
     const handled = new Set<string>()
+    const isolate = new Set<string>()
     let retries = 0
     for (;;) {
-      const end = await withGitMutationLocks(task.location, workspacePath, 'undo-ref-release', () => this.hold(task.location, workspacePath, admission, facts, limit, handled, result, options), options.signal, options.heldThreadLease)
-      if (end === 'finished') return result
+      let end: HoldEnd
+      try {
+        end = await withGitMutationLocks(task.location, workspacePath, 'undo-ref-release', (leasedRepository) => this.hold(task.location, workspacePath, leasedRepository, admission, facts, limit, handled, isolate, result, options), options.signal, options.heldThreadLease, undefined, RELEASE_LEASE_WAIT_MS)
+      } catch (error) {
+        if (!(error instanceof RepositoryLeaseBusyError)) throw error
+        result.retained.push({ receiptId: '', reason: error.message })
+        break
+      }
+      if (end === 'finished' || handled.size >= limit) break
       if (end !== 'yield') {
         if (++retries > RELEASE_EVIDENCE_RETRIES) {
           result.retained.push({ receiptId: '', reason: `Ownership kept changing while it was checked (${end.changed}); the release tries again on a later run.` })
-          return result
+          break
         }
         facts = await discoverOwnershipFacts(this.store, { newerThan: facts.generation })
-        await factsFor(this.store, facts, new Set([task.taskId]), [task])
       }
     }
+    result.oldestPendingReleaseAgeMs = this.oldestPendingReleaseAgeMs()
+    return result
   }
 
-  /** One hold of the repository lease: batches until the budget is spent, someone waits, or nothing is left. */
-  private async hold(location: string, workspacePath: string, admission: ReturnType<ResourceLifecycleStore['captureAdmission']>, facts: OwnershipFacts, limit: number, handled: Set<string>, result: ReceiptRefReleaseResult, options: { afterPrepared?: () => void; afterGit?: () => void; afterCheck?: () => void }): Promise<HoldEnd> {
+  /** One hold of the repository lease, with at most one delete transaction. */
+  private async hold(location: string, workspacePath: string, leasedRepository: RepositoryIdentity, admission: ReturnType<ResourceLifecycleStore['captureAdmission']>, facts: OwnershipFacts, limit: number, handled: Set<string>, isolate: Set<string>, result: ReceiptRefReleaseResult, options: ReleaseHooks): Promise<HoldEnd> {
     const task = this.store.require(this.taskId)
-    const held = performance.now()
     this.store.assertAdmission(admission)
     const identity = await resolveRepositoryIdentityAsync(workspacePath, { requireMutationCapability: true })
+    if (identity.key !== leasedRepository.key || identity.metadataDir !== leasedRepository.metadataDir) throw new Error('Receipt release repository changed while waiting for its lease.')
     const workspace = new ThreadWorkspaceManager(location).load()
     if (!workspace || workspace.repositoryId !== identity.key || workspace.lifecycle !== 'ready') throw new Error('Receipt release repository does not match the authoritative task workspace.')
     const retention = new UndoRetentionService(location, this.now)
     if (!retention.clockAllowsRelease()) throw new Error('Clock review or recovery is required before physical receipt release.')
-    // This repository's identity, read again under its lease: its keys and the worktrees it registers, which an
-    // unverified thread's scope is matched against. Then what the facts say about it, and every alias.
-    const repository = await repositoryTargetAsync(identity.commonDir, identity.key)
-    await rereadRepositoryFacts(facts, repository)
-    for (;;) {
-      const journal = new ThreadJournal(location)
-      const expired = retention.expiredReceiptIds()
-      const receipts = new ChangeReceiptService(location).list()
-      const latest = [...journal.latestByOperation().values()]
-      if (latest.some((entry) => entry.operationType !== 'undo-ref-release' && !settlesItself(entry.operationType) && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))) throw new Error('Active or recovery operations protect receipt refs.')
-      const pending = latest.filter((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'prepared')
-      const complete = new Set(latest.filter((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'completed').map((entry) => (entry.details as ReleaseIntent).receiptId))
-      const room = Math.min(RELEASE_BATCH_SIZE, limit - handled.size)
-      if (room <= 0) return 'finished'
-      const candidates: Candidate[] = [...pending.map((entry) => ({ receipt: receipts.find((receipt) => receipt.id === (entry.details as ReleaseIntent).receiptId), operationId: entry.operationId, intent: entry.details as ReleaseIntent })),
-        ...receipts.filter((receipt) => expired.has(receipt.id) && !complete.has(receipt.id) && !pending.some((entry) => (entry.details as ReleaseIntent).receiptId === receipt.id)).map((receipt) => ({ receipt, operationId: randomUUID(), intent: undefined as ReleaseIntent | undefined }))]
-        .filter((candidate) => !handled.has(candidate.intent?.receiptId ?? candidate.receipt?.id ?? candidate.operationId)).slice(0, room)
-      if (!candidates.length) return 'finished'
-      const end = await this.batch(task, journal, workspacePath, identity, repository, facts, expired, candidates, handled, result, options)
-      if (end !== 'next') return end
-      // Let go between batches once the hold is long or a turn wants the repository; the release takes it again.
-      if (performance.now() - held >= RELEASE_HOLD_BUDGET_MS || repositoryLeaseWanted(identity.key)) return 'yield'
+    const journal = new ThreadJournal(location)
+    const expired = retention.expiredReceiptIds()
+    const receipts = new Map(new ChangeReceiptService(location).list().map((receipt) => [receipt.id, receipt]))
+    const latest = [...journal.latestByOperation().values()]
+    if (latest.some((entry) => entry.operationType !== 'undo-ref-release' && !settlesItself(entry.operationType) && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))) throw new Error('Active or recovery operations protect receipt refs.')
+    const releases = new Map(latest.filter((entry) => entry.operationType === 'undo-ref-release').map((entry) => [(entry.details as ReleaseIntent).receiptId, entry]))
+    const room = Math.min(RELEASE_BATCH_SIZE, limit - handled.size)
+    const eligible = [...new Set([...releases.keys(), ...expired])].filter((id) => {
+      const entry = releases.get(id)
+      return !handled.has(id) && (entry ? entry.state === 'prepared' : receipts.has(id))
+    })
+    const candidates: Candidate[] = []
+    for (const id of eligible) {
+      const entry = releases.get(id)
+      const candidate = { receipt: receipts.get(id), operationId: entry?.operationId ?? randomUUID(), intent: entry?.details as ReleaseIntent | undefined }
+      if (isolate.has(id)) {
+        if (!candidates.length) candidates.push(candidate)
+        break
+      }
+      candidates.push(candidate)
+      if (candidates.length >= room) break
     }
+    if (!candidates.length) return 'finished'
+    const repository = await repositoryTargetAsync(identity.commonDir, identity.key)
+    const end = await this.batch(task, journal, workspacePath, identity, repository, facts, expired, candidates, handled, isolate, result, options)
+    if (end !== 'next') return end
+    return eligible.some((id) => !handled.has(id)) ? 'yield' : 'finished'
   }
 
-  private async batch(task: ReturnType<ResourceLifecycleStore['require']>, journal: ThreadJournal, workspacePath: string, identity: Awaited<ReturnType<typeof resolveRepositoryIdentityAsync>>, repository: Awaited<ReturnType<typeof repositoryTargetAsync>>, facts: OwnershipFacts, expired: ReadonlySet<string>, candidates: Candidate[], handled: Set<string>, result: ReceiptRefReleaseResult, options: { afterPrepared?: () => void; afterGit?: () => void; afterCheck?: () => void }): Promise<'next' | 'finished' | { changed: string }> {
+  private async batch(task: ReturnType<ResourceLifecycleStore['require']>, journal: ThreadJournal, workspacePath: string, identity: Awaited<ReturnType<typeof resolveRepositoryIdentityAsync>>, repository: Awaited<ReturnType<typeof repositoryTargetAsync>>, facts: OwnershipFacts, expired: ReadonlySet<string>, candidates: Candidate[], handled: Set<string>, isolate: Set<string>, result: ReceiptRefReleaseResult, options: ReleaseHooks): Promise<'next' | 'finished' | { changed: string }> {
     const retain = (candidate: Candidate, reason: string): void => {
       handled.add(candidate.intent?.receiptId ?? candidate.receipt?.id ?? candidate.operationId)
       result.retained.push({ receiptId: candidate.receipt?.id ?? candidate.intent?.receiptId ?? '', reason })
@@ -149,6 +181,9 @@ export class ReceiptRefReleaseService {
         if (!expired.has(receipt.id)) throw new Error('Receipt Undo claim is still retained.')
         const intent = this.intent(receipt, identity.key)
         if (candidate.intent && JSON.stringify(candidate.intent) !== JSON.stringify(intent)) throw new Error('Release intent does not match immutable receipt ownership.')
+        const pending = pendingUndoRefRelease(identity, receipt.id)
+        if (pending && pending.operationId !== candidate.operationId) throw new Error('Another task owns this pending Undo ref release.')
+        if (pending?.retryAfter && pending.retryAfter > this.now()) throw new Error('Undo refs are waiting to be retried on a later run.')
         named.push({ candidate, intent })
       } catch (error) { retain(candidate, (error as Error).message) }
     }
@@ -173,18 +208,18 @@ export class ReceiptRefReleaseService {
       } catch (error) { retain(candidate, (error as Error).message) }
     }
     if (!ready.length) return 'next'
-    const release = `start\n${ready.flatMap(({ present }) => present).map((ref) => `delete ${ref.name} ${ref.sha}`).join('\n')}\nprepare\ncommit\n`
+    const transaction = (items: typeof ready): string => ['start', ...items.flatMap(({ present }) => present.map((ref) => `delete ${ref.name} ${ref.sha}`)), 'prepare', 'commit', ''].join('\n')
     const deletes = ready.some(({ present }) => present.length)
     // Checked (by the central Git check) before ownership is read, so that from there to the start of the transaction nothing waits.
-    const argv = deletes ? await withoutRepoProgramsAsync(workspacePath, ['update-ref', '--no-deref', '--stdin'], { stdin: release }) : undefined
-    // From here to the start of the transaction nothing is awaited: the records are read, every claim is checked, and
-    // the intents are recorded, so a claim written by anything that runs in this process is either seen here or written
-    // after the refs are gone.
+    const argv = deletes ? await withoutRepoProgramsAsync(workspacePath, ['update-ref', '--no-deref', '--stdin'], { stdin: transaction(ready) }) : undefined
+    await rereadRepositoryFacts(facts, repository)
+    // From here to Git's start, no asynchronous work runs. Other processes that publish claims share this lease.
     const missed: string[] = []
     const inventory = buildResourceInventoryFromFacts(this.store, task, facts, {}, (what) => missed.push(what))
+    const ownMissed = missed.length
     let external: ReturnType<typeof getExternalResourceClaimsFromFacts>
     try { external = getExternalResourceClaimsFromFacts(this.store, new Set([task.taskId]), facts, (what) => missed.push(what)) }
-    catch (error) { if (missed.length) return { changed: missed[0]! }; throw error }
+    catch (error) { if (missed.length > ownMissed) return { changed: missed[ownMissed]! }; throw error }
     if (missed.length) return { changed: missed[0]! }
     if (inventory.blockers.length) throw new OwnershipBlocked(`Receipt ref release needs unambiguous ownership: ${inventory.blockers.join('; ')}`)
     options.afterCheck?.()
@@ -201,27 +236,45 @@ export class ReceiptRefReleaseService {
         if (!resources.length || resources.some((resource) => resource.ownerTaskId !== task.taskId || resource.repositoryId !== identity.key || resource.claims.length > 0 || resource.ownership === 'unknown')) { refused.push({ candidate, reason: `Reference has an active, shared or unknown claim: ${ref.name}` }); break }
       }
     }
-    if (refused.length) {
-      // The transaction was checked for every receipt in it: the refused ones are kept, the rest go in the next batch.
-      for (const { candidate, reason } of refused) retain(candidate, reason)
-      return 'next'
+    for (const { candidate, reason } of refused) retain(candidate, reason)
+    const approved = ready.filter(({ intent }) => !handled.has(intent.receiptId))
+    if (!approved.length) return 'next'
+    for (const { candidate, intent } of approved) {
+      if (!candidate.intent) journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'prepared', details: intent })
+      prepareUndoRefRelease(identity, intent.receiptId, candidate.operationId)
     }
-    for (const { candidate, intent } of ready) if (!candidate.intent) journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'prepared', details: intent })
     try {
       options.afterPrepared?.()
-      if (argv) {
-        const ran = await runGitProcess(argv, { cwd: workspacePath, env: repoProgramEnv(), input: release })
-        if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
+      if (argv && approved.some(({ present }) => present.length)) {
+        const ran = await runGitProcess(argv, { cwd: workspacePath, env: repoProgramEnv(), input: transaction(approved), timeout: 30_000 })
+        if (ran.error || ran.status !== 0) {
+          if (approved.length > 1) for (const { intent } of approved) isolate.add(intent.receiptId)
+          else {
+            const { candidate, intent } = approved[0]!
+            prepareUndoRefRelease(identity, intent.receiptId, candidate.operationId, this.now() + RELEASE_RETRY_DELAY_MS)
+            retain(candidate, gitRunError(argv, ran).message)
+          }
+          return 'next'
+        }
       }
       options.afterGit?.()
-      const after = await readDirectRefsAsync(workspacePath, ready.flatMap(({ intent }) => intent.refs.map((ref) => ref.name)))
-      for (const { intent } of ready) for (const ref of intent.refs) if (after.get(ref.name)?.sha !== undefined || after.get(ref.name)?.error) throw new Error('Receipt reference survived the release transaction.')
     } catch (error) {
-      // The prepared intents stay visible and block other mutations until this service retries them.
-      for (const { candidate } of ready) retain(candidate, error instanceof Error ? error.message : String(error))
+      for (const { candidate } of approved) retain(candidate, error instanceof Error ? error.message : String(error))
       return 'finished'
     }
-    for (const { candidate, intent } of ready) {
+    const after = await readDirectRefsAsync(workspacePath, approved.flatMap(({ intent }) => intent.refs.map((ref) => ref.name)))
+    for (const { candidate, intent } of approved) {
+      try {
+        for (const ref of intent.refs) {
+          const found = after.get(ref.name)
+          if (found?.error) throw new Error(found.error)
+          if ((found?.sha ?? await readDirectLifecycleRefAsync(workspacePath, ref.name)) !== undefined) throw new Error(`Receipt reference survived the release transaction: ${ref.name}`)
+        }
+      } catch (error) {
+        retain(candidate, (error as Error).message)
+        continue
+      }
+      finishUndoRefRelease(identity, intent.receiptId, candidate.operationId)
       journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'completed', details: intent })
       handled.add(intent.receiptId)
       result.releasedRefs.push(...intent.refs.map((ref) => ref.name))

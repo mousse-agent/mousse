@@ -534,6 +534,23 @@ export function repositoryLeaseWanted(key: string): boolean {
   return (queues.get(key)?.length ?? 0) > 0
 }
 
+/** Synchronous lifecycle publishers either take a free lease or stop before publishing anything. */
+export function tryAcquireRepositoryLease(identity: RepositoryIdentity): RepositoryLeaseHandle | undefined {
+  requireRepositoryMutationCapability(identity)
+  if (locallyHeldKeys.has(identity.key) || pumping.has(identity.key) || repositoryLeaseWanted(identity.key)) return undefined
+  const connection = new LockConnection(getRepositoryLockPath(identity))
+  let granted = false
+  try {
+    const attempt = tryAcquire(identity, {}, connection)
+    if (!('handle' in attempt)) return undefined
+    locallyHeldKeys.add(identity.key)
+    granted = true
+    return attempt.handle
+  } finally {
+    if (!granted) connection.close()
+  }
+}
+
 export function acquireRepositoryLease(identity: RepositoryIdentity, opts: AcquireRepositoryLeaseOptions = {}): Promise<RepositoryLeaseHandle> {
   requireRepositoryMutationCapability(identity)
   if (opts.signal?.aborted) return Promise.reject(new RepositoryLeaseAbortedError())

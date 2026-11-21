@@ -50,7 +50,7 @@ export async function withGitMutationLocks<T>(
   threadDirectory: string,
   repositoryPath: string,
   source: string,
-  operation: () => Promise<T> | T,
+  operation: (repository: RepositoryIdentity) => Promise<T> | T,
   signal?: AbortSignal,
   heldThreadLease?: ThreadLeaseHandle,
   /**
@@ -58,7 +58,9 @@ export async function withGitMutationLocks<T>(
    * started is left: when a stopped command left processes, the operation still ends, and the lock is kept until they
    * are gone, however long that takes.
    */
-  workSignal?: AbortSignal
+  workSignal?: AbortSignal,
+  /** Background cleanup can give up a busy repository and try again on its next pass. */
+  repositoryWaitMs?: number
 ): Promise<T> {
   if (heldThreadLease) assertHeldThreadLease(threadDirectory, heldThreadLease)
   const heldRepositories = mutationContext.getStore()
@@ -75,13 +77,13 @@ export async function withGitMutationLocks<T>(
   const { store, repository } = started
   const threadLease = await started.threadLease
   try {
-    const repositoryLease = await acquireRepositoryLease(repository, { signal })
+    const repositoryLease = await acquireRepositoryLease(repository, { signal, maxWaitMs: repositoryWaitMs })
     // What the turn read of its folder before this lease is read again under it: HEAD may have moved while it waited.
     forgetRepositoryFacts()
     const scope = workSignal ? gitCancellationScope(workSignal) : undefined
     try {
       const held = new Set([...(heldRepositories ?? []), repository.key])
-      const work = async (): Promise<T> => store ? inHiddenStore(store, operation) : operation()
+      const work = async (): Promise<T> => store ? inHiddenStore(store, () => operation(repository)) : operation(repository)
       return await mutationContext.run(held, () => scope ? scope.run(work) : work())
     } finally {
       const survivors = scope?.survivorsGone()

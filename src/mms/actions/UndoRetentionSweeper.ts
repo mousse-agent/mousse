@@ -44,7 +44,7 @@ export class UndoRetentionSweeper {
   private readonly abort = new AbortController()
   private cursor = 0
   private passes = 0
-  readonly outcomes = new Map<string, { at: string; expired?: number; releasedRefs?: number; expiredPreservedRefs?: number; reason?: string }>()
+  readonly outcomes = new Map<string, { at: string; expired?: number; releasedRefs?: number; expiredPreservedRefs?: number; oldestPendingReleaseAgeMs?: number | null; reason?: string }>()
   /** What the last pass did with each repository's loose `refs/mousse/` refs (`packMousseRefs`), by common directory. */
   readonly packs = new Map<string, { at: string; outcome?: PackOutcome; reason?: string }>()
   constructor(private readonly store: ResourceLifecycleStore, private readonly options: UndoRetentionSweeperOptions = { intervalMs: 60 * 60 * 1000, tasksPerBatch: 20, firstPassAfterMs: 2 * 60 * 1000 }) {}
@@ -136,18 +136,21 @@ export class UndoRetentionSweeper {
     for (const { task, worktreePath, expired, preserved } of pending) {
       if (this.abort.signal.aborted) return
       let lease
+      const service = new ReceiptRefReleaseService(this.store, task.taskId)
+      let oldestPendingReleaseAgeMs: number | null | undefined
       try {
+        oldestPendingReleaseAgeMs = service.oldestPendingReleaseAgeMs()
         lease = tryAcquireExecutionLease(task.location, { source: 'undo-retention-sweep' })
         if (!lease) {
-          this.outcomes.set(task.taskId, { at: new Date().toISOString(), expired, releasedRefs: 0, ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}), reason: ['Thread is in use; its receipts are released on a later run', ...(preserved.reason ? [preserved.reason] : [])].join('; ') })
+          this.outcomes.set(task.taskId, { at: new Date().toISOString(), expired, releasedRefs: 0, oldestPendingReleaseAgeMs, ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}), reason: ['Thread is in use; its receipts are released on a later run', ...(preserved.reason ? [preserved.reason] : [])].join('; ') })
           continue
         }
         await waitForFolderAccess([task.location, worktreePath], { whenNotAnswering: 'fail', signal: this.abort.signal })
-        const released = await new ReceiptRefReleaseService(this.store, task.taskId).release(worktreePath, { signal: this.abort.signal, heldThreadLease: lease, ...(discovery ? { discovery } : {}) })
+        const released = await service.release(worktreePath, { signal: this.abort.signal, heldThreadLease: lease, ...(discovery ? { discovery } : {}) })
         const reasons = [...released.retained.map((item) => item.reason), ...(preserved.reason ? [preserved.reason] : [])]
-        this.outcomes.set(task.taskId, { at: new Date().toISOString(), expired, releasedRefs: released.releasedRefs.length, ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}), ...(reasons.length ? { reason: reasons.join('; ') } : {}) })
+        this.outcomes.set(task.taskId, { at: new Date().toISOString(), expired, releasedRefs: released.releasedRefs.length, oldestPendingReleaseAgeMs: released.oldestPendingReleaseAgeMs, ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}), ...(reasons.length ? { reason: reasons.join('; ') } : {}) })
       } catch (error) {
-        this.outcomes.set(task.taskId, { at: new Date().toISOString(), ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}), reason: [error instanceof Error ? error.message : String(error), ...(preserved.reason ? [preserved.reason] : [])].join('; ') })
+        this.outcomes.set(task.taskId, { at: new Date().toISOString(), ...(oldestPendingReleaseAgeMs !== undefined ? { oldestPendingReleaseAgeMs } : {}), ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}), reason: [error instanceof Error ? error.message : String(error), ...(preserved.reason ? [preserved.reason] : [])].join('; ') })
       } finally { if (lease) releaseExecutionLeaseHandle(lease) }
     }
   }

@@ -1,7 +1,6 @@
 import { resolve } from 'node:path'
-import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import { getExternalResourceClaims } from './LifecycleClaims'
-import { buildResourceInventory, OwnershipFacts } from './ResourceInventory'
+import { OwnershipFacts } from './ResourceInventory'
 import type { ResourceLifecycleStore } from './ResourceLifecycleStore'
 
 /**
@@ -11,7 +10,6 @@ import type { ResourceLifecycleStore } from './ResourceLifecycleStore'
 export class OwnershipEvidenceChanged extends Error {
   constructor(readonly what: string) { super(`Ownership of ${what} changed while it was being read`) }
 }
-
 const running = new Map<string, { generation: number; facts: Promise<OwnershipFacts> }>()
 let generations = 0
 
@@ -35,8 +33,7 @@ export async function discoverOwnershipFacts(store: ResourceLifecycleStore, opti
     const facts = (async () => {
       const found = new OwnershipFacts()
       found.generation = generation
-      // Nothing excluded, so the facts cover any caller's exclusions. A refusal here is made again, from the records,
-      // by each caller's own check; facts it stopped before are read by `factsFor`.
+      // Nothing excluded, so the facts include the caller's thread too. Refusals are checked again from the records.
       await getExternalResourceClaims(store, new Set(), found).catch(() => undefined)
       return found
     })()
@@ -44,14 +41,4 @@ export async function discoverOwnershipFacts(store: ResourceLifecycleStore, opti
     void facts.finally(() => { if (running.get(key)?.facts === facts) running.delete(key) }).catch(() => undefined)
     return (await facts).copy()
   }
-}
-
-/**
- * Adds to `facts` what a check that excludes `ownedIds` needs and discovery did not read: the excluded threads' own
- * checkouts (`own`), and anything a refusal stopped discovery before. Reads only what is missing; no lease is needed.
- */
-export async function factsFor(store: ResourceLifecycleStore, facts: OwnershipFacts, ownedIds: Set<string>, own: readonly TaskLifecycleRecord[]): Promise<void> {
-  for (const record of own) await buildResourceInventory(store, record, {}, facts)
-  // Only the facts are wanted: a refusal is made again, from the records, by the check under the lease.
-  await getExternalResourceClaims(store, ownedIds, facts).catch(() => undefined)
 }

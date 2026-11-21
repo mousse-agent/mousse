@@ -282,6 +282,9 @@ export async function rereadRepositoryFacts(facts: OwnershipFacts, repository: {
     worktrees.push(need)
   }
   await readOwnershipFacts(worktrees, facts)
+  const legacy = [...facts.legacy.keys()]
+  for (const root of legacy) facts.legacy.delete(root)
+  await readOwnershipFacts(legacy.map((root) => ({ kind: 'legacy', root })), facts)
 }
 
 /**

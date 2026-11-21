@@ -8377,7 +8377,10 @@ export class OrchestratorService extends EventEmitter {
         // HEAD then) and the snapshot's files are written over it, so no snapshot commit becomes the fork's branch.
         const seedHead = checkpoint ? (await snapshotOriginAsync(sourceWorkspace?.worktreePath ?? projectPath, checkpoint.endSha)).head : undefined
         onStep?.('worktree')
-        await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, checkpoint ? seedHead : typeof seed.sha === 'string' ? seed.sha : undefined, { ...(checkpoint ? { snapshot: checkpoint.endSha } : {}), nameFrom: this.branchNameSource(threadId), onNotice: this.restoreNotifier(threadId) })
+        await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, checkpoint ? seedHead : typeof seed.sha === 'string' ? seed.sha : undefined, {
+          ...(checkpoint ? { snapshot: checkpoint.endSha, snapshotReceiptId: checkpoint.receiptId } : {}),
+          nameFrom: this.branchNameSource(threadId), onNotice: this.restoreNotifier(threadId)
+        })
       }
     } catch (error) {
       seed = { kind: 'failed', error: error instanceof Error ? error.message : String(error) }

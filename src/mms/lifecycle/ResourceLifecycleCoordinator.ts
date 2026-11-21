@@ -9,6 +9,7 @@ import { ResourceLifecycleError, ResourceLifecycleStore, validateResourceInvento
 import { buildResourceInventory } from './ResourceInventory'
 import { ResourcePurgeService } from './ResourcePurgeService'
 import { renameFolder } from './renameFolder'
+import { withMovingUndoClaims } from './threadUndoClaims'
 
 /** `keepWork`: a trash that is a step of a delete keeping the thread's work (`LifecycleOperation.keepWork`). */
 export interface LifecycleRequest { taskId: string; operationId: string; expectedGeneration?: number; keepWork?: boolean }
@@ -159,7 +160,8 @@ export class ResourceLifecycleCoordinator {
           })
           await this.hooks.onPhase?.(record, 'move-prepared')
         }
-        record = this.store.update(request.taskId, (current) => {
+        const moveLocation = existsSync(operation.from) ? operation.from : operation.to
+        record = await withMovingUndoClaims(moveLocation, () => this.store.update(request.taskId, (current) => {
           this.assertRunner(current, token)
           const active = current.operations.at(-1)!
           const source = existsSync(active.from), target = existsSync(active.to)
@@ -178,7 +180,7 @@ export class ResourceLifecycleCoordinator {
           current.location = active.to
           current.generation = active.expectedGeneration + 1
           active.phase = 'moved'
-        })
+        }), kind === 'restore')
         await this.hooks.onPhase?.(record, 'moved')
         operation = record.operations.at(-1)!
       }
