@@ -12,12 +12,13 @@ import { assertGitAllowedAsync, rethrowGitPolicyError, withOwnedBranches, type U
 import { safeWorktreeGit } from '../worktree/WorktreeManager'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { assertHeldThreadLease } from '../actions/GitOperationCoordinator'
-import { movedFilesNotice, moveFilesToSnapshotAsync, snapshotOriginAsync } from '../actions/snapshots'
+import { movedFilesNotice, moveFilesToSnapshotAsync, snapshotOriginAsync, takeSnapshotAsync, type Snapshot } from '../actions/snapshots'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
 import { addWorktree, worktreeCheckoutPlan, type WorktreeCheckoutPlan, type WorktreeGit } from '../worktree/worktreeCheckout'
 import { loadSnapshotWorkspaceMetadataAsync } from './SnapshotWorkspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
+import { readRecordedCheckoutHead, recordCheckoutIdentity } from './checkoutIdentity'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
 import { assertWorktreeFolderConnected, chosenFolderHolding, chosenWorktreeFolder, defaultWorktreeBase, notConnectedPlacementNote, placeThreadWorktree, worktreeRegistrationOf, worktreeRegistrationOfSync } from '../worktree/worktreeLayout'
@@ -393,8 +394,8 @@ export class ThreadWorkspaceManager {
      * setting off is refused. `userRequested` is that agreement as the central Git check sees it.
      *
      * `snapshot`: a workspace snapshot (a fork's source checkpoint) whose files are written into the new worktree
-     * after it is made at `startSha`, which is the commit the snapshot was taken on; the snapshot becomes the
-     * thread's latest one, so the first turn starts from it instead of recording it as outside changes. `onNotice` gets
+     * after it is made at `startSha`, which is the commit the snapshot was taken on. The bytes after seeding become the
+     * thread's first baseline, just as for a fresh checkout. `onNotice` gets
      * what that write kept or left as it is, as a line for the thread.
      *
      * `nameFrom`: the thread's first message. The worktree is made at once on a temporary branch `<prefix>/<random id>`
@@ -488,7 +489,18 @@ export class ThreadWorkspaceManager {
         }
       }
       await options.onWorktreeMade?.(worktreePath)
-      await git(repository.primaryCheckoutPath, ['update-ref', '--no-deref', retainedRef, options.snapshot ?? head])
+      // Capture the bytes Git and seeding wrote while this checkout is still being provisioned. Undo of the first turn
+      // must be independent of any later change to checkout settings.
+      let baseline: Snapshot | undefined
+      // Untrusted worktrees use config.worktree, which already requires normal start capture.
+      if (!options.untrusted) {
+        try {
+          const snapshot = await takeSnapshotAsync(worktreePath, { reason: 'worktree created', threadId })
+          if (snapshot.exactTree && !snapshot.coverageGaps?.length) baseline = snapshot
+        } catch { /* The first turn reads the files if the baseline could not be captured. */ }
+      }
+      const snapshotSha = baseline?.sha ?? options.snapshot
+      await git(repository.primaryCheckoutPath, ['update-ref', '--no-deref', retainedRef, snapshotSha ?? head])
       const metadata: ThreadWorkspaceMetadata = {
         schemaVersion: 1,
         threadId,
@@ -504,12 +516,13 @@ export class ThreadWorkspaceManager {
         projectRelativeSubdirectory: repository.projectRelativeSubdirectory,
         baseSha: head,
         headSha: head,
-        ...(options.snapshot ? { snapshotSha: options.snapshot } : {}),
+        ...(snapshotSha ? { snapshotSha } : {}),
         lifecycle: 'ready',
         lastVerifiedAt: new Date().toISOString(),
         ...(options.untrusted ? { untrusted: true as const } : {})
       }
       atomicWriteJsonSync(this.workspacePath, metadata)
+      if (baseline) await recordCheckoutIdentity(this.threadDirectory, worktreePath, baseline.sha)
       this.journal.append({
         operationId,
         operationType: 'workspace-provision',
@@ -864,6 +877,7 @@ export class ThreadWorkspaceManager {
       }
       const restored = await this.verify(metadata)
       atomicWriteJsonSync(this.workspacePath, restored)
+      if (restored.lifecycle === 'ready') await recordCheckoutIdentity(this.threadDirectory, restored.worktreePath)
       this.finishProvisionRecovery(restored)
       return restored
     } finally {
@@ -1012,11 +1026,13 @@ export class ThreadWorkspaceManager {
     }
     try {
       // The branch and HEAD are the agent's to move: ready means the checkout is there and no Mousse operation waits.
-      // A turn's start asks once for all its callers (`repositoryFacts.ts`); Git's answer is the checkout being there.
-      const facts = await repositoryFacts(metadata.worktreePath)
-      if (!facts) await git(metadata.worktreePath, ['rev-parse', '--show-toplevel'])
+      // A worktree of the thread's own is read from Git's files (`worktreeHeadFiles.ts`), so its turn starts with no Git;
+      // otherwise a turn's start asks once for all its callers (`repositoryFacts.ts`), Git's answer being the checkout there.
+      const files = isProjectFolderWorkspace(metadata) ? undefined : await readRecordedCheckoutHead(this.threadDirectory, metadata.worktreePath)
+      const facts = files ? undefined : await repositoryFacts(metadata.worktreePath)
+      if (!files && !facts) await git(metadata.worktreePath, ['rev-parse', '--show-toplevel'])
       if (this.hasPendingOperation(options.inFlight)) throw new Error('A Mousse operation is waiting for recovery.')
-      const headSha = (facts ? facts.head : (await tryGit(metadata.worktreePath, ['rev-parse', 'HEAD'])).stdout) || metadata.headSha
+      const headSha = (files ? files.head : facts ? facts.head : (await tryGit(metadata.worktreePath, ['rev-parse', 'HEAD'])).stdout) || metadata.headSha
       const verified = { ...metadata, lifecycle: 'ready' as const, headSha, lastVerifiedAt: new Date().toISOString() }
       return verified
     } catch {
@@ -1042,6 +1058,8 @@ export class ThreadWorkspaceManager {
    */
   private async currentBranch(metadata: ThreadWorkspaceMetadata): Promise<string | undefined> {
     if (!await pathExists(metadata.worktreePath)) return metadata.branch
+    const files = isProjectFolderWorkspace(metadata) ? undefined : await readRecordedCheckoutHead(this.threadDirectory, metadata.worktreePath)
+    if (files) return branchOfHeadRef(files.headRef)
     const facts = await repositoryFacts(metadata.worktreePath)
     if (facts) return branchOfHeadRef(await facts.headRef())
     // A plain read: a branch name when HEAD is on one; detached HEAD answers nothing.

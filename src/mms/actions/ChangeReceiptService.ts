@@ -74,7 +74,7 @@ export class ChangeReceiptService {
 
   /** Records an existing receipt again, as recovery does after an interruption: the same change, with its refs and workspace cache refreshed. */
   replay(workspacePath: string, receipt: ChangeReceipt): Promise<ChangeReceipt> {
-    const { id: _id, workspaceId: _workspaceId, generation: _generation, retainedRefs: _refs, createdAt: _createdAt, ...input } = receipt
+    const { id: _id, workspaceId: _workspaceId, generation: _generation, retainedRefs: _refs, createdAt: _createdAt, notCovered: _notCovered, ...input } = receipt
     return this.record(workspacePath, input)
   }
 

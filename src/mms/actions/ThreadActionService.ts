@@ -16,7 +16,7 @@ import { assertHeldThreadLease, withGitMutationLocks } from './GitOperationCoord
 import { gitWorkCancelled } from '../git/runGitProcess'
 import { IN_PROGRESS_GIT_MARKERS } from '../git/gitMarkers'
 import { changedPathsAsync, git, gitAsync, tryGitAsync } from './git'
-import { coverageNotice, describeGitAsync, namedGapsAsync, sameTreeAsync, SnapshotRefusedError, snapshotUncoveredAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
+import { coverageNotice, describeGitAsync, namedGapsAsync, readCheckpointSnapshotAsync, releaseCheckpointSnapshotAsync, sameTreeAsync, SnapshotRefusedError, snapshotUncoveredAsync, takeCheckpointSnapshotAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 import { activeHiddenStore } from '../git/hiddenStore'
 import { inThreadSnapshotScope, inThreadSnapshotScopeAsync, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 import { turnBoundaryStep } from '../diagnostics/turnBoundary'
@@ -89,7 +89,7 @@ export interface TurnStartCheck { workspacePath: string; startSha: string; error
 export interface OutsideChangesResult { startSha: string; action?: ThreadAction; startCheck?: TurnStartCheck }
 
 /** Written when a turn's start could not be snapshotted; the checkpoint of the action that starts there reads it. */
-const UNCAPTURED_START_FILE = 'uncaptured-start.json'
+export const UNCAPTURED_START_FILE = 'uncaptured-start.json'
 interface UncapturedStart { startSha: string; error: string }
 /** Written when a turn's end could not be snapshotted; the next record of outside changes says it holds that turn's changes. */
 export const UNRECORDED_END_FILE = 'unrecorded-end.json'
@@ -449,11 +449,17 @@ export class ThreadActionService {
     )
   }
 
-  /** The snapshot an explicit human action starts from: the files as they are, which the action then covers. */
-  private uncapturedStart(): UncapturedStart | undefined {
-    try { return JSON.parse(readFileSync(join(this.threadDirectory, UNCAPTURED_START_FILE), 'utf8')) as UncapturedStart } catch { return undefined }
+  private uncapturedStart(action: ThreadAction): UncapturedStart | undefined {
+    if (action.actor?.kind === 'user') return undefined
+    try {
+      const start = JSON.parse(readFileSync(join(this.threadDirectory, UNCAPTURED_START_FILE), 'utf8')) as UncapturedStart
+      return start.startSha === action.startSha ? start : undefined
+    } catch {
+      return undefined
+    }
   }
 
+  /** The snapshot an explicit human action starts from: the files as they are, which the action then covers. */
   private async startFromFiles(options: RunThreadActionOptions): Promise<string> {
     let snapshot: Snapshot
     try { snapshot = await takeSnapshotAsync(options.workspacePath, { reason: 'before the action', threadId: options.threadId }) }
@@ -473,7 +479,7 @@ export class ThreadActionService {
         if (!interrupted(entry)) continue
         const history = this.journal.history(entry.operationId)
         const all = this.list()
-        const details = [...history].reverse().map((item) => item.details as { action?: ThreadAction; actionState?: 'completed' | 'stopped' | 'failed' } | undefined)
+        const details = [...history].reverse().map((item) => item.details as { action?: ThreadAction; actionState?: 'completed' | 'stopped' | 'failed'; captured?: Snapshot } | undefined)
         let action = details.find((item) => item?.action)?.action ?? all.find((item) => item.id === entry.operationId)
         if (!action) throw new Error('Interrupted checkpoint has no durable action boundary.')
         action = structuredClone(action)
@@ -482,16 +488,23 @@ export class ThreadActionService {
         if (receipt) {
           // The snapshot was already taken and recorded; only the action's own record is finished. Files are not touched.
           await receipts.replay(workspacePath, receipt)
-          action.receiptId = receipt.id; action.endSha = receipt.afterSha; action.commits = receipt.introducedCommits
+          if (this.uncapturedStart(action)) rmSync(join(this.threadDirectory, UNCAPTURED_START_FILE), { force: true })
+          await releaseCheckpointSnapshotAsync(workspacePath, entry.operationId)
+          action.receiptId = receipt.id; action.startSha = receipt.beforeSha; action.endSha = receipt.afterSha
+          action.commits = receipt.introducedCommits
           action.changedPaths = await changedPathsAsync(workspacePath, action.startSha, action.endSha)
           action.externalEffects = receipt.externalEffects
           if (receipt.git) action.git = receipt.git
+          if (receipt.notCovered) action.notCovered = receipt.notCovered
           action.state = state; action.completedAt = receipt.createdAt
         } else {
-          // Nothing landed that a retake would not capture, whatever stopped the first attempt (this includes
-          // threads that an earlier version locked when the agent had switched branches or rewritten history).
+          // A completed capture belongs to this operation, even if the person saved other files before recovery.
           try {
-            await this.checkpoint(workspacePath, action, state)
+            const captured = await readCheckpointSnapshotAsync(workspacePath, entry.operationId) ?? details.find((item) => item?.captured)?.captured
+            if (captured && !(await tryGitAsync(workspacePath, ['cat-file', '-e', `${captured.sha}^{commit}`])).ok) {
+              throw new Error('The interrupted checkpoint snapshot is missing.')
+            }
+            await this.checkpoint(workspacePath, action, state, captured)
           } catch (error) {
             // The retake failed as well: the operation stays waiting, with what stopped it this time.
             this.journal.append({ operationId: entry.operationId, operationType: entry.operationType, state: 'recovery_required', details: { actionId: action.id, actionState: state, startSha: action.startSha, error: String(error) } })
@@ -513,7 +526,9 @@ export class ThreadActionService {
   private async checkpoint(
     workspacePath: string,
     action: ThreadAction,
-    state: 'completed' | 'stopped' | 'failed'
+    state: 'completed' | 'stopped' | 'failed',
+    /** The end snapshot an interrupted checkpoint of this action already took (`recoverPending`). */
+    taken?: Snapshot
   ): Promise<void> {
     workspacePath = (await repositoryFacts(workspacePath))?.top ?? await gitAsync(workspacePath, ['rev-parse', '--show-toplevel'])
     action.state = 'checkpointing'
@@ -521,8 +536,10 @@ export class ThreadActionService {
     const threadId = (await new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshotAsync())?.threadId
     const reason = action.turnId.startsWith(USER_CHANGES_TURN_PREFIX) ? 'outside changes' : `end of turn ${action.turnId}`
     let snapshot: Snapshot
+    let captured = false
     try {
-      snapshot = await takeSnapshotAsync(workspacePath, { reason, threadId, operationId: action.id })
+      snapshot = taken ?? await takeCheckpointSnapshotAsync(workspacePath, { reason, threadId, operationId: action.id })
+      captured = !taken
     } catch (error) {
       // A checkpoint that was stopped is not a snapshot that cannot be taken: it fails, and recovery takes it again.
       if (gitWorkCancelled()) throw error
@@ -540,13 +557,17 @@ export class ThreadActionService {
       // A folder past what its hidden store keeps: Undo says why until a turn finds it back within bounds.
       if (error instanceof SnapshotRefusedError) setSnapshotsOff(this.threadDirectory, error.message)
     }
+    // Recovery can reuse the capture before any receipt or workspace metadata is written.
+    if (captured) this.journal.append({
+      operationId: action.id, operationType: 'action-checkpoint', state: 'git_applied',
+      expectedPreState: { startSha: action.startSha }, details: { action, actionState: state, captured: snapshot }
+    })
     // The turn's start could not be captured: the placeholder start is not used. The turn is recorded from its end, so no
     // file is attributed to it and code Undo restores nothing (the conversation still rewinds), and the gap says why.
-    const uncaptured = this.uncapturedStart()
-    if (uncaptured?.startSha === action.startSha && action.actor?.kind !== 'user') {
+    const uncaptured = this.uncapturedStart(action)
+    if (uncaptured) {
       action.startSha = snapshot.sha
       snapshot = { ...snapshot, coverageGaps: [{ path: '.', reason: `start of turn not captured: ${uncaptured.error}` }, ...(snapshot.coverageGaps ?? [])] }
-      rmSync(join(this.threadDirectory, UNCAPTURED_START_FILE), { force: true })
     }
     // What the start did not cover is the turn's too: a file left out at the start and recorded at the end was not made
     // by the turn, and a file whose exact bytes the start could not hold comes back from it in Git's form only. The
@@ -586,6 +607,9 @@ export class ThreadActionService {
       contributions: integrations.map((item) => ({ receiptId: item.id, baseSha: item.beforeSha, resultSha: item.afterSha })),
       externalEffects: action.externalEffects, git: record
     })
+    // Before the receipt is durable, replay still needs the original marker to ignore the placeholder start.
+    if (uncaptured) rmSync(join(this.threadDirectory, UNCAPTURED_START_FILE), { force: true })
+    if (captured || taken) await releaseCheckpointSnapshotAsync(workspacePath, action.id)
     action.receiptId = receipt.id
   }
 
