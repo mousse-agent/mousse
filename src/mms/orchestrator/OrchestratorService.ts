@@ -1,6 +1,6 @@
 import { profilerService } from '../diagnostics/profilerService'
 import type { BugReportService } from '../bugReports/BugReportService'
-import { turnTimingMark } from '../diagnostics/turnTiming'
+import { turnTimingBeginRun, turnTimingEnd, turnTimingMark } from '../diagnostics/turnTiming'
 import { forEachYielding } from '../startup/startupTiming'
 import { inTurnBoundary, turnBoundaryMark, turnBoundaryReplyDone, turnBoundaryStarted } from '../diagnostics/turnBoundary'
 import { closeRepositoryFacts, forgetRepositoryFacts, openRepositoryFacts, withRepositoryFactsScope } from '../git/repositoryFacts'
@@ -14155,8 +14155,11 @@ export class OrchestratorService extends EventEmitter {
     const runId = args[3]?.runId
     const threadId = this.session.threadId
     // Where the turn's start and end spend their time, logged for every thread (`turnBoundary.ts`).
-    let requestedAt: string | undefined
-    try { requestedAt = runId ? this.runEngine?.getRun(runId)?.requestedAt : undefined } catch { /* Measured without it. */ }
+    let run: { requestedAt?: string; clientRequestId?: string | null; source?: string } | undefined
+    try { run = runId ? this.runEngine?.getRun(runId) ?? undefined : undefined } catch { /* Measured without it. */ }
+    const requestedAt = run?.requestedAt
+    // Where the turn's time goes from its request to its reply's first word, for every thread (`turnTiming.ts`).
+    const timed = turnTimingBeginRun(threadId, { ...(runId ? { runId } : {}), ...(run ? { requestedAt: run.requestedAt, clientRequestId: run.clientRequestId, source: run.source } : {}) })
     // What the turn's start and end ask Git about its folder, asked once for all their callers (`repositoryFacts.ts`).
     return inTurnBoundary({ threadId, ...(runId ? { runId } : {}), ...(requestedAt ? { requestedAt } : {}) }, () => withRepositoryFactsScope(async () => {
       // A subagent that may edit its parent's folder records that folder as its turn starts and ends: its result is
@@ -14176,7 +14179,7 @@ export class OrchestratorService extends EventEmitter {
         // records it here, so a later look at its result still has it.
         if (writer && runId && !this.sharedFolderEnded.delete(runId)) await this.recordSharedFolder(writer, runId, 'end')
       }
-    }))
+    })).finally(() => turnTimingEnd(threadId, timed))
   }
 
   /** Runs whose turn already recorded the shared folder's end (`recordSharedFolder`), until their `executeTurn` returns. */

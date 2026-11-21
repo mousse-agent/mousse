@@ -56,6 +56,7 @@ import type { BotFileReadResult } from '../../../shared/bots/personal/authority'
 import { botAppToolRefusal, checkBuiltinCall, checkMessage } from '../../../shared/bots/personal/walls'
 import { refusalText, type RefusalCode } from '../../run/mcp/appTools/refusal'
 import { neutralToolIdempotent, neutralToolsOf } from '../../../shared/harness/tools'
+import { turnTimingFirstText, turnTimingMark } from '../../diagnostics/turnTiming'
 
 /**
  * The Pi RPC engine (PR 2 §4): each thread of a `pi:*` instance runs on its own Pi process
@@ -1621,7 +1622,10 @@ export class PiRpcEngine implements ProviderAdapter {
       if (message.startsWith('/')) message = ` ${message}`
       const images = piImages(input.images)
       // Pi answers a prompt after its preflight (auth, compaction, extensions): bounded, and Stop cancels the wait.
+      turnTimingMark(input.threadId, 'prompt')
       await this.send(thread, { type: 'prompt', message, ...(images.length ? { images } : {}) }, this.options.promptDeadlineMs ?? PI_PROMPT_DEADLINE_MS, input.signal)
+      // Pi's answer to the prompt, after its preflight (`turnTiming.ts`), unless its turn started first.
+      turnTimingMark(input.threadId, 'firstFrame')
       turn.promptAccepted = true
       // On the hold (docs/design/steer-and-interruptions.md §3): a person's steer cuts in while Pi writes.
       if (ctl.peekSteer) {
@@ -2111,6 +2115,7 @@ export class PiRpcEngine implements ProviderAdapter {
     const { sink } = turn
     switch (event.type) {
       case 'turn_start':
+        turnTimingMark(turn.input.threadId, 'firstFrame')
         turn.piPhase = 'running'
         // A step's leftovers never outlive it: a missed end event would hold a steer for the rest of the turn.
         turn.stepTools = false
@@ -2726,6 +2731,7 @@ export class PiRpcEngine implements ProviderAdapter {
         turn.text.set(update.contentIndex, '')
         return turn.reply.update(turn.replyText())
       case 'text_delta':
+        turnTimingFirstText(turn.input.threadId)
         turn.text.set(update.contentIndex, `${turn.text.get(update.contentIndex) ?? ''}${update.delta ?? ''}`)
         return turn.reply.update(turn.replyText())
       case 'text_end':

@@ -100,6 +100,7 @@ import type { ChildTurnPolicy, PlanWindowUse } from '../../adapter'
 import { ONE_SHOT_TASK_TEXT, type OneShotSpec } from '../../driver'
 import { harnessAppError } from '../../../../shared/harness/types'
 import { QUESTIONS_REFUSED_MESSAGE } from '../../acp/permissions'
+import { turnTimingFirstText, turnTimingMark } from '../../../diagnostics/turnTiming'
 
 export const CODEX_PROVIDER_ID = 'codex'
 /** How long a live `account/read` result stands before it is checked again. */
@@ -1025,6 +1026,8 @@ class TurnRun {
   handle(notification: CodexNotification): void {
     const started = notificationParams(notification, 'turn/started')
     if (started) {
+      // Codex's first word on the turn (`turnTiming.ts`), unless the `turn/start` answer came first.
+      turnTimingMark(this.mousseThreadId, 'firstFrame')
       if (this.holding && !this.startInFlight && !this.turnOpen && !this.muted) {
         // The server started a turn on its own (a helper's message woke the thread): it is this run's
         // turn now, so Stop interrupts it by id, a steer joins it, and the wait resumes after it.
@@ -1070,6 +1073,7 @@ class TurnRun {
     if (delta) {
       if (!this.parts.has(delta.itemId)) this.order.push(delta.itemId)
       this.parts.set(delta.itemId, (this.parts.get(delta.itemId) ?? '') + delta.delta)
+      turnTimingFirstText(this.mousseThreadId)
       this.input.onText(this.text)
       return
     }
@@ -3279,8 +3283,10 @@ export class CodexProviderService {
         completion.catch(() => undefined)
         current.startInFlight = true
         // Recorded even when Stop wins the race below, so the interrupt still reaches the turn.
+        turnTimingMark(input.threadId, 'prompt')
         const starting = conn.request('turn/start', { threadId: codexThreadId, input: nextInput, ...turnParams }).then(
           (started) => {
+            turnTimingMark(input.threadId, 'firstFrame')
             // Assigned, not defaulted: a server turn that ended just before may have left its id behind.
             current.turnStarted(started.turn)
             if (current.interruptRequested) this.sendInterrupt(current)

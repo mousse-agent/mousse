@@ -7,6 +7,7 @@ import { providerReportedError } from '../../orchestrator/providerErrors'
 import { interruptWithDeadline, LOAD_DEADLINE_MS, loadWithDeadline, recoverActiveRun, SessionLoadTimeoutError } from '../supervise'
 import type { McpAttachment } from '../../run/mcp/MousseMcpServer'
 import { CursorHostCallError, CursorHostExitedError, type CursorHostClient, type CursorRunListener } from './hostClient'
+import { turnTimingFirstText, turnTimingMark } from '../../diagnostics/turnTiming'
 
 /**
  * The turn lifecycle of a Cursor instance: one SDK agent per thread, kept between turns while
@@ -671,7 +672,10 @@ export class CursorSessions {
       stop.addEventListener('abort', onStop, { once: true })
       let runId: string
       try {
+        turnTimingMark(input.threadId, 'prompt')
         runId = await this.startRun(input.threadId, agentId, input.cwd, params)
+        // Cursor named the run: its first word on the turn (`turnTiming.ts`).
+        turnTimingMark(input.threadId, 'firstFrame')
       } catch (error) {
         started(undefined)
         stop.removeEventListener('abort', onStop)
@@ -713,6 +717,7 @@ export class CursorSessions {
           switch (update.type) {
             case 'text-delta':
               if (typeof update.text !== 'string') return
+              if (update.text) turnTimingFirstText(input.threadId)
               runText += update.text
               progress.text = base + runText
               input.onText(progress.text)

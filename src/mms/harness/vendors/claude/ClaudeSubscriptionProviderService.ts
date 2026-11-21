@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { trackChildProcess, untrackChildProcess } from '../../../diagnostics/liveCounts'
-import { turnTimingEnd, turnTimingFirstText, turnTimingMark } from '../../../diagnostics/turnTiming'
+import { turnTimingFirstText, turnTimingMark } from '../../../diagnostics/turnTiming'
 import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
@@ -3838,7 +3838,6 @@ export class ClaudeSubscriptionProviderService {
       if (branch && !frames.text && cutRefused(error)) throw new CutRefused(error instanceof Error ? error.message : String(error), branch.fork)
       throw error
     } finally {
-      turnTimingEnd(input.threadId)
       // Only this turn's controller: a live query is not the turn's to abort.
       controller.abort()
       // Background helpers keep calling tools after the turn ended, or was cancelled: they are checked by

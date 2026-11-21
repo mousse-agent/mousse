@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { ChildProcess } from 'node:child_process'
+import { watchEventLoopLag, type EventLoopLagWatch } from './eventLoopLag'
 
 /**
  * Where every thread's turn boundaries spend their time: the turn's start, from `executeTurn` to its provider call, and
@@ -12,6 +13,7 @@ import type { ChildProcess } from 'node:child_process'
  * lifetimes (`gitMs`), the time `spawn()` itself held the event loop (`spawnMs`), the commands run synchronously and
  * the time they held it (`sync`, `syncMs`), and the time spent waiting for a repository's lease (`leaseMs`). A command
  * belongs to the phase it started in. `waitedMs` is the time between the run's request and the start of its setup.
+ * `lagMaxMs` (start only) is the longest the service's event loop was held during the boundary (`eventLoopLag.ts`).
  *
  * Counting is an `AsyncLocalStorage` lookup and a few additions per Git command, at its spawn site
  * (`timeGitChild`, `timeGitSync`), whatever executable it names; outside a boundary it is the lookup alone. Nothing
@@ -34,6 +36,8 @@ interface Boundary {
   last: number
   current: Counts
   phases: [string, Counts][]
+  /** The start boundary's event-loop watch. */
+  lag?: EventLoopLagWatch
 }
 
 interface TurnScope {
@@ -163,7 +167,7 @@ export function timeRepositoryLeaseWait<T>(waiting: Promise<T>): Promise<T> {
 
 function open(state: TurnScope, edge: Boundary['edge']): void {
   const now = performance.now()
-  state.boundary = { edge, start: now, last: now, current: { ms: 0 }, phases: [] }
+  state.boundary = { edge, start: now, last: now, current: { ms: 0 }, phases: [], ...(edge === 'start' ? { lag: watchEventLoopLag() } : {}) }
 }
 
 function mark(boundary: Boundary, label: string): void {
@@ -188,6 +192,7 @@ function close(state: TurnScope, ended?: 'beforeProvider' | 'settled'): void {
   if (!boundary) return
   state.boundary = undefined
   if (ended) mark(boundary, ended)
+  const lagMaxMs = boundary.lag?.stop()
   const total = { ms: 0, git: 0, gitMs: 0, leaseMs: 0 }
   const phases: Record<string, Record<string, number>> = {}
   for (const [label, counts] of boundary.phases) {
@@ -212,6 +217,7 @@ function close(state: TurnScope, ended?: 'beforeProvider' | 'settled'): void {
     gitMs: Math.round(total.gitMs),
     ...(total.leaseMs ? { leaseMs: Math.round(total.leaseMs) } : {}),
     ...(boundary.edge === 'start' && state.requestedAt !== undefined ? { waitedMs: Math.max(0, Math.round(Date.now() - total.ms - state.requestedAt)) } : {}),
+    ...(lagMaxMs !== undefined ? { lagMaxMs } : {}),
     phases
   }
   try {

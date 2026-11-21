@@ -29,6 +29,7 @@ import {
 import type { AcpQuirks } from './quirks'
 import { acpAgentError, agentCancelledError, promptStopOutcome } from './stopReason'
 import { xaiHandlers, xaiStopFailure } from './xai'
+import { turnTimingFirstText, turnTimingMark } from '../../diagnostics/turnTiming'
 
 /** The title is generic on agy: its launch arguments name the role and describe the work. */
 function subagentActivity(rawInput: unknown, title: string | undefined) {
@@ -850,6 +851,8 @@ export class AcpSessions {
       silenceTimer.unref?.()
     }
     const onUpdate = (update: unknown) => {
+      // The agent's first word on the turn (`turnTiming.ts`).
+      if (promptSent) turnTimingMark(input.threadId, 'firstFrame')
       watchSilence()
       noteCommands(current, update)
       if (!update || typeof update !== 'object') return
@@ -861,6 +864,7 @@ export class AcpSessions {
         readCarried()
       }
       if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') {
+        if (event.content.text) turnTimingFirstText(input.threadId)
         text += event.content.text ?? ''
         input.onText(text)
       }
@@ -1130,6 +1134,7 @@ export class AcpSessions {
           promptId = quirks.xaiExtensions ? randomUUID() : undefined
           promptInFlight = promptId
           promptSent = true
+          turnTimingMark(input.threadId, 'prompt')
           reply = active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId,
             prompt: [...blocks.map((block) => ({ type: 'text' as const, text: block })), ...attachments], ...(promptId ? { _meta: { promptId } } : {}) })
         }
