@@ -30,6 +30,7 @@ import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
 import { FIRST_SEND_BINDING_CAPABILITY } from '../../src/mms/protocol/types'
+import { nextSteerableQueueItem } from '../../src/renderer/lib/queuedContent'
 
 vi.setConfig({ testTimeout: 60_000 })
 
@@ -700,7 +701,7 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
     void a
   })
 
-  describe('Steer sent with its message while the turn is still being set up', () => {
+  describe('Steer sent with its message', () => {
     /** A turn held in its setup (the wait for its folders) until `release`, with the run it will be. */
     const settingUp = async (w: ReturnType<typeof world>, prompt = 'first', send = () => w.send(prompt)) => {
       let release!: (result: 'ready' | 'stopped') => void
@@ -721,6 +722,27 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
         globalSequence: () => 0, connection: { id: `${clientType}-1`, clientType, capabilities: new Set(clientType === 'gui' ? [FIRST_SEND_BINDING_CAPABILITY] : []) }
       } as unknown as HandlerContext, 'orchestrator.send', { threadId: w.thread.id, mode: 'agent', ...params }) as ReturnType<typeof w.send>
     const fromWindow = (w: ReturnType<typeof world>, params: Record<string, unknown>) => fromConnection(w, 'gui', params)
+
+    it('delivers a live composer Steer with its image in the running provider turn', async () => {
+      const w = world(false)
+      w.adapter.holdPrompts.add('first')
+      const first = w.send('first')
+      try {
+        await waitFor(() => w.adapter.prompts.includes('first'), 'the provider started the first turn')
+        const shot: ChatImageAttachment = { mimeType: 'image/png', data: 'c2NyZWVuc2hvdA==', name: 'shot.png' }
+        const runId = w.adapter.runs.get('first')!
+        await expect(fromWindow(w, { content: 'look at this', images: [shot], clientRequestId: 'live-steer', steer: true, steerRunId: runId }))
+          .resolves.toMatchObject({ steerApplied: true })
+        await waitFor(() => w.adapter.steers.includes('look at this'), 'the running provider received the composer Steer')
+        expect(w.adapter.steerImages).toEqual([[expect.objectContaining(shot)]])
+      } finally {
+        w.adapter.release('first')
+        await first
+      }
+      await w.idle('the live Steer settled')
+      expect(w.adapter.prompts).toEqual(['first'])
+      expect(w.adapter.steers).toEqual(['look at this'])
+    })
 
     it('waits first, shows as sending next on every read, is saved with its run, and joins that run once as it runs', async () => {
       const w = world(false)
@@ -772,16 +794,26 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
       expectEachOnce(w.adapter, ['first', 'Earlier' + NL + 'Later'])
     })
 
-    it('starts and completes the original turn when reading waiting Steers fails once', async () => {
+    it('keeps Send now available while the original turn runs after a transient queue read failure', async () => {
       const w = world(false)
       const { first, runId, release } = await settingUp(w)
       const read = vi.spyOn(durableQueue, 'readDurableQueue')
+      let visibleQueue: QueuedMessage[] = []
+      w.d.orch.on('queue-updated', ({ items }: { items: QueuedMessage[] }) => { visibleQueue = items })
       w.d.orch.once('turn-started', () => {
         read.mockImplementationOnce(() => { throw new Error('transient queue read failure') })
       })
       try {
-        await fromWindow(w, { content: 'S', clientRequestId: 'steer-s', steer: true, steerRunId: runId })
+        const sent = await fromWindow(w, { content: 'S', clientRequestId: 'steer-s', steer: true, steerRunId: runId })
         release()
+        await waitFor(() => w.adapter.prompts.includes('first'), 'the original turn started despite the queue read failure')
+        expect(w.adapter.steers).toEqual([])
+        for (const items of [visibleQueue, w.d.orch.queueSnapshot(w.thread.id).items]) {
+          // The composer can still have the item marked as sending next from when setup was pending.
+          expect(nextSteerableQueueItem(items, {}, new Set([sent.queueItem!.id]))).toMatchObject({
+            id: sent.queueItem!.id, steerMissed: true
+          })
+        }
         w.adapter.release('first')
         await expect(first).resolves.toMatchObject({ message: 'reply to first' })
         expect(w.d.engine.getRun(runId)?.status).toBe('completed')
@@ -795,7 +827,7 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
       }
     })
 
-    it.each(['explicit', 'inferred'] as const)('replays an admitted GUI Steer with an %s target after Stop before the first prompt is saved', async (target) => {
+    it.each(['explicit', 'inferred'] as const)('replays an admitted GUI Steer with an %s target after Stop and rejects a different target after the next admission', async (target) => {
       const w = world(false, true)
       const { first, runId, release } = await settingUp(w, 'first', () => fromWindow(w, {
         content: 'first', clientRequestId: 'first', expect: { permissionMode: w.d.settings.permissions.defaultMode }
@@ -815,12 +847,29 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
       expect(w.shownUserMessages()).toEqual([])
       expect(w.adapter.prompts).toEqual([])
       await expect(fromWindow(w, { ...request, clientRequestId: 'new-steer' })).rejects.toMatchObject({ code: 'first_send_unbound' })
-      await expect(fromWindow(w, { ...request, steerRunId: 'another-run' })).rejects.toMatchObject({ code: 'first_send_unbound' })
+      await expect(fromWindow(w, { ...request, steerRunId: 'another-run' })).rejects.toMatchObject({ code: 'client_request_id_conflict' })
       await expect(fromWindow(w, request)).resolves.toMatchObject({
         replayed: true, queued: true, queueItem: { id: admitted.queueItem!.id, heldAfterStop: true }
       })
       await expect(fromWindow(w, { ...request, content: 'different text' })).rejects.toMatchObject({ code: 'client_request_id_conflict' })
       expect(w.queue().map((item) => item.id)).toEqual([admitted.queueItem!.id])
+
+      const next = await settingUp(w, 'next', () => fromWindow(w, {
+        content: 'next', clientRequestId: 'next', expect: { permissionMode: w.d.settings.permissions.defaultMode }
+      }))
+      try {
+        expect(next.runId).not.toBe(runId)
+        await expect(fromWindow(w, { ...request, steerRunId: next.runId })).rejects.toMatchObject({ code: 'client_request_id_conflict' })
+        await expect(fromWindow(w, { ...request, steerRunId: '' })).rejects.toMatchObject({ code: 'client_request_id_conflict' })
+        await expect(fromWindow(w, request)).resolves.toMatchObject({
+          replayed: true, queued: true, queueItem: { id: admitted.queueItem!.id, heldAfterStop: true }
+        })
+      } finally {
+        await w.d.orch.stopThread(w.thread.id, 'user')
+        next.release('stopped')
+        w.adapter.release('next')
+        await next.first.catch(() => undefined)
+      }
     })
 
     it('delivers Stop-held messages in Send now order during the next turn setup', async () => {

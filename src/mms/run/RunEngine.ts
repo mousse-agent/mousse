@@ -76,6 +76,8 @@ export type RunCommand =
        * repeated `clientRequestId` with other text is refused instead of answered with another message's run.
        */
       prompt?: string
+      /** A Steer target supplied by the caller must match the receipt on retry. */
+      explicitSteerRunId?: string
       /** Recoverable queue payload of a person's Steer, written with the send's receipt. */
       steer?: { runId: string; message: Omit<EnqueueMessageInput, 'threadId' | 'runId' | 'clientRequestId' | 'steerOnStart'> }
       /**
@@ -1944,7 +1946,7 @@ export class RunEngine extends EventEmitter {
     const { threadId, clientRequestId } = command
     const receipt = store.getReceipt(clientRequestId)
     if (receipt) {
-      if (receipt.threadId !== threadId || receipt.commandKind !== command.kind || !samePrompt(command, receipt))
+      if (receipt.threadId !== threadId || receipt.commandKind !== command.kind || !matchesSendReceipt(command, receipt))
         return {
           status: 'rejected',
           reason: 'client_request_id_conflict',
@@ -2362,11 +2364,13 @@ function promptDigest(prompt: string): string {
   return createHash('sha256').update(prompt, 'utf8').digest('hex')
 }
 
-/** A repeated send carries the text it was first sent with. Receipts and sends without a text are not compared. */
-function samePrompt(command: RunCommand, receipt: ReceiptRecord): boolean {
-  if (command.kind !== 'send' || command.prompt === undefined) return true
-  const stored = (receipt.result as { promptDigest?: unknown } | null)?.promptDigest
-  return typeof stored !== 'string' || stored === promptDigest(command.prompt)
+/** A repeated send keeps its text and any explicit Steer target. An omitted target reuses the receipt. */
+function matchesSendReceipt(command: RunCommand, receipt: ReceiptRecord): boolean {
+  if (command.kind !== 'send') return true
+  const stored = receipt.result as { promptDigest?: unknown; steerRunId?: unknown } | null
+  if (command.explicitSteerRunId !== undefined && typeof stored?.steerRunId === 'string' && command.explicitSteerRunId !== stored.steerRunId)
+    return false
+  return command.prompt === undefined || typeof stored?.promptDigest !== 'string' || stored.promptDigest === promptDigest(command.prompt)
 }
 
 function replay(receipt: ReceiptRecord): CommandResult {

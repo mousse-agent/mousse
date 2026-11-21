@@ -10737,17 +10737,15 @@ export class OrchestratorService extends EventEmitter {
   private withQueueWait(threadId: string, items: QueuedMessage[]): QueuedMessage[] {
     const session = this.loadedSession(threadId)
     const wait = this.queueWaitOf(session)
-    // A Steer targeting this turn shows "Sends next" even before the turn lifts the Stop hold. One whose turn ended
-    // first is an ordinary queued message again, and says so.
-    const startingRunId = session && !session.activeTurn && session.turnAdmitted && !session.abortRequested && !session.stopping
-      ? session.admissionRunId ?? this.turnStates.get(threadId)?.turnId
-      : undefined
-    const targetRunId = session?.takesSteer() && !session.stopping ? session.activeTurn?.runId : startingRunId
+    // A Steer targeting the turn in setup shows "Sends next" even before the turn lifts the Stop hold.
+    // Once setup ends, a Steer still pending can be sent now again.
+    const settingUp = session?.turnAdmitted && !session.activeTurn && !session.abortRequested && !session.stopping
+    const startingRunId = settingUp ? session.admissionRunId ?? this.turnStates.get(threadId)?.turnId : undefined
     return items.map((item) => {
       const pending = item.state === 'pending'
       const next = pending && (item.steerOnStart
-        ? item.steerOnStart.runId === targetRunId
-        : !item.heldAfterStop && Boolean(session?.steerOnStart.includes(item.id)))
+        ? item.steerOnStart.runId === startingRunId
+        : settingUp && !item.heldAfterStop && session.steerOnStart.includes(item.id))
       const sendsNext = next ? true : undefined
       const steerMissed = pending && !next && item.steerOnStart ? true : undefined
       const waitsFor = pending && item.intent === 'normal' && !item.heldAfterStop && !next ? wait : undefined
@@ -11223,7 +11221,7 @@ export class OrchestratorService extends EventEmitter {
   private applyQueuedSendSteer(session: ThreadSession, item: QueuedMessage, steerRunId: string | undefined, tryPromote: boolean): { queueItem: QueuedMessage; steerApplied: boolean } {
     const threadId = session.threadId
     let [queueItem] = this.withQueueWait(threadId, [item])
-    if (queueItem.sendsNext || item.intent === 'steer') return { queueItem, steerApplied: true }
+    if (item.intent === 'steer' || (!session.activeTurn && queueItem.sendsNext)) return { queueItem, steerApplied: true }
     const takesSteer = session.takesSteer() || (!this.runEngine && session.turnAdmitted && !session.activeTurn && !session.stopping && !session.abortRequested)
     if (tryPromote && item.state === 'pending' && !item.heldAfterStop && takesSteer && (!steerRunId || this.steerTarget(session) === steerRunId)) {
       try {
@@ -13583,6 +13581,7 @@ export class OrchestratorService extends EventEmitter {
         clientRequestId,
         source: opts?.source ?? 'protocol',
         prompt: text,
+        ...(opts?.steer && opts.steerRunId !== undefined ? { explicitSteerRunId: opts.steerRunId } : {}),
         ...(steerRunId && this.threadStore ? {
           steer: {
             runId: steerRunId,
