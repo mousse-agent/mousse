@@ -200,8 +200,9 @@ describe('Send link (§5.1)', () => {
   it('shows the link with Copy, the code apart from it, the tries left, and the end after three wrong codes', async () => {
     const d = daemon()
     const update = await dialog(d)
-    await click(button('Send link'))
-    expect(d.called('netEngine.invite')).toEqual([{ kind: 'link' }])
+    await click(button('Send a link'))
+    // The dialog's own code first, then the link.
+    expect(d.called('netEngine.invite')).toEqual([{}, { kind: 'link' }])
     expect(field('Link').value).toBe(LINK)
     expect(button('Copy link')).toBeTruthy()
     expect(text()).toContain('123 456')
@@ -209,40 +210,39 @@ describe('Send link (§5.1)', () => {
     expect(text()).toContain('Send the link in a chat. Read the code to them another way.')
 
     // A wrong code: a new code and one try fewer.
-    await update({ links: [{ invitation: 'inv1', code: '654321', attemptsLeft: 2 }] })
+    await update({ links: [{ invitation: 'inv2', code: '654321', attemptsLeft: 2 }] })
     expect(text()).toContain('654 321')
     expect(text()).toContain('2 tries left')
 
     await update({
-      links: [{ invitation: 'inv1', code: '654321', attemptsLeft: 0, ended: 'attempts_exhausted' }]
+      links: [{ invitation: 'inv2', code: '654321', attemptsLeft: 0, ended: 'attempts_exhausted' }]
     })
     expect(text()).toContain('Three wrong codes. This link no longer works.')
     await click(button('New link'))
-    expect(d.called('netEngine.invite')).toHaveLength(2)
+    expect(d.called('netEngine.invite')).toHaveLength(3)
   })
 
   it('is offered only when the helper speaks Send link', async () => {
     await dialog(daemon({ sendLink: undefined }))
-    expect(button('Show QR')).toBeTruthy()
-    expect(button('Send link')).toBeUndefined()
+    expect(document.querySelector('[aria-label="Pairing QR code"]')).toBeTruthy()
+    expect(button('Send a link')).toBeUndefined()
     expect(button('Enter link')).toBeUndefined()
   })
 })
 
-describe('Enter link (§5.3)', () => {
-  it('asks consent with the destinations, shares nothing unticked, then asks for the code', async () => {
+describe('Scan or paste a sent link (§5.3)', () => {
+  it('takes a sent link in the one paste field, asks consent with the destinations, shares nothing unticked, then asks for the code', async () => {
     const d = daemon(
       {},
       { shareable: [{ route: 'tcp://203.0.113.7:7443', label: '203.0.113.7:7443', cls: 'public' }] }
     )
     const update = await dialog(d)
-    await click(button('Enter link'))
-    await type(field('Link'), LINK)
-    await submit(field('Link'))
+    await type(field('Pairing link'), LINK)
+    await submit(field('Pairing link'))
     expect(text()).toContain(
       'Connect to the computer in this link? It will also be able to use this computer.'
     )
-    expect(text()).toContain('192.168.1.20:7443 (LAN), 100.101.7.2:7443 (Tailnet)')
+    expect(text()).toContain('192.168.1.20:7443 (Same network), 100.101.7.2:7443 (Tailscale)')
     const share = document.querySelector<HTMLInputElement>('input[type="checkbox"]')!
     expect(share.checked).toBe(false)
     expect(share.parentElement!.textContent).toContain('Internet 203.0.113.7:7443')
@@ -332,7 +332,7 @@ describe('a mousse:// link that opened Mousse (§5.2)', () => {
   const both = () =>
     createElement(Fragment, null, createElement(PairLinkHost), createElement(EngineDevicesSection))
 
-  it('opens Enter link with it in Settings → Devices', async () => {
+  it('opens Scan or paste with it in Settings → Devices', async () => {
     const d = daemon()
     d.state.profiles = [{ id: 'p1', displayName: 'Work', networked: true }]
     useAppStore.setState({ profileId: 'p1' })

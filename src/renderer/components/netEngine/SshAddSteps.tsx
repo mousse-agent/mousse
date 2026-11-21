@@ -121,6 +121,7 @@ export function SshAddSteps({ onDone }: { onDone: () => void }) {
             <button
               type="button"
               className="settings-btn primary"
+              data-mousse-decision=""
               disabled={busy}
               onClick={() => void trust(step.resolved, step.probe)}
             >

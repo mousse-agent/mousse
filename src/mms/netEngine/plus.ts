@@ -34,6 +34,17 @@ export const PLUS_WRONG_PAGE = "Plus named a sign-in page that isn't on its addr
  */
 export const PLUS_WEB_ORIGINS_VARIABLE = 'MOUSSE_NET_ENGINE_PLUS_WEB_ORIGINS'
 
+/**
+ * The switch for Mousse Plus over the networking engine (Phase 4). Off by default: until the Plus server is set up
+ * for the engine, Plus stays on the old networking, and the engine sends the helper no Plus request, ignores its
+ * Plus events and shows no Plus state. `1` turns it on.
+ */
+export const ENGINE_PLUS_VARIABLE = 'MOUSSE_NET_ENGINE_PLUS'
+
+/** Whether Mousse Plus goes through the networking engine (`ENGINE_PLUS_VARIABLE`). */
+export const enginePlusOn = (env: NodeJS.ProcessEnv = process.env): boolean =>
+  env[ENGINE_PLUS_VARIABLE] === '1'
+
 /** The listed Plus website origins (`PLUS_WEB_ORIGINS_VARIABLE`), https only. */
 export function plusWebOrigins(env: NodeJS.ProcessEnv = process.env): Set<string> {
   const origins = new Set<string>()
@@ -151,7 +162,7 @@ export class EnginePlus {
     this.removals = new Map()
     this.asks = []
     this.off = helper.onEvent((event) => this.event(event))
-    void this.read(helper, 'plus.status', (reply) => this.status(reply))
+    if (enginePlusOn()) void this.read(helper, 'plus.status', (reply) => this.status(reply))
     void this.read(helper, 'removal.list', (reply) => this.list(reply))
   }
 
@@ -185,7 +196,7 @@ export class EnginePlus {
       return hostName ? { ...item, hostName } : item
     }
     return {
-      ...(this.plus ? { plus: this.plus } : {}),
+      ...(this.plus && enginePlusOn() ? { plus: this.plus } : {}),
       ...(this.removals.size ? { removals: [...this.removals.values()].map(named) } : {}),
       ...(this.asks.length ? { removalAsks: this.asks.map(named) } : {})
     }
@@ -232,6 +243,7 @@ export class EnginePlus {
   }
 
   private event(event: Json): void {
+    if (typeof event.ev === 'string' && event.ev.startsWith('plus.') && !enginePlusOn()) return
     switch (event.ev) {
       case 'plus.status':
         return this.status(event)
@@ -309,6 +321,7 @@ export class EnginePlus {
   }
 
   private async refreshStatus(): Promise<void> {
+    if (!enginePlusOn()) return
     try {
       this.status(await this.require().request('plus.status'))
     } catch {
@@ -317,6 +330,7 @@ export class EnginePlus {
   }
 
   private async call(op: string, fields: Json = {}): Promise<Json> {
+    if (op.startsWith('plus.') && !enginePlusOn()) throw new NetError('forbidden', PLUS_TEXT.plus_off!)
     try {
       return await this.require().request(op, fields)
     } catch (error) {

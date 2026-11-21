@@ -1138,6 +1138,38 @@ export class NetEngineService implements EngineDirectoryPort {
     }
   }
 
+  /**
+   * A helper that has never saved its routes listens as its command line says and, on every interface, offers every
+   * address it has, tailnet ones too, whatever Reach shows. When it offers one whose switch is off, what Reach shows
+   * is saved (`routes.config`), so invitations offer only routes whose switch is on.
+   */
+  private async keepShownReach(helper: EngineHelper): Promise<void> {
+    if (!helper.speaks(1)) return
+    const reach = readReach(helper.info.routes_config, helper.info)
+    const offered = strings(helper.info.routes)
+    const switchedOff = offered.some((route) => {
+      const parsed = parseRoute(route)
+      if (!parsed || parsed.kind !== 'tcp') return false
+      const cls = routeClass(parsed)
+      return (
+        (cls === 'tailnet' && !reach.tailnet) ||
+        (cls === 'lan' && !reach.lan) ||
+        (cls === 'public' && !reach.public.includes(parsed.canonical))
+      )
+    })
+    if (!switchedOff) return
+    const answer = await helper.request('routes.config', {
+      lan: reach.lan,
+      tailnet: reach.tailnet,
+      public: reach.public,
+      tunnels: reach.tunnels
+    })
+    if (answer.config && typeof answer.config === 'object') helper.info.routes_config = answer.config
+    if (Array.isArray(answer.routes)) helper.info.routes = strings(answer.routes)
+    this.changed()
+    if (answer.restart_needed === true) await this.restartHelper()
+  }
+
   /** Retry on a device's row: its ceremony or removal goes on, and it is dialled. */
   async retry(node: NodeId): Promise<void> {
     const started = this.require()
@@ -1224,6 +1256,9 @@ export class NetEngineService implements EngineDirectoryPort {
           ...(started.pairing.certificateWindow(node) ? { certificateWindow: true } : {}),
           ...(started.pairing.sshParked(node) ? { sshParked: started.pairing.sshParked(node) } : {}),
           ...(row.addresses?.length ? { addresses: row.addresses } : {}),
+          ...(row.ssh && !row.ssh.removed && (row.ssh.target || row.ssh.host)
+            ? { ssh: row.ssh.target || (row.ssh.user ? `${row.ssh.user}@${row.ssh.host}` : row.ssh.host!) }
+            : {}),
           ...(route ? { route } : {}),
           ...(via ? { via } : {}),
           ...(row.offered?.length ? { offered: row.offered } : {}),
@@ -1400,7 +1435,7 @@ export class NetEngineService implements EngineDirectoryPort {
         // The helper keeps a newer outbound path (renewed, or dialled while one was up) waiting until told.
         onPathInUse: (connection) => {
           const conn = Number(connection.id)
-          if (!Number.isSafeInteger(conn) || !this.helper) return
+          if (!Number.isSafeInteger(conn) || !this.helper || connection.reversed) return
           void this.helper.request('path.reopened', { conn }).catch(() => {
             // `not_renewed`: it was current already (the first path); `no_conn`: it is gone.
           })
@@ -1747,6 +1782,7 @@ export class NetEngineService implements EngineDirectoryPort {
     this.changed()
     // Its relays, and what each pairing's relays need (Phase 3); a helper without them says so once.
     if (this.helper === helper) this.rereadRelays()
+    if (this.helper === helper) await this.keepShownReach(helper).catch(() => undefined)
     // Removals finish, ceremonies resume, owed rows are written and every pairing is dialled again.
     if (this.helper === helper) {
       if (engineControl('route-leak')) await this.openLeak(helper)

@@ -87,7 +87,7 @@ export function PairLinkHost() {
   const open = async (link: string, profileId?: string) => {
     if (profileId && !(await bindProfile(profileId))) return
     offerPairLink(link)
-    openSettingsSection('connections', 'devices-engine')
+    openSettingsSection('connections', 'devices-list')
   }
 
   if (!choice) return null

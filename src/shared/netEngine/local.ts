@@ -136,6 +136,8 @@ export interface NetEngineDevice {
   via?: string
   /** Routes it offered in pairback that need the owner's Use before they are dialled (§1.3 suggestions). */
   offered?: string[]
+  /** Its SSH route as the owner typed it (`user@host` or an alias), when one was set up for it over SSH. */
+  ssh?: string
   /** It was added over SSH (§3.4): one way only, until a Send link adds the other direction. */
   source?: 'ssh'
   /** Added over SSH, one way: `out`, this computer uses it; `in`, it uses this computer (§3.6). */

@@ -52,3 +52,5 @@ The `stale-helper` control sets `MOUSSE_BUILD_ID=0000000+release`, which this ch
 
 An installed app also checks its helper: when the helper's hello names a build other than `ENGINE_COMMIT` beside it,
 the switch turns off and reads "Networking helper doesn't match this app".
+
+Mousse Plus over the engine (Phase 4) is off by default and stays on the old networking; `MOUSSE_NET_ENGINE_PLUS=1` turns it on.
