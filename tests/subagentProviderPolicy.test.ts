@@ -377,8 +377,8 @@ describe('Codex children', () => {
     const turns = s.requests('turn/start')
     expect(turns).toHaveLength(3)
     for (const turn of turns) expect(turn.params).toMatchObject({ approvalPolicy: 'on-request', sandboxPolicy: { type: 'readOnly', networkAccess: false } })
-    // The turns themselves never read or write the user's Codex config.
-    expect(s.messages.map((message) => message.method)).not.toContain('config/read')
+    // The startup sign-in check reads the store. Shared children need no separate MCP setup read.
+    expect(s.requests('config/read').some((message) => message.params?.includeLayers)).toBe(false)
   })
 
   it('an isolated child and a thread that is not a subagent run under the thread\'s permission mode', async () => {

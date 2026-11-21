@@ -1,4 +1,6 @@
 import { EventEmitter } from 'node:events'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import type { CodexLaunch, CodexProcess } from '../../harness/vendors/codex/CodexAppServerClient'
 import type { ReplayTransport } from './ReplayTransport'
@@ -37,6 +39,10 @@ class ReplayCodexProcess extends EventEmitter implements CodexProcess {
   signalCode: NodeJS.Signals | null = null
   private pumping = false
   private pending = ''
+  private syntheticRequests = 0
+  private readonly requestIds = new Map<number, number>()
+  private accountRequest?: number
+  private accountResult?: unknown
 
   constructor(private readonly transport: ReplayTransport) {
     super()
@@ -49,7 +55,7 @@ class ReplayCodexProcess extends EventEmitter implements CodexProcess {
           this.pending = this.pending.slice(end + 1)
           if (!line.trim()) continue
           try {
-            this.transport.send(withoutCwd(JSON.parse(line)))
+            this.send(JSON.parse(line))
           } catch (error) {
             done(error as Error)
             return
@@ -59,6 +65,29 @@ class ReplayCodexProcess extends EventEmitter implements CodexProcess {
         done()
       }
     })
+  }
+
+  private send(message: { id?: unknown; method?: unknown; params?: { includeLayers?: boolean } }): void {
+    if (typeof message.id === 'number' && typeof message.method === 'string') {
+      // Answer extra credential checks for file-backed replays while preserving checks already recorded.
+      const expected = this.transport.expectedOutbound as { method?: unknown } | undefined
+      if (message.method !== expected?.method) {
+        if (message.method === 'config/read' && !message.params?.includeLayers)
+          return this.replyToCredentialCheck(message.id, { config: { cli_auth_credentials_store: 'file' } })
+        if (message.method === 'account/read' && this.accountResult !== undefined)
+          return this.replyToCredentialCheck(message.id, this.accountResult)
+      }
+      const replayId = message.id - this.syntheticRequests
+      this.requestIds.set(replayId, message.id)
+      message.id = replayId
+      if (message.method === 'account/read') this.accountRequest = replayId
+    }
+    this.transport.send(withoutCwd(message))
+  }
+
+  private replyToCredentialCheck(id: number, result: unknown): void {
+    this.syntheticRequests += 1
+    this.stdout.write(JSON.stringify({ id, result }) + '\n')
   }
 
   private get exited(): boolean {
@@ -71,14 +100,23 @@ class ReplayCodexProcess extends EventEmitter implements CodexProcess {
     void (async () => {
       try {
         for (;;) {
-          const frame = await this.transport.receive()
+          const frame = await this.transport.receive((outbound) => (outbound as { method?: unknown } | null)?.method === 'initialize')
           if (frame === undefined || this.exited) return
-          const control = frame as { kind?: unknown; code?: unknown; line?: unknown }
+          const control = frame as { kind?: unknown; code?: unknown; line?: unknown; id?: unknown; method?: unknown; result?: unknown }
           if (control.kind === 'exit') {
             this.exit(typeof control.code === 'number' ? control.code : 1, null)
             return
           }
-          this.stdout.write((control.kind === 'stdout' ? String(control.line) : JSON.stringify(frame)) + '\n')
+          let response = frame
+          if (typeof control.id === 'number' && control.method === undefined) {
+            const id = this.requestIds.get(control.id)
+            if (id !== undefined) {
+              this.requestIds.delete(control.id)
+              if (control.id === this.accountRequest) this.accountResult = control.result
+              response = { ...control, id }
+            }
+          }
+          this.stdout.write((control.kind === 'stdout' ? String(control.line) : JSON.stringify(response)) + '\n')
         }
       } catch {
         /* the transport keeps the first mismatch; the scenario asserts it */
@@ -100,6 +138,15 @@ class ReplayCodexProcess extends EventEmitter implements CodexProcess {
     this.exit(null, signal)
     return true
   }
+}
+
+/** Give the replay a file-backed sign-in in its disposable home before the service snapshots it. */
+export function replayCodexEnv(home: string): () => NodeJS.ProcessEnv {
+  writeFileSync(join(home, 'auth.json'), JSON.stringify({
+    auth_mode: 'chatgpt',
+    tokens: { account_id: 'replay-workspace', access_token: 'replay-token' }
+  }))
+  return () => ({ CODEX_HOME: home })
 }
 
 /** A fresh replayed app-server process per launch. */

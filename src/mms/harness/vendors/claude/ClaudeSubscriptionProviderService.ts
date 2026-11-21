@@ -413,6 +413,8 @@ type Dependencies = {
     env: NodeJS.ProcessEnv,
     signal?: AbortSignal
   ) => Promise<string>
+  /** The account of the CLI environment (default `claudeAccountSubject`). */
+  accountSubject?: typeof claudeAccountSubject
   /** `claude --version` lookups (tests). */
   versions?: CliVersionCache
   /**
@@ -1478,7 +1480,7 @@ export class ClaudeSubscriptionProviderService {
       kind: 'error',
       message: 'Claude Code did not report its sign-in status. Update the Claude Code CLI and recheck.'
     }
-    const subjectBefore = claudeAccountSubject(env)
+    const subjectBefore = this.accountSubject(env)
     let output: string
     try {
       output = await this.runClaude(['auth', 'status'], env, signal)
@@ -1504,7 +1506,7 @@ export class ClaudeSubscriptionProviderService {
     const method = text(status.authMethod)
     const plan = text(status.subscriptionType)
     const label = plan ? `Claude ${plan[0].toUpperCase()}${plan.slice(1)}` : method && (CLAUDE_AUTH_METHOD_LABELS[method] ?? method)
-    const subject = claudeAccountSubject(env)
+    const subject = this.accountSubject(env)
     if (subject !== subjectBefore)
       return { kind: 'error', message: 'The Claude Code sign-in changed during its check. Try again.' }
     const apiProvider = text(status.apiProvider)
@@ -1517,8 +1519,8 @@ export class ClaudeSubscriptionProviderService {
     return result?.kind === 'signed_in' ? result.account : undefined
   }
   /** The account this instance runs as (`claudeAccountSubject`), read without starting Claude Code. */
-  accountSubject(): string | undefined {
-    return claudeAccountSubject(this.environment())
+  accountSubject(env = this.environment()): string | undefined {
+    return (this.dependencies.accountSubject ?? claudeAccountSubject)(env)
   }
   /**
    * Whether the user's Claude settings forbid `bypassPermissions` (`claudeBypassDisabled`) or turn auto

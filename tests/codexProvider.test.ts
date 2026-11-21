@@ -62,7 +62,10 @@ function scriptedServer(answer: (message: Message, launchIndex: number) => Reply
         pending = pending.slice(end + 1)
         messages.push(message)
         if (message.id === undefined || !message.method) continue
-        const reply = message.method === 'initialize' ? { result: { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' } } : answer(message, launchIndex)
+        let reply = message.method === 'initialize' ? { result: { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' } } : answer(message, launchIndex)
+        // The fixture defaults to Codex's file store unless the test supplies a config or an error.
+        if (message.method === 'config/read' && !reply?.error &&
+            !(reply?.result && typeof reply.result === 'object' && 'config' in reply.result)) reply = { result: { config: {} } }
         if (reply) stdout.write(JSON.stringify({ id: message.id, ...reply }) + '\n')
       }
     })
@@ -279,7 +282,7 @@ describe('CodexProviderService', () => {
     expect(launch.env.CODEX_API_KEY).toBeUndefined()
     expect('CODEX_HOME' in launch.env).toBe(false)
     expect(launch.env.PATH).toBe(process.env.PATH)
-    expect(server.methods()).toEqual(['initialize', 'initialized', 'account/read'])
+    expect(server.methods()).toEqual(['initialize', 'initialized', 'config/read', 'account/read'])
   })
 
   it('caches the account check for five minutes; Recheck and expiry check again', async () => {
@@ -463,12 +466,15 @@ describe('CodexProviderService options (managed Codex)', () => {
   type Turn = { status: 'completed' | 'failed'; error?: unknown }
 
   /** A server that runs turns: threads answer with `provider`, every turn ends as `turn` says. */
-  function turnServer(options: { provider?: (method: string) => string; turn?: () => Turn | null; compact?: () => Turn | 'unknown'; resume?: 'missing' | 'another'; beforeOpen?: (message: Message) => boolean; account?: (launchIndex: number) => Reply; authStore?: string } = {}) {
+  function turnServer(options: { provider?: (method: string) => string; turn?: () => Turn | null; compact?: () => Turn | 'unknown'; resume?: 'missing' | 'another'; beforeOpen?: (message: Message) => boolean; account?: (launchIndex: number) => Reply; authStore?: string | ((launch: number) => string) } = {}) {
     let threads = 0
     const server = scriptedServer((message, launchIndex) => {
       const method = message.method!
       if (method === 'account/read') return options.account?.(launchIndex) ?? chatgpt
-      if (method === 'config/read' && options.authStore) return { result: { config: { cli_auth_credentials_store: options.authStore } } }
+      if (method === 'config/read') {
+        const store = typeof options.authStore === 'function' ? options.authStore(launchIndex) : options.authStore
+        return { result: { config: { cli_auth_credentials_store: store } } }
+      }
       if (method === 'thread/resume' && options.resume === 'missing') return { error: { code: -32600, message: 'no rollout found for thread id' } }
       if (['thread/start', 'thread/resume', 'thread/fork'].includes(method)) {
         if (options.beforeOpen?.(message) === false) return undefined
@@ -585,6 +591,26 @@ describe('CodexProviderService options (managed Codex)', () => {
     expect(second.codexThreadId).not.toBe(first.codexThreadId)
     expect(server.requests('thread/resume')).toHaveLength(0)
     expect(server.requests('turn/start')).toHaveLength(2)
+    expect(server.processes.every((process) => process.signalCode === 'SIGTERM')).toBe(true)
+  })
+
+  it('reads the store selected by system config before trusting a leftover terminal auth file', async () => {
+    const server = turnServer({ authStore: (launch) => launch === 0 ? 'file' : 'keyring' })
+    const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X' }] })
+    const first = await chat(service)
+    service.commitConversation('t', 'file-backed conversation')
+    await service.stopAll('switch to system keyring')
+
+    // The user home has no config.toml, and auth.json still names the original workspace.
+    const second = await chat(service, { history: 'file-backed conversation' })
+    service.commitConversation('t', 'keyring-backed conversation')
+    const third = await chat(service, { history: 'keyring-backed conversation' })
+
+    expect(new Set([first.codexThreadId, second.codexThreadId, third.codexThreadId]).size).toBe(3)
+    expect(server.requests('thread/resume')).toHaveLength(0)
+    expect(server.requests('config/read')).toHaveLength(server.launches.length)
+    expect(JSON.stringify(server.requests('turn/start')[1])).toContain('file-backed conversation')
+    expect(JSON.stringify(server.requests('turn/start')[2])).toContain('keyring-backed conversation')
     expect(server.processes.every((process) => process.signalCode === 'SIGTERM')).toBe(true)
   })
 
@@ -1611,6 +1637,49 @@ describe('CodexProviderService options (managed Codex)', () => {
         await service.stop()
       }
     })
+
+    it.each([
+      ['at capacity', CODEX_MAX_LOADED_THREADS],
+      ['with one slot left', CODEX_MAX_LOADED_THREADS - 1]
+    ])(
+      'reuses a loaded thread %s while other turns stay active',
+      async (_capacity, loadedCount) => {
+        let holdTurn = false
+        const server = turnServer({ provider: () => MANAGED, turn: () => holdTurn ? null : { status: 'completed' } })
+        const service = managed(server)
+        const lifetime = new AbortController()
+        const pending: Array<Promise<unknown>> = []
+        const start = (threadId: string, history?: string) => {
+          const turn = chat(service, { threadId, history, signal: lifetime.signal })
+          void turn.catch(() => undefined)
+          pending.push(turn)
+        }
+        try {
+          const warm = await chat(service)
+          service.commitConversation('t', 'warm history')
+          holdTurn = true
+          for (let index = 1; index < loadedCount; index++) start('active-' + index)
+          await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(loadedCount))
+
+          start('t', 'warm history')
+          await vi.waitFor(() => expect(server.requests('turn/start').at(-1)?.params).toMatchObject({ threadId: warm.codexThreadId }))
+          expect(server.requests('thread/start')).toHaveLength(loadedCount)
+          expect(server.requests('thread/resume')).toHaveLength(0)
+
+          if (loadedCount < CODEX_MAX_LOADED_THREADS) {
+            holdTurn = false
+            await chat(service, { threadId: 'last-slot', signal: AbortSignal.timeout(2_000) })
+            expect(server.requests('thread/start')).toHaveLength(CODEX_MAX_LOADED_THREADS)
+          }
+          expect(server.requests('thread/unsubscribe')).toHaveLength(0)
+          expect(server.launches).toHaveLength(1)
+        } finally {
+          lifetime.abort()
+          await service.stop()
+          await Promise.allSettled(pending)
+        }
+      }
+    )
 
     it('recycles when unsubscribe acknowledges without confirming unload', async () => {
       const server = turnServer({ provider: () => MANAGED })

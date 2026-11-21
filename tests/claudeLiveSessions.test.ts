@@ -15,6 +15,7 @@ import {
   type ClaudeSubscriptionChatInput
 } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
 import { BackgroundObligations, LIVE_IDLE_CLOSE_MS, LiveSession, UNSURE_MEMORY_MS, type LiveTimings } from '../src/mms/harness/vendors/claude/liveSession'
+import { claudeAccountSubject } from '../src/mms/harness/vendors/claude/accountSubject'
 import { STOP_GRACE_MS } from '../src/mms/harness/stopProcesses'
 import { FakeClaudeCli, lifecycle, messageStart, notification, resultFrame, roster, SESSION, taskStarted, textDelta, toolResult, toolStart } from './run/fakeClaudeCli'
 
@@ -137,11 +138,15 @@ describe('a live Claude query', () => {
     void home
   })
 
-  it.each(['settings.json', 'settings.local.json'])('replaces the warm process when %s changes its API key', async (file) => {
-    const { cli, turn, service, home } = fixture()
-    const folder = join(home, '.claude')
-    mkdirSync(folder)
-    const settings = join(folder, file)
+  it.each(['project', 'local', 'managed drop-in'])('replaces the warm process when %s settings change the API key or add a helper', async (source) => {
+    const managed = source === 'managed drop-in'
+    const managedDir = join(process.env.CLAUDE_CONFIG_DIR!, 'policy')
+    const { cli, turn, service, home } = fixture({}, undefined, undefined, managed ? {
+      accountSubject: (env) => claudeAccountSubject(env, { managedFiles: [join(managedDir, 'managed-settings.json')] })
+    } : {})
+    const folder = managed ? join(managedDir, 'managed-settings.d') : join(home, '.claude')
+    mkdirSync(folder, { recursive: true })
+    const settings = join(folder, managed ? '10-credentials.json' : source === 'local' ? 'settings.local.json' : 'settings.json')
     const saveKey = (key: string) => writeFileSync(settings, JSON.stringify({ env: { ANTHROPIC_API_KEY: key } }))
     try {
       saveKey('first-fixture-key')

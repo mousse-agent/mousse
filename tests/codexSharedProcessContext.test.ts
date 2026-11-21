@@ -85,6 +85,9 @@ function sharedServer() {
           case 'initialize':
             reply({ userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' })
             break
+          case 'config/read':
+            reply({ config: {} })
+            break
           case 'account/read':
             reply({ account: { type: 'chatgpt', email: 'person@example.invalid', planType: 'plus' }, requiresOpenaiAuth: true })
             break

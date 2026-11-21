@@ -246,7 +246,8 @@ function appServers() {
           const account = accountOf(spec.env.CODEX_HOME)
           // `api-key`: signed in, but with a key and not a ChatGPT account.
           reply = { result: { account: account === 'api-key' ? { type: 'apiKey' } : account ? { type: 'chatgpt', email: `${account}@example.test`, planType: 'plus' } : null, requiresOpenaiAuth: true } }
-        } else if (message.method === 'model/list') reply = { result: { data: [{ id: 'gpt-test', displayName: 'GPT Test', hidden: false, supportedReasoningEfforts: [] }], nextCursor: null } }
+        } else if (message.method === 'config/read') reply = { result: { config: {} } }
+        else if (message.method === 'model/list') reply = { result: { data: [{ id: 'gpt-test', displayName: 'GPT Test', hidden: false, supportedReasoningEfforts: [] }], nextCursor: null } }
         else reply = { error: { code: -32000, message: 'replay ends here' } }
         stdout.write(JSON.stringify({ id: message.id, ...(reply as object) }) + '\n')
       }

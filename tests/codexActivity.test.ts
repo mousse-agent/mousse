@@ -19,7 +19,7 @@ import type { ThreadItem } from '../src/mms/harness/vendors/codex/protocol'
 import { CodexAdapter } from '../src/mms/harness/drivers/codex/adapter'
 import { createCodexProviderService, type CodexProviderService as AdapterService } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../src/mms/harness/adapter'
-import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer } from '../src/mms/run/testkit/codexAppServerReplay'
+import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer, replayCodexEnv } from '../src/mms/run/testkit/codexAppServerReplay'
 import { ReplayTransport, parseTranscript } from '../src/mms/run/testkit/ReplayTransport'
 import { TranscriptAssembler, type TranscriptStreamState } from '../src/mms/run/transcript/TranscriptAssembler'
 import { runtimeToolEvent } from '../src/mms/run/transcript/promptRuntime'
@@ -286,7 +286,7 @@ describe('the activity fixture through the Codex adapter', () => {
     chmodSync(binary, 0o755)
     mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
     writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }] }))
-    const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { env: () => ({ CODEX_HOME: home }), launch: () => ({ binaryPath: binary }) })
+    const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { env: replayCodexEnv(home), launch: () => ({ binaryPath: binary }) })
     services.push(service)
     const tools: StreamingLlmToolEvent[] = []
     const sink = new Proxy({}, { get: (_target, name) => (name === 'tool' ? (event: StreamingLlmToolEvent) => tools.push(event) : () => undefined) }) as TurnSink
@@ -445,6 +445,7 @@ describe('Codex activity against a scripted app-server', () => {
           const result =
             message.method === 'initialize' ? { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' }
             : message.method === 'account/read' ? { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, requiresOpenaiAuth: true }
+            : message.method === 'config/read' ? { config: {} }
             : message.method === 'thread/list' ? { data: [], nextCursor: null }
             : message.method === 'thread/start' ? { thread: { id: PARENT }, model: 'gpt-x', modelProvider: CODEX_MODEL_PROVIDER, cwd: home }
             : message.method === 'turn/start' ? { turn: { id: 'turn-1', status: 'inProgress', error: null } }

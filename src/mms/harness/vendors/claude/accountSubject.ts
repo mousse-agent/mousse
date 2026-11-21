@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { isClaudeSignInVariable } from '../../claude/apiKey'
@@ -19,6 +19,8 @@ export interface AccountSubjectOptions {
   /** The user's home directory (default `os.homedir()`). */
   home?: string
   platform?: NodeJS.Platform
+  /** The main managed settings paths and the locations of their adjacent drop-in directories. */
+  managedFiles?: readonly string[]
 }
 
 type Json = Record<string, unknown>
@@ -40,7 +42,7 @@ function readClaudeSettings(env: NodeJS.ProcessEnv, options: AccountSubjectOptio
     }
   }
   const configDir = env.CLAUDE_CONFIG_DIR?.trim()
-  const settings = [json(join(configDir || join(home, '.claude'), 'settings.json')), ...managedSettingsPaths(options.platform ?? process.platform).map(json)]
+  const settings = [json(join(configDir || join(home, '.claude'), 'settings.json')), ...(options.managedFiles ?? managedSettingsPaths(options.platform ?? process.platform)).map(json)]
     .filter((value): value is Json => Boolean(value))
   // Claude Code applies the `env` of its settings over its own environment.
   const effective: Record<string, string | undefined> = { ...env }
@@ -103,6 +105,30 @@ export function claudeSignInEnvironment(env: NodeJS.ProcessEnv, options: Account
   return signIn
 }
 
+/** Read every candidate in load order. An unreadable drop-in leaves its credentials unknown. */
+function managedDropInCredentials(options: AccountSubjectOptions) {
+  const settings: unknown[] = []
+  const readText = options.readText ?? ((path: string) => readFileSync(path, 'utf8'))
+  for (const file of options.managedFiles ?? managedSettingsPaths(options.platform ?? process.platform)) {
+    const folder = join(dirname(file), 'managed-settings.d')
+    let entries: string[]
+    try {
+      entries = readdirSync(folder, { withFileTypes: true })
+        .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && !entry.name.startsWith('.') && entry.name.endsWith('.json'))
+        .map((entry) => entry.name).sort()
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      return undefined
+    }
+    try {
+      for (const name of entries) settings.push(JSON.parse(readText(join(folder, name))))
+    } catch {
+      return undefined
+    }
+  }
+  return credentialOverrides(settings)
+}
+
 /**
  * A stable id of the account Claude Code runs as, read from the files and variables it reads,
  * without starting it (never shown or stored; the gateway hashes it). Undefined when Mousse cannot
@@ -119,7 +145,7 @@ export function claudeSignInEnvironment(env: NodeJS.ProcessEnv, options: Account
  * an `apiKeyHelper` or AWS credential export in Claude's settings, an AWS profile without static
  * keys (SSO, roles, processes), the cloud default chains, or a Google credential of another kind.
  * Cloud variables count only when their route is on (`CLAUDE_CODE_USE_BEDROCK`/`_VERTEX`).
- * Project settings are not read: they depend on the folder of each turn.
+ * Managed drop-ins contribute their credential overrides. Project settings depend on each turn's folder.
  */
 export function claudeAccountSubject(env: NodeJS.ProcessEnv, options: AccountSubjectOptions = {}): string | undefined {
   const { json, readText, home, configDir, settings, effective } = readClaudeSettings(env, options)
@@ -127,6 +153,8 @@ export function claudeAccountSubject(env: NodeJS.ProcessEnv, options: AccountSub
   const setting = (name: string) => settings.some((entry) => typeof entry[name] === 'string' && (entry[name] as string).trim())
 
   if (setting('apiKeyHelper')) return undefined
+  const dropIns = managedDropInCredentials(options)
+  if (!dropIns) return undefined
   const parts: string[] = []
   if (on(value('CLAUDE_CODE_USE_BEDROCK'))) {
     const principal = setting('awsCredentialExport') ? undefined : bedrockPrincipal(value, readText, home)
@@ -143,6 +171,7 @@ export function claudeAccountSubject(env: NodeJS.ProcessEnv, options: AccountSub
   if (isRecord(account) && typeof account.accountUuid === 'string' && account.accountUuid)
     parts.push(`claude.ai:${account.accountUuid}:${typeof account.organizationUuid === 'string' ? account.organizationUuid : ''}`)
   if (!parts.length) return undefined
+  if (dropIns.length) parts.push(`managed:${sha(JSON.stringify(dropIns))}`)
   // A proxy is not a credential, but the same credential through another route is another account.
   const route = value('ANTHROPIC_BASE_URL')
   if (route) parts.push(`route:${sha(route)}`)
@@ -173,7 +202,12 @@ export function claudeTurnCredentialKey(
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return undefined
     }
   }
-  const credentials: unknown[] = []
+  const credentials = credentialOverrides(settings)
+  return credentials && sha(JSON.stringify(credentials))
+}
+
+function credentialOverrides(settings: readonly unknown[]) {
+  const credentials: Array<Array<[string, unknown]>> = []
   for (const entry of settings) {
     if (!isRecord(entry)) continue
     if (entry.apiKeyHelper || entry.awsCredentialExport || entry.awsAuthRefresh || entry.gcpAuthRefresh || entry.forceLoginOrgUUID || entry.forceLoginMethod) return undefined
@@ -185,7 +219,7 @@ export function claudeTurnCredentialKey(
         (key !== 'ANTHROPIC_BASE_URL' && !CLAUDE_DIRECT_CREDENTIALS.includes(key)))) return undefined
     if (overrides.length) credentials.push(overrides.sort(([a], [b]) => a.localeCompare(b)))
   }
-  return sha(JSON.stringify(credentials))
+  return credentials
 }
 
 /**

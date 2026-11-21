@@ -412,15 +412,21 @@ function terminalAuthState(home: string) {
 interface TerminalAuth {
   home: string
   atLaunch: ReturnType<typeof terminalAuthState>
-  /** A config override may select a different auth store than the default file. */
-  checkStore: boolean
-  fileStore?: Promise<boolean>
+  fileStore: Promise<boolean>
   coldOnly?: boolean
   admitted?: boolean
 }
 
 class TerminalCredentialsChanged extends Error {
   constructor() { super('The Codex terminal sign-in changed. Try again.') }
+}
+
+interface LoadedCodexThread {
+  mcpToken: string | null
+  relayKey: string | null
+  cwd: string
+  childKey: string
+  instructionsHash?: string
 }
 
 interface CodexApp {
@@ -1279,7 +1285,7 @@ export class CodexProviderService {
   private readonly packages = new WeakMap<CodexConnection, string | undefined>()
   /** The Codex version each process reported at `initialize` (`codexVersionOf`): a bot's turn runs only on a checked one. */
   private readonly versions = new WeakMap<CodexConnection, string | undefined>()
-  private readonly loaded = new Map<string, { mcpToken: string | null; relayKey: string | null; cwd: string; childKey: string; instructionsHash?: string }>()
+  private readonly loaded = new Map<string, LoadedCodexThread>()
   private readonly activeThreads = new Set<string>()
   /**
    * Codex threads compacting for `/compact`, by Codex thread id: the compaction's turn once Codex started it, and
@@ -1507,12 +1513,8 @@ export class CodexProviderService {
         ? await this.options.account.read(signal)
         : classifyAccount(await conn!.request('account/read', { refreshToken: false }, { timeoutMs: 15_000, signal }), this.options.ownSignIn)
       if (terminal && result.kind === 'signed_in') {
-        if (terminal.checkStore) {
-          terminal.fileStore ??= conn!.request('config/read', { cwd: this.dir }, { timeoutMs: 5_000 })
-            .then(({ config }) => Boolean(config) && (config.cli_auth_credentials_store == null || config.cli_auth_credentials_store === 'file'))
-            .catch(() => false)
-        }
-        terminal.coldOnly = !terminal.atLaunch.observable || (terminal.fileStore !== undefined && !await terminal.fileStore)
+        const fileStore = await (signal ? abortable(terminal.fileStore, signal) : terminal.fileStore)
+        terminal.coldOnly = !fileStore || !terminal.atLaunch.observable
         if (!terminal.coldOnly && terminal.atLaunch.subject)
           nativeSubject = JSON.stringify([terminal.atLaunch.subject, result.email?.trim().toLowerCase() ?? null])
         if (nativeSubject) result = { ...result, subject: nativeSubject }
@@ -1572,7 +1574,9 @@ export class CodexProviderService {
   }
 
   /** Verify the server that will receive input, including a replacement after an observed account switch. */
-  private async verifiedConnection(signal: AbortSignal, reserved: Set<string>, savedId?: string) {
+  private async verifiedConnection(
+    signal: AbortSignal, reserved: Set<string>, options: { input?: CodexChatInput; savedId?: string } = {}
+  ) {
     let replacements = 0
     for (;;) {
       const conn = await abortable(this.connection(), signal)
@@ -1582,11 +1586,16 @@ export class CodexProviderService {
           throw new AppError({ code: 'codex_not_connected', message: result.message, errorInfo: { category: 'unavailable', retryable: false } })
         const app = this.app
         if (app?.conn === conn) {
-          this.assertAccount(conn)
-          // No await between checking capacity and claiming the slot.
-          if (this.hasThreadCapacity(app)) {
-            if (savedId && this.loaded.has(savedId) && !app.unloading.has(savedId)) reserved.add(savedId)
-            return { conn, release: this.holdThreads(app, reserved) }
+          const prepared = options.input && this.canAdmitThread(app) ? await this.prepareThread(conn, options.input, signal) : undefined
+          signal.throwIfAborted()
+          const owner = this.threadOwner(conn)
+          const savedId = prepared?.saved?.codexThreadId ?? options.savedId
+          const loaded = savedId && !app.unloading.has(savedId) ? this.loaded.get(savedId) : undefined
+          const reuse = Boolean(loaded && (prepared ? this.canReuseThread(prepared, loaded, owner) : true))
+          // No await between checking capacity and pinning a loaded thread or reserving a new slot.
+          if ((reuse && this.canAdmitThread(app)) || this.hasThreadCapacity(app)) {
+            if (savedId && loaded) reserved.add(savedId)
+            return { conn, prepared, reuse, release: this.holdThreads(app, reserved, !reuse) }
           }
           await this.awaitThreadCapacity(app, signal, savedId)
           continue
@@ -1895,7 +1904,7 @@ export class CodexProviderService {
       // The saved thread may have changed while this waited (a sign-out, a new account).
       if (this.settings.threads?.[threadId] !== saved) return false
       const reserved = new Set<string>()
-      const admission = await this.verifiedConnection(signal, reserved, codexThreadId)
+      const admission = await this.verifiedConnection(signal, reserved, { savedId: codexThreadId })
       const { conn } = admission
       releaseThreads = admission.release
       const owner = this.threadOwner(conn)
@@ -2377,18 +2386,14 @@ export class CodexProviderService {
   /** Starts the app-server process and initializes it. */
   private launch(target: CliLaunch, extras?: CodexLaunchExtras): Promise<CodexConnection> {
     let process: CodexProcess
-    let terminal: TerminalAuth | undefined
+    let terminalAuth: Pick<TerminalAuth, 'home' | 'atLaunch'> | undefined
     try {
       mkdirSync(this.dir, { recursive: true, mode: 0o700 })
       const userArgs = storedCliArgs(this.launchSettings())
       const env = withEnforced({ ...this.environment(), ...extras?.env }, this.options.telemetry?.()?.env)
       if (!this.options.account) {
         const home = env.CODEX_HOME ? resolve(this.dir, env.CODEX_HOME) : join(homedir(), '.codex')
-        terminal = {
-          home,
-          atLaunch: terminalAuthState(home),
-          checkStore: existsSync(join(home, 'config.toml')) || userArgs.some((arg) => /profile|cli_auth_credentials_store/.test(arg))
-        }
+        terminalAuth = { home, atLaunch: terminalAuthState(home) }
       }
       process = (this.dependencies.launch ?? spawnCodexAppServer)({
         binary: target.command,
@@ -2446,6 +2451,14 @@ export class CodexProviderService {
         return conn
       })
     ready.catch(() => conn.close())
+    // The effective store includes system and profile config. Only a verified file store makes auth.json authoritative.
+    const terminal: TerminalAuth | undefined = terminalAuth && {
+      ...terminalAuth,
+      fileStore: ready.then(() => conn.request('config/read', { cwd: this.dir }, { timeoutMs: 5_000 }))
+        .then(({ config }) => Boolean(config && typeof config === 'object' && !Array.isArray(config) &&
+          (config.cli_auth_credentials_store == null || config.cli_auth_credentials_store === 'file')))
+        .catch(() => false)
+    }
     this.app = { conn, ready, generation: this.launchGeneration, statuses, terminal, recycleRequired: false, threadUsers: new Set(), opening: new Set(), unloading: new Map(), capacityWaiters: new Set() }
     return ready
   }
@@ -3147,9 +3160,9 @@ export class CodexProviderService {
     this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
   }
 
-  private holdThreads(app: CodexApp, reserved: Set<string>): () => Promise<void> | undefined {
+  private holdThreads(app: CodexApp, reserved: Set<string>, opensThread: boolean): () => Promise<void> | undefined {
     app.threadUsers.add(reserved)
-    app.opening.add(reserved)
+    if (opensThread) app.opening.add(reserved)
     if (app.terminal) app.terminal.admitted = true
     return () => {
       app.threadUsers.delete(reserved)
@@ -3167,6 +3180,7 @@ export class CodexProviderService {
   ): Promise<CodexRequestMap[M]['result']> {
     this.assertAccount(conn)
     signal.throwIfAborted()
+    if (!this.app!.opening.has(reserved)) throw new Error('The loaded Codex thread closed before the request could be sent. Try again.')
     try {
       const result = pinnedProvider(this.modelProvider, await conn.request(method, params, { signal }))
       this.assertAccount(conn)
@@ -3205,8 +3219,12 @@ export class CodexProviderService {
     return [...new Set([...this.loaded.keys(), ...app.unloading.keys()])].filter((id) => !this.turns.has(id) && !reserved.has(id))
   }
 
+  private canAdmitThread(app: CodexApp): boolean {
+    return !app.recycleRequired && !(app.terminal?.coldOnly && app.terminal.admitted)
+  }
+
   private hasThreadCapacity(app: CodexApp): boolean {
-    if (app.recycleRequired || (app.terminal?.coldOnly && app.terminal.admitted)) return false
+    if (!this.canAdmitThread(app)) return false
     const ids = new Set([...this.loaded.keys(), ...app.unloading.keys(), ...[...app.threadUsers].flatMap((held) => [...held])])
     return ids.size + app.opening.size < CODEX_MAX_LOADED_THREADS
   }
@@ -3247,19 +3265,11 @@ export class CodexProviderService {
     })
   }
 
-  /**
-   * Opens the thread's Codex thread for this turn: the loaded one, a resumed saved one, or a new
-   * one. A failed resume starts a new thread and reports `broken`.
-   */
-  private async openThread(
-    conn: CodexConnection,
-    input: CodexChatInput,
-    signal: AbortSignal,
-    reserved: Set<string>
-  ): Promise<{ codexThreadId: string; model: string | undefined; continued: boolean; instructionsStale?: boolean; botSandbox?: CodexBotSandbox; resumeLost?: true }> {
+  /** Resolve the thread configuration before deciding if the turn needs a new loaded slot. */
+  private async prepareThread(conn: CodexConnection, input: CodexChatInput, signal: AbortSignal) {
+    await abortable(this.ensureTreeMode(conn), signal)
     const cwd = resolve(input.cwd)
     const instructionsHash = input.developerInstructions ? historyKey(input.developerInstructions).slice(0, 32) : undefined
-    const saved = this.settings.threads?.[input.threadId]
     const mcpToken = input.mcp?.token ?? null
     // The MCP relay and its catalogue revision: Codex lists a server's tools when it loads a thread.
     const relayKey = input.mcp?.relay ? `${input.mcp.relay.url}|${input.mcp.relay.revision}` : null
@@ -3322,11 +3332,34 @@ export class CodexProviderService {
       config: { ...overrides, model_provider: this.modelProvider },
       ...(input.developerInstructions ? { developerInstructions: input.developerInstructions } : {})
     }
+    const saved = this.settings.threads?.[input.threadId]
+    const resumable = saved && (saved.instanceId ?? CODEX_INSTANCE_ID) === (input.instanceId ?? CODEX_INSTANCE_ID) &&
+      saved.cwd === cwd && saved.historyKey === historyKey(input.history ?? '')
+    return { threadId: input.threadId, saved: resumable ? saved : undefined, params, mcpToken, relayKey, cwd, childKey, instructionsHash, botSandbox, bot: Boolean(input.bot) }
+  }
+
+  private canReuseThread(
+    prepared: Awaited<ReturnType<CodexProviderService['prepareThread']>>, loaded: LoadedCodexThread, owner: string | undefined
+  ): boolean {
+    const { saved, bot, instructionsHash, mcpToken, relayKey, cwd, childKey } = prepared
+    const opened = loaded.instructionsHash ?? saved?.instructionsHash
+    return Boolean(owner && saved?.account === owner &&
+      (!bot || instructionsHash === undefined || opened === undefined || opened === instructionsHash) &&
+      loaded.mcpToken === mcpToken && loaded.relayKey === relayKey && loaded.cwd === cwd && loaded.childKey === childKey)
+  }
+
+  /** Opens the thread for the turn, reusing the loaded thread when admission pinned it. */
+  private async openThread(
+    conn: CodexConnection,
+    prepared: Awaited<ReturnType<CodexProviderService['prepareThread']>>,
+    reuse: boolean,
+    signal: AbortSignal,
+    reserved: Set<string>
+  ): Promise<{ codexThreadId: string; model: string | undefined; continued: boolean; instructionsStale?: boolean; botSandbox?: CodexBotSandbox; resumeLost?: true }> {
+    const { threadId, saved, params, mcpToken, relayKey, cwd, childKey, instructionsHash, botSandbox, bot } = prepared
     // A Codex thread belongs to the instance that started it; another instance starts fresh.
     const owner = this.threadOwner(conn)
-    const resumable = saved && owner && saved.account === owner && !this.app!.unloading.has(saved.codexThreadId) &&
-      (saved.instanceId ?? CODEX_INSTANCE_ID) === (input.instanceId ?? CODEX_INSTANCE_ID) && saved.cwd === cwd && saved.historyKey === historyKey(input.history ?? '')
-    if (resumable) {
+    if (saved && owner && saved.account === owner && !this.app!.unloading.has(saved.codexThreadId)) {
       const previous = this.turns.get(saved.codexThreadId)
       if (previous) {
         // A stopped turn of this thread is still settling on the server.
@@ -3339,13 +3372,13 @@ export class CodexProviderService {
       // keeps its developer instructions, and they are what survives Codex's own compaction), so the dispatch starts a
       // new Codex thread under the new text, with the history given in its prompt.
       const opened = loaded?.instructionsHash ?? saved.instructionsHash
-      if (input.bot && instructionsHash !== undefined && opened !== undefined && opened !== instructionsHash) {
+      if (bot && instructionsHash !== undefined && opened !== undefined && opened !== instructionsHash) {
         if (loaded) void this.unloadThread(conn, saved.codexThreadId)
         const fresh = await this.requestThread(conn, 'thread/start', params, signal, reserved)
         this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
         return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox }
       }
-      if (loaded && loaded.mcpToken === mcpToken && loaded.relayKey === relayKey && loaded.cwd === cwd && loaded.childKey === childKey) {
+      if (loaded && reuse) {
         // The most recently used now. New admissions evict the oldest first.
         this.loaded.delete(saved.codexThreadId)
         this.loaded.set(saved.codexThreadId, loaded)
@@ -3368,7 +3401,7 @@ export class CodexProviderService {
         this.loaded.set(resumed.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
         // A resume answered with another thread holds none of the conversation: the history goes in the prompt.
         if (resumed.thread.id !== saved.codexThreadId) {
-          console.warn('[codex] Codex was asked to resume a thread and opened another one', { threadId: input.threadId })
+          console.warn('[codex] Codex was asked to resume a thread and opened another one', { threadId })
           return { codexThreadId: resumed.thread.id, model: resumed.model, continued: false, botSandbox, resumeLost: true }
         }
         return { codexThreadId: resumed.thread.id, model: resumed.model, continued: true, botSandbox }
@@ -3426,13 +3459,11 @@ export class CodexProviderService {
         if (!codexTakesImage(image)) throw new Error(`Codex cannot send image ${image.name}; use JPEG, PNG, GIF or WebP under 10 MiB`)
         return codexImageInput(image)
       })
-      const savedId = this.settings.threads?.[input.threadId]?.codexThreadId
       const reserved = new Set<string>()
-      const { conn, release } = await this.verifiedConnection(signal, reserved, savedId)
+      const { conn, prepared, reuse, release } = await this.verifiedConnection(signal, reserved, { input })
       releaseThreads = release
       scope = this.scope
-      await abortable(this.ensureTreeMode(conn), signal)
-      const thread = await this.openThread(conn, input, signal, reserved)
+      const thread = await this.openThread(conn, prepared!, reuse, signal, reserved)
       const codexThreadId = thread.codexThreadId
       unopened = { conn, id: codexThreadId }
       signal.throwIfAborted()
@@ -3756,11 +3787,11 @@ export class CodexProviderService {
       this.controllers.delete(controller)
       this.activeThreads.delete(input.threadId)
       if (unopened) void this.unloadThread(unopened.conn, unopened.id)
-      await releaseThreads?.()
-      this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
       // A stopped turn stays registered (for routing) until its sweep ends or the process dies.
       run?.mute()
       run?.cancelQuestions()
+      await releaseThreads?.()
+      this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
 
     }
   }
