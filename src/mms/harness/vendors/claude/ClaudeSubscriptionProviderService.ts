@@ -3244,7 +3244,10 @@ export class ClaudeSubscriptionProviderService {
      * compaction resumes the session with; `previous` when the turn started no process at all.
      */
     const ranEntrypoint = (previous?: string): { entrypoint?: string } => {
-      const name = live ? live.meta.entrypoint as string | undefined : query ? env.CLAUDE_CODE_ENTRYPOINT : previous
+      let name = previous
+      if (live) name = live.meta.entrypoint as string | undefined
+      // A finished one-shot detaches its query before saving the session.
+      else if (query || frames.sessionId) name = env.CLAUDE_CODE_ENTRYPOINT
       return name ? { entrypoint: name } : {}
     }
     const turnsBefore = (sessionId: string): SessionTurn[] =>
