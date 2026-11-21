@@ -9,11 +9,12 @@
 export const MEMORY_LOG_RELATIVE_PATH = 'diagnostics/memory.jsonl'
 export const MEMORY_ISSUE_REPO = 'mousse-agent/mousse'
 
-/** One process's memory, in MB with one decimal. `private` is the OS's private bytes when the OS reports them. */
+/** One process's memory, in MiB with one decimal (legacy fields call this MB). */
 export interface ProcessMemory {
   rss: number
   /** CPU use since the last sample, percent of one core. */
   cpu?: number
+  /** Legacy platform counter: private bytes, Electron private memory, or Linux RssAnon (resident anonymous pages). */
   private?: number
   heapUsed?: number
   heapTotal?: number
@@ -314,20 +315,46 @@ export function serviceMb(sample: MemorySample): number {
   return sample.service.private ?? sample.service.rss
 }
 
-/** The agent CLIs and tools the service started, together, MB; null when none ran or none could be read. */
+/** Legacy alert measure: child footprints or RSS, MB; null when none ran or none could be read. */
 export function childrenMb(sample: MemorySample): number | null {
   const sizes = (sample.children ?? []).map((child) => child.mb).filter((mb): mb is number => mb !== null)
   return sizes.length ? round1(sizes.reduce((sum, mb) => sum + mb, 0)) : null
 }
 
 /**
- * The app's processes together, with the agent CLIs and tools the service started for it, or null when the app has
- * not reported.
+ * Legacy alert/trend measure: desktop private/footprint with RSS fallbacks, plus children; excludes service.
+ * Retained for existing thresholds and history. Use memoryTotals for comparable working-set accounting.
  */
 export function appMb(sample: MemorySample): number | null {
   if (!sample.app?.length) return null
   return round1(sample.app.reduce((sum, process) => sum + (process.private ?? process.rss), 0) + (childrenMb(sample) ?? 0))
 }
+
+/**
+ * Comparable resident/working-set totals only. A macOS child footprint cannot stand in for RSS.
+ * Workers share the service process and are already included. Missing desktop/child samples are not zero.
+ */
+export function memoryTotals(sample: MemorySample) {
+  const desktopWorkingSetMb = sample.app?.length ? round1(sample.app.reduce((sum, p) => sum + p.rss, 0)) : null
+  const children = sample.children ?? []
+  const resident = children.filter((child) => child.mb !== null && !child.footprint)
+  const unavailableChildren = children.length - resident.length + Math.max(0, sample.counts.providerProcesses - children.length)
+  const childrenSampleAvailable = sample.children !== undefined
+  const measuredChildrenWorkingSetMb = round1(resident.reduce((sum, child) => sum + child.mb!, 0))
+  const measuredWorkingSetMb = round1(sample.service.rss + (desktopWorkingSetMb ?? 0) + measuredChildrenWorkingSetMb)
+  return {
+    desktopWorkingSetMb,
+    serviceWorkingSetMb: sample.service.rss,
+    childrenWorkingSetMb: childrenSampleAvailable && unavailableChildren === 0 ? measuredChildrenWorkingSetMb : null,
+    workloadWorkingSetMb: desktopWorkingSetMb !== null && childrenSampleAvailable && unavailableChildren === 0 ? measuredWorkingSetMb : null,
+    measuredWorkingSetMb,
+    unavailableChildren,
+    desktopSampleAvailable: desktopWorkingSetMb !== null,
+    childrenSampleAvailable
+  }
+}
+
+export const MEMORY_TOTAL_SCOPE = 'Working-set totals sum RSS/working sets, including shared pages more than once; they are not unique physical RAM. Desktop covers reported Electron processes only. Workload covers the service, reported desktop processes and measured service children only; untracked descendants are excluded. Desktop reports can predate the service sample. Workers are already in the service. Null means unavailable or incomplete; measuredWorkingSetMb is only the available subtotal. macOS child footprints are not RSS and are excluded from these totals.'
 
 /** The largest process of `kind`, or null when the app has not reported one. */
 export function largestOfKind(sample: MemorySample, kind: AppProcessKind): number | null {
@@ -560,7 +587,7 @@ export function appProcessLabels(processes: readonly AppProcessMemory[]): string
 /** One row of the per-process table (Settings, the CLI and the issue). MB, and CPU in percent of one core. */
 export interface MemoryTableRow {
   label: string
-  /** `service` rows come from the service; `app` rows from the desktop app; `total` is the app's sum. */
+  /** `service` rows come from the service; `app` rows include children; `total` rows state their scope. */
   group: 'service' | 'app' | 'total'
   private?: number
   rss?: number
@@ -592,7 +619,7 @@ function childrenDetail(children: readonly ChildMemory[]): string {
 
 /**
  * Every process with its role, like Task Manager: the service and its workers, then the app's processes and the agent
- * CLIs and tools the service started, which count in the app's total.
+ * CLIs and tools the service started. Totals use working sets only, separately from private/footprint values.
  */
 export function memoryTable(sample: MemorySample): MemoryTableRow[] {
   const rows: MemoryTableRow[] = [{ label: 'Service', group: 'service', ...pick(sample.service), ...(sample.service.cpu !== undefined ? { cpu: sample.service.cpu } : {}) }]
@@ -606,14 +633,19 @@ export function memoryTable(sample: MemorySample): MemoryTableRow[] {
     rows.push({ label: labels[i], group: 'app', ...pick(process), ...(process.cpu !== undefined ? { cpu: process.cpu } : {}), ...(detail ? { detail } : {}) })
   })
   const children = sample.children ?? []
-  const childTotal = childrenMb(sample)
   if (children.length) {
-    // On macOS each is its footprint, like the app's processes; elsewhere its resident or working set.
-    const column = children.every((child) => child.footprint) ? 'private' : 'rss'
-    rows.push({ label: `Agents and tools (${children.length})`, group: 'app', ...(childTotal !== null ? { [column]: childTotal } : {}), detail: childrenDetail(children) })
+    const footprints = children.filter((child) => child.footprint && child.mb !== null)
+    const resident = children.filter((child) => !child.footprint && child.mb !== null)
+    const total = (items: ChildMemory[]) => round1(items.reduce((sum, child) => sum + child.mb!, 0))
+    rows.push({ label: `Agents and tools (${children.length})`, group: 'app',
+      ...(footprints.length ? { private: total(footprints) } : {}),
+      ...(resident.length ? { rss: total(resident) } : {}),
+      detail: `${childrenDetail(children)}; ${footprints.length} footprints, ${resident.length} working sets, ${children.length - footprints.length - resident.length} unavailable` })
   }
-  const total = appMb(sample)
-  if (total !== null) rows.push({ label: 'App total', group: 'total', private: total, ...(childTotal !== null ? { detail: `With agents and tools (${Math.round(childTotal)} MB)` } : {}) })
+  const totals = memoryTotals(sample)
+  if (totals.desktopWorkingSetMb !== null) rows.push({ label: 'Desktop total', group: 'total', rss: totals.desktopWorkingSetMb, detail: 'Reported Electron processes only; excludes service, agents and tools. Shared pages may count more than once.' })
+  rows.push({ label: totals.workloadWorkingSetMb === null ? 'Measured workload subtotal' : 'Workload total', group: 'total', rss: totals.measuredWorkingSetMb,
+    detail: `${MEMORY_TOTAL_SCOPE} Desktop sample: ${totals.desktopSampleAvailable ? 'available' : 'unavailable'}; children sample: ${totals.childrenSampleAvailable ? 'available' : 'unavailable'}; children without working sets: ${totals.unavailableChildren}.` })
   return rows
 }
 
@@ -660,7 +692,7 @@ export function memoryIssueText(input: MemoryReportInput): { title: string; body
   lines.push('', '| Process | Memory MB | Working set MB | CPU % | Heap used MB | Heap total MB |', '|---|---|---|---|---|---|')
   for (const r of table) lines.push(`| ${r.label} | ${mb(r.private)} | ${mb(r.rss)} | ${mb(r.cpu)} | ${mb(r.heapUsed)} | ${mb(r.heapTotal)} |`)
   lines.push('', `Memory is ${memorySource(input.os.platform)}.`)
-  for (const r of table) if (r.detail && r.group === 'app') lines.push(`- ${r.label}: ${r.detail}`)
+  for (const r of table) if (r.detail) lines.push(`- ${r.label}: ${r.detail}`)
   if (sample.hints) lines.push('', `**What the windows draw:** ${appHintsLine(sample.hints)}`)
 
   const c = sample.counts

@@ -351,9 +351,72 @@ describe('the profiler tools', () => {
     const { service } = profilerFixture(dir)
     const { value, outcome } = await call(toolsFor(() => ON, service), 'profiler_overview')
     expect(value).toMatchObject({ profiler: 'on', serviceUptimeMinutes: expect.any(Number), service: { mb: 150 }, app: { gpuMb: 334, largestWindowMb: 320 }, trend: { serviceMb: [150] }, breaches: [] })
-    expect(value.processes.map((row: { label: string }) => row.label)).toEqual(['Service', 'Service workers (1)', 'Main', 'Window', 'GPU', 'Agents and tools (2)', 'App total'])
+    expect(value.processes.map((row: { label: string }) => row.label)).toEqual(['Service', 'Service workers (1)', 'Main', 'Window', 'GPU', 'Agents and tools (2)', 'Desktop total', 'Workload total'])
     expect(value.processes.find((row: { label: string }) => row.label === 'GPU')).toMatchObject({ privateMb: 334, workingSetMb: 380, cpuPercent: 3 })
+    expect(value.memoryTotals).toMatchObject({ desktopWorkingSetMb: 980, serviceWorkingSetMb: 190, childrenWorkingSetMb: 222, workloadWorkingSetMb: 1392 })
+    expect(value.processes.filter((row: { group: string }) => row.group === 'total').every((row: { privateMb?: number }) => row.privateMb === undefined)).toBe(true)
     expectNoPrivateData(outcome.text, dir)
+  })
+
+  it('reports missing child working sets through the agent tools without calling them zero', async () => {
+    const dir = home()
+    const { service, monitor } = profilerFixture(dir)
+    // Recorded monitor samples can contain footprint-only, unreadable, or absent measurements.
+    await service.collectApp(false, 1000)
+    await monitor.tick()
+    const status = monitor.status()
+    const sample = status.sample!
+    const registry = toolsFor(() => ON, service)
+    for (const children of [
+      [{ kind: 'codex', mb: 210, footprint: true }],
+      [{ kind: 'codex', mb: null }],
+      undefined
+    ]) {
+      vi.spyOn(monitor, 'status').mockReturnValue({ ...status, sample: { ...sample, children } })
+      const { value } = await call(registry, 'profiler_overview')
+      expect(value.memoryTotals).toMatchObject({ desktopWorkingSetMb: 980, workloadWorkingSetMb: null, measuredWorkingSetMb: 1170, unavailableChildren: 2 })
+      expect(value.processes.find((row: { label: string }) => row.label === 'Measured workload subtotal')).toMatchObject({ workingSetMb: 1170 })
+      expect(value.units).toContain('not unique physical RAM')
+    }
+    vi.restoreAllMocks()
+  })
+
+  it('reports a live service process with no desktop as a subtotal through the registered handler', async () => {
+    const dir = home()
+    const { service } = profilerFixture(dir)
+    const monitor = new MemoryMonitor({
+      homeDir: dir, version: '0.1.3',
+      readCounts: async () => ({ counts: { sqliteConnections: 0, workerThreads: 0, loadedThreads: 0, threadRuntimes: 0, threadCacheThreads: 0, threadCacheMb: 0, replayEvents: 0, ptys: 0, fileWatchers: 0, profiles: 1, activeTurns: 0 }, workerHeaps: [] }),
+      readChildren: async () => [], childCount: () => 0
+    })
+    try {
+      const registry = toolsFor(() => ON, { ...service, monitor: () => monitor, collectApp: async () => false })
+      const { value, outcome } = await call(registry, 'profiler_sample_now')
+      expect(outcome.isError).not.toBe(true)
+      expect(value.memoryTotals.serviceWorkingSetMb).toBeGreaterThan(0)
+      expect(value.memoryTotals.measuredWorkingSetMb).toBe(value.memoryTotals.serviceWorkingSetMb)
+      expect(value.memoryTotals).toMatchObject({ desktopWorkingSetMb: null, workloadWorkingSetMb: null, childrenWorkingSetMb: null, desktopSampleAvailable: false, childrenSampleAvailable: false })
+      expect(value.processes.find((row: { label: string }) => row.label === 'Measured workload subtotal')).toMatchObject({ workingSetMb: value.memoryTotals.serviceWorkingSetMb })
+    } finally {
+      monitor.stop()
+    }
+  })
+
+  it('keeps missing and mixed child measurements explicit in the child tool', async () => {
+    const { service, monitor } = profilerFixture(home())
+    vi.spyOn(monitor, 'readChildrenNow').mockResolvedValue([
+      { kind: 'codex', mb: 80 }, { kind: 'codex', mb: null },
+      { kind: 'mcp', mb: 40, footprint: true }, { kind: 'mcp', mb: 20 }
+    ])
+    try {
+      const { value } = await call(toolsFor(() => ON, service), 'profiler_children')
+      expect(value.totalMb).toBeNull()
+      expect(value.byKind.find((row: { kind: string }) => row.kind === 'codex')).toMatchObject({ mb: null, measuredMb: 80, unavailable: 1, metric: 'working-set' })
+      expect(value.byKind.find((row: { kind: string }) => row.kind === 'mcp')).toMatchObject({ mb: null, measuredMb: null, metric: 'mixed' })
+      expect(value.processes[2]).toMatchObject({ mb: 40, metric: 'footprint' })
+    } finally {
+      vi.restoreAllMocks()
+    }
   })
 
   it('profiler_service_breakdown: heap, counts, caches, this profile\'s threads by id and other profiles as totals', async () => {
@@ -534,7 +597,8 @@ describe('the profiler tools', () => {
     const registry = toolsFor(() => ON, service)
     await monitor.tick()
     const { value, outcome } = await call(registry, 'profiler_sample_now')
-    expect(value.now).toMatchObject({ serviceMb: 150, gpuMb: 334, loadedThreads: 1 })
+    expect(value.now).toMatchObject({ serviceMb: 150, gpuMb: 334, loadedThreads: 1, desktopWorkingSetMb: 980, workloadWorkingSetMb: 1392 })
+    expect(value.memoryTotals).toMatchObject({ workloadWorkingSetMb: 1392, unavailableChildren: 0 })
     expect(value.sincePreviousSample).toMatchObject({ change: expect.any(Object) })
     expect(monitor.samples()).toHaveLength(2)
     expectNoPrivateData(outcome.text, dir)

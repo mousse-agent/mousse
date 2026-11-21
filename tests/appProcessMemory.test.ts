@@ -111,7 +111,8 @@ describe('per-process table', () => {
       ['Network', 13, 30, 'app'],
       // Resident size off macOS: in the working set column, and in the app's total.
       ['Agents and tools (1)', null, 80, 'app'],
-      ['App total', 797, null, 'total']
+      ['Desktop total', null, 960, 'total'],
+      ['Workload total', null, 1420, 'total']
     ])
   })
 
@@ -137,8 +138,10 @@ describe('per-process table', () => {
     }
     const rows = memoryTable(sample)
     expect(rows.find((row) => row.label === 'Window')?.detail).toBe('JS heap 140 of 180 MB, Blink 45 of 1584 MB, resource cache 30 MB, rest 391 MB')
-    expect(rows.find((row) => row.label === 'Agents and tools (2)')).toMatchObject({ private: 143, detail: 'claude 143, mcp - MB' })
-    expect(rows.find((row) => row.group === 'total')?.private).toBe(120 + 2_155 + 340 + 143)
+    expect(rows.find((row) => row.label === 'Agents and tools (2)')).toMatchObject({ private: 143, detail: expect.stringContaining('claude 143, mcp - MB') })
+    expect(rows.find((row) => row.label === 'Desktop total')).toMatchObject({ rss: 1190 })
+    expect(rows.find((row) => row.label === 'Measured workload subtotal')).toMatchObject({ rss: 1390 })
+    expect(rows.filter((row) => row.group === 'total').every((row) => row.private === undefined)).toBe(true)
   })
 })
 
