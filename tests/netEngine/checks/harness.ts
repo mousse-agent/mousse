@@ -217,6 +217,9 @@ export class Fabric {
       if (route?.kind !== expected.kind || route?.class !== expected.class) record('route_mismatch')
     }
     if (!expected) return
+    // Every file of a routes run guards its own process: on Linux the kit's fence keeps a request from reaching the
+    // kit's Plus recorder, so the run records it here (as routes-app's own cases always did).
+    guardEgress()
     if (!REAL_HELPER) {
       // A 1.1 fake: routes with approvals, and the class map the debug helper reads.
       this.network.minor = 1
@@ -870,11 +873,17 @@ export function guardEgress(): void {
   process.env.MOUSSE_CHECK_EGRESS_GUARD ||= 'in-process'
   process.env.MOUSSE_ID_ORIGIN ||= 'https://plus.check.invalid'
   const plus = new URL(process.env.MOUSSE_ID_ORIGIN).host
+  // A cross-machine cell's other computer (`MOUSSE_NET_TEST_EGRESS`, as the kit allows it to the helper).
+  const allowed = (process.env.MOUSSE_NET_TEST_EGRESS ?? '')
+    .split(/[\s,]+/)
+    .map((host) => host.trim())
+    .filter(Boolean)
   const realFetch = globalThis.fetch
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url)
     if (url.host === plus) record('plus_contacted')
-    else if (!/^(localhost|127\.|\[::1\])/.test(url.host)) denied(url.host)
+    else if (!/^(localhost|127\.|\[::1\])/.test(url.host) && !allowed.includes(url.hostname))
+      denied(url.host)
     else return realFetch(input, init)
     throw new Error('egress denied by the check')
   }) as typeof fetch
@@ -891,7 +900,10 @@ export function guardEgress(): void {
         : typeof options === 'number'
           ? String(args[1] ?? 'localhost')
           : 'pipe'
-    if (!['pipe', 'localhost', '::1'].includes(host) && !host.startsWith('127.')) {
+    if (
+      !['pipe', 'localhost', '::1', ...allowed].includes(host) &&
+      !host.startsWith('127.')
+    ) {
       denied(host)
       process.nextTick(() => this.destroy(new Error('egress denied by the check')))
       return this

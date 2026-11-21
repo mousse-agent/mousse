@@ -459,6 +459,8 @@ export class NetEngineService implements EngineDirectoryPort {
    */
   async sshConnect(choice: Parameters<SshAdd['connect']>[0]): Promise<EnginePeerRow> {
     const started = this.require()
+    // Route setup, whichever way it goes: a computer already paired gets only the SSH route.
+    routeSetupProbes()
     // The list session 1 answered in this add: Connect signs in once more only for prepare (§3.4: four
     // connections per add).
     const profile = choice.selector
@@ -482,7 +484,6 @@ export class NetEngineService implements EngineDirectoryPort {
       await this.setAddresses({ ...paired, ssh }, paired.addresses ?? [])
       return started.peers.get(paired.localId)!
     }
-    routeSetupProbes()
     return this.sshAdd().connect(choice)
   }
 
