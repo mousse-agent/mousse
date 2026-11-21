@@ -37,15 +37,14 @@
       "branch": "early-checkout-preparation",
       "paths": [
         "src/mms/workspace",
-        "src/mms/worktree/worktreeCheckout.ts",
-        "src/mms/orchestrator/OrchestratorService.ts",
-        "src/mms/protocol/handlers.ts",
-        "src/renderer/components/OrchestratorChat.tsx",
-        "src/renderer/lib/createComposerThread.ts",
-        "src/shared/workspace.ts"
+        "src/mms/worktree/checkoutSlotProcess.ts",
+        "src/mms/git/runGitProcess.ts",
+        "src/mms/lifecycle/WorktreeRetirementService.ts",
+        "tests/run/earlyCheckoutPreparation.test.ts",
+        "tests/pullRequestUntrustedCheckout.test.ts"
       ],
       "claimedAt": "2026-11-21T10:14:56.694Z",
-      "expiresAt": "2026-11-21T16:34:35.440Z"
+      "expiresAt": "2026-11-21T17:56:13.289Z"
     },
     {
       "task": "faster-thread-titles",
@@ -106,22 +105,6 @@
       ],
       "claimedAt": "2026-11-21T05:08:34.813Z",
       "expiresAt": "2026-11-21T16:15:47.330Z"
-    },
-    {
-      "task": "net-lists-stream-compaction",
-      "session": "Avarnics-Mac-mini.local-8ee838",
-      "machine": "Avarnics-Mac-mini.local",
-      "branch": "net-lists-stream-compaction",
-      "paths": [
-        "src/mms/net/store/streams.ts",
-        "src/mms/net/contracts.ts",
-        "src/mms/bridge/hub/service.ts",
-        "src/mms/bridge/BridgeProfileService.ts",
-        "src/mms/bridge/remote/MmsListsSource.ts",
-        "src/mms/bridge/copyLimits.ts"
-      ],
-      "claimedAt": "2026-11-20T12:55:33.822Z",
-      "expiresAt": "2026-11-20T15:55:33.822Z"
     },
     {
       "task": "provider-idle-window",
