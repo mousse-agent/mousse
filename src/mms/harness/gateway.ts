@@ -57,7 +57,7 @@ import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { LoginSession as LoginSessionImpl } from '../providers/LoginSession'
 import { fail } from '../run/db/RunStoreError'
 import { hidesModel, modelsWithPrefs, ModelNamesService, ModelPrefsService, visibleProviderOption, type ModelNamesStore, type ModelPrefsStore } from './catalog'
-import { privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type OneShotTask } from './driver'
+import { privateHomeRule, type AuthReading, type DriverRuntime, type GeneratedImage, type HarnessDriver, type ImageModelFacts, type ImageRequestSpec, type RetiredPrompt, type InstallProgress, type InstanceConfig, type LiveProcessHost, type NativeCompactRequest, type NamingOrigin, type OneShotTask } from './driver'
 import { DEFAULT_HOME_ID, findOnPath, instanceEnv, ownedLaunchEnv, reservedEnvName, reservedLaunchKeys, type InstanceEnv } from './env'
 import { ClaudeSettingsError, claudeSettingsPath, readClaudeSettingsFile, writeClaudeSetting } from './vendors/claude/claudeSettingsFile'
 import { SharedSettingsConsentStore } from './sharedSettingsConsent'
@@ -315,7 +315,7 @@ export interface HarnessGateway {
   /** The same listing from what is known now, without waiting (synchronous readers). */
   listedLlmProviders(scope: ProviderScope): LlmProviderOption[]
   /** Stops the instances' runtimes and running operations. */
-  stop(): Promise<void>
+  stop(): void | Promise<void>
 }
 
 /** `HarnessGateway.bind`: the turn's mode, effort and origin, and the caller's part of its policy. */
@@ -393,6 +393,7 @@ export interface OneShotRequest {
   sessionKey?: string
   /** What the request is for (a refusal names it); absent reads as `title`. */
   task?: OneShotTask
+  namingOrigin?: NamingOrigin
   signal?: AbortSignal
 }
 
@@ -899,7 +900,7 @@ export class Harness implements HarnessGateway {
   private liveHost: LiveProcessHost | null = null
   private mcp: McpAttachmentProvider | null = null
   private readonly retired = new Set<InstanceRecord>()
-  private readonly runtimeStops = new Set<Promise<void>>()
+  private readonly runtimeStops = new Map<InstanceRecord, { promise: Promise<void>; failed?: true }>()
   private shutdown?: Promise<void>
   /**
    * The stops of a removal or disable still running, per instance (each settles, never rejects). They
@@ -1649,6 +1650,7 @@ export class Harness implements HarnessGateway {
         prompt: request.prompt,
         ...(request.sessionKey ? { sessionKey: request.sessionKey } : {}),
         ...(request.task ? { task: request.task } : {}),
+        ...(request.namingOrigin ? { namingOrigin: request.namingOrigin } : {}),
         onActivity: restart
       }, signal)
       return { text: text.slice(0, Math.max(0, request.maxChars)) }
@@ -2506,6 +2508,7 @@ export class Harness implements HarnessGateway {
     let upgraded = false
     const run = async () => {
       await Promise.race([this.shellPath, new Promise((resolve) => setTimeout(resolve, SHELL_PATH_WAIT_MS).unref?.())])
+      if (this.stopped) return
       const record = this.record(instanceId, { allowDisabled: true })
       const override = record.config.binaryPath
       // Signed out in Mousse: reported as such without asking the runtime (no CLI status check).
@@ -4163,6 +4166,8 @@ export class Harness implements HarnessGateway {
   }
 
   private stopRuntime(record: InstanceRecord): Promise<void> | undefined {
+    const existing = this.runtimeStops.get(record)
+    if (existing) return existing.promise
     let stopping: void | Promise<void>
     try {
       stopping = record.runtime.stop()
@@ -4170,10 +4175,13 @@ export class Harness implements HarnessGateway {
       stopping = Promise.reject(error)
     }
     if (!stopping) return undefined
-    this.runtimeStops.add(stopping)
+    // Keep failures from earlier runtime retirements available for profile shutdown.
+    const stop: { promise: Promise<void>; failed?: true } = { promise: stopping }
+    this.runtimeStops.set(record, stop)
     void stopping.then(
-      () => this.runtimeStops.delete(stopping),
+      () => this.runtimeStops.delete(record),
       (error: unknown) => {
+        stop.failed = true
         console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })
       }
     )
@@ -4182,6 +4190,7 @@ export class Harness implements HarnessGateway {
 
   stop(): Promise<void> {
     if (this.shutdown) return this.shutdown
+    const retry = this.stopped
     this.stopped = true
     if (this.modelSchedule) {
       clearInterval(this.modelSchedule.interval)
@@ -4191,15 +4200,24 @@ export class Harness implements HarnessGateway {
     }
     for (const operation of this.operations.values()) operation.cancel()
     this.operations.clear()
-    for (const record of new Set([...this.records.values(), ...this.retired])) void this.stopRuntime(record)
+    const records = new Set([...this.records.values(), ...this.retired])
+    if (retry) {
+      for (const [record, stop] of this.runtimeStops) {
+        if (!stop.failed) continue
+        this.runtimeStops.delete(record)
+        records.add(record)
+      }
+    }
+    for (const record of records) void this.stopRuntime(record)
     this.records.clear()
     this.retired.clear()
     this.listeners.clear()
-    const stops = [...this.runtimeStops, ...[...this.stopBarriers.values()].flatMap((set) => [...set])]
+    const stops = [...[...this.runtimeStops.values()].map((stop) => stop.promise), ...[...this.stopBarriers.values()].flatMap((set) => [...set])]
     this.shutdown = Promise.allSettled(stops).then((results) => {
       const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
       if (failures.length) throw new AggregateError(failures.map((failure) => failure.reason), 'Provider runtimes could not be stopped')
     })
+    void this.shutdown.catch(() => { this.shutdown = undefined })
     return this.shutdown
   }
 }
