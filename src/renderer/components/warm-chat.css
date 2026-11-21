@@ -1,0 +1,32 @@
+/* The warm start's one line (WarmChat): above the composer's top edge, so the composer keeps its place when it goes. */
+.warm-chat-line {
+  position: absolute;
+  right: 24px;
+  bottom: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.warm-chat-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--ui-control-radius, 6px);
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  font: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.warm-chat-retry:hover { background: var(--ui-hover, color-mix(in srgb, var(--text-primary) 10%, transparent)); }
+.warm-chat-retry:focus-visible { outline: none; background-image: var(--ui-focus-layer); }

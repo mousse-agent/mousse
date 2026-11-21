@@ -4,13 +4,15 @@
  * subscription, updates main could not hand to a window, and each catch-up it ran (which thread, why, what changed).
  *
  * Lines hold ids, counts, phases, reasons, and an error's class and code only: never an error's text (it can carry a
- * path or a line of the service's output), conversation text or thread names. Any text that still names the home
- * folder has it replaced by `<home>`. The file rotates at 1 MB and keeps two older files, so it never holds more than
- * about 3 MB.
+ * path or a line of the service's output), conversation text or thread names. The one exception is an
+ * `error.reference` line: a failure main showed as "Something went wrong … Reference: <id>" keeps its causes there,
+ * redacted (`errorCauseText`), so the reference can be looked up. Any text that still names the home folder has it
+ * replaced by `<home>`. The file rotates at 1 MB and keeps two older files, so it never holds more than about 3 MB.
  */
 import { homedir } from 'os'
 import { join } from 'path'
 import { RotatingFileLog } from '../../mms/log/rotatingFileLog'
+import { setErrorReferenceSink } from '../../shared/errors'
 
 export const GUI_CONNECTION_LOG_RELATIVE_PATH = join('logs', 'gui-connection.log')
 export const GUI_CONNECTION_LOG_MAX_BYTES = 1_000_000
@@ -26,6 +28,8 @@ export interface GuiConnectionLogSink {
 }
 
 const MAX_TEXT = 160
+/** An `error.reference` line's causes: up to four links of about 400 characters each. */
+const MAX_CAUSE_TEXT = 2_000
 
 /** An error code worth keeping: a short identifier (`ECONNRESET`, `thread_not_found`), never a sentence. */
 const CODE = /^[A-Za-z][\w.-]{0,63}$/
@@ -63,18 +67,28 @@ export function withoutHome(text: string): string {
   return homeRegex ? text.replace(homeRegex, '<home>') : text
 }
 
-function clip(text: string): string {
+function clip(text: string, max = MAX_TEXT): string {
   const scrubbed = withoutHome(text)
-  return scrubbed.length > MAX_TEXT ? `${scrubbed.slice(0, MAX_TEXT)}…` : scrubbed
+  return scrubbed.length > max ? `${scrubbed.slice(0, max)}…` : scrubbed
 }
 
-function clean(fields: GuiConnectionLogFields): Record<string, unknown> {
+function clean(event: string, fields: GuiConnectionLogFields): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(fields)) {
     if (value === undefined) continue
-    out[key] = typeof value === 'string' ? clip(value) : Array.isArray(value) ? value.slice(0, 20).map(clip) : value
+    const max = event === 'error.reference' && key === 'cause' ? MAX_CAUSE_TEXT : MAX_TEXT
+    out[key] = typeof value === 'string' ? clip(value, max) : Array.isArray(value) ? value.slice(0, 20).map((item) => clip(item)) : value
   }
   return out
+}
+
+/**
+ * Writes each generic failure main hands out ("… Reference: <id>") to `log` as an `error.reference` line with the
+ * id, code, operation and redacted causes. Returns a function that stops it.
+ */
+export function logErrorReferences(log: GuiConnectionLogSink): () => void {
+  setErrorReferenceSink((entry) => log.write('error.reference', { reference: entry.reference, code: entry.code, operation: entry.operation, cause: entry.cause }))
+  return () => setErrorReferenceSink(null)
 }
 
 export class GuiConnectionLog implements GuiConnectionLogSink {
@@ -98,7 +112,7 @@ export class GuiConnectionLog implements GuiConnectionLogSink {
 
   write(event: string, fields: GuiConnectionLogFields = {}): void {
     try {
-      this.file.write(JSON.stringify({ t: new Date(this.now()).toISOString(), event, ...clean(fields) }))
+      this.file.write(JSON.stringify({ t: new Date(this.now()).toISOString(), event, ...clean(event, fields) }))
     } catch {
       // Diagnostics never take main down.
     }

@@ -341,6 +341,20 @@ export const TITLE_SYSTEM_PROMPT = [
   'Reply with the title only.'
 ].join('\n')
 
+/** The longest title prompt kept (Settings → Agents → Title prompt, `settings.title.prompt`). */
+export const TITLE_PROMPT_MAX = 500
+
+/**
+ * The title model's system prompt: the rules, then the person's own title prompt when they wrote one.
+ * Theirs comes last and wins where it differs, so "use emoji" or "always English" takes effect; the
+ * length limit still holds because `normalizeTitle` fits every answer to the sidebar.
+ */
+export function titleSystemPrompt(custom?: string): string {
+  const own = custom?.trim().slice(0, TITLE_PROMPT_MAX)
+  if (!own) return TITLE_SYSTEM_PROMPT
+  return `${TITLE_SYSTEM_PROMPT}\nThe person's own instructions for titles follow. Where they differ from the rules above, follow them:\n${own}`
+}
+
 function hintLine(hints: TitleHints, images: number): string {
   const parts: string[] = []
   if (hints.skill) parts.push(`command /${hints.skill}`)

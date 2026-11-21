@@ -6,6 +6,7 @@ import { BOT_COLOUR_HEX, DEFAULT_BOT_LOOK, normalizeBotLook } from '../../../sha
 import { botMessageFrom, type BotMessageFrom } from '../../../shared/bots/personal/botMessages'
 import { plainCards } from '../../../shared/bots/personal/cards'
 import { MAX_BOT_CHAT_TEXT } from '../../../shared/bots/personal/methods'
+import { useAppStore } from '../../stores/appStore'
 import { botFaceState, useBotsStore } from '../../stores/botsStore'
 import { openProvider, openSettingsSection } from '../../lib/settingsNavigation'
 import { Markdown } from '../../chat/components/agent-elements/markdown'
@@ -66,7 +67,7 @@ const NO_VOICE: VoiceMessage[] = []
 const NO_REFERENCES: ChatReference[] = []
 
 /**
- * A pill in a bot's composer (a pasted or dropped thread): one of the owner's threads the bot may read, never a private
+ * A pill in a bot's composer (a dropped thread): one of the owner's threads the bot may read, never a private
  * thread or a subagent. It is sent as the thread's link.
  */
 function addBotReference(botId: string, reference: ChatReference): void {
@@ -802,6 +803,8 @@ function TypingDots({ status, still: hold = false }: { status: string; still?: b
   const glintRef = useRef<HTMLSpanElement>(null)
   const bubbleRef = useRef<HTMLSpanElement>(null)
   const still = useMotionScale() === 0 || hold
+  const shimmerAnimations = useAppStore((state) => state.shimmerAnimations)
+  const showShimmer = !still && shimmerAnimations && Boolean(status)
   useLayoutEffect(() => {
     if (still) return
     const dots = Array.from(dotsRef.current?.children ?? [])
@@ -813,7 +816,7 @@ function TypingDots({ status, still: hold = false }: { status: string; still?: b
   useLayoutEffect(() => {
     const glint = glintRef.current
     const copy = glint?.firstElementChild
-    if (still || !glint || !copy || typeof glint.animate !== 'function') return
+    if (!showShimmer || !glint || !copy || typeof glint.animate !== 'function') return
     const timing: KeyframeAnimationOptions = { duration: TYPING_CYCLE_MS, delay: TYPING_SHIMMER_DELAY_MS, iterations: Infinity, fill: 'backwards' }
     const shimmer = [glint.animate(TYPING_GLINT, timing), copy.animate(TYPING_GLINT_COPY, timing)]
     // On the dots' clock, so the wave that crosses them runs on into the words. Dots started in this same frame have no
@@ -821,8 +824,7 @@ function TypingDots({ status, still: hold = false }: { status: string; still?: b
     const lead = dotsRef.current?.firstElementChild?.getAnimations?.()[0]
     if (lead?.startTime !== null && lead?.startTime !== undefined) for (const animation of shimmer) animation.startTime = lead.startTime
     return () => shimmer.forEach((animation) => animation.cancel())
-    // The words (and their shimmer) appear only once the bot says what it does.
-  }, [still, Boolean(status)])
+  }, [showShimmer])
   // Paused, all together so the wave stays in step, while the bubble is scrolled out of view or the window is hidden.
   useLayoutEffect(() => {
     const bubble = bubbleRef.current
@@ -833,12 +835,12 @@ function TypingDots({ status, still: hold = false }: { status: string; still?: b
         else animation.play()
       }
     })
-  }, [still, Boolean(status)])
+  }, [still, showShimmer])
   return <span ref={bubbleRef} className={`bot-typing-row${still ? ' is-still' : ''}`}>
     <span ref={dotsRef} className="bot-typing-dots" aria-hidden><i /><i /><i /></span>
     {status && <span className="bot-typing-status">
       {status}
-      {!still && <span ref={glintRef} className="bot-typing-glint" aria-hidden><span>{status}</span></span>}
+      {showShimmer && <span ref={glintRef} className="bot-typing-glint" aria-hidden><span>{status}</span></span>}
     </span>}
   </span>
 }
@@ -1213,6 +1215,7 @@ export function BotChatView({ bot }: { bot: BotSummary }) {
             onAddReference={(reference) => addBotReference(bot.id, reference)}
             onRemoveReference={(id) => store().removeReference(bot.id, id)}
             onReferenceError={(message) => useBotsStore.setState({ error: message, errorBotId: bot.id })}
+            pastedThreadRefusal={botThreadReferenceRefusal}
             messageLimit={MAX_BOT_CHAT_TEXT}
             voiceMessages={NO_VOICE}
             onVoiceMessagesChange={ignore}

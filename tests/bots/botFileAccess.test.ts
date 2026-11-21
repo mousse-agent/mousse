@@ -84,7 +84,7 @@ describe('a bot an older build let use files on this computer', () => {
     const detail = f.bots.service.get(botId)
     expect(detail.needsApproval ?? []).toEqual([])
     // About → Can use lists what it still gives, never file access.
-    expect(detail.permissions.map((item) => item.title)).toEqual(['run commands'])
+    expect(detail.permissions.filter((item) => !item.builtIn).map((item) => item.title)).toEqual(['run commands'])
     await f.bots.service.chatSend({ botId, text: 'What is in my Documents?', clientRequestId: 'm-1' })
     const activation = f.store.laneActivations(botId, 'chat', ['running'])[0]!
     expect(activation.grantDigest).toBe(before.digest)
@@ -155,7 +155,7 @@ describe('a bot an older build let use files on this computer', () => {
     await reopen()
     expect(f.store.escalation('esc_allowed')).toMatchObject({ status: 'allowed_bot', title: 'use files on this computer' })
     expect(f.store.escalation('esc_denied')).toMatchObject({ status: 'denied' })
-    expect(f.bots.service.get(botId).permissions.map((item) => item.title)).toEqual(['run commands'])
+    expect(f.bots.service.get(botId).permissions.filter((item) => !item.builtIn).map((item) => item.title)).toEqual(['run commands'])
   })
 
   it('Remove in About still takes away what the grant gives, and the bot keeps running without asking', async () => {
@@ -164,7 +164,7 @@ describe('a bot an older build let use files on this computer', () => {
     f.bots.service.revokePermission(botId, shell.id)
     const after = f.store.activeGrant(botId)!
     expect(after.manifest.tools).not.toContain('shell')
-    expect(f.bots.service.get(botId).permissions).toEqual([])
+    expect(f.bots.service.get(botId).permissions.filter((item) => !item.builtIn)).toEqual([])
     expect(f.bots.service.get(botId).needsApproval ?? []).toEqual([])
     await f.bots.service.chatSend({ botId, text: 'Hi', clientRequestId: 'm-4' })
     expect(f.store.laneActivations(botId, 'chat', ['running'])).toHaveLength(1)

@@ -8,8 +8,8 @@ import { extractArchive } from '../../../agents/archive'
 import { killProcessTree } from '../../../../execution/processTree'
 import { scrubbedAntigravityEnv } from '../antigravity'
 import {
-  NATIVE_AGENT_NAME, WITHDRAWN_NATIVE_VERSIONS, isNativeAssetUrl, nativeExecutableName, nativeReleaseRefusal,
-  type NativeRelease, type NativeTarget, type VendorFeed
+  NATIVE_AGENT_NAME, NATIVE_MAX_DOWNLOAD_BYTES, NATIVE_MAX_EXECUTABLE_BYTES, WITHDRAWN_NATIVE_VERSIONS, isNativeAssetUrl,
+  nativeExecutableName, nativeReleaseRefusal, type NativeRelease, type NativeTarget
 } from './nativeRelease'
 
 /**
@@ -35,6 +35,8 @@ const VERIFY_TIMEOUT_MS = 90_000
 const EXIT_WAIT_MS = 10_000
 /** Free space kept beyond the download and the executable while installing. */
 const SPACE_MARGIN_BYTES = 256 * 1024 * 1024
+/** Space an install takes at most while it runs: the download, and for an archive the executable too. */
+const INSTALL_SPACE_BYTES: Record<NativeRelease['format'], number> = { exe: 320 * 1024 * 1024, 'tar.gz': 448 * 1024 * 1024 }
 
 function readJson<T>(path: string): T | undefined {
   try { return JSON.parse(readFileSync(path, 'utf8')) as T } catch { return undefined }
@@ -129,10 +131,9 @@ export const verifyNativeHandshake: NativeVerifier = (binary, scratch, signal) =
 })
 
 export interface NativeInstallOptions {
+  /** The release Google's update feed names now. */
   release: NativeRelease
   target: NativeTarget
-  /** What Google's update feed said just now; undefined when it could not be read. */
-  feed?: VendorFeed
   fetch?: typeof fetch
   verify?: NativeVerifier
   withdrawn?: readonly string[]
@@ -153,16 +154,16 @@ const defaultFreeBytes = (dir: string): number | undefined => {
 const running = new Set<string>()
 
 /**
- * Installs the reviewed release and makes it the active one. Refuses a withdrawn release, an older
- * version than the one installed, a URL off Google's exact path, and a download whose size or
- * SHA-512 differs. The executable must then answer `initialize` with Google's name and this exact
- * version. Only then does `active.json` move to it, in one atomic write that keeps the release before
+ * Installs the feed's release and makes it the active one. Refuses a withdrawn release, an older
+ * version than the one that runs, a URL off Google's exact path, a download over the size cap, and
+ * one whose SHA-512 differs from the feed's. The executable must then answer `initialize` with
+ * Google's name and this exact version. Only then does `active.json` move to it, in one atomic write that keeps the release before
  * it as the last good one. On any failure or cancel nothing changes and the staging folder is gone.
  */
 export async function installNativeAntigravity(installationHome: string, options: NativeInstallOptions): Promise<NativeRuntime> {
   const { release, target } = options
   const withdrawn = options.withdrawn ?? WITHDRAWN_NATIVE_VERSIONS
-  const refusal = nativeReleaseRefusal(release, options.feed, withdrawn)
+  const refusal = nativeReleaseRefusal(release, withdrawn)
   if (refusal) throw new Error(refusal)
   if (!isNativeAssetUrl(release.url, release.version, target) || !/^[0-9a-f]{128}$/.test(release.sha512)) throw new Error('This Antigravity download is not on Google\'s release path.')
   const current = activeNativeRuntime(installationHome, target, withdrawn)
@@ -185,7 +186,7 @@ export async function installNativeAntigravity(installationHome: string, options
     }
     mkdirSync(staging)
     const free = (options.freeBytes ?? defaultFreeBytes)(root)
-    const needed = release.size + release.executableSize + SPACE_MARGIN_BYTES
+    const needed = INSTALL_SPACE_BYTES[release.format] + SPACE_MARGIN_BYTES
     if (free !== undefined && free < needed) throw new Error(`Antigravity needs ${Math.ceil(needed / 1_048_576)} MB free to install.`)
     signal.throwIfAborted()
     progress('Downloading Google Antigravity…')
@@ -198,14 +199,14 @@ export async function installNativeAntigravity(installationHome: string, options
       mkdirSync(releaseDir)
       renameSync(download, join(releaseDir, executable))
     } else {
-      // One plain file named `antigravity`; links, other entries and a larger size are refused.
-      await extractArchive(download, releaseDir, { format: 'tar.gz', signal, maxEntries: 1, maxBytes: release.executableSize })
+      // One plain file named `antigravity`; links, other entries and an oversized file are refused.
+      await extractArchive(download, releaseDir, { format: 'tar.gz', signal, maxEntries: 1, maxBytes: NATIVE_MAX_EXECUTABLE_BYTES })
       rmSync(download, { force: true })
     }
     const binary = join(releaseDir, executable)
     const entries = readdirSync(releaseDir)
-    if (entries.length !== 1 || entries[0] !== executable || !statSync(binary).isFile() || statSync(binary).size !== release.executableSize)
-      throw new Error('Google\'s Antigravity download does not hold the expected executable.')
+    const executableSize = entries.length === 1 && entries[0] === executable && statSync(binary).isFile() ? statSync(binary).size : 0
+    if (!executableSize) throw new Error('Google\'s Antigravity download does not hold the expected executable.')
     if (process.platform !== 'win32') chmodSync(binary, 0o755)
     signal.throwIfAborted()
     const agent = await (options.verify ?? verifyNativeHandshake)(binary, join(staging, 'check'), signal)
@@ -213,7 +214,7 @@ export async function installNativeAntigravity(installationHome: string, options
       throw new Error(`The downloaded Antigravity reports ${agent.name ?? 'no name'} ${agent.version ?? 'without a version'}, not ${release.version}.`)
     // The last point to stop: past here the release is published.
     signal.throwIfAborted()
-    const record: VerifiedRecord = { version: release.version, sha512: release.sha512, target, executable, executableSize: release.executableSize }
+    const record: VerifiedRecord = { version: release.version, sha512: release.sha512, target, executable, executableSize }
     atomicWriteJsonSync(join(releaseDir, 'verified.json'), record)
     const destination = join(versionsDir(installationHome), id)
     if (existsSync(destination)) rmSync(destination, { recursive: true, force: true })
@@ -233,6 +234,9 @@ export async function installNativeAntigravity(installationHome: string, options
 async function fetchVerified(release: NativeRelease, path: string, signal: AbortSignal, progress: NonNullable<NativeInstallOptions['progress']>, fetchFile: typeof fetch): Promise<void> {
   const response = await fetchFile(release.url, { signal, redirect: 'error' })
   if (!response.ok || !response.body) throw new Error(`Google download failed (${response.status})`)
+  const announced = Number(response.headers.get('content-length') ?? Number.NaN)
+  if (Number.isFinite(announced) && announced > NATIVE_MAX_DOWNLOAD_BYTES) throw new Error('Google\'s Antigravity download is larger than Mousse accepts.')
+  const total = Number.isFinite(announced) && announced > 0 ? announced : undefined
   const writer = createWriteStream(path, { flags: 'wx' })
   // Settles once the file is closed, so a failed download never outlives its staging folder.
   const closed = new Promise<void>((resolveClose, reject) => { writer.once('close', resolveClose); writer.once('error', reject) })
@@ -248,13 +252,14 @@ async function fetchVerified(release: NativeRelease, path: string, signal: Abort
       const { done, value } = await reader.read()
       if (done) break
       size += value.byteLength
-      // Staging never holds more than the reviewed size.
-      if (size > release.size) throw new Error('Google\'s Antigravity download is larger than the reviewed release.')
+      // Staging never holds more than the announced size, nor more than the cap.
+      if (size > (total ?? NATIVE_MAX_DOWNLOAD_BYTES)) throw new Error('Google\'s Antigravity download is larger than Mousse accepts.')
       hash.update(value)
-      const percent = Math.floor((size / release.size) * 100)
-      if (percent > reported) {
-        reported = percent
-        progress(`Downloading ${mb(size)} of ${mb(release.size)}`, size / release.size, { receivedBytes: size, totalBytes: release.size })
+      const step = total ? Math.floor((size / total) * 100) : Math.floor(size / 10_485_760)
+      if (step > reported) {
+        reported = step
+        if (total) progress(`Downloading ${mb(size)} of ${mb(total)}`, size / total, { receivedBytes: size, totalBytes: total })
+        else progress(`Downloading ${mb(size)}`)
       }
       if (!writer.write(value)) await new Promise<void>((resolveDrain) => writer.once('drain', resolveDrain))
     }
@@ -268,7 +273,7 @@ async function fetchVerified(release: NativeRelease, path: string, signal: Abort
   writer.end()
   await closed
   signal.throwIfAborted()
-  if (size !== release.size || hash.digest('hex') !== release.sha512) throw new Error('Google\'s Antigravity download failed its size and SHA-512 check.')
+  if ((total !== undefined && size !== total) || hash.digest('hex') !== release.sha512) throw new Error('Google\'s Antigravity download failed its SHA-512 check.')
 }
 
 /**

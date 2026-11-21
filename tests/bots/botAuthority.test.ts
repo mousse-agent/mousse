@@ -136,8 +136,23 @@ describe('compileBotThread', () => {
     expect(chat.permissions.appTools).toContain('mcp_servers')
   })
 
-  it('offers secret_fetch in work with the secrets grant, independently excluding the chat', () => {
-    const grant = manifest({ appTools: ['secrets'] })
+  it('every skill unless switched off for the bot, and a thread narrowed to some skills has just those', () => {
+    const all = compile({ grant: manifest({ skills: [] }), allSkills: true })
+    if (!all.ok) throw new Error(all.error.message)
+    expect(all.permissions).toMatchObject({ allSkills: true, skills: [], appTools: expect.arrayContaining(['list_skills', 'load_skill']) })
+    expect(authorityOf(all).check({ kind: 'skill', skill: 'any-skill' })).toEqual({ ok: true })
+    const narrowed = compile({ grant: manifest({ skills: [] }), allSkills: true, thread: { narrow: { skills: ['release-notes'] } } })
+    if (!narrowed.ok) throw new Error(narrowed.error.message)
+    expect(narrowed.permissions.allSkills).toBeUndefined()
+    expect(narrowed.permissions.skills).toEqual(['release-notes'])
+    expect(authorityOf(narrowed).check({ kind: 'skill', skill: 'any-skill' }).ok).toBe(false)
+    const off = compile({ grant: manifest({ skills: [] }), thread: { narrow: { skills: ['release-notes'] } } })
+    if (!off.ok) throw new Error(off.error.message)
+    expect(off.permissions).toMatchObject({ skills: [], appTools: expect.not.arrayContaining(['list_skills']) })
+  })
+
+  it('offers secret_fetch in work with no grant, never in the chat', () => {
+    const grant = manifest()
     for (const frontDesk of [false, true]) {
       const compiled = compile({ grant, botTools: { escalate: true, consult: false, memory: true, owner: true, frontDesk } })
       if (!compiled.ok) throw new Error(compiled.error.message)

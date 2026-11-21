@@ -21,6 +21,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -37,6 +38,8 @@ import { MousseMainService } from '../../../src/mms/MousseMainService'
 import type { DomainConnectionContext } from '../../../src/mms/protocol/domainRegistry'
 import { dispatchMethod } from '../../../src/mms/protocol/handlers'
 import type { EngineHelper } from '../../../src/mms/netEngine/helper/connections'
+import { fingerprintOf } from '../../../src/mms/netEngine/pairing'
+import type { EnginePeerRow, EnginePeerStore } from '../../../src/mms/netEngine/store'
 import type { NodeId } from '../../../src/shared/net'
 import { NET_LOCAL_CAPABILITY } from '../../../src/shared/net/local'
 import { qualifyId } from '../../../src/shared/threadRef'
@@ -65,6 +68,21 @@ export const CHECK_ROUTE = readCheckRoute()
  * uses the owner and the owner gets no way back (§3.6).
  */
 export const ONE_WAY = REAL_HELPER && CHECK_ROUTE === 'ssh'
+/** This run's side of a cross-machine cell (`MOUSSE_NET_ENGINE_CHECK_ROLE`, as `./link` reads it), if any. */
+const CROSS_ROLE = ((role) => (role === 'host' || role === 'caller' ? role : undefined))(
+  process.env.MOUSSE_NET_ENGINE_CHECK_ROLE?.trim()
+)
+/**
+ * A cross-machine routes cell (`phase1b.routes-cross`): the check sets up the route itself, on the host (the Mac)
+ * only, and each computer starts with none.
+ */
+const CROSS_ROUTED = !!CHECK_ROUTE && !!CROSS_ROLE
+// Every helper of a run on one computer listens on loopback; only a cross-machine cell's computers listen on the LAN,
+// and of a routes cell only the host's (the PC listens on loopback, 1b §14). Set before any profile exists, so no
+// helper, whoever starts it, takes the app's default (every interface).
+if (REAL_HELPER)
+  process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP ||=
+    CROSS_ROLE === 'host' || (CROSS_ROLE && !CHECK_ROUTE) ? '0.0.0.0' : '127.0.0.1'
 /** In a real-helper tcp run, how many computers' loopback ports (from 47301) the class map names. */
 const CLASS_MAPPED_PORTS = 32
 /** The class `tcp` is mapped to for this run (`MOUSSE_NET_ENGINE_CHECK_CLASS`): tailnet, then public. */
@@ -155,7 +173,8 @@ function record(reason: string): void {
   const out = process.env.MOUSSE_NET_ENGINE_CHECK_OUT
   if (!out) return
   try {
-    writeFileSync(join(out, 'reason'), reason)
+    // A later pass of the same run (over tcp, the public class after the tailnet one) keeps the first reason.
+    writeFileSync(join(out, 'reason'), reason, { flag: 'wx' })
   } catch {
     // The FAIL line then has no reason, which the kit counts as a failed control.
   }
@@ -203,9 +222,11 @@ export interface Computer {
 }
 
 /** A computer's SSH test server in a real-helper run: its host alias and its default profile's selector. */
-interface SshHost {
+export interface SshHost {
   alias: string
   selector: string
+  /** The test server's own ssh_config (its port, the client key it accepts). */
+  config: string
 }
 
 /** The computers of one check, their helpers and the fake network between them. */
@@ -233,6 +254,8 @@ export class Fabric {
     []
   /** A relay run's setup has ended (`settle`): from now on every connection is judged. */
   private settled = CHECK_ROUTE !== 'relay'
+  /** Every connection a helper announced (`conn.up`), by the app it went to and the identity on the other end. */
+  readonly announced: Array<{ to: string; identity: unknown }> = []
 
   constructor() {
     withoutAgentClis()
@@ -248,17 +271,25 @@ export class Fabric {
     // route case from it (1b §14). A relay run's setup runs direct, so only what comes after it (`settle`) counts.
     const out = process.env.MOUSSE_NET_ENGINE_CHECK_OUT
     this.tap.watch = (message, to) => {
-      if (message.ev !== 'conn.up' || !this.settled) return
+      if (message.ev !== 'conn.up') return
+      this.announced.push({ to, identity: message.identity })
+      if (!this.settled) return
       if (out) appendFileSync(join(out, 'conn-up.jsonl'), `${JSON.stringify({ ...message, to })}
 `)
       if (!expected) return
       this.routesSeen.push({ to, route: message.route })
       // Every connection of the route's kind (as the kit judges it), and of its class: an inbound loopback
       // connection takes the class the map gives the listener port it arrived on. A relay's names one of the run's
-      // relays.
-      if (!routeMatches(message.route, expected, relays)) record('route_mismatch')
+      // relays. A cross-machine host's inbound connections come from the caller's own address, whose class the route
+      // does not set: only their kind counts.
+      const kind = (message.route as { kind?: unknown } | undefined)?.kind
+      const hostKindOnly = CROSS_ROLE === 'host' && kind === expected.kind
+      if (!routeMatches(message.route, expected, relays) && !hostKindOnly) record('route_mismatch')
     }
     if (!expected) return
+    // Every file of a routes run guards its own process: on Linux the kit's fence keeps a request from reaching the
+    // kit's Plus recorder, so the run records it here (as routes-app's own cases always did).
+    guardEgress()
     if (!REAL_HELPER && CHECK_ROUTE !== 'relay') {
       // A 1.1 fake: routes with approvals, and the class map the debug helper reads.
       this.network.minor = 1
@@ -350,7 +381,7 @@ export class Fabric {
       // and the app read the same map (`<port>=<class>`, 1b §14). The whole range is mapped before the first helper
       // starts, so each helper, which reads the map once, knows the computers made after it. Other loopback ports
       // stay `lan` (a LAN address that changes, as in reconnect).
-      if (CHECK_ROUTE === 'tcp' && !process.env.MOUSSE_NET_ENGINE_CHECK_ROLE) {
+      if (CHECK_ROUTE === 'tcp' && !CROSS_ROLE) {
         computer.port = 47300 + ++this.made
         if (computer.port > 47300 + CLASS_MAPPED_PORTS)
           throw new Error(`a routes run maps ${CLASS_MAPPED_PORTS} computers' ports`)
@@ -359,10 +390,7 @@ export class Fabric {
           (_, i) => `${47301 + i}=${CHECK_CLASS}`
         ).join(',')
       }
-      // A cross-machine cell's computers listen on every interface; the others only on loopback.
-      process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP ||= process.env.MOUSSE_NET_ENGINE_CHECK_ROLE
-        ? '0.0.0.0'
-        : '127.0.0.1'
+      if (this.mappedPorts.has(name)) computer.port = this.mappedPorts.get(name)
       mms.netEngine.launcher = async () => {
         const launched = await mms.netEngine.launchBuilt(
           computer.port === undefined ? {} : { port: computer.port }
@@ -410,8 +438,19 @@ export class Fabric {
     await mms.netEngine.enable()
     await mms.netEngine.startHelper()
     let engine = await running(mms)
+    // A cross-machine routes cell: no route yet, and a listener on loopback only; the check gives the host its route.
+    if (REAL_HELPER && CROSS_ROUTED) {
+      const before = engine
+      const { restarted } = await mms.netEngine.setReach({
+        lan: false,
+        tailnet: false,
+        public: [],
+        tunnels: []
+      })
+      if (restarted) engine = await running(mms, before)
+    }
     // Over ws with the real helper, this computer's only route is its tunnel: its own stand-in (1b §14).
-    if (REAL_HELPER && CHECK_ROUTE === 'ws') {
+    if (REAL_HELPER && CHECK_ROUTE === 'ws' && !CROSS_ROUTED) {
       const tunnel = await tunnelStandIn(() => mms.netEngine.reach()?.wsPort)
       this.cleanups.push(tunnel.close)
       const before = engine
@@ -420,7 +459,7 @@ export class Fabric {
     }
     // Over ssh with the real helper: this computer advertises no route, and answers SSH on its own test server.
     let ssh: SshHost | undefined
-    if (REAL_HELPER && CHECK_ROUTE === 'ssh') {
+    if (REAL_HELPER && CHECK_ROUTE === 'ssh' && !CROSS_ROUTED) {
       const before = engine
       const { restarted } = await mms.netEngine.setReach({ lan: false, tailnet: false, public: [] })
       if (restarted) engine = await running(mms, before)
@@ -488,6 +527,136 @@ export class Fabric {
   /** In a real-helper run over ssh, each computer's test SSH server. */
   private readonly sshOf = new Map<Computer, SshHost>()
 
+  /** With the real helper and no route case: the computers whose loopback port the class map names. */
+  private readonly mappedPorts = new Map<string, number>()
+
+  /**
+   * With the real helper and no route case: the computer `name`, made later, listens on a loopback port the class
+   * map gives `cls`, so its ticket's hint is outside the automatic rule and only a join that approved it dials it
+   * (1b §1.3). Call it before the run's first helper starts: each helper reads the map once.
+   */
+  mapClass(name: string, cls: 'tailnet' | 'public'): void {
+    const port = 47390 + this.mappedPorts.size
+    this.mappedPorts.set(name, port)
+    process.env.MOUSSE_NET_TEST_CLASS_MAP = [
+      process.env.MOUSSE_NET_TEST_CLASS_MAP,
+      `${port}=${cls}`
+    ]
+      .filter(Boolean)
+      .join(',')
+  }
+
+  /**
+   * How `mousse-check probe` reaches `computer` on the route under test with the real helper (1b §6.3): `--route`
+   * and, over ssh, its test server, the profile, and the pipe's state folder and helper.
+   */
+  probeRoute(computer: Computer): string[] {
+    if (CHECK_ROUTE === 'ssh') {
+      const ssh = this.sshOf.get(computer)!
+      return [
+        '--route',
+        'ssh',
+        '--ssh-config',
+        sshConfig(),
+        '--ssh-host',
+        ssh.alias,
+        '--ssh-profile',
+        ssh.selector,
+        '--pipe-state',
+        this.shortPath(join(computer.mms.netEngine.profileDir, 'net-engine', 'endpoint')),
+        '--pipe-helper',
+        process.env.MOUSSE_NET_HELPER!.trim()
+      ]
+    }
+    if (CHECK_ROUTE === 'ws')
+      return ['--route', `ws://127.0.0.1:${computer.mms.netEngine.reach()!.wsPort}/t/mousse-net/1`]
+    return ['--route', `tcp://127.0.0.1:${computer.port}`]
+  }
+
+  /**
+   * A cross-machine routes cell's `tcp` route on the host (1b §14): its helper listens on `address`, the host's local
+   * network address, and its tickets offer only `route`, the caller's loopback stand-in, which the caller's class map
+   * gives the class under test and which carries each connection to that listener. Set with `routes.config` itself:
+   * Settings takes no loopback address. Answers the port the helper listens on.
+   */
+  async crossTcp(computer: Computer, route: string, address: string): Promise<number> {
+    await computer.engine.request('routes.config', {
+      lan: false,
+      tailnet: false,
+      public: [route],
+      forward_to: address,
+      tunnels: []
+    })
+    const before = computer.engine
+    await computer.mms.netEngine.restartHelper()
+    computer.engine = await running(computer.mms, before)
+    return Number(computer.engine.info.port)
+  }
+
+  /**
+   * A cross-machine routes cell's `ws` route on the host (1b §14): its tunnel stand-in, on every interface, named by
+   * `address` (the host's local network address) with a certificate for it from the run's test root, is its only
+   * route. Answers
+   * the route and the root (DER, base64) the caller's helper must trust.
+   */
+  async crossTunnel(computer: Computer, address: string): Promise<{ route: string; root: string }> {
+    const tunnel = await tunnelStandIn(() => computer.mms.netEngine.reach()?.wsPort, address)
+    this.cleanups.push(tunnel.close)
+    const before = computer.engine
+    const { restarted } = await computer.mms.netEngine.setReach({ tunnels: [tunnel.route] })
+    if (restarted) computer.engine = await running(computer.mms, before)
+    const root = readFileSync(process.env.MOUSSE_NET_TEST_EXTRA_ROOT!).toString('base64')
+    return { route: tunnel.route, root }
+  }
+
+  /**
+   * Kit fixture of a cross-machine routes cell (1b §14): `computer` grants `endpoint` the owner role, as a pairing's
+   * Yes saves it, and keeps a Connected row for it, with no ceremony and no way back to it.
+   */
+  async fixtureGrant(computer: Computer, endpoint: string, name: string): Promise<NodeId> {
+    // The helper running now: an invitation may have restarted it (the `route-leak` control turns LAN on).
+    computer.engine = computer.mms.netEngine.currentHelper() ?? computer.engine
+    const answer = await computer.engine.request('grant.add', { identity: endpoint, name })
+    const row = fixtureRow(computer, { endpoint, name, grant: String(answer.grant) })
+    computer.engine.claim(endpoint)
+    return row.localId
+  }
+
+  /**
+   * Kit fixture of a cross-machine routes cell (1b §14): `computer` pins `endpoint`, with `routes` (its invitation's)
+   * as the addresses it dials, and keeps a Connected row for it.
+   */
+  async fixturePin(
+    computer: Computer,
+    endpoint: string,
+    name: string,
+    routes: string[]
+  ): Promise<NodeId> {
+    await computer.engine.request('peer.add', { identity: endpoint, name, routes: [] })
+    await computer.engine.request('peer.addresses.set', { identity: endpoint, routes })
+    return fixtureRow(computer, { endpoint, name, grant: '', addresses: routes }).localId
+  }
+
+  /**
+   * A cross-machine routes cell's `ssh` route on the host (1b §14): `computer` answers SSH on the kit's test server
+   * (on loopback, as `sshServer`), its entry `alias`.
+   */
+  crossSsh(computer: Computer, alias: string): Promise<SshHost> {
+    return this.sshHost(alias, computer.mms, computer.home)
+  }
+
+  /**
+   * `folder` by a short path on Unix: the probe opens `<state>/control.sock` by its full path, and a check's state
+   * folder is longer than a socket path may be on macOS (104 bytes). Windows names its pipe instead.
+   */
+  private shortPath(folder: string): string {
+    if (process.platform === 'win32') return folder
+    const short = mkdtempSync('/tmp/mp-')
+    symlinkSync(folder, join(short, 's'))
+    this.cleanups.push(() => rmSync(short, { recursive: true, force: true }))
+    return join(short, 's')
+  }
+
   /**
    * `mms` answers SSH at `alias` on the kit's test SSH server (`MOUSSE_CHECK_TEST_SSHD`, started through
    * `MOUSSE_CHECK_SSH_ROUTES`, 1b §14): on loopback, into its Mousse folder `home`. Its `mousse-helper` is this
@@ -519,8 +688,14 @@ export class Fabric {
         stop: () => Promise<void>
       }>
     }
+    // Over SSH the remote's /bin/sh runs <HOME>/.mousse/bin/mousse-cli, a launcher the app writes in its Mousse
+    // home: the session's HOME holds this computer's Mousse home as its .mousse.
+    const user = realpathSync(mkdtempSync(join(tmpdir(), 'engine-check-ssh-user-')))
+    symlinkSync(home, join(user, '.mousse'), 'junction')
+    this.cleanups.push(() => rmSync(user, { recursive: true, force: true }))
     const server = await startSshRoute({
       keys: join(home, `ssh-server-${alias}`),
+      home: user,
       mousseHome: home,
       launchers:
         process.platform === 'win32'
@@ -533,7 +708,7 @@ export class Fabric {
       `Host ${alias}`
     )
     appendFileSync(sshConfig(), `\n${entry}\n`)
-    return { alias, selector }
+    return { alias, selector, config: server.config }
   }
 
   /**
@@ -936,11 +1111,17 @@ export function guardEgress(): void {
   process.env.MOUSSE_CHECK_EGRESS_GUARD ||= 'in-process'
   process.env.MOUSSE_ID_ORIGIN ||= 'https://plus.check.invalid'
   const plus = new URL(process.env.MOUSSE_ID_ORIGIN).host
+  // A cross-machine cell's other computer (`MOUSSE_NET_TEST_EGRESS`, as the kit allows it to the helper).
+  const allowed = (process.env.MOUSSE_NET_TEST_EGRESS ?? '')
+    .split(/[\s,]+/)
+    .map((host) => host.trim())
+    .filter(Boolean)
   const realFetch = globalThis.fetch
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url)
     if (url.host === plus) record('plus_contacted')
-    else if (!/^(localhost|127\.|\[::1\])/.test(url.host)) denied(url.host)
+    else if (!/^(localhost|127\.|\[::1\])/.test(url.host) && !allowed.includes(url.hostname))
+      denied(url.host)
     else return realFetch(input, init)
     throw new Error('egress denied by the check')
   }) as typeof fetch
@@ -957,7 +1138,7 @@ export function guardEgress(): void {
         : typeof options === 'number'
           ? String(args[1] ?? 'localhost')
           : 'pipe'
-    if (!['pipe', 'localhost', '::1'].includes(host) && !host.startsWith('127.')) {
+    if (!['pipe', 'localhost', '::1', ...allowed].includes(host) && !host.startsWith('127.')) {
       denied(host)
       process.nextTick(() => this.destroy(new Error('egress denied by the check')))
       return this
@@ -1023,6 +1204,26 @@ export function useOffered(owner: Pick<Computer, 'mms' | 'dispatch'>): () => voi
   return () => clearInterval(timer)
 }
 
+/** A fixture's Connected row on `computer`, saved straight into its engine's store. */
+function fixtureRow(
+  computer: Computer,
+  row: Pick<EnginePeerRow, 'endpoint' | 'name' | 'grant'> & { addresses?: string[] }
+): EnginePeerRow {
+  const engine = computer.mms.netEngine as unknown as {
+    started?: { peers: EnginePeerStore }
+    changed(): void
+  }
+  if (!engine.started) throw new Error(`${computer.name}: networking is off`)
+  const saved = engine.started.peers.add({
+    ...row,
+    fingerprint: fingerprintOf(row.endpoint),
+    state: 'connected',
+    pairedAt: Date.now()
+  })
+  engine.changed()
+  return saved
+}
+
 /** A computer's row for another (by its endpoint), in any state but removed. */
 export function rowFor(on: Computer, other: Computer) {
   return on.mms.netEngine
@@ -1077,7 +1278,7 @@ let standInPki: { key: string; cert: string } | undefined
  */
 const GIT_OPENSSL = 'C:\\Program Files\\Git\\mingw64\\bin\\openssl.exe'
 
-function tunnelPki(): { key: string; cert: string } {
+function tunnelPki(address?: string): { key: string; cert: string } {
   if (standInPki) return standInPki
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'engine-check-pki-')))
   const openssl =
@@ -1106,7 +1307,7 @@ function tunnelPki(): { key: string; cert: string } {
   writeFileSync(
     join(dir, 'leaf.ext'),
     [
-      'subjectAltName=DNS:localhost',
+      `subjectAltName=DNS:localhost${address ? `,IP:${address}` : ''}`,
       'extendedKeyUsage=serverAuth',
       'keyUsage=critical,digitalSignature',
       'basicConstraints=CA:FALSE',
@@ -1142,12 +1343,14 @@ function tunnelPki(): { key: string; cert: string } {
 /**
  * A TLS-terminating tunnel stand-in on loopback (1b §14 `ws`): the outer TLS ends here, with a certificate from
  * the run's test root, and the plain bytes go on to the helper's ws listener (`wsPort()` at each connection, so a
- * helper restart is followed). Its route is `wss://localhost:<port>/t/mousse-net/1`.
+ * helper restart is followed). Its route is `wss://localhost:<port>/t/mousse-net/1`. A cross-machine host's listens
+ * on every interface instead, its route and certificate naming its local network `address`.
  */
 async function tunnelStandIn(
-  wsPort: () => number | undefined
+  wsPort: () => number | undefined,
+  address?: string
 ): Promise<{ route: string; close: () => Promise<void> }> {
-  const { key, cert } = tunnelPki()
+  const { key, cert } = tunnelPki(address)
   const open = new Set<Socket>()
   const server = createTlsServer({ key, cert, ALPNProtocols: ['http/1.1'] }, (socket) => {
     const port = wsPort()
@@ -1161,10 +1364,15 @@ async function tunnelStandIn(
     plain.on('error', () => socket.destroy())
     socket.pipe(plain).pipe(socket)
   })
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  // A host's on every interface without naming one: the kit's egress guard refuses the lookup an address takes.
+  await new Promise<void>((resolve) =>
+    !address || /^127\./.test(address)
+      ? server.listen(0, address ?? '127.0.0.1', resolve)
+      : server.listen(0, resolve)
+  )
   const port = (server.address() as { port: number }).port
   return {
-    route: `wss://localhost:${port}/t/mousse-net/1`,
+    route: `wss://${address ?? 'localhost'}:${port}/t/mousse-net/1`,
     close: () => closeServer(server, open)
   }
 }

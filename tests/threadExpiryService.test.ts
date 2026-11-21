@@ -127,4 +127,14 @@ describe('thread expiry', () => {
     expect(h.archived).toEqual([])
     await h.service.stop()
   })
+
+  it('looks at no thread list when a run ends while no thread waits to expire', async () => {
+    const h = harness([thread('a'), thread('sub', { lineage: { rootThreadId: 'a', parentThreadId: 'a', relationship: 'subagent' } as Thread['lineage'] })])
+    h.service.start()
+    await h.service.pass()
+    const listThreads = vi.spyOn(h.deps, 'listThreads')
+    for (let i = 0; i < 50; i += 1) h.endRun(i % 2 ? 'a' : 'sub')
+    expect(listThreads).not.toHaveBeenCalled()
+    await h.service.stop()
+  })
 })

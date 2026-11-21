@@ -3,6 +3,8 @@ import { useAppStore } from '../stores/appStore'
 import { privateThreadHeadline } from '../utils/emptyThreadHeadline'
 import { AnimatedHeadline } from './AnimatedHeadline'
 import { EmptyThreadLogo } from './EmptyThreadLogo'
+import { IncognitoGlasses } from './IncognitoGlasses'
+import { MousseLogoOutline } from './MousseLogoOutline'
 
 /** Whether the chat on screen is private: its thread's own setting once started, else the new chat's draft. */
 function useActiveChatPrivate(): boolean {
@@ -18,13 +20,32 @@ function useActiveChatPrivate(): boolean {
  * The logo and headline above an empty chat's composer, anchored so the composer stays centred.
  * In a private chat the logo wears sunglasses and the headline says the chat is off the record.
  */
-export function EmptyThreadHeading({ headline, incognito }: { headline: string; incognito?: boolean }) {
+export function EmptyThreadHeading({ headline, incognito, animate = true, continued = false }: {
+  headline: string
+  incognito?: boolean
+  animate?: boolean
+  /** It takes the place of the same heading already on screen (the warm start's): the logo does not draw itself in again. */
+  continued?: boolean
+}) {
   const privateChat = useActiveChatPrivate()
   const on = incognito ?? privateChat
+  const label = on ? 'Mousse, incognito' : 'Mousse'
+  const title = on ? 'Private: stays on this computer' : undefined
+  const text = on ? privateThreadHeadline(headline) : headline
+  if (!animate) {
+    return (
+      <>
+        <MousseLogoOutline className="chat-empty-logo" label={label}>
+          {on ? <IncognitoGlasses on /> : undefined}
+        </MousseLogoOutline>
+        <h1 className="chat-empty-title" title={title}>{text}</h1>
+      </>
+    )
+  }
   return (
     <>
-      <EmptyThreadLogo label={on ? 'Mousse, incognito' : 'Mousse'} incognito={on} />
-      <AnimatedHeadline className="chat-empty-title" title={on ? 'Private: stays on this computer' : undefined} text={on ? privateThreadHeadline(headline) : headline} />
+      <EmptyThreadLogo label={label} incognito={on} drawnAtStart={continued} />
+      <AnimatedHeadline className="chat-empty-title" title={title} text={text} />
     </>
   )
 }

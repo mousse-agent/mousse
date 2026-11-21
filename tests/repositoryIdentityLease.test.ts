@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { buildSync } from 'esbuild'
 import { afterEach, describe, expect, it } from 'vitest'
-import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
+import { resolveRepositoryIdentity, resolveRepositoryIdentityAsync } from '../src/mms/git/RepositoryIdentity'
 import { acquireRepositoryLease, getRepositoryLeasePath, RepositoryLeaseAbortedError, RepositoryLeaseBusyError } from '../src/mms/git/RepositoryLease'
 
 const dirs: string[] = []
@@ -29,6 +29,23 @@ describe('RepositoryIdentity', () => {
     expect(resolveRepositoryIdentity(bare).capability).toEqual({ allowed: false, reason: 'bare-repository' })
     const unborn = mkdtempSync(join(tmpdir(), 'mousse-unborn-')); dirs.push(unborn); execFileSync('git', ['init', '-q'], { cwd: unborn })
     expect(resolveRepositoryIdentity(unborn).capability).toEqual({ allowed: false, reason: 'unborn-head' })
+  })
+  // One `rev-parse` answers the common directory, bareness and work tree together: every kind of folder reads the
+  // same as asking each question alone, in the blocking and the async call.
+  it.each([
+    ['a repository', () => repo(), { allowed: true }],
+    ['a linked worktree', () => { const root = repo(); const linked = `${root}-linked`; dirs.push(linked); execFileSync('git', ['worktree', 'add', '-q', '-b', 'linked', linked], { cwd: root }); return linked }, { allowed: true }],
+    ['a bare repository', () => { const bare = mkdtempSync(join(tmpdir(), 'mousse-bare-')); dirs.push(bare); execFileSync('git', ['init', '--bare', '-q'], { cwd: bare }); return bare }, { allowed: false, reason: 'bare-repository' }],
+    ['a repository with no commit', () => { const unborn = mkdtempSync(join(tmpdir(), 'mousse-unborn-')); dirs.push(unborn); execFileSync('git', ['init', '-q'], { cwd: unborn }); return unborn }, { allowed: false, reason: 'unborn-head' }],
+    ['a folder outside any repository', () => { const plain = mkdtempSync(join(tmpdir(), 'mousse-plain-')); dirs.push(plain); return plain }, { allowed: false, reason: 'not-a-repository' }]
+  ] as const)('reads %s the same whichever way it is asked', async (_name, make, capability) => {
+    const folder = make()
+    const blocking = resolveRepositoryIdentity(folder)
+    const nonBlocking = await resolveRepositoryIdentityAsync(folder, { metadataHome: tmpdir() })
+    expect(blocking.capability).toEqual(capability)
+    expect(nonBlocking.capability).toEqual(capability)
+    expect(nonBlocking.commonDir).toBe(blocking.commonDir)
+    if (capability.allowed) expect(blocking.commonDir).toBe(resolveRepositoryIdentity(folder.endsWith('-linked') ? folder.slice(0, -'-linked'.length) : folder).commonDir)
   })
 })
 

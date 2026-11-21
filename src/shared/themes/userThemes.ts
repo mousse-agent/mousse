@@ -254,8 +254,8 @@ function fileWallpaper(raw: unknown): UserThemeFileWallpaper | undefined {
 
 /** The color tokens a theme usually sets, with what each one paints. Listed in the guide and offered in the editor. */
 export const THEME_TOKENS: ReadonlyArray<{ name: string; use: string }> = [
-  { name: '--surface-base', use: 'window background' },
-  { name: '--surface-strong', use: 'sidebar and raised panels' },
+  { name: '--surface-base', use: 'the window: title bar, rail, sidebar and the edges around the chat pane, one color (with acrylic, the glass tint)' },
+  { name: '--surface-strong', use: 'raised panels' },
   { name: '--pane-surface', use: 'the rounded chat pane in the middle (a thread or a bot\'s chat); its fades, bubbles and composer follow it' },
   { name: '--surface-soft', use: 'hovered rows, inputs' },
   { name: '--surface-elevated', use: 'menus and popovers' },
@@ -298,11 +298,12 @@ export function themeStylingGuide(): string {
     `The page root is html[data-theme="<base>"]; while a user theme is on it also has data-user-theme="<id>".`,
     'Tokens (set them in colors; in css they need !important, because Mousse sets them inline):',
     ...THEME_TOKENS.map((token) => `  ${token.name}: ${token.use}`),
+    'The background: when a person asks to color the background, the sidebar, the title bar or "behind the pane", set --surface-base. It colors the whole window around the chat pane as one, on every page. Leave the frame\'s parts out of css; give one part its own color (css on its selector) only when the person asks for parts in different colors.',
     'Stable selectors (other class names change without notice):',
     ...THEME_SELECTORS.map((entry) => `  ${entry.selector}: ${entry.part}`),
-    'Wallpaper: set userTheme.wallpaper = { path: "<absolute path of a PNG, JPEG or WebP on this computer>", fit, position, dim }. Mousse checks the image, keeps its own copy and shows a screen-sized copy behind the chat, dimmed by the theme\'s background color (more than dim when text needs it to stay readable). Leave path out to change only fit, position or dim; null removes it. Never put an image in css as a data: address.',
+    'Wallpaper: set userTheme.wallpaper = { path: "<absolute path of a PNG, JPEG or WebP on this computer>", fit, position, dim }. Mousse checks the image, keeps its own copy and shows a screen-sized copy behind the chat, dimmed by the theme\'s background color (more than dim when text needs it to stay readable). With acrylic on, the wallpaper is see-through so the window\'s glass shows; css does not need to change its opacity. Leave path out to change only fit, position or dim; null removes it. Never put an image in css as a data: address.',
     'While a wallpaper shows, html has data-wallpaper and var(--mousse-wallpaper) holds it, so css can reuse it elsewhere: [data-mousse="sidebar"] { background: var(--mousse-wallpaper) center / cover; }. Text on it must stay readable.',
-    'Where a person decides something (an approval, an ask, a host key) and on Settings pages other than Appearance, the theme is off, wallpaper included.',
+    'The theme never goes off as a whole: its colors and wallpaper show everywhere. Only its css is off where a person decides something (an approval, a permission, a host key) or where access is set up (Settings pages other than Appearance, the Automations page, a bot\'s About panel, the permission menu, the agent editor, an automation draft), so color the window with tokens, not css.',
     `Rules: nothing may load from outside. The only url() allowed is a quoted data: address, url("data:..."); @import, image-set(), src(), attr() and every other url() are dropped, declaration by declaration; invalid CSS is dropped by the browser rule by rule. CSS over ${THEME_CSS_MAX_LENGTH.toLocaleString('en-US')} characters is refused. Keep text readable (4.5:1 contrast) and do not hide controls.`
   ].join('\n')
 }

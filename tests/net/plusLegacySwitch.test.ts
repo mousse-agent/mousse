@@ -10,7 +10,7 @@ import { parseProtocolJson } from '../../src/mms/net/sync/codec'
 import type { NetStatus } from '../../src/shared/net/local'
 import type { TransportManifest } from '../../src/mms/net/contracts'
 
-// Settings → Labs → Mousse Plus (legacy): off, a profile's Net runs as a build without the Mousse ID module and sends
+// Settings → Labs → Mousse ID (legacy): off, a profile's Net runs as a build without the Mousse ID module and sends
 // nothing to Mousse Plus; on again, the module comes back with the saved hosted relay row.
 
 const cleanup: Array<() => void | Promise<void>> = []
@@ -55,7 +55,7 @@ function savedRows(profileDir: string): Array<{ id: string }> {
   }
 }
 
-it('turning Mousse Plus (legacy) off stops the module, drops the hosted relay and keeps networking on', async () => {
+it('turning Mousse ID (legacy) off stops the module, drops the hosted relay and keeps networking on', async () => {
   const profileDir = directory()
   const { module, made } = watchedModule()
   const net = new NetService({ profileDir, hosted: module })

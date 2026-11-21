@@ -8,12 +8,14 @@ import type { LifecycleResource, ResourceInventorySnapshot, ResourceSource, Rete
 import { assertLifecyclePath, ResourceLifecycleStore, validateResourceInventory } from './ResourceLifecycleStore'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
 import { lifecycleReadAsync, WorktreeRetirementService } from './WorktreeRetirementService'
-import { UndoRetentionService } from '../actions/UndoRetentionService'
+import { expiredReceiptIdsFromJournal } from '../actions/UndoRetentionService'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
-import { ThreadJournal } from '../data/ThreadJournal'
+import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { canonicalPathAsync, gitCommonDirAsync } from './canonicalPath'
-import { readThreadRecordSync, threadRecordFile, threadRecordPath } from '../data/threadRecords'
+import { findListedWorktreeAsync } from './worktreeRegistry'
+import { readThreadLifecycleRecordsSync, readThreadRecordSync, threadRecordFile, threadRecordPath } from '../data/threadRecords'
+import { THREAD_DB_FILE } from '../data/threadDb/threadDbEngine'
 
 type JsonObject = Record<string, unknown>
 const object = (value: unknown): JsonObject | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined
@@ -76,6 +78,8 @@ export interface OwnershipReads {
   commonDir(path: string): string | undefined
   /** Facts the pass needed and did not have: a blocker each, so ownership is never decided on a guess. */
   readonly missing: string[]
+  /** True once a collecting pass already recorded missing facts and its inventory will be discarded. */
+  collectingOnly?(): boolean
 }
 
 /** An absent checkout is verified against its own profile's reconstruction manifests, so the profile is part of the key. */
@@ -89,6 +93,7 @@ const EMPTY_LEGACY: LegacyScan = { visited: 0, metas: [] }
 export function collectingReads(facts: OwnershipFacts, needs: OwnershipNeed[]): OwnershipReads {
   return {
     missing: [],
+    collectingOnly: () => needs.length > 0,
     present: (path) => {
       if (facts.present.has(path)) return facts.present.get(path)!
       needs.push({ kind: 'present', path })
@@ -161,12 +166,18 @@ export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts:
     if (!unique.has(key)) unique.set(key, need)
   }
   const queue = [...unique.values()]
+  const storeTasks = new Map<ResourceLifecycleStore, TaskLifecycleRecord[]>()
+  const tasksFor = (store: ResourceLifecycleStore): TaskLifecycleRecord[] => {
+    let list = storeTasks.get(store)
+    if (!list) { list = store.list(); storeTasks.set(store, list) }
+    return list
+  }
   const readOne = async (need: OwnershipNeed): Promise<void> => {
     if (need.kind === 'present') {
       if (!facts.present.has(need.path)) facts.present.set(need.path, await access(need.path).then(() => true, () => false))
     } else if (need.kind === 'worktree') {
       const key = worktreeKey(need.store, need.path, need.branch, need.repository)
-      if (!facts.worktrees.has(key)) facts.worktrees.set(key, await verifyWorktreeFact(need.store, need.path, need.branch, need.repository))
+      if (!facts.worktrees.has(key)) facts.worktrees.set(key, await verifyWorktreeFact(need.store, need.path, need.branch, need.repository, tasksFor))
     } else if (need.kind === 'canonical') {
       if (!facts.canonical.has(need.path)) facts.canonical.set(need.path, await canonicalPathAsync(need.path))
     } else if (need.kind === 'common-dir') {
@@ -182,7 +193,7 @@ export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts:
  * regular linked worktree whose repository, top level and registration match; an absent one has exactly one owner's
  * reconstruction manifest whose pins still hold. The reason it is not, or undefined.
  */
-async function verifyWorktreeFact(store: ResourceLifecycleStore, path: string, expectedBranch: string | undefined, expectedRepository: string | undefined): Promise<string | undefined> {
+async function verifyWorktreeFact(store: ResourceLifecycleStore, path: string, expectedBranch: string | undefined, expectedRepository: string | undefined, tasksFor: (store: ResourceLifecycleStore) => TaskLifecycleRecord[] = (s) => s.list()): Promise<string | undefined> {
   try {
     if (!isAbsolute(path)) throw new Error('Registered checkout is not absolute')
     // In a worktree folder the person chose that is not there: the worktree is there, out of reach, and can't be checked.
@@ -191,7 +202,7 @@ async function verifyWorktreeFact(store: ResourceLifecycleStore, path: string, e
     if (offline) throw new Error(driveNotConnectedText(offline))
     if (!await access(path).then(() => true, () => false)) {
       const retirement = new WorktreeRetirementService(store)
-      const owners = store.list().filter((task) => existsSync(retirement.pathFor(task.taskId, path)))
+      const owners = tasksFor(store).filter((task) => existsSync(retirement.pathFor(task.taskId, path)))
       if (owners.length !== 1) throw new Error('Absent checkout lacks unique reconstruction authority')
       const manifest = retirement.load(retirement.pathFor(owners[0].taskId, path))
       if (expectedBranch && manifest.branch !== expectedBranch || expectedRepository && manifest.repositoryId !== expectedRepository) throw new Error('Reconstruction owner changed')
@@ -206,7 +217,8 @@ async function verifyWorktreeFact(store: ResourceLifecycleStore, path: string, e
     // The branch is the owner's record, not proof: the agent is free to switch to another, so the checkout is known by its path, registration and repository.
     const top = await realpathLikeSync(await git('rev-parse', '--show-toplevel'))
     if (top.toLowerCase() !== (await realpathLikeSync(path)).toLowerCase()) throw new Error('Source path is not the registered worktree root')
-    const listed = (await git('worktree', 'list', '--porcelain')).split(/\r?\n/).some((line) => line.startsWith('worktree ') && resolve(line.slice(9)).toLowerCase() === resolve(path).toLowerCase())
+    // Its own registration, read without listing every worktree of the repository (`worktreeRegistry`).
+    const listed = Boolean(await findListedWorktreeAsync(common, path, (entry, wanted) => resolve(entry).toLowerCase() === resolve(wanted).toLowerCase()))
     if (!listed) throw new Error('Git does not register the worktree')
     return undefined
   } catch (error) {
@@ -279,43 +291,99 @@ export function buildResourceInventoryFromFacts(store: ResourceLifecycleStore, r
   return inventoryFrom(store, record, options, finalReads(facts))
 }
 
+type SharedFileRead = { source: ResourceSource; data: unknown } | { source: ResourceSource; reason: string } | null
+interface IndexedSourceRecord { order: number; path: string; raw: string; digest: string; data: JsonObject; owner: string }
+interface SourceRootIndex { globalBlockers: string[]; byOwner: Map<string, IndexedSourceRecord[]> }
+
+/**
+ * Read-once store state shared across `inventoryFrom` calls within a single synchronous pass (`claimsFrom`),
+ * never persisted across calls so every pass remains fresh source-derived truth.
+ */
+export interface InventoryStorePass {
+  readonly tasks: readonly TaskLifecycleRecord[]
+  readonly taskById: ReadonlyMap<string, TaskLifecycleRecord>
+  readonly childrenByParent: ReadonlyMap<string, readonly TaskLifecycleRecord[]>
+  readonly sharedFiles: Map<string, SharedFileRead>
+  scheduledJobs?: { byOwner: Map<string, JsonObject[]>; blockers: string[] }
+  sourceIndex?: SourceRootIndex
+}
+
+export function createInventoryStorePass(tasks: readonly TaskLifecycleRecord[]): InventoryStorePass {
+  const taskById = new Map<string, TaskLifecycleRecord>()
+  const childrenByParent = new Map<string, TaskLifecycleRecord[]>()
+  for (const task of tasks) {
+    taskById.set(task.taskId, task)
+    if (task.parentTaskId) {
+      let list = childrenByParent.get(task.parentTaskId)
+      if (!list) childrenByParent.set(task.parentTaskId, (list = []))
+      list.push(task)
+    }
+  }
+  return { tasks, taskById, childrenByParent, sharedFiles: new Map() }
+}
+
 /** The synchronous pass over the records, answering checkouts from `reads`. */
-export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecycleRecord, options: ResourceInventoryOptions, reads: OwnershipReads): ResourceInventorySnapshot {
+export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecycleRecord, options: ResourceInventoryOptions, reads: OwnershipReads, pass?: InventoryStorePass): ResourceInventorySnapshot {
   const result: ResourceInventorySnapshot = { schemaVersion: 1, profileId: store.profileId, taskId: record.taskId, generation: record.generation, observedAt: new Date().toISOString(), sources: [], resources: [], blockers: [] }
   const resources = new Map<string, LifecycleResource>()
   const verifiedWorktrees = new Map<string, string | undefined>()
   const seenPaths = new Set<string>()
-  const source = (path: string, required = false): { source: ResourceSource; data: unknown } | undefined => {
+  const preloadedSources = new Map<string, { raw: string; data: unknown } | { error: string } | undefined>()
+  const source = (path: string, required = false, shared = false): { source: ResourceSource; data: unknown } | undefined => {
     if (seenPaths.has(path)) return undefined
     seenPaths.add(path)
+    if (shared && pass && pass.sharedFiles.has(path)) {
+      const cached = pass.sharedFiles.get(path)!
+      if (cached === null) return undefined
+      result.sources.push(cached.source)
+      if ('reason' in cached) { result.blockers.push(cached.reason); return undefined }
+      return { source: cached.source, data: cached.data }
+    }
     const id = digest(path)
     try {
-      const file = threadRecordFile(path)
-      let stat: ReturnType<typeof lstatSync>
-      try { stat = lstatSync(file) }
-      catch (error) { if (!required && (error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
-      // Read records only. Symlinked/malformed sources never become ownership authority.
-      if (!relative(store.profileHome, file).startsWith('..')) assertLifecyclePath(store.profileHome, file)
-      const inDatabase = file !== path
-      if (stat.isSymbolicLink() || !stat.isFile() || (!inDatabase && stat.size > 32 * 1024 * 1024)) throw new Error('Source is not a bounded regular record')
       let raw: string
       let data: unknown
-      if (inDatabase) {
-        const record = readThreadRecordSync(path)
-        if (!record) { if (!required) return undefined; throw new Error('Record is missing') }
-        raw = record.raw
-        data = record.data
+      if (preloadedSources.has(path)) {
+        const preloaded = preloadedSources.get(path)
+        if (!preloaded) { if (!required) return undefined; throw new Error('Record is missing') }
+        if ('error' in preloaded) throw new Error(preloaded.error)
+        raw = preloaded.raw
+        data = preloaded.data
       } else {
-        raw = readFileSync(path, 'utf8')
-        data = JSON.parse(raw)
+        const file = threadRecordFile(path)
+        let stat: ReturnType<typeof lstatSync>
+        try { stat = lstatSync(file) }
+        catch (error) {
+          if (!required && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+            if (shared && pass) pass.sharedFiles.set(path, null)
+            return undefined
+          }
+          throw error
+        }
+        // Read records only. Symlinked/malformed sources never become ownership authority.
+        if (!relative(store.profileHome, file).startsWith('..')) assertLifecyclePath(store.profileHome, file)
+        const inDatabase = file !== path
+        if (stat.isSymbolicLink() || !stat.isFile() || (!inDatabase && stat.size > 32 * 1024 * 1024)) throw new Error('Source is not a bounded regular record')
+        if (inDatabase) {
+          const record = readThreadRecordSync(path)
+          if (!record) { if (!required) return undefined; throw new Error('Record is missing') }
+          raw = record.raw
+          data = record.data
+        } else {
+          raw = readFileSync(path, 'utf8')
+          data = JSON.parse(raw)
+        }
       }
       const value: ResourceSource = { id, path, digest: digest(raw), status: 'verified' }
       result.sources.push(value)
+      if (shared && pass) pass.sharedFiles.set(path, { source: value, data })
       return { source: value, data }
     } catch (error) {
       const reason = `Cannot establish source ${path}: ${(error as Error).message}`
-      result.sources.push({ id, path, digest: 'unknown', status: 'unknown', reason })
+      const failed: ResourceSource = { id, path, digest: 'unknown', status: 'unknown', reason }
+      result.sources.push(failed)
       result.blockers.push(reason)
+      if (shared && pass) pass.sharedFiles.set(path, { source: failed, reason })
       return undefined
     }
   }
@@ -380,9 +448,6 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
   }
 
   const inventoryTask = (task: TaskLifecycleRecord): void => {
-    let expiredReceipts: ReadonlySet<string>
-    try { expiredReceipts = new UndoRetentionService(task.location, Date.now, true).expiredReceiptIds() }
-    catch (error) { result.blockers.push(`Undo retention authority is invalid: ${(error as Error).message}`); expiredReceipts = new Set() }
     const authority = source(store.recordPath(task.taskId), true)
     if (authority) resource('runtime', store.recordPath(task.taskId), authority.source.id, 'recovery', 'Stable lifecycle mapping, operation receipts and tombstone remain authoritative', task.taskId)
     const meta = source(join(task.location, 'meta.json'), true)
@@ -409,6 +474,27 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
       resource('git-ref', `refs/mousse/published/${task.taskId}`, workspace.source.id, 'recall', 'The last published files are the base of the next publish', task.taskId, repositoryId)
       verifyWorktree(text(value?.worktreePath), text(value?.branch), repositoryId)
       if (['conflicted', 'recovery_required', 'provisioning'].includes(String(value?.lifecycle))) resource('worktree', text(value?.worktreePath), workspace.source.id, value?.lifecycle === 'conflicted' ? 'conflict' : 'recovery', 'Workspace operation has not settled', task.taskId, repositoryId)
+    }
+    // Load `agents.json`, `mousse-agent-sessions.json` and artifact-bearing `messages.json` in one database open when `thread.db` exists.
+    const dbFile = join(task.location, THREAD_DB_FILE)
+    if (existsSync(dbFile)) {
+      const agentsPath = `${dbFile}#agents.json`
+      const sessionsPath = `${dbFile}#mousse-agent-sessions.json`
+      const messagesPath = `${dbFile}#messages.json`
+      try {
+        const stat = lstatSync(dbFile)
+        if (!relative(store.profileHome, dbFile).startsWith('..')) assertLifecyclePath(store.profileHome, dbFile)
+        if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('Source is not a bounded regular record')
+        const loaded = readThreadLifecycleRecordsSync(task.location)
+        preloadedSources.set(agentsPath, loaded.agents)
+        preloadedSources.set(sessionsPath, loaded.sessions)
+        preloadedSources.set(messagesPath, loaded.messages)
+      } catch (error) {
+        const message = (error as Error).message
+        preloadedSources.set(agentsPath, { error: message })
+        preloadedSources.set(sessionsPath, { error: message })
+        preloadedSources.set(messagesPath, { error: message })
+      }
     }
     for (const name of ['agents.json', 'mousse-agent-sessions.json']) {
       const found = source(threadRecordPath(task.location, name))
@@ -454,7 +540,7 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
     if (named) {
       try {
         const state = new AgentEpisodeStore(task.location).read()
-        const receipts = new ThreadJournal(task.location, { readOnly: true }).list().map((entry) => object(object(entry.details)?.receipt)).filter((entry): entry is JsonObject => Boolean(entry))
+        const receipts = reads.collectingOnly?.() ? [] : new ThreadJournal(task.location, { readOnly: true }).list().map((entry) => object(object(entry.details)?.receipt)).filter((entry): entry is JsonObject => Boolean(entry))
         const contextEpisodes = new Set<string>(), resolvedContext = new Set<string>()
         const identities = new Map(state.identities.map((identity) => [identity.id, identity]))
         for (const episode of [...state.episodes].reverse()) {
@@ -486,41 +572,58 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
             verifyWorktree(episode.binding.worktreePath, episode.binding.branch, repositoryId)
           }
         }
-        for (const identity of state.identities) {
-          if (!/^[a-z0-9][a-z0-9_-]{2,127}$/i.test(identity.id)) throw new Error('Invalid named agent journal identity')
-          internalReceiptRefs(join(task.location, 'agent-changes', identity.id), task.taskId, repositoryId, namedReceiptClaims, task.location)
+        if (!reads.collectingOnly?.()) {
+          for (const identity of state.identities) {
+            if (!/^[a-z0-9][a-z0-9_-]{2,127}$/i.test(identity.id)) throw new Error('Invalid named agent journal identity')
+            internalReceiptRefs(join(task.location, 'agent-changes', identity.id), task.taskId, repositoryId, namedReceiptClaims, task.location)
+          }
         }
       } catch (error) { result.blockers.push(`Named agent claims are invalid: ${(error as Error).message}`) }
     }
     // Receipts in the journal, rather than duplicate action/generation projections, own retained refs.
-    const journalRoot = join(task.location, 'journal')
-    const latest = new Map<string, { source: ResourceSource; data: JsonObject }>()
-    if (journalDirectory(journalRoot, task.location)) {
-      try {
-        assertLifecyclePath(task.location, journalRoot)
-        for (const name of readdirSync(journalRoot).filter((name) => /^\d{16}\.json$/.test(name)).sort()) {
-          const entry = source(join(journalRoot, name))
-          if (!entry) continue
-          const data = object(entry.data)
-          if (data?.schemaVersion !== 1 || !text(data.operationId)) { result.blockers.push('Unknown journal record schema/operation'); continue }
-          latest.set(String(data.operationId), { source: entry.source, data })
-          const receipt = object(object(data.details)?.receipt)
-          if (receipt) {
-            const kind: RetentionClaimKind = receipt.kind === 'undo' ? 'redo' : 'undo'
-            if (!Array.isArray(receipt.retainedRefs)) { result.blockers.push('Receipt lacks retained ref authority'); continue }
-            const expired = typeof receipt.id === 'string' && expiredReceipts.has(receipt.id)
-            for (const ref of receipt.retainedRefs) {
-              resource('git-ref', text(ref), entry.source.id, kind, 'Action remains eligible under the Undo retention policy', task.taskId, repositoryId)
-              if (expired) for (const item of resources.values()) if (item.kind === 'git-ref' && item.identity === ref) item.claims = item.claims.filter((claim) => claim.sourceId !== entry.source.id || !['undo', 'redo'].includes(claim.kind))
-              if (named && namedReceiptClaims.has(String(receipt.id))) resource('git-ref', text(ref), named.source.id, 'recall', 'Retained named agent episode references this result receipt', task.taskId, repositoryId)
+    // Journal entries never introduce worktree, present, legacy, common-dir or new absolute-path needs, so a
+    // collecting pass that already has missing facts skips reading them; the final pass always reads them in full.
+    if (!reads.collectingOnly?.()) {
+      const journalRoot = join(task.location, 'journal')
+      const latest = new Map<string, { sourceId: string; operationId: string; operationType: string; state: string }>()
+      const retentionRecords: ThreadJournalRecord[] = []
+      const receiptEntries: Array<{ sourceId: string; receiptId?: string; kind: RetentionClaimKind; retainedRefs: Array<string | undefined> }> = []
+      if (journalDirectory(journalRoot, task.location)) {
+        try {
+          assertLifecyclePath(task.location, journalRoot)
+          for (const name of readdirSync(journalRoot).filter((name) => /^\d{16}\.json$/.test(name)).sort()) {
+            const entry = source(join(journalRoot, name))
+            if (!entry) continue
+            const data = object(entry.data)
+            if (data?.schemaVersion !== 1 || !text(data.operationId)) { result.blockers.push('Unknown journal record schema/operation'); continue }
+            const operationId = String(data.operationId)
+            const operationType = String(data.operationType)
+            latest.set(operationId, { sourceId: entry.source.id, operationId, operationType, state: String(data.state) })
+            if (operationType === 'undo-retention') retentionRecords.push(data as unknown as ThreadJournalRecord)
+            const receipt = object(object(data.details)?.receipt)
+            if (receipt) {
+              const kind: RetentionClaimKind = receipt.kind === 'undo' ? 'redo' : 'undo'
+              if (!Array.isArray(receipt.retainedRefs)) { result.blockers.push('Receipt lacks retained ref authority'); continue }
+              receiptEntries.push({ sourceId: entry.source.id, receiptId: typeof receipt.id === 'string' ? receipt.id : undefined, kind, retainedRefs: receipt.retainedRefs.map(text) })
             }
           }
+        } catch (error) { result.blockers.push(`Journal inventory failed: ${(error as Error).message}`) }
+      }
+      let expiredReceipts: ReadonlySet<string>
+      try { expiredReceipts = expiredReceiptIdsFromJournal(retentionRecords) }
+      catch (error) { result.blockers.push(`Undo retention authority is invalid: ${(error as Error).message}`); expiredReceipts = new Set() }
+      for (const entry of receiptEntries) {
+        const expired = entry.receiptId !== undefined && expiredReceipts.has(entry.receiptId)
+        for (const ref of entry.retainedRefs) {
+          resource('git-ref', ref, entry.sourceId, expired ? undefined : entry.kind, 'Action remains eligible under the Undo retention policy', task.taskId, repositoryId)
+          if (expired && ref) for (const item of resources.values()) if (item.kind === 'git-ref' && item.identity === ref) item.claims = item.claims.filter((claim) => claim.sourceId !== entry.sourceId || !['undo', 'redo'].includes(claim.kind))
+          if (named && entry.receiptId !== undefined && namedReceiptClaims.has(entry.receiptId)) resource('git-ref', ref, named.source.id, 'recall', 'Retained named agent episode references this result receipt', task.taskId, repositoryId)
         }
-      } catch (error) { result.blockers.push(`Journal inventory failed: ${(error as Error).message}`) }
+      }
+      // An unsettled expiry of kept files only records which refs went, and an unsettled keep removed nothing yet; the purge
+      // lists the refs themselves.
+      for (const entry of latest.values()) if (!settlesItself(entry.operationType) && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state)) resource('task-data', task.location, entry.sourceId, 'recovery', `Unsettled operation ${entry.operationId}`, task.taskId)
     }
-    // An unsettled expiry of kept files only records which refs went, and an unsettled keep removed nothing yet; the purge
-    // lists the refs themselves.
-    for (const entry of latest.values()) if (!settlesItself(String(entry.data.operationType)) && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(String(entry.data.state))) resource('task-data', task.location, entry.source.id, 'recovery', `Unsettled operation ${entry.data.operationId}`, task.taskId)
     // Attachments are retained associations. No blob is unlinked in this phase.
     const messages = source(threadRecordPath(task.location, 'messages.json'))
     if (messages) {
@@ -543,53 +646,73 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
     }
   }
 
-  const tasks = store.list()
+  const tasks = pass?.tasks ?? store.list()
+  const taskById = pass?.taskById
   const owned = new Map([[record.taskId, record]])
-  for (let added = true; added;) {
-    added = false
-    for (const task of tasks) if (task.parentTaskId && owned.has(task.parentTaskId) && !owned.has(task.taskId)) { owned.set(task.taskId, task); added = true }
+  if (pass) {
+    const queue = [record.taskId]
+    while (queue.length) {
+      for (const child of pass.childrenByParent.get(queue.shift()!) ?? []) {
+        if (!owned.has(child.taskId)) { owned.set(child.taskId, child); queue.push(child.taskId) }
+      }
+    }
+  } else {
+    for (let added = true; added;) {
+      added = false
+      for (const task of tasks) if (task.parentTaskId && owned.has(task.parentTaskId) && !owned.has(task.taskId)) { owned.set(task.taskId, task); added = true }
+    }
   }
   for (const task of owned.values()) {
     if (existsSync(join(task.location, 'snapshot-workspace.json')) && !existsSync(join(task.location, 'workspace.json'))) inSnapshotStore.add(task.taskId)
   }
   for (const task of owned.values()) inventoryTask(task)
-  const config = source(join(store.profileHome, 'mousse.conf'))
-  const scheduledRuntime = source(join(store.profileHome, 'scheduled', 'jobs-runtime.json'))
-  if (config) for (const job of recordRows(object(object(config.data)?.scheduled)?.jobs ?? [], 'scheduled job definitions')) {
-    const owner = text(job.threadId)
-    if (!owner || !owned.has(owner)) continue
-    resource('workflow-record', `${config.source.path}#scheduled.jobs/${String(job.id)}`, config.source.id, 'recall', 'Scheduled definition explicitly targets this task', owner)
-    if (scheduledRuntime) resource('workflow-record', `${scheduledRuntime.source.path}#${String(job.id)}`, scheduledRuntime.source.id, 'recall', 'Scheduled runtime/history belongs to the task-bound job definition', owner)
+  const config = source(join(store.profileHome, 'mousse.conf'), false, true)
+  const scheduledRuntime = source(join(store.profileHome, 'scheduled', 'jobs-runtime.json'), false, true)
+  if (config) {
+    if (pass) {
+      if (!pass.scheduledJobs) {
+        const rawJobs = object(object(config.data)?.scheduled)?.jobs ?? []
+        const blockers: string[] = []
+        if (!Array.isArray(rawJobs) || rawJobs.some((item) => !object(item))) blockers.push('Unknown record in scheduled job definitions')
+        const byOwner = new Map<string, JsonObject[]>()
+        for (const job of rows(rawJobs)) {
+          const owner = text(job.threadId)
+          if (!owner) continue
+          let list = byOwner.get(owner)
+          if (!list) byOwner.set(owner, (list = []))
+          list.push(job)
+        }
+        pass.scheduledJobs = { byOwner, blockers }
+      }
+      result.blockers.push(...pass.scheduledJobs.blockers)
+      for (const owner of owned.keys()) {
+        for (const job of pass.scheduledJobs.byOwner.get(owner) ?? []) {
+          resource('workflow-record', `${config.source.path}#scheduled.jobs/${String(job.id)}`, config.source.id, 'recall', 'Scheduled definition explicitly targets this task', owner)
+          if (scheduledRuntime) resource('workflow-record', `${scheduledRuntime.source.path}#${String(job.id)}`, scheduledRuntime.source.id, 'recall', 'Scheduled runtime/history belongs to the task-bound job definition', owner)
+        }
+      }
+    } else {
+      for (const job of recordRows(object(object(config.data)?.scheduled)?.jobs ?? [], 'scheduled job definitions')) {
+        const owner = text(job.threadId)
+        if (!owner || !owned.has(owner)) continue
+        resource('workflow-record', `${config.source.path}#scheduled.jobs/${String(job.id)}`, config.source.id, 'recall', 'Scheduled definition explicitly targets this task', owner)
+        if (scheduledRuntime) resource('workflow-record', `${scheduledRuntime.source.path}#${String(job.id)}`, scheduledRuntime.source.id, 'recall', 'Scheduled runtime/history belongs to the task-bound job definition', owner)
+      }
+    }
   }
   const sourceRoots = options.sourceRoots ?? [join(store.profileHome, 'workflow-agent-bindings'), join(store.profileHome, 'workflow-admissions'), join(store.profileHome, 'platform', 'workflows'), join(store.profileHome, 'workflow-runs'), join(store.profileHome, 'agent-runs'), join(store.profileHome, 'scheduled'), join(store.profileHome, 'browser', 'artifact-index')]
-  const requestOwners = new Map<string, string>()
-  const walkSources = (root: string, path: string, depth = 0): void => {
+  const processSourceRecord = (path: string, data: JsonObject, owner: string, precomputed?: { raw: string; digest: string }): void => {
     try {
-      let stat: ReturnType<typeof lstatSync>
-      try { stat = lstatSync(path) }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
-      assertLifecyclePath(root, path)
-      if (stat.isSymbolicLink()) throw new Error('Source container is a link')
-      if (stat.isDirectory()) {
-        if (depth > 8) throw new Error('Source container exceeds supported nesting')
-        for (const name of readdirSync(path).sort()) if (!['snapshots', 'staging', 'scripts', 'results', 'bundle', 'workspace', 'artifacts', 'cache'].includes(name)) walkSources(root, join(path, name), depth + 1)
-        return
+      let found: { source: ResourceSource; data: unknown } | undefined
+      if (precomputed) {
+        if (seenPaths.has(path)) return
+        seenPaths.add(path)
+        const value: ResourceSource = { id: digest(path), path, digest: precomputed.digest, status: 'verified' }
+        result.sources.push(value)
+        found = { source: value, data }
+      } else {
+        found = source(path)
       }
-      if (!path.endsWith('.json')) return
-      if (stat.size > 32 * 1024 * 1024) throw new Error('Known source record exceeds the bounded inventory limit')
-      // Ownership must be explicit in known record fields, never inferred from directory names.
-      const data = object(JSON.parse(readFileSync(path, 'utf8')))
-      if (root === join(store.profileHome, 'browser', 'artifact-index')) {
-        const scope = object(data?.scope), ref = object(data?.ref)
-        if (!data || data.version !== 1 || !scope || !ref || !text(scope.threadId) || scope.profileId !== store.profileId || ref.profileId !== store.profileId || !tasks.some((task) => task.taskId === scope.threadId) || data.integrity !== sha256Hex(canonicalJson({ version: data.version, scope: data.scope, ref: data.ref }))) throw new Error('Browser artifact index has unknown ownership, schema or integrity')
-      }
-      if (!data) return
-      const context = object(data.context) ?? object(data.manifest) ?? object(data.request) ?? object(data.scope)
-      const owner = text(data.parentThreadId) ?? text(data.threadId) ?? text(context?.threadId) ?? requestOwners.get(String(data.requestId ?? ''))
-      if (!owner || !owned.has(owner)) return
-      const requestId = text(data.requestId) ?? text(context?.requestId)
-      if (requestId) requestOwners.set(requestId, owner)
-      const found = source(path)
       if (!found) return
       if (data.profileId !== undefined && data.profileId !== store.profileId) { result.blockers.push(`Cross-profile source: ${path}`); return }
       if ((data.version !== undefined && data.version !== 1) || (data.schemaVersion !== undefined && data.schemaVersion !== 1)) { result.blockers.push(`Unknown source schema: ${path}`); return }
@@ -603,7 +726,7 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
         } else {
           const agentId = `wf-${digest(`${store.profileId}:${owner}:${key}`).slice(0, 40)}`
           if (data.kind !== 'git-worktree' || data.branch !== `mousse/agent/${agentId}` || data.retainedRef !== `refs/mousse/workflows/${store.profileId}/${owner}/${agentId}` || !/^[a-f0-9]{32}$/.test(String(data.repositoryId))) throw new Error('Workflow checkout namespace does not match its owner')
-          const receipts = new ThreadJournal(owned.get(owner)!.location, { readOnly: true }).list().map((entry) => object(object(entry.details)?.receipt))
+          const receipts = reads.collectingOnly?.() ? [] : new ThreadJournal(owned.get(owner)!.location, { readOnly: true }).list().map((entry) => object(object(entry.details)?.receipt))
           // A result is settled once it is pinned and reported (Mousse no longer merges it), or was merged by an older version.
           const reported = typeof data.resultSha === 'string' && /^[a-f0-9]{40,64}$/.test(data.resultSha)
           const integrated = reported || data.resultSha === data.baseSha || (data.baseSnapshot !== undefined && data.resultSha === data.baseSnapshot) || receipts.some((receipt) => receipt?.kind === 'integration' && receipt.operationId === `workflow-integration:${key}` && rows(receipt.contributions).some((contribution) => contribution.actorId === agentId && contribution.resultSha === data.resultSha))
@@ -615,7 +738,7 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
           resource('git-ref', `refs/mousse/agents/${agentId}`, found.source.id, claim, 'Workflow integration owns its attributed result pin', owner, text(data.repositoryId))
           verifyWorktree(text(data.worktreePath), text(data.branch), text(data.repositoryId))
           resource('workflow-record', `${path}.changes`, found.source.id, undefined, 'Workflow source owns its internal checkpoint journal', owner)
-          internalReceiptRefs(`${path}.changes`, owner, text(data.repositoryId))
+          if (!reads.collectingOnly?.()) internalReceiptRefs(`${path}.changes`, owner, text(data.repositoryId))
         }
       }
       if (object(data.scope) && object(data.ref)) {
@@ -654,7 +777,89 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
       if (path.includes(`${join('workflow-agent-bindings', 'invocations')}`) && !executionId) result.blockers.push(`Legacy workflow invocation lacks execution ownership: ${path}`)
     } catch (error) { result.blockers.push(`Cannot verify source container ${relative(store.profileHome, path)}: ${(error as Error).message}`) }
   }
-  for (const root of sourceRoots) walkSources(root, root)
+  const artifactIndexRoot = join(store.profileHome, 'browser', 'artifact-index')
+  if (pass && !options.sourceRoots) {
+    if (!pass.sourceIndex) {
+      const globalBlockers: string[] = []
+      const byOwner = new Map<string, IndexedSourceRecord[]>()
+      const requestOwners = new Map<string, string>()
+      let order = 0
+      const indexWalk = (root: string, path: string, depth = 0): void => {
+        try {
+          let stat: ReturnType<typeof lstatSync>
+          try { stat = lstatSync(path) }
+          catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
+          assertLifecyclePath(root, path)
+          if (stat.isSymbolicLink()) throw new Error('Source container is a link')
+          if (stat.isDirectory()) {
+            if (depth > 8) throw new Error('Source container exceeds supported nesting')
+            for (const name of readdirSync(path).sort()) if (!['snapshots', 'staging', 'scripts', 'results', 'bundle', 'workspace', 'artifacts', 'cache'].includes(name)) indexWalk(root, join(path, name), depth + 1)
+            return
+          }
+          if (!path.endsWith('.json')) return
+          if (stat.size > 32 * 1024 * 1024) throw new Error('Known source record exceeds the bounded inventory limit')
+          const raw = readFileSync(path, 'utf8')
+          const data = object(JSON.parse(raw))
+          if (root === artifactIndexRoot) {
+            const scope = object(data?.scope), ref = object(data?.ref)
+            if (!data || data.version !== 1 || !scope || !ref || !text(scope.threadId) || scope.profileId !== store.profileId || ref.profileId !== store.profileId || !pass.taskById.has(scope.threadId as string) || data.integrity !== sha256Hex(canonicalJson({ version: data.version, scope: data.scope, ref: data.ref }))) throw new Error('Browser artifact index has unknown ownership, schema or integrity')
+          }
+          if (!data) return
+          const context = object(data.context) ?? object(data.manifest) ?? object(data.request) ?? object(data.scope)
+          const owner = text(data.parentThreadId) ?? text(data.threadId) ?? text(context?.threadId) ?? requestOwners.get(String(data.requestId ?? ''))
+          if (!owner) return
+          const requestId = text(data.requestId) ?? text(context?.requestId)
+          if (requestId) requestOwners.set(requestId, owner)
+          let list = byOwner.get(owner)
+          if (!list) byOwner.set(owner, (list = []))
+          list.push({ order: order++, path, raw, digest: digest(raw), data, owner })
+        } catch (error) { globalBlockers.push(`Cannot verify source container ${relative(store.profileHome, path)}: ${(error as Error).message}`) }
+      }
+      for (const root of sourceRoots) indexWalk(root, root)
+      pass.sourceIndex = { globalBlockers, byOwner }
+    }
+    result.blockers.push(...pass.sourceIndex.globalBlockers)
+    const matched: IndexedSourceRecord[] = []
+    for (const owner of owned.keys()) {
+      const list = pass.sourceIndex.byOwner.get(owner)
+      if (list) matched.push(...list)
+    }
+    if (matched.length > 1) matched.sort((a, b) => a.order - b.order)
+    for (const entry of matched) processSourceRecord(entry.path, entry.data, entry.owner, entry)
+  } else {
+    const requestOwners = new Map<string, string>()
+    const walkSources = (root: string, path: string, depth = 0): void => {
+      try {
+        let stat: ReturnType<typeof lstatSync>
+        try { stat = lstatSync(path) }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
+        assertLifecyclePath(root, path)
+        if (stat.isSymbolicLink()) throw new Error('Source container is a link')
+        if (stat.isDirectory()) {
+          if (depth > 8) throw new Error('Source container exceeds supported nesting')
+          for (const name of readdirSync(path).sort()) if (!['snapshots', 'staging', 'scripts', 'results', 'bundle', 'workspace', 'artifacts', 'cache'].includes(name)) walkSources(root, join(path, name), depth + 1)
+          return
+        }
+        if (!path.endsWith('.json')) return
+        if (stat.size > 32 * 1024 * 1024) throw new Error('Known source record exceeds the bounded inventory limit')
+        // Ownership must be explicit in known record fields, never inferred from directory names.
+        const data = object(JSON.parse(readFileSync(path, 'utf8')))
+        if (root === artifactIndexRoot) {
+          const scope = object(data?.scope), ref = object(data?.ref)
+          const hasTask = (id: string) => taskById ? taskById.has(id) : tasks.some((task) => task.taskId === id)
+          if (!data || data.version !== 1 || !scope || !ref || !text(scope.threadId) || scope.profileId !== store.profileId || ref.profileId !== store.profileId || !hasTask(scope.threadId as string) || data.integrity !== sha256Hex(canonicalJson({ version: data.version, scope: data.scope, ref: data.ref }))) throw new Error('Browser artifact index has unknown ownership, schema or integrity')
+        }
+        if (!data) return
+        const context = object(data.context) ?? object(data.manifest) ?? object(data.request) ?? object(data.scope)
+        const owner = text(data.parentThreadId) ?? text(data.threadId) ?? text(context?.threadId) ?? requestOwners.get(String(data.requestId ?? ''))
+        if (!owner || !owned.has(owner)) return
+        const requestId = text(data.requestId) ?? text(context?.requestId)
+        if (requestId) requestOwners.set(requestId, owner)
+        processSourceRecord(path, data, owner)
+      } catch (error) { result.blockers.push(`Cannot verify source container ${relative(store.profileHome, path)}: ${(error as Error).message}`) }
+    }
+    for (const root of sourceRoots) walkSources(root, root)
+  }
   for (const artifact of [...resources.values()].filter((item) => item.kind === 'artifact' && /^[a-f0-9-]{36}$/i.test(item.identity))) {
     for (const claim of artifact.claims) resource('runtime', join(store.profileHome, 'artifacts', artifact.identity), claim.sourceId, claim.kind, 'Artifact association owns its metadata/blob container', claim.ownerTaskId)
   }
@@ -683,6 +888,6 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
   }
   result.resources = [...resources.values()]
   result.blockers = [...new Set([...result.blockers, ...reads.missing])]
-  validateResourceInventory(result)
+  if (!reads.collectingOnly?.()) validateResourceInventory(result)
   return result
 }

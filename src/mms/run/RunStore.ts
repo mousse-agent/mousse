@@ -8,7 +8,6 @@ import { settleWaitingDelegations } from './delegation/hold'
 import { isAgentAccessLevel, narrowAgentAccess, type AgentAccessLevel } from '../../shared/settings'
 import { stableStringify } from './json'
 import { currentStopGeneration } from './stopGeneration'
-import { decodeOwnerProof, type OwnerProof } from './ownerProof'
 import {
   TERMINAL_RUN_STATUSES,
   attemptId as makeAttemptId,
@@ -128,8 +127,6 @@ export class RunStore {
     userMessageId?: string
     requestedAt?: string
     outcome?: RunOutcome
-    /** `RunRecord.ownerProof`: written with the run, never afterwards. */
-    ownerProof?: OwnerProof
   }): RunRecord {
     return this.db.transaction(() => {
       const max = this.db
@@ -150,16 +147,15 @@ export class RunStore {
         startedAt: null,
         completedAt: null,
         outcome: input.outcome ?? null,
-        heartbeatAt: null,
-        ...(input.ownerProof ? { ownerProof: { ...input.ownerProof } } : {})
+        heartbeatAt: null
       }
       this.db
         .statement(
           `INSERT INTO runs(run_id, thread_id, ordinal, status, epoch, active_attempt_id, source,
-             client_request_id, user_message_id, requested_at, started_at, completed_at, outcome, stop_generation, owner_proof)
-           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             client_request_id, user_message_id, requested_at, started_at, completed_at, outcome, stop_generation)
+           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
-        .run(...runParams(record), currentStopGeneration(this, record.threadId), jsonOrNull(record.ownerProof))
+        .run(...runParams(record), currentStopGeneration(this, record.threadId))
       this.appendEvent({
         threadId: record.threadId,
         runId: record.runId,
@@ -676,20 +672,8 @@ function toRun(row: Row): RunRecord {
     completedAt: str(row.completed_at),
     outcome: json<RunOutcome>(row.outcome),
     heartbeatAt: str(row.heartbeat_at),
-    ...(isAgentAccessLevel(row.access_grant) ? { accessGrant: row.access_grant } : {}),
-    ...ownerProofOf(row.owner_proof)
+    ...(isAgentAccessLevel(row.access_grant) ? { accessGrant: row.access_grant } : {})
   }
-}
-
-/** A stored owner proof, kept only when it is exactly one (`decodeOwnerProof`). */
-function ownerProofOf(value: unknown): { ownerProof?: OwnerProof } {
-  let proof: OwnerProof | undefined
-  try {
-    proof = decodeOwnerProof(json<unknown>(value))
-  } catch {
-    // Unreadable is no proof.
-  }
-  return proof ? { ownerProof: proof } : {}
 }
 
 function toAttempt(row: Row): AttemptRecord {

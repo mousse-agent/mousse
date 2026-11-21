@@ -87,7 +87,11 @@ export class CursorAdapter implements ProviderAdapter {
       steerTaken: (token) => ctl.steerTaken?.(token),
       returnSteer: (text, token) => ctl.returnSteer?.(text, token),
       onBoundary: () => sink.boundary?.(),
-      onProviderTurn: () => sink.providerTurn?.(),
+      onProviderTurn: () => {
+        sink.providerTurn?.()
+        // The run was sent to the agent: the turn is no longer starting, and the model is next.
+        sink.status?.('waiting')
+      },
       onSteer: (steer, token) => {
         progress()
         // The reply goes on below the steered message: what it wrote before keeps its row, above it.

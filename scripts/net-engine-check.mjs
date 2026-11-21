@@ -12,8 +12,9 @@
  * A 1b routes check runs over one route (`--route`, 1b §14), given to the run as `MOUSSE_NET_ENGINE_CHECK_ROUTE`:
  * each computer gets only that route and every connection must come up on it. `phase1b.routes-app` runs 1a's app
  * cases and its own over it; over `tcp` they run twice, the route mapped to the tailnet class and then the public
- * one (`MOUSSE_NET_ENGINE_CHECK_CLASS`). Every connection judged is written to `<out>/conn-up.jsonl`, one `conn.up`
- * per line, for the kit.
+ * one (`MOUSSE_NET_ENGINE_CHECK_CLASS`). `phase1b.routes-cross` is a cross-machine cell over one route (the PC
+ * dials the Mac); over `tcp` it runs once, of the tailnet class. Every connection judged is written to
+ * `<out>/conn-up.jsonl`, one `conn.up` per line, for the kit.
  *
  * `--route relay` (Phase 3) runs a 1a app case through a running `mousse-relay`, named by its enrollment links in
  * `MOUSSE_RELAY_TEST_LINKS` (one per computer of the case): each computer adds one as its own relay. Pairing setup
@@ -61,14 +62,24 @@ const CHECKS = {
   ],
   'phase1b.link-app': 'tests/netEngine/checks/linkApp.test.ts',
   // Add over SSH (1b §3.4–§3.6).
-  'phase1b.ssh-add-app': 'tests/netEngine/checks/sshAddApp.test.ts'
+  'phase1b.ssh-add-app': 'tests/netEngine/checks/sshAddApp.test.ts',
+  // The PC dials the Mac over one route (1b §14, cross-machine).
+  'phase1b.routes-cross': 'tests/netEngine/checks/routesCross.test.ts'
 }
-/** The checks that run over one route (`--route`), and the routes each takes. */
-const ROUTED = { 'phase1b.routes-app': ['tcp', 'ws', 'ssh'] }
+/** The checks that run over one route (`--route`), and the routes each takes: the cases checks/phase1b.toml gives. */
+const ROUTED = {
+  'phase1b.routes-app': ['tcp', 'ws', 'ssh'],
+  'phase1b.no-rpc-without-grant': ['tcp', 'ws', 'ssh'],
+  'phase1b.routes-cross': ['tcp', 'ws', 'ssh']
+}
 /** The checks that run as they are, or over one of these routes when `--route` names it. */
 const ROUTABLE = { 'phase1a.private-streams': ['relay'] }
 /** The checks that run as cross-machine cells, one role per computer. */
-const CROSS_MACHINE = new Set(['phase1a.pair-offline', 'phase1a.shared-computer'])
+const CROSS_MACHINE = new Set([
+  'phase1a.pair-offline',
+  'phase1a.shared-computer',
+  'phase1b.routes-cross'
+])
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const usage = `Usage: node scripts/net-engine-check.mjs <${Object.keys(CHECKS).join('|')}> [--out <folder>] [--role host|caller] [--topology <name>] [--route tcp|ws|ssh|relay]`
@@ -135,12 +146,14 @@ if (flags.route) console.log(`route=${flags.route}`)
 
 const vitest = join(root, 'node_modules', 'vitest', 'vitest.mjs')
 const files = [CHECKS[id]].flat()
-// Over `tcp`, the route is mapped to the tailnet class, then the public one (1b §14).
-const passes = flags.route === 'tcp' ? ['tailnet', 'public'] : [undefined]
-let run = { status: 0 }
+// Over `tcp`, the route is mapped to the tailnet class, then the public one (1b §14). Both always run: the kit
+// asks for connections of both classes, also from a run that failed (a control's), whose first reason stands. A
+// cross-machine cell runs once, its route of the tailnet class.
+const passes = flags.route === 'tcp' && !flags.role ? ['tailnet', 'public'] : [undefined]
+let failed = false
 for (const cls of passes) {
   if (cls) console.log(`class=${cls}`)
-  run = spawnSync(
+  const run = spawnSync(
     process.execPath,
     [vitest, 'run', ...files, '--reporter=verbose', '--no-file-parallelism'],
     {
@@ -157,7 +170,7 @@ for (const cls of passes) {
       }
     }
   )
-  if (run.status !== 0 || existsSync(join(out, 'reason'))) break
+  if (run.status !== 0 || existsSync(join(out, 'reason'))) failed = true
 }
 // What a caller heard of its host's builds over the test link.
 for (const key of ['host_build', 'host_app_build']) {
@@ -167,7 +180,7 @@ for (const key of ['host_build', 'host_app_build']) {
 }
 const reasonFile = join(out, 'reason')
 const reason = existsSync(reasonFile) ? readFileSync(reasonFile, 'utf8').trim() : ''
-if (run.status === 0 && !reason) {
+if (!failed && !reason) {
   console.log(`PASS ${id}`)
   process.exit(0)
 }

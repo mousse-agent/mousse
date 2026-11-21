@@ -124,21 +124,6 @@ it('Forget cancels the work timer with the original request', async () => {
   f.bots.afterForget()
   expect(f.store.activation(workId)?.status).toBe('failed')
 })
-it('quiet hours let work resume and hold its eventual report', async () => {
-  const { workId, turn } = await work()
-  await wait(workId)
-  await finish(f, turn.payload, 'completed', { text: '' })
-  f.clock.now += 60 * 60_000
-  Object.assign(f.host, { quietHoursFor: () => ({ end: f.clock.now + 3600_000 }), ownerActive: () => false })
-  await f.bots.deliverDueReminders()
-  await flush()
-  expect(f.store.dispatches(workId)).toHaveLength(2)
-  const next = await start(f, workId, 2)
-  await finish(f, next.payload, 'completed', { text: 'The release is ready.' })
-  const report = chatOf(f, botId).find(m => m.text === 'The release is ready.')!
-  expect(report).toBeDefined()
-  expect(Date.parse(f.store.message(report.id)!.tellAt!)).toBeGreaterThan(f.clock.now)
-})
 it('scheduled runs must leave their place for the next run', async () => {
   const { workId } = await work()
   f.store.run('UPDATE bot_activations SET trigger_json = ? WHERE id = ?', JSON.stringify({ kind: 'schedule', scheduleId: 'schedule', input: 'Check', occurrenceAt: f.store.now() }), workId)

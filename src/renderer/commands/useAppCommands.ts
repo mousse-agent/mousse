@@ -9,7 +9,6 @@ import { mainAreaAvailable } from '../lib/mainAreaAvailable'
 import { reloadWindow } from '../services/reloadWindow'
 import { SURFACE_CHOICES, openSurface } from '../lib/surfaces'
 import {
-  addProjectAndStartThread,
   archiveOpenThread,
   createAndSelectPrivateThread,
   createAndSelectThread,
@@ -58,7 +57,7 @@ export function useAppCommands(): void {
     () => void archiveOpenThread().catch(logFailure('Archiving the thread')),
     () => Boolean(openStartedThread() && !openStartedThread()!.settledAt)
   )
-  useCommand('project.open', () => void addProjectAndStartThread().catch(logFailure('Adding the project')))
+  useCommand('project.open', () => useAppStore.getState().setNewProjectOpen(true))
   useCommand('sideCard.toggle', () => {
     const state = useAppStore.getState()
     const { visible, mode } = deriveSideCardState({ ...state, botThreadShown: botThreadShownNow() })

@@ -1,14 +1,13 @@
-import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, chmodSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { pipeline } from 'node:stream/promises'
-import { open as openZip, type Entry, type ZipFile } from 'yauzl'
-import { atomicWriteJsonSync } from '../../../../data/AtomicFs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
 
-/** Google ACP registry release pinned by the attached implementation report. */
+/**
+ * Google's 1.1.1 ACP server, which Mousse installed before it ran `agy`. Mousse no longer installs it;
+ * an install made earlier is recognised by these digests and sizes, and runs until `agy` is installed.
+ */
 export const ANTIGRAVITY_RELEASE = 'agy_acp_server_1.1.1'
-export type Release = { url: string; sha256: string; archiveSize: number; agentSize: number; helperSize: number }
+type Release = { url: string; sha256: string; archiveSize: number; agentSize: number; helperSize: number }
 const RELEASES: Record<string, Release> = {
   'linux-x64': { url: 'https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip', sha256: '38f62d01b32deb0907b3d39a71ec301fd36369f6ffd1cf262d4af385177f79df', archiveSize: 681969407, agentSize: 1880360328, helperSize: 128966920 },
   'linux-arm64': { url: 'https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-arm64.zip', sha256: 'ed69e64b308fcb123ab54bf3277bf9cb0d651064f885ea5aab0ff520c7175398', archiveSize: 656572786, agentSize: 1862073131, helperSize: 122158704 },
@@ -39,20 +38,31 @@ export function installedAntigravityBinary(installationHome: string): string | u
   } catch { return undefined }
 }
 
-/** Manual installs must contain Google's matched ACP agent and local harness. */
+/** A manual 1.1.1 server must sit beside Google's matched local harness. */
 export function validateManualAntigravityBinary(path: string): string {
   const agent = resolve(path)
   if (!existsSync(agent) || !existsSync(join(dirname(agent), helper())) || !agent.endsWith(executable())) {
-    throw new Error(`Select Google's ${executable()} beside ${helper()}.`)
+    throw new Error(`Select agy, or Google's ${executable()} beside ${helper()}.`)
   }
   return agent
 }
 
-function zipOpen(path: string): Promise<ZipFile> {
-  return new Promise((resolveZip, reject) => openZip(path, { lazyEntries: true, autoClose: false }, (error, zip) => error || !zip ? reject(error ?? new Error('Invalid archive')) : resolveZip(zip)))
-}
-function entryStream(zip: ZipFile, entry: Entry): Promise<NodeJS.ReadableStream> {
-  return new Promise((resolveStream, reject) => zip.openReadStream(entry, (error, stream) => error || !stream ? reject(error ?? new Error('Unreadable archive entry')) : resolveStream(stream)))
+/** Google's CLI under the names it ships with: `agy` installed, `antigravity` in its download. */
+const AGY_NAME = /^(agy|antigravity)(\.exe)?$/i
+
+/**
+ * What a manual executable path runs: Google's `agy` CLI as `agy acp`, or the 1.1.1 ACP server
+ * beside its local harness. Throws for anything else.
+ */
+export function manualAntigravityRuntime(path: string): { kind: 'legacy' | 'native'; binary: string } {
+  const binary = resolve(path)
+  if (AGY_NAME.test(basename(binary))) {
+    try {
+      if (statSync(binary).isFile()) return { kind: 'native', binary }
+    } catch { /* reported below */ }
+    throw new Error(`Mousse cannot find ${binary}.`)
+  }
+  return { kind: 'legacy', binary: validateManualAntigravityBinary(binary) }
 }
 
 /** Installs running right now, keyed by release directory: a shared installation downloads once. */
@@ -93,21 +103,16 @@ export function cancelAntigravityInstall(installationHome: string): boolean {
   return true
 }
 
-/** Test seams: a different release (never the pinned one) and fetch. */
-export interface AntigravityInstallOptions { release?: Release; fetch?: typeof fetch }
-
-/**
- * Download only Google's pinned archive and publish a verified immutable release. One install runs per
- * installation; a second caller is rejected. Cancelling stops it before anything is published.
- */
-/** Install progress: a line, the fraction done, and the bytes received of the archive's size. */
+/** Install progress: a line, the fraction done, and the bytes received of the download's size. */
 export type AntigravityInstallProgress = (message: string, fraction?: number, bytes?: { receivedBytes: number; totalBytes: number }) => void
 
-export async function installAntigravity(installationHome: string, signal?: AbortSignal, progress?: AntigravityInstallProgress, options: AntigravityInstallOptions = {}): Promise<string> {
-  const pin = options.release ?? RELEASES[`${process.platform}-${process.arch}`]
-  if (!pin) throw new Error('This platform is not available in the pinned Antigravity release.')
-  const existing = installedAntigravityBinary(installationHome)
-  if (existing) return existing
+/**
+ * Runs `work`, an install into this installation, as the one install every profile sees: one runs
+ * per installation (a second caller is rejected), every profile hears it start, progress and end,
+ * and any profile may cancel it.
+ */
+export async function runSharedAntigravityInstall<T>(installationHome: string, signal: AbortSignal | undefined, progress: AntigravityInstallProgress | undefined,
+  work: (signal: AbortSignal, progress: AntigravityInstallProgress) => Promise<T>): Promise<T> {
   const key = releaseDirectory(installationHome)
   if (activeInstalls.has(key)) throw new Error('Antigravity is already being installed')
   const active: { abort: AbortController; progress?: string } = { abort: new AbortController() }
@@ -117,91 +122,14 @@ export async function installAntigravity(installationHome: string, signal?: Abor
   if (signal?.aborted) forward()
   else signal?.addEventListener('abort', forward, { once: true })
   try {
-    return await download(installationHome, pin, active.abort.signal, (message, fraction, bytes) => {
+    return await work(active.abort.signal, (message, fraction, bytes) => {
       active.progress = message
       progress?.(message, fraction, bytes)
       announce(key, { type: 'progress', message })
-    }, options.fetch ?? fetch)
+    })
   } finally {
     signal?.removeEventListener('abort', forward)
     activeInstalls.delete(key)
     announce(key, { type: 'finished' })
-  }
-}
-
-async function download(installationHome: string, pin: Release, signal: AbortSignal, progress: AntigravityInstallProgress, fetchFile: typeof fetch): Promise<string> {
-  const dir = releaseDirectory(installationHome)
-  const root = dirname(dir)
-  mkdirSync(root, { recursive: true })
-  const temp = join(root, `.download-${crypto.randomUUID()}`)
-  const staged = join(root, `.stage-${crypto.randomUUID()}`)
-  mkdirSync(staged)
-  try {
-    signal.throwIfAborted()
-    progress('Downloading Google Antigravity ACP agent…')
-    const response = await fetchFile(pin.url, { signal, redirect: 'error' })
-    if (!response.ok || !response.body) throw new Error(`Google download failed (${response.status})`)
-    const writer = createWriteStream(temp, { flags: 'wx' })
-    const hash = createHash('sha256')
-    let size = 0
-    const reader = response.body.getReader()
-    // Byte progress for the downloads indicator, at most once per whole percent.
-    const mb = (bytes: number) => `${Math.round(bytes / 1_048_576)} MB`
-    let reported = -1
-    try {
-      for (;;) {
-        signal.throwIfAborted()
-        const { done, value } = await reader.read()
-        if (done) break
-        size += value.byteLength
-        if (size > pin.archiveSize) throw new Error('Antigravity archive exceeds pinned size')
-        hash.update(value)
-        const percent = Math.floor((size / pin.archiveSize) * 100)
-        if (percent > reported) {
-          reported = percent
-          progress(`Downloading ${mb(size)} of ${mb(pin.archiveSize)}`, size / pin.archiveSize, { receivedBytes: size, totalBytes: pin.archiveSize })
-        }
-        if (!writer.write(value)) await new Promise<void>((resolveDrain) => writer.once('drain', resolveDrain))
-      }
-    } finally { writer.end() }
-    await new Promise<void>((resolveEnd, reject) => { writer.once('finish', resolveEnd); writer.once('error', reject) })
-    signal.throwIfAborted()
-    if (size !== pin.archiveSize || hash.digest('hex') !== pin.sha256) throw new Error('Antigravity archive failed pinned size/SHA-256 verification')
-    progress('Verifying agent and local harness…')
-    signal.throwIfAborted()
-    const zip = await zipOpen(temp)
-    try {
-      const expected = new Map([[executable(), pin.agentSize], [helper(), pin.helperSize]])
-      await new Promise<void>((resolveEntries, reject) => {
-        zip.on('entry', (entry: Entry) => {
-          if (signal.aborted) { reject(signal.reason); return }
-          const base = entry.fileName.split('/').at(-1) ?? ''
-          const expectedSize = expected.get(base)
-          if (expectedSize === undefined) { zip.readEntry(); return }
-          if (entry.uncompressedSize !== expectedSize) { reject(new Error(`Invalid ${base} in Google archive`)); return }
-          expected.delete(base)
-          void (async () => {
-            const source = await entryStream(zip, entry)
-            const target = join(staged, base)
-            await pipeline(source, createWriteStream(target, { flags: 'wx' }), { signal })
-            if (statSync(target).size !== expectedSize) throw new Error(`Invalid extracted ${base} size`)
-            if (process.platform !== 'win32') chmodSync(target, 0o755)
-            zip.readEntry()
-          })().catch(reject)
-        })
-        zip.once('end', () => expected.size ? reject(new Error('Google archive is missing the ACP agent or helper')) : resolveEntries())
-        zip.once('error', reject)
-        zip.readEntry()
-      })
-    } finally { zip.close() }
-    // The last point to stop: past here the release is published.
-    signal.throwIfAborted()
-    atomicWriteJsonSync(join(staged, 'verified.json'), { version: ANTIGRAVITY_RELEASE, sha256: pin.sha256 })
-    if (!existsSync(dir)) renameSync(staged, dir)
-    atomicWriteJsonSync(join(root, 'active.json'), { version: ANTIGRAVITY_RELEASE, platform: `${process.platform}-${process.arch}` })
-    return installedAntigravityBinary(installationHome) ?? (() => { throw new Error('Installed Antigravity release could not be verified') })()
-  } finally {
-    rmSync(temp, { force: true })
-    rmSync(staged, { recursive: true, force: true })
   }
 }

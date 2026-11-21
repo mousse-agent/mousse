@@ -45,6 +45,8 @@ export type PairingStep =
   | 'grant-removed'
 
 export interface PairingPort {
+  /** Under the routes checks' `route-leak` control: the address pairback offers first. */
+  leakedRoute?(): string | undefined
   peers: EnginePeerStore
   sessions: EngineSessions
   helper(): EngineHelper | undefined
@@ -396,7 +398,7 @@ export class EnginePairing {
         await this.waitOnline(node, engineLimits().pairbackDeadlineMs, () => this.dial(row))
         this.alive()
         // Its LAN routes, and only the ticked ones of the rest (§1.3).
-        const routes = pairbackRoutes(this.helper().info, row.share ?? [])
+        const routes = pairbackRoutes(this.helper().info, row.share ?? [], this.port.leakedRoute?.())
         await this.port.sessions.client(node).pairback({
           routes,
           ...(row.receipt ? { receipt: row.receipt } : {})

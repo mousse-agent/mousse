@@ -153,11 +153,15 @@ describe('windows hear of list changes once, as pushes', () => {
     mms.threads.saveThreadData(thread.id, { messages: [message('m1'), message('m2'), message('m3')], agents: [], tasks: [] })
     await new Promise((resolve) => setTimeout(resolve, 600))
     expect(touches().length).toBe(1)
-    // The turn ends: its held time goes out at once.
+    expect(lists()).toBe(0)
+    const held = mms.threads.getThread(thread.id)!.updatedAt
+    // The turn ends: its held time goes out at once, and the list once, for how the run ended (`Thread.lastRun`),
+    // without moving the thread's time back to the one in its file.
     mms.orchestrator.emit('turn-completed', { threadId: thread.id })
     await vi.waitFor(() => expect(touches().length).toBe(2), { timeout: 1000 })
-    expect(touches()[1][0].updatedAt).toBe(mms.threads.getThread(thread.id)!.updatedAt)
-    expect(lists()).toBe(0)
+    expect(touches()[1][0].updatedAt).toBe(held)
+    expect(mms.threads.getThread(thread.id)).toMatchObject({ updatedAt: held, lastRun: 'done' })
+    await vi.waitFor(() => expect(lists()).toBe(1), { timeout: 1000 })
   })
 
   it('tells windows when a chat changes, once for several changes together', async () => {

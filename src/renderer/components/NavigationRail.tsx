@@ -24,7 +24,8 @@ export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
   // The sidebar's footer shows the profile; while the sidebar is closed (a hover peek included) the rail does.
   const profileShown = useAppStore((s) => !sidebarProfileShown(s))
-  const profileReady = useAppStore((s) => s.profileReady)
+  // The profile shows from the warm start (showWarmView) until the window's own binding is known.
+  const profileShownEarly = useAppStore((s) => s.profileReady || Boolean(s.warmView?.profile))
   // One search on every tab: threads, archived threads, bots, chats and messages.
   const searchTitle = useShortcutTitle('Search everything', 'threads.search')
 
@@ -76,7 +77,7 @@ export function NavigationRail({ onMouseEnter, onMouseLeave, onPointerDown }: {
         <DownloadsIndicator variant="rail" />
         {shortcut('usage', 'Subscription usage', CircleGauge)}
         {shortcut('settings', 'Settings', Settings)}
-        {profileReady && <div className="navigation-rail-profile" data-shown={profileShown} inert={!profileShown} aria-hidden={!profileShown || undefined}>
+        {profileShownEarly && <div className="navigation-rail-profile" data-shown={profileShown} inert={!profileShown} aria-hidden={!profileShown || undefined}>
           <ProfileSwitcher variant="rail" onSwitched={(profile) => useAppStore.getState().activateProfile(profile.id)} />
         </div>}
       </div>

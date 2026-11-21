@@ -672,13 +672,14 @@ export function createBotContextProvider(options: BotContextPackOptions): BotCon
     // when that one ended meanwhile, the whole pack, as before epochs.
     if (!input.start) return current && !current.ended ? delta(current) : freeze({ text: chatPack(botId, activationId), fresh: false, epochId: current?.id ?? activationId })
     const verdict = input.keep(current, digestState(botId))
-    if (current && (!verdict || verdict === 'due')) {
-      // Past the high mark the epoch goes on while its digest is written in the background.
-      if (verdict === 'due') requestDigest(botId, input.selection)
+    if (current && (!verdict || verdict === 'due' || verdict === 'prepare')) {
+      // From the prepare mark the digest of the coming fold is written in the background, so it is ready when the epoch
+      // folds; past the high mark the epoch goes on until it is.
+      if (verdict === 'due' || verdict === 'prepare') requestDigest(botId, input.selection)
       else rebuildStale(botId, input.selection)
       return delta(current)
     }
-    const reason: BotChatEpochEnd = verdict && verdict !== 'due' ? verdict : 'none'
+    const reason: BotChatEpochEnd = verdict && verdict !== 'due' && verdict !== 'prepare' ? verdict : 'none'
     // A new epoch: a ready digest joins the summary, the window folds to its tail in one step, and the base carries the
     // summary and that tail. A fold without a digest asks for one when enough chat is in none yet; the next fold uses it.
     const digest = adoptPending(botId)

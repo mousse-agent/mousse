@@ -6,7 +6,8 @@ import {
   renameSync,
   writeFileSync
 } from 'node:fs'
-import { hostname } from 'node:os'
+import { connect as netConnect, createServer as createNetServer, type Socket } from 'node:net'
+import { hostname, networkInterfaces } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { NetError } from '../../shared/net/errors'
 import type { BlobId, NodeCapability, NodeId, StoredRecord, StreamId } from '../../shared/net'
@@ -81,7 +82,7 @@ import {
   relaysStatus,
   type RelayView
 } from './relays'
-import { automatic, loopbackClass } from './routes'
+import { automatic, handedRoutes, loopbackClass, privateRoute } from './routes'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 import { readTicket } from './ticket'
 import { SshAdd } from './ssh/add'
@@ -742,6 +743,8 @@ export class NetEngineService implements EngineDirectoryPort {
    */
   async sshConnect(choice: Parameters<SshAdd['connect']>[0]): Promise<EnginePeerRow> {
     const started = this.require()
+    // Route setup, whichever way it goes: a computer already paired gets only the SSH route.
+    routeSetupProbes()
     // The list session 1 answered in this add: Connect signs in once more only for prepare (§3.4: four
     // connections per add).
     const profile = choice.selector
@@ -765,7 +768,6 @@ export class NetEngineService implements EngineDirectoryPort {
       await this.setAddresses({ ...paired, ssh }, paired.addresses ?? [])
       return started.peers.get(paired.localId)!
     }
-    routeSetupProbes()
     return this.sshAdd().connect(choice)
   }
 
@@ -781,6 +783,7 @@ export class NetEngineService implements EngineDirectoryPort {
     return {
       identity: String(this.helper?.info.identity ?? ''),
       name: this.selfName(),
+      ...(this.leak ? { listener: this.leak.route } : {}),
       rowFor: (joiner) => {
         // A row being removed counts too: the request waits for it (busy).
         const row = started.peers.all().find((item) => item.endpoint === joiner && item.state !== 'removed')
@@ -1081,6 +1084,58 @@ export class NetEngineService implements EngineDirectoryPort {
   /** Pairing and removal for this run of the engine (§5). */
   pairing(): EnginePairing {
     return this.require().pairing
+  }
+
+  /**
+   * The routes checks' `route-leak` control (1b §14): a second loopback address of this helper, a forwarder to its
+   * listener on a port the checks' class map leaves out, so a route other than the one under test answers. Pairback
+   * and Add over SSH offer it first. A helper told to listen off loopback (a cross-machine cell's host, whose
+   * computer the other one dials) gets it on every interface, named by this computer's private address.
+   */
+  private leak?: { port: number; route: string; close(): void }
+
+  private async openLeak(helper: EngineHelper): Promise<void> {
+    const port = helper.info.port
+    if (typeof port !== 'number' || this.leak?.port === port) return
+    this.leak?.close()
+    const open = new Set<Socket>()
+    const server = createNetServer((socket) => {
+      const plain = netConnect(port, '127.0.0.1')
+      for (const one of [socket, plain]) {
+        open.add(one)
+        one.on('close', () => open.delete(one))
+        one.on('error', () => undefined)
+      }
+      socket.pipe(plain).pipe(socket)
+    })
+    const lan = offLoopback() ? privateAddress() : undefined
+    // Off loopback, every interface without naming one (a named address takes a lookup).
+    await new Promise<void>((done) => (lan ? server.listen(0, done) : server.listen(0, '127.0.0.1', done)))
+    const route = `tcp://${lan ?? '127.0.0.1'}:${(server.address() as { port: number }).port}`
+    this.leak = {
+      port,
+      route,
+      close: () => {
+        for (const socket of open) socket.destroy()
+        server.close()
+      }
+    }
+  }
+
+  /**
+   * The `route-leak` control on a helper told to listen off loopback (a cross-machine cell's host, 1b §14): LAN
+   * goes on before an invitation, so its ticket offers this computer's LAN addresses, which a joiner dials before
+   * any other route. Checks on one computer keep every listener on loopback and leak through pairback instead.
+   */
+  async leakBeforeInvite(): Promise<void> {
+    if (!engineControl('route-leak') || !offLoopback() || this.reach()?.lan !== false) return
+    const { restarted } = await this.setReach({ lan: true })
+    const until = Date.now() + 30_000
+    while (restarted && (!this.helper || this.helperStatus().state !== 'running')) {
+      if (Date.now() > until)
+        throw new NetError('deadline_exceeded', 'Networking did not start in time.')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
   }
 
   /** Retry on a device's row: its ceremony or removal goes on, and it is dialled. */
@@ -1387,6 +1442,7 @@ export class NetEngineService implements EngineDirectoryPort {
       crashAt: (step) => !!this.pairingCrash?.(step),
       sshRequest: (receipt) => this.sshHost?.requests.get(receipt)?.state,
       // A removal of a computer and its SSH prepares here take one lock: neither undoes the other (§3.6).
+      leakedRoute: () => this.leak?.route,
       exclusive: (endpoint, work) =>
         this.sshHost && endpoint ? this.sshHost.locked(endpoint, work) : work(),
       removed: async (row) => {
@@ -1572,6 +1628,8 @@ export class NetEngineService implements EngineDirectoryPort {
     // A's Add over SSH holds this run's store: the next start (after Start over, say) makes its own.
     this.sshFlow?.dispose()
     this.sshFlow = undefined
+    this.leak?.close()
+    this.leak = undefined
     const supervisor = this.supervisor
     this.supervisor = undefined
     await supervisor?.stop()
@@ -1691,6 +1749,7 @@ export class NetEngineService implements EngineDirectoryPort {
     if (this.helper === helper) this.rereadRelays()
     // Removals finish, ceremonies resume, owed rows are written and every pairing is dialled again.
     if (this.helper === helper) {
+      if (engineControl('route-leak')) await this.openLeak(helper)
       void started.pairing.recover().catch(() => undefined)
       this.recoverSsh()
     }
@@ -1918,12 +1977,12 @@ export function ownerRoutes(
   addresses: readonly string[]
 ): Array<string | SshRouteEntry> {
   const ssh = row.ssh
-  return [
+  return handedRoutes<string | SshRouteEntry>([
     ...addresses,
     ...(ssh?.routeId && ssh.selector
       ? [{ route_id: ssh.routeId, selector: ssh.selector, shell: ssh.shell ?? 'sh' }]
       : [])
-  ]
+  ])
 }
 
 /** A helper's refusal of the owner's addresses, as the row's dialog says it. */
@@ -1965,6 +2024,26 @@ function readReach(value: unknown, info: Record<string, unknown>): NetEngineReac
     ...(typeof info.ws_port === 'number' ? { wsPort: info.ws_port } : {}),
     ...(unbound.length ? { unbound } : {})
   }
+}
+
+/** Whether the helper was told to listen off loopback (`MOUSSE_NET_ENGINE_HELPER_LISTEN_IP`, set by checks only). */
+function offLoopback(env: NodeJS.ProcessEnv = process.env): boolean {
+  const ip = env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP?.trim()
+  return !!ip && ip !== '127.0.0.1' && ip !== '::1'
+}
+
+/** This computer's first private-range IPv4 address (not link-local), if it has one. */
+function privateAddress(): string | undefined {
+  for (const list of Object.values(networkInterfaces()))
+    for (const one of list ?? [])
+      if (
+        one.family === 'IPv4' &&
+        !one.internal &&
+        !one.address.startsWith('169.254.') &&
+        privateRoute(`tcp://${one.address}:1`)
+      )
+        return one.address
+  return undefined
 }
 
 /** A Reach change as `routes.config` takes it: only the fields given, each checked first. */

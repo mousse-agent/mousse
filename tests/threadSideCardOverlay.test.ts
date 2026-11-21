@@ -50,6 +50,8 @@ const escape = () => act(() => { document.dispatchEvent(new KeyboardEvent('keydo
 beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   useAppStore.setState({
+    // A window bound to its profile: before that only the card's room is kept (the warm start).
+    profileReady: true,
     sideCardOn: true,
     sideCardFits: null,
     sideCardOverlayOpen: false,
@@ -138,7 +140,8 @@ describe('thread side card when docked', () => {
     expect(card()?.getAttribute('data-shown')).toBe('true')
     expect(card()?.getAttribute('role')).toBeNull()
     expect(document.querySelector('.thread-side-card-scrim')).toBeNull()
-    expect(pane().style.getPropertyValue('--side-card-reserved')).toBe('276px')
+    // The 784px column and the card's 308px space on each side need 1400px; 1100px gives up 300px, short of the 308px cap.
+    expect(pane().style.getPropertyValue('--side-card-reserved')).toBe('300px')
   })
 
   it('reserves nothing in a window with room to spare', async () => {
@@ -146,6 +149,20 @@ describe('thread side card when docked', () => {
     await flushFrames()
     expect(card()?.getAttribute('data-shown')).toBe('true')
     expect(pane().style.getPropertyValue('--side-card-reserved')).toBe('0px')
+  })
+
+  it('keeps the card\'s room before the window\'s profile is known, and shows the card in it once it is', async () => {
+    useAppStore.setState({ profileReady: false })
+    mount(1100)
+    await flushFrames()
+    // The warm start: the column steps aside as it will, and the card, whose sections read the service, waits.
+    expect(card()).toBeNull()
+    expect(pane().style.getPropertyValue('--side-card-reserved')).toBe('300px')
+    act(() => useAppStore.setState({ profileReady: true }))
+    expect(pane().style.getPropertyValue('--side-card-reserved')).toBe('300px')
+    await flushFrames()
+    expect(card()?.getAttribute('data-shown')).toBe('true')
+    expect(pane().style.getPropertyValue('--side-card-reserved')).toBe('300px')
   })
 
   it('does not trap Escape: the card is part of the page', async () => {

@@ -29,11 +29,12 @@ export async function cancelPendingIntegrations(threadDirectory: string, workspa
   const cancelled: CancelledIntegration[] = []
   for (const entry of journal.latestByOperation().values()) {
     if (!['child-integration', 'change-integration'].includes(entry.operationType) || !UNFINISHED.has(entry.state)) continue
-    const intent = journal.list().find((item) => item.operationId === entry.operationId && item.state === 'prepared')
+    const history = journal.history(entry.operationId)
+    const intent = history.find((item) => item.state === 'prepared')
     const request = (intent?.details as { request?: { agentId?: string; pinnedWorkerSha?: string; expectedWorkerHead?: string; spawnBaseSha?: string } } | undefined)?.request
     const resultSha = request?.pinnedWorkerSha ?? request?.expectedWorkerHead
     // An older version merged with `git merge`; one it left stopped is still in the folder and stays abortable.
-    const left = [...journal.list()].reverse().find((item) => item.operationId === entry.operationId && (item.details as { preMergeSha?: unknown } | undefined)?.preMergeSha)?.details as { preMergeSha?: string; workerHeadSha?: string } | undefined
+    const left = [...history].reverse().find((item) => (item.details as { preMergeSha?: unknown } | undefined)?.preMergeSha)?.details as { preMergeSha?: string; workerHeadSha?: string } | undefined
     const mergeInProgress = workspacePath && (await tryGitAsync(workspacePath, ['rev-parse', '--verify', '-q', 'MERGE_HEAD'])).ok ? workspacePath : undefined
     const identity = mergeInProgress ? await mergeIdentityAsync(mergeInProgress) : undefined
     beforeRecord?.()

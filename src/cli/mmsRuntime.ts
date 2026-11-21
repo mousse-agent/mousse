@@ -112,7 +112,7 @@ export function getMmsStopRequestPath(homeDir: string, token: string): string {
   return join(canonicalizeHome(homeDir), `mms.stop.request.${key}.json`)
 }
 
-function getLegacyStopRequestPath(homeDir: string): string {
+export function getLegacyStopRequestPath(homeDir: string): string {
   return join(canonicalizeHome(homeDir), MMS_STOP_REQUEST_FILENAME)
 }
 
@@ -120,11 +120,36 @@ export function getMmsPidPath(homeDir: string): string {
   return join(canonicalizeHome(homeDir), MMS_PID_FILENAME)
 }
 
+/**
+ * Windows refuses to replace a file another process has open at that moment (EPERM, EBUSY, EACCES), such as a stop
+ * request the daemon is reading: the replacement is tried again a few times, about a quarter of a second in all.
+ */
+const RENAME_ATTEMPTS = 6
+
+function renameReplacingSync(source: string, target: string): void {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      renameSync(source, target)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (!['EPERM', 'EBUSY', 'EACCES'].includes(code ?? '') || attempt + 1 >= RENAME_ATTEMPTS) throw error
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 8 * 2 ** attempt)
+    }
+  }
+}
+
 function writeJsonAtomic(filePath: string, value: unknown): void {
   mkdirSync(dirname(filePath), { recursive: true })
   const temporary = `${filePath}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
   writeFileSync(temporary, JSON.stringify(value, null, 2), 'utf-8')
-  renameSync(temporary, filePath)
+  try {
+    renameReplacingSync(temporary, filePath)
+  } catch (error) {
+    // Never leave the temporary file behind in the home.
+    try { unlinkSync(temporary) } catch { /* the original failure is the one to report */ }
+    throw error
+  }
   // Runtime secret/token file — restrict permissions where supported.
   try {
     chmodSync(filePath, 0o600)

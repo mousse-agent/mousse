@@ -145,6 +145,7 @@ export function registerNetEngineMethods(
               return engine.status()
             case 'netEngine.invite': {
               await engine.tellName()
+              await engine.leakBeforeInvite()
               const invite = await engine
                 .pairing()
                 .invite(engine.ownName(), p.kind === 'link' ? 'link' : undefined)

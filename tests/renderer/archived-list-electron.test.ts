@@ -13,7 +13,7 @@ import electron from 'electron'
 import { expect, it } from 'vitest'
 import { build as viteBuild } from 'vite'
 
-type View = { drawn: number; blank: number[]; first: { id: string; top: number } | null; last: string | null; scrollTop: number; room: number }
+type View = { drawn: number; blank: number[]; first: { id: string; top: number } | null; last: string | null; scrollTop: number; room: number; headingShown: boolean }
 type Evidence = {
   open: View & { count: string }
   end: View
@@ -71,6 +71,9 @@ it('opens 600 archived threads with only the cards in view drawn, scrolls to the
     expect(evidence.end.scrollTop, all).toBeGreaterThanOrEqual(evidence.end.room - 1)
     expect(evidence.end.drawn, all).toBeLessThanOrEqual(DRAWN_AT_MOST)
     expect(evidence.end.blank, all).toEqual([])
+    // Only the list scrolls: the Archived heading stays in view at the end of a long list.
+    expect(evidence.open.headingShown, all).toBe(true)
+    expect(evidence.end.headingShown, all).toBe(true)
 
     // Halfway: no blank band, and the row at the top does not move while the cards drawn there are measured.
     expect(evidence.middle.before.blank, all).toEqual([])

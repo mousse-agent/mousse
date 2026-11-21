@@ -85,6 +85,7 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     tools,
     appTools,
     skills,
+    ...(permissions.allSkills ? { allSkills: true as const } : {}),
     mcp,
     ...(permissions.catalogue ? { catalogue: permissions.catalogue } : {}),
     workspace: workspace ? {
@@ -162,7 +163,7 @@ export function createBotAuthority(input: BotAuthorityInput): BotAuthority {
     if (input.waiting()) return { ok: false, wall: { kind: 'waiting' } }
     switch (call.kind) {
       case 'skill':
-        return skills.has(call.skill) ? { ok: true } : { ok: false, wall: { kind: 'skill', skill: call.skill } }
+        return permissions.allSkills || skills.has(call.skill) ? { ok: true } : { ok: false, wall: { kind: 'skill', skill: call.skill } }
       case 'mcp':
         // Granted parts never hold `:`, so a call whose parts do can never match another pair.
         return !call.server.includes(':') && !call.tool.includes(':') && mcp.has(`${call.server}::${call.tool}`)

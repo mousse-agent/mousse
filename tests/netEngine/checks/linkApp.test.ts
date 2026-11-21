@@ -8,12 +8,17 @@
  * back; a computer added over SSH converts its row only on the ticket's `PAIRED`.
  *
  * Controls: the app's (`MOUSSE_NET_ENGINE_CONTROL`) and the helper's (`RUSTFLAGS='--cfg mousse_control="..."'`,
- * which the fake helper's defects mirror) each fail with the reason `checks/phase1b.toml` names.
+ * which the fake helper's defects mirror) each fail with the reason `checks/phase1b.toml` names. Four of them only
+ * show against a helper that misbehaves (a host sending PAIRED before its key confirmation, a helper stopping between
+ * PAIRED and storing the outcome, an unpinned host's "already paired" believed): `link-code-bypass`, `done-pin-only`,
+ * `pin-stored-memory-only` and `link-pinned-journal` fail here with the fake helper only; the engine's send-link
+ * check covers them for the real one.
  */
 import { afterAll, describe, expect, it } from 'vitest'
 import { attachPairLinks, PAIR_LINK_IPC } from '../../../src/main/pairLink'
 import type { NodeId } from '../../../src/shared/net'
 import type { EnginePeerStore } from '../../../src/mms/netEngine/store'
+import { readTicket } from '../../../src/mms/netEngine/ticket'
 import { decodeTicket, encodeTicket } from '../ticketCbor'
 import {
   codeOf,
@@ -90,6 +95,18 @@ async function grants(on: Computer, other: Computer): Promise<number> {
 /** The reason a refused join gave (`details.reason`, else its code). */
 const reasonOf = (error: unknown) => codeOf(error)
 
+/** `joiner` pins `host` (as a one-way SSH add leaves it), with no grant either way. */
+async function pin(joiner: Computer, host: Computer): Promise<void> {
+  await joiner.engine.request('peer.add', { identity: host.endpoint, name: host.name, routes: [] })
+}
+
+/** What a one-way SSH add leaves (A uses B): `host` grants `user`, and `user` pins `host`. Answers the grant. */
+async function oneWay(host: Computer, user: Computer): Promise<string> {
+  const answer = await host.engine.request('grant.add', { identity: user.endpoint, name: user.name })
+  await pin(user, host)
+  return String(answer.grant)
+}
+
 /** A computer's pairing rows (a test writes the rows an SSH add would). */
 const peers = (computer: Computer): EnginePeerStore =>
   (computer.mms.netEngine as unknown as { started: { peers: EnginePeerStore } }).started.peers
@@ -99,8 +116,10 @@ describe('phase1b.link-app', () => {
   afterAll(() => fabric.close(), 120_000)
 
   it('pairs through a chat link opened from the launch argv, by typing the code, Connected both ways', async () => {
-    // The host listens on a LAN and a tailnet address (a helper says its routes at hello).
+    // The host listens on a LAN and a tailnet address (a helper says its routes at hello). A real helper listens on
+    // one loopback port, which the class map makes a tailnet one.
     if (!REAL_HELPER) fabric.network.routes.set(fakeIdentity('link-host'), [LAN, TAILNET])
+    else fabric.mapClass('link-host', 'tailnet')
     const host = await fabric.computer('link-host')
     // The joiner listens on a LAN and a tailnet address too; it shares none it was not asked to.
     if (!REAL_HELPER)
@@ -146,7 +165,9 @@ describe('phase1b.link-app', () => {
     const approved = (facts.destinations as Array<{ route: string; automatic: boolean }>)
       .filter((destination) => !destination.automatic)
       .map((destination) => destination.route)
-    if (!REAL_HELPER) await step('approval_lost', () => expect(approved).toEqual([TAILNET]))
+    await step('approval_lost', () =>
+      expect(approved).toEqual(REAL_HELPER ? [expect.stringMatching(/^tcp:\/\/127\.0\.0\.1:/)] : [TAILNET])
+    )
 
     const joined = connect(joiner, opened)
     let askedCode = false
@@ -215,7 +236,7 @@ describe('phase1b.link-app', () => {
     )
   }, 180_000)
 
-  it.skipIf(REAL_HELPER)(
+  it(
     'a swapped link gets the swapped-link text and never ends "already paired"',
     async () => {
       const host = await fabric.computer('swap-host'),
@@ -274,9 +295,6 @@ describe('phase1b.link-app', () => {
       expect(reasonOf(result.error)).toBe('attempts_exhausted')
       expect((result.error as Error).message).toBe('No tries left. Ask for a new link.')
     })
-    await step('attempts_exhausted_missing', () =>
-      eventually(() => expect(shown(host, link.invitation)?.ended).toBe('attempts_exhausted'))
-    )
     await step('row_left', () => expect(rowFor(joiner, host)).toBeUndefined())
 
     // Opening the same link again: this side ends from its flow record, the host because the invitation is gone.
@@ -294,6 +312,10 @@ describe('phase1b.link-app', () => {
       expect('asked' in outcome).toBe(false)
       expect(reasonOf((outcome as { error?: unknown }).error)).toBe('invitation_invalid')
     })
+    // The host's dialog ends too (after the reopen: a host that kept the invitation lets the link open again).
+    await step('attempts_exhausted_missing', () =>
+      eventually(() => expect(shown(host, link.invitation)?.ended).toBe('attempts_exhausted'))
+    )
     await step('grant_without_code', async () => {
       expect(await grants(host, joiner)).toBe(0)
       expect(await grants(joiner, host)).toBe(0)
@@ -488,13 +510,13 @@ describe('phase1b.link-app', () => {
     })
   }, 240_000)
 
-  it.skipIf(REAL_HELPER)(
+  it(
     'promotes nothing from a pin held before: a crash after Connect ends "Pairing didn\'t finish"',
     async () => {
       const host = await fabric.computer('pin-host'),
         joiner = await fabric.computer('pin-joiner')
       // The joiner pins the host already (as a one-way add leaves it), with no grant either way.
-      fabric.network.peer(joiner.endpoint, host.endpoint)
+      await pin(joiner, host)
       const link = await sendLink(host)
       let hit = false
       joiner.mms.netEngine.pairingCrash = (at) => at === 'consented' && !hit && (hit = true)
@@ -520,7 +542,7 @@ describe('phase1b.link-app', () => {
     120_000
   )
 
-  it.skipIf(REAL_HELPER)(
+  it(
     'recovers a crash after PAIRED from the ticket outcome: done, and an outcome lost with the approvals kept',
     async () => {
       // The answer arrived and the app stopped before writing `joined`.
@@ -537,6 +559,16 @@ describe('phase1b.link-app', () => {
       joiner.mms.netEngine.pairingCrash = undefined
       await fabric.restartEngine(joiner)
       await step('no_route_after_recovery', () => connectedBothWays(host, joiner))
+      // The outcome the restart replayed is settled on disk too: the ticket's join is no longer pending.
+      await step('pending_after_done', async () => {
+        const status = await joiner.engine.request('join.status', {
+          ticket_hash: readTicket(link.uri).hash
+        })
+        expect(status.pending).toBe(false)
+      })
+      // The helper stopping between PAIRED and its answer is the fake's (`losePaired`); with a real helper the
+      // replay after a restart is the case above.
+      if (REAL_HELPER) return
 
       // The confirmation was sent and the helper stopped before it answered: the join is repeated with the
       // approved list the consent stored.
@@ -564,15 +596,41 @@ describe('phase1b.link-app', () => {
     180_000
   )
 
-  it.skipIf(REAL_HELPER)(
+  it('restores nothing after a removal: a host forgotten before its outcome was stored stays removed', async () => {
+    const host = await fabric.computer('gone-host'),
+      joiner = await fabric.computer('gone-joiner')
+    const link = await sendLink(host)
+    // PAIRED came back and the app stopped before it stored anything: the helper keeps the outcome for a replay.
+    let hit = false
+    joiner.mms.netEngine.pairingCrash = (at) => at === 'join-replied' && !hit && (hit = true)
+    const joined = connect(joiner, link.uri)
+    await codeNeeded(joiner, link.invitation)
+    await typeCode(joiner, link.invitation, shown(host, link.invitation)!.code)
+    await joined
+    await step(undefined, () => expect(hit).toBe(true))
+    joiner.mms.netEngine.pairingCrash = undefined
+    // The host is removed on the joiner's helper (as a removal forgets it); then the app starts again and asks
+    // the ticket's outcome.
+    await joiner.engine.request('peer.forget', { identity: host.endpoint })
+    await fabric.restartEngine(joiner)
+    await step('removed_peer_restored', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+      const listed = await joiner.engine.request('peers.list')
+      const held = (listed.peers as Array<{ identity: string }>).map((peer) => peer.identity)
+      expect(held).not.toContain(host.endpoint)
+      expect(['joined', 'granted', 'connected']).not.toContain(rowFor(joiner, host)?.state)
+    })
+  }, 120_000)
+
+  it(
     'a damaged link after a one-way SSH add changes no grant on either side',
     async () => {
       // A uses B (B grants A; A pins B); both rows came from the SSH add.
       const a = await fabric.computer('ssh-a'),
         b = await fabric.computer('ssh-b')
-      const { grant } = fabric.network.grant(b.endpoint, a.endpoint)
+      const grant = await oneWay(b, a)
       sshRow(a, b, '')
-      sshRow(b, a, String(grant))
+      sshRow(b, a, grant)
       // B sends a link; A opens a damaged copy of it, and meets B's live grant ("already paired").
       const link = await sendLink(b)
       const fields = decodeTicket(link.uri.slice(link.uri.indexOf('#') + 1))
@@ -584,8 +642,9 @@ describe('phase1b.link-app', () => {
       })
       await new Promise((resolve) => setTimeout(resolve, 300))
       await step('grant_without_code', async () => {
-        expect(fabric.network.grantsAt(b.endpoint)).toEqual([{ caller: a.endpoint, grant }])
-        expect(fabric.network.grantsAt(a.endpoint)).toEqual([])
+        const atB = (await fabric.grantsAt(b.endpoint)).map((one) => [one.caller, String(one.grant)])
+        expect(atB).toEqual([[a.endpoint, grant]])
+        expect(await fabric.grantsAt(a.endpoint)).toEqual([])
         expect(rowFor(a, b)?.source).toBe('ssh')
         expect(rowFor(a, b)?.link).toBeUndefined()
         expect(rowFor(b, a)?.source).toBe('ssh')
@@ -594,14 +653,14 @@ describe('phase1b.link-app', () => {
     120_000
   )
 
-  it.skipIf(REAL_HELPER)(
+  it(
     "a Send link between computers added over SSH converts both rows only on the ticket's PAIRED",
     async () => {
       const a = await fabric.computer('convert-a'),
         b = await fabric.computer('convert-b')
-      const { grant } = fabric.network.grant(b.endpoint, a.endpoint)
+      const grant = await oneWay(b, a)
       sshRow(a, b, '')
-      sshRow(b, a, String(grant))
+      sshRow(b, a, grant)
       // A sends the link (B has no grant at A): B joins with the code.
       const link = await sendLink(a)
       const joined = connect(b, link.uri)

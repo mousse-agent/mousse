@@ -10,8 +10,9 @@
  *
  * Every connection must come up on the route under test (`conn.up.route`), else the run fails with
  * `route_mismatch`. The run also runs 1a's app cases over the route (`scripts/net-engine-check.mjs phase1b.routes-app
- * --route tcp|ws|ssh`). Its controls: `lan-only-candidates` (the joiner passes only LAN addresses) fails it with
- * `unreachable`; `route-leak` (routes other than the one under test, used first) with `route_mismatch`;
+ * --route tcp|ws|ssh`). Its controls: `lan-only-candidates` (the app passes only LAN addresses: a join approves
+ * none, and no pairing gets its other addresses or SSH route) leaves no connection on the route, which the kit
+ * judges `route_mismatch` before the run's own `unreachable`; `route-leak` (routes other than the one under test, used first) with `route_mismatch`;
  * `plus-probe` and `egress-probe` with what the kit's egress guard records (`plus_contacted`,
  * `egress_attempted`), which this run records too.
  */
@@ -23,6 +24,8 @@ vi.hoisted(() => {
   process.env.MOUSSE_NET_ENGINE_PAIRING_RETRY_MS ||= '500'
 })
 
+import { parseRoute } from '../../../src/shared/netEngine/routes'
+import { loopbackClass } from '../../../src/mms/netEngine/routes'
 import {
   approveAll,
   CHECK_ROUTE,
@@ -69,6 +72,14 @@ describe.skipIf(CHECK_ROUTE === 'ssh')('phase1b.routes-app', () => {
     }
   }
 
+  /** A route that is not the route under test: another kind, or over tcp another class (LAN, say). */
+  const offRoute = (route: string): boolean => {
+    const expected = expectedRoute()!
+    const kind = parseRoute(route)?.kind
+    if ((kind === 'wss' ? 'ws' : kind) !== expected.kind) return true
+    return kind === 'tcp' && (loopbackClass(route) ?? 'lan') !== expected.class
+  }
+
   /** The routes of the pairbacks `from` sent so far. */
   const pairbacks = (from: Computer): string[][] =>
     fabric.crossed
@@ -87,6 +98,11 @@ describe.skipIf(CHECK_ROUTE === 'ssh')('phase1b.routes-app', () => {
         expect(preview.destinations.some((item) => !item.automatic)).toBe(true)
         expect(preview.shareable.map((item) => item.route)).toEqual(expect.arrayContaining(own))
       }
+    })
+    // A route of another kind or class carried back (the `route-leak` control's listener) is off the route.
+    await step('route_mismatch', async () => {
+      await eventually(() => expect(pairbacks(quiet).length).toBeGreaterThan(0), 30_000)
+      for (const routes of pairbacks(quiet)) expect(routes.filter(offRoute)).toEqual([])
     })
     await step('disclosed', async () => {
       await eventually(() => expect(pairbacks(quiet).length).toBeGreaterThan(0), 30_000)

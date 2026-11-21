@@ -1,4 +1,6 @@
+import { useEffect, useRef, useState } from 'react'
 import { findListedModel, modelLabel } from '../../../shared/modelChoice'
+import { TITLE_PROMPT_MAX } from '../../../shared/threadTitleText'
 import { resolveModelChoice } from '../../lib/modelChoice'
 import type { IdleCompactionSetting, MousseSettings, MousseSettingsUpdate, SettingsOptions } from '../../../shared/settings'
 import { normalizeContextSettings, normalizeExperimentalSettings, oneShotProviderOptions } from '../../../shared/settings'
@@ -62,6 +64,68 @@ function CacheTimeRow() {
           )
         })}
       </ul>
+    </SettingsRow>
+  )
+}
+
+/**
+ * The optional title prompt under Thread titles: a dimmed row with Add while empty; the text box shows
+ * while it is being written or once it has text, and saves when it loses focus (blank removes it).
+ */
+function TitlePromptRow({ prompt, automatic, updateSettings }: {
+  prompt: string
+  automatic: boolean
+  updateSettings: (partial: MousseSettingsUpdate) => Promise<void>
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(prompt)
+  useEffect(() => { if (!editing) setDraft(prompt) }, [prompt, editing])
+  // Escape blurs the box without saving what was typed.
+  const discarded = useRef(false)
+  const open = editing || Boolean(prompt)
+  const save = () => {
+    setEditing(false)
+    if (discarded.current) {
+      discarded.current = false
+      setDraft(prompt)
+      return
+    }
+    const next = draft.trim()
+    if (next !== prompt) void updateSettings({ title: { prompt: next } })
+  }
+  return (
+    <SettingsRow
+      title="Title prompt"
+      anchor="agents-title-prompt"
+      htmlFor={open ? 'agents-title-prompt' : undefined}
+      indent
+      disabled={!open || automatic}
+      description={automatic ? <span title="Automatic names threads from their first line, without a model.">Used with a chosen title model.</span> : undefined}
+      control={!open && (
+        <button type="button" className="settings-btn" onClick={() => setEditing(true)}>Add</button>
+      )}
+    >
+      {open && (
+        <textarea
+          id="agents-title-prompt"
+          className="agents-title-prompt"
+          rows={2}
+          maxLength={TITLE_PROMPT_MAX}
+          autoFocus={editing && !prompt}
+          value={draft}
+          placeholder="e.g. Start each title with an emoji"
+          onFocus={() => setEditing(true)}
+          onChange={(event) => setDraft(event.currentTarget.value)}
+          onBlur={save}
+          onKeyDown={(event) => {
+            if (event.key !== 'Escape') return
+            event.preventDefault()
+            event.stopPropagation()
+            discarded.current = true
+            event.currentTarget.blur()
+          }}
+        />
+      )}
     </SettingsRow>
   )
 }
@@ -176,6 +240,7 @@ export function AgentsSettings({
             />
           }
         />
+        <TitlePromptRow prompt={settings.title?.prompt ?? ''} automatic={titleIsAutomatic} updateSettings={updateSettings} />
         <SettingsRow
           title="Bot model"
           anchor="agents-bot-model"

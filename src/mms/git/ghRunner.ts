@@ -3,6 +3,7 @@ import { basename } from 'node:path'
 import { mousseGitEnv } from './gitEnv'
 import { assertGitAllowed, type UserAction } from './gitPolicy'
 import { repoProgramEnv, withoutRepoProgramsAsync } from './repoPrograms'
+import { gitEnvFor, gitFile } from './gitExecutable'
 
 export interface ExecutableResult {
   stdout: string
@@ -28,12 +29,12 @@ export const execRunner: ExecutableRunner = async (executable, args, options) =>
   const argv = executable === 'git' ? await withoutRepoProgramsAsync(cwd, args, { userRequested: options?.userRequested }) : [...args]
   return new Promise((resolvePromise, reject) => {
     execFile(
-      executable,
+      executable === 'git' ? gitFile() : executable,
       argv,
       {
         cwd: options?.cwd,
         // `gh` runs Git itself (remotes, `pr checkout`), so its Git gets the same settings as Mousse's own.
-        env: executable === 'git' ? repoProgramEnv({ ...process.env, ...options?.env }) : mousseGitEnv({ ...process.env, ...options?.env }),
+        env: executable === 'git' ? gitEnvFor(repoProgramEnv({ ...process.env, ...options?.env })) : mousseGitEnv({ ...process.env, ...options?.env }),
         windowsHide: true,
         encoding: 'utf8',
         timeout: options?.timeoutMs ?? 60_000,

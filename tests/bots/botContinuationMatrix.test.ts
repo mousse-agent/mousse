@@ -1,5 +1,6 @@
 import { getDefaultSettings } from '../../src/shared/settings'
 import { BotMcp, callForBot } from '../../src/mms/bots/mcp/BotMcp'
+import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { actionContinuation } from '../../src/mms/bots/actions/BotActions'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import golden from './fixtures/continuationMaster.json'
@@ -131,12 +132,9 @@ it.each(actionLines)('schedule stored outcome %s shares the ordered continuation
   f.host.mcp = mcp
   await f.bots.reconcileOnStartup()
   const { botId } = await createBot(f, { reply: 'Hello' })
-  const request = await f.bots.activate({ botId, input: 'Allow mail', clientRequestId: 'matrix-permission' })
-  const asking = await start(f, request.id)
-  asking.prepared.authority.escalate!({ permission: { mcp: { server: 'Mail' } } as never, reason: 'Send mail' })
-  await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
-  await finish(f, asking.payload)
-  f.bots.setAsksFirstForDevelopment(botId, 'mail', 'send')
+  const grant = f.store.activeGrant(botId)!
+  const manifest = { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send', level: 'asks_first' as const }] }
+  f.store.approve(botId, botManifestDigest(manifest), manifest)
   f.bots.addSchedule(botId, { when: { kind: 'interval', minutes: 5 }, prompt: 'Send mail' }, 'owner')
   f.clock.now += 5 * 60_000
   const due = await f.tickSchedules(new Date(f.clock.now))

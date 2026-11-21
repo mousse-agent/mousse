@@ -1,7 +1,8 @@
 /**
  * How much of the theme's background covers a wallpaper so text stays readable (4.5:1): measured per sample of the image
  * as the browser blends it, in both directions (light text over bright spots, dark text over dark ones), with
- * semi-transparent secondary text composited, and a solid surface when nothing less will do.
+ * semi-transparent secondary text composited, and a solid surface when nothing less will do. Under acrylic the layer is
+ * see-through (drawn at an opacity over the window's tint), and the floor is measured for what text then sits on.
  */
 import { describe, expect, it } from 'vitest'
 import { contrastFloor, contrastRatio, READABLE_CONTRAST, scrimNeeded, type Rgba } from '../src/renderer/lib/wallpaperContrast'
@@ -80,5 +81,52 @@ describe('contrastFloor', () => {
     const solidOnly = scrimNeeded(pixel, [16, 20, 24], [rgba(230, 230, 230)])
     const withFaint = scrimNeeded(pixel, [16, 20, 24], [rgba(230, 230, 230), rgba(230, 230, 230, 0.6)])
     expect(withFaint).toBeGreaterThan(solidOnly)
+  })
+})
+
+/** What text sits on over an opaque `pixel` when the layer (scrim over image) is drawn at `opacity` over `backdrop`. */
+function seen(pixel: number[], theme: typeof DARK, scrim: number, opacity: number, backdrop: Rgba): [number, number, number] {
+  const base = [theme.base.r, theme.base.g, theme.base.b]
+  const under = [backdrop.r, backdrop.g, backdrop.b]
+  return [0, 1, 2].map((i) => opacity * (base[i] * scrim + pixel[i] * (1 - scrim)) + (1 - opacity) * under[i]) as [number, number, number]
+}
+
+function readsOn(background: [number, number, number], theme: typeof DARK): boolean {
+  return theme.texts.every((text) => {
+    const shown: [number, number, number] = [0, 1, 2].map((i) => [text.r, text.g, text.b][i] * text.a + background[i] * (1 - text.a)) as [number, number, number]
+    return contrastRatio(shown, background) >= READABLE_CONTRAST - 1e-6
+  })
+}
+
+describe('contrastFloor for a see-through layer (acrylic)', () => {
+  const OPACITY = 0.55
+
+  it.each([
+    ['dark theme, white image, tint like the base', DARK, [255, 255, 255], DARK.base],
+    ['dark theme, white image, a lighter tint', DARK, [255, 255, 255], rgba(60, 64, 70)],
+    ['light theme, black image, tint like the base', LIGHT, [0, 0, 0], LIGHT.base],
+    ['dark theme, mid-grey image', DARK, [150, 150, 150], DARK.base]
+  ])('%s: text reads at the floor and not clearly below it', (_name, theme, colour, backdrop) => {
+    const layer = { opacity: OPACITY, backdrop }
+    const floor = contrastFloor(fill(100, colour), theme.base, theme.texts, layer)
+    expect(floor).toBeGreaterThan(0)
+    expect(floor).toBeLessThan(1)
+    expect(readsOn(seen(colour, theme, floor, OPACITY, backdrop), theme)).toBe(true)
+    expect(readsOn(seen(colour, theme, floor - 0.02, OPACITY, backdrop), theme)).toBe(false)
+  })
+
+  it('a lighter tint behind the layer needs more scrim than one like the base, under a dark theme', () => {
+    const white = fill(100, [255, 255, 255])
+    const likeBase = contrastFloor(white, DARK.base, DARK.texts, { opacity: OPACITY, backdrop: DARK.base })
+    const lighter = contrastFloor(white, DARK.base, DARK.texts, { opacity: OPACITY, backdrop: rgba(60, 64, 70) })
+    expect(lighter).toBeGreaterThan(likeBase)
+  })
+
+  it('a dark image under a dark theme over its own tint needs no scrim', () => {
+    expect(contrastFloor(fill(100, [0, 0, 0]), DARK.base, DARK.texts, { opacity: OPACITY, backdrop: DARK.base })).toBe(0)
+  })
+
+  it('a tint that text does not read on even under a solid scrim gets a solid scrim (1)', () => {
+    expect(contrastFloor(fill(10, [255, 255, 255]), DARK.base, DARK.texts, { opacity: OPACITY, backdrop: rgba(255, 255, 255) })).toBe(1)
   })
 })

@@ -60,7 +60,7 @@ export class CodeRevertService {
       const threadId = workspace?.threadId
       // The files as they are now, including edits made since: they are part of the merge, so they stay.
       const ours = await takeSnapshotAsync(workspacePath, { reason: 'before code revert', threadId, operationId })
-      const gitNotice = await gitLeftInPlaceNoticeAsync(workspacePath, 'Revert', target)
+      const gitNotice = await gitLeftInPlaceNoticeAsync(workspacePath, 'Revert', target, new ThreadWorkspaceManager(this.threadDirectory).branchRecord().renamedTo)
       const restored = await restoreChangeAsync(workspacePath, { reason: `revert code action ${actionId}`, threadId, operationId, base: target.endSha, ours: ours.sha, theirs: target.startSha, restoredTo: 'at the start of the turn', keep: { owner: this.threadDirectory, action: 'Revert' } }, (expectedTree, expectedExactTree) => {
         const intent: RevertIntent = { target, latest: actions.at(-1), ours: ours.sha, expectedTree, ...(expectedExactTree ? { expectedExactTree } : {}), ...(gitNotice ? { gitNotice } : {}) }
         this.journal.append({ operationId, operationType: 'code-revert', state: 'prepared', expectedPreState: { startSha: ours.sha, actionId }, details: intent })
@@ -101,12 +101,12 @@ export class CodeRevertService {
   async recoverPending(workspacePath: string, heldThreadLease?: ThreadLeaseHandle, signal?: AbortSignal): Promise<void> {
     const interrupted = (entry: { operationType: string; state: string }) => ['code-revert', 'change-revert'].includes(entry.operationType) && ['prepared', 'git_applied'].includes(entry.state)
     // Nothing to finish takes no lock: a worktree the agent removed or emptied does not stop the next turn here.
-    if (![...this.journal.latestByOperation().values()].some(interrupted)) return
+    if (!this.journal.unsettled().some(interrupted)) return
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'code-revert-recovery', async () => {
       const receipts = new ChangeReceiptService(this.threadDirectory)
-      for (const entry of this.journal.latestByOperation().values()) {
+      for (const entry of this.journal.unsettled()) {
         if (!interrupted(entry)) continue
-        const intent = this.journal.list().find((item) => item.operationId === entry.operationId && item.state === 'prepared')
+        const intent = this.journal.history(entry.operationId).find((item) => item.state === 'prepared')
         const expected = intent?.expectedPreState as { startSha: string; actionId: string } | undefined
         const details = intent?.details as RevertIntent | undefined
         if (!expected || !details?.target) throw new Error('Code revert recovery intent is missing.')
@@ -116,7 +116,7 @@ export class CodeRevertService {
           this.journal.append({ operationId: entry.operationId, operationType: 'code-revert', state: 'cancelled', details: { recoveredBeforeGit: true } })
           continue
         }
-        const gitNotice = details.gitNotice ?? await gitLeftInPlaceNoticeAsync(workspacePath, 'Revert', details.target)
+        const gitNotice = details.gitNotice ?? await gitLeftInPlaceNoticeAsync(workspacePath, 'Revert', details.target, new ThreadWorkspaceManager(this.threadDirectory).branchRecord().renamedTo)
         await this.complete(workspacePath, entry.operationId, details, applied.startSha, applied.end, intent!.createdAt, [gitNotice ?? '', coverageNotice(details.target.git?.coverageGaps, await namedGapsAsync(workspacePath, applied.startSha, applied.end.sha, applied.end.coverageGaps)) ?? ''].filter(Boolean).join(' ') || undefined)
       }
     }, signal, heldThreadLease)

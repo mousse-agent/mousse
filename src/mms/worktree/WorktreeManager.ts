@@ -10,6 +10,8 @@ import { getMousseHomeDir } from '../data/paths'
 import { samePath } from '../lifecycle/verifiedDelete'
 import { agentWorktreeBases, chosenFolderPlace, defaultAgentWorktreeBase, isAgentWorktreePlace, placeAgentWorktreeBase } from './worktreeLayout'
 import { cleanupRecordFor, DELETING_NAME, findCleanupRecord, resumeCleanupAsync, verifiedCleanupAsync } from './verifiedCleanup'
+import { gitEnvFor, simpleGitWithProgram } from '../git/gitExecutable'
+import { addWorktree, worktreeCheckoutPlan } from './worktreeCheckout'
 
 
 /** `existsSync` without blocking the daemon. */
@@ -179,8 +181,10 @@ export class WorktreeManager {
         ? await safeWorktreeGit(repository.root)
         : { git: repository.git, safety: [] }
       baseSha ??= (await repository.git.revparse(['HEAD'])).trim()
+      // The plan's pattern file is read before anything is made (`worktreeCheckout.ts`); a missing one refuses the worktree.
+      const plan = await worktreeCheckoutPlan(repository.root)
       beforeCreate?.({ path: identity.path, branch: identity.branch, repositoryRoot: repository.root, baseSha })
-      await checkoutGit.raw([...safety, 'worktree', 'add', '-b', identity.branch, identity.path, baseSha])
+      await addWorktree({ cwd: repository.root, worktreePath: identity.path, add: ['-b', identity.branch, identity.path, baseSha], plan, prefix: safety })
       await checkoutGit.raw([...safety, 'update-ref', '--no-deref', `refs/mousse/agents/${agentId}/base`, baseSha])
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -506,7 +510,11 @@ async function keepThenDelete(input: {
  */
 export async function safeWorktreeGit(repositoryRoot: string): Promise<{ git: SimpleGit; safety: string[] }> {
   // The unsafe library flags only permit fixed disabling overrides and the process's own environment.
-  const git = policedSimpleGit(repositoryRoot, simpleGit({ baseDir: repositoryRoot, unsafe: UNSAFE_ALLOWED }).env(repoProgramEnv()))
+  const git = policedSimpleGit(repositoryRoot, simpleGitWithProgram(({ binary, allowUnsafeCustomBinary }) => simpleGit({
+    ...(binary ? { binary } : {}),
+    baseDir: repositoryRoot,
+    unsafe: { ...UNSAFE_ALLOWED, ...(allowUnsafeCustomBinary ? { allowUnsafeCustomBinary } : {}) }
+  }).env(gitEnvFor(repoProgramEnv()))))
   const safety = ['-c', `core.hooksPath=${GIT_NULL_DEVICE}`, '-c', 'core.fsmonitor=false', ...HOOK_EVENTS.flatMap((event) => ['-c', `hook.${event}.enabled=false`])]
   // Git LFS and other inherited drivers must never execute on dispatched content,
   // including Git's dirty-file check before worktree removal.

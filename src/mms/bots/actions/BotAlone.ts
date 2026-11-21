@@ -224,10 +224,10 @@ export class BotAlone {
     for (const row of this.host.store.all("SELECT key FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'", botId)) {
       const entry = this.read(botId, String(row.key))
       if (!entry) continue
+      // Every bot has its owner's MCP servers unless switched off, which only pauses an exception (`holds`): it goes with
+      // the bot's grant (the bot deleted), its automation, or a change of that automation's prompt.
       const schedule = this.host.schedule(botId, entry.scheduleId)
-      const grant = this.host.store.activeGrant(botId)
-      const pair = grant && [grant.manifest, ...this.host.store.disabledPermissions(botId).map(p => p.manifest)].some(manifest => manifest.mcp.some(p => p.serverId === entry.serverId && p.tool === entry.tool))
-      if (!pair || !schedule || actionDigest(schedule.prompt) !== entry.promptDigest) this.remove(botId, String(row.key))
+      if (!this.host.store.activeGrant(botId) || !schedule || actionDigest(schedule.prompt) !== entry.promptDigest) this.remove(botId, String(row.key))
     }
   }
   remove(botId: string, key: string): void { this.host.store.run("DELETE FROM bot_memory_state WHERE bot_id = ? AND key = ? AND key GLOB 'alone:*'", botId, key) }

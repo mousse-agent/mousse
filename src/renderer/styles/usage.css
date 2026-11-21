@@ -1311,8 +1311,8 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
 }
 
 .usage-agent-tile:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
 }
 
 .usage-agent-tile[aria-pressed='false'] {
@@ -1578,8 +1578,8 @@ html[data-theme='high-contrast'] .usage-bar-fill::after {
 }
 
 .usage-history-session-link:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline: none;
+  background-image: var(--ui-focus-layer);
   border-radius: 3px;
 }
 

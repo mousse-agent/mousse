@@ -4,6 +4,7 @@
  * never expire; consults run one at a time per context thread; the startup pass settles what a crash
  * left; trashing a bot's thread ends its activation; a deleted bot is archived, then purged.
  */
+import { BOT_AUTOMATION_APP_TOOLS } from '../../src/shared/bots/personal/manifest'
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -404,7 +405,8 @@ describe('consults', () => {
     expect(context).toMatchObject({ history: 'thread', authority: { role: 'context' } })
     // Depth is 1: no consult from a context thread; it narrows to read.
     expect(context.authority.consult).toBeUndefined()
-    expect(context.policy.tools?.allow).toEqual(['escalate', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, 'mcp_servers', 'read', 'running_list'].sort())
+    // What every bot has by default reaches it too: the automation tools and every skill.
+    expect(context.policy.tools?.allow).toEqual(['escalate', ...BOT_MEMORY_TOOLS, ...BOT_ITEM_TOOLS, ...BOT_AUTOMATION_APP_TOOLS, 'list_skills', 'load_skill', 'mcp_servers', 'read', 'running_list'].sort())
     expect(context.authority.counters).toBe(prepared.authority.counters)
     expect(context.authority.time.signal).toBe(prepared.authority.time.signal)
     start(payload.runId)

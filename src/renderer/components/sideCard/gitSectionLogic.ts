@@ -270,6 +270,8 @@ export interface GitCollapseInput {
   hasProject: boolean
   /** The folder is still being resolved. */
   pathPending: boolean
+  /** The folder has been looked up for so long that the section stops saying "Checking…". */
+  pathSlow?: boolean
   hasPath: boolean
   /** The first fetch has finished. */
   loaded: boolean
@@ -285,7 +287,7 @@ export const GIT_CHECKING_LABEL = 'Checking…'
  */
 export function gitCollapsedLabel(input: GitCollapseInput): string | null {
   if (!input.hasProject) return 'No project'
-  if (input.pathPending) return GIT_CHECKING_LABEL
+  if (input.pathPending) return input.pathSlow ? 'Unavailable' : GIT_CHECKING_LABEL
   if (!input.hasPath) return 'No project folder'
   if (!input.loaded) return GIT_CHECKING_LABEL
   if (!input.status) return 'Unavailable'

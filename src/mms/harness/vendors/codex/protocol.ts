@@ -45,6 +45,15 @@ export interface AccountReadResponse {
   account: CodexAccount | null
   requiresOpenaiAuth: boolean
 }
+/** `getAuthStatus`: how Codex is signed in, with its current access token when `includeToken` is set. */
+export interface GetAuthStatusParams {
+  includeToken?: boolean
+  refreshToken?: boolean
+}
+export interface GetAuthStatusResponse {
+  authMethod?: string | null
+  authToken?: string | null
+}
 
 export interface ModelListParams {
   cursor?: string | null
@@ -301,6 +310,7 @@ export interface CodexRequestMap {
   initialize: { params: InitializeParams; result: InitializeResponse }
   'config/read': { params: ConfigReadParams; result: ConfigReadResponse }
   'account/read': { params: AccountReadParams; result: AccountReadResponse }
+  getAuthStatus: { params: GetAuthStatusParams; result: GetAuthStatusResponse }
   'account/rateLimits/read': { params: undefined; result: RateLimitsReadResponse }
   'account/rateLimitResetCredit/consume': { params: ConsumeResetCreditParams; result: ConsumeResetCreditResponse }
   'model/list': { params: ModelListParams; result: ModelListResponse }

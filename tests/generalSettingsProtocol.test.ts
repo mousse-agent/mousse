@@ -37,33 +37,34 @@ describe('General settings through the daemon protocol', () => {
   })
 })
 
-it('validates quiet hours, preserves them on unrelated saves, and clears them across reload', () => {
-  const home = mkdtempSync(join(tmpdir(), 'mousse-quiet-settings-'))
-  try {
-    let settings = new SettingsStore(MousseConfigStore.load(home))
-    for (const quietHours of [{ from: '25:00', to: '08:00' }, { from: '22:00', to: '22:00' }, { from: '9:00', to: '10:00' }])
-      expect(() => settings.set({ notifications: { quietHours } })).toThrow('HH:MM')
-    settings.set({ notifications: { quietHours: { from: '22:00', to: '08:00' } } })
-    settings.set({ notifications: { threadCompletionSound: false } })
-    settings = new SettingsStore(MousseConfigStore.load(home))
-    expect(settings.get().notifications.quietHours).toEqual({ from: '22:00', to: '08:00' })
-    settings.set({ notifications: { quietHours: null } })
-    settings = new SettingsStore(MousseConfigStore.load(home))
-    expect(settings.get().notifications.quietHours).toBeUndefined()
-  } finally { rmSync(home, { recursive: true, force: true }) }
-})
-
-it('treats an omitted or undefined quiet-hours key as no change, and only null clears it over JSON', () => {
-  const home = mkdtempSync(join(tmpdir(), 'mousse-quiet-patch-'))
+it('saves the Threads group as its rows send it, the New thread picker switch included', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'mousse-general-settings-'))
   try {
     const settings = new SettingsStore(MousseConfigStore.load(home))
-    const range = { from: '22:00', to: '08:00' }
-    settings.set({ notifications: { quietHours: range } })
-    settings.set({ notifications: { quietHours: undefined, allRemoteThreads: true } })
-    expect(settings.get().notifications.quietHours).toEqual(range)
-    settings.set(JSON.parse(JSON.stringify({ notifications: { quietHours: null } })))
-    settings.set({ notifications: { memoryNotices: false } })
-    expect(settings.get().notifications.quietHours).toBeUndefined()
+    const ctx = { mms: { settings }, globalSequence: () => 1, emitEvent: vi.fn() } as unknown as HandlerContext
+    // Each row sends the whole group; a profile opened on this build has newThreadPicker saved.
+    const save = (runs: Record<string, unknown>) => dispatchMethod(ctx, 'settings.set', { partial: { runs: { ...settings.get().runs, ...runs } } })
+    await save({ newThreadPicker: false })
+    await save({ keepAwake: false })
+    await save({ newThreadPicker: true })
+    expect(new SettingsStore(MousseConfigStore.load(home)).get().runs).toMatchObject({ newThreadPicker: true, keepAwake: false })
+    await expect(save({ newThreadPicker: 'yes' })).rejects.toThrow('newThreadPicker must be a boolean')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// Bot quiet hours were removed: what an older version stored, or an older window still sends, is ignored.
+it('ignores bot quiet hours an older version stored or an older window sends', () => {
+  const home = mkdtempSync(join(tmpdir(), 'mousse-quiet-settings-'))
+  try {
+    MousseConfigStore.load(home).applySettingsPatch({ notifications: { quietHours: { from: '22:00', to: '08:00' } } } as never)
+    let settings = new SettingsStore(MousseConfigStore.load(home))
+    expect(settings.get().notifications).not.toHaveProperty('quietHours')
+    settings.set({ notifications: { quietHours: { from: '25:00', to: '08:00' }, memoryNotices: false } } as never)
+    settings = new SettingsStore(MousseConfigStore.load(home))
+    expect(settings.get().notifications.memoryNotices).toBe(false)
+    expect(settings.get().notifications).not.toHaveProperty('quietHours')
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 

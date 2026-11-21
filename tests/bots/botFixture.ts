@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
 import { BotEngine, type BotEngineHost } from '../../src/mms/bots/activation/BotEngine'
 import { BotDefinitionStore } from '../../src/mms/bots/definitions/BotDefinitionStore'
-import type { BotDispatchEnd, BotJournalInput, BotModelProblem, BotPickMiss } from '../../src/mms/bots/seams'
+import type { BotActivityCalls, BotDispatchEnd, BotJournalInput, BotModelProblem, BotPickMiss } from '../../src/mms/bots/seams'
 import { BotStore } from '../../src/mms/bots/store/BotStore'
 import { PI_NATIVE_TOOLS } from '../../src/mms/harness/pi/nativeTools'
 import { ProfileDatabase } from '../../src/mms/run/db/ProfileDatabase'
@@ -73,6 +73,8 @@ export interface BotFixture {
   packs: Array<{ lane: 'chat' | 'run'; activationId: string; scheduleId?: string }>
   /** Chips the fake sink rolls up per dispatch (`<activationId>:d<n>`). */
   chips: Map<string, BotChip[]>
+  /** The calls behind those chips (`drainCalls`), when a test sets them; absent: the sink gives chips only. */
+  calls: Map<string, BotActivityCalls>
   allowed: Array<{ tool: string; dispatchId: string }>
   timers: Array<{ fn: () => void; ms: number }>
   oneShot: { answer?: string; fail?: boolean; never?: boolean; prompts: string[] }
@@ -95,7 +97,7 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'device
     base, profile, clock, store, runs, outbox,
     candidates: [PI], limited: new Map<string, string>(), problem: undefined,
     resolved: [], journal: [], outsideTx: [], cleared: [], archived: [], trashed: [], purged: [], stopped: [],
-    afterDispatch: [], packs: [], chips: new Map(), allowed: [], timers: [],
+    afterDispatch: [], packs: [], chips: new Map(), calls: new Map(), allowed: [], timers: [],
     oneShot: { prompts: [] }, journalFails: { capture: false, append: false }
   } as unknown as BotFixture
   const host: BotEngineHost = {
@@ -174,7 +176,11 @@ export function botFixture(options: Pick<BotEngineHost, 'spawnWatcher' | 'device
     activity: {
       onAllowed: (ctx, call) => { fixture.allowed.push({ tool: call.tool, dispatchId: ctx.dispatchId }) },
       onAppResult: () => {},
-      drain: (dispatchId) => fixture.chips.get(dispatchId) ?? []
+      drain: (dispatchId) => fixture.chips.get(dispatchId) ?? [],
+      drainCalls: (dispatchId) => {
+        const calls = fixture.calls.get(dispatchId)
+        return { chips: fixture.chips.get(dispatchId) ?? [], ...(calls ? { calls } : {}) }
+      }
     },
     memory: {
       list: () => ({ entries: [], gauge: 'core 0/2,000' }),

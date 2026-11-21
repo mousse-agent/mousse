@@ -21,6 +21,8 @@ export interface PrepareReply {
   existing: boolean
   already: boolean
   starts_at_login: boolean
+  /** Under the `route-leak` control only: B's loopback listener, which A then dials first. */
+  routes?: string[]
 }
 
 /** B's row for A in the chosen profile, as step 4 reads it. */
@@ -36,6 +38,8 @@ export interface PrepareRow {
 export interface PrepareEngine {
   identity: string
   name: string
+  /** This computer's loopback listener (`tcp://127.0.0.1:<port>`), when its helper said its port. */
+  listener?: string
   rowFor(joiner: string): PrepareRow | undefined
   /** Step 4: `{state: ssh_granting, source: ssh, request_id}`; answers its key. */
   writeOwnRow(request: PrepareRequest): string
@@ -241,7 +245,9 @@ async function done(
     grant_id: record.grantId ?? '',
     existing,
     already: false,
-    starts_at_login: await port.startsAtLogin()
+    starts_at_login: await port.startsAtLogin(),
+    // The routes checks' `route-leak` control: a route other than SSH, offered first and answering (1b §14).
+    ...(engineControl('route-leak') && engine.listener ? { routes: [engine.listener] } : {})
   }
   // The control keeps no reply for an existing row: a repeat after a lost reply then has nothing to answer, and
   // reads removed.

@@ -27,6 +27,11 @@ function computeAll(): void {
     if (on) { const element = document.createElement('div'); element.id = 'decision'; element.setAttribute('data-mousse-decision', ''); element.innerHTML = '<button class="permission-request-btn">Deny</button><button class="permission-request-btn">Approve</button>'; document.body.append(element) }
     else document.getElementById('decision')?.remove()
   },
+  /** Opens or closes a page that guards its own access controls (Settings, the Automations page). */
+  guarded: (on: boolean): void => {
+    if (on) { const element = document.createElement('div'); element.id = 'guarded'; element.setAttribute('data-mousse-guarded', ''); document.body.append(element) }
+    else document.getElementById('guarded')?.remove()
+  },
   /** What a decision's button shows and the theme's sidebar and token, in the same task as the change. */
   look: () => ({
     sidebar: style('[data-mousse="sidebar"]', 'background-color'),

@@ -29,6 +29,12 @@
   transition: width calc(180ms * var(--ui-motion-scale)) ease, margin-left calc(180ms * var(--ui-motion-scale)) ease;
 }
 
+/* The room the card keeps at launch is in the first frame, not slid into (ThreadSideCard's launch frame). */
+.sidebar.sidebar-full[data-side-card-launch] .an-message-list > div,
+.sidebar.sidebar-full[data-side-card-launch] .chat-input-area {
+  transition: none;
+}
+
 /* Go to latest floats over the full-width scroller, so it would stay at the pane's middle while the
    composer moves left. Both columns are centred in the pane minus the reservation, so the pill takes
    the same centre (the composer's max width cancels out) and follows the card's fade. */

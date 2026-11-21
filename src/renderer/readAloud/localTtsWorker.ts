@@ -1,6 +1,7 @@
 import { findLocalTtsModel, type LocalTtsModel, type LocalTtsModelId } from '../../shared/readAloud'
 import { localModelFileUrl } from '../../shared/localModels'
 import { setupLocalModelWorker, type ModelFileRequest, type ModelFileResponse } from '../speechModels/workerSupport'
+import type { SentenceCut } from './speechText'
 
 /**
  * What every local read aloud worker shares: the messages it exchanges with the page, and a host
@@ -11,7 +12,7 @@ import { setupLocalModelWorker, type ModelFileRequest, type ModelFileResponse } 
 /** Messages from the page to a worker. `init` comes first and names the model. */
 export type LocalTtsWorkerRequest =
   | { type: 'init'; modelId: LocalTtsModelId }
-  | { type: 'speak'; id: number; text: string; voice: string; speed: number }
+  | { type: 'speak'; id: number; text: string; voice: string; speed: number; cut?: SentenceCut }
   | { type: 'cancel'; id: number }
   | ModelFileResponse
 
@@ -29,8 +30,8 @@ export interface TtsAudio {
 
 /** A loaded model. */
 export interface TtsSynthesizer {
-  /** Voices one segment of text. */
-  synthesize: (text: string, voice: string, speed: number) => Promise<TtsAudio>
+  /** Voices one segment of text; `cut` tells whether it starts or ends partway through a sentence. */
+  synthesize: (text: string, voice: string, speed: number, cut?: SentenceCut) => Promise<TtsAudio>
 }
 
 export interface TtsWorkerContext<Model extends LocalTtsModel> {
@@ -78,13 +79,13 @@ export function runLocalTtsWorker<Model extends LocalTtsModel>({ accepts, load }
   const cancelled = new Set<number>()
   let queue: Promise<void> = Promise.resolve()
 
-  const speak = async (id: number, text: string, voice: string, speed: number): Promise<void> => {
+  const speak = async (id: number, text: string, voice: string, speed: number, cut?: SentenceCut): Promise<void> => {
     try {
       if (cancelled.has(id)) return
       const loaded = await loadSynthesizer()
       if (cancelled.has(id) || !model) return
       const known = model.voices.some((entry) => entry.id === voice)
-      const audio = await loaded.synthesize(text, known ? voice : model.defaultVoice, speed)
+      const audio = await loaded.synthesize(text, known ? voice : model.defaultVoice, speed, cut)
       if (cancelled.has(id)) return
       post({ type: 'audio', id, samples: audio.samples, sampleRate: audio.sampleRate }, [audio.samples.buffer])
     } catch (error) {
@@ -103,7 +104,7 @@ export function runLocalTtsWorker<Model extends LocalTtsModel>({ accepts, load }
       model = chosen
       support = setupLocalModelWorker({ repo: chosen.repo, files: chosen.files, post })
     } else if (message.type === 'speak') {
-      queue = queue.then(() => speak(message.id, message.text, message.voice, message.speed))
+      queue = queue.then(() => speak(message.id, message.text, message.voice, message.speed, message.cut))
     } else if (message.type === 'cancel') {
       cancelled.add(message.id)
     }

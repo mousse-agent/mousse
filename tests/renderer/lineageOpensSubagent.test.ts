@@ -109,6 +109,39 @@ describe('Nest rows of a thread', () => {
     expect(model()).toBe('House Model 2')
   })
 
+  it.each([
+    { toolName: 'start_subagent', status: 'running', task: undefined, label: 'Working' },
+    { toolName: 'invoke_subagent', status: 'running', task: 'Read the documentation for the model picker.', label: 'Working' },
+    { toolName: 'invoke_subagent', status: 'done', task: 'Read the documentation for the model picker.', label: 'Launched' }
+  ] as const)('opens an Antigravity $toolName row from Nest when its call is $status', async ({ toolName, status, task, label }) => {
+    const shown = [
+      user('u1', 0, 'Look into the model picker'),
+      row('agy1', 1, { kind: 'subagent', toolName, description: 'Documentation reviewer', prompt: task, status, ...(status === 'done' ? { endedAt: at(2) } : {}) })
+    ]
+    const ui = mousseToUIMessages(shown)
+    useAppStore.setState({ activeThreadId: 't1', messages: shown, turnStates: { t1: { phase: 'streaming', turnId: RUN } } })
+    await act(async () => {
+      root.render(createElement(Fragment, null,
+        createElement(SubagentCardsContext.Provider, { value: collectNativeSubagentCards(ui, true, true) },
+          createElement(MessageList, { messages: ui, status: 'streaming' })),
+        createElement('aside', null, createElement(LineageSection, { threadId: 't1', projectId: null }))))
+    })
+
+    if (status === 'done') {
+      const launchedGroup = [...host.querySelectorAll<HTMLButtonElement>('aside button')]
+        .find((button) => button.textContent?.includes('1 launched'))
+      expect(launchedGroup).toBeDefined()
+      await act(async () => launchedGroup!.click())
+    }
+    const rowButton = [...host.querySelectorAll<HTMLButtonElement>('aside button')]
+      .find((button) => button.textContent?.includes('Documentation reviewer'))
+    expect(rowButton?.textContent).toContain(label)
+    await act(async () => rowButton!.click())
+    const card = host.querySelector<HTMLElement>('[data-native-subagent="agy1"]')
+    expect(card?.querySelector('button')?.getAttribute('aria-expanded')).toBe('true')
+    expect(card?.textContent).toContain(task ?? 'No subagent activity reported')
+  })
+
   it('open a running subagent of Claude Code from its row: the transcript lands on its card, opened', async () => {
     const ui = mousseToUIMessages(messages)
     await act(async () => {

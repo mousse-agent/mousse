@@ -1,5 +1,8 @@
 /** Versioned lifecycle authority. Paths and inventories are never caller-issued capabilities. */
 export const RESOURCE_LIFECYCLE_VERSION = 1 as const
+
+/** A delete the app stopped waiting for: the service may still finish it. */
+export const DELETE_TOO_LONG = 'The delete did not finish in time. It may still finish; if the thread is still in Archived, delete it again.'
 export const RETENTION_CLAIM_KINDS = [
   'current-result', 'undo', 'redo', 'recall', 'conversation-attachment',
   'pending-integration', 'conflict', 'recovery', 'trash-restore', 'user-pin'
@@ -139,6 +142,11 @@ export interface LifecyclePurgeItem {
   discardRequired?: boolean
   discardState?: 'pending' | 'cleared'
   branch?: string
+  /**
+   * A `ref` item that is a thread's worktree branch outside `refs/heads/mousse/`: the owner thread's journal shows Mousse
+   * made it (`threadBranchRecord`), so it is deleted as Mousse's own.
+   */
+  recordedBranch?: boolean
   sourcePath?: string
   rowId?: string
   indexDigest?: string

@@ -10,6 +10,7 @@ import type { ModelOverride } from './providerInstances'
 import { getSkillIdFromMode } from './chatMode'
 import { DEFAULT_PERMISSION_MODE, normalizePermissionMode, type PermissionMode } from './permissionMode'
 import { generateRandomUsername } from './randomUsername'
+import { normalizeBranchPrefix, type BranchNamingMode } from './mousseBranches'
 import type { ShortcutOverrides } from './commands'
 import { DEFAULT_FONT_CHOICE, normalizeFontChoice, type FontChoice } from './fontSettings'
 import { normalizeUserThemes, type UserTheme } from './themes/userThemes'
@@ -71,7 +72,7 @@ export interface AppearanceSettings {
   codeFont: FontChoice
   /** How cards in the Threads tab show their project's color. */
   threadProjectColors: ThreadProjectColorStyle
-  /** Thread rows and the Bots list show the latest reply under each title, on one muted line. */
+  /** Thread link cards and the Bots list show the latest reply under each title, on one muted line. */
   replyPreviews: boolean
   /** The title bar shows back and forward and the open thread's path (project / thread / subagent). */
   threadPathInTitleBar: boolean
@@ -142,17 +143,7 @@ export interface NotificationChannels {
   sound: boolean
 }
 
-export interface QuietHours { from: string; to: string }
-export function isQuietHours(value: unknown): value is QuietHours {
-  if (!value || typeof value !== 'object') return false
-  const { from, to } = value as QuietHours
-  const time = /^(?:[01]\d|2[0-3]):[0-5]\d$/
-  return typeof from === 'string' && typeof to === 'string' && time.test(from) && time.test(to) && from !== to
-}
-
 export interface NotificationSettings {
-  /** Absent means off. Times use the owner's last device zone. */
-  quietHours?: QuietHours
   /**
    * The sound for every event, from before sounds were chosen per event. Still read for an event
    * whose `sound` has not been chosen.
@@ -414,6 +405,12 @@ export interface RunSettings {
    * end, or Send now. Absent or `best_effort`: it goes in shortly after the tool. No UI sets it.
    */
   steerRelease?: Record<string, SteerRelease>
+  /**
+   * Whether the title bar's New thread asks for the project first, in a grid of projects, instead of opening a blank
+   * thread in the last project at once. A new profile starts with it on; a profile already in use when the picker came
+   * starts with it off (`settleNewThreadPickerDefault`). Absent counts as on.
+   */
+  newThreadPicker?: boolean
 }
 
 export type SteerRelease = 'best_effort' | 'strict'
@@ -428,6 +425,7 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
     : []
   return {
     ...(release.length ? { steerRelease: Object.fromEntries(release) } : {}),
+    ...(typeof raw?.newThreadPicker === 'boolean' ? { newThreadPicker: raw.newThreadPicker } : {}),
     resumeAfterUsageLimit: raw?.resumeAfterUsageLimit === true,
     usageLimitPauseCap:
       typeof cap === 'number' && Number.isInteger(cap) && cap >= 1 && cap <= MAX_USAGE_LIMIT_PAUSE_CAP
@@ -441,7 +439,7 @@ export function normalizeRunSettings(raw?: Partial<RunSettings> | null): RunSett
 }
 
 /**
- * Features that are still being tried out, each off until turned on (Mousse Plus (legacy) is the exception: on until
+ * Features that are still being tried out, each off until turned on (Mousse ID (legacy) is the exception: on until
  * turned off).
  *
  * `subagentWorktrees`: Mousse gives every subagent it starts a worktree of its own, made when the subagent starts from the
@@ -452,7 +450,7 @@ export interface ExperimentalSettings {
   botAsksFirstOff: boolean
   subagentWorktrees: boolean
   /**
-   * Mousse Plus (legacy), on unless turned off: today's Mousse ID sign-in, hosted relay and phone requests through
+   * Mousse ID (legacy), on unless turned off: today's Mousse ID sign-in, hosted relay and phone requests through
    * Mousse Plus. Off, this profile's networking sends nothing to Mousse Plus and runs on LAN, SSH, tunnels and
    * self-hosted relays only, as while the new networking engine and Plus are built and tried.
    */
@@ -462,6 +460,9 @@ export interface ExperimentalSettings {
    * flat 2D eyes animated over it, instead of the whole face drawn in 3D every frame.
    */
   hybridBotFaces: boolean
+  sidebarAnimations: boolean
+  newChatAnimations: boolean
+  shimmerAnimations: boolean
   /** The profiler (Settings → Labs). */
   profiler: ProfilerSettings
 }
@@ -472,6 +473,9 @@ export function normalizeExperimentalSettings(raw?: Partial<ExperimentalSettings
     subagentWorktrees: raw?.subagentWorktrees === true,
     plusLegacy: raw?.plusLegacy !== false,
     hybridBotFaces: raw?.hybridBotFaces === true,
+    sidebarAnimations: raw?.sidebarAnimations !== false,
+    newChatAnimations: raw?.newChatAnimations !== false,
+    shimmerAnimations: raw?.shimmerAnimations !== false,
     profiler: normalizeProfilerSettings(raw?.profiler)
   }
 }
@@ -514,6 +518,28 @@ export function normalizeStorageSettings(raw?: Partial<StorageSettings> | null):
   return { worktreeFolder: current, previousWorktreeFolders: previous }
 }
 
+/**
+ * How a thread's worktree branch is named (Settings → Storage → Branches). The worktree is always made at once on
+ * `<prefix>/<random id>`; the title model then names it in the background, unless the thread is private.
+ * `static`: `<prefix>/<slug>`. `semantic`: the model picks a kind (`feat/`, `fix/`, …) instead of the prefix.
+ * `custom`: the model names the whole branch, following `instructions`.
+ */
+export interface BranchNamingSettings {
+  mode: BranchNamingMode
+  /** Without a trailing slash; empty for no prefix. */
+  prefix: string
+  instructions: string
+}
+
+/** The longest naming instructions kept. */
+export const BRANCH_NAMING_INSTRUCTIONS_MAX = 2000
+
+export function normalizeBranchNamingSettings(raw?: Partial<BranchNamingSettings> | null): BranchNamingSettings {
+  const mode = raw?.mode === 'semantic' || raw?.mode === 'custom' ? raw.mode : 'static'
+  const instructions = typeof raw?.instructions === 'string' ? raw.instructions.slice(0, BRANCH_NAMING_INSTRUCTIONS_MAX) : ''
+  return { mode, prefix: normalizeBranchPrefix(raw?.prefix ?? undefined), instructions }
+}
+
 export interface MousseSettings {
   profile: {
     username: string
@@ -528,6 +554,8 @@ export interface MousseSettings {
   runs: RunSettings
   experimental: ExperimentalSettings
   storage: StorageSettings
+  /** Settings → Storage → Branches: how thread worktree branches are named. */
+  branches: BranchNamingSettings
   /** Settings → General → Error reports: the Report button and `report_bug`, and whose account files them. */
   errorReports: ErrorReportSettings
   provider: {
@@ -552,6 +580,8 @@ export interface MousseSettings {
     effort?: string
     /** Provider instance of the title model; absent on records from before instances (legacy mapping). */
     instanceId?: string
+    /** The person's own instructions for the title model (`titleSystemPrompt`); absent or blank for none. */
+    prompt?: string
   }
   /**
    * The model bots run on when a bot's own choice is automatic (Bot Phase 1 §5.6). Blank values are
@@ -580,8 +610,8 @@ export type DeepPartial<T> = {
       : T[K]
 }
 
-export type MousseSettingsUpdate = Omit<DeepPartial<MousseSettings>, 'notifications'> & {
-  notifications?: Omit<DeepPartial<NotificationSettings>, 'quietHours'> & { quietHours?: QuietHours | null }
+export type MousseSettingsUpdate = Omit<DeepPartial<MousseSettings>, 'experimental'> & {
+  experimental?: Partial<ExperimentalSettings>
 }
 
 export interface ThemeOption {
@@ -720,7 +750,7 @@ export type FrostedComposerSlider = 'frostedComposerOpacity' | 'frostedComposerB
 /** Slider bounds and defaults for the frosted composer. */
 export const FROSTED_COMPOSER_RANGES: Readonly<Record<FrostedComposerSlider, { min: number; max: number; step: number; default: number }>> = {
   frostedComposerOpacity: { min: 20, max: 95, step: 1, default: 60 },
-  frostedComposerBlur: { min: 0, max: 40, step: 1, default: 16 },
+  frostedComposerBlur: { min: 0, max: 40, step: 1, default: 6 },
   frostedComposerSaturation: { min: 1, max: 1.6, step: 0.02, default: 1.12 }
 }
 
@@ -948,6 +978,7 @@ export function getDefaultSettings(): MousseSettings {
     runs: normalizeRunSettings(),
     experimental: normalizeExperimentalSettings(),
     storage: normalizeStorageSettings(),
+    branches: normalizeBranchNamingSettings(),
     errorReports: normalizeErrorReportSettings(),
     provider: {
       llmProvider: '',

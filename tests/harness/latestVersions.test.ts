@@ -171,10 +171,12 @@ describe('latest published versions', () => {
 })
 
 describe('which drivers have a version source', () => {
-  it('Claude Code and Codex use npm, Antigravity its pinned release, ACP none', () => {
+  it('Claude Code and Codex use npm, Antigravity the release Google\'s feed names for Mousse\'s own copy, ACP none', () => {
     expect(claudeCodeDriver().latestVersion).toEqual(claude)
     expect(codexDriver({ builtIn: () => ({}) as never }).latestVersion).toEqual(codex)
-    expect(antigravityDriver({ builtIn: () => ({ pinnedVersion: () => '1.1.1' }) as never }).latestVersion).toEqual({ kind: 'pinned', version: '1.1.1' })
+    expect(antigravityDriver({ builtIn: () => ({ latestVersion: () => '1.5.13' }) as never }).latestVersion).toEqual({ kind: 'pinned', version: '1.5.13' })
+    // The user's own agy updates itself: no version to update to.
+    expect(antigravityDriver({ builtIn: () => ({ latestVersion: () => undefined }) as never }).latestVersion).toBeUndefined()
     expect(acpDriver().latestVersion).toBeUndefined()
   })
 })

@@ -18,8 +18,3 @@ html[data-wallpaper] .chat {
   pointer-events: none;
   contain: strict;
 }
-
-/* While a person decides something, nothing of the theme shows: the wallpaper goes with its sheet (themeCss.ts). */
-html[data-user-theme-paused] .chat-wallpaper {
-  display: none;
-}

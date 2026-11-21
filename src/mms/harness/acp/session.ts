@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { methods, type NewSessionResponse } from '@agentclientprotocol/sdk'
-import type { ProviderToolEvent } from '../../../shared/agentActivity'
+import { ACTIVITY_DESCRIPTION_CHARS, isAcpSubagentTool, type ProviderToolEvent } from '../../../shared/agentActivity'
 import type { PermissionMode } from '../../../shared/permissionMode'
 import type { LlmModelOption } from '../../../shared/settings'
 import type { ChatImageAttachment } from '../../../shared/types'
+import { IMAGE_MAX_DATA_CHARS } from '../../../shared/imageLimits'
 import type { UserQuestionService } from '../../orchestrator/UserQuestionService'
 import { harnessAppError } from '../../../shared/harness/types'
+import { compareVersions } from '../../../shared/net/version'
 import { interruptWithDeadline, loadWithDeadline, SessionLoadTimeoutError } from '../supervise'
 import { isAuthRequired } from './auth'
 import { initializeAgent, sessionCapability, type AcpAgentInfo } from './capabilities'
@@ -28,11 +30,25 @@ import type { AcpQuirks } from './quirks'
 import { acpAgentError, agentCancelledError, promptStopOutcome } from './stopReason'
 import { xaiHandlers, xaiStopFailure } from './xai'
 
+/** The title is generic on agy: its launch arguments name the role and describe the work. */
+function subagentActivity(rawInput: unknown, title: string | undefined) {
+  const args = rawInput && typeof rawInput === 'object' ? rawInput as Record<string, unknown> : {}
+  const role = typeof args.Role === 'string' ? args.Role.trim() : ''
+  const agentType = typeof args.TypeName === 'string' ? args.TypeName.trim().slice(0, ACTIVITY_DESCRIPTION_CHARS) : ''
+  const prompt = typeof args.Prompt === 'string' ? args.Prompt.trim() : ''
+  return {
+    kind: 'subagent' as const,
+    description: (role || title || 'Task').slice(0, ACTIVITY_DESCRIPTION_CHARS),
+    ...(agentType ? { agentType } : {}),
+    ...(prompt ? { prompt } : {})
+  }
+}
+
 /**
  * The ACP session lifecycle shared by every ACP agent: one agent process per thread, kept between
  * turns while its saved session still matches the committed history; `session/new`, or the saved
  * session reopened (resume, or load behind the load gate); the prompt loop with steer as
- * cancel-and-restart; stop through the turn's signal or a native cancel.
+ * cancel-and-restart (or a second prompt into the running one, `steersNatively`); stop through the turn's signal or a native cancel.
  */
 
 /** A connection the core opened, with the turn state it carries. */
@@ -84,6 +100,26 @@ export interface AcpProcess extends AcpConnection {
   cancelRequested?: boolean
   /** The slash commands the agent advertised (`available_commands_update`), without the slash. */
   commands?: Set<string>
+  /** The agent answered a steer's second prompt with an error: its later steers are cut and restarted (`AcpQuirks.nativeSteerFrom`). */
+  nativeSteerRefused?: boolean
+  /**
+   * Set on a one-shot's process (`AcpSessions.oneShot`): every request of the agent to use a tool (a permission, a
+   * file read or write) is refused, and ends the request.
+   */
+  refuseTools?: (what: string) => void
+}
+
+/** Whether a steer goes into `process`'s running prompt as a second prompt, with no cancel (`AcpQuirks.nativeSteerFrom`). */
+export function steersNatively(quirks: AcpQuirks, process: Pick<AcpProcess, 'info' | 'nativeSteerRefused'>): boolean {
+  if (!quirks.nativeSteerFrom || process.nativeSteerRefused) return false
+  const version = compareVersions(process.info?.agentInfo?.version, quirks.nativeSteerFrom)
+  return version === 0 || version === 1
+}
+
+/** A one-shot's file request: refused, and the request ends (`AcpProcess.refuseTools`). */
+function refuseFile(refuse: (what: string) => void, what: string): Promise<never> {
+  refuse(what)
+  return Promise.reject(new Error('This request runs no tools.'))
 }
 
 /** Session updates that show the agent working on the prompt in flight (not session bookkeeping). */
@@ -97,10 +133,10 @@ interface DrainedSteer {
   images?: ChatImageAttachment[]
 }
 
-/** An image as an ACP image block, or undefined when agents are not sent it (BMP, JPEG, PNG or WebP up to 10 MiB). */
+/** An image as an ACP image block, or undefined when agents are not sent it (BMP, JPEG, PNG or WebP within `IMAGE_MAX_DATA_CHARS`). */
 function acpImageBlock(image: ChatImageAttachment): { type: 'image'; data: string; mimeType: string } | undefined {
   const mimeType = image.mimeType.toLowerCase()
-  if (!['image/bmp', 'image/jpeg', 'image/png', 'image/webp'].includes(mimeType) || Buffer.byteLength(image.data, 'base64') > 10 * 1024 * 1024) return undefined
+  if (!['image/bmp', 'image/jpeg', 'image/png', 'image/webp'].includes(mimeType) || typeof image.data !== 'string' || !image.data || image.data.length > IMAGE_MAX_DATA_CHARS) return undefined
   return { type: 'image', data: image.data, mimeType }
 }
 
@@ -230,6 +266,8 @@ export interface AcpChatInput {
    */
   bot?: true
   onText: (text: string) => void
+  /** The agent's thoughts so far this turn (`agent_thought_chunk`), cumulative like `onText`. */
+  onThinking?: (text: string) => void
   drainSteer?: () => string | undefined
   /**
    * A steer drain with its token (`TurnControl.drainSteerEntry`). With `expect`, it takes only when the decision now is
@@ -268,6 +306,8 @@ export interface AcpObservations {
 export interface AcpSessionsOptions {
   /** The agent's name in prompts and errors ("Allow Antigravity to run this tool?"). */
   label: string
+  /** The provider a usage limit the agent reports names (`antigravity`), for the pause's wording. */
+  usageLimitProvider?: string
   /** The instance of sessions saved before provider instances existed. */
   defaultInstanceId: string
   questions: UserQuestionService
@@ -316,6 +356,8 @@ export class AcpSessions {
   private readonly processes = new Set<AcpProcess>()
   /** Processes running a turn right now. */
   private readonly turning = new Set<AcpProcess>()
+  /** Per thread, the session a turn that did not finish left resumable, until `commitInterrupted` fingerprints it. */
+  private readonly interrupted = new Map<string, string>()
   private stopped = false
   private readonly prompter: PermissionPrompter
 
@@ -342,6 +384,11 @@ export class AcpSessions {
     const classify = this.options.classifyOption ?? classifyGenericOption
     const handlers: AcpClientHandlers = {
       requestPermission: async (request) => {
+        // A one-shot runs no tool: refused unasked, and the request ends.
+        if (active?.refuseTools) {
+          active.refuseTools(request.toolCall?.title ?? 'a tool')
+          return { outcome: { outcome: 'cancelled' } }
+        }
         // While a person is asked, the call is not a foreground tool: a person's steer answers it rather than waiting.
         const callId = request.toolCall?.toolCallId
         const awaiting = callId ? active?.turnToolAwaiting : undefined
@@ -353,8 +400,14 @@ export class AcpSessions {
         return answer
       },
       ...(quirks.clientFs ? {
-        readTextFile: (request) => readWorkspaceFile(scope, request),
-        writeTextFile: (request) => writeWorkspaceFile(questions, scope, request, label)
+        readTextFile: (request) => {
+          if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file read')
+          return readWorkspaceFile(scope, request)
+        },
+        writeTextFile: (request) => {
+          if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file write')
+          return writeWorkspaceFile(questions, scope, request, label)
+        }
       } : {}),
       // A sign-in link the agent sends as a URL elicitation goes to the sign-in; nothing else is answered.
       ...(this.options.urlElicitation ? { createElicitation: async (request: Parameters<NonNullable<AcpClientHandlers['createElicitation']>>[0]) => {
@@ -514,6 +567,21 @@ export class AcpSessions {
     this.options.store.setSaved(threadId, { ...saved, historyKey: this.historyKey(history) })
   }
 
+  /**
+   * A turn that did not finish (stopped, failed, a usage limit) left its saved session resumable: `history` is the
+   * canonical history as that turn left it (its request included, no reply), which the next turn sends as its history,
+   * so that turn resumes the session and sends only its new message. Only a session `chat` marked for it (see
+   * `resumableAfterFailure`) is fingerprinted; anything else stays as it was, and the next turn hands its history to a
+   * new session.
+   */
+  commitInterrupted(threadId: string, history: string): void {
+    const sessionId = this.interrupted.get(threadId)
+    this.interrupted.delete(threadId)
+    const saved = this.options.store.saved(threadId)
+    if (!sessionId || !saved || saved.sessionId !== sessionId) return
+    this.options.store.setSaved(threadId, { ...saved, historyKey: this.historyKey(history) })
+  }
+
   /** Drops the saved session of `threadId`; its next turn starts a new one with the history in the prompt. */
   forgetConversation(threadId: string): void {
     if (!this.options.store.saved(threadId)) return
@@ -658,6 +726,7 @@ export class AcpSessions {
   async chat(input: AcpChatInput): Promise<string> {
     const { label, store, questions, quirks } = this.options
     input.signal?.throwIfAborted()
+    this.interrupted.delete(input.threadId)
     const historyKey = this.historyKey(input.history ?? '')
     const instanceId = input.instanceId ?? this.options.defaultInstanceId
     // A native session belongs to the instance that opened it; another instance starts fresh.
@@ -701,18 +770,25 @@ export class AcpSessions {
     }
     input.signal?.addEventListener('abort', abort, { once: true })
     let text = ''
+    let thinking = ''
     const toolTitles = new Map<string, string>()
     let resumed = !freshProcess
     let steerTimer: ReturnType<typeof setInterval> | undefined
     let steerFailure: unknown
     // A prompt is in flight, and the agent's silence is counted (`PROMPT_SILENCE_MS`).
     let prompting = false
+    // A prompt of this turn was sent, and the agent showed it works on one (`PROMPT_WORK_UPDATES`).
+    let promptSent = false
+    let worked = false
     // Steers drained for the next prompt, and those the prompt in flight carries that the agent has not shown it has.
     // A drain with a token is read (`steerTaken`, `onSteer`) only once the agent works on the prompt that carries it,
     // or answers it; until then a failure hands it back (`returnSteer`), so it is never lost
     // (docs/design/steer-and-interruptions.md §2.6, §2.7).
     const pendingSteers: DrainedSteer[] = []
     const carried: DrainedSteer[] = []
+    // A steer sent as a second prompt while one runs (`steersNatively`), with the steers it carries. The running
+    // prompt's answer shows the agent took it in: from then on it is the prompt in flight, and its end ends the turn.
+    let riding: { reply: Promise<unknown>; steers: DrainedSteer[] } | undefined
     const readCarried = (): void => {
       for (const entry of carried.splice(0)) {
         if (!entry.token) continue
@@ -728,7 +804,9 @@ export class AcpSessions {
       }
     }
     const handBack = (): void => {
-      for (const entry of [...carried.splice(0), ...pendingSteers.splice(0)]) if (entry.token) input.returnSteer?.(entry.text, entry.token)
+      const unconfirmed = riding?.steers.splice(0) ?? []
+      riding = undefined
+      for (const entry of [...carried.splice(0), ...unconfirmed, ...pendingSteers.splice(0)]) if (entry.token) input.returnSteer?.(entry.text, entry.token)
     }
     // The prompt in flight (xAI tags each one), and whether an earlier prompt of the turn may still send updates: one a
     // steer cancelled whose own end never came within `PROMPT_COMPLETE_WAIT_MS`. Its late updates are not work on
@@ -775,20 +853,29 @@ export class AcpSessions {
       watchSilence()
       noteCommands(current, update)
       if (!update || typeof update !== 'object') return
-      const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; toolCallId?: string; title?: string; name?: string; status?: string; configOptions?: NewSessionResponse['configOptions']; currentModeId?: string }
+      const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; toolCallId?: string; title?: string; name?: string; status?: string; rawInput?: unknown; configOptions?: NewSessionResponse['configOptions']; currentModeId?: string }
       // The agent works on the prompt that carries drained steers: they are read now, before what it writes.
       // An update that may be a cancelled prompt's late one does not count: the carrying prompt's reply reads them then.
-      if (prompting && event.sessionUpdate && PROMPT_WORK_UPDATES.has(event.sessionUpdate) && ofPromptInFlight(update)) readCarried()
+      if (prompting && event.sessionUpdate && PROMPT_WORK_UPDATES.has(event.sessionUpdate) && ofPromptInFlight(update)) {
+        worked = true
+        readCarried()
+      }
       if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') {
         text += event.content.text ?? ''
         input.onText(text)
       }
+      // Agents such as Antigravity say what they are doing between tool calls as thoughts, not as message text.
+      if (event.sessionUpdate === 'agent_thought_chunk' && event.content?.type === 'text' && event.content.text) {
+        thinking += event.content.text
+        input.onThinking?.(thinking)
+      }
       if (event.sessionUpdate === 'tool_call' && event.toolCallId) {
-        const subagent = event.name === 'start_subagent'
-        const title = subagent ? `${label} subagent: ${event.title ?? 'Task'}` : event.title ?? event.name ?? `${label} tool`
+        const subagent = isAcpSubagentTool(event.name)
+        const activity = subagent ? subagentActivity(event.rawInput, event.title) : undefined
+        const title = activity ? `${label} subagent: ${activity.description}` : event.title ?? event.name ?? `${label} tool`
         toolTitles.set(event.toolCallId, title)
         // A subagent call is never waited on by a held steer; any other call of an agent counts as foreground.
-        input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: event.name, ...(subagent ? { activity: { kind: 'subagent', description: event.title ?? 'Task' } } : {}) })
+        input.onTool?.({ phase: 'start', callId: event.toolCallId, title, toolName: event.name, ...(activity ? { activity } : {}) })
       }
       // A running call's own progress (its output, a new status) is a tool event: it restarts the release window.
       if (event.sessionUpdate === 'tool_call_update' && event.toolCallId && toolTitles.has(event.toolCallId) && event.status !== 'completed' && event.status !== 'failed')
@@ -859,7 +946,8 @@ export class AcpSessions {
         }
         input.signal?.throwIfAborted()
         // Until the owning turn commits its updated history, this ACP session is
-        // deliberately non-resumable after a crash or a failed/aborted prompt.
+        // deliberately non-resumable after a crash or a failed/aborted prompt (an
+        // agent that resumes by `session/resume` may be fingerprinted after one: `commitInterrupted`).
         // A resumed session keeps the instructions it was given; a new one has none yet.
         current.instructionsHash = resumed ? saved?.instructionsHash : undefined
         const instructions = current.instructionsHash ? { instructionsHash: current.instructionsHash } : {}
@@ -891,53 +979,91 @@ export class AcpSessions {
       let cancelSent = false
       const turnProcess = active
       // The hold (docs/design/steer-and-interruptions.md §2.7): a person's steer waits while a tool runs. While a prompt
-      // runs only a cut is taken; between prompts (the boundary), whatever can go in joins the next prompt.
+      // runs only a cut is taken, unless the agent steers natively: then whatever may go in now joins the running work as
+      // a second prompt. Between prompts (the boundary), whatever can go in joins the next prompt.
       const holds = Boolean(input.peekSteer && input.drainSteerEntry)
+      const native = () => prompting && !cancelSent && steersNatively(quirks, turnProcess)
       const drain = (): DrainedSteer | undefined => {
         if (holds) {
           const delivery = input.peekSteer!()?.delivery
-          if (!delivery || delivery === 'hold' || (prompting && delivery !== 'cut')) return undefined
-          return input.drainSteerEntry!({ expect: prompting ? ['cut'] : ['cut', 'native'] })
+          const now: Array<'cut' | 'native'> = prompting && !native() ? ['cut'] : ['cut', 'native']
+          if (!delivery || delivery === 'hold' || !now.includes(delivery)) return undefined
+          return input.drainSteerEntry!({ expect: now })
         }
         if (input.drainSteerEntry) return input.drainSteerEntry()
         const text = input.drainSteer?.()
         return text ? { text } : undefined
       }
+      /** Cancels the running prompt for the drained steers: the next prompt carries them. */
+      const cut = (): void => {
+        cancelSent = true
+        questions.autoRejectPendingForThread(input.threadId)
+        // The same cancel and deadline as a stop: an agent that does not stop for the steer is
+        // ended, and the turn fails rather than replaying a request whose outcome is unknown.
+        void interruptWithDeadline({
+          interrupt: async () => {
+            await turnProcess.connection.agent.notify(methods.agent.session.cancel, { sessionId: turnProcess.sessionId! })
+            await turnProcess.prompting
+            return 'interrupted'
+          },
+          terminate: () => {
+            steerFailure ??= new Error(`${label} did not stop for the new guidance, so it was ended. Send the guidance again.`)
+            closeAcpConnection(turnProcess)
+            this.sessions.delete(input.threadId)
+          },
+          forgetConversation: (threadId) => this.forgetConversation(threadId)
+        }, { provider: '', ...(turnProcess.sessionId ? { sessionId: turnProcess.sessionId } : {}) }, { threadId: input.threadId, ...(this.options.cancelDeadlineMs !== undefined ? { deadlineMs: this.options.cancelDeadlineMs } : {}) })
+          .catch((error) => { steerFailure ??= error; this.close(turnProcess) })
+      }
+      /**
+       * Sends the drained steers as a second prompt into the running one, with no cancel: nothing the agent does now is
+       * stopped. They are read once the running prompt has answered (the agent took them in) and the agent works on
+       * them or answers; an error answer before that hands them back, and this process cuts from then on.
+       */
+      const sendNative = (): void => {
+        const steers = pendingSteers.splice(0)
+        const reply = turnProcess.connection.agent.request(methods.agent.session.prompt, { sessionId: turnProcess.sessionId!,
+          prompt: [{ type: 'text' as const, text: steers.map((entry) => entry.text).join('\n') }, ...steerImageBlocks(steers)] })
+        const sent = { reply, steers }
+        riding = sent
+        // A stop's cancel ends both prompts: it waits for the second one too.
+        const running = turnProcess.prompting
+        turnProcess.prompting = Promise.all([running, reply.then(() => undefined, () => undefined)]).then(() => undefined)
+        reply.catch((error: unknown) => {
+          // Only an error answer while the first prompt still runs is a refusal; a closed connection ends the turn anyway.
+          const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+          if (riding !== sent || typeof code !== 'number' || input.signal?.aborted) return
+          riding = undefined
+          turnProcess.nativeSteerRefused = true
+          console.warn('[acp] the agent refused a steer sent as a second prompt; it is cut in instead', { code })
+          for (const entry of sent.steers.splice(0)) {
+            if (entry.token) input.returnSteer?.(entry.text, entry.token)
+            else pendingSteers.push(entry)
+          }
+          if (pendingSteers.length && prompting && !cancelSent) cut()
+        })
+      }
       const collectSteer = () => {
         if (input.signal?.aborted || steerFailure) return
+        // One second prompt at a time: the next steer waits until the running prompt shows the agent took this one.
+        if (prompting && riding) return
         try {
+          const nativeNow = native()
           const entry = drain()
           const steer = entry?.text.trim()
           if (!entry || !steer) return
           const drained: DrainedSteer = { text: steer, ...(entry.token ? { token: entry.token } : {}), ...(entry.images?.length ? { images: entry.images } : {}) }
-          // The check at dispatch: a tool that started since the decision is not cancelled for this steer.
-          if (prompting && !cancelSent && drained.token && input.mayCut && !input.mayCut(drained.token)) {
+          // The check at dispatch: a tool that started since the decision is not cancelled for this steer (a native
+          // steer cancels nothing).
+          if (prompting && !cancelSent && !nativeNow && drained.token && input.mayCut && !input.mayCut(drained.token)) {
             input.returnSteer?.(drained.text, drained.token)
             return
           }
           // A drain without a token keeps the old rule: read when it is drained.
           if (!drained.token) input.onSteer?.(steer)
           pendingSteers.push(drained)
-          if (prompting && !cancelSent) {
-            cancelSent = true
-            questions.autoRejectPendingForThread(input.threadId)
-            // The same cancel and deadline as a stop: an agent that does not stop for the steer is
-            // ended, and the turn fails rather than replaying a request whose outcome is unknown.
-            void interruptWithDeadline({
-              interrupt: async () => {
-                await turnProcess.connection.agent.notify(methods.agent.session.cancel, { sessionId: turnProcess.sessionId! })
-                await turnProcess.prompting
-                return 'interrupted'
-              },
-              terminate: () => {
-                steerFailure ??= new Error(`${label} did not stop for the new guidance, so it was ended. Send the guidance again.`)
-                closeAcpConnection(turnProcess)
-                this.sessions.delete(input.threadId)
-              },
-              forgetConversation: (threadId) => this.forgetConversation(threadId)
-            }, { provider: '', ...(turnProcess.sessionId ? { sessionId: turnProcess.sessionId } : {}) }, { threadId: input.threadId, ...(this.options.cancelDeadlineMs !== undefined ? { deadlineMs: this.options.cancelDeadlineMs } : {}) })
-              .catch((error) => { steerFailure ??= error; this.close(turnProcess) })
-          }
+          if (nativeNow) sendNative()
+          else if (prompting && !cancelSent) cut()
         } catch (error) { steerFailure = error; this.close(turnProcess) }
       }
       steerTimer = setInterval(collectSteer, 100)
@@ -966,41 +1092,51 @@ export class AcpSessions {
         : [orchestration + history + preamble + (input.prompt || '(image attachment)')]
       let commandTurn = command !== undefined
       let attachments = imageBlocks
+      // A native steer's prompt the agent took in: the loop waits on it next, and sends nothing.
+      let adopted: Promise<unknown> | undefined
       for (;;) {
         input.signal?.throwIfAborted()
         if (steerFailure) throw steerFailure
-        collectSteer()
-        if (pendingSteers.length) {
-          const steers = pendingSteers.splice(0)
-          carried.push(...steers)
-          const guidance = 'Additional guidance:\n' + steers.map((entry) => entry.text).join('\n')
-          if (commandTurn) blocks = [blocks[0], blocks[1] ? `${blocks[1]}\n\n${guidance}` : guidance]
-          else blocks = [`${blocks[0]}\n\n${guidance}`]
-          // The steers' images join the prompt they ride in.
-          attachments = [...attachments, ...steerImageBlocks(steers)]
+        let reply: Promise<unknown>
+        let promptId: string | undefined
+        if (adopted) {
+          reply = adopted
+          adopted = undefined
+        } else {
+          collectSteer()
+          if (pendingSteers.length) {
+            const steers = pendingSteers.splice(0)
+            carried.push(...steers)
+            const guidance = 'Additional guidance:\n' + steers.map((entry) => entry.text).join('\n')
+            if (commandTurn) blocks = [blocks[0], blocks[1] ? `${blocks[1]}\n\n${guidance}` : guidance]
+            else blocks = [`${blocks[0]}\n\n${guidance}`]
+            // The steers' images join the prompt they ride in.
+            attachments = [...attachments, ...steerImageBlocks(steers)]
+          }
+          prompting = true
+          // A boundary the previous prompt's end reported is over.
+          input.onProviderTurn?.()
+          cancelSent = false
+          active.cancelRequested = false
+          active.activity = watchSilence
+          watchSilence()
+          // Any accepted prompt makes the old history fingerprint stale until commit.
+          const accepted = store.saved(input.threadId)
+          if (accepted) {
+            const { historyKey: _stale, ...rest } = accepted
+            store.setSaved(input.threadId, rest)
+          }
+          // xAI: the prompt is tagged, and ends at its reply or its `prompt_complete`, whichever is first.
+          promptId = quirks.xaiExtensions ? randomUUID() : undefined
+          promptInFlight = promptId
+          promptSent = true
+          reply = active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId,
+            prompt: [...blocks.map((block) => ({ type: 'text' as const, text: block })), ...attachments], ...(promptId ? { _meta: { promptId } } : {}) })
         }
-        prompting = true
-        // A boundary the previous prompt's end reported is over.
-        input.onProviderTurn?.()
-        cancelSent = false
-        active.cancelRequested = false
-        active.activity = watchSilence
-        watchSilence()
-        // Any accepted prompt makes the old history fingerprint stale until commit.
-        const accepted = store.saved(input.threadId)
-        if (accepted) {
-          const { historyKey: _stale, ...rest } = accepted
-          store.setSaved(input.threadId, rest)
-        }
-        // xAI: the prompt is tagged, and ends at its reply or its `prompt_complete`, whichever is first.
-        const promptId = quirks.xaiExtensions ? randomUUID() : undefined
-        promptInFlight = promptId
-        const reply = active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId,
-          prompt: [...blocks.map((block) => ({ type: 'text' as const, text: block })), ...attachments], ...(promptId ? { _meta: { promptId } } : {}) })
         const completion = promptId ? this.completionOf(active, promptId) : undefined
         const request: Promise<unknown> = completion ? Promise.race([reply, completion.done]) : reply
         if (completion) reply.catch(() => undefined)
-        active.prompting = request.then(() => undefined, () => undefined)
+        active.prompting ??= request.then(() => undefined, () => undefined)
         let outcome: unknown
         try {
           outcome = await request
@@ -1008,7 +1144,27 @@ export class AcpSessions {
           completion?.dispose()
           throw error
         } finally {
-          active.prompting = undefined
+          // A steer's prompt that rides on is still the work a stop waits for.
+          active.prompting = riding?.reply.then(() => undefined, () => undefined)
+        }
+        // The SDK settles an answer at once but hands an update to its handlers a few steps later: what the agent
+        // wrote just before it answered (often its whole reply) is still on its way. It lands before the turn ends.
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        if (riding) {
+          // A native steer rides: the prompt answered because the agent took it into the running work (or the prompt
+          // was already ending, and it runs next). The steer's prompt carries the turn on, and its end ends the turn,
+          // so this answer's stop reason is not the turn's. Its steers are read once the agent works on them or answers.
+          readCarried()
+          const taken = riding
+          riding = undefined
+          carried.push(...taken.steers.splice(0))
+          adopted = taken.reply
+          active.prompting ??= adopted.then(() => undefined, () => undefined)
+          completion?.dispose()
+          input.onProviderTurn?.()
+          if (text) text += '\n\n'
+          watchSilence()
+          continue
         }
         prompting = false
         // The agent answered the prompt: it has the steers it carried, whatever it says of how it ended.
@@ -1054,6 +1210,16 @@ export class AcpSessions {
       for (const [callId, title] of toolTitles) input.onTool?.({ phase: 'complete', callId, title, status: 'unfinished' })
       return text
     } catch (error) {
+      // An agent that reopens a saved session by `session/resume` keeps it after a failed or stopped prompt. The next
+      // turn may resume it when the agent holds what Mousse's history then says: a prompt of this turn reached it, the
+      // session already held the conversation before it (resumed or reused) or the agent worked on it (a new session's
+      // first prompt carries the handed-over history, which the agent may not have kept if it never started), and no
+      // steer is in doubt (one a prompt carried that the agent never showed it read goes back and runs again, so
+      // Mousse's history lacks what the agent may hold). The adapter then fingerprints it (`commitInterrupted`).
+      const steerInDoubt = steerFailure !== undefined || carried.some((entry) => entry.token)
+      const sessionId = current.sessionId
+      if (quirks.preferResume && promptSent && (resumed || worked) && !steerInDoubt && sessionId && store.saved(input.threadId)?.sessionId === sessionId)
+        this.interrupted.set(input.threadId, sessionId)
       // Drained steers no prompt delivered go back; they run as the follow-up.
       handBack()
       this.close(current)
@@ -1061,7 +1227,7 @@ export class AcpSessions {
       if (steerFailure) throw steerFailure
       if (silenceFailure && !input.signal?.aborted) throw silenceFailure
       // A sign-in the agent asks for is a sign-in; any other error the agent answered with is shown in its words.
-      throw this.authRequiredError(current, error) ?? (input.signal?.aborted ? undefined : acpAgentError(error)) ?? error
+      throw this.authRequiredError(current, error) ?? (input.signal?.aborted ? undefined : acpAgentError(error, this.options.usageLimitProvider)) ?? error
     } finally {
       clearTimeout(silenceTimer)
       current.activity = undefined
@@ -1074,6 +1240,80 @@ export class AcpSessions {
       current.permissionMode = undefined
       this.turning.delete(current)
     }
+  }
+
+  /**
+   * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a commit message. A
+   * fresh agent process and session of its own in `cwd` (an empty folder the caller made for it), with no MCP
+   * server and no client file system; the system text and the prompt go as one prompt. Every permission or file
+   * request is refused, and any tool call the agent reports ends the request as refused. The answer is the agent's
+   * text. One attempt, never saved or resumed; `signal` stops it, and the process ends afterwards.
+   */
+  async oneShot(input: { cwd: string; model: string; system: string; prompt: string; signal: AbortSignal; onActivity(): void }): Promise<string> {
+    const { label, quirks } = this.options
+    input.signal.throwIfAborted()
+    // xAI's tagged prompts end on a notice this request does not wait for.
+    if (quirks.xaiExtensions) throw harnessAppError({ code: 'unsupported', message: `${label} cannot run a single request.` })
+    await this.options.beforeLaunch?.('one_shot')
+    input.signal.throwIfAborted()
+    const active = this.launch('one_shot')
+    active.cwd = input.cwd
+    let refused: Error | undefined
+    active.refuseTools = (what) => {
+      refused ??= harnessAppError({ code: 'policy_unenforceable', message: `${label} tried to use a tool (${what}) in a request that runs none, so Mousse stopped it.` })
+      closeAcpConnection(active)
+    }
+    const abort = () => closeAcpConnection(active)
+    input.signal.addEventListener('abort', abort, { once: true })
+    let text = ''
+    try {
+      await this.initialize(active)
+      input.signal.throwIfAborted()
+      input.onActivity()
+      const session = await active.connection.agent.request(methods.agent.session.new, { cwd: input.cwd, mcpServers: [] })
+      active.sessionId = session.sessionId
+      input.signal.throwIfAborted()
+      input.onActivity()
+      // The session's model control, read without recording anything: this session is not the profile's.
+      if (!quirks.modelConfigId) active.modelControl = agentModels(session, active.info?.meta).control
+      await this.selectModel(active, input.model)
+      input.signal.throwIfAborted()
+      active.onUpdate = (update) => {
+        if (!update || typeof update !== 'object' || refused) return
+        const event = update as { sessionUpdate?: string; content?: { type?: string; text?: string }; title?: string; name?: string }
+        // A tool is refused before anything else runs, a slow activity callback included.
+        if (event.sessionUpdate === 'tool_call' || event.sessionUpdate === 'tool_call_update') {
+          active.refuseTools?.(event.title ?? event.name ?? 'a tool')
+          return
+        }
+        input.onActivity()
+        if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text') text += event.content.text ?? ''
+      }
+      const prompt = [input.system, input.prompt].filter((part) => part.trim()).join('\n\n')
+      const outcome = await active.connection.agent.request(methods.agent.session.prompt, { sessionId: active.sessionId, prompt: [{ type: 'text', text: prompt }] })
+      // What the agent wrote just before it answered is still on its way (see `chat`).
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      if (refused) throw refused
+      input.signal.throwIfAborted()
+      const ended = promptStopOutcome(label, outcome)
+      if (ended === 'cancelled') throw agentCancelledError(label)
+      if (ended) throw ended
+      return text
+    } catch (error) {
+      if (refused) throw refused
+      if (input.signal.aborted) throw error
+      throw this.authRequiredError(active, error) ?? acpAgentError(error) ?? error
+    } finally {
+      // `refuseTools` stays: a request that arrives while the process ends is refused too.
+      input.signal.removeEventListener('abort', abort)
+      active.onUpdate = undefined
+      this.close(active)
+    }
+  }
+
+  /** Whether any agent process runs a turn now. */
+  busy(): boolean {
+    return this.turning.size > 0
   }
 
   /** Idle agent processes close now; a busy one is replaced on that thread's next turn. */

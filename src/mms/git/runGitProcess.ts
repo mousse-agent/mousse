@@ -3,6 +3,8 @@ import { spawn } from 'node:child_process'
 import { createReadStream, existsSync, rmSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { StoppedGitTree } from './stoppedGitTree'
+import { timeGitChild } from '../diagnostics/turnBoundary'
+import { gitEnvFor, gitFile } from './gitExecutable'
 export { gitStopProbe, StoppedGitTree } from './stoppedGitTree'
 
 /** What a Git process left: as `spawnSync` reports it. */
@@ -138,7 +140,7 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
     const lockedBefore = indexLock !== undefined && existsSync(indexLock)
     // When the command was started: its creation time must match this, so a pid reused later is never taken for it.
     const spawnedAt = Date.now()
-    const child = spawn('git', argv, { cwd: options.cwd, env: options.env, windowsHide: true, detached: ownGroup, stdio: [options.input !== undefined || options.inputFile !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
+    const child = timeGitChild(() => spawn(gitFile(), argv, { cwd: options.cwd, env: gitEnvFor(options.env), windowsHide: true, detached: ownGroup, stdio: [options.input !== undefined || options.inputFile !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] }))
     const out: Buffer[] = []
     const err: Buffer[] = []
     let outSize = 0

@@ -45,7 +45,6 @@ function deepMerge<T extends Record<string, unknown>>(base: T, partial: Partial<
   for (const key of Object.keys(partial) as Array<keyof T>) {
     const value = partial[key]
     if (key === '__proto__' || key === 'prototype' || key === 'constructor') continue
-    if (key === 'quietHours' && value === null) { delete result[key]; continue }
     if (value === undefined) continue
     const existing = base[key]
     if (
@@ -102,6 +101,7 @@ function splitSettings(full: MousseSettings): {
       runs: full.runs,
       experimental: full.experimental,
       storage: full.storage,
+      branches: full.branches,
       errorReports: full.errorReports,
       integrations: full.integrations,
       title: full.title,
@@ -613,6 +613,7 @@ export class MousseConfigStore {
       partial.runs ||
       partial.experimental ||
       partial.storage ||
+      partial.branches ||
       partial.errorReports ||
       partial.integrations ||
       partial.title ||
@@ -624,6 +625,7 @@ export class MousseConfigStore {
         ...(partial.runs ? { runs: partial.runs as MousseSettingsSection['runs'] } : {}),
         ...(partial.experimental ? { experimental: partial.experimental as MousseSettingsSection['experimental'] } : {}),
         ...(partial.storage ? { storage: partial.storage as MousseSettingsSection['storage'] } : {}),
+        ...(partial.branches ? { branches: partial.branches as MousseSettingsSection['branches'] } : {}),
         ...(partial.errorReports ? { errorReports: partial.errorReports as MousseSettingsSection['errorReports'] } : {}),
         ...(partial.profile ? { profile: partial.profile as MousseSettingsSection['profile'] } : {}),
         ...(partial.appearance

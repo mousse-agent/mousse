@@ -434,9 +434,9 @@ export class ConversationBranchService {
    */
   async recoverPending(workspacePath: string, restoreContext: (branch: ConversationBranch) => void | Promise<void>, heldThreadLease?: ThreadLeaseHandle, signal?: AbortSignal): Promise<void> {
     // Nothing to finish takes no lock: a worktree the agent removed or emptied does not stop the next turn here.
-    if (![...this.journal.latestByOperation().values()].some((entry) => entry.operationType === 'conversation-activate' && ['prepared', 'context_pending'].includes(entry.state))) return
+    if (!this.journal.unsettled().some((entry) => entry.operationType === 'conversation-activate' && ['prepared', 'context_pending'].includes(entry.state))) return
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'branch-context-recovery', async () => {
-      for (const entry of this.journal.latestByOperation().values()) {
+      for (const entry of this.journal.unsettled()) {
         if (entry.operationType !== 'conversation-activate') continue
         if (entry.state === 'prepared') {
           const intent = entry.details as SwitchIntent

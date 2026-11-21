@@ -184,6 +184,10 @@
   }
 }
 
+.an-text-shimmer--static {
+  color: var(--an-shimmer-base, var(--an-foreground-muted));
+}
+
 /* The two shimmer colours: the label's resting colour and the band that sweeps it. A theme whose subtle and
    muted text match (light) sets them itself (global.css). */
 .an-text-shimmer {

@@ -3,7 +3,8 @@ import { lstatSync, readdirSync, readFileSync, readlinkSync, rmdirSync, unlinkSy
 import { access, lstat, open, readdir, readFile, readlink } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { assertLifecyclePathAsync } from './ResourceLifecycleStore'
-import { lifecycleGitAsync, lifecycleReadAsync } from './lifecycleGit'
+import { lifecycleGitAsync } from './lifecycleGit'
+import { findListedWorktreeAsync } from './worktreeRegistry'
 
 /**
  * A verified delete: a folder Mousse removes is removed only as far as it is still exactly what a proof recorded.
@@ -422,18 +423,17 @@ export async function walkOwnedContentAsync(root: string, skipRootGit = false, o
   return entries
 }
 
-/** Why Git has the worktree registered at `path` locked (an empty reason for a lock without one), or undefined. */
+/**
+ * Why Git has the worktree registered at `path` locked (an empty reason for a lock without one), or undefined. Read from
+ * Git's registration (`worktreeRegistry`), the one the worktree's `.git` file names when it is there, not by listing every
+ * worktree of the repository.
+ */
 export async function worktreeLockAsync(commonDir: string, path: string): Promise<string | undefined> {
-  let inBlock = false
-  for (const line of (await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain'])).split(/\r?\n/)) {
-    if (line.startsWith('worktree ')) inBlock = samePath(line.slice(9), path)
-    else if (inBlock && (line === 'locked' || line.startsWith('locked '))) return line.slice('locked'.length).trim()
-  }
-  return undefined
+  return (await findListedWorktreeAsync(commonDir, path, samePath, { main: false }))?.locked
 }
-/** Whether Git lists a worktree at `path`. */
+/** Whether Git lists a worktree at `path`, read from Git's registrations as {@link worktreeLockAsync} does. */
 export async function worktreeRegisteredAsync(commonDir: string, path: string): Promise<boolean> {
-  return (await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain'])).split(/\r?\n/).some((line) => line.startsWith('worktree ') && samePath(line.slice(9), path))
+  return Boolean(await findListedWorktreeAsync(commonDir, path, samePath))
 }
 /**
  * Who is deleting a folder, for what the person reads when it stops: the trash expiry (a worktree waiting in the trash),

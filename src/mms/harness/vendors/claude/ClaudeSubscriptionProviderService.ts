@@ -20,6 +20,7 @@ import type {
 import type { LlmModelOption, LlmProviderOption } from '../../../../shared/settings'
 import { promptCacheHourOn, type CredentialKind, type PromptCacheHour } from '../../../../shared/harness/status'
 import type { ChatImageAttachment } from '../../../../shared/types'
+import { providerTakesImage } from '../../../../shared/imageLimits'
 import { normalizePermissionMode, permissionModeAllows, type PermissionLimits, type PermissionMode as ThreadPermissionMode } from '../../../../shared/permissionMode'
 import { applyEffortToModelId, parseThinkingSuffixFromModelId, supportedEffortOf } from '../../../../shared/modelVariants'
 import { AppError } from '../../../../shared/errors'
@@ -3997,9 +3998,9 @@ export class ClaudeSubscriptionProviderService {
 /** A steer a one-shot query took: its text and images, its drain's token when it had one, and its acceptance. */
 type OneShotSteer = { text: string; token?: string; images?: ChatImageAttachment[]; steered: () => void }
 
-/** The images Claude takes: JPEG, PNG, GIF or WebP up to 10 MiB. */
+/** The images Claude takes: JPEG, PNG, GIF or WebP within the per-image size (`shared/imageLimits.ts`). */
 function claudeTakesImage(image: ChatImageAttachment): boolean {
-  return ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) && Buffer.byteLength(image.data, 'base64') <= 10 * 1024 * 1024
+  return providerTakesImage(image)
 }
 
 /** Images as Claude's base64 image blocks (each one `claudeTakesImage` accepts). */

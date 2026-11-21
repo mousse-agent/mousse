@@ -1,6 +1,7 @@
 import type { BotChatContext, BotChatContextInput } from './memory/contextPack'
 import type { BotChatEpochEnd } from './memory/contextBudget'
 import type { BotChip } from '../../shared/bots/personal/chat'
+import type { BotChipCall, BotChipContext } from '../../shared/bots/personal/chips'
 import type { BotDepth, BotLane, BotModelPick, BotModelSlotKey, BotModelSlots, BotSchedule, BotWorkLevel, BotWorkModelName } from '../../shared/bots/personal/definition'
 import type { BotModelRows, BotPickMiss } from '../../shared/bots/personal/modelSlots'
 import type { BotQuestionFollow, BotQuestionSpec } from '../../shared/bots/personal/questions'
@@ -198,7 +199,7 @@ export interface BotToolHost {
  * text but its tools' names.
  */
 export interface BotMcpListing {
-  servers: Array<{ server: string; id: string; about: string; yours: 'yes' | 'no' | 'some: it has new tools' | 'no: it changed since you were allowed it'; answering?: false; starting?: true }>
+  servers: Array<{ server: string; id: string; about: string; yours: 'yes' | 'no' | 'no: switched off by your owner'; answering?: false; starting?: true }>
   note: string
 }
 
@@ -257,6 +258,18 @@ export interface BotActivitySink {
   onAppResult(ctx: BotActivityContext, tool: string, result: unknown): void
   /** The dispatch settled: its rolled-up chips for the message row, and the list is cleared. */
   drain(dispatchId: string): BotChip[]
+  /**
+   * As `drain`, with the calls the chips were rolled up from. A turn that goes on in another (the turn cap, a question)
+   * carries its calls rather than its chips, so the message that ends the work rolls them all up as one: "saved 30
+   * files", not "saved 2 files" once for each turn.
+   */
+  drainCalls?(dispatchId: string): { chips: BotChip[]; calls?: BotActivityCalls }
+}
+
+/** One dispatch's calls as the chips read them, and where they happened (`rollUpChips`). */
+export interface BotActivityCalls {
+  calls: BotChipCall[]
+  context: BotChipContext
 }
 
 /** How a dispatch ended, for capture. */

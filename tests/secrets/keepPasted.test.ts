@@ -46,29 +46,20 @@ it.each([{ value: 'ordinary prose' }, { value: `Use ${value} please` }, { value:
   expect(error.message).not.toContain(params.value ?? value)
   expect(vault.list()).toEqual([])
 })
-it('refuses a bot without Use secrets', async () => {
+it('refuses a bot with no approved grant', async () => {
   const { vault, call } = setup(false)
-  await expect(call()).rejects.toThrow(/Use secrets/)
+  await expect(call()).rejects.toThrow(/not set up yet/)
   expect(vault.list()).toEqual([])
 })
 
-it('resolves the real bot home and observes its current secret grant and switch', async () => {
-  const { botFixture, createBot, start, finish } = await import('../bots/botFixture')
+it('resolves the real bot home, which every bot may keep a key in with no ask', async () => {
+  const { botFixture, createBot } = await import('../bots/botFixture')
   const f = botFixture()
   try {
     await f.bots.reconcileOnStartup()
     const { botId } = await createBot(f, { name: 'Pip', description: 'Help me', reply: 'Hello.' })
-    expect(f.bots.service.secretHome(botId)).toMatchObject({ allowed: false })
-    const activation = await f.bots.activate({ botId, input: 'Use a key', clientRequestId: 'secret-grant' })
-    const turn = await start(f, activation.id)
-    turn.prepared.authority.escalate!({ permission: { tool: 'secrets' }, reason: 'Use a key.' })
-    await finish(f, turn.payload, 'completed', { text: 'Asked.' })
-    for (const ask of f.store.openAsks(botId)) await f.bots.service.answer(botId, ask.id, 'allow')
-    const resolved = f.bots.service.secretHome(botId)
-    expect(resolved).toEqual({ threadId: f.bots.service.get(botId).summary.homeThreadId, allowed: true })
-    const permission = f.bots.service.get(botId).permissions.find(item => item.title === 'use secrets you give it')!
-    f.bots.service.setPermission(botId, permission.id, false)
-    expect(f.bots.service.secretHome(botId).allowed).toBe(false)
+    expect(f.bots.service.secretHome(botId)).toEqual({ threadId: f.bots.service.get(botId).summary.homeThreadId, allowed: true })
+    expect(f.store.openAsks(botId)).toEqual([])
   } finally { f.close() }
 })
 

@@ -77,7 +77,7 @@ export function siblingThreads(
   const project = projectKnown(thread.projectId) ? projects.find((entry) => entry.id === thread.projectId) : undefined
   const peers = visibleThreads(threads).filter((entry) => listed(entry) && (project ? entry.projectId === project.id : !projectKnown(entry.projectId)))
   return {
-    label: project ? `Threads in ${project.name}` : 'Other threads',
+    label: project ? `Threads in ${project.name}` : 'No project',
     threads: sortSidebarThreads(peers).map((entry) => ({ id: entry.id, name: threadName(entry) }))
   }
 }

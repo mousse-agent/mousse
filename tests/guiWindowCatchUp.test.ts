@@ -295,6 +295,18 @@ describe('a window that missed the end of a turn', () => {
     expect(ofChannel('chats:changed')).toEqual([])
   })
 
+  it('reads the running thread after the status check for a live gap fails', async () => {
+    startTurn()
+    service.messages.push(message('a2', 'assistant', 'Reply recorded during the gap', 4))
+    dropped()
+    guiMms.turnStatusForSender.mockRejectedValueOnce(new Error('Status read interrupted'))
+
+    liveGap()
+
+    await vi.waitFor(() => expect(views().at(-1)?.messages.at(-1)?.content).toBe('Reply recorded during the gap'))
+    expect(lastTurn()?.phase).toBe('thinking')
+  })
+
   it('a live gap is checked once, though updates keep arriving while the statuses are read', async () => {
     startTurn()
     let release!: () => void

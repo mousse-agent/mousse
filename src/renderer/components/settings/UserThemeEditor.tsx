@@ -13,7 +13,7 @@ import { WallpaperRows } from './WallpaperRows'
 const SWATCHES: ReadonlyArray<{ key: 'accent' | string; label: string }> = [
   { key: 'accent', label: 'Accent' },
   { key: '--surface-base', label: 'Background' },
-  { key: '--surface-strong', label: 'Sidebar and panels' },
+  { key: '--surface-strong', label: 'Panels' },
   { key: '--text-primary', label: 'Text' },
   { key: '--text-secondary', label: 'Secondary text' }
 ]

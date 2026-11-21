@@ -198,8 +198,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
     return unsub
   }, [settingsOpen, refreshProviderData])
 
-  // External theme and bot quiet-hours changes must reach the copy later saves start from.
-  // Keep the page's other notification choices while taking the saved quiet hours, including their removal.
+  // External theme changes must reach the copy later saves start from.
   useEffect(() => {
     if (!settingsOpen) return
     return window.mousse.settings.onChanged?.((next) => {
@@ -207,12 +206,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
       setSettings((current) => {
         if (!current) return current
         const { theme, userTheme, userThemes } = next.appearance!
-        const { quietHours: _quietHours, ...notifications } = current.notifications
-        return {
-          ...current,
-          appearance: { ...current.appearance, theme, userTheme, userThemes },
-          notifications: next.notifications ? { ...notifications, ...(next.notifications.quietHours ? { quietHours: next.notifications.quietHours } : {}) } : current.notifications
-        }
+        return { ...current, appearance: { ...current.appearance, theme, userTheme, userThemes } }
       })
     })
   }, [settingsOpen])
@@ -386,8 +380,9 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   const searching = navQuery.trim() !== ''
   const results = useMemo(() => searchSettings(navQuery, searchPages(mousseId), searchIndex(mousseId)), [navQuery, mousseId])
   const sectionOf = (id: SettingsSectionId) => SETTINGS_SECTIONS.find((section) => section.id === id)!
-  // Settings grants access (devices, agents, bots, phones): only Appearance, where themes are edited, shows a theme.
-  const themePaused = settingsOpen && activeSection !== 'appearance' ? '' : undefined
+  // Settings grants access (devices, agents, bots, phones): outside Appearance, where themes are edited, the theme's CSS
+  // is off so it cannot relabel those controls; its colours stay. Prompts on these pages still pause the whole theme.
+  const themeGuarded = settingsOpen && activeSection !== 'appearance' ? '' : undefined
   const activeSectionInfo = sectionOf(activeSection)
   const activeSectionLabel = activeSectionInfo.label
   /** Up and Down move through the results; Up from the first goes back to the search field. */
@@ -475,7 +470,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
 
   if (!settings || !options) {
     return (
-      <div data-mousse="settings" data-mousse-decision={themePaused} className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
+      <div data-mousse="settings" data-mousse-guarded={themeGuarded} className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
         {settingsHeader}
         <div className="settings-body">
           {settingsNav}
@@ -497,7 +492,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
   }
 
   return (
-    <div data-mousse="settings" data-mousse-decision={themePaused} className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
+    <div data-mousse="settings" data-mousse-guarded={themeGuarded} className="settings-page overlay-page" hidden={!settingsOpen} data-page-hue={activeSectionInfo.hue}>
       {settingsHeader}
 
       <div className="settings-body">
@@ -510,7 +505,7 @@ function ProfileSettingsPage({ profileId }: { profileId: string }) {
               {anchorNote.text}
             </p>
           )}
-          {activeSection === 'storage' && <StorageSettings />}
+          {activeSection === 'storage' && <StorageSettings branches={settings.branches} onBranches={(branches) => updateSettings({ branches })} />}
           {activeSection === 'general' && (
             <GeneralSettings settings={settings} onUpdate={updateSettings} />
           )}

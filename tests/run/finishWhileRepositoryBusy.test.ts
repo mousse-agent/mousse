@@ -227,6 +227,59 @@ describe('a finished turn while its repository is busy', () => {
     // The finished notice is not repeated for the failure.
     expect(watch.notices).toEqual([{ state: 'completed', replyShown: true }])
   })
+
+  it('tells the windows why a queued message waits: the next turn being set up, then the last turn finishing', async () => {
+    home = mkdtempSync(join(tmpdir(), 'mousse-finish-busy-'))
+    previousHome = process.env.MOUSSE_HOME
+    process.env.MOUSSE_HOME = home
+    const projectDir = gitProject(home)
+    const adapter = new WritingAdapter('claude', CLAUDE_SUBSCRIPTION_CAPABILITIES, new Set(['first', 'second']))
+    const d = phase6Daemon(home, [adapter])
+    daemon = d
+    const project = d.projects.openProject(projectDir)
+    const thread = d.store.createThread('Busy repository', project.id)
+    d.orch.setThreadModelOverride(thread.id, { llmProvider: 'claude-subscription', model: 'vendor-model' })
+    // What the windows were last sent, and what a window that opens the thread now reads.
+    let sent: Array<{ content: string; waitsFor?: string }> = []
+    d.orch.on('queue-updated', (event: { threadId: string; items: Array<{ content: string; waitsFor?: string }> }) => {
+      if (event.threadId === thread.id) sent = event.items.map(({ content, waitsFor }) => ({ content, ...(waitsFor ? { waitsFor } : {}) }))
+    })
+    const listed = () => d.orch.queueSnapshot(thread.id).items.map(({ content, waitsFor }) => ({ content, ...(waitsFor ? { waitsFor } : {}) }))
+
+    // The first turn's setup waits for the repository: a message sent now waits for that setup.
+    held = await acquireRepositoryLease(resolveRepositoryIdentity(projectDir))
+    const first = await d.orch.send('write first', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
+    const second = await d.orch.send('write second', false, { threadId: thread.id, clientRequestId: 'second', awaitMode: 'ack' })
+    expect(second.queued).toBe(true)
+    expect(adapter.turns).toHaveLength(0)
+    expect(listed()).toEqual([{ content: 'write second', waitsFor: 'setup' }])
+    expect(sent).toEqual([{ content: 'write second', waitsFor: 'setup' }])
+
+    // The turn runs: the message only waits its turn.
+    held.release()
+    held = undefined
+    await waitFor(() => adapter.turns.length === 1, 'the first turn to reach the provider', 20_000)
+    await waitFor(() => sent.length === 1 && !sent[0]!.waitsFor, 'the windows to be told the setup ended')
+    expect(listed()).toEqual([{ content: 'write second' }])
+
+    // The answer is complete but its checkpoint waits for the repository: the message, queued before, now waits for the
+    // turn to finish, and so does one sent now.
+    held = await acquireRepositoryLease(resolveRepositoryIdentity(projectDir))
+    adapter.answer()
+    await waitFor(() => d.engine.getRun(first.runId!)?.status === 'finalizing', 'the first run to finalize')
+    await waitFor(() => sent[0]?.waitsFor === 'finish', 'the windows to be told the last turn is finishing')
+    await d.orch.send('write third', false, { threadId: thread.id, clientRequestId: 'third', awaitMode: 'ack' })
+    expect(sent).toEqual([{ content: 'write second', waitsFor: 'finish' }, { content: 'write third', waitsFor: 'finish' }])
+    expect(listed()).toEqual(sent)
+
+    // The checkpoint is recorded: the next message runs, and the one after it only waits its turn.
+    held.release()
+    held = undefined
+    await waitFor(() => adapter.turns.length === 2, 'the second message to run', 20_000)
+    await waitFor(() => listed().length === 1 && !listed()[0]!.waitsFor, 'the third message to wait only its turn', 20_000)
+    expect(sent).toEqual([{ content: 'write third' }])
+    adapter.answer()
+  })
 })
 
 /**

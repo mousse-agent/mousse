@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { BOT_WORK_ONLY_TOOLS, BOT_WORK_TOOLS } from '../../src/shared/bots/personal/manifest'
 import { BOT_TURN_WINDOW_MS } from '../../src/shared/bots/personal/definition'
+import { rollUpChips } from '../../src/shared/bots/personal/chips'
 import { BOT_FAILURE_PAUSE_STREAK, BOT_JOURNAL_ERROR, BotEngine, roomText, sayOnce } from '../../src/mms/bots/activation/BotEngine'
 import { reminderLabel, reminderTime } from '../../src/mms/run/mcp/appTools/bots'
 import { BotMemoryStore } from '../../src/mms/bots/memory/BotMemoryStore'
@@ -490,6 +491,25 @@ describe('long work', () => {
       expect(f.store.activation(workId)).toMatchObject({ status: 'running' })
       expect(f.store.dispatch(workId, 13)).toMatchObject({ kind: 'continue', send: { turnCap: true } })
       expect(errors()).toEqual([])
+    })
+
+    it('the report rolls up what every capped turn did with its own calls: one chip per kind, with the whole count', async () => {
+      const { workId } = await asked()
+      const did = (n: number, pages: number) => {
+        const calls = Array.from({ length: pages }, (_, page) => ({ tool: 'web_fetch', input: { url: `https://shop.example/${n}/${page}` } }))
+        f.calls.set(`${workId}:d${n}`, { calls, context: {} })
+        f.chips.set(`${workId}:d${n}`, rollUpChips(calls))
+      }
+      for (let n = 1; n <= 3; n += 1) {
+        const turn = await start(f, workId, n)
+        did(n, 2)
+        await finish(f, turn.payload, 'failed', { outcome: TURN_CAP })
+      }
+      const last = await start(f, workId, 4)
+      did(4, 1)
+      await finish(f, last.payload, 'completed', { text: 'The Roborock Q7 is the pick.' })
+      // Before, each capped turn's chip went on the report as it was: "read 2 pages" three times, then "read a page".
+      expect(chatOf(f, botId).at(-1)).toMatchObject({ kind: 'run_report', chips: [{ icon: 'web', text: 'read 7 pages', highlight: 'shop.example' }] })
     })
 
     it('a continuation that runs out at once still posts what the capped turn said and did', async () => {

@@ -11,7 +11,7 @@ import { atomicWriteJsonSync } from '../../data/AtomicFs'
 import type { LoginSession } from '../../providers/LoginSession'
 import { AcpAdapter } from './acp/adapter'
 import { decodeAuthMethods, type AcpAuthMethod } from '../acp/auth'
-import { connectAcpProcess, type AcpConnection, type AcpConnectionFactory, type AcpLaunchRequest, type AcpPurpose } from '../acp/connection'
+import { connectAcpProcess, treeKilledChild, type AcpConnection, type AcpConnectionFactory, type AcpLaunchRequest, type AcpPurpose } from '../acp/connection'
 import { AGENT_DEFAULT_MODEL } from '../acp/models'
 import type { AcpLaunch, AcpPreset, AcpSource } from '../acp/preset'
 import { GENERIC_ACP_PRESET } from '../acp/presets/generic'
@@ -22,7 +22,7 @@ import type { AgentInstalls, InstalledAgent, RegistrySource } from '../agents/in
 import { DIST_DIR } from '../agents/receipt'
 import { resolveCommand } from '../env'
 import { ptyAvailable, runInPty, signInPrompts, type PtySpawn } from '../pty'
-import { killTree, spawnHarness } from '../spawn'
+import { spawnHarness } from '../spawn'
 import { fingerprintOf } from '../status'
 
 /**
@@ -311,15 +311,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
       }
     })
     // The whole tree goes when the connection is closed: agents start helpers of their own.
-    connection.child = {
-      get pid() { return child.pid },
-      get exitCode() { return child.exitCode },
-      get signalCode() { return child.signalCode },
-      kill: () => {
-        killTree(child)
-        return true
-      }
-    }
+    connection.child = treeKilledChild(child)
     return connection
   }
 
@@ -526,6 +518,7 @@ export function createAcpRuntime(context: DriverContext, preset: AcpPreset, opti
   const client = {
     chat: (input: Parameters<AcpSessions['chat']>[0]) => sessions.chat(input),
     commitConversation: (threadId: string, history: string) => sessions.commitConversation(threadId, history),
+    commitInterrupted: (threadId: string, history: string) => sessions.commitInterrupted(threadId, history),
     configured: () => runtime.configured(),
     interrupt: (sessionId: string | undefined) => sessions.interrupt(sessionId)
   }

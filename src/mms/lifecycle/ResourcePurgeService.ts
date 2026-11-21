@@ -9,6 +9,7 @@ import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { canonicalPathAsync, comparablePath, gitCommonDirAsync } from './canonicalPath'
+import { mainWorktreePathAsync, WorktreeListPass } from './worktreeRegistry'
 import { buildResourceInventory, OwnershipFacts } from './ResourceInventory'
 import { projectFolderPurgeRefs, threadKeptFilesRefs } from './projectFolderRefs'
 import { measureTree } from './diskMeasure'
@@ -21,8 +22,10 @@ import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { claimOverlapsPath, getExternalResourceClaims, getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver, type ClaimTarget } from './LifecycleClaims'
 import { withFileLock } from '../scheduled/fileLock'
 import { isMousseOwnedRef } from '../../shared/mousseBranches'
+import { ThreadJournal } from '../data/ThreadJournal'
+import { BRANCH_RECORD_OPERATIONS, threadBranchRecord, type ThreadBranchRecord } from '../workspace/threadBranchRecords'
 import { isKeptFilesItem, keptOnDelete, unverifiedHolds } from '../../shared/resourceLifecycle'
-import { isOwnedSnapshotStore } from '../git/gitPolicy'
+import { isOwnedSnapshotStore, withOwnedBranches } from '../git/gitPolicy'
 import { threadStoreKeptFilesAsync } from '../actions/SnapshotRefReleaseService'
 import { threadRecordName } from '../data/threadRecords'
 
@@ -474,6 +477,7 @@ export class ResourcePurgeService {
     const record = this.store.require(taskId)
     const reservation = record.cleanupOwner?.token ?? ''
     if (!readOnly && !reservation) throw new Error('Cleanup reservation is missing')
+    const worktreeLists = new WorktreeListPass()
     if (record.state === 'purge-started' || record.state === 'purged') {
       if (!record.purge) throw new Error('Purge state has no external recovery ledger')
       return record.purge
@@ -643,8 +647,18 @@ export class ResourcePurgeService {
         // Already planned from the project folder's own repository.
         if (plannedRefs.has(resource.identity)) continue
         try {
-          if (!isMousseOwnedRef(resource.identity)) throw new Error('Source ref is not Mousse-owned')
           const commonDir = resource.repositoryId ? repositories.get(resource.repositoryId) : repositories.size === 1 ? [...repositories.values()][0] : undefined
+          const thread = this.threadWorkspaceBranch(resource.ownerTaskId, resource.identity)
+          if (thread) {
+            // The thread's own worktree branch: judged by the thread's records and by what its tip holds, whatever its name.
+            const verdict = await this.threadBranchVerdict(resource.ownerTaskId, thread, resource.identity, commonDir, worktreeLists)
+            if ('retained' in verdict) { preview.retained.push({ identity: resource.identity, reason: verdict.retained }); continue }
+            if ('blocker' in verdict) throw new Error(verdict.blocker)
+            if (!verdict.expectedValue || !commonDir) continue
+            preview.items.push({ id: resource.id, kind: 'ref', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir, expectedValue: verdict.expectedValue, ...(isMousseOwnedRef(resource.identity) ? {} : { recordedBranch: true }), status: 'pending' })
+            continue
+          }
+          if (!isMousseOwnedRef(resource.identity)) throw new Error('Source ref is not Mousse-owned')
           if (!commonDir) throw new Error('Repository is unavailable; ref existence cannot be established')
           const expectedValue = await readDirectLifecycleRefAsync(commonDir, resource.identity)
           if (!expectedValue) continue
@@ -697,6 +711,73 @@ export class ResourcePurgeService {
     const repository = await repositoryTargetAsync(item.kind === 'ref' || item.kind === 'worktree' ? item.commonDir : undefined)
     if (item.kind === 'ref') return { ...repository, ref: item.identity }
     return { ...repository, ...(isAbsolute(item.identity) ? { path: await canonicalPathAsync(item.identity) } : {}) }
+  }
+  /**
+   * When `ref` is the branch the owner thread's workspace.json names for its worktree: that record and the thread's
+   * branch records (`threadBranchRecord`; none when the journal cannot be read). Undefined for any other ref.
+   */
+  private threadWorkspaceBranch(taskId: string, ref: string): { workspace: { worktreePath: string; retainedRef?: string; headSha?: string }; record?: ThreadBranchRecord } | undefined {
+    if (!ref.startsWith('refs/heads/')) return undefined
+    let workspace: { threadId?: unknown; worktreePath?: unknown; branch?: unknown; retainedRef?: unknown; headSha?: unknown }
+    let location: string
+    try {
+      location = this.store.require(taskId).location
+      const workspacePath = join(location, 'workspace.json')
+      assertLifecyclePath(location, workspacePath)
+      workspace = JSON.parse(readFileSync(workspacePath, 'utf8'))
+    } catch { return undefined }
+    if (workspace.threadId !== taskId || typeof workspace.worktreePath !== 'string' || `refs/heads/${workspace.branch}` !== ref) return undefined
+    const own = { worktreePath: workspace.worktreePath, ...(typeof workspace.retainedRef === 'string' ? { retainedRef: workspace.retainedRef } : {}), ...(typeof workspace.headSha === 'string' ? { headSha: workspace.headSha } : {}) }
+    try {
+      return { workspace: own, record: threadBranchRecord(new ThreadJournal(location, { readOnly: true }).ofTypes(...BRANCH_RECORD_OPERATIONS), { worktreePath: workspace.worktreePath }) }
+    } catch {
+      return { workspace: own }
+    }
+  }
+  /**
+   * Whether a purge deletes the thread's own worktree branch. Only one Mousse owns now by the thread's records: a name a
+   * rename left unsettled, that Mousse released (retirement deleted it, so a branch of that name now is someone else's)
+   * or gave up stays, as a retained item. An owned one is deleted only when its tip is kept by the thread's own pins (its
+   * retained snapshot, its retirement record's result or snapshot, the commit its worktree started at, or an ancestor of
+   * one) and no worktree but the thread's has it checked out, the rule retirement deletes a branch by; otherwise it
+   * stays. A name the records never gave the worktree is refused, unless it is under `mousse/` as older records' are.
+   */
+  private async threadBranchVerdict(taskId: string, thread: NonNullable<ReturnType<ResourcePurgeService['threadWorkspaceBranch']>>, ref: string, commonDir: string | undefined, worktreeLists = new WorktreeListPass()): Promise<{ retained: string } | { blocker: string } | { expectedValue?: string }> {
+    const name = ref.slice('refs/heads/'.length)
+    const { record, workspace } = thread
+    if (!record) return { retained: "The thread's branch records cannot be read; the branch stays" }
+    if (record.pending && (record.pending.from === name || record.pending.to === name)) return { retained: 'A rename of this branch is not settled; the branch stays' }
+    if (!record.owned.has(name)) {
+      if (record.known.has(name)) return { retained: 'Mousse no longer owns this branch name; the branch stays' }
+      if (!isMousseOwnedRef(ref)) return { blocker: 'Source ref is not Mousse-owned' }
+    }
+    if (!commonDir) return { blocker: 'Repository is unavailable; ref existence cannot be established' }
+    const tip = await readDirectLifecycleRefAsync(commonDir, ref)
+    if (!tip) return {}
+    const pins: string[] = []
+    if (workspace.retainedRef?.startsWith('refs/mousse/')) {
+      const pinned = await readDirectLifecycleRefAsync(commonDir, workspace.retainedRef).catch(() => undefined)
+      if (pinned) pins.push(pinned)
+    }
+    try {
+      const manifestPath = this.retirement.pathFor(taskId, workspace.worktreePath)
+      if (existsSync(manifestPath)) {
+        const manifest = this.retirement.load(manifestPath)
+        pins.push(...[manifest.resultSha, manifest.snapshotSha].filter((sha): sha is string => Boolean(sha)))
+      }
+    } catch { /* No retirement record: the other pins decide. */ }
+    if (workspace.headSha && /^[0-9a-f]{40,64}$/.test(workspace.headSha)) pins.push(workspace.headSha)
+    let kept = false
+    for (const pin of pins) if (pin === tip || await lifecycleReadAsync(commonDir, ['merge-base', '--is-ancestor', tip, pin]).then(() => true, () => false)) { kept = true; break }
+    if (!kept) return { retained: 'This branch holds commits the thread does not; the branch stays' }
+    const own = comparablePath(resolve(workspace.worktreePath))
+    let path: string | undefined
+    // Every worktree's HEAD is the question, so Git's full list is read; once for all the thread branches of a preview.
+    for (const line of (await worktreeLists.listing(commonDir, () => lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain']))).split(/\r?\n/)) {
+      if (line.startsWith('worktree ')) path = line.slice('worktree '.length)
+      else if (line === `branch ${ref}` && path && comparablePath(resolve(path)) !== own) return { retained: 'This branch is checked out outside the thread; the branch stays' }
+    }
+    return { expectedValue: tip }
   }
   private sign(preview: LifecyclePurgePreview): LifecyclePurgePreview { preview.digest = digest({ ...preview, digest: '' }); return preview }
   private order(item: LifecyclePurgeItem, tasks: TaskLifecycleRecord[]): number { return item.kind === 'worktree' ? 0 : item.kind === 'ref' ? 1 : tasks.some((task) => task.location === item.identity) ? 3 : 2 }
@@ -823,8 +904,9 @@ export class ResourcePurgeService {
     // Kept files in a hidden snapshot store were released with the store by `releaseThreadSnapshots` (`beforeRemoval`).
     if (isKeptFilesItem(item) && isOwnedSnapshotStore(commonDir)) return
     if (!await present(commonDir)) throw purgeErrors.create('resource_purge_repository_unavailable')
-    const worktree = (await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain'])).split(/\r?\n/).find((line) => line.startsWith('worktree '))?.slice(9)
-    if (!worktree || !await present(worktree)) throw purgeErrors.create('resource_purge_repository_unavailable')
+    // The main worktree, the first one Git lists, found from the common directory itself rather than by listing them all.
+    const worktree = await mainWorktreePathAsync(commonDir)
+    if (!await present(worktree)) throw purgeErrors.create('resource_purge_repository_unavailable')
     const identity = await resolveRepositoryIdentityAsync(worktree, { requireMutationCapability: true })
     if (resolve(identity.commonDir) !== resolve(commonDir)) throw new Error('Repository identity changed')
     const lease = await acquireRepositoryLease(identity, { signal: AbortSignal.timeout(10_000) })
@@ -856,7 +938,8 @@ export class ResourcePurgeService {
         if (current !== item.expectedValue) throw new Error('Owned ref changed after purge preview')
         const input = `start\ndelete ${item.identity} ${item.expectedValue!}\nprepare\ncommit\n`
         // The central check runs first, then the ownership check right before the transaction starts, with nothing awaited in between.
-        await lifecycleGitAsync(commonDir, ['update-ref', '--no-deref', '--stdin'], input, undefined, undefined, unclaimed)
+        const remove = () => lifecycleGitAsync(commonDir, ['update-ref', '--no-deref', '--stdin'], input, undefined, undefined, unclaimed)
+        await (item.recordedBranch ? withOwnedBranches([item.identity.slice('refs/heads/'.length)], remove) : remove())
       }
     } finally { lease.release() }
   }

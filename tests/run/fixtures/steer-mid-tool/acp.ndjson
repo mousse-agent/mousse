@@ -6,9 +6,8 @@
 {"dir":"out","frame":{"kind":"request","method":"session/prompt","params":{"sessionId":"replay-session","prompt":[{"type":"text","text":"<mousse_orchestration_instructions>\nYour last reply of a turn is the only one the person sees. Put every answer they asked for in it, including ones you gave earlier in the turn.\n</mousse_orchestration_instructions>\n\nRun the tests"}]}}}
 {"dir":"in","frame":{"kind":"update","update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"npm test","kind":"execute","status":"in_progress"}}}
 {"dir":"cue","frame":{"action":"steer","text":"Use pnpm","exclusive":true}}
-{"dir":"in","frame":{"kind":"update","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"12 passed"}}]}}}
-{"dir":"in","frame":{"kind":"update","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Tests pass"}}}}
-{"dir":"in","frame":{"kind":"response","result":{"stopReason":"end_turn"}}}
+{"dir":"out","frame":{"kind":"notify","method":"session/cancel","params":{"sessionId":"replay-session"}}}
+{"dir":"in","frame":{"kind":"response","result":{"stopReason":"cancelled"}}}
 {"dir":"out","frame":{"kind":"request","method":"session/prompt","params":{"sessionId":"replay-session","prompt":[{"type":"text","text":"Use pnpm"}]}}}
 {"dir":"in","frame":{"kind":"update","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Switched to pnpm"}}}}
 {"dir":"in","frame":{"kind":"response","result":{"stopReason":"end_turn"}}}

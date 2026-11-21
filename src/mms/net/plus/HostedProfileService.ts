@@ -15,6 +15,32 @@ import type {
   RegistrationResult
 } from './contracts'
 const SECRET = 'plus/connector'
+/** Set when Mousse ID folded this computer's devices list into the account's one list. */
+const MERGED_SECRET = 'plus/list-merged'
+/**
+ * Mousse ID keeps one devices list per account (its `account_network` refusal): the account already
+ * has a list on another computer, or this computer's list was folded into it.
+ */
+export const ACCOUNT_NETWORK = 'account_network'
+/** The account has one devices list and this computer can't join it without leaving its own. */
+export const ACCOUNT_NETWORK_KEPT = 'account_network_kept'
+const ACCOUNT_NETWORK_MESSAGE = 'Your Mousse ID already has a devices list on another computer.'
+/** Whether Mousse ID refused because the account keeps another devices list. */
+export function isAccountNetwork(error: unknown): boolean {
+  return (
+    error instanceof NetError &&
+    error.code === 'conflict' &&
+    (error.details as { reason?: unknown } | undefined)?.reason === ACCOUNT_NETWORK
+  )
+}
+/** The refusal for a computer that keeps its own devices list (it has other devices or Spaces). */
+export function accountNetworkKept(): NetError {
+  return new NetError(
+    'conflict',
+    'Your Mousse ID already has a devices list on another computer. This computer has its own devices or Spaces, so it can’t join that list without leaving them. It keeps working on its own.',
+    { details: { reason: ACCOUNT_NETWORK_KEPT } }
+  )
+}
 /** Only the hosted endpoint's transactional rejection releases a durable original. */
 class RejectedRendezvous extends NetError {
   constructor() {
@@ -28,9 +54,11 @@ class RejectedRendezvous extends NetError {
 class RefusedRequest extends NetError {
   constructor(
     code: ConstructorParameters<typeof NetError>[0],
-    readonly status: number
+    readonly status: number,
+    message?: string,
+    details?: unknown
   ) {
-    super(code)
+    super(code, message, details === undefined ? undefined : { details })
   }
 }
 interface Stored {
@@ -128,6 +156,11 @@ export interface HostedProfileOptions {
    * Invalid or older rosters are ignored or refused by the identity service.
    */
   adoptRoster?(roster: Signed): boolean
+  /**
+   * Mousse ID folded this computer's devices list into the account's one list: the sign-in is
+   * already dropped here, and the module stops what used it.
+   */
+  listMerged?(): void
   signal: AbortSignal
   fetch?: typeof fetch
   now?(): number
@@ -520,7 +553,11 @@ export class HostedProfileService {
               }
             : {})
         }
-      : { configured: false, connected: false }
+      : {
+          configured: false,
+          connected: false,
+          ...(this.options.keys.getSecret(MERGED_SECRET) ? { reason: 'list_merged' as const } : {})
+        }
   }
   private now(): number {
     return this.options.now?.() ?? Date.now()
@@ -604,16 +641,21 @@ export class HostedProfileService {
             : response.status === 429
               ? 'rate_limited'
               : 'route_unreachable'
-      let refused = false
+      let refusal: unknown
       try {
-        refused =
-          response.status >= 400 &&
-          response.status < 500 &&
-          response.status !== 429 &&
-          typeof JSON.parse(text)?.error?.code === 'string'
+        refusal = JSON.parse(text)?.error?.code
       } catch {
         // A body that is not Mousse ID's error may come from a proxy in front of it.
       }
+      if (response.status === 409 && refusal === ACCOUNT_NETWORK) {
+        this.accountNetwork(token)
+        throw new RefusedRequest('conflict', 409, ACCOUNT_NETWORK_MESSAGE, { reason: ACCOUNT_NETWORK })
+      }
+      const refused =
+        response.status >= 400 &&
+        response.status < 500 &&
+        response.status !== 429 &&
+        typeof refusal === 'string'
       throw refused ? new RefusedRequest(code, response.status) : new NetError(code)
     }
     if (response.status === 204) return undefined as T
@@ -622,6 +664,20 @@ export class HostedProfileService {
     } catch {
       throw new NetError('bad_request')
     }
+  }
+  /**
+   * Mousse ID keeps another devices list for this account, so nothing of this sign-in is kept: it
+   * is dropped as when signed out. Refused with this computer's own credential, its list was folded
+   * into the account's one list, which status() then says until the next sign-in.
+   */
+  private accountNetwork(token: string): void {
+    const stored = this.read()
+    if (!stored) return
+    const folded = token === stored.connectorToken
+    this.clear()
+    if (!folded) return
+    this.options.keys.putSecret(MERGED_SECRET, canonicalJson({ at: this.now() }))
+    this.options.listMerged?.()
   }
   private async signed(
     configuration: PlusConfiguration,
@@ -782,6 +838,7 @@ export class HostedProfileService {
     delete stored.pending
     delete stored.refused
     this.save(stored)
+    if (this.options.keys.getSecret(MERGED_SECRET)) this.options.keys.deleteSecret(MERGED_SECRET)
     await this.recordDevices(stored, accountToken)
     return this.status()
   }
@@ -822,7 +879,8 @@ export class HostedProfileService {
     } catch (error) {
       // Mousse ID refused a saved renewal, typically because its challenge expired while the
       // computer slept or was offline. renewOnce dropped it, so sign a fresh one right away.
-      if (!(error instanceof RefusedRequest) || replayed?.purpose !== 'renew') throw error
+      if (!(error instanceof RefusedRequest) || replayed?.purpose !== 'renew' || isAccountNetwork(error))
+        throw error
       return this.renewOnce()
     }
     // A replayed request carries the roster inside its signed body, which is what the server
