@@ -246,6 +246,20 @@
       "expiresAt": "2026-11-20T14:33:21.627Z"
     },
     {
+      "task": "provider-idle-window",
+      "session": "Animatrix-b82cdb",
+      "machine": "Animatrix",
+      "branch": "provider-idle-window",
+      "paths": [
+        "src/mms/harness/vendors/claude",
+        "src/mms/harness/vendors/codex",
+        "src/mms/harness/stopProcesses.ts",
+        "src/mms/harness/gateway.ts"
+      ],
+      "claimedAt": "2026-11-21T10:20:49.161Z",
+      "expiresAt": "2026-11-21T12:20:49.161Z"
+    },
+    {
       "task": "read-aloud-sentence-splits-and-short-forms",
       "session": "Animatrix-ae54b8",
       "machine": "Animatrix",
