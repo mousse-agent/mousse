@@ -15,6 +15,9 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.retry': ['node'],
   'netEngine.remove': ['node'],
   'netEngine.address.add': ['node', 'address'],
+  'netEngine.removeEverywhere.plan': ['node'],
+  'netEngine.removeEverywhere': ['node'],
+  'netEngine.removeEverywhere.answer': ['identity', 'host'],
   'netEngine.address.remove': ['node', 'address'],
   'netEngine.address.use': ['node'],
   'netEngine.join.preview': ['ticket'],
@@ -23,7 +26,13 @@ const NEEDS: Partial<Record<NetEngineLocalMethod, string[]>> = {
   'netEngine.ssh.probe': ['routeId'],
   'netEngine.ssh.trust': ['routeId', 'sha256'],
   'netEngine.ssh.profiles': ['routeId'],
-  'netEngine.ssh.connect': ['routeId', 'target', 'host']
+  'netEngine.ssh.connect': ['routeId', 'target', 'host'],
+  'netEngine.relay.enroll': ['link'],
+  'netEngine.relay.remove': ['relay'],
+  'netEngine.relay.rotate': ['relay'],
+  'netEngine.relay.allow': ['node', 'destination'],
+  'netEngine.relay.disallow': ['node', 'destination'],
+  'netEngine.relay.dismiss': ['node', 'destination']
 }
 
 const text = (value: unknown): string | undefined =>
@@ -54,8 +63,27 @@ function validate(method: NetEngineLocalMethod, params: unknown): Record<string,
   for (const field of NEEDS[method] ?? [])
     if (typeof fields[field] !== 'string' || !fields[field])
       throw new DomainRpcError('bad_request', `${method} needs ${field}`)
-  if (method === 'netEngine.approve' && typeof fields.yes !== 'boolean')
+  if (
+    (method === 'netEngine.approve' || method === 'netEngine.removeEverywhere.answer') &&
+    typeof fields.yes !== 'boolean'
+  )
     throw new DomainRpcError('bad_request', `${method} needs yes`)
+  if (method === 'netEngine.removeEverywhere.answer' && !Number.isSafeInteger(fields.grant))
+    throw new DomainRpcError('bad_request', `${method} needs grant`)
+  if (method === 'netEngine.removeEverywhere') {
+    const hosts = fields.hosts
+    const ok =
+      Array.isArray(hosts) &&
+      hosts.length > 0 &&
+      hosts.every(
+        (h) =>
+          h &&
+          typeof h === 'object' &&
+          typeof (h as Record<string, unknown>).host === 'string' &&
+          Number.isSafeInteger((h as Record<string, unknown>).grant)
+      )
+    if (!ok) throw new DomainRpcError('bad_request', `${method} needs hosts [{host, grant}]`)
+  }
   if (method === 'netEngine.loginStart' && typeof fields.start !== 'boolean')
     throw new DomainRpcError('bad_request', `${method} needs start`)
   if (method === 'netEngine.workOnThreads' && typeof fields.enabled !== 'boolean')
@@ -72,6 +100,8 @@ function validate(method: NetEngineLocalMethod, params: unknown): Record<string,
   )
     throw new DomainRpcError('bad_request', `${method} takes arrival "scan" or "link"`)
   if (method === 'netEngine.routes.config') reach(fields)
+  if (method === 'netEngine.relay.rotate' && fields.cancel !== undefined && typeof fields.cancel !== 'boolean')
+    throw new DomainRpcError('bad_request', `${method} takes cancel as true or false`)
   if (method === 'netEngine.ssh.connect' && !text(fields.selector) === !text(fields.newLabel))
     throw new DomainRpcError('bad_request', `${method} needs selector or newLabel, one of them`)
   return fields
@@ -154,6 +184,29 @@ export function registerNetEngineMethods(
             case 'netEngine.address.add':
               await engine.addAddress(p.node, p.address)
               return engine.status()
+            case 'netEngine.plus.signIn':
+              return await engine.plus.signIn()
+            case 'netEngine.plus.cancel':
+              await engine.plus.cancelSignIn()
+              return engine.status()
+            case 'netEngine.plus.refresh':
+              await engine.plus.refresh()
+              return engine.status()
+            case 'netEngine.plus.signOut':
+              await engine.plus.signOut()
+              return engine.status()
+            case 'netEngine.removeEverywhere.plan': {
+              const { identity } = engine.device(p.node)
+              return { hosts: await engine.plus.plan(identity) }
+            }
+            case 'netEngine.removeEverywhere': {
+              const { identity, name } = engine.device(p.node)
+              await engine.plus.removeEverywhere(identity, name, p.hosts)
+              return engine.status()
+            }
+            case 'netEngine.removeEverywhere.answer':
+              await engine.plus.answer(p.identity, p.host, p.grant, p.yes)
+              return engine.status()
             case 'netEngine.loginStart':
               await engine.answerLoginStart(p.start)
               return engine.status()
@@ -194,6 +247,22 @@ export function registerNetEngineMethods(
               })
               return { node: row.localId, status: engine.status() }
             }
+            case 'netEngine.relay.enroll':
+              await engine.enrollRelay(p.link)
+              return engine.status()
+            case 'netEngine.relay.remove':
+              await engine.removeRelay(p.relay)
+              return engine.status()
+            case 'netEngine.relay.rotate':
+              await engine.rotateRelay(p.relay, p.cancel === true)
+              return engine.status()
+            case 'netEngine.relay.allow':
+            case 'netEngine.relay.disallow':
+              await engine.allowRelay(p.node, p.destination, method === 'netEngine.relay.allow')
+              return engine.status()
+            case 'netEngine.relay.dismiss':
+              engine.dismissRelay(p.node, p.destination)
+              return engine.status()
           }
         } catch (error) {
           if (error instanceof NetError) {

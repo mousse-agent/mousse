@@ -137,6 +137,20 @@ export interface EngineLimits {
    * hand the app a link, so it can only be lowered.
    */
   pairLinkMaxChars: number
+  /** How long adding this computer's own relay (pasting its link, `relay.enroll`) may take: the helper resolves and dials it. */
+  relayEnrollDeadlineMs: number
+  /** Most relay routes one device's row asks about at once ("<host> can be reached through relay … Allow?"). */
+  relayOffersShown: number
+  /** How long a burst of relay events is gathered before the relay lists are read again (once each). */
+  relayReadDebounceMs: number
+  /** The wait before asking a helper for its relays again when the first ask failed (it may be starting). */
+  relayReadRetryMs: number
+  /** How many times the relays are asked for before the app gives up until the next relay event. */
+  relayReadTries: number
+  /** Plus (Phase 4): after a failed read of the Plus state or the removals at hello, the wait before the next. */
+  plusReadRetryMs: number
+  /** How many times the Plus state and the removals are asked for at hello before the app waits for an event. */
+  plusReadTries: number
 }
 
 /** The helper's `APP_READ_AHEAD_BYTES`: a stream's credit must cover it before the helper reads that stream. */
@@ -195,7 +209,14 @@ export const ENGINE_LIMIT_DEFAULTS: Readonly<EngineLimits> = Object.freeze({
   cliStatusReadMs: 2_000,
   tunnelCloseLingerMs: 5_000,
   cliJoinWaitMs: 16 * 60_000,
-  pairLinkMaxChars: 4096
+  pairLinkMaxChars: 4096,
+  relayEnrollDeadlineMs: 60_000,
+  relayOffersShown: 3,
+  relayReadDebounceMs: 100,
+  relayReadRetryMs: 1_000,
+  relayReadTries: 5,
+  plusReadRetryMs: 1_000,
+  plusReadTries: 5
 })
 
 export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>> = Object.freeze({
@@ -251,7 +272,14 @@ export const ENGINE_LIMIT_VARIABLES: Readonly<Record<keyof EngineLimits, string>
   cliStatusReadMs: 'MOUSSE_NET_ENGINE_CLI_STATUS_READ_MS',
   tunnelCloseLingerMs: 'MOUSSE_NET_ENGINE_TUNNEL_CLOSE_LINGER_MS',
   cliJoinWaitMs: 'MOUSSE_NET_ENGINE_CLI_JOIN_WAIT_MS',
-  pairLinkMaxChars: 'MOUSSE_NET_ENGINE_PAIR_LINK_MAX_CHARS'
+  pairLinkMaxChars: 'MOUSSE_NET_ENGINE_PAIR_LINK_MAX_CHARS',
+  relayEnrollDeadlineMs: 'MOUSSE_NET_ENGINE_RELAY_ENROLL_DEADLINE_MS',
+  relayOffersShown: 'MOUSSE_NET_ENGINE_RELAY_OFFERS_SHOWN',
+  relayReadDebounceMs: 'MOUSSE_NET_ENGINE_RELAY_READ_DEBOUNCE_MS',
+  relayReadRetryMs: 'MOUSSE_NET_ENGINE_RELAY_READ_RETRY_MS',
+  relayReadTries: 'MOUSSE_NET_ENGINE_RELAY_READ_TRIES',
+  plusReadRetryMs: 'MOUSSE_NET_ENGINE_PLUS_READ_RETRY_MS',
+  plusReadTries: 'MOUSSE_NET_ENGINE_PLUS_READ_TRIES'
 })
 
 /** Limits that guard this computer against another: a value above the default is refused, so they only tighten. */

@@ -117,6 +117,23 @@
   min-width: 0;
 }
 
+/* Mousse Plus (Phase 4): the sign-in code, typed on the Plus website. */
+.engine-plus-code {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  user-select: all;
+}
+
+.engine-hosts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 /* Send link (design 1b §5.1): the link with Copy, then the code to read out. */
 .engine-link {
   display: flex;
@@ -194,6 +211,22 @@
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.engine-hosts label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.engine-ask {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.engine-ask span {
+  flex: 1;
 }
 
 .engine-address-list li {

@@ -63,7 +63,8 @@ export function automatic(route: string): boolean {
 /**
  * What Connect approves (§1.3): every dialable hint of the ticket outside the private ranges, as the join's
  * `approved`. Loopback hints of an unpackaged build count too, whatever class the checks map them to; approving an
- * automatic hint changes nothing. Under the `lan-only-candidates` control, none.
+ * automatic hint changes nothing. A relay hint is approved as its destination, `relay://host:port` (Phase 3
+ * §B.11, source `ticket`). Under the `lan-only-candidates` control, none.
  */
 /**
  * A pairing's addresses as the app hands them to the helper (`peer.addresses.set`): all of them, or under the
@@ -79,7 +80,7 @@ export function approvedHints(hints: readonly string[]): string[] {
   if (engineControl('lan-only-candidates')) return []
   return ticketDestinations(hints, !packagedBuild())
     .filter((hint) => !privateRoute(hint.route))
-    .map((hint) => hint.route)
+    .map((hint) => hint.destination ?? hint.route)
 }
 
 /**

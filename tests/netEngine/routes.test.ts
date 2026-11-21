@@ -6,12 +6,16 @@
 import { describe, expect, it } from 'vitest'
 import {
   classifyIp,
+  destinationText,
   ownerRoute,
   parseRoute,
+  relayText,
   routeText,
   ticketDestinations
 } from '../../src/shared/netEngine/routes'
 import { approvedHints, pairbackRoutes, splitPairback } from '../../src/mms/netEngine/routes'
+import { readRoute } from '../../src/mms/netEngine/helper/connections'
+import { engineWhere } from '../../src/renderer/components/netEngine/engineRows'
 
 describe('classifyIp (forbidden first, then the allowlist)', () => {
   it.each([
@@ -86,6 +90,9 @@ describe('ownerRoute (what Add address takes)', () => {
   })
 })
 
+const ID = 'A'.repeat(43),
+  HANDLE = 'B'.repeat(43)
+
 describe('the join dialog and Connect', () => {
   const hints = [
     'tcp://192.168.1.20:47100',
@@ -96,18 +103,34 @@ describe('the join dialog and Connect', () => {
     'ssh://me@box.example',
     'tcp://203.0.113.7:47100',
     'tcp://127.0.0.1:47100',
-    'garbage'
+    'garbage',
+    // Relay hints (Phase 3 §B.11): a name, a tailnet literal, a LAN literal, a forbidden literal, a broken one, and
+    // a second hint for a relay already listed.
+    `relay://Relay.Example.net:443/${ID}/${HANDLE}`,
+    `relay://100.101.7.3:7443/${ID}/${HANDLE}`,
+    `relay://192.168.1.9:443/${ID}/${HANDLE}`,
+    `relay://203.0.113.5:443/${ID}/${HANDLE}`,
+    `relay://relay.example.net:443/${ID}`,
+    `relay://relay.example.net:443/${HANDLE}/${ID}`
   ]
 
   it('lists each dialable hint with its class; ws, ssh, broken and forbidden hints are skipped', () => {
-    expect(ticketDestinations(hints).map((item) => [item.label, item.cls, item.automatic])).toEqual(
-      [
-        ['192.168.1.20:47100', 'lan', true],
-        ['100.101.7.2:47100', 'tailnet', false],
-        ['x.example', 'tunnel', false],
-        ['8.8.4.4:47100', 'public', false]
-      ]
-    )
+    expect(
+      ticketDestinations(hints).map((item) => [item.label, item.cls, item.automatic])
+    ).toEqual([
+      ['192.168.1.20:47100', 'lan', true],
+      ['100.101.7.2:47100', 'tailnet', false],
+      ['x.example', 'tunnel', false],
+      ['8.8.4.4:47100', 'public', false],
+      ['relay.example.net:443', 'relay', false],
+      ['100.101.7.3:7443', 'relay', false]
+    ])
+  })
+
+  it('says a relay hint as the relay it goes through', () => {
+    const relay = ticketDestinations(hints).find((item) => item.cls === 'relay')!
+    expect(destinationText(relay)).toBe('Through relay relay.example.net:443')
+    expect(destinationText({ label: '100.101.7.2:47100', cls: 'tailnet' })).toBe('100.101.7.2:47100 (Tailnet)')
   })
 
   it('approves every listed hint outside the private ranges, loopback too in a debug build', () => {
@@ -115,7 +138,9 @@ describe('the join dialog and Connect', () => {
       'tcp://100.101.7.2:47100',
       'wss://x.example/mousse-net/1',
       'tcp://8.8.4.4:47100',
-      'tcp://127.0.0.1:47100'
+      'tcp://127.0.0.1:47100',
+      'relay://relay.example.net:443',
+      'relay://100.101.7.3:7443'
     ])
   })
 })
@@ -180,5 +205,38 @@ describe('loopback in a debug build (MOUSSE_NET_TEST_CLASS_MAP)', () => {
       if (before === undefined) delete process.env.MOUSSE_NET_TEST_CLASS_MAP
       else process.env.MOUSSE_NET_TEST_CLASS_MAP = before
     }
+  })
+})
+
+describe('a connection over a relay (Phase 3 own relays, Phase 4 the paid relay)', () => {
+  const device = { node: 'n1', name: 'Phone', shortId: 'a1b2c3d4', state: 'connected', online: true } as const
+  const label = (value: unknown) => {
+    const route = readRoute(value)
+    return engineWhere({
+      ...device,
+      ...(route ? { route: route.kind === 'relay' ? 'relay' : (route.class as 'lan') } : {}),
+      ...(route?.destination ? { via: relayText(route.destination) } : {})
+    })
+  }
+
+  it.each([
+    [
+      'the paid relay, typing',
+      { kind: 'relay', class: 'relay', destination: 'relay://r1.plus.example:443', relay: 'ab'.repeat(32) },
+      'Through relay r1.plus.example:443'
+    ],
+    [
+      'the paid relay, copies',
+      { kind: 'relay', class: 'relay_bulk', destination: 'relay://r1.plus.example:443', relay: 'ab'.repeat(32) },
+      'Through relay r1.plus.example:443'
+    ],
+    ['a relay this computer does not name', { kind: 'relay', class: 'relay', destination: null }, 'Through a relay']
+  ])('reads %s as a relay, never as LAN', (_name, route, line) => {
+    expect(readRoute(route)?.kind).toBe('relay')
+    expect(label(route)).toBe(line)
+  })
+
+  it('refuses a relay route of a class that is not a relay class', () => {
+    expect(readRoute({ kind: 'relay', class: 'lan', destination: 'relay://r1.plus.example:443' })).toBeUndefined()
   })
 })

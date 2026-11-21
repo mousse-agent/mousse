@@ -374,7 +374,9 @@ export function JoinRoutes({
           title="Connect lets this computer dial these addresses."
         >
           {preview.destinations
-            .map((item) => `${item.label} (${ROUTE_WORDS[item.cls]})`)
+            .map((item) =>
+              item.cls === 'relay' ? `Through relay ${item.label}` : `${item.label} (${ROUTE_WORDS[item.cls]})`
+            )
             .join(', ')}
         </p>
       )}

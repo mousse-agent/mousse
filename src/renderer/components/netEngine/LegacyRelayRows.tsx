@@ -36,7 +36,7 @@ export function LegacyRelayRows({ net, busy, run }: { net: LegacyNet; busy: bool
         const on = !!live(net, manifest.id)?.enabled
         const address = savedAddress(net, manifest.id)
         const plus = manifest.id === 'plus-relay'
-        const label = plus ? 'Mousse relay' : 'Relay'
+        const label = plus ? 'Mousse relay for older devices' : 'Relay for older devices'
         return (
           <SettingsRow
             key={manifest.id}

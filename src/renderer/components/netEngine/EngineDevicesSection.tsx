@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { AlertTriangle, Laptop, Monitor, MonitorSmartphone, Plus, RefreshCw, Smartphone, X } from '../../lib/icons'
-import type { NetEngineDevice, NetEngineStatus } from '../../../shared/netEngine/local'
-import { routeText } from '../../../shared/netEngine/routes'
+import type {
+  NetEngineDevice,
+  NetEngineRemoval,
+  NetEngineRemovalHost,
+  NetEngineStatus
+} from '../../../shared/netEngine/local'
+import { relayText, routeText } from '../../../shared/netEngine/routes'
 import type { PlatformRequestMethod } from '../../../shared/platform'
 import type { SshRecordView } from '../../../shared/net/local'
 import { refreshComputers, useComputers } from '../../lib/computers'
@@ -33,10 +38,17 @@ import { SettingsAdvanced, SettingsGroup, SettingsRow, Switch } from '../setting
 import { Modal } from '../ui/Modal'
 import { AccessPanel } from './AccessPanel'
 import { AddEngineDeviceDialog } from './AddEngineDeviceDialog'
+import { EnginePlusGroup } from './EnginePlusGroup'
+import { hostLabel, removalText, removalTitle } from './plusRows'
 import {
   engineAddresses,
   engineRow,
   engineWhere,
+  relayLimitDetail,
+  relayLimitLine,
+  relayOfferLine,
+  RELAY_STALE_DETAIL,
+  RELAY_STALE_LINE,
   SHARED_ACCOUNT_DETAIL,
   SHARED_ACCOUNT_LINE
 } from './engineRows'
@@ -118,6 +130,8 @@ type RowView = {
   how?: string
   howDetail?: string
   access?: string
+  /** Relay notes after the line. */
+  extra?: ReactNode
   items: RowMenuItem[]
   quiet?: boolean
 }
@@ -152,6 +166,7 @@ export function EngineDevicesSection() {
     record: SshRecordView
     name: string
   }>()
+  const [everywhere, setEverywhere] = useState<NetEngineDevice>()
   // A `mousse://pair` link that opened Mousse opens Scan or paste with it.
   const offered = useOfferedPairLink()
   const [linkToEnter, setLinkToEnter] = useState<string>()
@@ -251,19 +266,46 @@ export function EngineDevicesSection() {
     const view = engineRow(device)
     const node = nodes.find((item) => item.node === device.node)
     const connected = view.line === 'Connected'
-    const items: RowMenuItem[] = view.actions.map((kind) =>
+    const relay = device.relay
+    // An allowed relay route can be taken back from the row (Phase 3 §B.11), before Remove.
+    const relayItems: RowMenuItem[] =
+      device.state === 'removing'
+        ? []
+        : (relay?.allowed ?? []).map((destination) => ({
+            label: `Stop using relay ${relayText(destination)}`,
+            action: 'engine-relay-disallow',
+            title: `${device.name} is no longer reached through this relay.`,
+            onSelect: () => void action('netEngine.relay.disallow', { node: device.node, destination })
+          }))
+    const items: RowMenuItem[] = view.actions.flatMap((kind): RowMenuItem[] =>
       kind === 'access'
-        ? accessItem(device.node)
+        ? [accessItem(device.node)]
         : kind === 'address'
-          ? { label: 'Addresses…', action: 'engine-address', onSelect: () => setAddressFor(device) }
+          ? [{ label: 'Addresses…', action: 'engine-address', onSelect: () => setAddressFor(device) }]
           : kind === 'retry'
-            ? {
-                label: 'Retry',
-                action: 'engine-retry',
-                onSelect: () => void action('netEngine.retry', { node: device.node })
-              }
-            : { label: 'Remove…', danger: true, action: 'engine-remove', onSelect: () => setRemoving(device) }
+            ? [
+                {
+                  label: 'Retry',
+                  action: 'engine-retry',
+                  onSelect: () => void action('netEngine.retry', { node: device.node })
+                }
+              ]
+            : [
+                ...relayItems,
+                ...(status?.identity
+                  ? [
+                      {
+                        label: 'Remove on all my hosts…',
+                        danger: true,
+                        action: 'engine-remove-everywhere',
+                        onSelect: () => setEverywhere(device)
+                      }
+                    ]
+                  : []),
+                { label: 'Remove…', danger: true, action: 'engine-remove', onSelect: () => setRemoving(device) }
+              ]
     )
+    if (!view.actions.includes('remove')) items.push(...relayItems)
     return {
       key: device.node,
       name: device.name,
@@ -274,6 +316,26 @@ export function EngineDevicesSection() {
       how: connected ? engineWhere(device) : undefined,
       howDetail: engineAddresses(device),
       access: view.warn ? undefined : accessShort(node, { workOnThreads: true, shareBots: true }),
+      extra: (
+        <>
+          {relay?.stale && (
+            <>
+              {' · '}
+              <span className="settings-muted" title={RELAY_STALE_DETAIL(device.name)}>
+                {RELAY_STALE_LINE}
+              </span>
+            </>
+          )}
+          {relay?.limit && (
+            <>
+              {' · '}
+              <span className="settings-muted" title={relayLimitDetail(relay.limit.callersMax)}>
+                {relayLimitLine(relay.limit.callersMax)}
+              </span>
+            </>
+          )}
+        </>
+      ),
       items
     }
   }
@@ -358,6 +420,7 @@ export function EngineDevicesSection() {
               </>
             )}
             {view.access && <>{' · '}{view.access}</>}
+            {view.extra}
           </span>
         }
         control={
@@ -399,6 +462,39 @@ export function EngineDevicesSection() {
           }
         />
       ),
+      ...(device.relay?.offered ?? []).map((destination) => (
+        <SettingsRow
+          key={`${device.node}-relay-${destination}`}
+          indent
+          title={relayOfferLine(device.name, destination)}
+          control={
+            <span className="engine-reach-control" data-mousse-decision="">
+              <button
+                type="button"
+                className="settings-btn"
+                disabled={busy}
+                title="Not asked again for this relay."
+                onClick={() =>
+                  void action('netEngine.relay.dismiss', { node: device.node, destination })
+                }
+              >
+                Not now
+              </button>
+              <button
+                type="button"
+                className="settings-btn"
+                disabled={busy}
+                title="Not dialled until you allow it."
+                onClick={() =>
+                  void action('netEngine.relay.allow', { node: device.node, destination })
+                }
+              >
+                Allow
+              </button>
+            </span>
+          }
+        />
+      )),
       selected === device.node && (
         <AccessPanel
           key={`${device.node}-access`}
@@ -637,6 +733,77 @@ export function EngineDevicesSection() {
             onUndo={() => setRecordDialog({ kind: 'undo', record, name: record.endpoint })}
           />
         ))}
+        {status?.on &&
+          status.removalAsks?.map((ask) => (
+            <p
+              key={`${ask.host}-${ask.grant}`}
+              className="settings-muted devices-note engine-ask"
+              role="status"
+            >
+              <span>
+                {ask.name} is also on {hostLabel(ask)}. Remove it there?
+              </span>
+              <button
+                type="button"
+                className="settings-btn danger-fill"
+                disabled={busy}
+                onClick={() =>
+                  void action('netEngine.removeEverywhere.answer', {
+                    identity: ask.identity,
+                    host: ask.host,
+                    grant: ask.grant,
+                    yes: true
+                  })
+                }
+              >
+                Remove
+              </button>
+              <button
+                type="button"
+                className="settings-btn"
+                disabled={busy}
+                onClick={() =>
+                  void action('netEngine.removeEverywhere.answer', {
+                    identity: ask.identity,
+                    host: ask.host,
+                    grant: ask.grant,
+                    yes: false
+                  })
+                }
+              >
+                Keep
+              </button>
+            </p>
+          ))}
+        {status?.on &&
+          removalGroups(status.removals).map(([removed, items]) => {
+            const title = removalTitle(items[0]!.name || removed.slice(0, 8), items)
+            return (
+              <SettingsRow
+                key={removed}
+                data-removal={removed}
+                title={
+                  <span className={title.warn ? 'settings-status-warn' : undefined}>{title.line}</span>
+                }
+                description={
+                  <span className="engine-row-line">
+                    {items.map((item, index) => {
+                      const text = removalText(item)
+                      return (
+                        <span key={item.id}>
+                          {index > 0 && ' · '}
+                          {hostLabel(item)}:{' '}
+                          <span className={text.warn ? 'settings-status-warn' : undefined}>
+                            {text.line}
+                          </span>
+                        </span>
+                      )
+                    })}
+                  </span>
+                }
+              />
+            )
+          })}
         {empty && switchOn && <p className="settings-muted devices-note">No devices yet.</p>}
         {error && (
           <p role="alert" className="chat-error devices-error">
@@ -674,6 +841,10 @@ export function EngineDevicesSection() {
             <LegacyUnlockRow busy={busy} onUnlock={(passphrase) => void action('net.unlock', { passphrase })} />
           )}
         </SettingsGroup>
+      )}
+
+      {status && (
+        <EnginePlusGroup status={status} read={read} />
       )}
 
       {status && (
@@ -743,6 +914,17 @@ export function EngineDevicesSection() {
           anyKind={!!status.reach}
           onClose={() => setAddressFor(undefined)}
           onAdded={read}
+        />
+      )}
+
+      {everywhere && (
+        <RemoveEverywhereDialog
+          device={everywhere}
+          onClose={() => setEverywhere(undefined)}
+          onDone={() => {
+            read()
+            void refreshComputers()
+          }}
         />
       )}
 
@@ -959,6 +1141,129 @@ function AddressesDialog({
           </button>
         </div>
       </form>
+    </Modal>
+  )
+}
+
+/** Removals by the device removed, in the order they were made. */
+function removalGroups(
+  removals: NetEngineRemoval[] | undefined
+): Array<[string, NetEngineRemoval[]]> {
+  const groups = new Map<string, NetEngineRemoval[]>()
+  for (const item of removals ?? [])
+    groups.set(item.removed, [...(groups.get(item.removed) ?? []), item])
+  return [...groups]
+}
+
+/**
+ * "Remove on all my hosts" (design D.1): each host where this computer is an owner and whose last list named the
+ * device, with the grant id seen there; a host whose list did not name it says so and gets nothing.
+ */
+function RemoveEverywhereDialog({
+  device,
+  onClose,
+  onDone
+}: {
+  device: NetEngineDevice
+  onClose: () => void
+  onDone: () => void
+}) {
+  const [hosts, setHosts] = useState<NetEngineRemovalHost[]>()
+  const [chosen, setChosen] = useState<Set<string>>(new Set())
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let live = true
+    void window.mousse.platformRequest
+      .request<{ hosts: NetEngineRemovalHost[] }>('netEngine.removeEverywhere.plan', {
+        node: device.node
+      })
+      .then((reply) => {
+        if (!live) return
+        setHosts(reply.hosts)
+        setChosen(new Set(reply.hosts.filter((h) => h.grant !== null).map((h) => h.host)))
+      })
+      .catch((cause) => {
+        if (live) setError(errorText(cause))
+      })
+    return () => {
+      live = false
+    }
+  }, [device.node])
+  const known = hosts?.filter((h) => h.grant !== null) ?? []
+  const confirm = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      await window.mousse.platformRequest.request('netEngine.removeEverywhere', {
+        node: device.node,
+        hosts: known
+          .filter((h) => chosen.has(h.host))
+          .map((h) => ({ host: h.host, grant: h.grant }))
+      })
+      onDone()
+      onClose()
+    } catch (cause) {
+      setError(errorText(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const label = (h: NetEngineRemovalHost) => h.name || h.host.slice(0, 8)
+  return (
+    <Modal open title={`Remove ${device.name} on all my hosts?`} onClose={onClose}>
+      <div className="engine-dialog">
+        {!hosts && !error && <p className="settings-muted">Reading your hosts…</p>}
+        {hosts && !hosts.length && (
+          <p className="settings-muted">This computer isn't an owner on any host.</p>
+        )}
+        {hosts && hosts.length > 0 && (
+          <ul className="engine-hosts">
+            {hosts.map((h) =>
+              h.grant === null ? (
+                <li key={h.host} className="settings-muted" data-host={h.host}>
+                  Not known on {label(h)}
+                </li>
+              ) : (
+                <li key={h.host} data-host={h.host}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={chosen.has(h.host)}
+                      disabled={busy}
+                      onChange={(event) => {
+                        const next = new Set(chosen)
+                        if (event.target.checked) next.add(h.host)
+                        else next.delete(h.host)
+                        setChosen(next)
+                      }}
+                    />
+                    {label(h)}
+                  </label>
+                </li>
+              )
+            )}
+          </ul>
+        )}
+        {error && (
+          <p role="alert" className="chat-error">
+            {error}
+          </p>
+        )}
+        <div className="devices-dialog-actions">
+          <button type="button" className="settings-btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="settings-btn danger-fill"
+            disabled={busy || !known.some((h) => chosen.has(h.host))}
+            onClick={() => void confirm()}
+          >
+            Remove
+          </button>
+        </div>
+      </div>
     </Modal>
   )
 }

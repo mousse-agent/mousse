@@ -1,4 +1,4 @@
-import type { RouteClass } from './routes'
+import type { RouteClass, TicketDestination } from './routes'
 
 /**
  * The daemon methods a Mousse window calls for the new networking (Phase 1a): the switch, the devices and their
@@ -17,6 +17,13 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.retry',
   'netEngine.remove',
   'netEngine.address.add',
+  'netEngine.plus.signIn',
+  'netEngine.plus.cancel',
+  'netEngine.plus.refresh',
+  'netEngine.plus.signOut',
+  'netEngine.removeEverywhere.plan',
+  'netEngine.removeEverywhere',
+  'netEngine.removeEverywhere.answer',
   'netEngine.loginStart',
   // "Work on threads", the safety switch, while v1 networking is off (its Devices group has it otherwise)
   'netEngine.workOnThreads',
@@ -31,7 +38,14 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.ssh.probe',
   'netEngine.ssh.trust',
   'netEngine.ssh.profiles',
-  'netEngine.ssh.connect'
+  'netEngine.ssh.connect',
+  // Phase 3: relays (§B.9, §B.11)
+  'netEngine.relay.enroll',
+  'netEngine.relay.remove',
+  'netEngine.relay.rotate',
+  'netEngine.relay.allow',
+  'netEngine.relay.disallow',
+  'netEngine.relay.dismiss'
 ] as const
 export type NetEngineLocalMethod = (typeof NET_ENGINE_LOCAL_METHODS)[number]
 
@@ -116,8 +130,10 @@ export interface NetEngineDevice {
   sshParked?: NetEngineSshParked
   /** Addresses added for it by hand (routes of any owner kind); none means it is found on the local network. */
   addresses?: string[]
-  /** The class of the route its connection runs over now (`conn.up.route`), while one is up. */
-  route?: RouteClass
+  /** The class of the route its connection runs over now (`conn.up.route`), while one is up; `relay` through one. */
+  route?: RouteClass | 'relay'
+  /** While connected through a relay: the relay's `host:port`. */
+  via?: string
   /** Routes it offered in pairback that need the owner's Use before they are dialled (§1.3 suggestions). */
   offered?: string[]
   /** It was added over SSH (§3.4): one way only, until a Send link adds the other direction. */
@@ -128,6 +144,80 @@ export interface NetEngineDevice {
   unfinished?: boolean
   /** That link is still valid, so Retry may ask for the code again. */
   linkValid?: boolean
+  /** Its relays (Phase 3), when anything about them needs showing. */
+  relay?: NetEngineDeviceRelay
+}
+
+/** What a device's row shows about relays (Phase 3 §B.5, §B.11). */
+export interface NetEngineDeviceRelay {
+  /** Relay destinations (`relay://host:port`) it can be reached through that wait for Allow. */
+  offered?: string[]
+  /** Relay destinations allowed for it (by a ticket, the owner or Allow) that can be taken back. */
+  allowed?: string[]
+  /** The relay info it sent (its manifest) has expired: its routes are tried last until it sends new info. */
+  stale?: boolean
+  /**
+   * It is past this computer's relay limit (a relay lists its first `callersMax` callers): it can't reach this
+   * computer through one. `callersMax` as this computer's relays name it, when one does.
+   */
+  limit?: { callersMax?: number }
+}
+
+/** One of this computer's own relays (Phase 3 §B.9), as Settings → Reach lists it. */
+export interface NetEngineRelay {
+  /** The relay's id, hex. */
+  id: string
+  /** `host:port`. */
+  endpoint: string
+  state: 'registered' | 'connecting' | 'retrying' | 'refused'
+  /** Why the last registration ended, while retrying or refused (`relay_unreachable`, …). */
+  reason?: string
+  /** When the next registration starts, ms since 1970, while retrying. */
+  retryAt?: number
+  /** Callers listed with the relay, and the most it lists (as the helper says; absent when it says none). */
+  callers: number
+  callersMax?: number
+  /** While a new relay key is taking over: when the old one stops, ms since 1970. */
+  rotatingUntil?: number
+  /** A new relay key is asked for and the relay has not taken it yet. */
+  newKeyPending?: boolean
+  /** That new key is being cancelled (`relay.rotate {cancel}`). */
+  cancelling?: boolean
+  /** The relay holds as many keys as it allows: New relay key waits until `chainFullUntil` (ms since 1970). */
+  chainFull?: boolean
+  chainFullUntil?: number
+}
+
+/** What a relay error word (`relay.enroll`'s refusal, a registration's end) means, as Settings says it. */
+export const RELAY_REASON_TEXT: Readonly<Record<string, string>> = Object.freeze({
+  bad_link: "That isn't a relay link.",
+  already: 'This relay is already added.',
+  unavailable: "Relays can't run on this computer.",
+  relay_unreachable: "Couldn't reach the relay.",
+  relay_refused: "Couldn't reach the relay.",
+  relay_key: "The relay's key doesn't match the link.",
+  relay_tls: "Couldn't connect securely to the relay.",
+  relay_timeout: "The relay didn't answer.",
+  relay_protocol: 'The relay answered something unexpected.',
+  relay_not_authorized: 'This link was used already, or has expired.',
+  relay_removed: 'The relay no longer lists this computer.',
+  relay_replaced: 'Another registration took this one’s place.',
+  relay_stopping: 'The relay is restarting.',
+  relay_limit: 'The relay is full.',
+  relay_closed: 'The relay closed the connection.',
+  store_failed: "Couldn't save the relay.",
+  no_relay: 'That relay was removed.',
+  not_registered: "The relay isn't connected; try again once it is.",
+  rotating: 'A new key is already on its way.',
+  not_rotating: 'No new key is on its way.',
+  chain_full: 'Too many key changes. Try again later.'
+})
+
+/** This computer's own relays, when its helper has relays. */
+export interface NetEngineRelays {
+  /** False when relays can't run here (no keystore). */
+  available: boolean
+  list: NetEngineRelay[]
 }
 
 /** A computer asking to join this one, waiting for this computer's window to answer (§5.1 step 3). */
@@ -138,6 +228,77 @@ export interface NetEngineApproval {
   name: string
   /** The start of its endpoint id. */
   device: string
+}
+
+/** One class of the paid relay (typing, or copies) as the helper's blocks stand. */
+export interface NetEngineRelayClass {
+  /** `funded`: blocks are held; `paused`: its refill failed or is late (copies only); `unfunded`: none held. */
+  state: 'funded' | 'paused' | 'unfunded'
+  bytesLeft: number
+  /** How long the held blocks last at the recent rate, or until they expire; also through a Plus outage. */
+  lastsSecs?: number
+  /** Why the last refill failed (`allowance_used`, `balance_empty`, ...). */
+  refillError?: string
+}
+
+/** A Plus balance (bytes). */
+export interface NetEnginePlusPool {
+  allowance?: number
+  available?: number
+  debt?: number
+}
+
+/** Mousse Plus as this computer's helper sees it (Phase 4, M16). */
+export interface NetEnginePlus {
+  /** This build has a Plus address. */
+  configured: boolean
+  /** This computer is signed in to Plus. */
+  linked: boolean
+  /** Sign-in in progress: the code to type on the Plus website, and where. */
+  link?: { userCode: string; verifyUrl: string; expiresAt: number }
+  /** How the last sign-in ended: `approved`, `denied`, `expired`, `gone` (start again) or `unlinked`. */
+  linkResult?: string
+  /** `active`, `past_due`, `cancelled` or `none`. */
+  plan?: string
+  periodEndsAt?: number
+  bulk?: NetEnginePlusPool
+  interactive?: NetEnginePlusPool
+  /** Plus can't be reached since this time (Unix seconds). */
+  unreachableSince?: number
+  /** The paid relay, per class, while this computer uses one. */
+  relay?: { interactive?: NetEngineRelayClass; bulk?: NetEngineRelayClass }
+}
+
+/** One removal sent from this computer for one host ("Remove on all my hosts", design D.3). */
+export interface NetEngineRemoval {
+  id: string
+  /** The host's endpoint id, and its name here when this computer knows it. */
+  host: string
+  hostName?: string
+  /** The removed device's endpoint id and name. */
+  removed: string
+  name: string
+  grant: number
+  /** `waiting`, `sent`, `quota`, `delivered`, `done` or `expired`. */
+  state: string
+  /** With `done`: `applied`, `stale` or `refused`. */
+  result?: string
+}
+
+/** A host that learned the removed device later: the user is asked again (design D.1). */
+export interface NetEngineRemovalAsk {
+  identity: string
+  name: string
+  host: string
+  hostName?: string
+  grant: number
+}
+
+/** One host in "Remove on all my hosts": the grant id its last list named for the device, or none. */
+export interface NetEngineRemovalHost {
+  host: string
+  name: string
+  grant: number | null
 }
 
 /** This computer's own routes (§1.5): what its helper listens on and advertises. */
@@ -169,7 +330,7 @@ export interface NetEngineJoinPreview {
   /** The ticket has expired by this computer's clock. */
   expired?: boolean
   /** Every hint this computer would dial, with its class; the non-automatic ones are what Connect approves. */
-  destinations: Array<{ route: string; label: string; cls: RouteClass; automatic: boolean }>
+  destinations: TicketDestination[]
   /** This computer's tailnet and public routes and tunnels: pairback sends one only when ticked. */
   shareable: Array<{ route: string; label: string; cls: RouteClass }>
 }
@@ -194,6 +355,11 @@ export interface NetEngineStatus {
   sharedAccount?: boolean
   /** How often Add device reads a camera frame for a pairing code (the engine limit `scanIntervalMs`). */
   scanIntervalMs?: number
+  /** Mousse Plus, once the helper said. */
+  plus?: NetEnginePlus
+  /** "Remove on all my hosts": what was sent, and the questions waiting. */
+  removals?: NetEngineRemoval[]
+  removalAsks?: NetEngineRemovalAsk[]
   /**
    * `ask`: the start-at-login question waits for this window (design §10). Answered with `netEngine.loginStart
    * {start}`; asked once per installation, while the switch is on.
@@ -212,5 +378,7 @@ export interface NetEngineStatus {
   links?: NetEngineLinkInvite[]
   /** Send link joins running here. */
   joins?: NetEngineLinkJoin[]
+  /** This computer's own relays, when its helper has relays (Phase 3). */
+  relays?: NetEngineRelays
 }
 

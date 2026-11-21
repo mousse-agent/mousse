@@ -338,6 +338,12 @@ export const ROUTE_CLASS_LABEL: Readonly<Record<RouteClass, string>> = Object.fr
   ssh: 'SSH'
 })
 
+/** Where a device's row says it is connected: "Through relay host:port", or its class's label. */
+export function connectedVia(route: RouteClass | 'relay', via?: string): string {
+  if (route === 'relay') return via ? `Through relay ${via}` : 'Through a relay'
+  return ROUTE_CLASS_LABEL[route]
+}
+
 /** A route as a person reads it: the host and port without the scheme, the path left off. */
 export function routeText(route: string): string {
   const parsed = parseRoute(route)
@@ -359,17 +365,114 @@ export function automaticRoute(route: string, loopback = false): boolean {
   return classifyIp(parsed.host) === 'lan'
 }
 
+// ---------------------------------------------------------------- relays (Phase 3 §B.11)
+
+/**
+ * A route hint's length: at most 255 bytes, a wire constant (spec/wire.md §10.2 ticket key 7, §10.2.1 for the
+ * `relay` hint; docs/limits.md "Fixed on purpose"), not a limit.
+ */
+const RELAY_HINT_MAX_BYTES = 255
+
+/** A relay route hint or destination, read: where the relay is, and the destination an approval names. */
+export interface RelayEndpoint {
+  /** Lower-case host: an IPv4 literal, an IPv6 literal without brackets, or a DNS name. */
+  host: string
+  port: number
+  literal: boolean
+  /** `host:port`, IPv6 in brackets: what a person reads. */
+  text: string
+  /** `relay://<lower-case host>:<port>`: what the owner approves, per peer (§B.11). */
+  destination: string
+}
+
+function relayAuthority(text: string): RelayEndpoint | undefined {
+  const parsed = authority(text, true)
+  if (!parsed || parsed.port === undefined) return undefined
+  const shown = `${bracket(parsed.host, parsed.v6)}:${parsed.port}`
+  return {
+    host: parsed.host,
+    port: parsed.port,
+    literal: parsed.literal,
+    text: shown,
+    destination: `relay://${shown}`
+  }
+}
+
+/** A ticket's relay hint, `relay://<host>:<port>/<base64url relay id>/<base64url handle>` (§B.11), or undefined. */
+export function parseRelayHint(text: string): RelayEndpoint | undefined {
+  const value = text.trim()
+  if (value.length > RELAY_HINT_MAX_BYTES || !value.startsWith('relay://')) return undefined
+  const parts = value.slice('relay://'.length).split('/')
+  if (parts.length !== 3 || !parts.slice(1).every((part) => /^[A-Za-z0-9_-]{43}$/.test(part)))
+    return undefined
+  return relayAuthority(parts[0]!)
+}
+
+/** A relay destination, `relay://<host>:<port>` (what approvals and `conn.up.route` name), or undefined. */
+export function parseRelayDestination(text: string): RelayEndpoint | undefined {
+  const value = text.trim()
+  if (!value.startsWith('relay://')) return undefined
+  return relayAuthority(value.slice('relay://'.length))
+}
+
+/** A relay destination as a person reads it: `host:port`. */
+export function relayText(destination: string): string {
+  return parseRelayDestination(destination)?.text ?? destination.replace(/^relay:\/\//, '')
+}
+
+/**
+ * Whether a relay endpoint may be listed for dialling (§B.11): a public or tailnet literal, or a name. LAN and
+ * forbidden literals are dropped (the helper drops them too); loopback is kept where `loopback` is set.
+ */
+function relayDialable(endpoint: RelayEndpoint, loopback: boolean): boolean {
+  if (!endpoint.literal) return true
+  if (loopback && isLoopbackIp(endpoint.host)) return true
+  const cls = classifyIp(endpoint.host)
+  return cls === 'public' || cls === 'tailnet'
+}
+
+/** One destination of a ticket, as the Connect dialog lists it. */
+export interface TicketDestination {
+  route: string
+  /** `host:port` (the path of a tunnel left off). */
+  label: string
+  cls: RouteClass | 'relay'
+  automatic: boolean
+  /** A relay hint's destination, `relay://host:port`: what Connect approves for it. */
+  destination?: string
+}
+
+/** A destination as the Connect dialog says it: "Through relay host:port", or "host:port (Class)". */
+export function destinationText(item: Pick<TicketDestination, 'label' | 'cls'>): string {
+  return item.cls === 'relay'
+    ? `Through relay ${item.label}`
+    : `${item.label} (${ROUTE_CLASS_LABEL[item.cls]})`
+}
+
 /**
  * A ticket's route hints as the Connect dialog lists them (§1.3): each dialable hint with its class, in the
  * ticket's order. `ws`, `ssh`, other schemes, broken hints and forbidden literals are skipped (loopback is kept
- * where `loopback` is set). `automatic` hints need no approval; the rest are what Connect approves.
+ * where `loopback` is set). `automatic` hints need no approval; the rest are what Connect approves. A relay hint
+ * (Phase 3 §B.11) is listed as its relay's endpoint, with the destination Connect approves.
  */
 export function ticketDestinations(
   hints: readonly string[],
   loopback = false
-): Array<{ route: string; label: string; cls: RouteClass; automatic: boolean }> {
-  const out: Array<{ route: string; label: string; cls: RouteClass; automatic: boolean }> = []
+): TicketDestination[] {
+  const out: TicketDestination[] = []
   for (const hint of hints) {
+    const relay = parseRelayHint(hint)
+    if (relay) {
+      if (relayDialable(relay, loopback) && !out.some((item) => item.destination === relay.destination))
+        out.push({
+          route: hint,
+          label: relay.text,
+          cls: 'relay',
+          automatic: false,
+          destination: relay.destination
+        })
+      continue
+    }
     const parsed = parseRoute(hint)
     if (!parsed || (parsed.kind !== 'tcp' && parsed.kind !== 'wss')) continue
     let cls = routeClass(parsed)
