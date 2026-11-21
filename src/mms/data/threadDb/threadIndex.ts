@@ -33,7 +33,8 @@ CREATE TRIGGER msg_ai AFTER INSERT ON msg BEGIN INSERT INTO msg_fts(rowid, folde
 CREATE TRIGGER msg_ad AFTER DELETE ON msg BEGIN INSERT INTO msg_fts(msg_fts, rowid, folded) VALUES ('delete', old.id, old.folded); END;
 `
 
-export interface IndexTarget { threadId: string; dir: string }
+/** A thread to bring up to date in the index; `drop`: take it out (it was trashed or purged). */
+export interface IndexTarget { threadId: string; dir: string; drop?: boolean }
 export interface IndexSearchRequest {
   /** Lowercased by the caller with JavaScript's `toLowerCase`. */
   query: string
@@ -170,8 +171,8 @@ export class ThreadIndex {
     })
   }
 
-  private updateThread(db: DatabaseSync, { threadId, dir }: IndexTarget, verify: boolean): boolean {
-    if (!existsSync(join(dir, THREAD_DB_FILE))) {
+  private updateThread(db: DatabaseSync, { threadId, dir, drop }: IndexTarget, verify: boolean): boolean {
+    if (drop || !existsSync(join(dir, THREAD_DB_FILE))) {
       this.drop(db, threadId)
       return false
     }

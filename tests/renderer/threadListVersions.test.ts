@@ -35,6 +35,7 @@ vi.mock('../../src/renderer/commands/useCommandShortcuts', () => ({ useCommandSh
 /** Every bridge call stays pending, except the thread list subscription, which the test drives. */
 let pushList: ((threads: unknown[], version?: { epoch: string; seq: number; generation?: number }) => void) | undefined
 let pushTouches: ((touches: Array<{ id: string; updatedAt: string }>) => void) | undefined
+let pushRow: ((row: { thread?: unknown; removed?: string; version: { epoch: string; seq: number; generation?: number } }) => void) | undefined
 /** The window's own list read (the fallback, on focus); a test answers it when it wants to. */
 let readList: (() => Promise<unknown>) | undefined
 function bridge(): unknown {
@@ -46,6 +47,7 @@ function bridge(): unknown {
     get: (_target, key) => {
       if (key === 'then') return undefined
       if (path === 'threads' && key === 'onUpdated') return (listener: typeof pushList) => { pushList = listener; return () => { pushList = undefined } }
+      if (path === 'threads' && key === 'onRow') return (listener: typeof pushRow) => { pushRow = listener; return () => { pushRow = undefined } }
       if (path === 'threads' && key === 'onTouched') return (listener: typeof pushTouches) => { pushTouches = listener; return () => { pushTouches = undefined } }
       if (path === 'threads' && key === 'listAllVersioned' && readList) return readList
       return node(String(key))
@@ -148,5 +150,33 @@ describe('the thread list a window holds', () => {
     expect(names()).toEqual(['After restart'])
     act(() => pushList!([row('a', 'From another computer')]))
     expect(names()).toEqual(['From another computer'])
+  })
+  it("puts one thread's row in the list it holds, drops a row the list already has, and takes a removal", async () => {
+    act(() => root.render(createElement(App)))
+    expect(pushRow).toBeTypeOf('function')
+    act(() => pushList!([row('a', 'A'), row('b', 'B'), row('c', 'C')], { epoch: 'A', seq: 4, generation: 1 }))
+    act(() => pushRow!({ thread: row('b', 'B renamed'), version: { epoch: 'A', seq: 6, generation: 1 } }))
+    expect(names()).toEqual(['A', 'B renamed', 'C'])
+    // A row read before the list held is older than it: dropped.
+    act(() => pushRow!({ thread: row('c', 'C before'), version: { epoch: 'A', seq: 5, generation: 1 } }))
+    expect(names()).toEqual(['A', 'B renamed', 'C'])
+    act(() => pushRow!({ thread: row('d', 'New'), version: { epoch: 'A', seq: 7, generation: 1 } }))
+    act(() => pushRow!({ removed: 'a', version: { epoch: 'A', seq: 8, generation: 1 } }))
+    expect(names()).toEqual(['B renamed', 'C', 'New'])
+    // A list taken before the last row is older: it does not undo the row.
+    act(() => pushList!([row('a', 'A'), row('b', 'B'), row('c', 'C')], { epoch: 'A', seq: 7, generation: 1 }))
+    expect(names()).toEqual(['B renamed', 'C', 'New'])
+  })
+
+  it('reads the whole list again for a row it has no list for, or one from a restarted service', async () => {
+    let reads = 0
+    readList = async () => { reads += 1; return { threads: [row('a', 'Read')], version: { epoch: 'B', seq: 3, generation: 2 } } }
+    act(() => root.render(createElement(App)))
+    await act(async () => { pushRow!({ thread: row('a', 'Row'), version: { epoch: 'A', seq: 2, generation: 1 } }) })
+    expect(reads).toBe(1)
+    expect(names()).toEqual(['Read'])
+    act(() => pushList!([row('a', 'Held')], { epoch: 'A', seq: 9, generation: 1 }))
+    await act(async () => { pushRow!({ thread: row('a', 'From the new service'), version: { epoch: 'C', seq: 1, generation: 3 } }) })
+    expect(reads).toBe(2)
   })
 })

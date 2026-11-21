@@ -88,6 +88,7 @@ import type {
   TaskStatus,
   Thread,
   ThreadListVersion,
+  ThreadRowPayload,
   ThreadActivitySnapshot,
   TurnState,
   TurnStateSnapshot,
@@ -1111,6 +1112,12 @@ const api = {
         Array.isArray(data) ? cb(data) : cb(data.threads, data.version)
       ipcRenderer.on('threads:updated', handler)
       return () => ipcRenderer.removeListener('threads:updated', handler)
+    },
+    /** One thread's change (`threads.row`): its row, or the id of a thread that left the list, with the list version. */
+    onRow: (cb: (row: ThreadRowPayload) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, row: ThreadRowPayload) => cb(row)
+      ipcRenderer.on('threads:row', handler)
+      return () => ipcRenderer.removeListener('threads:row', handler)
     },
     onTitleGenerationFailed: (
       cb: (payload: { threadId: string; error: string }) => void

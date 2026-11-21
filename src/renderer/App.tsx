@@ -40,7 +40,7 @@ import { mainAreaStyle, mainAreaWidthAtPointer, mainAreaWidthBounds } from './li
 import { selectThread } from './lib/threadActions'
 import { useShownBotThread } from './lib/botThread'
 import { isSessionClosing } from './lib/errorText'
-import { useAppStore, withNewerTimes } from './stores/appStore'
+import { useAppStore, withNewerTimes, withThreadRow } from './stores/appStore'
 import { createMessageUpdateBatcher } from './stores/messageUpdateBatcher'
 import { applyStreamedUpdates, landMessage } from './stores/liveTextStore'
 import { useViewSwap } from './lib/motion'
@@ -49,7 +49,7 @@ import { useMemoryNotices } from './hooks/useMemoryNotices'
 import { useWindowCounters } from './lib/windowCounters'
 import { normalizeRunSettings } from '../shared/settings'
 import { applyPlusLegacy } from './stores/mousseIdStore'
-import { isOlderThreadList, type ThreadListVersion } from '../shared/types'
+import { isOlderThreadList, threadRowAction, type ThreadListVersion, type ThreadRowPayload } from '../shared/types'
 import { useAppCommands } from './commands/useAppCommands'
 import { useBotsStore } from './stores/botsStore'
 // Rail pages, Chats and New bot load as their own chunks; see lib/lazySurfaces.
@@ -284,6 +284,22 @@ export default function App() {
       setThreads(withNewerTimes(threads, useAppStore.getState().threads))
     }
 
+    // One thread's change: put in the list held when it is newer than that list; read the whole list again when there
+    // is no versioned list to put it in, or it comes from a restarted service.
+    const applyThreadRow = (row: ThreadRowPayload) => {
+      if (!isCurrentProfile()) return
+      const action = threadRowAction(row.version, heldThreadList)
+      if (action === 'drop') return
+      if (action === 'refresh') {
+        void refreshThreads()
+        return
+      }
+      heldThreadList = row.version
+      threadListRevision += 1
+      const held = useAppStore.getState().threads
+      setThreads(withNewerTimes(withThreadRow(held, row), held))
+    }
+
     const refreshThreads = async (): Promise<void> => {
       if (disposed) return
       if (threadRefreshInFlight) {
@@ -404,6 +420,7 @@ export default function App() {
       window.mousse.tasks.onUpdated(applyIfCurrent(setTasks)),
       window.mousse.projects.onUpdated(applyIfCurrent(setProjects)),
       window.mousse.threads.onUpdated(applyThreadList),
+      window.mousse.threads.onRow(applyThreadRow),
       // A save moved only threads' times: those rows move ("Needs me", recent threads, row ages) without a whole list.
       window.mousse.threads.onTouched?.(applyIfCurrent(useAppStore.getState().applyThreadTouches)) ?? (() => undefined),
       // Sidebar already calls switchToThread optimistically; this covers createAndSelect

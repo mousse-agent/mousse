@@ -45,7 +45,7 @@ import {
   type MmsOwnerRecord
 } from '../../mms/ownership/MmsOwnerLease'
 import { LocalMmsClient } from '../../mms/protocol/client'
-import { FIRST_SEND_BINDING_CAPABILITY, type ProtocolEvent, type ProtocolHelloOk } from '../../mms/protocol/types'
+import { FIRST_SEND_BINDING_CAPABILITY, THREAD_ROWS_CAPABILITY, type ProtocolEvent, type ProtocolHelloOk } from '../../mms/protocol/types'
 import { PROFILES_V1_CAPABILITY } from '../../shared/profiles/types'
 import { AGENT_DEFINITION_CAPABILITY } from '../../shared/agentPlatform'
 import { WORKFLOW_DEFINITIONS_CAPABILITY } from '../../shared/workflowPlatform'
@@ -211,6 +211,7 @@ const GUI_PLATFORM_CAPABILITIES = [
   BROWSER_VIEWER_CAPABILITY,
   BROWSER_SETUP_CAPABILITY,
   FIRST_SEND_BINDING_CAPABILITY,
+  THREAD_ROWS_CAPABILITY,
   BOT_TELLING_CAPABILITY,
   KEEP_AWAKE_CAPABILITY
 ] as const

@@ -581,6 +581,7 @@ export function registerGuiIpc(
     // activeEventProfileId instead. Installation-wide listeners remain global.
     const targetProfileId = profileId ?? activeEventProfileId ?? senderProfile
     if (channel === 'threads:updated') notificationThreads.note(targetProfileId ?? currentProfileKey(), data)
+    if (channel === 'threads:row') notificationThreads.noteRow(targetProfileId ?? currentProfileKey(), data)
     if (channel === 'projects:updated') notificationThreads.noteProjects(targetProfileId ?? currentProfileKey(), data)
     warmStart?.observe(targetProfileId, channel, data)
     for (const win of BrowserWindow.getAllWindows()) {
@@ -1219,6 +1220,7 @@ export function registerGuiIpc(
     // A thread that finishes while a focused window shows it was seen as it finished.
     if (event.type === 'activity' || event.type === 'activity.snapshot') reportSeenIfDone(win)
     if (event.type === 'threads.updated') notificationThreads.note(binding.profileId, event.data)
+    if (event.type === 'threads.row') notificationThreads.noteRow(binding.profileId, event.data)
     if (event.type === 'projects.updated') notificationThreads.noteProjects(binding.profileId, event.data)
     bridgeProtocolEvent(event, target, presentationForSender(senderId))
     if (event.type === 'activity' && event.threadId) {

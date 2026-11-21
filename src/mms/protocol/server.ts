@@ -35,12 +35,14 @@ import {
   MMS_PROTOCOL_VERSION,
   GIT_OPERATIONS_CAPABILITY,
   FIRST_SEND_BINDING_CAPABILITY,
+  THREAD_ROWS_CAPABILITY,
   PROTOCOL_CAPABILITIES,
   type ProtocolConnectionEventType,
   type ProtocolEvent,
   type ProtocolClientType,
   type ProtocolHelloOk,
-  type ProtocolResponse
+  type ProtocolResponse,
+  type ThreadRowEventData
 } from './types'
 import type { TurnState } from '../../shared/types'
 import { PROCESS_INSTANCE_ID } from '../queue/processLiveness'
@@ -464,9 +466,30 @@ export class MmsProtocolServer {
       disposers.push(() => target.off(event, handler))
     }
 
-    // One `threads.updated` per change. Creating, renaming or settling a thread fires the store's event and the
-    // request's own, often several of them; each used to send the whole list. They are sent once, after the
-    // turn of the event loop that made them, with the list as it is then. A single thread's change keeps its id.
+    // Personal bots' threads (`Thread.botOwned`): no window lists them, counts their activity or is sent their rows.
+    // Read from the list the first time it is needed, then kept from the store's events (a thread never stops being a
+    // bot's), so an activity event does not look at every thread.
+    let botThreads: Set<string> | undefined
+    const botThreadIds = (): Set<string> =>
+      (botThreads ??= new Set(services.threads.listAllThreads().filter((thread) => thread.botOwned).map((thread) => thread.id)))
+    const noteBotRow = (thread: { id?: string; botOwned?: boolean } | undefined): void => {
+      if (botThreads && thread?.id && thread.botOwned) botThreads.add(thread.id)
+    }
+    onEmitter(services.threads, 'created', noteBotRow)
+    onEmitter(services.threads, 'updated', noteBotRow)
+    // Threads that windows listed until they became a bot's: the next push tells windows to drop the row.
+    const leftForBots = new Set<string>()
+    onEmitter(services.threads, 'bot-owned', (change: { id: string }) => {
+      botThreads?.add(change.id)
+      leftForBots.add(change.id)
+    })
+
+    // One push per change. Creating, renaming or settling a thread fires the store's event and the request's own,
+    // often several of them; they are sent once, after the turn of the event loop that made them, with the list as it
+    // is then. A change to one thread is sent as that thread's row (`threads.row`, or its removal), with the version
+    // of the list it was read from, so a turn's end costs one row, not every thread; a session that cannot apply rows
+    // is sent the whole list instead (`eventForSession`). Changes to several threads, or to the list as a whole (a
+    // reorder, a trash that takes owned threads along), send the whole list (`threads.updated`).
     let threadListPending: { threadId?: string } | undefined
     let threadListTimer: ReturnType<typeof setImmediate> | undefined
     const pushThreadsUpdated = (threadId?: string): void => {
@@ -479,8 +502,22 @@ export class MmsProtocolServer {
         const pending = threadListPending
         threadListPending = undefined
         threadListTimer = undefined
-        // The snapshot's version lets a window drop a list it receives after a newer one (`ThreadListVersion`).
-        emitToSubscribers(this.ring.push('threads.updated', services.threads.listAllThreadsVersioned(), pending?.threadId))
+        const id = pending?.threadId
+        if (!id) {
+          // The snapshot's version lets a window drop a list it receives after a newer one (`ThreadListVersion`).
+          emitToSubscribers(this.ring.push('threads.updated', services.threads.listAllThreadsVersioned(), undefined))
+          return
+        }
+        const { thread, version } = services.threads.listedThreadVersioned(id)
+        if (thread?.botOwned) {
+          // A bot's thread: nothing, unless windows still list it from before it became the bot's.
+          if (!leftForBots.delete(id)) return
+          const removed: ThreadRowEventData = { removed: id, version }
+          emitToSubscribers(this.ring.push('threads.row', removed, id))
+          return
+        }
+        const row: ThreadRowEventData = thread ? { thread, version } : { removed: id, version }
+        emitToSubscribers(this.ring.push('threads.row', row, id))
       })
     }
     this.threadListPushers.set(services.profileId, pushThreadsUpdated)
@@ -488,12 +525,10 @@ export class MmsProtocolServer {
     // - the store's other list writes (pin, settle, archive, reorder, trash, restore, purge, a first message);
     // - the service bus's `threads:updated`, which in-daemon producers raise (an expiry deletion, a routed pin,
     //   settle, reorder or delete through the phone's backend, agent executions, chats). A request's own
-    //   `threads.updated` also reaches the bus (`pushRequestEvent`); it is already pending then and adds nothing.
-    const threadListChanged = (threadId?: string): void => {
-      if (threadListPending) return
-      pushThreadsUpdated(threadId)
-    }
-    onEmitter(services.threads, 'list-changed', (change: { id?: string } | undefined) => threadListChanged(change?.id))
+    //   `threads.updated` also reaches the bus (`pushRequestEvent`); joined to the pending push, it makes it the
+    //   whole list, as the request's own did.
+    onEmitter(services.threads, 'list-changed', (change: { id?: string; wholeList?: boolean } | undefined) =>
+      pushThreadsUpdated(change?.wholeList ? undefined : change?.id))
     // A save that moved only a thread's time: windows hear it as `threads.touched` ({ touches: [{ id, updatedAt }] }),
     // at most once every TOUCH_INTERVAL_MS per thread, and every thread due at that moment in one event. A turn that
     // starts or ends, and an approval that waits or is answered, send the thread's held time at once.
@@ -539,7 +574,7 @@ export class MmsProtocolServer {
       touchTimer = undefined
       touchPending.clear()
     })
-    onEmitter(services.events, 'threads:updated', () => threadListChanged())
+    onEmitter(services.events, 'threads:updated', () => pushThreadsUpdated())
     disposers.push(() => {
       if (this.threadListPushers.get(services.profileId) === pushThreadsUpdated) this.threadListPushers.delete(services.profileId)
       if (threadListTimer) clearImmediate(threadListTimer)
@@ -874,7 +909,7 @@ export class MmsProtocolServer {
         state: string
         activity?: Record<string, string>
       }) => {
-        const bots = new Set(services.threads.listAllThreads().filter((thread) => thread.botOwned).map((thread) => thread.id))
+        const bots = botThreadIds()
         // A scheduled occurrence's turn: its end is announced by `scheduled.runEnded` as the job's Tell me says, so
         // clients do not also announce the thread finishing.
         const scheduled = services.orchestrator.isScheduledTurn(payload.threadId)
@@ -1099,6 +1134,8 @@ export class MmsProtocolServer {
       if (requested.has(ERROR_INFO_CAPABILITY)) session.capabilities.add(ERROR_INFO_CAPABILITY)
       // A window says it binds a chat's first message; nothing else may claim it.
       if (v.hello.clientType === 'gui' && requested.has(FIRST_SEND_BINDING_CAPABILITY)) session.capabilities.add(FIRST_SEND_BINDING_CAPABILITY)
+      // A window applies one thread's row; every other session keeps getting the whole list.
+      if (v.hello.clientType === 'gui' && requested.has(THREAD_ROWS_CAPABILITY)) session.capabilities.add(THREAD_ROWS_CAPABILITY)
       if (requested.has(PROFILES_V1_CAPABILITY) && advertised.includes(PROFILES_V1_CAPABILITY)) {
         session.capabilities.add(PROFILES_V1_CAPABILITY)
       }
@@ -1440,11 +1477,15 @@ export class MmsProtocolServer {
     const result = res.result as { sequence: number; gap: boolean; replay: ProtocolEvent[] }
     const replayBudget = Math.min(MMS_PROTOCOL_MAX_FRAME_BYTES, MMS_PROTOCOL_MAX_OUTBOUND_QUEUED_BYTES / 2)
     let replayBytes = 4 + Buffer.byteLength(JSON.stringify(res), 'utf8')
-    for (const stored of replay.events) {
+    // A session that cannot apply rows is sent the whole list once, at the last row change, not once per row.
+    let lastRow = -1
+    if (!session.capabilities.has(THREAD_ROWS_CAPABILITY)) replay.events.forEach((event, index) => { if (event.type === 'threads.row') lastRow = index })
+    for (const [index, stored] of replay.events.entries()) {
       if (session.clientType !== 'gui' && isQualifiedId(stored.threadId)) continue
       // Project for this client first, so the budget counts what is actually sent.
       if (stored.type === 'bots.tell') continue // A telling is shown live once; durable rows supply catch-up.
-      const event = projectEventFor(session.clientType, stored, this.remoteListsFor(session))
+      if (stored.type === 'threads.row' && lastRow >= 0 && index !== lastRow) continue
+      const event = projectEventFor(session.clientType, this.eventForSession(session, stored), this.remoteListsFor(session))
       replayBytes += Buffer.byteLength(JSON.stringify(event), 'utf8') + (result.replay.length ? 1 : 0)
       if (replayBytes > replayBudget) {
         result.gap = true
@@ -1544,7 +1585,7 @@ export class MmsProtocolServer {
       if (!this.clientAcceptsEvent(client, event)) continue
       // The ring holds the complete thread list; each client gets its own projection of it,
       // whether the event is sent now or held for the end of a subscribe handshake.
-      const projected = projectEventFor(client.clientType, event, this.remoteListsFor(client))
+      const projected = projectEventFor(client.clientType, this.eventForSession(client, event), this.remoteListsFor(client))
       if (client.subscribeState === 'buffering') {
         client.eventBuffer.push(projected)
         continue
@@ -1552,6 +1593,25 @@ export class MmsProtocolServer {
       if (client.subscribeState !== 'active') continue
       this.deliverEventToClient(client, projected)
     }
+  }
+
+  /** The whole-list form of a `threads.row` event, made once for all the sessions that need it. */
+  private readonly wholeListForms = new WeakMap<ProtocolEvent, ProtocolEvent>()
+
+  /**
+   * The event as this session can take it: a `threads.row` for a session that did not ask for rows
+   * (`THREAD_ROWS_CAPABILITY`) becomes the whole list as it is now (`threads.updated`), with the same sequence.
+   */
+  private eventForSession(session: ClientSession, event: ProtocolEvent): ProtocolEvent {
+    if (event.type !== 'threads.row' || session.capabilities.has(THREAD_ROWS_CAPABILITY)) return event
+    let whole = this.wholeListForms.get(event)
+    if (!whole) {
+      const services = this.servicesByProfile.get(event.profileId ?? this.opts.mms.profileId)
+      if (!services) return event
+      whole = { ...event, type: 'threads.updated', data: services.threads.listAllThreadsVersioned() }
+      this.wholeListForms.set(event, whole)
+    }
+    return whole
   }
 
   /** The merged lists of other computers for the profile a client is bound to; only windows are given them. */
