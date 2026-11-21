@@ -266,7 +266,7 @@
         "tests/worktreeFacts.test.ts"
       ],
       "claimedAt": "2026-11-21T05:51:04.012Z",
-      "expiresAt": "2026-11-21T16:09:41.478Z"
+      "expiresAt": "2026-11-21T17:05:13.421Z"
     },
     {
       "task": "worktree-turns-skip-start-snapshot",
