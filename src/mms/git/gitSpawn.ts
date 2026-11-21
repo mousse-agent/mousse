@@ -274,6 +274,7 @@ class Lane {
 
   /** Stops the helper now: what it started keeps running, and each caller still waiting gets an error and the end. */
   async terminate(): Promise<void> {
+    for (const child of this.children.values()) if (!child.isLaunched) child.kill()
     clearTimeout(this.idle)
     const helper = this.worker
     if (!helper || helper.exitCode !== null || helper.signalCode !== null) return
@@ -307,7 +308,10 @@ class Lane {
       // A helper that stopped before it answered which disk each drive is on: the next one is asked.
       if (!physicalDisks.size) diskMapAsked = false
       const error = Object.assign(new Error(`The Git helper stopped (${reason})`), { code: 'EGITWORKER' })
-      for (const child of [...this.children.values()]) child.lost(error)
+      // Ending a command can open a disk slot and start queued work on a replacement helper. Only commands already
+      // sent to the old helper failed.
+      const launched = [...this.children.values()].filter((child) => child.isLaunched)
+      for (const child of launched) child.lost(error)
     }
     worker.on('error', (error) => lost(error.message))
     worker.on('exit', (code, signal) => lost(`exit ${code ?? signal}`))
@@ -324,7 +328,7 @@ function lane(name: GitLane): Lane {
 
 /** Stops both lanes' helpers now (tests; a daemon's exit ends them anyway). Processes already started keep running. */
 export async function stopGitSpawnWorkers(): Promise<void> {
-  for (const name of ['interactive', 'background'] as const) {
+  for (const name of ['background', 'interactive'] as const) {
     const old = laneWorkers[name]
     laneWorkers[name] = new Lane(name)
     await old.terminate()

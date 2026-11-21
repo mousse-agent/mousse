@@ -214,6 +214,7 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
     }
     const onAbort = (): void => { if (!argv.some((arg) => REF_WRITERS.has(arg))) stop('ABORT_ERR') }
     signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted) onAbort()
     child.stdout!.on('data', (chunk: Buffer) => { outSize += chunk.length; if (outSize > limit) stop('ENOBUFS'); else out.push(chunk) })
     child.stderr!.on('data', (chunk: Buffer) => { errSize += chunk.length; if (errSize > limit) stop('ENOBUFS'); else err.push(chunk) })
     child.on('error', (spawnError) => { error ??= spawnError })

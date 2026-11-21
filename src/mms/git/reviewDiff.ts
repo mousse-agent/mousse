@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process'
 import { createReadStream } from 'node:fs'
 import { lstat, open, readlink, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative } from 'node:path'

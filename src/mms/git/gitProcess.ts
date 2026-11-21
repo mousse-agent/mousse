@@ -287,6 +287,7 @@ export function runGit(cwd: string, args: readonly string[], options: GitRunOpti
       else finish(code)
     })
     options.signal?.addEventListener('abort', onAbort, { once: true })
-    arm()
+    if (options.signal?.aborted) onAbort()
+    void gitChildSpawned(child).then(() => { if (!settled) arm() })
   })
 }
