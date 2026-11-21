@@ -185,13 +185,15 @@
       "machine": "Animatrix",
       "branch": "receipt-release-outside-lease",
       "paths": [
+        "src/mms/actions",
         "src/mms/lifecycle",
-        "src/mms/actions/ReceiptRefReleaseService.ts",
-        "src/mms/run/RunEngine.ts",
-        "src/mms/orchestrator/OrchestratorService.ts"
+        "src/mms/data",
+        "src/mms/run",
+        "src/mms/orchestrator",
+        "src/mms/git/runGitProcess.ts"
       ],
       "claimedAt": "2026-11-21T05:51:10.179Z",
-      "expiresAt": "2026-11-21T13:21:43.355Z"
+      "expiresAt": "2026-11-21T16:18:50.928Z"
     },
     {
       "task": "send-path-latency",
