@@ -7,7 +7,7 @@ import {
   assertGitAllowed, assertGitAllowedAsync, clearGitPolicyLog, decideGitCommand, GitPolicyError, gitPolicyLog, gitPolicyMode, isOwnedPath, isOwnedRef,
   currentUserRequest, registerOwnedGitRoot, stripInheritedGitEnv, userAction, withGitAccess, withOwnedBranches, withUserRequest, type GitCommandRequest, type GitDecision
 } from '../src/mms/git/gitPolicy'
-import { guardedSimpleGit, repoProgramEnv, withoutDeref, withoutRepoPrograms } from '../src/mms/git/repoPrograms'
+import { guardedGit, repoProgramEnv, withoutDeref, withoutRepoPrograms } from '../src/mms/git/repoPrograms'
 import { tryGit } from '../src/mms/actions/git'
 
 const USER = userAction('button', 'Push')
@@ -381,15 +381,15 @@ describe('round 3: private indexes in linked worktrees, update-ref options, simp
     git(outside, '-c', 'user.name=x', '-c', 'user.email=x@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'base')
     git(outside, 'branch', 'feature')
     vi.stubEnv('MOUSSE_GIT_POLICY', 'log')
-    await guardedSimpleGit(outside).branch(['-d', 'feature'])
+    await guardedGit(outside).raw(['branch', '-d', 'feature'])
     expect(gitPolicyLog().at(-1)).toMatchObject({ kind: 'violation', command: 'git branch -d feature' })
     vi.stubEnv('MOUSSE_GIT_POLICY', 'refuse')
     git(outside, 'branch', 'feature')
     // Refused before Git runs; the check reads without blocking, so the refusal rejects the call.
-    await expect(guardedSimpleGit(outside).branch(['-D', 'feature'])).rejects.toThrow(GitPolicyError)
+    await expect(guardedGit(outside).raw(['branch', '-D', 'feature'])).rejects.toThrow(GitPolicyError)
     expect(git(outside, 'branch', '--list', 'feature')).toContain('feature')
     // A listing is still a read.
-    await expect(guardedSimpleGit(outside).branchLocal()).resolves.toBeTruthy()
+    await expect(guardedGit(outside).branchLocal()).resolves.toBeTruthy()
   })
 })
 

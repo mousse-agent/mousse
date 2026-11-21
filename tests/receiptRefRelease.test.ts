@@ -16,6 +16,7 @@ import { actionOptions, git, gitFoundationFixture } from './fixtures/gitFoundati
 import { seedLegacyNamedEpisode } from './fixtures/legacy-named-agent'
 import { unverifiableThread } from './support/unverifiableThread'
 import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
+import * as gitProcess from '../src/mms/git/runGitProcess'
 
 // The real-Git setup and exact read-back both start processes, which can be slow on Windows.
 vi.setConfig({ testTimeout: 120_000 })
@@ -101,6 +102,27 @@ it('preserves a saved-branch claim and blocks physical release during pending in
   new ThreadJournal(f.thread).append({ operationId: 'pending-integration', operationType: 'integrate', state: 'prepared' })
   await expect(release.release(workspace.worktreePath)).rejects.toThrow('recovery')
 })
+
+it('keeps both refs when a saved branch claims one after discovery and before Git admission', async () => {
+  const { workspace, receipt, release } = await fixture()
+  const run = gitProcess.runGitProcess
+  const start = vi.spyOn(gitProcess, 'runGitProcess').mockImplementation((args, options) => {
+    if (args.includes('update-ref') && args.includes('--no-deref') && options.input?.includes(receipt.retainedRefs[0]!)) {
+      writeFileSync(join(f.thread, 'conversation-branches.json'), JSON.stringify([{ id: 'late-claim', retainedRef: receipt.retainedRefs[0] }]))
+    }
+    return run(args, options)
+  })
+  try {
+    const result = await release.release(workspace.worktreePath)
+    expect(result.releasedRefs).toEqual([])
+    expect(result.retained).toEqual([{ receiptId: receipt.id, reason: expect.stringContaining('claim') }])
+    expect(git(f.repo, 'rev-parse', receipt.retainedRefs[0]!)).toBe(receipt.beforeSha)
+    expect(git(f.repo, 'rev-parse', receipt.retainedRefs[1]!)).toBe(receipt.afterSha)
+    expect(new ThreadJournal(f.thread).ofTypes('undo-ref-release')).toEqual([])
+  } finally {
+    start.mockRestore()
+  }
+}, 60_000)
 
 it('rejects symbolic replacement rather than following it into user refs', async () => {
   const { workspace, receipt, release } = await fixture()

@@ -1,8 +1,8 @@
-import { execFile } from 'node:child_process'
 import { lstat, opendir, readlink, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { mousseGitEnv } from '../git/gitEnv'
+import { execFileGit } from '../git/gitSpawn'
 import { assertGitAllowed } from '../git/gitPolicy'
 import { timeGitChild } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile } from '../git/gitExecutable'
@@ -82,7 +82,7 @@ function commonDirFromGit(folder: string): Promise<string | null> {
     const args = ['rev-parse', '--path-format=absolute', '--git-common-dir']
     assertGitAllowed({ cwd: folder, args })
     try {
-      timeGitChild(() => execFile(gitFile(), ['-c', 'core.fsmonitor=false', ...args], {
+      timeGitChild(() => execFileGit(gitFile(), ['-c', 'core.fsmonitor=false', ...args], {
         cwd: folder,
         encoding: 'utf8',
         windowsHide: true,

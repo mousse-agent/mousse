@@ -6,28 +6,33 @@
  * folder; a name with spaces; an intent-to-add file; a merge stopped on a conflict; detached; a branch with no commit
  * yet; ahead of and behind its upstream; an upstream whose branch is gone; a linked worktree. Not covered: submodules.
  */
-import * as childProcess from 'node:child_process'
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { GitService } from '../src/mms/git/GitService'
 
 let root: string
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 
-// Every Git process this process starts, however it is started.
-let started = 0
-const prototype = (childProcess as unknown as { ChildProcess: { prototype: { spawn(options: { file?: string }): unknown } } }).ChildProcess.prototype
-const spawn = prototype.spawn
-beforeAll(() => {
-  prototype.spawn = function (this: unknown, options: { file?: string }) {
-    if (/^git(\.exe)?$/i.test(basename(String(options?.file ?? '')))) started++
-    return spawn.call(this, options)
+// Every Git process Mousse starts, counted where each one is started (`gitSpawn`), on the spawn helper or on this thread.
+const counter = vi.hoisted(() => ({ started: 0 }))
+vi.mock('../src/mms/git/gitSpawn', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/mms/git/gitSpawn')>()
+  const counted = <F extends (...args: never[]) => unknown>(start: F): F => ((...args: Parameters<F>) => {
+    counter.started++
+    return start(...args)
+  }) as F
+  return {
+    ...actual,
+    spawnGit: counted(actual.spawnGit),
+    spawnGitSync: counted(actual.spawnGitSync),
+    execFileGit: counted(actual.execFileGit),
+    execFileGitSync: counted(actual.execFileGitSync),
+    execFileGitAsync: counted(actual.execFileGitAsync)
   }
 })
-afterAll(() => { prototype.spawn = spawn })
 
 beforeEach(() => { root = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-status-one-'))) })
 afterEach(() => rmSync(root, { recursive: true, force: true }))
@@ -106,9 +111,9 @@ it.each(STATES)('%s: one Git process, the same answer as the read with many', as
   const service = new GitService()
   // The repository's settings are read once, on the first read.
   const first = await service.getStatus(cwd)
-  started = 0
+  counter.started = 0
   const status = await service.getStatus(cwd)
-  expect(started).toBe(1)
+  expect(counter.started).toBe(1)
   expect(status).toEqual(first)
   const earlier = await (service as unknown as { readStatusWithGit(cwd: string): Promise<unknown> }).readStatusWithGit(cwd)
   expect(status).toEqual(earlier)
@@ -130,9 +135,9 @@ it('callers asking together share one read', async () => {
   const cwd = repository()
   const service = new GitService()
   await service.getStatus(cwd)
-  started = 0
+  counter.started = 0
   const answers = await Promise.all([service.getStatus(cwd), service.getStatus(cwd), service.getStatus(cwd)])
-  expect(started).toBe(1)
+  expect(counter.started).toBe(1)
   expect(answers[1]).toBe(answers[0])
   // A read after they answered is a new read.
   writeFileSync(join(cwd, 'a.txt'), 'after\n')

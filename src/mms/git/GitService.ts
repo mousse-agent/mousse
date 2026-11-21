@@ -1,11 +1,10 @@
 import { AppError, createErrorProvider } from '../../shared/errors'
-import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { access, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import type { SimpleGit } from 'simple-git'
+import type { RepositoryGit } from './repoPrograms'
 import { redactGitText } from '../../shared/gitText'
 import { holdsRepositoryMutation } from '../actions/GitOperationCoordinator'
 import { abortKeepingCopy, AbortStoppedPartWayError, type AbortKind } from '../actions/abortKeepingCopy'
@@ -33,10 +32,11 @@ import { PULL_REQUEST_DRAFT_COMMITS, PULL_REQUEST_DRAFT_LIMITS, userCommits, typ
 import { MOUSSE_COMMIT_EMAIL } from './mousseCommitIdentity'
 import { resolveRepositoryIdentityAsync } from './RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseAbortedError } from './RepositoryLease'
-import { checkRepoPrograms, guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, SAFE_LOOKUP_ENV, withoutRepoProgramsAsync } from './repoPrograms'
+import { checkRepoPrograms, guardedGit, NO_DIFF_PROGRAMS, repoProgramEnv, SAFE_LOOKUP_ENV, withoutRepoProgramsAsync } from './repoPrograms'
 import { parseRawDiff, readWorkingTreeStatus, unchangedWorktreePaths, type StatusEntry } from './workingTreeStatus'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { GitPolicyError, withUserRequest, type UserAction } from './gitPolicy'
+import { cancelQueuedGit, gitChildSpawned, spawnGit } from './gitSpawn'
 import type {
   GitBranchInfo,
   GitBranchOptions,
@@ -483,7 +483,7 @@ async function readBoundedGit(cwd: string, args: readonly string[], maxBytes: nu
     return ''
   }
   return new Promise((resolvePromise) => {
-    const child = timeGitChild(() => spawn(gitFile(), guarded, {
+    const child = timeGitChild(() => spawnGit(gitFile(), guarded, {
       cwd,
       env: gitEnvFor(repoProgramEnv({ ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0', ...env })),
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -502,8 +502,9 @@ async function readBoundedGit(cwd: string, args: readonly string[], maxBytes: nu
       resolvePromise(ok || truncated ? Buffer.concat(chunks).subarray(0, maxBytes).toString('utf8') : '')
     }
     const timer = setTimeout(() => {
-      if (process.platform === 'win32' && child.pid) spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => undefined)
-      else child.kill()
+      if (!cancelQueuedGit(child)) void gitChildSpawned(child).then(() => {
+        child.kill()
+      })
       // Close ends the read; the backstop only covers a process that never closes its pipes.
       backstop = setTimeout(() => finish(false), SUMMARY_KILL_SETTLE_MS)
     }, SUMMARY_READ_MS)
@@ -607,8 +608,8 @@ export class GitService {
   } = {}) {}
 
   /** Every Git command here runs no program the repository configures (`repoPrograms`). */
-  private gitFor(cwd: string): SimpleGit {
-    return guardedSimpleGit(cwd)
+  private gitFor(cwd: string): RepositoryGit {
+    return guardedGit(cwd)
   }
 
   /**
@@ -756,7 +757,6 @@ export class GitService {
       return undefined
     })
     if (head) return head.repo
-    // simple-git answers false itself when Git says the folder is not a repository; what it throws is a failure.
     const check = this.gitFor(cwd).checkIsRepo()
     return options.strict ? check : check.catch(() => false)
   }
@@ -864,7 +864,7 @@ export class GitService {
     return IN_PROGRESS_ORDER.find((kind) => found.has(kind)) ?? null
   }
 
-  private async upstream(git: SimpleGit): Promise<string | null> {
+  private async upstream(git: RepositoryGit): Promise<string | null> {
     return git.raw(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']).then((value) => value.trim() || null).catch(() => null)
   }
 
@@ -872,17 +872,17 @@ export class GitService {
     if (!await this.isRepo(cwd)) return ''
     const git = this.gitFor(cwd)
     if (staged) {
-      return git.diff([...NO_DIFF_PROGRAMS, '--cached', '--', filePath])
+      return git.raw(['diff', ...NO_DIFF_PROGRAMS, '--cached', '--', filePath])
     }
 
     const normalized = normalizePath(filePath.replace(/\\/g, '/'))
     const entry = (await this.statusEntries(cwd)).find((file) => file.path === normalized)
     if (entry && isUntracked(entry)) {
       const nullPath = process.platform === 'win32' ? 'NUL' : '/dev/null'
-      return git.diff([...NO_DIFF_PROGRAMS, '--no-index', nullPath, filePath]).catch(() => '')
+      return git.raw(['diff', ...NO_DIFF_PROGRAMS, '--no-index', nullPath, filePath]).catch(() => '')
     }
 
-    return git.diff([...NO_DIFF_PROGRAMS, '--', filePath])
+    return git.raw(['diff', ...NO_DIFF_PROGRAMS, '--', filePath])
   }
 
   async getLog(cwd: string, limit = 30): Promise<GitCommit[]> {
@@ -903,22 +903,24 @@ export class GitService {
     }
     // Independent reads, run together so the answer waits for the slowest rather than for all of them in turn.
     const [log, unpushedOrNull, localOnly] = await Promise.all([
-      git.log({ maxCount: limit }),
+      git.raw(['log', '-z', `--max-count=${limit}`, '--format=%H%x00%aI%x00%s%x00%an']),
       readUnpushed().catch(() => null),
       readLocalOnly()
     ])
     const hasUpstream = unpushedOrNull !== null
     const unpushed = unpushedOrNull ?? new Set<string>()
 
-    return log.all.map((entry) => ({
-      hash: entry.hash,
-      shortHash: entry.hash.slice(0, 7),
-      message: entry.message,
-      author: entry.author_name,
-      date: entry.date,
-      pushed: hasUpstream && !unpushed.has(entry.hash),
-      onRemote: localOnly !== null && !localOnly.has(entry.hash)
-    }))
+    const fields = log.split('\0')
+    const commits: GitCommit[] = []
+    for (let index = 0; index + 3 < fields.length; index += 4) {
+      const [hash, date, message, author] = fields.slice(index, index + 4) as [string, string, string, string]
+      commits.push({
+        hash, shortHash: hash.slice(0, 7), message, author, date,
+        pushed: hasUpstream && !unpushed.has(hash),
+        onRemote: localOnly !== null && !localOnly.has(hash)
+      })
+    }
+    return commits
   }
 
   async getBranches(cwd: string): Promise<GitBranchInfo> {
@@ -956,7 +958,7 @@ export class GitService {
 
     const [unstaged, staged] = await Promise.all([
       this.unstagedNumstat(cwd).catch(() => ''),
-      git.diff([...NO_DIFF_PROGRAMS, '--cached', '--numstat']).catch(() => '')
+      git.raw(['diff', ...NO_DIFF_PROGRAMS, '--cached', '--numstat']).catch(() => '')
     ])
 
     const unstagedStats = parseNumstat(unstaged)
@@ -975,7 +977,7 @@ export class GitService {
    * remembers them) and only the rest are diffed; a list too long for a command line diffs the whole tree.
    */
   private async unstagedNumstat(cwd: string): Promise<string> {
-    const whole = () => this.gitFor(cwd).diff([...NO_DIFF_PROGRAMS, '--numstat'])
+    const whole = () => this.gitFor(cwd).raw(['diff', ...NO_DIFF_PROGRAMS, '--numstat'])
     const raw = await this.read(cwd, ['diff-files', '-z', '--raw', '--no-abbrev', '--ignore-submodules=dirty'])
     if (raw === null) return whole()
     const records = parseRawDiff(raw)
@@ -987,7 +989,7 @@ export class GitService {
     const paths = [...new Set(records.map((record) => record.path).filter((path) => !unchanged.has(path)))]
     if (paths.length === 0) return ''
     if (paths.reduce((total, path) => total + path.length + 12, 0) > NUMSTAT_PATHS_MAX_CHARS) return whole()
-    return this.gitFor(top).diff([...NO_DIFF_PROGRAMS, '--numstat', '--', ...paths.map((path) => `:(literal)${path}`)])
+    return this.gitFor(top).raw(['diff', ...NO_DIFF_PROGRAMS, '--numstat', '--', ...paths.map((path) => `:(literal)${path}`)])
   }
 
   /**
@@ -1024,15 +1026,17 @@ export class GitService {
   }
 
   private async withLease<T>(cwd: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    let identity: Awaited<ReturnType<typeof resolveRepositoryIdentityAsync>> | null = null
+    await waitForFolderAccess([resolve(cwd)])
     try {
-      await waitForFolderAccess([resolve(cwd)])
-      identity = await pathExists(cwd) ? await resolveRepositoryIdentityAsync(cwd) : null
-    } catch {
-      identity = null
+      await stat(cwd)
+    } catch (error) {
+      // Init may create a missing directory. An unreadable directory has not been established as missing.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return operation()
+      throw error
     }
+    const identity = await resolveRepositoryIdentityAsync(cwd)
     // Not a repository yet, or no commit yet: there is nothing a push or an amend could race with.
-    if (!identity?.capability.allowed) return operation()
+    if (!identity.capability.allowed) return operation()
     // Background Git actions already hold this lease when they call in; taking it again would wait on itself.
     if (holdsRepositoryMutation(identity.key)) return operation()
     let lease: Awaited<ReturnType<typeof acquireRepositoryLease>>
@@ -1071,7 +1075,7 @@ export class GitService {
       }
       if (!info?.isDirectory()) throw gitErrors.create('git_init_no_folder')
       if (await this.isRepo(cwd)) throw gitErrors.create('git_already_repo')
-      await this.gitFor(cwd).init()
+      await this.gitFor(cwd).raw(['init'])
     })
   }
 
@@ -1094,7 +1098,7 @@ export class GitService {
 
   /**
    * Runs `git <command> --pathspec-from-file` over the paths. The list goes through a
-   * temp file because simple-git has no stdin and a long list would exceed the
+   * temp file because a long list would exceed the
    * command-line limit; the paths are literal, so `*` and `[` in names match themselves.
    */
   private async withPathspecFile(cwd: string, command: readonly string[], paths: readonly string[], fail: GitErrorCode = 'git_failed'): Promise<void> {
@@ -1353,7 +1357,7 @@ export class GitService {
     }
   }
 
-  private async behindCount(git: SimpleGit): Promise<number> {
+  private async behindCount(git: RepositoryGit): Promise<number> {
     return git.raw(['rev-list', '--count', 'HEAD..@{upstream}']).then((value) => Number(value.trim()) || 0).catch(() => 0)
   }
 
@@ -2109,7 +2113,7 @@ ${run.output}`))
   private async runBytes(cwd: string, args: readonly string[], options: { env?: Record<string, string>; input?: Buffer; userAction?: boolean } = {}): Promise<{ ok: boolean; stdout: Buffer; stderr: string }> {
     const guarded = await withoutRepoProgramsAsync(cwd, args, { env: options.env, ...(options.userAction ? { userAction: true } : {}) })
     return new Promise((resolvePromise) => {
-      const child = timeGitChild(() => spawn(gitFile(), guarded, {
+      const child = timeGitChild(() => spawnGit(gitFile(), guarded, {
         cwd,
         env: gitEnvFor(repoProgramEnv({ ...process.env, ...englishMessagesEnv(), GIT_OPTIONAL_LOCKS: '0', ...options.env })),
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -2827,7 +2831,7 @@ ${run.output}`))
    * Amending a commit any remote already has would need a force push, which is never
    * done. This also covers a new branch whose only commit came from a pushed branch.
    */
-  private async assertAmendable(git: SimpleGit): Promise<void> {
+  private async assertAmendable(git: RepositoryGit): Promise<void> {
     const hasHead = await git.raw(['rev-parse', '--verify', 'HEAD']).then(() => true).catch(() => false)
     if (!hasHead) throw gitErrors.create('git_amend_no_commit')
     const onRemote = await git.raw(['for-each-ref', '--count=1', '--contains', 'HEAD', '--format=%(refname)', 'refs/remotes'])
@@ -2895,7 +2899,7 @@ ${run.output}`))
    *   pushes into `main`. `matching` and `nothing` act as `simple`: Push names one branch, never all of them;
    * - a branch without an upstream is published under its own name and tracked (`-u`).
    */
-  private async pushTarget(cwd: string, git: SimpleGit, branch: string): Promise<{ remote: string; branch: string; publish: boolean }> {
+  private async pushTarget(cwd: string, git: RepositoryGit, branch: string): Promise<{ remote: string; branch: string; publish: boolean }> {
     const config = (key: string): Promise<string | null> =>
       git.raw(['config', '--get', key]).then((value) => value.trim() || null).catch(() => null)
     const [pushRemote, pushDefault, mode, remotes, upstream] = await Promise.all([

@@ -1,10 +1,10 @@
+import { execFileGitSync } from '../git/gitSpawn'
 import { randomUUID } from 'node:crypto'
 import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 import { findListedWorktreeAsync, WorktreeListPass } from '../lifecycle/worktreeRegistry'
 import { assertFolderUnchanged, folderSignatureAsync, walkOwnedContentAsync } from '../lifecycle/verifiedDelete'
 import { getThreadLifecycleGate } from '../queue/ThreadLifecycleAdmission'
-import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { access, mkdir, readdir, realpath, rename, rm } from 'node:fs/promises'
 import { nonInteractiveGitEnv } from '../git/gitEnv'
@@ -53,7 +53,7 @@ export type InFlightTest = (entry: Pick<ThreadJournalRecord, 'operationType' | '
 
 /** Only for {@link ThreadWorkspaceManager.resolveRepository}, which callers that cannot wait yet still use. */
 function gitSync(cwd: string, args: string[]): string {
-  return timeGitSync(() => execFileSync(gitFile(), withoutRepoPrograms(cwd, args), { cwd, env: gitEnvFor(repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })).trim()
+  return timeGitSync(() => execFileGitSync(gitFile(), withoutRepoPrograms(cwd, args), { cwd, env: gitEnvFor(repoProgramEnv()), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })).trim()
 }
 
 /** Git for the workspace's own commands, without blocking the daemon: the same check, command and answer as `execFileSync`. */

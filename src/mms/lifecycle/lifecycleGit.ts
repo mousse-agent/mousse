@@ -7,15 +7,17 @@ import { gitRunError, runGitProcess } from '../git/runGitProcess'
 /**
  * Git for lifecycle work, without blocking the daemon: it waits until the folder's volume answers, runs the central
  * check, and the command with a 30-second limit. A failure carries Git's `status`, `stdout` and `stderr`.
- * `beforeStart` runs after Git preparation. It can return a promise for a final synchronous check,
- * which runs immediately before the command starts.
+ * `beforeStart` runs after Git preparation and again immediately before the command starts. It can instead return a
+ * promise for a final synchronous check, which then runs immediately before the command starts.
  */
 export async function lifecycleGitAsync(cwd: string, args: string[], input?: string, maxBuffer = 32 * 1024 * 1024, env?: NodeJS.ProcessEnv, beforeStart?: () => void | Promise<() => void>): Promise<string> {
   const argv = await withoutRepoProgramsAsync(cwd, args, { stdin: input, env })
   const runEnv = repoProgramEnv({ ...process.env, ...await gitDirectoryEnvAsync(cwd), ...env })
+  // A check that reads first returns a promise for its final synchronous check: the reads run now, and that check right
+  // before Git starts (after any wait for its disk), with nothing awaited in between. A synchronous check runs now and then.
   const admission = beforeStart?.()
-  if (admission) (await admission)()
-  const ran = await runGitProcess(argv, { cwd, input, env: runEnv, timeout: 30_000, maxBuffer })
+  const final = admission ? await admission : beforeStart
+  const ran = await runGitProcess(argv, { cwd, input, env: runEnv, timeout: 30_000, maxBuffer, beforeStart: final })
   if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
   return ran.stdout.trimEnd()
 }

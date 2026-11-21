@@ -1,8 +1,6 @@
-import { spawn, spawnSync } from 'node:child_process'
 import { statSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
-import simpleGit, { type SimpleGit, type SimpleGitOptions } from 'simple-git'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { gitDirectoryEnv, gitDirectoryEnvAsync, mousseGitEnv, scopedGitConfig } from './gitEnv'
 import { assertGitAllowed, assertGitAllowedAsync, untilAborted, type UserAction } from './gitPolicy'
@@ -11,7 +9,9 @@ import { activeHiddenStore, checkStoreCommandAsync, hiddenStoreEnv } from './hid
 import { isTrustedRepoEntry, readRepoTrust, readRepoTrustAt, readRepoTrustAtAsync, repoTrustPath, repoTrustPathAsync, TRUSTED_FILTER_KEY, writeRepoTrust, type RepoTrustRecord } from './repoTrust'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { timeGitChild, timeGitSync } from '../diagnostics/turnBoundary'
-import { gitEnvFor, gitFile, simpleGitWithProgram } from './gitExecutable'
+import { gitEnvFor, gitFile } from './gitExecutable'
+import { spawnGit, spawnGitSync, withGitDiskAdmission } from './gitSpawn'
+import { LISTING_MAX_BUFFER, runGitProcess } from './runGitProcess'
 
 /**
  * Git commands Mousse runs on a user's repository start no program the repository configures.
@@ -342,7 +342,7 @@ const PROBE_ARGS = (args: readonly string[]): string[] => ['-c', 'core.fsmonitor
 function bareGit(cwd: string, args: string[]): BareResult {
   assertGitAllowed({ cwd, args })
   // A common directory Mousse names is named the same way for the probe as for the command it is for.
-  const result = timeGitSync(() => spawnSync(gitFile(), PROBE_ARGS(args), { cwd, encoding: 'utf8', windowsHide: true, timeout: probeTimeoutMs, maxBuffer: PROBE_MAX_BUFFER, env: gitEnvFor(repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...gitDirectoryEnv(cwd) })) }))
+  const result = timeGitSync(() => spawnGitSync(gitFile(), PROBE_ARGS(args), { cwd, encoding: 'utf8', windowsHide: true, timeout: probeTimeoutMs, maxBuffer: PROBE_MAX_BUFFER, env: gitEnvFor(repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...gitDirectoryEnv(cwd) })) }))
   const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT'
   return { ok: !result.error && result.status === 0, stdout: result.error ? '' : result.stdout ?? '', failed: Boolean(result.error), timedOut }
 }
@@ -357,7 +357,7 @@ async function bareGitAsync(cwd: string, args: string[], signal?: AbortSignal, c
   const env = repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...await untilAborted(gitDirectoryEnvAsync(cwd), signal), ...(ceiling ? { GIT_CEILING_DIRECTORIES: ceiling } : {}) })
   signal?.throwIfAborted()
   return new Promise((settle, reject) => {
-    const child = timeGitChild(() => spawn(gitFile(), PROBE_ARGS(args), { cwd, windowsHide: true, env: gitEnvFor(env), stdio: ['ignore', 'pipe', 'ignore'], signal }))
+    const child = timeGitChild(() => spawnGit(gitFile(), PROBE_ARGS(args), { cwd, windowsHide: true, env: gitEnvFor(env), stdio: ['ignore', 'pipe', 'ignore'], signal }))
     const chunks: Buffer[] = []
     let size = 0
     let stopped: 'time' | 'size' | undefined
@@ -380,7 +380,13 @@ async function bareGitAsync(cwd: string, args: string[], signal?: AbortSignal, c
       if (size > PROBE_MAX_BUFFER) stop('size')
       else chunks.push(chunk)
     })
-    child.on('error', () => finish({ ok: false, stdout: '', failed: true, timedOut: false }))
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EGITWORKER') {
+        done = true
+        clearTimeout(timer)
+        reject(error)
+      } else finish({ ok: false, stdout: '', failed: true, timedOut: false })
+    })
     child.on('close', (code) => finish(stopped
       ? { ok: false, stdout: '', failed: true, timedOut: stopped === 'time' }
       : { ok: code === 0, stdout: Buffer.concat(chunks).toString('utf8'), failed: false, timedOut: false }))
@@ -569,12 +575,12 @@ export async function repoProgramSettingsAsync(cwd: string, options: RepoProgram
 
 /**
  * Waits until `cwd`'s volume answers and reads its repository's programs, without blocking: throws the
- * {@link RepoProgramError} a Git command there would. Called before a run of simple-git commands whose
+ * {@link RepoProgramError} a Git command there would. Called before a run of Git commands whose
  * failures the caller turns into defaults, so a refused repository still shows its reason.
  */
 export async function checkRepoPrograms(cwd: string, options: WaitOptions = {}): Promise<RepoConfigFacts | undefined> {
   await waitForFolderAccess([resolve(cwd)], options)
-  // Inside a hidden store's scope, `guardedSimpleGit` runs nothing of the folder's config, so there is nothing to refuse.
+  // Inside a hidden store's scope, `guardedGit` runs nothing of the folder's config, so there is nothing to refuse.
   if (activeHiddenStore(cwd)) return undefined
   return (await programsForAsync(cwd, options.signal)).facts
 }
@@ -718,112 +724,56 @@ export function withoutDeref(args: readonly string[]): string[] {
   return ['update-ref', '--no-deref', ...args.slice(1)]
 }
 
-/** simple-git's checks Mousse turns off: the values it sets are its own, never a caller's (see {@link guardedSimpleGit}). */
-export const UNSAFE_ALLOWED = {
-  allowUnsafeHooksPath: true,
-  allowUnsafeFsMonitor: true,
-  allowUnsafeFilter: true,
-  allowUnsafeDiffTextConv: true,
-  allowUnsafeDiffExternal: true,
-  allowUnsafeMergeDriver: true,
-  allowUnsafeSshCommand: true,
-  allowUnsafeAskPass: true,
-  allowUnsafeEditor: true,
-  allowUnsafeGpgProgram: true,
-  allowUnsafePack: true,
-  allowUnsafeCredentialHelper: true,
-  allowUnsafeProtocolOverride: true,
-  // The instance's environment is the process's own (plus SAFE_LOOKUP_ENV), never a caller's; simple-git
-  // would otherwise refuse a GIT_CONFIG_GLOBAL, EDITOR, PAGER or askpass the user set.
-  allowUnsafeConfigPaths: true,
-  allowUnsafeConfigEnvCount: true,
-  allowUnsafeGitProxy: true,
-  allowUnsafeTemplateDir: true,
-  allowUnsafePager: true
-} as const
-
-/** The Git subcommand a simple-git method other than `raw` runs, for the central check. */
-const SIMPLE_GIT_COMMANDS: Record<string, readonly string[]> = {
-  status: ['status'], diff: ['diff'], diffSummary: ['diff'], log: ['log'], show: ['show'], branchLocal: ['branch'], branch: ['branch'],
-  checkIsRepo: ['rev-parse'], revparse: ['rev-parse'], listRemote: ['ls-remote'], getRemotes: ['remote'], tags: ['tag'], init: ['init'],
-  deleteLocalBranch: ['branch', '-d'], deleteLocalBranches: ['branch', '-d'], checkoutBranch: ['checkout', '-b'], checkoutLocalBranch: ['checkout', '-b'],
-  addConfig: ['config'], addRemote: ['remote', 'add'], removeRemote: ['remote', 'remove'], addTag: ['tag'], addAnnotatedTag: ['tag', '-a']
+/** Git reads and writes in the repository, checked before starting a tracked process. */
+export interface RepositoryGit {
+  raw(args: readonly string[]): Promise<string>
+  checkIsRepo(): Promise<boolean>
+  branchLocal(): Promise<{ current: string | null; all: string[] }>
 }
 
-/**
- * The command a simple-git call runs, as the check should see it: the method's subcommand followed by the
- * string arguments it was given (`branch(['-d', name])` is `git branch -d name`, not a branch listing).
- * An options object only ever adds reading options for the methods used here, so only strings are kept.
- */
-function simpleGitCommand(method: string, parameters: readonly unknown[] = []): string[] {
-  const words = parameters.flat().filter((value): value is string => typeof value === 'string')
-  return [...(SIMPLE_GIT_COMMANDS[method] ?? [method]), ...words]
-}
-
-/**
- * `git` with every `raw` command, and every other method, checked by {@link assertGitAllowed} first: for
- * a simple-git instance made with settings of its own (`safeWorktreeGit`).
- */
-export function policedSimpleGit(cwd: string, git: SimpleGit): SimpleGit {
-  return new Proxy(git, {
-    get(target, key, receiver) {
-      const value = Reflect.get(target, key, receiver) as unknown
-      if (typeof key === 'symbol' || typeof value !== 'function' || key === 'env' || key === 'then') return value
-      return async (...parameters: unknown[]) => {
-        const args = key === 'raw' ? parameters.flat().filter((item): item is string => typeof item === 'string') : simpleGitCommand(key, parameters)
-        // Without blocking: the folder answers first, then the check reads what it needs with async calls.
-        await waitForFolderAccess([resolve(cwd)])
-        await assertGitAllowedAsync({ cwd, args })
-        return await (value as (...values: unknown[]) => unknown).apply(target, parameters)
-      }
-    }
+export function guardedGit(cwd: string, options: { isolatedCheckout?: boolean } = {}): RepositoryGit {
+  const isolatedCheckout = options.isolatedCheckout === true
+  const run = (args: readonly string[]) => withGitDiskAdmission(cwd, async () => {
+    await waitForFolderAccess([resolve(cwd)])
+    const store = isolatedCheckout ? undefined : activeHiddenStore(cwd)
+    if (store) await checkStoreCommandAsync(store, cwd, args)
+    else await assertGitAllowedAsync({ cwd, args, lockFree: !isolatedCheckout })
+    // Isolated checkouts supply their own disabling overrides. The store has only its own configuration.
+    const config = store || isolatedCheckout ? [] : await noRepoProgramArgsAsync(cwd, args)
+    const env = repoProgramEnv(isolatedCheckout ? process.env : { ...process.env, GIT_OPTIONAL_LOCKS: '0' })
+    const result = await runGitProcess([...config, ...args], {
+      cwd, env: store ? hiddenStoreEnv(store, env) : env, maxBuffer: LISTING_MAX_BUFFER
+    })
+    if (result.error) throw result.error
+    return result
   })
-}
-
-/**
- * simple-git for `cwd`. Each method call gets a fresh instance with the settings worked out for that
- * command, so a config written after an earlier call is seen. simple-git refuses these keys unless
- * allowed; they are only ever set to the values above, never to a caller's.
- *
- * Nothing here blocks the daemon: each method first waits until the folder's volume answers, then runs the
- * central check ({@link assertGitAllowedAsync}) and works out the settings ({@link repoProgramSettingsAsync})
- * without blocking. So each method returns a promise, and a refusal (by the central check, or for a
- * repository whose programs Mousse cannot turn off) rejects it rather than throwing. A caller that turns
- * failed reads into defaults calls {@link checkRepoPrograms} first, so a refused repository still shows its
- * reason.
- */
-export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOptions, 'baseDir' | 'config' | 'unsafe'>> = {}): SimpleGit {
-  // A command in a hidden store reads only the store's config (`hiddenStoreEnv`): nothing of the folder's is overridden.
-  const forCommand = (config: string[]): SimpleGit => simpleGitWithProgram(({ binary, allowUnsafeCustomBinary }) => simpleGit({
-    ...options,
-    ...(binary ? { binary } : {}),
-    baseDir: cwd,
-    config,
-    unsafe: { ...UNSAFE_ALLOWED, ...(allowUnsafeCustomBinary ? { allowUnsafeCustomBinary } : {}) }
-  }))
-  return new Proxy({} as SimpleGit, {
-    get(_target, key) {
-      // Not a thenable: awaiting the instance itself must not call a Git method.
-      if (key === 'then' || typeof key === 'symbol') return undefined
-      return async (...parameters: unknown[]) => {
-        // Only `raw` takes free-form arguments; every other method used here only reads.
-        const args = key === 'raw' ? parameters.flat().filter((value): value is string => typeof value === 'string') : []
-        const command = key === 'raw' ? args : simpleGitCommand(key, parameters)
-        // Before anything reads the folder.
-        await waitForFolderAccess([resolve(cwd)])
-        // Inside a hidden store's scope (snapshot review) the command goes through the store; nowhere else is a folder's Git redirected.
-        const store = activeHiddenStore(cwd)
-        // Lock-free: the instance's config holds NO_INDEX_REFRESH (a store's isolation turns it off too) and its
-        // environment turns optional locks off. A store command is checked with the store it names.
-        if (store) await checkStoreCommandAsync(store, cwd, command)
-        else await assertGitAllowedAsync({ cwd, args: command, lockFree: true })
-        const config = store ? [] : await repoProgramSettingsAsync(cwd, { write: writesThroughFilters(args) })
-        // No optional locks: a status or diff read here never refreshes and rewrites the index.
-        const instance = forCommand(config).env(gitEnvFor(store ? hiddenStoreEnv(store, repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) : repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' }))) as unknown as Record<string, (...values: unknown[]) => unknown>
-        return await instance[key]!(...parameters)
+  const raw = async (args: readonly string[]) => {
+    const result = await run(args)
+    // A quiet Git read can exit nonzero with an empty stderr (detached HEAD, a missing quiet ref, or diff --no-index).
+    if (result.status !== 0 && result.stderr) throw new Error(result.stderr)
+    return result.stdout
+  }
+  return {
+    raw,
+    async checkIsRepo() {
+      const result = await run(['rev-parse', '--is-inside-work-tree'])
+      if (result.status === 0) return result.stdout.trim() === 'true'
+      if (/not a git repository|kein git-repository/i.test(result.stderr)) return false
+      throw new Error(result.stderr || 'Git could not check the repository')
+    },
+    async branchLocal() {
+      const listing = await raw(['branch', '-v', '--no-color'])
+      const all: string[] = []
+      let current: string | null = null
+      for (const line of listing.split(/\r?\n/)) {
+        const name = /^\((?:HEAD )?detached (?:from|at) (\S+)\)/.exec(line.slice(2))?.[1] ?? /^\S+/.exec(line.slice(2))?.[0]
+        if (!name) continue
+        all.push(name)
+        if (line.startsWith('*')) current = name
       }
+      return { current, all }
     }
-  })
+  }
 }
 
 /** For tests: forget cached repositories. */

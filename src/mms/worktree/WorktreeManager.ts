@@ -1,8 +1,8 @@
 import { access, readdir, stat } from 'fs/promises'
 import { GIT_NULL_DEVICE } from '../git/gitNullDevice'
 import { basename, dirname, join, relative, resolve, sep } from 'path'
-import simpleGit, { SimpleGit } from 'simple-git'
-import { guardedSimpleGit, HOOK_EVENTS, policedSimpleGit, repoProgramEnv, UNSAFE_ALLOWED } from '../git/repoPrograms'
+import { guardedGit, HOOK_EVENTS, type RepositoryGit } from '../git/repoPrograms'
+import { withGitDiskAdmission } from '../git/gitSpawn'
 import { RepositoryContext } from './RepositoryContext'
 import { WorktreeIdentity } from './WorktreeIdentity'
 import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
@@ -10,7 +10,6 @@ import { getMousseHomeDir } from '../data/paths'
 import { samePath } from '../lifecycle/verifiedDelete'
 import { agentWorktreeBases, chosenFolderPlace, defaultAgentWorktreeBase, isAgentWorktreePlace, placeAgentWorktreeBase } from './worktreeLayout'
 import { cleanupRecordFor, DELETING_NAME, findCleanupRecord, resumeCleanupAsync, verifiedCleanupAsync } from './verifiedCleanup'
-import { gitEnvFor, simpleGitWithProgram } from '../git/gitExecutable'
 import { addWorktree, worktreeCheckoutPlan } from './worktreeCheckout'
 
 
@@ -114,8 +113,8 @@ export class WorktreeManager {
   }
 
   /** Git for the repository; no program the repository configures runs. */
-  private get git(): SimpleGit {
-    return this.repository?.git ?? guardedSimpleGit(this.repoRoot)
+  private get git(): RepositoryGit {
+    return this.repository?.git ?? guardedGit(this.repoRoot)
   }
 
   async init(): Promise<void> {
@@ -180,7 +179,7 @@ export class WorktreeManager {
       const { git: checkoutGit, safety } = options?.safeCheckout
         ? await safeWorktreeGit(repository.root)
         : { git: repository.git, safety: [] }
-      baseSha ??= (await repository.git.revparse(['HEAD'])).trim()
+      baseSha ??= (await repository.git.raw(['rev-parse', 'HEAD'])).trim()
       // The plan's pattern file is read before anything is made (`worktreeCheckout.ts`); a missing one refuses the worktree.
       const plan = await worktreeCheckoutPlan(repository.root)
       beforeCreate?.({ path: identity.path, branch: identity.branch, repositoryRoot: repository.root, baseSha })
@@ -372,17 +371,19 @@ export class WorktreeManager {
         if (resumed === 'gone' && renamed) return { success: false, error: `Another cleanup finished ${worktreeInfo.path}.`, kept: { ignoredFiles: 0, code: 'cleanup_running', reason: `Kept: another cleanup finished ${worktreeInfo.path}.` } }
         if (resumed !== 'restart' && resumed !== 'gone') {
           if ('kept' in resumed) return { success: false, error: resumed.kept.reason, kept: resumed.kept }
-          if (options.deleteBranch === true) await repository.git.branch(['-d', worktreeInfo.branch])
+          if (options.deleteBranch === true) await repository.git.raw(['branch', '-d', worktreeInfo.branch])
           return { success: true, ...resumed }
         }
       }
       let kept: Pick<WorktreeCleanupResult, 'copy' | 'admin' | 'late' | 'adminLater'> = {}
       if (await exists(worktreePath)) {
         // Read in the worktree with hooks, the file system monitor and every filter driver off, so none runs for the check.
-        const { git: inWorktree, safety: worktreeSafety } = options.safeCheckout
-          ? await safeWorktreeGit(worktreePath)
-          : { git: guardedSimpleGit(worktreePath), safety: [] }
-        const inWorktreeGit = (args: string[]) => inWorktree.raw([...worktreeSafety, ...args])
+        const inWorktreeGit = options.safeCheckout
+          ? (args: string[]) => withGitDiskAdmission(worktreePath, async () => {
+            const { git, safety } = await safeWorktreeGit(worktreePath)
+            return git.raw([...safety, ...args])
+          })
+          : guardedGit(worktreePath).raw
         const ignored = await ignoredFilesOf(inWorktreeGit)
         // A dirty check is no proof for a delete: the worktree could be clean a moment later, and Git would then remove
         // it with its ignored files and its own data, keeping nothing. So it stays, and nothing runs that could remove it.
@@ -395,7 +396,7 @@ export class WorktreeManager {
         if ('kept' in outcome) return { success: false, error: outcome.kept.reason, kept: outcome.kept }
         kept = outcome
       }
-      if (options.deleteBranch === true) await repository.git.branch(['-d', worktreeInfo.branch])
+      if (options.deleteBranch === true) await repository.git.raw(['branch', '-d', worktreeInfo.branch])
       return { success: true, ...kept }
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
@@ -508,13 +509,8 @@ async function keepThenDelete(input: {
  * overrides that switch off hooks, the file system monitor and every configured clean, smudge and process
  * filter; a thread worktree that holds a pull request's commits keeps the same values in its own configuration.
  */
-export async function safeWorktreeGit(repositoryRoot: string): Promise<{ git: SimpleGit; safety: string[] }> {
-  // The unsafe library flags only permit fixed disabling overrides and the process's own environment.
-  const git = policedSimpleGit(repositoryRoot, simpleGitWithProgram(({ binary, allowUnsafeCustomBinary }) => simpleGit({
-    ...(binary ? { binary } : {}),
-    baseDir: repositoryRoot,
-    unsafe: { ...UNSAFE_ALLOWED, ...(allowUnsafeCustomBinary ? { allowUnsafeCustomBinary } : {}) }
-  }).env(gitEnvFor(repoProgramEnv()))))
+export async function safeWorktreeGit(repositoryRoot: string): Promise<{ git: RepositoryGit; safety: string[] }> {
+  const git = guardedGit(repositoryRoot, { isolatedCheckout: true })
   const safety = ['-c', `core.hooksPath=${GIT_NULL_DEVICE}`, '-c', 'core.fsmonitor=false', ...HOOK_EVENTS.flatMap((event) => ['-c', `hook.${event}.enabled=false`])]
   // Git LFS and other inherited drivers must never execute on dispatched content,
   // including Git's dirty-file check before worktree removal.

@@ -40,6 +40,7 @@ import { prepareMemoryMonitor } from '../../mms/diagnostics/startMemoryMonitor'
 import { formatStartupTiming, startupPhase, startupTimingBegin, startupTimingEnd } from '../../mms/startup/startupTiming'
 import { logInfo } from '../../mms/log/diag'
 import { startDaemonExitWatchdog } from '../daemonExitWatchdog'
+import { resumeGitSpawnWorkers } from '../../mms/git/gitSpawn'
 import {
   DAEMON_EXIT_DEADLINE_MS,
   armDaemonExitDeadline,
@@ -114,6 +115,7 @@ export interface DaemonForegroundOptions {
  * Every failure after owner/MMS creation uses the same idempotent shutdown path.
  */
 export async function runDaemonForeground(opts: DaemonForegroundOptions): Promise<DaemonLifecycleState> {
+  await resumeGitSpawnWorkers()
   const homeDir = canonicalizeHome(opts.homeDir)
   const startedAt = new Date().toISOString()
   const startedAtMs = performance.now()
@@ -209,6 +211,11 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
   state.pollStop = setInterval(checkStopRequest, SERVICE_POLL_INTERVAL_MS)
 
   try {
+    // A stop can arrive while startup is waiting for the previous daemon's Git helpers to drain.
+    if (opts.stopSignal?.aborted) {
+      await shutdown('stop-signal')
+      return state
+    }
     // Before owner creation, so an Electron quit during startup is held too.
     if (!opts.skipSignals) {
       releaseElectronQuit = await installElectronDaemonQuit(shutdown, error => {

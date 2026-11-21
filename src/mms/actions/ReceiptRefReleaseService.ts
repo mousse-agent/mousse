@@ -63,8 +63,9 @@ async function preparedReceiptRefReleaseCleanup(location: string) {
       if (error instanceof FolderNotAnsweringError) continue
       throw error
     }
-    const repository = await resolveRepositoryIdentityAsync(path)
-    if (!repository.capability.allowed || repository.key !== workspace?.repositoryId) continue
+    // A checkout that is gone, or whose repository cannot be read, is not where the releases settle.
+    const repository = await resolveRepositoryIdentityAsync(path).catch(() => undefined)
+    if (!repository?.capability.allowed || repository.key !== workspace?.repositoryId) continue
     const releases = pending.map((entry) => {
       const intent = entry.details as ReleaseIntent
       if (intent?.version !== 1 || intent.repositoryId !== repository.key) throw new Error('Cannot verify a pending Undo release repository for purge.')
@@ -291,48 +292,63 @@ export class ReceiptRefReleaseService {
     const argv = deletes ? await bounded(withoutRepoProgramsAsync(workspacePath, ['update-ref', '--no-deref', '--stdin'], { stdin: transaction(ready) })) : undefined
     await bounded(rereadRepositoryFacts(facts, repository))
     check()
-    // From here to Git's start, no asynchronous work runs. Other processes that publish claims share this lease.
-    const missed: string[] = []
-    const inventory = buildResourceInventoryFromFacts(this.store, task, facts, {}, (what) => missed.push(what))
-    const ownMissed = missed.length
-    let external: ReturnType<typeof getExternalResourceClaimsFromFacts>
-    try { external = getExternalResourceClaimsFromFacts(this.store, new Set([task.taskId]), facts, (what) => missed.push(what)) }
-    catch (error) { if (missed.length > ownMissed) return { changed: missed[ownMissed]! }; throw error }
-    if (missed.length) return { changed: missed[0]! }
-    if (inventory.blockers.length) throw new OwnershipBlocked(`Receipt ref release needs unambiguous ownership: ${inventory.blockers.join('; ')}`)
-    options.afterCheck?.()
-    const refused: Array<{ candidate: Candidate; reason: string }> = []
-    for (const { candidate, intent } of ready) {
-      for (const ref of intent.refs) {
-        const resources = inventory.resources.filter((resource) => resource.kind === 'git-ref' && resource.identity === ref.name)
-        // Receipt refs are named by their receipt's id, so a claim on the same name is on this ref whatever repository the
-        // claim records: a record written before the repository moved still names the old one.
-        if (external.some((resource) => resource.kind === 'git-ref' && resource.identity === ref.name)) { refused.push({ candidate, reason: `Reference is associated with another task or profile: ${ref.name}` }); break }
-        // A thread whose checkout can't be verified holds what its records may name, and its repositories (recorded or real).
-        const unverified = unverifiedOwnerOver(external, { ...repository, ref: ref.name })
-        if (unverified) { refused.push({ candidate, reason: `${unverified.reason} ${ref.name} is kept.` }); break }
-        if (!resources.length || resources.some((resource) => resource.ownerTaskId !== task.taskId || resource.repositoryId !== identity.key || resource.claims.length > 0 || resource.ownership === 'unknown')) { refused.push({ candidate, reason: `Reference has an active, shared or unknown claim: ${ref.name}` }); break }
-      }
-    }
-    for (const { candidate, reason } of refused) retain(candidate, reason)
+    // The ownership check runs right before Git starts (`runGitProcess`'s `beforeStart`, after any wait for its disk),
+    // with nothing awaited in between; with no ref left to delete, it runs here. Other processes that publish claims
+    // share this lease. The transaction names every ready receipt's refs, so it starts only when all of them pass: a
+    // receipt refused here is retained, and the others are released by the next hold.
+    let end: 'next' | { changed: string } | undefined
     const approved: typeof ready = []
-    for (const item of ready) {
-      check()
-      const { candidate, intent } = item
-      if (handled.has(intent.receiptId)) continue
-      try {
-        if (!candidate.intent) journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'prepared', details: intent })
-        prepareUndoRefRelease(identity, intent.receiptId, candidate.operationId)
-        approved.push(item)
-      } catch (error) { retain(candidate, (error as Error).message) }
-    }
-    if (!approved.length) return 'next'
-    try {
+    const notAdmitted = new Error('Receipt release was not admitted.')
+    // What the ownership check throws ends the release, as before Git; from the first prepared receipt on, it retains them.
+    let preparing = false
+    const admit = (): void => {
+      const missed: string[] = []
+      const inventory = buildResourceInventoryFromFacts(this.store, task, facts, {}, (what) => missed.push(what))
+      const ownMissed = missed.length
+      let external: ReturnType<typeof getExternalResourceClaimsFromFacts>
+      try { external = getExternalResourceClaimsFromFacts(this.store, new Set([task.taskId]), facts, (what) => missed.push(what)) }
+      catch (error) {
+        if (missed.length > ownMissed) { end = { changed: missed[ownMissed]! }; throw notAdmitted }
+        throw error
+      }
+      if (missed.length) { end = { changed: missed[0]! }; throw notAdmitted }
+      if (inventory.blockers.length) throw new OwnershipBlocked(`Receipt ref release needs unambiguous ownership: ${inventory.blockers.join('; ')}`)
+      options.afterCheck?.()
+      const refused: Array<{ candidate: Candidate; reason: string }> = []
+      for (const { candidate, intent } of ready) {
+        for (const ref of intent.refs) {
+          const resources = inventory.resources.filter((resource) => resource.kind === 'git-ref' && resource.identity === ref.name)
+          // Receipt refs are named by their receipt's id, so a claim on the same name is on this ref whatever repository the
+          // claim records: a record written before the repository moved still names the old one.
+          if (external.some((resource) => resource.kind === 'git-ref' && resource.identity === ref.name)) { refused.push({ candidate, reason: `Reference is associated with another task or profile: ${ref.name}` }); break }
+          // A thread whose checkout can't be verified holds what its records may name, and its repositories (recorded or real).
+          const unverified = unverifiedOwnerOver(external, { ...repository, ref: ref.name })
+          if (unverified) { refused.push({ candidate, reason: `${unverified.reason} ${ref.name} is kept.` }); break }
+          if (!resources.length || resources.some((resource) => resource.ownerTaskId !== task.taskId || resource.repositoryId !== identity.key || resource.claims.length > 0 || resource.ownership === 'unknown')) { refused.push({ candidate, reason: `Reference has an active, shared or unknown claim: ${ref.name}` }); break }
+        }
+      }
+      for (const { candidate, reason } of refused) retain(candidate, reason)
+      if (refused.length && deletes) { end = 'next'; throw notAdmitted }
+      preparing = true
+      for (const item of ready) {
+        check()
+        const { candidate, intent } = item
+        if (handled.has(intent.receiptId)) continue
+        try {
+          if (!candidate.intent) journal.append({ operationId: candidate.operationId, operationType: 'undo-ref-release', state: 'prepared', details: intent })
+          prepareUndoRefRelease(identity, intent.receiptId, candidate.operationId)
+          approved.push(item)
+        } catch (error) { retain(candidate, (error as Error).message) }
+      }
+      // A receipt left out stays prepared or retained; the transaction, which names it, waits for the next hold.
+      if (!approved.length || deletes && approved.length !== ready.length) { end = 'next'; throw notAdmitted }
       options.afterPrepared?.()
       check()
-      if (argv && approved.some(({ present }) => present.length)) {
+    }
+    try {
+      if (argv) {
         const ran = await withScopedGitConfig(NO_REF_LOCK_RETRY, () =>
-          runGitProcess(argv, { cwd: workspacePath, env: repoProgramEnv(), input: transaction(approved) }))
+          runGitProcess(argv, { cwd: workspacePath, env: repoProgramEnv(), input: transaction(ready), beforeStart: admit }))
         check()
         if (ran.error || ran.status !== 0) {
           if (approved.length > 1) for (const { intent } of approved) isolate.add(intent.receiptId)
@@ -345,9 +361,11 @@ export class ReceiptRefReleaseService {
           }
           return 'next'
         }
-      }
+      } else admit()
       options.afterGit?.()
     } catch (error) {
+      if (error === notAdmitted) return end!
+      if (!preparing) throw error
       check()
       for (const { candidate } of approved) retain(candidate, error instanceof Error ? error.message : String(error))
       return 'finished'

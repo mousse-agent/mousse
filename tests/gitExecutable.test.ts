@@ -5,7 +5,7 @@ import { join, win32 } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { tryGit, tryGitAsync } from '../src/mms/actions/git'
 import { findGitOnPath, gitEnvFor, gitFile, gitProgramSettled, resetGitProgram, resolveGitProgram, withLauncherEnvironment, type GitLocatorDeps } from '../src/mms/git/gitExecutable'
-import { guardedSimpleGit } from '../src/mms/git/repoPrograms'
+import { guardedGit } from '../src/mms/git/repoPrograms'
 
 const ROOT = 'C:\\Program Files\\Git'
 const LAUNCHER = `${ROOT}\\cmd\\git.exe`
@@ -179,7 +179,7 @@ describe.skipIf(!installed)('Git for Windows through the real executable', { tim
     expect((await tryGitAsync(repo, ['rev-parse', '--git-dir'])).stdout).toBe('.git')
   })
 
-  it("starts the real executable for Mousse's own commands, their checks, and simple-git", async () => {
+  it("starts the real executable for repository commands and their checks", async () => {
     await realGit()
     const repo = scratch()
     execFileSync(installed!.launcher, ['init', '-q'], { cwd: repo, env: daemonEnv() })
@@ -188,7 +188,7 @@ describe.skipIf(!installed)('Git for Windows through the real executable', { tim
     try {
       expect(tryGit(repo, ['rev-parse', '--git-dir']).ok).toBe(true)
       expect((await tryGitAsync(repo, ['rev-parse', '--git-dir'])).ok).toBe(true)
-      await guardedSimpleGit(repo).raw(['rev-parse', '--git-dir'])
+      await guardedGit(repo).raw(['rev-parse', '--git-dir'])
     } finally {
       delete process.env.GIT_TRACE2_EVENT
     }

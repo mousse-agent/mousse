@@ -6,6 +6,7 @@
 import type { MousseMainService } from './contract'
 import type { MmsProtocolServer } from '../mms/protocol/server'
 import { readOwnerRecord } from '../mms/ownership/MmsOwnerLease'
+import { drainGitSpawnWorkers } from '../mms/git/gitSpawn'
 import {
   clearStopRequest,
   pollUntilRuntimeStopped,
@@ -270,6 +271,7 @@ async function tearDownRemaining(
     }
   }
   state.mms = null
+  await drainGitSpawnWorkers()
 
   if (state.runtimeWritten && state.ownerToken) {
     try {

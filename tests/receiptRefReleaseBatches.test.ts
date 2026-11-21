@@ -10,6 +10,7 @@
  * - a stop between the recorded intent and the delete leaves the refs, and the next run finishes the release.
  */
 import { execFileSync, spawn } from 'node:child_process'
+import { spawnGit } from '../src/mms/git/gitSpawn'
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -39,9 +40,10 @@ import * as reservations from '../src/mms/actions/undoRefClaims'
 import * as folderMoves from '../src/mms/lifecycle/renameFolder'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 
-vi.mock('node:child_process', async (importOriginal) => {
-  const childProcess = await importOriginal<typeof import('node:child_process')>()
-  return { ...childProcess, spawn: vi.fn(childProcess.spawn) }
+// Git starts are counted where Mousse starts them (`gitSpawn`), on the spawn helper or on this thread.
+vi.mock('../src/mms/git/gitSpawn', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/mms/git/gitSpawn')>()
+  return { ...actual, spawnGit: vi.fn(actual.spawnGit) }
 })
 
 // Each case makes several checkpoints, each a few Git processes; process starts are slow on Windows.
@@ -230,7 +232,8 @@ it('a copied thread in another profile cannot publish the same-OID claim during 
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)
     } })
   ` }, bundle: true, platform: 'node', format: 'esm', outfile: bundle, banner: { js: CRASH_CHILD_REQUIRE } })
-  const child = spawn(process.execPath, [bundle, f.home, f.root, workspace.worktreePath, String(advance(0))], { stdio: ['ignore', 'pipe', 'inherit'] })
+  // The bundle is outside the repository: the packages it loads when it runs (koffi for Git on Windows) come from the repository's.
+  const child = spawn(process.execPath, [bundle, f.home, f.root, workspace.worktreePath, String(advance(0))], { stdio: ['ignore', 'pipe', 'inherit'], env: { ...process.env, NODE_PATH: resolve('node_modules') } })
   const exited = once(child, 'exit')
   try {
     const prepared = once(child.stdout, 'data').then(([chunk]) => String(chunk).trim())
@@ -511,14 +514,14 @@ it('lets Git unwind the first lock when the second ref is busy, then releases bo
   git(f.repo, 'config', 'core.filesRefLockTimeout', '60000')
   const [firstLock, secondLock] = receipt.retainedRefs.map((ref) => join(repository.commonDir, `${ref}.lock`))
   writeFileSync(secondLock!, '')
-  vi.mocked(spawn).mockClear()
+  vi.mocked(spawnGit).mockClear()
   try {
     let preparedAt = 0
     const result = await new ReceiptRefReleaseService(store, 'task', () => advance(0)).release(workspace.worktreePath, {
       discovery, afterPrepared: () => { preparedAt = performance.now() }
     })
-    const writers = vi.mocked(spawn).mock.calls.flatMap(([, argv], i) => Array.isArray(argv) && argv.includes('update-ref') && argv.includes('--stdin')
-      ? [vi.mocked(spawn).mock.results[i]!.value as ReturnType<typeof spawn>] : [])
+    const writers = vi.mocked(spawnGit).mock.calls.flatMap(([, argv], i) => argv.includes('update-ref') && argv.includes('--stdin')
+      ? [vi.mocked(spawnGit).mock.results[i]!.value as ReturnType<typeof spawnGit>] : [])
     expect(writers).toHaveLength(1)
     expect(preparedAt).toBeGreaterThan(0)
     expect(performance.now() - preparedAt).toBeLessThan(27_000)

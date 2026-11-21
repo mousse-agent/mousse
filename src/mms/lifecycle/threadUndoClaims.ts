@@ -105,8 +105,9 @@ export async function withMovingUndoClaims<T>(location: string, move: () => T, r
   const claims = threadUndoClaims(location)
   if (!claims) return move()
   for (const cwd of claims.paths) {
-    const repository = await resolveRepositoryIdentityAsync(cwd)
-    if (!matches(repository, claims)) continue
+    // A path that is gone, or whose repository cannot be read, does not verify the claims.
+    const repository = await resolveRepositoryIdentityAsync(cwd).catch(() => undefined)
+    if (!repository || !matches(repository, claims)) continue
     const lease = await acquireRepositoryLease(repository, { maxWaitMs: 30_000 })
     try {
       if (restore) {

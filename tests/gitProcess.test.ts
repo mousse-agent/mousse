@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { runGit, type GitLine } from '../src/mms/git/gitProcess'
+import { runGitProcess } from '../src/mms/git/runGitProcess'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -146,6 +147,16 @@ describe('runGit', () => {
     const [parent, child] = pids(pidFile)
     expect(await waitDead(parent)).toBe(true)
     expect(await waitDead(child)).toBe(true)
+  }, 30_000)
+
+  it.runIf(process.platform === 'win32')('waits for a bounded Git command and its children to exit after a timeout', async () => {
+    const cwd = folder()
+    const pidFile = join(cwd, 'pids')
+    const result = await runGitProcess(aliasArgs(cwd, hangingTree(pidFile)), { cwd, env: process.env, timeout: 3_000 })
+    expect(result.error?.code).toBe('ETIMEDOUT')
+    const [parent, child] = pids(pidFile)
+    expect(alive(parent)).toBe(false)
+    expect(alive(child)).toBe(false)
   }, 30_000)
 
   it('cancels on abort: the whole process tree ends before the result settles', async () => {

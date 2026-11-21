@@ -21,6 +21,7 @@
     "tests/gitProcess.test.ts",
     "tests/gitServiceConfiguredUpstream.test.ts",
     "tests/gitServiceWrites.test.ts",
+    "tests/gitSpawnWorker.test.ts",
     "tests/guiMmsController.test.ts",
     "tests/harness/claudeLockedProcess.test.ts",
     "tests/harness/claudeMcpCommandLine.test.ts",
