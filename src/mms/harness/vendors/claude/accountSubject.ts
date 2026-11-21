@@ -170,7 +170,9 @@ export function claudeAccountSubject(env: NodeJS.ProcessEnv, options: AccountSub
   const account = json(configDir ? join(configDir, '.claude.json') : join(home, '.claude.json'))?.oauthAccount
   if (isRecord(account) && typeof account.accountUuid === 'string' && account.accountUuid)
     parts.push(`claude.ai:${account.accountUuid}:${typeof account.organizationUuid === 'string' ? account.organizationUuid : ''}`)
-  if (!parts.length) return undefined
+  const dropInHasCredential = dropIns.some((entries) => entries.some(([name, value]) =>
+    CLAUDE_DIRECT_CREDENTIALS.includes(name) && typeof value === 'string' && value.trim()))
+  if (!parts.length && !dropInHasCredential) return undefined
   if (dropIns.length) parts.push(`managed:${sha(JSON.stringify(dropIns))}`)
   // A proxy is not a credential, but the same credential through another route is another account.
   const route = value('ANTHROPIC_BASE_URL')

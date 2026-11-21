@@ -1623,6 +1623,10 @@ export class CodexProviderService {
         const app = this.app
         if (app?.conn === conn) {
           const prepared = options.input && this.canAdmitThread(app) ? await this.prepareThread(conn, options.input, signal) : undefined
+          // A terminal startup notification can arrive while preparing the thread. Keep writes fenced
+          // until its check settles, then validate the same connection before reserving a slot.
+          while (this.app === app && app.verifiedAccountRevision !== app.accountRevision && this.probing)
+            await abortable(this.probing, signal)
           signal.throwIfAborted()
           const owner = this.threadOwner(conn)
           const savedId = prepared?.saved?.codexThreadId ?? options.savedId

@@ -167,6 +167,7 @@ interface LaunchContext {
   threadId: string
   signal?: AbortSignal
   timeoutMs: number
+  beforeStart(): void
   /** The user's servers that were left out: their registration failed. */
   leftOut(names: string[]): void
   /** The user's servers that were left out because this computer's Claude Code policy forbids added servers. */
@@ -985,6 +986,15 @@ const historyKey = (history: string) => createHash('sha256').update(history).dig
 function sessionBoundTo(saved: SavedSession, instanceId: string): boolean {
   return (saved.instanceId ?? CLAUDE_INSTANCE_ID) === instanceId
 }
+
+function sessionCredentialIdentity(identity: string | undefined, subject: string | undefined, credentialKey: string | undefined): string | null {
+  return credentialKey ? historyKey(JSON.stringify([identity, subject, credentialKey])) : null
+}
+
+function sessionUsesCredential(saved: SavedSession, identity: string | null): boolean {
+  // Legacy sessions have no proof of which credential opened them. Opaque settings cannot prove a match either.
+  return identity !== null && saved.credentialIdentity === identity
+}
 /** The session now holds `history`: the next turn resumes it, and an undo back to here can cut it after its latest turn. */
 function fingerprintSession(saved: SavedSession, history: string): void {
   saved.historyKey = historyKey(history)
@@ -1248,9 +1258,25 @@ export class ClaudeSubscriptionProviderService {
     let compacted = false
     try {
       throwIfStopped()
-      if (this.checkDue()) await this.status()
+      if (this.stopped || this.settingsError || this.signedOut() || !this.binary()) return false
+      const policy = await this.dependencies.turnSettings?.(saved.cwd)
       throwIfStopped()
-      if (!this.configured()) return false
+      if (policy?.refuse) return false
+      const compactionEnv = () => this.finalEnv({
+        ...this.environment(),
+        ...this.compactionEntrypoint(saved),
+        ...(options.cacheCold ? { DISABLE_PROMPT_CACHING: '1' } : {})
+      })
+      const env = compactionEnv()
+      const signIn = await this.readSignIn(env, controller.signal)
+      throwIfStopped()
+      if (signIn.result.kind !== 'signed_in') return false
+      const subject = this.probedSubject(env, signIn.result)
+      const canResume = () => this.settings.sessions?.[threadId] === saved &&
+        !this.stopped && !this.signedOut() && signIn.epoch === this.signInEpoch &&
+        subject === this.accountSubject(compactionEnv()) &&
+        sessionUsesCredential(saved, sessionCredentialIdentity(signIn.identity, subject, this.turnCredentialKey(saved.cwd, policy?.settings)))
+      if (!canResume()) return false
       // A live process holds the conversation as it was; it is closed so the next turn resumes the compacted one.
       const live = this.live.get(threadId)
       if (live && !live.dead) {
@@ -1258,18 +1284,17 @@ export class ClaudeSubscriptionProviderService {
         live.close('closed')
         this.live.delete(threadId)
       }
-      sent = true
       query = await this.createQuery(`/compact${focus ? ` ${focus}` : ''}`, {
-        ...this.options(saved.cwd, controller, this.finalEnv({
-          ...this.environment(),
-          ...this.compactionEntrypoint(saved),
-          ...(options.cacheCold ? { DISABLE_PROMPT_CACHING: '1' } : {})
-        })),
+        ...this.options(saved.cwd, controller, env, [], policy?.settings),
         resume: saved.sessionId,
         ...(saved.model ? { model: saved.model } : {}),
         includePartialMessages: false,
         // Compaction runs no tools.
         canUseTool: async () => ({ behavior: 'deny', message: 'No tools run while compacting.' })
+      }, undefined, () => {
+        throwIfStopped()
+        if (!canResume()) throw new Error('The Claude Code session or sign-in changed before compaction could start. Try again.')
+        sent = true
       })
       for await (const message of query) {
         if (message.type === 'system' && message.subtype === 'compact_boundary') compacted = true
@@ -1658,6 +1683,16 @@ export class ClaudeSubscriptionProviderService {
     }
     return { result, identity, epoch: this.signInEpoch }
   }
+  private probedSubject(env: NodeJS.ProcessEnv, result: Extract<AuthProbe, { kind: 'signed_in' }>): string | undefined {
+    return this.dependencies.probe ? this.accountSubject(env) : result.account?.subject
+  }
+
+  private turnCredentialKey(cwd: string, settings?: SdkSettings): string | undefined {
+    const extraArgs = claudeExtraArgs(storedCliArgs(this.launchSettings()))
+    if ('settings' in extraArgs || 'setting-sources' in extraArgs) return undefined
+    return claudeTurnCredentialKey(cwd, this.dependencies.settingSources, settings)
+  }
+
   /** A live check is due: the last terminal sign-in result is missing or stale. */
   private checkDue(): boolean {
     if (this.stopped || this.settingsError || this.signedOut()) return false
@@ -1801,7 +1836,8 @@ export class ClaudeSubscriptionProviderService {
   private async createQuery(
     prompt: string | AsyncIterable<SDKUserMessage>,
     options: Options,
-    startup?: { servers: ClaudeMcpServers; piped?: boolean; stderr?: ClaudeStderrTail }
+    startup?: { servers: ClaudeMcpServers; piped?: boolean; stderr?: ClaudeStderrTail },
+    beforeStart?: () => void
   ): Promise<Query> {
     if (this.stopped) throw new Error('Claude provider is stopped')
     // The SDK wraps the process without its pid; it reports the pid when it starts it, so Stop can end the process
@@ -1839,6 +1875,7 @@ export class ClaudeSubscriptionProviderService {
       given = { ...given, stderr: (data: string) => { tail.push(data); own?.(data) } }
     }
     if (this.dependencies.query) {
+      beforeStart?.()
       created = await this.dependencies.query({ prompt, options: given })
       if (startup?.piped) noteClaudeQuerySpawn(created, () => spawned)
       return created
@@ -1862,6 +1899,7 @@ export class ClaudeSubscriptionProviderService {
         }
       }
     }
+    beforeStart?.()
     created = sdk.query({ prompt, options: { ...given, onProcessSpawned: onSpawned } as Options })
     noteClaudeQuerySpawn(created, () => spawned)
     return created
@@ -1910,7 +1948,7 @@ export class ClaudeSubscriptionProviderService {
     const stderr = new ClaudeStderrTail(() => known)
     const startup = { servers: mcp.startup, piped: false, stderr }
     // Held until the servers are registered: a start that fails leaves `prompt` unread, for the start that follows.
-    const query = await this.createQuery(promptAfter(ready, prompt), options, startup)
+    const query = await this.createQuery(promptAfter(ready, prompt), options, startup, context.beforeStart)
     try {
       let servers = claudeLiteralServers(mcp.registered, 'input')
       if (Object.keys(servers).length > 0) {
@@ -2004,6 +2042,8 @@ export class ClaudeSubscriptionProviderService {
     // The append flags travel in `systemPrompt.append` (see claudeLaunchAppendSystemPrompt).
     const extraArgs = claudeExtraArgs(storedCliArgs(this.launchSettings()))
     for (const name of [...APPEND_SYSTEM_PROMPT_ARGS, ...(this.dependencies.droppedArgs ?? [])]) delete extraArgs[name]
+    // Only Mousse can select a native session, after it verifies the credential that opened it.
+    for (const name of ['resume', 'continue', 'from-pr', 'resume-session-at', 'fork-session', 'session-id']) delete extraArgs[name]
     const appendText = append.filter(Boolean).join('\n\n')
     return {
       cwd,
@@ -2566,7 +2606,7 @@ export class ClaudeSubscriptionProviderService {
     key: { hard: readonly unknown[]; soft: string; mode: PermissionMode; flags: LiveFlags; historyNow: string; entrypoint?: string },
     resume: string | undefined,
     create: (live: LiveSession<TurnContext>) => Options,
-    mcp: { servers: () => TurnMcp; mousse: McpAttachment | null; timeoutMs: number; signal?: AbortSignal; leftOut(names: string[]): void; policy(names: string[]): void },
+    mcp: Omit<LaunchContext, 'threadId'> & { servers: () => TurnMcp; mousse: McpAttachment | null },
     bot?: { idleCloseMs: number }
   ): Promise<LiveSession<TurnContext> | undefined> {
     const timings = this.liveConfig
@@ -2667,6 +2707,7 @@ export class ClaudeSubscriptionProviderService {
         threadId,
         timeoutMs: mcp.timeoutMs,
         ...(mcp.signal ? { signal: mcp.signal } : {}),
+        beforeStart: mcp.beforeStart,
         leftOut: mcp.leftOut,
         policy: mcp.policy
       })
@@ -3402,12 +3443,9 @@ export class ClaudeSubscriptionProviderService {
       const signIn = await this.readSignIn(env, controller.signal, owner)
       if (signIn.result.kind !== 'signed_in')
         throw new AppError({ code: 'claude_subscription_sign_in_required', message: signIn.result.message, errorInfo: { category: 'unavailable', retryable: false } })
-      const extraArgs = locked ? {} : claudeExtraArgs(storedCliArgs(this.launchSettings()))
-      const turnCredentials = () => locked ? 'locked' :
-        'settings' in extraArgs || 'setting-sources' in extraArgs ? undefined :
-        claudeTurnCredentialKey(input.cwd, this.dependencies.settingSources, turnSettings)
+      const turnCredentials = () => locked ? 'locked' : this.turnCredentialKey(input.cwd, turnSettings)
       const credentialKey = turnCredentials()
-      const probedSubject = this.dependencies.probe ? this.accountSubject(env) : signIn.result.account?.subject
+      const probedSubject = this.probedSubject(env, signIn.result)
       const assertSignIn = (dispatch?: 'live' | 'fresh') => {
         // The sign-in subject covers managed settings and their drop-ins. Reread it after warm SDK setup.
         if (credentialKey !== turnCredentials() || (dispatch && probedSubject !== this.accountSubject(env))) {
@@ -3423,9 +3461,8 @@ export class ClaudeSubscriptionProviderService {
       assertSignIn()
       // Settings and sign-in can change during setup, even if the adapter admitted the turn on the
       // previous account. Compare with the credential that actually opened the saved session.
-      credentialIdentity = credentialKey ? historyKey(JSON.stringify([signIn.identity, probedSubject, credentialKey])) : null
-      if (candidate && (candidate.credentialIdentity === undefined ||
-          (credentialIdentity !== null && candidate.credentialIdentity === credentialIdentity))) saved = candidate
+      credentialIdentity = sessionCredentialIdentity(signIn.identity, probedSubject, credentialKey)
+      if (candidate && sessionUsesCredential(candidate, credentialIdentity)) saved = candidate
       const sameSetup = saved?.cwd === resolve(input.cwd)
       // A model change can still continue the same session (issue #359).
       if (!fresh && saved && !saved.fork && sameSetup && savedHistoryKey === historyNow) resume = saved.sessionId
@@ -3661,7 +3698,10 @@ export class ClaudeSubscriptionProviderService {
             const folder = mkdtempSync(join(tmpdir(), 'mousse-claude-settings-'))
             created.meta.cleanup = () => removeSettingsFolder(folder)
             return lockedOptions(folder, created.lifetime, () => created.current ?? turn)
-          }, { servers: turnServers, mousse, timeoutMs: claudeMcpRegistrationMs(env), signal: controller.signal, leftOut, policy }, botWarm ? { idleCloseMs: BOT_LIVE_IDLE_CLOSE_MS } : undefined)
+          }, {
+            servers: turnServers, mousse, timeoutMs: claudeMcpRegistrationMs(env), signal: controller.signal,
+            beforeStart: () => assertSignIn('live'), leftOut, policy
+          }, botWarm ? { idleCloseMs: BOT_LIVE_IDLE_CLOSE_MS } : undefined)
         } catch (error) {
           // A refused change started nothing: the conversation is as it was, so the next request can resume it.
           // Mousse keeps the refused message in the transcript, so the history the next request carries has
@@ -3826,6 +3866,7 @@ export class ClaudeSubscriptionProviderService {
             threadId: input.threadId,
             signal: controller.signal,
             timeoutMs: claudeMcpRegistrationMs(env),
+            beforeStart: () => assertSignIn('fresh'),
             leftOut,
             policy
           })).query

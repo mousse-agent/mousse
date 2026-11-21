@@ -364,6 +364,66 @@ describe('CodexProviderService', () => {
     expect(server.launches).toHaveLength(1)
   })
 
+  it.each(['matching', 'changed'])('waits for a %s startup account recheck before admitting the first Send', async (identity) => {
+    const listing = Promise.withResolvers<Message>()
+    const recheck = Promise.withResolvers<Message>()
+    let checking = false
+    const server = scriptedServer((message) => {
+      if (message.method === 'account/read') {
+        if (!checking) return chatgpt
+        recheck.resolve(message)
+        return undefined
+      }
+      if (message.method === 'thread/list') {
+        listing.resolve(message)
+        return undefined
+      }
+      if (message.method === 'thread/start') {
+        return { result: { thread: { id: 'first-thread' }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
+      }
+      if (message.method === 'turn/start') {
+        setImmediate(() => write({ method: 'turn/completed', params: { threadId: 'first-thread', turn: { id: 'first-turn', status: 'completed', error: null } } }))
+        return { result: { turn: { id: 'first-turn', status: 'inProgress', error: null } } }
+      }
+      return { result: {} }
+    })
+    const write = (message: object) => server.processes[0].stdout.write(JSON.stringify(message) + '\n')
+    const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X' }] })
+    let settled = false
+    const sending = service.chat({ threadId: 't', cwd: home, model: 'gpt-x', prompt: 'first Send', onText: () => {} }).then(
+      (result) => { settled = true; return { result } },
+      (error: unknown) => { settled = true; return { error } }
+    )
+    const list = await listing.promise
+    checking = true
+    write({ method: 'account/updated', params: { authMode: 'chatgpt' } })
+    const check = await recheck.promise
+    write({ id: list.id, error: { code: -32601, message: 'unknown method' } })
+    // Let the thread preparation finish while the account response is still held.
+    await new Promise((resolve) => setImmediate(resolve))
+    const settledBeforeRecheck = settled
+    const openedBeforeRecheck = server.methods().includes('thread/start')
+    write({
+      id: check.id,
+      result: { ...chatgpt.result, workspaceRouting: { chatgptAccountId: identity === 'matching' ? 'workspace-one' : 'workspace-two' } }
+    })
+
+    const outcome = await sending
+    expect(settledBeforeRecheck).toBe(false)
+    expect(openedBeforeRecheck).toBe(false)
+    expect(server.launches).toHaveLength(1)
+    if (identity === 'matching') {
+      expect(outcome).toMatchObject({ result: { codexThreadId: 'first-thread' } })
+      expect(server.processes[0].signalCode).toBeNull()
+      expect(server.methods()).toContain('turn/start')
+    } else {
+      expect(outcome).toMatchObject({ error: expect.any(Error) })
+      expect(server.processes[0].signalCode).toBe('SIGTERM')
+      expect(server.methods()).not.toContain('thread/start')
+      expect(server.methods()).not.toContain('turn/start')
+    }
+  })
+
   it('refuses an API-key sign-in so turns never bill an API key', async () => {
     const server = scriptedServer(() => ({ result: { account: { type: 'apiKey' }, requiresOpenaiAuth: true } }))
     const service = create(server)
