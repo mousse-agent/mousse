@@ -423,7 +423,7 @@ describe('routes (1b §1.3, §1.5)', () => {
     await mount()
     await click(button('Add device'))
     await click(button(/^Over the internet/))
-    expect(document.body.textContent).toContain('domain on your Cloudflare account')
+    expect(document.body.textContent).toContain('You’ll need a domain managed by Cloudflare.')
     await click(button('Connect Cloudflare'))
     expect(d.called('netEngine.cloudflare.connect')).toEqual([{}])
 

@@ -19,7 +19,7 @@ export function CloudflareSetup({ connection }: { connection: NetEngineCloudflar
   return (
     <div>
       {state === 'off' && !hostname ? (
-        <p className="settings-muted">You’ll need a domain on your Cloudflare account.</p>
+        <p className="settings-muted">You’ll need a domain managed by Cloudflare.</p>
       ) : (
         <p role="status" className="settings-muted">{STATE_TEXT[state]}</p>
       )}
