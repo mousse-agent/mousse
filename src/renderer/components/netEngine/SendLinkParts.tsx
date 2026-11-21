@@ -7,6 +7,7 @@ import {
   type KeyboardEvent
 } from 'react'
 import type {
+  NetEngineDevice,
   NetEngineJoinPreview,
   NetEngineLinkJoin,
   NetEngineStatus
@@ -14,6 +15,42 @@ import type {
 import { destinationText, ROUTE_CLASS_LABEL } from '../../../shared/netEngine/routes'
 import { CopyButton } from '../settings/IconButtons'
 import { errorText, useDaemonCall } from '../devices/useDaemonCall'
+import { unreachableDetail } from './engineRows'
+
+/**
+ * What the inviting window shows once the other computer joined: connected, or finishing the other direction until
+ * the row's stuck bound (`rowStuckMs`), then why and Retry.
+ */
+export function JoinedLine({ device }: { device: NetEngineDevice }) {
+  const { call, busy, error } = useDaemonCall()
+  if (device.state === 'connected')
+    return (
+      <p role="status" className="settings-muted">
+        {device.name} is connected.
+      </p>
+    )
+  if (!device.stuck)
+    return (
+      <p role="status" className="settings-muted">
+        {device.name} can use this computer; finishing the other direction…
+      </p>
+    )
+  return (
+    <div className="engine-link-ended" role="group" aria-label="Pairing did not finish">
+      <p role="alert" className="chat-error">
+        {error || unreachableDetail(device, 'in')}
+      </p>
+      <button
+        type="button"
+        className="settings-btn"
+        disabled={busy}
+        onClick={() => void call('netEngine.retry', { node: device.node })}
+      >
+        Retry
+      </button>
+    </div>
+  )
+}
 
 /** What Enter link says of a link it cannot read. */
 const DAMAGED = 'This link is damaged. Ask for a new one.'
@@ -79,12 +116,12 @@ export function SendLinkPanel({
       </p>
     )
   if (!made) return <p className="settings-muted">Making a link…</p>
-  if (joined)
+  if (joined) return <JoinedLine device={joined} />
+  // The right code was typed: the link is used, and its row comes next.
+  if (shown && (shown.node || shown.ended === 'used'))
     return (
       <p role="status" className="settings-muted">
-        {joined.state === 'connected'
-          ? `${joined.name} is connected.`
-          : `${joined.name} can use this computer; finishing the other direction…`}
+        Adding the other computer…
       </p>
     )
   if (shown?.ended && shown.ended !== 'used')

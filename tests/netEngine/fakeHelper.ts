@@ -929,8 +929,20 @@ export class FakeHelper {
     const record = this.network.flowsOf(this).get(waiting.hash)!
     this.codeWaits.delete(invitation)
     if (!host?.alive) return waiting.reply({ error: 'no_route', reason: 'the host went away' })
-    if (code === waiting.invite.code && !waiting.changed)
+    if (code === waiting.invite.code && !waiting.changed) {
+      // As the engine's host does, a try is taken when an attempt starts, and the next code shows, before the result.
+      waiting.invite.attemptsLeft -= 1
+      if (waiting.invite.attemptsLeft > 0) {
+        waiting.invite.code = newCode()
+        host.event({
+          ev: 'invite.code',
+          invitation: waiting.invite.invitation,
+          code: waiting.invite.code,
+          attempts_left: waiting.invite.attemptsLeft
+        })
+      }
       return this.linkPaired(host, waiting.invite, record, waiting.reply, waiting.candidates)
+    }
     // A pinned join trusted as journaled (the defect): a failed key confirmation ends as "already paired".
     if (waiting.pinned && this.network.defects.has('journal-pins-link'))
       return waiting.reply({ identity: host.identity, name: host.identity, role: 'owner', already: true })

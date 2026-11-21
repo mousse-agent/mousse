@@ -1,5 +1,5 @@
 import type { NetEngineDevice } from '../../../shared/netEngine/local'
-import { connectedVia, relayText, routeText } from '../../../shared/netEngine/routes'
+import { connectedVia, parseRoute, relayText, routeClass, routeText } from '../../../shared/netEngine/routes'
 
 /** What a device's row offers (design §5.2): Access opens the preset control under it. */
 export type EngineRowAction = 'access' | 'address' | 'retry' | 'remove'
@@ -42,6 +42,25 @@ export const relayLimitDetail = (callersMax?: number): string =>
 /** The one line a device's row shows for a relay route waiting for the owner's Allow (§B.11). */
 export const relayOfferLine = (name: string, destination: string): string =>
   `${name} can be reached through relay ${relayText(destination)}. Allow?`
+
+/**
+ * What to do when one direction to a device does not come up, by the route it uses: the one its connection runs
+ * over now, else the first address added for it, else the local network. `in`: it can't reach this computer; `out`:
+ * this computer can't reach it.
+ */
+export function unreachableDetail(device: NetEngineDevice, way: 'in' | 'out'): string {
+  const name = device.name
+  const added = device.addresses?.map((address) => parseRoute(address)).find(Boolean)
+  const cls = device.route ?? (added ? routeClass(added) : 'lan')
+  if (cls === 'tailnet') return 'Keep Tailscale on and online on both computers, then Retry.'
+  if (cls !== 'lan')
+    return way === 'in'
+      ? 'Check the address this computer shares, then Retry.'
+      : `Check the address ${name} shares, then Retry.`
+  return way === 'in'
+    ? `${name} can't reach this computer. Let Mousse through this computer's firewall, then Retry.`
+    : `This computer can't reach ${name}. Let Mousse through the firewall on ${name}, then Retry.`
+}
 
 /** A device's row as Settings → Devices shows it (design §5.2, with the clock case of §8). */
 export function engineRow(device: NetEngineDevice): EngineRowView {
@@ -102,8 +121,7 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
     return device.stuck
       ? {
           line: 'Finishing pairing…',
-          detail:
-            'Pairing is taking longer than it should. Keep both computers on the same network, then Retry.',
+          detail: unreachableDetail(device, 'in'),
           warn: true,
           actions: ['retry', 'remove']
         }
@@ -111,14 +129,14 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
   if (device.unreachable === 'in')
     return {
       line: `${name} can't reach this computer`,
-      detail: `Let Mousse through this computer's firewall, and keep both on the same network.`,
+      detail: unreachableDetail(device, 'in'),
       warn: true,
       actions: ['retry', 'remove']
     }
   if (device.unreachable === 'out')
     return {
       line: `This computer can't reach ${name}`,
-      detail: `Let Mousse through the firewall on ${name}, and keep both on the same network.`,
+      detail: unreachableDetail(device, 'out'),
       warn: true,
       actions: ['retry', 'remove']
     }
