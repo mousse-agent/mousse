@@ -117,13 +117,14 @@ describe('managed Cloudflare tunnel', () => {
       expect(first.advertise).toHaveBeenLastCalledWith(null)
       await vi.advanceTimersByTimeAsync(120_000)
       expect(fixture.processes[0].stop).not.toHaveBeenCalled()
-      expect(connection.status()?.state).toBe('reconnecting')
+      expect(connection.status()).toMatchObject({ state: 'reconnecting', message: expect.stringContaining('Check') })
     } finally {
       vi.useRealTimers()
     }
     first.test.mockResolvedValue(true)
     fixture.processes[0].ready()
     await vi.waitFor(() => expect(connection.status()?.state).toBe('connected'))
+    expect(connection.status()?.message).toBeUndefined()
 
     await connection.useOrigin(undefined)
     expect(first.advertise).toHaveBeenLastCalledWith(null)

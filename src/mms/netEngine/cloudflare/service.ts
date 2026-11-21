@@ -13,6 +13,9 @@ import { CLOUDFLARE_TUNNEL_ID, CloudflareCli, cloudflareHostname, cloudflareEdge
 import { cloudflaredEnv, resolveCloudflared } from './runtime'
 
 const SIGN_IN_CLEANUP = { recursive: true, force: true, maxRetries: 3, retryDelay: 100 } as const
+const CONNECTION_HINT_MS = 90_000
+const CONNECTION_HINT = 'Still can’t reach the tunnel. Check that the tunnel and domain are active in Cloudflare.'
+const CONNECTOR_CONFIG = 'connector.yml'
 
 interface CloudflareOrigin {
   port: number
@@ -44,6 +47,7 @@ interface Attempt {
   probe?: AbortController
   advertised?: boolean
   reconnecting?: boolean
+  connectionHint?: ReturnType<typeof setTimeout>
 }
 
 function valid(value: unknown): value is Settings {
@@ -139,6 +143,7 @@ export class ManagedCloudflare {
   async forget(): Promise<void> {
     if (this.settings?.enabled) this.save({ ...this.settings, enabled: false })
     await this.cancel()
+    rmSync(join(this.directory, CONNECTOR_CONFIG), { force: true })
     rmSync(this.stateFile, { force: true })
     this.settings = undefined
     this.set('off')
@@ -159,12 +164,13 @@ export class ManagedCloudflare {
     this.settings = record
   }
 
-  private set(state: NetEngineCloudflare['state'], error?: unknown, loginUrl?: string): void {
+  private set(state: NetEngineCloudflare['state'], detail?: unknown, loginUrl?: string): void {
+    const message = typeof detail === 'string' ? detail : detail instanceof Error ? detail.message : undefined
     this.view = {
       state,
       ...(this.settings && 'hostname' in this.settings ? { hostname: this.settings.hostname } : {}),
       ...(this.settings || (state === 'failed' && existsSync(this.stateFile)) ? { canForget: true } : {}),
-      ...(state === 'failed' && error instanceof Error ? { message: error.message } : {}),
+      ...(message ? { message } : {}),
       ...(loginUrl ? { loginUrl } : {})
     }
     this.changed()
@@ -174,14 +180,19 @@ export class ManagedCloudflare {
     const { signal } = attempt.abort
     await this.startupCleanup
     signal.throwIfAborted()
-    await this.clearInterruptedSignIns()
+    const settings = this.settings
+    const saved = settings && 'token' in settings ? settings : undefined
+    try {
+      await this.clearInterruptedSignIns()
+    } catch {
+      const message = 'Mousse could not remove old Cloudflare sign-in files.'
+      if (!saved) throw new Error(`${message} Wait a moment, then try again.`)
+      console.warn(message)
+    }
     signal.throwIfAborted()
     const runtime = await resolveCloudflared(this.runtimeDirectory, signal)
     signal.throwIfAborted()
-    const settings = this.settings
-    const ready = settings && 'token' in settings
-      ? settings
-      : await this.provision(attempt, runtime, settings)
+    const ready = settings && 'token' in settings ? settings : await this.provision(attempt, runtime, settings)
     signal.throwIfAborted()
     if (!ready.enabled) this.save({ ...ready, enabled: true })
     await this.connect(attempt, runtime, ready)
@@ -214,14 +225,16 @@ export class ManagedCloudflare {
       this.save(ready)
       return ready
     } finally {
-      await rm(scratch, SIGN_IN_CLEANUP)
+      await rm(scratch, SIGN_IN_CLEANUP).catch(() => {
+        throw new Error('Mousse could not remove the Cloudflare sign-in files. Wait a moment, then try again.')
+      })
     }
   }
 
   private async connect(attempt: Attempt, binary: string, ready: Ready): Promise<void> {
     const route = tunnelRoute(`https://${ready.hostname}`)
     if (!route) throw new Error('Cloudflare returned an unusable address.')
-    const config = join(this.directory, 'connector.yml')
+    const config = join(this.directory, CONNECTOR_CONFIG)
     await writeFile(config, JSON.stringify({
       ingress: [
         { hostname: ready.hostname, path: `^${WS_PATH_SUFFIX}$`, service: `http://127.0.0.1:${attempt.origin.port}` },
@@ -247,7 +260,7 @@ export class ManagedCloudflare {
           return
         }
         if (state === 'degraded') attempt.reconnecting = true
-        this.set(attempt.reconnecting ? 'reconnecting' : 'connecting')
+        this.waitForRoute(attempt)
       },
       line: (line) => {
         if (this.attempt !== attempt) return
@@ -258,7 +271,7 @@ export class ManagedCloudflare {
             this.resetProbe(attempt)
             if (attempt.advertised) void this.withdraw(attempt)
             attempt.reconnecting = true
-            this.set('reconnecting')
+            this.waitForRoute(attempt)
           }
           return
         }
@@ -284,11 +297,25 @@ export class ManagedCloudflare {
         attempt.advertised = true
         await attempt.origin.advertise(route)
         signal.throwIfAborted()
+        this.clearConnectionHint(attempt)
         this.set('connected')
         return
       }
       await delay(wait, undefined, { signal, ref: false })
     }
+  }
+
+  private waitForRoute(attempt: Attempt): void {
+    const state = attempt.reconnecting ? 'reconnecting' : 'connecting'
+    if (this.view.state !== state) this.set(state, this.view.message)
+    attempt.connectionHint ??= setTimeout(() => {
+      this.set(attempt.reconnecting ? 'reconnecting' : 'connecting', CONNECTION_HINT)
+    }, CONNECTION_HINT_MS).unref()
+  }
+
+  private clearConnectionHint(attempt: Attempt): void {
+    clearTimeout(attempt.connectionHint)
+    attempt.connectionHint = undefined
   }
 
   private resetProbe(attempt: Attempt): void {
@@ -312,6 +339,7 @@ export class ManagedCloudflare {
     this.attempt = undefined
     attempt.abort.abort()
     this.resetProbe(attempt)
+    this.clearConnectionHint(attempt)
     this.ending = Promise.all([
       attempt.advertised ? this.withdraw(attempt) : undefined,
       attempt.connector?.stop(),
