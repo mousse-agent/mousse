@@ -169,12 +169,12 @@ export class SkillsRegistry {
   ): Promise<{ snapshot: SkillsRegistrySnapshot; scannedAt: number } | undefined> {
     let scannedAt = Date.now()
     const projectPath = options.projectPath ?? this.context.projectPath
-    const projectId = projectPath ? await scanSlot(() => getProjectIdentityAsync(projectPath)) : undefined
+    const projectId = projectPath ? await scanSlot(() => getProjectIdentityAsync(projectPath), background) : undefined
     const native = getNativeSkillRootCandidates(this.context, projectPath, projectId).map(
       ({ owner, label, ...descriptor }) => scanSlot(async (): Promise<SkillSourceDescriptor> => {
         const path = await assertOwnedPathAsync(owner, descriptor.path, label)
         return { ...descriptor, path, exists: await pathExists(path) }
-      })
+      }, background)
     )
     const external = getSkillRootPaths(projectPath).map(
       (descriptor) => scanSlot(async (): Promise<SkillSourceDescriptor> => ({
@@ -182,7 +182,7 @@ export class SkillsRegistry {
         exists: await pathExists(descriptor.path),
         managed: false,
         projectId: descriptor.scope === 'project' ? projectId : undefined
-      }))
+      }), background)
     )
     const sources = await Promise.all([...native, ...external])
 
@@ -201,13 +201,13 @@ export class SkillsRegistry {
         diagnostics.push(...scanned.diagnostics)
         continue
       }
-      const scanned = await this.scanSource(source)
+      const scanned = await this.scanSource(source, background)
       skills.push(...scanned.skills)
       diagnostics.push(...scanned.diagnostics)
     }
 
     if (generation !== this.sharedGeneration) return undefined
-    await scanSlot(() => this.applyManagedState(skills))
+    await scanSlot(() => this.applyManagedState(skills), background)
     const visible = options.includeDisabled === false
       ? skills.filter((skill) => skill.enabled !== false && skill.archived !== true)
       : skills.filter((skill) => skill.archived !== true)
@@ -232,7 +232,7 @@ export class SkillsRegistry {
     if (running && (background || !running.background)) return running.scan
     const order = ++this.sharedScanOrder
     this.latestSharedScan.set(key, order)
-    const scan = this.scanSource(source).then((scanned) => {
+    const scan = this.scanSource(source, background).then((scanned) => {
       if (generation !== this.sharedGeneration) return scanned
       // A newer foreground scan can overtake a shared scan started by a different project.
       if (order !== this.latestSharedScan.get(key)) {
@@ -250,13 +250,13 @@ export class SkillsRegistry {
     return scan
   }
 
-  private async scanSource(source: SkillSourceDescriptor): Promise<ScannedSource> {
+  private async scanSource(source: SkillSourceDescriptor, background: boolean): Promise<ScannedSource> {
     const skills: SkillDescriptor[] = []
     const diagnostics: IntegrationDiagnostic[] = []
     try {
-      const skillFiles = await findSkillFiles(source.path)
+      const skillFiles = await findSkillFiles(source.path, background)
       // Read together, up to `SKILL_SCAN_CONCURRENCY` at a time. Results keep the files' order.
-      for (const parsed of await Promise.all(skillFiles.map((skillPath) => scanSlot(() => this.readSkillDescriptor(source, skillPath))))) {
+      for (const parsed of await Promise.all(skillFiles.map((skillPath) => scanSlot(() => this.readSkillDescriptor(source, skillPath), background)))) {
         if (parsed.skill) skills.push(parsed.skill)
         diagnostics.push(...parsed.diagnostics)
       }
@@ -510,38 +510,66 @@ function managedStateFor(installations: Record<string, ManagedSkillState>, skill
 /** Filesystem operations in flight across all Skills scans in the process. */
 export const SKILL_SCAN_CONCURRENCY = 16
 
-/** Runs `task` once fewer than `max` tasks it was given are running; the others wait in call order. */
-function concurrencyLimit(max: number): <T>(task: () => Promise<T>) => Promise<T> {
-  let active = 0
-  const waiting: Array<() => void> = []
-  return async (task) => {
-    if (active < max) active++
-    else await new Promise<void>((resolve) => waiting.push(resolve))
+/** Background refreshes stay below the total cap so cold foreground turns always keep bounded scan capacity. */
+const BACKGROUND_SKILL_SCAN_CONCURRENCY = Math.max(1, Math.floor(SKILL_SCAN_CONCURRENCY / 2))
+
+/** Runs `task` within `max` total slots while capping background refreshes to `maxBackground` and waking foreground first. */
+function concurrencyLimit(
+  max: number,
+  maxBackground: number
+): <T>(task: () => Promise<T>, background?: boolean) => Promise<T> {
+  let activeTotal = 0
+  let activeBackground = 0
+  const foregroundWaiting: Array<() => void> = []
+  const backgroundWaiting: Array<() => void> = []
+  const dispatch = (): void => {
+    while (activeTotal < max && foregroundWaiting.length > 0) {
+      activeTotal++
+      foregroundWaiting.shift()!()
+    }
+    while (activeTotal < max && activeBackground < maxBackground && backgroundWaiting.length > 0) {
+      activeTotal++
+      activeBackground++
+      backgroundWaiting.shift()!()
+    }
+  }
+  return async (task, background = false) => {
+    if (background) {
+      if (activeTotal < max && activeBackground < maxBackground && foregroundWaiting.length === 0) {
+        activeTotal++
+        activeBackground++
+      } else {
+        await new Promise<void>((resolve) => backgroundWaiting.push(resolve))
+      }
+    } else if (activeTotal < max) {
+      activeTotal++
+    } else {
+      await new Promise<void>((resolve) => foregroundWaiting.push(resolve))
+    }
     try {
       return await task()
     } finally {
-      // A waiting task takes the slot over; otherwise it is free again.
-      const next = waiting.shift()
-      if (next) next()
-      else active--
+      activeTotal--
+      if (background) activeBackground--
+      dispatch()
     }
   }
 }
 
-const scanSlot = concurrencyLimit(SKILL_SCAN_CONCURRENCY)
+const scanSlot = concurrencyLimit(SKILL_SCAN_CONCURRENCY, BACKGROUND_SKILL_SCAN_CONCURRENCY)
 
-async function findSkillFiles(rootPath: string): Promise<string[]> {
+async function findSkillFiles(rootPath: string, background: boolean): Promise<string[]> {
   // A slot is held for the listing only, never while subfolders are read, so the recursion cannot wait on itself.
-  const entries = await scanSlot(() => readdir(rootPath, { withFileTypes: true }))
+  const entries = await scanSlot(() => readdir(rootPath, { withFileTypes: true }), background)
   // Subfolders are read together, up to `SKILL_SCAN_CONCURRENCY` at a time; results keep the entries' order.
   const found = await Promise.all(entries.map(async (entry): Promise<string[]> => {
     if (entry.isSymbolicLink() || entry.name === '.' || entry.name === '..') return []
     const entryPath = join(rootPath, entry.name)
     // A link the listing did not name as one (a Windows junction) is never followed either.
-    const info = await scanSlot(() => lstat(entryPath)).catch(() => undefined)
+    const info = await scanSlot(() => lstat(entryPath), background).catch(() => undefined)
     if (!info || info.isSymbolicLink()) return []
     if (entry.isFile() && entry.name === 'SKILL.md') return [entryPath]
-    return entry.isDirectory() ? findSkillFiles(entryPath) : []
+    return entry.isDirectory() ? findSkillFiles(entryPath, background) : []
   }))
   return found.flat()
 }
