@@ -2,6 +2,7 @@ import { attachLinuxWindowShape } from './linuxWindowShape'
 import { app, BrowserWindow, dialog, nativeTheme, session, shell, type WebContents } from 'electron'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
+import { WarmStartCache } from './warmStartCache'
 
 import { detectCliMode, stripCliModeArgs } from '../cli/cliLaunch'
 import { configureElectronContext, configureWindowlessElectron, finishElectronCli } from '../cli/electronContext'
@@ -146,6 +147,9 @@ if (isChatgptTokenCommand) {
  * Phase 3 GUI: connect to standalone MMS daemon via local protocol.
  * Electron never acquires the MMS owner lease and never stops the daemon on quit.
  */
+/** The longest a quit waits for the warm start file to be written. */
+const WARM_START_QUIT_WAIT_MS = 500
+
 function startGuiApp(): void {
   if (configureLinuxWindowing(app, process.platform, process.env)) return
   configureLinuxGraphics(app, process.platform, process.env)
@@ -169,6 +173,8 @@ function startGuiApp(): void {
   let desktopUpdater: DesktopUpdater | null = null
   let serviceTray: import('electron').Tray | null = null
   let mousseHome: string | null = null
+  /** What each profile's window last showed; read once here, written in the background (see WarmStartCache). */
+  let warmStart: WarmStartCache | null = null
   /** Set by the tray's Quit: this quit also stops the background service. */
   let stopServiceOnQuit = false
 
@@ -418,6 +424,12 @@ function startGuiApp(): void {
       }
       const browserMms = guiMms
 
+      if (!warmStart) {
+        warmStart = new WarmStartCache(join(app.getPath('userData'), 'warm-start.json'))
+        // Read while the window loads; the window asks for it once its page runs.
+        void warmStart.load()
+      }
+
       if (!ipcRegistered) {
         registerFontIpc()
         registerRendererErrorIpc(new RendererErrorLog(homeDir, { connectionLog }))
@@ -432,7 +444,8 @@ function startGuiApp(): void {
             requestAppRestart: () => coordinatedRestart(),
             connectionLog,
             // Development only: see `createDevTurnEndDropper`. An installed build never reads the variable.
-            devDropTurnEnd: !app.isPackaged && process.env.MOUSSE_DEV_DROP_TURN_END === '1'
+            devDropTurnEnd: !app.isPackaged && process.env.MOUSSE_DEV_DROP_TURN_END === '1',
+            warmStart
           },
           () => mainWindow
         )
@@ -523,6 +536,11 @@ function startGuiApp(): void {
     if (shutdownPromise) return shutdownPromise
     isQuitting = true
     shutdownPromise = (async () => {
+      // What the windows showed is written while the connection closes; a slow disk never holds the quit.
+      const warmStartWritten = Promise.race([
+        warmStart?.flush().catch(() => undefined),
+        new Promise<void>((resolve) => setTimeout(resolve, WARM_START_QUIT_WAIT_MS).unref())
+      ])
       try {
         if (devGuiPollerStop) {
           devGuiPollerStop()
@@ -535,6 +553,7 @@ function startGuiApp(): void {
         console.error('guiMms.stop failed during shutdown:', err)
       }
       guiMms = null
+      await warmStartWritten
       serviceTray?.destroy()
       serviceTray = null
       try {

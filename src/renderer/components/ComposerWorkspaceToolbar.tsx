@@ -190,9 +190,11 @@ export function ComposerProjectPicker({ projects, workspace, disabled, device, o
  * Below a new thread's composer: where it runs (computer, then checkout or worktree) on the left;
  * Private and when it archives itself on the right.
  */
-export function ComposerThreadSettings({ workspace, disabled, device, onChange, onPrivateChange, onExpiryChange }: {
+export function ComposerThreadSettings({ workspace, disabled, device, onChange, onPrivateChange, onExpiryChange, readsGit = true }: {
   workspace: ComposerWorkspace
   disabled: boolean
+  /** Off before the window's profile is known (the warm start): the project's Git state is not read, and no branch shows. */
+  readsGit?: boolean
   device?: ComposerDeviceProps
   onChange: (workspace: ComposerWorkspace) => void
   /** Turns Private on or off for the new chat (`Thread.localOnly`). Without it the toggle is not shown. */
@@ -200,8 +202,8 @@ export function ComposerThreadSettings({ workspace, disabled, device, onChange, 
   /** Picks when the new chat archives itself (`ms` after it is created, or null for never). Without it the menu is not shown. */
   onExpiryChange?: (ms: number | null, stopsRun: boolean) => void
 }) {
-  const git = useProjectGit(workspace.projectId)
-  const repo = projectRepoState(workspace.projectId, git)
+  const git = useProjectGit(readsGit ? workspace.projectId : undefined)
+  const repo = readsGit ? projectRepoState(workspace.projectId, git) : 'unknown'
   // A folder without Git works in place: no worktree and no base branch go out with the new thread.
   useEffect(() => {
     if (repo === 'no' && (workspace.worktreeEnabled || workspace.baseBranch)) onChange(workspaceWithMode(workspace, false))

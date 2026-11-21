@@ -38,6 +38,8 @@ import { daemonGitParams } from './daemonGitParams'
 import { PROJECT_ICON_EXTENSIONS, type ProjectIconChoice, type ProjectIconImage } from '../../shared/projectIcon'
 import { getComputerName } from '../../mms/computerName'
 import { randomUUID } from 'node:crypto'
+import type { WarmStartCache } from '../warmStartCache'
+import type { ProfilePublicDto } from '../../shared/profiles/types'
 import type { GuiMmsController, ReadOrder, ThreadSnapshotResult } from '../mms/GuiMmsController'
 import { updateOrders, type UpdateKind } from '../mms/updateOrder'
 import { PresentationState } from '../mms/PresentationState'
@@ -230,9 +232,14 @@ export interface GuiIpcServices {
    * second, to see the catch-up recover by hand.
    */
   devDropTurnEnd?: boolean
+  /** What each profile's window last showed, for the next launch to show before the service answers. */
+  warmStart?: Pick<WarmStartCache, 'observe' | 'noteProfile' | 'noteProjectIcon' | 'noteAppInfo' | 'view' | 'lastActiveThread' | 'forget'>
 }
 
 let activeGuiMms: GuiMmsController | null = null
+/** The synchronous `app:warmStartView` read (a sync message has one listener; the last registration answers it). */
+let answerWarmStartView: (event: Electron.IpcMainEvent) => void = (event) => { event.returnValue = null }
+let warmStartViewListening = false
 
 /** An update main could not hand to a window is followed by a catch-up this long after the first of a burst. */
 const UNDELIVERED_CATCH_UP_DELAY_MS = 1_000
@@ -450,7 +457,8 @@ export function registerGuiIpc(
     presentation,
     settings,
     browserView,
-    repoRoot
+    repoRoot,
+    warmStart
   } = services
   activeGuiMms = guiMms
   registerLinuxWindowResizeIpc(getWindow)
@@ -574,6 +582,7 @@ export function registerGuiIpc(
     const targetProfileId = profileId ?? activeEventProfileId ?? senderProfile
     if (channel === 'threads:updated') notificationThreads.note(targetProfileId ?? currentProfileKey(), data)
     if (channel === 'projects:updated') notificationThreads.noteProjects(targetProfileId ?? currentProfileKey(), data)
+    warmStart?.observe(targetProfileId, channel, data)
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) {
         if (targetProfileId) {
@@ -1198,7 +1207,9 @@ export function registerGuiIpc(
     quietWatch.touch(senderId, event.threadId)
     queueMicrotask(() => noteShown(senderId))
     const target = (channel: string, data: unknown): void => {
-      if (!win.isDestroyed()) win.webContents.send(channel, data)
+      if (win.isDestroyed()) return
+      warmStart?.observe(binding.profileId, channel, data)
+      win.webContents.send(channel, data)
     }
     const tracker = activityTrackerFor(binding.profileId)
     const previousActivity = event.type === 'activity' && event.threadId
@@ -1437,7 +1448,9 @@ export function registerGuiIpc(
     const presentation = presentationForSender(senderId)
     const activeId = presentation.getActiveThreadId()
     const target = (channel: string, data: unknown): void => {
-      if (!win.isDestroyed()) win.webContents.send(channel, data)
+      if (win.isDestroyed()) return
+      warmStart?.observe(profileId, channel, data)
+      win.webContents.send(channel, data)
     }
     const tracker = activityTrackerFor(profileId)
     const activityBefore = activeId ? tracker.getState(activeId) ?? 'idle' : undefined
@@ -2168,6 +2181,8 @@ export function registerGuiIpc(
   registerHandler('projects:icon', async (_e, projectId: string) => {
     try {
       const res = await guiMms.request<{ icon: ProjectIconImage | null }>('projects.icon', { projectId })
+      // The next launch shows this icon before the service answers.
+      warmStart?.noteProjectIcon(guiMms.getWindowBinding()?.profileId, projectId, res.icon ?? null)
       return res.icon ?? null
     } catch (error) {
       // A daemon from before project icons: the folder glyph.
@@ -2299,7 +2314,9 @@ export function registerGuiIpc(
     } catch (error) {
       console.warn('thread statuses could not be read; showing the last ones received', error)
     }
-    return tracker.getSnapshot()
+    const snapshot = tracker.getSnapshot()
+    warmStart?.observe(guiMms.getWindowBinding()?.profileId, 'threads:activity', snapshot)
+    return snapshot
   })
 
   // The renderer calls this after it knows its trusted profile and subscribes.
@@ -2319,11 +2336,15 @@ export function registerGuiIpc(
       if (!isCurrent()) return
       if (channel === 'threads:updated') notificationThreads.note(binding.profileId, data)
       if (channel === 'projects:updated') notificationThreads.noteProjects(binding.profileId, data)
+      warmStart?.observe(binding.profileId, channel, data)
       event.sender.send(channel, data)
     }
+    warmStart?.noteProfile(binding.profileId)
     const promise = bootstrapPresentation(guiMms, currentPresentation(), target, {
       isCurrent,
-      onTurnSnapshot: syncDaemonTurnSnapshot
+      onTurnSnapshot: syncDaemonTurnSnapshot,
+      // A new window opens on the thread this profile's window showed last, as its warm start showed it.
+      preferThreadId: warmStart?.lastActiveThread(binding.profileId) ?? undefined
     }).finally(() => presentationBootstraps.delete(key))
     presentationBootstraps.set(key, promise)
     return promise
@@ -3094,25 +3115,66 @@ export function registerGuiIpc(
 
   // The computer name is looked up once; starting it here keeps getInfo fast.
   void getComputerName()
-  registerHandler('app:getInfo', async () => ({
-    platform: process.platform,
-    deviceName: await getComputerName(),
-    repoRoot,
-    llmProvider: settings.get().provider.llmProvider
-  }))
+  registerHandler('app:getInfo', async () => {
+    const info = {
+      platform: process.platform,
+      deviceName: await getComputerName(),
+      repoRoot,
+      llmProvider: settings.get().provider.llmProvider
+    }
+    // The rows' provider marks and the computer's name, for the next launch's warm start.
+    warmStart?.noteAppInfo(guiMms.getWindowBinding()?.profileId, info)
+    return info
+  })
 
   // Profile operations are installation metadata plus a trusted per-window
   // binding. The renderer supplies only an id/slug; daemon admission resolves
   // the owned profile root and changes the sender's session epoch.
-  registerHandler('profiles:list', () => guiMms.request('profiles.list'))
+  registerHandler('profiles:list', async () => {
+    const listed = await guiMms.request<{ profiles?: ProfilePublicDto[] }>('profiles.list')
+    // The bound profile's name, colour and avatar, for the warm start's profile button.
+    const bound = guiMms.getWindowBinding()?.profileId
+    const profile = bound ? listed?.profiles?.find((entry) => entry?.id === bound) : undefined
+    if (bound && profile) warmStart?.noteProfile(bound, profile)
+    return listed
+  })
+  // What this profile's window showed last, read from disk at startup; it never waits for the service. The window's
+  // preload asks once, synchronously, so its first frame already shows it. Only the main window's own page is answered.
+  answerWarmStartView = (event) => {
+    const win = getWindow()
+    const fromWindow = Boolean(win && !win.isDestroyed() && event.sender === win.webContents && event.senderFrame?.parent === null)
+    if (!fromWindow || !warmStart) {
+      event.returnValue = null
+      return
+    }
+    // The file is read as the app starts, before the window loads; this waits only if that read is still going.
+    void warmStart.view().then((view) => { event.returnValue = view ?? null }, () => { event.returnValue = null })
+  }
+  if (!warmStartViewListening) {
+    warmStartViewListening = true
+    ipcMain.on('app:warmStartView', (event) => answerWarmStartView(event))
+  }
   registerHandler('profiles:status', () => guiMms.request('profiles.status'))
   registerHandler('profiles:bind', (_e, profile: string) => guiMms.request('profiles.bind', { profile }))
   registerHandler('profiles:create', (_e, input: unknown) => guiMms.request('profiles.create', input))
   registerHandler('profiles:update', (_e, input: unknown) => guiMms.request('profiles.update', input))
-  registerHandler('profiles:archive', (_e, input: unknown) => guiMms.request('profiles.archive', input))
+  // A profile archived or removed is not shown at the next launch.
+  const forgetProfileOf = (input: unknown): void => {
+    const profileId = (input as { profileId?: unknown } | null)?.profileId
+    if (typeof profileId === 'string') warmStart?.forget(profileId)
+  }
+  registerHandler('profiles:archive', async (_e, input: unknown) => {
+    const archived = await guiMms.request('profiles.archive', input)
+    forgetProfileOf(input)
+    return archived
+  })
   registerHandler('profiles:restore', (_e, input: unknown) => guiMms.request('profiles.restore', input))
   registerHandler('profiles:removePreview', (_e, profileId: string) => guiMms.request('profiles.removePreview', { profileId }))
-  registerHandler('profiles:remove', (_e, input: unknown) => guiMms.request('profiles.remove', input))
+  registerHandler('profiles:remove', async (_e, input: unknown) => {
+    const removed = await guiMms.request('profiles.remove', input)
+    forgetProfileOf(input)
+    return removed
+  })
 
   registerHandler('app:getActiveProjectPath', async (_e, threadId?: string | null) => {
     const id = threadId ?? currentPresentation().getActiveThreadId()

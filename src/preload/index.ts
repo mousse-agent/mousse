@@ -114,6 +114,7 @@ import type {
   StartPullRequestThreadResult
 } from '../shared/pullRequests'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
+import type { WarmStartView } from '../shared/warmStart'
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThreadNotificationEvent } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
 import type {
@@ -206,6 +207,9 @@ let windowCountersProvider: (() => { mountedTurns?: number; mountedRows?: number
 async function attachmentPath(file: File, target: { kind: 'bot' } | { kind: 'thread'; threadId: string | null }): Promise<string> {
   return webUtils.getPathForFile(file) || ipcRenderer.invoke('attachments:stage', target, file.name, new Uint8Array(await file.arrayBuffer()))
 }
+
+/** The warm start is read once per page load (`app.warmStartView`). */
+let warmStartTaken = false
 
 const api = {
   platform: process.platform,
@@ -1421,6 +1425,15 @@ const api = {
   },
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),
+    /**
+     * What this window's profile showed last time, to show until the service answers (display only). Synchronous, so
+     * the window's first frame shows it; answered once per page load, then null.
+     */
+    warmStartView: (): WarmStartView | null => {
+      if (warmStartTaken) return null
+      warmStartTaken = true
+      return (ipcRenderer.sendSync('app:warmStartView') as WarmStartView | null) ?? null
+    },
     getActiveProjectPath: (threadId?: string | null): Promise<string | null> =>
       ipcRenderer.invoke('app:getActiveProjectPath', threadId),
     getFilesRoot: (threadId?: string | null): Promise<string> =>

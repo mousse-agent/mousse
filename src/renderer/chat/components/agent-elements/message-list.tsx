@@ -13,6 +13,7 @@ import type { UIMessage, ChatStatus } from "ai";
 import { cn } from "./utils/cn";
 import { motionOff, motionScale } from "../../../lib/motion";
 import { ProviderIcon } from "../../../lib/providerIcons";
+import { takeWarmScroll, type WarmScroll } from "../../../lib/warmHandover";
 import { inferModelBrand } from "../../../../shared/modelVariants";
 import { useProviderSnapshotsStore } from "../../../lib/providerSnapshots";
 import { resolveModelChoice } from "../../../lib/modelChoice";
@@ -138,7 +139,8 @@ export type MessageListProps = {
   className?: string;
   onAtBottomChange?: (atBottom: boolean) => void;
   /** The composer should fold to one line: the reader is browsing earlier messages. */
-  onComposerCompactChange?: (compact: boolean) => void;
+  /** `animate` false: the composer takes the new size at once (a list that opens folded). */
+  onComposerCompactChange?: (compact: boolean, animate?: boolean) => void;
   lastTurnNotice?: React.ReactNode;
   /**
    * Drawn after the last turn (the thread's queued messages), above the reply gap. Outside the
@@ -1430,6 +1432,8 @@ export const MessageList = memo(function MessageList({
   const turnActionsForEdit = useTurnActions();
   const [isMounted, setIsMounted] = useState(false);
   const [isPinned, setIsPinned] = useState(initialScrollBehavior !== "top");
+  // Where the warm start left this thread's transcript (`takeWarmScroll`); undefined until read.
+  const warmScrollRef = useRef<WarmScroll | null | undefined>(undefined);
   useEffect(() => { onAtBottomChange?.(isPinned) }, [isPinned, onAtBottomChange]);
 
   const [scrollbarActive, setScrollbarActive] = useState(false);
@@ -1755,9 +1759,30 @@ export const MessageList = memo(function MessageList({
     const contentWrapper = contentWrapperRef.current;
     if (!container || !contentWrapper) return;
 
-    const initial = initialScrollBehavior === "top" ? "top" : "bottom";
+    let initial: "top" | "bottom" = initialScrollBehavior === "top" ? "top" : "bottom";
     programmaticScrollAtRef.current = performance.now();
     container.scrollTop = initial === "top" ? 0 : container.scrollHeight;
+    // The warm start showed this thread read up from its end: it opens with the same turn at the same place. Read
+    // once per list (Strict Mode runs this twice).
+    if (warmScrollRef.current === undefined) warmScrollRef.current = takeWarmScroll(threadId);
+    const warm = warmScrollRef.current;
+    if (warm && !warm.pinned && warm.turnKey !== undefined) {
+      const turn = [...container.querySelectorAll<HTMLElement>("[data-turn-key]")].find((element) => element.dataset.turnKey === warm.turnKey);
+      if (turn) {
+        container.scrollTop += turn.getBoundingClientRect().top - container.getBoundingClientRect().top - (warm.offset ?? 0);
+        initial = "top";
+        setIsPinned(false);
+        // Read away from the end, the composer is folded as it was in the warm view: from the first frame, unmoving.
+        const compact = nextComposerCompact(composerCompactRef.current, {
+          mode: "free",
+          distanceFromEnd: container.scrollHeight - container.scrollTop - container.clientHeight,
+        });
+        if (compact !== composerCompactRef.current) {
+          composerCompactRef.current = compact;
+          onComposerCompactChangeRef.current?.(compact, false);
+        }
+      }
+    }
     followModeRef.current = reduceFollow(followModeRef.current, {
       type: "thread-open",
       initial,

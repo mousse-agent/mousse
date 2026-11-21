@@ -63,6 +63,8 @@ export function useActiveProjectLocation(): ActiveProject {
   const scope = `${profileId}:${activeThreadId ?? '__blank__'}`
   const [resolved, setResolved] = useState<({ scope: string } & ResolvedWorkspace) | null>(null)
   const turnPhase = useAppStore((s) => (s.activeThreadId ? s.turnStates[s.activeThreadId]?.phase ?? null : null))
+  // The warm start's thread is not looked up until the window knows its profile (showWarmView).
+  const warmOnly = useAppStore((s) => !s.profileReady && s.warmView !== null)
   // A new worktree thread's worktree is made when its first turn starts: look again as that turn moves on.
   const recheck = folderRecheckKey({
     threadId: activeThreadId,
@@ -72,12 +74,13 @@ export function useActiveProjectLocation(): ActiveProject {
   })
 
   useEffect(() => {
+    if (warmOnly) return
     let cancelled = false
     void resolveShared(scope, activeThreadId).then((workspace) => {
       if (!cancelled) setResolved({ scope, ...workspace })
     }).catch(() => { if (!cancelled) setResolved({ scope, path: null, workspaceThreadId: null }) })
     return () => { cancelled = true }
-  }, [activeThreadId, profileId, scope, recheck])
+  }, [activeThreadId, profileId, scope, recheck, warmOnly])
 
   return resolveActiveProject({
     isNewChat,

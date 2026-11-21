@@ -7,6 +7,7 @@ import { EmptyThreadAddProject, offersAddProject } from './EmptyThreadAddProject
 import { ChatWallpaper } from './ChatWallpaper'
 import { AmbientGlow } from './AmbientGlow'
 import { EmptyThreadHeading } from './EmptyThreadHeading'
+import { endWarmEmptyView, warmEmptyViewOf } from '../lib/warmHandover'
 import { emptyThreadHeadline } from '../utils/emptyThreadHeadline'
 import { normalizeContextSettings, type ContextSettings, type LlmProviderOption } from '../../shared/settings'
 import type {
@@ -298,6 +299,13 @@ export function OrchestratorChat() {
     : activeThread?.permissionMode ?? defaultPermissionMode
   // Picked once per chat, so it holds while typing; another chat may get another line.
   const emptyHeadline = useMemo(() => emptyThreadHeadline(new Date(), activeThreadId ?? '__blank__'), [activeThreadId])
+  // The warm start showed this same empty chat: its logo and glow carry on rather than playing in again. Only for the
+  // chat it showed, until another one opens.
+  const [warmEmpty] = useState(() => warmEmptyViewOf(activeThreadId ?? '__blank__'))
+  const warmEmptyLeft = useRef(false)
+  if (warmEmpty && warmEmpty.threadKey !== (activeThreadId ?? '__blank__')) warmEmptyLeft.current = true
+  const continuesWarmEmpty = warmEmpty !== null && !warmEmptyLeft.current
+  useEffect(() => endWarmEmptyView(), [])
   const browserElements = useAppStore(
     (s) =>
       s.browserElementAttachmentsByThread[s.activeThreadId ?? '__standalone__'] ??
@@ -1422,6 +1430,15 @@ export function OrchestratorChat() {
     goal: (threadId, action, text) => window.mousse.platformRequest.request<{ text?: string }>('threads.goal', { threadId, action, ...(text !== undefined ? { text } : {}) })
   })
 
+  // A message sent from the warm start (WarmChat) while the window was connecting goes once, as an ordinary send of the
+  // thread's draft, as soon as this chat has read the profile's settings. A send held for another thread is dropped;
+  // its text stays in that thread's draft.
+  const handleSendRef = useRef<typeof handleSend | null>(null)
+  const selectionRead = profileDefault !== undefined
+  useEffect(() => {
+    if (!workspaceReady || !selectionRead) return
+    if (useAppStore.getState().takeWarmSend(activeThreadId)) void handleSendRef.current?.()
+  }, [workspaceReady, selectionRead, activeThreadId])
   const handleSend = async (skillMode?: SkillChatMode, options?: { steer?: boolean; skipQuestions?: boolean }) => {
     if (!useAppStore.getState().workspaceReady) return
     // A file is sent as its path on this computer, which the agent of a thread on another computer can't read. A long
@@ -2040,10 +2057,12 @@ export function OrchestratorChat() {
     onOpenRemoteProject: openProjectOnRunOnDevice
   }
 
+  handleSendRef.current = handleSend
+
   return (
     <div data-mousse="chat" className={`chat${emptyThread ? ' chat--empty' : ''}`} data-new-chat-motion={emptyThread && !newChatAnimations ? 'off' : undefined} style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <ChatWallpaper />
-      {emptyThread && newChatAnimations && <AmbientGlow />}
+      {emptyThread && newChatAnimations && <AmbientGlow since={continuesWarmEmpty ? warmEmpty.since : undefined} />}
       <SubagentParentBar />
       <ThreadComputerBar />
       <ThreadStartedByBar />
@@ -2071,7 +2090,7 @@ export function OrchestratorChat() {
         className={`chat-input-area${showQuestions ? ' has-questions' : ''}`}
       >
         {activeThreadId && !activeThread?.node && <ChatBrowserAccess key={`${profileId}:${activeThreadId}`} threadId={activeThreadId} requireSelectedThread />}
-        {emptyThread && <EmptyThreadHeading headline={emptyHeadline} animate={newChatAnimations} />}
+        {emptyThread && <EmptyThreadHeading headline={emptyHeadline} animate={newChatAnimations} continued={continuesWarmEmpty} />}
         <ComposerNoticeProvider>
         {sendError && (sendChanges?.line === sendError && activeThreadId
           ? <PendingChangesNotice threadId={activeThreadId} message={sendChanges.message} details={sendChanges.details}

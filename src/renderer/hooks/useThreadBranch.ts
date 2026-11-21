@@ -69,9 +69,12 @@ async function readThread(threadId: string, projectId: string): Promise<Omit<Bra
   return { branch: status.metadata.branch || null, own: true }
 }
 
+/** The window shows its warm start and does not know its profile yet: nothing is read for its threads until it does. */
+const warmOnly = (state: ReturnType<typeof useAppStore.getState>): boolean => !state.profileReady && state.warmView !== null
+
 function read(key: string, { projectId, threadId }: Target) {
   const api = window.mousse
-  if (!api?.git?.status || reading.has(key)) return
+  if (!api?.git?.status || reading.has(key) || warmOnly(useAppStore.getState())) return
   reading.add(key)
   const reads = threadId
     ? readThread(threadId, projectId)
@@ -88,6 +91,11 @@ function attach() {
   }
   window.addEventListener('focus', readProjects)
   const unsubscribe = useAppStore.subscribe((state, previous) => {
+    // The window's profile is known: the cards shown meanwhile are read now.
+    if (warmOnly(previous) && !warmOnly(state)) {
+      for (const [key, { target }] of watched) read(key, target)
+      return
+    }
     if (!anyTurnEnded(previous.turnStates, state.turnStates)) return
     readProjects()
     for (const [key, { target }] of watched) {

@@ -113,9 +113,9 @@ function useGlowPhase(ref: RefObject<HTMLElement | null>, start: boolean): void 
  * and a send pours: liquid surges, bubbles rise and the swirl bobs. Private chats add the sunglasses.
  * With Animation speed Off or reduced motion it is still: no draw-in, a fill level without a wave.
  */
-export function EmptyThreadLogo({ label, incognito }: { label: string; incognito: boolean }) {
+export function EmptyThreadLogo({ label, incognito, drawnAtStart = false }: { label: string; incognito: boolean; drawnAtStart?: boolean }) {
   const still = useMotionScale() === 0
-  const [drawn, setDrawn] = useState(still)
+  const [drawn, setDrawn] = useState(still || drawnAtStart)
   const length = useAppStore(draftLength)
   const rootRef = useRef<HTMLDivElement>(null)
   const tiltRef = useRef<HTMLDivElement>(null)

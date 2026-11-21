@@ -192,7 +192,9 @@ export function MousseAgentChatShell({
   </>, [threadId, interrupted, continueRun, uncertain, continueUncertain])
   return (
     <MousseComposerContext.Provider value={composer}>
-      <PromptUndoProvider key={`${profileId}:${threadId ?? ""}`} threadId={threadId} busy={busy} revision={messages}>
+      {/* A thread's undo starts over in another profile. Without a thread (the warm start's chat) there is none, and the
+          window learning its profile does not mount the transcript again (which would scroll it back to its end). */}
+      <PromptUndoProvider key={threadId ? `${profileId}:${threadId}` : ""} threadId={threadId} busy={busy} revision={messages}>
       <QuickActionApprovalContext.Provider value={quickActionApproval ?? null}>
       <PermissionRequestContext.Provider value={permissionRequests ?? NO_PERMISSION_REQUESTS}>
       <SubagentCardsContext.Provider value={subagentCards}>
