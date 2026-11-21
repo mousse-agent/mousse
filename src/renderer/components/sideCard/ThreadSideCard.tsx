@@ -47,9 +47,14 @@ export function SideCardSections({ threadId, projectId }: SideCardSectionsProps)
  * keeps the pane's full width. In a thread area too narrow for that the same
  * card is an overlay: it slides in over the conversation with a scrim, takes
  * focus, closes on Escape or a click on the scrim, and reserves nothing.
+ *
+ * Before the window's profile is known (the warm start) the card's room is kept as it will be, so the conversation
+ * column has its final width from the first frame; the card itself, whose sections read the service, shows once the
+ * profile is known.
  */
 export function ThreadSideCard() {
   const visible = useSideCardVisible()
+  const profileReady = useAppStore((s) => s.profileReady)
   const overlay = useSideCardMode() === 'overlay'
   const mainAreaOpen = useAppStore((s) => s.mainAreaOpen)
   const setSideCardFits = useAppStore((s) => s.setSideCardFits)
@@ -97,12 +102,15 @@ export function ThreadSideCard() {
     return () => cancelAnimationFrame(frame)
   }, [])
 
-  const { mounted, shown, reserved } = useSideCardPresence(visible, launched)
+  const { mounted, shown, reserved } = useSideCardPresence(visible && profileReady, launched)
+  // A card wanted but not in the layout yet (the warm start, or the update before its fade-in starts) already has its
+  // room, so the column never steps back in between.
+  const keepsRoom = reserved || (visible && !mounted)
 
   // Written on the pane, not passed up: the width follows the window while it is
   // resized, and nothing above the pane needs to render for it.
   const columnWidth = chatColumnWidth(useChatWidth())
-  const reservedWidth = !overlay && reserved && threadWidth !== null ? sideCardReservedWidth(threadWidth, columnWidth) : 0
+  const reservedWidth = !overlay && keepsRoom && threadWidth !== null ? sideCardReservedWidth(threadWidth, columnWidth) : 0
   useLayoutEffect(() => {
     layerRef.current?.parentElement?.style.setProperty('--side-card-reserved', `${reservedWidth}px`)
   }, [reservedWidth])
@@ -110,8 +118,17 @@ export function ThreadSideCard() {
     const pane = layerRef.current?.parentElement
     return () => {
       pane?.style.removeProperty('--side-card-reserved')
+      pane?.removeAttribute('data-side-card-launch')
     }
   }, [])
+  // The room kept at launch is there in the first frame, with no slide: the conversation (the warm start's) may have
+  // been laid out a moment before this card measured, which would start the column's width transition.
+  useLayoutEffect(() => {
+    const pane = layerRef.current?.parentElement
+    if (!pane) return
+    if (launched) pane.removeAttribute('data-side-card-launch')
+    else pane.setAttribute('data-side-card-launch', '')
+  }, [launched])
 
   const closeOverlay = useCallback(() => useAppStore.getState().setSideCardOverlayOpen(false), [])
   // Focus moves into the overlay once it has faded in and returns to the control that opened it

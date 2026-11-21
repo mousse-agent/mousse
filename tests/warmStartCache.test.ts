@@ -146,6 +146,32 @@ describe('the warm start file', () => {
     expect(writes).toBe(1)
   })
 
+  it('writes a thread that turns Done within 2 seconds, while a reply in another thread keeps streaming', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    // What each write put on disk, in memory: the app may end without quitting (no flush) right after.
+    const written: string[] = []
+    const memory: WarmStartFs = {
+      readFile: () => Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' })),
+      writeFile: async (_path, data) => { written.push(data) },
+      rename: async () => undefined,
+      rm: async () => undefined
+    }
+    const cache = new WarmStartCache(file, { fs: memory, log })
+    showWindow(cache)
+    await cache.flush()
+    written.length = 0
+    const doneOnDisk = () => written.some((text) => JSON.parse(text).profiles[0][1].activity?.t2 === 'completed')
+    for (let at = 0; at < 10_000; at += 500) {
+      cache.observe('prf_a', 'orchestrator:thread-message-updated', { threadId: 't1', message: message('m2', `part ${at}`) })
+      // Thread t2 finishes 3 seconds in; the service pushes every thread's state with each change.
+      if (at >= 3_000) cache.observe('prf_a', 'threads:activity', { t1: 'processing', t2: 'completed' })
+      await vi.advanceTimersByTimeAsync(500)
+      if (at === 4_500) expect(doneOnDisk()).toBe(true)
+    }
+    // The same states pushed again are not a change: only the streaming reply is still waiting to be written.
+    expect(written).toHaveLength(1)
+  })
+
   it('keeps the newest messages within its size, then the most recent profiles', async () => {
     const big = (id: string) => message(id, 'x'.repeat(2_000))
     const cache = new WarmStartCache(file, { fs, log, maxBytes: 30_000, maxMessages: 40 })

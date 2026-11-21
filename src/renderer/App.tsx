@@ -686,7 +686,8 @@ export default function App() {
               : <WorkspaceLoading conversationOnly error={bootstrapError} onRetry={retryBootstrap} />}
 
           </KeepMounted>
-          {profileReady && <ThreadSideCard />}
+          {/* From the warm start on: the conversation column keeps the card's room from the first frame. */}
+          {workspaceShown && <ThreadSideCard />}
           {profileReady && <QuickActionEditorHost />}
         </aside>
 

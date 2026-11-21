@@ -11,8 +11,9 @@ import type { WarmStartAppInfo, WarmStartView } from '../shared/warmStart'
  *
  * Everything here is noted from what main already sends to a window; nothing asks the service. The file is read once
  * at startup and written in the background: a write waits for updates to settle (`WARM_START_WRITE_DELAY_MS`, at most
- * `WARM_START_MAX_WRITE_DELAY_MS` while they keep coming), goes to a temporary file that then replaces the old one, and
- * is skipped rather than grown past `WARM_START_MAX_BYTES`.
+ * `WARM_START_MAX_WRITE_DELAY_MS` while they keep coming; a change to the threads' settled states at most
+ * `WARM_START_WRITE_DELAY_MS`), goes to a temporary file that then replaces the old one, and is skipped rather than
+ * grown past `WARM_START_MAX_BYTES`.
  */
 
 const FILE_VERSION = 1
@@ -81,6 +82,13 @@ function settledActivity(data: unknown): ThreadActivitySnapshot | undefined {
   return settled
 }
 
+/** Whether two snapshots of settled states name the same threads in the same states. */
+function sameSettled(a: ThreadActivitySnapshot | undefined, b: ThreadActivitySnapshot): boolean {
+  if (!a) return false
+  const ids = Object.keys(b)
+  return ids.length === Object.keys(a).length && ids.every((id) => a[id] === b[id])
+}
+
 /** The rows of a list as a channel carries it: a bare array, or `{ threads }` / `{ projects }` (a versioned list). */
 function rowsOf(data: unknown, key: 'threads' | 'projects'): unknown[] | undefined {
   if (Array.isArray(data)) return data
@@ -104,6 +112,8 @@ export class WarmStartCache {
   private loading: Promise<void> | null = null
   private timer: unknown = null
   private firstPendingAt: number | null = null
+  /** When a pending change to the settled states is written at the latest (`schedule(true)`). */
+  private settledDueAt: number | null = null
   private writing: Promise<void> | null = null
   private dirtyWhileWriting = false
 
@@ -226,8 +236,14 @@ export class WarmStartCache {
       case 'threads:activity': {
         const settled = settledActivity(data)
         if (!settled) return
-        this.entry(profileId).activity = settled
-        break
+        const entry = this.entry(profileId)
+        // Pushes that repeat the states held (most of them: a thread working, then waiting) change nothing here.
+        if (sameSettled(entry.activity, settled)) return
+        entry.activity = settled
+        // A thread's Done or Input reaches the file soon, however long a reply keeps streaming: a window that closes,
+        // or an app that ends without quitting, a few seconds later still shows it at the next launch.
+        this.schedule(true)
+        return
       }
       case 'thread:selected': {
         const id = isRecord(data) ? data.id : undefined
@@ -283,6 +299,7 @@ export class WarmStartCache {
       this.clearTimer(this.timer)
       this.timer = null
       this.firstPendingAt = null
+      this.settledDueAt = null
       return this.write()
     }
     return this.writing ?? Promise.resolve()
@@ -297,16 +314,19 @@ export class WarmStartCache {
     return entry
   }
 
-  private schedule(): void {
+  /** `settled`: the change is to the settled states, written within `writeDelayMs` whatever follows it. */
+  private schedule(settled = false): void {
     const now = Date.now()
     this.firstPendingAt ??= now
+    if (settled) this.settledDueAt ??= now + this.writeDelayMs
     if (this.timer !== null) this.clearTimer(this.timer)
-    const delay = Math.max(0, Math.min(this.writeDelayMs, this.firstPendingAt + this.maxWriteDelayMs - now))
+    const due = Math.min(now + this.writeDelayMs, this.firstPendingAt + this.maxWriteDelayMs, this.settledDueAt ?? Infinity)
     this.timer = this.setTimer(() => {
       this.timer = null
       this.firstPendingAt = null
+      this.settledDueAt = null
       void this.write()
-    }, delay)
+    }, Math.max(0, due - now))
   }
 
   private write(): Promise<void> {

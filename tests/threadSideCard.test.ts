@@ -293,6 +293,8 @@ describe('thread side card rendering', () => {
     Object.assign(initial, patch)
   }
   const reset = {
+    // A window bound to its profile: before that the card keeps only its room (the warm start).
+    profileReady: true,
     sideCardOn: true,
     sideCardFits: null as boolean | null,
     sideCardOverlayOpen: false,
