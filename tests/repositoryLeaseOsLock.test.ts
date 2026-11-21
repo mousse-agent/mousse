@@ -368,8 +368,10 @@ describe('the repository lease, round 2', () => {
     gitStopProbe.kill = () => undefined
     const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const controller = new AbortController()
-    setTimeout(() => controller.abort(), 500)
-    const ran = await withGitMutationLocks(threadDirectory, root, 'test', () => runGitProcess(['-c', 'alias.slow=!sleep 30', 'slow'], { cwd: root, env: process.env }), undefined, undefined, controller.signal)
+    const running = withGitMutationLocks(threadDirectory, root, 'test', () => runGitProcess(['-c', 'alias.slow=!: > git-ready; sleep 30', 'slow'], { cwd: root, env: process.env }), undefined, undefined, controller.signal)
+    await vi.waitFor(() => expect(existsSync(join(root, 'git-ready'))).toBe(true), { timeout: 10_000 })
+    controller.abort()
+    const ran = await running
     expect(ran.error?.code).toBe('ABORT_ERR')
     const first = JSON.parse(readFileSync(getRepositoryLeasePath(identity), 'utf8')) as { heartbeatAt: string; stoppedGitPids?: number[] }
     expect(first.stoppedGitPids?.length).toBeGreaterThan(0)
