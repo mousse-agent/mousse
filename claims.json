@@ -260,14 +260,13 @@
       "machine": "Animatrix",
       "branch": "worktree-turns-skip-start-snapshot",
       "paths": [
-        "src/mms/actions/snapshots.ts",
-        "src/mms/actions/ThreadActionService.ts",
-        "src/mms/git/worktreeHeadFiles.ts",
-        "src/mms/workspace",
-        "src/mms/orchestrator/OrchestratorService.ts"
+        "src/mms/git/worktreeObjects.ts",
+        "src/mms/orchestrator/OrchestratorService.ts",
+        "tests/run/turnHandoff.test.ts",
+        "tests/worktreeHeadFiles.test.ts"
       ],
       "claimedAt": "2026-11-21T06:18:08.908Z",
-      "expiresAt": "2026-11-21T16:44:35.962Z"
+      "expiresAt": "2026-11-21T19:11:01.762Z"
     }
   ]
 }
