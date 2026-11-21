@@ -211,7 +211,7 @@
         "tests/run/queueSteerExactlyOnce.test.ts"
       ],
       "claimedAt": "2026-11-21T10:50:38.459Z",
-      "expiresAt": "2026-11-21T16:24:04.664Z"
+      "expiresAt": "2026-11-21T17:39:19.856Z"
     },
     {
       "task": "thread-journal-scaling",
