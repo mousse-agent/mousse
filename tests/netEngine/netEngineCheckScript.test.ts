@@ -20,7 +20,7 @@ describe('net-engine-check.mjs route cases', () => {
     (id) => {
       const refused = run(id, '--route', 'udp')
       expect(refused.status).toBe(2)
-      expect(refused.stderr).toContain(`${id} runs over one route: give --route tcp|ws|ssh.`)
+      expect(refused.stderr).toContain(`${id} runs over --route tcp|ws|ssh, not udp.`)
     }
   )
 

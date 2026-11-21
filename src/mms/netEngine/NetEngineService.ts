@@ -21,7 +21,9 @@ import type {
 } from '../../shared/netEngine/local'
 import {
   ownerRoute,
+  parseRelayDestination,
   parseRoute,
+  relayText,
   routeClass,
   routeText,
   ticketDestinations
@@ -60,11 +62,26 @@ import {
   HelperSupervisor,
   type HelperStatus
 } from './helper/supervisor'
+import { EnginePlus } from './plus'
 import type { LoginStartQuestion } from './loginStart'
 import { EnginePairing, fingerprintOf, type PairingStep } from './pairing'
 import { EngineEditor, engineEditorRefusal, type EngineEditorRights, type EngineEditorTestOptions } from './editor'
 import { TunnelError } from '../net/editor/tunnel'
 import { routeSetupProbes } from './probes'
+import {
+  deviceRelay,
+  dismissKey,
+  nextStale,
+  offeredBy,
+  readGrantRelays,
+  readPeerRelays,
+  readRelayInfo,
+  readRelayList,
+  relayError,
+  relayLink,
+  relaysStatus,
+  type RelayView
+} from './relays'
 import { automatic, handedRoutes, loopbackClass, privateRoute } from './routes'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 import { readTicket } from './ticket'
@@ -74,6 +91,10 @@ import type { SshRequestStore } from './ssh/requests'
 
 export const NON_KEEPER_MESSAGE =
   "This profile's network is managed by another computer. Turn its networking on, or Start over."
+
+/** The relay lists the app reads from its helper (Phase 3): own relays, pairings' relay info, callers' entries. */
+type RelayList = 'relays' | 'peers' | 'grants'
+const RELAY_LISTS: readonly RelayList[] = ['relays', 'peers', 'grants']
 
 interface EngineSettings {
   enabled: boolean
@@ -146,6 +167,22 @@ export class NetEngineService implements EngineDirectoryPort {
   private readonly since = new Map<string, number>()
   /** Wakes the windows when a condition is due to show (`rowStuckMs` after it began). */
   private stuckTimer?: ReturnType<typeof setTimeout>
+  /** Mousse Plus and "Remove on all my hosts", as the helper reports them (Phase 4). */
+  readonly plus = new EnginePlus(() => this.changed())
+  /**
+   * What the helper running now said of relays (Phase 3): undefined until it answered, null when it has none (it
+   * refused `relay.list`).
+   */
+  private relayView?: RelayView | null
+  /**
+   * The relay lists to read again (`relays`, `peers`, `grants`), gathered over `relayReadDebounceMs` so a burst of
+   * events reads each list once. `relayReading` is the read running; what arrives meanwhile waits for the next.
+   */
+  private readonly relayWanted = new Set<RelayList>()
+  private relayTimer?: ReturnType<typeof setTimeout>
+  private relayReading?: Promise<void>
+  /** The relay destinations the owner said Not now to, or stopped using: not asked about again (`dismissKey`). */
+  private relayDismissed?: Set<string>
   constructor(
     private readonly options: {
       profileDir: string
@@ -288,9 +325,11 @@ export class NetEngineService implements EngineDirectoryPort {
       ...(this.started?.pairing.links().length ? { links: this.started.pairing.links() } : {}),
       ...(this.started?.pairing.joins().length ? { joins: this.started.pairing.joins() } : {}),
       ...(this.reach() ? { reach: this.reach() } : {}),
+      ...(this.relayView ? { relays: relaysStatus(this.relayView) } : {}),
       ...(this.options.net.v1On()
         ? {}
-        : { workOnThreads: this.options.net.nodePolicyConfig().workOnThreads !== false })
+        : { workOnThreads: this.options.net.nodePolicyConfig().workOnThreads !== false }),
+      ...(this.helper ? this.plus.view((identity) => this.peerName(identity)) : {})
     }
   }
 
@@ -300,6 +339,251 @@ export class NetEngineService implements EngineDirectoryPort {
    */
   setWorkOnThreads(enabled: boolean): void {
     this.options.net.setWorkOnThreads(enabled)
+    this.changed()
+  }
+
+  // ---------------------------------------------------------------- relays (Phase 3 §B.5, §B.9, §B.11)
+
+  /**
+   * Settings → Reach → Your own relay: the owner pastes the link `mousse-relay init` or `enroll` printed. The helper
+   * dials the relay pinned to the link's id and registers; pasting is also the owner's approval of that relay.
+   */
+  async enrollRelay(link: string): Promise<void> {
+    const helper = this.relayHelper()
+    const value = relayLink(link)
+    if (!value)
+      throw new NetError('bad_request', "That isn't a relay link.", { details: { reason: 'bad_link' } })
+    let answer: Record<string, unknown>
+    try {
+      answer = await helper.request(
+        'relay.enroll',
+        { link: value },
+        engineLimits().relayEnrollDeadlineMs
+      )
+    } catch (error) {
+      throw relayError(error)
+    }
+    this.relayInfo(helper, answer.relay)
+    this.rereadRelays()
+  }
+
+  /** Remove on one of this computer's relays: it stops registering there, and leaves the next invitations. */
+  async removeRelay(relay: string): Promise<void> {
+    const helper = this.relayHelper()
+    try {
+      await helper.request('relay.remove', { relay })
+    } catch (error) {
+      throw relayError(error)
+    }
+    if (this.helper === helper) this.relayView?.relays.delete(relay)
+    this.changed()
+    this.rereadRelays()
+  }
+
+  /** New relay key: a new registration key takes over, the old one kept until the overlap ends (§B.4, §B.11). */
+  /** New relay key, or with `cancel` its Cancel while the relay has not taken the new key. */
+  async rotateRelay(relay: string, cancel = false): Promise<void> {
+    const helper = this.relayHelper()
+    let answer: Record<string, unknown>
+    try {
+      answer = await helper.request('relay.rotate', cancel ? { relay, cancel: true } : { relay })
+    } catch (error) {
+      throw relayError(error)
+    }
+    this.relayInfo(helper, answer.relay)
+  }
+
+  /**
+   * Allow on "<host> can be reached through relay <host:port>. Allow?" (§B.11), or Stop using relay on its row: the
+   * pairing's relay route to `destination` is dialled from now on, or no longer. Only a destination that pairing's
+   * relay info offers here is taken. Stopping is also Not now: the row does not ask about it again.
+   */
+  async allowRelay(node: NodeId, destination: string, allow: boolean): Promise<void> {
+    const { row, parsed } = this.relayRoute(node, destination)
+    const helper = this.relayHelper()
+    try {
+      await helper.request(allow ? 'peer.relay.allow' : 'peer.relay.disallow', {
+        identity: row.endpoint,
+        destination: parsed.destination
+      })
+    } catch (error) {
+      throw relayError(error)
+    }
+    this.setDismissed(row.endpoint, parsed.destination, !allow)
+    // The row changes at once; the read after it confirms.
+    const peer = this.relayView?.peers.get(row.endpoint.toLowerCase())
+    const route = peer?.routes.find((item) => item.destination === parsed.destination)
+    if (route) {
+      route.approved = allow
+      if (allow) route.source = 'manifest'
+      else delete route.source
+    }
+    this.changed()
+    this.rereadRelays('peers')
+  }
+
+  /** Not now on a relay route's Allow? row: it is not asked about again, and it is not dialled. */
+  dismissRelay(node: NodeId, destination: string): void {
+    const { row, parsed } = this.relayRoute(node, destination)
+    this.setDismissed(row.endpoint, parsed.destination, true)
+    this.changed()
+  }
+
+  /** A pairing and one relay destination its relay info offers here; anything else is refused. */
+  private relayRoute(node: NodeId, destination: string): { row: EnginePeerRow; parsed: { destination: string } } {
+    const started = this.require()
+    const row = started.peers.serving(node)
+    if (!row) throw new NetError('bad_request', 'Unknown device.')
+    const parsed = parseRelayDestination(destination)
+    if (!parsed)
+      throw new NetError('bad_request', "That isn't a relay.", { details: { reason: 'bad_destination' } })
+    if (!offeredBy(this.relayView ?? undefined, row.endpoint, parsed.destination))
+      throw new NetError('bad_request', `${row.name} doesn't offer that relay.`, {
+        details: { reason: 'not_offered' }
+      })
+    return { row, parsed }
+  }
+
+  /** `relay-dismissed.json` in this profile's engine folder: the destinations not to ask about again. */
+  private get dismissedPath(): string {
+    return join(this.directory, 'relay-dismissed.json')
+  }
+
+  private dismissed(): Set<string> {
+    if (this.relayDismissed) return this.relayDismissed
+    let keys: string[] = []
+    try {
+      const value = JSON.parse(readFileSync(this.dismissedPath, 'utf8')) as { dismissed?: unknown }
+      if (Array.isArray(value?.dismissed))
+        keys = value.dismissed.filter((key): key is string => typeof key === 'string')
+    } catch {
+      // None yet.
+    }
+    this.relayDismissed = new Set(keys)
+    return this.relayDismissed
+  }
+
+  private setDismissed(identity: string, destination: string, dismissed: boolean): void {
+    const keys = this.dismissed()
+    const key = dismissKey(identity, destination)
+    if (keys.has(key) === dismissed) return
+    if (dismissed) keys.add(key)
+    else keys.delete(key)
+    try {
+      mkdirSync(this.directory, { recursive: true })
+      writeFileSync(this.dismissedPath, JSON.stringify({ dismissed: [...keys] }))
+    } catch {
+      // Kept for this run.
+    }
+  }
+
+  /** The helper running now, when it has relays. */
+  private relayHelper(): EngineHelper {
+    this.require()
+    const helper = this.helper
+    if (!helper) throw new NetError('peer_offline', 'Turn networking on first.')
+    if (this.relayView === null)
+      throw new NetError('bad_request', 'Update Mousse to use relays.', {
+        details: { reason: 'no_relays' }
+      })
+    return helper
+  }
+
+  /** One own relay as the helper said it (`relay.enroll`, `relay.rotate`, `relay.state`). */
+  private relayInfo(helper: EngineHelper, value: unknown): void {
+    const relay = readRelayInfo(value, Date.now())
+    if (!relay || this.helper !== helper) return
+    this.relayView ??= { available: true, relays: new Map(), peers: new Map(), grants: new Map() }
+    this.relayView.relays.set(relay.id, relay)
+    this.changed()
+  }
+
+  /**
+   * The helper's relay events: an own relay's state is applied; for the rest, only the list each one changes is
+   * read again (a pairing's relay info: `peers.list`; who fits within the relay limit: `grants.list`).
+   */
+  private relayEvent(helper: EngineHelper, event: Record<string, unknown>): void {
+    if (this.helper !== helper || this.relayView === null) return
+    switch (event.ev) {
+      case 'relay.state':
+        return this.relayInfo(helper, event.relay)
+      case 'peer.manifest':
+      case 'peer.relay.offered':
+        return this.rereadRelays('peers')
+      // A caller key, or a pairing made or removed here, moves which callers fit within the relay limit.
+      case 'peer.keys':
+      case 'enrolled':
+      case 'grant.closed':
+        return this.rereadRelays('grants')
+    }
+  }
+
+  /**
+   * Reads the named relay lists again: the requests of `relayReadDebounceMs` are gathered into one read of each list
+   * asked for, one read at a time.
+   */
+  private rereadRelays(...lists: RelayList[]): void {
+    if (!this.helper || this.relayView === null) return
+    for (const list of lists.length ? lists : RELAY_LISTS) this.relayWanted.add(list)
+    if (this.relayTimer || this.relayReading) return
+    this.relayTimer = setTimeout(() => {
+      this.relayTimer = undefined
+      const helper = this.helper
+      const wanted = new Set(this.relayWanted)
+      this.relayWanted.clear()
+      if (!helper || !wanted.size) return
+      this.relayReading = this.readRelays(helper, wanted)
+        .catch(() => undefined)
+        .finally(() => {
+          this.relayReading = undefined
+          // Only the lists asked for meanwhile: none asked for would read all three.
+          if (this.relayWanted.size) this.rereadRelays(...this.relayWanted)
+        })
+    }, engineLimits().relayReadDebounceMs)
+    this.relayTimer.unref?.()
+  }
+
+  /**
+   * The relay lists in `wanted`. A helper that refuses `relay.list` has no relays; one that fails it otherwise (just
+   * started, busy) is asked again `relayReadRetryMs` later, at most `relayReadTries` times.
+   */
+  private async readRelays(helper: EngineHelper, wanted: Set<RelayList>): Promise<void> {
+    let list: Record<string, unknown> | undefined
+    if (wanted.has('relays') || this.relayView === undefined) {
+      const { relayReadTries, relayReadRetryMs } = engineLimits()
+      for (let attempt = 1; ; attempt++) {
+        try {
+          list = await helper.request('relay.list')
+          break
+        } catch (error) {
+          if (this.helper !== helper) return
+          if (helperCode(error) === 'unknown_op') {
+            this.relayView = null
+            this.changed()
+            return
+          }
+          if (attempt >= relayReadTries) return
+          await new Promise((resolve) => setTimeout(resolve, relayReadRetryMs))
+          if (this.helper !== helper) return
+        }
+      }
+    }
+    const [peers, grants] = await Promise.all([
+      wanted.has('peers') || this.relayView === undefined
+        ? helper.request('peers.list').catch(() => undefined)
+        : undefined,
+      wanted.has('grants') || this.relayView === undefined
+        ? helper.request('grants.list').catch(() => undefined)
+        : undefined
+    ])
+    if (this.helper !== helper) return
+    const before = this.relayView
+    this.relayView = {
+      available: list ? list.available !== false : (before?.available ?? true),
+      relays: list ? readRelayList(list, Date.now()) : (before?.relays ?? new Map()),
+      peers: peers ? readPeerRelays(peers) : (before?.peers ?? new Map()),
+      grants: grants ? readGrantRelays(grants) : (before?.grants ?? new Map())
+    }
     this.changed()
   }
 
@@ -668,6 +952,21 @@ export class NetEngineService implements EngineDirectoryPort {
     }
   }
 
+  /** The other computer of a pairing: its endpoint id and name, for "Remove on all my hosts". */
+  device(node: NodeId): { identity: string; name: string } {
+    const row = this.require()
+      .peers.all()
+      .find((r) => r.localId === node && r.state !== 'removed')
+    if (!row) throw new NetError('bad_request', 'No such device.')
+    return { identity: row.endpoint, name: row.name }
+  }
+
+  /** A paired computer's name by its endpoint id. */
+  private peerName(identity: string): string | undefined {
+    return this.started?.peers.all().find((r) => r.endpoint === identity && r.state !== 'removed')
+      ?.name
+  }
+
   /** Where this computer's helper listens, as it said in `hello`. */
   private routes(): string[] {
     const routes: unknown = this.helper?.info.routes
@@ -904,8 +1203,14 @@ export class NetEngineService implements EngineDirectoryPort {
         const outDown = held(`${node} out`, paired && !online) >= stuckMs
         const inDown = held(`${node} in`, paired && !serving) >= stuckMs
         const unreachable = outDown && serving ? 'out' : inDown && online ? 'in' : undefined
-        // The class of the route its connection came up on (§7 `conn.up.route`), this computer's dial first.
-        const route = started.sessions.route(node)?.class
+        // The class of the route its connection came up on (§7 `conn.up.route`), this computer's dial first; a
+        // relay connection names its relay.
+        const connectedOn = started.sessions.route(node)
+        const route = connectedOn?.kind === 'relay' ? 'relay' : (connectedOn?.class as NetEngineDevice['route'])
+        const via = connectedOn?.kind === 'relay' && connectedOn.destination ? relayText(connectedOn.destination) : undefined
+        const relay = this.relayView
+          ? deviceRelay(this.relayView, row.endpoint, now, this.dismissed(), engineLimits().relayOffersShown)
+          : undefined
         return {
           node,
           name: row.name,
@@ -920,6 +1225,7 @@ export class NetEngineService implements EngineDirectoryPort {
           ...(started.pairing.sshParked(node) ? { sshParked: started.pairing.sshParked(node) } : {}),
           ...(row.addresses?.length ? { addresses: row.addresses } : {}),
           ...(route ? { route } : {}),
+          ...(via ? { via } : {}),
           ...(row.offered?.length ? { offered: row.offered } : {}),
           ...(row.source ? { source: row.source } : {}),
           ...(started.pairing.linkUnfinished(node)
@@ -929,17 +1235,24 @@ export class NetEngineService implements EngineDirectoryPort {
                   ? { linkValid: true }
                   : {})
               }
-            : {})
+            : {}),
+          ...(relay ? { relay } : {})
         }
       })
     for (const key of [...this.since.keys()]) if (!seen.has(key)) this.since.delete(key)
-    this.wakeWhenStuck(now, stuckMs)
+    // A pairing's relay info going stale shows then too.
+    const stale = this.relayView ? nextStale(this.relayView, now) : undefined
+    this.wakeWhenStuck(now, stuckMs, stale)
     return devices
   }
 
-  /** A condition that has not shown yet shows once it has held for the bound: the windows read again then. */
-  private wakeWhenStuck(now: number, stuckMs: number): void {
+  /**
+   * A condition that has not shown yet shows once it has held for the bound, and relay info once it goes stale
+   * (`also`): the windows read again then.
+   */
+  private wakeWhenStuck(now: number, stuckMs: number, also?: number): void {
     const due = [...this.since.values()].map((at) => at + stuckMs).filter((at) => at > now)
+    if (also !== undefined && also > now) due.push(also)
     if (this.stuckTimer) clearTimeout(this.stuckTimer)
     this.stuckTimer = undefined
     if (!due.length || !this.started) return
@@ -948,7 +1261,8 @@ export class NetEngineService implements EngineDirectoryPort {
         this.stuckTimer = undefined
         this.changed()
       },
-      Math.min(...due) - now + 50
+      // A timer's longest wait is about 24 days; one due later is set again when it fires.
+      Math.min(Math.min(...due) - now + 50, 2 ** 31 - 1)
     )
     this.stuckTimer.unref?.()
   }
@@ -1009,6 +1323,18 @@ export class NetEngineService implements EngineDirectoryPort {
     // What aborted handlers wrote under a removed pairing's id goes, then its tombstone (§5.4 step 4).
     peers.sweep()
     const revocations = new Map<NodeId, AbortController>()
+    /**
+     * A pairing's row while this run of the engine is on. A helper's pipe can close after the profile's database
+     * did (the app stopping): then there is none.
+     */
+    const liveRow = (node: NodeId): EnginePeerRow | undefined => {
+      if (this.started?.peers !== peers || this.started.ending) return undefined
+      try {
+        return peers.get(node)
+      } catch {
+        return undefined
+      }
+    }
     const sessions: EngineSessions = new EngineSessions({
       name: () => this.selfName(),
       host: {
@@ -1048,7 +1374,7 @@ export class NetEngineService implements EngineDirectoryPort {
           pairing.clientReady(node)
           // A: its first live connection to B confirms an SSH add (1b §3.4 step 6).
           // Stopping: the store is closed, and nothing is written.
-          const row = this.started?.peers === peers && !this.started.ending ? peers.get(node) : undefined
+          const row = liveRow(node)
           if (row?.source === 'ssh' && row.state === 'ssh_granted') this.sshAdd().connected(row)
           this.changed()
         },
@@ -1060,7 +1386,7 @@ export class NetEngineService implements EngineDirectoryPort {
           // A pairing that can no longer reach this computer keeps no editor tunnel here.
           editor.reconcile()
           // B: A's first live inbound with the row's grant connects it ("Added over SSH from <A>").
-          const row = this.started?.peers === peers && !this.started.ending ? peers.get(node) : undefined
+          const row = liveRow(node)
           if (
             row?.source === 'ssh' &&
             row.state === 'ssh_granted' &&
@@ -1321,6 +1647,10 @@ export class NetEngineService implements EngineDirectoryPort {
     this.since.clear()
     this.helper?.close()
     this.helper = undefined
+    this.relayView = undefined
+    if (this.relayTimer) clearTimeout(this.relayTimer)
+    this.relayTimer = undefined
+    this.relayWanted.clear()
     clearInterval(started.timer)
     this.options.net.setEngineAuthorizer(undefined)
     started.sessions.closeAll('stopped')
@@ -1400,15 +1730,23 @@ export class NetEngineService implements EngineDirectoryPort {
       }
     })
     this.helper = helper
+    this.relayView = undefined
+    this.relayWanted.clear()
     helper.onEvent((event) => started.pairing.event(event))
+    helper.onEvent((event) => this.relayEvent(helper, event))
     helper.onPaused(() => this.changed())
     helper.channel.onClose(() => {
-      if (this.helper === helper) this.helper = undefined
+      if (this.helper !== helper) return
+      this.helper = undefined
+      this.relayView = undefined
     })
     const told = this.selfName()
     await helper.hello()
+    this.plus.attach(helper)
     this.toldName = told
     this.changed()
+    // Its relays, and what each pairing's relays need (Phase 3); a helper without them says so once.
+    if (this.helper === helper) this.rereadRelays()
     // Removals finish, ceremonies resume, owed rows are written and every pairing is dialled again.
     if (this.helper === helper) {
       if (engineControl('route-leak')) await this.openLeak(helper)

@@ -30,7 +30,7 @@ import { PassThrough } from 'node:stream'
 import { createServer as createTlsServer } from 'node:tls'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { vi } from 'vitest'
+import { expect, vi } from 'vitest'
 import { runNetEngineSsh } from '../../../src/cli/commands/netEngineSsh'
 import { setSharedShellPath } from '../../../src/mms/harness/shellPath'
 import { observeHarnessSpawns } from '../../../src/mms/harness/spawn'
@@ -54,7 +54,13 @@ export const REAL_HELPER = !!process.env.MOUSSE_NET_HELPER?.trim()
 
 /**
  * The route a 1b routes check runs over (`--route`, 1b §14): each computer is given only that route, and every
- * connection must come up on it (`conn.up.route`), else the run fails with `route_mismatch`. Unset: 1a's checks.
+ * connection must come up on it (`conn.up.route`), else the run fails with `route_mismatch`. Each `conn.up` it judges
+ * is written to `<out>/conn-up.jsonl`, one JSON object per line, for the kit to judge too.
+ *
+ * `relay` (Phase 3): each computer adds one of the relays in `MOUSSE_RELAY_TEST_LINKS` as its own. Pairing setup runs
+ * direct (a host learns a caller's relay only from what that caller sends as a host); `Fabric.settle` then turns every
+ * computer's direct routes off and restarts its helpers, and every `conn.up` after setup must be of kind `relay`
+ * through one of those relays. Unset: 1a's checks.
  */
 export const CHECK_ROUTE = readCheckRoute()
 /**
@@ -83,9 +89,24 @@ const CLASS_MAPPED_PORTS = 32
 export const CHECK_CLASS: 'tailnet' | 'public' =
   process.env.MOUSSE_NET_ENGINE_CHECK_CLASS === 'public' ? 'public' : 'tailnet'
 
-function readCheckRoute(): 'tcp' | 'ws' | 'ssh' | undefined {
+function readCheckRoute(): 'tcp' | 'ws' | 'ssh' | 'relay' | undefined {
   const value = process.env.MOUSSE_NET_ENGINE_CHECK_ROUTE?.trim()
-  return value === 'tcp' || value === 'ws' || value === 'ssh' ? value : undefined
+  return value === 'tcp' || value === 'ws' || value === 'ssh' || value === 'relay' ? value : undefined
+}
+
+/**
+ * The enrollment links of a running `mousse-relay` in `text` (`MOUSSE_RELAY_TEST_LINKS`: whitespace- or
+ * comma-separated, each used once), each with the destination (`relay://host:port`) it names. Words that are not
+ * links are left out.
+ */
+export function relayTestLinks(text: string | undefined): Array<{ link: string; destination: string }> {
+  const out: Array<{ link: string; destination: string }> = []
+  for (const word of (text ?? '').split(/[\s,]+/).filter(Boolean)) {
+    const match =
+      /^mousse-relay:\/\/(\[[0-9A-Fa-f:.]+\]|[^/:[\]]+):(\d{1,5})\/#[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.exec(word)
+    if (match) out.push({ link: word, destination: `relay://${match[1]!.toLowerCase()}:${Number(match[2])}` })
+  }
+  return out
 }
 
 /** The route kind and class every connection of a routes run must report. */
@@ -93,7 +114,24 @@ export function expectedRoute(): { kind: string; class: string } | undefined {
   if (CHECK_ROUTE === 'tcp') return { kind: 'tcp', class: CHECK_CLASS }
   if (CHECK_ROUTE === 'ws') return { kind: 'ws', class: 'tunnel' }
   if (CHECK_ROUTE === 'ssh') return { kind: 'ssh', class: 'ssh' }
+  if (CHECK_ROUTE === 'relay') return { kind: 'relay', class: 'relay' }
   return undefined
+}
+
+/**
+ * Whether a `conn.up` route is the one a routes run expects: its kind and class; for a relay, class `relay` or
+ * `relay_bulk`, naming as its destination one of the run's `relays`.
+ */
+export function routeMatches(
+  route: unknown,
+  expected: { kind: string; class: string },
+  relays: readonly string[] = []
+): boolean {
+  const up = route as { kind?: unknown; class?: unknown; destination?: unknown } | undefined
+  if (up?.kind !== expected.kind) return false
+  if (expected.kind !== 'relay') return up.class === expected.class
+  if (up.class !== 'relay' && up.class !== 'relay_bulk') return false
+  return typeof up.destination === 'string' && relays.includes(up.destination.toLowerCase())
 }
 
 export const DAY = 24 * 60 * 60_000
@@ -209,33 +247,50 @@ export class Fabric {
   private made = 0
   /** Every `conn.up` route a helper reported in a routes run, by the app it went to. */
   readonly routesSeen: Array<{ to: string; route: unknown }> = []
+  /** A relay run's links not given to a computer yet. */
+  private readonly relayLinks = relayTestLinks(process.env.MOUSSE_RELAY_TEST_LINKS)
+  /** The pairings `pair` made. */
+  private readonly pairs: Array<{ owner: Computer; caller: Computer; callerOnOwner: NodeId; ownerOnCaller: NodeId }> =
+    []
+  /** A relay run's setup has ended (`settle`): from now on every connection is judged. */
+  private settled = CHECK_ROUTE !== 'relay'
   /** Every connection a helper announced (`conn.up`), by the app it went to and the identity on the other end. */
   readonly announced: Array<{ to: string; identity: unknown }> = []
 
   constructor() {
     withoutAgentClis()
     const expected = expectedRoute()
+    if (CHECK_ROUTE === 'relay') {
+      // Redials and re-registrations after `settle`'s restarts, without minutes of backoff.
+      process.env.MOUSSE_NET_KEEP_RETRY_FIRST_MS ||= '200'
+      process.env.MOUSSE_NET_KEEP_RETRY_MAX_MS ||= '2000'
+      process.env.MOUSSE_NET_VIA_RELAY_RETRY_FIRST_MS ||= '200'
+    }
+    const relays = this.relayLinks.map((entry) => entry.destination)
     // Every connection a helper reports goes to <out>/conn-up.jsonl, one JSON object per line: the kit judges the
-    // route case from it (1b §14).
+    // route case from it (1b §14). A relay run's setup runs direct, so only what comes after it (`settle`) counts.
     const out = process.env.MOUSSE_NET_ENGINE_CHECK_OUT
     this.tap.watch = (message, to) => {
       if (message.ev !== 'conn.up') return
       this.announced.push({ to, identity: message.identity })
-      if (out) appendFileSync(join(out, 'conn-up.jsonl'), `${JSON.stringify({ ...message, to })}\n`)
+      if (!this.settled) return
+      if (out) appendFileSync(join(out, 'conn-up.jsonl'), `${JSON.stringify({ ...message, to })}
+`)
       if (!expected) return
       this.routesSeen.push({ to, route: message.route })
-      const route = message.route as { kind?: unknown; class?: unknown } | undefined
       // Every connection of the route's kind (as the kit judges it), and of its class: an inbound loopback
-      // connection takes the class the map gives the listener port it arrived on. A cross-machine host's inbound
-      // connections come from the caller's own address, whose class the route does not set: only their kind counts.
-      const classOk = route?.class === expected.class || CROSS_ROLE === 'host'
-      if (route?.kind !== expected.kind || !classOk) record('route_mismatch')
+      // connection takes the class the map gives the listener port it arrived on. A relay's names one of the run's
+      // relays. A cross-machine host's inbound connections come from the caller's own address, whose class the route
+      // does not set: only their kind counts.
+      const kind = (message.route as { kind?: unknown } | undefined)?.kind
+      const hostKindOnly = CROSS_ROLE === 'host' && kind === expected.kind
+      if (!routeMatches(message.route, expected, relays) && !hostKindOnly) record('route_mismatch')
     }
     if (!expected) return
     // Every file of a routes run guards its own process: on Linux the kit's fence keeps a request from reaching the
     // kit's Plus recorder, so the run records it here (as routes-app's own cases always did).
     guardEgress()
-    if (!REAL_HELPER) {
+    if (!REAL_HELPER && CHECK_ROUTE !== 'relay') {
       // A 1.1 fake: routes with approvals, and the class map the debug helper reads.
       this.network.minor = 1
       this.network.classMap = {}
@@ -248,6 +303,11 @@ export class Fabric {
    */
   private routeFor(identity: string, n: number): void {
     if (!CHECK_ROUTE || REAL_HELPER) return
+    // A fake helper with relays: once its computer adds one, every dial to it goes through that relay.
+    if (CHECK_ROUTE === 'relay') {
+      this.network.relays.set(identity, { available: true, relays: [], peers: new Map(), grants: new Map() })
+      return
+    }
     const port = 47100 + n
     const route =
       CHECK_ROUTE === 'tcp'
@@ -435,6 +495,11 @@ export class Fabric {
           routedParams(mms, method, params)
         )
     })
+    // A relay run: one of the run's relays becomes this computer's own, and it allows its pairings' relays.
+    if (CHECK_ROUTE === 'relay') {
+      await this.addRelay(computer)
+      this.cleanups.push(allowRelays(computer))
+    }
     // A routes run: each owner taps Use on what its pairings offer, as its window would (unless a check says no).
     if (CHECK_ROUTE && this.autoUse) this.cleanups.push(useOffered(computer))
     this.all.push(computer)
@@ -753,6 +818,81 @@ export class Fabric {
   }
 
   /**
+   * A relay run: `computer` adds the next relay of `MOUSSE_RELAY_TEST_LINKS` as its own, as Settings → Reach does.
+   * Without a link left the run fails with `not_configured`.
+   */
+  private async addRelay(computer: Computer): Promise<void> {
+    const next = this.relayLinks.shift()
+    if (!next) {
+      record('not_configured')
+      throw new Error('A relay run needs one MOUSSE_RELAY_TEST_LINKS link for each computer.')
+    }
+    await step('relay_not_added', () =>
+      computer.dispatch('netEngine.relay.enroll', { link: next.link }, true)
+    )
+  }
+
+  /**
+   * The end of a check's setup. In a relay run (Phase 3), once every pairing knows the other's relay (the host lists
+   * the caller's key, the caller allowed the host's relay), each computer turns LAN and tailnet off and moves to a
+   * new port, so no direct route is left; then every helper restarts at once and every pairing must come back,
+   * both ways, through a relay. Every connection from here on is judged. Nothing in other runs.
+   */
+  async settle(): Promise<void> {
+    if (this.settled) return
+    if (REAL_HELPER)
+      await step('relay_not_ready', () =>
+        eventually(async () => {
+          for (const { owner, caller } of this.pairs)
+            for (const [host, peer] of [
+              [owner, caller],
+              [caller, owner]
+            ] as const) {
+              const grants = await host.engine.request('grants.list')
+              const grant = (grants.grants as Array<Record<string, unknown>>).find(
+                (item) => item.identity === peer.endpoint
+              )
+              expect(grant?.relay).toBe('listed')
+              const peers = await peer.engine.request('peers.list')
+              const entry = (peers.peers as Array<Record<string, any>>).find(
+                (item) => item.identity === host.endpoint
+              )
+              expect(entry?.relay?.routes?.some((route: { approved?: unknown }) => route.approved === true)).toBe(
+                true
+              )
+            }
+        }, 60_000)
+      )
+    for (const computer of this.all) {
+      if (!computer.mms.netEngine.status().reach) continue
+      const before = computer.engine
+      const port = await freePort()
+      computer.port = port
+      const saved = await step(undefined, () =>
+        computer.dispatch('netEngine.routes.config', { lan: false, tailnet: false, port }, true)
+      )
+      if (saved?.restarted) computer.engine = await running(computer.mms, before)
+    }
+    this.settled = true
+    await Promise.all(this.all.map((computer) => this.restartHelper(computer)))
+    // Each side asks for its direction again while it is down, as a window's Retry would: a dial made while the
+    // other helper was still restarting is not retried by every helper.
+    for (const { owner, caller, callerOnOwner, ownerOnCaller } of this.pairs)
+      await step('not_reconnected', () =>
+        eventually(() => {
+          for (const [from, node] of [
+            [owner, callerOnOwner],
+            [caller, ownerOnCaller]
+          ] as const)
+            if (!from.mms.netEngine.online(node)) {
+              void from.mms.netEngine.dial(node).catch(() => undefined)
+              throw new Error(`${from.name} is not connected to its pairing yet`)
+            }
+        }, 90_000)
+      )
+  }
+
+  /**
    * Pairs two computers both ways through their windows: the owner's shows an invitation, the caller's joins it,
    * the owner's says Yes; then each waits until its row reads Connected. Answers each one's local id for the other.
    */
@@ -771,6 +911,7 @@ export class Fabric {
     }
     const callerOnOwner = await connectedBothWays(owner, caller)
     const grant = owner.mms.netEngine.peerRows().find((row) => row.localId === callerOnOwner)!.grant
+    this.pairs.push({ owner, caller, callerOnOwner, ownerOnCaller: joined.node })
     return { callerOnOwner, ownerOnCaller: joined.node, grant }
   }
 
@@ -1004,6 +1145,41 @@ export function guardEgress(): void {
     }
     return connect.apply(this, args)
   } as typeof Socket.prototype.connect
+}
+
+/**
+ * Taps Allow on every "<host> can be reached through relay <host:port>. Allow?" on `computer`, as its window would,
+ * until stopped (Phase 3 §B.11).
+ */
+export function allowRelays(computer: Pick<Computer, 'mms' | 'dispatch'>): () => void {
+  const asked = new Set<string>()
+  const timer = setInterval(() => {
+    let devices: Array<{ node: string; relay?: { offered?: string[] } }> = []
+    try {
+      devices = computer.mms.netEngine.status().devices
+    } catch {
+      return
+    }
+    for (const device of devices)
+      for (const destination of device.relay?.offered ?? []) {
+        const key = `${device.node} ${destination}`
+        if (asked.has(key)) continue
+        asked.add(key)
+        void computer
+          .dispatch('netEngine.relay.allow', { node: device.node, destination }, true)
+          .catch(() => asked.delete(key))
+      }
+  }, 25)
+  return () => clearInterval(timer)
+}
+
+/** A port nothing listens on now. */
+async function freePort(): Promise<number> {
+  const server = createServer()
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  await new Promise<void>((resolve) => server.close(() => resolve()))
+  return port
 }
 
 /** Taps Use on every "Addresses <B> offered" on `owner`, as its window would, until stopped. */

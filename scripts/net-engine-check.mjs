@@ -7,13 +7,18 @@
  *   FAIL <id> reason=<word>   (exit 1)
  *
  * Usage: node scripts/net-engine-check.mjs <check id> [--out <folder>] [--role host|caller] [--topology <name>]
- *        [--route tcp|ws|ssh]
+ *        [--route tcp|ws|ssh|relay]
  *
  * A 1b routes check runs over one route (`--route`, 1b §14), given to the run as `MOUSSE_NET_ENGINE_CHECK_ROUTE`:
  * each computer gets only that route and every connection must come up on it. `phase1b.routes-app` runs 1a's app
  * cases and its own over it; over `tcp` they run twice, the route mapped to the tailnet class and then the public
  * one (`MOUSSE_NET_ENGINE_CHECK_CLASS`). `phase1b.routes-cross` is a cross-machine cell over one route (the PC
- * dials the Mac); over `tcp` it runs once, of the tailnet class.
+ * dials the Mac); over `tcp` it runs once, of the tailnet class. Every connection judged is written to
+ * `<out>/conn-up.jsonl`, one `conn.up` per line, for the kit.
+ *
+ * `--route relay` (Phase 3) runs a 1a app case through a running `mousse-relay`, named by its enrollment links in
+ * `MOUSSE_RELAY_TEST_LINKS` (one per computer of the case): each computer adds one as its own relay. Pairing setup
+ * runs direct; every conn.up after setup must be kind relay, through one of those relays.
  *
  * `MOUSSE_NET_ENGINE_CONTROL` (a control's deliberate defect) and `MOUSSE_NET_HELPER` pass through to the run. Each
  * check is a test file under tests/netEngine/checks; its first failed step writes its reason to the run's folder.
@@ -67,6 +72,8 @@ const ROUTED = {
   'phase1b.no-rpc-without-grant': ['tcp', 'ws', 'ssh'],
   'phase1b.routes-cross': ['tcp', 'ws', 'ssh']
 }
+/** The checks that run as they are, or over one of these routes when `--route` names it. */
+const ROUTABLE = { 'phase1a.private-streams': ['relay'] }
 /** The checks that run as cross-machine cells, one role per computer. */
 const CROSS_MACHINE = new Set([
   'phase1a.pair-offline',
@@ -75,7 +82,7 @@ const CROSS_MACHINE = new Set([
 ])
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const usage = `Usage: node scripts/net-engine-check.mjs <${Object.keys(CHECKS).join('|')}> [--out <folder>] [--role host|caller] [--topology <name>] [--route tcp|ws|ssh]`
+const usage = `Usage: node scripts/net-engine-check.mjs <${Object.keys(CHECKS).join('|')}> [--out <folder>] [--role host|caller] [--topology <name>] [--route tcp|ws|ssh|relay]`
 const refuse = (message) => {
   console.error(message ? `${message}\n${usage}` : usage)
   process.exit(2)
@@ -102,13 +109,22 @@ if ((flags.role !== undefined || flags.topology !== undefined) && !CROSS_MACHINE
   refuse(`${id} runs on one computer; it takes no --role or --topology.`)
 if (CROSS_MACHINE.has(id) && flags.role === undefined)
   refuse(`${id} is a cross-machine cell: give --role.`)
-if (flags.route !== undefined && !ROUTED[id]) refuse(`${id} takes no --route.`)
-if (ROUTED[id] && !ROUTED[id].includes(flags.route ?? ''))
+const routes = ROUTED[id] ?? ROUTABLE[id]
+if (flags.route !== undefined && !routes) refuse(`${id} takes no --route.`)
+if (flags.route !== undefined && !routes.includes(flags.route))
+  refuse(`${id} runs over --route ${routes.join('|')}, not ${flags.route}.`)
+if (ROUTED[id] && flags.route === undefined)
   refuse(`${id} runs over one route: give --route ${ROUTED[id].join('|')}.`)
+// A relay route needs a running relay's enrollment links (the kit passes them as they are).
+if (
+  flags.route === 'relay' &&
+  !/mousse-relay:\/\/[^\s,]+\/#[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(process.env.MOUSSE_RELAY_TEST_LINKS ?? '')
+)
+  refuse('--route relay needs MOUSSE_RELAY_TEST_LINKS, enrollment links of a running mousse-relay.')
 const out = flags.out ? resolve(flags.out) : mkdtempSync(join(tmpdir(), 'net-engine-check-'))
 mkdirSync(out, { recursive: true })
 // What an earlier run left in the folder is not this run's.
-for (const key of ['reason', 'host_build', 'host_app_build'])
+for (const key of ['reason', 'host_build', 'host_app_build', 'conn-up.jsonl'])
   rmSync(join(out, key), { force: true })
 
 const git = (...gitArgs) => spawnSync('git', gitArgs, { cwd: root, encoding: 'utf8' })

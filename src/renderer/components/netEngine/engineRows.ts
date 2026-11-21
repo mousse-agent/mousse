@@ -1,5 +1,5 @@
 import type { NetEngineDevice } from '../../../shared/netEngine/local'
-import { ROUTE_CLASS_LABEL, routeText } from '../../../shared/netEngine/routes'
+import { connectedVia, relayText, routeText } from '../../../shared/netEngine/routes'
 
 /** What a device's row offers (design §5.2): Access opens the preset control under it. */
 export type EngineRowAction = 'access' | 'address' | 'retry' | 'remove'
@@ -22,6 +22,26 @@ export const CLOCK_MESSAGE =
 export const SHARED_ACCOUNT_LINE = "Profiles in this account can read each other's files and keys."
 export const SHARED_ACCOUNT_DETAIL =
   'Each profile keeps its own pairings and removals, but any app running as this account can read both profiles’ files and keys. Use separate accounts on this computer to keep them private.'
+
+/** A device whose relay info (its signed manifest, Phase 3 §B.11) expired. */
+export const RELAY_STALE_LINE = 'Relay info out of date'
+export const RELAY_STALE_DETAIL = (name: string): string =>
+  `The relay addresses ${name} sent have expired. They're tried last until it sends new ones.`
+
+/**
+ * A device past this computer's relay limit (§B.5): its caller key is not listed with the relay. The limit is the
+ * one the helper names (`callers_max`).
+ */
+export const relayLimitLine = (callersMax?: number): string =>
+  callersMax === undefined
+    ? 'Not reachable through the relay (over its limit)'
+    : `Not reachable through the relay (limit ${callersMax})`
+export const relayLimitDetail = (callersMax?: number): string =>
+  `Your relays list the first ${callersMax ?? 'few hundred'} paired devices. LAN and other addresses still work.`
+
+/** The one line a device's row shows for a relay route waiting for the owner's Allow (§B.11). */
+export const relayOfferLine = (name: string, destination: string): string =>
+  `${name} can be reached through relay ${relayText(destination)}. Allow?`
 
 /** A device's row as Settings → Devices shows it (design §5.2, with the clock case of §8). */
 export function engineRow(device: NetEngineDevice): EngineRowView {
@@ -127,11 +147,11 @@ export function engineRow(device: NetEngineDevice): EngineRowView {
 }
 
 /**
- * Where a device is found: the class of the route it is connected on (1b §7 `conn.up.route`), else "LAN" or the
- * address added for it.
+ * Where a device is found: the class of the route it is connected on (1b §7 `conn.up.route`), "Through relay
+ * host:port" on a relay (Phase 3), else "LAN" or the address added for it.
  */
 export function engineWhere(device: NetEngineDevice): string {
-  if (device.route) return ROUTE_CLASS_LABEL[device.route]
+  if (device.route) return connectedVia(device.route, device.via)
   const first = device.addresses?.[0]
   if (!first) return 'LAN'
   const address = routeText(first)
