@@ -7,7 +7,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { connect as netConnect, createServer as createNetServer, type Socket } from 'node:net'
-import { hostname } from 'node:os'
+import { hostname, networkInterfaces } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { NetError } from '../../shared/net/errors'
 import type { BlobId, NodeCapability, NodeId, StoredRecord, StreamId } from '../../shared/net'
@@ -65,7 +65,7 @@ import { EnginePairing, fingerprintOf, type PairingStep } from './pairing'
 import { EngineEditor, engineEditorRefusal, type EngineEditorRights, type EngineEditorTestOptions } from './editor'
 import { TunnelError } from '../net/editor/tunnel'
 import { routeSetupProbes } from './probes'
-import { automatic, handedRoutes, loopbackClass } from './routes'
+import { automatic, handedRoutes, loopbackClass, privateRoute } from './routes'
 import { EnginePeerStore, type EnginePeerRow } from './store'
 import { readTicket } from './ticket'
 import { SshAdd } from './ssh/add'
@@ -790,7 +790,8 @@ export class NetEngineService implements EngineDirectoryPort {
   /**
    * The routes checks' `route-leak` control (1b §14): a second loopback address of this helper, a forwarder to its
    * listener on a port the checks' class map leaves out, so a route other than the one under test answers. Pairback
-   * and Add over SSH offer it first.
+   * and Add over SSH offer it first. A helper told to listen off loopback (a cross-machine cell's host, whose
+   * computer the other one dials) gets it on every interface, named by this computer's private address.
    */
   private leak?: { port: number; route: string; close(): void }
 
@@ -808,8 +809,10 @@ export class NetEngineService implements EngineDirectoryPort {
       }
       socket.pipe(plain).pipe(socket)
     })
-    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
-    const route = `tcp://127.0.0.1:${(server.address() as { port: number }).port}`
+    const lan = offLoopback() ? privateAddress() : undefined
+    // Off loopback, every interface without naming one (a named address takes a lookup).
+    await new Promise<void>((done) => (lan ? server.listen(0, done) : server.listen(0, '127.0.0.1', done)))
+    const route = `tcp://${lan ?? '127.0.0.1'}:${(server.address() as { port: number }).port}`
     this.leak = {
       port,
       route,
@@ -817,6 +820,22 @@ export class NetEngineService implements EngineDirectoryPort {
         for (const socket of open) socket.destroy()
         server.close()
       }
+    }
+  }
+
+  /**
+   * The `route-leak` control on a helper told to listen off loopback (a cross-machine cell's host, 1b §14): LAN
+   * goes on before an invitation, so its ticket offers this computer's LAN addresses, which a joiner dials before
+   * any other route. Checks on one computer keep every listener on loopback and leak through pairback instead.
+   */
+  async leakBeforeInvite(): Promise<void> {
+    if (!engineControl('route-leak') || !offLoopback() || this.reach()?.lan !== false) return
+    const { restarted } = await this.setReach({ lan: true })
+    const until = Date.now() + 30_000
+    while (restarted && (!this.helper || this.helperStatus().state !== 'running')) {
+      if (Date.now() > until)
+        throw new NetError('deadline_exceeded', 'Networking did not start in time.')
+      await new Promise((resolve) => setTimeout(resolve, 100))
     }
   }
 
@@ -1667,6 +1686,26 @@ function readReach(value: unknown, info: Record<string, unknown>): NetEngineReac
     ...(typeof info.ws_port === 'number' ? { wsPort: info.ws_port } : {}),
     ...(unbound.length ? { unbound } : {})
   }
+}
+
+/** Whether the helper was told to listen off loopback (`MOUSSE_NET_ENGINE_HELPER_LISTEN_IP`, set by checks only). */
+function offLoopback(env: NodeJS.ProcessEnv = process.env): boolean {
+  const ip = env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP?.trim()
+  return !!ip && ip !== '127.0.0.1' && ip !== '::1'
+}
+
+/** This computer's first private-range IPv4 address (not link-local), if it has one. */
+function privateAddress(): string | undefined {
+  for (const list of Object.values(networkInterfaces()))
+    for (const one of list ?? [])
+      if (
+        one.family === 'IPv4' &&
+        !one.internal &&
+        !one.address.startsWith('169.254.') &&
+        privateRoute(`tcp://${one.address}:1`)
+      )
+        return one.address
+  return undefined
 }
 
 /** A Reach change as `routes.config` takes it: only the fields given, each checked first. */

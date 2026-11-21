@@ -24,6 +24,15 @@ describe('net-engine-check.mjs route cases', () => {
     }
   )
 
+  it('runs phase1b.routes-cross as a cross-machine cell over one route', () => {
+    const noRole = run('phase1b.routes-cross', '--route', 'tcp')
+    expect(noRole.status).toBe(2)
+    expect(noRole.stderr).toContain('phase1b.routes-cross is a cross-machine cell: give --role.')
+    const noRoute = run('phase1b.routes-cross', '--role', 'host')
+    expect(noRoute.status).toBe(2)
+    expect(noRoute.stderr).toContain('phase1b.routes-cross runs over one route: give --route tcp|ws|ssh.')
+  })
+
   it('refuses a route for a check the kit gives no cases', () => {
     const refused = run('phase1b.link-app', '--route', 'tcp')
     expect(refused.status).toBe(2)
