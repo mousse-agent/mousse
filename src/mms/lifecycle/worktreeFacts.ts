@@ -192,7 +192,7 @@ async function ownedByMeAsync(paths: readonly string[]): Promise<Set<string>> {
   }
   // Windows: one PowerShell for every path, comparing each owner's SID with this process's user's.
   const shell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-  const script = '$u=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; foreach ($p in $input) { try { if ((Get-Acl -LiteralPath $p).GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $u) { "1`t$p" } else { "0`t$p" } } catch { "0`t$p" } }'
+  const script = '[Console]::InputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $u=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; foreach ($p in $input) { try { $acl=if ([IO.Directory]::Exists($p)) { [IO.Directory]::GetAccessControl($p) } else { [IO.File]::GetAccessControl($p) }; if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $u) { "1`t$p" } } catch { } }'
   const output = await new Promise<string>((done) => {
     let text = ''
     try {
@@ -200,7 +200,8 @@ async function ownedByMeAsync(paths: readonly string[]): Promise<Set<string>> {
       const timer = setTimeout(() => child.kill(), 30_000)
       child.stdout.setEncoding('utf8').on('data', (chunk: string) => { text += chunk })
       child.on('error', () => { clearTimeout(timer); done('') })
-      child.on('close', () => { clearTimeout(timer); done(text) })
+      child.on('close', (code) => { clearTimeout(timer); done(code === 0 ? text : '') })
+      child.stdin.on('error', () => { /* If the shell cannot read the input, its result proves no ownership. */ })
       child.stdin.end(paths.join('\n') + '\n', 'utf8')
     } catch { done('') }
   })

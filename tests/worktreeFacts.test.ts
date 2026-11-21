@@ -18,6 +18,7 @@ import { getExternalResourceClaims, unverifiedOwnerOver } from '../src/mms/lifec
 import { standardLinkedWorktreeAsync, verifyPinsAsync } from '../src/mms/lifecycle/worktreeFacts'
 import type { WorktreeReconstructionManifest } from '../src/mms/lifecycle/WorktreeRetirementService'
 import { unverifiableThread } from './support/unverifiableThread'
+import * as gitPrograms from '../src/mms/git/repoPrograms'
 
 // Each case runs Git dozens of times to build its layouts; starting a process on Windows is slow.
 vi.setConfig({ testTimeout: 180_000 })
@@ -26,6 +27,7 @@ const FIXTURE_ENV = { ...process.env, GIT_CONFIG_GLOBAL: process.platform === 'w
 const roots: string[] = []
 const savedEnv = { owner: process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER, global: process.env.GIT_CONFIG_GLOBAL }
 afterEach(() => {
+  vi.restoreAllMocks()
   delete process.env.GIT_TRACE2_EVENT
   for (const [name, value] of [['GIT_TEST_ASSUME_DIFFERENT_OWNER', savedEnv.owner], ['GIT_CONFIG_GLOBAL', savedEnv.global]] as const) {
     if (value === undefined) delete process.env[name]
@@ -162,6 +164,9 @@ it('Git checks the checkout itself when only safe.directory can trust it', async
   git(repo.main, 'worktree', 'add', '-q', '-b', 'wt', path)
   // Git's own switch for treating every owner as someone else's: trust can only come from safe.directory.
   process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = '1'
+  // Production strips inherited Git test switches. Pass this one to the real Git process only for this test.
+  const normalEnv = gitPrograms.repoProgramEnv
+  vi.spyOn(gitPrograms, 'repoProgramEnv').mockImplementation((env) => ({ ...normalEnv(env), GIT_TEST_ASSUME_DIFFERENT_OWNER: '1' }))
   const config = join(root, 'global.gitconfig')
   writeFileSync(config, '')
   process.env.GIT_CONFIG_GLOBAL = config
