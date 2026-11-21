@@ -115,6 +115,11 @@ export interface WorkspaceExecutionContext {
    */
   startNote?: string
   /**
+   * Set only on the context of the turn that made the thread's worktree just now: the commit Git checked it out at.
+   * Nothing has run in it since, so the turn's start snapshot is that commit's tree, recorded without reading the files.
+   */
+  madeAt?: string
+  /**
    * Set only when the thread's worktree is gone or no longer a Git repository and the turn runs in the project folder:
    * the line the agent is told, with the first such turn's message.
    */

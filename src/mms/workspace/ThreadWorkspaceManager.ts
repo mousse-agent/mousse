@@ -278,6 +278,11 @@ export class ThreadWorkspaceManager {
    * worktree folder the person chose was not connected and it went to Mousse's own folder instead.
    */
   placementNote?: string
+  /**
+   * Set by the last {@link provision} that made a worktree and wrote nothing into it: the commit Git checked it out at
+   * (`WorkspaceExecutionContext.madeAt`). Undefined after one that wrote a snapshot's files or let its caller write.
+   */
+  madeAt?: string
 
   constructor(readonly threadDirectory: string) {
     this.journal = new ThreadJournal(threadDirectory)
@@ -505,6 +510,7 @@ export class ThreadWorkspaceManager {
         ...(options.untrusted ? { untrusted: true as const } : {})
       }
       atomicWriteJsonSync(this.workspacePath, metadata)
+      this.madeAt = options.snapshot || options.onWorktreeMade ? undefined : head
       this.journal.append({
         operationId,
         operationType: 'workspace-provision',

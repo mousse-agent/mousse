@@ -158,6 +158,8 @@ export class WorkspaceResolver {
     await manager.provision(this.threadId, conversationBranchId, this.projectPath, signal, heldThreadLease, undefined, { nameFrom })
     forgetRepositoryFacts()
     const note = [startNote, manager.placementNote].filter(Boolean).join(' ')
-    return { ...await manager.executionContext(this.projectPath), ...(note ? { startNote: note } : {}) }
+    // A worktree checked out at its start and nothing else: the turn records its start from that commit (`madeAt`).
+    const fresh = manager.madeAt ? { madeAt: manager.madeAt } : {}
+    return { ...await manager.executionContext(this.projectPath), ...(note ? { startNote: note } : {}), ...fresh }
   }
 }
