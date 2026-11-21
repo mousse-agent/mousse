@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, renameSync, symlinkSync, unlinkSync, cpSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, readdirSync, renameSync, symlinkSync, unlinkSync, cpSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
@@ -132,7 +132,10 @@ test('keeps the branch when an unmanaged sibling checks it out during peer refre
     return argv
   })
 
-  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toThrow(/branch is checked out/)
+  // The branch stays where the sibling checked it out, and the purge goes on without it.
+  const record = await f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })
+  expect(record.state).toBe('purged')
+  expect(record.purge?.items).toContainEqual(expect.objectContaining({ identity: ref, status: 'retained', retainedReason: expect.stringMatching(/branch is checked out/) }))
   expect(switched).toBe(true)
   expect(git(sibling, ['symbolic-ref', 'HEAD'])).toBe(ref)
   expect(git(sibling, ['rev-parse', 'HEAD'])).toBe(sha)
@@ -669,7 +672,8 @@ test('a broken thread whose repository moved without its worktrees repaired keep
   for (const ref of receiptRefs) git(old, ['update-ref', ref, sha])
   const entry = (sequence: number) => JSON.stringify({ schemaVersion: 1, sequence, operationId: 'shared-turn', operationType: 'change-checkpoint', state: 'completed', createdAt: at, details: { receipt: { id: receiptId, kind: 'checkpoint', beforeSha: sha, afterSha: sha, retainedRefs: receiptRefs, createdAt: at } } })
   mkdirSync(join(broken.location, 'journal')); writeFileSync(join(broken.location, 'journal', '0000000000000001.json'), entry(1))
-  writeFileSync(join(f.location, 'journal', '0000000000000003.json'), entry(3))
+  const next = readdirSync(join(f.location, 'journal')).length + 1
+  writeFileSync(join(f.location, 'journal', String(next).padStart(16, '0') + '.json'), entry(next))
   writeFileSync(join(f.location, 'conversation-branches.json'), JSON.stringify([{ id: 'saved', retainedRef: broken.retainedRef }]))
   renameSync(old, f.repo)
   expect(relative(old, adminOf(broken.worktree))).toMatch(/^\.git[\\/]worktrees[\\/]/)

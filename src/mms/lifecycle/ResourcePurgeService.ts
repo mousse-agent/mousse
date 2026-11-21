@@ -1012,13 +1012,22 @@ export class ResourcePurgeService {
           if (!proof) return 'The purge recorded no proof of branch ownership; the branch stays'
           let reason = 'The branch reflog changed since the purge preview; the branch stays'
           const deleted = await withOwnedBranches([name], () => deleteVerifiedBranchAsync(commonDir, item.identity, current, async () => {
+            // Ownership is read while Git holds the branch's lock, and checked, with nothing awaited, right before the commit.
+            let unclaimed: () => void
+            try { unclaimed = await readUnclaimed() }
+            catch (error) {
+              // A branch checked out meanwhile stays, and the purge goes on without it.
+              if (await branchCheckedOutAsync(commonDir, item.identity).catch(() => false)) {
+                reason = 'This branch is checked out; the branch stays'
+                return false
+              }
+              throw error
+            }
             // Git can switch another worktree onto the branch even while this transaction holds the ref lock.
             if (await branchCheckedOutAsync(commonDir, item.identity)) {
               reason = 'This branch is checked out; the branch stays'
               return false
             }
-            // The ownership check runs after its reads, with nothing awaited between it and the commit of the transaction.
-            const unclaimed = await readUnclaimed()
             unclaimed()
             const record = this.readThreadBranchRecord(item.ownerTaskId, proof.worktreePath)
             const retained = this.threadBranchRetention(record, name)
