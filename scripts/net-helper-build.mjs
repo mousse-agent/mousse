@@ -85,3 +85,19 @@ export function packagedLayout(app) {
     executable: join(app, windows ? 'Mousse.exe' : 'mousse')
   }
 }
+
+/**
+ * The Rust toolchain a Windows helper build uses: the default one when it targets MSVC; else stable MSVC for this
+ * computer's architecture, unless RUSTUP_TOOLCHAIN chose another (`chosen`). `hostOf(toolchain)` says what a
+ * toolchain targets (`rustc -vV`'s host, empty when it is not installed). Answers `{ toolchain }` (undefined: the
+ * default) or `{ fail }`, the message a build stops with, never quietly.
+ */
+export function windowsToolchain({ arch, host, chosen, hostOf }) {
+  if (host.endsWith('-msvc')) return { toolchain: undefined }
+  const msvc = `stable-${arch === 'arm64' ? 'aarch64' : 'x86_64'}-pc-windows-msvc`
+  const fix = `install it with "rustup toolchain install ${msvc}", or set RUSTUP_TOOLCHAIN to an MSVC toolchain`
+  if (chosen) return { fail: `RUSTUP_TOOLCHAIN=${chosen} targets ${host || 'an unknown host'}, not MSVC; ${fix}` }
+  if (!hostOf(msvc).endsWith('-msvc'))
+    return { fail: `the default Rust toolchain targets ${host || 'an unknown host'}, not MSVC, and ${msvc} is not installed; ${fix}` }
+  return { toolchain: msvc }
+}

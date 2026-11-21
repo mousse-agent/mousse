@@ -60,6 +60,12 @@ export interface EngineConnection {
   readonly endpoint?: string
   /** The route the connection runs over (protocol 1.1 `conn.up.route`), when the helper said. */
   readonly route?: EngineRoute
+  /**
+   * The other way of a connection that carries calls both ways (wire minor 3): `outbound`, this computer's calls on
+   * a connection the other computer dialled; `inbound`, its calls on one this computer dialled. The helper's path
+   * is the dialler's, so the path switch never names it.
+   */
+  readonly reversed?: boolean
   /** Opens a stream; `method` names the call a `mousse.rpc` stream carries, which decides its class. */
   open(label: EngineLabel, method?: string): EngineStream
   onStream(listener: (stream: EngineStream) => void): void

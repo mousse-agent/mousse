@@ -23,7 +23,14 @@ import { spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { HELPER_TARGETS, helperFileName, parseHelperVersion, sameBuild, targetName } from './net-helper-build.mjs'
+import {
+  HELPER_TARGETS,
+  helperFileName,
+  parseHelperVersion,
+  sameBuild,
+  targetName,
+  windowsToolchain
+} from './net-helper-build.mjs'
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const folder = join(project, 'native', 'net-helper')
@@ -42,6 +49,12 @@ function skip(message) {
   rmSync(packageDir, { recursive: true, force: true })
   console.log(`net helper: ${message}; networking will show "Not in this build".`)
   process.exit(0)
+}
+
+/** Fails the build, also without --require: a setup that is wrong, not missing, is never passed over quietly. */
+function fail(message) {
+  console.error(`net helper: ${message}`)
+  process.exit(1)
 }
 
 function stop(message) {
@@ -100,17 +113,33 @@ if (git('checkout', '-q', '--detach', commit).status !== 0) stop(`could not chec
 if (git('rev-parse', 'HEAD').stdout.trim() !== commit) stop(`the source is not at ${commit}`)
 
 if (run('cargo', ['--version']).status !== 0) stop('Rust was not found (install it from https://rustup.rs)')
-const host = /^host: (.+)$/m.exec(run('rustc', ['-vV']).stdout ?? '')?.[1]?.trim() ?? ''
-if (process.platform === 'win32' && !host.endsWith('-msvc'))
-  stop(`the Rust toolchain targets ${host || 'an unknown host'}; build with an MSVC one (RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc)`)
+const rustHost = (env) => /^host: (.+)$/m.exec(run('rustc', ['-vV'], { env }).stdout ?? '')?.[1]?.trim() ?? ''
+const rustEnv = { ...process.env }
+let host = rustHost(rustEnv)
+// On Windows the helper builds with an MSVC toolchain. A default GNU one is passed over for stable MSVC, unless
+// RUSTUP_TOOLCHAIN chose it; without stable MSVC the build fails, even in a dev build, and says how to fix it.
+if (process.platform === 'win32') {
+  const choice = windowsToolchain({
+    arch: process.arch,
+    host,
+    chosen: process.env.RUSTUP_TOOLCHAIN,
+    hostOf: (toolchain) => rustHost({ ...process.env, RUSTUP_TOOLCHAIN: toolchain })
+  })
+  if (choice.fail) fail(choice.fail)
+  if (choice.toolchain) {
+    rustEnv.RUSTUP_TOOLCHAIN = choice.toolchain
+    host = rustHost(rustEnv)
+    console.log(`net helper: building with ${choice.toolchain} (the default Rust toolchain is not MSVC)`)
+  }
+}
 // A target other than this computer's own needs its standard library.
 if (triple !== host) {
-  const installed = run('rustup', ['target', 'list', '--installed'])
+  const installed = run('rustup', ['target', 'list', '--installed'], { env: rustEnv })
   if (installed.status === 0 && !installed.stdout.split(/\r?\n/).includes(triple))
     stop(`the Rust target ${triple} is not installed (rustup target add ${triple})`)
 }
 
-const env = { ...process.env, CARGO_TARGET_DIR: targetDir }
+const env = { ...rustEnv, CARGO_TARGET_DIR: targetDir }
 // The helper names the commit it was built from, never an id from the environment.
 delete env.MOUSSE_BUILD_ID
 if (triple.endsWith('-windows-msvc')) {
