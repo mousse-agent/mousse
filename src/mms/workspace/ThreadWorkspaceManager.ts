@@ -240,7 +240,7 @@ async function untrustedWorktreeGit(primaryCheckoutPath: string, worktreePath: s
     await assertGitAllowedAsync({ cwd, args: argv, ...(input === undefined ? {} : { stdin: input }) })
     const env = repoProgramEnv({ ...process.env, ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' })
     if (linked) {
-      await runIsolatedCheckout(cwd, args, input, env, observer)
+      await runIsolatedCheckout(cwd, args, input, env, { observer })
     } else {
       const ran = await runGitProcess(argv, { cwd, env, observer, ...(input === undefined ? {} : { input }) })
       if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
@@ -367,7 +367,7 @@ export class ThreadWorkspaceManager {
    */
   async ensureProjectFolder(threadId: string, conversationBranchId: ConversationBranchId, projectPath: string): Promise<ThreadWorkspaceMetadata | undefined> {
     const existing = this.load()
-    if (existing) return this.verify(existing)
+    if (existing && !existing.prepared) return this.verify(existing)
     const repository = await this.resolveRepositoryAsync(projectPath)
     if (!repository.capability.gitBacked) return undefined
     const head = (await tryGit(repository.gitTopLevel, ['rev-parse', '--verify', '-q', 'HEAD^{commit}'])).stdout
@@ -391,9 +391,10 @@ export class ThreadWorkspaceManager {
       lifecycle: 'ready',
       lastVerifiedAt: new Date().toISOString()
     }
-    // The record may have been made while this call waited on Git: the first one stands.
+    // The first binding stands. An unclaimed checkout can stay on disk with its own
+    // workspace record for storage cleanup while this thread works in the project folder.
     const made = this.load()
-    if (made) return this.verify(made)
+    if (made && !made.prepared) return this.verify(made)
     atomicWriteJsonSync(join(this.threadDirectory, PROJECT_FOLDER_RECORD), metadata)
     return metadata
   }
@@ -782,8 +783,8 @@ export class ThreadWorkspaceManager {
   }
 
   /**
-   * Once the original path is gone, a stopped cleanup owns the renamed folder and its proof. It can
-   * still be resumed separately. A new choice must not use that folder as the thread's workspace.
+   * Once the original path is gone, the cleanup record owns any renamed files and the old Git
+   * registration. Storage cleanup can finish independently, even if only the registration is left.
    */
   async separateRenamedPreparation(heldThreadLease: ThreadLeaseHandle): Promise<boolean> {
     assertHeldThreadLease(this.threadDirectory, heldThreadLease)
@@ -791,10 +792,10 @@ export class ThreadWorkspaceManager {
     const pending = metadata?.prepared && this.preparedReleasePending(metadata)
     if (!metadata || !pending) return false
     const record = await findCleanupRecord(getMousseHomeDir(), metadata.worktreePath)
-    if (!record || !samePath(record.owner, this.threadDirectory) || record.branch !== metadata.branch ||
-        !await pathExists(record.deletingPath) || await pathExists(metadata.worktreePath)) return false
+    if ((record && (!samePath(record.owner, this.threadDirectory) || record.branch !== metadata.branch)) ||
+        await pathExists(metadata.worktreePath)) return false
     await rm(this.workspacePath, { force: true })
-    this.journal.append({ operationId: pending.operationId, operationType: PREPARED_RELEASE_OPERATION, state: 'cancelled', details: { branch: metadata.branch, cleanupId: record.id } })
+    this.journal.append({ operationId: pending.operationId, operationType: PREPARED_RELEASE_OPERATION, state: 'cancelled', details: { branch: metadata.branch, cleanupId: record?.id } })
     return true
   }
 

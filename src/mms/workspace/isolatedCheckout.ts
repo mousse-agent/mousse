@@ -22,7 +22,7 @@ async function copyIfPresent(from: string, to: string): Promise<void> {
  * its config through an empty, private Git directory. The registered checkout keeps its own HEAD.
  */
 export async function runIsolatedCheckout(
-  cwd: string, args: string[], input: string | undefined, environment: NodeJS.ProcessEnv, observer?: GitProcessObserver
+  cwd: string, args: string[], input: string | undefined, environment: NodeJS.ProcessEnv, options?: { observer?: GitProcessObserver; timeout?: number }
 ): Promise<void> {
   const paths = ['objects', 'index', 'info/attributes', 'info/sparse-checkout']
   const [head, locations, config] = await Promise.all([
@@ -59,7 +59,7 @@ export async function runIsolatedCheckout(
       '-c', 'submodule.recurse=false', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', ...args
     ]
     const ran = await runGitProcess(argv, {
-      cwd, input, observer, preserveIndexLock: true,
+      cwd, input, ...options, preserveIndexLock: true,
       env: {
         ...env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: GIT_NULL_DEVICE,
         GIT_DIR: directory, GIT_WORK_TREE: cwd, GIT_OBJECT_DIRECTORY: objects, GIT_INDEX_FILE: index

@@ -117,7 +117,10 @@ export class WorkspaceResolver {
       return unprovisionedContext(this.threadId, this.projectPath, repository.capability.gitBacked, 'Read-only turn uses the primary checkout')
     }
     if (heldThreadLease && existing?.prepared && this.placement === 'project-folder') {
-      if (await manager.releasePrepared(heldThreadLease) !== 'released') throw new Error('The unclaimed worktree could not be removed. Its files were kept.')
+      if (await manager.releasePrepared(heldThreadLease, undefined, signal) === 'kept') {
+        await manager.separateRenamedPreparation(heldThreadLease)
+      }
+      signal?.throwIfAborted()
       existing = undefined
     }
     if (heldThreadLease && existing?.lifecycle === 'provisioning' &&

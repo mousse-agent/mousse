@@ -58,7 +58,7 @@ export const gitStopProbe: {
 /** How long one look at the process list may take before it counts as unreadable. */
 export const PROCESS_LIST_TIMEOUT_MS = 3_000
 
-const WINDOWS_TABLE_SCRIPT = [
+export const WINDOWS_TABLE_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
   "Get-CimInstance -ClassName Win32_Process | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $(if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() } else { 0 }) }"
 ].join('; ')

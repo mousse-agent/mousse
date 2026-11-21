@@ -7,9 +7,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { FileService } from '../../src/mms/files/FileService'
 import type { ChatMode } from '../../src/shared/types'
 import * as gitProcess from '../../src/mms/git/runGitProcess'
+import { readProcessEntries } from '../../src/mms/git/stoppedGitTree'
 import { trustRepositoryPrograms } from '../../src/mms/git/repoPrograms'
 import { dispatchMethod, type HandlerContext } from '../../src/mms/protocol/handlers'
-import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../../src/mms/queue/ThreadExecutionLease'
+import { releaseExecutionLeaseHandle, tryAcquireExecutionLease, waitAcquireExecutionLease } from '../../src/mms/queue/ThreadExecutionLease'
 import { ThreadRuntimeManager } from '../../src/mms/runtime/ThreadRuntimeManager'
 import { PtyManager } from '../../src/mms/terminals/PtyManager'
 import { ThreadWorkspaceManager } from '../../src/mms/workspace/ThreadWorkspaceManager'
@@ -19,6 +20,7 @@ import * as workspaceResolver from '../../src/mms/workspace/WorkspaceResolver'
 import { PREPARED_WORKTREE_MAX_AGE_MS, releasePreparedWorkspace, settledPreparation } from '../../src/mms/workspace/workspacePreparation'
 import { crashChild } from '../support/build'
 import * as checkout from '../../src/mms/worktree/worktreeCheckout'
+import { findCleanupRecord } from '../../src/mms/worktree/verifiedCleanup'
 import { defaultThreadWorktreePath } from '../../src/mms/worktree/worktreeLayout'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
@@ -483,6 +485,64 @@ describe('the first turn in a new worktree', () => {
     else expect(w.git(w.repo, 'worktree', 'list', '--porcelain')).not.toContain(prepared.branch)
   }, 90_000)
 
+  it('uses a fresh worktree for Send after a locked registration survives draft deletion', async () => {
+    const w = world()
+    const draft = w.thread()
+    await w.focus(draft.id)
+    await settledPreparation(draft.directory)
+    const prepared = draft.manager.load()!
+    const remove = verifiedDelete.deleteVerifiedAsync
+    // Lock the actual Git registration after the proof has removed the files, before cleanup unregisters it.
+    const lock = vi.spyOn(verifiedDelete, 'deleteVerifiedAsync').mockImplementationOnce(async (input) => {
+      const result = await remove(input)
+      expect(existsSync(input.root)).toBe(false)
+      w.git(w.repo, 'worktree', 'lock', '--reason', 'held by another Git client', prepared.worktreePath)
+      return result
+    })
+    await w.toggle(draft.id, false, true)
+    lock.mockRestore()
+    const cleanup = await findCleanupRecord(home!, prepared.worktreePath)
+    expect(cleanup?.branch).toBe(prepared.branch)
+    expect(existsSync(cleanup!.deletingPath)).toBe(false)
+    expect(existsSync(prepared.worktreePath)).toBe(false)
+    const registrations = () => w.git(w.repo, 'worktree', 'list', '--porcelain')
+    expect(registrations()).toContain('locked held by another Git client')
+
+    await w.toggle(draft.id, true, true)
+    await w.send(draft.id)
+    await waitFor(() => w.pi.turns.length === 1 || !w.d.orch.isActiveTurnRunning(draft.id), 'Send to settle')
+    const claimed = draft.manager.load()!
+    expect(w.pi.turns[0]?.cwd).toBe(claimed.worktreePath)
+    expect(claimed.worktreePath).not.toBe(prepared.worktreePath)
+    expect(claimed.prepared).toBeUndefined()
+    expect(readFileSync(join(claimed.worktreePath, 'keep', 'tracked.txt'), 'utf8')).toBe('keep')
+    expect(registrations()).toContain('locked held by another Git client')
+  }, 90_000)
+
+  it('sends from the project folder while keeping a dirty draft', async () => {
+    const w = world()
+    const draft = w.thread()
+    await w.focus(draft.id)
+    await settledPreparation(draft.directory)
+    const prepared = draft.manager.load()!
+    const tracked = join(prepared.worktreePath, 'keep', 'tracked.txt')
+    const untracked = join(prepared.worktreePath, 'draft.txt')
+    writeFileSync(tracked, 'draft edit')
+    w.git(prepared.worktreePath, 'add', 'keep/tracked.txt')
+    writeFileSync(untracked, 'only in the draft')
+    const dirty = w.git(prepared.worktreePath, 'status', '--porcelain')
+    expect(dirty).toContain('M  keep/tracked.txt')
+
+    await w.toggle(draft.id, false, true)
+    await w.send(draft.id)
+    await waitFor(() => w.pi.turns.length === 1 || !w.d.orch.isActiveTurnRunning(draft.id), 'Send to settle')
+    expect(w.pi.turns[0]?.cwd).toBe(w.repo)
+    expect(draft.manager.load()).toMatchObject({ kind: 'project-folder', worktreePath: w.repo })
+    expect(w.git(prepared.worktreePath, 'status', '--porcelain')).toBe(dirty)
+    expect(readFileSync(tracked, 'utf8')).toBe('draft edit')
+    expect(readFileSync(untracked, 'utf8')).toBe('only in the draft')
+  }, 90_000)
+
   it.each(['disk wait', 'Git invocation'] as const)('ignores a filter added at the %s when writing an untrusted checkout', async (stage) => {
     const w = world()
     const draft = w.thread()
@@ -610,6 +670,70 @@ describe('the first turn in a new worktree', () => {
     const made = await draft.manager.provision(draft.id, 'main', w.repo)
     expect(readFileSync(join(made.worktreePath, 'keep', 'tracked.txt'), 'utf8')).toBe('keep')
   }, 90_000)
+
+  it('stops a live checkout and its descendants before the disk slot and thread lease are reused', async () => {
+    const w = world()
+    const draft = w.thread()
+    const started = join(home!, 'stalled-checkout-pids')
+    const proceed = join(home!, 'release-stalled-checkout')
+    const filter = join(home!, 'stalled-checkout.cjs')
+    writeFileSync(filter, [
+      'const fs = require("node:fs")',
+      'const { spawn } = require("node:child_process")',
+      'const [started, proceed, parent] = process.argv.slice(2)',
+      'const wait = (finish) => { const timer = setInterval(() => { if (fs.existsSync(proceed)) { clearInterval(timer); finish() } }, 15) }',
+      'if (parent) {',
+      '  fs.writeFileSync(started, JSON.stringify([Number(parent), process.pid]))',
+      '  wait(() => {})',
+      '} else {',
+      '  const bytes = fs.readFileSync(0)',
+      '  if (fs.existsSync(started)) process.stdout.write(bytes)',
+      '  else {',
+      '    spawn(process.execPath, [__filename, started, proceed, String(process.pid)], { stdio: "ignore" }).unref()',
+      '    wait(() => process.stdout.write(bytes))',
+      '  }',
+      '}'
+    ].join('\n'))
+    writeFileSync(join(w.repo, '.gitattributes'), 'keep/tracked.txt filter=stall\n')
+    w.git(w.repo, 'add', '.gitattributes')
+    w.git(w.repo, 'commit', '-qm', 'attributes')
+    const quote = (path: string) => '"' + path.replaceAll('\\', '/') + '"'
+    w.git(w.repo, 'config', 'filter.stall.smudge', [process.execPath, filter, started, proceed].map(quote).join(' '))
+    expect(trustRepositoryPrograms(w.repo)?.filters['filter.stall.smudge']).toBeTruthy()
+
+    const abort = new AbortController()
+    unblock = () => { writeFileSync(proceed, ''); abort.abort() }
+    const active = draft.manager.provision(draft.id, 'main', w.repo, abort.signal)
+    const stopped = active.then(() => 'completed', (error: Error) => error.name)
+    pending.push(stopped)
+    let pids: number[] | undefined
+    await waitFor(() => {
+      try { pids = JSON.parse(readFileSync(started, 'utf8')) as number[]; return true } catch { return false }
+    }, 'the checkout filter and its child to start')
+    const live = async () => {
+      const entries = await readProcessEntries()
+      expect(entries).toBeDefined()
+      return entries!.filter((entry) => pids!.includes(entry.pid) && !entry.zombie).map((entry) => entry.pid)
+    }
+    expect(await live()).toHaveLength(2)
+    expect(tryAcquireExecutionLease(draft.directory, { source: 'test while checkout is active' })).toBeNull()
+
+    const waiting = join(home!, 'waiting-after-stop')
+    await checkout.registerWorktree({ cwd: w.repo, add: ['--detach', waiting, 'HEAD'] })
+    const next = checkout.populateWorktree({
+      worktreePath: waiting, plan: { settings: [] },
+      beforeCheckout: async () => { expect(await live()).toEqual([]) }
+    })
+    const nextLease = waitAcquireExecutionLease(draft.directory, { source: 'test after checkout stops', maxAttempts: 200, retryDelayMs: 50 })
+      .then(async (lease) => {
+        try { expect(await live()).toEqual([]) } finally { releaseExecutionLeaseHandle(lease) }
+      })
+    pending.push(next, nextLease)
+    abort.abort()
+    await Promise.all([expect(stopped).resolves.toBe('AbortError'), next, nextLease])
+    expect(readFileSync(join(waiting, 'keep', 'tracked.txt'), 'utf8')).toBe('keep')
+    expect(existsSync(proceed)).toBe(false)
+  }, 35_000)
 
   it('preserves the disk slot after a crash until the surviving Git writer finishes', async () => {
     const w = world()

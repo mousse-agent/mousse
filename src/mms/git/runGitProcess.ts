@@ -142,7 +142,7 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
       const file = gitFile()
       const { status, stdoutBytes, stderr, failure } = await timeGitRun(() => slot.run({
         file, argv, cwd: options.cwd, env: gitEnvFor(options.env), input: options.input, limit
-      }))
+      }, signal))
       signal?.throwIfAborted()
       const error = failure && Object.assign(new Error(failure.message), { code: failure.code })
       return { status, stdoutBytes, stdout: stdoutBytes.toString('utf8'), stderr, ...(error ? { error } : {}) }
