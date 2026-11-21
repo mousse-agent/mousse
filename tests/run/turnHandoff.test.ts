@@ -5,10 +5,15 @@
  * Engine and effect worker over a Git project, with a scripted provider; Git is counted from each turn's start line
  * (`[turn-boundary]`).
  *
+ * Any other turn in the thread's own worktree starts from the last state Mousse recorded there without reading it
+ * either (`OrchestratorService.ownWorktreeStart`): an edit made there between turns is the next turn's. A thread in the
+ * project folder reads its folder first, so an edit the person made there is an action of its own.
+ *
  * Cases: a queued message; a wake for a notice that arrived during the turn (the fixture runs no reconciler, so only
  * the settle's own wake starts it); a wake the reconciler made and deferred before the settle; an Undo pressed between
  * the turn and its wake; a Stop of the idle thread; a message sent or queued once the thread is idle, after the person
- * edited a file; each check the hand-off must pass before use; the placements that never hand off.
+ * edited a file, in its worktree and in the project folder (where Undo of the agent gives the person's save back); each
+ * check the hand-off must pass before use; the placements that never hand off.
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
@@ -42,6 +47,8 @@ class WritingAdapter implements ProviderAdapter {
     sink.providerRef(providerRef)
     const name = input.prompt.match(/write (\w+)/)?.[1]
     if (name && input.cwd) writeFileSync(join(input.cwd, `${name}.txt`), `${name}\n`)
+    const overwritten = input.prompt.match(/overwrite (\S+)/)?.[1]
+    if (overwritten && input.cwd) writeFileSync(join(input.cwd, overwritten), 'written by the agent\n')
     if (name === 'first') await new Promise<void>((resolve) => { this.gate = resolve })
     sink.text({ phase: 'complete', content: 'Done', contentIndex: 0 })
     host.context.nativeHistoryAfterTurn('Done')
@@ -163,7 +170,7 @@ describe('a turn its previous turn\'s settle starts', () => {
     expect(actionOf(wake.runId)!.changedPaths.map((change) => change.path)).toEqual(['woken.txt'])
   })
 
-  it('an Undo pressed between the turn and its wake makes the wake read and snapshot the worktree again', async () => {
+  it('an Undo pressed between the turn and its wake: the wake starts from the undone files, with no snapshot', async () => {
     const { d, adapter, thread, threadDir, starts, actionOf, idle, releaseWakes } = await setup(true)
     const first = await d.orch.send('write first', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
     await waitFor(() => adapter.turns.length === 1, 'the first turn to reach the provider', 180_000)
@@ -176,14 +183,18 @@ describe('a turn its previous turn\'s settle starts', () => {
     releaseWakes()
     await waitFor(() => adapter.turns.length === 2 && idle(), 'the wake to run and settle', 300_000)
     const wake = d.engine.listRuns(thread.id).find((run) => run.source === 'wake')!
-    expect(starts.find((line) => line.runId === wake.runId)!.git).toBeGreaterThan(0)
+    const started = starts.find((line) => line.runId === wake.runId)!
+    // The Undo ended the hand-off; the wake starts from what the Undo recorded, without reading the worktree.
+    expect(started.phases.handoff).toBeUndefined()
+    expect(started.phases.ownWorktree).toBeDefined()
+    expect(started.phases.snapshotIndex).toBeUndefined()
     const woke = actionOf(wake.runId)!
     expect(woke.startSha).not.toBe(actionOf(first.runId)!.endSha)
     // It starts from the undone files: the undone file is not its to take back, and it changed only its own.
     expect(woke.changedPaths.map((change) => change.path)).toEqual(['woken.txt'])
   })
 
-  it('a message sent once the thread is idle records the person\'s edits as their own action first', async () => {
+  it('a message sent once the thread is idle starts from the last end in its own worktree: an edit made there since is the turn\'s', async () => {
     const { d, adapter, thread, threadDir, starts, actionOf, idle } = await setup()
     const first = await d.orch.send('write first', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
     await waitFor(() => adapter.turns.length === 1, 'the first turn to reach the provider', 180_000)
@@ -193,13 +204,37 @@ describe('a turn its previous turn\'s settle starts', () => {
     writeFileSync(join(worktree, 'README.md'), 'edited by the person\n')
     const later = await d.orch.send('write later', false, { threadId: thread.id, clientRequestId: 'later', awaitMode: 'ack' })
     await waitFor(() => adapter.turns.length === 2 && idle(), 'the later turn to run and settle', 300_000)
-    expect(starts.find((line) => line.runId === later.runId)!.git).toBeGreaterThan(0)
+    const started = starts.find((line) => line.runId === later.runId)!
+    expect(started.phases.ownWorktree).toBeDefined()
+    expect(started.phases.snapshotIndex).toBeUndefined()
+    const actions = new ThreadActionService(threadDir).list()
+    const own = actionOf(later.runId)!
+    // No record of its own for the person's edit: the turn starts where the last one ended and covers it.
+    expect(actions.some((action) => action.actor?.kind === 'user')).toBe(false)
+    expect(own.startSha).toBe(actionOf(first.runId)!.endSha)
+    expect(own.changedPaths.map((change) => change.path).sort()).toEqual(['README.md', 'later.txt'])
+  })
+
+  it('in the project folder, a file the person saved between turns comes back when the agent\'s overwrite of it is undone', async () => {
+    const { d, adapter, thread, threadDir, starts, actionOf, idle } = await setup(false, 'project-folder')
+    const first = await d.orch.send('write first', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
+    await waitFor(() => adapter.turns.length === 1, 'the first turn to reach the provider', 180_000)
+    adapter.answer()
+    await waitFor(() => idle() && d.engine.getRun(first.runId!)?.status === 'completed', 'the first turn to settle', 300_000)
+    const folder = new ThreadWorkspaceManager(threadDir).load()!.worktreePath
+    // The person saves a file in an editor; the next turn's agent writes over it.
+    writeFileSync(join(folder, 'README.md'), 'saved in the editor\n')
+    const later = await d.orch.send('overwrite README.md', false, { threadId: thread.id, clientRequestId: 'later', awaitMode: 'ack' })
+    await waitFor(() => adapter.turns.length === 2 && idle(), 'the later turn to run and settle', 300_000)
+    expect(starts.find((line) => line.runId === later.runId)!.phases.ownWorktree).toBeUndefined()
     const actions = new ThreadActionService(threadDir).list()
     const own = actionOf(later.runId)!
     const outside = actions[actions.findIndex((action) => action.id === own.id) - 1]!
     expect(outside.actor).toEqual({ kind: 'user' })
     expect(outside.changedPaths.map((change) => change.path)).toEqual(['README.md'])
-    expect(own.changedPaths.map((change) => change.path)).toEqual(['later.txt'])
+    expect(readFileSync(join(folder, 'README.md'), 'utf8')).toBe('written by the agent\n')
+    await pressed('Undo', () => new UndoService(threadDir).undoLatest('main', folder))
+    expect(readFileSync(join(folder, 'README.md'), 'utf8')).toBe('saved in the editor\n')
   })
 
   it('a wake the reconciler made and deferred between the run\'s end and its settle is brought forward and starts from its end', async () => {
@@ -230,7 +265,7 @@ describe('a turn its previous turn\'s settle starts', () => {
     expect(actionOf(wakes[0].runId)!.startSha).toBe(actionOf(first.runId)!.endSha)
   })
 
-  it('a Stop of the idle thread ends the hand-off its wake was armed with: the wake reads the worktree again', async () => {
+  it('a Stop of the idle thread ends the hand-off its wake was armed with: the wake checks the worktree again', async () => {
     const { d, adapter, thread, starts, idle, handoff, releaseWakes } = await setup(true)
     await d.orch.send('write first', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
     await waitFor(() => adapter.turns.length === 1, 'the first turn to reach the provider', 180_000)
@@ -241,10 +276,10 @@ describe('a turn its previous turn\'s settle starts', () => {
     releaseWakes()
     await waitFor(() => adapter.turns.length === 2 && idle(), 'the wake to run and settle', 300_000)
     const wake = d.engine.listRuns(thread.id).find((run) => run.source === 'wake')!
-    expect(starts.find((line) => line.runId === wake.runId)!.git).toBeGreaterThan(0)
+    expect(starts.find((line) => line.runId === wake.runId)!.phases.handoff).toBeUndefined()
   })
 
-  it('a turn whose settle starts nothing leaves no hand-off: a message queued later, after an edit, reads the worktree again', async () => {
+  it('a turn whose settle starts nothing leaves no hand-off: a message queued later, after an edit, starts from its end and covers the edit', async () => {
     const { d, adapter, thread, threadDir, starts, idle, handoff } = await setup()
     const first = await d.orch.send('write first', false, { threadId: thread.id, clientRequestId: 'first', awaitMode: 'ack' })
     await waitFor(() => adapter.turns.length === 1, 'the first turn to reach the provider', 180_000)
@@ -255,11 +290,10 @@ describe('a turn its previous turn\'s settle starts', () => {
     writeFileSync(join(worktree, 'README.md'), 'edited by the person\n')
     d.orch.enqueueAndDrain(thread.id, { content: 'write later', mode: 'agent' }, 'test')
     await waitFor(() => adapter.turns.length === 2 && idle(), 'the queued turn to run and settle', 300_000)
-    expect(starts.find((line) => line.runId !== first.runId)!.git).toBeGreaterThan(0)
+    expect(starts.find((line) => line.runId !== first.runId)!.phases.handoff).toBeUndefined()
     const actions = new ThreadActionService(threadDir).list()
-    expect(actions.at(-2)!.actor).toEqual({ kind: 'user' })
-    expect(actions.at(-2)!.changedPaths.map((change) => change.path)).toEqual(['README.md'])
-    expect(actions.at(-1)!.changedPaths.map((change) => change.path)).toEqual(['later.txt'])
+    expect(actions.some((action) => action.actor?.kind === 'user')).toBe(false)
+    expect(actions.at(-1)!.changedPaths.map((change) => change.path).sort()).toEqual(['README.md', 'later.txt'])
   })
 
   it('a hand-off is used only while each thing it was recorded against is unchanged', async () => {
@@ -307,5 +341,7 @@ describe('a turn its previous turn\'s settle starts', () => {
     await waitFor(() => adapter.turns.length === 2 && idle(), 'the queued message to run and settle', 300_000)
     expect(starts.filter((line) => line.runId !== first.runId)).toHaveLength(1)
     expect(starts.find((line) => line.runId !== first.runId)!.phases.handoff).toBeUndefined()
+    // Nor does it start from the last end unread: only a worktree of the thread's own is the agent's.
+    expect(starts.find((line) => line.runId !== first.runId)!.phases.ownWorktree).toBeUndefined()
   })
 })

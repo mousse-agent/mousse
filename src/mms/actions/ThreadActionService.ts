@@ -89,7 +89,7 @@ export interface TurnStartCheck { workspacePath: string; startSha: string; error
 export interface OutsideChangesResult { startSha: string; action?: ThreadAction; startCheck?: TurnStartCheck }
 
 /** Written when a turn's start could not be snapshotted; the checkpoint of the action that starts there reads it. */
-const UNCAPTURED_START_FILE = 'uncaptured-start.json'
+export const UNCAPTURED_START_FILE = 'uncaptured-start.json'
 interface UncapturedStart { startSha: string; error: string }
 /** Written when a turn's end could not be snapshotted; the next record of outside changes says it holds that turn's changes. */
 export const UNRECORDED_END_FILE = 'unrecorded-end.json'

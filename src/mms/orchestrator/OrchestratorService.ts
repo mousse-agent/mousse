@@ -307,7 +307,8 @@ import { lineageForChild } from '../data/subagentLineage'
 import { SNAPSHOT_STORE_REASON, WorkspaceResolver, modeMutatesFiles, unprovisionedContext } from '../workspace/WorkspaceResolver'
 import { ensureSnapshotWorkspaceAsync, loadSnapshotWorkspaceMetadataAsync, setSnapshotsOff } from '../workspace/SnapshotWorkspace'
 import { threadPlacement, type ThreadPlacement } from '../workspace/threadPlacement'
-import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { isProjectFolderWorkspace, ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { readWorktreeHead } from '../git/worktreeHeadFiles'
 import { findWorktreeOwner } from '../scheduled/validateJobOptions'
 import { jobPermissionRequest } from '../scheduled/jobPermission'
 import { occurrenceResultOfRun, scheduledReceiptId, type ScheduledRunProbe } from '../scheduled/ScheduledJobStore'
@@ -318,7 +319,7 @@ import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
 import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
-import { ThreadActionService, UNRECORDED_END_FILE, type TurnStartCheck } from '../actions/ThreadActionService'
+import { ThreadActionService, UNCAPTURED_START_FILE, UNRECORDED_END_FILE, type TurnStartCheck } from '../actions/ThreadActionService'
 import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
 import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
 import type { NativeContextBoundary, ThreadAction } from '../../shared/threadActions'
@@ -13975,6 +13976,31 @@ export class OrchestratorService extends EventEmitter {
     return meant ? handoff : undefined
   }
 
+  /**
+   * Where a turn in the thread's own worktree starts, or undefined when it must read the files first. A worktree Mousse
+   * made for the thread (or a subagent) belongs to its agent, so the turn starts from the last state Mousse recorded
+   * there: the end of the last turn, Undo or restore (the record's snapshot), or the commit the worktree was made from.
+   * Nothing in Git runs for it, and an edit made there between turns counts as this turn's. A thread working in the
+   * person's own checkout (the project folder) never starts this way: the person edits there too, so its start is read.
+   * A record that is not ready, is on another conversation branch, or a start or end that could not be recorded, reads
+   * the files as before.
+   */
+  private async ownWorktreeStart(session: ThreadSession, conversationBranchId: string): Promise<string | undefined> {
+    const workspace = session.workspace
+    if (!workspace || workspace.lifecycle !== 'ready' || workspace.placement === 'project-folder' || !workspace.workspacePath) return undefined
+    const threadDir = this.resolveThreadDir(session.threadId)
+    if (!threadDir) return undefined
+    const record = new ThreadWorkspaceManager(threadDir).load()
+    if (!record || record.lifecycle !== 'ready' || isProjectFolderWorkspace(record) || record.snapshotOnly || record.worktreePath !== workspace.workspacePath) return undefined
+    if ((record.conversationBranchId ?? 'main') !== conversationBranchId) return undefined
+    if (existsSync(join(threadDir, UNRECORDED_END_FILE)) || existsSync(join(threadDir, UNCAPTURED_START_FILE))) return undefined
+    // Still the repository's linked worktree, read from Git's files: a folder someone made a new repository in reads it.
+    if (!await readWorktreeHead(record.worktreePath, { linkedOnly: true })) return undefined
+    // A Mousse operation waiting for recovery stops the turn before its message is accepted, as the start check would.
+    new ChangeReceiptService(threadDir).assertNoPendingOperation()
+    return record.snapshotSha ?? new ThreadActionService(threadDir).latest(conversationBranchId)?.endSha ?? record.headSha
+  }
+
   /** Whether `handoff` still describes the worktree as Mousse last left it (`takeTurnHandoff`). */
   private turnHandoffHolds(session: ThreadSession, handoff: TurnHandoff, threadDir: string, conversationBranchId: string): boolean {
     if (conversationBranchId !== handoff.conversationBranchId) return false
@@ -14545,11 +14571,18 @@ export class OrchestratorService extends EventEmitter {
     let turnStartSha: string | undefined
     /** The snapshot just made or found the start's commit there: it is not checked again (`OutsideChangesResult`). */
     let recordedStartCheck: TurnStartCheck | undefined
+    let ownStart: string | undefined
     if (checkpointEnabled && checkpointCwd && handoff && !snapshotFolder && checkpointCwd === handoff.workspacePath) {
       // The turn starts where the last one ended: an edit made outside Mousse since counts as made during this turn.
       turnStartSha = handoff.endSha
       recordedStartCheck = { workspacePath: checkpointCwd, startSha: handoff.endSha }
       turnBoundaryMark(session.threadId, 'handoff')
+    } else if (checkpointEnabled && checkpointCwd && !snapshotFolder && (ownStart = await this.ownWorktreeStart(session, conversationBranchId)) !== undefined) {
+      // The thread's own worktree: the turn starts from the last state Mousse recorded there, with no Git before the
+      // provider. Edits made there between turns count as this turn's.
+      turnStartSha = ownStart
+      recordedStartCheck = { workspacePath: checkpointCwd, startSha: ownStart }
+      turnBoundaryMark(session.threadId, 'ownWorktree')
     } else if (checkpointEnabled && checkpointCwd) {
       setupStep('snapshot')
       // Edits made outside Mousse since the last action become an action of their own, so Undo of this turn leaves them.
