@@ -15,6 +15,8 @@ import type { QueueCommandRow, QueueCommands, QueueIntent } from '../run/QueueCo
 import {
   demoteSteerItems,
   editQueuedMessage,
+  holdQueueAfterStop,
+  insertQueuedMessage,
   markSteerNow,
   normalizeQueuedMessages,
   promoteQueuedMessageToSteer,
@@ -29,6 +31,7 @@ import {
 export interface QueueEffects {
   /** The thread's active engine run, or null. Read when a promotion is applied. */
   activeRunId(threadId: string): string | null
+  stopGeneration?(threadId: string): number
   /**
    * Runs an intent's side effects (cancel `cancelRunIds` still queued, release `releaseInboxIds` still held by the
    * item). Called inside one run-database transaction: it throws to roll everything back, and it is idempotent.
@@ -70,7 +73,7 @@ export type QueueCommandResult = Record<string, unknown>
  * removed, a reorder already in force and a promotion already steering change nothing, which a recovered entry
  * relies on. `outcome` is what the command reports.
  */
-export function applyIntent(items: QueuedMessage[], intent: QueueIntent, ctx: { activeRunId: string | null }): AppliedIntent {
+export function applyIntent(items: QueuedMessage[], intent: QueueIntent, ctx: { activeRunId: string | null; stopGeneration?: number }): AppliedIntent {
   const done = (next: QueuedMessage[], result: QueueCommandResult, skipped = false): AppliedIntent => ({
     items: next,
     result: { ...result, itemId: intent.itemId, revision: queueRevision(next) },
@@ -82,6 +85,18 @@ export function applyIntent(items: QueuedMessage[], intent: QueueIntent, ctx: { 
       if (!intent.item) return done(items, { outcome: 'enqueued' })
       const present = items.find((item) => item.id === intent.item!.id)
       return done(present ? items : sortQueue([...items, intent.item]), { outcome: 'enqueued' })
+    }
+    case 'enqueue_steer': {
+      const saved = intent.item!
+      const present = items.find((item) => item.id === saved.id || item.clientRequestId === saved.clientRequestId)
+      const held = (ctx.stopGeneration ?? 0) > (intent.admissionStopGeneration ?? 0)
+      // Stop may have committed after the queue save, before this command was marked applied.
+      const item = held ? holdQueueAfterStop([present ?? saved])[0]! : present ?? saved
+      if (present) {
+        const next = item === present ? items : items.map((entry) => entry === present ? item : entry)
+        return done(next, { outcome: 'enqueued' })
+      }
+      return done(insertQueuedMessage(items, item).items, { outcome: 'enqueued' })
     }
     case 'edit': {
       const present = items.find((item) => item.id === intent.itemId)
@@ -208,6 +223,15 @@ export function recoverQueueJournal(store: QueueStoreLike, threadId: string, ite
   }
   let current = items
   for (const row of unfinished) {
+    if (row.intent.op === 'enqueue_steer') {
+      // A send is already admitted. Keep its payload until it is saved and marked applied, and
+      // block later queue mutations if either write fails so they cannot consume an unmarked row.
+      const applied = applyIntent(current, row.intent, { activeRunId: null, stopGeneration: journal.effects.stopGeneration?.(threadId) })
+      current = normalizeQueuedMessages(applied.items, threadId)
+      store.saveMessageQueue(threadId, current)
+      journal.commands.markApplied(row, applied.result)
+      continue
+    }
     try {
       let result = row.result ?? {}
       let finishing = row

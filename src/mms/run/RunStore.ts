@@ -507,6 +507,17 @@ export class RunStore {
     })
   }
 
+  /** Records provider acceptance before dropping the queue row that identifies this send. */
+  recordSteerDelivery(threadId: string, requestId: string, itemId: string, runId: string): void {
+    this.db.statement(
+      `UPDATE receipts SET result = json_set(result, '$.steerDeliveredRunId', ?)
+       WHERE client_request_id = ? AND thread_id = ? AND command_kind = 'send' AND status = 'accepted'
+         AND json_extract(result, '$.steerRunId') = ?
+         AND (json_extract(result, '$.steerItemId') = ? OR json_extract(result, '$.steerItemId') IS NULL)
+         AND json_extract(result, '$.steerDeliveredRunId') IS NULL`
+    ).run(runId, requestId, threadId, runId, itemId)
+  }
+
   /** Appends to the thread's event log and returns the new `seq`. */
   appendEvent(input: {
     threadId: string

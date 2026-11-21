@@ -33,6 +33,7 @@ export interface EnqueueMessageInput {
   source?: string
   /** The sender's id for the send that queued it (`QueuedMessage.clientRequestId`). */
   clientRequestId?: string
+  steerOnStart?: QueuedMessage['steerOnStart']
   internal?: boolean
   runId?: string
   inboxIds?: string[]
@@ -271,6 +272,8 @@ export function normalizeQueuedMessages(raw: unknown, threadId?: string): Queued
       ...(state === 'steering' && item.promotedWithCopyId === true ? { promotedWithCopyId: true as const } : {}),
       // Only a steering item can be sent now (Send now on its hold).
       ...(state === 'steering' && isSteerNow(item.steerNow) ? { steerNow: { runId: item.steerNow.runId, holdGeneration: item.steerNow.holdGeneration, requestId: item.steerNow.requestId } } : {}),
+      // Keep the target until delivery is confirmed, including when a steer is returned to the queue unread.
+      ...(state !== 'claimed' && typeof item.steerOnStart?.runId === 'string' && item.steerOnStart.runId ? { steerOnStart: { runId: item.steerOnStart.runId } } : {}),
       ...(origin ? { origin } : {})
     })
   }
@@ -372,6 +375,7 @@ export function enqueueMessage(
     state: 'pending',
     source: input.source,
     ...(input.clientRequestId ? { clientRequestId: input.clientRequestId } : {}),
+    ...(input.steerOnStart ? { steerOnStart: input.steerOnStart } : {}),
     internal: input.internal === true ? true : undefined,
     ...(input.runId ? { runId: input.runId } : {}),
     ...(input.continuationOfRunId ? { continuationOfRunId: input.continuationOfRunId } : {}),
@@ -386,7 +390,19 @@ export function enqueueMessage(
     ...(input.waitsForLease && (input.intent ?? 'normal') === 'normal' ? { waitsForLease: true as const } : {})
   }
 
-  return { items: sortQueue([...items, item]), item }
+  return insertQueuedMessage(items, item)
+}
+
+/** Inserts a prepared item at the time it reaches the queue, preserving the order of messages sent to the same turn. */
+export function insertQueuedMessage(items: QueuedMessage[], saved: QueuedMessage): { items: QueuedMessage[]; item: QueuedMessage } {
+  const item = { ...saved, order: saved.steerOnStart ? nextOrder(items) : saved.order }
+  const next = sortQueue([...items, item])
+  if (!item.steerOnStart) return { items: next, item }
+  const pending = listPendingQueue(next).filter((entry) => !entry.internal)
+  const joining = pending.filter((entry) => entry.steerOnStart?.runId === item.steerOnStart?.runId)
+  const first = new Set(joining.map((entry) => entry.id))
+  const ordered = reorderQueuedMessages(next, [...first, ...pending.filter((entry) => !first.has(entry.id)).map((entry) => entry.id)])
+  return { items: ordered, item: ordered.find((entry) => entry.id === item.id)! }
 }
 
 export function removeQueuedMessage(
@@ -530,18 +546,36 @@ export function promoteQueuedMessageToSteer(
   if (current.state !== 'pending' && current.state !== 'steering') {
     throw new QueueValidationError(`Queue item ${id} is not pending.`)
   }
+  const { steerOnStart, ...rest } = current
   const item: QueuedMessage = {
-    ...current,
+    ...rest,
     intent: 'steer',
     state: 'steering',
     claim: undefined,
     ...(current.state === 'pending' ? { promotedWithCopyId: true as const } : {}),
     ...(bind?.steerRunId ? { steerRunId: bind.steerRunId } : {}),
+    ...(steerOnStart && steerOnStart.runId === bind?.steerRunId ? { steerOnStart } : {}),
     ...(bind?.permissionMode ? { permissionMode: bind.permissionMode } : {})
   }
   const next = [...items]
   next[index] = item
   return { items: sortQueue(next), item }
+}
+
+/**
+ * Marks a pending item as steered into the run being set up (`QueuedMessage.steerOnStart`), or, without a run, clears the
+ * mark. Other items are returned as they are.
+ */
+export function markSteerOnStart(items: QueuedMessage[], id: string, runId: string | undefined): QueuedMessage[] {
+  return items.map((entry) => {
+    if (entry.id !== id) return entry
+    if (!runId) {
+      if (!entry.steerOnStart) return entry
+      const { steerOnStart: _steerOnStart, ...rest } = entry
+      return rest
+    }
+    return entry.state === 'pending' && entry.steerOnStart?.runId !== runId ? { ...entry, steerOnStart: { runId } } : entry
+  })
 }
 
 /** Convert a free-form steer text into a transient steer queue entry (not persisted after accept). */

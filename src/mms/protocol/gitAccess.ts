@@ -65,6 +65,7 @@ export const GIT_ACCESS = {
   'thread.messageImage': 'none',
   'thread.changesSince': 'none',
   'orchestrator.send': 'owned',
+  'orchestrator.sendAccepted': 'none',
   'orchestrator.abort': 'owned',
   'orchestrator.steer': 'owned',
   'orchestrator.steerNow': 'owned',

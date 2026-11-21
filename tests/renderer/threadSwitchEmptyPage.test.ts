@@ -138,10 +138,12 @@ beforeEach(async () => {
       started('thread-e'),
       started('thread-f'),
       started('thread-slow'),
+      started('thread-starting'),
       started('thread-cleared'),
       started('thread-unreachable'),
       { id: 'thread-draft', name: 'New Chat', createdAt: now, updatedAt: now, order: 0 }
     ] as never,
+    turnStates: {},
     messages: [message('a-1', 'First thread')] as never
   })
   host = document.createElement('div')
@@ -158,6 +160,17 @@ afterEach(() => {
 })
 
 describe('switching threads', () => {
+  it('opens a starting thread while its transcript request is still pending', async () => {
+    const useAppStore = await store()
+    useAppStore.setState({ turnStates: { 'thread-starting': { threadId: 'thread-starting', turnId: 'run-starting', phase: 'queued', updatedAt: now } } })
+    await mount()
+    await switchTo('thread-starting')
+    expect(shownThread()).toEqual({ thread: 'thread-starting', messages: '' })
+    expect(useAppStore.getState().transcriptPending).toBe(true)
+    expect(host.querySelector('.chat--empty')).toBeNull()
+    expect(host.querySelector('.composer-input')).not.toBeNull()
+  })
+
   it('shows a started thread outside the cache with its messages in the first paint that shows it', async () => {
     await mount()
     expect(host.querySelector('.chat')?.classList.contains('chat--empty')).toBe(false)
