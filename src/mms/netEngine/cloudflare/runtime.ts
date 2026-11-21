@@ -1,10 +1,9 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, open, rename, rm, stat } from 'node:fs/promises'
-import { delimiter, join } from 'node:path'
+import { join } from 'node:path'
 import { ensurePrivateDirectory } from '../../data/privateAcl'
 import { extractArchive } from '../../harness/agents/archive'
-import { resolveCommand } from '../../harness/env'
 
 const RELEASE = '2026.11.1'
 const RELEASES = 'https://github.com/cloudflare/cloudflared/releases/download'
@@ -83,16 +82,6 @@ export async function resolveCloudflared(directory: string, signal: AbortSignal)
   const exists = (path: string) => stat(path).then((info) => info.isFile(), () => false)
 
   if (await exists(installed) && (await binaryVersion(installed, signal)) === RELEASE) return installed
-  signal.throwIfAborted()
-
-  const system = resolveCommand(executable, {
-    env: process.env,
-    searchPath: (process.env.PATH ?? '').split(delimiter).filter(Boolean)
-  })
-  if (system && !system.args.length) {
-    const version = await binaryVersion(system.path, signal)
-    if (version === RELEASE) return system.path
-  }
   signal.throwIfAborted()
 
   ensurePrivateDirectory(directory)

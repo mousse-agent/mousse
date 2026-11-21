@@ -233,6 +233,9 @@ export function registerNetEngineMethods(
             case 'netEngine.cloudflare.stop':
               await engine.cloudflare.stop()
               return engine.status()
+            case 'netEngine.cloudflare.forget':
+              await engine.cloudflare.forget()
+              return engine.status()
             case 'netEngine.ssh.resolve':
               return engine.sshAdd().resolve(p.target)
             case 'netEngine.ssh.probe':

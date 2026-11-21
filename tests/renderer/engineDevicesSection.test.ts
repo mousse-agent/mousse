@@ -442,6 +442,19 @@ describe('routes (1b §1.3, §1.5)', () => {
     expect(document.body.textContent).toContain('123 456')
   })
 
+  it('asks before forgetting a Cloudflare connection', async () => {
+    const d = daemon({
+      reach: { lan: false, tailnet: false, public: [], tunnels: [], wsPort: 47101 },
+      cloudflare: { state: 'failed', canForget: true }
+    })
+    await mount()
+    await click(button('Set up'))
+    await click(button('Forget connection…'))
+    expect(d.called('netEngine.cloudflare.forget')).toEqual([])
+    await click(button('Forget connection'))
+    expect(d.called('netEngine.cloudflare.forget')).toEqual([{}])
+  })
+
   it('copies the local tunnel origin before saving a URL and sends a pairing link after setup', async () => {
     const reach = { lan: false, tailnet: false, public: [], tunnels: [], wsPort: 47101 }
     const d = daemon({ reach, sendLink: true })

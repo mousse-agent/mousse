@@ -111,10 +111,16 @@ describe('managed Cloudflare tunnel', () => {
     fixture.processes[0].ready(1)
     fixture.processes[0].lost()
     expect(connection.status()?.state).toBe('connected')
-    fixture.processes[0].lost(1)
-    await vi.waitFor(() => expect(first.advertise).toHaveBeenLastCalledWith(null))
-    expect(connection.status()?.state).toBe('connecting')
-
+    vi.useFakeTimers()
+    try {
+      fixture.processes[0].lost(1)
+      expect(first.advertise).toHaveBeenLastCalledWith(null)
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(fixture.processes[0].stop).not.toHaveBeenCalled()
+      expect(connection.status()?.state).toBe('reconnecting')
+    } finally {
+      vi.useRealTimers()
+    }
     first.test.mockResolvedValue(true)
     fixture.processes[0].ready()
     await vi.waitFor(() => expect(connection.status()?.state).toBe('connected'))
@@ -136,7 +142,7 @@ describe('managed Cloudflare tunnel', () => {
 
     await connection.stop()
     expect(next.advertise).toHaveBeenLastCalledWith(null)
-    expect(connection.status()).toEqual({ state: 'off', hostname: address })
+    expect(connection.status()).toMatchObject({ state: 'off', hostname: address })
     await connection.useOrigin(origin(47110))
     expect(fixture.processes).toHaveLength(2)
   })
@@ -154,5 +160,30 @@ describe('managed Cloudflare tunnel', () => {
     expect(fixture.create).not.toHaveBeenCalled()
     expect(fixture.processes).toHaveLength(0)
     expect(await readdir(join(folder, 'tunnel'))).toEqual([])
+  })
+
+  it('reuses the saved setup on retry and lets a person forget it to choose another domain', async () => {
+    fixture.token.mockRejectedValueOnce(new Error('Token request failed'))
+    fixture.token.mockRejectedValueOnce(new Error('Token request failed'))
+    await connection.useOrigin(origin(47101))
+    connection.start()
+    await vi.waitFor(() => expect(connection.status()).toMatchObject({ state: 'failed', canForget: true }))
+    const [label, secret] = fixture.create.mock.calls[0]
+
+    connection.start()
+    await vi.waitFor(() => expect(connection.status()).toMatchObject({ state: 'failed', canForget: true }))
+    expect(fixture.create).toHaveBeenLastCalledWith(label, secret, expect.any(AbortSignal))
+
+    fixture.login.mockResolvedValue({ ...account, zoneId: 'c'.repeat(32) })
+    connection.start()
+    await vi.waitFor(() => expect(connection.status()?.message).toContain('forget this setup'))
+    expect(fixture.create).toHaveBeenCalledTimes(2)
+
+    await connection.forget()
+    expect(connection.status()).toEqual({ state: 'off' })
+    expect(await readdir(join(folder, 'tunnel'))).toEqual([])
+    connection.start()
+    await vi.waitFor(() => expect(fixture.processes).toHaveLength(1))
+    expect(fixture.create.mock.lastCall?.[0]).not.toBe(label)
   })
 })

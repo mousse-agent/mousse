@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -12,8 +12,7 @@ import { ProcessSupervisor } from '../../net/transports/runtime/process'
 import { CLOUDFLARE_TUNNEL_ID, CloudflareCli, cloudflareHostname, cloudflareEdge, type CloudflareAccount } from './cli'
 import { cloudflaredEnv, resolveCloudflared } from './runtime'
 
-const PROBE_MS = 90_000
-const REGISTER_MS = 60_000
+const SIGN_IN_CLEANUP = { recursive: true, force: true, maxRetries: 3, retryDelay: 100 } as const
 
 interface CloudflareOrigin {
   port: number
@@ -42,9 +41,9 @@ interface Attempt {
   abort: AbortController
   job: Promise<void>
   connector?: ProcessSupervisor
-  registration?: ReturnType<typeof setTimeout>
   probe?: AbortController
   advertised?: boolean
+  reconnecting?: boolean
 }
 
 function valid(value: unknown): value is Settings {
@@ -66,7 +65,7 @@ export class ManagedCloudflare {
   private origin?: CloudflareOrigin
   private attempt?: Attempt
   private ending?: Promise<void>
-  private cleanedSignIns?: Promise<void>
+  private readonly startupCleanup: Promise<void>
   private originGeneration = 0
   private settings?: Settings
   private view: NetEngineCloudflare = { state: 'off' }
@@ -75,7 +74,13 @@ export class ManagedCloudflare {
     private readonly directory: string,
     private readonly runtimeDirectory: string,
     private readonly changed: () => void
-  ) {}
+  ) {
+    this.startupCleanup = this.clearInterruptedSignIns().catch(() => undefined)
+  }
+
+  private get stateFile(): string {
+    return join(this.directory, 'state.json')
+  }
 
   status(): NetEngineCloudflare | undefined {
     return this.origin ? this.view : undefined
@@ -88,9 +93,6 @@ export class ManagedCloudflare {
     await this.cancel()
     if (generation !== this.originGeneration || !origin) return
     try {
-      this.cleanedSignIns ??= this.clearInterruptedSignIns()
-      await this.cleanedSignIns
-      if (generation !== this.originGeneration) return
       this.origin = origin
       this.read()
       this.set('off')
@@ -109,12 +111,13 @@ export class ManagedCloudflare {
     })
     await Promise.all(files
       .filter((entry) => entry.isDirectory() && /^login-[A-Za-z0-9]{6}$/.test(entry.name))
-      .map((entry) => rm(join(this.directory, entry.name), { recursive: true, force: true })))
+      .map((entry) => rm(join(this.directory, entry.name), SIGN_IN_CLEANUP)))
   }
 
   start(): void {
     const origin = this.origin
-    if (!origin || this.attempt || this.ending) return
+    if (this.ending) throw new Error('Cloudflare is still stopping. Try again in a moment.')
+    if (!origin || this.attempt) return
     try {
       this.read()
     } catch (error) {
@@ -133,19 +136,26 @@ export class ManagedCloudflare {
     this.set('off')
   }
 
-  private read(): void {
-    const file = join(this.directory, 'state.json')
+  async forget(): Promise<void> {
+    if (this.settings?.enabled) this.save({ ...this.settings, enabled: false })
+    await this.cancel()
+    rmSync(this.stateFile, { force: true })
     this.settings = undefined
-    if (!existsSync(file)) return
+    this.set('off')
+  }
+
+  private read(): void {
+    this.settings = undefined
+    if (!existsSync(this.stateFile)) return
     let record: unknown
-    try { record = JSON.parse(readFileSync(file, 'utf8')) } catch { /* No parser details for credentials. */ }
+    try { record = JSON.parse(readFileSync(this.stateFile, 'utf8')) } catch { /* No parser details for credentials. */ }
     if (!valid(record)) throw new Error('Mousse could not read this Cloudflare connection.')
     this.settings = record
   }
 
   private save(record: Settings): void {
     ensurePrivateDirectory(this.directory)
-    atomicWriteJsonSync(join(this.directory, 'state.json'), record, { mode: 0o600 })
+    atomicWriteJsonSync(this.stateFile, record, { mode: 0o600 })
     this.settings = record
   }
 
@@ -153,6 +163,7 @@ export class ManagedCloudflare {
     this.view = {
       state,
       ...(this.settings && 'hostname' in this.settings ? { hostname: this.settings.hostname } : {}),
+      ...(this.settings || (state === 'failed' && existsSync(this.stateFile)) ? { canForget: true } : {}),
       ...(state === 'failed' && error instanceof Error ? { message: error.message } : {}),
       ...(loginUrl ? { loginUrl } : {})
     }
@@ -161,6 +172,10 @@ export class ManagedCloudflare {
 
   private async prepare(attempt: Attempt): Promise<void> {
     const { signal } = attempt.abort
+    await this.startupCleanup
+    signal.throwIfAborted()
+    await this.clearInterruptedSignIns()
+    signal.throwIfAborted()
     const runtime = await resolveCloudflared(this.runtimeDirectory, signal)
     signal.throwIfAborted()
     const settings = this.settings
@@ -182,7 +197,7 @@ export class ManagedCloudflare {
       const account = await cli.login(signal, (url) => this.set('sign_in', undefined, url))
       signal.throwIfAborted()
       if (existing && (existing.accountId !== account.accountId || existing.zoneId !== account.zoneId))
-        throw new Error('Sign in to the Cloudflare account and domain you chose before.')
+        throw new Error('Sign in to the same Cloudflare domain, or forget this setup to use another domain.')
       const setup = existing ?? {
         ...account,
         label: `mousse-${randomBytes(10).toString('hex')}`,
@@ -199,7 +214,7 @@ export class ManagedCloudflare {
       this.save(ready)
       return ready
     } finally {
-      await rm(scratch, { recursive: true, force: true })
+      await rm(scratch, SIGN_IN_CLEANUP)
     }
   }
 
@@ -221,6 +236,7 @@ export class ManagedCloudflare {
       cwd: this.directory,
       env: { ...cloudflaredEnv(), TUNNEL_TOKEN: ready.token },
       clock: systemClock,
+      maxRestarts: Number.POSITIVE_INFINITY,
       state: (state) => {
         if (this.attempt !== attempt) return
         edges.clear()
@@ -230,8 +246,8 @@ export class ManagedCloudflare {
           void this.failed(attempt, new Error('Cloudflare disconnected. Try connecting again.'))
           return
         }
-        this.set('connecting')
-        if (state === 'provisioning') this.waitForEdge(attempt)
+        if (state === 'degraded') attempt.reconnecting = true
+        this.set(attempt.reconnecting ? 'reconnecting' : 'connecting')
       },
       line: (line) => {
         if (this.attempt !== attempt) return
@@ -241,8 +257,8 @@ export class ManagedCloudflare {
           if (edges.delete(edge.index) && !edges.size) {
             this.resetProbe(attempt)
             if (attempt.advertised) void this.withdraw(attempt)
-            this.set('connecting')
-            this.waitForEdge(attempt)
+            attempt.reconnecting = true
+            this.set('reconnecting')
           }
           return
         }
@@ -261,8 +277,7 @@ export class ManagedCloudflare {
   }
 
   private async verify(attempt: Attempt, route: string, signal: AbortSignal): Promise<void> {
-    const until = Date.now() + PROBE_MS
-    for (let wait = 500; Date.now() < until; wait = Math.min(wait * 2, 5_000)) {
+    for (let wait = 500; ; wait = Math.min(wait * 2, 5_000)) {
       signal.throwIfAborted()
       if (await attempt.origin.test(route)) {
         signal.throwIfAborted()
@@ -272,28 +287,20 @@ export class ManagedCloudflare {
         this.set('connected')
         return
       }
-      await delay(wait, undefined, { signal })
+      await delay(wait, undefined, { signal, ref: false })
     }
-    throw new Error('Cloudflare connected, but Mousse could not reach its address. Try again.')
-  }
-
-  private waitForEdge(attempt: Attempt): void {
-    attempt.registration = setTimeout(() => {
-      void this.failed(attempt, new Error('Cloudflare did not connect. Try again.'))
-    }, REGISTER_MS)
-    attempt.registration.unref()
   }
 
   private resetProbe(attempt: Attempt): void {
-    if (attempt.registration) clearTimeout(attempt.registration)
-    attempt.registration = undefined
     attempt.probe?.abort()
     attempt.probe = undefined
   }
 
   private withdraw(attempt: Attempt): Promise<void> {
     attempt.advertised = false
-    return attempt.origin.advertise(null).catch(() => undefined)
+    return attempt.origin.advertise(null).catch(() => {
+      console.warn('Mousse could not remove the inactive Cloudflare route from the networking helper.')
+    })
   }
 
   private cancel(): Promise<void> {

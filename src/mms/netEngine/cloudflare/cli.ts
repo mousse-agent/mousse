@@ -69,6 +69,8 @@ export class CloudflareCli {
   ): Promise<CommandOutput> {
     return new Promise((resolve, reject) => {
       const env = isolatedEnv(this.scratch)
+      // Let the Mousse window open the validated URL in the user's browser profile.
+      if (options.loginLine) env.PATH = ''
       if (options.secret) env.TUNNEL_CREATE_SECRET = options.secret
       const child = execFile(this.binary, [
         'tunnel', '--config', this.config, '--no-autoupdate', '--output', 'json',

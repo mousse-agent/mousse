@@ -35,6 +35,7 @@ export const NET_ENGINE_LOCAL_METHODS = [
   'netEngine.routes.test',
   'netEngine.cloudflare.connect',
   'netEngine.cloudflare.stop',
+  'netEngine.cloudflare.forget',
   // Phase 1b: Add over SSH (§3.4)
   'netEngine.ssh.resolve',
   'netEngine.ssh.probe',
@@ -340,8 +341,9 @@ export interface NetEngineJoinPreview {
 }
 
 export interface NetEngineCloudflare {
-  state: 'off' | 'preparing' | 'sign_in' | 'connecting' | 'connected' | 'failed'
+  state: 'off' | 'preparing' | 'sign_in' | 'connecting' | 'connected' | 'reconnecting' | 'failed'
   hostname?: string
+  canForget?: boolean
   loginUrl?: string
   message?: string
 }
