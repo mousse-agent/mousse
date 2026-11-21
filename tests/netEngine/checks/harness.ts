@@ -49,6 +49,12 @@ export type { Crossed } from './tap'
 
 /** Whether the checks run the real helper (`MOUSSE_NET_HELPER`) instead of the fake one. */
 export const REAL_HELPER = !!process.env.MOUSSE_NET_HELPER?.trim()
+// Every helper of a run on one computer listens on loopback; only a cross-machine cell's role listens on the LAN. Set
+// before any profile exists, so no helper, whoever starts it, takes the app's default (every interface).
+if (REAL_HELPER)
+  process.env.MOUSSE_NET_ENGINE_HELPER_LISTEN_IP ||= process.env.MOUSSE_NET_ENGINE_CHECK_ROLE
+    ? '0.0.0.0'
+    : '127.0.0.1'
 
 /**
  * The route a 1b routes check runs over (`--route`, 1b §14): each computer is given only that route, and every

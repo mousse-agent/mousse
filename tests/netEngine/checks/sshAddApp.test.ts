@@ -11,7 +11,8 @@
  * - an existing 1a row is kept, and a lost existing reply is answered again;
  * - a crash after the grant was saved, then a removal, then a restart with no retry leaves no grant and no row;
  * - a done request is answered again only while its grant still serves;
- * - `net-engine ssh` never starts a daemon.
+ * - `net-engine ssh` never starts a daemon;
+ * - nothing the run starts listens outside loopback (after each case, as the OS reports it; `listened_off_loopback`).
  *
  * Its controls (`MOUSSE_NET_ENGINE_CONTROL`) fail it with: `refuse-if-paired` refused_paired_profile,
  * `ssh-row-pairback` ssh_row_pairback, `profile-before-journal` duplicate_after_crash, `grant-id-not-checked`
@@ -21,9 +22,10 @@
  * `ssh-row-not-converted` stuck_finishing (a Send link between the two converts both rows).
  */
 import { PassThrough } from 'node:stream'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { runNetEngineCommand } from '../../../src/cli/commands/netEngineSsh'
 import type { PrepareStep } from '../../../src/mms/netEngine/ssh/prepare'
+import { offLoopbackBinds } from './binds'
 import {
   connectedBothWays,
   deviceState,
@@ -57,6 +59,19 @@ describe('phase1b.ssh-add-app', () => {
     served = await fabric.sshServer(HOST, b)
   }, 120_000)
   afterAll(() => fabric.close(), 180_000)
+  // One computer, so loopback only: on Windows anything else raises a firewall prompt on the owner's desktop. macOS
+  // and Linux runs are fenced to loopback by the kit; where the fence hides the OS's list, the fence holds instead.
+  afterEach(async () => {
+    if (process.env.MOUSSE_NET_ENGINE_CHECK_ROLE) return
+    let binds
+    try {
+      binds = offLoopbackBinds()
+    } catch (error) {
+      if (process.platform === 'win32') throw error
+      return
+    }
+    await step('listened_off_loopback', () => expect(binds).toEqual([]))
+  }, 60_000)
 
   /** A's window: resolve, trust the key, list B's profiles. */
   async function begin(a: Computer) {

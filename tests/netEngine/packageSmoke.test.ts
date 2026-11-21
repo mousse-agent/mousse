@@ -5,7 +5,7 @@
  */
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { runsHere, smokeConfig } from '../../scripts/net-engine-package-smoke.mjs'
+import { homeParent, runsHere, smokeConfig } from '../../scripts/net-engine-package-smoke.mjs'
 
 describe('the package smoke', () => {
   it.each([
@@ -50,5 +50,15 @@ describe('the package smoke', () => {
     expect(config.publish).toBeNull()
     // Another architecture's Electron is not the one in node_modules.
     expect(smokeConfig(build, { out: '/smoke', helperDir: '/h', sameArch: false, root: '/app', exists: () => true }).electronDist).toBeUndefined()
+  })
+
+  it("keeps the packaged daemon's socket within the Unix socket path limit", () => {
+    const deep = '/Users/someone/' + 'a-deep-run-folder/'.repeat(5)
+    // macOS takes 104 bytes, Linux 108: a deep temporary folder gives way to /tmp.
+    expect(homeParent('darwin', deep)).toBe('/tmp')
+    expect(homeParent('linux', deep)).toBe('/tmp')
+    expect(homeParent('darwin', '/var/folders/ab/cdefgh/T')).toBe('/var/folders/ab/cdefgh/T')
+    // Windows listens on a named pipe: any folder will do.
+    expect(homeParent('win32', deep)).toBe(deep)
   })
 })
