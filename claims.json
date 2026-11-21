@@ -313,6 +313,19 @@
       "expiresAt": "2026-11-21T01:01:48.345Z"
     },
     {
+      "task": "turn-send-timing",
+      "session": "Animatrix-44cfb7",
+      "machine": "Animatrix",
+      "branch": "turn-send-timing",
+      "paths": [
+        "src/mms/diagnostics",
+        "src/mms/orchestrator/OrchestratorService.ts",
+        "src/mms/harness"
+      ],
+      "claimedAt": "2026-11-21T05:07:53.262Z",
+      "expiresAt": "2026-11-21T07:07:53.262Z"
+    },
+    {
       "task": "window-warm-start",
       "session": "Animatrix-b233b3",
       "machine": "Animatrix",
