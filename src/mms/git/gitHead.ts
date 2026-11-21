@@ -1,4 +1,5 @@
-import { lstat, readFile, stat } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { access, lstat, readFile, stat } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { physicalPath } from './gitDirFiles'
 import { IN_PROGRESS_GIT_MARKERS } from './gitMarkers'
@@ -93,6 +94,20 @@ export function branchOfHeadFile(text: string): string | null | undefined {
   return ref
 }
 
+/** Git requires searchable objects and refs directories in the common Git directory. */
+async function isSearchableDirectory(path: string): Promise<boolean> {
+  try {
+    if (!(await stat(path)).isDirectory()) return false
+    // On Windows X_OK is equivalent to F_OK, which stat already checked.
+    if (process.platform !== 'win32') await access(path, constants.X_OK)
+    return true
+  } catch (error) {
+    const { code } = error as NodeJS.ErrnoException
+    if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EACCES') return false
+    throw error
+  }
+}
+
 /** The last read of each folder, kept while the `.git` and `HEAD` it read have not changed. */
 const cache = new Map<string, { layout: Layout; dotGit: string; head: string; branch: string | null; commit?: string }>()
 /** At most this many folders are remembered; the oldest is dropped first. */
@@ -111,12 +126,19 @@ export async function readFolderHead(folder: string): Promise<FolderHead | undef
   if (layout === false) return { repo: false }
   if (!layout) return undefined
   const headPath = join(layout.gitDir, 'HEAD')
-  const [dotGit, head] = await Promise.all([signature(join(layout.top, '.git')), signature(headPath)])
+  // Daemon Git reads strip inherited GIT_OBJECT_DIRECTORY. Check the on-disk layout before
+  // reusing a cached HEAD, since removing objects or refs can leave that file unchanged.
+  const [dotGit, head, objects, refs] = await Promise.all([
+    signature(join(layout.top, '.git')),
+    signature(headPath),
+    isSearchableDirectory(join(layout.commonDir, 'objects')),
+    isSearchableDirectory(join(layout.commonDir, 'refs'))
+  ])
+  if (head === '-' || !objects || !refs) return undefined
   const known = cache.get(key)
   if (known && known.dotGit === dotGit && known.head === head && known.layout.gitDir === layout.gitDir) {
     return { repo: true, ...layout, branch: known.branch, ...(known.commit ? { commit: known.commit } : {}) }
   }
-  if (head === '-') return undefined
   headFileReads++
   const text = await readFile(headPath, 'utf8')
   const branch = branchOfHeadFile(text)

@@ -78,6 +78,18 @@ describe('a folder read from Git files', () => {
     expect(await commonDirFromFiles(worktree)).toBe(dirname(dirname(join(directory))))
   })
 
+  it.each(['objects', 'refs'])('checks for %s in a linked worktree’s common Git directory', async (name) => {
+    const main = repository()
+    const worktree = join(root, 'wt')
+    git(main, 'worktree', 'add', '-q', '-b', 'linked', worktree)
+    expect(await folderBranch(worktree)).toEqual({ repo: true, branch: 'linked' })
+    const directory = join(main, '.git', name)
+    renameSync(directory, `${directory}-away`)
+
+    expect(() => git(worktree, 'rev-parse', '--is-inside-work-tree')).toThrow(/not a git repository/)
+    expect(await folderBranch(worktree)).toEqual({ repo: false, branch: null })
+  })
+
   it('a branch with no commit yet names that branch', async () => {
     const cwd = join(root, 'empty')
     mkdirSync(cwd)

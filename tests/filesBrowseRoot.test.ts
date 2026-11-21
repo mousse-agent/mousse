@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
 import type { ProtocolClientType } from '../src/mms/protocol/types'
@@ -36,6 +36,7 @@ describe('a folder the Files panel browses outside the thread', () => {
 
   afterEach(async () => {
     folderAccess.reset()
+    vi.restoreAllMocks()
     await mms?.stop()
     delete process.env.MOUSSE_HOME
     rmSync(base, { recursive: true, force: true })
@@ -93,18 +94,25 @@ describe('a folder the Files panel browses outside the thread', () => {
     expect(existsSync(join(browsed, 'notes', 'new.txt'))).toBe(false)
   })
 
-  it('must be a full drive or share path, and a refused one is never touched', async () => {
+  it('must be a full local path, and a refused one is never touched', async () => {
     const probed: string[] = []
     folderAccess.reset({ probe: async (path) => { probed.push(path) }, commonDir: async () => null })
+    // Even if validation regresses, the fake share in this test must never reach the filesystem.
+    const listDir = vi.spyOn(mms.fileService, 'listDir').mockResolvedValue([])
+    const readFile = vi.spyOn(mms.fileService, 'readFileDetails').mockResolvedValue({ content: '' })
     const refused = process.platform === 'win32'
-      ? ['notes', '.\\notes', '\\Users', 'C:Users', '\\\\server', '//server/', '\\\\server\\pipe', '\\\\?\\C:\\', '\\\\.\\PhysicalDrive0', '\\\\?\\UNC\\server\\share']
+      ? ['notes', '.\\notes', '\\Users', 'C:Users', '\\\\server', '//server/', '\\\\server\\share', '//server/share', '\\\\server\\pipe', '\\\\?\\C:\\', '\\\\.\\PhysicalDrive0', '\\\\?\\UNC\\server\\share']
       : ['notes', './notes', '~/notes']
     for (const root of refused)
       await expect(call(window(), 'files.list', { root, path: '' }), root).rejects.toMatchObject({ code: 'invalid_params' })
+    if (process.platform === 'win32')
+      await expect(call(window(), 'files.read', { root: '\\\\server\\share', path: 'notes.txt' })).rejects.toMatchObject({ code: 'invalid_params' })
     await expect(call(window(), 'files.list', { root: `${browsed}\0x`, path: '' })).rejects.toMatchObject({ code: 'invalid_params' })
     // Nor is a folder another caller names.
     await expect(call(as('cli'), 'files.list', { root: browsed, path: '' })).rejects.toMatchObject({ code: 'forbidden' })
     expect(probed).toEqual([])
+    expect(listDir).not.toHaveBeenCalled()
+    expect(readFile).not.toHaveBeenCalled()
   })
 
   it('never saves into Git’s folder, the Mousse data folder, or through a link that leads there', async () => {
@@ -160,13 +168,10 @@ describe('a folder the Files panel browses outside the thread', () => {
 })
 
 describe('the rules for a browsed folder', () => {
-  it('takes drive and UNC share paths on Windows and / paths elsewhere, and refuses devices', () => {
+  it('takes a drive path on Windows and a / path elsewhere, never a Windows share or device', () => {
     expect(browsedRootRefusal('C:\\Users\\me', 'win32')).toBeUndefined()
     expect(browsedRootRefusal('d:/notes', 'win32')).toBeUndefined()
-    expect(browsedRootRefusal('\\\\nas\\media', 'win32')).toBeUndefined()
-    expect(browsedRootRefusal('//nas/media/notes', 'win32')).toBeUndefined()
-    expect(normalizedBrowsedRoot('//nas/media/a/../notes', 'win32')).toBe('\\\\nas\\media\\notes')
-    for (const root of ['\\\\nas', '//nas/', '//nas/../x', '//nas/pipe/x', '//nas/mailslot/x', '\\\\?\\C:\\x', '\\\\.\\pipe\\mousse', '\\Users', 'C:Users', 'notes'])
+    for (const root of ['\\\\nas\\media', '//nas/media/notes', '\\\\nas', '//nas/', '//nas/../x', '//nas/pipe/x', '//nas/mailslot/x', '\\\\?\\C:\\x', '\\\\.\\pipe\\mousse', '\\Users', 'C:Users', 'notes'])
       expect(browsedRootRefusal(root, 'win32'), root).toBeDefined()
     expect(browsedRootRefusal('/home/me', 'linux')).toBeUndefined()
     expect(browsedRootRefusal('//srv/share', 'linux')).toBeUndefined()

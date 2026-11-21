@@ -30,6 +30,7 @@ import { openLineDetail, type FilesSearchMode } from './filesSearchState'
 import { ResizablePanelSidebar } from './ResizablePanelSidebar'
 import { ensureProjectReferenceThread } from '../utils/chatLinks'
 import { DelayedLoader } from './ui/DelayedLoader'
+import { showToast } from './ui/Toast'
 import './filesPanel.css'
 
 const REVALIDATE_MS = 2_000
@@ -378,11 +379,12 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       if (loadSequences.current.get(key) !== sequence || useAppStore.getState().profileId !== ownerProfileId) return false
       const store = useFileWorkspaceStore.getState()
       const workspace = store.workspaces[targetScope]
+      const logicalPath = comparableFilePath(logicalFilePath(target)).toLowerCase()
       const alias = canonicalPath && workspace?.openPaths.find((openPath) => {
         const file = filesRef.current[`${targetScope}\0${openPath}`]
         return openPath !== path && file?.canonicalPath === canonicalPath
           && Boolean(file.target.root) === Boolean(target.root)
-          && samePath(logicalFilePath(file.target), logicalFilePath(target))
+          && comparableFilePath(logicalFilePath(file.target)).toLowerCase() === logicalPath
       })
       if (alias) {
         const aliasKey = `${targetScope}\0${alias}`
@@ -553,9 +555,14 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       }
       const targetRoot = await window.mousse.app.getFilesRoot(targetThreadId)
       if (!stillCurrent()) return
+      const linkedPath = detail.path.trim()
+      if (/^[\\/]{2}/.test(linkedPath) && pathInside(linkedPath, targetRoot) === null) {
+        showToast({ key: 'unc-file-link', tone: 'error', message: 'Map the share to a drive letter first' })
+        return
+      }
       const targetScope = fileWorkspaceScope(ownerProfileId, targetThreadId, targetProjectId)
       const localProject = Boolean(targetProjectId && !targetThread?.node && typeof window.mousse.fs.listDrives === 'function')
-      const path = tabPathFor(detail.path, targetRoot, targetScope, localProject)
+      const path = tabPathFor(linkedPath, targetRoot, targetScope, localProject)
       const currentStore = useAppStore.getState()
       currentStore.openSurfaceKind('files')
       useFileWorkspaceStore.getState().openFile(targetScope, path, pickedFileTarget(path, localProject ? targetRoot : null))

@@ -147,6 +147,15 @@ it('names every card’s branch without a Git process, and pushes a change when 
   })
 })
 
+it('stops reporting a repository when its objects directory is moved aside', async () => {
+  expect((await heads({ projectIds: [projectId] })).projects[projectId]).toEqual({ repo: true, branch: 'main' })
+  const dotGit = join(repo, '.git')
+  renameSync(join(dotGit, 'objects'), join(dotGit, 'objects-away'))
+
+  expect(() => git(repo, 'rev-parse', '--is-inside-work-tree')).toThrow(/not a git repository/)
+  expect((await heads({ projectIds: [projectId] })).projects[projectId]).toEqual({ repo: false, branch: null })
+})
+
 it('rejects malformed Git scopes before asking for access to a folder', async () => {
   const wait = vi.spyOn(main.orchestrator, 'waitForThreadFolders')
   const path = join(home, 'must-not-probe')

@@ -320,28 +320,34 @@ describe('Files panel without an open file', () => {
     expect(host.querySelectorAll('[aria-label="Close Notes.txt"]')).toHaveLength(1)
   })
 
-  it('reuses the same editor for alternate casing on a case-insensitive Windows volume', async () => {
+  it.each([
+    { resolve: win32.resolve, checkout: 'C:\\checkout', alias: 'c:/checkout/notes.txt', sameFile: true },
+    { resolve: posix.resolve, checkout: '/repo/checkout', alias: '/repo/checkout/notes.txt', sameFile: true },
+    { resolve: posix.resolve, checkout: '/repo/checkout', alias: '/repo/checkout/notes.txt', sameFile: false }
+  ])('handles case aliases at $checkout (same file: $sameFile)', async ({ resolve, checkout, alias, sameFile }) => {
     const threadId = 'case-insensitive-checkout'
-    threadFolders[threadId] = 'C:\\checkout'
-    const canonicalPath = 'C:\\checkout\\Notes.txt'
+    threadFolders[threadId] = checkout
+    const canonicalPath = resolve(checkout, 'Notes.txt')
     const writeFile = vi.fn(async () => undefined)
     window.mousse.fs.readFile = async () => 'saved notes'
     window.mousse.fs.writeFile = writeFile
     useAppStore.setState({ activeThreadId: threadId, threads: [{ ...startedThread(threadId), projectId: 'p1' }] })
     window.mousse.fs.readFileDetails = async (path, _project, _thread, folder) => {
-      if (win32.resolve(folder ?? threadFolders[threadId]!, path).toLowerCase() !== canonicalPath.toLowerCase()) throw new Error('File not found')
-      return { content: 'saved notes', canonicalPath }
+      const requested = resolve(folder ?? checkout, path)
+      return requested === canonicalPath || sameFile
+        ? { content: 'saved notes', canonicalPath }
+        : { content: 'separate notes', canonicalPath: requested }
     }
 
     await mountFiles()
-    await openLink('C:\\checkout\\Notes.txt')
+    await openLink(canonicalPath)
     expect(editor()?.value).toBe('saved notes')
     await editText('edited notes')
-    await openLink('c:/checkout/notes.txt')
-    expect(editor()?.value).toBe('edited notes')
-    expect(writeFile).not.toHaveBeenCalled()
+    await openLink(alias)
+    expect(editor()?.value).toBe(sameFile ? 'edited notes' : 'separate notes')
+    if (sameFile) expect(writeFile).not.toHaveBeenCalled()
     expect(host.querySelectorAll('[aria-label="Close Notes.txt"]')).toHaveLength(1)
-    expect(host.querySelector('[aria-label="Close notes.txt"]')).toBeNull()
+    expect(host.querySelectorAll('[aria-label="Close notes.txt"]')).toHaveLength(sameFile ? 0 : 1)
   })
 
   it.each([false, true])('keeps a junction tab separate from its direct target (retargeted: %s)', async (retargeted) => {
@@ -427,31 +433,38 @@ describe('the folder the Files tree shows', () => {
     expect(crumbs()).toEqual(['/', 'home', 'me', 'work', 'app'])
   })
 
-  it('uses checkout scope for a UNC checkout and preserves the share when browsing elsewhere', async () => {
+  it.each([
+    ['\\\\server\\share\\other\\notes.txt'],
+    ['//server/other-share/notes.txt']
+  ])('refuses a chat file link outside the registered UNC checkout (%s)', async (path) => {
+    const threadId = 'unc-checkout'
+    threadFolders[threadId] = '\\\\server\\share\\checkout'
+    useAppStore.setState({ activeThreadId: threadId, threads: [{ ...startedThread(threadId), projectId: 'p1' }] })
+    const readFile = vi.fn(async () => 'outside notes')
+    window.mousse.fs.readFile = readFile
+
+    await mountFiles()
+    listDir.mockClear()
+    await openLink(path)
+    expect(listDir).not.toHaveBeenCalled()
+    expect(readFile).not.toHaveBeenCalled()
+    expect(editor()).toBeNull()
+  })
+
+  it('reads a file picked inside a registered UNC checkout with checkout scope', async () => {
     const threadId = 'unc-checkout'
     const checkout = '\\\\server\\share\\checkout'
-    const folder = '\\\\server\\other-share\\notes'
     threadFolders[threadId] = checkout
     useAppStore.setState({ activeThreadId: threadId, threads: [{ ...startedThread(threadId), projectId: 'p1' }] })
-    const readFile = vi.fn(async (name: string, _project?: string, _thread?: string | null, root?: string) => {
-      if (!root && win32.normalize(name) === win32.join(checkout, 'notes.txt')) return 'checkout notes'
-      if (root === folder && name === 'notes.txt') return 'browsed notes'
-      throw new Error('Unexpected file target')
-    })
+    const readFile = vi.fn<typeof window.mousse.fs.readFile>(async () => 'checkout notes')
     window.mousse.fs.readFile = readFile
 
     await mountFiles()
     expect(tree().dataset.root).toBe(checkout)
     await act(async () => tree().click())
+    expect(readFile.mock.calls.map(([path, project, thread, folder]) => [win32.normalize(path), project, thread, folder]))
+      .toEqual([[win32.join(checkout, 'notes.txt'), undefined, threadId, undefined]])
     expect(editor()?.value).toBe('checkout notes')
-
-    await browseTo('//server/other-share/notes')
-    expect(listDir).toHaveBeenCalledWith('', undefined, threadId, folder)
-    expect(tree().dataset.listRoot).toBe(folder)
-    await act(async () => tree().click())
-    expect(readFile).toHaveBeenLastCalledWith('notes.txt', undefined, threadId, folder)
-    expect(editor()?.value).toBe('browsed notes')
-    expect(host.querySelectorAll('[aria-label="Close notes.txt"]')).toHaveLength(2)
   })
 
   it('is home for a thread without a folder', async () => {
