@@ -15,6 +15,7 @@ import type { QueueCommandRow, QueueCommands, QueueIntent } from '../run/QueueCo
 import {
   demoteSteerItems,
   editQueuedMessage,
+  holdQueueAfterStop,
   insertQueuedMessage,
   markSteerNow,
   normalizeQueuedMessages,
@@ -88,9 +89,13 @@ export function applyIntent(items: QueuedMessage[], intent: QueueIntent, ctx: { 
     case 'enqueue_steer': {
       const saved = intent.item!
       const present = items.find((item) => item.id === saved.id || item.clientRequestId === saved.clientRequestId)
-      if (present) return done(items, { outcome: 'enqueued' })
       const held = (ctx.stopGeneration ?? 0) > (intent.admissionStopGeneration ?? 0)
-      const item = held ? { ...saved, heldAfterStop: true as const } : saved
+      // Stop may have committed after the queue save, before this command was marked applied.
+      const item = held ? holdQueueAfterStop([present ?? saved])[0]! : present ?? saved
+      if (present) {
+        const next = item === present ? items : items.map((entry) => entry === present ? item : entry)
+        return done(next, { outcome: 'enqueued' })
+      }
       return done(insertQueuedMessage(items, item).items, { outcome: 'enqueued' })
     }
     case 'edit': {

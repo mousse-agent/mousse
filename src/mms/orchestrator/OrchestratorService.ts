@@ -11106,9 +11106,13 @@ export class OrchestratorService extends EventEmitter {
       const pending = listPendingQueue(items).filter((entry) => !entry.internal)
       const item = pending.find((entry) => entry.id === itemId)
       if (!item || item.state !== 'pending') throw new QueueConflictError('queue_item_not_found', 'That message is not in the queue.')
-      const first = [...session.steerOnStart, itemId].filter((id) => pending.some((entry) => entry.id === id))
+      const first = new Set(pending.filter((entry) => !entry.heldAfterStop && (runId
+        ? entry.steerOnStart?.runId === runId
+        : session.steerOnStart.includes(entry.id))).map((entry) => entry.id))
+      if (first.has(itemId)) return items
+      first.add(itemId)
       // Saved with the item: the run it joins. Another run that meets it never takes it as a steer.
-      return markSteerOnStart(reorderQueuedMessages(items, [...first, ...pending.map((entry) => entry.id).filter((id) => !first.includes(id))]), itemId, runId)
+      return markSteerOnStart(reorderQueuedMessages(items, [...first, ...pending.filter((entry) => !first.has(entry.id)).map((entry) => entry.id)]), itemId, runId)
     }
     const runId = this.steerTarget(session)
     session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, order) : order(session.queue)

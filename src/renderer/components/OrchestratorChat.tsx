@@ -12,7 +12,9 @@ import { emptyThreadHeadline } from '../utils/emptyThreadHeadline'
 import { normalizeContextSettings, type ContextSettings, type LlmProviderOption } from '../../shared/settings'
 import type {
   BrowserElementAttachment,
+  ChatImageAttachment,
   ChatMessage,
+  ChatMode,
   ContextUsageSnapshot,
   QueuedMessage,
   SendExpectation,
@@ -100,7 +102,7 @@ import { ThreadModeBar } from './ThreadModeBar'
 import { EarlierMessagesBar } from './EarlierMessagesBar'
 import { forgetMessageImageRequests, hydrateMessageImages, missingImages } from '../lib/messageImages'
 import { isOutcomeUncertain, settleUncertainSend } from '../lib/uncertainSend'
-import { SendRetryIds } from '../lib/sendRetryIds'
+import { SendRetryIds, type SendRetry } from '../lib/sendRetryIds'
 import { composerAutoModel, composerSelection, fallbackModel, onProviderListingsChanged, pickerListsModel, pickerOffers, pickerIdFor, pickerProviders, projectScope, useProviderSnapshots, type PickerSelection } from '../lib/providerSnapshots'
 import { compactNowFailureLine, errorText, isRequestTimeout, readableError, sendErrorLine } from '../lib/errorText'
 import { showToast } from './ui/Toast'
@@ -209,6 +211,14 @@ function sameModel(
  * the click's time, which its turn's Working time counts from. `taken` once the send paints it as its own.
  */
 type ShownFirstPrompt = { id: string; at: string; taken: boolean }
+type SteerRetry = SendRetry<string> & { signature: string }
+
+/** A retry belongs to the original message even when the visible turn changes. */
+async function sendSignature(profileId: string, threadId: string | null, content: string, mode: ChatMode, images: ChatImageAttachment[] | undefined, steer?: boolean): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify({ profileId, threadId, content, mode, images, steer }))
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
 
 /** The transcript shows a prompt with these words that was not there before the send (`seenBefore`): its turn started. */
 function startedAsPrompt(messages: readonly ChatMessage[], seenBefore: ReadonlySet<string>, content: string): boolean {
@@ -494,7 +504,7 @@ export function OrchestratorChat() {
     state.addComposerReference(expectedThread, resolved)
     setSendError(null)
   }, [pastedThreadRefusal])
-  const sendIds = useRef(new SendRetryIds())
+  const sendIds = useRef(new SendRetryIds<string>())
   // Prompts sent here and still on their way, by thread (their send answers when the turn ends). A message sent
   // meanwhile is queued behind them, even before the thread reports the turn running.
   const promptsOnTheWay = useRef(new Map<string, number>())
@@ -1087,13 +1097,14 @@ export function OrchestratorChat() {
       steer?: boolean | { row: string | null },
       /** The copy of this message shown since the click (a new chat's first message): it is kept, not painted again. */
       firstPrompt?: ShownFirstPrompt,
-      steerRunId?: string
+      steerTarget?: { runId?: string; retry?: SteerRetry }
     ) => {
       if (!content && !(images && images.length)) return
 
       setConnectionFailed(false)
       setSendError(null)
       const stillVisible = () => useAppStore.getState().profileId === profileId && useAppStore.getState().activeThreadId === targetThreadId
+      const steerRunId = steerTarget?.runId
       const request = {
         content: content || (images?.length ? '[Image attachment]' : ''),
         mode,
@@ -1193,10 +1204,11 @@ export function OrchestratorChat() {
       try {
         // Keep retry identities across navigation without retaining message/image bodies. The message is sent even if
         // its thread was left meanwhile: it is already shown there.
-        const bytes = new TextEncoder().encode(JSON.stringify({ profileId, threadId: targetThreadId, content, mode, images, steer: request.steer, steerRunId: request.steerRunId }))
-        signature = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('')
+        signature = steerTarget?.retry?.signature ?? await sendSignature(profileId, targetThreadId, content, mode, images, request.steer)
+        const retry = steerTarget?.retry ?? sendIds.current.retry(signature)
+        if (request.steer && retry) request.steerRunId = retry.context
         // The service's retry key: a send that may have arrived lends its id to the same message sent again.
-        requestId = sendIds.current.begin(signature)
+        requestId = sendIds.current.begin(signature, request.steerRunId, retry)
         const sentId = requestId
         const pendingQueue = targetThreadId ? { threadId: targetThreadId, observed: false } : undefined
         if (pendingQueue) sendsAwaitingQueue.current.set(sentId, pendingQueue)
@@ -1221,9 +1233,8 @@ export function OrchestratorChat() {
             item.id !== optimisticQueueId ? [item] : !pendingQueue?.observed && result.queued && result.queueItem ? [result.queueItem] : []
           ))
         }
-        // A message the service queued (a turn started meanwhile, or a run is paused by a usage limit) waits in the
-        // queue: it is shown there, not also in the transcript.
-        if (result.queued && optimisticMessageId) {
+        // A queued message is shown in the queue. A replay of a delivered Steer already has its own transcript row.
+        if (optimisticMessageId && (result.queued || (request.steer && result.accepted && result.steerApplied))) {
           useAppStore.getState().dropMessage(targetThreadId, optimisticMessageId)
           if (result.queueItem && !pendingQueue?.observed) {
             const held = result.queueItem
@@ -1285,6 +1296,13 @@ export function OrchestratorChat() {
           void settleUncertainSend({
             refresh: () => window.mousse.threads.select(thread),
             arrived: async () => {
+              // A steer can leave the queue before this window sees it. Admission is still in the send receipt.
+              if (request.steer) {
+                const { accepted } = await window.mousse.platformRequest.request<{ accepted: boolean }>(
+                  'orchestrator.sendAccepted', { threadId: thread, clientRequestId: requestId }
+                )
+                return accepted
+              }
               if (optimisticQueueId) return (await window.mousse.queue.list(thread)).some((item) => item.clientRequestId === requestId)
               return useAppStore.getState().messages.some((message) =>
                 message.role === 'user' && !message.id.startsWith('optimistic:') && !seenBefore.has(message.id) && message.content === request.content)
@@ -1297,7 +1315,7 @@ export function OrchestratorChat() {
             // It arrived: the same text sent later is a new message, not a repeat of this one.
             sendIds.current.settle(signature, requestId, outcome === 'arrived' ? 'arrived' : 'unknown')
             if (!stillVisible()) return
-            if (outcome === 'missing') {
+            if (outcome === 'missing' && sendIds.current.retry(signature)?.id === requestId) {
               setSendError(`${sendErrorLine(error)} It did not arrive, so it is back in the composer.`)
               if (onUnsent) onUnsent()
               else setInput((current) => current || extractChatReferences(content).text)
@@ -1579,6 +1597,14 @@ export function OrchestratorChat() {
     const command = await runSlashCommand(trimmed, slashCommandEnv(attached))
     // A command's earlier answer (`/goal` alone) is about what was true then.
     if (command) setCommandInfo(null)
+    // A retry of a send-with-Steer must take the receipt-based path even if the reply now takes direct Steer.
+    let retrySteer: SteerRetry | undefined
+    if (!command && activeThreadId && !isQualifiedId(activeThreadId) && sendIds.current.hasRetry) {
+      const signature = await sendSignature(profileId, activeThreadId, text, skillMode ?? chatMode, images, true)
+      if (!stillVisible()) return
+      const retry = sendIds.current.retry(signature)
+      if (retry) retrySteer = { signature, ...retry }
+    }
     let steerQueued = false
     // A steer the turn could not take yet, painted in the reply since the click: the send below keeps that row.
     let steerShown: string | null = null
@@ -1602,10 +1628,10 @@ export function OrchestratorChat() {
       // A /steer no turn took: next-turn guidance, sent as an ordinary message.
       text = command.text
       if (command.adoptGoal) goalToAdopt = command.text
-    } else if (options?.steer && !skillMode && !trimmed.startsWith('/') && (
+    } else if (retrySteer || (options?.steer && !skillMode && !trimmed.startsWith('/') && (
       images.length > 0 || (activeThreadId && !isQualifiedId(activeThreadId) &&
         (turnState?.phase === 'queued' || (promptThreadsOnTheWay.has(activeThreadId) && !replyTakesSteer)))
-    )) {
+    ))) {
       // While the run starts, send the Steer with the message. The same send also carries images.
       steerQueued = true
     } else if (options?.steer && !skillMode && images.length === 0 && trimmed && !trimmed.startsWith('/')) {
@@ -1670,7 +1696,7 @@ export function OrchestratorChat() {
     // Questions open above the composer: the message, with its images and files, answers the question the card
     // shows, and the card moves on to the next unanswered one. Answering the last one submits all the answers, once,
     // each question with its own images. The card's "Skip questions and send" sends it as usual instead.
-    const asked = questionsTakeMessage && !options?.skipQuestions ? pendingQuestions : null
+    const asked = questionsTakeMessage && !options?.skipQuestions && !retrySteer ? pendingQuestions : null
     const card = questionCardRef.current
     if (asked && card && (text || images.length > 0)) {
       // It answers a question instead: it is not on its way into the reply.
@@ -1704,7 +1730,7 @@ export function OrchestratorChat() {
     // What the first turn of a new chat is bound to (`expect`): the daemon runs nothing on other settings.
     let bound: SendExpectation | undefined
     let autoModelRevision: number | undefined
-    if (newChat) {
+    if (newChat && !retrySteer) {
       // What the composer shows at this click, read before anything below awaits.
       const wanted = selectedProviderId && selectedModelId
         ? { ...selectionFor(selectedProviderId), ...pickedSelection(selectedModelId) }
@@ -1794,7 +1820,7 @@ export function OrchestratorChat() {
         revision = result.thread.settingsRevision
       }
       bound = { permissionMode: shownMode, ...(wanted ? { model: wanted } : {}), settingsRevision: revision }
-    } else if (autoModel && activeThreadId) {
+    } else if (!retrySteer && autoModel && activeThreadId) {
       // A thread without a model of its own would run on the unusable default: give it the shown one.
       const updated = await window.mousse.threads.setModel(activeThreadId, autoModel)
       if (!stillVisible()) return
@@ -1808,7 +1834,7 @@ export function OrchestratorChat() {
     // The service clears the flag once the first message is saved, so it, not the transcript this window holds, decides.
     // A turn already under way (the first one still setting up its worktree, say) means this message is not the first:
     // it is sent unbound and queued, as any other.
-    if (!bound && !newChat && activeThreadId && activeThread && sendIsFirst(activeThread, turnState?.phase, activeThreadActivity)) {
+    if (!bound && !newChat && !retrySteer && activeThreadId && activeThread && sendIsFirst(activeThread, turnState?.phase, activeThreadActivity)) {
       const shownModel = autoModel ?? (selectedProviderId && selectedModelId
         ? { ...selectionFor(selectedProviderId), ...pickedSelection(selectedModelId) }
         : undefined)
@@ -1862,7 +1888,11 @@ export function OrchestratorChat() {
       const shownId = firstPrompt.id
       setFirstSendIds((current) => new Set([...current].filter((id) => id !== shownId)))
     }
-    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound, steerShown ? { row: steerShown } : steerQueued, firstPrompt, hasAdmittedTurn ? turnRunId ?? undefined : undefined)
+    const sent = await sendMessage(text, skillMode ?? chatMode, images, targetThreadId, restoreUnsent, undefined, bound,
+      steerShown ? { row: steerShown } : steerQueued, firstPrompt, {
+        runId: hasAdmittedTurn ? turnRunId ?? undefined : undefined,
+        retry: retrySteer
+      })
     // Refused: nothing runs, so the goal set for it goes too. (An unconfirmed send may have arrived; it keeps the goal.)
     if (goalThread && sent === false) void window.mousse.platformRequest.request('threads.goal', { threadId: goalThread, action: 'clear' }).catch(() => undefined)
     if (sent === false) {

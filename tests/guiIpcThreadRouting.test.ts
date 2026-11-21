@@ -1,3 +1,6 @@
+// @vitest-environment jsdom
+import { act, createElement } from 'react'
+import { createRoot } from 'react-dom/client'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -22,13 +25,18 @@ vi.mock('electron', () => ({
   webContents: {}
 }))
 
+// These neighbours make their own daemon requests, separately from the thread rows.
+vi.mock('../src/renderer/components/profiles/ProfileSwitcher', () => ({ ProfileSwitcher: () => null }))
+vi.mock('../src/renderer/components/chats/ChatsSidebar', () => ({ ChatsSidebar: () => null }))
+
 import { registerGuiIpc, type GuiIpcServices } from '../src/main/ipc/registerGuiIpc'
 import { PresentationState } from '../src/main/mms/PresentationState'
 import { MmsProtocolError } from '../src/mms/protocol/client'
 import { isQualifiedId, qualifyId } from '../src/shared/threadRef'
 import type { TurnState } from '../src/shared/types'
 import { useAppStore } from '../src/renderer/stores/appStore'
-import { selectThread } from '../src/renderer/lib/threadActions'
+import { ThreadsSidebar } from '../src/renderer/components/ThreadsSidebar'
+import { dispatchMethod, type HandlerContext } from '../src/mms/protocol/handlers'
 import { phase6Daemon, piAdapter, PI } from './run/phase6Fixture'
 
 const NODE = 'nod_0123456789abcdefghjkmnpqrs'
@@ -568,11 +576,20 @@ it('selects a cold admitted thread through sidebar IPC while the transcript and 
   const setup = new Promise<'stopped'>((resolve) => { finishSetup = () => resolve('stopped') })
   const reading = new Promise<void>((resolve) => { finishRead = resolve })
   const previous = useAppStore.getState()
+  const previousBridge = window.mousse
+  const host = document.createElement('div')
+  document.body.append(host)
+  const root = createRoot(host)
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  let selecting: Promise<unknown> | undefined
   try {
     const cold = d.store.createThread('Cold', undefined)
     d.orch.setThreadModelOverride(cold.id, PI)
     const warm = { ...cold, id: 'warm-thread', startedAt: cold.createdAt }
-    useAppStore.setState({ activeThreadId: warm.id, threads: [warm, { ...cold, startedAt: cold.createdAt }], turnStates: {}, messages: [] })
+    useAppStore.setState({
+      activeThreadId: warm.id, threads: [warm, { ...cold, startedAt: cold.createdAt }], turnStates: {}, messages: [],
+      threadsSidebarView: 'threads', sidebarMode: 'projects'
+    })
     d.orch.on('turn-state', (state: TurnState) => useAppStore.getState().setTurnState(state))
     vi.spyOn(d.orch, 'waitForThreadFolders').mockReturnValueOnce(setup)
     const result = await d.orch.send('First', false, { source: 'gui', threadId: cold.id, clientRequestId: 'first', awaitMode: 'ack' })
@@ -586,21 +603,49 @@ it('selects a cold admitted thread through sidebar IPC while the transcript and 
       await reading
       return { messages: [], queue: [], claimed: [], activeTurn: { active: false, running: true }, connectionFailed: false }
     })
-    vi.stubGlobal('window', { mousse: { threads: { select: (id: string) => invoke('threads:select', id) } } })
-    const selecting = selectThread(cold.id)
+    Object.defineProperty(window, 'mousse', { configurable: true, writable: true, value: {
+      platform: 'win32',
+      threads: { select: (id: string) => { selecting = invoke('threads:select', id); return selecting } }
+    } })
+    await act(async () => root.render(createElement(ThreadsSidebar)))
+    const coldRow = host.querySelector<HTMLButtonElement>(`button[data-thread-id="${cold.id}"]`)
+    expect(coldRow?.textContent).toContain('Cold')
+    await act(async () => coldRow!.click())
     expect(await requested).toBe(cold.id)
     expect(presentation.getActiveThreadId()).toBe(cold.id)
     expect(useAppStore.getState()).toMatchObject({ activeThreadId: cold.id, openingThreadId: null, transcriptPending: true })
 
-    const followUp = await d.orch.send('Follow-up', false, { source: 'gui', threadId: cold.id, clientRequestId: 'steer', steer: true, steerRunId: result.runId })
-    expect(followUp.queueItem).toMatchObject({ content: 'Follow-up', sendsNext: true, steerOnStart: { runId: result.runId } })
-    await d.orch.stopThread(cold.id, 'user')
+    const sendThroughDaemon = async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      return dispatchMethod({
+        mms: { orchestrator: d.orch, threads: d.store, runEngine: d.engine },
+        globalSequence: () => 0,
+        connection: { id: 'gui-1', clientType: 'gui', capabilities: new Set() }
+      } as unknown as HandlerContext, method, params)
+    }
+    request.mockImplementationOnce(sendThroughDaemon)
+    const followUp = await invoke('orchestrator:sendToThread', cold.id, {
+      content: 'Follow-up', requestId: 'steer', steer: true, steerRunId: result.runId
+    })
+    expect(sent('orchestrator.send')[0]?.params).toMatchObject({
+      threadId: cold.id, content: 'Follow-up', clientRequestId: 'steer', steer: true, steerRunId: result.runId
+    })
+    expect(followUp).toMatchObject({ queueItem: { content: 'Follow-up', sendsNext: true, steerOnStart: { runId: result.runId } } })
+    for (const [threadId, accepted] of [[cold.id, true], [warm.id, false]] as const) {
+      request.mockImplementationOnce(sendThroughDaemon)
+      await expect(invoke('platform:request', {
+        method: 'orchestrator.sendAccepted', params: { threadId, clientRequestId: 'steer' }
+      })).resolves.toEqual({ ok: true, value: { accepted } })
+    }
+    await act(async () => { await d.orch.stopThread(cold.id, 'user') })
 
-    finishRead()
-    await selecting
+    await act(async () => { finishRead(); await selecting })
   } finally {
     finishSetup()
     finishRead()
+    act(() => root.unmount())
+    host.remove()
+    window.mousse = previousBridge
     await d.shutdown()
     useAppStore.setState(previous)
     vi.unstubAllGlobals()

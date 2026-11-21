@@ -2741,6 +2741,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})
       }))
     }
+    case 'orchestrator.sendAccepted': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'clientRequestId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const clientRequestId = asString(p.clientRequestId, 'clientRequestId', 128)
+      const receipt = ctx.mms.runEngine.store.getReceipt(clientRequestId)
+      return { accepted: receipt?.threadId === threadId && receipt.commandKind === 'send' && receipt.status === 'accepted' }
+    }
     case 'orchestrator.abort': {
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, ['threadId', 'clearQueue', 'runId', 'clientRequestId'])

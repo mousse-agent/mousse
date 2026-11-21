@@ -456,6 +456,48 @@ describe('follow-ups while switching between starting threads', () => {
     expect(rows()).toHaveLength(0)
   })
 
+  it.each(['already accepted', 'accepted after refresh'] as const)('reconciles a consumed Steer with its receipt (%s)', async (timing) => {
+    const w = await openThreads(async () => [])
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const steer = vi.fn(async () => true)
+    orchestrator.steer = steer
+    let accepted = timing === 'already accepted'
+    const readReceipt = vi.fn(async () => ({ accepted }))
+    window.mousse.platformRequest.request = readReceipt as typeof window.mousse.platformRequest.request
+
+    await send('From A', { ctrlKey: true })
+    expect(w.sendToThread).toHaveBeenCalledOnce()
+    const original = w.sendToThread.mock.calls[0]![1]
+    expect(original).toMatchObject({ steer: true, steerRunId: 'run-thread-a' })
+    await act(async () => {
+      w.refuse(Object.assign(new Error('Reply lost'), { code: 'outcome_uncertain' }))
+    })
+    await settle()
+    expect(composerInput().value).toBe(accepted ? '' : 'From A')
+    expect(rows()).toHaveLength(0)
+
+    if (accepted) {
+      expect(readReceipt).toHaveBeenCalledWith('orchestrator.sendAccepted', { threadId: 'thread-a', clientRequestId: original.requestId })
+      return
+    }
+    // The first IPC is admitted and consumed after the first receipt check, with no queue or transcript push.
+    accepted = true
+    await act(async () => useAppStore.getState().setTurnState({
+      threadId: 'thread-a', phase: 'streaming', turnId: 'run-next', updatedAt: now
+    }))
+    await send('From A', { ctrlKey: true })
+    expect(steer).not.toHaveBeenCalled()
+    expect(w.sendToThread).toHaveBeenCalledTimes(2)
+    expect(w.sendToThread.mock.calls[1]![1]).toMatchObject({
+      requestId: original.requestId, steer: true, steerRunId: 'run-thread-a'
+    })
+    await act(async () => w.answer({
+      message: '', actions: [], replayed: true, accepted: true, steerApplied: true, runId: 'run-thread-a'
+    }))
+    expect(composerInput().value).toBe('')
+    expect(rows()).toHaveLength(0)
+  })
+
   it('restores a refused Steer and its attachment to A while B remains open', async () => {
     const w = await openThreads()
     vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: () => 'blob:refused', revokeObjectURL: () => undefined }))

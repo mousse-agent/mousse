@@ -289,7 +289,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   'skills.importPackage', 'skills.exportPackage',
   'mcp.create', 'mcp.update', 'mcp.read', 'mcp.enable', 'mcp.delete',
   'mcp.testConnection', 'mcp.beginAuth', 'mcp.cancelAuth', 'mcp.revokeAuth',
-  'runs.resumeNow', 'runs.cancelPause', 'threads.goal', 'threads.setHidden'
+  'orchestrator.sendAccepted', 'runs.resumeNow', 'runs.cancelPause', 'threads.goal', 'threads.setHidden'
 ])
 
 class PlatformRequestError extends AppError {

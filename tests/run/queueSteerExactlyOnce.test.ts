@@ -748,6 +748,66 @@ describe('Steer on a queued message runs exactly that message, exactly once', ()
       expectEachOnce(w.adapter, ['first', 'S', 'A'])
     })
 
+    it('delivers an earlier composer Steer before a later queue Send now during setup', async () => {
+      const w = world(false)
+      const { first, runId, release } = await settingUp(w)
+      try {
+        const later = await fromWindow(w, { content: 'Later', clientRequestId: 'later' })
+        await fromWindow(w, { content: 'Earlier', clientRequestId: 'earlier', steer: true, steerRunId: runId })
+        expect(w.d.orch.promoteQueueItem(w.thread.id, later.queueItem!.id)).toEqual({ ok: true })
+        release()
+        await waitFor(() => w.adapter.steers.length > 0, 'both steers reached the provider')
+        expect(w.adapter.steers).toEqual(['Earlier' + NL + 'Later'])
+      } finally {
+        release()
+        w.adapter.release('first')
+        await first
+      }
+      await w.idle('both steers settled')
+      expectEachOnce(w.adapter, ['first', 'Earlier' + NL + 'Later'])
+    })
+
+    it('recovers a saved Steer held by a Stop committed before the journal marker', async () => {
+      const w = world(false)
+      await w.d.worker.stop()
+      const { runId } = await w.d.orch.send('first', false, {
+        threadId: w.thread.id, clientRequestId: 'first', awaitMode: 'ack'
+      })
+      const commands = w.d.store.getQueueJournal()!.commands
+      const mark = vi.spyOn(commands, 'markApplied').mockImplementationOnce(() => {
+        // The queue write finished. Commit Stop in the engine and cut power before either queue write can follow.
+        expect(w.d.store.loadMessageQueue(w.thread.id)).toEqual([expect.objectContaining({ content: 'S', steerOnStart: { runId } })])
+        expect(w.d.engine.stopSubtree({ threadId: w.thread.id, reason: 'user' }).status).toBe('stopped')
+        throw new Error('interrupted before journal marker')
+      })
+      try {
+        await expect(fromWindow(w, { content: 'S', clientRequestId: 'steer-s', steer: true, steerRunId: runId }))
+          .resolves.toMatchObject({ accepted: true })
+        expect(w.d.store.loadMessageQueue(w.thread.id)[0]?.heldAfterStop).toBeUndefined()
+        expect(commands.listUnfinished(w.thread.id)).toHaveLength(1)
+      } finally {
+        mark.mockRestore()
+      }
+
+      await w.d.crash()
+      const adapter = new SteeringAdapter()
+      const restarted = phase6Daemon(home!, [adapter], { orchestratorBoot: true })
+      daemon = restarted
+      restarted.orch.recoverQueueCommandsOnBoot()
+      await restarted.orch.recoverStartupQueues()
+      expect(restarted.orch.queueSnapshot(w.thread.id).items).toEqual([
+        expect.objectContaining({ content: 'S', heldAfterStop: true, steerMissed: true })
+      ])
+      expect(adapter.prompts).toEqual([])
+      expect(adapter.steers).toEqual([])
+
+      restarted.orch.setThreadModelOverride(w.thread.id, MODEL)
+      await restarted.orch.send('Continue', false, { threadId: w.thread.id, clientRequestId: 'continue' })
+      await waitFor(() => restarted.orch.queueSnapshot(w.thread.id).items.length === 0 &&
+        !restarted.orch.isActiveTurnRunning(w.thread.id), 'the held steer ran after Continue')
+      expect(adapter.prompts).toEqual(['Continue', 'S'])
+    })
+
     it('replays a delivered Steer after its queue row is consumed and the acknowledgement was lost', async () => {
       const w = world(false)
       const { first, runId, release } = await settingUp(w)
