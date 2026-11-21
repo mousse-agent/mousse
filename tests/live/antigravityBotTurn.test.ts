@@ -1,18 +1,20 @@
 /**
  * Live check of a bot's turn on the real `agy`: one Ask-mode turn whose permission and file requests are answered by a
- * bot authority (`AcpChatInput.botAuthority`), never a person. The authority allows calls inside the turn's folder and
- * refuses the rest; the test records what the real agent asked for, with which ACP kinds and paths, and checks that
+ * bot authority (`AcpChatInput.botAuthority`), never a person: the real one, granted files and commands in the turn's
+ * folder only; the test records what the real agent asked for, with which ACP kinds and paths, and checks that
  * the allowed file exists and the refused one does not, and that the agent still runs the step after the refusal
  * and replies. It reuses this computer's existing `agy` sign-in and never
  * signs in or out. Only with MOUSSE_LIVE_AGY=1; MOUSSE_LIVE_AGY_MODEL picks the model (default `gemini-4-hydrogen`).
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { AntigravityProviderService } from '../../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
 import { agyStandalonePaths, cliNames, findOnPath } from '../../src/mms/harness/env'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
+import { createBotAuthority } from '../../src/mms/bots/authority/botAuthority'
+import { RunCounters } from '../../src/mms/harness/budget'
 import type { BotAuthority, NormalisedCall } from '../../src/shared/bots/personal/authority'
 
 const live = process.env.MOUSSE_LIVE_AGY === '1'
@@ -33,15 +35,18 @@ describe.runIf(live && binary)('a bot turn on the real agy', () => {
     const asked = vi.spyOn(questions, 'requestAnswers')
     const service = new AntigravityProviderService(home, home, questions, undefined, { findUserAgy: () => binary })
     const checked: NormalisedCall[] = []
-    const bot: Pick<BotAuthority, 'check'> = {
-      check: (call) => {
-        checked.push(call)
-        const path = call.kind === 'builtin' ? call.args.path : undefined
-        return typeof path === 'string' && !resolve(path).toLowerCase().startsWith(resolve(cwd).toLowerCase())
-          ? { ok: false, refused: { text: 'That folder is outside what this bot may change.', askId: 'live-ask' } }
-          : { ok: true }
-      }
-    }
+    const scratch = mkdtempSync(join(tmpdir(), 'mousse-live-agy-bot-scratch-'))
+    dirs.push(scratch)
+    const base = createBotAuthority({
+      activationId: 'live-activation',
+      role: 'activation',
+      permissions: { tools: ['read', 'list', 'search', 'edit', 'write', 'shell'], appTools: [], mcp: [], skills: [], workspace: { roots: [cwd], access: 'write', scratch } },
+      waiting: () => false,
+      counters: new RunCounters(),
+      time: { deadline: () => Number.MAX_SAFE_INTEGER, signal: new AbortController().signal },
+      spend: null
+    })
+    const bot: Pick<BotAuthority, 'check'> = { check: (call) => { checked.push(call); return base.check(call) } }
     try {
       expect(await service.checkSignedIn(home)).toBe(true)
       const started = Date.now()

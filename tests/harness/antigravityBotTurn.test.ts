@@ -9,7 +9,7 @@
  * - one of a kind no permission names (`other`, as an MCP tool call): allowed unchecked;
  * - a client file write, allowed or not.
  */
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { methods, PROTOCOL_VERSION, type AgentApp } from '@agentclientprotocol/sdk'
@@ -157,7 +157,10 @@ describe('a bot on Antigravity', () => {
     const cwd = tempDir()
     const inside = join(cwd, 'notes.md')
     const outside = join(tmpdir(), 'elsewhere', 'secret.txt')
+    const existing = join(cwd, 'existing.md')
+    writeFileSync(existing, 'already here')
     const agent = agentSending([
+      { kind: 'edit', path: existing },
       { kind: 'read', path: inside },
       { kind: 'edit', path: outside },
       { kind: 'execute' },
@@ -167,11 +170,12 @@ describe('a bot on Antigravity', () => {
     ])
     const { bot, checked } = botAllowing(cwd)
     const { asked } = await botTurn(agent, bot, cwd)
-    expect(agent.outcomes).toEqual(['yes', 'no', 'yes', 'no', 'yes', 'yes'])
+    expect(agent.outcomes).toEqual(['yes', 'yes', 'no', 'yes', 'no', 'yes', 'yes'])
     expect(asked).not.toHaveBeenCalled()
     // The read and the command were checked as the bot's tools; both paths of the two-path edit were checked.
+    // A path that does not exist yet is a new file: a `write`.
     expect(checked.map((call) => call.kind === 'builtin' ? `${call.tool}:${String(call.args.path ?? '')}` : call.kind)).toEqual([
-      `read:${inside}`, `edit:${outside}`, 'shell:', `edit:${inside}`, `edit:${outside}`
+      `edit:${existing}`, `read:${inside}`, `write:${outside}`, 'shell:', `write:${inside}`, `write:${outside}`
     ])
   })
 

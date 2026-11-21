@@ -66,7 +66,8 @@ export function answerBotPermission(
   const paths = (request.toolCall.locations ?? []).map((location) => location.path).filter((path): path is string => typeof path === 'string' && path.length > 0)
   // Every path the call names must be allowed, each on its own.
   const calls: NormalisedCall[] = paths.length
-    ? paths.map((path) => ({ kind: 'builtin', tool, nativeName: kind ?? 'other', args: { ...described, path } }))
+    // Antigravity's `edit` also creates files: one that does not exist yet is a `write`, as a client file write is.
+    ? paths.map((path) => ({ kind: 'builtin', tool: kind === 'edit' && !existsSync(path) ? 'write' : tool, nativeName: kind ?? 'other', args: { ...described, path } }))
     : [{ kind: 'builtin', tool, nativeName: kind ?? 'other', args: described }]
   for (const call of calls) {
     const check = bot.check(call)
