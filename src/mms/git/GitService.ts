@@ -214,6 +214,9 @@ const IN_PROGRESS_KIND: Record<(typeof IN_PROGRESS_GIT_MARKERS)[number], GitInPr
 }
 const IN_PROGRESS_ORDER: readonly GitInProgress[] = ['rebase', 'merge', 'cherry-pick', 'revert']
 
+/** How long after it started a status read is still joined by a caller asking for the same folder. */
+const STATUS_SHARE_MS = 2_000
+
 /** The status of a folder that is not in a repository. */
 const NOT_A_REPOSITORY: GitStatusSnapshot = { isRepo: false, branch: null, upstream: null, tracking: 'none', ahead: 0, behind: 0, changes: [] }
 /** Characters of changed paths a numstat names one by one; past it, it diffs the whole tree (Windows caps a command line at 32K). */
@@ -564,8 +567,8 @@ export class GitService {
   private readonly mutations = new Map<string, Promise<void>>()
   /** Actions that can be followed and cancelled, by the id their client chose. */
   private readonly operations = new Map<string, { controller: AbortController; owner?: string; cancellable: boolean }>()
-  /** The status read running for each folder, which every caller asking meanwhile shares. */
-  private readonly statusReads = new Map<string, Promise<GitStatusSnapshot>>()
+  /** The status read running for each folder, which every caller asking within `STATUS_SHARE_MS` of its start shares. */
+  private readonly statusReads = new Map<string, { read: Promise<GitStatusSnapshot>; at: number }>()
 
   constructor(private readonly options: {
     /** Overrides how long a commit may stay silent; for tests. */
@@ -739,12 +742,14 @@ export class GitService {
    */
   getStatus(cwd: string): Promise<GitStatusSnapshot> {
     // Callers that ask while a read of the folder runs (the side card, the Git panel and the toolbar ask together) share it.
+    // A read that has run longer than STATUS_SHARE_MS (a drive that stopped answering) is not joined: Retry reads again.
     const key = resolve(cwd)
     const running = this.statusReads.get(key)
-    if (running) return running
-    const read = this.readStatus(cwd).finally(() => this.statusReads.delete(key))
-    this.statusReads.set(key, read)
-    return read
+    if (running && Date.now() - running.at < STATUS_SHARE_MS) return running.read
+    const entry = { read: this.readStatus(cwd), at: Date.now() }
+    entry.read = entry.read.finally(() => { if (this.statusReads.get(key) === entry) this.statusReads.delete(key) })
+    this.statusReads.set(key, entry)
+    return entry.read
   }
 
   /**

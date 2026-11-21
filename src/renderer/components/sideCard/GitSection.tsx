@@ -11,14 +11,15 @@ import {
 import { openSurface } from '../../lib/surfaces'
 import { useActiveThreadPullRequest } from '../../hooks/useActiveThreadPullRequest'
 import { useTransientError } from '../../hooks/useTransientError'
-import { abortGitInProgress, continueGitInProgress, initGitRepository, pullGit, pushGitBranch, type GitStatusView } from '../../stores/gitStatusStore'
+import { abortGitInProgress, continueGitInProgress, GIT_STATUS_SLOW_ERROR, initGitRepository, pullGit, pushGitBranch, type GitStatusView } from '../../stores/gitStatusStore'
 import { cancelGitOperation, useGitOperation } from '../../stores/gitOperationStore'
 import { useUpstreamCheck } from '../../stores/upstreamCheckStore'
 import { isActive } from '../git/gitOperationLogic'
 import { pullResultNotice } from '../git/gitSyncLogic'
 import type { PullRequestDetail, ThreadPullRequestLink } from '../../../shared/pullRequests'
 import { useRetiredWorktreeNote } from './useRetiredWorktreeNote'
-import { GIT_FOLDER_SLOW_MS, useStillPending } from './useStillPending'
+import { GIT_LOOKUP_BUDGET_MS, useStillPending } from './useStillPending'
+import { WORKTREE_NOT_ON_DISK } from '../../hooks/useActiveProjectPath'
 import { gitScopeFor } from '../../lib/activeProject'
 import type { GitInProgress, GitPullRequestLookup, GitPullStrategy, GitUpstreamCheck } from '../../../shared/types'
 import { useGitActionRunner } from '../git/useGitActionRunner'
@@ -41,6 +42,7 @@ import {
   GIT_BUSY_REASON,
   GIT_CHECKING_LABEL,
   gitActionLock,
+  gitCanRetry,
   gitCollapsedLabel,
   gitErrorMessage,
   isGitCancelled,
@@ -223,6 +225,8 @@ interface GitSectionViewProps {
   pullRequestLink?: ThreadPullRequestLink | null
   /** When set, the section shows only this muted line, and starts collapsed once the folder is known to have no repository (unless it offers Initialize Git). */
   collapsedLabel: string | null
+  /** Reads the folder and its status again; offered while what shows is a read that did not answer. */
+  onRetry?: () => void
   /** The folder is not a repository (or is gone), so the section offers Initialize Git, open from the start. */
   canInitialize?: boolean
   /** "Worktree removed by cleanup on …" while a cleanup rule's retirement of the thread's worktree stands. */
@@ -249,6 +253,7 @@ export function GitSectionView({
   pullRequestError = null,
   pullRequestLink = null,
   collapsedLabel,
+  onRetry,
   canInitialize = false,
   retiredNote = null,
   upstreamCheck = null,
@@ -279,9 +284,9 @@ export function GitSectionView({
     const initLock = gitActionLock(running, 'init')
     const label = collapsedLabel ?? 'No project folder'
     const settled = label !== GIT_CHECKING_LABEL
-    // A folder Git can be started in shows its button right away and opens like a repository's section; any other
-    // settled answer collapses the section and keeps its own remembered choice.
-    const quiet = settled && !(canInitialize && path)
+    // A folder Git can be started in, or a read that did not answer, shows its button right away and opens like a
+    // repository's section; any other settled answer collapses the section and keeps its own remembered choice.
+    const quiet = settled && !(canInitialize && path) && !onRetry
     return (
       <SideCardSection
         title="Git"
@@ -292,6 +297,11 @@ export function GitSectionView({
       >
         <p className="side-card-git-quiet side-card-git-collapsed">{label}</p>
         {retired}
+        {onRetry && (
+          <button type="button" className="side-card-git-init" onClick={onRetry}>
+            Retry
+          </button>
+        )}
         {canInitialize && path && (
           <button
             type="button"
@@ -478,18 +488,30 @@ export function GitSectionView({
 export function GitSection({ threadId }: SideCardSectionContext) {
   const { location, git, path, projectId, ownThreadId, link, lookup: pullRequest, detail, detailError } = useActiveThreadPullRequest(threadId)
   const { loading } = location
-  // A folder lookup that has not answered for a while (a drive asleep, a busy service) ends "Checking…"; the answer still shows.
-  const pathSlow = useStillPending(loading, threadId ?? '', GIT_FOLDER_SLOW_MS)
+  // The folder lookup and the first status read together have a budget (a drive asleep, a busy service): past it the
+  // section says so and offers Retry, and an answer that comes later still shows.
+  const [attempt, setAttempt] = useState(0)
+  // A first status read the store gave up on (`GIT_STATUS_SLOW_ERROR`) counts as not answering too.
+  const pathSlow = useStillPending(loading || (path !== null && !git.loaded), `${threadId ?? ''}:${attempt}`, GIT_LOOKUP_BUDGET_MS) || git.error === GIT_STATUS_SLOW_ERROR
   const collapse = {
     hasProject: projectId !== null,
     pathPending: loading,
     pathSlow,
+    ...(location.unavailable ? { unavailable: location.unavailable } : {}),
     hasPath: path !== null,
     loaded: git.loaded,
     status: git.status
   }
   const collapsedLabel = gitCollapsedLabel(collapse)
-  const retiredNote = useRetiredWorktreeNote(ownThreadId, !loading)
+  const retry = gitCanRetry(collapsedLabel)
+    ? () => {
+      setAttempt((count) => count + 1)
+      location.retry?.()
+      void git.refresh()
+    }
+    : undefined
+  // Only for a worktree that is not on disk: the note's read is not on the way to the status.
+  const retiredNote = useRetiredWorktreeNote(location.unavailable === WORKTREE_NOT_ON_DISK ? ownThreadId : null, !loading)
   const upstreamCheck = useUpstreamCheck(path, gitScopeFor({ projectId, workspaceThreadId: location.workspaceThreadId }), git.status?.tracking === 'tracked')
   return (
     <GitSectionView
@@ -504,6 +526,7 @@ export function GitSection({ threadId }: SideCardSectionContext) {
       pullRequestError={detailError}
       pullRequestLink={link}
       collapsedLabel={collapsedLabel}
+      onRetry={retry}
       canInitialize={canInitRepository(collapse)}
       retiredNote={retiredNote}
       upstreamCheck={upstreamCheck}

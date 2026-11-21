@@ -70,6 +70,27 @@ describe('the warm start file', () => {
     expect(next.lastActiveThread('prf_a')).toBe('t1')
   })
 
+  it('keeps the branches thread cards named for the next launch, without failed reads or folders', async () => {
+    const cache = new WarmStartCache(file, { fs, log })
+    showWindow(cache)
+    cache.noteHeads('prf_a', {
+      threads: {
+        t1: { own: true, branch: 'mousse/fix-build', folder: 'C:/wt/t1', generation: 2, lifecycle: 'ready' },
+        t2: { project: true },
+        t3: { error: 'The drive at E:\\ is not answering.' }
+      },
+      projects: { p1: { repo: true, branch: 'main' }, p2: { error: 'Project not found' } }
+    })
+    // A later read that fails keeps what was named before.
+    cache.noteHeads('prf_a', { threads: { t1: { error: 'not answering' } }, projects: {} })
+    await cache.flush()
+    const view = await new WarmStartCache(file, { fs, log }).view()
+    expect(view?.heads).toEqual({
+      threads: { t1: { own: true, branch: 'mousse/fix-build', generation: 2, lifecycle: 'ready' }, t2: { project: true } },
+      projects: { p1: { repo: true, branch: 'main' } }
+    })
+  })
+
   it('keeps the threads\' settled states and the projects\' icons, within their limits', async () => {
     const cache = new WarmStartCache(file, { fs, log })
     showWindow(cache)

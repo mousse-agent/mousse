@@ -235,7 +235,7 @@ export interface GuiIpcServices {
    */
   devDropTurnEnd?: boolean
   /** What each profile's window last showed, for the next launch to show before the service answers. */
-  warmStart?: Pick<WarmStartCache, 'observe' | 'noteProfile' | 'noteProjectIcon' | 'noteAppInfo' | 'view' | 'lastActiveThread' | 'forget'>
+  warmStart?: Pick<WarmStartCache, 'observe' | 'noteProfile' | 'noteProjectIcon' | 'noteAppInfo' | 'noteHeads' | 'view' | 'lastActiveThread' | 'forget'>
 }
 
 let activeGuiMms: GuiMmsController | null = null
@@ -3319,12 +3319,15 @@ export function registerGuiIpc(
     (await guiMms.request<{ status: GitStatusSnapshot }>('git.status', daemonGitParams(scope))).status
   )
   // The branches thread cards name, read from Git's files in the daemon (`git.heads`).
-  registerHandler('git:heads', async (_e, request?: GitHeadsRequest) =>
-    guiMms.request<GitHeadsResult>('git.heads', {
+  // What they named is kept for the next launch's cards (`WarmStartView.heads`).
+  registerHandler('git:heads', async (_e, request?: GitHeadsRequest) => {
+    const result = await guiMms.request<GitHeadsResult>('git.heads', {
       ...(Array.isArray(request?.threadIds) ? { threadIds: request.threadIds } : {}),
       ...(Array.isArray(request?.projectIds) ? { projectIds: request.projectIds } : {})
     })
-  )
+    warmStart?.noteHeads(guiMms.getWindowBinding()?.profileId, result)
+    return result
+  })
   registerHandler('git:log', async (_e, limit: number | undefined, scope?: GitScope) =>
     (await guiMms.request<{ commits: GitCommit[] }>('git.log', daemonGitParams(scope, { limit }))).commits
   )

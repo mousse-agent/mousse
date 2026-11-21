@@ -7,27 +7,30 @@ interface ResolvedWorkspace {
   path: string | null
   /** The thread whose ready worktree `path` is, when it is one. */
   workspaceThreadId: string | null
+  /** That worktree's generation. */
+  workspaceGeneration?: number
+  /** Why the thread's own worktree cannot be read now; `path` is then null. */
+  unavailable?: string
 }
 
-/** The folder of the thread's own ready worktree, read from Mousse's record and Git's files (no Git process); null when it has none on disk now. */
-async function ownWorktreeFolder(threadId: string): Promise<{ folder: string | null; own: boolean }> {
-  const head = (await window.mousse.git.heads({ threadIds: [threadId] })).threads[threadId]
-  if (!head || 'error' in head || 'project' in head) return { folder: null, own: false }
-  return { folder: head.folder ?? null, own: true }
-}
+/** Said when a storage rule retired the thread's worktree: it comes back when the thread runs or its files are opened. */
+export const WORKTREE_NOT_ON_DISK = 'Worktree not on disk'
 
+/**
+ * The folder the thread works in, from Mousse's record and Git's files (`git.heads`): no Git process, and nothing set up
+ * or brought back to answer it. A worktree still being made reads as its project's folder until it is ready.
+ */
 async function resolveWorkspaceProjectPath(threadId: string | null): Promise<ResolvedWorkspace> {
   if (!threadId) return { path: await window.mousse.app.getActiveProjectPath(threadId), workspaceThreadId: null }
   try {
-    let found = await ownWorktreeFolder(threadId)
-    // A worktree a storage rule retired comes back first (the Files panel's folder does), so the Git panel, the tree,
-    // the header and the terminal all start from the same folder. Only then: a worktree on disk is never waited on.
-    if (found.own && !found.folder) {
-      await window.mousse.app.getFilesRoot(threadId).catch(() => undefined)
-      found = await ownWorktreeFolder(threadId)
+    const head = (await window.mousse.git.heads({ threadIds: [threadId] })).threads[threadId]
+    if (head && 'own' in head) {
+      const generation = { workspaceGeneration: head.generation }
+      // A thread in its project's folder works there as the person does: the project's own Git rules, no Publish.
+      if (head.folder) return { path: head.folder, workspaceThreadId: threadId, ...generation }
+      if (head.unavailable) return { path: null, workspaceThreadId: threadId, ...generation, unavailable: head.unavailable }
+      if (head.lifecycle === 'ready') return { path: null, workspaceThreadId: threadId, ...generation, unavailable: WORKTREE_NOT_ON_DISK }
     }
-    // A thread in its project's folder works there as the person does: the project's own Git rules, no Publish.
-    if (found.folder) return { path: found.folder, workspaceThreadId: threadId }
   } catch {
     // Legacy/standalone threads keep the existing project-path behavior.
   }
@@ -35,15 +38,18 @@ async function resolveWorkspaceProjectPath(threadId: string | null): Promise<Res
 }
 
 /** Lookups still running, by profile and thread: the side card, the panels and the toolbar ask at the same moment. */
-const resolving = new Map<string, Promise<ResolvedWorkspace>>()
+const resolving = new Map<string, { lookup: Promise<ResolvedWorkspace>; at: number }>()
+/** A lookup older than this is not joined: one that hung (a drive, a busy service) never holds a later look. */
+const SHARE_MS = 2_000
 
-/** {@link resolveWorkspaceProjectPath}, with every caller that asks while one lookup runs sharing it. */
+/** {@link resolveWorkspaceProjectPath}, with every caller that asks while one recent lookup runs sharing it. */
 function resolveShared(scope: string, threadId: string | null): Promise<ResolvedWorkspace> {
   const running = resolving.get(scope)
-  if (running) return running
-  const lookup = resolveWorkspaceProjectPath(threadId).finally(() => resolving.delete(scope))
-  resolving.set(scope, lookup)
-  return lookup
+  if (running && Date.now() - running.at < SHARE_MS) return running.lookup
+  const entry = { lookup: resolveWorkspaceProjectPath(threadId), at: Date.now() }
+  entry.lookup = entry.lookup.finally(() => { if (resolving.get(scope) === entry) resolving.delete(scope) })
+  resolving.set(scope, entry)
+  return entry.lookup
 }
 
 /**
@@ -68,6 +74,8 @@ export function useActiveProjectLocation(): ActiveProject {
   ).projectId)
   const scope = `${profileId}:${activeThreadId ?? '__blank__'}`
   const [resolved, setResolved] = useState<({ scope: string } & ResolvedWorkspace) | null>(null)
+  // Retry (the Git section's) looks the folder up again.
+  const [attempt, setAttempt] = useState(0)
   const turnPhase = useAppStore((s) => (s.activeThreadId ? s.turnStates[s.activeThreadId]?.phase ?? null : null))
   // The warm start's thread is not looked up until the window knows its profile (showWarmView).
   const warmOnly = useAppStore((s) => !s.profileReady && s.warmView !== null)
@@ -75,7 +83,7 @@ export function useActiveProjectLocation(): ActiveProject {
   const recheck = folderRecheckKey({
     threadId: activeThreadId,
     threadProjectId,
-    resolvedWorkspaceThreadId: resolved?.scope === scope ? resolved.workspaceThreadId : null,
+    resolvedWorkspaceThreadId: resolved?.scope === scope && resolved.path ? resolved.workspaceThreadId : null,
     turnPhase
   })
 
@@ -86,17 +94,18 @@ export function useActiveProjectLocation(): ActiveProject {
       if (!cancelled) setResolved({ scope, ...workspace })
     }).catch(() => { if (!cancelled) setResolved({ scope, path: null, workspaceThreadId: null }) })
     return () => { cancelled = true }
-  }, [activeThreadId, profileId, scope, recheck, warmOnly])
+  }, [activeThreadId, profileId, scope, recheck, warmOnly, attempt])
 
-  return resolveActiveProject({
+  const location = resolveActiveProject({
     isNewChat,
     draftProjectId,
     threadProjectId,
     projects,
     resolved: resolved?.scope === scope
-      ? { path: resolved.path, loading: false, workspaceThreadId: resolved.workspaceThreadId }
+      ? { path: resolved.path, loading: false, workspaceThreadId: resolved.workspaceThreadId, workspaceGeneration: resolved.workspaceGeneration, unavailable: resolved.unavailable }
       : { path: null, loading: true, workspaceThreadId: null }
   })
+  return { ...location, retry: () => setAttempt((count) => count + 1) }
 }
 
 export function useActiveProjectPath(): string | null {

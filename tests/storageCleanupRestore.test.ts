@@ -67,7 +67,7 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
   }
   const marker = (threadId: string) => cleanupMarkerPath(mms.threads.lifecycleStore, threadId)
 
-  it('reports the retirement from workspace.getStatus without restoring, and git.status restores it', async () => {
+  it('reports the retirement from workspace.getStatus without restoring, and the Git panel status read leaves it retired', async () => {
     const { threadId, worktreePath } = await retiredThread()
     for (let call = 0; call < 2; call++) {
       const status = await gui.request<{ metadata: { lifecycle: string }; retiredByCleanup?: { at: string; rule: string } }>('workspace.getStatus', { threadId })
@@ -76,7 +76,11 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
       expect(existsSync(worktreePath)).toBe(false)
     }
     expect(existsSync(marker(threadId))).toBe(true)
-    await gui.request('git.status', { threadId })
+    // Viewing the thread's Git state never brings its worktree back: the folder reads as missing.
+    expect((await gui.request<{ status: { isRepo: boolean; missing?: boolean } }>('git.status', { threadId })).status).toMatchObject({ isRepo: false, missing: true })
+    expect(existsSync(worktreePath)).toBe(false); expect(existsSync(marker(threadId))).toBe(true)
+    // Opening its files does.
+    await gui.request('files.root', { threadId })
     expect(existsSync(worktreePath)).toBe(true)
     const after = await gui.request<{ metadata: { lifecycle: string }; retiredByCleanup?: unknown }>('workspace.getStatus', { threadId })
     expect(after.retiredByCleanup).toBeUndefined(); expect(after.metadata.lifecycle).toBe('ready'); expect(existsSync(marker(threadId))).toBe(false)
@@ -98,10 +102,6 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
     ['files.list', { path: '' }],
     ['files.read', { path: 'value.txt' }],
     ['files.stat', { path: 'value.txt' }],
-    ['git.diff', { path: 'value.txt' }],
-    ['git.log', {}],
-    ['git.branches', {}],
-    ['git.diffStats', {}],
     ['git.lastCommitMessage', {}],
     ['files.search', { query: 'value' }],
     ['files.grep', { query: 'base' }],
@@ -113,6 +113,18 @@ describe('a worktree retired by a storage rule comes back on demand', () => {
     const { threadId, worktreePath } = await retiredThread({ reuse: true })
     await gui.request(method, { threadId, ...extra })
     expect(existsSync(worktreePath)).toBe(true); expect(existsSync(marker(threadId))).toBe(false)
+  }, 120_000)
+
+  it.each([
+    ['git.status', {}],
+    ['git.diff', { path: 'value.txt' }],
+    ['git.log', {}],
+    ['git.branches', {}],
+    ['git.diffStats', {}]
+  ])('%s, a read of the Git panel, leaves the checkout retired', async (method, extra) => {
+    const { threadId, worktreePath } = await retiredThread({ reuse: true })
+    await gui.request(method, { threadId, ...extra }).catch(() => undefined)
+    expect(existsSync(worktreePath)).toBe(false); expect(existsSync(marker(threadId))).toBe(true)
   }, 120_000)
 
   it.each([

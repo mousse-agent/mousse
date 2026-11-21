@@ -24,6 +24,8 @@ import { useGitStatusStore } from '../stores/gitStatusStore'
  */
 interface BranchRead {
   branch: string | null
+  /** HEAD names a commit (this one, its short id; '' when not known) instead of a branch. Never a failed read. */
+  detachedAt?: string
   /** The folder is a Git repository (only on a project's read). */
   repo?: boolean
   /** The thread works in its own worktree (only on a thread's read). */
@@ -31,6 +33,8 @@ interface BranchRead {
   /** The thread has no worktree of its own (only on a thread's read). */
   project?: boolean
   readAt: number
+  /** Kept from the last launch (`seedBranchReads`): shown at once, and read again when its card first shows. */
+  seeded?: boolean
 }
 
 const useBranchReads = create<Record<string, BranchRead>>(() => ({}))
@@ -61,14 +65,37 @@ function request(keys: Iterable<string>) {
   if (flushing === undefined && pending.size) flushing = setTimeout(flush, 0)
 }
 
+// A failed read (`error`) answers nothing: the card keeps what it shows.
 function fromProject(head: GitFolderHead | undefined): Omit<BranchRead, 'readAt'> | undefined {
   if (!head || 'error' in head) return undefined
-  return { branch: head.repo ? head.branch : null, repo: head.repo }
+  return { branch: head.repo ? head.branch : null, repo: head.repo, ...(head.repo && head.detachedAt !== undefined ? { detachedAt: head.detachedAt } : {}) }
 }
 
 function fromThread(head: GitThreadHead | undefined): Omit<BranchRead, 'readAt'> | undefined {
   if (!head || 'error' in head) return undefined
-  return 'project' in head ? { branch: null, project: true } : { branch: head.branch, own: true }
+  return 'project' in head ? { branch: null, project: true } : { branch: head.branch, own: true, ...(head.detachedAt !== undefined ? { detachedAt: head.detachedAt } : {}) }
+}
+
+/**
+ * Shows what the cards named when the window last closed, before anything is read (`app.warmStartView`): a card that
+ * first shows names its branch at once, and the read that follows replaces it. Never replaces a read of this window.
+ */
+export function seedBranchReads(heads: { threads?: Record<string, GitThreadHead>; projects?: Record<string, GitFolderHead> } | undefined, threadProjects: Record<string, string>): void {
+  if (!heads) return
+  const current = useBranchReads.getState()
+  const seeds: Record<string, BranchRead> = {}
+  for (const [projectId, head] of Object.entries(heads.projects ?? {})) {
+    const read = fromProject(head)
+    const key = projectKey(projectId)
+    if (read && !current[key]) seeds[key] = { ...read, readAt: 0, seeded: true }
+  }
+  for (const [threadId, head] of Object.entries(heads.threads ?? {})) {
+    const read = fromThread(head)
+    const projectId = threadProjects[threadId]
+    const key = projectId ? threadKey(threadId, projectId) : null
+    if (read && key && !current[key]) seeds[key] = { ...read, readAt: 0, seeded: true }
+  }
+  if (Object.keys(seeds).length) useBranchReads.setState(seeds)
 }
 
 function flush() {
@@ -137,8 +164,9 @@ function attach() {
 function watch(key: string, target: Target): () => void {
   watched.set(key, { count: (watched.get(key)?.count ?? 0) + 1, target })
   attach()
-  // Read once; after that, only the moments above read it again.
-  if (!useBranchReads.getState()[key]) request([key])
+  // Read once (a card seeded from the last launch is read too); after that, only the moments above read it again.
+  const known = useBranchReads.getState()[key]
+  if (!known || known.seeded) request([key])
   return () => {
     const entry = watched.get(key)
     if (entry && entry.count > 1) watched.set(key, { ...entry, count: entry.count - 1 })
@@ -151,7 +179,7 @@ function watch(key: string, target: Target): () => void {
 }
 
 /** A project's folder (nothing to read when null): whether it is a Git repository and its branch; undefined until read. */
-function useProjectFolderBranch(projectId: string | null): { repo: boolean; branch: string | null } | undefined {
+function useProjectFolderBranch(projectId: string | null): { repo: boolean; branch: string | null; detachedAt?: string } | undefined {
   const key = projectId ? projectKey(projectId) : null
   const gitKey = projectId ? folderKey({ projectId, workspaceThreadId: null }) : null
   const own = useBranchReads((state) => (key ? state[key] : undefined))
@@ -161,14 +189,27 @@ function useProjectFolderBranch(projectId: string | null): { repo: boolean; bran
   useEffect(() => (key && projectId ? watch(key, { projectId }) : undefined), [key, projectId])
 
   if (!key) return undefined
-  if (sharedStatus && sharedAt >= (own?.readAt ?? 0)) return { repo: sharedStatus.isRepo, branch: sharedStatus.isRepo ? sharedStatus.branch : null }
-  return own ? { repo: Boolean(own.repo), branch: own.branch } : undefined
+  if (sharedStatus && sharedAt >= (own?.readAt ?? 0)) {
+    const detached = sharedStatus.isRepo && sharedStatus.tracking === 'detached'
+    return { repo: sharedStatus.isRepo, branch: sharedStatus.isRepo ? sharedStatus.branch : null, ...(detached ? { detachedAt: '' } : {}) }
+  }
+  return own ? { repo: Boolean(own.repo), branch: own.branch, ...(own.detachedAt !== undefined ? { detachedAt: own.detachedAt } : {}) } : undefined
 }
 
 export interface ThreadBranch {
+  /** The branch's name; for a detached HEAD, `detached` and the commit. */
   branch: string
   /** The branch is the thread's own worktree's, not its project folder's. */
   worktree: boolean
+  /** HEAD names a commit, not a branch. */
+  detached?: boolean
+}
+
+/** What a card names for a read: its branch, `detached <commit>` for a detached HEAD, else nothing. */
+function named(read: { branch: string | null; detachedAt?: string }, worktree: boolean): ThreadBranch | undefined {
+  if (read.branch) return { branch: read.branch, worktree }
+  if (read.detachedAt !== undefined) return { branch: read.detachedAt ? `detached ${read.detachedAt}` : 'detached', worktree, detached: true }
+  return undefined
 }
 
 /**
@@ -185,10 +226,10 @@ export function useThreadBranch(thread: Pick<Thread, 'projectId' | 'node' | 'wor
 
   useEffect(() => (key && projectId ? watch(key, { projectId, threadId }) : undefined), [key, projectId, threadId])
 
-  const projectBranch = folder?.repo && folder.branch ? { branch: folder.branch, worktree: false } : undefined
+  const projectBranch = folder?.repo ? named(folder, false) : undefined
   if (!key) return projectBranch
-  // Until the worktree is read, nothing: the project's branch could be the wrong one.
+  // Until the worktree is read (or seeded), nothing: the project's branch could be the wrong one.
   if (!own) return undefined
   if (own.project) return projectBranch
-  return own.branch ? { branch: own.branch, worktree: true } : undefined
+  return named(own, true)
 }

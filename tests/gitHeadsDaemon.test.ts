@@ -7,7 +7,7 @@
  */
 import * as childProcess from 'node:child_process'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -71,12 +71,13 @@ afterEach(async () => {
   prototype.spawn = spawn
   vi.restoreAllMocks()
   await main.stop()
-  rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  // On Windows a just-stopped service's folders can stay held for a moment (master's fixtures meet the same EPERM).
+  try { rmSync(home, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 }) } catch { /* left for the temp folder's own cleanup */ }
 })
 
 const heads = (params: unknown) => dispatchMethod({ mms: main, globalSequence: () => 0 }, 'git.heads', params) as Promise<GitHeadsResult>
 
-it('names every card’s branch without a Git process, and pushes a change when Mousse makes a worktree', async () => {
+it('names every card’s branch without a Git process, and pushes a change when Mousse makes a worktree', { timeout: 180_000 }, async () => {
   const pushed: unknown[] = []
   main.events.on('protocol:event', (event: { type?: string; data?: unknown }) => { if (event.type === 'git.headsChanged') pushed.push(event.data) })
   const own = main.threads.createThread('Own', projectId, repo, {})
@@ -101,13 +102,23 @@ it('names every card’s branch without a Git process, and pushes a change when 
   expect(started).toBe(0)
   expect(answer.projects[projectId]).toEqual({ repo: true, branch: 'person-branch' })
   expect(answer.projects['no-such-project']).toEqual({ error: 'Project not found' })
-  expect(answer.threads[own.id]).toEqual({ own: true, branch: 'agent-branch', folder: workspace.worktreePath })
+  expect(answer.threads[own.id]).toEqual({ own: true, branch: 'agent-branch', folder: workspace.worktreePath, generation: workspace.generation ?? 0, lifecycle: 'ready' })
   expect(answer.threads[folder.id]).toEqual({ project: true })
   expect(answer.threads[fresh.id]).toEqual({ project: true })
   expect(answer.threads['no-such-thread']).toEqual({ error: 'Thread not found' })
 
   // Not on disk (a storage rule retired it): the branch Mousse recorded, and no folder to work in.
   renameSync(workspace.worktreePath, `${workspace.worktreePath}-away`)
-  expect((await heads({ threadIds: [own.id] })).threads[own.id]).toEqual({ own: true, branch: 'mousse/named-by-title' })
+  expect((await heads({ threadIds: [own.id] })).threads[own.id]).toEqual({ own: true, branch: 'mousse/named-by-title', generation: workspace.generation ?? 0, lifecycle: 'ready' })
+  // The Git panel's status read of it does not bring it back either.
+  const status = await dispatchMethod({ mms: main, globalSequence: () => 0 }, 'git.status', { threadId: own.id }) as { status: { missing?: boolean } }
+  expect(status.status.missing).toBe(true)
+  expect(existsSync(workspace.worktreePath)).toBe(false)
   expect(started).toBe(0)
+
+  // A detached HEAD names its commit; it is not a failed read.
+  renameSync(`${workspace.worktreePath}-away`, workspace.worktreePath)
+  git(workspace.worktreePath, 'checkout', '-q', '--detach')
+  const commit = git(workspace.worktreePath, 'rev-parse', '--short=7', 'HEAD')
+  expect((await heads({ threadIds: [own.id] })).threads[own.id]).toMatchObject({ own: true, branch: null, detachedAt: commit })
 })

@@ -2220,17 +2220,23 @@ export interface GitStatusSnapshot {
   discardKeptForMs?: number
 }
 
-/** A folder's branch as a thread card names it (`git.heads`): read from Git's files, or why it could not be. */
-export type GitFolderHead = { repo: boolean; branch: string | null } | { error: string }
+/**
+ * A folder's branch as a thread card names it (`git.heads`): read from Git's files, or why it could not be (`error`).
+ * A detached HEAD has no branch and names its commit (`detachedAt`, '' when not known); a failed read is an `error`.
+ */
+export type GitFolderHead = { repo: boolean; branch: string | null; detachedAt?: string } | { error: string }
 
 /**
  * What a thread's card names (`git.heads`): its project's branch when it works in its project's folder or has no
- * worktree yet (`project`); else its own worktree's branch, null when detached. `folder` is the folder the thread works
- * in, set only while its worktree is on disk and ready; without it the branch is the one Mousse recorded.
+ * worktree yet (`project`); else its own worktree's branch, null when detached (`detachedAt`). `folder` is the folder
+ * the thread works in, set only while its worktree is on disk and ready; without it the branch is the one Mousse
+ * recorded, and `lifecycle` says why (`provisioning` while it is made; `ready` but not on disk once a storage rule
+ * retired it), or `unavailable` says its drive is not answering. `generation` counts the worktree's rebuilds: Git
+ * state read for an older one is not this one's.
  */
 export type GitThreadHead =
   | { project: true }
-  | { own: true; branch: string | null; folder?: string }
+  | { own: true; branch: string | null; detachedAt?: string; folder?: string; generation: number; lifecycle: string; unavailable?: string }
   | { error: string }
 
 export interface GitHeadsRequest {
@@ -2442,6 +2448,8 @@ export interface GitScope {
   projectId: string | null
   /** Set only when the folder is the thread's own ready worktree. */
   workspaceThreadId: string | null
+  /** That worktree's generation (`git.heads`): what was read of an older one is kept apart. Never sent to the service. */
+  workspaceGeneration?: number
 }
 
 /** The copy a Discard kept before it removed anything (`git.discard`'s `kept`). */

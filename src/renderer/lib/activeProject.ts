@@ -14,6 +14,10 @@ export interface ActiveProjectInput {
     loading: boolean
     /** Set when `path` is the thread's own ready worktree rather than the project folder. */
     workspaceThreadId?: string | null
+    /** That worktree's generation. */
+    workspaceGeneration?: number
+    /** Why the thread's own worktree cannot be read now (not on disk, its drive not answering); `path` is then null. */
+    unavailable?: string
   }
 }
 
@@ -27,6 +31,12 @@ export interface ActiveProject {
   loading: boolean
   /** The thread whose own worktree `path` is; null when `path` is the project folder. */
   workspaceThreadId: string | null
+  /** That worktree's generation: what is cached of it is cached under it (`folderKey`). */
+  workspaceGeneration?: number
+  /** Why the thread's own worktree cannot be read now; the Git section says so instead of reading anything. */
+  unavailable?: string
+  /** Looks the folder up again (Retry). */
+  retry?: () => void
 }
 
 /**
@@ -41,12 +51,16 @@ export function resolveActiveProject(input: ActiveProjectInput): ActiveProject {
   }
   const projectId = input.isNewChat ? null : input.threadProjectId
   const workspaceThreadId = input.isNewChat ? null : input.resolved.workspaceThreadId ?? null
+  const workspaceGeneration = workspaceThreadId ? input.resolved.workspaceGeneration : undefined
+  const unavailable = input.isNewChat ? undefined : input.resolved.unavailable
   return {
     projectId,
     path: input.resolved.path,
-    key: input.resolved.path ? folderKey({ projectId, workspaceThreadId }) : null,
+    key: input.resolved.path ? folderKey({ projectId, workspaceThreadId, ...(workspaceGeneration !== undefined ? { workspaceGeneration } : {}) }) : null,
     loading: input.resolved.loading,
-    workspaceThreadId
+    workspaceThreadId,
+    ...(workspaceGeneration !== undefined ? { workspaceGeneration } : {}),
+    ...(unavailable ? { unavailable } : {})
   }
 }
 
@@ -73,12 +87,14 @@ export function folderRecheckKey(input: {
  * path is not parsed or compared on this computer. Null when the scope names no folder.
  */
 export function folderKey(scope: GitScope): string | null {
-  if (scope.workspaceThreadId) return `thread:${scope.workspaceThreadId}`
+  // A rebuilt worktree is another folder: nothing read of the one before it shows for it.
+  if (scope.workspaceThreadId) return `thread:${scope.workspaceThreadId}${scope.workspaceGeneration ? `@${scope.workspaceGeneration}` : ''}`
   if (scope.projectId) return `project:${scope.projectId}`
   return null
 }
 
 /** What a Git mutation sends the daemon: the thread when the folder is its own worktree, the project otherwise. */
-export function gitScopeFor(location: Pick<ActiveProject, 'projectId' | 'workspaceThreadId'>): GitScope {
-  return { projectId: location.projectId, workspaceThreadId: location.workspaceThreadId ?? null }
+export function gitScopeFor(location: Pick<ActiveProject, 'projectId' | 'workspaceThreadId'> & { workspaceGeneration?: number }): GitScope {
+  const generation = location.workspaceThreadId ? location.workspaceGeneration : undefined
+  return { projectId: location.projectId, workspaceThreadId: location.workspaceThreadId ?? null, ...(generation !== undefined ? { workspaceGeneration: generation } : {}) }
 }

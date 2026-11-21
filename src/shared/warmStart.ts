@@ -1,6 +1,6 @@
 import type { ProfilePublicDto } from './profiles/types'
 import type { ProjectIconImage } from './projectIcon'
-import type { ChatMessage, Project, Thread, ThreadActivitySnapshot } from './types'
+import type { ChatMessage, GitFolderHead, GitThreadHead, Project, Thread, ThreadActivitySnapshot } from './types'
 
 /**
  * What a window showed last time, kept by the main process so the next launch can show it before the background
@@ -24,6 +24,14 @@ export interface WarmStartView {
   projectIcons?: Record<string, ProjectIconImage | null>
   /** What the window knew of this computer and the profile's default provider (the rows' provider marks). */
   appInfo?: WarmStartAppInfo
+  /** The branches the thread cards named (`git.heads`), so a card names its branch before the service answers. */
+  heads?: WarmStartHeads
+}
+
+/** The last `git.heads` answers by thread and project, without folders or failed reads. */
+export interface WarmStartHeads {
+  threads: Record<string, GitThreadHead>
+  projects: Record<string, GitFolderHead>
 }
 
 export interface WarmStartAppInfo {

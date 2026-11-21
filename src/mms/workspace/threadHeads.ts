@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { join, parse, resolve } from 'node:path'
 import type { GitFolderHead, GitThreadHead } from '../../shared/types'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { folderBranch, readFolderHead } from '../git/gitHead'
@@ -29,14 +29,77 @@ export function noteThreadBranchChanged(threadId: string): void {
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
+/** A folder's reads that have not answered by then answer that the drive is not answering; they finish in the background. */
+export const HEAD_ANSWER_MS = 2_000
+/** Reads running at once on one drive: a drive that hangs holds at most this many of Node's few file threads. */
+const PER_DRIVE = 2
+/** After a read on a drive did not answer, its other folders answer at once that it is not answering, for this long. */
+const STALLED_FOR_MS = 10_000
+
+interface Drive { running: number; queue: Array<() => void>; stalledUntil: number }
+const drives = new Map<string, Drive>()
+const driveOf = (path: string): string => {
+  const root = parse(resolve(path)).root
+  return process.platform === 'win32' ? root.toLowerCase() : root
+}
+const notAnswering = (path: string): string => `The drive at ${parse(resolve(path)).root} is not answering.`
+
+/**
+ * Runs `work`, which reads files on `path`'s drive, at most {@link PER_DRIVE} at a time per drive, and answers
+ * `stalled` when it has not finished within {@link HEAD_ANSWER_MS} or the drive did not answer a moment ago.
+ */
+async function onDrive<T>(path: string, work: () => Promise<T>, stalled: (reason: string) => T): Promise<T> {
+  const key = driveOf(path)
+  let drive = drives.get(key)
+  if (!drive) drives.set(key, drive = { running: 0, queue: [], stalledUntil: 0 })
+  const d = drive
+  // A drive that did not answer a moment ago is not asked again yet, nor waited for.
+  if (Date.now() < d.stalledUntil) return stalled(notAnswering(path))
+  const release = () => {
+    d.running--
+    d.queue.shift()?.()
+  }
+  let gaveUp = false
+  // A slot on the drive; one handed to a caller that already gave up is handed on at once.
+  const turn = new Promise<void>((done) => {
+    const go = () => {
+      d.running++
+      if (gaveUp) release()
+      else done()
+    }
+    if (d.running < PER_DRIVE) go()
+    else d.queue.push(go)
+  })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<'late'>((done) => { timer = setTimeout(() => done('late'), HEAD_ANSWER_MS) })
+  try {
+    if (await Promise.race([turn.then(() => 'turn' as const), late]) === 'late') {
+      gaveUp = true
+      return stalled(notAnswering(path))
+    }
+    if (Date.now() < d.stalledUntil) {
+      release()
+      return stalled(notAnswering(path))
+    }
+    const answer = await Promise.race([work().finally(release), late])
+    if (answer !== 'late') return answer
+    d.stalledUntil = Date.now() + STALLED_FOR_MS
+    return stalled(notAnswering(path))
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /** A folder's branch from Git's files; a folder whose drive does not answer, or that cannot be read, says why. */
 export async function folderHead(path: string): Promise<GitFolderHead> {
-  try {
-    await waitForFolderAccess([resolve(path)], { whenNotAnswering: 'fail' })
-    return await folderBranch(path)
-  } catch (error) {
-    return { error: errorText(error) }
-  }
+  return onDrive(path, async () => {
+    try {
+      await waitForFolderAccess([resolve(path)], { whenNotAnswering: 'fail' })
+      return await folderBranch(path)
+    } catch (error) {
+      return { error: errorText(error) }
+    }
+  }, (reason) => ({ error: reason }))
 }
 
 /** The thread's workspace record, read without blocking; undefined when it has none or it cannot be read. */
@@ -60,21 +123,34 @@ const sameFolder = (a: string, b: string): boolean =>
 
 /**
  * What a thread's card names: its project's branch (`project`) when it works in its project's folder or has no worktree
- * yet; else its worktree's branch, with the folder it works in when the worktree is on disk and ready.
+ * yet; else its worktree's branch, with the folder it works in when the worktree is on disk and ready. Reads files
+ * only: it never sets a worktree up or brings one back.
  */
 export async function threadHead(threadDirectory: string): Promise<GitThreadHead> {
   const record = await readRecord(threadDirectory)
   if (!record || record.kind === 'project-folder') return { project: true }
-  const recorded: GitThreadHead = { own: true, branch: record.branch || null }
+  const recorded = { own: true as const, branch: record.branch || null, generation: record.generation ?? 0, lifecycle: record.lifecycle }
   if (record.lifecycle !== 'ready') return recorded
-  try {
-    await waitForFolderAccess([resolve(record.worktreePath)], { whenNotAnswering: 'fail' })
-    const head = await readFolderHead(record.worktreePath)
-    // Not on disk (retired, or its `.git` gone, so a folder above answers): the branch Mousse made for it.
-    if (!head?.repo || !sameFolder(head.top, record.worktreePath)) return recorded
-    const sub = record.projectRelativeSubdirectory
-    return { own: true, branch: head.branch, folder: !sub || sub === '.' ? record.worktreePath : join(record.worktreePath, sub) }
-  } catch {
-    return recorded
-  }
+  // A drive that does not answer: the branch Mousse recorded, and no folder to work in for now.
+  return onDrive(record.worktreePath, async (): Promise<GitThreadHead> => {
+    try {
+      try {
+        await waitForFolderAccess([resolve(record.worktreePath)], { whenNotAnswering: 'fail' })
+      } catch (error) {
+        return { ...recorded, unavailable: errorText(error) }
+      }
+      const head = await readFolderHead(record.worktreePath)
+      // Not on disk (retired, or its `.git` gone, so a folder above answers): the branch Mousse made for it.
+      if (!head?.repo || !sameFolder(head.top, record.worktreePath)) return recorded
+      const sub = record.projectRelativeSubdirectory
+      return {
+        ...recorded,
+        branch: head.branch,
+        ...(head.commit ? { detachedAt: head.commit.slice(0, 7) } : {}),
+        folder: !sub || sub === '.' ? record.worktreePath : join(record.worktreePath, sub)
+      }
+    } catch {
+      return recorded
+    }
+  }, (reason) => ({ ...recorded, unavailable: reason }))
 }

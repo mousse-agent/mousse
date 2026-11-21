@@ -130,3 +130,28 @@ it('a thread in its project’s folder names the project’s branch', async () =
   await settle()
   expect(shown()).toEqual(['main', 'main', 'develop'])
 })
+
+it('a detached HEAD names its commit, and a read that fails for one card keeps what that card named', async () => {
+  showCards()
+  await settle()
+  answer = async (request) => {
+    const result = await fromBranches(request)
+    result.threads.t1 = { own: true, branch: null, detachedAt: 'abc1234', generation: 0, lifecycle: 'ready' }
+    result.threads.t2 = { error: 'The drive at E:\ is not answering.' }
+    return result
+  }
+  await act(async () => { window.dispatchEvent(new Event('focus')) })
+  await settle()
+  expect(shown()).toEqual(['detached abc1234', 'mousse/docs', 'develop'])
+})
+
+it('a card that first shows names what it named at the last launch, then what is read now', async () => {
+  hook.seedBranchReads({ threads: { t1: { own: true, branch: 'mousse/last-time', generation: 0, lifecycle: 'ready' } }, projects: { p2: { repo: true, branch: 'develop' } } }, { t1: 'p1', t2: 'p1' })
+  showCards()
+  // Before any read has answered.
+  expect(shown()[0]).toBe('mousse/last-time')
+  expect(shown()[2]).toBe('develop')
+  await settle()
+  expect(sorted(calls[0]!)).toEqual({ threadIds: ['t1', 't2'], projectIds: ['p1', 'p2'] })
+  expect(shown()).toEqual(['mousse/fix-build', 'mousse/docs', 'develop'])
+})

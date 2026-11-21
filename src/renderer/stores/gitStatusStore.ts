@@ -40,7 +40,7 @@ export const GIT_LOG_LIMIT = 40
 /** A fetch younger than this satisfies an ordinary (not forced) request. */
 export const GIT_STATUS_MAX_AGE_MS = 1500
 /** A folder's first status read that has not answered by then shows {@link GIT_STATUS_SLOW_ERROR} instead of "Checking…". */
-export const GIT_STATUS_SLOW_MS = 15_000
+export const GIT_STATUS_SLOW_MS = 2_500
 export const GIT_STATUS_SLOW_ERROR = 'Git has not answered yet'
 
 export interface GitStatusEntry {
@@ -85,9 +85,12 @@ export interface GitRefreshOptions {
 interface Flight {
   promise: Promise<void>
   rerun: boolean
+  startedAt: number
 }
 
 const flights = new Map<string, Flight>()
+/** A read running longer than this is not waited for by a forced read (Retry): a new one starts, and the old one's late answer is dropped. */
+export const GIT_STALE_FLIGHT_MS = 2_000
 
 function patchEntry(key: string, patch: Partial<GitStatusEntry>) {
   useGitStatusStore.setState((state) => ({
@@ -109,25 +112,27 @@ type GitDetail = 'commits' | 'branches' | 'diffStats'
  * reads' Git processes to show it. The other three are read once the status says the folder is a repository; until
  * they answer the previous fetch's values stay.
  */
-async function fetchInto(key: string, scope: GitScope): Promise<void> {
+async function fetchInto(key: string, scope: GitScope, current: () => boolean = () => true): Promise<void> {
   const git = window.mousse.git
+  // A read a newer one replaced (Retry past a read that hung) changes nothing shown.
+  const patch = (value: Partial<GitStatusEntry>) => { if (current()) patchEntry(key, value) }
   let status: GitStatusSnapshot
   // A first read still unanswered after a while ends "Checking…" with an error; its answer still lands when it comes.
   const slow = setTimeout(() => {
     if (useGitStatusStore.getState().entries[key]?.loaded) return
-    patchEntry(key, { loaded: true, loading: false, error: GIT_STATUS_SLOW_ERROR })
+    patch({ loaded: true, loading: false, error: GIT_STATUS_SLOW_ERROR })
   }, GIT_STATUS_SLOW_MS)
   try {
     status = await git.status(scope)
   } catch (error) {
-    patchEntry(key, { loaded: true, error: errorText(error), fetchedAt: Date.now() })
+    patch({ loaded: true, error: errorText(error), fetchedAt: Date.now() })
     return
   } finally {
     clearTimeout(slow)
   }
   const previous = useGitStatusStore.getState().entries[key] ?? EMPTY_GIT_ENTRY
   if (!status.isRepo) {
-    patchEntry(key, {
+    patch({
       status: keepIfEqual(previous.status, status),
       commits: previous.commits.length ? [] : previous.commits,
       branches: null,
@@ -138,7 +143,7 @@ async function fetchInto(key: string, scope: GitScope): Promise<void> {
     })
     return
   }
-  patchEntry(key, { status: keepIfEqual(previous.status, status), loading: false, loaded: true, error: null, fetchedAt: Date.now() })
+  patch({ status: keepIfEqual(previous.status, status), loading: false, loaded: true, error: null, fetchedAt: Date.now() })
   const details: Array<[GitDetail, Promise<GitStatusEntry[GitDetail]>]> = [
     ['commits', git.log(GIT_LOG_LIMIT, scope)],
     ['branches', git.branches(scope)],
@@ -147,7 +152,7 @@ async function fetchInto(key: string, scope: GitScope): Promise<void> {
   // Each one as it arrives; a failed read keeps what the folder showed before.
   await Promise.all(details.map(([field, read]) => read.then((value) => {
     const current = useGitStatusStore.getState().entries[key] ?? EMPTY_GIT_ENTRY
-    patchEntry(key, { [field]: keepIfEqual(current[field], value) } as Partial<GitStatusEntry>)
+    patch({ [field]: keepIfEqual(current[field], value) } as Partial<GitStatusEntry>)
   }, () => undefined)))
 }
 
@@ -158,7 +163,8 @@ async function fetchInto(key: string, scope: GitScope): Promise<void> {
  */
 export function refreshGitStatus(key: string, options: GitRefreshOptions): Promise<void> {
   const flight = flights.get(key)
-  if (flight) {
+  // Retry past a read that hung does not wait for it.
+  if (flight && !(options.force && Date.now() - flight.startedAt >= GIT_STALE_FLIGHT_MS)) {
     if (options.force) flight.rerun = true
     return flight.promise
   }
@@ -168,7 +174,7 @@ export function refreshGitStatus(key: string, options: GitRefreshOptions): Promi
     return Promise.resolve()
   }
 
-  const next: Flight = { promise: Promise.resolve(), rerun: false }
+  const next: Flight = { promise: Promise.resolve(), rerun: false, startedAt: Date.now() }
   flights.set(key, next)
   // Only a folder with nothing loaded yet shows a spinner; a refresh keeps the cached data on screen.
   patchEntry(key, { loading: !entry?.loaded })
@@ -176,11 +182,13 @@ export function refreshGitStatus(key: string, options: GitRefreshOptions): Promi
     try {
       do {
         next.rerun = false
-        await fetchInto(key, options.scope)
-      } while (next.rerun)
+        await fetchInto(key, options.scope, () => flights.get(key) === next)
+      } while (next.rerun && flights.get(key) === next)
     } finally {
-      flights.delete(key)
-      patchEntry(key, { loading: false })
+      if (flights.get(key) === next) {
+        flights.delete(key)
+        patchEntry(key, { loading: false })
+      }
     }
   })()
   return next.promise

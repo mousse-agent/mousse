@@ -4800,9 +4800,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ])
       return { projects, threads } satisfies GitHeadsResult
     }
+    // The Git panel's reads never set a worktree up or bring a retired one back: a folder not on disk reads as missing.
     case 'git.status': {
       const p = isObject(params) ? params : {}
-      await materializeRequestedWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
       const status = await ctx.mms.gitService.getStatus(root)
       // How long a Discard here keeps its copy, for the confirmation to say: the owner's Undo window.
@@ -4811,24 +4811,20 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     }
     case 'git.diff': {
       const p = isObject(params) ? params : {}
-      await materializeRequestedWorkspace(ctx, p)
       const root = projectRootContext(ctx, p)
       return { diff: await ctx.mms.gitService.getDiff(root, requiredContainedPath(ctx, root, p.path, 'inspect'), asOptionalBoolean(p.staged, 'staged') === true) }
     }
     case 'git.log': {
       const p = isObject(params) ? params : {}
       const limit = asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 100 }) ?? 30
-      await materializeRequestedWorkspace(ctx, p)
       return { commits: await ctx.mms.gitService.getLog(projectRootContext(ctx, p), limit) }
     }
     case 'git.branches': {
       const p = isObject(params) ? params : {}
-      await materializeRequestedWorkspace(ctx, p)
       return { branches: await ctx.mms.gitService.getBranches(projectRootContext(ctx, p)) }
     }
     case 'git.diffStats': {
       const p = isObject(params) ? params : {}
-      await materializeRequestedWorkspace(ctx, p)
       return { stats: await ctx.mms.gitService.getDiffStats(projectRootContext(ctx, p)) }
     }
     case 'git.checkUpstream': {

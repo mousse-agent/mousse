@@ -28,6 +28,8 @@ export type FolderHead =
       commonDir: string
       /** The branch HEAD is on, or null when HEAD names a commit (detached). */
       branch: string | null
+      /** The commit a detached HEAD names. */
+      commit?: string
     }
 
 /** What a cached read depends on: each file's identity and size, and when it last changed. */
@@ -85,7 +87,7 @@ export function branchOfHeadFile(text: string): string | null | undefined {
 }
 
 /** The last read of each folder, kept while the `.git` and `HEAD` it read have not changed. */
-const cache = new Map<string, { layout: Layout; dotGit: string; head: string; branch: string | null }>()
+const cache = new Map<string, { layout: Layout; dotGit: string; head: string; branch: string | null; commit?: string }>()
 /** At most this many folders are remembered; the oldest is dropped first. */
 const CACHE_MAX = 2_000
 
@@ -105,18 +107,20 @@ export async function readFolderHead(folder: string): Promise<FolderHead | undef
   const [dotGit, head] = await Promise.all([signature(join(layout.top, '.git')), signature(headPath)])
   const known = cache.get(key)
   if (known && known.dotGit === dotGit && known.head === head && known.layout.gitDir === layout.gitDir) {
-    return { repo: true, ...layout, branch: known.branch }
+    return { repo: true, ...layout, branch: known.branch, ...(known.commit ? { commit: known.commit } : {}) }
   }
   if (head === '-') return undefined
   headFileReads++
-  const branch = branchOfHeadFile(await readFile(headPath, 'utf8'))
+  const text = await readFile(headPath, 'utf8')
+  const branch = branchOfHeadFile(text)
   if (branch === undefined) return undefined
+  const commit = branch === null ? text.trim() : undefined
   // Read again after: a `HEAD` rewritten while it was read is not kept under the older signature.
   if (await signature(headPath) !== head) return readFolderHead(folder)
   cache.delete(key)
-  cache.set(key, { layout, dotGit, head, branch })
+  cache.set(key, { layout, dotGit, head, branch, ...(commit ? { commit } : {}) })
   if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value!)
-  return { repo: true, ...layout, branch }
+  return { repo: true, ...layout, branch, ...(commit ? { commit } : {}) }
 }
 
 /** For tests: forget every folder read. */
@@ -129,15 +133,15 @@ export function clearFolderHeadCache(): void {
  * Whether `folder` is in a repository and the branch it is on: from Git's files, or for a layout they cannot tell, from
  * one `git symbolic-ref`. A folder Git says is not in a repository answers `repo: false`; any other failure throws.
  */
-export async function folderBranch(folder: string): Promise<{ repo: boolean; branch: string | null }> {
+export async function folderBranch(folder: string): Promise<{ repo: boolean; branch: string | null; detachedAt?: string }> {
   const head = await readFolderHead(folder)
-  if (head) return head.repo ? { repo: true, branch: head.branch } : { repo: false, branch: null }
+  if (head) return !head.repo ? { repo: false, branch: null } : head.commit ? { repo: true, branch: null, detachedAt: head.commit.slice(0, 7) } : { repo: true, branch: head.branch }
   const argv = await withoutRepoProgramsAsync(folder, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
   const ran = await runGitProcess(argv, { cwd: folder, env: repoProgramEnv() })
   if (ran.error) throw ran.error
   if (ran.status === 0) return { repo: true, branch: ran.stdout.trim() || null }
-  // Status 1: HEAD names a commit.
-  if (ran.status === 1) return { repo: true, branch: null }
+  // Status 1: HEAD names a commit; which one is not asked (a second process).
+  if (ran.status === 1) return { repo: true, branch: null, detachedAt: '' }
   if (/not a git repository/i.test(ran.stderr)) return { repo: false, branch: null }
   throw new Error(ran.stderr.trim() || `git symbolic-ref failed with exit code ${ran.status}`)
 }
