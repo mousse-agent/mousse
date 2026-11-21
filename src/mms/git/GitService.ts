@@ -34,7 +34,7 @@ import { checkRepoPrograms, guardedSimpleGit, NO_DIFF_PROGRAMS, repoProgramEnv, 
 import { parseRawDiff, readWorkingTreeStatus, unchangedWorktreePaths, type StatusEntry } from './workingTreeStatus'
 import { waitForFolderAccess } from '../files/folderAccess'
 import { GitPolicyError, withUserRequest, type UserAction } from './gitPolicy'
-import { spawnGit } from './gitSpawn'
+import { cancelQueuedGit, gitChildSpawned, spawnGit } from './gitSpawn'
 import type {
   GitBranchInfo,
   GitBranchOptions,
@@ -469,8 +469,11 @@ async function readBoundedGit(cwd: string, args: readonly string[], maxBytes: nu
       resolvePromise(ok || truncated ? Buffer.concat(chunks).subarray(0, maxBytes).toString('utf8') : '')
     }
     const timer = setTimeout(() => {
-      if (process.platform === 'win32' && child.pid) spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => undefined)
-      else child.kill()
+      if (!cancelQueuedGit(child)) void gitChildSpawned(child).then(() => {
+        if (!child.pid || child.exitCode !== null || child.signalCode !== null) return
+        if (process.platform === 'win32') spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => child.kill())
+        else child.kill()
+      })
       // Close ends the read; the backstop only covers a process that never closes its pipes.
       backstop = setTimeout(() => finish(false), SUMMARY_KILL_SETTLE_MS)
     }, SUMMARY_READ_MS)

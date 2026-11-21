@@ -41,6 +41,7 @@ function repo(): string {
 
 /** A Git command that runs for 30 seconds through a program Git starts (an alias), as a stuck command would. */
 const SLOW = ['-c', 'alias.slow=!sleep 30', 'slow']
+const SIGNAL_READY = ['-c', 'alias.slow=!: > git-ready; sleep 30', 'slow']
 
 describe('gitCancellationScope', () => {
   it('starts no Git once the work was stopped', async () => {
@@ -128,8 +129,10 @@ describe('gitCancellationScope', () => {
     let lingering = true
     gitStopProbe.alive = () => lingering
     const controller = new AbortController()
-    // Stopped once the slow command is on its way: a fixed delay from here could stop the work before Git starts.
-    const ran = await withGitMutationLocks(threadDirectory, cwd, 'test', () => runGitProcess(SLOW, { cwd, env: process.env, beforeStart: () => { setTimeout(() => controller.abort(), 300) } }), undefined, undefined, controller.signal)
+    const running = withGitMutationLocks(threadDirectory, cwd, 'test', () => runGitProcess(SIGNAL_READY, { cwd, env: process.env }), undefined, undefined, controller.signal)
+    await vi.waitFor(() => expect(existsSync(join(cwd, 'git-ready'))).toBe(true), { timeout: 10_000 })
+    controller.abort()
+    const ran = await running
     // The operation ended, so a stopped turn ends; the repository stays locked.
     expect(ran.error?.code).toBe('ABORT_ERR')
     await expect(acquireRepositoryLease(identity, { retryDelayMs: 5, maxWaitMs: 300 })).rejects.toBeInstanceOf(RepositoryLeaseBusyError)
@@ -147,8 +150,10 @@ describe('gitCancellationScope', () => {
     gitStopProbe.alive = () => lingering
     const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const controller = new AbortController()
-    // Stopped once the slow command is on its way: a fixed delay from here could stop the work before Git starts.
-    const ran = await withGitMutationLocks(threadDirectory, cwd, 'test', () => runGitProcess(SLOW, { cwd, env: process.env, beforeStart: () => { setTimeout(() => controller.abort(), 300) } }), undefined, undefined, controller.signal)
+    const running = withGitMutationLocks(threadDirectory, cwd, 'test', () => runGitProcess(SIGNAL_READY, { cwd, env: process.env }), undefined, undefined, controller.signal)
+    await vi.waitFor(() => expect(existsSync(join(cwd, 'git-ready'))).toBe(true), { timeout: 10_000 })
+    controller.abort()
+    const ran = await running
     expect(ran.error?.code).toBe('ABORT_ERR')
     // The watch starts once the stop's look at the process list is done, which can take a while on a busy machine.
     await vi.waitFor(() => expect(logged).toHaveBeenCalledWith(expect.stringContaining('until it ends or Mousse restarts'), expect.anything()), { timeout: 10_000 })

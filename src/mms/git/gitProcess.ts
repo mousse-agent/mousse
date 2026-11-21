@@ -1,6 +1,7 @@
-import { spawn } from 'node:child_process'
-import { gitChildSpawned, spawnGit } from './gitSpawn'
 import { StringDecoder } from 'node:string_decoder'
+import { setTimeout as delay } from 'node:timers/promises'
+import { cancelQueuedGit, gitChildSpawned, gitChildStartedAt, spawnGit } from './gitSpawn'
+import { StoppedGitTree } from './stoppedGitTree'
 import { mousseGitEnv } from './gitEnv'
 import { timeGitChild } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile } from './gitExecutable'
@@ -152,8 +153,8 @@ class LineSplitter {
  * before the result is returned. The result settles only after the process has closed, so Git
  * no longer holds the repository when the caller restores state and releases its lease.
  *
- * The process tree ends with the process group on POSIX (the child leads its own) and with
- * `taskkill /T` on Windows, where a hook's shell and its children are not in the same group.
+ * The process tree ends with the process group on POSIX. On Windows it is stopped and checked by
+ * `StoppedGitTree` before the caller can release the repository.
  */
 export function runGit(cwd: string, args: readonly string[], options: GitRunOptions = {}): Promise<GitRun> {
   return new Promise((resolvePromise, reject) => {
@@ -161,12 +162,13 @@ export function runGit(cwd: string, args: readonly string[], options: GitRunOpti
       resolvePromise({ ok: false, code: null, stalled: false, cancelled: true, exited: true, stdout: '', truncated: false, output: '' })
       return
     }
-    options.beforeStart?.()
+    const spawnRequestedAt = Date.now()
     const child = timeGitChild(() => spawnGit(gitFile(), args, {
       cwd,
       env: gitEnvFor(mousseGitEnv({ ...process.env, ...englishMessagesEnv(), ...options.env })),
       stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       windowsHide: true,
+      beforeStart: options.beforeStart,
       // Leads its own process group on POSIX, so a stop reaches hooks and helpers too.
       detached: process.platform !== 'win32'
     }))
@@ -228,23 +230,27 @@ export function runGit(cwd: string, args: readonly string[], options: GitRunOpti
       if (stopping) return
       stopping = true
       if (silence) clearTimeout(silence)
+      if (cancelQueuedGit(child)) return
       // The process may still be starting on the Git worker: its pid is known once it has.
       const started = gitChildSpawned(child)
       if (process.platform === 'win32') {
-        // `/T` walks the process tree, `/F` is the only way to end a console-less process.
-        treeKilled = started.then(() => new Promise<void>((done) => {
-          if (!child.pid) return done()
-          const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
-          killer.on('error', () => done())
-          killer.on('close', () => done())
-        }))
+        treeKilled = started.then(async () => {
+          if (!child.pid) return
+          const tree = await StoppedGitTree.stop(child, gitChildStartedAt(child, spawnRequestedAt))
+          while (await tree.alive()) await delay(250)
+        })
+        // A process outside the tree may still hold a pipe. The lease can go only after the tree is confirmed gone.
+        void treeKilled.then(() => {
+          if (!settled) fallback = setTimeout(() => finish(null, false), KILL_SETTLE_MS)
+        })
       } else {
-        // Let Git remove its lock files, then end the whole group.
-        void started.then(() => killGroup('SIGTERM'))
-        escalate = setTimeout(() => killGroup('SIGKILL'), KILL_GRACE_MS)
+        void started.then(() => {
+          if (settled) return
+          killGroup('SIGTERM')
+          escalate = setTimeout(() => killGroup('SIGKILL'), KILL_GRACE_MS)
+          fallback = setTimeout(() => finish(null, false), KILL_SETTLE_MS)
+        })
       }
-      // A grandchild holding the pipes must not hold the repository lease.
-      fallback = setTimeout(() => finish(null, false), KILL_SETTLE_MS)
     }
     function onAbort(): void {
       cancelled = true
@@ -276,7 +282,7 @@ export function runGit(cwd: string, args: readonly string[], options: GitRunOpti
       reject(error)
     })
     child.on('close', (code) => {
-      // On Windows the tree is gone only once taskkill has finished with it.
+      // On Windows a child can close its pipes before the processes it started have gone.
       if (treeKilled) void treeKilled.then(() => finish(code))
       else finish(code)
     })

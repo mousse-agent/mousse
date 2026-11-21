@@ -4,13 +4,14 @@
  * command started by the helper and started on the calling thread (`MOUSSE_GIT_SPAWN_WORKER=0`, as before) and
  * compares everything the caller sees.
  */
+import { AsyncLocalStorage } from 'node:async_hooks'
 import childProcess, { execFile, execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { runGitProcess, type GitProcess } from '../src/mms/git/runGitProcess'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { gitCancellationScope, runGitProcess, type GitProcess } from '../src/mms/git/runGitProcess'
 import { DiskGate, diskGate, diskOf, execFileGit, inBackgroundGitLane, spawnGit, stopGitSpawnWorkers } from '../src/mms/git/gitSpawn'
 import { gitFile } from '../src/mms/git/gitExecutable'
 import { resolveRepositoryIdentityAsync } from '../src/mms/git/RepositoryIdentity'
@@ -29,7 +30,7 @@ beforeAll(() => {
 })
 afterAll(async () => {
   await stopGitSpawnWorkers()
-  rmSync(dir, { recursive: true, force: true })
+  rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
 })
 afterEach(() => { delete process.env.MOUSSE_GIT_SPAWN_WORKER })
 
@@ -74,6 +75,35 @@ describe('Git started by the helper', () => {
     const here = await spawnsHere(() => runGitProcess(['rev-parse', 'HEAD'], { cwd, env: process.env }))
     expect(here.spawns).toBe(1)
     expect(here.result.stdout).toBe(onWorker.result.stdout)
+  })
+
+  it('keeps a final admission check next to the actual spawn', async () => {
+    let allowed = false
+    const command = () => runGitProcess(['rev-parse', 'HEAD'], { cwd, env: process.env, beforeStart: () => {
+      if (!allowed) throw new Error('Admission refused')
+    } })
+    await expect(command()).rejects.toThrow('Admission refused')
+    allowed = true
+    expect(await spawnsHere(command)).toMatchObject({ spawns: 1, result: { status: 0 } })
+  })
+
+  it('routes results back to the async context for each concurrent operation', async () => {
+    const context = new AsyncLocalStorage<string>()
+    const names = ['first', 'second']
+    const replies = await Promise.all(names.map((name) => context.run(name, () => new Promise((resolve, reject) => {
+      execFileGit(gitFile(), ['rev-parse', 'HEAD'], { cwd }, (error, stdout) => {
+        if (error) reject(error)
+        else resolve({ name: context.getStore(), head: stdout.trim() })
+      })
+    }))))
+    expect(replies).toEqual(names.map((name) => ({ name, head: expect.stringMatching(/^[a-f0-9]+$/) })))
+  })
+
+  it('times out a Git process that is waiting for input', async () => {
+    const error = await new Promise((resolve) => {
+      execFileGit(gitFile(), ['cat-file', '--batch'], { cwd, timeout: 100 }, (failure) => resolve(failure))
+    })
+    expect(error).toMatchObject({ killed: true })
   })
 
   // Every way a `runGitProcess` caller can see a command end.
@@ -138,6 +168,7 @@ describe('Git started by the helper', () => {
     let starting = true
     const starter = (async () => {
       while (starting) {
+        if (long.length >= 12) break
         long.push(inBackgroundGitLane(() => spawnGit(gitFile(), ['cat-file', '--batch'], { cwd, stdio: ['pipe', 'pipe', 'pipe'] })))
         await new Promise((tick) => setTimeout(tick, 5))
       }
@@ -185,22 +216,33 @@ describe('background Git on a disk where interactive Git runs', () => {
     expect(seen).toEqual(started)
   })
 
+  it('keeps counting active commands when two drive letters are found to share a disk', () => {
+    const aliases = new Map<string, string>()
+    const gate = new DiskGate((volume) => aliases.get(volume) ?? volume)
+    gate.interactiveStarted('A')
+    gate.background('B', () => undefined)
+    aliases.set('A', 'disk')
+    aliases.set('B', 'disk')
+    let launched = false
+    gate.background('B', () => { launched = true })
+    expect(launched).toBe(false)
+    gate.interactiveEnded('A')
+    expect(launched).toBe(true)
+  })
+
   it('holds a background command while an interactive one runs on its disk, and starts it when that ends', async () => {
-    // The background lane's first command asks which physical disk each drive is on; the test waits for that answer, so
-    // every command below is counted on the same disk.
-    await inBackgroundGitLane(() => runGitProcess(['rev-parse', 'HEAD'], { cwd, env: process.env }))
-    if (process.platform === 'win32') await vi.waitFor(() => expect(diskOf(cwd)).toMatch(/^disk:/), { timeout: 30_000, interval: 50 })
     const disk = diskOf(cwd)
     // An interactive command that runs until its input closes, and a background one that does too.
     const interactive = spawnGit(gitFile(), ['cat-file', '--batch'], { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
     const holder = inBackgroundGitLane(() => spawnGit(gitFile(), ['cat-file', '--batch'], { cwd, stdio: ['pipe', 'pipe', 'pipe'] }))
     const waiting = inBackgroundGitLane(() => runGitProcess(['hash-object', '--stdin'], { cwd, env: process.env, input: 'held input\n', timeout: 60_000 }))
-    const killedWhileWaiting = inBackgroundGitLane(() => spawnGit(gitFile(), ['rev-parse', 'HEAD'], { cwd, stdio: ['ignore', 'pipe', 'pipe'] }))
+    const controller = new AbortController()
+    const scope = gitCancellationScope(controller.signal)
+    const cancelled = inBackgroundGitLane(() => scope.run(() => runGitProcess(['rev-parse', 'HEAD'], { cwd, env: process.env })))
     expect(diskGate.load(disk)).toEqual({ running: 1, waiting: 2, interactive: 1 })
-    const ended = new Promise<[number | null, string | null]>((settle) => killedWhileWaiting.on('close', (code, signal) => settle([code, signal])))
-    expect(killedWhileWaiting.kill()).toBe(true)
-    expect(await ended).toEqual([null, 'SIGTERM'])
-    expect(killedWhileWaiting.pid).toBeUndefined()
+    controller.abort()
+    expect(await cancelled).toMatchObject({ status: null, error: { code: 'ABORT_ERR' } })
+    expect(scope.survivorsGone()).toBeUndefined()
     expect(diskGate.load(disk)).toEqual({ running: 1, waiting: 1, interactive: 1 })
     // The interactive command ends: the waiting one starts, with the input it was given while it waited.
     interactive.stdin.end()

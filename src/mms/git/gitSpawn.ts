@@ -1,4 +1,4 @@
-import { AsyncLocalStorage } from 'node:async_hooks'
+import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks'
 import { execFile, spawn, type ChildProcess, type ChildProcessByStdio } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { createReadStream, statSync } from 'node:fs'
@@ -16,7 +16,8 @@ import { Readable, Writable } from 'node:stream'
  * (the same events in the same order, its output as `Buffer` chunks, `kill`, `pid` once started, `ref`/`unref`).
  * Everything the command depends on (program, arguments, working folder, environment) is worked out by the caller, as
  * before, and passed across unchanged; so are the Git policy's checks, the cancellation scope and the turn-boundary
- * accounting, which stay with the caller.
+ * accounting, which stay with the caller. Events and callbacks run in the async scope of the command that requested
+ * them, so concurrent operations keep their own context.
  *
  * A helper process, not a worker thread: on Windows a process started from one thread inherits the pipes another thread
  * is creating for its own child at that moment, and holds them open, so that child's end never arrives while it runs.
@@ -55,6 +56,8 @@ export interface GitSpawnOptions {
   stdio?: [Pipe, Pipe, Pipe]
   windowsHide?: boolean
   detached?: boolean
+  /** A final admission check that must run on the same thread, immediately before spawning Git. */
+  beforeStart?: () => void
   /** As `spawn`'s: aborting it kills the process with `killSignal` and emits an `AbortError`. */
   signal?: AbortSignal
   killSignal?: NodeJS.Signals | number
@@ -70,10 +73,11 @@ function workerEnabled(): boolean {
 
 /**
  * Starts `file` (the Git program, from `gitFile()`) with `args`, on the current lane's helper. Returns at once; the
- * process starts on the helper. Use as `spawn` would be used.
+ * process starts on the helper. Commands with a final `beforeStart` check run directly to keep that check adjacent
+ * to process creation.
  */
 export function spawnGit<I extends Pipe = 'pipe', O extends Pipe = 'pipe', E extends Pipe = 'pipe'>(file: string, args: readonly string[], options: GitSpawnOptions & { stdio?: [I, O, E] } = {}): GitChild<I, O, E> {
-  if (!workerEnabled()) return spawnHere(file, args, options) as GitChild<I, O, E>
+  if (options.beforeStart || !workerEnabled()) return spawnHere(file, args, options) as GitChild<I, O, E>
   return lane(lanes.getStore() ?? 'interactive').start(file, args, options) as unknown as GitChild<I, O, E>
 }
 
@@ -82,7 +86,8 @@ export type GitChild<I extends Pipe, O extends Pipe, E extends Pipe> = ChildProc
 
 /** On the calling thread, as before the worker: also the shape the worker itself uses. */
 function spawnHere(file: string, args: readonly string[], options: GitSpawnOptions): ChildProcess {
-  const { inputFile, onInputFileError, ...spawnOptions } = options
+  const { inputFile, onInputFileError, beforeStart, ...spawnOptions } = options
+  beforeStart?.()
   const child = spawn(file, [...args], spawnOptions)
   if (inputFile !== undefined && child.stdin) {
     const stdin = child.stdin
@@ -99,6 +104,11 @@ export function gitChildSpawned(child: ChildProcess): Promise<void> {
   return child instanceof WorkerGitChild ? child.spawned : Promise.resolve()
 }
 
+/** Cancel before the request has been sent to the helper, without starting a Git process. */
+export function cancelQueuedGit(child: ChildProcess): boolean {
+  return child instanceof WorkerGitChild && !child.isLaunched && child.kill()
+}
+
 /** When the process was really started (epoch ms): on the worker, which may be later than the call; else `fallback`. */
 export function gitChildStartedAt(child: ChildProcess, fallback: number): number {
   return child instanceof WorkerGitChild ? child.startedAt ?? fallback : fallback
@@ -113,15 +123,22 @@ const { spawn } = require('node:child_process')
 const { createReadStream } = require('node:fs')
 const children = new Map()
 const plain = (e) => ({ message: String(e && e.message || e), name: e && e.name, code: e && e.code, errno: e && e.errno, syscall: e && e.syscall, path: e && e.path, spawnargs: e && e.spawnargs })
-const parentPort = { postMessage: (message) => { if (process.connected) process.send(message) } }
+const send = (message, done) => process.connected && process.send(message, done)
+const pipe = (stream, fd, post) => {
+  if (!stream) return
+  stream.on('data', (data) => {
+    const sent = post({ t: 'data', fd, data }, () => { if (!sent) stream.resume() })
+    if (!sent) stream.pause()
+  })
+}
 process.on('disconnect', () => process.exit(0))
 process.on('message', (m) => {
   if (m.t === 'disks') {
-    require('node:child_process').execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-Partition | Where-Object DriveLetter | ForEach-Object { "{0}={1}" -f $_.DriveLetter, $_.DiskNumber }'], { windowsHide: true, timeout: 30000 }, (error, stdout) => parentPort.postMessage({ id: 0, t: 'disks', text: error ? '' : String(stdout) }))
+    require('node:child_process').execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-Partition | Where-Object DriveLetter | ForEach-Object { "{0}={1}" -f $_.DriveLetter, $_.DiskNumber }'], { windowsHide: true, timeout: 30000 }, (error, stdout) => send({ id: 0, t: 'disks', text: error ? '' : String(stdout) }))
     return
   }
   if (m.t === 'spawn') {
-    const post = (message) => parentPort.postMessage(Object.assign({ id: m.id }, message))
+    const post = (message, done) => send(Object.assign({ id: m.id }, message), done)
     const at = Date.now()
     let child
     try { child = spawn(m.file, m.args, m.options) } catch (error) { post({ t: 'throw', error: plain(error) }); return }
@@ -129,13 +146,19 @@ process.on('message', (m) => {
     child.once('spawn', () => post({ t: 'spawn', pid: child.pid, at }))
     child.on('error', (error) => post({ t: 'error', error: plain(error) }))
     child.on('exit', (code, signal) => post({ t: 'exit', code, signal }))
-    child.on('close', (code, signal) => { children.delete(m.id); post({ t: 'close', code, signal }) })
-    if (child.stdout) child.stdout.on('data', (data) => post({ t: 'data', fd: 1, data }))
-    if (child.stderr) child.stderr.on('data', (data) => post({ t: 'data', fd: 2, data }))
+    let source
+    child.on('close', (code, signal) => {
+      children.delete(m.id)
+      const closed = () => post({ t: 'close', code, signal })
+      if (!source || source.closed) closed()
+      else { source.once('close', closed); source.destroy() }
+    })
+    pipe(child.stdout, 1, post)
+    pipe(child.stderr, 2, post)
     if (child.stdin) {
       child.stdin.on('error', (error) => post({ t: 'stdinError', error: plain(error) }))
       if (m.inputFile !== undefined) {
-        const source = createReadStream(m.inputFile)
+        source = createReadStream(m.inputFile)
         source.on('error', (error) => { child.stdin.destroy(); child.kill(); post({ t: 'inputFileError', error: plain(error) }) })
         source.pipe(child.stdin)
       }
@@ -184,7 +207,6 @@ class Lane {
   constructor(private readonly name: GitLane) {}
 
   start(file: string, args: readonly string[], options: GitSpawnOptions): WorkerGitChild {
-    this.ensure()
     const id = nextChildId++
     const pipes = options.stdio ?? ['pipe', 'pipe', 'pipe']
     const child = new WorkerGitChild(this, id, file, args, pipes as [Pipe, Pipe, Pipe], options)
@@ -198,7 +220,7 @@ class Lane {
         // A worker's own environment is a copy taken when it started: the caller's is always passed.
         env: { ...(options.env ?? process.env) },
         stdio: pipes,
-        ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+        cwd: options.cwd ?? process.cwd(),
         ...(options.windowsHide !== undefined ? { windowsHide: options.windowsHide } : {}),
         ...(options.detached !== undefined ? { detached: options.detached } : {})
       }
@@ -290,6 +312,7 @@ class Lane {
     worker.on('error', (error) => lost(error.message))
     worker.on('exit', (code, signal) => lost(`exit ${code ?? signal}`))
     this.worker = worker
+    this.hold(0)
     return worker
   }
 }
@@ -321,18 +344,22 @@ function learnDisks(text: string): void {
   }
 }
 
+function physicalDisk(key: string): string {
+  const disk = key.startsWith('volume:') ? physicalDisks.get(key.slice('volume:'.length)) : undefined
+  return disk === undefined ? key : `disk:${disk}`
+}
+
 /** Off Windows: a folder's device, by `stat`, once per folder. */
 const devices = new Map<string, string>()
 
-/** The disk a command in `cwd` reads: the physical disk of its drive on Windows, else its file system's device. */
+/** Stable key for the volume a command reads, even while its physical disk is being discovered. */
 export function diskOf(cwd: string | undefined): string {
   const where = resolve(cwd ?? process.cwd())
   if (process.platform === 'win32') {
     const root = win32.parse(where).root
     const letter = /^([a-z]):/i.exec(root)?.[1]?.toUpperCase()
     if (!letter) return `share:${root.toLowerCase()}`
-    const disk = physicalDisks.get(letter)
-    return disk !== undefined ? `disk:${disk}` : `volume:${letter}`
+    return `volume:${letter}`
   }
   let device = devices.get(where)
   if (device === undefined) {
@@ -351,6 +378,8 @@ export class DiskGate {
   private readonly interactive = new Map<string, number>()
   private readonly running = new Map<string, number>()
   private readonly waiting: { disk: string; go: () => void }[] = []
+
+  constructor(private readonly diskFor = (key: string): string => key) {}
 
   interactiveStarted(disk: string): void { this.add(this.interactive, disk, 1) }
   interactiveEnded(disk: string): void { this.add(this.interactive, disk, -1); this.pump() }
@@ -371,11 +400,13 @@ export class DiskGate {
 
   /** Background processes running on `disk`, how many wait, and the interactive ones running there. */
   load(disk: string): { running: number; waiting: number; interactive: number } {
-    return { running: this.running.get(disk) ?? 0, waiting: this.waiting.filter((entry) => entry.disk === disk).length, interactive: this.interactive.get(disk) ?? 0 }
+    const key = this.diskFor(disk)
+    return { running: this.count(this.running, key), waiting: this.waiting.filter((entry) => this.diskFor(entry.disk) === key).length, interactive: this.count(this.interactive, key) }
   }
 
   private allows(disk: string): boolean {
-    return !this.interactive.get(disk) || !this.running.get(disk)
+    const key = this.diskFor(disk)
+    return !this.count(this.interactive, key) || !this.count(this.running, key)
   }
 
   private pump(): void {
@@ -388,6 +419,12 @@ export class DiskGate {
     }
   }
 
+  private count(counts: Map<string, number>, disk: string): number {
+    let total = 0
+    for (const [key, count] of counts) if (this.diskFor(key) === disk) total += count
+    return total
+  }
+
   private add(counts: Map<string, number>, disk: string, delta: number): void {
     const next = (counts.get(disk) ?? 0) + delta
     if (next > 0) counts.set(disk, next)
@@ -395,7 +432,7 @@ export class DiskGate {
   }
 }
 
-export const diskGate = new DiskGate()
+export const diskGate = new DiskGate(physicalDisk)
 
 /** What `spawnGit` returns when the worker starts the process: a `ChildProcess` as its callers use one. */
 class WorkerGitChild extends EventEmitter {
@@ -412,6 +449,7 @@ class WorkerGitChild extends EventEmitter {
   readonly stderr: Readable | null
   readonly stdio: [Writable | null, Readable | null, Readable | null]
   readonly spawned: Promise<void>
+  private readonly asyncScope = new AsyncResource('GitSpawn')
   private markSpawned!: () => void
   private referenced = true
   private done = false
@@ -441,7 +479,7 @@ class WorkerGitChild extends EventEmitter {
       if (signal.aborted) process.nextTick(onAbort)
       else {
         signal.addEventListener('abort', onAbort, { once: true })
-        this.once('exit', () => signal.removeEventListener('abort', onAbort))
+        this.once('close', () => signal.removeEventListener('abort', onAbort))
       }
     }
   }
@@ -473,6 +511,7 @@ class WorkerGitChild extends EventEmitter {
   /** The worker was asked to start it: what waited for that goes now. */
   launched(): void {
     this.isLaunched = true
+    this.cancelWaiting = undefined
     for (const message of this.unsent.splice(0)) this.owner.post(message)
   }
 
@@ -523,6 +562,10 @@ class WorkerGitChild extends EventEmitter {
   }
 
   receive(message: FromWorker): void {
+    this.asyncScope.runInAsyncScope(() => this.handleMessage(message))
+  }
+
+  private handleMessage(message: FromWorker): void {
     switch (message.t) {
       case 'spawn':
         this.pid = message.pid
@@ -568,8 +611,10 @@ class WorkerGitChild extends EventEmitter {
   lost(error: Error): void {
     if (this.done) return
     this.markSpawned()
-    this.emit('error', error)
-    this.close(null, null)
+    this.asyncScope.runInAsyncScope(() => {
+      this.emit('error', error)
+      this.close(null, null)
+    })
   }
 
   private close(code: number | null, signal: NodeJS.Signals | null): void {
@@ -585,7 +630,10 @@ class WorkerGitChild extends EventEmitter {
     this.stdout?.push(null)
     this.stderr?.push(null)
     let left = reading.length
-    const emitClose = (): void => { this.emit('close', code, signal) }
+    const emitClose = (): void => {
+      this.asyncScope.runInAsyncScope(() => this.emit('close', code, signal))
+      this.asyncScope.emitDestroy()
+    }
     if (!left) { process.nextTick(emitClose); return }
     const ended = (): void => { if (--left === 0) emitClose() }
     for (const stream of reading) {
@@ -685,7 +733,6 @@ export function execFileGit(file: string, args: readonly string[], options: Exec
     failure = error
     child.stdout?.destroy()
     child.stderr?.destroy()
-    exit(null, null)
   })
   child.on('close', exit)
   return child

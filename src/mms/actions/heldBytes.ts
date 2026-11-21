@@ -4,7 +4,7 @@ import { readFrozenEntryAsync, type FrozenEntryProof } from '../lifecycle/verifi
 import { gitEnv, guardedAsync } from './git'
 import { timeGitChild } from '../diagnostics/turnBoundary'
 import { gitEnvFor, gitFile } from '../git/gitExecutable'
-import { gitChildSpawned, spawnGit } from '../git/gitSpawn'
+import { cancelQueuedGit, gitChildSpawned, spawnGit } from '../git/gitSpawn'
 
 /**
  * Which files on disk a restore can remove without a copy: those whose bytes are exactly what Git writes back from their
@@ -73,9 +73,9 @@ async function streamGitAsync(top: string, args: string[], input: string, onData
     let failed: Error | undefined
     let stopped = false
     // The process may still be starting on the Git worker: its pid is known once it has.
-    const stopAll = (): void => { void gitChildSpawned(child).then(stopStarted) }
+    const stopAll = (): void => { if (!cancelQueuedGit(child)) void gitChildSpawned(child).then(stopStarted) }
     const stopStarted = (): void => {
-      if (child.pid === undefined) return
+      if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return
       // Git first, so it never reports the filters it started as failed; then everything else in its group.
       if (group) { child.kill('SIGKILL'); try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ } }
       else if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => child.kill('SIGKILL'))
