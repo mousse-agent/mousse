@@ -23,6 +23,15 @@ import type { ReplayTransport } from './ReplayTransport'
 export const CODEX_APP_SERVER_BOUNDARY =
   'Codex app-server JSON-RPC on stdio: client messages out; server responses, notifications and requests in'
 
+/** A synthetic token with the workspace claim Codex reports in a ChatGPT access token. */
+export function codexFixtureAccessToken(workspace?: string, signature = 'fixture'): string {
+  const claims = { 'https://api.openai.com/auth': { chatgpt_account_id: workspace } }
+  return 'fixture.' + Buffer.from(JSON.stringify(claims)).toString('base64url') + '.' + signature
+}
+
+const REPLAY_WORKSPACE = 'replay-workspace'
+const REPLAY_TOKEN = codexFixtureAccessToken(REPLAY_WORKSPACE)
+
 function withoutCwd(message: unknown): unknown {
   if (!message || typeof message !== 'object') return message
   const { params } = message as { params?: unknown }
@@ -74,6 +83,8 @@ class ReplayCodexProcess extends EventEmitter implements CodexProcess {
       if (message.method !== expected?.method) {
         if (message.method === 'config/read' && !message.params?.includeLayers)
           return this.replyToCredentialCheck(message.id, { config: { cli_auth_credentials_store: 'file' } })
+        if (message.method === 'getAuthStatus')
+          return this.replyToCredentialCheck(message.id, { authMethod: 'chatgpt', authToken: REPLAY_TOKEN })
         if (message.method === 'account/read' && this.accountResult !== undefined)
           return this.replyToCredentialCheck(message.id, this.accountResult)
       }
@@ -144,7 +155,7 @@ class ReplayCodexProcess extends EventEmitter implements CodexProcess {
 export function replayCodexEnv(home: string): () => NodeJS.ProcessEnv {
   writeFileSync(join(home, 'auth.json'), JSON.stringify({
     auth_mode: 'chatgpt',
-    tokens: { account_id: 'replay-workspace', access_token: 'replay-token' }
+    tokens: { account_id: REPLAY_WORKSPACE, access_token: REPLAY_TOKEN }
   }))
   return () => ({ CODEX_HOME: home })
 }

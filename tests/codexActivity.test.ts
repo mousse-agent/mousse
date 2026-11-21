@@ -19,7 +19,7 @@ import type { ThreadItem } from '../src/mms/harness/vendors/codex/protocol'
 import { CodexAdapter } from '../src/mms/harness/drivers/codex/adapter'
 import { createCodexProviderService, type CodexProviderService as AdapterService } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../src/mms/harness/adapter'
-import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer, replayCodexEnv } from '../src/mms/run/testkit/codexAppServerReplay'
+import { CODEX_APP_SERVER_BOUNDARY, codexFixtureAccessToken, replayCodexAppServer, replayCodexEnv } from '../src/mms/run/testkit/codexAppServerReplay'
 import { ReplayTransport, parseTranscript } from '../src/mms/run/testkit/ReplayTransport'
 import { TranscriptAssembler, type TranscriptStreamState } from '../src/mms/run/transcript/TranscriptAssembler'
 import { runtimeToolEvent } from '../src/mms/run/transcript/promptRuntime'
@@ -270,7 +270,6 @@ describe('the activity fixture through the Codex adapter', () => {
   const questions = new UserQuestionService()
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'mousse-codex-activity-'))
-    writeFileSync(join(home, 'auth.json'), JSON.stringify({ tokens: { account_id: 'fixture-workspace', access_token: 'fixture-token' } }))
     mkdirSync(join(home, 'work'))
   })
   afterEach(() => {
@@ -379,6 +378,7 @@ describe('Codex activity against a scripted app-server', () => {
   type Message = { id?: number | string; method?: string; params?: Record<string, unknown> }
   const PARENT = 'thr-1'
   const HELPER = 'helper-1'
+  const token = codexFixtureAccessToken('fixture-workspace')
   let home: string
   const services: CodexProviderService[] = []
   const questions = new UserQuestionService()
@@ -386,7 +386,7 @@ describe('Codex activity against a scripted app-server', () => {
   beforeEach(() => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     home = mkdtempSync(join(tmpdir(), 'mousse-codex-activity-s-'))
-    writeFileSync(join(home, 'auth.json'), JSON.stringify({ tokens: { account_id: 'fixture-workspace', access_token: 'fixture-token' } }))
+    writeFileSync(join(home, 'auth.json'), JSON.stringify({ tokens: { account_id: 'fixture-workspace', access_token: token } }))
     const binary = join(home, 'codex')
     writeFileSync(binary, '#!/bin/sh\nexit 0\n')
     chmodSync(binary, 0o755)
@@ -445,6 +445,7 @@ describe('Codex activity against a scripted app-server', () => {
           const result =
             message.method === 'initialize' ? { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' }
             : message.method === 'account/read' ? { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, requiresOpenaiAuth: true }
+            : message.method === 'getAuthStatus' ? { authMethod: 'chatgpt', authToken: token }
             : message.method === 'config/read' ? { config: {} }
             : message.method === 'thread/list' ? { data: [], nextCursor: null }
             : message.method === 'thread/start' ? { thread: { id: PARENT }, model: 'gpt-x', modelProvider: CODEX_MODEL_PROVIDER, cwd: home }

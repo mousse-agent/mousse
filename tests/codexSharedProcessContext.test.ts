@@ -15,6 +15,7 @@ import { currentWorkScope, runInWorkScope, threadScope, type WorkScope } from '.
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import type { CodexLaunch, CodexProcess } from '../src/mms/harness/vendors/codex/CodexAppServerClient'
 import { CodexProviderService } from '../src/mms/harness/vendors/codex/CodexProviderService'
+import { codexFixtureAccessToken } from '../src/mms/run/testkit/codexAppServerReplay'
 
 type Message = { id?: number | string; method?: string; params?: Record<string, unknown> }
 
@@ -22,10 +23,11 @@ let home: string
 let binary: string
 let questions: UserQuestionService
 const services: CodexProviderService[] = []
+const token = codexFixtureAccessToken('shared-workspace')
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'mousse-codex-shared-'))
-  writeFileSync(join(home, 'auth.json'), JSON.stringify({ tokens: { account_id: 'shared-workspace', access_token: 'fixture-token' } }))
+  writeFileSync(join(home, 'auth.json'), JSON.stringify({ tokens: { account_id: 'shared-workspace', access_token: token } }))
   binary = join(home, 'codex')
   writeFileSync(binary, '#!/bin/sh\nexit 0\n')
   chmodSync(binary, 0o755)
@@ -90,6 +92,9 @@ function sharedServer() {
             break
           case 'account/read':
             reply({ account: { type: 'chatgpt', email: 'person@example.invalid', planType: 'plus' }, requiresOpenaiAuth: true })
+            break
+          case 'getAuthStatus':
+            reply({ authMethod: 'chatgpt', authToken: token })
             break
           case 'thread/start':
             reply({ thread: { id: `thr-${++threads}` }, model: 'gpt-x', modelProvider: 'openai', cwd: home })

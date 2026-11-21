@@ -3039,6 +3039,7 @@ export class ClaudeSubscriptionProviderService {
     try {
       return await this.chatTurn(input, true)
     } catch (error) {
+      if (error instanceof ClaudeTurnCredentialsChanged) return this.chatTurn(input, false, true)
       if (!(error instanceof CutRefused)) throw error
       if (error.fork) {
         this.forgetConversation(input.threadId)
@@ -3048,7 +3049,7 @@ export class ClaudeSubscriptionProviderService {
       return this.chatTurn(input, false)
     }
   }
-  private async chatTurn(input: ClaudeSubscriptionChatInput, branching: boolean): Promise<string> {
+  private async chatTurn(input: ClaudeSubscriptionChatInput, branching: boolean, fresh = false): Promise<string> {
     input.signal?.throwIfAborted()
     // The thread's last one-shot query answered but may still be writing its session: it is resumed once it has exited.
     const previousExit = this.oneShotExits.get(input.threadId)
@@ -3178,7 +3179,7 @@ export class ClaudeSubscriptionProviderService {
     // A model change resumes the session too (issue #359): Claude Code takes a session made on another model, as its
     // own model switch does, so the conversation keeps its thinking, images and tool calls.
     const sameSetup = saved?.cwd === resolve(input.cwd)
-    const resume = !saved?.fork && sameSetup && saved?.historyKey === historyNow ? saved.sessionId : undefined
+    const resume = !fresh && !saved?.fork && sameSetup && saved?.historyKey === historyNow ? saved.sessionId : undefined
     /**
      * Issue #360: the session resumed cut, into a new session (`id`) so the one it came from stays
      * whole. A fork's first turn makes its branch (whatever the thread's history holds: every turn
@@ -3416,10 +3417,14 @@ export class ClaudeSubscriptionProviderService {
         'settings' in extraArgs || 'setting-sources' in extraArgs ? undefined :
         claudeTurnCredentialKey(input.cwd, this.dependencies.settingSources, turnSettings)
       const credentialKey = turnCredentials()
-      const assertSignIn = () => {
-        if (credentialKey !== turnCredentials()) {
+      const probedSubject = this.dependencies.probe ? this.accountSubject(env) : signIn.result.account?.subject
+      const assertSignIn = (dispatch?: 'live' | 'fresh') => {
+        // The sign-in subject covers managed settings and their drop-ins. Reread it after warm SDK setup.
+        if (credentialKey !== turnCredentials() || (dispatch && probedSubject !== this.accountSubject(env))) {
           const previous = this.live.get(input.threadId)
           if (previous) this.closeLiveSession(input.threadId, previous)
+          if (dispatch === 'live' && !input.continuation && (!owner || !this.signedOut()))
+            throw new ClaudeTurnCredentialsChanged()
           throw new Error('The Claude Code sign-in changed before the turn could be sent. Try again.')
         }
         if (owner && (signIn.epoch !== this.signInEpoch || this.signedOut()))
@@ -3464,7 +3469,7 @@ export class ClaudeSubscriptionProviderService {
         signIn.identity ?? null,
         credentialKey ?? null
       ]
-      const reusable = input.continuation ? undefined : this.reusableLive(input.threadId, hard, resume, historyNow)
+      const reusable = input.continuation || fresh ? undefined : this.reusableLive(input.threadId, hard, resume, historyNow)
       /** The prompt, with the history in front when no session holds it: none resumed, cut or kept warm. */
       const contentFor = (reuse: boolean): SDKUserMessage['message']['content'] => {
         const prompt = (input.turnPreamble ? input.turnPreamble + '\n\nCurrent request:\n' : '') +
@@ -3633,7 +3638,7 @@ export class ClaudeSubscriptionProviderService {
           })
         }
         metrics.beginQuery(live.sessionId, saved?.usageBaseline)
-        assertSignIn()
+        assertSignIn('live')
         liveRun.attach(observe)
       } else {
         const key = { hard, soft: this.launchKey(env, integrations, launchSettings, input.mcp?.relay ?? null), mode: permissionMode, flags, historyNow, entrypoint: env.CLAUDE_CODE_ENTRYPOINT }
@@ -3644,7 +3649,7 @@ export class ClaudeSubscriptionProviderService {
             const previous = this.live.get(input.threadId)
             if (previous) this.closeLiveSession(input.threadId, previous)
           }
-          live = (locked && !botWarm) || !signIn.identity || !credentialKey ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
+          live = fresh || (locked && !botWarm) || !signIn.identity || !credentialKey ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
             created.current = turn
             if (!botWarm) return buildOptions(created.lifetime, () => created.current ?? turn, true)
             const folder = mkdtempSync(join(tmpdir(), 'mousse-claude-settings-'))
@@ -3693,7 +3698,7 @@ export class ClaudeSubscriptionProviderService {
             // A cancel under way (another turn was cut off) would sweep this prompt up; wait for it.
             for (;;) {
               try {
-                assertSignIn()
+                assertSignIn('live')
                 promptId = live.push(liveRun, userMessage(live.sessionId ?? resume ?? branch?.id ?? ''))
                 turnTimingMark(input.threadId, 'prompt')
                 break
@@ -3773,7 +3778,7 @@ export class ClaudeSubscriptionProviderService {
         // The same for a bot's one-shot query: no wait while the last reading said signed in (`signInFresh`).
         const threadId = input.threadId
         let nextPrompt: AsyncIterable<SDKUserMessage> = (async function* (): AsyncGenerator<SDKUserMessage> {
-          assertSignIn()
+          assertSignIn(fresh ? 'fresh' : undefined)
           turnTimingMark(threadId, 'prompt')
           yield* messages()
         })()
@@ -4149,6 +4154,9 @@ function oneShotPromptRead(message: unknown, id: string): boolean {
 
 /** The model Claude Code names on a message it made up itself, with no request to the model. */
 const SYNTHETIC_MODEL = '<synthetic>'
+
+/** The prompt is still unsent, so it can be retried with the transcript in a fresh process. */
+class ClaudeTurnCredentialsChanged extends Error {}
 
 /** Claude Code could not resume a session cut (`cutRefused`); `fork` when the cut was a fork's branch. */
 class CutRefused extends Error {

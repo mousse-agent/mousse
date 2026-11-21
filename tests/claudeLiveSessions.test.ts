@@ -173,6 +173,47 @@ describe('a live Claude query', () => {
     }
   })
 
+  it('sends the prompt on a fresh process when a managed drop-in changes during warm setup', async () => {
+    const managedDir = join(process.env.CLAUDE_CONFIG_DIR!, 'policy')
+    const folder = join(managedDir, 'managed-settings.d')
+    mkdirSync(folder, { recursive: true })
+    const settings = join(folder, '10-credentials.json')
+    const saveKey = (key: string) => writeFileSync(settings, JSON.stringify({ env: { ANTHROPIC_API_KEY: key } }))
+    const { cli, turn, service } = fixture({}, undefined, undefined, {
+      accountSubject: (env) => claudeAccountSubject(env, { managedFiles: [join(managedDir, 'managed-settings.json')] })
+    })
+    let releaseSetup!: () => void
+    const finishSetup = new Promise<void>((done) => { releaseSetup = done })
+    let enterSetup!: () => void
+    const enteredSetup = new Promise<void>((done) => { enterSetup = done })
+    const mcp = { url: 'http://127.0.0.1:9/mcp', token: 'first-token' }
+    try {
+      saveKey('first-fixture-key')
+      await turn({ prompt: 'first', mcp }, 'first transcript')
+      const warm = cli.last
+      warm.mcpHold = () => {
+        enterSetup()
+        return finishSetup
+      }
+
+      const next = turn({ prompt: 'send after rotation', history: 'first transcript', mcp: { ...mcp, token: 'second-token' } }, 'first transcript')
+      void next.catch(() => undefined)
+      await enteredSetup
+      saveKey('second-fixture-key')
+      releaseSetup()
+
+      expect(await next).toBe('reply to 1')
+      expect(warm.inputs).toHaveLength(1)
+      expect(warm.closed).toBe(true)
+      expect(cli.last).not.toBe(warm)
+      expect(cli.last.options.resume).toBeUndefined()
+      expect(JSON.stringify(cli.last.inputs)).toContain('first transcript')
+    } finally {
+      releaseSetup()
+      await service.stop()
+    }
+  })
+
   it('a turn aborted before Claude started its prompt cancels the queued prompt and keeps the process', async () => {
     const { cli, chat } = fixture()
     silent(cli)

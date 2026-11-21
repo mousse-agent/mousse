@@ -383,6 +383,21 @@ function missingCodexThread(error: unknown): boolean {
   return error instanceof CodexRpcError && error.code === -32600 && /^(?:no rollout found for thread id\b|thread not found:)/i.test(error.message)
 }
 
+/** The ChatGPT workspace named by the access token the app-server actually holds. */
+function chatGptTokenWorkspace(token: string): string | undefined {
+  const parts = token.split('.')
+  if (parts.length !== 3 || !parts[1]) return undefined
+  try {
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as {
+      'https://api.openai.com/auth'?: { chatgpt_account_id?: unknown }
+    }
+    const workspace = claims['https://api.openai.com/auth']?.chatgpt_account_id
+    return typeof workspace === 'string' && workspace.trim() ? workspace : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function terminalAuthState(home: string) {
   const read = (name: string) => {
     try {
@@ -394,19 +409,18 @@ function terminalAuthState(home: string) {
   const auth = read('auth.json')
   const config = read('config.toml')
   const fingerprint = createHash('sha256').update(JSON.stringify([auth ?? null, config ?? null, auth === undefined, config === undefined])).digest('hex')
-  let accessToken: string | undefined
-  let subject: string | undefined
+  let account: { tokenHash: string; workspace: string } | undefined
   try {
     const stored = auth ? JSON.parse(auth) as { auth_mode?: unknown; tokens?: { account_id?: unknown; access_token?: unknown } } : undefined
     if (stored?.auth_mode === undefined || stored.auth_mode === 'chatgpt') {
       const { account_id, access_token } = stored?.tokens ?? {}
-      if (typeof access_token === 'string' && access_token) accessToken = access_token
-      if (accessToken && typeof account_id === 'string' && account_id.trim()) subject = 'chatgpt:terminal-workspace:' + account_id
+      if (typeof access_token === 'string' && access_token && typeof account_id === 'string' && account_id.trim())
+        account = { tokenHash: createHash('sha256').update(access_token).digest('hex'), workspace: account_id }
     }
   } catch {
     // Invalid or unavailable credentials cannot identify the terminal account.
   }
-  return { fingerprint, observable: Boolean(accessToken) && config !== undefined, subject }
+  return { fingerprint, account: config === undefined ? undefined : account }
 }
 
 interface TerminalAuth {
@@ -1444,12 +1458,12 @@ export class CodexProviderService {
    * Mousse neither refreshes nor writes Codex's tokens). Undefined for any other sign-in, or a Codex
    * that does not answer with one.
    */
-  private async chatGptToken(conn: CodexConnection, signal: AbortSignal): Promise<string | undefined> {
+  private async chatGptToken(conn: CodexConnection, signal?: AbortSignal): Promise<string | undefined> {
     try {
       const status = await conn.request('getAuthStatus', { includeToken: true, refreshToken: false }, { timeoutMs: 15_000, signal })
       return status.authMethod === 'chatgpt' && typeof status.authToken === 'string' && status.authToken ? status.authToken : undefined
     } catch (error) {
-      if (error instanceof CodexRpcError && !signal.aborted) return undefined
+      if (error instanceof CodexRpcError && !signal?.aborted) return undefined
       throw error
     }
   }
@@ -1514,9 +1528,17 @@ export class CodexProviderService {
         : classifyAccount(await conn!.request('account/read', { refreshToken: false }, { timeoutMs: 15_000, signal }), this.options.ownSignIn)
       if (terminal && result.kind === 'signed_in') {
         const fileStore = await (signal ? abortable(terminal.fileStore, signal) : terminal.fileStore)
-        terminal.coldOnly = !fileStore || !terminal.atLaunch.observable
-        if (!terminal.coldOnly && terminal.atLaunch.subject)
-          nativeSubject = JSON.stringify([terminal.atLaunch.subject, result.email?.trim().toLowerCase() ?? null])
+        const fileAccount = terminal.atLaunch.account
+        if (fileStore && fileAccount && !terminal.coldOnly) {
+          // config/read reloads disk policy. The app-server may have opened another store at startup.
+          const token = await this.chatGptToken(conn!, signal).catch(() => undefined)
+          signal?.throwIfAborted()
+          const workspace = token && createHash('sha256').update(token).digest('hex') === fileAccount.tokenHash
+            ? chatGptTokenWorkspace(token) : undefined
+          if (!terminal.coldOnly && workspace === fileAccount.workspace)
+            nativeSubject = JSON.stringify(['chatgpt:terminal-workspace:' + workspace, result.email?.trim().toLowerCase() ?? null])
+        }
+        if (!nativeSubject) terminal.coldOnly = true
         if (nativeSubject) result = { ...result, subject: nativeSubject }
       } else if (result.kind === 'signed_in') nativeSubject = result.subject
     } catch (error) {
@@ -2451,7 +2473,7 @@ export class CodexProviderService {
         return conn
       })
     ready.catch(() => conn.close())
-    // The effective store includes system and profile config. Only a verified file store makes auth.json authoritative.
+    // The current store includes system and profile config. Native reuse also checks the running credential.
     const terminal: TerminalAuth | undefined = terminalAuth && {
       ...terminalAuth,
       fileStore: ready.then(() => conn.request('config/read', { cwd: this.dir }, { timeoutMs: 5_000 }))
@@ -3153,7 +3175,12 @@ export class CodexProviderService {
 
   /** The run no longer receives the thread's events and nothing waits for it. */
   private release(run: TurnRun): void {
-    if (this.turns.get(run.codexThreadId) === run) this.turns.delete(run.codexThreadId)
+    if (this.turns.get(run.codexThreadId) === run) {
+      this.turns.delete(run.codexThreadId)
+      const app = this.app
+      // Stop can release the reservation while the sweep still keeps this thread busy.
+      if (app && app.conn === run.conn) this.wakeCapacityWaiters(app)
+    }
     run.tree = undefined
     run.settled()
     void this.recycleAfterLastTurn()?.catch(() => undefined)

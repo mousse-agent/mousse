@@ -24,6 +24,7 @@ import {
   type CodexServiceOptions
 } from '../src/mms/harness/vendors/codex/CodexProviderService'
 import { codexMcpConfigOverrides } from '../src/mms/run/mcp/attachment'
+import { codexFixtureAccessToken } from '../src/mms/run/testkit/codexAppServerReplay'
 import { CODEX_ONE_SHOT_FEATURES_OFF, codexOneShotRunsOn } from '../src/mms/harness/vendors/codex/oneShot'
 import { CHATGPT_CODEX_BASE_URL, type CodexDirectStream } from '../src/mms/harness/vendors/codex/directOneShot'
 import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream } from '@earendil-works/pi-ai'
@@ -38,6 +39,15 @@ function scriptedServer(answer: (message: Message, launchIndex: number) => Reply
   const processes: Array<EventEmitter & CodexProcess & { stdout: PassThrough }> = []
   const launch = (spec: CodexLaunch): CodexProcess => {
     const launchIndex = launches.push(spec) - 1
+    const authHome = spec.env.CODEX_HOME ?? join(home, '.codex')
+    let startupToken: string | undefined
+    if (authHome.startsWith(home)) {
+      try {
+        startupToken = JSON.parse(readFileSync(join(authHome, 'auth.json'), 'utf8')).tokens?.access_token
+      } catch {
+        // No file-backed credentials for this process.
+      }
+    }
     const stdout = new PassThrough()
     const stdin = new PassThrough()
     const process = Object.assign(new EventEmitter(), {
@@ -66,6 +76,9 @@ function scriptedServer(answer: (message: Message, launchIndex: number) => Reply
         // The fixture defaults to Codex's file store unless the test supplies a config or an error.
         if (message.method === 'config/read' && !reply?.error &&
             !(reply?.result && typeof reply.result === 'object' && 'config' in reply.result)) reply = { result: { config: {} } }
+        if (message.method === 'getAuthStatus' && !reply?.error &&
+            !(reply?.result && typeof reply.result === 'object' && 'authMethod' in reply.result))
+          reply = { result: { authMethod: 'chatgpt', authToken: startupToken ?? null } }
         if (reply) stdout.write(JSON.stringify({ id: message.id, ...reply }) + '\n')
       }
     })
@@ -77,9 +90,12 @@ function scriptedServer(answer: (message: Message, launchIndex: number) => Reply
 
 const chatgpt = { result: { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, requiresOpenaiAuth: true } }
 
-function writeTerminalAuth(dir: string, workspace: string | undefined, token = 'fixture-token'): void {
+function writeTerminalAuth(dir: string, workspace: string | undefined, signature?: string): void {
   mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt', tokens: { account_id: workspace, access_token: token } }))
+  writeFileSync(join(dir, 'auth.json'), JSON.stringify({
+    auth_mode: 'chatgpt',
+    tokens: { account_id: workspace, access_token: codexFixtureAccessToken(workspace, signature) }
+  }))
 }
 
 let home: string
@@ -108,13 +124,14 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true })
 })
 
-function create(server: Pick<ReturnType<typeof scriptedServer>, 'launch'>, settings: Record<string, unknown> = {}): CodexProviderService {
+function create(server: Pick<ReturnType<typeof scriptedServer>, 'launch'>, settings: Record<string, unknown> = {}, options: CodexServiceOptions = {}): CodexProviderService {
   mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
   writeFileSync(join(home, 'providers', 'codex', 'settings.json'), JSON.stringify({ binaryPath: binary, ...settings }))
   // The instance config's launch settings and sign-out flag, as the gateway hands them over.
   const service = new CodexProviderService(home, questions, { launch: server.launch }, {
     launch: () => ({ binaryPath: binary }),
-    signedOut: () => signedOut
+    signedOut: () => signedOut,
+    ...options
   })
   services.push(service)
   return service
@@ -282,7 +299,7 @@ describe('CodexProviderService', () => {
     expect(launch.env.CODEX_API_KEY).toBeUndefined()
     expect('CODEX_HOME' in launch.env).toBe(false)
     expect(launch.env.PATH).toBe(process.env.PATH)
-    expect(server.methods()).toEqual(['initialize', 'initialized', 'config/read', 'account/read'])
+    expect(server.methods()).toEqual(['initialize', 'initialized', 'config/read', 'account/read', 'getAuthStatus'])
   })
 
   it('caches the account check for five minutes; Recheck and expiry check again', async () => {
@@ -466,11 +483,12 @@ describe('CodexProviderService options (managed Codex)', () => {
   type Turn = { status: 'completed' | 'failed'; error?: unknown }
 
   /** A server that runs turns: threads answer with `provider`, every turn ends as `turn` says. */
-  function turnServer(options: { provider?: (method: string) => string; turn?: () => Turn | null; compact?: () => Turn | 'unknown'; resume?: 'missing' | 'another'; beforeOpen?: (message: Message) => boolean; account?: (launchIndex: number) => Reply; authStore?: string | ((launch: number) => string) } = {}) {
+  function turnServer(options: { provider?: (method: string) => string; turn?: () => Turn | null; compact?: () => Turn | 'unknown'; resume?: 'missing' | 'another'; beforeOpen?: (message: Message) => boolean; account?: (launchIndex: number) => Reply; authStatus?: (launchIndex: number) => Reply; authStore?: string | ((launch: number) => string) } = {}) {
     let threads = 0
     const server = scriptedServer((message, launchIndex) => {
       const method = message.method!
       if (method === 'account/read') return options.account?.(launchIndex) ?? chatgpt
+      if (method === 'getAuthStatus' && options.authStatus) return options.authStatus(launchIndex)
       if (method === 'config/read') {
         const store = typeof options.authStore === 'function' ? options.authStore(launchIndex) : options.authStore
         return { result: { config: { cli_auth_credentials_store: store } } }
@@ -612,6 +630,39 @@ describe('CodexProviderService options (managed Codex)', () => {
     expect(JSON.stringify(server.requests('turn/start')[1])).toContain('file-backed conversation')
     expect(JSON.stringify(server.requests('turn/start')[2])).toContain('keyring-backed conversation')
     expect(server.processes.every((process) => process.signalCode === 'SIGTERM')).toBe(true)
+  })
+
+  it('rebuilds the transcript when config/read switches to file after Codex opened the keyring', async () => {
+    let systemStore = 'file'
+    const startedWith: string[] = []
+    let startFromKeyring = false
+    const server = turnServer({
+      authStore: (launch) => {
+        if (startedWith[launch] === 'keyring') systemStore = 'file'
+        return systemStore
+      },
+      authStatus: (launch) => ({
+        result: { authMethod: 'chatgpt', authToken: codexFixtureAccessToken(startedWith[launch] === 'keyring' ? 'workspace-two' : 'workspace-one') }
+      })
+    })
+    const service = create({ launch: (spec) => {
+      if (startFromKeyring) systemStore = 'keyring'
+      startedWith.push(systemStore)
+      return server.launch(spec)
+    } }, { models: [{ id: 'gpt-x', label: 'GPT X' }] })
+
+    const first = await chat(service)
+    service.commitConversation('t', 'file workspace transcript')
+    await service.stopAll('restart for the new system policy')
+    startFromKeyring = true
+    // The file stayed on disk, and account/read reports the same email in both workspaces.
+    const second = await chat(service, { history: 'file workspace transcript' })
+
+    expect(startedWith).toContain('keyring')
+    expect(systemStore).toBe('file')
+    expect(second.codexThreadId).not.toBe(first.codexThreadId)
+    expect(server.requests('thread/resume')).toHaveLength(0)
+    expect(JSON.stringify(server.requests('turn/start').at(-1))).toContain('file workspace transcript')
   })
 
   it('the existing CLI pins openai on start, fork and resume', async () => {
@@ -973,6 +1024,7 @@ describe('CodexProviderService options (managed Codex)', () => {
       const server = scriptedServer((message) => {
         const method = message.method!
         if (method === 'account/read') return chatgpt
+        if (method === 'getAuthStatus') return { result: { authMethod: 'chatgpt', authToken: null } }
         if (method === 'model/list') return { result: { data: models, nextCursor: null } }
         if (method === 'config/read') return mcp ? { result: { config: { mcp_servers: mcp }, layers: [] } } : { error: { code: -32603, message: 'config unreadable' } }
         if (method === 'thread/start') {
@@ -1122,7 +1174,7 @@ describe('CodexProviderService options (managed Codex)', () => {
         const server = scriptedServer((message) => {
           const method = message.method!
           if (method === 'account/read') return chatgpt
-          if (method === 'getAuthStatus') return { result: auth }
+          if (method === 'getAuthStatus') return { result: { authMethod: null, ...auth } }
           if (method === 'model/list') return { result: { data: LISTED, nextCursor: null } }
           if (method === 'config/read') return { result: { config: { mcp_servers: {} }, layers: [] } }
           return { result: {} }
@@ -1145,7 +1197,9 @@ describe('CodexProviderService options (managed Codex)', () => {
         const answer = await service.oneShot({ model: 'gpt-v2:low', system: 'Name the chat.', prompt: 'Request: fix the login redirect', onActivity }, new AbortController().signal)
         expect(answer).toEqual({ text: 'Login redirect fix' })
         // Codex's token as it holds it: Mousse never asks Codex to refresh it.
-        expect(server.requests('getAuthStatus').map((message) => message.params)).toEqual([{ includeToken: true, refreshToken: false }])
+        const authChecks = server.requests('getAuthStatus')
+        expect(authChecks.length).toBeGreaterThan(0)
+        for (const { params } of authChecks) expect(params).toEqual({ includeToken: true, refreshToken: false })
         // No Codex thread or turn runs.
         expect(server.requests('thread/start')).toEqual([])
         expect(server.requests('turn/start')).toEqual([])
@@ -1244,7 +1298,7 @@ describe('CodexProviderService options (managed Codex)', () => {
       let mode: 'answer' | 'fail' | 'hold' = 'answer'
       const server = scriptedServer((message) => {
         const method = message.method!
-        if (method === 'account/read') return chatgpt
+        if (method === 'getAuthStatus') return { result: { authMethod: 'chatgpt', authToken: null } }
         if (method === 'model/list') return { result: { data: LISTED, nextCursor: null } }
         if (method === 'config/read') return { result: { config: { mcp_servers: {} }, layers: [] } }
         if (method === 'thread/start') return { result: { thread: { id: 'thr-once' }, model: 'gpt-x', modelProvider: 'openai', cwd: home } }
@@ -1259,7 +1313,9 @@ describe('CodexProviderService options (managed Codex)', () => {
         }
         return { result: {} }
       })
-      const service = create(server)
+      const service = create(server, {}, {
+        account: { read: async () => ({ kind: 'signed_in', planType: 'plus', email: null, subject: 'chatgpt:account' }) }
+      })
       await service.status()
       const baseline = connectionListeners(service)
       for (let run = 0; run < 3; run += 1) {
@@ -1680,6 +1736,57 @@ describe('CodexProviderService options (managed Codex)', () => {
         }
       }
     )
+
+    it('admits a queued ninth Send after a stopped turn finishes settling', async () => {
+      let holdTurn = true
+      const server = turnServer({ provider: () => MANAGED, turn: () => holdTurn ? null : { status: 'completed' } })
+      let reads = 0
+      const service = managed(server, { account: { read: async () => {
+        reads += 1
+        return { kind: 'signed_in', planType: 'plus', email: null, subject: 'chatgpt:account' }
+      } } })
+      const lifetime = new AbortController()
+      const stop = new AbortController()
+      const pending: Array<Promise<unknown>> = []
+      const start = (threadId: string, signal = lifetime.signal) => {
+        const turn = chat(service, { threadId, signal })
+        void turn.catch(() => undefined)
+        pending.push(turn)
+        return turn
+      }
+      try {
+        const stopped = start('stopped', stop.signal)
+        await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(1))
+        const victim = (server.requests('turn/start')[0]!.params as { threadId: string }).threadId
+        for (let index = 1; index < CODEX_MAX_LOADED_THREADS; index++) start('active-' + index)
+        await vi.waitFor(() => expect(server.requests('turn/start')).toHaveLength(CODEX_MAX_LOADED_THREADS))
+
+        const readsBefore = reads
+        const queued = start('ninth')
+        await vi.waitFor(() => expect(reads).toBeGreaterThan(readsBefore))
+        expect(server.requests('thread/start')).toHaveLength(CODEX_MAX_LOADED_THREADS)
+
+        stop.abort(new Error('Stopped'))
+        await expect(stopped).rejects.toThrow('Stopped')
+        expect(server.requests('turn/interrupt').map((message) => message.params)).toContainEqual({ threadId: victim, turnId: 'turn-1' })
+        expect(server.requests('thread/unsubscribe')).toHaveLength(0)
+
+        const notify = (method: string, params: unknown) => server.processes[0]!.stdout.write(JSON.stringify({ method, params }) + '\n')
+        notify('turn/completed', { threadId: victim, turn: { id: 'turn-1', status: 'interrupted', error: null } })
+        await vi.waitFor(() => expect(server.requests('thread/unsubscribe').map((message) => message.params)).toEqual([{ threadId: victim }]))
+        holdTurn = false
+        notify('thread/closed', { threadId: victim })
+
+        expect((await queued).codexThreadId).not.toBe(victim)
+        expect(server.requests('turn/start')).toHaveLength(CODEX_MAX_LOADED_THREADS + 1)
+        expect(server.launches).toHaveLength(1)
+      } finally {
+        stop.abort()
+        lifetime.abort()
+        await service.stop()
+        await Promise.allSettled(pending)
+      }
+    })
 
     it('recycles when unsubscribe acknowledges without confirming unload', async () => {
       const server = turnServer({ provider: () => MANAGED })
