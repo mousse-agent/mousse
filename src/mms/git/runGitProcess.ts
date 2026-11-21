@@ -131,7 +131,7 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
       return
     }
     // A command that may be stopped leads a process group of its own off Windows, so stopping it reaches what it started.
-    const ownGroup = scope !== undefined && process.platform !== 'win32'
+    const ownGroup = (scope !== undefined || options.timeout !== undefined) && process.platform !== 'win32'
     // The lock of the private index the command works on, and whether it was already there before the command started:
     // only a lock that was not, and was made since, can be the stopped command's.
     const startedAt = Date.now()
@@ -178,7 +178,7 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
       if (settled || error) return
       error = Object.assign(new Error(`spawnSync git ${code}`), { code, syscall: 'spawnSync git' })
       if (cancelQueuedGit(child)) return
-      if (!scope) { child.kill(); return }
+      if (!scope && code !== 'ETIMEDOUT') { child.kill(); return }
       stoppingTree = true
       // From the stop, not from when the output closes: something that escaped the kill may hold it open for good. The
       // run ends at this deadline whatever the kill or a look at the process list is still doing.
@@ -188,23 +188,28 @@ export function runGitProcess(argv: string[], options: { cwd: string; env: NodeJ
       const stopping = gitChildSpawned(child).then(() => child.pid ? StoppedGitTree.stop(child, gitChildStartedAt(child, spawnedAt)).then(async (tree) => ({ tree, gone: await goneBy(tree, deadline) })) : undefined)
       const atDeadline = sleep(GIT_STOP_TIMING.exitWaitMs).then(() => 'deadline' as const)
       void (async () => {
-        const first = await Promise.race([stopping, atDeadline])
-        if (first !== 'deadline' && (!first || first.gone)) cleanLock()
-        else {
-          // Something of it may still be there. The run ends now, so the work can end; the caller keeps the repository
-          // locked until the watch sees it gone, and then the lock is cleaned up.
-          let watched: StoppedGitTree | undefined
-          scope.survivors.push({
-            pids: () => watched?.pids() ?? (child.pid ? [child.pid] : []),
-            gone: (async () => {
-              const settled = await stopping
-              if (settled && !settled.gone) {
-                watched = settled.tree
-                await watchSurvivors(settled.tree, () => ({ command: argv.slice(0, 4).join(' '), cwd: options.cwd }))
-              }
-              cleanLock()
-            })()
-          })
+        let watched: StoppedGitTree | undefined
+        const waitForSurvivors = async (): Promise<void> => {
+          const stopped = await stopping
+          if (stopped && !stopped.gone) {
+            watched = stopped.tree
+            await watchSurvivors(stopped.tree, () => ({ command: argv.slice(0, 4).join(' '), cwd: options.cwd }))
+          }
+          cleanLock()
+        }
+        if (!scope) {
+          // Timeouts outside a cancellation scope have no deferred lease release. Wait here for the process tree.
+          await waitForSurvivors()
+        } else {
+          const first = await Promise.race([stopping, atDeadline])
+          if (first !== 'deadline' && (!first || first.gone)) cleanLock()
+          else {
+            // End the run now. A surviving process keeps the repository locked until the watch sees it gone.
+            scope.survivors.push({
+              pids: () => watched?.pids() ?? (child.pid ? [child.pid] : []),
+              gone: waitForSurvivors()
+            })
+          }
         }
         // The output is not waited for: a process that escaped the kill may hold it open.
         for (const stream of [child.stdin, child.stdout, child.stderr]) stream?.destroy()
