@@ -253,6 +253,20 @@
       "expiresAt": "2026-11-20T12:53:30.178Z"
     },
     {
+      "task": "receipt-release-outside-lease",
+      "session": "Animatrix-92964c",
+      "machine": "Animatrix",
+      "branch": "receipt-release-outside-lease",
+      "paths": [
+        "src/mms/actions/ReceiptRefReleaseService.ts",
+        "src/mms/actions/UndoRetentionSweeper.ts",
+        "src/mms/lifecycle/ownershipDiscovery.ts",
+        "src/mms/git/RepositoryLease.ts"
+      ],
+      "claimedAt": "2026-11-21T05:51:10.179Z",
+      "expiresAt": "2026-11-21T07:51:10.179Z"
+    },
+    {
       "task": "sidebar-branch-without-git-reads",
       "session": "Animatrix-4b6bd9",
       "machine": "Animatrix",
