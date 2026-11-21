@@ -7,6 +7,7 @@ import { withGitMutationLocks } from './GitOperationCoordinator'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { enableVersionedLifecycleWriter } from '../queue/ThreadLifecycleAdmission'
 import { readActions } from './actionsFile'
+import { requireLiveUndoRef } from './undoRefClaims'
 
 interface RetentionEvent {
   version: 1
@@ -279,12 +280,18 @@ export class UndoRetentionService {
 
   async pin(workspacePath: string, actionId: string, pinned: boolean, human: boolean, reason = 'Saved checkpoint'): Promise<void> {
     if (!human) throw new Error('Only a human-controlled action can pin an Undo checkpoint indefinitely.')
-    await withGitMutationLocks(this.threadDirectory, workspacePath, 'undo-retention-pin', () => {
+    await withGitMutationLocks(this.threadDirectory, workspacePath, 'undo-retention-pin', async (repository) => {
       this.sweepHeld()
       const action = this.actions().find((item) => item.id === actionId)
       if (!action) throw new Error('Action not found.')
       const state = this.state(), id = this.key(action)
       if (state.expired.has(id)) throw new Error('Expired Undo checkpoints cannot be pinned or recreated.')
+      if (pinned && action.receiptId) {
+        const receipt = this.receipts().find((item) => item.id === action.receiptId)
+        if (!receipt) throw new Error('This Undo checkpoint is no longer available.')
+        await requireLiveUndoRef(repository, workspacePath, receipt.id, 'before', receipt.beforeSha)
+        await requireLiveUndoRef(repository, workspacePath, receipt.id, 'after', receipt.afterSha)
+      }
       this.append({ kind: 'pin', at: state.highWater, ids: [id], pinned, reason: reason.slice(0, 512) })
     })
   }

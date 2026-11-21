@@ -214,10 +214,10 @@ export async function getExternalResourceClaims(current: ResourceLifecycleStore,
 
 /**
  * {@link getExternalResourceClaims} from facts already read, synchronously: the records are read now with nothing
- * awaited, and anything the facts do not cover fails closed.
+ * awaited, and anything the facts do not cover fails closed. `missed` hears of each fact that was not there.
  */
-export function getExternalResourceClaimsFromFacts(current: ResourceLifecycleStore, ownedIds: Set<string>, facts: OwnershipFacts): ExternalClaims {
-  return claimsFrom(current, ownedIds, finalReads(facts))
+export function getExternalResourceClaimsFromFacts(current: ResourceLifecycleStore, ownedIds: Set<string>, facts: OwnershipFacts, missed?: (what: string) => void): ExternalClaims {
+  return claimsFrom(current, ownedIds, finalReads(facts, missed))
 }
 
 function claimsFrom(current: ResourceLifecycleStore, ownedIds: Set<string>, reads: OwnershipReads): ExternalClaims {

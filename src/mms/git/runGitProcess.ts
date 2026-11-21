@@ -35,7 +35,7 @@ const cancellation = new AsyncLocalStorage<GitCancellation>()
 /**
  * Work whose Git commands (run through {@link runGitProcess}) end with `signal`: a command not yet started then fails
  * at once, and one running is stopped with everything it started. A command that writes a ref is left to finish (it is
- * quick, and a stopped one would leave the ref's lock file behind).
+ * quick, and a stopped one can leave the ref's lock file behind).
  *
  * A stopped command's run ends once its processes are confirmed gone, or {@link GIT_STOP_TIMING}`.exitWaitMs` after the
  * stop when some are still there (one stuck in the file system can outlive a kill, and one that escaped the kill can

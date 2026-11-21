@@ -4639,15 +4639,16 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       }
       // What still waits after this attempt, in plain words: recovery reports the truth, not only that it ran.
       const left = await threadRecovery(operation.threadDirectory, operation.projectPath)
-      const stillWaiting = !left ? undefined
+      const stillWaiting = !left
+        ? releaseRetained && `old Undo history could not be released yet: ${releaseRetained}`
         : publish.some((item) => item.state === 'pending') && left.kind === 'publish' ? "the project folder can't be read, so Mousse can't tell yet whether the Publish reached its branch"
-        : releaseRetained && left.operationType === 'undo-ref-release' ? `old Undo history could not be released yet: ${releaseRetained}`
         : left.kind === 'merge' ? 'a merge from an earlier version is still in progress; abort it, or finish it with Git'
         : left.operationType ? `recovery could not finish the ${left.operationType} operation: ${left.reason}` : left.reason
       return {
         ok: true,
-        settled: !left,
-        ...(left ? { recovery: left, stillWaiting } : {}),
+        settled: !left && !releaseRetained,
+        ...(left ? { recovery: left } : {}),
+        ...(stillWaiting ? { stillWaiting } : {}),
         ...(cancelledIntegrations.length ? { cancelledIntegrations } : {})
       }
     }

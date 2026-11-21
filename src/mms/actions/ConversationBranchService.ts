@@ -17,6 +17,8 @@ import { gitAsync, LISTING, mergeTreesAsync, refuseUnsafeChangesAsync, treeOfAsy
 import { restoreCommandsText, restoreKindOf } from './restoreCommands'
 import { coverageNotice, exactBytesNotice, exactTreeOfAsync, namedGapsAsync, leftAsIsNotice, moveOutcome, moveProgressAsync, plannedExactAsync, plannedExactGapsAsync, preservedNotice, restoreChangeAsync, snapshotOfTreeAsync, takeSnapshotAsync, type Snapshot } from './snapshots'
 import { retentionWindowText } from '../../shared/undoRetention'
+import type { RepositoryIdentity } from '../git/RepositoryIdentity'
+import { requireLiveUndoRef } from './undoRefClaims'
 
 /** The thread's first conversation branch: the one every thread starts on. */
 export const FIRST_BRANCH_ID = 'main'
@@ -493,10 +495,10 @@ export class ConversationBranchService {
     at: 'start' | 'end' = 'end',
     assertIdle?: () => void
   ): Promise<ConversationBranch> {
-    return withGitMutationLocks(this.threadDirectory, workspacePath, 'conversation-fork', async () => {
+    return withGitMutationLocks(this.threadDirectory, workspacePath, 'conversation-fork', async (repository) => {
       assertIdle?.()
       this.actions.assertExpectedRevision(expectedJournalRevision)
-      return this.forkHeld(workspacePath, sourceBranchId, actionId, name, codeMode, at)
+      return this.forkHeld(workspacePath, repository, sourceBranchId, actionId, name, codeMode, at)
     })
   }
 
@@ -518,11 +520,11 @@ export class ConversationBranchService {
       saveContext: (leaving: ConversationBranchId) => void | Promise<void>
     }
   ): Promise<ConversationBranchActivation> {
-    return withGitMutationLocks(this.threadDirectory, workspacePath, 'conversation-edit', async () => {
+    return withGitMutationLocks(this.threadDirectory, workspacePath, 'conversation-edit', async (repository) => {
       hooks.assertIdle?.()
       this.actions.assertExpectedRevision(hooks.expectedJournalRevision)
       await hooks.saveContext(sourceBranchId)
-      const branch = await this.forkHeld(workspacePath, sourceBranchId, actionId, name, 'current', 'start')
+      const branch = await this.forkHeld(workspacePath, repository, sourceBranchId, actionId, name, 'current', 'start')
       await hooks.created(branch)
       return this.activateHeld(workspacePath, branch.id, hooks.restoreContext, hooks.saveContext)
     })
@@ -530,6 +532,7 @@ export class ConversationBranchService {
 
   private async forkHeld(
     workspacePath: string,
+    repository: RepositoryIdentity,
     sourceBranchId: ConversationBranchId,
     actionId: string,
     name: string,
@@ -545,7 +548,10 @@ export class ConversationBranchService {
       // have finished, so a prompt after a stopped turn, or the first prompt, can be edited.
       if (!action || (at === 'end' ? action.state !== 'completed' : action.state === 'running')) throw new Error(at === 'end' ? 'Fork requires a completed action.' : 'Wait for the turn to finish before editing its prompt.')
       new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
-      if (codeMode === 'historical' && at === 'end') new UndoRetentionService(this.threadDirectory).assertAvailable(action)
+      if (codeMode === 'historical' && at === 'end') {
+        new UndoRetentionService(this.threadDirectory).assertAvailable(action)
+        if (action.receiptId) await requireLiveUndoRef(repository, workspacePath, action.receiptId, 'after', action.endSha)
+      }
       if (action.conversationBranchId !== sourceBranchId) throw new Error('Action does not belong to the source conversation branch.')
       const boundary = at === 'start' ? action.nativeContextStartBoundary : action.nativeContextBoundary
       if (!boundary?.safeBoundaryProof || (at === 'start' && boundary.fidelity === 'legacy')) throw new Error('The selected turn has no validated native-context boundary.')

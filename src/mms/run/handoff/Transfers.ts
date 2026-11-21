@@ -75,6 +75,12 @@ export class ContextTransfers {
       .map(toTransfer)
   }
 
+  /** Forks with a checkpoint that boot may still need to retire. */
+  listForksWithPins(): TransferRecord[] {
+    return this.db.statement("SELECT * FROM context_transfers WHERE type = 'fork' AND json_extract(payload, '$.pinnedCheckpoint') = 1")
+      .all().map(toTransfer)
+  }
+
   /** Pending transfers of `type` waiting on `targetThreadId`, oldest first. */
   listPending(targetThreadId: string, type?: TransferType): TransferRecord[] {
     return this.db
