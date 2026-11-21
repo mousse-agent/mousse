@@ -74,6 +74,7 @@ import {
 import { claudeActionOf, claudeChildToolDenial, claudePermissionKey } from './childPolicy'
 import { CancelInProgress, claudeQueryProcess, DEFAULT_LIVE_TIMINGS, LiveSession, noteClaudeQuerySpawn, type ClaudeProcess, type LiveRun, type LiveTimings } from './liveSession'
 import { reapProcessTree, type SpawnedRoot } from '../../stopProcesses'
+import { spawnWindowsJobProcess, type WindowsJobProcess } from '../../windowsJobProcess'
 import { CLAUDE_TURN_EXTRA_ARGS, TurnFrames } from './turnFrames'
 import { providerApiError, providerReportedError, providerStatusError, readUsageLimit } from '../../../orchestrator/providerErrors'
 import type { ProviderRetries } from '../../../../shared/providerRetry'
@@ -1367,7 +1368,7 @@ export class ClaudeSubscriptionProviderService {
   /** One request on a process of its own, started now, with `prompt` as its input. */
   private async runOneShot(prompt: string, options: Options, controller: AbortController, spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }> {
     signal.throwIfAborted()
-    const { query, close } = this.openOneShot(prompt, options, controller)
+    const { query, close } = this.openOneShot(prompt, options, controller, oneShotUsesSpare(spec.task))
     const abort = (): void => close(signal.reason)
     if (signal.aborted) abort()
     else signal.addEventListener('abort', abort, { once: true })
@@ -1452,7 +1453,7 @@ export class ClaudeSubscriptionProviderService {
     this.dropOneShotSpare()
     const controller = new AbortController()
     const input = new OneShotInput()
-    const { query, close } = this.openOneShot(input, { ...options, abortController: controller }, controller, () => input.end())
+    const { query, close } = this.openOneShot(input, { ...options, abortController: controller }, controller, true, () => input.end())
     const spare: OneShotSpare = { key, generation, input, controller, query, close, timer: setTimeout(() => this.dropOneShotSpare(spare), ONE_SHOT_SPARE_IDLE_MS) }
     spare.timer.unref?.()
     // One that could not start is dropped; a request that took it meanwhile starts its own.
@@ -1468,14 +1469,39 @@ export class ClaudeSubscriptionProviderService {
    * Owns pending and running one-shots. Register cleanup as soon as a query is closed or aborted, so logout
    * and shutdown wait even when the SDK has not returned the query yet.
    */
-  private openOneShot(prompt: string | OneShotInput, options: Options, controller: AbortController, end?: () => void): { query: Promise<Query>; close: (reason?: unknown) => void } {
+  private openOneShot(prompt: string | OneShotInput, options: Options, controller: AbortController, naming: boolean, end?: () => void): { query: Promise<Query>; close: (reason?: unknown) => void } {
+    let job: WindowsJobProcess | undefined
+    let closing = false
+    if (naming && process.platform === 'win32') {
+      const stderr = options.stderr
+      options = { ...options, spawnClaudeCodeProcess: (target) => {
+        if (closing || job) throw new Error('The Windows naming process is already started or closed')
+        job = spawnWindowsJobProcess(target)
+        const child = job.child
+        child.on('message', (pid) => {
+          if (typeof pid === 'number') trackChildProcess({ pid, once: (_event, listener) => child.once('exit', listener) }, 'claude')
+        })
+        child.stderr.setEncoding('utf8').on('data', (data: string) => stderr?.(data))
+        return child
+      } }
+    }
     const query = this.createQuery(prompt, options)
+    const report = (error: unknown): void => console.warn('[claude-subscription] a one-shot process could not be ended', { error: error instanceof Error ? error.message : String(error) })
     const close = (reason?: unknown): void => {
       if (!this.oneShotClosers.delete(close)) return
+      closing = true
       const abort = (): void => { controller.abort(reason); end?.() }
-      const reaping = query.then((started) => this.reapOneShot(started, abort), abort)
-        .catch((error: unknown) => console.warn('[claude-subscription] a one-shot process could not be ended', { error: error instanceof Error ? error.message : String(error) }))
-        .finally(() => this.oneShotReaping.delete(reaping))
+      let stopped: Promise<void>
+      if (job) {
+        // The job is ours even if the query has not returned, or its process already exited. Its stop never uses stdin.
+        stopped = job.stop()
+        abort()
+        void query.then((started) => started.close()).catch(report)
+      } else {
+        stopped = query.then((started) => this.reapOneShot(started, abort), abort).catch(report)
+      }
+      const reaping = stopped.finally(() => this.oneShotReaping.delete(reaping))
+      void reaping.catch(report)
       this.oneShotReaping.add(reaping)
     }
     this.oneShotClosers.add(close)

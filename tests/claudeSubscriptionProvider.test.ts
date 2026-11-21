@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -649,6 +649,64 @@ describe('Claude Subscription native provider', () => {
         }
         if (parent?.exitCode === null && parent.signalCode === null) parent.kill('SIGKILL')
         await service.stop()
+      }
+    }, 30_000)
+
+    it.runIf(process.platform === 'win32').each(['logout', 'stop'] as const)('%s empties the Windows job after a late detached child outlives its parent', async (method) => {
+      let root: ChildProcess | undefined
+      let descendant: number | undefined
+      const { started, query } = processes(() => 'answer', () => root)
+      const { service, home } = fixture((input) => {
+        if (started.length === 1) {
+          const args = ['-e', `
+            const { spawn } = require('node:child_process')
+            const { existsSync, writeFileSync } = require('node:fs')
+            writeFileSync('parent-pid', String(process.pid))
+            const timer = setInterval(() => {
+              if (!existsSync('start-child')) return
+              clearInterval(timer)
+              const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true })
+              child.on('spawn', () => {
+                writeFileSync('descendant-pid', String(child.pid))
+                process.exit(0)
+              })
+            }, 10)
+          `]
+          const target = { cwd: home, env: process.env }
+          root = (input.options.spawnClaudeCodeProcess
+            ? input.options.spawnClaudeCodeProcess({ command: nodeExecutable, args, ...target, signal: new AbortController().signal })
+            : spawn(nodeExecutable, args, { ...target, windowsHide: true })) as ChildProcess
+        }
+        return query(input)
+      }, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      const hasExited = (pid: number) => {
+        try { process.kill(pid, 0); return false } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+          return true
+        }
+      }
+      try {
+        await ask(service, 'title', 'First Send')
+        await vi.waitFor(() => expect(existsSync(join(home, 'parent-pid'))).toBe(true), { timeout: 10_000 })
+        const parent = Number(readFileSync(join(home, 'parent-pid'), 'utf8'))
+        expect(hasExited(parent)).toBe(false)
+        writeFileSync(join(home, 'start-child'), '')
+        await vi.waitFor(() => expect(hasExited(parent)).toBe(true), { timeout: 10_000 })
+        descendant = Number(readFileSync(join(home, 'descendant-pid'), 'utf8'))
+        expect(hasExited(descendant)).toBe(false)
+        await service[method]()
+        expect(hasExited(descendant)).toBe(true)
+        expect(hasExited(root!.pid!)).toBe(true)
+      } finally {
+        await service.stop()
+        if (descendant && !hasExited(descendant)) {
+          process.kill(descendant, 'SIGKILL')
+          await vi.waitFor(() => expect(hasExited(descendant!)).toBe(true))
+        }
+        if (root?.pid && !hasExited(root.pid)) {
+          root.kill('SIGKILL')
+          await vi.waitFor(() => expect(hasExited(root!.pid!)).toBe(true))
+        }
       }
     }, 30_000)
 

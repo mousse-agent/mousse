@@ -36,10 +36,11 @@ import type {
   WorkspaceExecutionContext
 } from '../../shared/workspace'
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '../git/repoPrograms'
+import { branchReflogIdentity } from '../git/branchReflogIdentity'
 import { DEFAULT_BRANCH_PREFIX, isAcceptableThreadBranchName } from '../../shared/mousseBranches'
 import { branchNamingFor, requestBranchName, temporaryBranchName } from './branchNaming'
 import type { NamingOrigin } from '../harness/driver'
-import { BRANCH_RECORD_OPERATIONS, BRANCH_RENAME_OPERATION, threadBranchRecord, type ThreadBranchRecord } from './threadBranchRecords'
+import { BRANCH_RECORD_OPERATIONS, BRANCH_RENAME_OPERATION, threadBranchRecord, type PendingBranchRename, type ThreadBranchRecord } from './threadBranchRecords'
 import { threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { timeGitSync } from '../diagnostics/turnBoundary'
@@ -626,7 +627,7 @@ export class ThreadWorkspaceManager {
 
   /** Whether a rename of the worktree's branch has no outcome recorded; reads only the journal's index of latest records. */
   branchRenamePending(): boolean {
-    for (const entry of this.journal.latestByOperation().values()) if (entry.operationType === BRANCH_RENAME_OPERATION && entry.state === 'planned') return true
+    for (const entry of this.journal.latestByOperation().values()) if (entry.operationType === BRANCH_RENAME_OPERATION && (entry.state === 'planned' || entry.state === 'git_applied')) return true
     return false
   }
 
@@ -677,8 +678,8 @@ export class ThreadWorkspaceManager {
    * at most 30 seconds). Returns 'renamed', or why the branch keeps its name.
    *
    * Each step leaves a state a stop can be settled from: the journal's planned record first (Mousse still owns only
-   * `from`), then Git's rename, then workspace.json, then the completed record that moves ownership to `to`. A stop in
-   * between is settled from the repository (`settleBranchRename`).
+   * `from`), then Git's rename, its verification, workspace.json and the completed record that moves ownership to `to`.
+   * A stop in between is settled with the verification and the repository (`settleBranchRename`).
    */
   async renameOwnBranch(from: string, to: string, signal?: AbortSignal): Promise<string> {
     if (!isAcceptableThreadBranchName(to) || to === from) return 'the name is not usable'
@@ -704,23 +705,34 @@ export class ThreadWorkspaceManager {
       if (!await pathExists(current.worktreePath)) return 'the worktree is not there'
       const fromRef = `refs/heads/${from}`
       if ((await tryGit(current.worktreePath, ['symbolic-ref', '-q', 'HEAD'])).stdout !== fromRef) return 'the worktree is on another branch'
-      const fromSha = (await this.headRefs(primary)).get(fromRef)
-      if (!fromSha) return 'the branch is gone'
+      if (!(await this.headRefs(primary)).has(fromRef)) return 'the branch is gone'
       // Pushed already (an upstream is set): the remote branch keeps the old name, and pushing or opening a pull request
       // from the renamed one would fail, so it keeps its name.
       if ((await tryGit(primary, ['config', '--get', `branch.${from}.remote`])).stdout) return 'the branch has an upstream'
       if (await this.branchNameTaken(primary, to)) return 'the name is taken'
       if (signal?.aborted) return 'naming was cancelled'
+      const commonDir = repository.gitCommonDirectory
+      const original = branchReflogIdentity(commonDir, fromRef)
+      if (!original) return 'the branch has no verifiable reflog'
       const operationId = randomUUID()
-      const intent = this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: { from, to, worktreePath: current.worktreePath, fromSha } })
+      const plan = { from, to, worktreePath: current.worktreePath, fromReflogId: original.id }
+      const intent = this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: plan })
+      const pending = { ...plan, operationId, sequence: intent.sequence }
       try {
-        await withOwnedBranches([from, to], () => git(primary, ['branch', '-m', '--', from, to], undefined, () => signal?.throwIfAborted()))
+        await withOwnedBranches([from, to], () => git(primary, ['branch', '-m', '--', from, to], undefined, () => {
+          signal?.throwIfAborted()
+          if (branchReflogIdentity(commonDir, fromRef)?.version !== original.version) throw new Error('The original branch changed')
+        }))
       } catch (error) {
-        // Git refused (a name another branch's folder holds, for one), or failed part way: the repository says which.
-        const settled = await this.settlePendingRename(primary, current.worktreePath, { from, to, operationId, fromSha })
-        if (settled === 'renamed') return 'renamed'
+        await this.settlePendingRename(primary, commonDir, pending)
         return `Git did not rename it: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`
       }
+      // The successful command must have moved the original reflog. A same-name replacement has a different file.
+      if (branchReflogIdentity(commonDir, `refs/heads/${to}`)?.id !== original.id) {
+        await this.settlePendingRename(primary, commonDir, pending)
+        return 'Git did not move the original branch'
+      }
+      this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'git_applied', details: { reflogId: original.id } })
       this.recordBranchName(from, to)
       this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'completed', details: { intentSequence: intent.sequence, from, to } })
       return 'renamed'
@@ -730,10 +742,9 @@ export class ThreadWorkspaceManager {
   }
 
   /**
-   * Settles a rename a stop left without an outcome. A destination branch must carry Git's reflog entry for this
-   * rename, even if it is already checked out or has the expected tip. If Git moved the ref and logged the rename
-   * before it could update HEAD, recovery finishes the HEAD update. When the outcome is uncertain, both names are
-   * given up. Takes the repository's lease unless the caller holds it.
+   * Settles a rename a stop left without an outcome. The destination must still have the original branch's reflog
+   * and the journal must show that this operation verified Git moved it. When the outcome is uncertain, both names
+   * are given up. Takes the repository's lease unless the caller holds it.
    */
   async settleBranchRename(options: { holdingRepositoryLease?: boolean; signal?: AbortSignal } = {}): Promise<void> {
     const metadata = this.load()
@@ -743,31 +754,27 @@ export class ThreadWorkspaceManager {
     if (!pending || this.hasReconstructionManifest(metadata)) return
     if (!metadata.integrationTarget?.checkoutPath) return
     const repository = await this.resolveRepositoryAsync(metadata.integrationTarget.checkoutPath)
-    if (!repository.capability.gitBacked) return
+    if (!repository.capability.gitBacked || repository.repositoryId !== metadata.repositoryId) return
     const lease = options.holdingRepositoryLease ? undefined : await acquireWorkspaceRepositoryLease(await resolveRepositoryIdentityAsync(repository.gitTopLevel, { requireMutationCapability: true }), options.signal)
     try {
       const again = this.branchRecord(this.load()).pending
-      if (again?.operationId === pending.operationId) await this.settlePendingRename(repository.primaryCheckoutPath, pending.worktreePath, pending)
+      if (again?.operationId === pending.operationId) await this.settlePendingRename(repository.primaryCheckoutPath, repository.gitCommonDirectory, again)
     } finally {
       lease?.release()
     }
   }
 
-  private async settlePendingRename(primary: string, worktreePath: string, pending: { from: string; to: string; operationId: string; fromSha?: string }): Promise<'renamed' | 'not-renamed' | 'unknown'> {
-    const { from, to, operationId, fromSha } = pending
+  private async settlePendingRename(primary: string, commonDir: string, pending: PendingBranchRename): Promise<void> {
+    const { from, to, worktreePath, operationId, fromReflogId, gitApplied } = pending
     // Exact-case ref lookup so a case-only sibling on Windows/macOS is never mistaken for `to` or `from`.
     const refs = await this.headRefs(primary)
     const fromRef = `refs/heads/${from}`
     const toRef = `refs/heads/${to}`
     const fromTip = refs.get(fromRef)
     const toTip = refs.get(toRef)
-    let outcome: 'renamed' | 'not-renamed' | 'unknown' = fromTip && !toTip ? 'not-renamed' : 'unknown'
-    if (!fromTip && toTip && (!fromSha || toTip === fromSha || (await tryGit(primary, ['merge-base', '--is-ancestor', fromSha, toTip])).ok)) {
-      const log = await tryGit(primary, ['reflog', 'show', '--format=%gs', toRef, '--'])
-      // The last rename or copy must be the planned rename. Checkout and commit history alone leave the ref ambiguous.
-      const lastMove = log.stdout.split(/\r?\n/).find((message) => /^Branch: (renamed|copied) /.test(message))
-      if (log.ok && lastMove === `Branch: renamed ${fromRef} to ${toRef}`) outcome = 'renamed'
-    }
+    const renamed = gitApplied && !fromTip && toTip && branchReflogIdentity(commonDir, toRef)?.id === fromReflogId
+    const unchanged = !gitApplied && fromTip && !toTip && fromReflogId && branchReflogIdentity(commonDir, fromRef)?.id === fromReflogId
+    const outcome = renamed ? 'renamed' : unchanged ? 'not-renamed' : 'unknown'
     const head = outcome === 'renamed' && await pathExists(worktreePath)
       ? (await tryGit(worktreePath, ['symbolic-ref', '-q', 'HEAD'])).stdout : ''
     if (outcome === 'renamed' && head === fromRef) {
@@ -776,17 +783,16 @@ export class ThreadWorkspaceManager {
       } catch (error) {
         rethrowGitPolicyError(error)
         // HEAD could not be moved: nothing is recorded, and the next turn settles it again.
-        return 'unknown'
+        return
       }
     }
     if (outcome === 'renamed') {
       this.recordBranchName(from, to)
-      this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'completed', details: { from, to, settled: true, proof: 'rename-reflog' } })
+      this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'completed', details: { from, to, settled: true } })
     } else {
       if (outcome === 'not-renamed') this.recordBranchName(to, from)
       this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: outcome === 'unknown' ? 'cancelled' : 'failed', details: { from, to, settled: true, ...(outcome === 'unknown' ? { disowned: true } : {}) } })
     }
-    return outcome
   }
 
   /** Points workspace.json at `to` when it names `from`; every other field stays as written. */

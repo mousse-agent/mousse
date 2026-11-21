@@ -201,6 +201,43 @@ describe("a new chat's thread while its first turn is set up", () => {
     } finally { snapshot.resolve() }
   })
 
+  it('keeps the temporary Git branch until a workflow Send accepts its first message', async () => {
+    const w = world()
+    const draft = w.emptyThread()
+    w.d.settings.title = { ...w.d.settings.title, ...PI }
+    const oneShot = vi.fn(async () => ({ text: 'workflow-release' }))
+    ;(w.d.orch as unknown as { harness: { oneShot: unknown } }).harness.oneShot = oneShot
+    const admitted = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const run = {
+      invocationId: 'fixture-invocation', profileId: 'profile', threadId: draft.id, definitionId: 'definition',
+      revisionId: 'revision', runId: 'workflow-run', title: 'Release', state: 'running' as const
+    }
+    w.d.orch.setWorkflowChatExecutor({
+      prepare: async () => { throw new Error('not used') },
+      execute: async () => { admitted.resolve(); await release.promise; return run },
+      observe: async () => { throw new Error('not used') },
+      abandon: () => undefined
+    })
+    const renaming = vi.spyOn(ThreadWorkspaceManager.prototype, 'renameOwnBranch')
+    const send = w.d.orch.send({ content: '/release', mode: 'agent', workflowInvocationId: run.invocationId }, false, { threadId: draft.id, clientRequestId: 'workflow-first' })
+    try {
+      await admitted.promise
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      await Promise.allSettled(renaming.mock.results.map(({ value }) => value))
+      expect(w.d.orch.getMessages(draft.id)).toEqual([])
+      expect(w.localBranches()).toContainEqual(expect.stringMatching(/^mousse\/[0-9a-f]{8}$/))
+      expect(w.localBranches()).not.toContain('mousse/workflow-release')
+      release.resolve()
+      await expect(send).resolves.toMatchObject({ workflowRun: run })
+      expect(w.d.orch.getMessages(draft.id)).toContainEqual(expect.objectContaining({ role: 'user', workflowInvocationId: run.invocationId }))
+      await waitFor(() => w.localBranches().includes('mousse/workflow-release'), 'the accepted workflow branch name', 30_000)
+    } finally {
+      release.resolve()
+      await send.catch(() => undefined)
+    }
+  })
+
   it('ignores a naming answer that arrives after Stop reaches a running provider', async () => {
     const reply = Promise.withResolvers<string>()
     const w = world(() => reply.promise)

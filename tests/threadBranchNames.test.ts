@@ -241,30 +241,36 @@ describe('what Undo says about Git work after the branch was renamed', () => {
 
 describe('a rename a stop interrupted is settled from the repository', () => {
   /** A ready worktree on a temporary branch, and a planned rename to `fix/login-button` as the journal records it first. */
-  async function interrupted() {
+  async function interrupted(at: 'planned' | 'git_applied' | 'completed' = 'planned') {
     const dir = threadDir('one')
     const manager = new ThreadWorkspaceManager(dir)
     const made = await manager.provision('thread-one', 'main', repo)
     const fromSha = git(repo, 'rev-parse', made.branch)
-    manager.journal.append({ operationId: 'rename-1', operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: { from: made.branch, to: 'fix/login-button', worktreePath: made.worktreePath, fromSha } })
+    const append = manager.journal.append.bind(manager.journal)
+    const interrupt = vi.spyOn(manager.journal, 'append').mockImplementation((record) => {
+      if (record.operationType === BRANCH_RENAME_OPERATION && record.state === at) {
+        if (at === 'planned') append(record)
+        throw new Error('rename interrupted')
+      }
+      return append(record)
+    })
+    try { await expect(manager.renameOwnBranch(made.branch, 'fix/login-button')).rejects.toThrow('rename interrupted') }
+    finally { interrupt.mockRestore() }
     return { dir, manager, made, from: made.branch, to: 'fix/login-button', fromSha }
   }
 
   // Each row: what happened before the stop, then what Mousse owns once the next turn settles it.
   it.each([
-    ['only the journal\'s planned record', () => undefined, 'from'],
-    ['Git renamed the branch; workspace.json not yet written', (f: Awaited<ReturnType<typeof interrupted>>) => git(repo, 'branch', '-m', f.from, f.to), 'to'],
-    ['Git renamed the branch and workspace.json names it', (f: Awaited<ReturnType<typeof interrupted>>) => {
-      git(repo, 'branch', '-m', f.from, f.to)
-      writeFileSync(join(f.dir, 'workspace.json'), JSON.stringify({ ...workspace(f.dir), branch: f.to }))
+    ['only the planned record, with the source still intact', 'planned', () => undefined, 'from'],
+    ['Mousse verified the rename before workspace.json was written', 'completed', (f: Awaited<ReturnType<typeof interrupted>>) => {
+      writeFileSync(join(f.dir, 'workspace.json'), JSON.stringify({ ...workspace(f.dir), branch: f.from }))
     }, 'to'],
-    // A crash after Git renamed the ref and wrote its reflog can leave the checkout on the old name.
-    ['Git recorded the rename but HEAD still names the old ref', (f: Awaited<ReturnType<typeof interrupted>>) => {
-      git(repo, 'branch', '-m', f.from, f.to)
+    ['Mousse verified the rename and workspace.json names it', 'completed', () => undefined, 'to'],
+    ['Mousse verified the rename and HEAD now names the old ref', 'completed', (f: Awaited<ReturnType<typeof interrupted>>) => {
       git(f.made.worktreePath, 'symbolic-ref', 'HEAD', `refs/heads/${f.from}`)
     }, 'to']
-  ] as const)('%s', async (_case, before, owner) => {
-    const f = await interrupted()
+  ] as const)('%s', async (_case, at, before, owner) => {
+    const f = await interrupted(at)
     before(f)
     // While unsettled, nothing may rename it again.
     expect(await f.manager.renameOwnBranch(workspace(f.dir).branch, 'fix/other')).not.toBe('renamed')
@@ -292,6 +298,30 @@ describe('a rename a stop interrupted is settled from the repository', () => {
     expect([...f.manager.branchRecord().owned]).toEqual([])
     expect(git(repo, 'rev-parse', f.to)).toBe(f.fromSha)
     expect(git(f.made.worktreePath, 'symbolic-ref', 'HEAD')).toBe(head)
+  })
+
+  it('does not claim a replacement that Git renamed from the old name at the same commit', async () => {
+    const f = await interrupted()
+    git(repo, 'update-ref', '-d', `refs/heads/${f.from}`)
+    git(repo, 'branch', f.from, f.fromSha)
+    git(repo, 'branch', '-m', f.from, f.to)
+    const toRef = `refs/heads/${f.to}`
+    expect(git(repo, 'reflog', 'show', '--format=%gs', toRef).split(/\r?\n/)[0]).toBe(`Branch: renamed refs/heads/${f.from} to ${toRef}`)
+    const head = git(f.made.worktreePath, 'symbolic-ref', 'HEAD')
+    await f.manager.settleBranchRename()
+    expect(f.manager.branchRecord().pending).toBeUndefined()
+    expect(f.manager.branchRecord().owned.size).toBe(0)
+    expect(git(repo, 'rev-parse', toRef)).toBe(f.fromSha)
+    expect(git(f.made.worktreePath, 'symbolic-ref', 'HEAD')).toBe(head)
+  })
+
+  it('leaves the destination alone when Git succeeded but Mousse did not record verification', async () => {
+    const f = await interrupted('git_applied')
+    await f.manager.settleBranchRename()
+    expect(f.manager.branchRecord().pending).toBeUndefined()
+    expect(f.manager.branchRecord().owned.size).toBe(0)
+    expect(git(repo, 'rev-parse', f.to)).toBe(f.fromSha)
+    expect(git(f.made.worktreePath, 'symbolic-ref', 'HEAD')).toBe(`refs/heads/${f.to}`)
   })
 
   it('a branch of the new name that holds other commits is not the renamed one: Mousse gives up both names and moves nothing', async () => {

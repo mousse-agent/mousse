@@ -585,8 +585,11 @@ export class ResourceLifecycleStore {
       for (const item of purge.items) {
         if (!item.id || ids.has(item.id) || !purge.ownedTaskIds.includes(item.ownerTaskId) || !['worktree', 'ref', 'path', 'scheduled-row'].includes(item.kind) || !['pending', 'removed', 'retained'].includes(item.status) || item.discardRequired && !purge.discardAuthorized) throw new ResourceLifecycleError('ambiguous', 'Invalid purge resource progress')
         ids.add(item.id)
-        // A thread's branch outside `refs/heads/mousse/` was proved Mousse's from its thread's journal when the preview was made.
-        const recordedBranch = item.recordedBranch === true && item.identity.startsWith('refs/heads/') && isAcceptableThreadBranchName(item.identity.slice('refs/heads/'.length))
+        const branch = item.kind === 'ref' && item.identity.startsWith('refs/heads/')
+        const proof = item.branchProvenance
+        if (proof !== undefined && (!branch || !proof || typeof proof.worktreePath !== 'string' || !isAbsolute(proof.worktreePath) || !/^[a-f0-9]{64}$/.test(proof.reflogVersion))) throw new ResourceLifecycleError('ambiguous', 'Invalid purge branch provenance')
+        if (item.retainedReason !== undefined && (item.status !== 'retained' || typeof item.retainedReason !== 'string')) throw new ResourceLifecycleError('ambiguous', 'Invalid purge retention progress')
+        const recordedBranch = (proof !== undefined || item.recordedBranch === true) && branch && isAcceptableThreadBranchName(item.identity.slice('refs/heads/'.length))
         if (item.kind === 'ref' && (!(isMousseOwnedRef(item.identity) || recordedBranch) || !/^[a-f0-9]{40,64}$/.test(item.expectedValue ?? '') || !isAbsolute(item.commonDir ?? ''))) throw new ResourceLifecycleError('ambiguous', 'Invalid purge reference intent')
         if (item.kind === 'path') {
           assertLifecyclePath(this.profileHome, item.identity)
@@ -597,7 +600,7 @@ export class ResourceLifecycleStore {
         if (item.manifestPath) assertLifecyclePath(this.root, item.manifestPath)
         if (item.kind === 'scheduled-row' && ![join(this.profileHome, 'mousse.conf'), join(this.profileHome, 'scheduled', 'jobs-runtime.json')].includes(item.sourcePath ?? '')) throw new ResourceLifecycleError('ambiguous', 'Purge configuration intent is invalid')
       }
-      const original = { schemaVersion: purge.schemaVersion, taskId: purge.taskId, generation: purge.generation, digest: '', items: purge.items.map((item) => ({ ...item, status: 'pending', ...(item.discardState ? { discardState: 'pending' } : {}) })), ownedTaskIds: purge.ownedTaskIds, blockers: purge.blockers, retained: purge.retained, exclusiveBytes: purge.exclusiveBytes, ...(purge.keepWork ? { keepWork: true } : {}) }
+      const original = { schemaVersion: purge.schemaVersion, taskId: purge.taskId, generation: purge.generation, digest: '', items: purge.items.map(({ retainedReason: _retainedReason, ...item }) => ({ ...item, status: 'pending', ...(item.discardState ? { discardState: 'pending' } : {}) })), ownedTaskIds: purge.ownedTaskIds, blockers: purge.blockers, retained: purge.retained, exclusiveBytes: purge.exclusiveBytes, ...(purge.keepWork ? { keepWork: true } : {}) }
       if (createHash('sha256').update(JSON.stringify(original)).digest('hex') !== purge.digest) throw new ResourceLifecycleError('ambiguous', 'Purge intent digest does not match its immutable resource plan')
     }
     const ids = new Set<string>()

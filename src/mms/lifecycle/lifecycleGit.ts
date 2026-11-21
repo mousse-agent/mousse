@@ -1,7 +1,11 @@
+import { spawn } from 'node:child_process'
+import { createInterface } from 'node:readline'
 import { gitDirectoryEnvAsync } from '../git/gitEnv'
 import { READ_ONLY_GIT_ENV } from '../git/readOnlyGit'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
+import { gitEnvFor, gitFile } from '../git/gitExecutable'
+import { timeGitChild } from '../diagnostics/turnBoundary'
 
 /**
  * Git for lifecycle work, without blocking the daemon: it waits until the folder's volume answers, runs the central
@@ -17,6 +21,40 @@ export async function lifecycleGitAsync(cwd: string, args: string[], input?: str
   if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
   return ran.stdout.trimEnd()
 }
+/** Deletes a branch only if its provenance still holds after Git locks the ref and verifies the old tip. */
+export async function deleteVerifiedBranchAsync(cwd: string, ref: string, sha: string, verify: () => boolean): Promise<boolean> {
+  const prepare = `start\ndelete ${ref} ${sha}\nprepare\n`
+  const args = await withoutRepoProgramsAsync(cwd, ['update-ref', '--no-deref', '--stdin'], { stdin: prepare + 'commit\n' })
+  const env = gitEnvFor(repoProgramEnv({ ...process.env, ...await gitDirectoryEnvAsync(cwd) }))
+  return new Promise((resolve, reject) => {
+    const child = timeGitChild(() => spawn(gitFile(), args, { cwd, env, windowsHide: true, stdio: 'pipe' }))
+    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity })
+    let verified: boolean | undefined
+    let failure: unknown
+    let stderr = ''
+    const timer = setTimeout(() => {
+      failure = new Error('Git timed out preparing a branch deletion')
+      child.stdin.end()
+    }, 30_000)
+    child.stderr.setEncoding('utf8').on('data', (data: string) => { stderr = (stderr + data).slice(-4096) })
+    child.stdin.on('error', (error) => { failure ??= error })
+    child.on('error', (error) => { failure ??= error })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      lines.close()
+      if (failure) reject(failure)
+      else if (code !== 0 || verified === undefined) reject(new Error(stderr.trim() || 'Git could not prepare the branch deletion'))
+      else resolve(verified)
+    })
+    lines.on('line', (line) => {
+      if (line !== 'prepare: ok' || failure) return
+      try { verified = verify() } catch (error) { failure = error }
+      child.stdin.end(verified ? 'commit\n' : 'abort\n')
+    })
+    child.stdin.write(prepare)
+  })
+}
+
 /** A lifecycle read (a preview, the checks before a delete): it never refreshes the index and never fetches a missing object. */
 export function lifecycleReadAsync(cwd: string, args: string[], input?: string, maxBuffer?: number): Promise<string> {
   return lifecycleGitAsync(cwd, args, input, maxBuffer, READ_ONLY_GIT_ENV)

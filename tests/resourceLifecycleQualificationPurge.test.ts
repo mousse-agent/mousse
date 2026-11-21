@@ -38,4 +38,4 @@ it('does not dereference a user branch substituted after the irreversible purge 
     expect(existsSync(store.require('task').location)).toBe(true)
     await expect(coordinator.restore({ taskId: 'task', operationId: 'qualification-restore' })).rejects.toThrow(/purge-started/)
   } finally { f.dispose() }
-}, 30_000)
+}, process.platform === 'win32' ? 60_000 : 30_000)

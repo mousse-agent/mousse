@@ -15,8 +15,9 @@ import { projectFolderPurgeRefs, threadKeptFilesRefs } from './projectFolderRefs
 import { measureTree } from './diskMeasure'
 import { assertLifecyclePath, assertLifecyclePathAsync, ResourceLifecycleStore } from './ResourceLifecycleStore'
 import { lockReasonSync, WorktreeRetirementService } from './WorktreeRetirementService'
-import { lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
+import { deleteVerifiedBranchAsync, lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
 import { READ_ONLY_GIT_ENV } from '../git/readOnlyGit'
+import { branchReflogIdentity } from '../git/branchReflogIdentity'
 import { assertFrozenEntryUnchanged, lockedText, proveFrozenContentEntryAsync, walkOwnedContentAsync } from './verifiedDelete'
 import { isOwnerLive, PROCESS_INSTANCE_ID } from '../queue/processLiveness'
 import { claimOverlapsPath, getExternalResourceClaims, getExternalResourceClaimsFromFacts, repositoryTargetAsync, unverifiedOwnerOver, type ClaimTarget } from './LifecycleClaims'
@@ -655,7 +656,14 @@ export class ResourcePurgeService {
             if ('retained' in verdict) { preview.retained.push({ identity: resource.identity, reason: verdict.retained }); continue }
             if ('blocker' in verdict) throw new Error(verdict.blocker)
             if (!verdict.expectedValue || !commonDir) continue
-            preview.items.push({ id: resource.id, kind: 'ref', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir, expectedValue: verdict.expectedValue, ...(isMousseOwnedRef(resource.identity) ? {} : { recordedBranch: true }), status: 'pending' })
+            const reflogVersion = branchReflogIdentity(commonDir, resource.identity)?.version
+            if (!reflogVersion) { preview.retained.push({ identity: resource.identity, reason: 'Mousse cannot verify the branch reflog; the branch stays' }); continue }
+            const branchProvenance = { worktreePath: thread.workspace.worktreePath, reflogVersion }
+            preview.items.push({ id: resource.id, kind: 'ref', identity: resource.identity, ownerTaskId: resource.ownerTaskId, commonDir, expectedValue: verdict.expectedValue, branchProvenance, status: 'pending' })
+            continue
+          }
+          if (resource.identity.startsWith('refs/heads/')) {
+            preview.retained.push({ identity: resource.identity, reason: 'Mousse has no proof it owns this branch; the branch stays' })
             continue
           }
           if (!isMousseOwnedRef(resource.identity)) throw new Error('Source ref is not Mousse-owned')
@@ -728,10 +736,16 @@ export class ResourcePurgeService {
     } catch { return undefined }
     if (workspace.threadId !== taskId || typeof workspace.worktreePath !== 'string' || `refs/heads/${workspace.branch}` !== ref) return undefined
     const own = { worktreePath: workspace.worktreePath, ...(typeof workspace.retainedRef === 'string' ? { retainedRef: workspace.retainedRef } : {}), ...(typeof workspace.headSha === 'string' ? { headSha: workspace.headSha } : {}) }
+    return { workspace: own, record: this.readThreadBranchRecord(taskId, workspace.worktreePath) }
+  }
+
+  private readThreadBranchRecord(taskId: string, worktreePath: string): ThreadBranchRecord | undefined {
     try {
-      return { workspace: own, record: threadBranchRecord(new ThreadJournal(location, { readOnly: true }).ofTypes(...BRANCH_RECORD_OPERATIONS), { worktreePath: workspace.worktreePath }) }
+      const { location } = this.store.require(taskId)
+      assertLifecyclePath(location, join(location, 'journal'))
+      return threadBranchRecord(new ThreadJournal(location, { readOnly: true }).ofTypes(...BRANCH_RECORD_OPERATIONS), { worktreePath })
     } catch {
-      return { workspace: own }
+      return undefined
     }
   }
   /**
@@ -837,14 +851,16 @@ export class ResourcePurgeService {
       const reservation = record.cleanupOwner!.token
       for (const item of record.purge.items) {
         if (item.status !== 'pending') continue
-        // A purge resumed from an older preview may include a thread branch whose ownership was never proved.
-        const thread = item.kind === 'ref' ? this.threadWorkspaceBranch(item.ownerTaskId, item.identity) : undefined
-        const retained = thread && this.threadBranchRetention(thread.record, item.identity.slice('refs/heads/'.length))
-        if (retained) {
+        const retain = (reason: string): void => {
           record = this.store.update(input.taskId, (current) => {
-            current.purge!.items.find((entry) => entry.id === item.id)!.status = 'retained'
-            current.purge!.retained.push({ identity: item.identity, reason: retained })
+            const progress = current.purge!.items.find((entry) => entry.id === item.id)!
+            progress.status = 'retained'
+            progress.retainedReason = reason
           })
+        }
+        // Older ledgers cannot establish which incarnation of a branch the preview reviewed.
+        if (item.kind === 'ref' && item.identity.startsWith('refs/heads/') && !item.branchProvenance) {
+          retain('The purge recorded no proof of branch ownership; the branch stays')
           continue
         }
         // Peer source records are re-read at each step. Partial failure never weakens another owner's claim.
@@ -853,8 +869,9 @@ export class ResourcePurgeService {
         if (peers.some((peer) => peer.identity === item.identity || target.path !== undefined && claimOverlapsPath(peer, target.path))) throw new Error(`New shared owner retains ${item.identity}`)
         const unverified = unverifiedOwnerOver(peers, target)
         if (unverified) throw new Error(`${unverified.reason} ${item.identity} is kept.`)
-        await this.remove(item, new Set(record.purge!.ownedTaskIds), () => this.store.update(input.taskId, (current) => { current.purge!.items.find((entry) => entry.id === item.id)!.discardState = 'cleared' }), () => this.assertReservation(input.taskId, reservation, record.generation), { taskId: input.taskId, token: reservation, generation: record.generation })
-        record = this.store.update(input.taskId, (current) => { const progress = current.purge!.items.find((entry) => entry.id === item.id)!; progress.status = 'removed'; delete current.purge!.error; delete current.blockedReason })
+        const retained = await this.remove(item, new Set(record.purge!.ownedTaskIds), () => this.store.update(input.taskId, (current) => { current.purge!.items.find((entry) => entry.id === item.id)!.discardState = 'cleared' }), () => this.assertReservation(input.taskId, reservation, record.generation), { taskId: input.taskId, token: reservation, generation: record.generation })
+        if (retained) retain(retained)
+        else record = this.store.update(input.taskId, (current) => { const progress = current.purge!.items.find((entry) => entry.id === item.id)!; progress.status = 'removed'; delete current.purge!.error; delete current.blockedReason })
         await this.hooks.onBoundary?.(record)
       }
       for (const taskId of record.purge!.ownedTaskIds) {
@@ -879,7 +896,7 @@ export class ResourcePurgeService {
       throw descriptor
     } finally { active.delete(key) }
   }
-  private async remove(item: LifecyclePurgeItem, ownedIds: Set<string>, onDiscardCleared: () => unknown, assertReservation: () => void, reservation: { taskId: string; token: string; generation: number }): Promise<void> {
+  private async remove(item: LifecyclePurgeItem, ownedIds: Set<string>, onDiscardCleared: () => unknown, assertReservation: () => void, reservation: { taskId: string; token: string; generation: number }): Promise<string | void> {
     assertReservation()
     if (item.kind === 'scheduled-row') {
       const path = item.sourcePath!
@@ -948,10 +965,24 @@ export class ResourcePurgeService {
         const current = await readDirectLifecycleRefAsync(commonDir, item.identity)
         if (!current) return
         if (current !== item.expectedValue) throw new Error('Owned ref changed after purge preview')
-        const input = `start\ndelete ${item.identity} ${item.expectedValue!}\nprepare\ncommit\n`
-        // The central check runs first, then the ownership check right before the transaction starts, with nothing awaited in between.
-        const remove = () => lifecycleGitAsync(commonDir, ['update-ref', '--no-deref', '--stdin'], input, undefined, undefined, unclaimed)
-        await (item.recordedBranch ? withOwnedBranches([item.identity.slice('refs/heads/'.length)], remove) : remove())
+        if (item.identity.startsWith('refs/heads/')) {
+          const name = item.identity.slice('refs/heads/'.length)
+          const proof = item.branchProvenance
+          if (!proof) return 'The purge recorded no proof of branch ownership; the branch stays'
+          let reason = 'The branch reflog changed since the purge preview; the branch stays'
+          const listing = await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain'])
+          if (listing.split(/\r?\n/).includes(`branch ${item.identity}`)) return 'This branch is checked out; the branch stays'
+          const deleted = await withOwnedBranches([name], () => deleteVerifiedBranchAsync(commonDir, item.identity, current, () => {
+            unclaimed()
+            const retained = this.threadBranchRetention(this.readThreadBranchRecord(item.ownerTaskId, proof.worktreePath), name)
+            if (retained) { reason = retained; return false }
+            return branchReflogIdentity(commonDir, item.identity)?.version === proof.reflogVersion
+          }))
+          if (!deleted) return reason
+          return
+        }
+        const input = `start\ndelete ${item.identity} ${current}\nprepare\ncommit\n`
+        await lifecycleGitAsync(commonDir, ['update-ref', '--no-deref', '--stdin'], input, undefined, undefined, unclaimed)
       }
     } finally { lease.release() }
   }

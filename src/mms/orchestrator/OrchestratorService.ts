@@ -12035,7 +12035,7 @@ export class OrchestratorService extends EventEmitter {
    * except for a private thread's, which is asked for its title alone.
    * A model that fails or names nothing leaves it provisional until the pass after the first reply.
    */
-  private nameThreadOnFirstSend(threadId: string, userContent: string, images: number, setupSignal?: AbortSignal, namingSignal = setupSignal): void {
+  private nameThreadOnFirstSend(threadId: string, userContent: string, images: number, restoreSignal?: AbortSignal, namingSignal = restoreSignal): void {
     if (!this.threadStore || threadId === '__unbound__' || namingSignal?.aborted) return
     const thread = this.threadStore.getThread(threadId)
     if (!thread || !isDefaultThreadName(thread.name) || thread.titleSource === 'user') return
@@ -12043,18 +12043,18 @@ export class OrchestratorService extends EventEmitter {
     const restore = (): void => {
       if (shown) this.writeThreadTitle(threadId, shown, thread.name, thread.titleSource)
     }
-    setupSignal?.addEventListener('abort', restore, { once: true })
+    restoreSignal?.addEventListener('abort', restore, { once: true })
     const fromMessage = heuristicTitle(userContent)
     if (!this.hasTitleModel()) {
       // No model will name it later: a message that names nothing ("hello") is used as written.
       const name = fromMessage || fitTitle(cleanTitleText(userContent).text)
       if (name) shown = this.writeThreadTitle(threadId, thread, name, 'final')
-      if (setupSignal?.aborted) restore()
+      if (restoreSignal?.aborted) restore()
       return
     }
     shown = this.writeThreadTitle(threadId, thread, fromMessage || thread.name, 'provisional')
-    if (setupSignal?.aborted) restore()
-    if (!shown || setupSignal?.aborted) return
+    if (restoreSignal?.aborted) restore()
+    if (!shown || restoreSignal?.aborted) return
     // A private thread's branch is never named from its messages: it is asked for its title alone.
     const naming = thread.localOnly
       ? new Promise<void>((resolve) => setImmediate(resolve)).then(async () => {
@@ -14180,10 +14180,12 @@ export class OrchestratorService extends EventEmitter {
   private async executeWorkflowChatTurn(
     session: ThreadSession,
     request: NormalizedOrchestratorSendRequest,
+    turnAbort: AbortController,
+    onAccepted: () => void,
     opts?: { runId?: string; queueItemId?: string; claimOwnerToken?: string; suppressAutoQueueDrain?: boolean; externalSignal?: AbortSignal; onTurnSettled?: (aborted: boolean) => void; onUserInputAccepted?: () => void }
   ): Promise<OrchestratorResponse> {
     if (!this.workflowChat) throw new Error('Workflow command execution is unavailable')
-    const turn = { abort: new AbortController(), pendingSteer: [] as SteerEntry[] }
+    const turn = { abort: turnAbort, pendingSteer: [] as SteerEntry[] }
     const abort = () => turn.abort.abort()
     if (opts?.externalSignal?.aborted) abort()
     else opts?.externalSignal?.addEventListener('abort', abort, { once: true })
@@ -14214,6 +14216,7 @@ export class OrchestratorService extends EventEmitter {
         this.touchUserActivityAndNotify(session.threadId)
         this.acceptTurnUserInput(session, request.content, undefined, true, opts?.queueItemId, request.mode, run)
       }
+      onAccepted()
       this.notifyUserInputAccepted(session.threadId, opts?.onUserInputAccepted)
       if (!session.messages.some((message) => message.workflowRun?.runId === run.runId)) {
         const content = `Workflow: ${run.title}\nRun: ${run.runId}\nRevision: ${run.revisionId}\nState at admission: ${run.state}`
@@ -14253,8 +14256,12 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** One turn; whatever way it ends, nothing of its app-tool context stays registered. */
-  private async executeTurn(...args: Parameters<OrchestratorService['executeTurnBody']>): Promise<OrchestratorResponse> {
-    const runId = args[3]?.runId
+  private async executeTurn(
+    input: OrchestratorSendInput, reuseLastUser: boolean, displayUserMessage: boolean,
+    opts?: Parameters<OrchestratorService['executeTurnBody']>[4]
+  ): Promise<OrchestratorResponse> {
+    const runId = opts?.runId
+    const admission = { rollback: new AbortController(), accepted: false }
     const threadId = this.session.threadId
     // Where the turn's start and end spend their time, logged for every thread (`turnBoundary.ts`).
     let requestedAt: string | undefined
@@ -14269,8 +14276,9 @@ export class OrchestratorService extends EventEmitter {
         turnBoundaryMark(threadId, 'sharedFolder')
       }
       try {
-        return await this.executeTurnBody(...args)
+        return await this.executeTurnBody(admission, input, reuseLastUser, displayUserMessage, opts)
       } finally {
+        if (!admission.accepted) admission.rollback.abort()
         // A turn that ended before it started (a setup failure, a Stop, a requeue) shows no setup step any more.
         this.endSetupStep(threadId, true)
         if (runId) this.appToolTurns.dropRun(runId)
@@ -14316,9 +14324,10 @@ export class OrchestratorService extends EventEmitter {
   }
 
   private async executeTurnBody(
+    admission: { rollback: AbortController; accepted: boolean },
     input: OrchestratorSendInput,
-    reuseLastUser = false,
-    displayUserMessage = true,
+    reuseLastUser: boolean,
+    displayUserMessage: boolean,
     opts?: {
       source?: string
       queueItemId?: string
@@ -14348,7 +14357,6 @@ export class OrchestratorService extends EventEmitter {
     const queueItemId = opts?.queueItemId
     const claimOwnerToken = opts?.claimOwnerToken
     const suppressAutoQueueDrain = opts?.suppressAutoQueueDrain === true
-    let claimAccepted = false
     if (session.deleted) {
       throw new Error(`Thread deleted: ${session.threadId}`)
     }
@@ -14379,10 +14387,12 @@ export class OrchestratorService extends EventEmitter {
     session.setupStop = setupStop
     const setupSignal = opts?.externalSignal ? AbortSignal.any([opts.externalSignal, setupStop.signal]) : setupStop.signal
     const turnAbort = new AbortController()
-    const namingSignal = AbortSignal.any([setupSignal, turnAbort.signal])
+    const draftTitleSignal = admission.rollback.signal
+    const namingSignal = AbortSignal.any([setupSignal, turnAbort.signal, draftTitleSignal])
     // Ask before the worktree and snapshot. Stop can cancel naming during either setup or the active turn.
-    const namingFirstSend = startedAtAdmission && (typeof input === 'string' || !input.workflowInvocationId)
-    if (namingFirstSend) this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent), setupStop.signal, namingSignal)
+    if (startedAtAdmission && (typeof input === 'string' || !input.workflowInvocationId)) {
+      this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent), draftTitleSignal, namingSignal)
+    }
     this.noteQueueWait(session)
     const turnId = opts?.runId ?? uuidv4()
     // The turn a settle started may start from the last turn's end (`TurnHandoff`). It is taken now, used or not, and
@@ -14533,6 +14543,12 @@ export class OrchestratorService extends EventEmitter {
     // The folder a turn is recorded in when it has no worktree: a project without Git, or a thread with no project.
     let snapshotFolder: SnapshotFolder | undefined
     let firstBranchNameFrom: string | undefined
+    const nameAcceptedFirstBranch = (): void => {
+      const branch = session.workspace?.lifecycle === 'ready' ? session.workspace.branch : undefined
+      if (!firstBranchNameFrom || !branch || namingSignal.aborted) return
+      const directory = this.resolveThreadDir(session.threadId)
+      if (directory) new ThreadWorkspaceManager(directory).nameTemporaryBranch(session.threadId, branch, firstBranchNameFrom, namingSignal)
+    }
     // Resolve the task binding before dispatch. Provisioning failures must not
     // turn an isolated code request into a write to the registered checkout.
     if (session.sharedWorkspace) {
@@ -14574,8 +14590,8 @@ export class OrchestratorService extends EventEmitter {
           try {
             const pending = opts?.agent ? agentMessageWords(request.content, agentOriginOf(opts.agent)) : request.content
             const nameFrom = this.branchNameSource(session.threadId, session.messages, pending)
-            // A worktree can be ready while the first message is still waiting for its snapshot.
-            const namingFirstBranch = namingFirstSend && !session.messages.some((message) => message.role === 'user' && !message.inherited)
+            // The workspace can be ready while the first input still waits for a snapshot or workflow admission.
+            const namingFirstBranch = (startedAtAdmission || Boolean(request.workflowInvocationId)) && !session.messages.some((message) => message.role === 'user' && !message.inherited)
             if (namingFirstBranch) firstBranchNameFrom = nameFrom
             const acceptedNameFrom = namingFirstBranch ? undefined : nameFrom
             await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, namingFirstBranch ? undefined : this.branchNameSource(session.threadId), setupStep)
@@ -14622,7 +14638,11 @@ export class OrchestratorService extends EventEmitter {
     if (request.workflowInvocationId) {
       this.endSetupStep(session.threadId)
       closeRepositoryFacts()
-      return await this.executeWorkflowChatTurn(session, request, opts)
+      setupSignal.throwIfAborted()
+      return await this.executeWorkflowChatTurn(session, request, turnAbort, () => {
+        admission.accepted = true
+        nameAcceptedFirstBranch()
+      }, opts)
     }
 
     let checkpointEnabled = Boolean(session.workspace?.capability.checkpointable) || snapshotFolder !== undefined
@@ -14728,7 +14748,7 @@ export class OrchestratorService extends EventEmitter {
 
     // A thread the admission did not name (the transcript changed during the setup) is named now.
     setupSignal.throwIfAborted()
-    if (!reuseLastUser && displayUserMessage && !startedAtAdmission) this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent), setupStop.signal, namingSignal)
+    if (!reuseLastUser && displayUserMessage && !startedAtAdmission) this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent), draftTitleSignal, namingSignal)
 
     // The mode the turn runs in is known before its message is admitted, so a change reaches the
     // agent with that message and the message records the mode. A bot's turn runs under its grant, never a thread
@@ -14760,7 +14780,7 @@ export class OrchestratorService extends EventEmitter {
             this.runEngine ? opts?.runId : undefined,
             opts?.settleNotice
           )
-          claimAccepted = true
+          admission.accepted = true
           this.notifyUserInputAccepted(session.threadId, opts?.onUserInputAccepted)
         } catch (err) {
           if (queueItemId) {
@@ -14770,7 +14790,7 @@ export class OrchestratorService extends EventEmitter {
             )
             if (status === 'accepted') {
               // Partial write left durable provenance — never release/reappend.
-              claimAccepted = true
+              admission.accepted = true
               this.completeSessionClaim(session, queueItemId, claimOwnerToken)
             }
             // unavailable / not_accepted: outer catch settles claim fail-closed
@@ -14783,7 +14803,7 @@ export class OrchestratorService extends EventEmitter {
         }
       }
     } catch (err) {
-      if (queueItemId && !claimAccepted) {
+      if (queueItemId && !admission.accepted) {
         // Only definite not_accepted may release; accepted completes; unavailable leaves claim.
         this.settleClaimAfterFailure(
           session,
@@ -14924,11 +14944,7 @@ export class OrchestratorService extends EventEmitter {
     session.setupStop = null
     this.noteQueueWait(session)
     this.applyRequestedAbort(session, turn)
-    const branch = session.workspace?.lifecycle === 'ready' ? session.workspace.branch : undefined
-    if (claimAccepted && firstBranchNameFrom && branch && !namingSignal.aborted) {
-      const directory = this.resolveThreadDir(session.threadId)
-      if (directory) new ThreadWorkspaceManager(directory).nameTemporaryBranch(session.threadId, branch, firstBranchNameFrom, namingSignal)
-    }
+    if (admission.accepted) nameAcceptedFirstBranch()
     // The thread runs again: what a Stop held in its queue goes on after this turn, as after any turn that ends.
     if (!turn.abort.signal.aborted) this.releaseStopHold(session)
     // A person's turn lets the settle notices held for them go on after it too.

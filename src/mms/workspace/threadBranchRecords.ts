@@ -33,13 +33,14 @@ export interface BranchRenameIntent {
   from: string
   to: string
   worktreePath: string
-  /** The commit `from` was at when the rename was planned; absent on older records. */
-  fromSha?: string
+  /** The original branch's reflog identity, absent on older records. */
+  fromReflogId?: string
 }
 
 export interface PendingBranchRename extends BranchRenameIntent {
   operationId: string
   sequence: number
+  gitApplied?: true
 }
 
 export interface ThreadBranchRecord {
@@ -70,7 +71,7 @@ export function renameIntentOf(entry: ThreadJournalRecord): BranchRenameIntent |
   const intent = entry.expectedPreState as Partial<BranchRenameIntent> | undefined
   if (typeof intent?.from !== 'string' || typeof intent.to !== 'string' || typeof intent.worktreePath !== 'string') return undefined
   if (!isAcceptableThreadBranchName(intent.to)) return undefined
-  return { from: intent.from, to: intent.to, worktreePath: intent.worktreePath, ...(typeof intent.fromSha === 'string' && /^[0-9a-f]{40,64}$/.test(intent.fromSha) ? { fromSha: intent.fromSha } : {}) }
+  return { from: intent.from, to: intent.to, worktreePath: intent.worktreePath, ...(typeof intent.fromReflogId === 'string' && /^[0-9a-f]{64}$/.test(intent.fromReflogId) ? { fromReflogId: intent.fromReflogId } : {}) }
 }
 
 /** A release or restore record's branch, for the worktree at `at` (any worktree when `at` is undefined). */
@@ -128,10 +129,15 @@ export function threadBranchRecord(entries: readonly ThreadJournalRecord[], opti
       } else {
         const rename = renames.get(entry.operationId)
         if (!rename) continue
+        const details = entry.details as { disowned?: unknown; settled?: unknown; reflogId?: unknown } | undefined
+        if (entry.state === 'git_applied') {
+          if (rename.fromReflogId && details?.reflogId === rename.fromReflogId) rename.gitApplied = true
+          continue
+        }
+        if (entry.state !== 'completed' && entry.state !== 'failed' && entry.state !== 'cancelled') continue
         renames.delete(entry.operationId)
-        const details = entry.details as { disowned?: unknown; settled?: unknown; proof?: unknown } | undefined
-        // Older recovery could report a rename from the destination tip alone.
-        const unproven = entry.state === 'completed' && details?.settled === true && details.proof !== 'rename-reflog'
+        // Older recovery could mistake a replacement's tip or ordinary Git rename message for the original branch.
+        const unproven = entry.state === 'completed' && (details?.settled === true || rename.fromReflogId !== undefined) && !rename.gitApplied
         if (entry.state === 'completed' && !unproven && owned.has(rename.from)) {
           owned.delete(rename.from)
           temporary.delete(rename.from)
