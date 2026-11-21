@@ -12,7 +12,8 @@
  * A 1b routes check runs over one route (`--route`, 1b §14), given to the run as `MOUSSE_NET_ENGINE_CHECK_ROUTE`:
  * each computer gets only that route and every connection must come up on it. `phase1b.routes-app` runs 1a's app
  * cases and its own over it; over `tcp` they run twice, the route mapped to the tailnet class and then the public
- * one (`MOUSSE_NET_ENGINE_CHECK_CLASS`).
+ * one (`MOUSSE_NET_ENGINE_CHECK_CLASS`). `phase1b.routes-cross` is a cross-machine cell over one route (the PC
+ * dials the Mac); over `tcp` it runs once, of the tailnet class.
  *
  * `MOUSSE_NET_ENGINE_CONTROL` (a control's deliberate defect) and `MOUSSE_NET_HELPER` pass through to the run. Each
  * check is a test file under tests/netEngine/checks; its first failed step writes its reason to the run's folder.
@@ -56,15 +57,22 @@ const CHECKS = {
   ],
   'phase1b.link-app': 'tests/netEngine/checks/linkApp.test.ts',
   // Add over SSH (1b §3.4–§3.6).
-  'phase1b.ssh-add-app': 'tests/netEngine/checks/sshAddApp.test.ts'
+  'phase1b.ssh-add-app': 'tests/netEngine/checks/sshAddApp.test.ts',
+  // The PC dials the Mac over one route (1b §14, cross-machine).
+  'phase1b.routes-cross': 'tests/netEngine/checks/routesCross.test.ts'
 }
 /** The checks that run over one route (`--route`), and the routes each takes: the cases checks/phase1b.toml gives. */
 const ROUTED = {
   'phase1b.routes-app': ['tcp', 'ws', 'ssh'],
-  'phase1b.no-rpc-without-grant': ['tcp', 'ws', 'ssh']
+  'phase1b.no-rpc-without-grant': ['tcp', 'ws', 'ssh'],
+  'phase1b.routes-cross': ['tcp', 'ws', 'ssh']
 }
 /** The checks that run as cross-machine cells, one role per computer. */
-const CROSS_MACHINE = new Set(['phase1a.pair-offline', 'phase1a.shared-computer'])
+const CROSS_MACHINE = new Set([
+  'phase1a.pair-offline',
+  'phase1a.shared-computer',
+  'phase1b.routes-cross'
+])
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const usage = `Usage: node scripts/net-engine-check.mjs <${Object.keys(CHECKS).join('|')}> [--out <folder>] [--role host|caller] [--topology <name>] [--route tcp|ws|ssh]`
@@ -123,8 +131,9 @@ if (flags.route) console.log(`route=${flags.route}`)
 const vitest = join(root, 'node_modules', 'vitest', 'vitest.mjs')
 const files = [CHECKS[id]].flat()
 // Over `tcp`, the route is mapped to the tailnet class, then the public one (1b §14). Both always run: the kit
-// asks for connections of both classes, also from a run that failed (a control's), whose first reason stands.
-const passes = flags.route === 'tcp' ? ['tailnet', 'public'] : [undefined]
+// asks for connections of both classes, also from a run that failed (a control's), whose first reason stands. A
+// cross-machine cell runs once, its route of the tailnet class.
+const passes = flags.route === 'tcp' && !flags.role ? ['tailnet', 'public'] : [undefined]
 let failed = false
 for (const cls of passes) {
   if (cls) console.log(`class=${cls}`)

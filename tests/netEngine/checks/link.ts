@@ -10,7 +10,8 @@
  *
  * Without a role, a cell runs both sides in one process over `localLink`, on one fabric.
  *
- * Its defaults are named here, each with its variable: the link's port, how long either side waits for the other
+ * Its defaults are named here, each with its variable: the link's port and address (every interface,
+ * `MOUSSE_NET_ENGINE_CHECK_LINK_IP`), how long either side waits for the other
  * (`MOUSSE_NET_ENGINE_CHECK_LINK_WAIT_MS`, 30 min) and for one answer (`MOUSSE_NET_ENGINE_CHECK_ASK_MS`, 2 min), and
  * where and how long a computer looks for the internet (`MOUSSE_NET_ENGINE_CHECK_INTERNET_PROBES`, three public DNS
  * services on port 443; `MOUSSE_NET_ENGINE_CHECK_PROBE_MS`, 3 s).
@@ -37,6 +38,8 @@ export function topology(fallback: string): string {
 }
 
 const LINK_PORT = Number(process.env.MOUSSE_NET_ENGINE_CHECK_LINK_PORT || 47190)
+/** Where the host listens for its caller: every interface. */
+const LINK_IP = process.env.MOUSSE_NET_ENGINE_CHECK_LINK_IP?.trim() || '0.0.0.0'
 /** How long a caller keeps trying to reach its host, and a host waits for its caller to finish. */
 const LINK_WAIT_MS = Number(process.env.MOUSSE_NET_ENGINE_CHECK_LINK_WAIT_MS || 30 * 60_000)
 const ASK_MS = Number(process.env.MOUSSE_NET_ENGINE_CHECK_ASK_MS || 120_000)
@@ -122,10 +125,18 @@ export function serveLink(handlers: Handlers): Promise<string | undefined> {
       clearTimeout(timer)
       reject(error)
     })
-    server.listen(LINK_PORT, '0.0.0.0', () =>
+    const listening = () =>
       console.log(`host: test link on port ${LINK_PORT}; waiting for the caller`)
-    )
+    // Every interface without naming one: the kit's egress guard refuses the lookup a named address would take.
+    if (LINK_IP === '0.0.0.0') server.listen(LINK_PORT, listening)
+    else server.listen(LINK_PORT, LINK_IP, listening)
   })
+}
+
+/** The host's address as the caller dials it: `MOUSSE_NET_ENGINE_CHECK_HOST` without a port. */
+export function hostAddress(): string {
+  const host = process.env.MOUSSE_NET_ENGINE_CHECK_HOST?.trim() ?? ''
+  return host.includes(':') ? host.slice(0, host.lastIndexOf(':')) : host
 }
 
 /** The caller's side: dials its host, trying again until the host listens. */
