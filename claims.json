@@ -217,13 +217,14 @@
       "machine": "Animatrix",
       "branch": "sidebar-branch-without-git-reads",
       "paths": [
-        "src/mms/workspace/threadHeads.ts",
-        "src/mms/git/GitService.ts",
-        "src/renderer/hooks/useThreadBranch.ts",
-        "src/renderer/hooks/useActiveProjectPath.ts"
+        "src/mms/workspace/ThreadWorkspaceManager.ts",
+        "src/mms/lifecycle/WorktreeRetirementService.ts",
+        "src/renderer/components/FilesPanel.tsx",
+        "tests/gitHeadsDaemon.test.ts",
+        "tests/renderer/filesPanelEmpty.test.ts"
       ],
       "claimedAt": "2026-11-21T04:52:44.669Z",
-      "expiresAt": "2026-11-21T13:02:40.654Z"
+      "expiresAt": "2026-11-21T16:19:45.584Z"
     },
     {
       "task": "starting-thread-is-own-thread",
