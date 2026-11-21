@@ -11,9 +11,8 @@ import { sensitiveFolderContaining, type FolderRuleEnvironment } from './sensiti
  *
  * The protocol handler accepts one from a Mousse window on this computer only. Here are the rules for the
  * path itself, and for a save into it:
- * - it is a full path on a drive of this computer (Windows: `C:\…`; elsewhere `/…`). A network share
- *   (`\\server\share`) is refused, because opening one signs in to that computer with the user's Windows
- *   account; so are Windows device paths (`\\?\…`, `\\.\…`). A share mapped to a drive letter works;
+ * - it is a full path on a drive or a UNC share (`\\server\share`) on Windows, or an absolute path elsewhere.
+ *   Windows device paths (`\\?\…`, `\\.\…`) and UNC pipes and mailslots are refused;
  * - every path of the call stays inside it, as for a thread's folder (`lexicalGuard`);
  * - a save never lands in Git's own folder (`.git`, where hooks and config start programs), in the Mousse
  *   data folders (this computer's keys and every profile), or in the folders that hold the user's sign-ins
@@ -25,7 +24,12 @@ import { sensitiveFolderContaining, type FolderRuleEnvironment } from './sensiti
 export function browsedRootRefusal(root: string, platform: NodeJS.Platform = process.platform): string | undefined {
   if (root.includes('\0')) return 'That is not a folder path.'
   if (platform === 'win32') {
-    if (/^[\\/]{2}/.test(root)) return 'Network and device paths cannot be browsed. Map the share to a drive letter first.'
+    if (/^[\\/]{2}/.test(root)) {
+      const share = /^[\\/]{2}([^\\/]+)[\\/]([^\\/]+)(?:[\\/]|$)/.exec(root)
+      if (!share || /^(?:\.{1,2}|\?)$/.test(share[1]!) || /^(?:\.{1,2}|pipe|mailslot)$/i.test(share[2]!))
+        return 'Enter the full path of a folder on a drive or a UNC share.'
+      return undefined
+    }
     if (!/^[a-zA-Z]:[\\/]/.test(root)) return 'Enter the full path of a folder, starting with its drive.'
     return undefined
   }

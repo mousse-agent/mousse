@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { posix, win32 } from 'node:path'
+import { mkdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { join, posix, resolve, win32 } from 'node:path'
 import { act, createElement, Fragment } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -7,6 +8,7 @@ import { reloadWindow } from '../../src/renderer/services/reloadWindow'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { fileWorkspaceScope, useFileWorkspaceStore } from '../../src/renderer/stores/filesStore'
 import type { GitThreadHead, Thread } from '../../src/shared/types'
+import { ownedTemp } from '../support/tmp'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -81,6 +83,20 @@ const mountFiles = () => act(async () => root.render(createElement(Fragment, nul
 const openLink = (path: string) => act(async () => {
   window.dispatchEvent(new CustomEvent('mousse:open-file', { detail: { path } }))
 })
+const browseTo = async (folder: string) => {
+  if (!tree()) await act(async () => host.querySelector<HTMLButtonElement>('.main-view-tab-select[title="Files"]')!.click())
+  await act(async () => {
+    tree().dispatchEvent(new KeyboardEvent('keydown', { key: 'l', ctrlKey: true, bubbles: true, cancelable: true }))
+  })
+  const input = host.querySelector<HTMLInputElement>('.files-path-input')!
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, folder)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  await act(async () => {
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+  })
+}
 const editor = () => host.querySelector<HTMLTextAreaElement>('.editor-stub')
 const editText = (value: string) => act(async () => {
   const field = editor()!
@@ -176,6 +192,45 @@ describe('Files panel without an open file', () => {
     expect(editor()?.value).toBe('saved notes on D:')
   })
 
+  it.each(['new pick during checkout outage', 'legacy tab reopened after checkout recovery'])('opens a healthy browsed file (%s)', async (scenario) => {
+    const threadId = 'browsed-outside-checkout'
+    const projectId = 'p1'
+    const checkout = 'C:\\checkout'
+    const folder = 'D:\\notes'
+    const path = win32.join(folder, 'notes.txt')
+    const scope = fileWorkspaceScope(useAppStore.getState().profileId, threadId, projectId)
+    const legacy = scenario === 'legacy tab reopened after checkout recovery'
+    threadFolders[threadId] = checkout
+    useAppStore.setState({ activeThreadId: threadId, threads: [{ ...startedThread(threadId), projectId }] })
+    if (legacy) useFileWorkspaceStore.setState({ workspaces: { [scope]: { openPaths: [path], activePath: path } } })
+    const readFile = vi.fn(async (name: string, _project?: string, _thread?: string | null, root?: string) => {
+      if (root !== folder || name !== 'notes.txt') throw new Error('Path is outside the project root')
+      return 'healthy browsed notes'
+    })
+    window.mousse.fs.readFile = readFile
+
+    await mountFiles()
+    if (legacy) expect(host.textContent).toContain('Path is outside the project root')
+    await browseTo(folder)
+    window.mousse.app.getFilesRoot = async () => { throw new Error('Checkout drive not answering') }
+    await act(async () => headsChanged?.({ threadIds: [threadId] }))
+    expect(tree().dataset.listRoot).toBe(folder)
+    if (legacy) {
+      window.mousse.app.getFilesRoot = async () => checkout
+      await act(async () => headsChanged?.({ threadIds: [threadId] }))
+    }
+
+    readFile.mockClear()
+    await act(async () => tree().click())
+    expect(readFile).toHaveBeenCalledWith('notes.txt', undefined, threadId, folder)
+    expect(editor()?.value).toBe('healthy browsed notes')
+    expect(host.querySelectorAll('[aria-label="Close notes.txt"]')).toHaveLength(1)
+
+    readFile.mockClear()
+    await restoreFileTabs()
+    expect(readFile).toHaveBeenCalledWith('notes.txt', undefined, threadId, folder)
+  })
+
   it.each(['saved target', 'older path-only snapshot'])('keeps a restored checkout file scoped to the thread (%s)', async (snapshot) => {
     const threadId = 'recovering-checkout'
     const projectId = 'p1'
@@ -233,6 +288,13 @@ describe('Files panel without an open file', () => {
     expect(disk.get(projectFile)).toBe('same bytes')
     expect(disk.get(worktreeFile)).toBe('same bytes')
     expect(editor()?.value).toBe('my project edit')
+
+    await browseTo(project)
+    await act(async () => tree().click())
+    expect(editor()?.value).toBe('my project edit')
+    await act(async () => { expect(await reloadWindow(reload)).toBe('reloaded') })
+    expect(disk.get(projectFile)).toBe('my project edit')
+    expect(disk.get(worktreeFile)).toBe('same bytes')
   })
 
   it.each([true, false])('opens distinct Windows filenames separately and reuses separator variants (canonical metadata: %s)', async (includeCanonicalPath) => {
@@ -282,6 +344,52 @@ describe('Files panel without an open file', () => {
     expect(host.querySelector('[aria-label="Close notes.txt"]')).toBeNull()
   })
 
+  it.each([false, true])('keeps a junction tab separate from its direct target (retargeted: %s)', async (retargeted) => {
+    const fixture = ownedTemp('mousse-files-junction-')
+    const a = fixture.child('A')
+    const b = fixture.child('B')
+    const junction = fixture.child('junction')
+    const fileA = join(a, 'notes.txt')
+    const fileB = join(b, 'notes.txt')
+    const threadId = 'junction-checkout'
+    try {
+      mkdirSync(a)
+      mkdirSync(b)
+      writeFileSync(fileA, 'same bytes')
+      writeFileSync(fileB, 'same bytes')
+      const linkType = process.platform === 'win32' ? 'junction' : 'dir'
+      symlinkSync(a, junction, linkType)
+      threadFolders[threadId] = fixture.path
+      useAppStore.setState({ activeThreadId: threadId, threads: [{ ...startedThread(threadId), projectId: 'p1' }] })
+      const target = (path: string, folder?: string) => resolve(folder ?? fixture.path, path)
+      window.mousse.fs.readFile = async (path, _project, _thread, folder) => readFileSync(target(path, folder), 'utf8')
+      window.mousse.fs.readFileDetails = async (path, _project, _thread, folder) => {
+        const file = target(path, folder)
+        return { content: readFileSync(file, 'utf8'), canonicalPath: realpathSync.native(file) }
+      }
+      window.mousse.fs.writeFile = async (path, content, _project, _thread, folder) => {
+        writeFileSync(target(path, folder), content)
+      }
+
+      await mountFiles()
+      await openLink(join(junction, 'notes.txt'))
+      expect(editor()?.value).toBe('same bytes')
+      if (retargeted) {
+        unlinkSync(junction)
+        symlinkSync(b, junction, linkType)
+      }
+
+      await openLink(fileA)
+      await editText('edit for A')
+      await act(async () => { await reloadWindow(vi.fn()) })
+      expect(readFileSync(fileA, 'utf8')).toBe('edit for A')
+      expect(readFileSync(fileB, 'utf8')).toBe('same bytes')
+      expect(host.querySelectorAll('[aria-label="Close notes.txt"]')).toHaveLength(2)
+    } finally {
+      await fixture.close()
+    }
+  })
+
   it('opens a picked file in a sibling tab; returning to Files shows the browser', async () => {
     await act(async () => root.render(createElement(Fragment, null, createElement(MainViewTabs), createElement(FilesPanel))))
     await flush()
@@ -317,6 +425,33 @@ describe('the folder the Files tree shows', () => {
     expect(tree().dataset.root).toBe('/home/me/work/app')
     expect(tree().dataset.listRoot).toBe('')
     expect(crumbs()).toEqual(['/', 'home', 'me', 'work', 'app'])
+  })
+
+  it('uses checkout scope for a UNC checkout and preserves the share when browsing elsewhere', async () => {
+    const threadId = 'unc-checkout'
+    const checkout = '\\\\server\\share\\checkout'
+    const folder = '\\\\server\\other-share\\notes'
+    threadFolders[threadId] = checkout
+    useAppStore.setState({ activeThreadId: threadId, threads: [{ ...startedThread(threadId), projectId: 'p1' }] })
+    const readFile = vi.fn(async (name: string, _project?: string, _thread?: string | null, root?: string) => {
+      if (!root && win32.normalize(name) === win32.join(checkout, 'notes.txt')) return 'checkout notes'
+      if (root === folder && name === 'notes.txt') return 'browsed notes'
+      throw new Error('Unexpected file target')
+    })
+    window.mousse.fs.readFile = readFile
+
+    await mountFiles()
+    expect(tree().dataset.root).toBe(checkout)
+    await act(async () => tree().click())
+    expect(editor()?.value).toBe('checkout notes')
+
+    await browseTo('//server/other-share/notes')
+    expect(listDir).toHaveBeenCalledWith('', undefined, threadId, folder)
+    expect(tree().dataset.listRoot).toBe(folder)
+    await act(async () => tree().click())
+    expect(readFile).toHaveBeenLastCalledWith('notes.txt', undefined, threadId, folder)
+    expect(editor()?.value).toBe('browsed notes')
+    expect(host.querySelectorAll('[aria-label="Close notes.txt"]')).toHaveLength(2)
   })
 
   it('is home for a thread without a folder', async () => {

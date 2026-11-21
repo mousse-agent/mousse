@@ -93,11 +93,11 @@ describe('a folder the Files panel browses outside the thread', () => {
     expect(existsSync(join(browsed, 'notes', 'new.txt'))).toBe(false)
   })
 
-  it('must be a full path of this computer, and a refused one is never touched', async () => {
+  it('must be a full drive or share path, and a refused one is never touched', async () => {
     const probed: string[] = []
     folderAccess.reset({ probe: async (path) => { probed.push(path) }, commonDir: async () => null })
     const refused = process.platform === 'win32'
-      ? ['notes', '.\\notes', '\\Users', 'C:Users', '\\\\server\\share', '//server/share', '\\\\?\\C:\\', '\\\\.\\PhysicalDrive0', '\\\\?\\UNC\\server\\share']
+      ? ['notes', '.\\notes', '\\Users', 'C:Users', '\\\\server', '//server/', '\\\\server\\pipe', '\\\\?\\C:\\', '\\\\.\\PhysicalDrive0', '\\\\?\\UNC\\server\\share']
       : ['notes', './notes', '~/notes']
     for (const root of refused)
       await expect(call(window(), 'files.list', { root, path: '' }), root).rejects.toMatchObject({ code: 'invalid_params' })
@@ -160,10 +160,13 @@ describe('a folder the Files panel browses outside the thread', () => {
 })
 
 describe('the rules for a browsed folder', () => {
-  it('takes a drive path on Windows and a / path elsewhere, never a share or a device', () => {
+  it('takes drive and UNC share paths on Windows and / paths elsewhere, and refuses devices', () => {
     expect(browsedRootRefusal('C:\\Users\\me', 'win32')).toBeUndefined()
     expect(browsedRootRefusal('d:/notes', 'win32')).toBeUndefined()
-    for (const root of ['\\\\nas\\media', '//nas/media', '\\\\?\\C:\\x', '\\\\.\\pipe\\mousse', '\\Users', 'C:Users', 'notes'])
+    expect(browsedRootRefusal('\\\\nas\\media', 'win32')).toBeUndefined()
+    expect(browsedRootRefusal('//nas/media/notes', 'win32')).toBeUndefined()
+    expect(normalizedBrowsedRoot('//nas/media/a/../notes', 'win32')).toBe('\\\\nas\\media\\notes')
+    for (const root of ['\\\\nas', '//nas/', '//nas/../x', '//nas/pipe/x', '//nas/mailslot/x', '\\\\?\\C:\\x', '\\\\.\\pipe\\mousse', '\\Users', 'C:Users', 'notes'])
       expect(browsedRootRefusal(root, 'win32'), root).toBeDefined()
     expect(browsedRootRefusal('/home/me', 'linux')).toBeUndefined()
     expect(browsedRootRefusal('//srv/share', 'linux')).toBeUndefined()

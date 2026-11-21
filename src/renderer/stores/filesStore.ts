@@ -15,7 +15,7 @@ export interface FileWorkspaceSnapshot {
 
 interface FileWorkspaceState {
   workspaces: Record<string, FileWorkspaceSnapshot>
-  openFile: (scope: string, path: string, target?: FileTabTarget) => void
+  openFile: (scope: string, path: string, target?: FileTabTarget, fromBrowsedFolder?: boolean) => void
   rememberTarget: (scope: string, path: string, target: FileTabTarget) => void
   mergeFileAlias: (scope: string, alias: string, path: string) => void
   activateFile: (scope: string, path: string) => void
@@ -68,10 +68,13 @@ function current(state: FileWorkspaceState, scope: string): FileWorkspaceSnapsho
 export const useFileWorkspaceStore = create<FileWorkspaceState>()(persist(
   (set) => ({
     workspaces: {},
-    openFile: (scope, path, target) => set((state) => {
+    openFile: (scope, path, target, fromBrowsedFolder) => set((state) => {
       const workspace = current(state, scope)
       const next = openFileInSnapshot(workspace, path)
-      if (target && !workspace.openPaths.includes(path)) next.targets = { ...workspace.targets, [path]: target }
+      const previous = fileTabTarget(workspace, path)
+      if (target && (!workspace.openPaths.includes(path) || (fromBrowsedFolder && target.root && !previous?.root))) {
+        next.targets = { ...workspace.targets, [path]: target }
+      }
       return { workspaces: { ...state.workspaces, [scope]: next } }
     }),
     rememberTarget: (scope, path, target) => set((state) => {

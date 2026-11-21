@@ -1121,8 +1121,8 @@ const restoresInFlight = new Map<string, Promise<void>>()
 /** The most threads, and the most projects, one `git.heads` call names: more than a sidebar shows. */
 const GIT_HEADS_MAX = 2_000
 
-/** What names the folder of a Git panel read: its thread or project, the worktree generation it expects, a Retry's number. */
-const GIT_READ_SCOPE = ['threadId', 'projectId', 'workspaceGeneration', 'attempt'] as const
+// The thread or project supplies the folder even if an older caller also sends cwd.
+const GIT_READ_SCOPE = ['threadId', 'projectId', 'workspaceGeneration', 'attempt', 'cwd'] as const
 /** The Git reads whose parameters are checked before their folder is waited for or looked at, and the keys each takes. */
 const GIT_READ_KEYS: Record<string, readonly string[]> = {
   'git.heads': ['threadIds', 'projectIds', 'attempt'],
@@ -1974,9 +1974,9 @@ function readsFolder(method: string): boolean {
  * Waits for the folders a request works in. A Stop of its thread or the profile's shutdown ends the wait
  * with an error, so neither waits on a pending macOS permission prompt.
  */
-async function waitForRequestFolders(ctx: HandlerContext, method: string, params: unknown): Promise<void> {
+async function waitForRequestFolders(ctx: HandlerContext, method: string, params: unknown, browsedRoot?: string): Promise<void> {
   if (!readsFolder(method)) return
-  const folders = requestFolders(ctx, params, !Object.hasOwn(GIT_READ_KEYS, method))
+  const folders = browsedRoot ? [browsedRoot] : requestFolders(ctx, params, !Object.hasOwn(GIT_READ_KEYS, method))
   if (folders.length === 0) return
   const threadId = isObject(params) && typeof params.threadId === 'string' ? params.threadId : undefined
   const shutdown = ctx.mms.requestShutdownSignal
@@ -2043,11 +2043,10 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       ctx.mms.threads?.lifecycleStore?.get(params.threadId)) {
     ctx.mms.threads.assertThreadAdmission(params.threadId)
   }
-  // A browsed folder is checked before its volume is waited for, so one that is refused (a network share, a
-  // device path, a caller that is not this computer's window) is never touched.
-  if (BROWSED_ROOT_METHODS.has(method) && isObject(params)) browsedFilesRoot(ctx, params)
+  // An explicit browsed root replaces the checkout for this call. Validate access before probing its volume.
+  const browsedRoot = BROWSED_ROOT_METHODS.has(method) && isObject(params) ? browsedFilesRoot(ctx, params) : undefined
   // Before any synchronous work in the folder: a pending macOS permission prompt then holds only this request.
-  await waitForRequestFolders(ctx, method, params)
+  await waitForRequestFolders(ctx, method, params, browsedRoot)
   if (ctx.mms.domains?.has(method)) return ctx.mms.domains.dispatch(ctx, method, params)
   switch (method) {
     case 'threads.focus': {
@@ -4711,14 +4710,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     case 'files.list': {
       const p = isObject(params) ? params : {}
       return await fileCall(ctx, async () => {
-        const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
+        const root = browsedRoot ?? await filesRootContext(ctx, p)
         return { entries: await ctx.mms.fileService.listDir(root, containedPath(ctx, root, p.path), guardFor(ctx)) }
       })
     }
     case 'files.read': {
       const p = isObject(params) ? params : {}
       return await fileCall(ctx, async () => {
-        const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
+        const root = browsedRoot ?? await filesRootContext(ctx, p)
         const path = requiredContainedPath(ctx, root, p.path)
         const includeCanonicalPath = p.includeCanonicalPath === true && isLocalWindow(ctx) && !ctx.connection?.bridgeCaller
         return { path, ...await ctx.mms.fileService.readFileDetails(root, path, guardFor(ctx), includeCanonicalPath) }
@@ -4730,7 +4729,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const offset = asOptionalBoundedInt(p.offset, 'offset', { min: 0, max: Number.MAX_SAFE_INTEGER }) ?? 0
       const length = asOptionalBoundedInt(p.length, 'length', { min: 1, max: FILE_ASSET_PIECE_BYTES }) ?? FILE_ASSET_PIECE_BYTES
       return await fileCall(ctx, async () => {
-        const root = browsedFilesRoot(ctx, p) ?? await filesRootContext(ctx, p)
+        const root = browsedRoot ?? await filesRootContext(ctx, p)
         const path = requiredContainedPath(ctx, root, p.path)
         const includeCanonicalPath = offset === 0 && p.includeCanonicalPath === true && isLocalWindow(ctx) && !ctx.connection?.bridgeCaller
         const { data, ...piece } = await ctx.mms.fileService.readAssetRange(root, path, offset, length, guardFor(ctx), includeCanonicalPath)
@@ -4751,12 +4750,11 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       if (saveExceedsRequest(p.content)) throw new DomainRpcError('file_too_large', SAVE_TOO_LARGE_MESSAGE)
       const content = p.content
       return await fileCall(ctx, async () => {
-        const browsed = browsedFilesRoot(ctx, p)
         // The file was read from the thread's worktree, so a retired one comes back before it is written.
-        if (!browsed) await materializeRequestedWorkspace(ctx, p)
-        const root = browsed ?? await localFilesRoot(ctx, p)
+        if (!browsedRoot) await materializeRequestedWorkspace(ctx, p)
+        const root = browsedRoot ?? await localFilesRoot(ctx, p)
         const path = requiredContainedPath(ctx, root, p.path)
-        if (browsed) {
+        if (browsedRoot) {
           // A folder the person browsed to is any folder of this computer: Git's own files, the Mousse data
           // folders and the folders of the user's sign-ins and keys are never saved into from there.
           const refusal = browsedSaveRefusal(resolve(root, path), [ctx.mms.getHomeDir(), ctx.mms.getProfileHomeDir()])

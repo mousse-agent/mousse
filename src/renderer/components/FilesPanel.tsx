@@ -73,6 +73,10 @@ function comparableFilePath(path: string): string {
   return normalizeFolderPath(path).replace(/\\/g, '/')
 }
 
+function logicalFilePath(target: FileTabTarget): string {
+  return target.root ? joinFolder(target.root, target.path) : target.path
+}
+
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -94,10 +98,10 @@ function writeText(target: FileTabTarget, content: string, threadId: string | nu
   return window.mousse.fs.writeFile(target.path, content, undefined, threadId, target.root)
 }
 
-/** Record the scope when a person picks a file, while the checkout is known. */
-function pickedFileTarget(path: string, checkout: string | null): FileTabTarget | undefined {
+/** An explicit browse can name its own folder even while the checkout lookup fails. */
+function pickedFileTarget(path: string, checkout: string | null, fromBrowsedFolder = false): FileTabTarget | undefined {
   if (checkout === null) return fileLocation(path)
-  if (!checkout) return undefined
+  if (!checkout) return fromBrowsedFolder ? fileLocation(path) : undefined
   if (!isAbsolutePath(path)) return { path: joinFolder(checkout, path) }
   return pathInside(path, checkout) === null ? fileLocation(path) : { path }
 }
@@ -264,8 +268,9 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
 
   const fileKey = useCallback((path: string) => `${scope}\0${path}`, [scope])
   const tabPathFor = useCallback((file: string, root: string, targetScope: string, localProject: boolean) => {
-    if (!localProject || !root) return normalizeWorkspacePath(file, root)
+    if (!localProject) return normalizeWorkspacePath(file, root)
     const path = normalizeWorkspacePath(file)
+    if (!root && !isAbsolutePath(path)) return path
     const absolute = isAbsolutePath(path) ? path : joinFolder(root, path)
     if (!isAbsolutePath(path) && pathInside(absolute, root) === null) return path
     const comparable = comparableFilePath(absolute)
@@ -273,7 +278,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     const workspace = useFileWorkspaceStore.getState().workspaces[targetScope]
     return workspace?.openPaths.find((openPath) => {
       const target = filesRef.current[`${targetScope}\0${openPath}`]?.target ?? fileTabTarget(workspace, openPath)
-      const location = isAbsolutePath(openPath) ? openPath : target?.path ?? joinFolder(root, openPath)
+      const location = isAbsolutePath(openPath) ? openPath : target ? logicalFilePath(target) : root ? joinFolder(root, openPath) : openPath
       return comparableFilePath(location) === comparable
     }) ?? absolute
   }, [])
@@ -301,14 +306,17 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     let queue = queues.current.get(key)
     if (queue) return queue
     const isCurrent = () => useAppStore.getState().profileId === ownerProfileId && Boolean(filesRef.current[key])
+    // A pick from the browser can update the tab's target. Each save uses one target for both its check and its write.
+    let saveTarget = target
     queue = new SerializedAutosave({
       read: () => {
         if (useAppStore.getState().profileId !== ownerProfileId) throw new Error('File save belongs to an inactive profile')
-        return readText(target, threadId)
+        saveTarget = filesRef.current[key]?.target ?? target
+        return readText(saveTarget, threadId)
       },
       write: (content) => {
         if (useAppStore.getState().profileId !== ownerProfileId) throw new Error('File save belongs to an inactive profile')
-        return writeText(target, content, threadId)
+        return writeText(saveTarget, content, threadId)
       },
       onSaved: (savedContent) => {
         if (!isCurrent()) return
@@ -340,13 +348,22 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   ) => {
     const key = `${targetScope}\0${path}`
     const existing = filesRef.current[key]
-    if (existing?.loading || (existing && !(retryInitial && existing.initialLoadFailed))) return
     const workspaceStore = useFileWorkspaceStore.getState()
     const savedTarget = fileTabTarget(workspaceStore.workspaces[targetScope], path)
+    if (existing) {
+      if (savedTarget?.root && !existing.target.root) {
+        if (!existing.loading && !existing.initialLoadFailed) {
+          // Keep the editor and its edits, and invalidate any refresh still using the old scope.
+          loadSequences.current.set(key, (loadSequences.current.get(key) ?? 0) + 1)
+          patchFile(key, { target: savedTarget })
+          return
+        }
+      } else if (existing.loading || !(retryInitial && existing.initialLoadFailed)) return
+    }
     // A checkout tab keeps its absolute path in a thread-scoped request. An older snapshot with
     // only a path cannot prove that it was browsed, so keep its access scoped to the thread too.
     if (workspaceRoot === '' && !savedTarget?.root && !existing) return
-    const target = existing?.target ?? savedTarget ?? (workspaceRoot
+    const target = savedTarget ?? existing?.target ?? (workspaceRoot
       ? { path: isAbsolutePath(path) ? path : joinFolder(workspaceRoot, path) }
       : fileLocation(path))
     if (!savedTarget) workspaceStore.rememberTarget(targetScope, path, target)
@@ -363,7 +380,9 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
       const workspace = store.workspaces[targetScope]
       const alias = canonicalPath && workspace?.openPaths.find((openPath) => {
         const file = filesRef.current[`${targetScope}\0${openPath}`]
-        return openPath !== path && file?.canonicalPath === canonicalPath && Boolean(file.target.root) === Boolean(target.root)
+        return openPath !== path && file?.canonicalPath === canonicalPath
+          && Boolean(file.target.root) === Boolean(target.root)
+          && samePath(logicalFilePath(file.target), logicalFilePath(target))
       })
       if (alias) {
         const aliasKey = `${targetScope}\0${alias}`
@@ -407,12 +426,13 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     for (const path of openPaths) void loadFile(path)
   }, [loadFile, openPaths])
 
-  const openInPanel = useCallback((file: string) => {
+  const openInPanel = useCallback((file: string, folder: string) => {
     const localProject = !remote && Boolean(projectId)
     const path = tabPathFor(file, filesRoot, scope, localProject)
-    openFile(scope, path, pickedFileTarget(path, localProject ? filesRoot : null))
+    const fromBrowsedFolder = !remote && Boolean(listRootFor(folder))
+    openFile(scope, path, pickedFileTarget(path, localProject ? filesRoot : null, fromBrowsedFolder), fromBrowsedFolder)
     void loadFile(path)
-  }, [filesRoot, loadFile, openFile, projectId, remote, scope, tabPathFor])
+  }, [filesRoot, listRootFor, loadFile, openFile, projectId, remote, scope, tabPathFor])
 
   const openSearchedLine = useCallback((match: FileGrepMatch) => {
     // The listener below turns the position into a Monaco reveal; the column is UTF-16, as Monaco counts.
@@ -427,7 +447,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
   // A picked result opens beside the results, which stay for the next pick. Its path is relative to the folder searched.
   const searchHandlers = useMemo(() => ({
     onAction: search.onAction,
-    onOpenFile: (path: string) => openInPanel(joinFolder(searchRoot, path)),
+    onOpenFile: (path: string) => openInPanel(joinFolder(searchRoot, path), searchRoot),
     onOpenLine: openSearchedLine,
     onClose: closeSearch
   }), [closeSearch, openInPanel, openSearchedLine, search.onAction, searchRoot])
@@ -476,7 +496,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
             if (current.assetUrl) URL.revokeObjectURL(current.assetUrl)
             patchFile(key, { assetUrl: url, assetSignature: signature, error: null })
           }).catch((error) => {
-            if (filesRef.current[key] && useAppStore.getState().profileId === pollProfileId) patchFile(key, { error: `Refresh failed: ${message(error)}`, refreshFailed: true })
+            if (filesRef.current[key] && loadSequences.current.get(key) === sequence && useAppStore.getState().profileId === pollProfileId) patchFile(key, { error: `Refresh failed: ${message(error)}`, refreshFailed: true })
           })
           continue
         }
@@ -495,7 +515,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
             patchFile(key, { diskContent: result.diskContent, saveState: 'conflict', error: 'This file changed on disk. Your edits were kept.', refreshFailed: false })
           }
         }).catch((error) => {
-          if (filesRef.current[key] && useAppStore.getState().profileId === pollProfileId) patchFile(key, { error: `Refresh failed: ${message(error)}`, refreshFailed: true })
+          if (filesRef.current[key] && loadSequences.current.get(key) === sequence && useAppStore.getState().profileId === pollProfileId) patchFile(key, { error: `Refresh failed: ${message(error)}`, refreshFailed: true })
         })
       }
     }, REVALIDATE_MS)
@@ -844,7 +864,7 @@ export function FilesPanel({ showing = true }: FilesPanelProps) {
     <div className="files-browse" hidden={searchShowsResults}>
       <FileTree key={`${navKey}|${browseRoot}`} memory={treeMemories.current.get(`${navKey}|${browseRoot}`)} filesRoot={browseRoot} listRoot={listRoot} threadId={activeThreadId}
         selectedPath={treePathOf(selectedLocation)} refreshKey={refreshKey}
-        onSelectFile={(path) => openInPanel(joinFolder(browseRoot, path))} />
+        onSelectFile={(path) => openInPanel(joinFolder(browseRoot, path), browseRoot)} />
     </div>
   </div>
 
