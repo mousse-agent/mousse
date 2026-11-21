@@ -57,7 +57,7 @@ export function withPendingArchives(threads: readonly Thread[], pending: Readonl
  * can fade and close, and the new row opens in its new place. With motion off (reduced motion, Animation speed Off)
  * nothing is recorded and rows move at once. A failed archive changes nothing, so nothing moves.
  */
-export function useArchiveMoves(threads: readonly Thread[]): ArchiveMoves {
+export function useArchiveMoves(threads: readonly Thread[], animate = true): ArchiveMoves {
   const seen = useRef<ReadonlyMap<string, Thread> | null>(null)
   const timers = useRef(new Map<ArchiveMove, ReturnType<typeof setTimeout>>())
   const [moves, setMoves] = useState<ArchiveMoves>(NO_MOVES)
@@ -67,6 +67,12 @@ export function useArchiveMoves(threads: readonly Thread[]): ArchiveMoves {
   useLayoutEffect(() => {
     const previous = seen.current
     seen.current = new Map(threads.map((thread) => [thread.id, thread]))
+    if (!animate) {
+      for (const timer of timers.current.values()) clearTimeout(timer)
+      timers.current.clear()
+      setMoves(NO_MOVES)
+      return
+    }
     if (!previous) return
     const duration = scaleMotionMs(ARCHIVE_MOVE_MS)
     if (duration <= 0 || !motionAllowed()) return
@@ -88,13 +94,13 @@ export function useArchiveMoves(threads: readonly Thread[]): ArchiveMoves {
       }, duration * (1 + FADE_PART) + 40))
     }
     setMoves((current) => new Map([...current, ...started]))
-  }, [threads])
+  }, [threads, animate])
 
   useEffect(() => () => {
     for (const timer of timers.current.values()) clearTimeout(timer)
   }, [])
 
-  return moves
+  return animate ? moves : NO_MOVES
 }
 
 /**
@@ -122,10 +128,17 @@ export function archiveMotionOf(moves: ArchiveMoves, thread: Thread): 'leave' | 
  * so the rows below move up; an arriving row opens its height as the leaving one closes, then fades in. Rows that are
  * not on the page (a collapsed project, Archived closed) do not move; Archived's count changes at once.
  */
-export function useArchiveMotion(root: RefObject<HTMLElement | null>, moves: ArchiveMoves): void {
+export function useArchiveMotion(root: RefObject<HTMLElement | null>, moves: ArchiveMoves, animate = true): void {
   // The move each row last played, and its animation: a row plays each move once, and a new move (an archive undone
   // at once) stops the old animation first, so a closed row never stays closed.
   const played = useRef(new WeakMap<Element, { move: ArchiveMove; animation: Animation }>())
+  useLayoutEffect(() => {
+    if (animate) return
+    for (const animation of root.current?.getAnimations?.({ subtree: true }) ?? []) {
+      if (animation.id === 'archive-row') animation.cancel()
+    }
+  }, [root, animate])
+
   useLayoutEffect(() => {
     if (moves.size === 0 || !root.current) return
     const duration = scaleMotionMs(ARCHIVE_MOVE_MS)
@@ -155,19 +168,18 @@ export function useArchiveMotion(root: RefObject<HTMLElement | null>, moves: Arc
           ],
           { duration, delay: duration * FADE_PART, fill: 'backwards' },
         )
+      animation.id = 'archive-row'
       played.current.set(row, { move, animation })
-      if (row.dataset.archiveMotion === 'enter') {
-        const done = () => { if (played.current.get(row)?.animation === animation) row.style.overflow = '' }
-        animation.finished.then(done, done)
-      }
+      const clearOverflow = () => { if (played.current.get(row)?.animation === animation) row.style.overflow = '' }
+      animation.finished.then(row.dataset.archiveMotion === 'enter' ? clearOverflow : undefined, clearOverflow)
     }
   })
 }
 
 /** The move's rows, for the sidebar: the leaving row cannot be clicked or focused and is hidden from screen readers. */
-export function useArchiveMotionRows(root: RefObject<HTMLElement | null>, threads: readonly Thread[]) {
-  const moves = useArchiveMoves(threads)
-  useArchiveMotion(root, moves)
+export function useArchiveMotionRows(root: RefObject<HTMLElement | null>, threads: readonly Thread[], animate: boolean) {
+  const moves = useArchiveMoves(threads, animate)
+  useArchiveMotion(root, moves, animate)
   const motionOf = useCallback((thread: Thread) => archiveMotionOf(moves, thread), [moves])
   return { moves, motionOf }
 }

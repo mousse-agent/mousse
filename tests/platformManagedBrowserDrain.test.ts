@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import type { ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { BrowserObservation, BrowserSessionRecord, BrowserTab } from '../src/shared/browser/types'
 import { BrowserBroker } from '../src/mms/browser/BrowserBroker'
 import { createAllowHttpPolicy } from '../src/mms/browser/defaultPorts'
@@ -30,6 +30,20 @@ const brokers: Array<{ beginShutdown(): void; shutdown(options?: { timeoutMs?: n
 function trackRoot(root: string): string {
   tempRoots.push(root)
   return root
+}
+
+function isChromeStillRunning(pid: number): boolean {
+  if (!isProcessAlive(pid)) return false
+  if (process.platform !== 'linux') return true
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    // An exited process can keep its PID until its parent reaps it.
+    const state = stat[stat.lastIndexOf(')') + 2]
+    return state !== 'Z' && state !== 'X'
+  } catch (error) {
+    if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) return false
+    throw error
+  }
 }
 
 async function waitMs(ms: number): Promise<void> {
@@ -219,9 +233,12 @@ describe.skipIf(!chrome.ok)('managed Chromium drain', () => {
     const descendantPids = [record.pid, ...tree.descendants.map((item) => item.pid), ...(record.descendants ?? []).map((item) => item.pid)]
     await broker.shutdown({ timeoutMs: 20_000 })
     expect(broker.getActiveCount()).toBe(0)
-    for (const pid of new Set(descendantPids)) {
-      expect(isProcessAlive(pid), `owned chrome pid ${pid} still alive`).toBe(false)
-    }
+    // Chrome's helpers can finish exiting independently of the browser process.
+    await vi.waitFor(() => {
+      for (const pid of new Set(descendantPids)) {
+        expect(isChromeStillRunning(pid), `owned chrome pid ${pid} still running`).toBe(false)
+      }
+    }, { timeout: 2_000 })
   }, 120_000)
 
   it('preserves a dispatched act result across caller timeout and posts only once', async () => {

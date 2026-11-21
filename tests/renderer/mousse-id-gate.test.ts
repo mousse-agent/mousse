@@ -18,7 +18,7 @@ describe('Mousse ID switch', () => {
     expect(mousseIdAvailable({ runtimeOrigin: '   ' })).toBe(false)
   })
 
-  it('is off while Mousse Plus (legacy) is off for the profile, whatever the address', () => {
+  it('is off while Mousse ID (legacy) is off for the profile, whatever the address', () => {
     expect(mousseIdAvailable({ runtimeOrigin: 'https://id.example', plusLegacy: false })).toBe(false)
     expect(mousseIdAvailable({ runtimeOrigin: 'https://id.example', plusLegacy: true })).toBe(true)
   })

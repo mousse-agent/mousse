@@ -20,6 +20,7 @@ import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { MmsProfileServices } from '../../src/mms/MmsProfileServices'
 import { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
 import { ProviderAuthService } from '../../src/mms/providers/ProviderAuthService'
+import { ResourceLifecycleStore } from '../../src/mms/lifecycle/ResourceLifecycleStore'
 
 const cleanup: Array<() => unknown> = []
 afterEach(async () => {
@@ -62,6 +63,31 @@ describe('a bot\'s threads from an earlier build', () => {
     expect(reopened.threads.getThread(thread.id)).toMatchObject({ botOwned: true, updatedAt })
     expect(reopened.threads.getThread(other.id)?.botOwned).toBeUndefined()
     expect(reopened.threads.listThreads().find((entry) => entry.id === thread.id)?.botOwned).toBe(true)
+  }, 60_000)
+
+  it('are found with one read of the lists, not one per bot thread, so opening stays fast as threads add up', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-bot-marks-')))
+    cleanup.push(() => rmSync(home, { recursive: true, force: true }))
+    const profileId = randomUUID()
+    const first = profile(undefined, profileId, home)
+    const store = (first as unknown as { botStore: BotStore }).botStore
+    const threads = 40
+    const botThreads = 40
+    for (let i = 0; i < threads; i++) first.threads.createThread(`Mine ${i}`, undefined, undefined, { started: true })
+    const listed = first.threads.ensureExecutionThread('bot:old-helper', 'Old helper')
+    store.ensureRegistry('old-helper')
+    store.setHomeThread('old-helper', listed.id)
+    store.putThread({ threadId: listed.id, botId: 'old-helper', role: 'home', key: 'home' })
+    // Most of a long-lived profile's bot threads are no longer listed anywhere.
+    for (let i = 1; i < botThreads; i++) store.putThread({ threadId: randomUUID(), botId: 'old-helper', role: 'activation', key: `gone-${i}` })
+    await first.stop()
+    const reads = vi.spyOn(ResourceLifecycleStore.prototype, 'get')
+    const reopened = profile(undefined, profileId, home)
+    const count = reads.mock.calls.length
+    reads.mockRestore()
+    expect(reopened.threads.getThread(listed.id)?.botOwned).toBe(true)
+    // Reading the lists once per bot thread made this threads × botThreads (1600 here).
+    expect(count).toBeLessThan(3 * (threads + botThreads))
   }, 60_000)
 })
 

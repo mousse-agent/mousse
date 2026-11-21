@@ -19,6 +19,7 @@ import {
 } from './profiles/migration/adapters'
 import { ProfileHost } from './profiles/ProfileHost'
 import { startsAtLogin } from './netEngine/loginStart'
+import { startupPhase } from './startup/startupTiming'
 import { registerProfileDomain } from './profiles/profileDomain'
 import type { ProfileId } from '../shared/profiles/ids'
 import { registerEditorTunnelMethods, registerNetMethods } from './net/registerMethods'
@@ -106,27 +107,27 @@ export class MousseMainService extends MmsProfileServices {
     const home = canonicalizeHome(options?.homeDir ?? process.env.MOUSSE_HOME ?? join(homedir(), '.mousse'))
     // Installation identity only. Profile bind/switch never changes this.
     process.env.MOUSSE_HOME = home
-    const owner = options?.requireOwnership === false ? null : acquireMmsOwnerLease(home, {
+    const owner = options?.requireOwnership === false ? null : startupPhase('create.ownerLease', () => acquireMmsOwnerLease(home, {
       kind: options?.ownerKind ?? (options?.headless ? 'cli' : 'gui'),
       version: options?.version ?? process.env.npm_package_version,
       build: options?.build,
       token: options?.ownerToken
-    })
+    }))
     let providers: ProviderAuthService | undefined
     let service: MousseMainService | undefined
     try {
       const installation = createInstallationPaths(home)
       providers = new ProviderAuthService(installation.authJson)
-      await providers.init()
+      await startupPhase('create.providers', () => providers!.init())
 
       const manager = ProfileManager.open(installation)
       const migration = new ProfileMigrationService(installation, manager)
-      migration.run({
+      startupPhase('create.profileMigration', () => migration.run({
         adapters: {
           credentials: createControlStoreCredentialAdapter(),
           gitWorktrees: createRetainingGitWorktreeAdapter()
         }
-      })
+      }))
       if (!manager.isInitialized()) manager.initializeFresh()
 
       const defaultId = manager.getDefaultProfileId()
@@ -135,17 +136,18 @@ export class MousseMainService extends MmsProfileServices {
       const profileConfig = MousseConfigStore.loadProfile(defaultPaths.root, installationConfig)
       const domains = new DomainHandlerRegistry()
 
-      service = new MousseMainService(
+      const providerAuth = providers
+      service = startupPhase('create.services', () => new MousseMainService(
         profileConfig,
         options,
         owner,
         defaultPaths.root,
-        providers,
+        providerAuth,
         domains,
         home,
         defaultId,
         true
-      )
+      ))
       const host = new ProfileHost({
         providerAuth: providers,
         domains,
@@ -161,8 +163,7 @@ export class MousseMainService extends MmsProfileServices {
       })
       host.attachDefault(service, defaultId)
       service.profileHost = host
-      registerProfileDomain(domains, service)
-      service.registerPlatformDomains()
+      startupPhase('create.domains', () => { registerProfileDomain(domains, service!); service!.registerPlatformDomains() })
       await service.initialize()
       return service
     } catch (error) {
@@ -191,16 +192,19 @@ export class MousseMainService extends MmsProfileServices {
     if (!host) return
     for (const record of host.manager.list()) {
       if (record.status !== 'active' || record.id === this.profileId) continue
-      const services = await host.getProfileServices(record.id)
-      await services.start()
+      const services = await startupPhase(`profile.${record.id.slice(0, 8)}.open`, () => host.getProfileServices(record.id))
+      await startupPhase(`profile.${record.id.slice(0, 8)}.start`, () => services.start())
     }
   }
 
   /**
-   * Called once the daemon published its readiness. The network engines and their helpers start now, in the
-   * background: nothing waits for them, and readiness never waited for them either.
+   * Called once the daemon published its readiness. The start's deferred passes, and the network engines and their
+   * helpers, start now, in the background: readiness never waited for them.
    */
   afterReady(): void {
+    // The start's slow passes (lifecycle recovery, the restart's runtime pass, the search index's first sweep) run now.
+    if (this.profileHost) this.profileHost.startAfterReadyWork()
+    else this.startAfterReadyWork()
     void this.profileHost?.startNetworkedProfiles()
     void this.sshRemote()
       ?.afterReady()

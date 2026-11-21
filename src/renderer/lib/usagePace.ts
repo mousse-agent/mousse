@@ -2,9 +2,13 @@ import type { ProviderUsageWindow } from '../../shared/providerAuth'
 
 const HOUR = 3_600_000
 
-/** How long a limit window lasts, from its id; undefined for a window whose length isn't known. */
-function windowLength(id: string, resetsAt: number): number | undefined {
-  if (id === 'five_hour' || id === 'rolling') return 5 * HOUR
+/**
+ * How long a limit window lasts, from its id; undefined for a window whose length isn't known. A scoped id
+ * (`<scope>:<window>`, such as Antigravity's `gemini-models:5h`) is read by its window part.
+ */
+function windowLength(scoped: string, resetsAt: number): number | undefined {
+  const id = scoped.slice(scoped.lastIndexOf(':') + 1)
+  if (id === 'five_hour' || id === 'rolling' || id === '5h') return 5 * HOUR
   if (id.startsWith('seven_day') || id === 'weekly') return 7 * 24 * HOUR
   if (id === 'monthly') {
     const start = new Date(resetsAt)

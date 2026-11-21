@@ -1,8 +1,10 @@
+import { useMemo } from 'react'
 import { ChevronLeft } from '../lib/icons'
 import { isSubagentThread } from '../../shared/threadLineage'
 import { openThread } from '../lib/openThread'
 import { useThreadPathInTitleBar } from '../lib/threadPathSetting'
 import { useAppStore } from '../stores/appStore'
+import { findSubagentEntry } from './subagentStatus'
 import './subagentParentBar.css'
 
 interface SubagentParentBarViewProps {
@@ -40,18 +42,22 @@ export function SubagentParentBarView({ parentName, childName, onOpenParent, hid
 
 /** Shown above the selected thread when it is a subagent whose parent is still around. */
 export function SubagentParentBar() {
+  const activeThreadId = useAppStore((s) => s.activeThreadId)
   const child = useAppStore((s) => {
     const active = s.threads.find((thread) => thread.id === s.activeThreadId)
     return active && isSubagentThread(active) ? active : undefined
   })
-  const parent = useAppStore((s) => (child ? s.threads.find((thread) => thread.id === child.lineage?.parentThreadId) : undefined))
+  const subagentsByParent = useAppStore((s) => s.subagentsByParent)
+  const fallback = useMemo(() => (child ? undefined : findSubagentEntry(subagentsByParent, activeThreadId)), [child, subagentsByParent, activeThreadId])
+  const parentId = child?.lineage?.parentThreadId ?? fallback?.parentThreadId
+  const parent = useAppStore((s) => (parentId ? s.threads.find((thread) => thread.id === parentId) : undefined))
   const pathInTitleBar = useThreadPathInTitleBar()
   // A subagent whose parent is gone is listed as a normal thread, so it gets no link to one.
-  if (!child || !parent) return null
+  if ((!child && !fallback) || !parent) return null
   return (
     <SubagentParentBarView
       parentName={parent.name.trim() || 'Untitled thread'}
-      childName={child.name.trim() || 'Subagent'}
+      childName={(child?.name ?? fallback?.subagent.title ?? '').trim() || 'Subagent'}
       onOpenParent={() => void openThread(parent.id)}
       hideBreadcrumb={pathInTitleBar}
     />

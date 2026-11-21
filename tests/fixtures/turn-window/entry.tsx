@@ -430,6 +430,32 @@ const qa = {
     render()
   },
   lastTurn: () => turnCount - 1,
+  /** Opens turns `from` to `to - 1`: the newest part of a long thread, as it arrives. */
+  async mountRange(from: number, to: number): Promise<void> {
+    turnCount = to
+    messages = Array.from({ length: to - from }, (_, index) => turnMessages(from + index)).flat()
+    epoch += 1
+    streaming = false
+    render()
+    await frames(3)
+  },
+  /**
+   * Adds turns `from` to `to - 1` above the ones shown (an earlier page coming in) and reports where `sentinel` sits
+   * right after the commit and after each of `count` frames, with the scroll position.
+   */
+  async prependRun(from: number, to: number, sentinel: string, count = 24) {
+    const el = container()
+    const start = { top: targetTop(sentinel), scrollTop: el.scrollTop, windowed: qa.windowed() }
+    messages = [...Array.from({ length: to - from }, (_, index) => turnMessages(from + index)).flat(), ...messages]
+    render()
+    const sample = () => ({ top: targetTop(sentinel), scrollTop: el.scrollTop })
+    const samples = [sample()]
+    for (let index = 0; index < count; index += 1) {
+      await new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done, 0)))
+      samples.push(sample())
+    }
+    return { start, samples, windowed: qa.windowed() }
+  },
   /**
    * Appends a turn that is still running: a thought, six steps of narration and a command, then a tall answer of twelve
    * paragraphs (`fold-<n>-0` to `-11`). `foldRun` ends it.

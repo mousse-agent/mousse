@@ -16,6 +16,7 @@ import { TurnProgressContext, type TurnProgressState } from '../../src/renderer/
 import { IconSpinner } from '../../src/renderer/chat/components/agent-elements/icons'
 import { setReplyPacing } from '../../src/renderer/lib/replyPacingSetting'
 import { offscreenWatchForTests } from '../../src/renderer/lib/offscreenMotion'
+import { useAppStore } from '../../src/renderer/stores/appStore'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -62,6 +63,7 @@ afterEach(() => {
   delete (document as { visibilityState?: unknown }).visibilityState
   delete (HTMLElement.prototype as { animate?: unknown }).animate
   setReplyPacing(true)
+  useAppStore.setState({ shimmerAnimations: true })
 })
 
 const createdAt = '2026-11-18T10:00:00.000Z'
@@ -130,6 +132,23 @@ describe('a looping indicator pauses while no one can see it', () => {
     expect(moving.every(paused)).toBe(true)
     inView(moving, true)
     expect(moving.some(paused)).toBe(false)
+  })
+
+  it('leaves a readable running label and keeps the status icon when shimmer is off', () => {
+    render([ask(), reply('a1', thought('output-available', 'Running the tests first.'), bash('b1', 'npm test'))], { phase: 'tool_running' })
+    act(() => host.querySelector<HTMLButtonElement>('button.turn-live-toggle')!.click())
+    const rows = host.querySelector('[data-turn-live] .an-tool-group-rows')!
+    const label = rows.querySelector('.an-text-shimmer--active')!
+    const text = label.textContent
+
+    act(() => useAppStore.setState({ shimmerAnimations: false }))
+    expect(rows.textContent).toContain(text!)
+    expect(rows.querySelector('.an-text-shimmer--active')).toBeNull()
+    expect(watcherOf(label)).toBeUndefined()
+    expect(rows.querySelector('.an-tool-icon[data-state="running"]')).not.toBeNull()
+
+    act(() => useAppStore.setState({ shimmerAnimations: true }))
+    expect(rows.querySelector('.an-text-shimmer--active')?.textContent).toBe(text)
   })
 
   it('a still indicator is not watched: a finished call and a done thought take no observer', () => {

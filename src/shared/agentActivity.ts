@@ -78,6 +78,8 @@ export type AgentActivityItem = ActivityBase &
         /** The model the call asked the subagent to run on ("sonnet"), when it named one. */
         model?: string
         description?: string
+        /** The task delegated to the subagent, when the provider reports it. */
+        prompt?: string
         nativeId?: string
         background?: boolean
         durationMs?: number
@@ -86,6 +88,11 @@ export type AgentActivityItem = ActivityBase &
   )
 
 export type ActivityKind = AgentActivityItem['kind']
+
+/** Legacy and current names reported by ACP agents for a subagent launch. */
+export function isAcpSubagentTool(toolName: unknown): toolName is 'start_subagent' | 'invoke_subagent' {
+  return toolName === 'start_subagent' || toolName === 'invoke_subagent'
+}
 
 /**
  * What a provider knows about a call. The assembler fills `id`, `callId`, `status` and the
@@ -718,10 +725,11 @@ export function boundActivity<T extends ActivityDraft | AgentActivityItem>(item:
       const capped = capHead(next.text, ACTIVITY_GENERIC_CAP_BYTES)
       return capped.truncated ? ({ ...next, text: capped.text } as T) : item
     }
-    case 'subagent':
-      return next.description !== undefined && next.description.length > ACTIVITY_DESCRIPTION_CHARS
-        ? ({ ...next, description: clip(next.description, ACTIVITY_DESCRIPTION_CHARS) } as T)
-        : item
+    case 'subagent': {
+      const description = next.description === undefined ? undefined : clip(next.description, ACTIVITY_DESCRIPTION_CHARS)
+      const prompt = next.prompt === undefined ? undefined : capHead(next.prompt, ACTIVITY_GENERIC_CAP_BYTES).text
+      return description !== next.description || prompt !== next.prompt ? ({ ...next, description, prompt } as T) : item
+    }
     case 'generic':
       return next.input ? ({ ...next, input: capRecord(next.input) } as T) : item
     default:

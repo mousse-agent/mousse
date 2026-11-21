@@ -336,7 +336,7 @@ function createHashOf(text: string): string {
 }
 
 describe('a re-forked branch the thread moved past', () => {
-  it('is resumed with the delta of a turn on another provider (through the orchestrator)', async () => {
+  it('keeps the parent history in a full handoff when Pi never opened the branch', async () => {
     const s = fixture()
     const priorHome = process.env.MOUSSE_HOME
     process.env.MOUSSE_HOME = s.dir
@@ -394,12 +394,13 @@ describe('a re-forked branch the thread moved past', () => {
     expect((await d.orch.send('Ask elsewhere', false, { threadId: fork.threadId, clientRequestId: 'claude' })).error).toBeUndefined()
     d.orch.setThreadModelOverride(fork.threadId, PI)
     expect((await d.orch.send('Back on pi', false, { threadId: fork.threadId, clientRequestId: 'back' })).error).toBeUndefined()
-    // The switch back plans a delta (the Claude turn): Pi resumes the re-forked branch, which holds
-    // the parent's history, and the delta in the prompt adds what ran elsewhere.
+    // Pi never opened the re-forked branch, so the handoff includes the inherited conversation.
     const last = processFor.mock.calls.at(-1)!
-    expect(last[2]).toBe('branch-2')
-    expect((last[0] as { historyHandedOver?: boolean }).historyHandedOver).toBeUndefined()
-    expect((last[0] as { prompt: string }).prompt).toContain('strategy="delta"')
+    expect(last[2]).toBeUndefined()
+    expect(last[0]).toMatchObject({ historyHandedOver: true, nativeHistory: '' })
+    expect((last[0] as { prompt: string }).prompt).toContain('strategy="full_summary"')
+    expect((last[0] as { prompt: string }).prompt).toContain('Parent request')
+    expect((last[0] as { prompt: string }).prompt).toContain('parent answer')
     expect((last[0] as { prompt: string }).prompt).toContain('answer elsewhere')
     expect(handOver).not.toHaveBeenCalled()
   })
@@ -559,16 +560,17 @@ describe('the resend after a fork’s first turn (review round 4, through the or
       const fork = await d.engine.forkThread({ sourceThreadId: sourceId, clientRequestId: 'fork' })
       await d.orch.send('Continue', false, { threadId: fork.threadId, clientRequestId: 'try-1' })
       if (firstOutcome === 'stale') {
-        // A turn on another provider, then back. The switch plans a delta (what ran elsewhere since Pi's
-        // own session): Pi resumes the branch, which holds the parent's history, and gets the delta.
+        // The Pi attempt failed without a resumable session. The turn gets the whole conversation.
         d.orch.setThreadModelOverride(fork.threadId, CLAUDE)
         expect((await d.orch.send('Ask elsewhere', false, { threadId: fork.threadId, clientRequestId: 'claude' })).error).toBeUndefined()
         d.orch.setThreadModelOverride(fork.threadId, PI)
         expect((await d.orch.send('Back on pi', false, { threadId: fork.threadId, clientRequestId: 'back' })).error).toBeUndefined()
-        expect(received[1]?.historyHandedOver).toBeUndefined()
-        expect(received[1]?.prompt).toContain('strategy="delta"')
+        expect(received[1]?.historyHandedOver).toBe(true)
+        expect(received[1]?.prompt).toContain('strategy="full_summary"')
+        expect(received[1]?.prompt).toContain('Parent request')
+        expect(received[1]?.prompt).toContain('parent answer')
         expect(received[1]?.prompt).toContain('answer elsewhere')
-        expect(resumed).toEqual(['branch-1', 'branch-1'])
+        expect(resumed).toEqual(['branch-1', undefined])
       } else {
         // The resend forks again from the parent and resumes that branch; nothing is handed over.
         expect((await d.orch.send('Continue', false, { threadId: fork.threadId, clientRequestId: 'try-2' })).error).toBeUndefined()

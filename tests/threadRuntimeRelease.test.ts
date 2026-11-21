@@ -7,13 +7,14 @@
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProjectManager } from '../src/mms/data/ProjectManager'
 import { ThreadDataStore } from '../src/mms/data/ThreadDataStore'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import type { OrchestratorService } from '../src/mms/orchestrator/OrchestratorService'
 import { ThreadRuntimeManager } from '../src/mms/runtime/ThreadRuntimeManager'
 import { UnseenDoneStore } from '../src/mms/runtime/UnseenDoneStore'
+import { LiveWorkMarks } from '../src/mms/runtime/LiveWorkMarks'
 import { PtyManager } from '../src/mms/terminals/PtyManager'
 import { createOrchestrator } from './run/phase6Fixture'
 import type { ChatMessage } from '../src/shared/types'
@@ -159,5 +160,89 @@ describe('thread runtimes are released', () => {
     restarted.restoreOnStartup()
     expect(restarted.get(plain)).toBeUndefined()
     expect(restarted.get(withTask)?.tasks.list().map((task) => task.status)).toEqual(['interrupted'])
+  })
+
+  it('after a restart, a thread used before the background pass reaches it is settled on that use, and the pass leaves its new work alone', async () => {
+    const used = store.createThread('Opened right after the restart', undefined, undefined, { started: true }).id
+    const later = store.createThread('Not opened', undefined, undefined, { started: true }).id
+    for (const id of [used, later]) {
+      runtimes.createTask(id, { description: 'cut short', status: 'in_progress' })
+      runtimes.persistAgentsTasks(id)
+    }
+
+    const restarted = new ThreadRuntimeManager()
+    restarted.attach({ threadStore: store, orchestrator: orch, ptyManager: new PtyManager(), questions: new UserQuestionService() })
+    // What the daemon does before it is ready: no thread is read yet.
+    restarted.beginRestart()
+    expect(restarted.get(used)).toBeUndefined()
+    expect(restarted.get(later)).toBeUndefined()
+    // The first read already shows what the restart cut short as interrupted.
+    expect(restarted.listTasks(used).map((task) => task.status)).toEqual(['interrupted'])
+    restarted.createTask(used, { description: 'started after the restart', status: 'in_progress' })
+    // The rest, after ready, in the background.
+    await restarted.settleRestartedThreads()
+    expect(restarted.listTasks(used).map((task) => task.status)).toEqual(['interrupted', 'in_progress'])
+    expect(restarted.get(later)?.tasks.list().map((task) => task.status)).toEqual(['interrupted'])
+  })
+  it('a restart reads only the threads whose work was running, and still settles each of them', async () => {
+    // As the profile attaches it: the list of threads with running work kept in the profile's folder.
+    const restart = (): ThreadRuntimeManager => {
+      const manager = new ThreadRuntimeManager()
+      manager.attach({ threadStore: store, orchestrator: orch, ptyManager: new PtyManager(), questions: new UserQuestionService(), liveWork: new LiveWorkMarks(home, 0) })
+      return manager
+    }
+    const reads = vi.spyOn(store, 'loadThreadWorkState')
+    const readThreads = (): string[] => [...new Set(reads.mock.calls.map(([id]) => id))].sort()
+    const before = restart()
+    const idle = Array.from({ length: 12 }, (_, index) => store.createThread(`Idle ${index}`, undefined, undefined, { started: true }).id)
+    // Work that is not running: a task waiting, as most threads with tasks have.
+    for (const id of idle.slice(0, 4)) before.createTask(id, { description: 'later', status: 'pending' })
+    const cutShort = store.createThread('Task cut short', undefined, undefined, { started: true }).id
+    before.createTask(cutShort, { description: 'cut short', status: 'in_progress' })
+    const archived = store.createThread('Archived while its task ran', undefined, undefined, { started: true }).id
+    before.createTask(archived, { description: 'cut short too', status: 'in_progress' })
+    store.setThreadSettled(archived, true)
+
+    // The first start with the list reads every thread (the fixture's own too), as before, and settles what was running.
+    reads.mockClear()
+    const first = restart()
+    first.beginRestart()
+    await first.settleRestartedThreads()
+    expect(readThreads()).toEqual(expect.arrayContaining([...idle, cutShort, archived]))
+    expect(first.listTasks(cutShort).map((task) => task.status)).toEqual(['interrupted'])
+
+    // From then on only a thread whose work runs is read: the eleven idle ones and the archived one are not.
+    first.createTask(idle[5]!, { description: 'running at the restart', status: 'in_progress' })
+    reads.mockClear()
+    const second = restart()
+    second.beginRestart()
+    await second.settleRestartedThreads()
+    expect(readThreads()).toEqual([idle[5]])
+    expect(second.listTasks(idle[5]!).map((task) => task.status)).toEqual(['interrupted'])
+
+    // A thread is taken off the list a little after its work stopped (here at once: a delay of 0).
+    await new Promise((settle) => setTimeout(settle, 10))
+    // An archived thread's running work is settled at the first restart after it is restored.
+    store.setThreadSettled(archived, false)
+    reads.mockClear()
+    const third = restart()
+    third.beginRestart()
+    await third.settleRestartedThreads()
+    expect(readThreads()).toEqual([archived])
+    expect(third.listTasks(archived).map((task) => task.status)).toEqual(['interrupted'])
+  })
+
+  it('a thread whose runs the restart cut off is read even when nothing listed it', async () => {
+    const first = new ThreadRuntimeManager()
+    first.attach({ threadStore: store, orchestrator: orch, ptyManager: new PtyManager(), questions: new UserQuestionService(), liveWork: new LiveWorkMarks(home, 0) })
+    const quiet = store.createThread('Run cut off', undefined, undefined, { started: true }).id
+    first.beginRestart()
+    await first.settleRestartedThreads()
+    const reads = vi.spyOn(store, 'loadThreadWorkState')
+    const second = new ThreadRuntimeManager()
+    second.attach({ threadStore: store, orchestrator: orch, ptyManager: new PtyManager(), questions: new UserQuestionService(), liveWork: new LiveWorkMarks(home, 0) })
+    second.beginRestart([quiet])
+    await second.settleRestartedThreads()
+    expect(reads.mock.calls.map(([id]) => id)).toEqual([quiet])
   })
 })

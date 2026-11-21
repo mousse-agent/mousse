@@ -158,7 +158,9 @@ function timelineLine(digest: ChatDigest, zone: string | undefined): string {
 /**
  * The summary's text from its parts. Without digests it is the deterministic fold alone, as before them. With them,
  * oldest first: the timeline of older digests, the newest digests in full, then the lines of chat folded since the last
- * digest, within about `BOT_CHAT_DIGEST.summary` tokens.
+ * digest, within about `BOT_CHAT_DIGEST.summary` tokens. Each digest carries over the standing constraints still in force,
+ * so only the newest digest that lists any shows them: older copies would repeat them on every request, along with any
+ * the owner has cancelled since.
  */
 export function renderChatSummary(state: Pick<ChatSummaryState, 'lines' | 'digests'>, zone: string | undefined): string {
   const digests = state.digests ?? []
@@ -171,8 +173,11 @@ export function renderChatSummary(state: Pick<ChatSummaryState, 'lines' | 'diges
     const lines = withinBudget(older.map((digest) => timelineLine(digest, zone)).reverse(), BOT_CHAT_DIGEST.timeline).reverse()
     if (lines.length) blocks.push(`Timeline of older digests:\n${lines.join('\n')}`)
   }
-  for (const digest of full)
-    blocks.push(`Digest of ${dayRange(digest.firstAt, digest.lastAt, zone)} (j${digest.fromSeq}–j${digest.throughSeq})${digest.headline ? `: ${digest.headline}` : ''}\n${digest.text ?? timelineLine(digest, zone)}`)
+  const constraintsAt = full.map((digest) => digestConstraints(digest.text).length > 0).lastIndexOf(true)
+  full.forEach((digest, index) => {
+    const text = digest.text === undefined ? timelineLine(digest, zone) : index === constraintsAt ? digest.text : withoutConstraints(digest.text)
+    blocks.push(`Digest of ${dayRange(digest.firstAt, digest.lastAt, zone)} (j${digest.fromSeq}–j${digest.throughSeq})${digest.headline ? `: ${digest.headline}` : ''}\n${text}`)
+  })
   const used = blocks.reduce((sum, block) => sum + estimateTokens(block) + 1, 0)
   const room = Math.min(BOT_CHAT_PACK_BUDGET.summary, BOT_CHAT_DIGEST.summary - used) - 10
   const lines = room > 0 ? withinBudget(state.lines, room) : []
@@ -271,6 +276,16 @@ export function digestConstraints(text: string | undefined): string[] {
     if (line.trim().startsWith('-') && !/^-\s*none\.?$/i.test(line.trim())) out.push(line.trim())
   }
   return out
+}
+
+/** A digest's text without its standing constraints (the heading and its items): a newer digest carries them. */
+function withoutConstraints(text: string): string {
+  const lines = text.split('\n')
+  const start = lines.findIndex((line) => isHeading(line, DIGEST_SECTIONS[0]))
+  if (start < 0) return text
+  let end = start + 1
+  while (end < lines.length && !DIGEST_SECTIONS.some((section) => isHeading(lines[end]!, section))) end++
+  return [...lines.slice(0, start), ...lines.slice(end)].join('\n')
 }
 
 /**

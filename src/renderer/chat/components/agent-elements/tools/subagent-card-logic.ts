@@ -42,7 +42,8 @@ export function cardElapsedLabel(card: Pick<SubagentCardModel, "createdAt" | "co
 }
 
 /** The state in words; a task the subagent has since continued says so. */
-export function cardStatusLabel(card: Pick<SubagentCardModel, "state" | "pending" | "waitingOn" | "continued">): string {
+export function cardStatusLabel(card: Pick<SubagentCardModel, "state" | "pending" | "waitingOn" | "continued" | "native">): string {
+  if (card.native?.acp?.launched) return "Launched";
   const base =
     card.state === "waiting"
       ? waitingLabel(card)
@@ -85,7 +86,7 @@ export interface CardLine {
 }
 
 export function cardLine(
-  card: Pick<SubagentCardModel, "state" | "pending" | "waitingOn" | "continued">,
+  card: Pick<SubagentCardModel, "state" | "pending" | "waitingOn" | "continued" | "native">,
   result: string | null | undefined,
 ): CardLine {
   const noteText = cardStateNote(card);
@@ -97,7 +98,7 @@ export function cardLine(
   return { note: null, text: card.state === "working" || card.state === "starting" || card.pending ? `${status}…` : status };
 }
 
-type CardCounted = Pick<SubagentCardModel, "state" | "pending">;
+type CardCounted = Pick<SubagentCardModel, "state" | "pending" | "native">;
 
 /** One coloured count in a group's summary, such as "2 working". */
 export interface GroupSummaryPart {
@@ -111,9 +112,10 @@ const SUMMARY_KINDS: ReadonlyArray<{ tone: SubagentBadgeTone; matches: (card: Ca
   { tone: "running", matches: (card) => subagentBadgeTone(card) === "running", text: (count) => `${count} working` },
   { tone: "attention", matches: (card) => !card.pending && card.state === "waiting", text: (count) => `${count} waiting` },
   { tone: "failed", matches: (card) => subagentBadgeTone(card) === "failed", text: (count) => `${count} failed` },
+  { tone: "idle", matches: (card) => Boolean(card.native?.acp?.launched), text: (count) => `${count} launched` },
   { tone: "done", matches: (card) => subagentBadgeTone(card) === "done", text: (count) => `${count} done` },
   { tone: "idle", matches: (card) => !card.pending && card.state === "stopped", text: (count) => `${count} stopped` },
-  { tone: "idle", matches: (card) => !card.pending && card.state === "idle", text: (count) => `${count} idle` },
+  { tone: "idle", matches: (card) => !card.pending && card.state === "idle" && !card.native?.acp?.launched, text: (count) => `${count} idle` },
 ];
 
 /** Header of consecutive cards: "5 subagents", and below it "2 working · 3 done". */

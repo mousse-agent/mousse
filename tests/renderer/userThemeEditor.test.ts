@@ -15,6 +15,8 @@ import { MousseConfigStore } from '../../src/mms/config/MousseConfigStore'
 import { SettingsStore } from '../../src/mms/settings/SettingsStore'
 import type { MousseSettingsUpdate, SettingsOptions } from '../../src/shared/settings'
 import { userThemeFile } from '../../src/shared/themes/userThemes'
+import { DIM_KEY_PEEK_MS } from '../../src/renderer/components/settings/WallpaperRows'
+import { resetWallpapersForTests, showWallpaperLayerForTests, wallpaperLayerNow } from '../../src/renderer/lib/wallpaper'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -186,5 +188,56 @@ describe('View → Turn off custom theme', () => {
     await act(async () => { await runCommand('theme.builtIn', 'menu') })
     expect(set).toHaveBeenCalledWith({ appearance: { userTheme: '' } })
     expect(store.get().appearance.userTheme).toBe('')
+  })
+})
+
+describe('wallpaper dim', () => {
+  const peeking = () => document.documentElement.hasAttribute('data-settings-peek')
+  const slider = () => host.querySelector<HTMLInputElement>('#wallpaper-dim')!
+  /** A theme in use with a wallpaper at 10% dim, whose image needs 50% for readable text. */
+  const showWithWallpaper = () => {
+    store.set({ appearance: { userThemes: [{ id: 'user-w', name: 'W', base: 'dark', accent: '', colors: {}, css: '', wallpaper: { id: 'a'.repeat(64), type: 'image/webp', width: 10, height: 10, fit: 'cover', position: 'center', dim: 10 } }], userTheme: 'user-w' } } as MousseSettingsUpdate)
+    show()
+    act(() => showWallpaperLayerForTests({ url: 'blob:w', fit: 'cover', position: 'center', base: 'rgb(16 20 24)', opacity: 1, dim: 0.1, floor: 0.5, scrim: 0.5 }))
+  }
+
+  afterEach(() => {
+    vi.useRealTimers()
+    resetWallpapersForTests()
+    document.documentElement.removeAttribute('data-settings-peek')
+  })
+
+  it('dragging changes the chat wallpaper at once with Settings aside, never below the readability floor, and Save keeps it', () => {
+    showWithWallpaper()
+    // Below the floor the dim changes nothing, so the slider starts at the floor and says so.
+    expect(slider().value).toBe('50')
+    expect(host.querySelector('.wallpaper-dim-row')?.textContent).toContain('At least 50%')
+
+    act(() => slider().dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })))
+    expect(peeking()).toBe(true)
+    typeInto(slider(), '70')
+    // Drawn now, not after the theme preview's pause.
+    expect(wallpaperLayerNow()).toMatchObject({ dim: 0.7, scrim: 0.7 })
+    typeInto(slider(), '20')
+    expect(slider().value).toBe('50')
+    expect(wallpaperLayerNow()).toMatchObject({ dim: 0.5, scrim: 0.5 })
+    typeInto(slider(), '60')
+    act(() => window.dispatchEvent(new MouseEvent('pointerup')))
+    expect(peeking()).toBe(false)
+
+    act(() => button('Save').click())
+    expect(store.get().appearance.userThemes[0]!.wallpaper?.dim).toBe(60)
+  })
+
+  it('an arrow key moves Settings aside for a moment', () => {
+    vi.useFakeTimers()
+    showWithWallpaper()
+    act(() => slider().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })))
+    expect(peeking()).toBe(true)
+    act(() => { vi.advanceTimersByTime(DIM_KEY_PEEK_MS) })
+    expect(peeking()).toBe(false)
+    // Other keys leave Settings in place.
+    act(() => slider().dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true })))
+    expect(peeking()).toBe(false)
   })
 })

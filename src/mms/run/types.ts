@@ -1,7 +1,6 @@
 import type { ExecutionBinding } from '../../shared/harness/types'
 import type { AgentAccessLevel } from '../../shared/settings'
 import type { PermissionMode } from '../../shared/permissionMode'
-import type { OwnerProof } from './ownerProof'
 export type RunStatus =
   | 'queued'
   | 'starting'
@@ -47,8 +46,6 @@ export interface RunPause {
   /** The message queue item that carries the continue turn (`resume:<runId>`). */
   resumeItemId?: string
   resumeRequested?: 'auto' | 'user'
-  /** The owner pressed Resume now from a Mousse window (`OwnerProof`): the continue turn carries it. */
-  resumeOwner?: OwnerProof
   /**
    * The automatic timer fired more than 24 h after `until` (Mousse was off) and was dropped
    * (`endPause(…, 'stale')`): the run is still `paused`, `autoResume` is off, and only Resume now
@@ -122,12 +119,6 @@ export interface RunRecord {
    * is never granted more. Absent on runs from before it was recorded, and on a run whose turn never started.
    */
   accessGrant?: AgentAccessLevel
-  /**
-   * The owner sent this run's message themselves, from a Mousse window here or on another of their computers
-   * (`ownerProof.ts`). Set only when the run is created, from the connection the send came in on, or for a Resume now
-   * from the press recorded on its pause. Absent on every other run.
-   */
-  ownerProof?: OwnerProof
 }
 
 export interface ProviderRef {
@@ -530,9 +521,74 @@ export function isAgentNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): bool
   return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'agent_note'
 }
 
-/** A note sent with `attention: none`: it never starts a turn of its own. */
+/** What a thread agent started in the background (`monitor_start`, `background_run`, `keep_working`). */
+export type { MonitorKind, MonitorEnd } from '../../shared/backgroundWork'
+import type { MonitorKind, MonitorEnd } from '../../shared/backgroundWork'
+
+/**
+ * Payload of a `reconcile_notice` row that carries what a thread's monitor or background command reported
+ * (`ThreadMonitors`): a batch of its events, and on the last one how it ended. It is delivered as an agent note is:
+ * steered into a native run, handed over with a Mousse tool's result on a runtime that restarts its reply, or as a wake
+ * turn of an idle thread. Its events are outside text: the notice quotes them.
+ */
+export interface MonitorEventPayload {
+  kind: 'monitor_event'
+  monitorId: string
+  monitorKind: MonitorKind
+  /** The agent's short description of it. */
+  description: string
+  /** What it printed or received since the last notice, one entry per line or message, each cut. */
+  events: string[]
+  /** Events left out of this notice because it was full. */
+  droppedEvents?: number
+  /** Set on its last notice. */
+  end?: MonitorEnd
+  /** A background command's last output, on its end notice. */
+  tail?: string
+  /** `needed` starts a notice turn on an idle thread; `none` waits for the thread's next turn (after a Stop). */
+  attention: 'needed' | 'none'
+}
+
+export function isMonitorEventRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'monitor_event'
+}
+
+/**
+ * Payload of a `reconcile_notice` row that carries a thread agent's own wake-up (`wake`, `ThreadWakes`): it was due, or
+ * what it waited on happened (another thread finished its turn, a pull request merged, its checks settled or it got a
+ * review), or it ended without it. It is delivered as an agent note is, and grants nothing: an idle thread starts a turn
+ * no person started, a running turn takes it as a steer or with its next Mousse tool call, and it waits while the thread
+ * waits on a person's answer. `text` is the whole notice the agent reads (`wakeInput`); the rest is for the app's row.
+ * One with `attention: none` says the thread's wake-ups were cancelled (its Stop or archive) and waits for its next turn.
+ */
+export interface ThreadWakePayload {
+  kind: 'thread_wake'
+  wakeId: string
+  /** What happened, in a few words: "Following up · acme/app#12 merged" (`wakeFiredLabel`). */
+  label: string
+  /** What the agent wrote for itself. */
+  brief: string
+  text: string
+  attention: 'needed' | 'none'
+}
+
+export function isThreadWakeRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return row.kind === 'reconcile_notice' && (row.payload as { kind?: unknown } | null)?.kind === 'thread_wake'
+}
+
+/**
+ * A row that waits while the thread waits on a person's answer: an agent's note, a monitor's event or a wake-up. A live
+ * provider settles a pending request when it takes a steer, and none of them answers one.
+ */
+export function waitsForAnswer(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
+  return isAgentNoteRow(row) || isMonitorEventRow(row) || isThreadWakeRow(row)
+}
+
+/** A note, a monitor's notice or a wake-up's sent with `attention: none`: it never starts a turn of its own. */
 export function isQuietNoteRow(row: Pick<InboxRecord, 'kind' | 'payload'>): boolean {
-  return isAgentNoteRow(row) && (row.payload as AgentNotePayload).attention === 'none'
+  if (isAgentNoteRow(row)) return (row.payload as AgentNotePayload).attention === 'none'
+  if (isThreadWakeRow(row)) return (row.payload as ThreadWakePayload).attention === 'none'
+  return isMonitorEventRow(row) && (row.payload as MonitorEventPayload).attention === 'none'
 }
 
 /** Payload of a `turn.start` effect that wakes a thread for its pending inbox rows (rule 4). */

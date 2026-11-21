@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { GitScope, GitStatusSnapshot } from '../src/shared/types'
 import { folderKey } from '../src/renderer/lib/activeProject'
-import { refreshGitStatus, retainGitPath, stageGitPaths, useGitStatusStore } from '../src/renderer/stores/gitStatusStore'
+import { GIT_STATUS_SLOW_MS, refreshGitStatus, retainGitPath, stageGitPaths, useGitStatusStore } from '../src/renderer/stores/gitStatusStore'
 
 const status = (branch: string): GitStatusSnapshot => ({ isRepo: true, branch, upstream: null, tracking: 'none', ahead: 0, behind: 0, changes: [] })
 const projectScope = (projectId: string): GitScope => ({ projectId, workspaceThreadId: null })
@@ -63,6 +63,25 @@ describe('Git state by thread or project', () => {
     const { entries } = useGitStatusStore.getState()
     expect(entries['project:p1']?.status?.branch).toBe('main')
     expect(entries['thread:t1']?.status?.branch).toBe('mousse/thread/t1')
+  })
+
+  it('a first status read that does not answer stops showing Checking with an error, and its late answer still shows', async () => {
+    vi.useFakeTimers()
+    const project = projectScope('p1')
+    const key = folderKey(project)!
+    const { git } = installGit(() => 'main')
+    let answer: (value: GitStatusSnapshot) => void = () => undefined
+    git.status.mockImplementation(() => new Promise((resolve) => { answer = resolve }))
+    const refreshed = refreshGitStatus(key, { scope: project })
+    expect(useGitStatusStore.getState().entries[key]).toMatchObject({ loaded: false, loading: true })
+
+    await vi.advanceTimersByTimeAsync(GIT_STATUS_SLOW_MS)
+    expect(useGitStatusStore.getState().entries[key]).toMatchObject({ loaded: true, loading: false, status: null })
+    expect(useGitStatusStore.getState().entries[key]?.error).toBeTruthy()
+
+    answer(status('main'))
+    await refreshed
+    expect(useGitStatusStore.getState().entries[key]).toMatchObject({ error: null, status: { branch: 'main' } })
   })
 
   it('shows the status as soon as it answers, and fills in the commits and diff counts when they arrive', async () => {

@@ -278,12 +278,15 @@ export class BotChatService {
     return this.detailOf(botId)
   }
 
-  /** The local vault resolves its recipient and current grant here, never from a window's thread id. */
+  /**
+   * The local vault resolves its recipient here, never from a window's thread id. Every bot may be given secrets: one
+   * with an approved grant may keep a pasted key.
+   */
   secretHome(botId: string): { threadId: string; allowed: boolean } {
     this.engine.definitionOf(botId)
     const threadId = this.store.registry(botId)?.homeThreadId
     if (!threadId) throw new Error('This bot has no home thread.')
-    return { threadId, allowed: this.store.activeGrant(botId)?.manifest.appTools.includes('secrets') === true }
+    return { threadId, allowed: this.store.activeGrant(botId) !== undefined }
   }
 
   /**
@@ -449,7 +452,6 @@ export class BotChatService {
    * answered together. Sending the same request again answers a wall the first one never reached.
    */
   async chatSend(input: { botId: string; text: string; attachments?: BotChatAttachment[]; clientRequestId: string; replyTo?: string; from?: { limit: PermissionMode; node?: string } }): Promise<{ message: BotChatMessage }> {
-    this.engine.noteOwnerActivity()
     return this.send(input)
   }
 
@@ -495,7 +497,6 @@ export class BotChatService {
     const question = this.questionToAnswer(input.botId, input.questionId)
     const choice = question.spec.choices.find((entry) => entry.label === input.choice)
     if (!choice) throw new BotEngineError('invalid_params', 'Pick one of the question\'s answers.')
-    this.engine.noteOwnerActivity()
     // A question the bot's work waits on: the tap answers the work, which goes on with it; no chat turn starts. Once the
     // work ended (it went on with its default), a late tap is an ordinary reply to the chat (below).
     if (question.lane === 'run') {

@@ -134,6 +134,16 @@ export function codexStandalonePaths(base: NodeJS.ProcessEnv = process.env): str
 }
 
 /**
+ * Where Google's installer puts the user's own `agy` on Windows, even before PATH is updated here.
+ * On macOS and Linux it goes to `~/.local/bin`, which every search covers already.
+ */
+export function agyStandalonePaths(base: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string[] {
+  if (platform !== 'win32') return []
+  const localAppData = Object.entries(base).find(([key]) => key.toUpperCase() === 'LOCALAPPDATA')?.[1]
+  return localAppData && isAbsolute(localAppData) ? [join(localAppData, 'agy', 'bin')] : []
+}
+
+/**
  * How the environment of an instance with its own home is built, for the drivers that take part
  * (`ownedLaunchEnv`). Mousse's own environment may hold the user's sign-in in more places than a
  * list of credential names can follow, so the families that choose or hold a credential are closed:
@@ -318,7 +328,8 @@ export function instanceEnv(input: {
   const own = input.home ? DRIVER_VARIABLES[input.driver] : undefined
   if (own) env = withUserEnv(env, { ...own })
   // Standalone installs are found after PATH, wherever the instance's home is.
-  const extraSearch = input.driver === 'grok' ? [grokStandaloneBin(base)] : input.driver === 'codex' ? codexStandalonePaths(base) : []
+  const extraSearch = input.driver === 'grok' ? [grokStandaloneBin(base)] : input.driver === 'codex' ? codexStandalonePaths(base)
+    : input.driver === 'antigravity' ? agyStandalonePaths(base) : []
   return {
     instanceId: input.instanceId,
     driver: input.driver,

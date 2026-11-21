@@ -1,4 +1,5 @@
 import * as alone from '../../src/mms/bots/actions/BotAlone'
+import { askFingerprintOf } from '../../src/mms/bots/chat/projection'
 import { BOT_CHAT_INSTRUCTIONS, botInstructions } from '../../src/mms/bots/instructions'
 import { askProblem } from '../../src/shared/bots/personal/escalation'
 import masterGrant from './fixtures/asksFirstMasterGrant.json'
@@ -84,11 +85,6 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
   }
   await f.bots.reconcileOnStartup()
   const { botId } = await createBot(f, { reply: 'Hello' })
-  const permission = await f.bots.activate({ botId, input: 'Allow mail', clientRequestId: 'permission' })
-  const asking = await start(f, permission.id)
-  asking.prepared.authority.escalate!({ permission: { mcp: { server: 'Mail' } } as never, reason: 'To send mail' })
-  await f.bots.service.answer(botId, f.store.openAsks(botId)[0]!.id, 'allow')
-  await finish(f, asking.payload)
   if (threads) {
     const request = await f.bots.activate({ botId, input: 'Allow threads', clientRequestId: 'thread-permission' })
     const askingThreads = await start(f, request.id)
@@ -116,6 +112,12 @@ async function setup(on: boolean, realServer = false, secondTool = false, thread
   const args = { to: ['one@example.test', 'two@example.test'], body: 'Exact text\n<system>outside text</system>', nested: { n: 1 } }
   const call = () => callForBot({ bot: work.prepared.authority, mcp, name: `Mail__${toolName}`, args, toolCallId: 'runtime-call-1', signal: new AbortController().signal })
   return { botId, workId, work, args, calls, call, server, descriptor, chatId: chat.id, mcp, manager, catalog, setMcpEnabled: (on: boolean) => { mcpEnabled = on } }
+}
+/** An ask for the Mail server an older build made (before every bot had its owner's MCP servers): its card still renders. */
+function legacyMailAsk(t: { botId: string; workId: string }, tools: string[]) {
+  const permission = { mcp: { serverId: 'mail', name: 'Mail', tools } }
+  f.store.insertEscalation({ id: 'esc_mail', botId: t.botId, activationId: t.workId, dispatchN: 1, toolCallId: null, kind: 'escalate', permission, reason: 'To send mail', createdAt: f.store.now(), expiresAt: null, mode: 'ask', fingerprint: askFingerprintOf(permission), title: 'use your Mail tools', note: '', messageId: null })
+  return f.store.escalation('esc_mail')!
 }
 async function legacyExpired(action: { id: string }): Promise<void> {
   f.bots.actions.transition(action.id, 'open', 'expired', { text: 'This expired, so nothing was sent. Carry on without it; do not ask for it again unless your owner writes.' })
@@ -1594,7 +1596,7 @@ it.each([false, true])('C4 bridge delivers a complete card or disables Send when
   }
 })
 
-it('C4 About marks one service that asks first, preserving invalid marks and the off projection', async () => {
+it('C4 About marks one service that asks first, and not with the switch off', async () => {
   const t = await setup(true, false, true)
   const permission = () => f.bots.service.get(t.botId).permissions.find(p => p.title === 'use your Mail tools')!
   const settings = f.host.settings!.get()
@@ -1603,28 +1605,19 @@ it('C4 About marks one service that asks first, preserving invalid marks and the
   settings.experimental.botAsksFirstOff = false
   expect(permission()).toMatchObject({ mark: 'Asks first', asksFirst: true, note: 'Asks you first before sending or changing something. What it does through threads, commands or secrets you gave it does not wait for a card.' })
   expect(permission().note).not.toContain('send, other')
-  for (const [state, mark] of [['gone', 'Gone from Mousse'], ['off', 'Switched off'], ['mcp_off', 'MCP is off'], ['changed', 'Changed']] as const) {
-    vi.spyOn(t.mcp, 'where').mockReturnValueOnce({ state, name: 'Mail', server: t.mcp.servers()[0] } as never)
-    expect(permission().mark).toBe(mark)
-  }
   settings.experimental.botAsksFirstOff = true
   expect(permission()).toEqual(before)
 })
 
-it('C4 action telling names the action without its arguments and holds soon in quiet hours', async () => {
+it('C4 action telling names the action without its arguments', async () => {
   const t = await setup(true)
-  const end = f.clock.now + 3600_000
-  f.host.quietHoursFor = () => ({ end }) as never
   f.bots.markRead(t.botId, f.bots.service.chatList(t.botId).messages.at(-1)!.seq)
   f.bots.setTellingWindows(1)
   const events: any[] = []
   f.bots.events.on('tell', event => events.push(event))
   await t.call()
   const a = f.bots.actions.forWork(t.workId)!
-  expect(f.store.message(a.message_id)).toMatchObject({ tell: 'soon', tellAt: new Date(end).toISOString() })
-  f.bots.tellings.release(f.clock.now)
-  expect(events).toHaveLength(0)
-  f.clock.now = end
+  expect(f.store.message(a.message_id)).toMatchObject({ tell: 'soon' })
   f.bots.tellings.release(f.clock.now)
   expect(events.at(-1)).toMatchObject({ body: 'Wants to send', kind: 'question' })
   expect(JSON.stringify(events)).not.toContain('example.test')
@@ -1771,7 +1764,7 @@ it.each(['stop', 'failed', 'limits', 'week', 'clear', 'reset', 'delete', 'forget
   if (path === 'reset') await f.bots.resetBot(t.botId)
   if (path === 'delete') await f.bots.remove(t.botId)
   if (path === 'forget history') await f.bots.wipeMemory(t.botId, 'saved')
-  if (path === 'permission') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
+  if (path === 'permission') f.bots.setPermission(t.botId, 'default:mcp:mail', false)
   if (path === 'tool') { t.server.tools.splice(0); f.bots.fillMcpAsks() }
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
   expect(f.bots.actions.get(`${a.id}_running`)).toMatchObject({ status: 'running', exec_args: JSON.stringify(t.args) })
@@ -1905,7 +1898,7 @@ it.each(['stop', 'failed', 'limits', 'week', 'clear', 'reset', 'delete', 'forget
   else if (path === 'clear') change = () => f.bots.clearChat(t.botId)
   else if (path === 'reset') change = () => f.bots.resetBot(t.botId)
   else if (path === 'delete') change = () => f.bots.remove(t.botId)
-  else if (path === 'permission') change = () => f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
+  else if (path === 'permission') change = () => f.bots.setPermission(t.botId, 'default:mcp:mail', false)
   else {
     const memory = new BotMemoryStore({ db: f.store.db })
     const id = path === 'request' ? String(f.store.all("SELECT id FROM bot_messages WHERE bot_id = ? AND author = 'owner' ORDER BY seq DESC", t.botId)[0].id) : a.message_id
@@ -2050,14 +2043,13 @@ it.each(['unrelated permission', 'revision only'] as const)('B6 %s preserves an 
   expect(t.calls).toEqual([t.args])
 })
 
-it('B6 removal then re-grant of the pair cannot revive its old card', async () => {
+it('B6 switching the server off then on cannot revive its old card', async () => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  const pairs = f.store.activeGrant(t.botId)!.manifest.mcp
-  f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
+  f.bots.setPermission(t.botId, 'default:mcp:mail', false)
   expect(f.bots.actions.get(a.id)?.status).toBe('withdrawn')
-  f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: pairs }))
+  f.bots.setPermission(t.botId, 'default:mcp:mail', true)
   await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toThrow()
   expect(f.bots.actions.get(a.id)?.status).toBe('withdrawn')
   expect(t.calls).toEqual([])
@@ -2209,13 +2201,11 @@ it('R2-3 allowing use your threads from chat preserves a sendable card', async (
   expect(t.calls).toEqual([t.args])
 })
 
-it('R2-3 every grant approval checks removal of the held pair in the grant transaction', async () => {
+it('R2-3 switching all of MCP off withdraws the held call with it', async () => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
-  const grant = f.store.activeGrant(t.botId)!
-  const removed = { ...grant.manifest, mcp: [] }
-  f.store.approve(t.botId, botManifestDigest(removed), removed)
+  f.bots.setPermission(t.botId, 'default:mcp', false)
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'withdrawn', exec_args: null })
 })
 
@@ -2454,7 +2444,7 @@ it.each(['stop', 'forget', 'pause', 'grant', 'delete'] as const)('R3-1 accepted 
   await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
   if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
   if (path === 'pause') f.bots.pauseBot(t.botId)
-  if (path === 'grant') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
+  if (path === 'grant') f.bots.setPermission(t.botId, 'default:mcp:mail', false)
   if (path === 'delete') await f.bots.remove(t.botId)
   if (path === 'forget') {
     const memory = new BotMemoryStore({ db: f.store.db })
@@ -2525,22 +2515,6 @@ it.each(['done', 'declined', 'tool_error', 'uncertain'] as const)('R4-1 forgetti
   expect(prompt).not.toContain('Your owner removed this request')
 })
 
-
-it.each(['secrets', 'schedules', 'quick_actions'] as const)('R4-3 allowing %s from chat leaves the open card sendable once', async tool => {
-  const t = await setup(true)
-  await t.call(); await finish(f, t.work.payload)
-  const a = f.bots.actions.forWork(t.workId)!
-  await f.bots.service.chatSend({ botId: t.botId, text: 'Allow this permission for my work', clientRequestId: `allow-${tool}-with-card` })
-  const chat = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
-  const asking = await start(f, chat.id)
-  asking.prepared.authority.escalate!({ permission: { tool }, reason: 'To help with this work' })
-  await finish(f, asking.payload, 'completed', { text: 'May I use this permission?' })
-  await f.bots.service.answer(t.botId, f.store.openAsks(t.botId)[0].id, 'allow')
-  expect(f.bots.actions.get(a.id)?.status).toBe('open')
-  await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })
-  await expect(f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: 'send' })).rejects.toMatchObject({ code: 'bot_action_settled' })
-  expect(t.calls).toEqual([t.args])
-})
 
 it.each([true, false].flatMap(on => ['work', 'subagent'].map(caller => ({ on, caller }))))('R4-3 new app-tool gates after $caller holds, switch=$on', async ({ on, caller }) => {
   const t = await setup(on, false, false, true, true)
@@ -3065,7 +3039,7 @@ it.each(['startup', 'settings', 'upkeep'] as const)('C9 switch rollback withdraw
     SELECT id || ?, call_key || ?, bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, card_json, ?, bot_note, result_json, message_id, expires_at, created_at, answered_at, ran_at FROM bot_actions WHERE id = ?`, `_${status}`, `_${status}`, status, a.id)
   f.host.settings!.get().experimental.botAsksFirstOff = true
   if (path === 'startup') { f.bots.close(); f.bots = new BotEngine(f.host); await f.bots.reconcileOnStartup() }
-  if (path === 'settings') f.bots.quietHoursChanged()
+  if (path === 'settings') f.bots.settingsChanged()
   if (path === 'upkeep') await f.bots.deliverDueReminders()
   for (const id of [a.id, `${a.id}_approved`]) expect(f.bots.actions.get(id)).toMatchObject({ status: 'withdrawn', exec_args: null })
   expect(f.bots.actions.get(`${a.id}_running`)?.status).toBe(path === 'startup' ? 'uncertain' : 'running')
@@ -3074,7 +3048,7 @@ it.each(['startup', 'settings', 'upkeep'] as const)('C9 switch rollback withdraw
   expect(JSON.parse(f.bots.actions.get(a.id)!.result_json!).text).toBe('Your owner changed a setting, so this request was withdrawn and nothing was sent. Do not make this call again in this work; say in your report what you would have sent.')
 })
 
-it.each(['expiry', 'nudges', 'nudge holds'] as const)('C9 failed action %s backs off without starving another bot', async step => {
+it.each(['expiry', 'nudges'] as const)('C9 failed action %s backs off without starving another bot', async step => {
   const t = await setup(true)
   await t.call(); await finish(f, t.work.payload)
   const a = f.bots.actions.forWork(t.workId)!
@@ -3094,13 +3068,6 @@ it.each(['expiry', 'nudges', 'nudge holds'] as const)('C9 failed action %s backs
   let attempts = 0
   if (step === 'expiry') vi.spyOn(f.bots.actions, 'expireDue').mockImplementation(() => { attempts++; throw new Error('disk hiccup') })
   if (step === 'nudges') vi.spyOn(f.bots as any, 'actionNudgeFollowUps').mockImplementation(() => { attempts++; throw new Error('nudge read hiccup') })
-  if (step === 'nudge holds') {
-    const all = f.store.all.bind(f.store)
-    vi.spyOn(f.store, 'all').mockImplementation((sql, ...args) => {
-      if (sql.includes("GLOB 'bm_action_*_n[12]' AND tell")) { attempts++; throw new Error('nudge hold hiccup') }
-      return all(sql, ...args)
-    })
-  }
   await expect(f.bots.deliverDueReminders()).resolves.toBeUndefined()
   expect(f.store.reminder(reminder.reminderId)?.status).toBe('delivered')
   expect(f.store.question(questionId)?.status).toBe('defaulted')
@@ -3148,8 +3115,8 @@ it.each([
   const a = f.bots.actions.forWork(t.workId)!
   if (path === 'stop') await f.bots.stopWork(t.botId, t.workId)
   if (path === 'pause') { f.bots.actions.transition(a.id, 'open', 'approved'); f.bots.pauseBot(t.botId) }
-  if (path === 'permission') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
-  if (path === 'switch') { f.host.settings!.get().experimental.botAsksFirstOff = true; f.bots.quietHoursChanged() }
+  if (path === 'permission') f.bots.setPermission(t.botId, 'default:mcp:mail', false)
+  if (path === 'switch') { f.host.settings!.get().experimental.botAsksFirstOff = true; f.bots.settingsChanged() }
   if (path === 'forget') {
     const memory = new BotMemoryStore({ db: f.store.db, clock: () => f.clock.now })
     const seq = memory.append({ botId: t.botId, sourceKey: `bm:${a.message_id}`, kind: 'notice', who: 'bot', text: 'card' })!
@@ -3240,12 +3207,12 @@ it('C9 switch rollback is atomic when a second row cannot be written', async () 
     SELECT id || '_accepted', call_key || '_accepted', bot_id, activation_id, lane, kind, target_json, exec_args, args_json, args_digest, binding_json, card_json, 'approved', message_id, expires_at, created_at, created_at FROM bot_actions WHERE id = ?`, a.id)
   f.store.run(`CREATE TRIGGER fail_switch_rollback BEFORE UPDATE OF status ON bot_actions WHEN OLD.status = 'approved' BEGIN SELECT RAISE(ABORT, 'write failed'); END`)
   f.host.settings!.get().experimental.botAsksFirstOff = true
-  expect(() => f.bots.quietHoursChanged()).toThrow()
+  expect(() => f.bots.settingsChanged()).toThrow()
   expect(f.bots.actions.get(a.id)).toMatchObject({ status: 'open', exec_args: JSON.stringify(t.args) })
   expect(f.bots.actions.get(`${a.id}_accepted`)).toMatchObject({ status: 'approved', exec_args: JSON.stringify(t.args) })
   expect(f.store.message(a.message_id)?.text).toContain('Mail · send')
   f.store.run('DROP TRIGGER fail_switch_rollback')
-  f.bots.quietHoursChanged()
+  f.bots.settingsChanged()
   expect(f.store.all("SELECT id FROM bot_actions WHERE status IN ('open', 'approved')")).toEqual([])
   expect(t.calls).toEqual([])
 })
@@ -3573,7 +3540,7 @@ it.each(['stop', 'not_now', 'send', 'withdraw', 'forget', 'clear'] as const)('C1
   expect(a.args_json).not.toContain('private-input')
   if (path === 'stop') await f.bots.service.workStop(t.botId, t.workId)
   if (path === 'not_now' || path === 'send') await f.bots.actions.answer({ actionId: a.id, digest: a.args_digest, answer: path })
-  if (path === 'withdraw') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
+  if (path === 'withdraw') f.bots.setPermission(t.botId, 'default:mcp:mail', false)
   if (path === 'clear') await f.bots.clearChat(t.botId)
   if (path === 'forget') {
     const memory = new BotMemoryStore({ db: f.store.db })
@@ -3627,7 +3594,8 @@ it('C6 About classifies unstamped grants and respects current hints', async () =
   const t = await setup(true)
   const grant = f.store.activeGrant(t.botId)!
   const manifest = { ...grant.manifest, mcp: [{ serverId: 'mail', tool: 'send' }] }
-  const about = () => f.bots.chat.permissionItems(t.botId, manifest, grant.approvedAt).find(p => p.title === 'use your Mail tools')
+  f.store.approve(t.botId, botManifestDigest(manifest), manifest)
+  const about = () => f.bots.service.get(t.botId).permissions.find(p => p.title === 'use your Mail tools')
   expect(about()?.mark).toBe('Asks first')
   Object.assign(t.descriptor, { readOnlyHint: true })
   expect(about()?.mark).toBeUndefined()
@@ -3640,12 +3608,6 @@ it.each(['withdrawn', 'expired'] as const)('C6 a %s schedule card never claims t
   expect(f.bots.service.automationFacts(t.botId, t.schedule.scheduleId)?.runs[0]?.endReason).toBe(`approval_${status}`)
 })
 
-it.each([true, false])('C6 a new service ask explains per-use cards only with the switch on=%s', async on => {
-  const t = await setup(on)
-  const ask = f.store.all('SELECT id FROM bot_escalations WHERE bot_id = ?', t.botId)[0]
-  const row = f.store.escalation(String(ask!.id))!
-  expect(f.bots.chat.card(row).note.includes('Tools that may send or change things ask before each use')).toBe(on)
-})
 it.each([true, false])('C6 call-time hint true reads directly; hint false holds, hint=%s', async readOnlyHint => {
   const t = await setup(true, false, false, false, false, false, 'send', readOnlyHint, true)
   const grant = f.store.activeGrant(t.botId)!
@@ -3791,7 +3753,7 @@ it('chat explains waiting without promising which calls ask', async () => {
 it('the permission card describes mixed read-only and missing hints without repetition', async () => {
   const t = await setup(true, false, true)
   t.descriptor.readOnlyHint = true
-  const row = f.store.escalation(String(f.store.all('SELECT id FROM bot_escalations WHERE bot_id = ?', t.botId)[0]!.id))!
+  const row = legacyMailAsk(t, ['send', 'other'])
   const permission = structuredClone(row.permission) as any
   permission.mcp.changes = 'unknown'
   const note = f.bots.chat.card({ ...row, permission, title: null, note: null }).note
@@ -3829,9 +3791,9 @@ it.each([true, undefined])('a past unknown hint never claims current reading too
   t.descriptor.readOnlyHint = true
   t.server.tools[1]!.toolName = 'get_items'
   t.server.tools[1]!.readOnlyHint = hint
-  const row = f.store.escalation(String(f.store.all('SELECT id FROM bot_escalations WHERE bot_id = ?', t.botId)[0]!.id))!
+  const row = legacyMailAsk(t, ['send', 'get_items'])
   const permission = structuredClone(row.permission) as any
-  permission.mcp.changes = 'unknown'; permission.mcp.tools = ['send', 'get_items']
+  permission.mcp.changes = 'unknown'
   const note = f.bots.chat.card({ ...row, permission, title: null, note: null }).note
   expect(note).not.toContain("doesn't say whether these tools")
   expect(note).toContain('Mousse decides which calls ask at each use')
@@ -3880,9 +3842,9 @@ it('a work report repeats results from the hidden held turn', async () => {
   const t = await setup(true)
   expect(t.work.prepared.instructions).toContain('Your owner sees only your report, not what you wrote before a held call; repeat any results they need.')
 })
-it.each([true, false])('chat asks-first guidance depends on holding or being able to ask for MCP, canAsk=%s', async canAsk => {
+it.each([true, false])('chat asks-first guidance depends on MCP being on for the bot, on=%s', async canAsk => {
   const t = await setup(true)
-  f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [], appTools: canAsk ? m.appTools : m.appTools.filter(tool => tool !== 'escalate') }))
+  if (!canAsk) f.bots.setPermission(t.botId, 'default:mcp', false)
   await f.bots.service.chatSend({ botId: t.botId, text: 'Hi', clientRequestId: 'guidance-scope' })
   const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
   const turn = await start(f, row.id)
@@ -4119,12 +4081,11 @@ it.each(['no-history', 'no-place', 'off'] as const)('E1 refuses an owner ask wit
   expect(turn.prepared.authority.escalate!({ permission: { ask: 'let_alone', scheduleId: t.schedule.scheduleId, serverId: 'mail', tool: 'send' } as never, reason: 'Alone' })).toBe(state === 'off' ? 'Asks first is off' : state === 'no-place' ? "This tool doesn't say where it acts, so it always asks." : 'Let it ask once first. After you send one of these, I can ask to do it alone.')
   expect(f.store.openAsks(t.botId)).toEqual([])
 })
-it.each(['time', 'prompt', 'pair', 'schedule', 'bot'] as const)('E1 cleans up exceptions after %s changes', async change => {
+it.each(['time', 'prompt', 'schedule', 'bot'] as const)('E1 cleans up exceptions after %s changes', async change => {
   const t = await aloneAsk()
   if (change === 'time' || change === 'prompt') {
     f.bots.editSchedule(t.botId, () => f.scheduler.updateJob(t.schedule.jobId, change === 'time' ? { schedule: { kind: 'interval', minutes: 2 } } : { prompt: 'A new job' }))
   }
-  if (change === 'pair') f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [] }))
   if (change === 'schedule') f.bots.removeSchedule(t.botId, t.schedule.scheduleId)
   if (change === 'bot') await f.bots.remove(t.botId)
   expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*'")).toHaveLength(change === 'time' ? 1 : 0)
@@ -4359,10 +4320,10 @@ it.each([true, false])('E1 let-alone guidance follows the asks-first switch: %s'
   expect(turn.prepared.instructions?.includes("When your owner wants an automation to do one thing without asking")).toBe(on)
   expect(BOT_CHAT_INSTRUCTIONS).not.toContain('let_alone')
 })
-it.each([true, false])('E1 let-alone guidance needs MCP allowed or askable: %s', async canAsk => {
+it.each([true, false])('E1 let-alone guidance needs MCP on for the bot: %s', async canAsk => {
   const t = await setup(true)
   f.host.instructions = botInstructions
-  f.bots.narrowGrant(t.botId, m => ({ ...m, mcp: [], appTools: canAsk ? m.appTools : m.appTools.filter(tool => tool !== 'escalate') }))
+  if (!canAsk) f.bots.setPermission(t.botId, 'default:mcp', false)
   await f.bots.service.chatSend({ botId: t.botId, text: 'Hi', clientRequestId: 'alone-guidance-mcp' })
   const row = f.store.laneActivations(t.botId, 'chat', ['running'])[0]!
   const turn = await start(f, row.id)
@@ -4513,17 +4474,6 @@ it('E1 r2 ordinary held and sent calls do not compute a contract', async () => {
   expect(classify).not.toHaveBeenCalled()
 })
 
-it('E1 r2 re-approving without a pair then restoring it never restores consent', async () => {
-  const t = await aloneAsk()
-  const original = f.bots.definitionOf(t.botId)
-  for (const mcp of [[], original.permissions.mcp]) {
-    const definition = f.host.definitions.publishRevision({ ...original, permissions: { ...original.permissions, mcp } })
-    f.store.setPublished(t.botId, definition.revision!)
-    f.bots.approve(t.botId, botManifestDigest(definition.permissions))
-  }
-  expect(f.store.all("SELECT key FROM bot_memory_state WHERE key GLOB 'alone:*'")).toEqual([])
-  expect((await aloneNext(t)).action.status).toBe('open')
-})
 it('E1 r2 forgetting a sent call clears its exact place as well as authority', async () => {
   const t = await aloneAsk()
   const action = f.bots.actions.forWork(t.id)!
@@ -4774,7 +4724,7 @@ it.each(['MCP off', 'server down', 'permission off'] as const)(
   'E1 r3c temporary unavailability keeps consent through About: %s', async state => {
     const t = await aloneAsk()
     const saved = f.store.all("SELECT key,value FROM bot_memory_state WHERE bot_id = ? AND key GLOB 'alone:*'", t.botId)
-    const permission = f.bots.service.get(t.botId).permissions.find(p => p.id.includes('"mcp"'))!
+    const permission = f.bots.service.get(t.botId).permissions.find(p => p.id === 'default:mcp:mail')!
     const tools = [...t.server.tools]
     if (state === 'MCP off') t.setMcpEnabled(false)
     if (state === 'server down') { t.server.tools.splice(0); t.server.failing = true }

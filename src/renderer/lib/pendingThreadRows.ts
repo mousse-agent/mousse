@@ -293,6 +293,14 @@ interface PendingThreadRowsState {
 
 export const usePendingThreadRows = create<PendingThreadRowsState>(() => ({ rows: [], rowKeys: new Map() }))
 
+/**
+ * Threads a send is starting from the new-chat composer: its own thread from the click on, never an empty draft that
+ * New thread opens again, even before the service lists it started.
+ */
+export function startingThreadIds(rows: readonly PendingThreadRow[] = usePendingThreadRows.getState().rows): ReadonlySet<string> {
+  return new Set(rows.flatMap((row) => (row.threadId ? [row.threadId] : [])))
+}
+
 /** Lists a pending row now. */
 export function addPendingThreadRow(row: PendingThreadRow): PendingThreadRow {
   usePendingThreadRows.setState((state) => ({ rows: [...state.rows.filter((entry) => entry.key !== row.key), row] }))

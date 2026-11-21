@@ -16,6 +16,7 @@ import {
   type ThreadSourceEvent
 } from '../../../../src/mms/bridge/remote'
 import type { ListsServices } from '../../../../src/mms/bridge/remote/MmsListsSource'
+import { copyLimits } from '../../../../src/mms/bridge/copyLimits'
 import { remoteListMethods, type RemoteChatsPort } from '../../../../src/mms/bridge/remote/RemoteLists'
 import type { ChatSummary } from '../../../../src/shared/chats'
 import type { Project, Thread, ThreadActivityState, TurnState } from '../../../../src/shared/types'
@@ -62,19 +63,24 @@ function thread(id: string, extra: Partial<Thread> = {}): Thread {
 /** Timers the test runs by hand. */
 function manualTimers() {
   const timeouts = new Map<number, () => void>()
+  const delays = new Map<number, number>()
   const intervals = new Map<number, () => void>()
   let next = 1
   return {
     timeouts,
+    delays,
     intervals,
-    setTimeout: (run: () => void) => (timeouts.set(next, run), next++),
+    setTimeout: (run: () => void, ms = 0) => (timeouts.set(next, run), delays.set(next, ms), next++),
     clearTimeout: (handle: unknown) => timeouts.delete(handle as number),
     setInterval: (run: () => void) => (intervals.set(next, run), next++),
     clearInterval: (handle: unknown) => intervals.delete(handle as number),
-    flush() {
-      const due = [...timeouts.entries()]
-      timeouts.clear()
-      for (const [, run] of due) run()
+    /** Runs the timeouts set so far whose delay is at most `upToMs`. */
+    flush(upToMs = Infinity) {
+      for (const [handle, run] of [...timeouts.entries()]) {
+        if ((delays.get(handle) ?? 0) > upToMs) continue
+        timeouts.delete(handle)
+        run()
+      }
     }
   }
 }
@@ -199,6 +205,47 @@ describe('phone sidebar lists', () => {
     expect(timers.intervals.size).toBe(0)
     expect(f.chatListeners.size).toBe(0)
     expect((f.services.threads as unknown as EventEmitter).listenerCount('updated')).toBe(0)
+  })
+
+  it('reports a change of thread times alone at most once per interval, and any other change at once', () => {
+    const f = fakeServices(),
+      timers = manualTimers(),
+      interval = copyLimits().listsTimesIntervalMs,
+      settle = interval - 1
+    f.threads.list = [thread('t1'), thread('t2')]
+    let calls = 0
+    const stop = new MmsListsSource(f.services, timers).watch(() => calls++)
+    const save = (id: string, updatedAt: string, extra: Partial<Thread> = {}): void => {
+      f.threads.list = f.threads.list.map((entry) => (entry.id === id ? { ...entry, ...extra, updatedAt } : entry))
+      f.threads.emit('updated', f.threads.list.find((entry) => entry.id === id))
+      timers.flush(settle)
+    }
+    const held = (): number[] => [...timers.timeouts.keys()].filter((handle) => timers.delays.get(handle) === interval)
+    // A running turn saves every second or so: its time alone is held, one wait for any number of saves.
+    for (let second = 1; second <= 30; second++) save('t1', `2026-10-21T10:00:${String(second).padStart(2, '0')}.000Z`)
+    save('t2', '2026-10-21T10:00:31.000Z')
+    expect(calls).toBe(0)
+    expect(held()).toHaveLength(1)
+    timers.flush()
+    expect(calls).toBe(1)
+    expect(held()).toEqual([])
+    // A time held, then a rename: the rename is reported at once and the wait is dropped.
+    save('t1', '2026-10-21T10:01:00.000Z')
+    expect(held()).toHaveLength(1)
+    save('t2', '2026-10-21T10:01:01.000Z', { name: 'Renamed' })
+    expect(calls).toBe(2)
+    expect(held()).toEqual([])
+    // A status change with no new time is reported at once too.
+    f.runtimes.activity = { t1: 'processing' }
+    f.runtimes.emit('activity', {})
+    timers.flush(settle)
+    expect(calls).toBe(3)
+    // Stopping drops a held time.
+    save('t1', '2026-10-21T10:02:00.000Z')
+    expect(held()).toHaveLength(1)
+    stop()
+    expect(timers.timeouts.size).toBe(0)
+    expect(calls).toBe(3)
   })
 
   it('publishes the lists as a signed display stream and replaces the snapshot on change', async () => {

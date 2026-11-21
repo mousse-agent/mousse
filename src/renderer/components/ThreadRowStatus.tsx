@@ -46,6 +46,7 @@ const setupFailedTitle = (reason: string): string => `Didn't start. ${reason}`
 export const ThreadRowStatusIcon = memo(function ThreadRowStatusIcon({ threadId, activity, live, awaitsApproval, setupFailed }: RowStatusProps) {
   countRender(`SidebarStatus:${threadId}`)
   const status = threadStatus(useRowActivity(threadId, activity, live), awaitsApproval)
+  const animateWorking = useAppStore((s) => status === 'working' && s.sidebarAnimations)
   const pause = useOwnPause(threadId)
   // When the limit resets moves with the clock; the other icons show no time.
   useAgeClock(status === 'paused')
@@ -55,7 +56,13 @@ export const ThreadRowStatusIcon = memo(function ThreadRowStatusIcon({ threadId,
   }
   switch (status) {
     case 'working':
-      return <Loader2 size={14} strokeWidth={2} className="threads-sidebar-status-spinner icon-spin" aria-hidden="true" />
+      return animateWorking ? (
+        <Loader2 size={14} strokeWidth={2} className="threads-sidebar-status-spinner icon-spin" aria-hidden="true" />
+      ) : (
+        <span className="threads-sidebar-status-icon threads-sidebar-status-icon--working" role="img" aria-label="Agent is working" title="Working">
+          <span className="threads-sidebar-status-dot" aria-hidden="true" />
+        </span>
+      )
     case 'done':
       return <CircleCheck size={14} strokeWidth={2} className="threads-sidebar-status-icon threads-sidebar-status-icon--completed" aria-label="Agent finished" />
     case 'approval':
@@ -141,11 +148,13 @@ export const ThreadCardStatus = memo(function ThreadCardStatus({ threadId, activ
   const pause = useOwnPause(threadId)
   const age = threadAge(isThreadActivityActive(shown) ? startedAt ?? updatedAt : updatedAt)
   const status: ThreadLinkStatus = linkStatus ?? threadStatus(shown, awaitsApproval)
+  // Chat thread links share this card layout but have their own motion.
+  const animateWorking = useAppStore((s) => status === 'working' && (linkStatus !== undefined || s.sidebarAnimations))
   const settledAge = withAge && age && age !== 'now' ? ` ${age}` : ''
   if (status === 'working') {
     return (
       <span className="threads-sidebar-card-status threads-sidebar-card-status-working">
-        <Loader2 size={12} strokeWidth={2} className="icon-spin" aria-hidden="true" />
+        {animateWorking && <Loader2 size={12} strokeWidth={2} className="icon-spin" aria-hidden="true" />}
         Working{age && age !== 'now' ? ` ${age}` : ''}
       </span>
     )

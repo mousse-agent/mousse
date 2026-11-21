@@ -52,3 +52,28 @@
   flex-direction: column;
   gap: 4px;
 }
+
+/* One steered message: its actions sit left of the bubble, at its foot, so a short steer adds no row. The bubble keeps
+   a prompt's 80% cap of the whole row; when the actions do not fit beside it they wrap under it, at the right, as
+   under a prompt, rather than narrowing it. */
+.steer-group-item {
+  display: flex;
+  flex-direction: row-reverse;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0 4px;
+}
+
+.steer-group-item > :first-child {
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 80%;
+}
+
+.steer-group-item > :first-child .chat-user-bubble {
+  max-width: 100%;
+}
+
+.steer-group-item > .chat-message-toolbar {
+  flex: none;
+}

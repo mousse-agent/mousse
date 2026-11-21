@@ -10,6 +10,8 @@ import { NO_HOOKS_PATH } from './gitNullDevice'
 import { activeHiddenStore, checkStoreCommandAsync, hiddenStoreEnv } from './hiddenStore'
 import { isTrustedRepoEntry, readRepoTrust, readRepoTrustAt, readRepoTrustAtAsync, repoTrustPath, repoTrustPathAsync, TRUSTED_FILTER_KEY, writeRepoTrust, type RepoTrustRecord } from './repoTrust'
 import { waitForFolderAccess } from '../files/folderAccess'
+import { timeGitChild, timeGitSync } from '../diagnostics/turnBoundary'
+import { gitEnvFor, gitFile, simpleGitWithProgram } from './gitExecutable'
 
 /**
  * Git commands Mousse runs on a user's repository start no program the repository configures.
@@ -318,7 +320,7 @@ const PROBE_ARGS = (args: readonly string[]): string[] => ['-c', 'core.fsmonitor
 function bareGit(cwd: string, args: string[]): BareResult {
   assertGitAllowed({ cwd, args })
   // A common directory Mousse names is named the same way for the probe as for the command it is for.
-  const result = spawnSync('git', PROBE_ARGS(args), { cwd, encoding: 'utf8', windowsHide: true, timeout: probeTimeoutMs, maxBuffer: PROBE_MAX_BUFFER, env: repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...gitDirectoryEnv(cwd) }) })
+  const result = timeGitSync(() => spawnSync(gitFile(), PROBE_ARGS(args), { cwd, encoding: 'utf8', windowsHide: true, timeout: probeTimeoutMs, maxBuffer: PROBE_MAX_BUFFER, env: gitEnvFor(repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...gitDirectoryEnv(cwd) })) }))
   const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT'
   return { ok: !result.error && result.status === 0, stdout: result.error ? '' : result.stdout ?? '', failed: Boolean(result.error), timedOut }
 }
@@ -333,7 +335,7 @@ async function bareGitAsync(cwd: string, args: string[], signal?: AbortSignal, c
   const env = repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0', ...await untilAborted(gitDirectoryEnvAsync(cwd), signal), ...(ceiling ? { GIT_CEILING_DIRECTORIES: ceiling } : {}) })
   signal?.throwIfAborted()
   return new Promise((settle, reject) => {
-    const child = spawn('git', PROBE_ARGS(args), { cwd, windowsHide: true, env, stdio: ['ignore', 'pipe', 'ignore'], signal })
+    const child = timeGitChild(() => spawn(gitFile(), PROBE_ARGS(args), { cwd, windowsHide: true, env: gitEnvFor(env), stdio: ['ignore', 'pipe', 'ignore'], signal }))
     const chunks: Buffer[] = []
     let size = 0
     let stopped: 'time' | 'size' | undefined
@@ -615,7 +617,7 @@ export function trustExistingProjectsOnce(profileHome: string, projectPaths: rea
 }
 
 /**
- * `args` with the `-c` arguments in front, for a `spawn('git', …)` in `cwd`. `git config` runs no
+ * `args` with the `-c` arguments in front, for a `timeGitChild(() => spawn(gitFile(), …))` in `cwd`. `git config` runs no
  * program and must read the repository's values as they are (a `-c` would answer for them), so it
  * is left alone.
  */
@@ -770,12 +772,13 @@ export function policedSimpleGit(cwd: string, git: SimpleGit): SimpleGit {
  */
 export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOptions, 'baseDir' | 'config' | 'unsafe'>> = {}): SimpleGit {
   // A command in a hidden store reads only the store's config (`hiddenStoreEnv`): nothing of the folder's is overridden.
-  const forCommand = (config: string[]): SimpleGit => simpleGit({
+  const forCommand = (config: string[]): SimpleGit => simpleGitWithProgram(({ binary, allowUnsafeCustomBinary }) => simpleGit({
     ...options,
+    ...(binary ? { binary } : {}),
     baseDir: cwd,
     config,
-    unsafe: UNSAFE_ALLOWED
-  })
+    unsafe: { ...UNSAFE_ALLOWED, ...(allowUnsafeCustomBinary ? { allowUnsafeCustomBinary } : {}) }
+  }))
   return new Proxy({} as SimpleGit, {
     get(_target, key) {
       // Not a thenable: awaiting the instance itself must not call a Git method.
@@ -794,7 +797,7 @@ export function guardedSimpleGit(cwd: string, options: Partial<Omit<SimpleGitOpt
         else await assertGitAllowedAsync({ cwd, args: command, lockFree: true })
         const config = store ? [] : await repoProgramSettingsAsync(cwd, { write: writesThroughFilters(args) })
         // No optional locks: a status or diff read here never refreshes and rewrites the index.
-        const instance = forCommand(config).env(store ? hiddenStoreEnv(store, repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) : repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) as unknown as Record<string, (...values: unknown[]) => unknown>
+        const instance = forCommand(config).env(gitEnvFor(store ? hiddenStoreEnv(store, repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' })) : repoProgramEnv({ ...process.env, GIT_OPTIONAL_LOCKS: '0' }))) as unknown as Record<string, (...values: unknown[]) => unknown>
         return await instance[key]!(...parameters)
       }
     }

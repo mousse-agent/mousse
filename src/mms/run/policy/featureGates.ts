@@ -50,9 +50,8 @@ export interface SubagentRefusal {
   /**
    * `shared_unsupported_for_provider`: the target cannot run a read-only child (leave `readOnly` out).
    * `read_only_caller_requires_shared`: the caller is itself read-only, so its children must be too.
-   * `owner_only_provider`: the target runs only messages its owner sends (Antigravity's personal Google sign-in).
    */
-  code: 'shared_unsupported_for_provider' | 'read_only_caller_requires_shared' | 'owner_only_provider'
+  code: 'shared_unsupported_for_provider' | 'read_only_caller_requires_shared'
   message: string
 }
 

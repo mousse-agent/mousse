@@ -8,9 +8,12 @@ import { StorageCleanupSection } from './storage/StorageCleanupSection'
 import { StoragePolicyRows } from './storage/StoragePolicyRows'
 import { StorageUsageSection } from './storage/StorageUsageSection'
 import { WorktreeFolderRow } from './storage/WorktreeFolderRow'
+import { BranchNamingGroup } from './storage/BranchNamingGroup'
+import type { BranchNamingSettings } from '../../shared/settings'
 import '../styles/storage.css'
 
-export function StorageSettings() {
+/** `branches` and `onBranches`: Settings → Storage → Branches, saved with the rest of the settings. */
+export function StorageSettings({ branches, onBranches }: { branches?: BranchNamingSettings; onBranches?: (next: BranchNamingSettings) => void | Promise<void> } = {}) {
   const [policy, setPolicy] = useState<StoragePolicy>()
   const [storagePaused, setStoragePaused] = useState(false)
   const [reviewRecommended, setReviewRecommended] = useState(false)
@@ -125,6 +128,7 @@ export function StorageSettings() {
       onPolicy={savePolicy}
       onResumeStorage={() => { if (policy) savePolicy(policy) }}
       worktreeFolder={<WorktreeFolderRow status={worktreeFolder} busy={busy} refusal={folderRefusal} onChoose={chooseWorktreeFolder} onReset={resetWorktreeFolder} />}
+      branches={onBranches && <BranchNamingGroup value={branches} onChange={onBranches} />}
     />
     {error && <p className="storage-error" role="alert">{error}</p>}
   </section>

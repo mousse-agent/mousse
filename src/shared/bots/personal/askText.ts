@@ -43,31 +43,6 @@ const TOOL_TEXT: Record<string, AskText> = {
     tip: "It can read app windows, click, type and run steps in apps on this computer through Cua Driver, as a thread's agent can, in its work (never in the chat itself). Threads it starts get it too. Settings → Computer use can still turn it off for everyone."
   },
   threads: THREADS_TEXT,
-  profiler: {
-    title: 'use the profiler',
-    note: "Mousse's memory and CPU numbers, while Labs lets agents read the profiler.",
-    tip: "It can read Mousse's profiler: memory and CPU of each process, the service's counts and caches, windows and the GPU, and take samples. Numbers only, never your chats or files; threads it can't see count only in totals. Never a heap snapshot. Settings → Labs → Profiler can still turn it off."
-  },
-  themes: {
-    title: 'change how Mousse looks',
-    note: 'Themes, colors, CSS and a wallpaper picture from this computer, without asking each time.',
-    tip: "It can read your themes, switch between them, and save a theme with colors, an accent, CSS and a wallpaper, as a thread's agent can in Full access. Theme CSS can restyle or cover anything in Mousse's window; CSS that loads anything from outside Mousse is dropped. A wallpaper is a PNG, JPEG or WebP it names on this computer, never on a network share; Mousse keeps its own copy. Settings → Appearance switches the theme back."
-  },
-  schedules: {
-    title: 'schedule work in your threads',
-    note: 'Scheduled jobs that run in your threads with full access, without asking each time.',
-    tip: "It can make scheduled jobs, as a thread's agent can: a turn in one of your threads, or a new thread in a project, later or on a cadence. It sees, changes, pauses, runs and removes only the jobs it made. Its jobs run in Full access (or no wider than the device you wrote from). The profile's limits on agent jobs hold, and Automations shows each job; only you resume or extend one."
-  },
-  secrets: {
-    title: 'use secrets you give it',
-    note: 'You type each one into a private card in its chat; it gets only the name.',
-    tip: 'It can ask you for a secret (an API key, a token) with a private card in its chat, where you type it or pick a saved one. It never sees the value: it uses the secret by name in commands its work runs from its files folder (with "run commands"), each command\'s output masked. Those commands run as its other commands do, with only the secrets they name and none of your other settings or credentials; on Linux with bubblewrap, in a sandbox with only its folders and no network. Settings → Secrets lists and removes them.'
-  },
-  quick_actions: {
-    title: 'add quick actions',
-    note: 'Buttons in your Actions list, without asking for each.',
-    tip: 'It can add a quick action: a button in your Actions list that sends a message or runs a shell command when you press it. Nothing runs until you press it.'
-  },
   // The bot's own tools: a bot made before one of them existed has none of it in its grant, so its first use asks.
   bot_schedule_add: { title: 'run on a schedule', note: '' },
   bot_schedule_remove: { title: 'remove its schedules', note: '' },
@@ -83,12 +58,7 @@ const TOOL_TEXT: Record<string, AskText> = {
   memory_save: { title: 'save to its memory', note: '' },
   memory_forget: { title: 'forget things in its memory', note: '' },
   item_save: { title: 'keep its list of what you asked for', note: '' },
-  item_list: { title: 'read its list of what you asked for', note: '' },
-  automation_draft_save: { title: 'draft automations', note: 'You turn each one on yourself.' },
-  automation_ask: { title: 'ask you about its automation drafts', note: '' },
-  automation_list: { title: 'see your automations', note: '' },
-  automation_update: { title: 'change your automations', note: '' },
-  automation_pause: { title: 'pause your automations', note: '' }
+  item_list: { title: 'read its list of what you asked for', note: '' }
 }
 
 /** Any other tool: the card never shows a tool's name; the tooltip does. */

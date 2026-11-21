@@ -1,11 +1,11 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Edit, FolderPlus, Info, PanelLeft, PanelRightClose, PanelRightOpen } from '../lib/icons'
 import { useShortcutTitle } from '../commands/commandRegistry'
-import { addProjectAndStartThread, createAndSelectThread } from '../lib/threadActions'
-import { runWithToast } from '../lib/actionToast'
+import { createAndSelectThread } from '../lib/threadActions'
 import { useChatsStore } from '../stores/chatsStore'
 import { WindowCaptionButtons } from './WindowCaptionButtons'
 import { TitleBarNav } from './TitleBarNav'
+import { NewThreadPicker } from './NewThreadPicker'
 import { IconButton } from './IconButton'
 import {
   applySideCardToggle,
@@ -46,6 +46,11 @@ export function TitleBar() {
   }, [needsMeCount])
   // In the Chats tab, New starts an agent chat. Search is in the navigation rail.
   const chatsMode = useAppStore((s) => s.sidebarMode === 'chats')
+  // New thread asks which project first; with none to pick from, or the picker off, it starts the thread at once.
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false)
+  const hasProjects = useAppStore((s) => s.projects.length > 0)
+  // Settings → General → Threads can turn the picker off, back to one click.
+  const pickerOn = useAppStore((s) => s.newThreadPicker)
   const sidebarLabel = threadsSidebarOpen ? 'Hide sidebar' : showBadge ? `Show sidebar · ${needsMeLabel(needsMe.threads, needsMe.bots)}` : 'Show sidebar'
   const sidebarTitle = useShortcutTitle(sidebarLabel, 'sidebar.toggle')
   const newThreadTitle = useShortcutTitle('New thread', 'thread.new')
@@ -109,7 +114,7 @@ export function TitleBar() {
                 label="Add project"
                 title={addProjectTitle}
                 variant="titlebar"
-                onClick={() => void runWithToast('add the project', addProjectAndStartThread)}
+                onClick={() => useAppStore.getState().setNewProjectOpen(true)}
               />
             )}
             <IconButton
@@ -119,6 +124,7 @@ export function TitleBar() {
               variant="titlebar"
               onClick={() => {
                 if (chatsMode) useChatsStore.setState({ newChatOpen: true, newChatKind: 'direct' })
+                else if (hasProjects && pickerOn) setProjectPickerOpen(true)
                 else void createAndSelectThread()
               }}
             />
@@ -150,6 +156,7 @@ export function TitleBar() {
         <WindowCaptionButtons />
       </div>
     </header>
+    <NewThreadPicker open={projectPickerOpen} onClose={() => setProjectPickerOpen(false)} />
     </>
   )
 }

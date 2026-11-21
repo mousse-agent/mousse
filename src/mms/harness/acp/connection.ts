@@ -1,5 +1,6 @@
-import type { ChildProcessWithoutNullStreams } from 'node:child_process'
+import type { ChildProcess, ChildProcessWithoutNullStreams } from 'node:child_process'
 import { Readable, Writable, type Transform } from 'node:stream'
+import { killTree } from '../spawn'
 import {
   client,
   methods,
@@ -53,7 +54,7 @@ export interface AcpClientHandlers {
 }
 
 /** Why a connection opens. */
-export type AcpPurpose = 'turn' | 'sign_in' | 'sign_out' | 'models' | 'handshake'
+export type AcpPurpose = 'turn' | 'sign_in' | 'sign_out' | 'models' | 'handshake' | 'one_shot'
 
 export interface AcpLaunchRequest {
   purpose: AcpPurpose
@@ -127,6 +128,23 @@ export function acpClientApp(handlers: AcpClientHandlers, active: Pick<AcpConnec
   for (const [method, handle] of Object.entries(handlers.extNotifications ?? {}))
     app.onNotification<unknown>(method, raw, ({ params }) => handle(params))
   return app
+}
+
+/**
+ * The agent process as the core sees it, where ending it ends its whole process tree: an agent's
+ * launcher starts the real agent, which starts helpers of its own, and killing only the launcher
+ * would leave them running.
+ */
+export function treeKilledChild(child: ChildProcess): AcpChild {
+  return {
+    get pid() { return child.pid },
+    get exitCode() { return child.exitCode },
+    get signalCode() { return child.signalCode },
+    kill: () => {
+      killTree(child)
+      return true
+    }
+  }
 }
 
 /** Closes the connection and ends the process: a polite signal, then a kill after 3 s. */

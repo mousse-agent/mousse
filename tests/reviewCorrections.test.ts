@@ -145,6 +145,31 @@ describe('Review: daemon.shutdown shared implementation', () => {
     expect(logs.at(-1)).toMatch(/forcing the stop/)
   }, 10_000)
 
+  it('a stop attempt that never answers is stuck: teardown ends at the drain deadline, logged, and the readiness record goes', async () => {
+    const token = 'never-answers'
+    const runtime = getMmsRuntimePath(home)
+    const now = new Date().toISOString()
+    writeFileSync(runtime, JSON.stringify({ token, pid: process.pid, processInstanceId: 'x', home, startedAt: now, readyAt: now }))
+    const mms = { stop: () => new Promise<void>(() => undefined) } as unknown as MmsInstance
+    const state: DaemonLifecycleState = {
+      homeDir: home,
+      mms,
+      protocolServer: null,
+      ownerToken: token,
+      runtimeWritten: true,
+      pollStop: null,
+      shuttingDown: false,
+      drainWait: { retryDelayMs: 5, stuckAfterMs: 150 }
+    }
+    const logs: string[] = []
+    const began = Date.now()
+    await shutdownDaemonLifecycle(state, { onLog: (msg) => logs.push(msg) })
+    expect(Date.now() - began).toBeLessThan(2_000)
+    expect(state.mms).toBeNull()
+    expect(existsSync(runtime)).toBe(false)
+    expect(logs.at(-1)).toMatch(/forcing the stop/)
+  })
+
   it('a stop reaches a daemon whose lease is unreadable for a moment while it is rewritten', async () => {
     const lease = acquireMmsOwnerLease(home, { kind: 'daemon' })
     try {

@@ -1,6 +1,8 @@
 import { COMPUTER_ERROR_CODES } from '../../shared/bridge/computerErrors'
 import { HARNESS_ERROR_CODES } from '../../shared/harness/types'
 import { PROVIDER_INSTANCE_ERROR_CODES } from '../../shared/providerInstances'
+import { SERVICE_ANSWERED_LATE, SERVICE_STOPPED_ANSWERING } from '../../shared/errors'
+import { SIZE_ERROR_CODES } from '../../shared/imageLimits'
 
 /** The message of a thrown value, whatever its type. */
 export function errorText(error: unknown): string {
@@ -43,13 +45,31 @@ export function isServiceBusy(error: unknown): boolean {
   return ipcErrorLine(error) === 'Too many pending requests'
 }
 
+// What the connection to the background service says when it dropped before the call was answered.
+const CONNECTION_LOST_LINES = new Set(['Connection closed', 'Connection closed before hello', 'Not connected'])
+
+/**
+ * Plain words for a call that failed in transit, not because the service refused it: the connection to the
+ * background service dropped (`service_connection_lost`, `Connection closed`) or no answer came in time
+ * (`service_timeout`, `Request timeout: <method>`). Undefined for any other failure.
+ */
+export function serviceFailureLine(error: unknown): string | undefined {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined
+  if (code === 'service_connection_lost') return SERVICE_STOPPED_ANSWERING
+  if (code === 'service_timeout') return SERVICE_ANSWERED_LATE
+  const line = ipcErrorLine(error)
+  if (CONNECTION_LOST_LINES.has(line)) return SERVICE_STOPPED_ANSWERING
+  if (line.startsWith('Request timeout: ')) return SERVICE_ANSWERED_LATE
+  return undefined
+}
+
 /**
  * A failure as a person reads it: its own first line (see `ipcErrorLine`), plain words for an
- * overloaded background service, or `fallback` when the failure says nothing.
+ * overloaded or unreachable background service, or `fallback` when the failure says nothing.
  */
 export function readableError(error: unknown, fallback: string): string {
   if (isServiceBusy(error)) return 'Mousse is busy. Try again in a moment.'
-  return ipcErrorLine(error) || fallback
+  return serviceFailureLine(error) ?? (ipcErrorLine(error) || fallback)
 }
 
 /**
@@ -57,7 +77,17 @@ export function readableError(error: unknown, fallback: string): string {
  * may still be running there, so this says nothing about how it ended.
  */
 export function isRequestTimeout(error: unknown): boolean {
-  return ipcErrorLine(error).startsWith('Request timeout: ')
+  return serviceFailureLine(error) === SERVICE_ANSWERED_LATE
+}
+
+/** The reference an error was logged under, at the end of its message: `… Reference: 1ecec6b5-…`. */
+const REFERENCE = /\s*Reference:\s*(\S+)\s*$/
+
+/** A message and the reference at its end, apart. */
+export function splitErrorReference(message: string): { text: string; reference?: string } {
+  const match = REFERENCE.exec(message)
+  if (!match) return { text: message.trim() }
+  return { text: message.slice(0, match.index).trim(), reference: match[1] }
 }
 
 /**
@@ -84,6 +114,7 @@ const PLAIN_CODES = new Set<string>([
   ...HARNESS_ERROR_CODES,
   ...Object.values(PROVIDER_INSTANCE_ERROR_CODES),
   ...COMPUTER_ERROR_CODES,
+  ...SIZE_ERROR_CODES,
   'permission_mode_above_ceiling',
   'workflow_not_available_remotely'
 ])
@@ -92,8 +123,13 @@ const PLAIN_CODES = new Set<string>([
  * A failed send as the composer shows it: the message, prefixed with its code (`[code] …`) except
  * for provider errors, whose messages already say what happened and what to do next.
  */
+const OLD_IMAGE_SIZE_REFUSAL = /^(images|attachments\.[^\s]+)\[\d+\]\.data exceeds max size$/
+const OLD_IMAGE_SIZE_LINE = 'An image is too large for the Mousse running this thread. Update Mousse there, or attach a smaller image.'
+
 export function sendErrorLine(error: unknown): string {
   if (!error || typeof error !== 'object' || !('message' in error) || typeof error.message !== 'string') return 'The send failed. Please try again.'
   const code = 'code' in error && error.code !== undefined ? String(error.code) : ''
+  // A service from before larger images (another computer not yet updated) refuses one with its raw check.
+  if (code === 'invalid_params' && OLD_IMAGE_SIZE_REFUSAL.test(error.message)) return OLD_IMAGE_SIZE_LINE
   return code && !PLAIN_CODES.has(code) ? `[${code}] ${error.message}` : error.message
 }

@@ -78,11 +78,12 @@ describe('the bot changelog in the pack', () => {
     expect(pack).not.toContain(BOT_CHANGELOG[0]!.text)
   })
 
-  it('tells a bot that saw the old watcher advice that every chat turn can start commands', async () => {
+  it('never repeats the old watcher advice to a bot that saw it', async () => {
     existingBot()
     memory.write(() => memory.setState('ada', 'changelog_seen', 9))
     const pack = await packs().chatPreamble({ botId: 'ada', activationId: 'act-watch-rule' })
-    expect(pack).toMatch(/any chat turn can start a background command with watch_start/i)
+    // The newest entries only (`BOT_CHANGELOG_PACK_ENTRIES`).
+    expect(pack).toContain(BOT_CHANGELOG.at(-1)!.text)
     expect(pack).not.toMatch(/only.*chat turn.*owner.*own message/i)
     expect(pack).not.toMatch(/tell your owner what to start/i)
   })
@@ -122,11 +123,8 @@ describe('the bot changelog entries', () => {
   })
 })
 
-// Quiet settings and the changelog are read together by old bots.
-it('quiet-hour advice agrees with settings and later entries', () => {
-  const advice = BOT_CHANGELOG.map(entry => entry.text).join('\n')
-  expect(advice).not.toMatch(/there are no quiet hours|never tell your owner you hold anything/i)
-  expect(BOT_CHANGELOG.find(entry => entry.id === 15)!.text).toMatch(/quiet hours now exist/i)
+// Old bots read every entry they have not seen, oldest first: a later entry never says what an earlier one removed.
+it('later entries never say a removed behaviour', () => {
   for (const entry of BOT_CHANGELOG) for (const gone of entry.gone ?? []) {
     for (const text of BOT_CHANGELOG.filter(later => later.id > entry.id).map(later => later.text)) expect(text).not.toMatch(gone)
   }

@@ -45,6 +45,8 @@ async function main(): Promise<void> {
   const server = new MmsProtocolServer({ mms, ownerToken: owner.token, version: 'profile-production-fixture' })
   const endpoint = await server.start()
   mms.getOwnerLease()!.setEndpoint(endpoint)
+  // Ready, as the daemon's start publishes it: the passes it leaves for after ready run now.
+  mms.afterReady()
   const gui = new GuiMmsController({
     homeDir: home,
     disableAutoStart: true,

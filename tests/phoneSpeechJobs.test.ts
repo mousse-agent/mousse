@@ -176,6 +176,14 @@ describe('phone speech jobs', () => {
     expect(channel.sent).toEqual([{ type: 'audio', clip: 0, part: 0, last: true, mimeType: 'audio/mpeg', rate: 1.5, data: bytesToBase64(new Uint8Array([7, 7])) }])
   })
 
+  it('writes short forms out before a provider model reads them', async () => {
+    const synthesizeProvider = vi.fn(async () => ({ audio: new Uint8Array([7]), mimeType: 'audio/mpeg' }))
+    const fake = fakeDeps({ synthesizeProvider })
+    fake.deps.setReadAloudSelection({ source: 'provider', providerId: 'openai', modelId: 'tts-1', label: 'OpenAI · TTS 1' })
+    await runPhoneSpeechJob(job('speak', 'readAloud', { text: 'IDK, the PR is fine.' }), fake.deps, io().io)
+    expect(synthesizeProvider).toHaveBeenCalledWith(expect.objectContaining({ text: "I don't know, the P R is fine." }))
+  })
+
   it('stops reading once the phone stops listening', async () => {
     let signal: AbortSignal | undefined
     const synthesizeLocal = vi.fn<PhoneSpeechDeps['synthesizeLocal']>(async (_modelId, _text, options) => {

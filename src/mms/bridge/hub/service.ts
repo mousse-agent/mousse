@@ -7,6 +7,8 @@ import {
   validateStreamDescriptor
 } from '../../../shared/net'
 import type {
+  Envelope,
+  EventId,
   NetErrorCode,
   NodeDelegation,
   NodeId,
@@ -48,6 +50,7 @@ import { DispatchInputJournal } from './inputs'
 import { streamBoundElsewhere } from '../../netEngine/store'
 import type { BridgeClient } from '../peers'
 import { engineTwin, openPrivateThread, routedResult } from './engine'
+import { copyLimits } from '../copyLimits'
 
 /** How long a usage history read on another computer may take: its first read of many logs runs for minutes. */
 const USAGE_HISTORY_DEADLINE_MS = 10 * 60_000
@@ -111,7 +114,11 @@ interface Attachment {
   caught: boolean
   /** Set on a private attachment: it is reopened the same way after a reconnect. */
   options?: HubAttachOptions
+  /** The first record of the snapshot being displayed, kept once that snapshot is complete. */
+  begin?: { epoch: number; seq: number; id: EventId }
 }
+/** Where a display snapshot starts: the first record a copy must keep. */
+type SnapshotStart = { epoch: number; seq: number; id: EventId }
 export interface BridgeHubOptions {
   db: NetDatabase
   identity: IdentityService
@@ -188,6 +195,9 @@ function dropStagedData(request: { method: string; params: unknown }): void {
 /** A private attachment also takes the records only a private stream has (Git progress, terminal output). */
 const projectionTypes = (options?: HubAttachOptions): readonly string[] =>
   options?.open ? BRIDGE_ROUTED_EVENT_TYPES : []
+/** Lets other work run between two steps of background work. */
+const pause = (ms: number): Promise<void> =>
+  new Promise<void>((resolve) => (ms > 0 ? setTimeout(resolve, ms) : setImmediate(resolve)))
 /** Trusted local caller journal. A sent mutation is never resubmitted by recovery. */
 export class BridgeHub {
   private readonly clock: Clock
@@ -221,6 +231,15 @@ export class BridgeHub {
   private readonly listeners = new Set<(status: BridgeHubRequestStatus) => void>()
   private stopped = false
   private lastSweepAt = Number.NEGATIVE_INFINITY
+  /**
+   * Records whose author signature was checked, by the digest of their bytes, oldest first. A stream read again (a
+   * second window, a reconnect, a new snapshot) is not checked again; a change of roster forgets them all.
+   */
+  private readonly verified = new Set<string>()
+  private readonly offRoster: () => void
+  /** Copies to drop records from, each up to the start of its newest complete snapshot; one step at a time. */
+  private readonly drops = new Map<StreamId, SnapshotStart>()
+  private dropping?: Promise<void>
   constructor(readonly options: BridgeHubOptions) {
     this.clock = options.clock ?? systemClock
     for (const [key, maximum] of [
@@ -241,6 +260,7 @@ export class BridgeHub {
     this.inputs = new DispatchInputJournal(this, (target) =>
       this.session(target, 'bridge.dispatch')
     )
+    this.offRoster = options.identity.onRosterChanged(() => this.verified.clear())
   }
   onChanged(listener: (status: BridgeHubRequestStatus) => void): () => void {
     if (this.listeners.size >= 64) return fail('rate_limited')
@@ -1223,13 +1243,13 @@ export class BridgeHub {
     const descriptor = JSON.parse(row.descriptor as string) as StreamDescriptor
     if (!this.options.store.getStream(descriptor.id)) return false
     const projection = new ThreadDisplayProjection(ref.entityId, projectionTypes(options))
-    const reader = this.options.store.openSnapshot(descriptor.id)
+    const reader = this.openFromSnapshot(descriptor.id),
+      reading = this.reading()
     try {
       for (;;) {
         const page = reader.next(1024 * 1024, 64)
         for (const record of page.records) {
-          this.verifyRecord(record, descriptor)
-          const value = projection.accept(decodeEnvelope(record.envelope).envelope)
+          const value = projection.accept(this.checkRecord(record, descriptor, reading))
           if (value) update(value)
         }
         if (page.done) break
@@ -1353,15 +1373,34 @@ export class BridgeHub {
     }
   }
   verifyRecord(record: StoredRecord, descriptor: StreamDescriptor): void {
+    this.checkRecord(record, descriptor)
+  }
+  /**
+   * Who reads, checked once for a whole replay rather than for each of its records (`checkRecord`), and only
+   * if a record needs it.
+   */
+  private reading(): () => { user: string } {
+    let self: { user: string } | undefined
+    return () => (self ??= this.self('read'))
+  }
+  /**
+   * Checks a stored record before it is displayed, and returns its envelope. An author signature is checked once:
+   * a record with the same bytes is taken on that check while the roster stays as it was.
+   */
+  private checkRecord(
+    record: StoredRecord,
+    descriptor: StreamDescriptor,
+    reading: () => { user: string } = () => this.self('read')
+  ): Envelope {
     const env = decodeEnvelope(record.envelope).envelope,
-      self = this.self('read')
+      self = reading()
     // A stream read from an engine pairing: its records were taken on the pinned channel's word, and are read
     // again only while the stream is bound to a pairing that is still serving.
     if (this.isEngine(descriptor.authority)) {
       if (descriptor.kind !== 'node.thread' || env.stream !== descriptor.id || env.minor > 0)
         return fail('forbidden')
       this.options.engine!.verifyStream(descriptor.id)
-      return
+      return env
     }
     if (
       descriptor.kind !== 'node.thread' ||
@@ -1372,7 +1411,151 @@ export class BridgeHub {
       env.minor > 0
     )
       return fail('forbidden')
+    const limit = copyLimits().verifiedRecords
+    const key = createHash('sha256').update(record.envelope).update(record.sig).digest('base64url')
+    if (this.verified.delete(key)) {
+      this.verified.add(key)
+      return env
+    }
     this.options.identity.verifyAuthor(env.author, record.envelope, record.sig, env.ts, 'history')
+    if (limit > 0) {
+      this.verified.add(key)
+      while (this.verified.size > limit) this.verified.delete(this.verified.values().next().value!)
+    }
+    return env
+  }
+  /**
+   * Where the newest complete display snapshot of a stream starts: its `thread.snapshot.begin`, if the newest
+   * `thread.snapshot.end` closes that same snapshot. Undefined when the stream has none, which is read whole.
+   */
+  private newestSnapshot(stream: StreamId): SnapshotStart | undefined {
+    const store = this.options.store
+    if (!store.lastOfType) return undefined
+    try {
+      const end = store.lastOfType(stream, 'thread.snapshot.end')
+      if (!end) return undefined
+      const begin = store.lastOfType(stream, 'thread.snapshot.begin', end.seq - 1)
+      if (!begin) return undefined
+      const closing = decodeEnvelope(end.envelope).envelope,
+        opening = decodeEnvelope(begin.envelope).envelope
+      const id = (body: unknown): unknown => (body as { snapshot?: unknown } | null)?.snapshot
+      if (begin.epoch !== end.epoch || id(opening.body) !== id(closing.body)) return undefined
+      return { epoch: begin.epoch, seq: begin.seq, id: opening.id }
+    } catch {
+      return undefined
+    }
+  }
+  /**
+   * A reader of what the copy on disk holds, from its newest complete snapshot on: a snapshot replaces everything
+   * before it, so what comes before it is not read (nor checked) again.
+   */
+  private openFromSnapshot(stream: StreamId) {
+    const from = this.newestSnapshot(stream)
+    return this.options.store.openSnapshot(stream, from ? { from } : undefined)
+  }
+  /**
+   * Once a copy's snapshot has been checked and displayed whole, the records before it go, in the background and
+   * a step at a time (`dropBefore` keeps nothing back unless that snapshot is still held).
+   */
+  private dropBefore(descriptor: StreamDescriptor, start: SnapshotStart): void {
+    if (!this.options.store.dropBefore || this.stopped || start.seq <= 1) return
+    if (descriptor.authority === this.options.identity.self()?.node) return
+    this.drops.set(descriptor.id, { ...start })
+    if (this.dropping) return
+    const run = (async () => {
+      const { dropBatchRows, dropBatchBytes, dropPauseMs } = copyLimits()
+      while (this.drops.size && !this.stopped) {
+        const [stream, keep] = this.drops.entries().next().value!
+        let dropped = 0
+        try {
+          dropped = this.options.store.dropBefore!(stream, keep, { rows: dropBatchRows, bytes: dropBatchBytes })
+        } catch {
+          // The stream is gone, or writes are suspended: the next snapshot of it tries again.
+        }
+        if (!dropped && this.drops.get(stream) === keep) this.drops.delete(stream)
+        await pause(dropPauseMs)
+      }
+    })().finally(() => {
+      this.cleanup.delete(run)
+      if (this.dropping === run) this.dropping = undefined
+    })
+    this.dropping = run
+    this.cleanup.add(run)
+  }
+  /**
+   * Tidies the copies on disk, in the background and a step at a time: drops the records no read reaches (old
+   * generations and epochs of thread display streams), then, for each copy this computer keeps of another
+   * computer's thread or lists, the records before its newest snapshot, once that snapshot's records pass the same
+   * checks as a display (signatures, and a whole snapshot whose digest matches). A copy whose newest snapshot does
+   * not pass keeps everything. Resolves once all of it is done, with how many unread rows went (the records before
+   * a snapshot go through the same steps as after a display, and are not counted).
+   */
+  async tidyCopies(): Promise<number> {
+    if (this.stopped) return 0
+    const { dropBatchRows, dropBatchBytes, dropPauseMs } = copyLimits()
+    let removed = 0
+    if (this.options.store.retireUnread)
+      for (;;) {
+        if (this.stopped) return removed
+        let count = 0
+        try {
+          count = this.options.store.retireUnread({ rows: dropBatchRows, bytes: dropBatchBytes })
+        } catch {
+          break
+        }
+        if (!count) break
+        removed += count
+        await pause(dropPauseMs)
+      }
+    const rows = this.options.db.database
+      .prepare('SELECT entity,descriptor FROM net_bridge_hub_threads')
+      .all() as Array<{ entity: string; descriptor: string }>
+    for (const row of rows) {
+      if (this.stopped) return removed
+      try {
+        const descriptor = JSON.parse(row.descriptor) as StreamDescriptor
+        if (!this.options.store.getStream(descriptor.id)) continue
+        const start = await this.checkedSnapshot(
+          descriptor,
+          row.entity.startsWith('private:') ? row.entity.slice('private:'.length) : row.entity
+        )
+        if (start) this.dropBefore(descriptor, start)
+      } catch {
+        // A copy that cannot be checked now keeps everything.
+      }
+      await pause(dropPauseMs)
+    }
+    const before = this.dropping
+    if (before) await before
+    return removed
+  }
+  /** The newest snapshot of a copy on disk, if every one of its records passes a display's checks. */
+  private async checkedSnapshot(
+    descriptor: StreamDescriptor,
+    threadId: string
+  ): Promise<SnapshotStart | undefined> {
+    const start = this.newestSnapshot(descriptor.id)
+    if (!start) return undefined
+    const reader = this.options.store.openSnapshot(descriptor.id, { from: start }),
+      reading = this.reading(),
+      projection = new ThreadDisplayProjection(threadId)
+    try {
+      for (let first = true; ; first = false) {
+        if (this.stopped) return undefined
+        const page = reader.next(1024 * 1024, 64)
+        for (const [index, record] of page.records.entries()) {
+          // The reader starts at the snapshot, or from the start when it was replaced meanwhile: then not now.
+          if (first && index === 0 && (record.epoch !== start.epoch || record.seq !== start.seq))
+            return undefined
+          const value = projection.accept(this.checkRecord(record, descriptor, reading))
+          if (value?.kind === 'snapshot') return start
+        }
+        if (page.done) return undefined
+        await new Promise<void>((resolve) => setImmediate(resolve))
+      }
+    } finally {
+      reader.close()
+    }
   }
   private rebuild(attachment: Attachment): Promise<void> {
     const pending = this.rebuildNow(attachment)
@@ -1385,12 +1568,14 @@ export class BridgeHub {
   }
   private async rebuildNow(attachment: Attachment): Promise<void> {
     attachment.projection.reset()
-    const reader = this.options.store.openSnapshot(attachment.descriptor.id)
+    attachment.begin = undefined
+    const reader = this.openFromSnapshot(attachment.descriptor.id),
+      reading = this.reading()
     try {
       for (;;) {
         if (attachment.stopped || this.stopped) return
         const page = reader.next(1024 * 1024, 64)
-        for (const record of page.records) await this.display(attachment, record)
+        for (const record of page.records) await this.display(attachment, record, reading)
         if (page.done) break
         await new Promise<void>((resolve) => setImmediate(resolve))
       }
@@ -1398,10 +1583,19 @@ export class BridgeHub {
       reader.close()
     }
   }
-  private async display(attachment: Attachment, record: StoredRecord): Promise<void> {
+  private async display(
+    attachment: Attachment,
+    record: StoredRecord,
+    reading?: () => { user: string }
+  ): Promise<void> {
     if (attachment.stopped || this.stopped) return
-    this.verifyRecord(record, attachment.descriptor)
-    const value = attachment.projection.accept(decodeEnvelope(record.envelope).envelope)
+    const envelope = this.checkRecord(record, attachment.descriptor, reading)
+    const value = attachment.projection.accept(envelope)
+    if (envelope.type === 'thread.snapshot.begin')
+      attachment.begin = { epoch: record.epoch, seq: record.seq, id: envelope.id }
+    else if (value?.kind === 'snapshot' && attachment.begin)
+      // A whole, checked snapshot: what the copy holds before it is not needed again.
+      this.dropBefore(attachment.descriptor, attachment.begin)
     if (value) {
       for (const listener of attachment.listeners) {
         try {
@@ -1468,6 +1662,8 @@ export class BridgeHub {
   close(): void {
     if (this.stopped) return
     this.stopped = true
+    this.offRoster()
+    this.drops.clear()
     this.inputs.close()
     this.ownerAttachments.clear()
     for (const pending of this.ownerPending.values()) pending.cancelled = true

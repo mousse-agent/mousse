@@ -57,17 +57,26 @@ function stopPour(): boolean {
  */
 function pourAfterSend(logo: HTMLElement): void {
   stopPour()
+  if (!useAppStore.getState().newChatAnimations) return
   const rect = logo.getBoundingClientRect()
   const copy = logo.cloneNode(true) as HTMLElement
   const timers: ReturnType<typeof setTimeout>[] = []
-  const pour: { cancel: () => void; copy?: HTMLElement } = { cancel: () => timers.splice(0).forEach(clearTimeout) }
+  const clearTimers = () => timers.splice(0).forEach(clearTimeout)
+  const unsubscribe = useAppStore.subscribe((state) => { if (!state.newChatAnimations) stopPour() })
+  const pour: { cancel: () => void; copy?: HTMLElement } = {
+    cancel: () => { clearTimers(); unsubscribe() }
+  }
   currentPour = pour
   const check = (wait: number, last: boolean) => timers.push(setTimeout(() => {
+    if (typeof document === 'undefined' || document !== logo.ownerDocument || !document.body) {
+      stopPour()
+      return
+    }
     if (logo.isConnected) {
       if (last && currentPour === pour) stopPour()
       return
     }
-    pour.cancel()
+    clearTimers()
     copy.classList.add('empty-logo-pour-copy')
     copy.setAttribute('data-pouring', '')
     copy.setAttribute('aria-hidden', 'true')
@@ -78,10 +87,7 @@ function pourAfterSend(logo: HTMLElement): void {
     pour.copy = copy
     // The fill drains as the pour plays.
     requestAnimationFrame(() => copy.querySelector<HTMLElement>('.empty-logo-liquid')?.style.setProperty('--empty-logo-fill', '0'))
-    setTimeout(() => {
-      copy.remove()
-      if (currentPour === pour) currentPour = undefined
-    }, scaleMotionMs(POUR_MS))
+    timers.push(setTimeout(stopPour, scaleMotionMs(POUR_MS)))
   }, wait))
   check(0, false)
   check(60, false)
@@ -107,9 +113,9 @@ function useGlowPhase(ref: RefObject<HTMLElement | null>, start: boolean): void 
  * and a send pours: liquid surges, bubbles rise and the swirl bobs. Private chats add the sunglasses.
  * With Animation speed Off or reduced motion it is still: no draw-in, a fill level without a wave.
  */
-export function EmptyThreadLogo({ label, incognito }: { label: string; incognito: boolean }) {
+export function EmptyThreadLogo({ label, incognito, drawnAtStart = false }: { label: string; incognito: boolean; drawnAtStart?: boolean }) {
   const still = useMotionScale() === 0
-  const [drawn, setDrawn] = useState(still)
+  const [drawn, setDrawn] = useState(still || drawnAtStart)
   const length = useAppStore(draftLength)
   const rootRef = useRef<HTMLDivElement>(null)
   const tiltRef = useRef<HTMLDivElement>(null)

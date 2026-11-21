@@ -10,7 +10,7 @@ import { writeTerminalRun } from '../terminal'
 import {
   TERMINAL_RUN_STATUSES,
   stoppedByPerson,
-  isAgentNoteRow,
+  waitsForAnswer,
   isQuietNoteRow,
   isRetiredInboxRow,
   isWakeTurnPayload,
@@ -29,11 +29,11 @@ export type CapabilitiesFor = (threadId: string) => ProviderCapabilities | null
 export type AwaitsAnswer = (threadId: string) => boolean
 
 /**
- * The rows that may be delivered now. While the thread waits on a person's answer, agent notes stay pending: a live
+ * The rows that may be delivered now. While the thread waits on a person's answer, agent notes and monitor events stay pending: a live
  * provider settles the request when it takes a steer, and a note never answers one. They go after the answer.
  */
 function deliverableRows(rows: InboxRecord[], awaitsAnswer: boolean): InboxRecord[] {
-  return awaitsAnswer ? rows.filter((row) => !isAgentNoteRow(row)) : rows
+  return awaitsAnswer ? rows.filter((row) => !waitsForAnswer(row)) : rows
 }
 
 export interface WakeReport {
@@ -239,13 +239,16 @@ export function wakeThreads(
   outbox: EffectOutbox,
   capabilitiesFor: CapabilitiesFor | undefined,
   now: string,
-  awaitsAnswer?: AwaitsAnswer
+  awaitsAnswer?: AwaitsAnswer,
+  /** Only this thread's rows (a turn's settle wakes its own thread at once); every thread's when absent. */
+  onlyThreadId?: string
 ): WakeReport {
   const inbox = new Inbox(store)
   const delegations = new Delegations(store, inbox)
   const restored = store.db.transaction(() => restoreUndeliveredRows(store, outbox, now))
   const report: WakeReport = { wakes: [], steers: [], cancelled: cancelAcknowledgedWakes(store, outbox, now), restored }
   for (const threadId of inbox.listThreadsWithPending()) {
+    if (onlyThreadId !== undefined && threadId !== onlyThreadId) continue
     try {
       store.db.transaction(() => {
         const pending = inbox.listPending(threadId)

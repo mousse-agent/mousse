@@ -5,7 +5,7 @@ import { ERROR_INFO_CAPABILITY, parseErrorInfo, type ErrorInfo } from '../../sha
 
 import { createConnection, type Socket } from 'net'
 import { randomBytes } from 'crypto'
-import { EnvelopeAssembler } from './envelopeChunks'
+import { EnvelopeAssembler, requestFrames } from './envelopeChunks'
 import { FrameDecoder, encodeFrame, FrameDecodeError, FrameTooLargeError } from './framing'
 import { parseEnvelope } from './validators'
 import { BOTS_BROWSER_STREAM_CAPABILITY } from '../../shared/bots/personal/browser'
@@ -13,6 +13,8 @@ import { BROWSER_VIEW_CAPABILITY } from '../../shared/browser/threadView'
 import {
   GIT_OPERATIONS_CAPABILITY,
   MMS_PROTOCOL_CHUNK_CAPABILITY,
+  MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY,
+  MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES,
   MMS_PROTOCOL_DEFAULT_REQUEST_TIMEOUT_MS,
   MMS_PROTOCOL_GIT_OPERATION_TIMEOUT_MS,
   MMS_PROTOCOL_COMPACT_TIMEOUT_MS,
@@ -25,6 +27,7 @@ import {
   type ProtocolEvent,
   type ProtocolConnectionEvent,
   type ProtocolHelloOk,
+  type ProtocolRequest,
   type ProtocolResponse
 } from './types'
 import { resolveLocalEndpoint } from './endpoint'
@@ -149,6 +152,7 @@ export const SHARED_READ_METHODS: ReadonlySet<string> = new Set([
   'skills.list',
   'storage.policy',
   'subagents.list',
+  'threads.backgroundWork',
   'thread.snapshot',
   'threads.approvalRules',
   'threads.get',
@@ -356,7 +360,7 @@ export class LocalMmsClient implements MmsClient {
               ownerToken: this.opts.ownerToken,
               clientType: this.opts.clientType ?? 'cli',
               clientBuild: this.opts.clientBuild,
-              requestedCapabilities: [...new Set([...(this.opts.requestedCapabilities ?? [ERROR_INFO_CAPABILITY]), MMS_PROTOCOL_CHUNK_CAPABILITY])]
+              requestedCapabilities: [...new Set([...(this.opts.requestedCapabilities ?? [ERROR_INFO_CAPABILITY]), MMS_PROTOCOL_CHUNK_CAPABILITY, MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY])]
             })
           )
         } catch (err) {
@@ -592,7 +596,7 @@ export class LocalMmsClient implements MmsClient {
           method
         })
         try {
-          this.write({ kind: 'req', id, method, params })
+          this.writeRequest({ kind: 'req', id, method, params })
         } catch (err) {
           // Remove/reject pending immediately — do not wait for timeout.
           // Reject the pending promise (do not also throw) so callers get one rejection.
@@ -815,6 +819,25 @@ export class LocalMmsClient implements MmsClient {
     if (maxQueuedBytes !== undefined && this.socket.writableLength > maxQueuedBytes) {
       throw new Error('Command response outbound backlog exceeded')
     }
+  }
+
+  /**
+   * Writes a request: in chunks when it is larger than one frame and the service takes chunked requests (an older one
+   * never receives a chunk). One larger than the service takes is refused here (`request_too_large`), not sent.
+   */
+  private writeRequest(request: ProtocolRequest): void {
+    if (!this._connected || !this.socket || this.socket.destroyed) throw new Error('Socket not writable')
+    const out = requestFrames(request, this._hello?.capabilities.includes(MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY) === true)
+    if ('tooLarge' in out) {
+      const older = out.tooLarge.max < MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES
+      throw new MmsProtocolError(
+        'request_too_large',
+        older ? 'This message is too large for the running Mousse service. Restart Mousse to send it.' : 'This message is too large to send.',
+        out.tooLarge,
+        { category: 'invalid', retryable: false }
+      )
+    }
+    for (const frame of out.frames) this.socket.write(frame)
   }
 
   private onDisconnect(err: Error): void {

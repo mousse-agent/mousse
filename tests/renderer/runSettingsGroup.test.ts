@@ -117,6 +117,18 @@ describe('Settings > General > Runs', () => {
     expect(saved().keepAwake).toBe(true)
   })
 
+  it('turns the New thread project picker off and on in the saved settings', () => {
+    show()
+    const picker = () => host.querySelector<HTMLElement>('[role="switch"][aria-label="Pick a project for new threads"]')!
+    // Absent counts as on.
+    expect(picker().getAttribute('aria-checked')).toBe('true')
+    click(picker())
+    expect(saved().newThreadPicker).toBe(false)
+    expect(picker().getAttribute('aria-checked')).toBe('false')
+    click(picker())
+    expect(saved().newThreadPicker).toBe(true)
+  })
+
   it('choosing another count saves it and the description follows', () => {
     const { updates } = show({ resumeAfterUsageLimit: true })
     pick('Up to 5 times')

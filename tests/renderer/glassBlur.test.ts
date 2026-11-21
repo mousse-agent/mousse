@@ -64,18 +64,24 @@ describe('no blur where nothing shows through', () => {
 const MASK = /(?<![\w-])(-webkit-)?mask(-image)?\s*:\s*(?!none\b)/
 /** Selector parts that apply only in a see-through window, with the frosted composer on, or over a theme's wallpaper. */
 const SEE_THROUGH = /(^|[\s(])html\[data-((acrylic|frosted-composer)='true'|wallpaper)\]/
+/** Sidebar also masks under an active user theme, where its backdrop may be feathered, gradient or custom CSS. */
+const USER_THEME_ACTIVE = /(^|[\s(])html\[data-user-theme\](?![\w-])/
 
 describe('no mask on a whole pane where nothing shows through', () => {
   // A mask on a scroller makes the GPU keep a copy of the scroller, its mask and their tiles as long as it is on
-  // screen: about 75 MB for the thread transcript at 1400x870 on a 2x screen. Over a solid pane the fades are painted
-  // in the pane's colour instead; only a see-through window or a wallpaper, where no colour can stand in for what lies
-  // behind, masks.
-  it('masks the thread transcript, the thread list and the bot chat only in a see-through window, with the frosted composer or over a wallpaper', () => {
+  // screen: about 75 MB for the thread transcript at 1400x870 on a 2x screen. Over a solid built-in pane the fades are
+  // painted in the pane's colour instead; only a see-through window, a wallpaper, or (for the sidebar) an active user
+  // theme where no single colour can stand in for what lies behind, masks.
+  it('masks the thread transcript, the thread list and the bot chat only when no single solid colour stands behind them', () => {
     const panes = ['.an-message-list', '.threads-sidebar-scroll', '.chat-transcript']
     const masking = allRules().filter(({ selector, body }) => MASK.test(body) && panes.some((pane) => new RegExp(`${pane.replace(/[.-]/g, '\\$&')}(?![\\w-])`).test(selector)))
     expect(masking.length).toBeGreaterThan(0)
     for (const { file, selector } of masking) {
-      for (const part of selector.split(',')) expect(part.trim(), `${file}: ${selector}`).toMatch(SEE_THROUGH)
+      const isSidebar = /\.threads-sidebar-scroll(?![\w-])/.test(selector)
+      for (const part of selector.split(',')) {
+        const trimmed = part.trim()
+        expect(SEE_THROUGH.test(trimmed) || (isSidebar && USER_THEME_ACTIVE.test(trimmed)), `${file}: ${selector}`).toBe(true)
+      }
     }
   })
 })

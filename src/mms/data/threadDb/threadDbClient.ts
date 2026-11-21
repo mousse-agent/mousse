@@ -12,7 +12,7 @@
  * When the built worker script is not beside this bundle (tests running from source), both run in-process.
  */
 import { existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { MessageChannel, receiveMessageOnPort, Worker, type MessagePort } from 'node:worker_threads'
 import { ThreadDbEngine, ThreadDbError } from './threadDbEngine'
@@ -68,6 +68,26 @@ export function threadDbWorkerScript(): string | undefined {
 }
 
 const SYNC_TIMEOUT_MS = 120_000
+
+/**
+ * How many times this process asked to change each thread folder's database, by folder. A reader that keeps what it
+ * read with the database's file stamp also keeps this count: the stamp alone may not change on a file system whose
+ * times are coarse (a second on some), when a checkpoint and a new write log land in the same second at the same size.
+ * Reads also count, which only costs a reader a fresh read.
+ */
+const threadDbWrites = new Map<string, number>()
+const LIFECYCLE_READ_OPS: ReadonlySet<string> = new Set(['readLifecycleRecords', 'readRecord'])
+
+function noteThreadDbWrite(op: string, dir: unknown): void {
+  if (LIFECYCLE_READ_OPS.has(op) || typeof dir !== 'string') return
+  const key = resolve(dir)
+  threadDbWrites.set(key, (threadDbWrites.get(key) ?? 0) + 1)
+}
+
+/** See `threadDbWrites`. */
+export function threadDbWriteCount(dir: string): number {
+  return threadDbWrites.get(resolve(dir)) ?? 0
+}
 /**
  * The search index and import workers stop after this long without a request, and start again on the next one. Each
  * idle worker holds about 11 MB (its own V8 heap and the worker bundle), and both are used in bursts.
@@ -284,6 +304,11 @@ export class ThreadDbClient {
 
   /** A save or a small read, finished when this returns. */
   callSync<K extends Op>(op: K, ...args: Args<K>): Result<K> {
+    // Counted even when the call fails: a write that timed out may still have committed.
+    try { return this.callSyncNow(op, ...args) } finally { noteThreadDbWrite(op, args[0]) }
+  }
+
+  private callSyncNow<K extends Op>(op: K, ...args: Args<K>): Result<K> {
     if (this.closed) throw new Error('Thread database client is closed')
     if (this.inlineWrite) return runOp(this.inlineWrite, op, args) as Result<K>
     const flag = this.syncFlag!
@@ -358,6 +383,10 @@ export class ThreadDbClient {
    * engine. While the worker backs off after crashing, an import waits for the backoff to end, then runs.
    */
   callImport<K extends Op>(op: K, ...args: Args<K>): Promise<Result<K>> {
+    return this.callImportNow(op, ...args).finally(() => noteThreadDbWrite(op, args[0]))
+  }
+
+  private callImportNow<K extends Op>(op: K, ...args: Args<K>): Promise<Result<K>> {
     if (this.closed) return Promise.reject(new Error('Thread database client is closed'))
     if (this.inlineRead) return this.call(op, ...args)
     if (!this.importer) {

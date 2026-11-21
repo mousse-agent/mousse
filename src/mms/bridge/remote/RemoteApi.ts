@@ -7,6 +7,7 @@ import {
   type BridgeRemoteMethod
 } from './capabilities'
 import { REMOTE_ATTACHMENT_MAX_CHARS, validateRemoteParams } from './dto'
+import { REMOTE_MESSAGE_IMAGES_MAX_DATA_CHARS } from '../../../shared/imageLimits'
 import { canonicalJson } from '../../net/sync/codec'
 import { ReplyPages } from '../routed/pages'
 import type { RoutedPaged } from '../../../shared/bridge/routed'
@@ -71,11 +72,11 @@ const STAGED_UPLOADS_TOTAL = 128
 const STAGED_CHARS_PER_CALLER = 24 * 1024 * 1024
 const STAGED_CHARS_TOTAL = 48 * 1024 * 1024
 /**
- * Base64 characters in one message's images. The message is shown to every remote reader, whose
- * events and snapshots are bounded (25 and 32 MiB), so a larger batch would make the thread
- * unreadable from a phone.
+ * Base64 characters in one message's images (`shared/imageLimits.ts`). The message is shown to every
+ * remote reader, whose events and snapshots are bounded (25 and 32 MiB), so a larger batch would make
+ * the thread unreadable from a phone.
  */
-export const REMOTE_MESSAGE_IMAGES_MAX_CHARS = 8 * 1024 * 1024
+export const REMOTE_MESSAGE_IMAGES_MAX_CHARS = REMOTE_MESSAGE_IMAGES_MAX_DATA_CHARS
 interface StagedUpload {
   user: UserId
   name: string

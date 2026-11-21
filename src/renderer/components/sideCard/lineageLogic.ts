@@ -20,6 +20,7 @@ type LineageSubagent = Pick<SubagentSummary, 'childThreadId' | 'state' | 'create
  */
 export type LineageEntry = Pick<SubagentSummary, 'childThreadId' | 'state' | 'createdAt' | 'updatedAt' | 'title' | 'provider' | 'model' | 'waitingOn' | 'computer'> & {
   native?: boolean
+  launched?: boolean
   /** A native subagent's line under its name: its kind of agent in plain words and its model (`nativeSubagentLabel`). */
   nativeLabel?: string | null
 }
@@ -74,6 +75,7 @@ export function nativeLineageEntry(card: Pick<SubagentCardModel, 'toolCallId' | 
     provider: null,
     model: null,
     nativeLabel: nativeSubagentLabel(card.native),
+    ...(card.native?.acp?.launched ? { launched: true } : {}),
     waitingOn: [],
     createdAt: isoOf(card.createdAt),
     updatedAt: isoOf(card.completedAt ?? card.createdAt),
@@ -126,9 +128,11 @@ export function orderLineageSubagents<T extends LineageSubagent>(subagents: read
 }
 
 /** Label of the folded group of finished subagents: "3 finished", or "3 finished · 1 failed". */
-export function finishedGroupLabel(finished: readonly Pick<SubagentSummary, 'state'>[]): string {
+export function finishedGroupLabel(finished: readonly Pick<LineageEntry, 'state' | 'launched'>[]): string {
   const failed = finished.filter((subagent) => subagent.state === 'failed').length
-  return failed > 0 ? `${finished.length} finished · ${failed} failed` : `${finished.length} finished`
+  const launched = finished.filter((subagent) => subagent.launched).length
+  const ended = finished.length - launched
+  return [ended > 0 ? `${ended} finished` : '', launched > 0 ? `${launched} launched` : '', failed > 0 ? `${failed} failed` : ''].filter(Boolean).join(' · ')
 }
 
 export interface LineageSlice<T> {
@@ -168,14 +172,14 @@ export function waitingLabel(subagent: Pick<SubagentSummary, 'waitingOn'>): stri
  * Muted text on the right of a row: the state while running, otherwise how long ago it finished. A subagent on another
  * computer whose Stop has not reached that computer yet says so: its run there may still be going.
  */
-export function lineageStatusLabel(subagent: Pick<SubagentSummary, 'state' | 'updatedAt' | 'waitingOn' | 'computer'>, now: number): string {
+export function lineageStatusLabel(subagent: Pick<LineageEntry, 'state' | 'updatedAt' | 'waitingOn' | 'computer' | 'launched'>, now: number): string {
   if (subagent.computer?.stopRequested) return 'Stop requested'
   if (subagent.state === 'waiting') return waitingLabel(subagent)
   const running = RUNNING_LABELS[subagent.state]
   if (running) return running
   const updated = Date.parse(subagent.updatedAt)
   const ago = Number.isFinite(updated) ? formatAgo(updated, now) : ''
-  const prefix = FINISHED_LABELS[subagent.state]
+  const prefix = subagent.launched ? 'Launched' : FINISHED_LABELS[subagent.state]
   if (!prefix) return ago || 'Idle'
   return ago ? `${prefix} ${ago}` : prefix
 }

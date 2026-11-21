@@ -28,6 +28,7 @@ const VERBS: Record<string, readonly [ing: string, past: string]> = {
   fork: ["forking", "forked"],
   forget: ["forgetting", "forgot"],
   give: ["giving", "gave"],
+  keep: ["keeping", "kept"],
   hide: ["hiding", "hid"],
   list: ["listing", "listed"],
   load: ["loading", "loaded"],
@@ -114,6 +115,11 @@ const TOOLS: Record<string, readonly [Verb, string]> = {
   watch_list: ["check", "background commands in Mousse"],
   watch_stop: ["stop", "a background command in Mousse"],
   running_list: ["check", "what is running in Mousse"],
+  // A thread's monitors and background commands
+  monitor_start: ["start", "a monitor in Mousse"],
+  background_run: ["start", "a background command in Mousse"],
+  background_stop: ["stop", "background work in Mousse"],
+  keep_working: ["keep", "the thread working in Mousse"],
   // Subagents and tasks
   delegate_task: ["start", "a subagent in Mousse"],
   create_subagent: ["start", "a subagent in Mousse"],

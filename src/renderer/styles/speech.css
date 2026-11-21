@@ -104,23 +104,30 @@
 
 /* Room for the indicator: the row's content and the hover actions sit left of it. */
 .app .threads-sidebar-thread-container.speaking {
-  --thread-actions-room: 114px;
+  --sidebar-speech-wave-room: 17px;
+  /* The Stop button beside Pause. */
+  --sidebar-speech-stop-room: 21px;
+  --thread-actions-room: calc(97px + var(--sidebar-speech-stop-room) + var(--sidebar-speech-wave-room));
+}
+
+.app[data-sidebar-motion='off'] .threads-sidebar-thread-container.speaking {
+  --sidebar-speech-wave-room: 0px;
 }
 
 .app .threads-sidebar-thread-container.speaking .threads-sidebar-thread {
-  padding-right: 44px;
+  padding-right: calc(27px + var(--sidebar-speech-stop-room) + var(--sidebar-speech-wave-room));
 }
 
 .app .threads-sidebar-thread-container.speaking .threads-sidebar-thread:not(.threads-sidebar-card) {
   padding-right: var(--thread-actions-room);
 }
 
-.app .threads-sidebar-thread-container.speaking .threads-sidebar-thread-trailing {
-  right: 46px;
+.app .threads-sidebar-thread-container.speaking > .threads-sidebar-thread > .threads-sidebar-thread-trailing {
+  right: calc(29px + var(--sidebar-speech-stop-room) + var(--sidebar-speech-wave-room));
 }
 
 .app .threads-sidebar-thread-container.speaking .threads-sidebar-thread-actions {
-  right: 42px;
+  right: calc(25px + var(--sidebar-speech-stop-room) + var(--sidebar-speech-wave-room));
 }
 
 .speech-settings-error,

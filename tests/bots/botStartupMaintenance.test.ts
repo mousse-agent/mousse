@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { botFixture, createBot, T0 } from './botFixture'
 const fixtures: ReturnType<typeof botFixture>[] = []
 afterEach(() => { vi.restoreAllMocks(); fixtures.splice(0).forEach(f => f.close()) })
-it.each(['quietHoursChanged', 'loadPendingScheduleRemovals', 'retryCompletedScheduleRemovals'])('startup continues when %s throws', async method => {
+it.each(['settingsChanged', 'loadPendingScheduleRemovals', 'retryCompletedScheduleRemovals'])('startup continues when %s throws', async method => {
   const f = botFixture(); fixtures.push(f)
   vi.spyOn(f.bots as any, method).mockImplementationOnce(() => { throw new Error('store unavailable') })
   await expect(f.bots.reconcileOnStartup()).resolves.toBeUndefined()

@@ -9,13 +9,31 @@ export const LIMIT_READINGS_KEEP_MS = 31 * 86_400_000
 export const LIMIT_READING_STEP_MS = 15 * 60_000
 
 const WINDOWS: ReadonlyArray<[LimitTrendWindowId, string, readonly string[]]> = [
-  ['five_hour', '5-hour', ['five_hour', 'rolling']],
+  ['five_hour', '5-hour', ['five_hour', 'rolling', '5h']],
   ['seven_day', 'Weekly', ['seven_day', 'weekly']]
 ]
 
 /** [share used in %, when the window resets in ms or null when the provider does not say]. */
 type WindowReading = [number, number | null]
 interface Reading { t: number; p: string; l: string; w: Partial<Record<LimitTrendWindowId, WindowReading>> }
+
+/**
+ * A provider's windows by the limit they count against. A scoped id (`<scope>:<window>`, such as Antigravity's
+ * `gemini-models:5h`) is its own limit, named by its label's part before ` · `; the rest are the provider's own.
+ */
+function byScope(windows: readonly ProviderUsageWindow[]): Array<{ scope?: { id: string; name: string }; windows: ProviderUsageWindow[] }> {
+  const own: ProviderUsageWindow[] = []
+  const scoped = new Map<string, { id: string; name: string; windows: ProviderUsageWindow[] }>()
+  for (const window of windows) {
+    const cut = window.id.lastIndexOf(':')
+    if (cut <= 0) { own.push(window); continue }
+    const id = window.id.slice(0, cut)
+    const group = scoped.get(id) ?? { id, name: window.label.split(' · ')[0] || id, windows: [] }
+    group.windows.push({ ...window, id: window.id.slice(cut + 1) })
+    scoped.set(id, group)
+  }
+  return [{ windows: own }, ...[...scoped.values()].map(({ windows: list, ...scope }) => ({ scope, windows: list }))]
+}
 
 function windowsOf(windows: readonly ProviderUsageWindow[]): Reading['w'] {
   const out: Reading['w'] = {}
@@ -51,16 +69,23 @@ export class LimitReadingStore {
 
   constructor(private readonly path: string, private readonly clock: () => number = Date.now) {}
 
-  /** Keeps a provider's fresh reading, and each of its sign-ins' when it reads several. */
+  /**
+   * Keeps a provider's fresh reading, and each of its sign-ins' when it reads several. Each scoped limit
+   * (`provider#scope`, such as one of Antigravity's model groups) is kept as its own trend.
+   */
   async record(usage: ProviderUsage): Promise<void> {
     const at = this.clock()
     const entries: Reading[] = []
-    const own = windowsOf(usage.windows)
-    if (Object.keys(own).length) entries.push({ t: at, p: usage.id, l: usage.label, w: own })
+    const add = (id: string, label: string, windows: readonly ProviderUsageWindow[]) => {
+      for (const { scope, windows: list } of byScope(windows)) {
+        const w = windowsOf(list)
+        if (Object.keys(w).length) entries.push({ t: at, p: scope ? `${id}#${scope.id}` : id, l: scope ? `${label} · ${scope.name}` : label, w })
+      }
+    }
+    add(usage.id, usage.label, usage.windows)
     for (const account of usage.accounts ?? []) {
       if (account.pending) continue
-      const windows = windowsOf(account.windows)
-      if (Object.keys(windows).length) entries.push({ t: at, p: `${usage.id}#${account.id}`, l: `${usage.label} · ${account.label}`, w: windows })
+      add(`${usage.id}#${account.id}`, `${usage.label} · ${account.label}`, account.windows)
     }
     if (!entries.length) return
     const readings = await this.load()

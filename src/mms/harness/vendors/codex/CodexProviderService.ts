@@ -18,6 +18,7 @@ import type {
 } from '../../../../shared/providerAuth'
 import type { LlmModelOption, LlmProviderOption } from '../../../../shared/settings'
 import type { ChatImageAttachment } from '../../../../shared/types'
+import { providerTakesImage } from '../../../../shared/imageLimits'
 import { mousseVersion } from '../../../appVersion'
 import { killTree } from '../../spawn'
 import { cliNames, codexStandalonePaths, findOnPath, withEnforced } from '../../env'
@@ -92,6 +93,7 @@ import { NativeHelpers, type StrayThread } from './nativeHelpers'
 import { readCodexUserSetup, type CodexUserSetup } from './userSetup'
 import { isMousseTempEntry } from '../../../data/closedPlaces'
 import { CODEX_ONE_SHOT_ITEMS, codexOneShotConfig, codexOneShotRunsOn } from './oneShot'
+import { runCodexDirectOneShot, type CodexDirectStream } from './directOneShot'
 import type { BotAuthority } from '../../../../shared/bots/personal/authority'
 import { CODEX_BOT_USER_MCP_UNREADABLE, codexBotCommand, codexBotFileChange, codexBotMcpOverrides } from './botApprovals'
 import type { ChildTurnPolicy, PlanWindowUse } from '../../adapter'
@@ -163,7 +165,8 @@ export function codexModelOption(model: CodexModel): LlmModelOption {
     ...(efforts.length ? { efforts, thinkingOff: false as const } : {}),
     ...(efforts.length && efforts.includes(model.defaultReasoningEffort) ? { defaultEffort: model.defaultReasoningEffort } : {}),
     ...(Object.keys(descriptions).length ? { effortDescriptions: descriptions } : {}),
-    // Its subagent tools cannot be turned off for a single request: never offered for titles.
+    // Its subagent tools cannot be turned off in an app-server turn: not offered for titles, unless the
+    // instance runs one-shots as direct requests (`CodexProviderService.models`).
     ...(codexOneShotRunsOn(model.multiAgentVersion) ? {} : { oneShot: false as const })
   }
 }
@@ -352,6 +355,8 @@ export type CodexServiceDependencies = {
   listProcesses?: typeof listProcesses
   /** How long a stopped `/compact` waits for Codex to end its compaction turn (tests). */
   compactSettleMs?: number
+  /** The transport of a direct one-shot (`runCodexDirectOneShot`; tests substitute it). */
+  directStream?: CodexDirectStream
 }
 
 /** `stopAll`: a closed process gets this long before its tree is killed. */
@@ -498,9 +503,9 @@ interface DrainedSteer {
   images?: ChatImageAttachment[]
 }
 
-/** The images Codex takes: JPEG, PNG, GIF or WebP up to 10 MiB. */
+/** The images Codex takes: JPEG, PNG, GIF or WebP within the per-image size (`shared/imageLimits.ts`). */
 function codexTakesImage(image: ChatImageAttachment): boolean {
-  return ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(image.mimeType) && Buffer.byteLength(image.data, 'base64') <= 10 * 1024 * 1024
+  return providerTakesImage(image)
 }
 
 function codexImageInput(image: ChatImageAttachment): UserInput {
@@ -1339,9 +1344,39 @@ export class CodexProviderService {
     }
   }
 
-  /** The listed models; none until a listing has run. */
+  /**
+   * The listed models; none until a listing has run. On OpenAI's own provider a one-shot runs as a
+   * direct request with no tools (`oneShot`), so every model may name chats there, whatever the
+   * listing marked for an app-server turn.
+   */
   models(): LlmModelOption[] {
-    return this.settings.models ?? []
+    const models = this.settings.models ?? []
+    if (!this.directOneShots()) return models
+    return models.map((model) => {
+      if (model.oneShot === undefined) return model
+      const { oneShot: _appServerOnly, ...rest } = model
+      return rest
+    })
+  }
+
+  /** Whether one-shots run as direct requests to the ChatGPT backend: only on OpenAI's own provider. */
+  private directOneShots(): boolean {
+    return this.modelProvider === CODEX_MODEL_PROVIDER
+  }
+
+  /**
+   * The access token of Codex's ChatGPT sign-in, as Codex holds it (`getAuthStatus`, never refreshed:
+   * Mousse neither refreshes nor writes Codex's tokens). Undefined for any other sign-in, or a Codex
+   * that does not answer with one.
+   */
+  private async chatGptToken(conn: CodexConnection, signal: AbortSignal): Promise<string | undefined> {
+    try {
+      const status = await conn.request('getAuthStatus', { includeToken: true, refreshToken: false }, { timeoutMs: 15_000, signal })
+      return status.authMethod === 'chatgpt' && typeof status.authToken === 'string' && status.authToken ? status.authToken : undefined
+    } catch (error) {
+      if (error instanceof CodexRpcError && !signal.aborted) return undefined
+      throw error
+    }
   }
 
   /** When Codex last listed the models, kept with them across restarts. */
@@ -1757,7 +1792,9 @@ export class CodexProviderService {
 
   /**
    * One request with no tools (`DriverRuntime.oneShot`): a chat title, a pull request draft or a
-   * commit message on the chosen model. It runs as one turn on an ephemeral Codex thread (never written
+   * commit message on the chosen model. On OpenAI's own provider with a ChatGPT sign-in it is one direct
+   * request to the ChatGPT backend with Codex's own access token and no tools (`runCodexDirectOneShot`),
+   * on any model Codex lists. Otherwise it runs as one turn on an ephemeral Codex thread (never written
    * to Codex's history) with the system text as its base instructions, a read-only sandbox in a folder
    * of its own, no approvals (any request is refused: no run owns the thread), Codex's native tools and
    * web search off, and every MCP server off (`codexOneShotConfig`); it is refused when the user's MCP
@@ -1779,6 +1816,16 @@ export class CodexProviderService {
       if (!this.configured())
         throw new AppError({ code: 'codex_not_connected', message: this.signInMessage(), errorInfo: { category: 'unavailable', retryable: false } })
       conn = await this.verifiedConnection(signal)
+      const effort = spec.effort ?? supportedEffortOf(spec.model, this.settings.models ?? [], EFFORTS)
+      const token = this.directOneShots() ? await abortable(this.chatGptToken(conn, signal), signal) : undefined
+      if (token) {
+        const { baseId } = parseThinkingSuffixFromModelId(spec.model)
+        const listed = await abortable(this.listedModel(conn, baseId), signal)
+        if (!listed)
+          throw harnessAppError({ code: 'model_unavailable', message: `Codex does not list ${baseId}. Refresh models or choose another title model in Settings → Agents.` })
+        // Always the listed model, `default` included, with its own default effort when none is chosen.
+        return await runCodexDirectOneShot({ model: listed.model || listed.id, effort: effort ?? listed.defaultReasoningEffort, token, spec }, signal, this.dependencies.directStream)
+      }
       const cwd = this.standaloneWorkspace('one-shot')
       const locked = codexOneShotConfig((await abortable(readCodexUserSetup(conn, cwd), signal)).mcpServers)
       if (!locked)
@@ -1788,7 +1835,6 @@ export class CodexProviderService {
       const listed = await abortable(this.listedModel(conn, baseId), signal)
       if (!listed || !codexOneShotRunsOn(listed.multiAgentVersion))
         throw harnessAppError({ code: 'unsupported', message: `${listed?.displayName || baseId} can start subagents that Mousse cannot turn off for a single request, so it cannot ${ONE_SHOT_TASK_TEXT[spec.task ?? 'title']}. Choose another title model in Settings → Agents, or Automatic.` })
-      const effort = spec.effort ?? supportedEffortOf(spec.model, this.settings.models ?? [], EFFORTS)
       // Always the checked model, `default` included: left out, Codex would run the model the user's or a
       // profile's config names, which was never checked.
       const pinned = listed.model || listed.id

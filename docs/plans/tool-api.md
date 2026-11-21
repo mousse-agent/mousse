@@ -17,7 +17,7 @@ The structure every tool an agent or a personal bot can call should have: how to
 - Names follow `<resource>_<action>`.
 - These verb-first names flip in PR 9: `list_tasks`, `create_task`, `update_task`, `list_skills`, `load_skill`, `list_models`, `list_computers`, `publish_applet`, `create_quick_action`, `withdraw_question`, `ask_user`, `show_card` and `make_image`.
 - Clear names stay: `browser_*`, `web_*`, `git_*`, `profiler_*`, `theme_*`, `secret_*` and `running_list`.
-- The bot-only `consult`, `remind` and `wake` are named exceptions until their families move.
+- The bot-only `consult` and `remind`, and `wake` (bots and threads), are named exceptions until their families move.
 - Provider-native tools and relayed `<server>__<tool>` tools keep their names.
 - "Task" means only a checklist item. A delegated assignment is "work" (`intent: work`, `view: delegations`), and results keep its `delegationId`.
 - A generated manifest appendix lists every tool and alias with its audience and per-variant needs. It replaces hand-kept tables like §1.5.
@@ -210,11 +210,20 @@ Under `approvals: never`, a variant that produces a request is unavailable, unle
 - Replaces: `set_profile`, `set_depth`, `use_model` and `telling_set` → `bot_update`, with authority checked per field; `memory_forget` → `memory_remove`.
 - `consult` stays until the bot port supplies context-thread resolution and serialised consults (`BotEngine.ts:5769`).
 
-**wake and terminal** (bots)
-- Tools: `wake_set`, `terminal_start`, `terminal_list`, `terminal_read`, `terminal_stop`.
+**wake and terminal** (bots and threads)
+- Tools: `wake_set` (bots and threads), `terminal_start`, `terminal_list`, `terminal_read`, `terminal_stop` (bots).
 - Replaces: `wake` and `work_wait` → `wake_set`; `watch_*` → `terminal_*`.
 - A wake is a durable continuation. It never resets a deadline, never creates authority and never becomes a person turn.
 - Wakes are listed and cancelled through thread status and Stop, so `wake_list` and `wake_remove` are not needed yet.
+- Threads have `wake`, `reminder_list` and `reminder_cancel` today, with the bots' names, parameters and limits: one tool per name, the bot's version on a bot turn. A thread's wake waits on a time, another thread's turn, or a pull request of one of the person's projects (merged, checks or review). The decisions are the bots' own (`src/mms/bots/wakeSources.ts`); `src/mms/wakes/ThreadWakes.ts` keeps them in a file, so they fire after a restart or sleep. A due wake is a `reconcile_notice` row with payload `thread_wake`, delivered as agent notes are: an idle thread starts a turn, a running one takes it as a steer or at its next Mousse tool call, and it waits while the thread waits on a person's answer. Pending wakes show with the thread's background work; Stop, archive and delete cancel them (the agent is told once, except on delete). Subagents set none: their task ends with the result to their parent, which can wake on the subagent's thread or the pull request.
+- One engine is the next step: the decisions and notice text are shared, but the bots keep their wakes in `bots.db` reminder rows ticked by `BotEngine`, and threads in their own file and timer. Extract one wake scheduler from `BotEngine` (store interface, tick, event checks and the pull request read interval, fire sink), with `bots.db` and the thread store as its two stores, so a fix to one reaches both. It lands with the background-command engine merge below, and it must not tie a thread's wakes to the bots being loaded.
+
+**monitors and background work** (threads; #1605)
+- Tools: `monitor_start`, `background_run`, `background_stop`, `keep_working`.
+- `monitor_start` runs a script (each printed line is an event) or watches a `wss://` socket (`ws://` only on loopback); events within 200 ms are one notice. `background_run` tells the agent once, when its command ends, with the exit code and the end of its output. `keep_working` keeps the thread Working while it waits on something outside Mousse; `release: true` ends its holds. `background_stop` stops any of them by id.
+- Notices are `reconcile_notice` rows with payload `monitor_event`, delivered as agent notes are; the output is quoted. Every end is told (exit, socket close, failure, timeout, over-chatty, thread Stop, daemon restart); a Stop's notice waits for the next turn. `background_stop` posts no notice: its result carries what was not reported yet.
+- Limits are named constants in `src/mms/monitors/ThreadMonitors.ts`; nothing caps how many run at once.
+- Starting a script needs what the agent's shell needs (`editsWorkspace`, asks unless Full access, refused in Plan and read-only subagents). Bots keep `watch_start` and `wake`; these four are not offered to bots yet.
 
 **automation**
 - Names unchanged: `schedule_*`, `automation_*`, `bot_schedule_*`, `remind`, `reminder_*`, `run_report`.

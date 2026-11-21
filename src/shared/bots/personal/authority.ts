@@ -165,6 +165,8 @@ export interface BotAuthority {
   /** Granted Mousse app tools, by their app-tool name. */
   appTools: ReadonlySet<string>
   skills: ReadonlySet<string>
+  /** Every skill the owner has is this turn's too (skills are on by default): `skills` names none of them. */
+  allSkills?: true
   /** Granted MCP tools, as `<server id>::<tool name>`. */
   mcp: ReadonlySet<`${string}::${string}`>
   /**

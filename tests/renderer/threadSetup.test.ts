@@ -36,6 +36,34 @@ describe("the sidebar's New thread", () => {
   })
 })
 
+describe("the sidebar's New thread while a send is starting the project's empty thread", () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  it('opens a fresh empty thread instead of the one the send is starting, before the service lists it started', async () => {
+    const { useAppStore } = await import('../../src/renderer/stores/appStore')
+    const { usePendingThreadRows, addPendingThreadRow, pendingThreadRow, dropPendingThreadRows } = await import('../../src/renderer/lib/pendingThreadRows')
+    const { createAndSelectProjectThread } = await import('../../src/renderer/lib/threadActions')
+    const empty = { id: 'empty', name: 'New Chat', projectId: 'p', createdAt: '', updatedAt: '', order: 0 } as never
+    useAppStore.setState({ profileId: 'default', threads: [empty], activeThreadId: 'empty', projects: [{ id: 'p', name: 'p', path: '/p', createdAt: '', order: 0 }] })
+    usePendingThreadRows.setState({ rows: [], rowKeys: new Map() })
+    const create = vi.fn(async () => ({ ...(empty as object), id: 'made' }))
+    vi.stubGlobal('window', { mousse: { threads: { create, select: vi.fn(async () => undefined) } } })
+    // Sent from the empty thread, which the send uses: the service has not listed it started yet (its worktree is still made).
+    const row = pendingThreadRow({ profileId: 'default', text: 'Plan it', attached: false, shown: empty, reuses: true, workspace: { projectId: 'p' }, threads: [empty] })!
+    addPendingThreadRow(row)
+    await createAndSelectProjectThread('p')
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(useAppStore.getState().activeThreadId).toBe('made')
+
+    // A send that stopped before it started leaves the empty thread as it was: New thread opens it again.
+    dropPendingThreadRows([row.key])
+    useAppStore.setState({ threads: [empty], activeThreadId: null })
+    await createAndSelectProjectThread('p')
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(useAppStore.getState().activeThreadId).toBe('empty')
+  })
+})
+
 describe("the sidebar's New thread when the remembered model can no longer be used", () => {
   const opus = { instanceId: 'claude', llmProvider: 'claude-subscription', model: 'opus' }
   afterEach(() => { vi.unstubAllGlobals() })

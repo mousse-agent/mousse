@@ -10,7 +10,12 @@ export async function bootstrapPresentation(
   guiMms: GuiMmsController,
   presentation: PresentationState,
   broadcast: (channel: string, data: unknown) => void,
-  opts?: { onTurnSnapshot?: (snap: unknown) => void; isCurrent?: () => boolean }
+  opts?: {
+    onTurnSnapshot?: (snap: unknown) => void
+    isCurrent?: () => boolean
+    /** The thread to open when the window has none yet (the one it showed last time), if it is still open. */
+    preferThreadId?: string
+  }
 ): Promise<void> {
   const isCurrent = opts?.isCurrent ?? (() => true)
   const initialActiveId = presentation.getActiveThreadId()
@@ -28,8 +33,9 @@ export async function bootstrapPresentation(
   if (!activeId) {
     // Startup never opens a subagent: it sits under its parent, which is what the sidebar lists.
     const selectable = visibleThreads(usable, threadsRes.threads)
+    const preferred = opts?.preferThreadId ? selectable.find((t) => t.id === opts.preferThreadId) : undefined
     if (selectable.length > 0) {
-      activeId = selectable[0].id
+      activeId = (preferred ?? selectable[0]).id
     } else {
       const created = await guiMms.request<{ thread: { id: string } }>('threads.create', { name: 'New Chat' })
       if (!isCurrent()) return

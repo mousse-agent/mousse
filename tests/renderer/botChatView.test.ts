@@ -14,6 +14,7 @@ import { rollUpChips } from '../../src/shared/bots/personal/chips'
 import { AT, fakeBots, installPreload, message, summary, type FakeBots } from './fakeBotsClient'
 import { setAnimationSpeed } from '../../src/renderer/lib/motion'
 import type { BotLaunchedThread } from '../../src/shared/bots/personal/chat'
+import { MOUSSE_REFERENCE_MIME } from '../../src/shared/chatReferences'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -1017,6 +1018,12 @@ describe('while it works', () => {
       act(() => setAnimationSpeed('normal'))
       expect(onDots()).toHaveLength(3)
       expect(shimmer()).toHaveLength(2)
+      act(() => useAppStore.setState({ shimmerAnimations: false }))
+      expect(onDots()).toHaveLength(3)
+      expect(shimmer()).toHaveLength(0)
+      expect(words().textContent).toBe('Looking at your inbox')
+      act(() => useAppStore.setState({ shimmerAnimations: true }))
+      expect(shimmer()).toHaveLength(2)
       // The bot's own line takes its place and shimmers the same way; nothing restarts as it comes.
       const before = running()
       await act(async () => fake.emit.activity('inbox', null, 'act1', 'Checking prices at Indian stores now'))
@@ -1029,6 +1036,7 @@ describe('while it works', () => {
     } finally {
       delete (HTMLElement.prototype as { animate?: unknown }).animate
       setAnimationSpeed('normal')
+      useAppStore.setState({ shimmerAnimations: true })
     }
   })
 
@@ -1639,8 +1647,14 @@ describe('the composer', () => {
     expect(await file.text()).toBe(log)
   })
 
-  it('a pasted thread reference is a pill, sent as the thread\'s link after the words; a private thread is refused, a subagent is not', async () => {
-    const pasteText = (text: string) => fire(box(), 'paste', 'clipboardData', { items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }], files: [], getData: () => text })
+  it('a pasted thread reference goes in as text and is sent where it was written; a private thread is refused, a subagent is not', async () => {
+    const pasted: Event[] = []
+    const pasteText = async (text: string) => {
+      const event = new Event('paste', { bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'clipboardData', { value: { items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }], files: [], getData: () => text } })
+      pasted.push(event)
+      await act(async () => { box().dispatchEvent(event) })
+    }
     const pills = () => [...composer().querySelectorAll('.composer-reference-pill')].map((pill) => pill.textContent?.trim())
     const at = AT
     useAppStore.setState({ threads: [
@@ -1649,25 +1663,29 @@ describe('the composer', () => {
       { id: 'thread-s', name: 'Reviewer', lineage: { relationship: 'subagent', parentThreadId: 'thread-b', rootThreadId: 'thread-b' }, createdAt: at, updatedAt: at, startedAt: at, order: 2 }
     ] as never })
     await open()
-    await pasteText('mousse://thread/thread-p')
+    await pasteText('see mousse://thread/thread-p')
     await settle()
+    expect(pasted.at(-1)!.defaultPrevented).toBe(true)
     expect(composerError()?.textContent).toContain('“Secret plans” is private')
-    expect(pills()).toEqual([])
+    expect(box().value).toBe('')
 
-    // A subagent is read through the thread that started it, as far as the bot reaches that one.
+    // A subagent is read through the thread that started it, as far as the bot reaches that one. The text box inserts
+    // the paste at the caret, as any paste.
     await pasteText('mousse://thread/thread-b mousse://thread/thread-s')
     await settle()
-    expect(box().value).toBe('')
-    expect(pills()).toEqual(['Design notes', 'Reviewer'])
-    await type(box(), 'What is left on this?')
+    expect(pasted.at(-1)!.defaultPrevented).toBe(false)
+    expect(pills()).toEqual([])
+    await type(box(), 'What is left on mousse://thread/thread-b and mousse://thread/thread-s?')
     await click(button('Send message'))
     await settle()
-    expect(fake.calls.find(([name]) => name === 'send')?.[2]).toBe('What is left on this?\n\nmousse://thread/thread-b\nmousse://thread/thread-s')
-    expect(pills()).toEqual([])
+    expect(fake.calls.find(([name]) => name === 'send')?.[2]).toBe('What is left on mousse://thread/thread-b and mousse://thread/thread-s?')
   })
 
-  it('a send that fails gives its thread pills back, beside one pasted while it was sending', async () => {
-    const pasteText = (text: string) => fire(box(), 'paste', 'clipboardData', { items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }], files: [], getData: () => text })
+  it('a send that fails gives its thread pills back, beside one dropped while it was sending', async () => {
+    const dropThread = (threadId: string, title: string) => {
+      const data = JSON.stringify({ id: `thread:${threadId}`, kind: 'thread', title, threadId })
+      return fire(composer(), 'drop', 'dataTransfer', { types: [MOUSSE_REFERENCE_MIME], files: [], getData: (type: string) => (type === MOUSSE_REFERENCE_MIME ? data : '') })
+    }
     const pills = () => [...composer().querySelectorAll('.composer-reference-pill')].map((pill) => pill.textContent?.trim())
     useAppStore.setState({ threads: [
       { id: 'thread-a', name: 'Design notes', createdAt: AT, updatedAt: AT, startedAt: AT, order: 0 },
@@ -1677,11 +1695,11 @@ describe('the composer', () => {
     vi.mocked(fake.client.send).mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject }))
     await open()
     await type(box(), 'Review these')
-    await pasteText('mousse://thread/thread-a')
+    await dropThread('thread-a', 'Design notes')
     await settle()
     await click(button('Send message'))
     expect(pills()).toEqual([])
-    await pasteText('mousse://thread/thread-b')
+    await dropThread('thread-b', 'Release plan')
     await settle()
     await act(async () => fail(new Error('The bot is offline.')))
     await settle()
@@ -3382,8 +3400,8 @@ describe('keeping a pasted key private', () => {
     await click(button('Send message'))
     expect(vi.mocked(fake.client.send).mock.calls[0]?.[1]).toBe(key)
   })
-  it('a forbidden save explains Use secrets without sending; removing the key cancels the offer', async () => {
-    window.mousse.platformRequest = { request: vi.fn(async () => { throw Object.assign(new Error('Allow Use secrets in About.'), {code:'forbidden'}) }) } as never
+  it('a forbidden save explains it without sending; removing the key cancels the offer', async () => {
+    window.mousse.platformRequest = { request: vi.fn(async () => { throw Object.assign(new Error("This bot is not set up yet, so it can't keep a key."), {code:'forbidden'}) }) } as never
     await open(); await type(field(), key); await click(button('Keep as secret'))
     expect(host.textContent).toContain("Inbox helper can't keep secrets")
     expect(host.querySelector('[role="status"]')?.textContent).not.toContain(key)

@@ -11,6 +11,7 @@ import { readListeningPorts, readProcessTable, readWorkingFolders, type Listenin
  * - Mousse's terminals with a command running in them (a quick action's, or one the person typed);
  * - the commands agents left running after their tool call ended (a background shell), noted as threads run them;
  * - bots' background commands (`watch_start`);
+ * - threads' monitors and background commands (`monitor_start`, `background_run`);
  * - any other process that listens on a port and works in the folder (macOS and Linux, which tell a process's folder).
  *
  * Each one's address is the port its processes listen on, or the local address it printed when no port could be read.
@@ -26,7 +27,7 @@ export type RunningStarter =
   | { kind: 'outside' }
 
 export interface RunningEntry {
-  /** `terminal:<ptyId>`, `command:<threadId>:<callId>`, `watcher:<id>` or `process:<pid>`. */
+  /** `terminal:<ptyId>`, `command:<threadId>:<callId>`, `watcher:<id>`, `monitor:<id>` or `process:<pid>`. */
   id: string
   /** A quick action's or a background command's label; absent: the command is its name. */
   label?: string
@@ -62,6 +63,20 @@ export interface RunningWatcher {
   output: string
 }
 
+/** A thread's monitor script or background command (`ThreadMonitors.processes`). */
+export interface RunningMonitor {
+  id: string
+  threadId: string
+  /** What it is, with its id and description: `Monitor mon-1a2b: CI for PR 12`. */
+  label: string
+  command: string
+  pid?: number
+  cwd: string
+  startedAt: number
+  /** The end of its output. */
+  output: string
+}
+
 export interface RunningThreadInfo {
   title?: string
   projectId?: string
@@ -75,6 +90,8 @@ export interface RunningSources {
   /** The end of a terminal's output. */
   terminalOutput(ptyId: string): string
   watchers(): RunningWatcher[]
+  /** Threads' monitor scripts and background commands. */
+  monitors?(): RunningMonitor[]
   thread(threadId: string): RunningThreadInfo | undefined
   botName?(botId: string): string | undefined
 }
@@ -181,6 +198,7 @@ export class RunningRegistry {
       const possible =
         this.sources.terminals().some((terminal) => terminal.pid && (terminal.threadId !== '__unbound__' ? threadInScope(terminal.threadId, terminal.cwd) : inFolders(terminal.cwd))) ||
         this.sources.watchers().some((watcher) => watcher.pid && (watcher.botId === scope.botId || inFolders(watcher.cwd))) ||
+        (this.sources.monitors?.() ?? []).some((monitor) => monitor.pid && threadInScope(monitor.threadId, monitor.cwd)) ||
         [...this.noted.values()].some((command) => command.endedAt !== undefined && threadInScope(command.threadId, command.folder))
       if (!possible) return []
     }
@@ -203,6 +221,8 @@ export class RunningRegistry {
     for (const { job } of terminalJobs) claim(job.pid)
     const watchers = this.sources.watchers()
     for (const watcher of watchers) if (watcher.pid) claim(watcher.pid)
+    const monitors = this.sources.monitors?.() ?? []
+    for (const monitor of monitors) if (monitor.pid) claim(monitor.pid)
     const noted = [...this.noted.entries()].sort(([, a], [, b]) => b.notedAt - a.notedAt)
     const commandCandidates = new Map(noted.map(([key, command]) => [key, command.endedAt === undefined ? [] : commandCandidatesOf(tree, this.system.selfPid, command, ours, claimed)]))
     const listening = snapshot.listeners
@@ -243,6 +263,21 @@ export class RunningRegistry {
         folder: watcher.cwd,
         startedAt: watcher.startedAt,
         output: () => watcher.output
+      }))
+    }
+
+    // Threads' monitors and background commands.
+    for (const monitor of monitors) {
+      if (!monitor.pid || !tree.row(monitor.pid)) continue
+      if (!threadInScope(monitor.threadId, monitor.cwd)) continue
+      entries.push(this.entry(snapshot, tree, tree.row(monitor.pid)!, {
+        id: `monitor:${monitor.id}`,
+        label: monitor.label,
+        command: monitor.command,
+        startedBy: { kind: 'thread', threadId: monitor.threadId },
+        folder: monitor.cwd,
+        startedAt: monitor.startedAt,
+        output: () => monitor.output
       }))
     }
 
