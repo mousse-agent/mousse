@@ -36,6 +36,7 @@ import { withDrivers } from '../git/gitEnv'
 import { restoreCommands, restoreShell, type RestoreKind, type RestoreShell } from '../actions/restoreCommands'
 import { retentionWindowText } from '../../shared/undoRetention'
 import { gitSucceeds, lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
+import { verifyPinsAsync } from './worktreeFacts'
 import { assertFolderUnchanged, assertFoldersUnchanged, caseInsensitiveAt, deleteVerifiedAsync, FolderChanged, folderSignatureAsync, identityOf, lockedText, lstatAll, recordFoldersAboveAsync, sameEntry, samePath, statOrThrow, unregisterDeletedAsync, walkOwnedContentAsync, worktreeLockAsync, worktreeRegisteredAsync, type ContentEntry, type DeletePlace, type FolderSignature, type HeldCheck, type LateWrites } from './verifiedDelete'
 import { readThreadRecordSync, threadRecordFile, threadRecordFolder, threadRecordName } from '../data/threadRecords'
 
@@ -1689,15 +1690,10 @@ export class WorktreeRetirementService {
     if (!existsSync(path)) return false
     try { return this.load(path).rebuilding !== undefined } catch { return false }
   }
+  /** Throws unless the manifest's pins still hold (`verifyPinsAsync`: one ref listing and one object read, not Git per ref). */
   async verifyPins(manifest: WorktreeReconstructionManifest): Promise<void> {
-    await assertLifecyclePathAsync(dirname(manifest.commonDir), manifest.commonDir)
-    if (hash((await realpathLikeSync(manifest.commonDir)).toLowerCase()).slice(0, 32) !== manifest.repositoryId) throw new Error('Repository identity is unavailable or changed')
-    for (const [ref, sha] of [[manifest.baseRef, manifest.baseSha], [manifest.resultRef, manifest.resultSha], ...(manifest.snapshotRef ? [[manifest.snapshotRef, manifest.snapshotSha!]] : []), ...(manifest.adminRef ? [[manifest.adminRef, manifest.adminCommit!]] : [])]) if (await readDirectLifecycleRefAsync(manifest.commonDir, ref) !== sha) throw new Error('Reconstruction pin changed or is unavailable')
-    if (manifest.adminCommit && await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.adminCommit}^{tree}`]) !== manifest.adminTree) throw new Error('Retained Git data of the worktree changed')
-    const prefix = manifest.resultRef.slice(0, -'/result'.length)
-    for (const layer of manifest.keptFiles ?? []) if (layer.sha && await readDirectLifecycleRefAsync(manifest.commonDir, `${prefix}/kept/${layer.sha}`) !== layer.sha) throw new Error('A pin of the kept files changed or is unavailable')
-    if (await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.resultSha}^{tree}`]) !== manifest.treeSha) throw new Error('Retained result tree changed')
-    if (manifest.snapshotSha && await lifecycleGitAsync(manifest.commonDir, ['rev-parse', `${manifest.snapshotSha}^{tree}`]) !== manifest.snapshotTree) throw new Error('Retained snapshot tree changed')
+    const error = (await verifyPinsAsync([manifest])).get(manifest)
+    if (error) throw error
   }
   /**
    * The commit a branch points at, never following a symbolic ref: a branch that is a symbolic ref (or unreadable) is

@@ -322,16 +322,26 @@ function ownerStores(current: ResourceLifecycleStore, reads: OwnershipReads): Ar
   const movedFrom = (store: ResourceLifecycleStore): boolean => nested && resolve(store.profileHome) === resolve(installation)
   return listed.map(({ store, records }) => {
     let visited = 0
+    // Which folders each record names, by task id: one lookup per thread folder instead of a search of every record.
+    const locationsById = new Map<string, Set<string>>()
+    for (const record of records) {
+      let set = locationsById.get(record.taskId)
+      if (!set) locationsById.set(record.taskId, (set = new Set()))
+      for (const location of record.locations) set.add(resolve(location))
+    }
+    const recordNames = (id: string, path: string): boolean => locationsById.get(id)?.has(resolve(path)) ?? false
+    // Folders already checked for links during this synchronous scan (`assertLifecyclePath`), by root.
+    const checked = new Set<string>()
     const scanOwners = (root: string, path: string, depth = 0): void => {
       if (!existsSync(path)) return
-      assertLifecyclePath(root, path)
+      assertLifecyclePath(root, path, checked)
       if (++visited > OWNER_SCAN_LIMIT || depth > 4) throw new Error('Unregistered storage layout exceeds bounded ownership discovery.')
       if (!lstatSync(path).isDirectory()) return
       const meta = join(path, 'meta.json')
       if (existsSync(meta)) {
-        assertLifecyclePath(root, meta)
+        assertLifecyclePath(root, meta, checked)
         const value = JSON.parse(readFileSync(meta, 'utf8')) as { id?: string }
-        if (!value.id || !records.some((record) => record.taskId === value.id && record.locations.some((location) => resolve(location) === resolve(path))) && !(movedFrom(store) && leftByMove(listed, value.id, path, store))) throw new Error(untrackedThread(path))
+        if (!value.id || !recordNames(value.id, path) && !(movedFrom(store) && leftByMove(listed, value.id, path, store))) throw new Error(untrackedThread(path))
         return // Historical generations inside a known task are not separate live owners.
       }
       for (const name of readdirSync(path)) {
@@ -352,7 +362,7 @@ function ownerStores(current: ResourceLifecycleStore, reads: OwnershipReads): Ar
         const scan = reads.legacy(join(project.path, '.mousse', '.data'))
         visited += scan.visited
         for (const meta of scan.metas) {
-          if (!meta.id || !records.some((record) => record.taskId === meta.id && record.locations.some((location) => resolve(location) === resolve(meta.path))) && !leftByMove(listed, meta.id, meta.path)) throw new Error(untrackedThread(meta.path))
+          if (!meta.id || !recordNames(meta.id, meta.path) && !leftByMove(listed, meta.id, meta.path)) throw new Error(untrackedThread(meta.path))
         }
         if (scan.error) throw new Error(scan.error)
         if (visited > OWNER_SCAN_LIMIT) throw new Error('Unregistered storage layout exceeds bounded ownership discovery.')
@@ -362,7 +372,7 @@ function ownerStores(current: ResourceLifecycleStore, reads: OwnershipReads): Ar
     if (existsSync(index)) {
       assertLifecyclePath(store.profileHome, index)
       const entries = JSON.parse(readFileSync(index, 'utf8')) as Array<{ id?: string }>
-      if (!Array.isArray(entries) || entries.some((entry) => !entry.id || !records.some((record) => record.taskId === entry.id) && !(movedFrom(store) && leftByMove(listed, entry.id, undefined, store)))) throw new Error(`Unregistered thread ownership in profile ${store.profileId} prevents cleanup.`)
+      if (!Array.isArray(entries) || entries.some((entry) => !entry.id || !locationsById.has(entry.id) && !(movedFrom(store) && leftByMove(listed, entry.id, undefined, store)))) throw new Error(`Unregistered thread ownership in profile ${store.profileId} prevents cleanup.`)
     }
     return { store, records }
   })

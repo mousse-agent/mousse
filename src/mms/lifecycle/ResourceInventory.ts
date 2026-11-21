@@ -7,7 +7,8 @@ import { promisify } from 'node:util'
 import type { LifecycleResource, ResourceInventorySnapshot, ResourceSource, RetentionClaimKind, TaskLifecycleRecord } from '../../shared/resourceLifecycle'
 import { assertLifecyclePath, ResourceLifecycleStore, validateResourceInventory } from './ResourceLifecycleStore'
 import { canonicalJson, sha256Hex } from '../../shared/agents/hashes'
-import { lifecycleReadAsync, WorktreeRetirementService } from './WorktreeRetirementService'
+import { lifecycleReadAsync, WorktreeRetirementService, type WorktreeReconstructionManifest } from './WorktreeRetirementService'
+import { standardLinkedWorktreeAsync, verifyPinsAsync } from './worktreeFacts'
 import { expiredReceiptIdsFromJournal } from '../actions/UndoRetentionService'
 import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
@@ -154,8 +155,52 @@ export function finalReads(facts: OwnershipFacts): OwnershipReads {
 
 const realpathLikeSync = promisify(realpathCallback)
 
-/** How many facts are read at once: each worktree's is a few Git processes, and an installation may have a hundred. */
+/** How many facts are read at once: a worktree's is a few file reads, or a few Git processes when Git must answer. */
 const FACT_READS_AT_ONCE = 4
+
+/** The reconstruction manifests a profile keeps, by file name (`<hash of the worktree path>.json`), with the tasks keeping each. */
+async function manifestOwnersAsync(store: ResourceLifecycleStore, tasks: readonly TaskLifecycleRecord[]): Promise<Map<string, string[]>> {
+  const owners = new Map<string, string[]>()
+  const root = join(store.root, 'workspaces')
+  let folders: string[]
+  try { folders = await readdir(root) } catch { return owners }
+  const known = new Set(tasks.map((task) => task.taskId))
+  for (const taskId of folders) {
+    if (!known.has(taskId)) continue
+    let names: string[]
+    try { names = await readdir(join(root, taskId)) } catch { continue }
+    for (const name of names) {
+      const list = owners.get(name)
+      if (list) list.push(taskId)
+      else owners.set(name, [taskId])
+    }
+  }
+  return owners
+}
+
+/** What one read of facts reads once per profile: the profile's tasks, and which of them keep which manifests. */
+interface WorktreeFactContext {
+  tasksFor(store: ResourceLifecycleStore): TaskLifecycleRecord[]
+  manifestOwners(store: ResourceLifecycleStore): Promise<Map<string, string[]>>
+}
+
+function worktreeFactContext(): WorktreeFactContext {
+  const tasks = new Map<ResourceLifecycleStore, TaskLifecycleRecord[]>()
+  const manifests = new Map<ResourceLifecycleStore, Promise<Map<string, string[]>>>()
+  const tasksFor = (store: ResourceLifecycleStore): TaskLifecycleRecord[] => {
+    let list = tasks.get(store)
+    if (!list) { list = store.list(); tasks.set(store, list) }
+    return list
+  }
+  return {
+    tasksFor,
+    manifestOwners: (store) => {
+      let owners = manifests.get(store)
+      if (!owners) { owners = manifestOwnersAsync(store, tasksFor(store)); manifests.set(store, owners) }
+      return owners
+    }
+  }
+}
 
 /** Reads the facts in `needs` into `facts`, without blocking, a few at a time. */
 export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts: OwnershipFacts): Promise<void> {
@@ -166,18 +211,18 @@ export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts:
     if (!unique.has(key)) unique.set(key, need)
   }
   const queue = [...unique.values()]
-  const storeTasks = new Map<ResourceLifecycleStore, TaskLifecycleRecord[]>()
-  const tasksFor = (store: ResourceLifecycleStore): TaskLifecycleRecord[] => {
-    let list = storeTasks.get(store)
-    if (!list) { list = store.list(); storeTasks.set(store, list) }
-    return list
-  }
+  const context = worktreeFactContext()
+  // Absent worktrees whose manifest was found: their pins are read afterwards, together per repository (`verifyPinsAsync`).
+  const pinned: Array<{ key: string; path: string; manifest: WorktreeReconstructionManifest }> = []
   const readOne = async (need: OwnershipNeed): Promise<void> => {
     if (need.kind === 'present') {
       if (!facts.present.has(need.path)) facts.present.set(need.path, await access(need.path).then(() => true, () => false))
     } else if (need.kind === 'worktree') {
       const key = worktreeKey(need.store, need.path, need.branch, need.repository)
-      if (!facts.worktrees.has(key)) facts.worktrees.set(key, await verifyWorktreeFact(need.store, need.path, need.branch, need.repository, tasksFor))
+      if (facts.worktrees.has(key)) return
+      const found = await inspectWorktreeFact(need.store, need.path, need.branch, need.repository, context)
+      if (typeof found === 'object') pinned.push({ key, path: need.path, manifest: found.manifest })
+      else facts.worktrees.set(key, found)
     } else if (need.kind === 'canonical') {
       if (!facts.canonical.has(need.path)) facts.canonical.set(need.path, await canonicalPathAsync(need.path))
     } else if (need.kind === 'common-dir') {
@@ -186,14 +231,32 @@ export async function readOwnershipFacts(needs: readonly OwnershipNeed[], facts:
   }
   const worker = async (): Promise<void> => { for (let need = queue.shift(); need; need = queue.shift()) await readOne(need) }
   await Promise.all(Array.from({ length: Math.min(FACT_READS_AT_ONCE, queue.length) }, worker))
+  if (!pinned.length) return
+  const verdicts = await verifyPinsAsync(pinned.map((entry) => entry.manifest))
+  for (const { key, path, manifest } of pinned) {
+    const error = verdicts.get(manifest)
+    facts.worktrees.set(key, error ? `Unverified worktree ${path}: ${error.message}` : undefined)
+  }
 }
 
 /**
  * Whether `path` is the registered worktree its record says, as the inventory has always checked it: a present one is a
  * regular linked worktree whose repository, top level and registration match; an absent one has exactly one owner's
- * reconstruction manifest whose pins still hold. The reason it is not, or undefined.
+ * reconstruction manifest whose pins still hold. The reason it is not, or undefined. Reads without blocking, and
+ * without Git for a worktree in the layout `git worktree add` writes (`standardLinkedWorktreeAsync`).
  */
-async function verifyWorktreeFact(store: ResourceLifecycleStore, path: string, expectedBranch: string | undefined, expectedRepository: string | undefined, tasksFor: (store: ResourceLifecycleStore) => TaskLifecycleRecord[] = (s) => s.list()): Promise<string | undefined> {
+export async function verifyWorktreeFact(store: ResourceLifecycleStore, path: string, expectedBranch: string | undefined, expectedRepository: string | undefined): Promise<string | undefined> {
+  const found = await inspectWorktreeFact(store, path, expectedBranch, expectedRepository, worktreeFactContext())
+  if (typeof found !== 'object') return found
+  const error = (await verifyPinsAsync([found.manifest])).get(found.manifest)
+  return error ? `Unverified worktree ${path}: ${error.message}` : undefined
+}
+
+/**
+ * {@link verifyWorktreeFact} up to the pins of an absent worktree: the reason it is not verified, undefined when it is,
+ * or the manifest whose pins decide it.
+ */
+async function inspectWorktreeFact(store: ResourceLifecycleStore, path: string, expectedBranch: string | undefined, expectedRepository: string | undefined, context: WorktreeFactContext): Promise<string | undefined | { manifest: WorktreeReconstructionManifest }> {
   try {
     if (!isAbsolute(path)) throw new Error('Registered checkout is not absolute')
     // In a worktree folder the person chose that is not there: the worktree is there, out of reach, and can't be checked.
@@ -202,21 +265,27 @@ async function verifyWorktreeFact(store: ResourceLifecycleStore, path: string, e
     if (offline) throw new Error(driveNotConnectedText(offline))
     if (!await access(path).then(() => true, () => false)) {
       const retirement = new WorktreeRetirementService(store)
-      const owners = tasksFor(store).filter((task) => existsSync(retirement.pathFor(task.taskId, path)))
+      // One listing of the profile's manifests per read of facts, instead of a lookup per task for each absent worktree.
+      const known = new Set(context.tasksFor(store).map((task) => task.taskId))
+      const owners = ((await context.manifestOwners(store)).get(basename(retirement.pathFor('', path))) ?? []).filter((taskId) => known.has(taskId))
       if (owners.length !== 1) throw new Error('Absent checkout lacks unique reconstruction authority')
-      const manifest = retirement.load(retirement.pathFor(owners[0].taskId, path))
+      const manifest = retirement.load(retirement.pathFor(owners[0]!, path))
       if (expectedBranch && manifest.branch !== expectedBranch || expectedRepository && manifest.repositoryId !== expectedRepository) throw new Error('Reconstruction owner changed')
-      await retirement.verifyPins(manifest)
-      return undefined
+      return { manifest }
     }
     if ((await lstat(path)).isSymbolicLink() || !(await lstat(join(path, '.git'))).isFile()) throw new Error('Not a regular linked Git worktree')
+    // The standard layout is read from Git's own files; anything else is asked of Git, every time.
+    const standard = await standardLinkedWorktreeAsync(path)
     const git = async (...args: string[]) => (await lifecycleReadAsync(path, args)).trim()
-    const common = await realpathLikeSync(resolve(path, await git('rev-parse', '--git-common-dir')))
+    const common = standard ? standard.commonDir : await realpathLikeSync(resolve(path, await git('rev-parse', '--git-common-dir')))
     const repositoryId = digest(common.toLowerCase()).slice(0, 32)
     if (expectedRepository && repositoryId !== expectedRepository) throw new Error('Repository common-directory identity changed')
     // The branch is the owner's record, not proof: the agent is free to switch to another, so the checkout is known by its path, registration and repository.
-    const top = await realpathLikeSync(await git('rev-parse', '--show-toplevel'))
-    if (top.toLowerCase() !== (await realpathLikeSync(path)).toLowerCase()) throw new Error('Source path is not the registered worktree root')
+    // In the standard layout the top level is the folder holding the `.git` file, `path` itself.
+    if (!standard) {
+      const top = await realpathLikeSync(await git('rev-parse', '--show-toplevel'))
+      if (top.toLowerCase() !== (await realpathLikeSync(path)).toLowerCase()) throw new Error('Source path is not the registered worktree root')
+    }
     // Its own registration, read without listing every worktree of the repository (`worktreeRegistry`).
     const listed = Boolean(await findListedWorktreeAsync(common, path, (entry, wanted) => resolve(entry).toLowerCase() === resolve(wanted).toLowerCase()))
     if (!listed) throw new Error('Git does not register the worktree')
@@ -306,6 +375,8 @@ export interface InventoryStorePass {
   readonly sharedFiles: Map<string, SharedFileRead>
   scheduledJobs?: { byOwner: Map<string, JsonObject[]>; blockers: string[] }
   sourceIndex?: SourceRootIndex
+  /** Folders checked for links during the pass (`assertLifecyclePath`), so each is read once per pass, not once per record. */
+  readonly checkedFolders: Set<string>
 }
 
 export function createInventoryStorePass(tasks: readonly TaskLifecycleRecord[]): InventoryStorePass {
@@ -319,7 +390,7 @@ export function createInventoryStorePass(tasks: readonly TaskLifecycleRecord[]):
       list.push(task)
     }
   }
-  return { tasks, taskById, childrenByParent, sharedFiles: new Map() }
+  return { tasks, taskById, childrenByParent, sharedFiles: new Map(), checkedFolders: new Set() }
 }
 
 /** The synchronous pass over the records, answering checkouts from `reads`. */
@@ -328,6 +399,8 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
   const resources = new Map<string, LifecycleResource>()
   const verifiedWorktrees = new Map<string, string | undefined>()
   const seenPaths = new Set<string>()
+  // Folders already checked for links in this synchronous pass (`assertLifecyclePath`).
+  const checked = pass?.checkedFolders ?? new Set<string>()
   const preloadedSources = new Map<string, { raw: string; data: unknown } | { error: string } | undefined>()
   const source = (path: string, required = false, shared = false): { source: ResourceSource; data: unknown } | undefined => {
     if (seenPaths.has(path)) return undefined
@@ -361,7 +434,7 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
           throw error
         }
         // Read records only. Symlinked/malformed sources never become ownership authority.
-        if (!relative(store.profileHome, file).startsWith('..')) assertLifecyclePath(store.profileHome, file)
+        if (!relative(store.profileHome, file).startsWith('..')) assertLifecyclePath(store.profileHome, file, checked)
         const inDatabase = file !== path
         if (stat.isSymbolicLink() || !stat.isFile() || (!inDatabase && stat.size > 32 * 1024 * 1024)) throw new Error('Source is not a bounded regular record')
         if (inDatabase) {
@@ -417,7 +490,7 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
       let stat: ReturnType<typeof lstatSync>
       try { stat = lstatSync(path) }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error }
-      assertLifecyclePath(ownedRoot, path)
+      assertLifecyclePath(ownedRoot, path, checked)
       if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('Journal authority is not a regular directory')
       return true
     } catch (error) { result.blockers.push(`Cannot establish journal authority ${path}: ${(error as Error).message}`); return false }
@@ -425,7 +498,7 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
   const internalReceiptRefs = (directory: string, owner: string, repositoryId?: string, retained = new Set<string>(), ownedRoot = store.profileHome): void => {
     const journal = join(directory, 'journal')
     if (!journalDirectory(journal, ownedRoot)) return
-    assertLifecyclePath(ownedRoot, journal)
+    assertLifecyclePath(ownedRoot, journal, checked)
     for (const name of readdirSync(journal).filter((entry) => /^\d{16}\.json$/.test(entry)).sort()) {
       const entry = source(join(journal, name), true)
       if (!entry) continue
@@ -483,7 +556,7 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
       const messagesPath = `${dbFile}#messages.json`
       try {
         const stat = lstatSync(dbFile)
-        if (!relative(store.profileHome, dbFile).startsWith('..')) assertLifecyclePath(store.profileHome, dbFile)
+        if (!relative(store.profileHome, dbFile).startsWith('..')) assertLifecyclePath(store.profileHome, dbFile, checked)
         if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('Source is not a bounded regular record')
         const loaded = readThreadLifecycleRecordsSync(task.location)
         preloadedSources.set(agentsPath, loaded.agents)
@@ -590,7 +663,7 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
       const receiptEntries: Array<{ sourceId: string; receiptId?: string; kind: RetentionClaimKind; retainedRefs: Array<string | undefined> }> = []
       if (journalDirectory(journalRoot, task.location)) {
         try {
-          assertLifecyclePath(task.location, journalRoot)
+          assertLifecyclePath(task.location, journalRoot, checked)
           for (const name of readdirSync(journalRoot).filter((name) => /^\d{16}\.json$/.test(name)).sort()) {
             const entry = source(join(journalRoot, name))
             if (!entry) continue
@@ -789,7 +862,7 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
           let stat: ReturnType<typeof lstatSync>
           try { stat = lstatSync(path) }
           catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
-          assertLifecyclePath(root, path)
+          assertLifecyclePath(root, path, checked)
           if (stat.isSymbolicLink()) throw new Error('Source container is a link')
           if (stat.isDirectory()) {
             if (depth > 8) throw new Error('Source container exceeds supported nesting')
@@ -833,7 +906,7 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
         let stat: ReturnType<typeof lstatSync>
         try { stat = lstatSync(path) }
         catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
-        assertLifecyclePath(root, path)
+        assertLifecyclePath(root, path, checked)
         if (stat.isSymbolicLink()) throw new Error('Source container is a link')
         if (stat.isDirectory()) {
           if (depth > 8) throw new Error('Source container exceeds supported nesting')
@@ -866,7 +939,7 @@ export function inventoryFrom(store: ResourceLifecycleStore, record: TaskLifecyc
   for (const task of owned.values()) {
     const manifestRoot = join(store.root, 'workspaces', task.taskId)
     if (!existsSync(manifestRoot)) continue
-    assertLifecyclePath(store.root, manifestRoot)
+    assertLifecyclePath(store.root, manifestRoot, checked)
     for (const name of readdirSync(manifestRoot).filter((name) => name.endsWith('.json'))) {
       const found = source(join(manifestRoot, name), true)
       if (!found) continue
