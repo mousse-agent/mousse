@@ -4,7 +4,8 @@
  * still waits for its worktree. Before, it stayed an unstarted draft for that whole wait: its row did not open, and
  * New thread opened it again instead of a fresh one. Real orchestrator, Run Engine and Git; the test holds the
  * project's repository, as another operation would, so the worktree step lasts as long as the test wants.
- * Rows: one empty thread sent; two sent one after the other (their order, during the setup and after it).
+ * Rows: one empty thread sent (listed, and named from its message); two sent one after the other (their order, during
+ * the setup and after it).
  */
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -88,6 +89,18 @@ describe("a new chat's thread while its first turn is set up", () => {
     w.freeRepository()
     await waitFor(() => w.pi.turns.length === 2 && w.idle(draft.id), 'the turn to finish', 40_000)
     expect(w.pi.turns[1]!.prompt).toMatch(/Plan the release$/)
+  })
+
+  it('names it from its message while its worktree is still made, not once the setup is over', async () => {
+    const w = world()
+    const draft = w.emptyThread()
+    await w.holdRepository()
+    await w.d.orch.send('Please plan the release for Friday', false, { threadId: draft.id, clientRequestId: 'first', awaitMode: 'ack' })
+    await waitFor(() => w.preparingWorktree(draft.id), 'the worktree step to show')
+    expect(w.d.store.getThread(draft.id)!.name).toBe('Plan the release for Friday')
+    w.freeRepository()
+    await waitFor(() => w.pi.turns.length === 1 && w.idle(draft.id), 'the turn to finish', 40_000)
+    expect(w.d.store.getThread(draft.id)!.name).toBe('Plan the release for Friday')
   })
 
   it('keeps two threads started one after the other in the order they were sent, during their setup and after it', async () => {

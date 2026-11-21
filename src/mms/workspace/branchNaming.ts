@@ -6,10 +6,13 @@ import { normalizeBranchNamingSettings, type BranchNamingSettings } from '../../
 /**
  * Naming a thread's worktree branch after its first message, in the background.
  *
- * The worktree is made at once on `<prefix>/<random id>` (`temporaryBranchName`). Once it is ready, the profile's
- * namer asks the title model for a name (`requestBranchName`), and the workspace renames its branch to it. Nothing
- * waits on that: the turn starts on the temporary name, and every failure (no title model, a refusal, the timeout, an
- * answer that names nothing usable, a name already taken) leaves the temporary name as it is.
+ * The title model names the branch in the same request that names the thread, made when the first message is sent
+ * (`OrchestratorService.nameThreadOnFirstSend`). When that answer is in by the time the worktree is made, the branch is
+ * made on it (`readyBranchName`). Otherwise the worktree is made at once on `<prefix>/<random id>`
+ * (`temporaryBranchName`); once it is ready, the profile's namer gives the answer (`requestBranchName`), waiting for it
+ * if needed, and the workspace renames its branch to it. Nothing waits on that: the turn starts on the temporary name,
+ * and every failure (no title model, a refusal, the timeout, an answer that names nothing usable, a name already taken)
+ * leaves the temporary name as it is.
  */
 
 /** How long the title model may take to name a branch before the temporary name is kept. */
@@ -22,6 +25,8 @@ export interface BranchNamer {
   settings(): BranchNamingSettings
   /** The title model's answer to `prompt`, or undefined when there is no title model. Throws on a failed request. */
   ask(request: { threadId: string; system: string; prompt: string }, signal: AbortSignal): Promise<string | undefined>
+  /** The title model's branch name for the thread's first message when it has already answered; never waits. */
+  ready?(threadId: string): string | undefined
 }
 
 const namers = new Map<string, BranchNamer>()
@@ -58,21 +63,40 @@ export function temporaryBranchName(prefix: string): string {
   return withBranchPrefix(prefix, randomBytes(4).toString('hex'))
 }
 
-/** The request the title model gets for a branch name. */
+/** How a branch name is written in the naming setting's mode: the rules every request for a branch name gives the model. */
+export function branchNamingRules(settings: BranchNamingSettings): string[] {
+  const rules = ['Use lowercase ASCII letters, digits and hyphens; three to six words at most; say what the work changes.']
+  if (settings.mode === 'semantic') {
+    rules.push(`Start with a kind and a slash, one of: ${SEMANTIC_BRANCH_KINDS.join(', ')}. For example: fix/login-button-on-safari.`)
+  } else if (settings.mode === 'custom') {
+    rules.push('Give the whole branch name, slashes allowed. Follow these instructions from the person:', settings.instructions.trim() || '(none)')
+  } else {
+    rules.push('Give only the part after the prefix, without slashes. For example: login-button-on-safari.')
+  }
+  return rules
+}
+
+/** The request the title model gets for a branch name alone. */
 export function branchNamingPrompt(text: string, settings: BranchNamingSettings): { system: string; prompt: string } {
   const message = text.trim().slice(0, NAMING_TEXT_MAX)
-  const base = [
-    'You name Git branches for coding tasks. Reply with the branch name only: one line, no quotes, no explanation.',
-    'Use lowercase ASCII letters, digits and hyphens; three to six words at most; say what the work changes.'
-  ]
-  if (settings.mode === 'semantic') {
-    base.push(`Start with a kind and a slash, one of: ${SEMANTIC_BRANCH_KINDS.join(', ')}. For example: fix/login-button-on-safari.`)
-  } else if (settings.mode === 'custom') {
-    base.push('Give the whole branch name, slashes allowed. Follow these instructions from the person:', settings.instructions.trim() || '(none)')
-  } else {
-    base.push('Give only the part after the prefix, without slashes. For example: login-button-on-safari.')
+  const system = ['You name Git branches for coding tasks. Reply with the branch name only: one line, no quotes, no explanation.', ...branchNamingRules(settings)]
+  return { system: system.join('\n'), prompt: `The task:\n${message}` }
+}
+
+/**
+ * The branch name the title model already gave for the thread's first message (`BranchNamer.ready`), fitted to the
+ * folder's naming settings. Undefined when it has not answered yet, named nothing usable, or there is no namer. Never
+ * waits, so a worktree made now can take it instead of a temporary name.
+ */
+export function readyBranchName(threadDirectory: string, threadId: string): string | undefined {
+  try {
+    const answer = namerFor(threadDirectory)?.ready?.(threadId)
+    if (!answer) return undefined
+    const settings = branchNamingFor(threadDirectory)
+    return branchNameFromModel(answer, settings.mode, settings.prefix)
+  } catch {
+    return undefined
   }
-  return { system: base.join('\n'), prompt: `The task:\n${message}` }
 }
 
 /**

@@ -287,6 +287,11 @@ export interface DriverRuntime {
    * aborts it (the caller stopped, or the gateway's inactivity timeout).
    */
   oneShot?(spec: OneShotSpec, signal: AbortSignal): Promise<{ text: string }>
+  /**
+   * Gets ready for a one-shot of `spec` soon, without making a request: Claude Code starts a process ahead, which the
+   * next one-shot on the same model takes instead of starting its own. Never throws.
+   */
+  prewarmOneShot?(spec: Pick<OneShotSpec, 'model' | 'effort' | 'customModel' | 'task'>): void
   /** The models this entry can make pictures with in Mousse's own process (#1088); absent or empty: none. */
   imageModels?(): readonly ImageModelFacts[]
   /**

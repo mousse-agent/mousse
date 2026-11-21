@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CLAUDE_AUTH_STATUS_TTL_MS, ClaudeSubscriptionProviderService, claudeModelOptions } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
+import { ONE_SHOT_SPARE_SYSTEM } from '../src/mms/harness/vendors/claude/oneShotSpare'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { ProfileDatabase } from '../src/mms/run/db/ProfileDatabase'
 import { EffectOutbox } from '../src/mms/run/EffectOutbox'
@@ -420,6 +421,84 @@ describe('Claude Subscription native provider', () => {
     const signedOut = fixture(query, false)
     await expect(signedOut.service.oneShot({ model: 'sonnet', system: 's', prompt: 'p', onActivity: () => {} }, new AbortController().signal)).rejects.toMatchObject({ code: 'claude_subscription_sign_in_required' })
     expect(query).not.toHaveBeenCalled()
+  })
+  describe('titles and branch names run on a Claude Code process started ahead', () => {
+    /**
+     * Claude Code as the SDK starts it: a string prompt is read at once; a streamed one (a process started ahead) when its
+     * message comes. `silent` processes end without saying anything (one that died while it waited).
+     */
+    const processes = (silent: (index: number) => boolean = () => false) => {
+      const started: Array<{ options: Options; streamed: boolean; close: ReturnType<typeof vi.fn> }> = []
+      const query = ({ options, prompt }: { options: Options; prompt: unknown }) => {
+        const index = started.length
+        const close = vi.fn()
+        started.push({ options, streamed: typeof prompt !== 'string', close })
+        const generator = (async function* () {
+          if (silent(index)) return
+          let text = typeof prompt === 'string' ? prompt : ''
+          if (typeof prompt !== 'string') for await (const message of prompt as AsyncIterable<{ message: { content: string } }>) { text = message.message.content; break }
+          yield { type: 'stream_event', event: {} }
+          yield { ...result, result: `answer from ${index}: ${text.split('\n').pop()}` }
+        })()
+        return Object.assign(generator, { close }) as unknown as Query
+      }
+      return { started, query }
+    }
+    const ask = (service: ClaudeSubscriptionProviderService, task: 'title' | 'branch_name' | 'pull_request', prompt: string, model = 'haiku') =>
+      service.oneShot({ model, task, system: `Instructions for ${task}.`, prompt, onActivity: () => {} }, new AbortController().signal)
+
+    it('a request takes the process started ahead and starts none of its own; the next one is started once it answered', async () => {
+      const { started, query } = processes()
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku', efforts: ['low', 'high'] }])
+      await service.status()
+      service.prewarmOneShot({ model: 'haiku', task: 'title' })
+      expect(started).toHaveLength(1)
+      expect(started[0]).toMatchObject({ streamed: true, options: { model: 'haiku', effort: 'low', systemPrompt: ONE_SHOT_SPARE_SYSTEM, tools: [], maxTurns: 1, persistSession: false, settingSources: [] } })
+      // A second warm-up for the same launch starts nothing.
+      service.prewarmOneShot({ model: 'haiku', task: 'branch_name' })
+      expect(started).toHaveLength(1)
+
+      expect(await ask(service, 'title', 'Request: fix the login redirect')).toEqual({ text: 'answer from 0: Request: fix the login redirect' })
+      expect(started[0]!.close).toHaveBeenCalled()
+      expect(started).toHaveLength(2)
+      expect(await ask(service, 'branch_name', 'The task: fix the login redirect')).toEqual({ text: 'answer from 1: The task: fix the login redirect' })
+      expect(started).toHaveLength(3)
+
+      // Any other one-shot starts its own process, with its own instructions as the system prompt.
+      expect(await ask(service, 'pull_request', 'Draft it')).toEqual({ text: 'answer from 3: Draft it' })
+      expect(started[3]).toMatchObject({ streamed: false, options: { systemPrompt: 'Instructions for pull_request.' } })
+      expect(started[2]!.close).not.toHaveBeenCalled()
+    })
+
+    it('a request on another launch closes the waiting process and starts its own', async () => {
+      const { started, query } = processes()
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }, { id: 'sonnet', label: 'Sonnet' }])
+      await service.status()
+      service.prewarmOneShot({ model: 'haiku', task: 'title' })
+      expect(await ask(service, 'title', 'Request: x', 'sonnet')).toEqual({ text: 'answer from 1: Request: x' })
+      expect(started[0]!.close).toHaveBeenCalled()
+      expect(started[1]).toMatchObject({ streamed: false, options: { model: 'sonnet' } })
+      // The next one is started ahead on the launch the request used.
+      expect(started[2]).toMatchObject({ streamed: true, options: { model: 'sonnet' } })
+    })
+
+    it('a process started ahead that ended before it said anything is not a request: the request starts its own', async () => {
+      const { started, query } = processes((index) => index === 0)
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      await service.status()
+      service.prewarmOneShot({ model: 'haiku', task: 'title' })
+      expect(await ask(service, 'title', 'Request: y')).toEqual({ text: 'answer from 1: Request: y' })
+      expect(started[1]).toMatchObject({ streamed: false })
+    })
+
+    it('stopping the provider closes the process waiting ahead', async () => {
+      const { started, query } = processes()
+      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      await service.status()
+      service.prewarmOneShot({ model: 'haiku', task: 'title' })
+      service.stop()
+      await vi.waitFor(() => expect(started[0]!.close).toHaveBeenCalled())
+    })
   })
   it('resumes a saved session only on the instance that created it', async () => {
     const inputs: Array<{ options: Options; prompt: unknown }> = []

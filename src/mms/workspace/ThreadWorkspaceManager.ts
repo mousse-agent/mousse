@@ -37,7 +37,7 @@ import type {
 } from '../../shared/workspace'
 import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { DEFAULT_BRANCH_PREFIX, isAcceptableThreadBranchName } from '../../shared/mousseBranches'
-import { branchNamingFor, requestBranchName, temporaryBranchName } from './branchNaming'
+import { branchNamingFor, readyBranchName, requestBranchName, temporaryBranchName } from './branchNaming'
 import { BRANCH_RECORD_OPERATIONS, BRANCH_RENAME_OPERATION, threadBranchRecord, type ThreadBranchRecord } from './threadBranchRecords'
 import { threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { settlesItself } from '../../shared/resourceLifecycle'
@@ -397,10 +397,12 @@ export class ThreadWorkspaceManager {
      * thread's latest one, so the first turn starts from it instead of recording it as outside changes. `onNotice` gets
      * what that write kept or left as it is, as a line for the thread.
      *
-     * `nameFrom`: the thread's first message. The worktree is made at once on a temporary branch `<prefix>/<random id>`
-     * (Settings → Storage → Branches), checked against the repository under its lease. Once it is ready, the title model
-     * is asked in the background for a name from `nameFrom`, and the branch is renamed to it (`nameBranchLater`); nothing
-     * waits on that. A private thread's (`Thread.localOnly`) first message is never sent: its branch keeps the random name.
+     * `nameFrom`: the thread's first message. When the title model already named the branch (the request the first send
+     * made, `readyBranchName`) and the name is free, the worktree is made on it. Otherwise it is made at once on a
+     * temporary branch `<prefix>/<random id>` (Settings → Storage → Branches), checked against the repository under its
+     * lease; once it is ready, the title model's name for `nameFrom` is awaited in the background and the branch is renamed
+     * to it (`nameBranchLater`); nothing waits on that. A private thread's (`Thread.localOnly`) first message is never
+     * sent: its branch keeps the random name.
      *
      * `onWorktreeMade`: runs once the worktree is made and its files written, still under the repository's lease and
      * before anything else can fail: what Mousse wrote there, as a caller that may have to remove it again reads it.
@@ -430,10 +432,12 @@ export class ThreadWorkspaceManager {
       // Without a start from the caller, the branch picked for the thread when it was created (`Thread.worktreeStartSha`).
       startSha ??= threadFolderWorktreeStart(this.threadDirectory)
       const head = startSha ? await git(repository.primaryCheckoutPath, ['rev-parse', '--verify', `${startSha}^{commit}`]) : primaryHead
-      // A temporary name, picked under the repository's lease so two threads cannot take the same one. A private thread's
-      // first message is never sent for naming: Git reads from the user's other computers list branch names.
+      // The title model's name when it has already answered and the name is free, or else a temporary name, picked under
+      // the repository's lease so two threads cannot take the same one. A private thread's first message is never sent
+      // for naming: Git reads from the user's other computers list branch names.
       const nameFrom = threadFolderIsLocalOnly(this.threadDirectory) ? undefined : options.nameFrom?.trim() || undefined
-      const branch = await this.freeTemporaryBranch(repository.primaryCheckoutPath)
+      const named = nameFrom ? readyBranchName(this.threadDirectory, threadId) : undefined
+      const branch = named && await this.branchNameFree(repository.primaryCheckoutPath, named) ? named : await this.freeTemporaryBranch(repository.primaryCheckoutPath)
       const retainedRef = `refs/mousse/threads/${threadId}/${conversationBranchId}`
       // In the worktree folder the person chose (Settings → Storage), or Mousse's own; see `worktreeLayout`.
       const registrations = new WorktreeListPass()
@@ -516,7 +520,7 @@ export class ThreadWorkspaceManager {
         state: 'completed',
         details: { intentSequence: intent.sequence, head, branch, retainedRef }
       })
-      if (nameFrom) this.nameBranchLater(threadId, branch, nameFrom)
+      if (nameFrom && branch !== named) this.nameBranchLater(threadId, branch, nameFrom)
       return metadata
     } catch (error) {
       this.journal.append({
@@ -585,6 +589,12 @@ export class ThreadWorkspaceManager {
       }
     }
     throw new Error('Mousse could not find a free branch name for the worktree.')
+  }
+
+  /** Whether a branch can be made as `name`: no branch has it, none is under it, and none is named after one of its folders. */
+  private async branchNameFree(checkoutPath: string, name: string): Promise<boolean> {
+    const folder = name.includes('/') ? name.slice(0, name.lastIndexOf('/')) : ''
+    return !await this.branchNameTaken(checkoutPath, name) && !await this.folderOfNameTaken(checkoutPath, folder)
   }
 
   /** Whether a branch of this name is there, or branches under it. */

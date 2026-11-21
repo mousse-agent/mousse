@@ -24,10 +24,10 @@ const threadDir = (name: string, meta: Record<string, unknown> = {}): string => 
   writeFileSync(join(dir, 'meta.json'), JSON.stringify({ id: name, ...meta }))
   return dir
 }
-/** The profile's namer: the settings given, and the title model's answer from `answer`. */
-const namer = (settings: Partial<BranchNamingSettings>, answer: BranchNamer['ask']): ReturnType<typeof vi.fn> => {
+/** The profile's namer: the settings given, the title model's answer from `answer`, and (`ready`) the one the first send's naming request already gave. */
+const namer = (settings: Partial<BranchNamingSettings>, answer: BranchNamer['ask'], ready?: BranchNamer['ready']): ReturnType<typeof vi.fn> => {
   const ask = vi.fn(answer)
-  forget = registerBranchNamer(home, { settings: () => ({ mode: 'static', prefix: 'mousse', instructions: '', ...settings }), ask })
+  forget = registerBranchNamer(home, { settings: () => ({ mode: 'static', prefix: 'mousse', instructions: '', ...settings }), ask, ...(ready ? { ready } : {}) })
   return ask
 }
 const workspace = (dir: string) => JSON.parse(readFileSync(join(dir, 'workspace.json'), 'utf8')) as { branch: string; worktreePath: string }
@@ -116,8 +116,36 @@ describe('a thread worktree starts on a temporary branch and is named in the bac
     expect(await requestBranchName(threadDir('one'), 'thread-one', 'Fix the login button', 20)).toBeUndefined()
   })
 
+  it('a name the title model already gave is the branch the worktree is made on: no temporary name, no rename', async () => {
+    const ask = namer({ mode: 'semantic' }, async () => 'fix/other', (threadId) => (threadId === 'thread-one' ? 'Branch: fix/login-button' : undefined))
+    const manager = new ThreadWorkspaceManager(threadDir('one'))
+    const made = await manager.provision('thread-one', 'main', repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
+    expect(made.branch).toBe('fix/login-button')
+    expect(git(made.worktreePath, 'symbolic-ref', '--short', 'HEAD')).toBe('fix/login-button')
+    expect(manager.branchNaming).toBeUndefined()
+    expect(ask).not.toHaveBeenCalled()
+    expect(branches(repo)).toEqual(['fix/login-button', 'main'])
+    expect(manager.branchRecord().owned.has('fix/login-button')).toBe(true)
+    expect(manager.journal.ofTypes(BRANCH_RENAME_OPERATION)).toEqual([])
+  })
+
+  it.each([
+    ['a branch someone has', 'static', 'login-button', 'mousse/login-button'],
+    ['a branch named after its folder', 'semantic', 'fix/login-button', 'fix']
+  ] as const)('a ready name %s holds is not taken: the worktree starts on a temporary name, and their branches stay', async (_case, mode, answer, theirs) => {
+    git(repo, 'branch', theirs)
+    const refs = () => git(repo, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads').split('\n')
+    const before = refs()
+    namer({ mode }, async () => answer, () => answer)
+    const manager = new ThreadWorkspaceManager(threadDir('one'))
+    const made = await manager.provision('thread-one', 'main', repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
+    expect(made.branch).toMatch(/^mousse\/[0-9a-f]{8}$/)
+    await manager.branchNaming
+    expect(refs().filter((line) => !line.startsWith(`refs/heads/${manager.load()!.branch} `))).toEqual(before)
+  })
+
   it('a private thread\'s first message is never sent, and its branch keeps the random name', async () => {
-    const ask = namer({}, async () => 'login-button')
+    const ask = namer({}, async () => 'login-button', () => 'login-button')
     const manager = new ThreadWorkspaceManager(threadDir('one', { localOnly: true }))
     const made = await manager.provision('thread-one', 'main', repo, undefined, undefined, undefined, { nameFrom: 'Fix the login button' })
     expect(manager.branchNaming).toBeUndefined()

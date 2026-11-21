@@ -33,6 +33,7 @@ import { atomicWriteJsonSync as writeSetupRetry } from '../data/AtomicFs'
 import { setupFailureDetail, setupFailureReason } from '../../shared/setupFailure'
 import {
   normalizeAgentAccessSettings,
+  normalizeBranchNamingSettings,
   normalizeContextSettings,
   normalizeExperimentalSettings,
   normalizeRunSettings,
@@ -41,6 +42,7 @@ import {
   settingCompactionPoint,
   type AgentAccessLevel
 } from '../../shared/settings'
+import { parseThreadNaming, threadNamingRequest, type ThreadNaming } from './threadNaming'
 import { piInstanceId, piProviderIdOf, PROVIDER_INSTANCE_ERROR_CODES, type ModelOverride } from '../../shared/providerInstances'
 import { parseThinkingSuffixFromModelId } from '../../shared/modelVariants'
 import { promptCacheGoneCold } from '../../shared/promptCacheCold'
@@ -1036,6 +1038,8 @@ interface ContinuationTurnPayload {
  * that is recorded and not over is waited for as long as it takes; this only checks it again at this interval.
  */
 const CONTINUATION_CALL_WAIT_MS = 10_000
+/** How long a first send's naming answer is kept for its worktree's branch after it came (`startThreadNaming`). */
+const THREAD_NAMING_KEPT_MS = 5 * 60_000
 /** How long a turn's start waits for its running list (`runningNoteFor`) before it starts without the note. */
 const RUNNING_NOTE_BUDGET_MS = 2_500
 
@@ -11725,9 +11729,23 @@ export class OrchestratorService extends EventEmitter {
    * The title model's answer when asked to name a thread's worktree branch (`branchNaming`): the same model, scope and
    * gateway as chat titles. Undefined when no title model is chosen; the branch then keeps its temporary name. `signal`
    * ends the request when the naming gives up waiting (`BRANCH_NAMING_TIMEOUT_MS`).
+   *
+   * A thread whose first send asked for its title and branch name together (`startThreadNaming`) gets that request's
+   * branch line, waited for; no second request is made, unless that answer had no branch line. A failed one stays failed.
    */
   async askBranchName(request: { threadId: string; system: string; prompt: string }, signal?: AbortSignal): Promise<string | undefined> {
     if (!this.hasTitleModel()) return undefined
+    const pending = this.threadNamings?.get(request.threadId)
+    if (pending) {
+      const answer = await Promise.race([
+        pending.answer,
+        new Promise<undefined>((resolve) => {
+          if (signal?.aborted) resolve(undefined)
+          signal?.addEventListener('abort', () => resolve(undefined), { once: true })
+        })
+      ])
+      if (!answer || answer.branch) return answer?.branch
+    }
     return this.titleModelText(request.system, request.prompt, {
       task: 'branch_name',
       scope: this.threadScope(request.threadId),
@@ -11735,6 +11753,46 @@ export class OrchestratorService extends EventEmitter {
       maxChars: 120,
       ...(signal ? { signal } : {})
     })
+  }
+
+  /** The branch line the first send's naming request already gave (`BranchNamer.ready`); never waits. */
+  readyBranchName(threadId: string): string | undefined {
+    return this.threadNamings?.get(threadId)?.settled?.branch
+  }
+
+  /**
+   * The request each new thread's first send made for its title and branch name together (`threadNaming.ts`), kept for
+   * its worktree's branch naming (`askBranchName`, `readyBranchName`) until `THREAD_NAMING_KEPT_MS` after it answered.
+   */
+  private threadNamings?: Map<string, { answer: Promise<ThreadNaming | undefined>; settled?: ThreadNaming }>
+
+  /** Asks the title model for the thread's title and branch name in one request, made now. Rejects when it fails. */
+  private startThreadNaming(threadId: string, request: string, images: number): Promise<ThreadNaming> {
+    const settings = this.settingsStore.get()
+    const { system, prompt } = threadNamingRequest({ request, images }, settings.title.prompt, normalizeBranchNamingSettings(settings.branches))
+    const naming = this.titleModelText(system, prompt, { task: 'title', scope: this.threadScope(threadId), sessionKey: threadId, maxChars: 400 }).then(parseThreadNaming)
+    const entry: { answer: Promise<ThreadNaming | undefined>; settled?: ThreadNaming } = { answer: naming.catch(() => undefined) }
+    const namings = this.threadNamings ??= new Map()
+    namings.set(threadId, entry)
+    void entry.answer.then((answer) => {
+      if (answer) entry.settled = answer
+      const timer = setTimeout(() => { if (namings.get(threadId) === entry) namings.delete(threadId) }, THREAD_NAMING_KEPT_MS)
+      timer.unref?.()
+    })
+    return naming
+  }
+
+  /**
+   * Has the title model's provider get ready for a new thread's naming request (`HarnessGateway.prewarmOneShot`), so the
+   * request made at its first send does not wait for a process to start. Nothing without a title model, for a private
+   * thread (its first message is never sent), or one that already has a name.
+   */
+  prewarmThreadNaming(threadId: string): void {
+    if (!this.hasTitleModel() || !this.harness?.prewarmOneShot) return
+    const thread = this.threadStore?.getThread(threadId)
+    if (!thread || thread.localOnly || !isDefaultThreadName(thread.name)) return
+    const { prompt: _titlePrompt, ...selection } = this.settingsStore.get().title
+    this.harness.prewarmOneShot({ selection, scope: this.threadScope(threadId), purpose: 'title', task: 'title' })
   }
 
   /**
@@ -11941,11 +11999,18 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /** What a send names its thread from: its words (an agent's, never the header Mousse wrote around them) and its image count. */
+  private firstSendWords(input: OrchestratorSendInput, agent: AgentOrigin | undefined): [string, number] {
+    const { content, images } = normalizeSendRequest(input)
+    return [agent ? agentMessageWords(content, agentOriginOf(agent)) : content, images?.length ?? 0]
+  }
+
   /**
-   * Names a thread when its first message is sent, without holding up the turn, while it still has the
-   * default name. Without a title model, the title from the message is final. With one, the title from the
-   * message shows at once as `provisional` (dimmed in the sidebar) and the model's title replaces it as
-   * `auto`. A model that fails or names nothing leaves it provisional until the pass after the first reply.
+   * Names a thread as its first message's turn is admitted, before its worktree and snapshot are set up and without
+   * holding up the turn, while it still has the default name. Without a title model, the title from the message is
+   * final. With one, the title from the message shows at once as `provisional` (dimmed in the sidebar) and the model's
+   * title replaces it as `auto`, in place. The same request names the thread's worktree branch (`startThreadNaming`).
+   * A model that fails or names nothing leaves it provisional until the pass after the first reply.
    */
   private nameThreadOnFirstSend(threadId: string, userContent: string, images: number): void {
     if (!this.threadStore || threadId === '__unbound__') return
@@ -11960,10 +12025,11 @@ export class OrchestratorService extends EventEmitter {
     }
     const shown = this.writeThreadTitle(threadId, thread, fromMessage || thread.name, 'provisional')
     if (!shown) return
+    const naming = this.startThreadNaming(threadId, userContent, images)
     void this.queueTitleWork(threadId, async () => {
       let title: string | null = null
       try {
-        title = await this.generateTitleText({ request: userContent, images }, threadId)
+        title = (await naming).title
       } catch (error) {
         this.warnTitleFailure(threadId, error)
         this.emit('thread-title-generation-failed', { threadId, error: error instanceof Error ? error.message : String(error) })
@@ -14272,6 +14338,9 @@ export class OrchestratorService extends EventEmitter {
     // draft: its row would not open, and New thread would open it again instead of a fresh one. Internal wakes stay hidden.
     const startedAtAdmission = !reuseLastUser && displayUserMessage && !rerunOfSavedMessage()
     if (startedAtAdmission) this.touchUserActivityAndNotify(session.threadId)
+    // And it is named then, from the message (the title model's request goes out now, alongside the setup), never after
+    // the worktree and snapshot: those can take a minute on a busy hard disk. A workflow's invocation names nothing.
+    if (startedAtAdmission && (typeof input === 'string' || !input.workflowInvocationId)) this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent))
     // A Stop while the turn is still being set up ends the setup's waits (`endTurnSetups`); `startTurn` then ends the
     // turn before it started.
     const setupStop = new AbortController()
@@ -14614,10 +14683,8 @@ export class OrchestratorService extends EventEmitter {
       this.touchUserActivityAndNotify(session.threadId)
     }
 
-    if (!reuseLastUser && displayUserMessage) {
-      // An agent's message names the thread from its words, never from the header Mousse wrote around them.
-      this.nameThreadOnFirstSend(session.threadId, opts?.agent ? agentMessageWords(userContent, agentOriginOf(opts.agent)) : userContent, images?.length ?? 0)
-    }
+    // A thread the admission did not name (the transcript changed during the setup) is named now.
+    if (!reuseLastUser && displayUserMessage && !startedAtAdmission) this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent))
 
     // The mode the turn runs in is known before its message is admitted, so a change reaches the
     // agent with that message and the message records the mode. A bot's turn runs under its grant, never a thread
