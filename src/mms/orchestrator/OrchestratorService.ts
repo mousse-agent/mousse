@@ -3710,11 +3710,15 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /** The threads whose runs this boot cut off (`recoverRunEngineOnBoot`): the restart settles their agents and tasks too. */
+  restartCutOffThreads: string[] = []
+
   /** Boot reconciliation: runs the previous daemon left active become interrupted. */
   recoverRunEngineOnBoot(): string[] {
     const engine = this.runEngine
     if (!engine) return []
-    const { interrupted } = engine.reconcileOnBoot({ queued: (run) => this.queueHoldsRun(run.threadId, run.runId) })
+    const { interrupted, uncertain } = engine.reconcileOnBoot({ queued: (run) => this.queueHoldsRun(run.threadId, run.runId) })
+    this.restartCutOffThreads = [...new Set([...interrupted, ...uncertain].map((runId) => engine.getRun(runId)?.threadId).filter((id): id is string => Boolean(id)))]
     this.recoverGoalsOnce()
     this.writeRestartTranscripts()
     for (const runId of interrupted) {

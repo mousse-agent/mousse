@@ -9,6 +9,7 @@ import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { acquireRepositoryLease } from '../git/RepositoryLease'
 import { resolveRepositoryIdentityAsync } from '../git/RepositoryIdentity'
 import { canonicalPathAsync, comparablePath, gitCommonDirAsync } from './canonicalPath'
+import { mainWorktreePathAsync, WorktreeListPass } from './worktreeRegistry'
 import { buildResourceInventory, OwnershipFacts } from './ResourceInventory'
 import { projectFolderPurgeRefs, threadKeptFilesRefs } from './projectFolderRefs'
 import { measureTree } from './diskMeasure'
@@ -476,6 +477,7 @@ export class ResourcePurgeService {
     const record = this.store.require(taskId)
     const reservation = record.cleanupOwner?.token ?? ''
     if (!readOnly && !reservation) throw new Error('Cleanup reservation is missing')
+    const worktreeLists = new WorktreeListPass()
     if (record.state === 'purge-started' || record.state === 'purged') {
       if (!record.purge) throw new Error('Purge state has no external recovery ledger')
       return record.purge
@@ -649,7 +651,7 @@ export class ResourcePurgeService {
           const thread = this.threadWorkspaceBranch(resource.ownerTaskId, resource.identity)
           if (thread) {
             // The thread's own worktree branch: judged by the thread's records and by what its tip holds, whatever its name.
-            const verdict = await this.threadBranchVerdict(resource.ownerTaskId, thread, resource.identity, commonDir)
+            const verdict = await this.threadBranchVerdict(resource.ownerTaskId, thread, resource.identity, commonDir, worktreeLists)
             if ('retained' in verdict) { preview.retained.push({ identity: resource.identity, reason: verdict.retained }); continue }
             if ('blocker' in verdict) throw new Error(verdict.blocker)
             if (!verdict.expectedValue || !commonDir) continue
@@ -740,7 +742,7 @@ export class ResourcePurgeService {
    * one) and no worktree but the thread's has it checked out, the rule retirement deletes a branch by; otherwise it
    * stays. A name the records never gave the worktree is refused, unless it is under `mousse/` as older records' are.
    */
-  private async threadBranchVerdict(taskId: string, thread: NonNullable<ReturnType<ResourcePurgeService['threadWorkspaceBranch']>>, ref: string, commonDir: string | undefined): Promise<{ retained: string } | { blocker: string } | { expectedValue?: string }> {
+  private async threadBranchVerdict(taskId: string, thread: NonNullable<ReturnType<ResourcePurgeService['threadWorkspaceBranch']>>, ref: string, commonDir: string | undefined, worktreeLists = new WorktreeListPass()): Promise<{ retained: string } | { blocker: string } | { expectedValue?: string }> {
     const name = ref.slice('refs/heads/'.length)
     const { record, workspace } = thread
     if (!record) return { retained: "The thread's branch records cannot be read; the branch stays" }
@@ -770,7 +772,8 @@ export class ResourcePurgeService {
     if (!kept) return { retained: 'This branch holds commits the thread does not; the branch stays' }
     const own = comparablePath(resolve(workspace.worktreePath))
     let path: string | undefined
-    for (const line of (await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain'])).split(/\r?\n/)) {
+    // Every worktree's HEAD is the question, so Git's full list is read; once for all the thread branches of a preview.
+    for (const line of (await worktreeLists.listing(commonDir, () => lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain']))).split(/\r?\n/)) {
       if (line.startsWith('worktree ')) path = line.slice('worktree '.length)
       else if (line === `branch ${ref}` && path && comparablePath(resolve(path)) !== own) return { retained: 'This branch is checked out outside the thread; the branch stays' }
     }
@@ -901,8 +904,9 @@ export class ResourcePurgeService {
     // Kept files in a hidden snapshot store were released with the store by `releaseThreadSnapshots` (`beforeRemoval`).
     if (isKeptFilesItem(item) && isOwnedSnapshotStore(commonDir)) return
     if (!await present(commonDir)) throw purgeErrors.create('resource_purge_repository_unavailable')
-    const worktree = (await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain'])).split(/\r?\n/).find((line) => line.startsWith('worktree '))?.slice(9)
-    if (!worktree || !await present(worktree)) throw purgeErrors.create('resource_purge_repository_unavailable')
+    // The main worktree, the first one Git lists, found from the common directory itself rather than by listing them all.
+    const worktree = await mainWorktreePathAsync(commonDir)
+    if (!await present(worktree)) throw purgeErrors.create('resource_purge_repository_unavailable')
     const identity = await resolveRepositoryIdentityAsync(worktree, { requireMutationCapability: true })
     if (resolve(identity.commonDir) !== resolve(commonDir)) throw new Error('Repository identity changed')
     const lease = await acquireRepositoryLease(identity, { signal: AbortSignal.timeout(10_000) })

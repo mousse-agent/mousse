@@ -13,6 +13,7 @@ import type { PtyManager } from '../terminals/PtyManager'
 import type { UserQuestionService } from '../orchestrator/UserQuestionService'
 import { ThreadRuntime } from './ThreadRuntime'
 import type { UnseenDoneStore } from './UnseenDoneStore'
+import { hasLiveWork, type LiveWorkMarks } from './LiveWorkMarks'
 import type { Agent, AgentStatus, Task, ThreadActivityState } from '../../shared/types'
 import { forEachYielding } from '../startup/startupTiming'
 
@@ -76,6 +77,14 @@ export class ThreadRuntimeManager extends EventEmitter {
    * (`beginRestart`): each is settled once, on its first use or by the background pass, whichever comes first.
    */
   private restartPending: Set<string> | null = null
+  /** The threads whose saved agents or tasks are working, so a restart reads only those (`beginRestart`). */
+  private liveWork: LiveWorkMarks | null = null
+  /**
+   * Archived threads this restart's pass still looks at, only while the list of threads with work is not complete yet
+   * (`beginRestart`): not settled (as before), only listed when their saved work is running, so the restart after one is
+   * restored settles it.
+   */
+  private restartArchived: string[] | null = null
 
   attach(deps: {
     threadStore: ThreadDataStore
@@ -83,12 +92,14 @@ export class ThreadRuntimeManager extends EventEmitter {
     ptyManager: PtyManager
     questions: UserQuestionService
     unseenDone?: UnseenDoneStore
+    liveWork?: LiveWorkMarks
   }): void {
     this.threadStore = deps.threadStore
     this.orchestrator = deps.orchestrator
     this.ptyManager = deps.ptyManager
     this.questions = deps.questions
     this.unseenDone = deps.unseenDone ?? null
+    this.liveWork = deps.liveWork ?? null
 
     // Wire per-session agent/task registries from orchestrator hydration.
     deps.orchestrator.setRuntimeManager(this)
@@ -180,11 +191,15 @@ export class ThreadRuntimeManager extends EventEmitter {
     if (!this.threadStore?.getThread(threadId)) return
     const rt = this.runtimes.get(threadId)
     if (!rt) return
+    const working = hasLiveWork({ agents: rt.agents.list(), tasks: rt.tasks.list() })
+    // Listed before working agents or tasks are on disk, so a crash in between still has the restart settle them.
+    if (working) this.liveWork?.mark(threadId)
     // Fields left out keep what is stored; only agents and tasks are written.
     this.threadStore.mutateThreadData(threadId, () => ({
       agents: rt.agents.list(),
       tasks: rt.tasks.list()
     }))
+    if (!working) this.liveWork?.unmark(threadId)
   }
 
   listAgents(threadId: string): Agent[] {
@@ -459,10 +474,11 @@ export class ThreadRuntimeManager extends EventEmitter {
    * Marks non-reattachable PTY as interrupted (no live process after daemon restart).
    */
   /** The restart's pass in one go: every listed thread is settled before this returns (`beginRestart`). */
-  restoreOnStartup(): void {
-    this.beginRestart()
+  restoreOnStartup(cutOff: Iterable<string> = []): void {
+    this.beginRestart(cutOff)
     for (const threadId of [...(this.restartPending ?? [])]) this.settleRestarted(threadId)
-    this.restartPending = null
+    for (const threadId of this.restartArchived ?? []) this.listArchivedWork(threadId)
+    this.finishRestart()
   }
 
   /**
@@ -470,10 +486,26 @@ export class ThreadRuntimeManager extends EventEmitter {
    * now: on the thread's first use (`getOrHydrate`), or by `settleRestartedThreads`, whichever comes first. So the
    * service is ready without reading every thread, and nothing sees an agent from before the restart as running.
    * Done marks are restored now.
+   *
+   * Listed are the threads whose saved agents or tasks were working (`LiveWorkMarks`) and the threads whose runs the run
+   * engine's boot cut off (`cutOff`), not every thread: an idle thread, a bot's included, is not read. While that list
+   * is not complete yet (the first start with it, or after it could not be saved), every thread is listed, and the
+   * pass makes it complete.
    */
-  beginRestart(): void {
+  beginRestart(cutOff: Iterable<string> = []): void {
     if (!this.threadStore) return
-    this.restartPending = new Set(this.threadStore.listAllThreads().filter((thread) => !thread.settledAt).map((thread) => thread.id))
+    const known = this.liveWork?.startupList()
+    if (known) {
+      const open = (threadId: string): boolean => { const thread = this.threadStore!.getThread(threadId); return Boolean(thread && !thread.settledAt) }
+      this.restartPending = new Set([...known, ...cutOff].filter(open))
+      this.restartArchived = null
+      // Listed for a thread that is gone since: nothing to settle there. An archived one stays listed until restored.
+      for (const threadId of known) if (!this.threadStore.getThread(threadId)) this.liveWork?.unmark(threadId)
+    } else {
+      const threads = this.threadStore.listAllThreads()
+      this.restartPending = new Set(threads.filter((thread) => !thread.settledAt).map((thread) => thread.id))
+      this.restartArchived = this.liveWork ? threads.filter((thread) => thread.settledAt).map((thread) => thread.id) : null
+    }
     for (const threadId of [...this.restartPending]) {
       const rt = this.runtimes.get(threadId)
       if (rt?.isHydrated) this.settleRestarted(threadId, rt)
@@ -498,7 +530,27 @@ export class ThreadRuntimeManager extends EventEmitter {
     const pending = this.restartPending
     if (!pending) return
     await forEachYielding([...pending], (threadId) => this.settleRestarted(threadId), shouldStop)
-    if (this.restartPending === pending && !pending.size) this.restartPending = null
+    if (this.restartPending !== pending || pending.size) return
+    const archived = this.restartArchived
+    if (archived) await forEachYielding(archived, (threadId) => this.listArchivedWork(threadId), shouldStop)
+    if (this.restartPending === pending && !shouldStop()) this.finishRestart()
+  }
+
+  /** Every listed thread is settled: a pass that read every thread leaves the list of threads with work complete. */
+  private finishRestart(): void {
+    this.restartPending = null
+    if (this.restartArchived) this.liveWork?.markComplete()
+    this.restartArchived = null
+  }
+
+  /** Lists an archived thread whose saved work is running, without settling it (`restartArchived`). */
+  private listArchivedWork(threadId: string): void {
+    try {
+      if (!this.threadStore?.getThread(threadId)) return
+      if (hasLiveWork(this.threadStore.loadThreadWorkState(threadId))) this.liveWork?.mark(threadId)
+    } catch {
+      this.liveWork?.mark(threadId)
+    }
   }
 
   /** Marks interrupted what the restart cut short in one thread, once. `rt`: its runtime, already hydrated. */
@@ -510,7 +562,7 @@ export class ThreadRuntimeManager extends EventEmitter {
         const data = this.threadStore.loadThreadWorkState(threadId)
         // Only threads with work to look at: a runtime for every started thread is what the idle sweep later drops.
         const hasWork = data.agents.length > 0 || data.tasks.length > 0 || data.queued > 0 || data.sessions > 0
-        if (!hasWork) return
+        if (!hasWork) { this.liveWork?.unmark(threadId); return }
         rt = this.getOrHydrate(threadId)
       }
       for (const agent of rt.agents.list()) {
@@ -528,7 +580,12 @@ export class ThreadRuntimeManager extends EventEmitter {
           rt.tasks.updateStatus(task.id, 'interrupted')
         }
       }
+      // An agent still running across the restart (a terminal that lives on) keeps the thread listed for the next one.
+      if (hasLiveWork({ agents: rt.agents.list(), tasks: rt.tasks.list() })) this.liveWork?.mark(threadId)
+      else this.liveWork?.unmark(threadId)
     } catch (error) {
+      // Not known to be settled: listed, so the next restart reads it again.
+      this.liveWork?.mark(threadId)
       // A thread that cannot be read now (moving to the trash, say) is left as it is; it is not listed afterwards.
       console.warn("a thread's work from before the restart could not be settled", { threadId, error: error instanceof Error ? error.message : String(error) })
     }

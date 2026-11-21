@@ -13,6 +13,7 @@ import { AgentEpisodeStore } from '../agents/AgentEpisodeStore'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { canonicalPathAsync, gitCommonDirAsync } from './canonicalPath'
+import { findListedWorktreeAsync } from './worktreeRegistry'
 import { readThreadLifecycleRecordsSync, readThreadRecordSync, threadRecordFile, threadRecordPath } from '../data/threadRecords'
 import { THREAD_DB_FILE } from '../data/threadDb/threadDbEngine'
 
@@ -216,7 +217,8 @@ async function verifyWorktreeFact(store: ResourceLifecycleStore, path: string, e
     // The branch is the owner's record, not proof: the agent is free to switch to another, so the checkout is known by its path, registration and repository.
     const top = await realpathLikeSync(await git('rev-parse', '--show-toplevel'))
     if (top.toLowerCase() !== (await realpathLikeSync(path)).toLowerCase()) throw new Error('Source path is not the registered worktree root')
-    const listed = (await git('worktree', 'list', '--porcelain')).split(/\r?\n/).some((line) => line.startsWith('worktree ') && resolve(line.slice(9)).toLowerCase() === resolve(path).toLowerCase())
+    // Its own registration, read without listing every worktree of the repository (`worktreeRegistry`).
+    const listed = Boolean(await findListedWorktreeAsync(common, path, (entry, wanted) => resolve(entry).toLowerCase() === resolve(wanted).toLowerCase()))
     if (!listed) throw new Error('Git does not register the worktree')
     return undefined
   } catch (error) {
