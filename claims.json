@@ -42,6 +42,22 @@
       "expiresAt": "2026-11-20T14:28:00.992Z"
     },
     {
+      "task": "devices-declutter",
+      "session": "Animatrix-69a682",
+      "machine": "Animatrix",
+      "branch": "devices-declutter",
+      "paths": [
+        "src/renderer/components/SettingsPage.tsx",
+        "src/renderer/components/NetDevicesSection.tsx",
+        "src/renderer/components/devices",
+        "src/renderer/components/netEngine",
+        "src/renderer/lib/settingsSearch.ts",
+        "src/renderer/lib/netDevices.ts"
+      ],
+      "claimedAt": "2026-11-21T04:04:09.685Z",
+      "expiresAt": "2026-11-21T06:04:09.685Z"
+    },
+    {
       "task": "download-windows-git",
       "session": "agibook-b1b05b",
       "machine": "agibook",
