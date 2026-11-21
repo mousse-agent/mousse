@@ -99,6 +99,37 @@ test.each(['peer HEAD changed before update-ref', 'peer HEAD changed during targ
   expect(git(f.repo, ['rev-parse', retained])).toBe(sha)
 }, 120_000)
 
+test('keeps the branch when an unmanaged sibling checks it out during peer refresh', async () => {
+  const f = fixture({ git: true })
+  const peer = unverifiableThread(f.store, { id: 'peer', name: 'Peer', repo: f.repo, how: 'intact' })
+  const sibling = join(f.root, 'unmanaged')
+  git(f.repo, ['worktree', 'add', '--detach', sibling])
+  const branch = 'mousse/thread/task/main'
+  const ref = 'refs/heads/' + branch
+  const sha = git(f.repo, ['rev-parse', ref])
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task')
+  expect(preview.items).toContainEqual(expect.objectContaining({ identity: ref, status: 'pending' }))
+  const prepare = gitPrograms.withoutRepoProgramsAsync
+  let deletingBranch = false
+  let switched = false
+  vi.spyOn(gitPrograms, 'withoutRepoProgramsAsync').mockImplementation(async (cwd, args, options) => {
+    const argv = await prepare(cwd, args, options)
+    deletingBranch ||= args[0] === 'update-ref' && Boolean(options?.stdin?.includes('delete ' + ref + ' '))
+    if (deletingBranch && !switched && cwd === peer.worktree && args.join(' ') === 'rev-parse --show-toplevel') {
+      git(sibling, ['checkout', branch])
+      switched = true
+    }
+    return argv
+  })
+
+  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toThrow(/branch is checked out/)
+  expect(switched).toBe(true)
+  expect(git(sibling, ['symbolic-ref', 'HEAD'])).toBe(ref)
+  expect(git(sibling, ['rev-parse', 'HEAD'])).toBe(sha)
+  expect(git(f.repo, ['rev-parse', ref])).toBe(sha)
+}, 120_000)
+
 test('keeps a relocated checkout when a peer changes during preparation to remove it, and can then resume', async () => {
   const f = fixture({ git: true })
   const peer = unverifiableThread(f.store, { id: 'peer', name: 'Peer', repo: f.repo, how: 'intact' })
@@ -132,7 +163,7 @@ test('keeps a relocated checkout when a peer changes during preparation to remov
   expect(existsSync(trash)).toBe(false)
 }, 120_000)
 
-test('a resumed purge preserves a replacement that appears while Git prepares to unregister the missing trash checkout', async () => {
+test.each(['still absent', 'replaced during removal preparation'] as const)('resumes purge with the trash checkout %s', async (pathState) => {
   const f = fixture({ git: true })
   const sha = git(f.worktree, ['rev-parse', 'HEAD'])
   git(f.worktree, ['config', 'core.excludesFile', join(f.root, 'ignore')])
@@ -148,9 +179,11 @@ test('a resumed purge preserves a replacement that appears while Git prepares to
     const argv = await prepare(cwd, args, options)
     if (args[0] === 'worktree' && args[1] === 'remove' && args.at(-1) === trash) {
       if (args[2] === '--force') throw new Error('Stopped after relocation')
-      cpSync(parked, trash, { recursive: true })
-      writeFileSync(join(trash, 'keep.log'), 'replacement bytes\n')
-      replaced = true
+      if (pathState === 'replaced during removal preparation') {
+        cpSync(parked, trash, { recursive: true })
+        writeFileSync(join(trash, 'keep.log'), 'replacement bytes\n')
+        replaced = true
+      }
     }
     return argv
   })
@@ -159,12 +192,18 @@ test('a resumed purge preserves a replacement that appears while Git prepares to
   expect(readFileSync(join(trash, 'a.txt'), 'utf8')).toBe('first\n')
   renameSync(trash, parked)
 
-  const resume = await f.coordinator.purge(request).catch(() => undefined)
-  expect(replaced).toBe(true)
-  expect(resume?.state).toBeUndefined()
-  expect(readFileSync(join(trash, 'keep.log'), 'utf8')).toBe('replacement bytes\n')
-  expect(git(trash, ['rev-parse', 'HEAD'])).toBe(sha)
-  expect(git(trash, ['check-ignore', 'keep.log'])).toBe('keep.log')
+  const resume = f.coordinator.purge(request)
+  if (pathState === 'still absent') {
+    await expect(resume).resolves.toMatchObject({ state: 'purged' })
+    expect(existsSync(trash)).toBe(false)
+    expect(git(f.repo, ['worktree', 'list', '--porcelain', '-z']).replaceAll('\\', '/')).not.toContain('worktree ' + trash.replaceAll('\\', '/'))
+  } else {
+    await expect(resume).rejects.toThrow()
+    expect(replaced).toBe(true)
+    expect(readFileSync(join(trash, 'keep.log'), 'utf8')).toBe('replacement bytes\n')
+    expect(git(trash, ['rev-parse', 'HEAD'])).toBe(sha)
+    expect(git(trash, ['check-ignore', 'keep.log'])).toBe('keep.log')
+  }
 }, 120_000)
 
 test('keeps the next reviewed file when a peer changes after the first unlink', async () => {

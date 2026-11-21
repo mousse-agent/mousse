@@ -896,13 +896,17 @@ export class ResourcePurgeService {
     }
     const readUnclaimed = async (path = item.identity): Promise<() => void> => {
       const target = await this.claimTarget(item, path)
-      if (item.kind === 'ref') {
-        // A repository can contain worktrees that no Mousse task names. Git must still be able to list them.
+      // Bracket peer verification with Git's view of the target repository. The first listing gives verification
+      // a chance to see changes during Git startup. The second catches checkouts (including unmanaged siblings)
+      // that switched while peers were being read, and invalidates the check if any listed worktree changed.
+      const listWorktrees = async (): Promise<string> => {
         const listing = await lifecycleReadAsync(item.commonDir!, ['worktree', 'list', '--porcelain', '-z'])
-        if (listing.split('\0').includes(`branch ${item.identity}`)) throw new Error('The branch is checked out and is kept')
+        if (listing.split('\0').includes('branch ' + item.identity)) throw purgeStopped('the branch is checked out. It was kept.')
+        return listing
       }
-      // Listing the target can take time. Read peer worktree facts after it returns.
+      const listing = item.kind === 'ref' ? await listWorktrees() : undefined
       const claims = await this.peersCheck(ownedIds)
+      if (listing !== undefined && await listWorktrees() !== listing) throw purgeStopped('the repository worktrees changed. The ref was kept.')
       return () => {
         assertReservation()
         const current = claims()
