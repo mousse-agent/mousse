@@ -30,7 +30,7 @@ export const GUI_REQUIRED_METHODS = [
   'files.grep',
   // The Files and Git panels look a thread's or project's folder up in the daemon; main reads no folder itself.
   'files.root', 'files.list', 'files.read', 'files.readAsset', 'files.writeDirect',
-  'git.status', 'git.log', 'git.branches', 'git.diffStats', 'git.lastCommitMessage',
+  'git.status', 'git.heads', 'git.log', 'git.branches', 'git.diffStats', 'git.lastCommitMessage',
   // The Changes tab reads hunks, includes or leaves them out, reverts and restores, and undoes the last commit.
   'git.changes', 'git.include', 'git.undoLastCommit', 'git.revert', 'git.restoreReverted', 'git.revertedList',
   // The Bots section (Bot UI): personal bots, profile-bound; an older service lacks them.

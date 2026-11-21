@@ -66,6 +66,9 @@ import type {
   GitPushOptions,
   GitScope,
   GitStatusSnapshot,
+  GitHeadsChangedEvent,
+  GitHeadsRequest,
+  GitHeadsResult,
   MainView,
   OrchestratorResponse,
   PermissionMode,
@@ -577,6 +580,15 @@ const api = {
     // Reads name their folder by scope, like the mutations: the thread when it is the thread's own worktree, else the project.
     status: (scope: GitScope): Promise<GitStatusSnapshot> =>
       ipcRenderer.invoke('git:status', scope),
+    /** The branches thread cards name, from Git's files: no Git process. */
+    heads: (request: GitHeadsRequest): Promise<GitHeadsResult> =>
+      ipcRenderer.invoke('git:heads', request),
+    /** Mousse changed these threads' branches (made a worktree, renamed its branch). */
+    onHeadsChanged: (cb: (event: GitHeadsChangedEvent) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: GitHeadsChangedEvent): void => cb(payload)
+      ipcRenderer.on('git:headsChanged', handler)
+      return () => ipcRenderer.removeListener('git:headsChanged', handler)
+    },
     log: (limit: number | undefined, scope: GitScope): Promise<GitCommit[]> =>
       ipcRenderer.invoke('git:log', limit, scope),
     branches: (scope: GitScope): Promise<GitBranchInfo> =>

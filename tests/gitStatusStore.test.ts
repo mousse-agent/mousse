@@ -95,13 +95,28 @@ describe('Git state by thread or project', () => {
     const refreshed = refreshGitStatus(key, { scope: project })
 
     await vi.waitFor(() => expect(useGitStatusStore.getState().entries[key]?.status?.branch).toBe('main'))
-    expect(useGitStatusStore.getState().entries[key]).toMatchObject({ loaded: true, loading: false, diffStats: null, branches: { current: 'main' } })
+    await vi.waitFor(() => expect(useGitStatusStore.getState().entries[key]).toMatchObject({ loaded: true, loading: false, diffStats: null, branches: { current: 'main' } }))
 
     failDiffStats(new Error('diff failed'))
     answerLog([])
     await refreshed
     // A failed detail read leaves what the folder showed; the status stays without an error.
     expect(useGitStatusStore.getState().entries[key]).toMatchObject({ diffStats: null, error: null, commits: [] })
+  })
+
+  it('reads the status alone first: the commits, branches and diff counts wait until it has answered', async () => {
+    const project = projectScope('p1')
+    const key = folderKey(project)!
+    const { git } = installGit(() => 'main')
+    let answerStatus: (value: GitStatusSnapshot) => void = () => undefined
+    git.status.mockImplementation(() => new Promise((resolve) => { answerStatus = resolve }))
+    const refreshed = refreshGitStatus(key, { scope: project })
+    await Promise.resolve()
+    expect(git.status).toHaveBeenCalledTimes(1)
+    expect([git.log, git.branches, git.diffStats].map((read) => read.mock.calls.length)).toEqual([0, 0, 0])
+    answerStatus(status('main'))
+    await refreshed
+    expect([git.log, git.branches, git.diffStats].map((read) => read.mock.calls.length)).toEqual([1, 1, 1])
   })
 
   it('reads again through the same scope after an action, and when the window is focused again', async () => {

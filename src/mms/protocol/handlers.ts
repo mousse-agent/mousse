@@ -8,6 +8,7 @@ import { listKeptWorktrees } from '../lifecycle/keptWorktrees'
 import { chooseWorktreeFolder, recordedWorktreePaths, worktreeFolderStatus } from '../worktree/worktreeFolderSetting'
 import { userAction, withGitAccess, withUserRequest, type UserAction } from '../git/gitPolicy'
 import { gitAccessOf, USER_REQUEST_LABELS } from './gitAccess'
+import { folderHead, threadHead } from '../workspace/threadHeads'
 import { projectIconFor, readIconFile, resolveStoredIconPath } from '../data/projectIcon'
 import { WALLPAPER_PIECE_MAX_BYTES, WallpaperRefused } from '../appearance/WallpaperStore'
 import { isWallpaperBucket, WALLPAPER_MAX_BYTES, WALLPAPER_UPLOAD_MAX_BASE64, WALLPAPER_UPLOAD_MAX_BYTES } from '../../shared/themes/wallpaperImage'
@@ -48,7 +49,7 @@ import { PULL_REQUEST_EXISTS, PullRequestReadError } from '../git/GitHubCodeHost
 import { PullRequestThreadError, PullRequestThreadService } from '../git/PullRequestThreadService'
 import { PullRequestWatchError } from '../git/PullRequestWatchService'
 import { lifecycleForReply } from '../../shared/resourceLifecycle'
-import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, NewThreadChoice, OrchestratorSendInput, OrchestratorSendRequest, ScheduledJob, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
+import type { ChatMessage, FileGrepResponse, FileSearchResponse, GitChangesResult, GitCommitSelection, GitHeadsResult, GitIncludeRequest, GitRestoreRevertedResult, GitOperationKind, GitOperationOptions, GitPullStrategy, GitStatusSnapshot, NativeLlmContext, NewThreadChoice, OrchestratorSendInput, OrchestratorSendRequest, ScheduledJob, ScheduledSettings, ScheduledThreadEventTrigger, Thread, ThreadEventKind, ThreadSearchResult } from '../../shared/types'
 import { privateThreadOf } from '../automations/sharedAutomations'
 import { AGENT_JOB_LIMIT_RANGES, AGENT_JOB_LIMIT_SETTINGS, type AgentJobLimitKey } from '../../shared/agentJobLimits'
 import type { MousseConfigStore } from '../config/MousseConfigStore'
@@ -1114,6 +1115,9 @@ async function ensureWorkspaceMaterialized(ctx: HandlerContext, threadId: string
   return restore
 }
 const restoresInFlight = new Map<string, Promise<void>>()
+
+/** The most threads, and the most projects, one `git.heads` call names: more than a sidebar shows. */
+const GIT_HEADS_MAX = 2_000
 
 /** `ensureWorkspaceMaterialized` for a request that names a thread; an unknown thread fails later with its usual error. */
 async function materializeRequestedWorkspace(ctx: HandlerContext, params: Record<string, unknown>): Promise<void> {
@@ -4775,6 +4779,26 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         limit: asOptionalBoundedInt(p.limit, 'limit', { min: 1, max: 2000 }) ?? 500,
         timeoutMs: asOptionalBoundedInt(p.timeoutMs, 'timeoutMs', { min: 100, max: 10_000 }) ?? 1_000
       }) satisfies FileGrepResponse
+    }
+    case 'git.heads': {
+      // The branches the sidebar's thread cards name, from Git's files: no Git process, no worktree set up or brought
+      // back, nothing waited for but each folder's own drive. One folder that cannot be read answers why; the rest answer.
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadIds', 'projectIds'])
+      const ids = (field: string) => p[field] === undefined ? [] : asStringArray(p[field], field, { unique: true, maxItems: GIT_HEADS_MAX, maxItemLen: 256 })
+      const projects: GitHeadsResult['projects'] = {}
+      const threads: GitHeadsResult['threads'] = {}
+      await Promise.all([
+        ...ids('projectIds').map(async (projectId) => {
+          const project = ctx.mms.projects.getProject(projectId)
+          projects[projectId] = project ? await folderHead(project.path) : { error: 'Project not found' }
+        }),
+        ...ids('threadIds').map(async (threadId) => {
+          if (!ctx.mms.threads.getThread(threadId)) { threads[threadId] = { error: 'Thread not found' }; return }
+          threads[threadId] = await threadHead(ctx.mms.threads.getThreadDir(threadId))
+        })
+      ])
+      return { projects, threads } satisfies GitHeadsResult
     }
     case 'git.status': {
       const p = isObject(params) ? params : {}

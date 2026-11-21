@@ -230,6 +230,8 @@ export const GIT_ACCESS = {
   'files.search': 'owned',
   'files.grep': 'owned',
   'git.status': 'owned',
+  // Git's files; one `symbolic-ref` only for a layout they do not tell.
+  'git.heads': 'read',
   'git.diff': 'owned',
   'review.files': 'owned',
   'review.file': 'owned',

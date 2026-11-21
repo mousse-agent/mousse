@@ -129,6 +129,7 @@ export const SHARED_READ_METHODS: ReadonlySet<string> = new Set([
   'git.branches',
   'git.changes',
   'git.diffStats',
+  'git.heads',
   'git.log',
   'git.revertedList',
   'git.status',

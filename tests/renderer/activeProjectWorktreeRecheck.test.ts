@@ -34,10 +34,11 @@ beforeEach(() => {
   seen = null
   ;(window as unknown as { mousse: unknown }).mousse = {
     app: { getFilesRoot: async () => (worktreeReady ? WORKTREE : PROJECT), getActiveProjectPath: async () => PROJECT },
-    workspace: {
-      getStatus: async () => {
+    git: {
+      // The worktree is made by the first turn: until then the thread works in no folder of its own.
+      heads: async () => {
         lookups++
-        return worktreeReady ? { execution: { projectPath: WORKTREE, lifecycle: 'ready' } } : { execution: { lifecycle: 'unprovisioned' } }
+        return { projects: {}, threads: { t1: worktreeReady ? { own: true, branch: 'mousse/t1', folder: WORKTREE } : { project: true } } }
       }
     }
   }

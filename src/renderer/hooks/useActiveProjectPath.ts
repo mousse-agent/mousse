@@ -9,19 +9,25 @@ interface ResolvedWorkspace {
   workspaceThreadId: string | null
 }
 
+/** The folder of the thread's own ready worktree, read from Mousse's record and Git's files (no Git process); null when it has none on disk now. */
+async function ownWorktreeFolder(threadId: string): Promise<{ folder: string | null; own: boolean }> {
+  const head = (await window.mousse.git.heads({ threadIds: [threadId] })).threads[threadId]
+  if (!head || 'error' in head || 'project' in head) return { folder: null, own: false }
+  return { folder: head.folder ?? null, own: true }
+}
+
 async function resolveWorkspaceProjectPath(threadId: string | null): Promise<ResolvedWorkspace> {
   if (!threadId) return { path: await window.mousse.app.getActiveProjectPath(threadId), workspaceThreadId: null }
-  // The Files panel's folder comes back first if a storage rule retired the thread's worktree, so the Git
-  // panel, the tree, the header and the terminal all start from the same folder. It answers either way.
-  await window.mousse.app.getFilesRoot(threadId).catch(() => undefined)
   try {
-    const status = await window.mousse.workspace.getStatus(threadId) as {
-      execution?: { projectPath?: string; lifecycle?: string; placement?: 'project-folder' }
+    let found = await ownWorktreeFolder(threadId)
+    // A worktree a storage rule retired comes back first (the Files panel's folder does), so the Git panel, the tree,
+    // the header and the terminal all start from the same folder. Only then: a worktree on disk is never waited on.
+    if (found.own && !found.folder) {
+      await window.mousse.app.getFilesRoot(threadId).catch(() => undefined)
+      found = await ownWorktreeFolder(threadId)
     }
     // A thread in its project's folder works there as the person does: the project's own Git rules, no Publish.
-    if (status.execution?.projectPath && status.execution.lifecycle === 'ready' && status.execution.placement !== 'project-folder') {
-      return { path: status.execution.projectPath, workspaceThreadId: threadId }
-    }
+    if (found.folder) return { path: found.folder, workspaceThreadId: threadId }
   } catch {
     // Legacy/standalone threads keep the existing project-path behavior.
   }

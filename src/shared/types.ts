@@ -2220,6 +2220,34 @@ export interface GitStatusSnapshot {
   discardKeptForMs?: number
 }
 
+/** A folder's branch as a thread card names it (`git.heads`): read from Git's files, or why it could not be. */
+export type GitFolderHead = { repo: boolean; branch: string | null } | { error: string }
+
+/**
+ * What a thread's card names (`git.heads`): its project's branch when it works in its project's folder or has no
+ * worktree yet (`project`); else its own worktree's branch, null when detached. `folder` is the folder the thread works
+ * in, set only while its worktree is on disk and ready; without it the branch is the one Mousse recorded.
+ */
+export type GitThreadHead =
+  | { project: true }
+  | { own: true; branch: string | null; folder?: string }
+  | { error: string }
+
+export interface GitHeadsRequest {
+  threadIds?: string[]
+  projectIds?: string[]
+}
+
+export interface GitHeadsResult {
+  projects: Record<string, GitFolderHead>
+  threads: Record<string, GitThreadHead>
+}
+
+/** Mousse changed these threads' branches (made a worktree, renamed its branch): their cards read them again. */
+export interface GitHeadsChangedEvent {
+  threadIds: string[]
+}
+
 export interface GitCommit {
   hash: string
   shortHash: string

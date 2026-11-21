@@ -151,6 +151,8 @@ import type {
   GitRevertRequest,
   GitDiffStats,
   GitStatusSnapshot,
+  GitHeadsRequest,
+  GitHeadsResult,
   GitContinueResult,
   GitInProgress,
   GitUpstreamCheck,
@@ -3315,6 +3317,13 @@ export function registerGuiIpc(
   // worktree, the project otherwise. The daemon resolves the folder; a path from the renderer is never used.
   registerHandler('git:status', async (_e, scope?: GitScope) =>
     (await guiMms.request<{ status: GitStatusSnapshot }>('git.status', daemonGitParams(scope))).status
+  )
+  // The branches thread cards name, read from Git's files in the daemon (`git.heads`).
+  registerHandler('git:heads', async (_e, request?: GitHeadsRequest) =>
+    guiMms.request<GitHeadsResult>('git.heads', {
+      ...(Array.isArray(request?.threadIds) ? { threadIds: request.threadIds } : {}),
+      ...(Array.isArray(request?.projectIds) ? { projectIds: request.projectIds } : {})
+    })
   )
   registerHandler('git:log', async (_e, limit: number | undefined, scope?: GitScope) =>
     (await guiMms.request<{ commits: GitCommit[] }>('git.log', daemonGitParams(scope, { limit }))).commits

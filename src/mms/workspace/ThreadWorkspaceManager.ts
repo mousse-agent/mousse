@@ -38,6 +38,7 @@ import { repoProgramEnv, withoutRepoPrograms, withoutRepoProgramsAsync } from '.
 import { DEFAULT_BRANCH_PREFIX, isAcceptableThreadBranchName } from '../../shared/mousseBranches'
 import { branchNamingFor, requestBranchName, temporaryBranchName } from './branchNaming'
 import { BRANCH_RECORD_OPERATIONS, BRANCH_RENAME_OPERATION, threadBranchRecord, type ThreadBranchRecord } from './threadBranchRecords'
+import { noteThreadBranchChanged } from './threadHeads'
 import { threadFolderIsLocalOnly } from '../data/localOnlyThreads'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { timeGitSync } from '../diagnostics/turnBoundary'
@@ -511,6 +512,7 @@ export class ThreadWorkspaceManager {
         state: 'completed',
         details: { intentSequence: intent.sequence, head, branch, retainedRef }
       })
+      noteThreadBranchChanged(threadId)
       if (nameFrom) this.nameBranchLater(threadId, branch, nameFrom)
       return metadata
     } catch (error) {
@@ -752,7 +754,9 @@ export class ThreadWorkspaceManager {
   /** Points workspace.json at `to` when it names `from`; every other field stays as written. */
   private recordBranchName(from: string, to: string): void {
     const stored = JSON.parse(readFileSync(this.workspacePath, 'utf8')) as ThreadWorkspaceMetadata
-    if (stored.branch === from) atomicWriteJsonSync(this.workspacePath, { ...stored, branch: to })
+    if (stored.branch !== from) return
+    atomicWriteJsonSync(this.workspacePath, { ...stored, branch: to })
+    noteThreadBranchChanged(stored.threadId)
   }
 
   /**
