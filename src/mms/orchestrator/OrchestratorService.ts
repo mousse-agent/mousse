@@ -11721,12 +11721,13 @@ export class OrchestratorService extends EventEmitter {
    * model or an instance that cannot run a single request (an agent without one-shots, a Bedrock model) is refused
    * by its typed error, never swapped for another provider.
    */
-  private async generateTitleText(context: TitleContext, threadId: string | undefined): Promise<string | null> {
+  private async generateTitleText(context: TitleContext, threadId: string | undefined, signal?: AbortSignal): Promise<string | null> {
     const text = await this.titleModelText(titleSystemPrompt(this.settingsStore.get().title.prompt), buildTitlePrompt(context), {
       task: 'title',
       scope: threadId ? this.threadScope(threadId) : undefined,
       sessionKey: threadId ?? `title:${context.request.slice(0, 200)}`,
-      maxChars: 120
+      maxChars: 120,
+      signal
     })
     return normalizeTitle(text)
   }
@@ -11742,53 +11743,72 @@ export class OrchestratorService extends EventEmitter {
    * Any other request (the setup stopped and another message came, the settings changed) drops it and asks on its own.
    */
   async askBranchName(request: { threadId: string; system: string; prompt: string }, signal?: AbortSignal): Promise<string | undefined> {
-    if (!this.hasTitleModel()) return undefined
+    if (!this.hasTitleModel() || signal?.aborted) return undefined
+    const settings = this.branchNamingSettingsKey()
     const pending = this.threadNamings?.get(request.threadId)
-    if (pending && (pending.branch.system !== request.system || pending.branch.prompt !== request.prompt)) this.threadNamings!.delete(request.threadId)
-    else if (pending) {
-      const answer = await Promise.race([
-        pending.answer,
-        new Promise<undefined>((resolve) => {
-          if (signal?.aborted) resolve(undefined)
-          signal?.addEventListener('abort', () => resolve(undefined), { once: true })
-        })
-      ])
+    if (pending && (pending.settings !== settings || pending.branch.system !== request.system || pending.branch.prompt !== request.prompt)) {
+      this.threadNamings!.delete(request.threadId)
+    } else if (pending) {
+      const stopped = signal && pending.signal ? AbortSignal.any([signal, pending.signal]) : signal ?? pending.signal
+      if (stopped?.aborted) return undefined
+      let onAbort: (() => void) | undefined
+      const aborted = new Promise<undefined>((resolve) => {
+        onAbort = () => resolve(undefined)
+        stopped?.addEventListener('abort', onAbort, { once: true })
+      })
+      const answer = await Promise.race([pending.answer, aborted])
+      if (onAbort) stopped?.removeEventListener('abort', onAbort)
+      if (stopped?.aborted || this.branchNamingSettingsKey() !== settings) return undefined
       if (!answer || answer.branch) return answer?.branch
     }
-    return this.titleModelText(request.system, request.prompt, {
+    const answer = await this.titleModelText(request.system, request.prompt, {
       task: 'branch_name',
       scope: this.threadScope(request.threadId),
       sessionKey: request.threadId,
-      maxChars: 120,
-      ...(signal ? { signal } : {})
+      maxChars: 100,
+      signal
     })
+    return signal?.aborted || this.branchNamingSettingsKey() !== settings ? undefined : answer
   }
 
+  private branchNamingSettingsKey(): string {
+    const { branches, title } = this.settingsStore.get()
+    return JSON.stringify([normalizeBranchNamingSettings(branches), title])
+  }
   /**
    * The request each new thread's first send made for its title and branch name together (`threadNaming.ts`), and the
    * branch request (`branchNamingPrompt`) its answer stands for. Kept for the worktree's branch naming (`askBranchName`)
    * until `THREAD_NAMING_KEPT_MS` after it answered.
    */
-  private threadNamings?: Map<string, { answer: Promise<ThreadNaming | undefined>; branch: { system: string; prompt: string } }>
+  private threadNamings?: Map<string, { answer: Promise<ThreadNaming | undefined>; branch: { system: string; prompt: string }; settings: string; signal?: AbortSignal }>
 
   /**
    * Asks the title model for the thread's title and branch name in one request. The request starts once the send's own
    * work has returned to the event loop: the provider reads its launch settings then, not inside the turn's admission.
    * Rejects when it fails.
    */
-  private startThreadNaming(threadId: string, words: string, images: number): Promise<ThreadNaming> {
+  private startThreadNaming(threadId: string, words: string, images: number, signal?: AbortSignal): Promise<ThreadNaming> {
     const settings = this.settingsStore.get()
     const branches = normalizeBranchNamingSettings(settings.branches)
     const { system, prompt } = threadNamingRequest({ request: words, images }, settings.title.prompt, branches)
     const naming = new Promise<void>((resolve) => setImmediate(resolve))
-      .then(() => this.titleModelText(system, prompt, { task: 'title', scope: this.threadScope(threadId), sessionKey: threadId, maxChars: 400 }))
+      .then(() => {
+        signal?.throwIfAborted()
+        return this.titleModelText(system, prompt, { task: 'title', scope: this.threadScope(threadId), sessionKey: threadId, maxChars: 400, signal })
+      })
       .then(parseThreadNaming)
     // The branch request this answer stands for, as `branchNameSource` and `requestBranchName` will write it.
-    const entry = { answer: naming.catch(() => undefined), branch: branchNamingPrompt(withoutSubagentPreamble(words).trim(), branches) }
+    const entry = { answer: naming.catch(() => undefined), branch: branchNamingPrompt(withoutSubagentPreamble(words).trim(), branches), settings: this.branchNamingSettingsKey(), signal }
     const namings = this.threadNamings ??= new Map()
+    const forget = () => {
+      signal?.removeEventListener('abort', forget)
+      if (namings.get(threadId) === entry) namings.delete(threadId)
+    }
     namings.set(threadId, entry)
+    signal?.addEventListener('abort', forget, { once: true })
     void entry.answer.then(() => {
-      const timer = setTimeout(() => { if (namings.get(threadId) === entry) namings.delete(threadId) }, THREAD_NAMING_KEPT_MS)
+      if (signal?.aborted) return
+      const timer = setTimeout(forget, THREAD_NAMING_KEPT_MS)
       timer.unref?.()
     })
     return naming
@@ -11984,7 +12004,7 @@ export class OrchestratorService extends EventEmitter {
    * read: a rename made while the title model was working is never overwritten. Returns the updated thread,
    * or undefined when it was not written.
    */
-  private writeThreadTitle(threadId: string, seen: Thread, name: string, titleSource: ThreadTitleSource): Thread | undefined {
+  private writeThreadTitle(threadId: string, seen: Thread, name: string, titleSource: ThreadTitleSource | undefined): Thread | undefined {
     const current = this.threadStore?.getThread(threadId)
     if (!current || current.name !== seen.name || current.titleSource !== seen.titleSource) return undefined
     if (current.name === name && current.titleSource === titleSource) return current
@@ -12012,35 +12032,44 @@ export class OrchestratorService extends EventEmitter {
    * except for a private thread's, which is asked for its title alone.
    * A model that fails or names nothing leaves it provisional until the pass after the first reply.
    */
-  private nameThreadOnFirstSend(threadId: string, userContent: string, images: number): void {
-    if (!this.threadStore || threadId === '__unbound__') return
+  private nameThreadOnFirstSend(threadId: string, userContent: string, images: number, setupSignal?: AbortSignal): void {
+    if (!this.threadStore || threadId === '__unbound__' || setupSignal?.aborted) return
     const thread = this.threadStore.getThread(threadId)
-    if (!thread || !isDefaultThreadName(thread.name)) return
+    if (!thread || !isDefaultThreadName(thread.name) || thread.titleSource === 'user') return
+    let shown: Thread | undefined
+    const restore = (): void => {
+      if (shown) this.writeThreadTitle(threadId, shown, thread.name, thread.titleSource)
+    }
+    setupSignal?.addEventListener('abort', restore, { once: true })
     const fromMessage = heuristicTitle(userContent)
     if (!this.hasTitleModel()) {
       // No model will name it later: a message that names nothing ("hello") is used as written.
       const name = fromMessage || fitTitle(cleanTitleText(userContent).text)
-      if (name) this.writeThreadTitle(threadId, thread, name, 'final')
+      if (name) shown = this.writeThreadTitle(threadId, thread, name, 'final')
+      if (setupSignal?.aborted) restore()
       return
     }
-    const shown = this.writeThreadTitle(threadId, thread, fromMessage || thread.name, 'provisional')
-    if (!shown) return
+    shown = this.writeThreadTitle(threadId, thread, fromMessage || thread.name, 'provisional')
+    if (setupSignal?.aborted) restore()
+    if (!shown || setupSignal?.aborted) return
     // A private thread's branch is never named from its messages: it is asked for its title alone.
     const naming = thread.localOnly
-      ? new Promise<void>((resolve) => setImmediate(resolve)).then(() => this.generateTitleText({ request: userContent, images }, threadId)).then((title) => ({ title }))
-      : this.startThreadNaming(threadId, userContent, images)
+      ? new Promise<void>((resolve) => setImmediate(resolve)).then(async () => {
+        setupSignal?.throwIfAborted()
+        return { title: await this.generateTitleText({ request: userContent, images }, threadId, setupSignal) }
+      })
+      : this.startThreadNaming(threadId, userContent, images, setupSignal)
     void this.queueTitleWork(threadId, async () => {
-      let title: string | null = null
       try {
-        title = (await naming).title
+        const { title } = await naming
+        if (title && shown && !setupSignal?.aborted) shown = this.writeThreadTitle(threadId, shown, title, 'auto')
       } catch (error) {
+        if (setupSignal?.aborted) return
         this.warnTitleFailure(threadId, error)
         this.emit('thread-title-generation-failed', { threadId, error: error instanceof Error ? error.message : String(error) })
       }
-      if (title) this.writeThreadTitle(threadId, shown, title, 'auto')
     })
   }
-
   /** Keeps how the thread's latest run ended (`Thread.lastRun`) in its metadata, for its links. Never fails the turn. */
   private recordLastRun(threadId: string, lastRun: Thread['lastRun']): void {
     if (!this.threadStore || threadId === '__unbound__') return
@@ -14121,6 +14150,7 @@ export class OrchestratorService extends EventEmitter {
    * set up): nothing of it runs, now or later. Its queue item goes, as a Stop's cancelled runs' entries do.
    */
   private endTurnBeforeStart(session: ThreadSession, runId: string | undefined, queueItemId: string | undefined, claimOwnerToken: string | undefined): OrchestratorResponse {
+    session.setupStop?.abort()
     if (runId) this.markRun(runId, (engine, id) => {
       const current = engine.getRun(id)
       if (current && !TERMINAL_RUN_STATUSES.has(current.status)) engine.markTerminal(id, 'cancelled', { error: 'cancelled_before_start' })
@@ -14341,13 +14371,11 @@ export class OrchestratorService extends EventEmitter {
     // draft: its row would not open, and New thread would open it again instead of a fresh one. Internal wakes stay hidden.
     const startedAtAdmission = !reuseLastUser && displayUserMessage && !rerunOfSavedMessage()
     if (startedAtAdmission) this.touchUserActivityAndNotify(session.threadId)
-    // And it is named then, from the message (the title model's request goes out now, alongside the setup), never after
-    // the worktree and snapshot: those can take a minute on a busy hard disk. A workflow's invocation names nothing.
-    if (startedAtAdmission && (typeof input === 'string' || !input.workflowInvocationId)) this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent))
-    // A Stop while the turn is still being set up ends the setup's waits (`endTurnSetups`); `startTurn` then ends the
-    // turn before it started.
+    // A Stop while the turn is still being set up ends the setup's waits and discards the name of the cancelled send.
     const setupStop = new AbortController()
     session.setupStop = setupStop
+    // The thread is named from the message before the worktree and snapshot. A workflow's invocation names nothing.
+    if (startedAtAdmission && (typeof input === 'string' || !input.workflowInvocationId)) this.nameThreadOnFirstSend(session.threadId, ...this.firstSendWords(input, opts?.agent), setupStop.signal)
     this.noteQueueWait(session)
     const turnId = opts?.runId ?? uuidv4()
     // The turn a settle started may start from the last turn's end (`TurnHandoff`). It is taken now, used or not, and

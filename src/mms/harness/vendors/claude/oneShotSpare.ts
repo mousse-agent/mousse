@@ -73,5 +73,6 @@ export interface OneShotSpare {
   controller: AbortController
   /** The query, once the SDK started it; rejects when it could not be. */
   query: Promise<Query>
+  close: () => void
   timer: ReturnType<typeof setTimeout>
 }

@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { acquireRepositoryLease, type RepositoryLeaseHandle } from '../../src/mms/git/RepositoryLease'
 import { resolveRepositoryIdentity } from '../../src/mms/git/RepositoryIdentity'
+import { registerBranchNamer } from '../../src/mms/workspace/branchNaming'
 import { findUnstartedThread } from '../../src/shared/threadTitle'
 import { PI, phase6Daemon, piAdapter, waitFor, type Phase6Daemon } from './phase6Fixture'
 
@@ -24,10 +25,13 @@ describe("a new chat's thread while its first turn is set up", () => {
   let previousHome: string | undefined
   let daemon: Phase6Daemon | undefined
   let held: RepositoryLeaseHandle | undefined
+  let unregisterNamer: (() => void) | undefined
 
   afterEach(async () => {
     held?.release()
     held = undefined
+    unregisterNamer?.()
+    unregisterNamer = undefined
     await daemon?.stop().catch(() => undefined)
     daemon = undefined
     if (previousHome === undefined) delete process.env.MOUSSE_HOME
@@ -47,6 +51,10 @@ describe("a new chat's thread while its first turn is set up", () => {
     writeFileSync(join(projectDir, 'README.md'), 'hello\n'); git('add', '.'); git('commit', '-qm', 'init')
     const pi = piAdapter(() => 'Done')
     const d = (daemon = phase6Daemon(home, [pi]))
+    unregisterNamer = registerBranchNamer(home, {
+      settings: () => d.settings.branches,
+      ask: (request, signal) => d.orch.askBranchName(request, signal)
+    })
     const project = d.projects.openProject(projectDir)
     /** An empty thread in a new worktree, as the sidebar's New thread makes it: not started until a message is sent. */
     const emptyThread = () => {
@@ -62,7 +70,8 @@ describe("a new chat's thread while its first turn is set up", () => {
       return state.phase === 'queued' && state.step?.kind === 'preparing' && state.step.what === 'worktree'
     }
     const idle = (threadId: string) => !d.orch.getOrCreateSession(threadId).isTurnRunning()
-    return { d, pi, project, emptyThread, listed, holdRepository, freeRepository, preparingWorktree, idle }
+    const localBranches = () => execFileSync('git', ['for-each-ref', '--format=%(refname:short)', 'refs/heads'], { cwd: projectDir, encoding: 'utf8' }).trim().split(/\r?\n/)
+    return { d, pi, project, emptyThread, listed, holdRepository, freeRepository, preparingWorktree, idle, localBranches }
   }
 
   it('lists it started, on top of its project, while its worktree is still made, so New thread does not open it again', async () => {
@@ -115,6 +124,35 @@ describe("a new chat's thread while its first turn is set up", () => {
     expect(w.pi.turns[0]!.prompt).toMatch(/Please plan the release for Friday$/)
     expect(oneShot).toHaveBeenCalledTimes(1)
     expect(w.d.store.getThread(draft.id)).toMatchObject({ name: 'Plan the release for Friday', titleSource: 'provisional' })
+  })
+
+  it("discards the cancelled send's title and branch when a different first message is sent after Stop", async () => {
+    const w = world()
+    w.d.settings.title = { ...w.d.settings.title, ...PI }
+    let answerStopped!: (answer: { text: string }) => void
+    const stoppedAnswer = new Promise<{ text: string }>((resolve) => { answerStopped = resolve })
+    const oneShot = vi.fn(async () => ({ text: 'Title: Fix checkout retries\nBranch: checkout-retries' }))
+      .mockImplementationOnce(() => stoppedAnswer)
+    ;(w.d.orch as unknown as { harness: { oneShot: unknown } }).harness.oneShot = oneShot
+    const draft = w.emptyThread()
+    await w.holdRepository()
+    await w.d.orch.send('Plan the release for Friday', false, { threadId: draft.id, clientRequestId: 'first', awaitMode: 'ack' })
+    await waitFor(() => w.preparingWorktree(draft.id) && oneShot.mock.calls.length === 1, 'the first send to wait on setup and naming')
+    expect(w.d.store.getThread(draft.id)!.name).toBe('Plan the release for Friday')
+    expect((await w.d.orch.stopThread(draft.id, 'user', { clientRequestId: 'stop-first' })).ok).toBe(true)
+    await waitFor(() => w.idle(draft.id), 'the cancelled send to settle')
+    expect(w.d.store.getThread(draft.id)!.name).toBe('New Chat')
+
+    await w.d.orch.send('Please fix checkout retries', false, { threadId: draft.id, clientRequestId: 'second', awaitMode: 'ack' })
+    await waitFor(() => oneShot.mock.calls.length === 2, 'the second send to ask for a new name')
+    expect(w.d.store.getThread(draft.id)!.name).toBe('Fix checkout retries')
+    answerStopped({ text: 'Title: Stale release plan\nBranch: stale-release' })
+    w.freeRepository()
+    await waitFor(() => w.pi.turns.length === 1 && w.idle(draft.id), 'the new turn to finish', 40_000)
+    expect(w.pi.turns[0]!.prompt).toMatch(/Please fix checkout retries$/)
+    expect(w.d.store.getThread(draft.id)!.name).toBe('Fix checkout retries')
+    await waitFor(() => w.localBranches().includes('mousse/checkout-retries'), 'the branch to get the new name', 40_000)
+    expect(w.localBranches()).not.toContain('mousse/stale-release')
   })
 
   it('keeps two threads started one after the other in the order they were sent, during their setup and after it', async () => {

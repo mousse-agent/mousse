@@ -315,7 +315,7 @@ export interface HarnessGateway {
   /** The same listing from what is known now, without waiting (synchronous readers). */
   listedLlmProviders(scope: ProviderScope): LlmProviderOption[]
   /** Stops the instances' runtimes and running operations. */
-  stop(): void
+  stop(): void | Promise<void>
 }
 
 /** `HarnessGateway.bind`: the turn's mode, effort and origin, and the caller's part of its policy. */
@@ -898,6 +898,7 @@ export class Harness implements HarnessGateway {
   private liveHost: LiveProcessHost | null = null
   private mcp: McpAttachmentProvider | null = null
   private readonly retired = new Set<InstanceRecord>()
+  private readonly runtimeStops = new Set<Promise<void>>()
   /**
    * The stops of a removal or disable still running, per instance (each settles, never rejects). They
    * belong to the instance, not to a runtime, so a reconfiguration or a runtime that finished its
@@ -2317,16 +2318,20 @@ export class Harness implements HarnessGateway {
       } catch (error) {
         console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })
       }
-      // A removed instance's files wait for its processes to exit.
-      const removal = this.removals.get(record.instanceId)
-      if (stopped && removal) {
-        removal.pending += 1
-        void stopped.catch((error) => console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })).finally(() => {
-          removal.pending -= 1
-          this.deleteRemoved()
+      if (stopped) {
+        // A removed instance's files, and profile shutdown, wait for its processes to exit.
+        const removal = this.removals.get(record.instanceId)
+        if (removal) removal.pending += 1
+        const pending = stopped.catch((error) => {
+          console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })
+        }).finally(() => {
+          this.runtimeStops.delete(pending)
+          if (removal) {
+            removal.pending -= 1
+            this.deleteRemoved()
+          }
         })
-      } else if (stopped) {
-        void stopped.catch(() => {})
+        this.runtimeStops.add(pending)
       }
     }
     this.deleteRemoved()
@@ -4165,7 +4170,7 @@ export class Harness implements HarnessGateway {
     return this.options.now?.() ?? Date.now()
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true
     if (this.modelSchedule) {
       clearInterval(this.modelSchedule.interval)
@@ -4175,16 +4180,11 @@ export class Harness implements HarnessGateway {
     }
     for (const operation of this.operations.values()) operation.cancel()
     this.operations.clear()
-    for (const record of [...this.records.values(), ...this.retired]) {
-      try {
-        void Promise.resolve(record.runtime.stop()).catch(() => {})
-      } catch {
-        /* stopping is best effort */
-      }
-    }
+    const stopped = [...this.records.values(), ...this.retired].map(async (record) => record.runtime.stop())
     this.records.clear()
     this.retired.clear()
     this.listeners.clear()
+    await Promise.allSettled([...this.runtimeStops, ...stopped])
   }
 }
 

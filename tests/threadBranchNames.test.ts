@@ -142,7 +142,7 @@ describe('a thread worktree starts on a temporary branch and is named in the bac
   })
 })
 
-describe('recovering a failed worktree provision only deletes proven Mousse-owned branches', () => {
+describe('recovering a failed worktree provision leaves branches without proof of ownership alone', () => {
   function writeFailedProvision(dir: string, branch: string, head: string): ThreadWorkspaceManager {
     const manager = new ThreadWorkspaceManager(dir)
     const worktreePath = join(dir, 'missing-worktree')
@@ -168,17 +168,18 @@ describe('recovering a failed worktree provision only deletes proven Mousse-owne
   }
 
   it.each([
-    ['a proven mousse/ temporary branch at the start commit', 'mousse/a1b2c3d4', 'mousse/a1b2c3d4', true],
-    ['an unproven non-mousse/ branch whose provision never completed', 'feat/a1b2c3d4', 'feat/a1b2c3d4', false],
-    ['someone else\'s branch that differs only in case', 'mousse/a1b2c3d4', 'mousse/A1B2C3D4', false]
-  ] as const)('%s', async (_case, plannedBranch, existingBranch, shouldDelete) => {
+    ['someone else took the reserved name at the same commit', 'mousse/a1b2c3d4', 'mousse/a1b2c3d4'],
+    ['someone else took the reserved name under a custom prefix', 'feat/a1b2c3d4', 'feat/a1b2c3d4'],
+    ['someone else has a branch that differs only in case', 'mousse/a1b2c3d4', 'mousse/A1B2C3D4']
+  ] as const)('%s', async (_case, plannedBranch, existingBranch) => {
     const head = git(repo, 'rev-parse', 'HEAD')
     git(repo, 'branch', existingBranch, head)
+    const refs = git(repo, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads')
     const manager = writeFailedProvision(threadDir('one'), plannedBranch, head)
     expect(await manager.reconcileFailedProvision(repo)).toBe(true)
     expect(manager.load()).toBeUndefined()
-    const remaining = branches(repo)
-    expect(remaining.includes(existingBranch)).toBe(!shouldDelete)
+    expect(manager.branchRecord().owned.has(plannedBranch)).toBe(false)
+    expect(git(repo, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads')).toBe(refs)
   })
 })
 

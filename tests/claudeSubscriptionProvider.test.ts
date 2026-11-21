@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { createHash } from 'node:crypto'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -425,6 +425,10 @@ describe('Claude Subscription native provider', () => {
     expect(query).not.toHaveBeenCalled()
   })
   describe('titles and branch names run on a Claude Code process started ahead', () => {
+    beforeEach(() => {
+      writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'test-account' } }))
+    })
+
     /**
      * Claude Code as the SDK starts it: a string prompt is read at once; a streamed one (a process started ahead) when its
      * message comes. How process `index` behaves: it answers (the default); it ends without a word (`silent`); it waits
@@ -526,42 +530,74 @@ describe('Claude Subscription native provider', () => {
       expect(started).toHaveLength(1)
     })
 
-    it('switching to another Claude account drops the waiting process and starts a new one', async () => {
-      let email = 'alice@example.com'
+    it.each(['OAuth status recheck', 'OAuth without recheck', 'API key without recheck'] as const)(
+      'switching accounts via %s starts a fresh naming process',
+      async (change) => {
+        const { started, query } = processes()
+        const { service, home, setLaunch } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+        const configDir = join(home, 'claude-config')
+        mkdirSync(configDir)
+        const connect = (account: string) => {
+          if (change === 'API key without recheck') {
+            setLaunch({ env: { CLAUDE_CONFIG_DIR: configDir, ANTHROPIC_API_KEY: `test-key-${account}` } })
+          } else {
+            setLaunch({ env: { CLAUDE_CONFIG_DIR: configDir } })
+            writeFileSync(join(configDir, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: account, organizationUuid: 'org-1' } }))
+          }
+        }
+
+        try {
+          connect('alice')
+          await service.status()
+          await ask(service, 'title', 'Request: first')
+          expect(started).toHaveLength(2)
+          connect('bob')
+          if (change === 'OAuth status recheck') {
+            await service.status({ force: true })
+            expect(started[1]!.close).toHaveBeenCalledOnce()
+          }
+          expect(await ask(service, 'title', 'Request: second')).toEqual({ text: 'answer from 2: Request: second' })
+          expect(started[1]!.close).toHaveBeenCalledOnce()
+          expect(started[2]).toMatchObject({ streamed: false })
+          expect(started[3]).toMatchObject({ streamed: true })
+        } finally {
+          await service.stop()
+        }
+      }
+    )
+
+    it('runs each naming request on a fresh process when the account cannot be identified', async () => {
       const { started, query } = processes()
-      const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }], {
-        runAuth: async () => JSON.stringify({ loggedIn: true, email, orgId: 'org-1', authMethod: 'claude.ai' })
-      })
-      await service.status()
-      await ask(service, 'title', 'Request: first')
-      expect(started).toHaveLength(2)
-      // Account changes in the terminal and status rechecks: the old account's spare is closed.
-      email = 'bob@example.com'
-      await service.status({ force: true })
-      expect(started[1]!.close).toHaveBeenCalled()
-      expect(await ask(service, 'title', 'Request: second')).toEqual({ text: 'answer from 2: Request: second' })
-      expect(started[2]).toMatchObject({ streamed: false })
-      expect(started[3]).toMatchObject({ streamed: true })
+      const { service, home, setLaunch } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }])
+      setLaunch({ env: { CLAUDE_CONFIG_DIR: join(home, 'unknown-account') } })
+      await expect(ask(service, 'title', 'Request: first')).resolves.toEqual({ text: 'answer from 0: Request: first' })
+      await expect(ask(service, 'title', 'Request: second')).resolves.toEqual({ text: 'answer from 1: Request: second' })
+      expect(started.map(({ streamed }) => streamed)).toEqual([false, false])
     })
 
-    it('signing out waits until the waiting process tree has exited', async () => {
+    it.each(['logout', 'stop'] as const)('%s waits until the waiting process tree has exited', async (method) => {
       let releaseReap!: () => void
       const reapDone = new Promise<void>((resolve) => { releaseReap = resolve })
-      const reap = vi.fn(async () => { await reapDone; return 'exited' as const })
+      let startedReaping!: () => void
+      const reapStarted = new Promise<void>((resolve) => { startedReaping = resolve })
+      const reap = vi.fn(async () => { startedReaping(); await reapDone; return 'exited' as const })
       const fakeProc = { pid: 99999 } as unknown as ChildProcess
       const { started, query } = processes(() => 'answer', (index) => (index === 1 ? fakeProc : undefined))
       const { service } = fixture(query, true, undefined, [{ id: 'haiku', label: 'Haiku' }], { reap })
       await service.status()
       await ask(service, 'title', 'Request: x')
-      await vi.waitFor(() => expect(started).toHaveLength(2))
-      let loggedOut = false
-      const loggingOut = service.logout().then(() => { loggedOut = true })
-      await vi.waitFor(() => expect(reap).toHaveBeenCalledWith(99999, expect.anything()))
-      await new Promise((resolve) => setTimeout(resolve, 20))
-      expect(loggedOut).toBe(false)
-      releaseReap()
-      await loggingOut
-      expect(loggedOut).toBe(true)
+      expect(started).toHaveLength(2)
+      const finishing = service[method]()
+      try {
+        await reapStarted
+        expect(reap).toHaveBeenCalledWith(99999, expect.anything())
+        const nextTick = new Promise<'waiting'>((resolve) => setImmediate(() => resolve('waiting')))
+        expect(await Promise.race([finishing.then(() => 'finished'), nextTick])).toBe('waiting')
+      } finally {
+        releaseReap()
+        await finishing
+      }
+      expect(started[1]!.close).toHaveBeenCalledOnce()
     })
 
     it('stopping the provider ends the waiting process with its process tree', async () => {
@@ -579,10 +615,10 @@ describe('Claude Subscription native provider', () => {
         await ask(service, 'title', 'Request: x')
         await vi.waitFor(() => expect(started).toHaveLength(2))
         const exited = new Promise<number | null>((resolve) => children[0]!.once('exit', (code) => resolve(code)))
-        service.stop()
-        // The query's own close is a stand-in that ends nothing: the process tree reaper ends the real process.
-        await expect(exited).resolves.not.toBe(undefined)
+        // The query's own close is a stand-in that ends nothing: shutdown waits for the real process to end.
+        await service.stop()
         expect(children[0]!.exitCode !== null || children[0]!.signalCode !== null).toBe(true)
+        await expect(exited).resolves.not.toBe(undefined)
       } finally {
         for (const process of children) if (process.exitCode === null && process.signalCode === null) process.kill('SIGKILL')
       }
@@ -1597,8 +1633,8 @@ describe('older Claude models', () => {
 it('keeps standalone workspaces profile-owned even for non-path thread IDs', () => {
   const { service, home } = fixture(() => fakeQuery())
   const path = service.standaloneWorkspace('../../outside')
-  expect(path).toMatch(new RegExp('/workspaces/[a-f0-9]{64}$'))
-  expect(path.startsWith(home)).toBe(true)
+  expect(basename(path)).toMatch(/^[a-f0-9]{64}$/)
+  expect(dirname(path)).toBe(join(home, 'providers', 'claude-subscription', 'workspaces'))
   expect(service.standaloneWorkspace('../../outside')).toBe(path)
 })
 

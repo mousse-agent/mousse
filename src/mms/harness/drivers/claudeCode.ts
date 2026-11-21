@@ -531,6 +531,7 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
        * work, with the account still signed in, is an error the user sees, and nothing is recorded.
        */
       const signOutOfHome = async (): Promise<void> => {
+        await service.stopOneShots()
         const problem = ownedHomeProblem(privateHome!, context.profileHome)
         if (problem) throw new Error(problem)
         const launch = service.authLaunch()
@@ -624,12 +625,12 @@ export function claudeCodeDriver(options: ClaudeCodeDriverOptions = {}): Harness
           user.users -= 1
           // A config change retires this runtime just before it builds the next one, which takes
           // the service over: it stops only when no runtime took it by then.
-          queueMicrotask(() => {
+          return Promise.resolve().then(() => {
             if (user.users > 0) return
             if (owned.get(context.instanceId) === user) owned.delete(context.instanceId)
             // A sign-in terminal this runtime started ends with the instance, not with a config change.
             activeRun?.cancel()
-            user.service.stop()
+            return user.service.stop()
           })
         }
       }

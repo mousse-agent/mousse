@@ -7,8 +7,8 @@ import { isAcceptableThreadBranchName, isMousseBranchName } from '../../shared/m
  *
  * A branch is Mousse's when its journal says so, whatever its name:
  * - `workspace-provision`: the worktree was made with `git worktree add -b <branch>`, which fails when a branch of that
- *   name is already there, so a completed provision proves Mousse made the branch. For a `mousse/` name the planned
- *   record is enough, as it always was (records written before the completed one carried the branch).
+ *   name is already there, so a completed provision proves Mousse made the branch. Older journals could record
+ *   a `mousse/` name only in the plan. Keep interpreting those plans for recovery, unless the add failed.
  * - `workspace-branch-rename`: Mousse renamed a branch it owned (`git branch -m`, which fails when the new name is
  *   taken). Only a completed rename moves ownership to the new name. A rename with no outcome recorded (a stop between
  *   its steps) is `pending`: until it is settled from the repository (`ThreadWorkspaceManager.settleBranchRename`),
@@ -58,9 +58,10 @@ export interface ThreadBranchRecord {
 
 const fold = (path: string): string => (process.platform === 'win32' || process.platform === 'darwin' ? resolve(path).toLowerCase() : resolve(path))
 
-function provisionIntent(entry: ThreadJournalRecord): { branch: string; worktreePath?: string } | undefined {
-  const intent = entry.expectedPreState as { branch?: unknown; worktreePath?: unknown } | undefined
-  return typeof intent?.branch === 'string' ? { branch: intent.branch, ...(typeof intent.worktreePath === 'string' ? { worktreePath: intent.worktreePath } : {}) } : undefined
+function provisionIntent(entry: ThreadJournalRecord): { branch: string; worktreePath?: string; requiresCompletion: boolean } | undefined {
+  const intent = entry.expectedPreState as { branch?: unknown; worktreePath?: unknown; requiresCompletion?: unknown } | undefined
+  if (typeof intent?.branch !== 'string') return undefined
+  return { branch: intent.branch, ...(typeof intent.worktreePath === 'string' ? { worktreePath: intent.worktreePath } : {}), requiresCompletion: intent.requiresCompletion === true }
 }
 
 export function renameIntentOf(entry: ThreadJournalRecord): BranchRenameIntent | undefined {
@@ -93,13 +94,17 @@ export function threadBranchRecord(entries: readonly ThreadJournalRecord[], opti
   const renames = new Map<string, PendingBranchRename>()
   const renamedFrom = new Map<string, string>()
   const at = options.worktreePath ? fold(options.worktreePath) : undefined
+  const failedProvisions = new Set(entries.filter((entry) => entry.operationType === PROVISION_OPERATION && entry.state === 'failed').map((entry) => entry.operationId))
   for (const entry of [...entries].sort((a, b) => a.sequence - b.sequence)) {
     if (entry.operationType === PROVISION_OPERATION) {
       if (entry.state === 'planned') {
         const intent = provisionIntent(entry)
         if (!intent || (at && (!intent.worktreePath || fold(intent.worktreePath) !== at)) || options.acceptProvision?.(entry) === false) continue
         provisions.set(entry.operationId, intent.branch)
-        if (isMousseBranchName(intent.branch)) { owned.add(intent.branch); known.add(intent.branch) }
+        if (!intent.requiresCompletion && !failedProvisions.has(entry.operationId) && isMousseBranchName(intent.branch)) {
+          owned.add(intent.branch)
+          known.add(intent.branch)
+        }
       } else if (entry.state === 'completed') {
         const branch = provisions.get(entry.operationId)
         const recorded = (entry.details as { branch?: unknown } | undefined)?.branch

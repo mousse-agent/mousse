@@ -454,7 +454,7 @@ export class ThreadWorkspaceManager {
         operationId,
         operationType: 'workspace-provision',
         state: 'planned',
-        expectedPreState: { head, branch, retainedRef, worktreePath }
+        expectedPreState: { head, branch, retainedRef, worktreePath, requiresCompletion: true }
       })
       atomicWriteJsonSync(this.workspacePath, {
         schemaVersion: 1,
@@ -516,7 +516,7 @@ export class ThreadWorkspaceManager {
         state: 'completed',
         details: { intentSequence: intent.sequence, head, branch, retainedRef }
       })
-      if (nameFrom) this.nameBranchLater(threadId, branch, nameFrom)
+      if (nameFrom) this.nameBranchLater(threadId, branch, nameFrom, signal)
       return metadata
     } catch (error) {
       this.journal.append({
@@ -536,9 +536,9 @@ export class ThreadWorkspaceManager {
    * A provision whose `git worktree add` failed (a path too long, a full disk) leaves its record `provisioning` and no
    * worktree. Only when that is verified (the last provision is `failed` for this very path and branch, nothing is at
    * the path, and Git registers no worktree there) the record is cleared, so the thread's next message makes the
-   * worktree again instead of waiting for recovery. The branch the failed add made goes too, but only while it is still
-   * at the commit the add started from and nothing has it checked out. Returns whether the record was cleared; anything
-   * else stays as it is, for recovery. Called with the thread's lease held (`WorkspaceResolver.resolve`).
+   * worktree again instead of waiting for recovery. A failed add cannot prove who made the branch, even if it has the
+   * expected name and commit. Keep the ref and let the retry pick a free name. Called with the thread's lease held
+   * (`WorkspaceResolver.resolve`).
    */
   async reconcileFailedProvision(projectPath: string, signal?: AbortSignal): Promise<boolean> {
     const metadata = this.load()
@@ -551,29 +551,14 @@ export class ThreadWorkspaceManager {
     const expected = intent?.expectedPreState as { worktreePath?: string; branch?: string; head?: string } | undefined
     const fold = (value: string): string => process.platform === 'win32' || process.platform === 'darwin' ? resolve(value).toLowerCase() : resolve(value)
     if (!expected?.worktreePath || fold(expected.worktreePath) !== fold(metadata.worktreePath) || expected.branch !== metadata.branch) return false
-    if (await pathExists(metadata.worktreePath)) return false
     const repository = await this.resolveRepositoryAsync(projectPath)
     const repositoryLease = await acquireWorkspaceRepositoryLease(await resolveRepositoryIdentityAsync(repository.gitTopLevel, { requireMutationCapability: true }), signal)
     try {
-      const listed = (await tryGit(repository.primaryCheckoutPath, ['worktree', 'list', '--porcelain'])).stdout.split(/\r?\n/)
-      if (listed.some((line) => line.startsWith('worktree ') && fold(line.slice('worktree '.length)) === fold(metadata.worktreePath))) return false
-      const ref = `refs/heads/${metadata.branch}`
-      // Only delete a branch Mousse's records prove it owns, matched by exact case and with no case-only sibling on
-      // case-insensitive disks (Windows, macOS), so recovery never deletes someone else's branch.
-      if (expected.head && this.branchRecord(metadata).owned.has(metadata.branch)) {
-        const refs = await this.headRefs(repository.primaryCheckoutPath)
-        const tip = refs.get(ref)
-        const foldRef = (name: string): string => (process.platform === 'win32' || process.platform === 'darwin' ? name.toLowerCase() : name)
-        const caseCollision = (process.platform === 'win32' || process.platform === 'darwin')
-          && [...refs.keys()].some((name) => name !== ref && name.toLowerCase() === ref.toLowerCase())
-        const checkedOut = listed.some((line) => line.startsWith('branch ') && foldRef(line.slice('branch '.length)) === foldRef(ref))
-        if (tip && tip === expected.head && !caseCollision && !checkedOut) {
-          // Left behind is harmless (the next worktree takes another name), so a refusal here changes nothing.
-          try { await withOwnedBranches([metadata.branch], () => git(repository.primaryCheckoutPath, ['update-ref', '-d', ref, tip])) } catch { /* The branch stays. */ }
-        }
-      }
+      if (await pathExists(metadata.worktreePath)) return false
+      const listed = await tryGit(repository.primaryCheckoutPath, ['worktree', 'list', '--porcelain'])
+      if (!listed.ok || listed.stdout.split(/\r?\n/).some((line) => line.startsWith('worktree ') && fold(line.slice('worktree '.length)) === fold(metadata.worktreePath))) return false
       await rm(this.workspacePath, { force: true })
-      this.journal.append({ operationId: last.operationId, operationType: 'workspace-provision', state: 'cancelled', details: { reconciled: 'worktree add failed; nothing was made' } })
+      this.journal.append({ operationId: last.operationId, operationType: 'workspace-provision', state: 'cancelled', details: { reconciled: 'worktree add failed; no worktree exists' } })
       return true
     } finally {
       repositoryLease.release()
@@ -653,11 +638,12 @@ export class ThreadWorkspaceManager {
   branchNaming?: Promise<void>
 
   /** Asks the title model for a name for the new worktree's branch and renames it, in the background; never throws. */
-  private nameBranchLater(threadId: string, branch: string, text: string): void {
+  private nameBranchLater(threadId: string, branch: string, text: string, signal?: AbortSignal): void {
     this.branchNaming = (async () => {
+      if (signal?.aborted) return
       const name = await requestBranchName(this.threadDirectory, threadId, text)
-      if (!name || name === branch) return
-      const outcome = await this.renameOwnBranch(branch, name)
+      if (!name || name === branch || signal?.aborted) return
+      const outcome = await this.renameOwnBranch(branch, name, signal)
       if (outcome !== 'renamed') console.info('[branches] the worktree branch keeps its temporary name', { threadId, reason: outcome })
     })().catch((error) => console.warn('[branches] the worktree branch could not be renamed', { threadId, error: error instanceof Error ? error.message : String(error) }))
   }
@@ -707,12 +693,15 @@ export class ThreadWorkspaceManager {
       if (refusal) return refusal
       const current = this.load()!
       if (!await pathExists(current.worktreePath)) return 'the worktree is not there'
-      const fromSha = (await tryGit(primary, ['rev-parse', '--verify', '--quiet', `refs/heads/${from}^{commit}`])).stdout
+      const fromRef = `refs/heads/${from}`
+      if ((await tryGit(current.worktreePath, ['symbolic-ref', '-q', 'HEAD'])).stdout !== fromRef) return 'the worktree is on another branch'
+      const fromSha = (await this.headRefs(primary)).get(fromRef)
       if (!fromSha) return 'the branch is gone'
       // Pushed already (an upstream is set): the remote branch keeps the old name, and pushing or opening a pull request
       // from the renamed one would fail, so it keeps its name.
       if ((await tryGit(primary, ['config', '--get', `branch.${from}.remote`])).stdout) return 'the branch has an upstream'
       if (await this.branchNameTaken(primary, to)) return 'the name is taken'
+      if (signal?.aborted) return 'naming was cancelled'
       const operationId = randomUUID()
       const intent = this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: { from, to, worktreePath: current.worktreePath, fromSha } })
       try {

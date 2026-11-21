@@ -4,9 +4,8 @@ import { branchNamingRules } from '../workspace/branchNaming'
 
 /**
  * A new thread is named once, when its first message is sent: one request to the title model gives both the thread's
- * title and its worktree branch's name, instead of one request for each. Every thread's request asks for both, whether
- * it has a worktree or not, so the request is the same for all of them and a Claude Code process started ahead can
- * answer any of them (`ClaudeSubscriptionProviderService.oneShot`); the branch line costs a few words.
+ * title and its worktree branch's name, instead of one request for each. Private threads use a title-only request.
+ * A Claude Code process started ahead can answer either kind of request (`ClaudeSubscriptionProviderService.oneShot`).
  */
 
 /** The request: the title rules (with the person's own title prompt), the branch rules of the naming setting, and the answer's two lines. */
