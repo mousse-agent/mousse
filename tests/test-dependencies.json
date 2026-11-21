@@ -84,6 +84,11 @@
       "run": ["tests/platformWorkflowCompiler.test.ts", "tests/platformWorkflowRegistry.test.ts", "tests/platformWorkflowRuntime.test.ts"]
     },
     {
+      "name": "the warm start column fixture is bundled at run time, so the import graph cannot see it",
+      "when": ["tests/fixtures/warm-start-column/**"],
+      "run": ["tests/renderer/warm-start-column-electron.test.ts"]
+    },
+    {
       "name": "the Storage page fixture is bundled at run time, so the import graph cannot see it",
       "when": ["tests/fixtures/storage-settings/**", "src/shared/storage*.ts"],
       "run": ["tests/renderer/storage-settings-electron.test.ts", "tests/renderer/storageSettings.test.ts"]

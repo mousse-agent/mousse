@@ -6,13 +6,14 @@ import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { UserQuestionService } from '../src/mms/orchestrator/UserQuestionService'
 import { AntigravityProviderService } from '../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
-import { installAntigravity } from '../src/mms/harness/acp/presets/antigravity/installation'
+import { installNativeAntigravity, type NativeInstallOptions } from '../src/mms/harness/acp/presets/antigravity/nativeInstall'
 
 const fake = vi.hoisted(() => ({ spawnLine: undefined as string | undefined, stdouts: [] as Array<{ write(line: string): void }> }))
 
-vi.mock('../src/mms/harness/acp/presets/antigravity/installation', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/mms/harness/acp/presets/antigravity/installation')>()),
-  installAntigravity: vi.fn()
+// The download and check of Google's release are stood in for; the service's install runs as shipped.
+vi.mock('../src/mms/harness/acp/presets/antigravity/nativeInstall', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/mms/harness/acp/presets/antigravity/nativeInstall')>()),
+  installNativeAntigravity: vi.fn()
 }))
 
 // The agent process is the only boundary replaced: `launch()` itself runs as in production.
@@ -37,7 +38,13 @@ vi.mock('node:child_process', async (importOriginal) => {
 })
 
 const authUrl = 'https://accounts.google.com/o/oauth2/v2/auth?response_type=code&state=owned-state&redirect_uri=http%3A%2F%2F127.0.0.1%3A41414%2F'
-const installMock = vi.mocked(installAntigravity)
+const installMock = vi.mocked(installNativeAntigravity)
+const installed = (home: string) => ({ binary: join(home, 'agy.exe'), version: '1.5.13', id: 'a'.repeat(32) })
+/** Google's feed entry for this computer. */
+const feed = vi.fn(async () => Response.json({
+  version: '1.5.13', sha512: 'a'.repeat(128),
+  url: 'https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.13-1/windows-x64/cli_windows_x64.exe'
+})) as unknown as typeof fetch
 const homes: string[] = []
 const services: AntigravityProviderService[] = []
 
@@ -60,7 +67,9 @@ function setup(settings: Record<string, unknown> = {}, initialLaunch: { binaryPa
   const saveLaunch = vi.fn(async (patch: { binaryPath?: string | null }) => {
     if (patch.binaryPath === null) launch = {}
   })
-  const service = new AntigravityProviderService(home, home, new UserQuestionService(), undefined, { launch: () => launch, saveLaunch })
+  const service = new AntigravityProviderService(home, home, new UserQuestionService(), undefined, {
+    launch: () => launch, saveLaunch, native: { target: 'windows_amd64', fetch: feed }
+  })
   services.push(service)
   const saved = () => JSON.parse(readFileSync(settingsPath, 'utf8')) as Record<string, unknown>
   return { home, service, saved, saveLaunch, launch: () => launch }
@@ -68,7 +77,7 @@ function setup(settings: Record<string, unknown> = {}, initialLaunch: { binaryPa
 
 /** An install that stays pending until it is aborted. */
 function pendingInstall() {
-  installMock.mockImplementation((_home, signal) => new Promise<string>((_resolve, reject) => {
+  installMock.mockImplementation((_home, { signal }) => new Promise((_resolve, reject) => {
     signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted', 'AbortError')), { once: true })
   }))
 }
@@ -76,19 +85,21 @@ function pendingInstall() {
 describe('Antigravity install', () => {
   it('installs, streams progress, replaces a manual path and leaves sign-in alone', async () => {
     const { home, service, saved, saveLaunch } = setup({ signedIn: true, models: [{ id: 'm', label: 'M' }] }, { binaryPath: join('manual', 'agy_acp_server') })
-    installMock.mockImplementation(async (_home, _signal, progress) => {
-      progress?.('Downloading Google Antigravity ACP agent…')
-      progress?.('Verifying agent and local harness…')
-      return join(home, 'agy_acp_server')
+    installMock.mockImplementation(async (_home, { progress }: NativeInstallOptions) => {
+      progress?.('Downloading Google Antigravity…')
+      progress?.('Checking Antigravity…')
+      return installed(home)
     })
     const messages: string[] = []
     const changed = vi.fn()
     service.hooks.changed = changed
     const generation = (service as unknown as { launchGeneration: number }).launchGeneration
     const config = await service.install((message) => messages.push(message))
-    expect(installMock).toHaveBeenCalledWith(home, expect.any(AbortSignal), expect.any(Function))
-    expect(messages).toEqual(['Downloading Google Antigravity ACP agent…', 'Verifying agent and local harness…'])
-    expect(changed).toHaveBeenCalledTimes(1)
+    // The release the feed names now is what installs.
+    expect(installMock).toHaveBeenCalledWith(home, expect.objectContaining({ release: expect.objectContaining({ version: '1.5.13' }), signal: expect.any(AbortSignal) }))
+    expect(messages).toEqual(['Downloading Google Antigravity…', 'Checking Antigravity…'])
+    // Clients hear of it: when it starts (every profile sees it) and once this profile's settings changed.
+    expect(changed).toHaveBeenCalled()
     expect(config).toMatchObject({ instanceId: 'antigravity', args: [], env: {} })
     // The manual path leaves the instance config through the gateway (which also mirrors it).
     expect(saveLaunch).toHaveBeenCalledWith({ binaryPath: null })
@@ -100,7 +111,7 @@ describe('Antigravity install', () => {
 
   it('does not start a sign-in after installing', async () => {
     const { service } = setup()
-    installMock.mockResolvedValue('agy')
+    installMock.mockResolvedValue(installed('x'))
     const login = vi.spyOn(service, 'login')
     await service.install()
     expect(login).not.toHaveBeenCalled()
@@ -117,7 +128,7 @@ describe('Antigravity install', () => {
 
   it('leaves the settings alone when a cancel lands after the download finished', async () => {
     const { service, saved, saveLaunch } = setup({ binaryPath: 'kept', signedIn: true }, { binaryPath: 'kept' })
-    installMock.mockImplementation(async () => { service.stop(); return 'agy' })
+    installMock.mockImplementation(async () => { service.stop(); return installed('x') })
     await expect(service.install()).rejects.toThrow('Antigravity install cancelled')
     expect(saveLaunch).not.toHaveBeenCalled()
     expect(saved()).toEqual({ binaryPath: 'kept', signedIn: true })
@@ -151,7 +162,8 @@ describe('Antigravity sign-in state', () => {
 
   function installedService(settings: Record<string, unknown> = signedIn) {
     const context = setup(settings)
-    vi.spyOn(context.service as unknown as { runtime: () => { kind: string; binary: string } }, 'runtime').mockReturnValue({ kind: 'legacy', binary: join(context.home, 'agy_acp_server') })
+    // The 1.1.1 server from a manual path: it prints its sign-in link on stdout.
+    vi.spyOn(context.service as unknown as { runtime: () => unknown }, 'runtime').mockReturnValue({ kind: 'legacy', binary: join(context.home, 'agy_acp_server'), source: 'manual' })
     const changed = vi.fn()
     context.service.hooks.changed = changed
     return { ...context, changed }

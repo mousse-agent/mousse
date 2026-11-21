@@ -14,6 +14,7 @@ import { actionOptions } from './fixtures/gitFoundation'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { canonicalJson } from '../src/mms/net/sync/codec'
 import { lifecycleForReply, type TaskLifecycleRecord } from '../src/shared/resourceLifecycle'
+import { CUT_SHORT_TRIES } from '../src/mms/lifecycle/threadDelete'
 
 /** Puts a file only this thread has in its scratch folder: unpublished work a purge may discard only with consent. */
 function soleCopy(services: MmsProfileServices, threadId: string): string {
@@ -445,6 +446,104 @@ describe('threads.delete', () => {
       const plain = f.services.threads.createThread('Nothing unpublished')
       await f.services.deleteThreadForGood(plain.id, { human: false, discard: false, internal: true })
       expect(f.services.threads.lifecycleStore.require(plain.id).state).toBe('purged')
+    } finally { await f.close() }
+  })
+})
+
+/**
+ * Threads moved out of an older layout (a project's `.mousse/.data`, or the installation's own folders from before
+ * profiles) can leave their old copy behind: a move to another drive can't put it in the migration trash. Inputs: a copy
+ * of the deleted thread itself, a copy of another thread, the installation's copy with its thread list, and, as the
+ * control, a thread no record owns.
+ */
+describe('old copies a move left behind', () => {
+  /** A project of the profile with an archived thread, and the old copy the move to the profile's folder left. */
+  async function movedThread(f: Awaited<ReturnType<typeof lifecycleHarness>>) {
+    const repo = join(f.root, 'smiletrack')
+    mkdirSync(repo, { recursive: true })
+    const projectId = f.services.projects.openProject(repo).id
+    const thread = f.services.threads.createThread('Browser selection', projectId, repo, { started: true })
+    const other = f.services.threads.createThread('Another thread', projectId, repo, { started: true })
+    // Both moved into the profile's own folder, where their lifecycle records name them.
+    for (const id of [thread.id, other.id]) f.services.threads.getThreadDir(id)
+    const copy = (id: string, name: string) => {
+      const left = join(repo, '.mousse', '.data', id)
+      mkdirSync(left, { recursive: true })
+      writeFileSync(join(left, 'meta.json'), JSON.stringify({ id, name, projectId }))
+      writeFileSync(join(left, 'messages.json'), '[]')
+      return left
+    }
+    const left = copy(thread.id, thread.name)
+    copy(other.id, other.name)
+    // The installation's folders from before profiles, kept as a lifecycle owner of their own, hold copies too.
+    mkdirSync(join(f.home, 'lifecycle'), { recursive: true })
+    writeFileSync(join(f.home, 'lifecycle', 'manifest.json'), JSON.stringify({ schemaVersion: 1, minimumWriterVersion: 1, profileId: 'default' }))
+    const before = join(f.home, 'thread-data', 'repositories', projectId, thread.id)
+    mkdirSync(before, { recursive: true })
+    writeFileSync(join(before, 'meta.json'), JSON.stringify({ id: thread.id, name: thread.name, projectId }))
+    writeFileSync(join(f.home, 'threads-index.json'), JSON.stringify([{ id: other.id, name: other.name }]))
+    writeFileSync(join(f.home, 'projects.json'), JSON.stringify([{ id: projectId, name: 'smiletrack', path: repo }]))
+    f.services.threads.setThreadSettled(thread.id, true)
+    return { repo, projectId, thread, left, folder: f.services.threads.getThreadDir(thread.id) }
+  }
+
+  it('deletes a thread whose old copies are still there, and never copies the deleted thread back from them', async () => {
+    const f = await lifecycleHarness()
+    let restarted: MousseMainService | undefined
+    try {
+      const { projectId, thread, left, folder } = await movedThread(f)
+      const reply = await f.rpc.request<{ lifecycle: { state: string } }>('threads.delete', { threadId: thread.id, discard: true })
+      expect(reply.lifecycle.state).toBe('purged')
+      expect(existsSync(folder)).toBe(false)
+      // The old copy is left as it was, and the next start's scan of the project does not bring the thread's folder back.
+      expect(existsSync(join(left, 'meta.json'))).toBe(true)
+      await f.main.stop()
+      restarted = await MousseMainService.create({ homeDir: f.home, repoRoot: f.root, requireOwnership: false, headless: true })
+      const services = await restarted.getProfileServices(f.alice.id)
+      expect(services.threads.listThreads(projectId).map((listed) => listed.id)).not.toContain(thread.id)
+      expect(existsSync(folder)).toBe(false)
+    } finally { await restarted?.stop(); await f.close() }
+  })
+
+  it('still refuses while a thread no record owns is in an old data folder, says where, and keeps the thread in Archived', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const { repo, thread } = await movedThread(f)
+      const stray = join(repo, '.mousse', '.data', 'not-a-known-thread')
+      mkdirSync(stray, { recursive: true })
+      writeFileSync(join(stray, 'meta.json'), JSON.stringify({ id: 'not-a-known-thread' }))
+      const refused = await f.rpc.request('threads.delete', { threadId: thread.id, discard: true }).then(() => undefined, (error: { code?: string; message?: string }) => error)
+      expect(refused?.code).toBe('thread_delete_blocked')
+      expect(refused?.message).toContain(stray)
+      expect(f.services.threads.getThread(thread.id)?.settledAt).toBeTruthy()
+      expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('active')
+    } finally { await f.close() }
+  })
+
+  it('gives up a delete left in the trash that keeps being refused after three starts, and puts the thread back in Archived', async () => {
+    const f = await lifecycleHarness()
+    try {
+      const { repo, thread } = await movedThread(f)
+      vi.spyOn(f.services.lifecycle.cleanup, 'purge').mockRejectedValueOnce(new Error('the process ended'))
+      await expect(f.rpc.request('threads.delete', { threadId: thread.id, discard: true })).rejects.toThrow()
+      expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('trashed')
+      // Something the delete is refused for appears before the next start, and stays.
+      const stray = join(repo, '.mousse', '.data', 'not-a-known-thread')
+      mkdirSync(stray, { recursive: true })
+      writeFileSync(join(stray, 'meta.json'), JSON.stringify({ id: 'not-a-known-thread' }))
+      for (const tried of [1, 2]) {
+        const [kept] = await f.services.finishCutShortDeletes()
+        expect(kept).toMatchObject({ taskId: thread.id, outcome: 'kept' })
+        expect(kept!.reason).toContain(stray)
+        expect(kept!.reason).toContain(`${tried} of ${CUT_SHORT_TRIES}`)
+      }
+      const [archived] = await f.services.finishCutShortDeletes()
+      expect(archived).toMatchObject({ taskId: thread.id, outcome: 'archived' })
+      expect(archived!.reason).toContain(stray)
+      expect(f.services.threads.lifecycleStore.require(thread.id).state).toBe('active')
+      expect(f.services.threads.getThread(thread.id)?.settledAt).toBeTruthy()
+      // Nothing is left to try at the next start.
+      expect(await f.services.finishCutShortDeletes()).toEqual([])
     } finally { await f.close() }
   })
 })

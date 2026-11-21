@@ -105,7 +105,7 @@ export function SshAddSteps({ onDone }: { onDone: () => void }) {
       )}
 
       {step.kind === 'key' && (
-        <div className="engine-confirm">
+        <div className="engine-confirm" data-mousse-decision="">
           <p>Trust {host(step.resolved)}?</p>
           <p
             className="settings-muted engine-fingerprint"

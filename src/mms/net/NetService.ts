@@ -462,11 +462,11 @@ export class NetService {
   /** Loopback listeners that exist only while a remote machine joins; never persisted. */
   private readonly enrollmentListeners = new Set<DirectTransport>()
   /**
-   * The optional Mousse ID module; absent in builds and tests that leave it out, and while Mousse Plus (legacy) is
+   * The optional Mousse ID module; absent in builds and tests that leave it out, and while Mousse ID (legacy) is
    * off for this profile (`setPlusLegacy`).
    */
   private hosted?: HostedNet
-  /** Stops the running Mousse ID module's own work when Mousse Plus (legacy) is turned off. */
+  /** Stops the running Mousse ID module's own work when Mousse ID (legacy) is turned off. */
   private hostedStop?: AbortController
   constructor(
     private readonly options: {
@@ -475,7 +475,7 @@ export class NetService {
       onChanged?(status: NetStatus): void
       composeRuntime?(runtime: NetRuntime): NetDomainComposition | void
       hosted?: HostedNetModule
-      /** Mousse Plus (legacy) is off for this profile at start: the module above is not run (`setPlusLegacy`). */
+      /** Mousse ID (legacy) is off for this profile at start: the module above is not run (`setPlusLegacy`). */
       plusLegacyOff?: boolean
       /** Tests replace the `ssh` executable, the user's known_hosts file and the setup's inputs. */
       ssh?: { binary?: string; userKnownHosts?: string } & Partial<
@@ -522,7 +522,7 @@ export class NetService {
     return this.options.hosted.create(this.hostedHost(AbortSignal.any([this.shutdownSignal.signal, stop.signal])))
   }
   /**
-   * Mousse Plus (legacy), in Settings → Labs, on by default. Off: this profile's Net runs as a build without the
+   * Mousse ID (legacy), in Settings → Labs, on by default. Off: this profile's Net runs as a build without the
    * Mousse ID module, so it signs in to nothing, runs no hosted relay and sends no request to Mousse Plus. The saved
    * sign-in and hosted relay row stay on disk for when it is turned on again. LAN, SSH, Tailscale, tunnels and
    * self-hosted relays keep working either way. Applied at once, running transports restarted.
@@ -1032,11 +1032,15 @@ export class NetService {
         )
       )
     // Signing in to Mousse ID on a computer with no network identity joins the account's network.
+    // So does a computer that can leave its network without losing anything others rely on: it
+    // joins the account's devices when there are any, since Mousse ID keeps one devices list per
+    // account. Only a computer that keeps its network signs in with its own identity.
     if (
       this.hosted &&
       ['net.plus.discover', 'net.plus.login.begin', 'net.plus.login.finish'].includes(method) &&
       ((method === 'net.plus.login.finish' && this.hosted.handlesJoin(String(params.id))) ||
-        !this.hasIdentity())
+        !this.hasIdentity() ||
+        (method !== 'net.plus.login.finish' && this.aloneOnNetwork()))
     )
       return this.track(this.hosted.joinSignIn(method, params))
     // Joining, and finishing or giving up a join, need no network yet. The wait for the first
@@ -1520,15 +1524,15 @@ export class NetService {
   hostedSpaceMembershipChanged(): void {
     this.hosted?.membershipChanged()
   }
-  /** Mousse ID is left out of this build, or Mousse Plus (legacy) is off for this profile. */
+  /** Mousse ID is left out of this build, or Mousse ID (legacy) is off for this profile. */
   private plusUnavailable(): NetError {
     return this.options.hosted
-      ? new NetError('profile_unsupported', 'Mousse Plus (legacy) is off in Settings → Labs.')
+      ? new NetError('profile_unsupported', 'Mousse ID (legacy) is off in Settings → Labs.')
       : hostedUnavailable()
   }
   /**
    * What the Mousse ID module may use. Each entry keeps NetService's own gates and queue. `signal` also ends when
-   * Mousse Plus (legacy) is turned off; a module stopped that way no longer restarts the transports.
+   * Mousse ID (legacy) is turned off; a module stopped that way no longer restarts the transports.
    */
   private hostedHost(signal: AbortSignal): HostedNetHost {
     return {
@@ -1606,7 +1610,14 @@ export class NetService {
       joinWithInvite: async (invite, name) => {
         await this.firstSession(await this.serial(() => this.join(invite, name, undefined, undefined, true)))
       },
-      dropUnsentJoin: () => this.serial(() => this.dropUnsentJoin())
+      dropUnsentJoin: () => this.serial(() => this.dropUnsentJoin()),
+      mayJoinAccount: () => this.aloneOnNetwork(),
+      ownNode: () => (this.hasIdentity() ? this.runtime().identity.self()?.node : undefined),
+      leaveLoneNetwork: () =>
+        this.serial(async () => {
+          if (!this.aloneOnNetwork()) throw new NetError('conflict', 'This computer can no longer leave its network.')
+          await this.setAsideNetwork('joined-account')
+        })
     }
   }
   /** A network identity exists for this profile; never creates the network database. */
@@ -1614,6 +1625,26 @@ export class NetService {
     return (
       existsSync(join(this.options.profileDir, 'net', 'net.db')) && !!this.runtime().identity.self()
     )
+  }
+  /**
+   * This computer owns a network that nobody else relies on, so it may leave it to join the
+   * account's devices list: it may start over (no Space hosted, no other device holding a pass),
+   * belongs to no Space, keeps no bots in its list and is not signed in to Mousse ID. Leaving
+   * would drop it out of any Space, so a computer in one keeps its network.
+   */
+  private aloneOnNetwork(): boolean {
+    try {
+      if (!this.hasIdentity() || this.hosted?.status().configured) return false
+      const check = this.startOverCheck()
+      return (
+        check.allowed === 'alone' &&
+        check.keeper &&
+        check.spaces.length === 0 &&
+        !this.runtime().identity.listsBots()
+      )
+    } catch {
+      return false
+    }
   }
   /** This computer has an identity that was removed from its devices (see `NetIdentityService.selfRemoved`). */
   private selfRemoved(): boolean {

@@ -5,6 +5,26 @@ Mousse agent worktrees share Git objects and, when available, the repository's r
 files plus the transitive dependency/dependent blast radius. This avoids copying unrelated
 tracked files or installing an identical dependency tree for every worker.
 
+## New worktrees: parallel and sparse checkout
+
+A thread's or subagent's new worktree is written by Git's parallel checkout (`checkout.workers=0`, one
+worker per core) unless your Git config sets `checkout.workers` itself.
+
+To give a large project's new worktrees only some of its paths, name a file of sparse-checkout
+patterns in the project's Git config, and turn on Git's per-worktree settings so the sparse
+checkout stays in Mousse's worktrees:
+
+    git config extensions.worktreeConfig true
+    git config mousse.sparseCheckout .mousse-sparse   # relative to the project's top folder, or absolute
+
+The file holds one path per line (`#` starts a comment). Plain folder names use Git's faster cone
+mode; a line with a pattern character (`*`, `?`, `[`, `!`, `\`) switches to Git's pattern mode.
+Your own checkout of the project stays whole. A missing or empty file, or per-worktree settings
+turned off, stops the new worktree before anything is made. If the file goes away later, a worktree
+restored from its snapshot comes back whole.
+
+## Packaging
+
 Packaging commands delete the reproducible `release/` staging tree before building. This
 prevents unpacked applications and installers from older builds accumulating indefinitely.
 The cleanup is deliberately restricted to `<project>/release`; it never removes `tmp/`,

@@ -1,16 +1,34 @@
-import { APP_PRESENCE_CAPABILITY } from '../notifications/OwnerQuietHours'
 import { KEEP_AWAKE_CAPABILITY } from '../../shared/keepAwake'
 import { BOT_TELLING_CAPABILITY } from '../../shared/bots/personal/telling'
+import { IMAGE_MAX_DATA_CHARS, MESSAGE_IMAGES_MAX_DATA_CHARS, MESSAGE_MAX_IMAGES } from '../../shared/imageLimits'
 /**
  * Versioned MMS local protocol envelopes (transport-independent).
  * No Electron imports.
  */
 
 import type { BrowserWorkerRequest, BrowserWorkerResponse } from '../../shared/browser/types'
+import type { Thread, ThreadListVersion } from '../../shared/types'
 
 export const MMS_PROTOCOL_CHUNK_CAPABILITY = 'envelope-chunks.v1'
+/**
+ * The client may send a request larger than one frame as envelope chunks (the same `envelope_chunk` frames the
+ * service sends), up to `MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES`. A client sends chunks only to a service that
+ * advertised this, so an older service never receives one.
+ */
+export const MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY = 'envelope-chunks-inbound.v1'
 export const MMS_PROTOCOL_CHUNK_BYTES = 256 * 1024
+/** One envelope the service sends a client in chunks. */
 export const MMS_PROTOCOL_MAX_ENVELOPE_BYTES = 32 * 1024 * 1024
+/**
+ * One request a client sends the service in chunks: a message with the most images it may carry (80 MiB as base64,
+ * about 107 MiB) and its text, with room for the JSON around them.
+ */
+export const MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES = 128 * 1024 * 1024
+/**
+ * Bytes of chunked requests the service holds while they arrive, across all connections: two full requests. A transfer
+ * that would take more closes its connection, so what arrives in chunks stays bounded however many clients send.
+ */
+export const MMS_PROTOCOL_MAX_INBOUND_IN_FLIGHT_BYTES = 2 * MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES
 /**
  * 2: the old provider methods (`providers.listConfigured`, `setApiKey`, `login*`, ...) and the
  * `providers.changed` / `providers.login-event` events are gone; clients use `providers.instances.*`,
@@ -48,9 +66,11 @@ export const MMS_PROTOCOL_MAX_METHOD_LENGTH = 96
 export const MMS_PROTOCOL_MAX_TEXT_LENGTH = 512 * 1024
 export const MMS_PROTOCOL_MAX_OWNER_TOKEN_LENGTH = 256
 export const MMS_PROTOCOL_MAX_ORDERED_IDS = 10_000
-export const MMS_PROTOCOL_MAX_IMAGES = 16
-/** Base64 image data length bound (well under max frame). */
-export const MMS_PROTOCOL_MAX_IMAGE_DATA_CHARS = 3 * 1024 * 1024
+export const MMS_PROTOCOL_MAX_IMAGES = MESSAGE_MAX_IMAGES
+/** Base64 characters in one image. A request past one frame goes in chunks (`MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY`). */
+export const MMS_PROTOCOL_MAX_IMAGE_DATA_CHARS = IMAGE_MAX_DATA_CHARS
+/** Base64 characters in all of one message's images. */
+export const MMS_PROTOCOL_MAX_MESSAGE_IMAGE_DATA_CHARS = MESSAGE_IMAGES_MAX_DATA_CHARS
 /** Outstanding reverse commands on one authenticated connection. */
 export const MMS_PROTOCOL_MAX_CONNECTION_COMMANDS = 8
 /** Outstanding reverse commands across the daemon. */
@@ -154,6 +174,23 @@ export const GIT_OPERATIONS_CAPABILITY = 'git.operations.v1'
  */
 export const FIRST_SEND_BINDING_CAPABILITY = 'threads.firstSendBinding.v1'
 
+/**
+ * Asked for by a window that applies `threads.row`: a change to one thread is sent as that thread's row (or its
+ * removal), with the list version it belongs to, instead of the whole list. A session without it is sent the whole
+ * list (`threads.updated`) for every such change, as before.
+ */
+export const THREAD_ROWS_CAPABILITY = 'threads.rows.v1'
+
+/**
+ * `threads.row`'s data: the changed thread's row as the list has it now, or `removed` when it left the list (or became
+ * a personal bot's), and the version of the list snapshot it was read from (`ThreadListVersion`).
+ */
+export interface ThreadRowEventData {
+  thread?: Thread
+  removed?: string
+  version: ThreadListVersion
+}
+
 /** One authenticated socket's live display lane. Never sequenced or replayed. */
 export interface ProtocolConnectionEvent {
   kind: 'connection_event'
@@ -242,7 +279,6 @@ export type ProtocolEnvelope =
  */
 export const PROTOCOL_METHODS = [
   'applets.get', 'applets.state.get', 'applets.state.save', 'applets.export',
-  'app.presence',
   'health',
   'capabilities',
   'projects.list',
@@ -313,6 +349,8 @@ export const PROTOCOL_METHODS = [
   'orchestrator.pendingQuestions',
   'subagents.list',
   'subagents.stopAll',
+  'threads.backgroundWork',
+  'threads.stopBackground',
   'queue.list',
   'queue.enqueue',
   'queue.edit',
@@ -530,10 +568,10 @@ export const PROTOCOL_METHODS = [
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number]
 
 export const PROTOCOL_CAPABILITIES = [
-  APP_PRESENCE_CAPABILITY,
   KEEP_AWAKE_CAPABILITY,
   BOT_TELLING_CAPABILITY,
   MMS_PROTOCOL_CHUNK_CAPABILITY,
+  MMS_PROTOCOL_INBOUND_CHUNK_CAPABILITY,
   'errors.v1',
   'health',
   'projects',
@@ -567,11 +605,13 @@ export type ProtocolEventType =
   | 'run.interrupted-on-boot'
   | 'projects.updated'
   | 'threads.updated'
+  | 'threads.row'
   | 'threads.touched'
   | 'pullRequests.updated'
   | 'git.selectionChanged'
   | 'thread.title-generation-failed'
   | 'subagents.updated'
+  | 'thread.backgroundWork'
   | 'thread.message'
   | 'thread.message-updated'
   | 'thread.messages'

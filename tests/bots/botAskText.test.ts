@@ -3,7 +3,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { askText } from '../../src/shared/bots/personal/askText'
-import { BOT_APP_TOOLS } from '../../src/shared/bots/personal/manifest'
+import { BOT_APP_TOOLS, BOT_AUTOMATION_APP_TOOLS } from '../../src/shared/bots/personal/manifest'
 
 describe('askText', () => {
   it('a file ask an older build wrote reads as no longer available', () => {
@@ -45,6 +45,7 @@ describe('askText', () => {
 
   it('every tool a bot can be asked for has words of its own', () => {
     const fallback = askText({ tool: 'some_tool' }).title
-    for (const tool of BOT_APP_TOOLS) expect([tool, askText({ tool }).title]).not.toEqual([tool, fallback])
+    // The automation tools are every bot's unless switched off, so they are never asked for.
+    for (const tool of BOT_APP_TOOLS) if (!BOT_AUTOMATION_APP_TOOLS.includes(tool)) expect([tool, askText({ tool }).title]).not.toEqual([tool, fallback])
   })
 })

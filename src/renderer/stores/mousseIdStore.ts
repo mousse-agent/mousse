@@ -15,6 +15,7 @@ import {
   withSignInCallback
 } from '../lib/plusSignIn'
 import { useAppStore } from './appStore'
+import { serviceFailureLine } from '../lib/errorText'
 
 export interface PendingSignIn {
   id: string
@@ -34,7 +35,7 @@ interface MousseIdState {
   net?: NetStatus
   /** Runtime `MOUSSE_ID_ORIGIN` from the main process. */
   runtimeOrigin: string
-  /** Settings → Labs → Mousse Plus (legacy) for this profile; off hides Mousse ID as if no service were set. */
+  /** Settings → Labs → Mousse ID (legacy) for this profile; off hides Mousse ID as if no service were set. */
   plusLegacy?: boolean
   pending?: PendingSignIn
   busy: boolean
@@ -47,7 +48,7 @@ interface MousseIdState {
 
 const request = <T,>(method: PlatformRequestMethod, params: unknown = {}) =>
   window.mousse.platformRequest.request<T>(method, params)
-const message = (cause: unknown) => String((cause as Error | null)?.message ?? cause)
+const message = (cause: unknown) => serviceFailureLine(cause) ?? String((cause as Error | null)?.message ?? cause)
 const errorCode = (cause: unknown) => (cause as { code?: unknown } | null)?.code
 
 export { mousseIdPreparation, mousseIdSetupStep, signInErrorMessage }
@@ -58,7 +59,7 @@ export const mousseIdOrigin = (state: Pick<MousseIdState, 'runtimeOrigin'>): str
 
 /**
  * Mousse ID exists in this window only when a service address is set, at build time or with
- * `MOUSSE_ID_ORIGIN` at launch, and Mousse Plus (legacy) is on. Otherwise no account UI is shown and no account
+ * `MOUSSE_ID_ORIGIN` at launch, and Mousse ID (legacy) is on. Otherwise no account UI is shown and no account
  * status is read.
  */
 export const mousseIdAvailable = (state: Pick<MousseIdState, 'runtimeOrigin' | 'plusLegacy'>): boolean =>
@@ -262,7 +263,7 @@ export const useMousseIdStore = create<MousseIdState>((set, get) => ({
   }
 }))
 
-/** Follows this profile's Settings → Labs → Mousse Plus (legacy); a change reads the account status again. */
+/** Follows this profile's Settings → Labs → Mousse ID (legacy); a change reads the account status again. */
 export function applyPlusLegacy(settings: { experimental?: { plusLegacy?: boolean } } | null | undefined): void {
   const plusLegacy = settings?.experimental?.plusLegacy !== false
   if ((useMousseIdStore.getState().plusLegacy !== false) === plusLegacy) return

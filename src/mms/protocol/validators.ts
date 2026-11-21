@@ -12,6 +12,7 @@ import { PROVIDER_DRIVER_KINDS, type ModelOverride } from '../../shared/provider
 import { upgradeSelection } from '../../shared/modelSelection'
 import { MAX_USAGE_LIMIT_PAUSE_CAP } from '../../shared/settings'
 import { MAX_GOAL_TURN_LIMIT } from '../../shared/threadGoal'
+import { isInlineImageMimeType } from '../../shared/imageLimits'
 import { isPermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import {
   RESERVED_AGENT_IDS,
@@ -35,12 +36,13 @@ import {
 } from './connectionCommandValidate'
 import {
   MMS_PROTOCOL_CHUNK_BYTES,
-  MMS_PROTOCOL_MAX_ENVELOPE_BYTES,
+  MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES,
   MMS_PROTOCOL_MAX_ID_LENGTH,
   maxConnectionEventBytes,
   PROTOCOL_CONNECTION_EVENT_TYPES,
   MMS_PROTOCOL_MAX_IMAGE_DATA_CHARS,
   MMS_PROTOCOL_MAX_IMAGES,
+  MMS_PROTOCOL_MAX_MESSAGE_IMAGE_DATA_CHARS,
   MMS_PROTOCOL_MAX_METHOD_LENGTH,
   MMS_PROTOCOL_MAX_ORDERED_IDS,
   MMS_PROTOCOL_MAX_OWNER_TOKEN_LENGTH,
@@ -88,7 +90,7 @@ export function parseEnvelope(raw: unknown): ProtocolEnvelope | null {
           !isBoundedString(raw.transferId, 64, { nonEmpty: true }) ||
           !Number.isSafeInteger(raw.index) || (raw.index as number) < 0 ||
           !Number.isSafeInteger(raw.totalBytes) || (raw.totalBytes as number) < 1 ||
-          (raw.totalBytes as number) > MMS_PROTOCOL_MAX_ENVELOPE_BYTES ||
+          (raw.totalBytes as number) > MMS_PROTOCOL_MAX_INBOUND_ENVELOPE_BYTES ||
           !isBoundedString(raw.data, Math.ceil(MMS_PROTOCOL_CHUNK_BYTES / 3) * 4, { nonEmpty: true }) ||
           !/^[A-Za-z0-9+/]+={0,2}$/.test(raw.data)) return null
       return raw as unknown as import('./types').ProtocolEnvelopeChunk
@@ -376,6 +378,11 @@ function invalidParams(message: string) {
   return knownAppError({ code: 'invalid_params', message }, { category: 'invalid', retryable: false })
 }
 
+/** An image, or a message's images together, past what a message may carry (`shared/imageLimits.ts`). */
+function imageTooLarge(message: string, image?: string) {
+  return knownAppError({ code: 'image_too_large', message, ...(image ? { details: { image } } : {}) }, { category: 'invalid', retryable: false })
+}
+
 /** Validate ChatMode from untrusted input. */
 export function asChatMode(v: unknown, name = 'mode'): ChatMode {
   if (typeof v === 'string') {
@@ -405,6 +412,7 @@ export function asChatImages(v: unknown, name = 'images'): ChatImageAttachment[]
     throw invalidParams(`${name} exceeds max ${MMS_PROTOCOL_MAX_IMAGES} images`)
   }
   const out: ChatImageAttachment[] = []
+  let total = 0
   for (let i = 0; i < v.length; i++) {
     const item = v[i]
     if (!isObject(item)) throw invalidParams(`${name}[${i}] must be an object`)
@@ -416,11 +424,22 @@ export function asChatImages(v: unknown, name = 'images'): ChatImageAttachment[]
       throw invalidParams(`${name}[${i}].mimeType must be a non-empty string`)
     }
     if (item.mimeType.length > 128) throw invalidParams(`${name}[${i}].mimeType too long`)
+    // Refused here, before the message is saved, rather than by the provider once its turn has started.
+    if (!isInlineImageMimeType(item.mimeType)) {
+      throw knownAppError(
+        { code: 'image_unsupported', message: `${item.name} is not a JPEG, PNG, GIF or WebP image.`, details: { image: item.name } },
+        { category: 'invalid', retryable: false }
+      )
+    }
     if (typeof item.data !== 'string' || !item.data) {
       throw invalidParams(`${name}[${i}].data must be a non-empty string`)
     }
     if (item.data.length > MMS_PROTOCOL_MAX_IMAGE_DATA_CHARS) {
-      throw invalidParams(`${name}[${i}].data exceeds max size`)
+      throw imageTooLarge(`${item.name} is larger than one image may be.`, item.name)
+    }
+    total += item.data.length
+    if (total > MMS_PROTOCOL_MAX_MESSAGE_IMAGE_DATA_CHARS) {
+      throw imageTooLarge('These images are larger together than one message may carry.')
     }
     out.push({ name: item.name, mimeType: item.mimeType, data: item.data })
   }
@@ -986,6 +1005,7 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
     'bots',
     'experimental',
     'errorReports',
+    'branches',
     'agents',
     'integrations'
   ])
@@ -1021,7 +1041,20 @@ export function asSettingsPartial(v: unknown): Record<string, unknown> {
   if (walked.permissions !== undefined) assertPermissionsPatch(walked.permissions)
   if (walked.runs !== undefined) assertRunsPatch(walked.runs)
   if (walked.errorReports !== undefined) assertErrorReportsPatch(walked.errorReports)
+  if (walked.branches !== undefined) assertBranchesPatch(walked.branches)
   return walked
+}
+
+/** Branch naming: a mode, a prefix and instructions; the daemon normalizes the prefix. */
+function assertBranchesPatch(value: unknown): void {
+  const patch = asPlainObject(value, 'partial.branches')
+  for (const [key, item] of Object.entries(patch)) {
+    if (key === 'mode') {
+      if (item !== 'static' && item !== 'semantic' && item !== 'custom') throw new Error('partial.branches.mode is not a naming mode')
+    } else if (key === 'prefix' || key === 'instructions') {
+      if (typeof item !== 'string') throw new Error(`partial.branches.${key} must be a string`)
+    } else throw new Error(`partial.branches.${key} is not allowed`)
+  }
 }
 
 /** Error reports: two switches. */
@@ -1046,7 +1079,7 @@ function assertPermissionsPatch(value: unknown): void {
 function assertRunsPatch(value: unknown): void {
   const patch = asPlainObject(value, 'partial.runs')
   for (const key of Object.keys(patch)) {
-    if (key !== 'resumeAfterUsageLimit' && key !== 'usageLimitPauseCap' && key !== 'newThreadWorktree' && key !== 'privateThreadExpiry' && key !== 'goalTurnLimit' && key !== 'keepAwake' && key !== 'steerRelease') throw new Error(`partial.runs.${key} is not allowed`)
+    if (key !== 'resumeAfterUsageLimit' && key !== 'usageLimitPauseCap' && key !== 'newThreadWorktree' && key !== 'privateThreadExpiry' && key !== 'goalTurnLimit' && key !== 'keepAwake' && key !== 'steerRelease' && key !== 'newThreadPicker') throw new Error(`partial.runs.${key} is not allowed`)
   }
   // How a held steer is released, per provider instance (docs/design/steer-and-interruptions.md §2.3.2).
   if (patch.steerRelease !== undefined) {
@@ -1060,6 +1093,8 @@ function assertRunsPatch(value: unknown): void {
     throw new Error('partial.runs.privateThreadExpiry must be never, 1h, 24h, 7d or 30d')
   if (patch.keepAwake !== undefined && typeof patch.keepAwake !== 'boolean')
     throw new Error('partial.runs.keepAwake must be a boolean')
+  if (patch.newThreadPicker !== undefined && typeof patch.newThreadPicker !== 'boolean')
+    throw new Error('partial.runs.newThreadPicker must be a boolean')
   if (patch.resumeAfterUsageLimit !== undefined && typeof patch.resumeAfterUsageLimit !== 'boolean')
     throw new Error('partial.runs.resumeAfterUsageLimit must be a boolean')
   if (patch.usageLimitPauseCap !== undefined && (!Number.isInteger(patch.usageLimitPauseCap) || (patch.usageLimitPauseCap as number) < 1 || (patch.usageLimitPauseCap as number) > MAX_USAGE_LIMIT_PAUSE_CAP))
@@ -1141,11 +1176,14 @@ export function asOptionalAnswerAttachments(v: unknown): Record<string, ChatImag
   // No prototype: a question id such as `constructor` is an ordinary key here.
   const out = Object.create(null) as Record<string, ChatImageAttachment[]>
   let total = 0
+  let chars = 0
   for (const key of keys) {
     if (!key || key.length > 256) throw invalidParams('attachments key must be a question id')
     const images = asChatImages(o[key], `attachments.${key}`)
     total += images.length
     if (total > MMS_PROTOCOL_MAX_IMAGES) throw invalidParams(`attachments exceed max ${MMS_PROTOCOL_MAX_IMAGES} images`)
+    for (const image of images) chars += image.data.length
+    if (chars > MMS_PROTOCOL_MAX_MESSAGE_IMAGE_DATA_CHARS) throw imageTooLarge('These images are larger together than one message may carry.')
     if (images.length) out[key] = images
   }
   return Object.keys(out).length ? out : undefined

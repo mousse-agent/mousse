@@ -19,6 +19,7 @@ import type { LocalSttModelId, LocalSttModelStatus, ProviderTranscriptionRequest
 import type { WindowResizeEdge } from '../shared/windowResize'
 import { UPDATE_IPC, type UpdateChannel, type UpdateState } from '../shared/updates'
 import type { SubagentSummary, SubagentsUpdatedEvent } from '../shared/subagents'
+import type { ThreadBackgroundWork } from '../shared/backgroundWork'
 import type {
   Agent,
   BrowserBounds,
@@ -87,6 +88,7 @@ import type {
   TaskStatus,
   Thread,
   ThreadListVersion,
+  ThreadRowPayload,
   ThreadActivitySnapshot,
   TurnState,
   TurnStateSnapshot,
@@ -113,6 +115,7 @@ import type {
   StartPullRequestThreadResult
 } from '../shared/pullRequests'
 import type { ProfileCreateInput, ProfilePublicDto, ProfileUpdateInput } from '../shared/profiles/types'
+import type { WarmStartView } from '../shared/warmStart'
 import type { MousseSettings, MousseSettingsUpdate, SettingsOptions, ThreadNotificationEvent } from '../shared/settings'
 import type { LineEditStatsSnapshot, UsageStatsSnapshot } from '../shared/lineEditStats'
 import type {
@@ -205,6 +208,9 @@ let windowCountersProvider: (() => { mountedTurns?: number; mountedRows?: number
 async function attachmentPath(file: File, target: { kind: 'bot' } | { kind: 'thread'; threadId: string | null }): Promise<string> {
   return webUtils.getPathForFile(file) || ipcRenderer.invoke('attachments:stage', target, file.name, new Uint8Array(await file.arrayBuffer()))
 }
+
+/** The warm start is read once per page load (`app.warmStartView`). */
+let warmStartTaken = false
 
 const api = {
   platform: process.platform,
@@ -964,7 +970,10 @@ const api = {
   },
   projects: {
     list: (): Promise<Project[]> => ipcRenderer.invoke('projects:list'),
-    open: (): Promise<Project | null> => ipcRenderer.invoke('projects:open'),
+    /** Asks for a folder; or opens `path` as it is, or with `create` makes it first as a new empty Git project. */
+    open: (target?: { path: string; create?: boolean }): Promise<Project | null> => ipcRenderer.invoke('projects:open', target),
+    /** Asks where new and cloned projects go; null when cancelled. */
+    chooseFolder: (): Promise<string | null> => ipcRenderer.invoke('projects:chooseFolder'),
     remove: (projectId: string): Promise<void> =>
       ipcRenderer.invoke('projects:remove', projectId),
     rename: (projectId: string, name: string): Promise<Project> =>
@@ -990,6 +999,16 @@ const api = {
     }
   },
   threads: {
+    /** What the thread runs in the background besides its subagents (the composer's status row). */
+    backgroundWork: (threadId: string): Promise<ThreadBackgroundWork> => ipcRenderer.invoke('threads:backgroundWork', threadId),
+    /** Stops one item of it by id (`PROVIDER_BACKGROUND_ID` for the provider's own work); false when it was not running. */
+    stopBackground: (threadId: string, id: string): Promise<boolean> => ipcRenderer.invoke('threads:stopBackground', threadId, id),
+    /** The daemon's whole picture of a thread's background work, each time it changes. */
+    onBackgroundWork: (cb: (work: ThreadBackgroundWork) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, work: ThreadBackgroundWork) => cb(work)
+      ipcRenderer.on('threads:backgroundWork', handler)
+      return () => ipcRenderer.removeListener('threads:backgroundWork', handler)
+    },
     /**
      * A file attached in a thread's composer as a path on this computer: where it is, or, for a pasted one, a
      * temporary copy under the thread's folder (`new` before the thread is made).
@@ -1025,6 +1044,9 @@ const api = {
     /** One image of a message that arrived without its bytes. */
     messageImage: (threadId: string, messageId: string, index: number): Promise<{ name: string; mimeType: string; data: string }> =>
       ipcRenderer.invoke('threads:messageImage', threadId, messageId, index),
+    /** One image of a queued message that arrived without its bytes (a queue list sends large ones by name). */
+    queueImage: (threadId: string, queueItemId: string, index: number): Promise<{ name: string; mimeType: string; data: string }> =>
+      ipcRenderer.invoke('threads:queueImage', threadId, queueItemId, index),
     /** Deletes an archived thread and its subagent threads for good; a thread that is not archived is refused. */
     delete: (threadId: string): Promise<void> => storageInvoke('threads:delete', threadId),
     rename: (threadId: string, name: string): Promise<Thread> =>
@@ -1075,8 +1097,9 @@ const api = {
       ipcRenderer.invoke('threads:setExpiry', threadId, expiresAt, stopsRun),
     reorder: (projectId: string | undefined, threadIds: string[]): Promise<Thread[]> =>
       ipcRenderer.invoke('threads:reorder', projectId, threadIds),
-    search: (query: string, limit?: number): Promise<ThreadSearchResponse> =>
-      ipcRenderer.invoke('threads:search', query, limit),
+    /** `perThread`: which threads match, one message hit each, from this computer only (the sidebar's filter). */
+    search: (query: string, limit?: number, options?: { perThread?: boolean }): Promise<ThreadSearchResponse> =>
+      ipcRenderer.invoke('threads:search', query, limit, options),
     /** Saves that moved only these threads' `updatedAt` (`threads.touched`), throttled by the service. */
     onTouched: (cb: (touches: Array<{ id: string; updatedAt: string }>) => void): (() => void) => {
       const handler = (_: Electron.IpcRendererEvent, touches: Array<{ id: string; updatedAt: string }>) => cb(touches)
@@ -1089,6 +1112,12 @@ const api = {
         Array.isArray(data) ? cb(data) : cb(data.threads, data.version)
       ipcRenderer.on('threads:updated', handler)
       return () => ipcRenderer.removeListener('threads:updated', handler)
+    },
+    /** One thread's change (`threads.row`): its row, or the id of a thread that left the list, with the list version. */
+    onRow: (cb: (row: ThreadRowPayload) => void): (() => void) => {
+      const handler = (_: Electron.IpcRendererEvent, row: ThreadRowPayload) => cb(row)
+      ipcRenderer.on('threads:row', handler)
+      return () => ipcRenderer.removeListener('threads:row', handler)
     },
     onTitleGenerationFailed: (
       cb: (payload: { threadId: string; error: string }) => void
@@ -1403,6 +1432,15 @@ const api = {
   },
   app: {
     getInfo: (): Promise<AppInfo> => ipcRenderer.invoke('app:getInfo'),
+    /**
+     * What this window's profile showed last time, to show until the service answers (display only). Synchronous, so
+     * the window's first frame shows it; answered once per page load, then null.
+     */
+    warmStartView: (): WarmStartView | null => {
+      if (warmStartTaken) return null
+      warmStartTaken = true
+      return (ipcRenderer.sendSync('app:warmStartView') as WarmStartView | null) ?? null
+    },
     getActiveProjectPath: (threadId?: string | null): Promise<string | null> =>
       ipcRenderer.invoke('app:getActiveProjectPath', threadId),
     getFilesRoot: (threadId?: string | null): Promise<string> =>

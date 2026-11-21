@@ -3,12 +3,12 @@ import { expiryPresetMs } from '../../shared/threadExpiry'
 import { composerWorkspaceFor, rememberedChoiceOf, workspaceWithPrivate } from './newThread'
 import { openSubagentParentRow, visibleThreads } from '../../shared/threadLineage'
 import { findUnstartedThread, isThreadStarted } from '../../shared/threadTitle'
-import type { NewThreadChoice, Thread } from '../../shared/types'
+import type { NewThreadChoice, Project, Thread } from '../../shared/types'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
 import { orderedThreadIds, threadAfterArchive } from './threadOrder'
-import { afterNextPaint } from './pendingThreadRows'
+import { afterNextPaint, startingThreadIds } from './pendingThreadRows'
 import { runWithToast } from './actionToast'
 import { showProjectInSidebar } from './sidebarReveal'
 import { markPendingArchive } from './archiveMotion'
@@ -29,7 +29,6 @@ export async function selectThread(threadId: string): Promise<void> {
   // A page opened from the rail covers the workspace; the thread has to be visible.
   store.setScheduledOpen(false)
   store.setUsageOpen(false)
-  if (threadId === store.activeThreadId && !store.openingThreadId) return
   await openAndSelect(threadId)
 }
 
@@ -39,7 +38,13 @@ export async function selectThread(threadId: string): Promise<void> {
  * (`openThreadWhenReady`), so it never shows without them. `keepWorkspace`: Chats stays on screen (a bot's thread in its pane).
  */
 export async function openAndSelect(threadId: string, options?: { keepWorkspace?: boolean }): Promise<void> {
-  const opening = useAppStore.getState().openThreadWhenReady(threadId, options)
+  const store = useAppStore.getState()
+  if (threadId === store.activeThreadId && !store.openingThreadId && !store.transcriptPending) {
+    const thread = store.threads.find((entry) => entry.id === threadId)
+    // A failed read can leave the row selected with an empty transcript. Opening it again asks the service again.
+    if (store.messages.length > 0 || (thread && !isThreadStarted(thread))) return
+  }
+  const opening = store.openThreadWhenReady(threadId, options)
   if (opening === 'held') setTimeout(() => useAppStore.getState().showOpeningThread(threadId), OPEN_THREAD_HOLD_MS)
   if (opening === 'cached') void afterNextPaint().then(() => useAppStore.getState().showOpeningThread(threadId))
   await selectOrSettle(threadId)
@@ -67,7 +72,18 @@ export async function createAndSelectThread(): Promise<void> {
     await createAndSelectProjectThread(remembered)
     return
   }
-  const thread = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly)) ?? await window.mousse.threads.create()
+  await openNoProjectThread()
+}
+
+/** The New thread picker's "No project": a thread on this computer without a project, remembered for the next new thread. */
+export async function createAndSelectNoProjectThread(): Promise<void> {
+  useAppStore.getState().setLastNewThreadProjectId(null)
+  await openNoProjectThread()
+}
+
+async function openNoProjectThread(): Promise<void> {
+  const store = useAppStore.getState()
+  const thread = findUnstartedThread(draftCandidates(store.threads).filter((entry) => !entry.localOnly)) ?? await window.mousse.threads.create()
   store.upsertThread(thread)
   await selectThread(thread.id)
 }
@@ -76,7 +92,7 @@ export async function createAndSelectThread(): Promise<void> {
 export async function createAndSelectPrivateThread(): Promise<void> {
   const store = useAppStore.getState()
   const thread =
-    findUnstartedThread(visibleThreads(store.threads).filter((entry) => entry.localOnly && !entry.node)) ??
+    findUnstartedThread(draftCandidates(store.threads).filter((entry) => entry.localOnly && !entry.node)) ??
     await window.mousse.threads.create(undefined, undefined, { localOnly: true })
   store.upsertThread(thread)
   // The command means private, with the private-chat expiry from Settings unless one was picked; a reused draft
@@ -125,6 +141,12 @@ function usableRemembered(remembered: NewThreadChoice | undefined, projectId: st
   return rest
 }
 
+/** The threads New thread may open as an empty draft: not one a send is starting, which is a thread of its own already. */
+function draftCandidates(threads: Thread[]): Thread[] {
+  const starting = startingThreadIds()
+  return visibleThreads(threads).filter((entry) => !starting.has(entry.id))
+}
+
 /**
  * Opens the newest empty draft thread of a project, or creates one there with the project's remembered choices, and
  * selects it. An empty thread is reused only while it matches those choices; otherwise a new one is made with them
@@ -137,7 +159,7 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
   store.setLastNewThreadProjectId(projectId)
   // A project just added (Add project) may not be listed in this window yet when the create answers.
   const listedBefore = store.projects.some((project) => project.id === projectId)
-  const empty = findUnstartedThread(visibleThreads(store.threads).filter((entry) => !entry.localOnly), projectId)
+  const empty = findUnstartedThread(draftCandidates(store.threads).filter((entry) => !entry.localOnly), projectId)
   const remembered = usableRemembered(rememberedChoiceOf(store.projects, projectId), projectId)
   if (empty && matchesRememberedChoices(empty, remembered)) {
     await selectThread(empty.id)
@@ -161,6 +183,11 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
 export async function addProjectAndStartThread(): Promise<void> {
   const project = await window.mousse.projects.open()
   if (!project) return
+  await listProjectAndStartThread(project)
+}
+
+/** A project just added (opened, cloned, made, or on another computer): listed at once, and a new thread opened in it. */
+export async function listProjectAndStartThread(project: Project): Promise<void> {
   const store = useAppStore.getState()
   // The service also pushes the list, but that can come after the new thread is open.
   if (!store.projects.some((entry) => entry.id === project.id)) store.setProjects([...store.projects, project])

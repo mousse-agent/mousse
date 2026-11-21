@@ -1,6 +1,9 @@
 import { profilerService } from '../diagnostics/profilerService'
 import type { BugReportService } from '../bugReports/BugReportService'
 import { turnTimingMark } from '../diagnostics/turnTiming'
+import { forEachYielding } from '../startup/startupTiming'
+import { inTurnBoundary, turnBoundaryMark, turnBoundaryReplyDone, turnBoundaryStarted } from '../diagnostics/turnBoundary'
+import { closeRepositoryFacts, forgetRepositoryFacts, openRepositoryFacts, withRepositoryFactsScope } from '../git/repositoryFacts'
 import { describeQuestionAnswers } from './questionAnswers'
 import type { OpenQuestionCloseReason } from '../run/OpenQuestions'
 import { latestReplyPreview } from '../../shared/threadPreview'
@@ -56,6 +59,8 @@ import {
 } from '../platform/MmsWorkflowChat'
 import { DomainRpcError } from '../protocol/domainRegistry'
 import { CONTEXT_COMPACTION_TIME_LIMIT_MS } from '../protocol/types'
+import { withImageBudget } from '../protocol/transcriptPaging'
+import { imageDataChars, QUEUE_IMAGES_MAX_DATA_CHARS } from '../../shared/imageLimits'
 import { AgentExecutionService } from '../agentDefinitions/AgentExecutionService'
 import {
   createDefinitionRuntime,
@@ -96,6 +101,9 @@ import { CommandRejection, RunStoreError } from '../run/db/RunStoreError'
 import { EffectDeferredError, WorkerStoppedError, type EffectExecutor, type EffectWorker } from '../run/EffectWorker'
 import { steerReleaseWindow, steerStrategy, stopStrategy, type SteerDelivery } from '../run/CommandPolicy'
 import { runningListText, runningNote, type RunningRegistry, type RunningScope, type RunningThreadInfo, type RunningViewer } from '../running/RunningRegistry'
+import type { MonitorSummary, ThreadMonitors } from '../monitors/ThreadMonitors'
+import type { ThreadWakes } from '../wakes/ThreadWakes'
+import { PROVIDER_BACKGROUND_ID, type ThreadBackgroundWork } from '../../shared/backgroundWork'
 import { agentMessage, AppToolTurns, createAppToolRegistry, holdsPerson, type AgentAccessResult, type LacksReport, McpToolError, type BotAppToolDeps, type BotMemoryToolHost, type AgentApprovalResult, type AgentArchiveResult, type AgentArchiveOwnResult, type AgentCreatedThread, type AgentRemoteThreadRequest, type AgentRemoteThreadResult, type RemoteProjectCandidate, type AgentQueueCommand, type AgentQueueResult, type AgentScheduleHost, type AgentRunCommandResult, type AgentSendResult, type AgentThreadRequest, type ApprovalRequestInfo, type AppToolHost, type RemoteThreadsHost, type AppToolTurn, type McpCaller, type QueueSnapshot, type ToolRegistry, userMcpProxy } from '../run/mcp/appTools'
 import { AGENT_THREAD_COMMAND, AGENT_THREAD_CREATED_ACTION, AGENT_THREAD_REPAIR_WINDOW_MS, agentThreadFingerprint, readAgentThreadReceipt, type AgentThreadIntent } from './agentThreadIntent'
 import { AGENT_QUEUE_MAX_PER_SENDER, AGENT_QUEUE_MAX_PER_THREAD, AGENT_REPEAT_WINDOW_MS, botRequestPrefix, lineageRelation } from '../run/mcp/appTools/thread'
@@ -133,15 +141,13 @@ import { ACTIVITY_DESCRIPTION_CHARS, BACKGROUND_SUMMARY, taskEndSummary, type Ag
 import { createHarnessGateway, type AdapterHost, type BindInput, type ChildTurnPolicy, type HarnessGateway, type ProviderMetrics, type RecoveredContext, type ResolvedTurnSelection, type ToolHost, type TurnAppContext, type TurnControl, type TurnInput, type TurnSink } from '../harness/gateway'
 import { piDriver } from '../harness/drivers/pi'
 import { contextGauge, policyOrigin, threadTurnOrigin } from '../harness/policy'
-import type { RunProvenance } from '../harness/ownerOnly'
-import type { OwnerProof } from '../run/ownerProof'
 import type { BotThreads } from '../../shared/bots/personal/authority'
 import { BOT_COMPACTION_HOLD_MS, isBotRoomAbort, isBotWallAbort, type BotTurnDispatcher, type BotTurnSteer, type PreparedBotTurn } from '../bots/activation/dispatcher'
-import { harnessAppError, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type HarnessDriverKind, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
+import { harnessAppError, isProviderTurnCap, isRetriesExhausted, onRetiredBareRoute, PROVIDER_TURN_CAP, providerFailureText, type BindPolicy, type ExecutionBinding, type HarnessCaps, type HarnessDriverKind, type ProviderScope, type RunPolicy, type TurnOrigin } from '../../shared/harness/types'
 import type { McpAttachmentProvider, McpToolBoundary } from '../run/mcp/MousseMcpServer'
 import { planWakeNotice, type NoticeContext } from '../run/delegation/notice'
 import { acknowledgeRows } from '../run/terminal'
-import { cancelQueuedWakes, deliverAtToolBoundary, releaseToolBoundary } from '../run/delegation/wake'
+import { cancelQueuedWakes, deliverAtToolBoundary, pendingWakeEffects, releaseToolBoundary, wakeThreads } from '../run/delegation/wake'
 import { taskCheckpoint } from '../run/delegation/checkpoint'
 import { remoteSubagentPreamble, subagentPreamble, withoutSubagentPreamble } from '../run/delegation/guidance'
 import { qualifyId } from '../../shared/threadRef'
@@ -207,6 +213,7 @@ import {
   type OrchestratorSendInput,
   type PendingUserQuestions,
   type QueuedMessage,
+  type QueuedMessageWait,
   type Thread,
   type ThreadTitleSource,
   type ThreadSetupFailure,
@@ -214,6 +221,7 @@ import {
   type TurnEnd,
   type TurnPhase,
   type TurnStep,
+  type TurnSetupStep,
   type TurnState,
   type HeldSteer,
   type TurnStateSnapshot,
@@ -231,7 +239,7 @@ import { MirroredRun, NativeMirrorThreads } from './nativeMirrorThreads'
 import { nativeSessionEpoch, type CallAttribution } from '../run/nativeHelpers'
 import { isDefaultThreadName } from '../../shared/threadTitle'
 import { agentMessageWords } from '../../shared/agentMessageWords'
-import { buildTitlePrompt, cleanTitleText, fitTitle, heuristicTitle, normalizeTitle, TITLE_SYSTEM_PROMPT, titleContextOf, type TitleContext } from '../../shared/threadTitleText'
+import { buildTitlePrompt, cleanTitleText, fitTitle, heuristicTitle, normalizeTitle, titleContextOf, titleSystemPrompt, type TitleContext } from '../../shared/threadTitleText'
 import {
   buildPermissionModeChangeNotice,
   getLastUserPermissionMode,
@@ -306,13 +314,16 @@ import { occurrenceResultOfRun, scheduledReceiptId, type ScheduledRunProbe } fro
 import { UndoService } from '../actions/UndoService'
 import { CodeRevertService } from '../actions/CodeRevertService'
 import { PublishService } from '../actions/PublishService'
+import { ChangeReceiptService } from '../actions/ChangeReceiptService'
 import { ConversationBranchService } from '../actions/ConversationBranchService'
 import type { MousseFeatureFlags } from '../../shared/featureFlags'
 import { DEFAULT_FEATURE_FLAGS } from '../../shared/featureFlags'
-import { ThreadActionService } from '../actions/ThreadActionService'
+import { ThreadActionService, UNRECORDED_END_FILE, type TurnStartCheck } from '../actions/ThreadActionService'
 import { cancelledIntegrationsNotice, cancelPendingIntegrations } from '../agents/ChildAgentIntegrationService'
 import { buildSubagentResultReport, buildSubagentResultReportAsync, delegationResultRefPrefix, formatSubagentResultReport, readSubagentResults, recordedFilesAt, SUBAGENT_RESULTS_FILE, writeSubagentResults, type SubagentResultReport } from '../agents/subagentResultReport'
-import type { NativeContextBoundary } from '../../shared/threadActions'
+import type { NativeContextBoundary, ThreadAction } from '../../shared/threadActions'
+import type { WorkspaceExecutionContext } from '../../shared/workspace'
+import { ThreadJournal } from '../data/ThreadJournal'
 import { coverageNotice, SnapshotRefusedError, snapshotOriginAsync, takeSnapshotAsync } from '../actions/snapshots'
 import { git as actionGit, gitAsync as actionGitAsync, requireCleanAsync as requireCleanWorkspaceAsync, tryGitAsync as actionTryGitAsync } from '../actions/git'
 import {
@@ -352,6 +363,7 @@ import {
   heartbeatExecutionLease,
   isExecutionLeaseHeld,
   isLeaseHeldByLivePeer,
+  LeaseBusyError,
   onExecutionLeaseReleased,
   readLeaseOwner,
   releaseExecutionLeaseHandle,
@@ -414,6 +426,40 @@ import { computerUseAllowed } from '../run/mcp/appTools/computer'
 const PRIVATE_THREAD_REMOTE_REFUSAL = 'This is a private thread: it stays on this computer, so it cannot start or continue subagents on other computers.'
 
 /** A folder with no worktree whose turns are recorded in a hidden store (`snapshotFolderFor`). */
+/**
+ * The end of a thread's turn, handed to the turn its settle starts (`recordTurnHandoff`, `settleTurnHandoff`,
+ * `takeTurnHandoff`): that turn starts from this end snapshot instead of checking the worktree and snapshotting it
+ * again. Kept in memory only, for one settle.
+ */
+interface TurnHandoff {
+  /** The run whose end this is. */
+  runId: string
+  /** The end snapshot, the next turn's start. */
+  endSha: string
+  /** The action that recorded it, still the latest when used. */
+  actionId: string
+  conversationBranchId: string
+  /** The folder the turn's snapshots were taken in. */
+  workspacePath: string
+  /** The thread's latest journal sequence when it was recorded: any entry since (Undo, Publish, a revert) ends it. */
+  journalSequence: number
+  /** `workspace.json`'s generation when it was recorded. */
+  generation: number
+  /** The execution context the next turn runs in: the last one, with the branch and HEAD the end recorded. */
+  workspace: WorkspaceExecutionContext
+  /**
+   * Set at the settle: the turn that may use it, the queued message the settle's drain claimed (its item and the claim's
+   * token, which a released and claimed-again item never has again) or one of these wakes.
+   */
+  armed?: { queueItemId: string; claimToken: string } | { wakeRunIds: string[] }
+}
+
+/** A context without what only the turn that made it says (`startNote`, `workspaceNote`). */
+function withoutTurnNotes(context: WorkspaceExecutionContext): WorkspaceExecutionContext {
+  const { startNote: _start, workspaceNote: _note, ...rest } = context
+  return rest
+}
+
 interface SnapshotFolder {
   /** The thread's data folder. */
   directory: string
@@ -601,11 +647,6 @@ export interface OrchestratorSendOptions {
   source?: string
   forceQueue?: boolean
   clientRequestId?: string
-  /**
-   * The owner sent it from a Mousse window (`RunRecord.ownerProof`): given only by the `orchestrator.send` protocol
-   * handler, from the connection the send came in on, and written once with the run. Nothing else passes one.
-   */
-  ownerProof?: OwnerProof
   /**
    * `turn` (default) resolves with the turn's result; `ack` resolves once the send is committed
    * and its `turn.start` effect recorded (SPEC §12.7). Only the engine path honours `ack`.
@@ -948,7 +989,7 @@ interface TurnStartRequest {
   settleNotice?: SettleNoticeItem[]
   /** A mode the turn must not exceed (`OrchestratorSendOptions.permissionMode`). */
   permissionMode?: PermissionMode
-  /** A bound send (`OrchestratorSendOptions.refuseQueue`): a turn that cannot start now is refused, never queued. */
+  /** A bound send (`OrchestratorSendOptions.refuseQueue`): keep its admission through setup instead of queuing it. */
   refuseQueue?: boolean
   /** A scheduled turn's model and origin; JSON-safe, so a `turn.start` effect keeps them across a restart. */
   modelOverride?: ModelOverride
@@ -990,7 +1031,10 @@ interface ContinuationTurnPayload {
   backgroundNotice?: BackgroundTaskNoticeItem[]
 }
 
-/** How long a Mousse tool call waits for the run of a turn the provider started, before it fails as usual. */
+/**
+ * How long a Mousse tool call waits for a turn the provider started to get a run, before it fails as usual. A run
+ * that is recorded and not over is waited for as long as it takes; this only checks it again at this interval.
+ */
 const CONTINUATION_CALL_WAIT_MS = 10_000
 /** How long a turn's start waits for its running list (`runningNoteFor`) before it starts without the note. */
 const RUNNING_NOTE_BUDGET_MS = 2_500
@@ -1118,6 +1162,8 @@ const QUEUED_ROW_RELEASE_RETRY_MS = 2_000
 const QUEUE_REPAIR_ATTEMPTS = 6
 /** How often a message queued behind the thread lease looks whether another process released it. */
 const LEASE_WAIT_POLL_MS = 500
+/** A turn's setup step (making its worktree, its snapshot) is named under Working once it has taken this long. */
+const SETUP_STEP_SHOWN_MS = 1_000
 /**
  * The longest a lease wait goes between looks while a turn of the thread is only admitted (it may wait minutes for its
  * folders or an unplugged drive): from LEASE_WAIT_POLL_MS the interval doubles up to this.
@@ -1207,6 +1253,8 @@ function durableSendInput(input: OrchestratorSendInput): OrchestratorSendInput {
 const SETUP_RETRY_FILE = 'setup-retry.json'
 /** How long a bot's or agent's `thread_create` / `thread_send` waits for the thread's worktree to be set up. */
 const SETUP_WAIT_MS = 45_000
+/** A turn whose setup waited longer than this (its folders, its drive, the thread's lease) takes no hand-off. */
+const HANDOFF_SETUP_WAIT_MS = 1_000
 /** How long a setup's outcome is kept for a waiter that asks after it ended. */
 const SETUP_OUTCOME_KEEP_MS = 5 * 60_000
 
@@ -1928,6 +1976,71 @@ export class OrchestratorService extends EventEmitter {
     this.running = running
   }
 
+  /** What threads' agents left running in the background (`monitor_start`, `background_run`, `keep_working`). */
+  private monitors: ThreadMonitors | null = null
+
+  setMonitors(monitors: ThreadMonitors | null): void {
+    this.monitors = monitors
+  }
+
+  /** Threads' agents' own wake-ups (`wake`): shown with the thread's background work, and cancelled by its Stop. */
+  private threadWakes: ThreadWakes | null = null
+
+  setThreadWakes(wakes: ThreadWakes | null): void {
+    this.threadWakes = wakes
+  }
+
+  /** The thread's background work at a glance (counts and the latest event), or undefined when nothing runs. */
+  monitorSummary(threadId: string): MonitorSummary | undefined {
+    if (!this.monitors?.has(threadId)) return undefined
+    return this.monitors.summary(threadId)
+  }
+
+  /**
+   * What the thread runs in the background besides its subagents, as the composer's status row shows it: its agent's
+   * monitors, background commands and holds, and whether its provider still runs background work.
+   */
+  backgroundWork(threadId: string): ThreadBackgroundWork {
+    const monitors = this.monitors
+    const items = (monitors?.list(threadId) ?? []).map((view) => ({
+      id: view.id,
+      kind: view.kind,
+      description: view.description,
+      ...(view.command ? { command: view.command } : {}),
+      ...(view.url ? { url: view.url } : {}),
+      startedAt: view.startedAt,
+      until: view.until,
+      ...(view.latest ? { latest: view.latest } : {})
+    }))
+    const latest = items.length ? monitors?.summary(threadId).latest : undefined
+    // Its wake-ups still to come, after what runs: each says when, or what it waits for and when it gives up.
+    const wakes = (this.threadWakes?.list(threadId) ?? []).map((wake) => ({
+      id: wake.wakeId,
+      kind: 'wake' as const,
+      description: wake.brief.replace(/\s+/g, ' ').trim().slice(0, 120),
+      ...(wake.waitsFor ? { waitsFor: wake.waitsFor } : {}),
+      startedAt: wake.setAt,
+      until: wake.dueAt
+    }))
+    return { threadId, items: [...items, ...wakes], providerWork: this.providerBackground.has(threadId), ...(latest ? { latest } : {}) }
+  }
+
+  /** What the thread runs in the background changed: the app is told (`thread.backgroundWork`). */
+  backgroundWorkChanged(threadId: string): void {
+    this.emit('background-work', { threadId })
+  }
+
+  /**
+   * The person stops one piece of the thread's background work from the app: a monitor, a background command or a hold
+   * by its id (the agent is told with its next turn), or the provider's own background work (`PROVIDER_BACKGROUND_ID`).
+   * False when it is not running.
+   */
+  async stopBackground(threadId: string, id: string): Promise<boolean> {
+    if (id === PROVIDER_BACKGROUND_ID) return this.providerBackground.has(threadId) ? this.stopProviderWork(threadId) : false
+    if (this.threadWakes?.cancel(threadId, id)) return true
+    return Boolean(this.monitors?.stopByPerson(threadId, id))
+  }
+
   /**
    * The folders a turn works in and whose running list it gets: a thread's own folder and its project's; a bot's files
    * folder and the activation's scratch folder. Subagents sharing their parent's folder get the parent's list.
@@ -1955,7 +2068,12 @@ export class OrchestratorService extends EventEmitter {
     const { scope, viewer } = this.runningScope(turn)
     const entries = await running.list(scope)
     const sources = this.runningSources()
-    return kind === 'note' ? runningNote(entries, viewer, sources, Date.now()) : runningListText(entries, viewer, sources, Date.now())
+    const text = kind === 'note' ? runningNote(entries, viewer, sources, Date.now()) : runningListText(entries, viewer, sources, Date.now())
+    // Its WebSocket monitors and keep_working holds run no process, so the list above cannot show them.
+    const own = turn.bot ? [] : (this.monitors?.list(turn.threadId) ?? []).filter((view) => view.kind === 'url' || view.kind === 'keep_working')
+    if (!own.length) return text
+    const lines = own.map((view) => `- ${view.kind === 'url' ? `WebSocket monitor ${view.id}: ${view.description} (${view.url})` : `keep_working hold ${view.id}: ${view.description}`}, until ${view.until}`)
+    return [text, 'Also running for this thread (background_stop stops one by its id):', ...lines].filter(Boolean).join('\n')
   }
 
   /** The turn's running note, given up after `RUNNING_NOTE_BUDGET_MS` so a slow process listing never holds the turn. */
@@ -2085,26 +2203,11 @@ export class OrchestratorService extends EventEmitter {
   setHarness(harness: HarnessGateway): void {
     this.harness.setLiveHost(null)
     this.harness.setMcpAttachment(null)
-    this.harness.setRunProvenance?.(null)
     this.harness = harness
     this.attachLiveHost()
     this.harness.setMcpAttachment(this.mcpAttachment)
-    // Turn admission reads a run's provenance from the run store as it is now (`ownerOnly.ts`).
-    this.harness.setRunProvenance?.((runId) => this.runProvenance(runId))
   }
 
-  /** What the gateway's owner check reads of a run, from the run store; undefined without a run engine or run. */
-  private runProvenance(runId: string): RunProvenance | undefined {
-    const run = this.runEngine?.getRun(runId)
-    if (!run) return undefined
-    return {
-      source: run.source,
-      clientRequestId: run.clientRequestId,
-      ...(run.ownerProof ? { ownerProof: run.ownerProof } : {}),
-      ...(run.outcome?.continuationOf ? { continuationOf: run.outcome.continuationOf } : {}),
-      ...(run.outcome?.sentByAgent ? { sentByAgent: true } : {})
-    }
-  }
   /** Runtimes that keep a live process per thread report their background work and the turns they start themselves here. */
   private attachLiveHost(): void {
     this.harness.setLiveHost({
@@ -2387,8 +2490,8 @@ export class OrchestratorService extends EventEmitter {
   /** The clock saved queue holds are renewed and judged by (tests move it). */
   private queueHoldClock: () => number = () => Date.now()
 
-  /** The phase a running turn was in when it asked the person something (`setAwaitingInput`, `inputAnswered`). */
-  private readonly phaseBeforeInput = new Map<string, { phase: TurnPhase; turnId: string | null; activeMessageId?: string }>()
+  /** The turn state a thread was in when it asked the person something (`setAwaitingInput`, `inputAnswered`). */
+  private readonly phaseBeforeInput = new Map<string, TurnState>()
 
   /** `blockedOnWait`: every running tool call only waits, so the thread shows Waiting. */
 
@@ -2428,6 +2531,46 @@ export class OrchestratorService extends EventEmitter {
     else if (existing?.turnId) this.runHeartbeats.delete(existing.turnId)
     this.emit('turn-state', state)
     this.runtimeManager?.setActivity(threadId, turnPhaseActivity(phase, patch?.blockedOnWait))
+  }
+
+  /**
+   * The end of a thread's last turn, handed to the turn its settle starts (`TurnHandoff`), by thread. Set when a turn's
+   * checkpoint completes, armed or dropped at its settle, and taken (used or not) by the next turn that starts.
+   */
+  private readonly turnHandoffs = new Map<string, TurnHandoff>()
+
+  /** Setup steps of turns that have not started yet, by thread (`beginSetupStep`). */
+  private readonly setupSteps = new Map<string, { turnId: string; timer?: ReturnType<typeof setTimeout> }>()
+
+  /**
+   * A turn's setup began a step that can take long (`TurnStep` `preparing`). It is shown, with phase `queued`, only
+   * once it has taken `SETUP_STEP_SHOWN_MS`, so a quick setup never flashes a line by; a later step replaces it, and
+   * the turn's start ends it (`endSetupStep`). Costs a timer: nothing waits for it.
+   */
+  private beginSetupStep(threadId: string, turnId: string, what: TurnSetupStep): void {
+    const previous = this.setupSteps.get(threadId)
+    if (previous?.timer) clearTimeout(previous.timer)
+    const entry: { turnId: string; timer?: ReturnType<typeof setTimeout> } = { turnId }
+    entry.timer = setTimeout(() => {
+      entry.timer = undefined
+      if (this.setupSteps.get(threadId) !== entry) return
+      // Never over a turn that runs, this one's once started or another's.
+      const current = this.turnStates.get(threadId)
+      if (current && isTurnActivePhase(current.phase) && (current.phase !== 'queued' || current.turnId !== turnId)) return
+      this.setTurnPhase(threadId, 'queued', { turnId, step: { kind: 'preparing', what } })
+    }, SETUP_STEP_SHOWN_MS)
+    entry.timer.unref?.()
+    this.setupSteps.set(threadId, entry)
+  }
+
+  /** The setup is over. `abandoned`: its turn never started, so a step it showed goes and the thread is idle again. */
+  private endSetupStep(threadId: string, abandoned = false): void {
+    const entry = this.setupSteps.get(threadId)
+    if (!entry) return
+    if (entry.timer) clearTimeout(entry.timer)
+    this.setupSteps.delete(threadId)
+    const current = this.turnStates.get(threadId)
+    if (abandoned && current?.phase === 'queued' && current.turnId === entry.turnId && current.step?.kind === 'preparing') this.setTurnPhase(threadId, 'idle')
   }
 
   /**
@@ -2485,7 +2628,7 @@ export class OrchestratorService extends EventEmitter {
 
   setAwaitingInput(threadId: string): void {
     const existing = this.turnStates.get(threadId)
-    if (existing && isTurnActivePhase(existing.phase)) this.phaseBeforeInput.set(threadId, { phase: existing.phase, turnId: existing.turnId, ...(existing.activeMessageId ? { activeMessageId: existing.activeMessageId } : {}) })
+    if (existing && existing.phase !== 'awaiting_input') this.phaseBeforeInput.set(threadId, existing)
     this.setTurnPhase(threadId, 'awaiting_input')
   }
 
@@ -2493,13 +2636,30 @@ export class OrchestratorService extends EventEmitter {
    * The thread's last question or approval was answered: a turn that still runs goes back to the phase it asked from.
    * Without this it reads as waiting for an answer until the provider sends its next event (a whole command, after an
    * approved Bash), and the composer queues what the person meant as a steer.
+   *
+   * A request asked while no turn runs (the provider's own background work after its turn ended) puts back the state
+   * the thread had before it, else the thread and every parent above it would wait on the person until its next turn.
+   * A finished turn comes back quiet, not Done: the person has just been in the thread.
    */
   inputAnswered(threadId: string): void {
     const before = this.phaseBeforeInput.get(threadId)
     this.phaseBeforeInput.delete(threadId)
     const existing = this.turnStates.get(threadId)
-    if (existing?.phase !== 'awaiting_input' || !existing.turnId || !this.sessions.get(threadId)?.activeTurn) return
-    const same = before && before.turnId === existing.turnId
+    if (existing?.phase !== 'awaiting_input') return
+    // Asked from a phase that was not a running turn's (a turn's end can leave its session's turn set a moment longer).
+    const askedInTurn = !before || isTurnActivePhase(before.phase)
+    if (!askedInTurn || !existing.turnId || !this.sessions.get(threadId)?.activeTurn) {
+      if (!before || before.phase === 'completed' || before.phase === 'idle') {
+        this.setTurnPhase(threadId, 'idle')
+        return
+      }
+      const state: TurnState = { ...before, updatedAt: new Date().toISOString() }
+      this.turnStates.set(threadId, state)
+      this.emit('turn-state', state)
+      this.runtimeManager?.setActivity(threadId, turnPhaseActivity(state.phase))
+      return
+    }
+    const same = before && isTurnActivePhase(before.phase) && before.turnId === existing.turnId
     this.setTurnPhase(threadId, same ? before.phase : 'thinking', same && before.activeMessageId ? { activeMessageId: before.activeMessageId } : undefined)
   }
 
@@ -2893,6 +3053,28 @@ export class OrchestratorService extends EventEmitter {
       })
     })
     const onEvent = (event: ThreadEvent): void => {
+      // A newly delegated child run begins in `queued` while its turn waits to be claimed or sets up its worktree.
+      // Report its turn state immediately so opening the subagent from Nest shows Working / Starting… instead of an
+      // empty chat. Settle it if the run ends before the turn executor ever moves it out of `queued`.
+      if (event.type === 'run.created') {
+        const run = event.payload as Partial<RunRecord> | undefined
+        if (run?.source === 'delegation' && run.status === 'queued' && typeof run.runId === 'string' && !isTurnActivePhase(this.turnStates.get(event.threadId)?.phase ?? 'idle')) {
+          this.setTurnPhase(event.threadId, 'queued', { turnId: run.runId })
+        }
+      }
+      if (event.type === 'run.status') {
+        const run = event.payload as Partial<RunRecord> | undefined
+        const current = this.turnStates.get(event.threadId)
+        if (run?.status && TERMINAL_RUN_STATUSES.has(run.status) && current?.phase === 'queued' && current.turnId === run.runId) {
+          if (run.status === 'completed') this.setTurnPhase(event.threadId, 'completed', { turnId: run.runId })
+          else if (run.status === 'failed' || run.status === 'uncertain') {
+            const error = typeof run.outcome?.error === 'string' ? run.outcome.error : undefined
+            this.setTurnPhase(event.threadId, 'failed', { turnId: run.runId, ...(error ? { error } : {}) })
+          } else {
+            this.setTurnPhase(event.threadId, 'idle')
+          }
+        }
+      }
       // Running delegated tasks wake the parent when they finish; until then its thread is Waiting.
       if (event.type === 'delegation.status') {
         this.runtimeManager?.setPendingDelegations(event.threadId,
@@ -3074,6 +3256,7 @@ export class OrchestratorService extends EventEmitter {
     if (active === this.providerBackground.has(threadId)) return
     if (active) this.providerBackground.add(threadId)
     else this.providerBackground.delete(threadId)
+    this.backgroundWorkChanged(threadId)
     try {
       this.runtimeManager?.setPendingBackgroundWork(threadId, active)
     } catch (error) {
@@ -3168,14 +3351,33 @@ export class OrchestratorService extends EventEmitter {
     let settle!: (state: { runId: string | null }) => void
     const done = new Promise<{ runId: string | null }>((resolve) => { settle = resolve })
     // Claude keeps working while the run is made. Mousse tool calls it makes wait for the run to be
-    // active, so they act as it, not as a run that just ended or as no one; a run that never comes
-    // frees them after a while.
-    const timer = setTimeout(() => settle({ runId: null }), this.continuationCallWaitMs)
+    // active, so they act as it, not as a run that just ended or as no one. A run that is recorded and not
+    // over is on its way, however long the thread is busy or its setup takes, and its effect ends the hold
+    // either way: its calls keep waiting. Only a run that was never recorded, or that ended, frees them.
+    let recordedRunId: string | undefined
+    let timer: ReturnType<typeof setTimeout>
+    const expire = (): void => {
+      let run: ReturnType<typeof engine.getRun> | undefined
+      try {
+        run = recordedRunId ? engine.getRun(recordedRunId) : undefined
+      } catch {
+        // The engine is closed (the daemon is stopping): the run will not come.
+        run = undefined
+      }
+      if (run && !TERMINAL_RUN_STATUSES.has(run.status)) {
+        timer = setTimeout(expire, this.continuationCallWaitMs)
+        timer.unref?.()
+        return
+      }
+      settle({ runId: null })
+    }
+    timer = setTimeout(expire, this.continuationCallWaitMs)
     timer.unref?.()
     this.pendingContinuations.set(info.id, { threadId, reserved, done, settle: (runId) => { clearTimeout(timer); settle({ runId }) } })
     void engine.dispatch({ kind: 'send', threadId, clientRequestId: `continuation:${info.id}`, source: 'provider-continuation' })
       .then((result) => {
         if (result.status !== 'accepted') throw new Error(result.reason)
+        recordedRunId = result.runId
         const backgroundNotice = backgroundNoticeOf(info)
         const payload: ContinuationTurnPayload = { kind: 'continuation', threadId, runId: result.runId, continuationId: info.id, note, ...(backgroundNotice.length ? { backgroundNotice } : {}) }
         engine.outbox.enqueue({ effectId: `effect:${result.runId}:turn.start:1`, threadId, runId: result.runId, kind: 'turn.start', payload })
@@ -3508,11 +3710,15 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  /** The threads whose runs this boot cut off (`recoverRunEngineOnBoot`): the restart settles their agents and tasks too. */
+  restartCutOffThreads: string[] = []
+
   /** Boot reconciliation: runs the previous daemon left active become interrupted. */
   recoverRunEngineOnBoot(): string[] {
     const engine = this.runEngine
     if (!engine) return []
-    const { interrupted } = engine.reconcileOnBoot({ queued: (run) => this.queueHoldsRun(run.threadId, run.runId) })
+    const { interrupted, uncertain } = engine.reconcileOnBoot({ queued: (run) => this.queueHoldsRun(run.threadId, run.runId) })
+    this.restartCutOffThreads = [...new Set([...interrupted, ...uncertain].map((runId) => engine.getRun(runId)?.threadId).filter((id): id is string => Boolean(id)))]
     this.recoverGoalsOnce()
     this.writeRestartTranscripts()
     for (const runId of interrupted) {
@@ -3973,17 +4179,21 @@ export class OrchestratorService extends EventEmitter {
       // Without a run engine there is only the local turn and its queue.
       const ended = this.endFolderWaits([threadId])
       this.endTurnSetups([threadId])
+      const monitorsStopped = this.stopMonitors([threadId], reason) > 0
       const aborted = this.abortActiveTurn(threadId, { clearQueue: opts.clearQueue })
       if (aborted) this.showStopped(threadId, stoppedBy)
-      return { ok: aborted || ended || compactionStopped, status: 'stopped', replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
+      return { ok: aborted || ended || compactionStopped || monitorsStopped, status: 'stopped', replayed: false, threadId, threads: [threadId], activeRuns: [], cancelledRuns: [], delegations: [] }
     }
     const result = engine.stopSubtree({ threadId, reason, ...opts })
     if (result.status !== 'stopped') return { ok: false, ...result }
     // Work still waiting for its folder's volume (a pending macOS permission prompt) never starts, nor does a turn still
     // waiting to be set up (its repository held by another operation).
+    // And what they left running in the background (monitors, background commands, keep_working holds).
+    let monitorsStopped = 0
     if (!result.replayed) {
       this.endFolderWaits(result.threads)
       this.endTurnSetups(result.threads)
+      monitorsStopped = this.stopMonitors(result.threads, reason)
     }
     // The Stop is recorded (every thread of the subtree has a higher generation): a pull request watch on any of them ends now.
     this.emit('threads-stopped', { threadIds: [...result.threads] })
@@ -4044,8 +4254,47 @@ export class OrchestratorService extends EventEmitter {
       // And the threads they launched on other computers, there (kept until it is delivered).
       this.stopRemoteLaunches(result.threads, reason === 'deleted' || reason === 'expired' ? reason : 'stopped')
     }
-    const stoppedAnything = aborted || compactionStopped || worked.some(Boolean) || result.activeRuns.length + result.cancelledRuns.length + result.delegations.length > 0
+    const stoppedAnything = aborted || compactionStopped || monitorsStopped > 0 || worked.some(Boolean) || result.activeRuns.length + result.cancelledRuns.length + result.delegations.length > 0
     return { ok: stoppedAnything, ...result }
+  }
+
+  /**
+   * Ends the monitors, background commands and `keep_working` holds of stopped threads, and cancels their wake-ups. Each
+   * thread is told with its next turn (a Stop never wakes it); a deleted thread is told nothing. How many ended.
+   */
+  private stopMonitors(threadIds: readonly string[], reason: string): number {
+    // A Stop that only cancelled wake-ups still stopped something.
+    let stopped = this.cancelWakes(threadIds, reason)
+    const monitors = this.monitors
+    if (!monitors) return stopped
+    for (const id of threadIds) {
+      try {
+        stopped += monitors.stopThread(id, reason !== 'thread_deleted' && reason !== 'deleted')
+      } catch (error) {
+        console.warn('a stopped thread\'s monitors could not be stopped', { threadId: id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return stopped
+  }
+
+  /**
+   * Cancels the wake-ups of stopped threads: a person's or an agent's Stop, an archive or a delete. Each thread is told
+   * once with its next turn (a Stop never wakes it); a deleted one is told nothing. A run that reached its time limit
+   * keeps them: that ends a turn, not the thread's plan to carry on.
+   */
+  private cancelWakes(threadIds: readonly string[], reason: string): number {
+    const wakes = this.threadWakes
+    if (!wakes || reason === 'time_limit') return 0
+    const deleted = reason === 'thread_deleted' || reason === 'deleted'
+    let cancelled = 0
+    for (const id of threadIds) {
+      try {
+        cancelled += wakes.stopThread(id, !deleted, reason === 'settled' ? 'the thread was archived' : 'the thread was stopped')
+      } catch (error) {
+        console.warn('a stopped thread\'s wake-ups could not be cancelled', { threadId: id, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return cancelled
   }
 
   /**
@@ -4237,9 +4486,9 @@ export class OrchestratorService extends EventEmitter {
    * Stop's interrupt is killed. True when there was a process to end. What could not be ended is said
    * in the thread, so it never looks stopped while something still runs. Never throws.
    */
-  async stopProviderWork(threadId: string): Promise<boolean> {
+  async stopProviderWork(threadId: string, instanceId?: string): Promise<boolean> {
     try {
-      return (await this.harness.stopThread(threadId)) === 'stopped'
+      return (await this.harness.stopThread(threadId, instanceId)) === 'stopped'
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.warn('provider stop failed', { threadId, error: message })
@@ -4478,8 +4727,9 @@ export class OrchestratorService extends EventEmitter {
       ...(input.onPublishApplet ? { onPublishApplet: input.onPublishApplet } : {}),
       // A run nobody answers: Mousse tools that wait for the user are refused, on every transport.
       ...(input.approvals === 'never' ? { approvals: 'never' as const } : {}),
-      // A bot lists and loads only the skills it was granted, and an MCP result's images reach it only on a model that sees them.
-      ...(registered.bot ? { ...grantedSkills(skills, registered.bot.skills), toolImages: this.harness.catalog.toolImages(input.instanceId, input.model) } : skills)
+      // A bot lists and loads every skill unless its owner switched skills off (then none), else only those it was granted;
+      // an MCP result's images reach it only on a model that sees them.
+      ...(registered.bot ? { ...(registered.bot.allSkills ? skills : grantedSkills(skills, registered.bot.skills)), toolImages: this.harness.catalog.toolImages(input.instanceId, input.model) } : skills)
     }) ?? registered
     const descriptor = typeof turn.mode === 'string' ? this.modeRegistry.getModeSync(turn.mode, { projectPath: turn.projectPath }) : undefined
     // Agent and Plan run natively in the runtime; another mode's own instructions go into the preamble. A person's
@@ -4682,6 +4932,8 @@ export class OrchestratorService extends EventEmitter {
       skills: () => this.skillsRegistry,
       quickActions: new QuickActionTools(questionApproval(this.questions), (action) => this.emit('quick-action-created', action)),
       running: (turn) => this.runningText(turn, 'list'),
+      monitors: () => this.monitors ?? undefined,
+      threadWakes: () => this.threadWakes ?? undefined,
       web: new WebTools(this.providerAuth.credentials),
       devGui: new DevGuiTools(),
       // The git app tools read the project through their own scoped Git read (`git/scopedRead`).
@@ -5799,6 +6051,16 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * A person who writes in an archived thread wants it back: it is unarchived through the app's own Unarchive
+   * (`settleThread`) before their message or steer runs: from a window, their phone or the CLI. A thread whose expiry
+   * passed stays archived; its send is refused. Agents and bots never come here (`thread_archived`).
+   */
+  async unarchiveForPerson(threadId: string): Promise<void> {
+    if (!this.threadStore?.getThread(threadId)?.settledAt || this.isExpired(threadId)) return
+    await this.settleThread(threadId, false)
+  }
+
+  /**
    * `thread_archive` of another thread: an agent's turn the person started, or the owner's bot from its chat in a turn
    * that may act on threads (`botSenderOf`), archives or unarchives it through the app's own Archive (`settleThread`). An
    * agent's archive never ends work: a thread with a run working or paused, there or in a subagent below it, is refused,
@@ -6583,6 +6845,8 @@ export class OrchestratorService extends EventEmitter {
    * admission its send held is released, and a queue item whose run already ended leaves the queue.
    */
   private skipUnstartableTurn(payload: TurnStartPayload, entry: TurnResult | undefined, run: RunRecord): void {
+    // The turn a hand-off was armed for never starts: nothing else may use it.
+    this.turnHandoffs.delete(payload.threadId)
     if (entry && this.turnResults.get(payload.runId) === entry) this.turnResults.delete(payload.runId)
     const session = this.boundSession.threadId === payload.threadId ? this.boundSession : this.sessions.get(payload.threadId)
     if (session && entry?.payload.admissionHeld && !session.activeTurn) {
@@ -6608,6 +6872,7 @@ export class OrchestratorService extends EventEmitter {
    */
   private abandonTurnStart(runId: string, entry: TurnResult): void {
     entry.abandoned = true
+    this.turnHandoffs.delete(entry.payload.threadId)
     this.turnResults.delete(runId)
     const { payload } = entry
     try {
@@ -6923,10 +7188,9 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** `runs.resumeNow`: continue the paused run `runId` now. Refused `conflict` when it is not paused. */
-  async resumePausedRun(runId: string, ownerProof?: OwnerProof): Promise<{ runId: string; effectId: string }> {
+  async resumePausedRun(runId: string): Promise<{ runId: string; effectId: string }> {
     const engine = this.requireRunEngine()
-    // The owner's own press (a Mousse window's) is kept on the pause: the continue turn carries it.
-    const effect = engine.requestResume(runId, true, ownerProof)
+    const effect = engine.requestResume(runId, true)
     if (this.effectsEnabled()) this.effectWorker?.notify()
     else await this.executeResumeEffect(effect)
     return { runId, effectId: effect.effectId }
@@ -7491,11 +7755,12 @@ export class OrchestratorService extends EventEmitter {
    * parent's HEAD recorded when it was started, under the Mousse home, whatever the turn's mode. Its `mousse/` branch is named
    * from its task (`nameFrom`), as any thread's is from its first message.
    */
-  private async seedSubagentWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease'], nameFrom?: string): Promise<void> {
+  private async seedSubagentWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease'], nameFrom?: string, onStep?: (step: TurnSetupStep) => void): Promise<void> {
     const startSha = this.threadStore?.getThread(threadId)?.workspaceBinding?.startSha
     if (!startSha) return
     const manager = new ThreadWorkspaceManager(threadDir)
     if (manager.load()) return
+    onStep?.('worktree')
     await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, startSha, { nameFrom })
   }
 
@@ -7536,6 +7801,7 @@ export class OrchestratorService extends EventEmitter {
       // Never for a private thread: `delegateRemoteTask` refuses it before the engine gets here.
       if (this.isLocalOnly(parentThread.id)) throw new Error(PRIVATE_THREAD_REMOTE_REFUSAL)
       const child = this.threadStore.createThread(title, parentThread.projectId, undefined, {
+        started: true,
         lineage: lineageForChild(parentThread),
         ownerThreadId: parentThread.id,
         workspaceBinding: { policy: request.workspace === 'shared' ? 'shared' : 'isolated' },
@@ -7565,6 +7831,7 @@ export class OrchestratorService extends EventEmitter {
     // With "Give each subagent its own worktree" on, the child's worktree starts at the parent's HEAD as it is now.
     const startSha = request.workspace === 'isolated' && this.subagentWorktreesOn() ? this.parentHeadNow(request.parentThreadId) : undefined
     const child = this.threadStore.createThread(title, parentThread.projectId, undefined, {
+      started: true,
       lineage: lineageForChild(parentThread),
       ownerThreadId: parentThread.id,
       // `access` is kept whether or not the parent has a folder: a read-only child stays read-only without one.
@@ -8081,7 +8348,7 @@ export class OrchestratorService extends EventEmitter {
     return text || this.threadStore?.getThread(threadId)?.name
   }
 
-  private async seedForkWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease']): Promise<void> {
+  private async seedForkWorkspace(threadId: string, projectPath: string, threadDir: string, signal?: AbortSignal, lease?: ThreadSession['executionLease'], onStep?: (step: TurnSetupStep) => void): Promise<void> {
     const engine = this.runEngine
     const fork = engine?.transfers.listPending(threadId, 'fork')[0]
     if (!engine || !fork || fork.payload.seed) return
@@ -8109,6 +8376,7 @@ export class OrchestratorService extends EventEmitter {
         // A checkpoint is a snapshot: the fork's worktree is made at the commit the snapshot was taken on (the source's
         // HEAD then) and the snapshot's files are written over it, so no snapshot commit becomes the fork's branch.
         const seedHead = checkpoint ? (await snapshotOriginAsync(sourceWorkspace?.worktreePath ?? projectPath, checkpoint.endSha)).head : undefined
+        onStep?.('worktree')
         await manager.provision(threadId, 'main', projectPath, signal, lease ?? undefined, checkpoint ? seedHead : typeof seed.sha === 'string' ? seed.sha : undefined, { ...(checkpoint ? { snapshot: checkpoint.endSha } : {}), nameFrom: this.branchNameSource(threadId), onNotice: this.restoreNotifier(threadId) })
       }
     } catch (error) {
@@ -9346,7 +9614,8 @@ export class OrchestratorService extends EventEmitter {
     try {
       const continued = engine.getRun(runId)?.outcome?.continuationOf
       const source = continued ? engine.getRun(continued) : null
-      if (source) this.addSystemMessage(source.outcome?.pause ? `Continuing run ${source.ordinal} after the usage limit reset.` : `Continuing run ${source.ordinal} after a restart.`)
+      // A bot's work that reached its runtime's step cap goes on in a fresh turn: no restart happened.
+      if (source) this.addSystemMessage(source.outcome?.pause ? `Continuing run ${source.ordinal} after the usage limit reset.` : isProviderTurnCap(source.outcome?.error) ? `Continuing run ${source.ordinal}, which took the most steps one turn may take.` : `Continuing run ${source.ordinal} after a restart.`)
     } catch (error) {
       console.warn('run engine continuation note failed', { runId, error: error instanceof Error ? error.message : String(error) })
     }
@@ -10002,14 +10271,30 @@ export class OrchestratorService extends EventEmitter {
       return migrated?.instanceId ?? migrated?.llmProvider
     }
     const switched = instanceKey(session.modelOverride) !== instanceKey(next)
-    // SPEC §16.1: one provider switch at a time; a pending handoff must be delivered or fail first.
-    const pending = switched ? this.runEngine?.handoffs.pendingForThread(threadId) : null
-    if (pending)
-      throw new DomainRpcError('handoff_pending', `Thread ${threadId} is still handing its context to ${pending.toRef.provider}; switch providers after that turn.`, { handoffId: pending.handoffId })
+    // SPEC §16.1: one provider switch at a time. A pending handoff belongs to the turn that is delivering it, which
+    // is still running: the switch waits for that turn like any other (below), and the turn after it plans its own
+    // handoff to the newest choice, so a second switch replaces the first.
+    const turnLive = switched && (session.isTurnRunning() || session.turnAdmitted || Boolean(this.runEngine?.handoffs.pendingForThread(threadId)))
+    // The running turn finishes on the provider it started on; ending that provider's process or credentials now would
+    // fail its stream and its tool calls. The switch applies to the next turn and the old provider is cleaned up when
+    // this one settles (`endSwitchedProvider`). A second switch keeps the instance the turn is really on.
+    let live: string | undefined
+    if (turnLive && !session.switchedFromInstance) {
+      try {
+        live = this.resolvedForThread(threadId).instanceId
+      } catch {
+        live = undefined
+      }
+    }
     // Written first: a conditional change (`ifRevision`) the thread on disk refuses changes nothing here either.
     const stored = next ? structuredClone(next) : undefined
     if (this.threadStore) {
       this.threadStore.updateThreadMeta(threadId, { modelOverride: stored }, opts.ifRevision !== undefined ? { ifRevision: opts.ifRevision } : {})
+    }
+    if (turnLive) {
+      if (live) session.switchedFromInstance = live
+      session.modelOverride = stored ? structuredClone(stored) : undefined
+      return session.modelOverride
     }
     // The old provider's process is stopped while the thread still resolves to it; its helpers end with it.
     if (switched) void this.stopProviderWork(threadId)
@@ -10017,6 +10302,26 @@ export class OrchestratorService extends EventEmitter {
     // SPEC §15.1: a credential belongs to a thread and provider instance; a switch revokes it.
     if (switched) this.revokeMcp(threadId)
     return session.modelOverride
+  }
+
+  /**
+   * A turn has settled after the thread was switched to another provider meanwhile: the provider it ran on ends its
+   * process and the thread's credentials are revoked, as a switch with no turn running does at once. Nothing happens
+   * when the thread went back to that provider. Runs before the queue drains, so the next turn is never caught by it.
+   */
+  private endSwitchedProvider(session: ThreadSession): void {
+    const from = session.switchedFromInstance
+    if (!from) return
+    session.switchedFromInstance = undefined
+    let current: string | undefined
+    try {
+      current = this.resolvedForThread(session.threadId).instanceId
+    } catch {
+      current = undefined
+    }
+    if (current === from) return
+    void this.stopProviderWork(session.threadId, from)
+    this.revokeMcp(session.threadId)
   }
 
   /** Bind the GUI/CLI active session to a thread (call on thread switch). */
@@ -10114,6 +10419,7 @@ export class OrchestratorService extends EventEmitter {
         console.warn('a deleted thread\'s work could not be stopped', { threadId, error: error instanceof Error ? error.message : String(error) })
       }).finally(() => setTimeout(forgetResults, 2_000).unref?.())
     }
+    this.turnHandoffs.delete(threadId)
     const session = this.sessions.get(threadId)
     if (session) {
       session.deleted = true
@@ -10388,7 +10694,7 @@ export class OrchestratorService extends EventEmitter {
   getMessageQueue(threadId?: string): QueuedMessage[] {
     const id = threadId ?? this.getBoundThreadId()
     if (!id) return []
-    return listPendingQueue(this.getOrCreateSession(id).queue).filter((item) => !item.internal)
+    return this.withQueueWait(id, listPendingQueue(this.getOrCreateSession(id).queue).filter((item) => !item.internal))
   }
 
   listQueue(threadId: string): QueuedMessage[] {
@@ -10398,8 +10704,47 @@ export class OrchestratorService extends EventEmitter {
   private emitQueueUpdated(threadId: string, items: QueuedMessage[]): void {
     // A message an agent watches may have moved in its queue (an edit, a steer, a hand-back, a removal).
     this.settleNotices?.touch(threadId)
-    const pending = listPendingQueue(items).filter((item) => !item.internal)
-    this.emit('queue-updated', { threadId, items: pending })
+    // Every change sends the whole queue: images past a preview budget go by name and type (`withImageBudget`).
+    const pending = withImageBudget(listPendingQueue(items).filter((item) => !item.internal))
+    const session = this.loadedSession(threadId)
+    if (session) session.queueWaitShown = this.queueWaitOf(session) ?? null
+    this.emit('queue-updated', { threadId, items: this.withQueueWait(threadId, pending) })
+  }
+
+  /**
+   * Why the thread's pending messages wait now (`QueuedMessage.waitsFor`): its last turn's reply shows complete but the
+   * turn is still finishing (its end checkpoint), or its next turn is being set up. Undefined otherwise.
+   */
+  private queueWaitOf(session: ThreadSession | undefined): QueuedMessageWait | undefined {
+    if (!session) return undefined
+    if (session.activeTurn) {
+      const phase = this.turnStates.get(session.threadId)?.phase
+      return phase === 'completed' || phase === 'failed' ? 'finish' : undefined
+    }
+    return session.setupStop ? 'setup' : undefined
+  }
+
+  /** The listed `items` with why they wait now. */
+  private withQueueWait(threadId: string, items: QueuedMessage[]): QueuedMessage[] {
+    const wait = this.queueWaitOf(this.loadedSession(threadId))
+    return items.map((item) => {
+      // A steer, or a message a Stop holds, waits for something else.
+      if (wait && item.state === 'pending' && item.intent === 'normal' && !item.heldAfterStop) return item.waitsFor === wait ? item : { ...item, waitsFor: wait }
+      if (!item.waitsFor) return item
+      const { waitsFor: _wait, ...rest } = item
+      return rest
+    })
+  }
+
+  /** Sends the queue again when why its messages wait changed (a turn starts finishing, or its setup starts or ends). */
+  private noteQueueWait(session: ThreadSession): void {
+    const wait = this.queueWaitOf(session) ?? null
+    if (wait === session.queueWaitShown) return
+    if (!listPendingQueue(session.queue).some((item) => !item.internal)) {
+      session.queueWaitShown = wait
+      return
+    }
+    this.emitQueueUpdated(session.threadId, session.queue)
   }
 
   private emitThreadMessages(threadId: string, messages: ChatMessage[], replace = false): void {
@@ -10479,9 +10824,17 @@ export class OrchestratorService extends EventEmitter {
     // Work that starts on behalf of a parent remembers the Stop generation it was queued at (the Stop fence).
     const stopGeneration = opts?.stopGeneration ?? (this.runEngine && isFencedSource(opts?.source) ? currentStopGeneration(this.runEngine.store, threadId) : undefined)
     let item: QueuedMessage
+    // The queue is saved whole on every change: what its messages' images hold together is bounded.
+    const assertImagesFit = (items: readonly QueuedMessage[]): void => {
+      if (!request.images?.length) return
+      if (imageDataChars(items) + imageDataChars([request]) > QUEUE_IMAGES_MAX_DATA_CHARS) {
+        throw knownAppError({ code: 'queue_images_full', message: 'Too many images are waiting in this thread. Send this once they have gone.' }, { category: 'unavailable', retryable: true })
+      }
+    }
     if (this.threadStore) {
       // Cross-process RMW: load disk, enqueue, save under mutation lock.
       const next = mutateDurableQueue(this.threadStore, threadId, (diskItems) => {
+        assertImagesFit(diskItems)
         const result = enqueueMessage(diskItems, {
           threadId,
           content: request.content,
@@ -10511,6 +10864,7 @@ export class OrchestratorService extends EventEmitter {
       this.emitQueueUpdated(threadId, session.queue)
       return item!
     }
+    assertImagesFit(session.queue)
     const result = enqueueMessage(session.queue, {
       threadId,
       content: request.content,
@@ -10998,7 +11352,7 @@ export class OrchestratorService extends EventEmitter {
       if ((error as { code?: unknown } | null)?.code === 'merge_back_pending') blocked = 'merge_back_pending'
     }
     return {
-      items: listPendingQueue(all).filter((item) => !item.internal),
+      items: this.withQueueWait(threadId, listPendingQueue(all).filter((item) => !item.internal)),
       claimed: listClaimedQueue(all).filter((item) => !item.internal),
       revision: queueRevision(all),
       open: blocked === undefined,
@@ -11358,7 +11712,7 @@ export class OrchestratorService extends EventEmitter {
    * by its typed error, never swapped for another provider.
    */
   private async generateTitleText(context: TitleContext, threadId: string | undefined): Promise<string | null> {
-    const text = await this.titleModelText(TITLE_SYSTEM_PROMPT, buildTitlePrompt(context), {
+    const text = await this.titleModelText(titleSystemPrompt(this.settingsStore.get().title.prompt), buildTitlePrompt(context), {
       task: 'title',
       scope: threadId ? this.threadScope(threadId) : undefined,
       sessionKey: threadId ?? `title:${context.request.slice(0, 200)}`,
@@ -11368,21 +11722,40 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /**
+   * The title model's answer when asked to name a thread's worktree branch (`branchNaming`): the same model, scope and
+   * gateway as chat titles. Undefined when no title model is chosen; the branch then keeps its temporary name. `signal`
+   * ends the request when the naming gives up waiting (`BRANCH_NAMING_TIMEOUT_MS`).
+   */
+  async askBranchName(request: { threadId: string; system: string; prompt: string }, signal?: AbortSignal): Promise<string | undefined> {
+    if (!this.hasTitleModel()) return undefined
+    return this.titleModelText(request.system, request.prompt, {
+      task: 'branch_name',
+      scope: this.threadScope(request.threadId),
+      sessionKey: request.threadId,
+      maxChars: 120,
+      ...(signal ? { signal } : {})
+    })
+  }
+
+  /**
    * One request with no tools on the title model the user chose, through the gateway's `oneShot`:
    * chat titles, pull request drafts and commit messages. The gateway resolves the selection in
    * `scope`, bounds the wait and never retries; the caller falls back when it throws.
    */
-  private async titleModelText(system: string, prompt: string, options: { task: OneShotTask; scope: ProviderScope | undefined; sessionKey: string; maxChars: number }): Promise<string> {
+  private async titleModelText(system: string, prompt: string, options: { task: OneShotTask; scope: ProviderScope | undefined; sessionKey: string; maxChars: number; signal?: AbortSignal }): Promise<string> {
+    // The title prompt is the title's own instruction (`generateTitleText`), not part of the selection.
+    const { prompt: _titlePrompt, ...selection } = this.settingsStore.get().title
     try {
       const { text } = await this.harness.oneShot({
-        selection: this.settingsStore.get().title,
+        selection,
         ...(options.scope ? { scope: options.scope } : {}),
         purpose: 'title',
         system,
         prompt,
         maxChars: options.maxChars,
         sessionKey: options.sessionKey,
-        task: options.task
+        task: options.task,
+        ...(options.signal ? { signal: options.signal } : {})
       })
       return text
     } catch (error) {
@@ -12252,6 +12625,8 @@ export class OrchestratorService extends EventEmitter {
    */
   abortActiveTurn(threadId?: string, opts?: { clearQueue?: boolean; runId?: string }): boolean {
     const id = threadId ?? this.getBoundThreadId()
+    // After a Stop the next turn reads its folder afresh.
+    if (id) this.turnHandoffs.delete(id)
     const session = id
       ? this.boundSession.threadId === id
         ? this.boundSession
@@ -12389,6 +12764,7 @@ export class OrchestratorService extends EventEmitter {
     if (wasAborted) this.returnUnreadSteerItems(session, turn.pendingSteer)
     const hadUnreadSteers = !wasAborted && this.handOffUnreadSteers(session, turn)
     if (session.activeTurn === turn) session.activeTurn = null
+    this.noteQueueWait(session)
     // The agent asked to archive the thread when this turn ends.
     this.archiveAfterTurnEnds(session.threadId, turn.runId, wasAborted ? 'interrupted' : paused ? 'paused' : failed ? 'failed' : 'completed')
     // The turn's terminal write saw its unread steers and held the thread's tasks. They are queued as a
@@ -13005,6 +13381,9 @@ export class OrchestratorService extends EventEmitter {
     if (session.deleted) {
       throw new Error(`Thread deleted: ${threadId}`)
     }
+    // A person's message from a window or the CLI brings an archived thread back before it runs. Agents and bots are
+    // refused earlier (`thread_archived`) and never unarchive it.
+    if ((opts?.source === 'gui' || opts?.source === 'cli') && !opts.agent && !opts.delegation) await this.unarchiveForPerson(threadId)
     // An edited prompt is refused at once when the thread is already on another branch; its turn checks again when it
     // starts, under the thread's lease, and it never waits in the queue, where nothing would check it.
     const expectedBranch = expectedBranchOf(input)
@@ -13066,8 +13445,7 @@ export class OrchestratorService extends EventEmitter {
           : {}),
         ...(opts?.bindDelivery ? { bindDelivery: opts.bindDelivery } : {}),
         ...(queueBehindPause ? { queueBehindPause: true } : {}),
-        ...(opts?.refuseWhilePaused ? { refuseWhilePaused: true } : {}),
-        ...(opts?.ownerProof && !opts.agent ? { ownerProof: opts.ownerProof } : {})
+        ...(opts?.refuseWhilePaused ? { refuseWhilePaused: true } : {})
       }, { admit })
       if (result.status === 'rejected' && CONTINUATION_REFUSALS.has(result.reason))
         throw new DomainRpcError(result.reason, `Cannot continue run ${opts?.continuationOfRunId}: ${result.reason}.`)
@@ -13409,7 +13787,7 @@ export class OrchestratorService extends EventEmitter {
       continuationId?: string
       /** A mode this turn must not exceed (`OrchestratorSendOptions.permissionMode`). */
       permissionMode?: PermissionMode
-      /** A bound send: a turn that cannot start now is refused with its run cancelled, never queued. */
+      /** A bound send is refused if it cannot start after setup, never queued. */
       refuseQueue?: boolean
       /** A bot dispatch (PR 6 §4): its policy, authority and scratch folder. */
       bot?: PreparedBotTurn
@@ -13472,6 +13850,7 @@ export class OrchestratorService extends EventEmitter {
       throw error
     } finally {
       session.setupStop = null
+      this.noteQueueWait(session)
       // A queue item that was never accepted stays on the queue and keeps its run queued.
       const requeued = turnResponse?.queued === true ||
         (opts?.queueItemId !== undefined && session.queue.some((item) => item.id === opts.queueItemId))
@@ -13485,23 +13864,125 @@ export class OrchestratorService extends EventEmitter {
         if (!session.abortRequested && !session.stopping) session.drainAfterSettle = true
         session.steerOnStart = []
       }
+      // Read before the reset below: a Stop that reached this turn drops its hand-off (`settleTurnHandoff`).
+      const stoppedAtSettle = session.abortRequested || session.stopping
       session.turnAdmitted = false
       session.admissionRunId = undefined
       session.abortRequested = false
       session.stopping = false
       session.sentAfterStop = []
+      this.endSwitchedProvider(session)
       this.effectWorker?.notify()
       // Post-turn drains are deferred to here: while admission is held the drain would see a
       // running turn and skip, stranding queued messages.
+      let claimedAtSettle: { queueItemId: string; claimToken: string } | undefined
       if (session.drainAfterSettle) {
         session.drainAfterSettle = false
         try {
-          this.scheduleQueueDrain(session)
+          this.scheduleQueueDrain(session, { onClaimed: (queueItemId, claimToken) => { claimedAtSettle = { queueItemId, claimToken } } })
         } catch (error) {
           logDebug('OrchestratorService', 'post-turn queue drain failed to schedule', error, { threadId: session.threadId })
         }
       }
+      this.settleTurnHandoff(session, opts?.runId, Boolean(turnFailure) || requeued || stoppedAtSettle, claimedAtSettle)
     }
+  }
+
+  /**
+   * The thread's last turn completed with its end recorded in its worktree: the turn its settle starts, with nothing
+   * done to the worktree by Mousse in between, starts from that end instead of reading and snapshotting the worktree
+   * again (`TurnHandoff`). Only a worktree's turn whose end is a real, reversible snapshot hands off.
+   */
+  private recordTurnHandoff(session: ThreadSession, end: { runId: string; action: ThreadAction; conversationBranchId: string; workspacePath: string; workspace: WorkspaceExecutionContext }): void {
+    this.turnHandoffs.delete(session.threadId)
+    // A Stop that reached the turn while its end was recorded: the next turn reads the folder afresh.
+    if (session.abortRequested || session.stopping || session.deleted) return
+    const threadDir = this.resolveThreadDir(session.threadId)
+    if (!threadDir || end.action.state !== 'completed' || end.action.reversible === false || !end.action.endSha) return
+    if (end.workspace.lifecycle !== 'ready' || end.workspace.placement === 'project-folder' || !end.workspace.workspacePath) return
+    if (existsSync(join(threadDir, UNRECORDED_END_FILE))) return
+    const record = new ThreadWorkspaceManager(threadDir).load()
+    if (!record || record.snapshotSha !== end.action.endSha || record.worktreePath !== end.workspace.workspacePath) return
+    this.turnHandoffs.set(session.threadId, {
+      runId: end.runId,
+      endSha: end.action.endSha,
+      actionId: end.action.id,
+      conversationBranchId: end.conversationBranchId,
+      workspacePath: end.workspacePath,
+      journalSequence: new ThreadJournal(threadDir, { readOnly: true }).latestSequence(),
+      generation: record.generation ?? 0,
+      workspace: { ...withoutTurnNotes(end.workspace), ...(end.action.git?.branchAfter !== undefined ? { branch: end.action.git.branchAfter } : {}), ...(end.action.git?.headAfter ? { headSha: end.action.git.headAfter } : {}), generation: record.generation ?? 0 }
+    })
+  }
+
+  /**
+   * At a turn's settle: its hand-off goes to the turn this settle starts, or nowhere. A queued message the settle's drain
+   * admitted is that turn. Otherwise the thread's pending notices are turned into a wake now (reconciler rule 4 for
+   * this thread, instead of on the reconciler's next pass), a wake deferred while the turn ran is brought forward, and
+   * only that wake's run may use it. Nothing waiting: it is dropped.
+   */
+  private settleTurnHandoff(session: ThreadSession, runId: string | undefined, ended: boolean, claimed: { queueItemId: string; claimToken: string } | undefined): void {
+    const handoff = this.turnHandoffs.get(session.threadId)
+    const ours = handoff && !handoff.armed && handoff.runId === runId
+    if (handoff && !handoff.armed && (!ours || ended || session.deleted)) this.turnHandoffs.delete(session.threadId)
+    if (session.turnAdmitted) {
+      // Only the message this settle's drain claimed, under that claim, may use it.
+      if (ours && this.turnHandoffs.has(session.threadId)) {
+        if (claimed) handoff.armed = claimed
+        else this.turnHandoffs.delete(session.threadId)
+      }
+      return
+    }
+    if (!ours || !this.turnHandoffs.has(session.threadId)) return
+    const wakeRunIds = this.wakeThreadNow(session.threadId)
+    if (wakeRunIds.length) handoff.armed = { wakeRunIds }
+    else this.turnHandoffs.delete(session.threadId)
+  }
+
+  /**
+   * Reconciler rule 4 for one thread, now: its pending notices become a wake without waiting for the next pass, and a
+   * wake turn deferred while the thread was busy is made due now. Returns the thread's queued wake runs.
+   */
+  private wakeThreadNow(threadId: string): string[] {
+    const engine = this.runEngine
+    if (!engine || !this.effectsEnabled()) return []
+    try {
+      const now = new Date(engine.store.db.clock()).toISOString()
+      engine.outbox.bringForwardDeferred(threadId, now)
+      wakeThreads(engine.store, engine.outbox, (id) => this.capabilitiesForThread(id), now, (id) => this.awaitsAnswer(id), threadId)
+      this.effectWorker?.notify()
+      return pendingWakeEffects(engine.store, threadId).map((effect) => effect.runId).filter((id): id is string => typeof id === 'string')
+    } catch (error) {
+      logDebug('OrchestratorService', 'waking the thread at its settle failed; the reconciler does it on its next pass', error, { threadId })
+      return []
+    }
+  }
+
+  /**
+   * The hand-off for the turn starting now, taken whether it is used or not. Used only by the turn its settle armed it
+   * for, and only while nothing of Mousse's touched the worktree since: no journal entry, the same latest action and
+   * recorded snapshot, the same conversation branch. An edit made outside Mousse in the seconds between the two turns
+   * then counts as made during this one, as an edit made while a turn runs does.
+   */
+  private takeTurnHandoff(session: ThreadSession, opts: { queueItemId?: string; claimOwnerToken?: string; runId?: string } | undefined): TurnHandoff | undefined {
+    const handoff = this.turnHandoffs.get(session.threadId)
+    this.turnHandoffs.delete(session.threadId)
+    if (!handoff?.armed) return undefined
+    const armed = handoff.armed
+    const meant = 'queueItemId' in armed
+      ? opts?.queueItemId === armed.queueItemId && opts.claimOwnerToken === armed.claimToken
+      : Boolean(opts?.runId && armed.wakeRunIds.includes(opts.runId))
+    return meant ? handoff : undefined
+  }
+
+  /** Whether `handoff` still describes the worktree as Mousse last left it (`takeTurnHandoff`). */
+  private turnHandoffHolds(session: ThreadSession, handoff: TurnHandoff, threadDir: string, conversationBranchId: string): boolean {
+    if (conversationBranchId !== handoff.conversationBranchId) return false
+    const record = new ThreadWorkspaceManager(threadDir).load()
+    if (!record || record.lifecycle !== 'ready' || record.snapshotSha !== handoff.endSha || (record.generation ?? 0) !== handoff.generation || record.worktreePath !== handoff.workspace.workspacePath) return false
+    if (new ThreadJournal(threadDir, { readOnly: true }).latestSequence() !== handoff.journalSequence) return false
+    const latest = new ThreadActionService(threadDir).latest(conversationBranchId)
+    return latest?.id === handoff.actionId && latest.endSha === handoff.endSha && existsSync(handoff.workspace.workspacePath)
   }
 
   /**
@@ -13606,6 +14087,7 @@ export class OrchestratorService extends EventEmitter {
     else opts?.externalSignal?.addEventListener('abort', abort, { once: true })
     this.activeTurn = turn
     session.setupStop = null
+    this.noteQueueWait(session)
     this.applyRequestedAbort(session, turn)
     // The thread runs again: what a Stop held in its queue goes on after this turn, as after any turn that ends.
     if (!turn.abort.signal.aborted) this.releaseStopHold(session)
@@ -13671,18 +14153,30 @@ export class OrchestratorService extends EventEmitter {
   /** One turn; whatever way it ends, nothing of its app-tool context stays registered. */
   private async executeTurn(...args: Parameters<OrchestratorService['executeTurnBody']>): Promise<OrchestratorResponse> {
     const runId = args[3]?.runId
-    // A subagent that may edit its parent's folder records that folder as its turn starts and ends: its result is
-    // measured from those, never from the parent's own turn records, which say nothing once the parent's turn has ended.
-    const writer = runId ? this.sharedWriterOf(runId) : undefined
-    if (writer && runId) await this.recordSharedFolder(writer, runId, 'start')
-    try {
-      return await this.executeTurnBody(...args)
-    } finally {
-      if (runId) this.appToolTurns.dropRun(runId)
-      // A turn that completed recorded its end before its run did (`executeTurnBody`); one that failed or was stopped
-      // records it here, so a later look at its result still has it.
-      if (writer && runId && !this.sharedFolderEnded.delete(runId)) await this.recordSharedFolder(writer, runId, 'end')
-    }
+    const threadId = this.session.threadId
+    // Where the turn's start and end spend their time, logged for every thread (`turnBoundary.ts`).
+    let requestedAt: string | undefined
+    try { requestedAt = runId ? this.runEngine?.getRun(runId)?.requestedAt : undefined } catch { /* Measured without it. */ }
+    // What the turn's start and end ask Git about its folder, asked once for all their callers (`repositoryFacts.ts`).
+    return inTurnBoundary({ threadId, ...(runId ? { runId } : {}), ...(requestedAt ? { requestedAt } : {}) }, () => withRepositoryFactsScope(async () => {
+      // A subagent that may edit its parent's folder records that folder as its turn starts and ends: its result is
+      // measured from those, never from the parent's own turn records, which say nothing once the parent's turn has ended.
+      const writer = runId ? this.sharedWriterOf(runId) : undefined
+      if (writer && runId) {
+        await this.recordSharedFolder(writer, runId, 'start')
+        turnBoundaryMark(threadId, 'sharedFolder')
+      }
+      try {
+        return await this.executeTurnBody(...args)
+      } finally {
+        // A turn that ended before it started (a setup failure, a Stop, a requeue) shows no setup step any more.
+        this.endSetupStep(threadId, true)
+        if (runId) this.appToolTurns.dropRun(runId)
+        // A turn that completed recorded its end before its run did (`executeTurnBody`); one that failed or was stopped
+        // records it here, so a later look at its result still has it.
+        if (writer && runId && !this.sharedFolderEnded.delete(runId)) await this.recordSharedFolder(writer, runId, 'end')
+      }
+    }))
   }
 
   /** Runs whose turn already recorded the shared folder's end (`recordSharedFolder`), until their `executeTurn` returns. */
@@ -13769,10 +14263,28 @@ export class OrchestratorService extends EventEmitter {
       this.goalTurnEpochs.set(session.threadId, { ...(opts?.runId ? { runId: opts.runId } : {}), ...(epoch ? { epoch } : {}) })
       if (opts?.runId && epoch) this.goalRunEpochs.set(opts.runId, epoch)
     }
+    // A run started again after a restart (reconciler rule 5) whose message the transcript already has, tagged with
+    // its run, does not take it in a second time: the turn runs on it.
+    const rerunOfSavedMessage = (): boolean =>
+      !queueItemId && Boolean(opts?.runId) && Boolean(this.runEngine) && session.messages.some((message) => message.role === 'user' && message.turnId === opts?.runId)
+    // A person's message starts its thread, on top of its group, as its turn is admitted: not once the worktree and
+    // snapshot are set up, which can take a while. Until then a new chat's empty thread would still be an unstarted
+    // draft: its row would not open, and New thread would open it again instead of a fresh one. Internal wakes stay hidden.
+    const startedAtAdmission = !reuseLastUser && displayUserMessage && !rerunOfSavedMessage()
+    if (startedAtAdmission) this.touchUserActivityAndNotify(session.threadId)
     // A Stop while the turn is still being set up ends the setup's waits (`endTurnSetups`); `startTurn` then ends the
     // turn before it started.
     const setupStop = new AbortController()
     session.setupStop = setupStop
+    this.noteQueueWait(session)
+    const turnId = opts?.runId ?? uuidv4()
+    // The turn a settle started may start from the last turn's end (`TurnHandoff`). It is taken now, used or not, and
+    // used only when the setup's waits did not wait and it still holds once recovery is over. It does no setup then,
+    // so it shows no setup step from then on.
+    let handoffOffer = this.takeTurnHandoff(session, opts)
+    const setupBegan = performance.now()
+    let handoff: TurnHandoff | undefined
+    const setupStep = (step: TurnSetupStep): void => { if (!handoff) this.beginSetupStep(session.threadId, turnId, step) }
     const setupSignal = opts?.externalSignal ? AbortSignal.any([opts.externalSignal, setupStop.signal]) : setupStop.signal
     // A turn that cannot start now runs later, in its place: a claimed item goes back where it was
     // (never a replacement at the tail); anything else is queued with its run.
@@ -13835,11 +14347,22 @@ export class OrchestratorService extends EventEmitter {
     if (session.threadId !== '__unbound__') {
       const threadDir = this.resolveThreadDir(session.threadId)
       if (threadDir && !lease) {
-        lease = tryAcquireExecutionLease(threadDir, {
-          source: 'orchestrator',
-          token: claimOwnerToken
-        })
-        // Peer won the race: the turn runs later, in its place, as soon as the lease is free.
+        const leaseOptions = { source: 'orchestrator', token: claimOwnerToken }
+        lease = tryAcquireExecutionLease(threadDir, leaseOptions)
+        if (!lease && opts?.refuseQueue && !expectedBranchOf(input)) {
+          // A writer can hold the lease after admission, including work in this process. Keep the admitted turn
+          // and its model and permission cap while waiting briefly. Stop cancels the wait with the rest of setup.
+          try {
+            lease = await waitAcquireExecutionLease(threadDir, { ...leaseOptions, signal: setupSignal })
+          } catch (error) {
+            if (setupSignal.aborted) {
+              if (this.lifecycle.signal.aborted || this.isShutdownAbort(opts.externalSignal?.reason)) return requeueUnstarted()
+              return this.endTurnBeforeStart(session, opts.runId, queueItemId, claimOwnerToken)
+            }
+            if (!(error instanceof LeaseBusyError)) throw error
+          }
+        }
+        // If the lease is still held, queue ordinary messages or refuse bound ones.
         if (!lease) {
           const queued = requeueUnstarted(true)
           if (queued.queueItem) this.waitForThreadLease(session.threadId, queued.queueItem.id)
@@ -13849,6 +14372,8 @@ export class OrchestratorService extends EventEmitter {
       }
     }
     turnTimingMark(session.threadId, 'lease')
+    // A turn whose folder, drive or lease kept it waiting does not take the hand-off: anything may have changed meanwhile.
+    if (handoffOffer && performance.now() - setupBegan > HANDOFF_SETUP_WAIT_MS) handoffOffer = undefined
 
     if (recoveryDirectory && session.executionLease) {
       new ConversationActionService(recoveryDirectory).recover(session.executionLease, (action, kind) => {
@@ -13857,12 +14382,18 @@ export class OrchestratorService extends EventEmitter {
         else this.restoreConversationBoundary(session.threadId, action.presentationMessageStart, action.nativeContextStartBoundary!)
       })
     }
+    turnTimingMark(session.threadId, 'recoveryConversation')
 
     if (recoveryDirectory && recoveryWorkspace && session.executionLease) {
       const heldLease = session.executionLease
+      // Finishing what an earlier turn left unfinished in the worktree may wait for other work on its repository.
+      setupStep('check')
       // A merge of a subagent's result an older version left unfinished is cancelled, never run again; the thread hears of it.
       const cancelledIntegrations = cancelledIntegrationsNotice(await cancelPendingIntegrations(recoveryDirectory, recoveryWorkspace.worktreePath))
       if (cancelledIntegrations) this.sessionAls.run(session, () => this.addSystemMessage(cancelledIntegrations))
+      // Each recovery step is marked (from `recoveryConversation` above), so a slow first turn after a restart shows
+      // which one held it.
+      turnTimingMark(session.threadId, 'recoveryIntegrations')
       const primary = this.projectManager && this.threadStore
         ? resolveThreadProjectPath(this.projectManager, this.threadStore, session.threadId) : undefined
       if (primary) {
@@ -13870,13 +14401,17 @@ export class OrchestratorService extends EventEmitter {
         const merging = [...new Set(settled.flatMap((item) => item.state === 'cancelled' && item.mergeInProgress ? [item.mergeInProgress] : []))]
         if (merging.length) this.sessionAls.run(session, () => this.addSystemMessage(`A publish merge from an earlier version is still in progress in ${merging.join(', ')}; abort it (operations abort) or finish it with Git. It was not run again.`))
       }
+      turnTimingMark(session.threadId, 'recoveryPublish')
       await new ThreadActionService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease, setupSignal)
+      turnTimingMark(session.threadId, 'recoveryActions')
       await new CodeRevertService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, heldLease, setupSignal)
+      turnTimingMark(session.threadId, 'recoveryReverts')
       await new UndoService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, (action, kind) => {
         if (!action.nativeContextStartBoundary) return
         if (kind === 'redo') this.restoreConversationActionEnd(session.threadId, action.presentationMessageStart, action.presentationMessageEnd, action.nativeContextBoundary)
         else this.restoreConversationBoundary(session.threadId, action.presentationMessageStart, action.nativeContextStartBoundary)
       }, heldLease, setupSignal)
+      turnTimingMark(session.threadId, 'recoveryUndo')
       await new ConversationBranchService(recoveryDirectory).recoverPending(recoveryWorkspace.worktreePath, (branch) => {
         const path = join(recoveryDirectory, 'conversation-contexts', `${encodeURIComponent(branch.id)}.json`)
         const saved = JSON.parse(readFileSync(path, 'utf8')) as { schemaVersion: number; messages: ChatMessage[]; nativeContext: NativeLlmContext }
@@ -13885,6 +14420,9 @@ export class OrchestratorService extends EventEmitter {
       }, heldLease, setupSignal)
     }
     turnTimingMark(session.threadId, 'recovery')
+    // From the workspace check to the start check, the turn's callers share one read of its folder; recovery, which may
+    // move HEAD, is over.
+    openRepositoryFacts()
     const request = normalizeSendRequest(input)
     // The folder a turn is recorded in when it has no worktree: a project without Git, or a thread with no project.
     let snapshotFolder: SnapshotFolder | undefined
@@ -13913,13 +14451,27 @@ export class OrchestratorService extends EventEmitter {
           session.threadId
         )
         const threadDir = this.resolveThreadDir(session.threadId)
-        if (projectPath && threadDir) {
+        if (handoffOffer && projectPath && threadDir && this.turnHandoffHolds(session, handoffOffer, threadDir, recoveryManager?.load()?.conversationBranchId ?? 'main')) {
+          // The reused snapshot skips the normal start check. Pending recovery must still
+          // stop the turn before the queue accepts its message.
+          new ChangeReceiptService(threadDir).assertNoPendingOperation()
+          handoff = handoffOffer
+          // Recovery found nothing to do: whatever step it began is not shown.
+          this.endSetupStep(session.threadId)
+        }
+        if (handoff && projectPath && threadDir) {
+          // Nothing of Mousse's touched the worktree since the last turn ended in it: it is not checked again.
+          session.workspace = handoff.workspace
+          session.projectCwd = session.workspace.projectPath
+        } else if (projectPath && threadDir) {
           try {
-            await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease)
+            await this.seedForkWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, setupStep)
             const pending = opts?.agent ? agentMessageWords(request.content, agentOriginOf(opts.agent)) : request.content
-            await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, pending))
+            await this.seedSubagentWorkspace(session.threadId, projectPath, threadDir, setupSignal, session.executionLease, this.branchNameSource(session.threadId, session.messages, pending), setupStep)
+            // A fork or subagent worktree made just now is read afresh (`repositoryFacts.ts`).
+            forgetRepositoryFacts()
             session.workspace = await new WorkspaceResolver(threadDir, session.threadId, projectPath, this.placementOf(session.threadId), this.restoreNotifier(session.threadId))
-              .resolve(request.mode, 'main', setupSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, pending))
+              .resolve(request.mode, 'main', setupSignal, session.executionLease ?? undefined, this.branchNameSource(session.threadId, session.messages, pending), setupStep)
           } catch (error) {
             // Never a silent blank thread: the chat, the sidebar row and whoever sent it are told why (`Thread.setupFailure`).
             if (!setupSignal.aborted && !this.lifecycle.signal.aborted) this.recordSetupFailure(session.threadId, threadDir, request, error, { runId: opts?.runId, retryable: !reuseLastUser && !request.workflowInvocationId && !(typeof input !== 'string' && input.continuationOfRunId) })
@@ -13939,6 +14491,8 @@ export class OrchestratorService extends EventEmitter {
         }
     }
 
+    // Only a worktree thread's turn takes the hand-off.
+    if (handoff && session.workspace !== handoff.workspace) handoff = undefined
     turnTimingMark(session.threadId, 'workspace')
     this.noteSetupOutcome(session.threadId, opts?.runId, true)
     // Pull any messages peers enqueued before we started.
@@ -13954,6 +14508,8 @@ export class OrchestratorService extends EventEmitter {
     if (request.conversationBranchId && request.conversationBranchId !== (recoveryManager?.load()?.conversationBranchId ?? 'main')) throw branchChanged()
 
     if (request.workflowInvocationId) {
+      this.endSetupStep(session.threadId)
+      closeRepositoryFacts()
       return await this.executeWorkflowChatTurn(session, request, opts)
     }
 
@@ -13987,7 +14543,15 @@ export class OrchestratorService extends EventEmitter {
       safeBoundaryProof: 'captured before admitting the turn user message'
     }
     let turnStartSha: string | undefined
-    if (checkpointEnabled && checkpointCwd) {
+    /** The snapshot just made or found the start's commit there: it is not checked again (`OutsideChangesResult`). */
+    let recordedStartCheck: TurnStartCheck | undefined
+    if (checkpointEnabled && checkpointCwd && handoff && !snapshotFolder && checkpointCwd === handoff.workspacePath) {
+      // The turn starts where the last one ended: an edit made outside Mousse since counts as made during this turn.
+      turnStartSha = handoff.endSha
+      recordedStartCheck = { workspacePath: checkpointCwd, startSha: handoff.endSha }
+      turnBoundaryMark(session.threadId, 'handoff')
+    } else if (checkpointEnabled && checkpointCwd) {
+      setupStep('snapshot')
       // Edits made outside Mousse since the last action become an action of their own, so Undo of this turn leaves them.
       const directory = session.threadId !== '__unbound__' ? this.resolveThreadDir(session.threadId) : undefined
       if (snapshotFolder) {
@@ -13996,11 +14560,13 @@ export class OrchestratorService extends EventEmitter {
         try {
           const prepared = await ensureSnapshotWorkspaceAsync({ threadDirectory: snapshotFolder.directory, threadId: snapshotFolder.threadId, workTree: snapshotFolder.workTree, projectId: snapshotFolder.projectId })
           checkpointCwd = prepared.record.workTree
-          turnStartSha = (await new ThreadActionService(snapshotFolder.directory).recordOutsideChanges({
+          const recorded = await new ThreadActionService(snapshotFolder.directory).recordOutsideChanges({
             threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
             heldThreadLease: session.executionLease ?? undefined, signal: setupSignal,
             presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
-          })).startSha
+          })
+          turnStartSha = recorded.startSha
+          recordedStartCheck = recorded.startCheck
           setSnapshotsOff(snapshotFolder.directory, undefined)
         } catch (error) {
           // A Stop that ended the wait for the folder's store ends the turn; it says nothing about the folder's snapshots.
@@ -14014,11 +14580,13 @@ export class OrchestratorService extends EventEmitter {
         }
       } else if (directory) {
         try {
-          turnStartSha = (await new ThreadActionService(directory).recordOutsideChanges({
+          const recorded = await new ThreadActionService(directory).recordOutsideChanges({
             threadId: session.threadId, conversationBranchId, workspacePath: checkpointCwd,
             heldThreadLease: session.executionLease ?? undefined, signal: setupSignal,
             presentationMessageStart: turnPresentationStart, nativeContextBoundary: turnNativeStartBoundary
-          })).startSha
+          })
+          turnStartSha = recorded.startSha
+          recordedStartCheck = recorded.startCheck
         } catch (error) {
           // A worktree folder given a new repository (Initialize Git) has no commit to snapshot yet: the turn runs with
           // its conversation recorded alone, and Undo says why. Anything else still fails the turn.
@@ -14034,15 +14602,15 @@ export class OrchestratorService extends EventEmitter {
     // What `beginTurn` checks of the start, read here without blocking, where the turn already waited for its snapshot:
     // `beginTurn` itself runs with nothing awaited before the turn is registered, and reports the result as it always has.
     const turnStartCheck = checkpointEnabled && turnStartSha && checkpointCwd
-      ? await new ThreadActionService(this.resolveThreadDir(session.threadId)!).checkTurnStart(checkpointCwd, turnStartSha)
+      ? recordedStartCheck?.startSha === turnStartSha && recordedStartCheck.workspacePath === checkpointCwd
+        ? recordedStartCheck
+        : await new ThreadActionService(this.resolveThreadDir(session.threadId)!).checkTurnStart(checkpointCwd, turnStartSha)
       : undefined
-    // A run started again after a restart (reconciler rule 5) whose message the transcript already has, tagged with
-    // its run, does not take it in a second time: the turn runs on it.
-    if (!reuseLastUser && !queueItemId && opts?.runId && this.runEngine && session.messages.some((message) => message.role === 'user' && message.turnId === opts.runId)) {
-      reuseLastUser = true
-    }
-    // Keep user commits visible in the sidebar. Internal orchestration wakes stay hidden.
-    if (!reuseLastUser && displayUserMessage) {
+    turnBoundaryMark(session.threadId, 'startCheck')
+    closeRepositoryFacts()
+    if (!reuseLastUser && rerunOfSavedMessage()) reuseLastUser = true
+    // Keep user commits visible in the sidebar, if the admission did not (the transcript changed during the setup).
+    if (!reuseLastUser && displayUserMessage && !startedAtAdmission) {
       this.touchUserActivityAndNotify(session.threadId)
     }
 
@@ -14052,8 +14620,11 @@ export class OrchestratorService extends EventEmitter {
     }
 
     // The mode the turn runs in is known before its message is admitted, so a change reaches the
-    // agent with that message and the message records the mode.
-    const turnPermission = !reuseLastUser && displayUserMessage ? this.previewTurnPermission(session, mode, opts) : undefined
+    // agent with that message and the message records the mode. A bot's turn runs under its grant, never a thread
+    // permission mode, and nobody is asked before its commands and edits: it gets no mode and no notice of one. (Its
+    // first turn was stamped "Auto-accept edits" and its continuation "Ask before acting", so work that went on past
+    // the turn cap was told, wrongly, that its edits now wait for the owner.)
+    const turnPermission = !reuseLastUser && displayUserMessage && !opts?.bot ? this.previewTurnPermission(session, mode, opts) : undefined
     // The approvals this run was started to deliver (a continue turn, or a message that denied them).
     const approvalNote = !reuseLastUser ? this.approvalDecisionNote(opts?.runId) : undefined
     try {
@@ -14115,7 +14686,6 @@ export class OrchestratorService extends EventEmitter {
     this.transcript.reset()
     turnTimingMark(session.threadId, 'accepted')
 
-    const turnId = opts?.runId ?? uuidv4()
     // Run Engine bridge (SPEC §5): the run id is the turn id; each mark is one CAS write.
     const engineRunId = this.runEngine ? opts?.runId : undefined
     let runTerminalMarked = false
@@ -14133,6 +14703,7 @@ export class OrchestratorService extends EventEmitter {
     // C2: a run that cannot be marked starting (cancelled meanwhile, or held by another turn) is
     // not this turn's to run; it ends here, before any provider I/O.
     this.markRunStarting(engineRunId)
+    turnBoundaryMark(session.threadId, 'starting')
     this.deliverRestartNote(session.threadId, engineRunId)
     this.deliverContinuationNote(engineRunId)
     let conversationToolsUsed = false
@@ -14152,6 +14723,7 @@ export class OrchestratorService extends EventEmitter {
         nativeContextStartBoundary: turnNativeStartBoundary, nativeContextBoundary: turnNativeStartBoundary
       }, turnStartSha, turnStartCheck)
     }
+    turnBoundaryMark(session.threadId, 'beginTurn')
     const turn: ActiveTurnControl = {
       abort: new AbortController(),
       pendingSteer: [] as SteerEntry[],
@@ -14168,6 +14740,7 @@ export class OrchestratorService extends EventEmitter {
     } else {
       opts?.externalSignal?.addEventListener('abort', mirrorExternalAbort, { once: true })
     }
+    this.endSetupStep(session.threadId)
     this.setTurnPhase(session.threadId, 'queued', { turnId })
     // Until its provider reports something, the turn is starting: the runtime, its tools and Skills are being set up.
     this.setTurnPhase(session.threadId, 'thinking', { turnId, step: { kind: 'starting' } })
@@ -14177,7 +14750,10 @@ export class OrchestratorService extends EventEmitter {
     this.markRun(engineRunId, (engine, id) => engine.markRunning(id))
     // The run is active: Mousse tool calls Claude made while it was being started act as it.
     if (opts?.continuationId) this.endContinuationHold(opts.continuationId, false, engineRunId ?? null)
-    const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed', signal?: AbortSignal): Promise<void> => {
+    /** The action the turn's checkpoint recorded in its worktree, for the next turn's hand-off (`recordTurnHandoff`). */
+    let endAction: ThreadAction | undefined
+    const checkpointTurn = async (state: 'completed' | 'stopped' | 'failed', signal?: AbortSignal, how?: { endOnly?: boolean }): Promise<void> => {
+      turnBoundaryMark(session.threadId, 'finishing')
       if ((!checkpointEnabled || !turnStartSha || !checkpointCwd) && !conversationDirectory || session.threadId === '__unbound__') return
       const threadDir = this.resolveThreadDir(session.threadId)
       if (!threadDir) return
@@ -14209,9 +14785,20 @@ export class OrchestratorService extends EventEmitter {
             : undefined
         }
       }
+      if (how?.endOnly && !conversationDirectory) {
+        new ThreadActionService(threadDir).recordTurnEndOnly(checkpointOptions, state)
+        return
+      }
+      // The end reads the folder afresh, once for all its callers (`repositoryFacts.ts`): HEAD and the branch are where
+      // the agent left them.
       const action = conversationDirectory
         ? new ConversationActionService(conversationDirectory).settle(turnId, session.messages.length, checkpointOptions.nativeContextBoundary, state, conversationToolsUsed, session.executionLease!, snapshotsOff, snapshotsNotCovered)
-        : await new ThreadActionService(threadDir).checkpointExistingTurn(checkpointOptions, turnStartSha!, state)
+        : await (async () => {
+          openRepositoryFacts()
+          try { return await new ThreadActionService(threadDir).checkpointExistingTurn(checkpointOptions, turnStartSha!, state) } finally { closeRepositoryFacts() }
+        })()
+      if (!conversationDirectory) endAction = action as ThreadAction
+      turnBoundaryMark(session.threadId, 'receipt')
       for (let index = turnPresentationStart; index < session.messages.length; index += 1) {
         session.messages[index] = {
           ...session.messages[index],
@@ -14224,6 +14811,7 @@ export class OrchestratorService extends EventEmitter {
     this.activeTurn = turn
     // From here a Stop aborts the turn itself.
     session.setupStop = null
+    this.noteQueueWait(session)
     this.applyRequestedAbort(session, turn)
     // The thread runs again: what a Stop held in its queue goes on after this turn, as after any turn that ends.
     if (!turn.abort.signal.aborted) this.releaseStopHold(session)
@@ -14421,6 +15009,16 @@ export class OrchestratorService extends EventEmitter {
         // Read-only with no folder to hold it in: refuse rather than run with every tool.
         throw new AppError({ code: 'read_only_needs_folder', message: 'This read-only subagent has no folder to be held read-only in, so it cannot run.', errorInfo: { category: 'unavailable', retryable: false } })
       }
+      // SPEC §16.1-§16.2: planned before the binding is made (that can take a while), so the switch marker shows its
+      // strategy as soon as the turn starts. A turn that fails from here settles the handoff as failed.
+      const modelOverride = opts?.modelOverride ?? session.modelOverride
+      const planning: { failed: boolean; nativeFork?: boolean } = { failed: false }
+      handoffs = await this.planTurnHandoffs({
+        session, runId: engineRunId, resolved: instance, selection: selectedModel, previousModel,
+        content: userContent, images, mode, modelOverride, planning
+      })
+      if (handoffs) this.recordHandoffMarkers(session, handoffs, switchMarker, turnId, selectedModel)
+      turnTimingMark(session.threadId, 'handoffs')
       // The attempt's immutable binding; a retry of the same run keeps the one it already has.
       const binding = await this.bindTurn(engineRunId, runBinding, instance, mode, () => opts?.origin ?? this.turnOrigin(session.threadId, request.workflowInvocationId), {
         permissionMode: this.requestedPermissionMode(session.threadId, this.limitedByJob(this.limitedByContinuation(opts?.permissionMode, engineRunId, session.threadId), opts?.schedule)),
@@ -14429,7 +15027,6 @@ export class OrchestratorService extends EventEmitter {
       }, opts?.bot?.policy)
       turnTimingMark(session.threadId, 'bind')
       // Every runtime owns its loop, context and tools and receives prior turns as a prompt preamble.
-      const modelOverride = opts?.modelOverride ?? session.modelOverride
       const contextSettings = normalizeContextSettings(this.settingsStore.get().context)
       // Every thread turn is admitted to its task tree's browser grant, so a subagent on another runtime still finds the
       // tree its own runs came from; runtimes with their own loop get the browser through Mousse's MCP server.
@@ -14442,16 +15039,9 @@ export class OrchestratorService extends EventEmitter {
         : this.mainBrowserFactory
           ? treeBrowser
           : this.mainAgentBrowser?.execution.threadId === session.threadId && this.mainAgentBrowser.execution.turnId === turnId ? this.mainAgentBrowser : undefined
-      const planning: { failed: boolean; nativeFork?: boolean } = { failed: false }
       // An edited prompt's first turn: the model is told the files were not rewound, and which ones differ.
       const editDirectory = session.threadId !== '__unbound__' && displayUserMessage && !reuseLastUser ? this.resolveThreadDir(session.threadId) : undefined
       const editNote = editDirectory ? await this.editedPromptNote(editDirectory, conversationBranchId, turnId, turnStartSha, checkpointCwd) : undefined
-      handoffs = await this.planTurnHandoffs({
-        session, runId: engineRunId, resolved: instance, selection: selectedModel, previousModel,
-        content: userContent, images, mode, modelOverride, planning
-      })
-      if (handoffs) this.recordHandoffMarkers(session, handoffs, switchMarker, turnId, selectedModel)
-      turnTimingMark(session.threadId, 'handoffs')
       // The first turn on a different model: the agent is told which model it is and which wrote the earlier replies.
       const modelNote = displayUserMessage ? this.modelChangeNoteFor(session.messages, turnPresentationStart, turnId, reuseLastUser) : undefined
       // A thread with a working goal: every turn tells the agent the goal and how to report on it (`goal_status`).
@@ -14958,6 +15548,8 @@ export class OrchestratorService extends EventEmitter {
       const previous = engineRunId ? this.runEngine?.previousBinding(session.threadId, engineRunId, binding.instanceId) : undefined
       const attemptOrdinal = engineRunId ? this.runEngine?.activeAttemptOrdinal(engineRunId) : undefined
       let result: Awaited<ReturnType<HarnessGateway['startTurn']>['result']>
+      // The provider is called: the turn's start is logged here.
+      turnBoundaryStarted(session.threadId, 'harness')
       turnTimingMark(session.threadId, 'harness')
       const firstRequestAt = Date.now()
       // A request that failed for a passing reason before the provider answered, ran a tool or took a steer is sent
@@ -14991,8 +15583,7 @@ export class OrchestratorService extends EventEmitter {
             toolStarted: conversationToolsUsed,
             steered: drains > 0 || acceptedDrains.size > 0 || takenDrains.size > 0,
             runtimeRetried,
-            bot: Boolean(opts?.bot),
-            ownerOnly: Boolean(this.harness.ownerOnly?.(binding.instanceId))
+            bot: Boolean(opts?.bot)
           })
           if (delay === undefined) throw error
           logDebug('OrchestratorService', 'provider request failed before it was answered; trying again', error, { threadId: session.threadId, retry: retries + 1, delayMs: delay })
@@ -15052,6 +15643,8 @@ export class OrchestratorService extends EventEmitter {
         assistantText = providerFailureText(providerError)
       }
     } finally {
+      // The provider's turn is over: the turn's end is measured from here.
+      turnBoundaryReplyDone(session.threadId)
       // Nothing is held once the provider's turn is over: what is still pending is an unread steer, and the turn's end
       // handles it like any other (a follow-up turn, or back in the queue after a Stop).
       if (turnHold) {
@@ -15217,7 +15810,9 @@ export class OrchestratorService extends EventEmitter {
       this.setTurnPhase(session.threadId, 'stopped')
       markRunTerminal('interrupted', { interruptedBy: restart ? 'daemon_restart' : wall ? 'bot_wall' : 'user' }, partial)
       try {
-        await checkpointTurn('stopped', AbortSignal.timeout(this.stoppedTurnCheckpointWaitMs))
+        // A turn cut off by the service stopping saves where it ended and nothing more: it does not wait for its
+        // repository or run Git while the service exits. The next turn's recovery takes its snapshot.
+        await checkpointTurn('stopped', AbortSignal.timeout(this.stoppedTurnCheckpointWaitMs), { endOnly: restart })
       } catch (error) {
         // A stopped turn always ends, so its queued messages go and the thread is free. Where it ended is recorded by the
         // next turn's recovery (its checkpoint stays pending in the journal).
@@ -15382,6 +15977,8 @@ export class OrchestratorService extends EventEmitter {
       this.setTurnPhase(session.threadId, 'completed')
       this.markRun(engineRunId, (engine, id) => engine.markFinalizing(id))
     }
+    // The reply shows complete: a message queued now waits for the turn to finish, and says so.
+    this.noteQueueWait(session)
     // A subagent that edits its parent's folder: the folder as its turn ended, recorded while the run is still
     // finalizing, so its parent's result never comes without it.
     const sharedWriter = engineRunId ? this.sharedWriterOf(engineRunId) : undefined
@@ -15403,6 +16000,10 @@ export class OrchestratorService extends EventEmitter {
     }
     this.persist(true)
     if (!executionFailed) markRunTerminal('completed', undefined, displayText || 'Done.')
+    if (!executionFailed && endAction && turnStartSha && checkpointCwd && !snapshotFolder && !session.sharedWorkspace && !session.primaryCheckout && session.workspace) {
+      this.recordTurnHandoff(session, { runId: turnId, action: endAction, conversationBranchId, workspacePath: checkpointCwd, workspace: session.workspace })
+    }
+    turnBoundaryMark(session.threadId, 'completed')
     this.emit('response', response)
     this.emitThreadMessages(session.threadId, session.messages)
     settleOnce(aborted, executionFailed)
@@ -15436,12 +16037,7 @@ export class OrchestratorService extends EventEmitter {
     // (it rejects them to read it). Nothing an agent caused (its own steer, a message it promoted) may do that: it waits in
     // the turn's steer buffer until the user has answered.
     const asking = this.questions.listPendingForThread(session.threadId).length > 0
-    // A turn on a personal sign-in (`ownerOnly.ts`) reads only what its owner wrote: an agent's steer, or a message an
-    // agent promoted, waits and then runs as a turn of its own, which that provider refuses.
-    const binding = turn.runId ? this.runEngine?.bindingForRun(turn.runId) : undefined
-    const ownerOnly = Boolean(binding && this.harness.ownerOnly?.(binding.instanceId))
-    const holdsAgents = asking || ownerOnly
-    const held = holdsAgents ? turn.pendingSteer.filter((entry) => entry.origin || entry.byAgent) : []
+    const held = asking ? turn.pendingSteer.filter((entry) => entry.origin || entry.byAgent) : []
     const taking = held.length ? turn.pendingSteer.filter((entry) => !held.includes(entry)) : turn.pendingSteer
     if (taking.length > 0) {
       entries.push(...taking)
@@ -15463,7 +16059,7 @@ export class OrchestratorService extends EventEmitter {
         (item.state === 'pending' || item.state === 'steering') &&
         !session.drainedExternalSteerIds.has(item.id) &&
         !held.some((entry) => entry.itemId === item.id) &&
-        !(holdsAgents && item.origin?.kind === 'agent')
+        !(asking && item.origin?.kind === 'agent')
     )
     const revert: string[] = []
     for (const item of externalSteers) {
@@ -15700,6 +16296,8 @@ export class OrchestratorService extends EventEmitter {
     opts?: {
       onSettled?: (result: 'idle' | 'ran' | 'failed') => void
       managedByStartup?: boolean
+      /** The item this drain claimed and is starting, with its claim's token, as soon as it is claimed. */
+      onClaimed?: (queueItemId: string, claimToken: string) => void
     }
   ): void {
     const settle = (result: 'idle' | 'ran' | 'failed'): void => {
@@ -15897,6 +16495,7 @@ export class OrchestratorService extends EventEmitter {
       ...(queued.origin?.kind === 'agent' ? { agent: agentOriginOf(queued.origin) } : {})
     })
     }
+    opts?.onClaimed?.(item.id, claimToken)
     let started: Promise<OrchestratorResponse | undefined>
     if (resume) {
       // The pause ends in the transaction that admits the continuation. A refusal (the pause ended some other
@@ -16061,12 +16660,16 @@ export class OrchestratorService extends EventEmitter {
   scheduleStartupQueueRecovery(): void {
     if (this.lifecycle.stopping) return
     if (!this.threadStore) return
-    setImmediate(() => {
-      this.recoverAndDrainPendingQueuesAsync().catch((err: unknown) => {
-        this.emit('queue-drain-failed', {
-          threadId: null,
-          error: err instanceof Error ? err.message : String(err)
-        })
+    setImmediate(() => void this.recoverStartupQueues())
+  }
+
+  /** The start's queue recovery (`scheduleStartupQueueRecovery`), begun now: settles once every queue was looked at. */
+  recoverStartupQueues(): Promise<void> {
+    if (this.lifecycle.stopping || !this.threadStore) return Promise.resolve()
+    return this.recoverAndDrainPendingQueuesAsync().catch((err: unknown) => {
+      this.emit('queue-drain-failed', {
+        threadId: null,
+        error: err instanceof Error ? err.message : String(err)
       })
     })
   }
@@ -16078,29 +16681,48 @@ export class OrchestratorService extends EventEmitter {
    */
   private async recoverAndDrainPendingQueuesAsync(): Promise<void> {
     if (this.lifecycle.stopping || !this.threadStore) return
+    const store = this.threadStore
     this.recoverGoalsOnce()
-    const ordered = this.startupRecoveryOrder()
-    for (const thread of ordered) {
-      if (this.lifecycle.stopping) return
-      if (thread.settledAt) continue
+    const ordered = this.startupRecoveryOrder().filter((thread) => !thread.settledAt)
+    const stopping = (): boolean => this.lifecycle.stopping
+    // Threads whose queue has agent commands the journal holds unfinished; all of them when the journal can't be read.
+    let journaled: ReadonlySet<string> | undefined
+    try { journaled = new Set(store.getQueueJournal()?.commands.unfinishedThreadIds() ?? []) } catch { journaled = undefined }
+    // Only a queue that holds a claim or an unfinished command has anything to reclaim; the others are not rewritten.
+    // Each thread is looked at in turn, giving requests their turn every few milliseconds.
+    const reclaim: Thread[] = []
+    await forEachYielding(ordered, (thread) => { if (this.needsStartupReclaim(thread.id, journaled)) reclaim.push(thread) }, stopping)
+    for (const thread of reclaim) {
+      if (stopping()) return
       // Reclaiming reads the transcript only for a queue that holds a claim.
-      if (!this.sessions.has(thread.id) && this.hasClaimedQueueItem(thread.id)) await this.threadStore.warmThread(thread.id).catch(() => undefined)
+      if (!this.sessions.has(thread.id) && this.hasClaimedQueueItem(thread.id)) await store.warmThread(thread.id).catch(() => undefined)
       this.reclaimForStartup(thread.id)
     }
-    for (const thread of ordered) {
-      if (this.lifecycle.stopping) return
-      if (thread.settledAt || this.startupDrainScheduled.has(thread.id)) continue
-      if (!this.sessions.has(thread.id)) {
-        // A thread with nothing to drain is not loaded at all: its transcript stays on disk until someone opens it.
-        if (!this.hasPendingNormalQueueItem(thread.id)) {
-          this.reclaimStaleThreadLease(thread.id)
-          continue
-        }
-        await this.threadStore.warmThread(thread.id).catch(() => undefined)
-      }
+    const drain: Thread[] = []
+    await forEachYielding(ordered, (thread) => {
+      if (this.startupDrainScheduled.has(thread.id)) return
+      // A thread with nothing to drain is not loaded at all: its transcript stays on disk until someone opens it.
+      if (this.sessions.has(thread.id) || this.hasPendingNormalQueueItem(thread.id)) drain.push(thread)
+      else this.reclaimStaleThreadLease(thread.id)
+    }, stopping)
+    for (const thread of drain) {
+      if (stopping()) return
+      if (this.startupDrainScheduled.has(thread.id)) continue
+      if (!this.sessions.has(thread.id)) await store.warmThread(thread.id).catch(() => undefined)
       this.considerStartupDrain(thread.id)
     }
     this.pumpStartupDrainQueue()
+  }
+
+  /** Whether the start must reclaim this thread's queue: it holds a claim, or the journal has an unfinished command for it. */
+  private needsStartupReclaim(threadId: string, journaled: ReadonlySet<string> | undefined): boolean {
+    if (!journaled || journaled.has(threadId)) return true
+    try {
+      return this.threadStore?.loadMessageQueue(threadId).some((item) => item.state === 'claimed') ?? false
+    } catch {
+      // An unreadable queue is reclaimed as before, which reports it.
+      return true
+    }
   }
 
   private hasPendingNormalQueueItem(threadId: string): boolean {
@@ -16441,6 +17063,8 @@ export class OrchestratorService extends EventEmitter {
     itemId: string,
     ownerToken?: string
   ): QueuedMessage | null {
+    // A claim given back starts no turn now: a hand-off armed for it goes.
+    this.turnHandoffs.delete(session.threadId)
     if (this.threadStore && session.threadId !== '__unbound__') {
       try {
         const released = releaseClaimDurable(this.threadStore, session.threadId, itemId, {
@@ -17483,6 +18107,8 @@ export class OrchestratorService extends EventEmitter {
       const botRefusal = this.botThreadRefusal(threadId)
       if (botRefusal) return { text: '', silent: false, error: botRefusal.message }
       if (this.isExpired(threadId)) return { text: '', silent: false, error: 'This thread has expired and is being archived.' }
+      // The person's message from their phone brings an archived thread back, as one from a window does.
+      await this.unarchiveForPerson(threadId)
 
       try {
         lease = await waitAcquireExecutionLease(threadStore.getThreadDir(threadId), {

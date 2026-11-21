@@ -34,8 +34,6 @@ export interface TurnRetryFacts {
   runtimeRetried: boolean
   /** A bot's turn: its activation decides what happens after a failure. */
   bot: boolean
-  /** A turn on a personal sign-in (`Harness.ownerOnly`): only the owner sends a message again. */
-  ownerOnly?: boolean
 }
 
 /** A failure that may pass on its own: the provider was unreachable or busy, and said so as retryable. */
@@ -53,7 +51,7 @@ export function isTransientFailure(error: unknown): boolean {
  * The wait doubles each time up to its cap, and is spread by `random` (0..1) over its upper half.
  */
 export function turnRetryDelay(error: unknown, facts: TurnRetryFacts, random: () => number = Math.random): number | undefined {
-  if (facts.bot || facts.ownerOnly || facts.answered || facts.toolStarted || facts.steered || facts.runtimeRetried) return undefined
+  if (facts.bot || facts.answered || facts.toolStarted || facts.steered || facts.runtimeRetried) return undefined
   if (!isTransientFailure(error)) return undefined
   if (facts.retries >= TURN_RETRY.attempts) return undefined
   const ceiling = Math.min(TURN_RETRY.capMs, TURN_RETRY.baseMs * 2 ** facts.retries)

@@ -28,7 +28,7 @@ describe('frosted composer setting', () => {
     expect(normalizeAppearance(legacy)).toMatchObject({
       frostedComposer: false,
       frostedComposerOpacity: 60,
-      frostedComposerBlur: 16,
+      frostedComposerBlur: 6,
       frostedComposerSaturation: 1.12
     })
   })
@@ -47,8 +47,8 @@ describe('frosted composer setting', () => {
     expect(clampFrostedComposer('frostedComposerOpacity', 61.6)).toBe(62)
     expect(clampFrostedComposer('frostedComposerBlur', -4)).toBe(0)
     expect(clampFrostedComposer('frostedComposerBlur', '12')).toBe(12)
-    expect(clampFrostedComposer('frostedComposerBlur', '')).toBe(16)
-    expect(clampFrostedComposer('frostedComposerBlur', null)).toBe(16)
+    expect(clampFrostedComposer('frostedComposerBlur', '')).toBe(6)
+    expect(clampFrostedComposer('frostedComposerBlur', null)).toBe(6)
     expect(clampFrostedComposer('frostedComposerSaturation', 1.131)).toBe(1.14)
     expect(clampFrostedComposer('frostedComposerSaturation', 0.5)).toBe(1)
     expect(clampFrostedComposer('frostedComposerSaturation', 9)).toBe(1.6)
@@ -192,10 +192,10 @@ describe('Settings › Chat › Frosted composer', () => {
       .toEqual(['Opacity', 'Blur', 'Color boost'])
     expect(sliders.map((slider) => [slider.min, slider.max, slider.value])).toEqual([
       ['20', '95', '60'],
-      ['0', '40', '16'],
+      ['0', '40', '6'],
       ['1', '1.6', '1.12']
     ])
-    expect(sliders.map((slider) => slider.nextElementSibling?.textContent)).toEqual(['60%', '16px', '12%'])
+    expect(sliders.map((slider) => slider.nextElementSibling?.textContent)).toEqual(['60%', '6px', '12%'])
 
     const blur = sliders[1]
     await act(async () => {

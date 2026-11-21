@@ -83,7 +83,10 @@ describe('thread switching terminal lifecycle', () => {
     expect(appSource).toMatch(/Keep terminal PTYs and browser guests mounted/)
     const mainPane = appSource.match(/<KeepMounted as="main"[\s\S]*?<\/KeepMounted>/)?.[0]
     expect(mainPane).toBeDefined()
-    expect(mainPane).toMatch(/active=\{mainAreaOpen && layoutMode === 'projects'\}[^>]*\bpreserveLayout\b/)
+    // Active while the panel is open in the projects layout, and while it slides out after closing.
+    expect(appSource).toMatch(/const panelOpen = mainAreaOpen && layoutMode === 'projects'/)
+    expect(appSource).toMatch(/const panelShown = panelOpen \|\| panelClosing/)
+    expect(mainPane).toMatch(/active=\{panelShown\}[^>]*\bpreserveLayout\b/)
     expect(mainPane).toMatch(/<MainViewPanel\b[^>]*\/>/)
   })
 

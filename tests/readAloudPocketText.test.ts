@@ -127,10 +127,20 @@ describe('splitPocketChunks', () => {
     expect(chunks.map((chunk) => chunk.text)).toEqual(['Hello 3.4 world.'])
   })
 
-  it('splits an over-long sentence at commas', () => {
+  it('splits an over-long sentence at commas without ending its parts as sentences', () => {
     const chunks = splitPocketChunks('hello, world, hello, world', tokenizer, { ...OPTIONS, maxTokensPerChunk: 6 })
     expect(chunks.length).toBeGreaterThan(1)
-    for (const chunk of chunks) expect(chunk.text.endsWith('.')).toBe(true)
+    for (const chunk of chunks.slice(0, -1)) expect(chunk.text).toMatch(/,$/)
+    for (const chunk of chunks.slice(1)) expect(chunk.text).toMatch(/^[a-z]/)
+    expect(chunks.at(-1)!.text).toMatch(/\.$/)
+  })
+
+  it('reads a piece cut from a longer sentence as part of it', () => {
+    const cut = { startsMidSentence: true, endsMidSentence: true }
+    expect(preparePocketText('the old text is shut down', OPTIONS, cut).text).toBe('the old text is shut down,')
+    expect(preparePocketText('the old text is shut down;', OPTIONS, cut).text).toBe('the old text is shut down;')
+    const [chunk] = splitPocketChunks('the old text is shut down', tokenizer, OPTIONS, cut)
+    expect(chunk.text).toBe('the old text is shut down,')
   })
 
   it('gives every chunk two frames more than the text length suggests', () => {

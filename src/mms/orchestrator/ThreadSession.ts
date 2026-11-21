@@ -107,6 +107,11 @@ export class ThreadSession {
   admissionRunId: string | undefined
   /** A queue drain requested while the turn was still settling; run once admission is cleared. */
   drainAfterSettle = false
+  /**
+   * The provider instance a running turn is on, when the thread was switched to another one meanwhile. The turn
+   * finishes there; once it has settled its process and Mousse credentials end, unless the thread switched back.
+   */
+  switchedFromInstance: string | undefined
   /** Stop requested after admission but before the turn created its abort controller. */
   abortRequested = false
   /**
@@ -133,6 +138,8 @@ export class ThreadSession {
    * then, so a repository another operation holds cannot keep a stopped thread busy. Cleared once the turn runs.
    */
   setupStop: AbortController | null = null
+  /** The wait the windows were last told the queue's pending messages have (`QueuedMessage.waitsFor`). */
+  queueWaitShown: import('../../shared/types').QueuedMessageWait | null = null
   activeToolCallMessageIds = new Map<string, string>()
   /** Provider tool call id → timeline message id for the turn's calls, finished ones too (parents of later children). */
   callToMessage = new Map<string, string>()

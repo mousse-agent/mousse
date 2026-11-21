@@ -12,7 +12,8 @@ import { resolveRepositoryIdentity } from '../src/mms/git/RepositoryIdentity'
 import { buildResourceInventory } from '../src/mms/lifecycle/ResourceInventory'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
-import { cleanupMarkerPath, findNestedRepository, readCleanupMarker, StorageCleanupService } from '../src/mms/lifecycle/StorageCleanupService'
+import { readdir } from 'node:fs/promises'
+import { cleanupMarkerPath, findNestedRepository, onlyControlFiles, readCleanupMarker, StorageCleanupService } from '../src/mms/lifecycle/StorageCleanupService'
 import { StoragePolicyStore } from '../src/mms/lifecycle/StoragePolicyStore'
 import { StorageSweepClock } from '../src/mms/lifecycle/sweepClock'
 import { WorktreeRetirementService } from '../src/mms/lifecycle/WorktreeRetirementService'
@@ -46,6 +47,7 @@ const copyBase = committedGitTemplate((repo) => {
 interface FixtureOptions {
   installationHome?: string
   idle?: (taskId: string) => string | undefined
+  otherWork?: (path: string, exceptThreadId?: string) => string | undefined
   codeHost?: { cachedDefaultBranch(cwd: string): string | undefined }
   thread?: Record<string, unknown>
   measure?: typeof measureTree
@@ -76,7 +78,7 @@ function fixture(options: FixtureOptions = {}) {
   const thread = { id: 'task', name: 'Task one', projectId: 'project-1', createdAt: OLD.toISOString(), ...options.thread }
   const service = new StorageCleanupService({
     store, threads: { getThread: (id) => id === 'task' ? thread as never : undefined }, purge: coordinator.cleanup, policy, clock,
-    idle: options.idle ?? (() => undefined), installationHome: options.installationHome ?? home, codeHost: options.codeHost, now, measure: options.measure, probeRemoval: options.probeRemoval
+    idle: options.idle ?? (() => undefined), otherWork: options.otherWork, installationHome: options.installationHome ?? home, codeHost: options.codeHost, now, measure: options.measure, probeRemoval: options.probeRemoval
   })
   const f = { root, home, location, repo, repositoryId, worktree, branch, sha, store, coordinator, clock, clockState, policy, service, thread, now }
   age(f)
@@ -439,6 +441,9 @@ describe('merged rule', () => {
 describe('leases and re-checks', () => {
   const holdRepository = (f: Fixture) => acquireRepositoryLease(resolveRepositoryIdentity(f.repo, { requireMutationCapability: true }))
   const cleanupHoldsThread = (f: Fixture) => vi.waitFor(() => expect(readLeaseOwner(getExecutionLeasePath(f.location))?.source).toBe('storage-cleanup'), { timeout: 20_000, interval: 20 })
+  // A person replacing the folder while cleanup runs: Windows refuses to rename a folder a Git process is still
+  // working in (EBUSY), so the person tries again a moment later.
+  const renameWhenFree = (from: string, to: string) => vi.waitFor(() => renameSync(from, to), { timeout: 10_000, interval: 25 })
 
   it('takes no lease during the scan phase: a terminal or turn started then gets the thread', async () => {
     const seen: boolean[] = []
@@ -527,7 +532,7 @@ describe('leases and re-checks', () => {
     let run: Promise<StorageCleanupReport>
     try {
       run = f.service.run('manual'); await cleanupHoldsThread(f)
-      renameSync(f.worktree, real); symlinkSync(real, f.worktree, process.platform === 'win32' ? 'junction' : 'dir')
+      await renameWhenFree(f.worktree, real); symlinkSync(real, f.worktree, process.platform === 'win32' ? 'junction' : 'dir')
     } finally { repository.release() }
     try { expect(item(await run)).toMatchObject({ outcome: 'kept', reason: 'Worktree is a link' }) }
     finally { rmSync(f.worktree, { recursive: true, force: true }) }
@@ -549,6 +554,67 @@ describe('leases and re-checks', () => {
     vi.spyOn(WorktreeRetirementService.prototype, 'retire').mockImplementation(() => { throw new Error('Workspace content changed after retirement preview') })
     expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'Workspace content changed after retirement preview' })
     expect(existsSync(cleanupMarkerPath(f.store, 'task'))).toBe(false); expect(isExecutionLeaseHeld(f.location)).toBe(false)
+  }, 60_000)
+})
+
+describe('another thread working in the worktree', () => {
+  const OTHER = 'Another thread is working in this worktree'
+  /**
+   * `otherWork` is asked when the worktree is looked at (1), again under the leases (2) and right before the move (3).
+   * Each row has the other thread start working there at one of those points; work that starts at any of them keeps it.
+   * The last row is the control: with no one else in it, the same worktree is removed.
+   */
+  const rows: Array<{ name: string; from: number; kept: boolean }> = [
+    { name: 'already working when it is looked at', from: 1, kept: true },
+    { name: 'starts while cleanup takes the leases', from: 2, kept: true },
+    { name: 'starts while the checkout is prepared to move', from: 3, kept: true },
+    { name: 'nobody else works in it', from: Infinity, kept: false }
+  ]
+  const othersFrom = (from: number) => {
+    const calls: Array<[string, string | undefined]> = []
+    return { calls, otherWork: (path: string, except?: string) => { calls.push([path, except]); return calls.length >= from ? OTHER : undefined } }
+  }
+
+  it.each(rows)('inactive rule: $name', async ({ from, kept }) => {
+    const others = othersFrom(from)
+    const f = fixture({ otherWork: others.otherWork }); setPolicy(f, inactive())
+    const report = await f.service.run('manual')
+    if (kept) { expect(item(report)).toMatchObject({ outcome: 'kept', reason: OTHER }); expect(existsSync(f.worktree)).toBe(true); expect(existsSync(cleanupMarkerPath(f.store, 'task'))).toBe(false) }
+    else { expect(item(report)).toMatchObject({ rule: 'worktree-inactive', outcome: 'removed' }); expect(existsSync(f.worktree)).toBe(false); expect(others.calls).toHaveLength(3) }
+    // Asked about this worktree, leaving out the thread itself, whose own work `idle` covers.
+    expect(others.calls[0]).toEqual([f.worktree, 'task'])
+  }, 60_000)
+
+  it('merged rule: keeps a merged worktree another thread works in, and removes it once nobody does', async () => {
+    let other: string | undefined = OTHER
+    const f = fixture({ otherWork: () => other }); addRemote(f); setPolicy(f, { worktrees: { removeMerged: true } }); commit(f)
+    git(f.repo, ['merge', '--ff-only', '-q', f.branch])
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: OTHER })
+    expect(existsSync(f.worktree)).toBe(true)
+    other = undefined
+    expect(item(await f.service.run('manual'))).toMatchObject({ rule: 'worktree-merged', outcome: 'removed' })
+    expect(existsSync(f.worktree)).toBe(false)
+  }, 60_000)
+
+  it.each(rows)('deleted-threads rule: $name', async ({ from, kept }) => {
+    const others = othersFrom(from)
+    const f = fixture({ otherWork: others.otherWork }); await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+    setPolicy(f, { worktrees: { removeWithDeletedThreads: true } })
+    const report = await f.service.run('manual')
+    // Under the leases the purge keeps the checkout and words the reason as its own ("Checkout retained: …").
+    if (kept) { expect(item(report)).toMatchObject({ rule: 'worktree-deleted', outcome: 'kept', reason: expect.stringContaining(OTHER) }); expect(existsSync(f.worktree)).toBe(true) }
+    else { expect(item(report)).toMatchObject({ rule: 'worktree-deleted', outcome: 'removed' }); expect(existsSync(f.worktree)).toBe(false); expect(others.calls).toHaveLength(3) }
+    expect(others.calls[0]).toEqual([f.worktree, 'task'])
+  }, 60_000)
+
+  it('deleted-threads rule: a keep for work in it is not remembered, so the next run removes the worktree', async () => {
+    let other: string | undefined
+    let calls = 0
+    // Work starts there only under the leases, the keep the run would otherwise remember against an unchanged checkout.
+    const f = fixture({ otherWork: () => (++calls === 2 ? other : undefined) }); await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+    setPolicy(f, { worktrees: { removeWithDeletedThreads: true } }); other = OTHER
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: expect.stringContaining(OTHER) })
+    expect(item(await f.service.run('manual'))).toMatchObject({ rule: 'worktree-deleted', outcome: 'removed' })
   }, 60_000)
 })
 
@@ -616,6 +682,36 @@ describe('deleted threads and orphans', () => {
     const report = await f.service.run('manual')
     expect(report.items.filter((entry) => entry.rule === 'worktree-orphan')).toEqual([expect.objectContaining({ outcome: 'kept', reason: 'No thread uses this worktree', label: 'threads/ghost' })])
     expect(readFileSync(join(orphan, 'file.txt'), 'utf8')).toBe('who owns this')
+  }, 60_000)
+
+  it('skips the installation-wide ownership scan in orphanItems when every worktree folder is already claimed or empty, and still falls through for agent worktrees and malformed workspaces', async () => {
+    const f = fixture(); setPolicy(f, inactive())
+    const orphanScan = () => (f.service as unknown as { orphanItems(): Promise<StorageCleanupItem[]> }).orphanItems()
+    // 1. All worktree directories claimed by workspace.json -> 1 store.list() call only (no full ownership scan).
+    const listSpy = vi.spyOn(f.store, 'list')
+    expect(await orphanScan()).toEqual([])
+    expect(listSpy).toHaveBeenCalledTimes(1)
+    // 2. An empty leftover directory also skips the full ownership scan.
+    listSpy.mockClear()
+    const emptyLeftover = join(f.home, 'repositories', f.repositoryId, 'worktrees', 'threads', 'empty-leftover', 'main')
+    mkdirSync(emptyLeftover, { recursive: true })
+    expect(await orphanScan()).toEqual([])
+    expect(listSpy).toHaveBeenCalledTimes(1)
+    // 3. A directory claimed only via agents.json falls through to the full ownership scan and stays recognized as claimed.
+    const agentTree = join(f.home, 'repositories', f.repositoryId, 'worktrees', 'agents', 'agent-1')
+    git(f.repo, ['worktree', 'add', '-b', 'mousse/agent/agent-1', agentTree])
+    writeFileSync(join(f.location, 'agents.json'), JSON.stringify([{ id: 'agent-1', worktreePath: agentTree, branch: 'mousse/agent/agent-1', status: 'completed' }]))
+    listSpy.mockClear()
+    expect(await orphanScan()).toEqual([])
+    expect(listSpy.mock.calls.length).toBeGreaterThan(1)
+    // 4. A symlinked workspace.json is not fast-path trusted; orphanItems falls through and fails closed (throws).
+    rmSync(join(f.location, 'agents.json'))
+    rmSync(agentTree, { recursive: true, force: true })
+    git(f.repo, ['worktree', 'prune'])
+    const outside = join(f.root, 'outside-workspace.json')
+    renameSync(join(f.location, 'workspace.json'), outside)
+    symlinkSync(outside, join(f.location, 'workspace.json'), process.platform === 'win32' ? 'junction' : 'file')
+    await expect(orphanScan()).rejects.toThrow(/Shared ownership cannot be proven/)
   }, 60_000)
 })
 
@@ -1795,5 +1891,32 @@ describe('the hourly run does not hold up the daemon', () => {
     mkdirSync(join(f.worktree, 'node_modules', 'pkg'), { recursive: true }); writeFileSync(join(f.worktree, 'node_modules', 'pkg', 'index.js'), 'x')
     mkdirSync(join(f.worktree, 'node_modules', 'pkg', '.git'))
     expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'kept', reason: 'Has ignored files (node_modules/)' })
+  }, 60_000)
+
+  it('rules out non-control ignored directories without reading them, while still allowing Mousse control files', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mousse-control-files-')); roots.push(root)
+    mkdirSync(join(root, 'node_modules', 'pkg'), { recursive: true }); writeFileSync(join(root, 'node_modules', 'pkg', 'index.js'), 'x')
+    mkdirSync(join(root, '.mousse'), { recursive: true }); writeFileSync(join(root, '.mousse', 'task-progress.json'), '{}')
+    const reads: string[] = []
+    const countedReaddir = ((path: Parameters<typeof readdir>[0], options?: Parameters<typeof readdir>[1]) => {
+      reads.push(String(path))
+      return readdir(path, options as never)
+    }) as typeof readdir
+    // Non-control directory: ruled out by name with zero directory reads.
+    expect(await onlyControlFiles(root, 'node_modules/', countedReaddir)).toBe(false)
+    expect(reads).toEqual([])
+    // Directory containing only Mousse control files: allowed (does not keep worktree).
+    expect(await onlyControlFiles(root, '.mousse/', countedReaddir)).toBe(true)
+    expect(reads).toEqual([join(root, '.mousse')])
+    // Unexpected subdirectory inside .mousse: rejected without descending into it.
+    reads.length = 0
+    mkdirSync(join(root, '.mousse', 'cache'), { recursive: true }); writeFileSync(join(root, '.mousse', 'cache', 'big.bin'), 'data')
+    expect(await onlyControlFiles(root, '.mousse/', countedReaddir)).toBe(false)
+    expect(reads).toEqual([join(root, '.mousse')])
+    // End-to-end: a worktree whose only ignored file is a Mousse control file is still retired.
+    const f = fixture(); setPolicy(f, inactive())
+    appendFileSync(join(f.repo, '.git', 'info', 'exclude'), '\n.mousse/\n')
+    mkdirSync(join(f.worktree, '.mousse'), { recursive: true }); writeFileSync(join(f.worktree, '.mousse', 'task-progress.json'), '{}')
+    expect(item(await f.service.run('manual'))).toMatchObject({ outcome: 'removed' })
   }, 60_000)
 })

@@ -352,6 +352,10 @@ export interface BotPermissionItem {
   enabled?: boolean
   /** Devices need Full access to allow this permission. */
   needsFullAccess?: true
+  /** Every bot has it by default (MCP and each server, skills, automation tools): it can be switched off, not removed. */
+  builtIn?: true
+  /** The id of the row it belongs under (one MCP server under MCP): shown inset below it. */
+  under?: string
   id: string
   title: string
   note: string

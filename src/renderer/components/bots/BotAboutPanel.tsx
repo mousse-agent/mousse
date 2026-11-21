@@ -88,7 +88,7 @@ function agoText(at: string, now: number): string {
 export function permissionIcon(item: Pick<BotPermissionItem, 'title'>): Icon {
   const title = item.title.toLowerCase()
   if (/github|pull request/.test(title)) return GitPullRequest
-  if (/^use your .+ tools|^use .+'s new tools/.test(title)) return Plug
+  if (/^use your .+ tools|^use .+'s new tools|mcp servers/.test(title)) return Plug
   if (/search the web/.test(title)) return Search
   if (/web pages/.test(title)) return Globe
   if (/browser/.test(title)) return BrowserTab
@@ -406,7 +406,7 @@ function doingText(bot: BotSummary, now: number): string {
 
 function permissionsSummary(detail: BotDetail | undefined): string | undefined {
   if (!detail) return undefined
-  const off = detail.permissions.filter((item) => item.enabled === false || item.mark || item.gone).length
+  const off = detail.permissions.filter((item) => item.enabled === false || (item.mark && !item.asksFirst) || item.gone).length
   const on = detail.permissions.length - off
   if (!detail.permissions.length) return 'Asks when it needs something'
   return off ? `${on} on · ${off} off` : `${on} on`
@@ -458,8 +458,9 @@ export function BotAboutPanel({ bot, inPanel = false }: { bot: BotSummary; inPan
   const runs = detail?.runs ?? []
   const reminders = detail?.reminders ?? []
 
-  // What the bot may use and which devices reach it are changed here: the panel pauses a theme while it is open.
-  return <aside className={`bot-about settings-scope${inPanel ? ' is-in-panel' : ''}`} data-mousse-decision="" aria-label={`About ${bot.name}`}>
+  // What the bot may use and which devices reach it are changed here: while the panel is open a theme's CSS is off
+  // (its colors stay), so it cannot relabel them.
+  return <aside className={`bot-about settings-scope${inPanel ? ' is-in-panel' : ''}`} data-mousse-guarded="" aria-label={`About ${bot.name}`}>
     <div className="bot-about-scroll" ref={scroller}>
       <header className="bot-about-head">
         <BotFace look={bot.look} state={botFaceState(bot, happy)} size={76} view="full" />
@@ -491,12 +492,12 @@ export function BotAboutPanel({ bot, inPanel = false }: { bot: BotSummary; inPan
           ? <div className="settings-group-rows bot-about-surface">
             {detail.permissions.map((item) => {
               const off = item.mark ?? (item.gone ? 'Gone from Mousse' : undefined)
-              return <Row key={item.id} icon={permissionIcon(item)} className={`bot-about-permission${item.enabled === false ? ' is-off' : ''}`}
+              return <Row key={item.id} icon={permissionIcon(item)} className={`bot-about-permission${item.enabled === false ? ' is-off' : ''}${item.under ? ' indent' : ''}`}
                 title={capital(item.title)} titleTip={item.note || undefined}
                 {...(item.note ? { desc: item.note } : {})}
                 {...(off ? { status: { text: off, tone: 'warn' as const } } : {})}>
                 {item.enabled !== undefined && <span title={item.note}><Switch label={item.title} checked={item.enabled} onChange={(enabled) => void store().setPermission(bot.id, item.id, enabled)} /></span>}
-                <ConfirmRemoveButton label={`Remove ${item.title}`} onRemove={() => void store().revokePermission(bot.id, item.id)} />
+                {item.builtIn ? null : <ConfirmRemoveButton label={`Remove ${item.title}`} onRemove={() => void store().revokePermission(bot.id, item.id)} />}
               </Row>
             })}
           </div>

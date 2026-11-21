@@ -5,6 +5,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { SlidingThreadsPane } from '../../src/renderer/components/SlidingThreadsPane'
+import { useAppStore } from '../../src/renderer/stores/appStore'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -35,6 +36,7 @@ afterEach(() => {
   act(() => root.unmount())
   app.remove()
   window.matchMedia = realMatchMedia
+  useAppStore.setState({ sidebarAnimations: true })
 })
 
 type Props = { open: boolean; width?: number; overlay?: boolean; resizing?: boolean }
@@ -77,6 +79,23 @@ describe('SlidingThreadsPane, settled', () => {
     expect(pane().hasAttribute('inert')).toBe(false)
     expect(pane().classList.contains('is-expanded')).toBe(true)
     expect(sidebar()).not.toBeNull()
+  })
+
+  it.each([false, true])('opens and unmounts immediately with sidebar animations off (peek: %s)', (overlay) => {
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {}
+    })) as unknown as typeof window.matchMedia
+    useAppStore.setState({ sidebarAnimations: false })
+
+    draw({ open: false, overlay })
+    draw({ open: true, overlay })
+    expect(pane().classList.contains('is-expanded')).toBe(true)
+    expect(sidebar()).not.toBeNull()
+    draw({ open: false, overlay })
+    expect(sidebar()).toBeNull()
   })
 
   it('keeps the resized width through resizing, closing and reopening', () => {

@@ -9,6 +9,8 @@ import { expirePreservedFiles } from './preservedFiles'
 import { dispatchKeptFilesOwners, projectKeptFilesOwners, resumeProjectClockHeld } from './keptCopies'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import { existsSync } from 'node:fs'
+import { gitCommonDirAsync } from '../lifecycle/canonicalPath'
+import { packMousseRefs, type PackOutcome } from './packMousseRefs'
 
 export interface UndoRetentionSweeperOptions {
   intervalMs: number
@@ -37,6 +39,8 @@ export class UndoRetentionSweeper {
   private cursor = 0
   private passes = 0
   readonly outcomes = new Map<string, { at: string; expired?: number; releasedRefs?: number; expiredPreservedRefs?: number; reason?: string }>()
+  /** What the last pass did with each repository's loose `refs/mousse/` refs (`packMousseRefs`), by common directory. */
+  readonly packs = new Map<string, { at: string; outcome?: PackOutcome; reason?: string }>()
   constructor(private readonly store: ResourceLifecycleStore, private readonly options: UndoRetentionSweeperOptions = { intervalMs: 60 * 60 * 1000, tasksPerBatch: 20, firstPassAfterMs: 2 * 60 * 1000 }) {}
   start(): void {
     if (this.timer || this.abort.signal.aborted) return
@@ -67,6 +71,8 @@ export class UndoRetentionSweeper {
     // The first pass belongs to starting up: kept files are not looked at until a later one.
     const startup = this.passes++ === 0
     const batch = Math.min(tasks.length, this.options.tasksPerBatch)
+    /** A checkout of each repository this pass swept, whose loose Mousse refs are packed after it. */
+    const repositories = new Map<string, string>()
     for (let i = 0; i < batch && !this.abort.signal.aborted; i++) {
       const task = tasks[this.cursor++ % tasks.length]!
       let lease
@@ -79,6 +85,8 @@ export class UndoRetentionSweeper {
         if (!workspace || workspace.lifecycle !== 'ready') continue
         // Everything below runs Git synchronously in the thread's folder: a volume that does not answer is left for a later pass.
         await waitForFolderAccess([task.location, workspace.worktreePath], { whenNotAnswering: 'fail', signal: this.abort.signal })
+        const commonDir = workspace.snapshotOnly ? undefined : await gitCommonDirAsync(workspace.worktreePath)
+        if (commonDir && !repositories.has(commonDir)) repositories.set(commonDir, workspace.worktreePath)
         const result = await new UndoRetentionService(task.location).sweep(workspace.worktreePath, this.abort.signal, lease)
         if (!result.suspended && !startup) {
           try {
@@ -100,6 +108,19 @@ export class UndoRetentionSweeper {
       } finally { if (lease) releaseExecutionLeaseHandle(lease) }
     }
     await this.sweepKeptCopyOwners(startup)
+    await this.packRepositories(repositories)
+  }
+
+  /**
+   * After the pass's releases: each swept repository's loose `refs/mousse/` refs, packed once there are enough of them
+   * (`packMousseRefs`). One repository at a time, each under its own lease, and only those this pass swept.
+   */
+  private async packRepositories(repositories: Map<string, string>): Promise<void> {
+    for (const [commonDir, checkout] of repositories) {
+      if (this.abort.signal.aborted) return
+      try { this.packs.set(commonDir, { at: new Date().toISOString(), outcome: await packMousseRefs(checkout, { signal: this.abort.signal }) }) }
+      catch (error) { this.packs.set(commonDir, { at: new Date().toISOString(), reason: error instanceof Error ? error.message : String(error) }) }
+    }
   }
 
   /**

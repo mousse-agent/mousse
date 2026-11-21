@@ -375,7 +375,7 @@ html[data-theme='high-contrast'] {
    (`--project-hue`, set on the row from projectHues), the same as on its threads' cards, never its place in the list. */
 .app .threads-sidebar-project .threads-sidebar-project-icon { color: var(--project-hue, currentColor); }
 
-/* "Other threads" reads quieter than a project: regular weight, muted, no hue. Its header dims like a group out
+/* "No project" reads quieter than a project: regular weight, muted, no hue. Its header dims like a group out
    of focus unless it holds the open thread (threads-sidebar.css). */
 .app .threads-sidebar-other-threads .threads-sidebar-project-toggle {
   font-weight: 400;
@@ -1280,11 +1280,13 @@ html[data-frosted-composer='true'] .chat:not(.chat--empty) .an-message-list {
   );
 }
 
+/* On the new-thread page there is no transcript: the glass frosts the glow behind the composer. */
 html[data-frosted-composer='true'] .app .chat:not(.chat--empty) .chat-input-area .composer,
+html[data-frosted-composer='true'] .app .chat--empty .chat-input-area .composer,
 html[data-frosted-composer='true'] .chat:not(.chat--empty) .chat-jump {
   background-color: rgba(var(--surface-soft-rgb), var(--frosted-composer-alpha, 0.6));
-  -webkit-backdrop-filter: blur(var(--frosted-composer-blur, 16px)) saturate(var(--frosted-composer-saturate, 1.12));
-  backdrop-filter: blur(var(--frosted-composer-blur, 16px)) saturate(var(--frosted-composer-saturate, 1.12));
+  -webkit-backdrop-filter: blur(var(--frosted-composer-blur, 6px)) saturate(var(--frosted-composer-saturate, 1.12));
+  backdrop-filter: blur(var(--frosted-composer-blur, 6px)) saturate(var(--frosted-composer-saturate, 1.12));
 }
 
 /* On the glass, hover still deepens the fill and brings the text to full colour. */

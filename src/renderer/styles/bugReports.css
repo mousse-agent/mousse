@@ -20,7 +20,7 @@
 
 .bug-report-action:hover { background: color-mix(in srgb, var(--text-secondary) 20%, transparent); }
 .bug-report-action:focus-visible,
-.bug-report-done:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.bug-report-done:focus-visible { outline: none; background-image: var(--ui-focus-layer); }
 
 .bug-report-done {
   background: rgba(var(--accent-rgb), 0.14);
@@ -78,7 +78,7 @@
   font: 400 13px/1.45 var(--font-sans);
 }
 
-.bug-report-input:focus { outline: 2px solid rgba(var(--accent-rgb), 0.55); outline-offset: 0; }
+.bug-report-input:focus { outline: none; background: color-mix(in srgb, var(--text-secondary) 15%, transparent); }
 .bug-report-body { resize: vertical; min-height: 140px; max-height: 320px; }
 
 .bug-report-check {

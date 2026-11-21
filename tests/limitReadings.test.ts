@@ -63,6 +63,22 @@ describe('keeping limit readings', () => {
     expect(await readings.lastReadAt('claud')).toBeUndefined()
   })
 
+  it('keeps each scoped limit (an Antigravity model group) as its own trend, named by its group', async () => {
+    const readings = store()
+    const scoped = (id: string, label: string, used: number): ProviderUsageWindow => ({ ...window(id, used), label })
+    await readings.record(usage([
+      scoped('gemini-models:5h', 'Gemini Models · 5-hour limit', 13),
+      scoped('gemini-models:weekly', 'Gemini Models · Weekly limit', 40),
+      scoped('claude-and-gpt-models:5h', 'Claude and GPT models · 5-hour limit', 0)
+    ], { id: 'antigravity', label: 'Antigravity' }))
+    const trends = await readings.trends('24h')
+    expect(trends.map((trend) => [trend.id, trend.label, trend.windows.map((entry) => [entry.id, entry.points.at(-1)![1]])])).toEqual([
+      ['antigravity#claude-and-gpt-models', 'Antigravity · Claude and GPT models', [['five_hour', 0]]],
+      ['antigravity#gemini-models', 'Antigravity · Gemini Models', [['five_hour', 13], ['seven_day', 40]]]
+    ])
+    expect(await readings.lastReadAt('antigravity')).toBe(T0)
+  })
+
   it('keeps a month, leaving older and unreadable lines out of the file', async () => {
     mkdirSync(join(dir, 'cache'), { recursive: true })
     const line = (t: number) => JSON.stringify({ t, p: 'claude', l: 'Claude', w: { seven_day: [50, null] } })
@@ -125,7 +141,8 @@ describe('the background read', () => {
     { id: 'recent', label: 'Recent' },
     { id: 'page', label: 'Read by the page' },
     { id: 'out', label: 'Signed out', signedOut: true as const },
-    { id: 'never', label: 'Never read' }
+    { id: 'never', label: 'Never read' },
+    { id: 'asked', label: 'Read only when asked', onRequestOnly: true as const }
   ]
   const services = () => ({
     getProfileHomeDir: () => dir,
@@ -138,7 +155,7 @@ describe('the background read', () => {
     const at = Date.now()
     mkdirSync(join(dir, 'cache'), { recursive: true })
     const line = (p: string, ago: number) => JSON.stringify({ t: at - ago, p, l: p, w: { five_hour: [10, null] } })
-    writeFileSync(file(), [line('due', 20 * MINUTE), line('later', 30 * MINUTE), line('key', 20 * MINUTE), line('recent', 5 * MINUTE), line('page', HOUR), line('out', HOUR)].join('\n'))
+    writeFileSync(file(), [line('due', 20 * MINUTE), line('later', 30 * MINUTE), line('key', 20 * MINUTE), line('recent', 5 * MINUTE), line('page', HOUR), line('out', HOUR), line('asked#pool', HOUR)].join('\n'))
     const mms = services()
     // The page read this one a minute ago (its reading said nothing new, so the file has the older one).
     keepUsage(mms, usage([window('five_hour', 10)], { id: 'page' }), at - MINUTE)

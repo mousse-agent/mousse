@@ -2,8 +2,9 @@
 /**
  * Decisions that are reached another way than their first prompt still pause a theme (#1142): the host key every SSH
  * dialog confirms (adding a device, renaming an address, approving a route), and an editor request answered in
- * Settings → Devices after its dialog was dismissed, and the composer's permission menu, whose Full access row a theme
- * could otherwise show as "Ask before acting". The pause itself is tests/renderer/theme-css-electron.test.ts.
+ * Settings → Devices after its dialog was dismissed. The composer's permission menu, whose Full access row a theme's CSS
+ * could otherwise show as "Ask before acting", turns the theme's CSS off and keeps its colors. A plain question from the agent is not a decision: the theme stays on
+ * while it shows; an approval in the same dialog is. The pause itself is tests/renderer/theme-css-electron.test.ts.
  */
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -13,6 +14,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { HostKeyConfirm } from '../../src/renderer/components/devices/HostKeyConfirm'
 import { DeviceAccessView } from '../../src/renderer/components/devices/DeviceAccessRows'
 import { PermissionModeSection, permissionChoice } from '../../src/renderer/components/ComposerPermissionPicker'
+import { ComposerQuestionModal } from '../../src/renderer/components/ComposerQuestionModal'
 
 const marked = (html: string) => /data-mousse-decision=""/.test(html)
 
@@ -31,11 +33,23 @@ describe('decision markers on shared and left-behind prompts', () => {
     expect(marked(renderToStaticMarkup(createElement(DeviceAccessView, props)))).toBe(false)
   })
 
-  it('the composer\'s permission menu, Full access row included, is a decision', () => {
+  it('the composer\'s permission menu, Full access row included, is guarded: theme CSS off, colors kept', () => {
     const control = { mode: 'ask' as const, agent: 'Claude Code', onSelect: () => {} }
     const html = renderToStaticMarkup(createElement(PermissionModeSection, { control, choice: permissionChoice(control), onPicked: () => {} }))
     expect(html).toContain('aria-label="Full access.')
-    expect(marked(html)).toBe(true)
+    expect(html).toContain('data-mousse-guarded=""')
+    expect(marked(html)).toBe(false)
+  })
+
+  it.each([
+    ['a plain question from the agent', {}, [{ id: 'a', label: 'Red' }, { id: 'b', label: 'Blue' }], false],
+    ['a saved approval request', { approval: { reason: 'Run a command' } }, [{ id: 'a', label: 'Approve', decision: 'allow' }, { id: 'b', label: 'Deny', decision: 'reject' }], true],
+    ['a question whose options allow or reject', {}, [{ id: 'a', label: 'Yes', decision: 'allow' }, { id: 'b', label: 'No', decision: 'reject' }], true]
+  ] as const)('the question dialog: %s is a decision: %s', (_what, extra, options, decision) => {
+    const pending = { requestId: 'r1', questions: [{ id: 'q1', prompt: 'Which?', options: [...options] }], ...extra }
+    const html = renderToStaticMarkup(createElement(ComposerQuestionModal, { pending: pending as never, onSubmit: () => {}, onDismiss: () => {} }))
+    expect(html).toContain('Which?')
+    expect(marked(html)).toBe(decision)
   })
 
   it('the permission menu ignores the second click of a double click, and takes a single one', () => {

@@ -5,7 +5,12 @@ import type { NetLocalMethod, PlusConfiguration, PlusStatus } from '../../../sha
 import type { HostedNet, HostedNetHost, HostedNetModule, HostedRelayTransports } from '../hosted'
 import { hostedNotConfigured } from '../hosted'
 import type { RelayRendezvous } from '../relay/protocol'
-import { HostedProfileService, type PlusEnrollmentRequest } from './HostedProfileService'
+import {
+  accountNetworkKept,
+  HostedProfileService,
+  isAccountNetwork,
+  type PlusEnrollmentRequest
+} from './HostedProfileService'
 import {
   enrollmentJoinUrl,
   enrollmentMatchCode,
@@ -232,10 +237,15 @@ export class HostedNetController implements HostedNet {
   private async completeJoin(grant: JoinGrant): Promise<PlusStatus> {
     const client = this.join(),
       deviceName = grant.deviceName,
-      target = joinTarget(await client.inventory(grant)),
-      account = grant.email ? { email: grant.email } : {}
+      found = joinTarget(await client.inventory(grant)),
+      account = grant.email ? { email: grant.email } : {},
+      own = this.host.ownNode(),
+      // A computer alone on its own network that the account already lists keeps it.
+      target = found && found.node !== own ? found : undefined
     if (target) {
       if (!target.online) throw new NetError('authority_offline')
+      // A computer alone on its own network leaves it to join the account's devices.
+      if (own) await this.host.leaveLoneNetwork()
       const { transportFingerprint } = await this.host.serial(() => this.host.prepareJoin())
       try {
         await this.joinTarget(grant, target.node, deviceName, transportFingerprint)
@@ -244,10 +254,18 @@ export class HostedNetController implements HostedNet {
         await this.host.dropUnsentJoin().catch(() => {})
         throw error
       }
-    } else await this.host.serial(() => this.host.createIdentity(deviceName))
+    } else if (!own) await this.host.serial(() => this.host.createIdentity(deviceName))
     return this.host.serial(async () => {
       this.assertTransportCapacity()
-      const status = await this.service().useGrant(grant.configuration, grant.accessToken, !target, account)
+      let status: PlusStatus
+      try {
+        status = await this.service().useGrant(grant.configuration, grant.accessToken, !target, account)
+      } catch (error) {
+        // The account keeps a devices list whose owner computer isn't signed in to Mousse ID right
+        // now, so there was nothing to join. That computer adds this one once it is open.
+        if (!target && isAccountNetwork(error)) throw new NetError('authority_offline')
+        throw error
+      }
       await this.useHostedRelay()
       return status
     })
@@ -296,7 +314,16 @@ export class HostedNetController implements HostedNet {
         return this.service().configure(params.configuration as PlusConfiguration)
       case 'net.plus.login.finish': {
         this.assertTransportCapacity()
-        const status = await this.service().finishLogin(String(params.id))
+        let status: PlusStatus
+        try {
+          status = await this.service().finishLogin(String(params.id))
+        } catch (error) {
+          // Signed in with its own identity, this computer was refused a second devices list. One
+          // that can leave its network joins the account's list at its next sign-in; one that
+          // can't keeps working on its own.
+          if (isAccountNetwork(error) && !this.host.mayJoinAccount()) throw accountNetworkKept()
+          throw error
+        }
         await this.useHostedRelay()
         return status
       }
@@ -421,8 +448,7 @@ export class HostedNetController implements HostedNet {
       await this.service().renew()
       await this.reconcileSpaceRoutes()
     } catch (error) {
-      this.host.fail(error)
-      this.host.emit()
+      this.failed(error)
     }
     await this.refreshDirectPath(true)
   }
@@ -489,9 +515,8 @@ export class HostedNetController implements HostedNet {
         await this.reconcileSpaceRoutes()
       })
       .catch((error) => {
-        this.host.fail(error)
+        this.failed(error)
         this.armRenewal()
-        this.host.emit()
       })
   }
 
@@ -516,6 +541,32 @@ export class HostedNetController implements HostedNet {
     return this.host.serial(() =>
       this.service().rendezvous(Math.min(expiresAt, Date.now() + 599000), 'space')
     )
+  }
+
+  /**
+   * Records a failure of background Mousse ID work for `net.status`. A folded devices list is not
+   * a failure: the account row says it (PlusStatus `reason`), and the link is already dropped.
+   */
+  private failed(error: unknown): void {
+    if (!isAccountNetwork(error)) this.host.fail(error)
+    this.host.emit()
+  }
+
+  /**
+   * Mousse ID folded this computer's devices list into the account's one list and refuses its
+   * registration for good. The sign-in is already dropped; the hosted relay goes too, as when
+   * signed out, so nothing retries it. Signing in again joins the account's list.
+   */
+  private listMerged(): void {
+    if (this.plusRenewal) clearTimeout(this.plusRenewal)
+    this.plusRenewal = undefined
+    this.stopEnrollmentPoll()
+    this.host.saveHostedTransport(undefined)
+    void this.host
+      .serial(() => this.host.restartTransports())
+      .catch((error) => this.failed(error))
+      .finally(() => this.host.emit())
+    this.host.emit()
   }
 
   identityReset(): void {
@@ -600,10 +651,7 @@ export class HostedNetController implements HostedNet {
             this.armRenewal()
           }
         })
-        .catch((error) => {
-          this.host.fail(error)
-          this.host.emit()
-        })
+        .catch((error) => this.failed(error))
     }, Math.min(left, RENEW_WAKE_CHECK_MS))
     this.plusRenewal.unref?.()
   }
@@ -648,10 +696,7 @@ export class HostedNetController implements HostedNet {
         await this.host
           .serial(() => this.approveRequest(request))
           .then(() => this.requestsApproved.add(request.id))
-          .catch((error) => {
-            this.host.fail(error)
-            this.host.emit()
-          })
+          .catch((error) => this.failed(error))
       }
     this.setEnrollmentRequests(requests.filter((row) => !this.requestsApproved.has(row.id)))
     return this.enrollmentList
@@ -737,6 +782,7 @@ export class HostedNetController implements HostedNet {
           delegation: hello.delegation!
         }
       },
+      listMerged: () => this.listMerged(),
       adoptRoster: (roster) => {
         const self = rt.identity.self()
         const root = self && rt.identity.pinnedRootKey(self.user)

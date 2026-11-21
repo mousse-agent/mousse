@@ -26,6 +26,11 @@ export interface BotJournalCaptureOptions {
   store: BotMemoryStore
   /** `ThreadDataStore.loadThreadData`. */
   readThread: (threadId: string) => Pick<ThreadData, 'messages'> | undefined
+  /**
+   * `ThreadDataStore.transcriptStamp`: what the thread's transcript files look like, without reading them. The startup
+   * catch-up skips a thread whose stamp is the one its last copy saw, so it reads only threads written since.
+   */
+  transcriptStamp?: (threadId: string) => string | undefined
   /** Every bot thread, for the startup catch-up. */
   listThreads: () => BotThreadRef[]
   /** Whether a bot thread is one of its work's subagents' (`BotStore.threadRole`): its rows are marked as theirs. */
@@ -42,6 +47,8 @@ interface Cursor {
   n: number
   /** The id of message `n - 1`, so a rewritten transcript is copied again from the start. */
   lastId: string | null
+  /** The transcript's stamp (`transcriptStamp`) taken before the read this cursor came from. */
+  stamp?: string
 }
 
 type CapturedRow = BotJournalInput & { at: string }
@@ -184,7 +191,20 @@ export function createBotJournal(options: BotJournalCaptureOptions): BotJournalC
   const { store } = options
   const log = options.log ?? (() => {})
 
-  const syncNow = (ref: BotThreadRef): number => {
+  const stampOf = (threadId: string): string | undefined => {
+    try {
+      return options.transcriptStamp?.(threadId)
+    } catch {
+      // No stamp: the thread is read, as it would be without one.
+      return undefined
+    }
+  }
+
+  const syncNow = (ref: BotThreadRef, skipUnchanged = false): number => {
+    const cursorKey = `cursor:${ref.threadId}`
+    // Taken before the read: a write during or after it gives the next look a different stamp.
+    const stamp = stampOf(ref.threadId)
+    if (skipUnchanged && stamp !== undefined && store.getState<Cursor>(ref.botId, cursorKey)?.stamp === stamp) return 0
     let messages: ChatMessage[]
     try {
       messages = options.readThread(ref.threadId)?.messages ?? []
@@ -193,7 +213,6 @@ export function createBotJournal(options: BotJournalCaptureOptions): BotJournalC
       log(`bot memory: thread ${ref.threadId} could not be read for capture`, error)
       return 0
     }
-    const cursorKey = `cursor:${ref.threadId}`
     let subagent = false
     try {
       subagent = options.isSubagentThread?.(ref.threadId) === true
@@ -220,7 +239,8 @@ export function createBotJournal(options: BotJournalCaptureOptions): BotJournalC
         if (settledPrefix) start = index + 1
       }
       const lastId = messages[start - 1]?.id ?? null
-      if (!saved || saved.n !== start || saved.lastId !== lastId) store.setState(ref.botId, cursorKey, { n: start, lastId } satisfies Cursor)
+      if (!saved || saved.n !== start || saved.lastId !== lastId || saved.stamp !== stamp)
+        store.setState(ref.botId, cursorKey, { n: start, lastId, ...(stamp !== undefined ? { stamp } : {}) } satisfies Cursor)
       return written
     })
   }
@@ -245,7 +265,7 @@ export function createBotJournal(options: BotJournalCaptureOptions): BotJournalC
       for (const thread of threads) {
         if (failedBots.has(thread.botId)) continue
         try {
-          syncNow(thread)
+          syncNow(thread, true)
         } catch (error) {
           log(`bot memory: thread ${thread.threadId} could not be caught up`, error)
           if (error instanceof BotJournalError) failedBots.add(thread.botId)
@@ -253,6 +273,6 @@ export function createBotJournal(options: BotJournalCaptureOptions): BotJournalC
       }
       return { failedBots: [...failedBots] }
     },
-    syncNow
+    syncNow: (ref) => syncNow(ref)
   }
 }

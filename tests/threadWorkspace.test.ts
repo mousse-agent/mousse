@@ -29,12 +29,12 @@ describe('ThreadWorkspaceManager', () => {
     expect(context.capability.unavailableReason).toBe('Thread has no project workspace')
   })
 
-  it('provisions a branch named from the first message, a full-id retained ref, and an external worktree', async () => {
+  it('provisions a temporary branch, a full-id retained ref, and an external worktree', async () => {
     const fixture = repository(); const previous = process.env.MOUSSE_HOME; process.env.MOUSSE_HOME = fixture.home
     try {
       const manager = new ThreadWorkspaceManager(fixture.thread)
       const metadata = await manager.provision('thread-full-id', 'branch-full-id', fixture.root, undefined, undefined, undefined, { nameFrom: 'Fix the login button on Safari' })
-      expect(metadata.branch).toBe('mousse/fix-the-login-button-on-safari')
+      expect(metadata.branch).toMatch(/^mousse\/[0-9a-f]{8}$/)
       expect(metadata.retainedRef).toBe('refs/mousse/threads/thread-full-id/branch-full-id')
       expect(metadata.worktreePath.endsWith(join('threads', 'thread-full-id', 'branch-full-id'))).toBe(true)
       expect(metadata.worktreePath.startsWith(fixture.home)).toBe(true)
@@ -46,20 +46,8 @@ describe('ThreadWorkspaceManager', () => {
       // A restore keeps the name it was given: it is never picked again.
       const restored = await manager.restore(fixture.root)
       expect(restored.lifecycle).toBe('ready')
-      expect(restored.branch).toBe('mousse/fix-the-login-button-on-safari')
+      expect(restored.branch).toBe(metadata.branch)
       expect(execFileSync('git', ['branch', '--show-current'], { cwd: restored.worktreePath, encoding: 'utf8' }).trim()).toBe(restored.branch)
-    } finally {
-      if (previous === undefined) delete process.env.MOUSSE_HOME; else process.env.MOUSSE_HOME = previous
-    }
-  })
-
-  it('names a private thread\'s branch from its id, never from its first message', async () => {
-    const fixture = repository(); const previous = process.env.MOUSSE_HOME; process.env.MOUSSE_HOME = fixture.home
-    try {
-      writeFileSync(join(fixture.thread, 'meta.json'), JSON.stringify({ id: 'abcd1234-private', name: 'Taxes', localOnly: true }))
-      const metadata = await new ThreadWorkspaceManager(fixture.thread).provision('abcd1234-private', 'main', fixture.root, undefined, undefined, undefined, { nameFrom: 'My tax return numbers' })
-      expect(metadata.branch).toBe('mousse/private-abcd1234')
-      execFileSync('git', ['worktree', 'remove', '--force', metadata.worktreePath], { cwd: fixture.root })
     } finally {
       if (previous === undefined) delete process.env.MOUSSE_HOME; else process.env.MOUSSE_HOME = previous
     }

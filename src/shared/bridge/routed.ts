@@ -261,6 +261,7 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
   'runs.wait': read('thread', ['threadId', 'runId', 'timeoutMs'], { owned: { runId: 'run' } }),
   'activity.get': read('thread', ['threadId']),
   'subagents.list': read('thread', ['threadId']),
+  'threads.backgroundWork': read('thread', ['threadId']),
   'agents.list': read('thread', ['threadId']),
   'tasks.list': read('thread', ['threadId']),
   'workspace.getStatus': read('thread', ['threadId', GEN]),
@@ -476,6 +477,7 @@ export const ROUTED_METHODS: Readonly<Record<string, RoutedRow>> = Object.freeze
     owned: { runId: 'run' }
   }),
   'subagents.stopAll': chat('thread', ['threadId']),
+  'threads.stopBackground': chat('thread', ['threadId', 'id'], { required: ['id'] }),
   'agents.stop': chat('thread', ['threadId', 'agentId', 'merge'], { required: ['agentId'] }),
   'tasks.create': chat('thread', ['threadId', 'description', 'agentId', 'status'], {
     required: ['description']
@@ -985,7 +987,6 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
       'health',
       'capabilities',
       'events.subscribe',
-      'app.presence',
       'daemon.shutdown',
       'gui.devtoolsPoll',
       'gui.devtoolsRespond'
@@ -1065,6 +1066,10 @@ export const ROUTED_LOCAL_METHODS: readonly RoutedLocalRule[] = [
     methods: ['usage.history'],
     prefixes: ['settings.', 'stats.', 'storage.', 'scheduled.', 'mcp.', 'webTools.'],
     reason: 'Settings and services of the computer, not thread features.'
+  },
+  {
+    prefixes: ['computerUse.'],
+    reason: 'Cua Driver is found and installed on the computer itself; only a person at a window of that computer installs software.'
   },
   {
     methods: ['automations.asks.answer', 'automations.keep'],

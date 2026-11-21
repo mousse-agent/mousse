@@ -14,6 +14,7 @@ import {
   releaseExecutionLeaseHandle,
   tryAcquireExecutionLease
 } from '../../src/mms/queue/ThreadExecutionLease'
+import * as executionLease from '../../src/mms/queue/ThreadExecutionLease'
 import { createOrchestrator, piAdapter, waitFor, type ScriptedAdapter } from './phase6Fixture'
 
 describe('a send that lost the race for the thread lease', () => {
@@ -69,6 +70,32 @@ describe('a send that lost the race for the thread lease', () => {
     await settle(100)
     expect(ran('LEASE-A')).toBe(1)
     expect(adapter.turns).toHaveLength(1)
+  })
+
+  it('starts a bound first send once the writer that raced it releases the lease', async () => {
+    const thread = store.createThread('New Chat', undefined, undefined, { started: true, firstSendPending: true })
+    const directory = store.getThreadDir(thread.id)
+    const lease = tryAcquireExecutionLease(directory, { source: 'git-operation' })!
+    let missedLease!: () => void
+    const firstAttempt = new Promise<void>((resolve) => { missedLease = resolve })
+    const tryAcquire = executionLease.tryAcquireExecutionLease
+    vi.spyOn(executionLease, 'tryAcquireExecutionLease').mockImplementation((...args) => {
+      const handle = tryAcquire(...args)
+      if (args[0] === directory && !handle) missedLease()
+      return handle
+    })
+    const sending = orch.send('LEASE-BOUND first message', false, { threadId: thread.id, refuseQueue: true })
+    void sending.catch(() => undefined)
+    try {
+      await firstAttempt
+      expect(adapter.turns).toHaveLength(0)
+      expect(store.loadMessageQueue(thread.id)).toEqual([])
+    } finally {
+      releaseExecutionLeaseHandle(lease)
+    }
+    await expect(sending).resolves.toMatchObject({ message: 'ok' })
+    expect(ran('LEASE-BOUND')).toBe(1)
+    expect(store.loadMessageQueue(thread.id)).toEqual([])
   })
 
   it('keeps the order of messages queued behind the lease, each running once', async () => {

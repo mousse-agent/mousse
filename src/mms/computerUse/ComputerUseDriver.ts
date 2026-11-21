@@ -208,15 +208,15 @@ export class ComputerUseDriver {
   /** The driver now, as Settings shows it. `refresh`: look again now, not from the last minute's answer. */
   async status(refresh = false): Promise<ComputerUseStatus> {
     const { enabled, driverPath } = this.options.settings()
-    const base = { enabled, installable: cuaInstallCommand(this.platform) !== undefined, ...((command) => (command ? { installCommand: command } : {}))(cuaInstallCommand(this.platform)) }
+    const base = this.statusBase(enabled)
     if (this.installing) return { ...base, state: 'installing' }
     const key = driverPath ?? ''
     if (!refresh && this.cached && this.cached.key === key && Date.now() - this.cached.at < STATUS_TTL_MS) return { ...this.cached.status, ...base }
     const look = ++this.looks
-    const found = locateDriver({ chosen: driverPath, platform: this.platform, env: this.env, home: this.home, exists: this.options.exists })
+    const found = this.locate(driverPath)
     let status: ComputerUseStatus
     if (!found) {
-      status = { ...base, state: 'missing', ...(driverPath ? { path: driverPath, source: 'chosen' as const, error: 'No file there.' } : {}), ...(this.installError ? { error: this.installError } : {}) }
+      status = this.missingStatus(base, driverPath)
     } else {
       try {
         const version = parseDriverVersion(await (this.options.version ?? runVersion)(found.path))
@@ -236,12 +236,34 @@ export class ComputerUseDriver {
     return status
   }
 
+  private statusBase(enabled: boolean): Pick<ComputerUseStatus, 'enabled' | 'installable' | 'installCommand'> {
+    const command = cuaInstallCommand(this.platform)
+    return { enabled, installable: command !== undefined, ...(command ? { installCommand: command } : {}) }
+  }
+
+  private locate(driverPath: string | undefined): { path: string; source: ComputerDriverSource } | undefined {
+    return locateDriver({ chosen: driverPath, platform: this.platform, env: this.env, home: this.home, exists: this.options.exists })
+  }
+
+  private missingStatus(base: Pick<ComputerUseStatus, 'enabled' | 'installable' | 'installCommand'>, driverPath: string | undefined): ComputerUseStatus {
+    return { ...base, state: 'missing', ...(driverPath ? { path: driverPath, source: 'chosen' as const, error: 'No file there.' } : {}), ...(this.installError ? { error: this.installError } : {}) }
+  }
+
   /** The last answer of `status`, without looking (for a listing, which can't wait). Undefined before the first look. */
   known(): ComputerUseStatus | undefined {
     const { driverPath } = this.options.settings()
     if (this.installing) return undefined
-    if (!this.cached || this.cached.key !== (driverPath ?? '')) {
-      // Look now for the next listing; this one counts as unknown.
+    const key = driverPath ?? ''
+    if (!this.cached || this.cached.key !== key) {
+      // Whether a driver is there at all is a look at files, answered now: the first listing already leaves out the
+      // tools of a missing driver, so a thread's tool list doesn't change between its first turn and the next.
+      if (!this.locate(driverPath)) {
+        const status = this.missingStatus(this.statusBase(this.options.settings().enabled), driverPath)
+        ++this.looks
+        this.cached = { key, at: Date.now(), status }
+        return status
+      }
+      // A driver is there: its version is asked for the next listing; this one counts as unknown.
       void this.status().catch(() => undefined)
       return undefined
     }

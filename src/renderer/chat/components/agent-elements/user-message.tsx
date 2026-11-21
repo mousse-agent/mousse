@@ -11,8 +11,9 @@ import { imageDragItem, startDragOut } from "../../../lib/fileDragOut";
 import { ChatReferencePill } from "../../../components/ReferencePill";
 import { parseChatReference, type ChatReference } from "../../../../shared/chatReferences";
 import { openFileInPanel, openLinkedThread, routeLink } from "../../../utils/chatLinks";
-import { threadLink } from "../../../../shared/threadLink";
-import { LinkLabel } from "./link-label-view";
+import { parseThreadLink, threadLink } from "../../../../shared/threadLink";
+import { LinkLabel, threadLinkLabel } from "./link-label-view";
+import { ThreadChip } from "../../../components/ThreadChip";
 import { promptSegments } from "./prompt-links";
 import { WithSentQuotes } from "../../../components/QuotePill";
 import { Bot } from "../../../lib/icons";
@@ -207,16 +208,20 @@ function useTallEnoughToFold(ref: RefObject<HTMLElement | null>, text: string, f
   return tall;
 }
 
-/** The prompt's text with its links drawn as links, the way a reply draws them (see prompt-links, link-label). */
+/**
+ * The prompt's text with its links drawn as links, the way a reply draws them (see prompt-links, link-label): a thread's
+ * link as the thread's chip, in place.
+ */
 function PromptText({ text }: { text: string }) {
   const segments = promptSegments(text);
   if (segments.length === 1 && segments[0]!.kind === "text") return <>{text}</>;
   return (
     <>
-      {segments.map((segment, i) =>
-        segment.kind === "text" ? (
-          segment.text
-        ) : (
+      {segments.map((segment, i) => {
+        if (segment.kind === "text") return segment.text;
+        const threadId = parseThreadLink(segment.href);
+        if (threadId) return <ThreadChip key={i} threadId={threadId} label={threadLinkLabel(segment.href, segment.text)} />;
+        return (
           <a
             key={i}
             href={segment.href}
@@ -229,8 +234,8 @@ function PromptText({ text }: { text: string }) {
           >
             <LinkLabel href={segment.href}>{segment.text}</LinkLabel>
           </a>
-        ),
-      )}
+        );
+      })}
     </>
   );
 }

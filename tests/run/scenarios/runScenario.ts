@@ -255,9 +255,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
       thread = store.createThread(name, project.id, workspace)
     } else thread = store.createThread(name)
     threadId = thread.id
-    // Sent as a Mousse window sends it: Antigravity's personal sign-in runs only messages its owner sends.
-    const owner = adapterId === 'antigravity' ? { source: 'gui', ownerProof: { via: 'gui' as const } } : {}
-    const response = await orch.send(scenario.prompt, false, { threadId, clientRequestId: 'scenario-send', ...owner })
+    const response = await orch.send(scenario.prompt, false, { threadId, clientRequestId: 'scenario-send' })
     await transport.idle()
     transport.assertDone()
     const run = engine.listRuns(threadId).find((entry) => entry.clientRequestId === 'scenario-send')

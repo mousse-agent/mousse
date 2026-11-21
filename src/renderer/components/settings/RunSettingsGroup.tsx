@@ -81,6 +81,18 @@ export function RunSettingsGroup({ runs, onUpdate }: { runs: MousseSettings['run
         }
       />
       <SettingsRow
+        title="Pick a project for new threads"
+        anchor="general-new-thread-picker"
+        description={<span title="On: the title bar's New thread opens a grid of your projects, the last one picked highlighted. Off: it opens a blank thread in the last project at once, as Ctrl+N does.">New thread asks which project first.</span>}
+        control={
+          <Switch
+            checked={runs.newThreadPicker !== false}
+            label="Pick a project for new threads"
+            onChange={(newThreadPicker) => void onUpdate({ runs: { ...runs, newThreadPicker } })}
+          />
+        }
+      />
+      <SettingsRow
         title="Archive private threads after"
         anchor="general-private-expiry"
         description={<span title="A new private thread starts with this expiry; the composer can change it before the first message, and the thread can be extended or kept later. At expiry the thread is archived, as Archive does; nothing is deleted.">New private threads archive themselves after this time.</span>}

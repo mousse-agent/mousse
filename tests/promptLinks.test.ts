@@ -32,6 +32,18 @@ describe('promptSegments', () => {
     ])
   })
 
+  it('splits out thread links written bare, as <…> or as a Markdown link, but not inside inline code', () => {
+    expect(promptSegments('see mousse://thread/t-a, <mousse://thread/nod_0123456789abcdefghjkmnpqrs:t-b> and [notes](mousse://thread/t-c); `mousse://thread/t-d`')).toEqual([
+      { kind: 'text', text: 'see ' },
+      { kind: 'link', text: 'mousse://thread/t-a', href: 'mousse://thread/t-a' },
+      { kind: 'text', text: ', ' },
+      { kind: 'link', text: 'mousse://thread/nod_0123456789abcdefghjkmnpqrs:t-b', href: 'mousse://thread/nod_0123456789abcdefghjkmnpqrs:t-b' },
+      { kind: 'text', text: ' and ' },
+      { kind: 'link', text: 'notes', href: 'mousse://thread/t-c' },
+      { kind: 'text', text: '; `mousse://thread/t-d`' }
+    ])
+  })
+
   it('leaves text without a web address alone', () => {
     expect(promptSegments('no links [here](./file.ts) or javascript:alert(1)')).toEqual([
       { kind: 'text', text: 'no links [here](./file.ts) or javascript:alert(1)' }

@@ -13,6 +13,7 @@ import type { UIMessage, ChatStatus } from "ai";
 import { cn } from "./utils/cn";
 import { motionOff, motionScale } from "../../../lib/motion";
 import { ProviderIcon } from "../../../lib/providerIcons";
+import { takeWarmScroll, type WarmScroll } from "../../../lib/warmHandover";
 import { inferModelBrand } from "../../../../shared/modelVariants";
 import { useProviderSnapshotsStore } from "../../../lib/providerSnapshots";
 import { resolveModelChoice } from "../../../lib/modelChoice";
@@ -138,7 +139,8 @@ export type MessageListProps = {
   className?: string;
   onAtBottomChange?: (atBottom: boolean) => void;
   /** The composer should fold to one line: the reader is browsing earlier messages. */
-  onComposerCompactChange?: (compact: boolean) => void;
+  /** `animate` false: the composer takes the new size at once (a list that opens folded). */
+  onComposerCompactChange?: (compact: boolean, animate?: boolean) => void;
   lastTurnNotice?: React.ReactNode;
   /**
    * Drawn after the last turn (the thread's queued messages), above the reply gap. Outside the
@@ -361,6 +363,39 @@ function TurnWorkStatus({
 }
 
 const NO_WAITS: readonly WaitSpan[] = [];
+const EMPTY_UI_MESSAGES: UIMessage[] = [];
+/** The work clock of a turn under way before its prompt is saved (`StartingTurnRow`). */
+const STARTING_TURN_ID = "__starting__";
+
+type WorkClock = { turnId: string; startedAt: number; endedAt: number | null };
+
+/**
+ * A turn already under way whose first message has not been written yet (such as a newly started
+ * subagent setting up its worktree): the same Working header and Starting… progress row that a
+ * turn with a prompt shows before its first output arrives. Its start goes on the list's work clock,
+ * so the turn row that takes over when the prompt is saved keeps counting from it.
+ */
+function StartingTurnRow({ clockRef }: { clockRef: React.MutableRefObject<WorkClock | null> }) {
+  const state = useTurnProgressState();
+  const startedAt = useMemo(() => {
+    if (!state?.startedAt) return null;
+    const ms = Date.parse(state.startedAt);
+    return Number.isFinite(ms) ? ms : null;
+  }, [state?.startedAt]);
+  useEffect(() => {
+    if (startedAt != null) clockRef.current = { turnId: STARTING_TURN_ID, startedAt, endedAt: null };
+  }, [clockRef, startedAt]);
+  return (
+    <div data-turn-key="__starting__" className="relative space-y-2">
+      <div className="group/assistant-turn">
+        <TurnWorkStatus active startedAt={startedAt} durationMs={null} />
+        <div data-mousse="assistant-message" className="turn-answer flex flex-col gap-3">
+          <TurnProgressRow messages={EMPTY_UI_MESSAGES} standalone />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /**
  * " · (message icon) 3" after a finished turn's time: how many replies its fold hides. Only the icon and number show;
@@ -738,6 +773,8 @@ function MessageToolbar({
         hoverClass,
         visible && "opacity-100 pointer-events-auto",
       )}
+      // Set while it shows without hover or focus: copied, read aloud, or its menu open.
+      data-pinned={visible || undefined}
       onMouseDown={(event) => event.stopPropagation()}
       onPointerDown={(event) => event.stopPropagation()}
     >
@@ -824,6 +861,12 @@ function isSteeredMessage(message: UIMessage): boolean {
 export function readSteerGroup(message: UIMessage): UIMessage[] | undefined {
   const group = (message.metadata as { steerGroup?: unknown } | undefined)?.steerGroup;
   return Array.isArray(group) ? (group as UIMessage[]) : undefined;
+}
+
+/** True when `key` is the copy key (`user-<id>`) of a message steered into this turn's reply. */
+function isSteerCopyKeyOf(turn: Turn, key: string): boolean {
+  if (!key.startsWith("user-")) return false;
+  return turn.assistantMsgs.some((message) => readSteerGroup(message)?.some((steered) => `user-${steered.id}` === key));
 }
 
 /** Steer group rows by their first message, kept while their messages are the same objects (memoised rows). */
@@ -1389,6 +1432,8 @@ export const MessageList = memo(function MessageList({
   const turnActionsForEdit = useTurnActions();
   const [isMounted, setIsMounted] = useState(false);
   const [isPinned, setIsPinned] = useState(initialScrollBehavior !== "top");
+  // Where the warm start left this thread's transcript (`takeWarmScroll`); undefined until read.
+  const warmScrollRef = useRef<WarmScroll | null | undefined>(undefined);
   useEffect(() => { onAtBottomChange?.(isPinned) }, [isPinned, onAtBottomChange]);
 
   const [scrollbarActive, setScrollbarActive] = useState(false);
@@ -1398,11 +1443,7 @@ export const MessageList = memo(function MessageList({
   // it. Marker position state itself lives in the overlay so recomputes
   // never re-render the message list.
   const promptScrollAnimRef = useRef(0);
-  const workClockRef = useRef<{
-    turnId: string;
-    startedAt: number;
-    endedAt: number | null;
-  } | null>(null);
+  const workClockRef = useRef<WorkClock | null>(null);
   const [settledWork, setSettledWork] = useState<Record<string, number>>({});
   // The optimistic send id is replaced by the saved id a moment later. Keep
   // one React key so the bubble does not unmount and land again. The aliases
@@ -1718,9 +1759,30 @@ export const MessageList = memo(function MessageList({
     const contentWrapper = contentWrapperRef.current;
     if (!container || !contentWrapper) return;
 
-    const initial = initialScrollBehavior === "top" ? "top" : "bottom";
+    let initial: "top" | "bottom" = initialScrollBehavior === "top" ? "top" : "bottom";
     programmaticScrollAtRef.current = performance.now();
     container.scrollTop = initial === "top" ? 0 : container.scrollHeight;
+    // The warm start showed this thread read up from its end: it opens with the same turn at the same place. Read
+    // once per list (Strict Mode runs this twice).
+    if (warmScrollRef.current === undefined) warmScrollRef.current = takeWarmScroll(threadId);
+    const warm = warmScrollRef.current;
+    if (warm && !warm.pinned && warm.turnKey !== undefined) {
+      const turn = [...container.querySelectorAll<HTMLElement>("[data-turn-key]")].find((element) => element.dataset.turnKey === warm.turnKey);
+      if (turn) {
+        container.scrollTop += turn.getBoundingClientRect().top - container.getBoundingClientRect().top - (warm.offset ?? 0);
+        initial = "top";
+        setIsPinned(false);
+        // Read away from the end, the composer is folded as it was in the warm view: from the first frame, unmoving.
+        const compact = nextComposerCompact(composerCompactRef.current, {
+          mode: "free",
+          distanceFromEnd: container.scrollHeight - container.scrollTop - container.clientHeight,
+        });
+        if (compact !== composerCompactRef.current) {
+          composerCompactRef.current = compact;
+          onComposerCompactChangeRef.current?.(compact, false);
+        }
+      }
+    }
     followModeRef.current = reduceFollow(followModeRef.current, {
       type: "thread-open",
       initial,
@@ -1777,7 +1839,11 @@ export const MessageList = memo(function MessageList({
 
   useEffect(() => {
     const turnId = lastUserMessageId;
-    if (!turnId) return;
+    if (!turnId) {
+      // A start that ended before its prompt was saved (stopped while setting up) times nothing later.
+      if (!replyActive && workClockRef.current?.turnId === STARTING_TURN_ID) workClockRef.current = null;
+      return;
+    }
     if (replyActive) {
       const clock = workClockRef.current;
       if (clock && clock.turnId !== turnId && clock.endedAt == null) {
@@ -2190,7 +2256,7 @@ export const MessageList = memo(function MessageList({
                 liveStartedAt={isLastTurn ? liveStartedAt : null}
                 sentAt={sentAtOf(turn.userMsg, openMemory)}
                 settledMs={turn.userMsg ? settledWork[turn.userMsg.id] : undefined}
-                copyActive={activeCopyId !== null && (activeCopyId === userCopyKey || activeCopyId === copyKey) ? activeCopyId : null}
+                copyActive={activeCopyId !== null && (activeCopyId === userCopyKey || activeCopyId === copyKey || isSteerCopyKeyOf(turn, activeCopyId)) ? activeCopyId : null}
                 editingPromptId={turn.userMsg && editingPromptId === turn.userMsg.id ? editingPromptId : null}
                 setEditingPromptId={setEditingPromptId}
                 markCopied={markCopied}
@@ -2211,6 +2277,7 @@ export const MessageList = memo(function MessageList({
               />
             );
           })}
+          {turns.length === 0 && isStreaming && <StartingTurnRow clockRef={workClockRef} />}
         </div>
         {afterTurns != null && (
           // Clear of the last turn's toolbar, which reaches into the space below the rows.
@@ -2433,6 +2500,27 @@ const TurnRow = memo(function TurnRow({
   countRender("TurnRow");
   const turnActionsForEdit = useTurnActions();
   const foldingIn = useFoldingIn(replyActive && isLastTurn);
+  // A steered message's actions: a prompt's, less Edit and Undo (a steer has no checkpoint of its own). Kept while
+  // its inputs are, so the memoised Steer block re-renders only when they change.
+  const renderSteerActions = useCallback((steered: UIMessage) => {
+    const text = getTextFromParts(steered.parts ?? [], "");
+    const key = `user-${steered.id}`;
+    const createdAt = (steered as { createdAt?: Date | string }).createdAt;
+    return (
+      <MessageToolbar
+        text={showCopyToolbar ? text : ""}
+        timestamp={isMounted ? formatMessageTime(createdAt) : undefined}
+        heightClass="h-6 pt-0"
+        hoverClass="group-hover/user-message:opacity-100 group-hover/user-message:pointer-events-auto"
+        isVisible={copyActive === key}
+        alignClass="justify-end"
+        onCopied={() => markCopied(key)}
+        speechKey={key}
+        // Like a prompt: an agent's or a bot's steer is not the person's to repeat.
+        repeatText={agentOriginOfMessage(steered) !== undefined ? undefined : text}
+      />
+    );
+  }, [showCopyToolbar, isMounted, copyActive, markCopied]);
   return (
     <div
       ref={rowRef}
@@ -2604,7 +2692,8 @@ const TurnRow = memo(function TurnRow({
             const notice = readSubagentNotice(msg);
             if (!notice) return [msg];
             const rest = notice.filter((item) =>
-              item.delegationId ? !cardedSubagents.has(item.delegationId) : !cardedThreads.has(item.childThreadId),
+              item.event === "note" || item.event === "monitor" || item.event === "wake" ? true
+                : item.delegationId ? !cardedSubagents.has(item.delegationId) : !cardedThreads.has(item.childThreadId),
             );
             if (rest.length === 0) return [];
             return [{ ...msg, metadata: { ...(msg.metadata as object | undefined), subagentNotice: rest } }];
@@ -2725,6 +2814,7 @@ const TurnRow = memo(function TurnRow({
                       UserMessageComponent={CustomUserMessage}
                       className={userMessageClassName}
                       enableImagePreview={enableImagePreview}
+                      renderActions={renderSteerActions}
                     />
                   ),
                 };

@@ -20,6 +20,8 @@ const APPROVED_GIT_SPAWNERS: Record<string, string> = {
   'src/mms/files/gitControl.ts': 'assertGitAllowed',
   'src/mms/git/GitService.ts': 'withoutRepoPrograms',
   'src/mms/git/RepositoryIdentity.ts': 'withoutRepoPrograms',
+  // The runner behind `runExecutable('git', …)`.
+  'src/mms/git/ghRunner.ts': 'withoutRepoProgramsAsync',
   'src/mms/git/gitProcess.ts': 'callers pass withoutRepoPrograms',
   // The async Git process runner (`runGitProcess`): its callers pass arguments from `withoutRepoProgramsAsync`, `guardedAsync` or the store check.
   'src/mms/git/runGitProcess.ts': 'callers pass withoutRepoPrograms',
@@ -46,6 +48,15 @@ const SPAWNERS = new Set(['spawn', 'spawnSync', 'execFile', 'execFileSync', 'exe
 /** Calls that take `'gh'` without starting it themselves: the runner checks it. */
 const RUNNERS = new Set(['runExecutable', 'base', 'run', 'runner'])
 
+/** Whether a spawn's program is Git: the name, or `gitFile()` (the program `gitExecutable.ts` resolves). */
+function startsGit(node: ts.Expression | undefined): boolean {
+  if (!node) return false
+  if (ts.isStringLiteralLike(node)) return /^git(\.exe)?$/i.test(node.text)
+  if (ts.isCallExpression(node)) return ts.isIdentifier(node.expression) && node.expression.text === 'gitFile'
+  if (ts.isConditionalExpression(node)) return startsGit(node.whenTrue) || startsGit(node.whenFalse)
+  return false
+}
+
 function sources(dir: string): string[] {
   const found: string[] = []
   for (const name of readdirSync(dir)) {
@@ -58,8 +69,9 @@ function sources(dir: string): string[] {
 
 interface Finding { file: string; line: number; text: string }
 
-function scan(): { git: Map<string, Finding[]>; gh: Finding[]; banned: Finding[] } {
+function scan(): { git: Map<string, Finding[]>; byName: Finding[]; gh: Finding[]; banned: Finding[] } {
   const git = new Map<string, Finding[]>()
+  const byName: Finding[] = []
   const gh: Finding[] = []
   const banned: Finding[] = []
   for (const path of sources(join(ROOT, 'src'))) {
@@ -71,7 +83,8 @@ function scan(): { git: Map<string, Finding[]>; gh: Finding[]; banned: Finding[]
         const callee = ts.isIdentifier(node.expression) ? node.expression.text : ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text : ''
         const first = node.arguments[0]
         const program = first && ts.isStringLiteralLike(first) ? first.text : null
-        if ((SPAWNERS.has(callee) && program !== null && /^git(\.exe)?$/i.test(program)) || callee === 'simpleGit') git.set(file, [...(git.get(file) ?? []), at(node)])
+        if ((SPAWNERS.has(callee) && startsGit(first)) || callee === 'simpleGit') git.set(file, [...(git.get(file) ?? []), at(node)])
+        if (SPAWNERS.has(callee) && program !== null && /^git(\.exe)?$/i.test(program)) byName.push(at(node))
         if (program !== null && /^gh(\.exe)?$/i.test(program) && !RUNNERS.has(callee)) gh.push(at(node))
       }
       if (ts.isArrayLiteralExpression(node)) {
@@ -86,7 +99,7 @@ function scan(): { git: Map<string, Finding[]>; gh: Finding[]; banned: Finding[]
     }
     visit(source)
   }
-  return { git, gh, banned }
+  return { git, byName, gh, banned }
 }
 
 describe('Git command sources', () => {
@@ -105,6 +118,11 @@ describe('Git command sources', () => {
     }
     // The approved list has no stale entries.
     expect(Object.keys(APPROVED_GIT_SPAWNERS).filter((file) => !found.git.has(file))).toEqual([])
+  })
+
+  it('starts Git as the program gitExecutable.ts resolves, never by name', () => {
+    // By name, Windows runs Git for Windows' launcher, which starts the real Git: two processes for each command.
+    expect(found.byName).toEqual([])
   })
 
   it('starts gh only from the checked runner', () => {

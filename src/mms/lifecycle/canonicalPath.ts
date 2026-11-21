@@ -47,11 +47,17 @@ export function comparablePath(path: string): string {
   return process.platform === 'darwin' || process.platform === 'win32' ? path.normalize('NFC').toLowerCase() : path
 }
 
+const inside = (root: string, path: string) => { const rel = relative(root, path); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`) }
+
 /** Whether two real paths ({@link canonicalPathAsync}) are the same, or one is inside the other. */
 export function pathsOverlap(left: string, right: string): boolean {
   const a = comparablePath(left), b = comparablePath(right)
-  const inside = (root: string, path: string) => { const rel = relative(root, path); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`) }
   return inside(a, b) || inside(b, a)
+}
+
+/** Whether the real path `path` is `root` or inside it (both {@link canonicalPathAsync}). */
+export function pathWithin(root: string, path: string): boolean {
+  return inside(comparablePath(root), comparablePath(path))
 }
 
 /**

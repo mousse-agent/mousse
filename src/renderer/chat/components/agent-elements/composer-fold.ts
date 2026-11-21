@@ -21,12 +21,12 @@ export function useComposerFold() {
   const compactRef = useRef(false);
   const timerRef = useRef<number | null>(null);
 
-  const onCompactChange = useCallback((compact: boolean) => {
+  const onCompactChange = useCallback((compact: boolean, animate = true) => {
     if (compact === compactRef.current) return;
     compactRef.current = compact;
     if (timerRef.current !== null) window.clearTimeout(timerRef.current);
     timerRef.current = null;
-    const motion = !prefersReducedMotion();
+    const motion = animate && !prefersReducedMotion();
     setFold({ compact, motion });
     if (!motion) return;
     timerRef.current = window.setTimeout(() => {

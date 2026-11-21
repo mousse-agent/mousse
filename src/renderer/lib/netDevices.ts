@@ -3,6 +3,7 @@ import type { AgentReach, BridgeAccessMine, BridgeNodeConnection, BridgeNodePoli
 import type { PlatformRequestMethod } from '../../shared/platform'
 import type { TransportManifest } from '../../mms/net/contracts'
 import { formatAgo } from './formatAgo'
+import { serviceFailureLine } from './errorText'
 import { describePermissionMode, type PermissionMode } from '../../shared/permissionMode'
 import { accessPreset, accessPresetOf } from '../../shared/net/accessPresets'
 
@@ -128,7 +129,7 @@ export function joinErrorWords(error: { code?: unknown; details?: unknown; messa
     case 'conflict':
       return 'This computer is already set up with its own devices, so it can’t join another set.'
   }
-  return String(error.message ?? error.code ?? 'The connection failed.')
+  return serviceFailureLine(error) ?? String(error.message ?? error.code ?? 'The connection failed.')
 }
 
 /** Words for a capability in the device line; `settings` is "work on threads". */

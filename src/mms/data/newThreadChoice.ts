@@ -19,6 +19,21 @@ export function migrateWorktreeDefaultSetting(config: {
   config.removeRunsKey('worktreeByDefault')
 }
 
+/**
+ * The title bar's New thread picker (`runs.newThreadPicker`) starts on for a new profile and off for one already in
+ * use when it came, so a person who knows New thread as one click keeps it that way until they turn the picker on.
+ * Decided at the first start without a value, from whether the profile had projects or threads then, and written down
+ * so it never changes on its own.
+ */
+export function settleNewThreadPickerDefault(
+  config: { assembleSettings(): { runs?: unknown }; setRunsKey(key: string, value: unknown): void },
+  inUse: () => boolean
+): void {
+  const runs = config.assembleSettings().runs as Record<string, unknown> | undefined
+  if (runs && typeof runs.newThreadPicker === 'boolean') return
+  config.setRunsKey('newThreadPicker', !inUse())
+}
+
 type Caller = { readonly clientType?: string; readonly bridgeCaller?: unknown } | undefined
 
 /**

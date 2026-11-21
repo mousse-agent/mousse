@@ -3,7 +3,8 @@
  * window makes a display-sized copy from the original once, turned upright by the image's EXIF rotation, and the
  * daemon's own check takes it (edges compared long to long); an appearance change and a second window never read the
  * original again; a profile switch takes the wallpaper off and releases its URL; a kept copy that does not decode is
- * made again once and replaces the broken one. The contrast floor is measured against the page's own colours.
+ * made again once and replaces the broken one. The contrast floor is measured against the page's own colours. Under
+ * acrylic the layer is drawn see-through, with no solid colour, and its floor is measured for what shows through.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
@@ -18,7 +19,7 @@ it('makes the copy once from an EXIF-rotated original, reuses it, drops it on a 
   let child: ChildProcess | undefined
   let exited: Promise<number | null> | undefined
   try {
-    await build({ entryPoints: [resolve('tests/fixtures/wallpaper/entry.ts')], outfile: join(directory, 'entry.js'), bundle: true, platform: 'browser', format: 'iife', logLevel: 'silent' })
+    await build({ entryPoints: [resolve('tests/fixtures/wallpaper/entry.ts')], outfile: join(directory, 'entry.js'), bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' }, logLevel: 'silent' })
     await build({ entryPoints: [resolve('tests/fixtures/wallpaper/main.ts')], outfile: join(directory, 'main.mjs'), bundle: true, platform: 'node', format: 'esm', logLevel: 'silent', external: ['electron'] })
     const env: NodeJS.ProcessEnv = { ...process.env, MOUSSE_WALLPAPER_DIRECTORY: directory }
     delete env.ELECTRON_RUN_AS_NODE
@@ -43,12 +44,19 @@ it('makes the copy once from an EXIF-rotated original, reuses it, drops it on a 
     expect(evidence.readsAfterSecondWindow).toBe(1)
     expect(evidence.afterSwitch).toEqual({ layer: null, attribute: false, variable: '' })
     expect(evidence.oldUrlReleased).toBe(true)
-    // Applied while paused: nothing is measured against the base theme's colours; after the pause the floor is the theme's.
-    expect(evidence.paused.whilePaused).toBeNull()
-    expect(evidence.paused.afterPause).toBeCloseTo(evidence.first.floor, 3)
     // A broken kept copy: the original is read once more, and the new copy replaces the old one.
     expect(evidence.rebuilt).toMatchObject({ originalReads: 2, shown: true })
     expect(evidence.rebuilt.saves[1]).toEqual({ bucket: 1920, replace: true, accepted: true })
+    // Drawn on a solid window: the theme's colour fills the layer and all of it shows.
+    expect(evidence.drawn.solid).toEqual({ opacity: '1', backgroundColor: 'rgb(16, 20, 24)', image: true })
+    // Under acrylic: no solid colour and part of the layer shows, so the window's glass shows through it; the floor is
+    // measured for that (the half-white image still needs a scrim) rather than for a solid base.
+    expect(evidence.drawn.acrylic).toEqual({ opacity: '0.55', backgroundColor: 'rgba(0, 0, 0, 0)', image: true })
+    expect(evidence.drawn.acrylicLayer.opacity).toBe(0.55)
+    expect(evidence.drawn.acrylicLayer.floor).toBeGreaterThan(0)
+    expect(evidence.drawn.acrylicLayer.floor).not.toBeCloseTo(evidence.drawn.solidFloor, 3)
+    // Acrylic off again: drawn as before.
+    expect(evidence.drawn.offAgain).toEqual(evidence.drawn.solid)
   } finally {
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       child.kill('SIGTERM')

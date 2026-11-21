@@ -214,6 +214,8 @@ export interface UsageSlot {
   instanceId?: string
   /** Lists its sign-ins before reading them (`getUsageFor` with `preview`), then reads each one. */
   previewAccounts?: true
+  /** Read only when the usage page asks, never in the background. */
+  onRequestOnly?: true
   /** The last reading this computer made, dated (`readAt`), to show until the fresh one arrives. */
   cached?: ProviderUsage
 }

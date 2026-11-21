@@ -1,0 +1,77 @@
+/* Top of the composer: what the thread waits on in the background. Nothing on it moves. */
+
+.background-work .composer-banner-row {
+  gap: 4px;
+}
+
+.background-work-text {
+  color: var(--text-primary);
+}
+
+.background-work-latest {
+  color: var(--text-secondary);
+}
+
+.background-work-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.background-work-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 26px;
+  padding: 2px 4px 2px 8px;
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+
+.background-work-line:hover,
+.background-work-line:focus-within {
+  background: var(--ui-hover);
+}
+
+.background-work-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.background-work-kind {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+}
+
+.background-work-stop {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.background-work-stop:hover {
+  background: var(--ui-pressed);
+  color: var(--text-primary);
+}
+
+.background-work-stop:focus-visible {
+  outline: none;
+  background-image: var(--ui-focus-layer);
+}

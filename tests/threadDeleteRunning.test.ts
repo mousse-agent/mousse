@@ -302,6 +302,29 @@ describe('deleting a thread while its turn runs', () => {
       await p.close()
     }
   })
+
+  it('answers when the Stop itself never does: the delete is refused within its bound, and the thread stays', async () => {
+    const p = await profile()
+    try {
+      const target = await p.thread('stop never answers')
+      await p.run(target.id, false)
+      ;(p.f.services as unknown as { deleteStopWaitMs: number }).deleteStopWaitMs = 1_000
+      // A Stop that never comes back, as one waiting on a provider that never lets go.
+      vi.spyOn(p.f.services.orchestrator, 'stopThread').mockImplementation(() => new Promise(() => {}))
+      archived(p.f.services.threads, target.id)
+      const started = Date.now()
+      const refused = await p.f.rpc.request('threads.delete', { threadId: target.id }).then(() => undefined, (error: Error) => error)
+      expect(refused).toBeInstanceOf(Error)
+      expect(Date.now() - started).toBeLessThan(20_000)
+      // Nothing was stopped or removed: the thread is listed, archived, and its turn goes on.
+      expect(p.f.services.threads.getThread(target.id)?.settledAt).toBeTruthy()
+      expect(p.f.services.threads.lifecycleStore.get(target.id)?.state ?? 'active').toBe('active')
+      expect(p.adapter.live(target.id)).toBe(1)
+    } finally {
+      vi.restoreAllMocks()
+      await p.close()
+    }
+  })
 })
 
 describe('a delete that will be refused stops nothing', () => {

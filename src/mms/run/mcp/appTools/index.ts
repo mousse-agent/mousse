@@ -14,6 +14,7 @@ import { familyRelation, threadFamily } from './family'
 import { goalTools } from './goal'
 import { devGuiTools } from './devGui'
 import type { AppToolHost } from './host'
+import { monitorTools } from './monitors'
 import { profilerTools } from './profiler'
 import { projectGitTools } from './projectGit'
 import { quickActionTools, runningTools } from './quickActions'
@@ -25,6 +26,7 @@ import { skillTools } from './skills'
 import { taskTools } from './tasks'
 import { terminalTools } from './terminals'
 import { botThreadReach, lineageRelation, threadTools } from './thread'
+import { shareWakeTools, threadWakeTools } from './threadWakes'
 import type { AppToolTurns } from './turns'
 import { webTools } from './web'
 
@@ -40,6 +42,7 @@ export { AUTOMATION_TOOL_NAMES, type AutomationToolHost } from './automations'
 export { THEME_READ_TOOL, THEME_SET_TOOL, type AppearanceToolHost } from './appearance'
 export type { BotMemoryToolHost } from './botMemory'
 export { TERMINAL_READ_TOOL } from './terminals'
+export { MONITOR_PERMISSION_KEY, MONITOR_TOOL_NAMES } from './monitors'
 export { projectGitToolDefinitions, runProjectGitTool } from './projectGit'
 export type { ProfilerToolHost } from './profiler'
 export type { ComputerUseToolHost } from './computer'
@@ -126,13 +129,14 @@ export function createAppToolRegistry(input: {
   add('thread', engine ? threadTools(host, engine, input.bots) : [])
   add('schedules', [...(engine ? scheduleTools(host, engine) : []), ...automationTools(host)])
   add('skills', skillTools(host))
-  add('quickActions', [...quickActionTools(host), ...runningTools(host)])
+  add('quickActions', [...quickActionTools(host), ...runningTools(host), ...monitorTools(host)])
   add('devGui', devGuiTools(host))
   add('web', webTools(host))
   add('browser', browserTools(host))
   add('computer', computerTools(host))
   add('applets', appletTools())
-  add('bots', [...botTools(input.bots), ...botCatalogueTools(() => registry), ...(input.botMemory ? [...botMemoryTools(input.botMemory), ...botItemTools(input.botMemory)] : [])])
+  // `wake`, `reminder_list` and `reminder_cancel` serve a bot's turn and any thread's (`shareWakeTools`).
+  add('bots', [...shareWakeTools(botTools(input.bots), threadWakeTools(host)), ...botCatalogueTools(() => registry), ...(input.botMemory ? [...botMemoryTools(input.botMemory), ...botItemTools(input.botMemory)] : [])])
   add('projectGit', projectGitTools(host))
   add('profiler', profilerTools(host, engine))
   add('appearance', appearanceTools(host))

@@ -29,10 +29,8 @@ it('persists ACP replies and accepted steer in canonical context and forwards it
     const committed = vi.spyOn(main.antigravity, 'commitConversation')
     const project = main.projects.openProject(workspace)
     const thread = main.threads.createThread('Existing conversation', project.id, workspace)
-    // Sent as a Mousse window sends it: Antigravity's personal sign-in runs only messages its owner sends.
-    const owner = { source: 'gui', ownerProof: { via: 'gui' as const } }
     await main.orchestrator.send({ content: 'first request', mode: 'agent' }, false, {
-      threadId: thread.id, ...owner
+      threadId: thread.id
     })
     expect(chat).toHaveBeenCalledOnce()
     expect(committed).toHaveBeenCalledWith(thread.id, expect.stringContaining('ACP answer'))
@@ -41,7 +39,7 @@ it('persists ACP replies and accepted steer in canonical context and forwards it
       expect.objectContaining({ role: 'user', content: 'accepted guidance' }),
       expect.objectContaining({ role: 'assistant', provider: 'antigravity', content: [{ type: 'text', text: 'ACP answer' }] })
     ]))
-    await main.orchestrator.send({ content: 'second request', mode: 'agent' }, false, { threadId: thread.id, ...owner })
+    await main.orchestrator.send({ content: 'second request', mode: 'agent' }, false, { threadId: thread.id })
     expect(inputs[1]?.history).toContain('first request')
     expect(inputs[1]?.history).toContain('accepted guidance')
     expect(inputs[1]?.history).toContain('ACP answer')

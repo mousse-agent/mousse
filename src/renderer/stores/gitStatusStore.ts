@@ -39,6 +39,9 @@ import { createPullRequestForBranch, pullRequestKey, refreshPullRequest, useGitP
 export const GIT_LOG_LIMIT = 40
 /** A fetch younger than this satisfies an ordinary (not forced) request. */
 export const GIT_STATUS_MAX_AGE_MS = 1500
+/** A folder's first status read that has not answered by then shows {@link GIT_STATUS_SLOW_ERROR} instead of "Checking…". */
+export const GIT_STATUS_SLOW_MS = 15_000
+export const GIT_STATUS_SLOW_ERROR = 'Git has not answered yet'
 
 export interface GitStatusEntry {
   status: GitStatusSnapshot | null
@@ -116,12 +119,19 @@ async function fetchInto(key: string, scope: GitScope): Promise<void> {
   for (const [, read] of details) read.catch(() => undefined)
 
   let status: GitStatusSnapshot
+  // A first read still unanswered after a while ends "Checking…" with an error; its answer still lands when it comes.
+  const slow = setTimeout(() => {
+    if (useGitStatusStore.getState().entries[key]?.loaded) return
+    patchEntry(key, { loaded: true, loading: false, error: GIT_STATUS_SLOW_ERROR })
+  }, GIT_STATUS_SLOW_MS)
   try {
     status = await git.status(scope)
   } catch (error) {
     patchEntry(key, { loaded: true, error: errorText(error), fetchedAt: Date.now() })
     await Promise.allSettled(details.map(([, read]) => read))
     return
+  } finally {
+    clearTimeout(slow)
   }
   const previous = useGitStatusStore.getState().entries[key] ?? EMPTY_GIT_ENTRY
   if (!status.isRepo) {

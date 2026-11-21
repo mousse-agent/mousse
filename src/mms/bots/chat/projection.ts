@@ -11,7 +11,7 @@ import { launchedActive, withAppletNames, type BotAskCard, type BotAskStatus, ty
 import { BOT_MODEL_SLOT_KEYS, type BotDefinition, type BotLane, type BotManifest } from '../../../shared/bots/personal/definition'
 import { isPinned, limitOnPick, slotsOf, stuckRowsOf } from '../../../shared/bots/personal/modelSlots'
 import { askFingerprint, BOT_BUDGET_WALL_KEYS, isSpecialAsk, mcpAskTools, type BotAskRequest, type BotEscalationStatus, type BotPermissionRequest } from '../../../shared/bots/personal/escalation'
-import { BOT_RETIRED_APP_TOOLS, BOT_THREADS_PERMISSION, botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
+import { BOT_AUTOMATION_APP_TOOLS, BOT_RETIRED_APP_TOOLS, BOT_THREADS_PERMISSION, botStarterManifest, canonicalManifest, isOwnBotAppTool } from '../../../shared/bots/personal/manifest'
 import type { BotJournalKind } from '../../../shared/bots/personal/memory'
 import { botState } from '../../../shared/bots/personal/state'
 import { normalizeBotLook } from '../../../shared/bots/personal/look'
@@ -230,13 +230,14 @@ export class BotChatProjection {
     store: BotStore
     asksFirst?(): boolean
     aloneItems?(botId: string): BotPermissionItem[]
+    /** About → Can use's switches of what every bot has by default (MCP and each server, skills, automation tools). */
+    defaultItems?(botId: string): BotPermissionItem[]
     aloneAsk?(botId: string, activationId: string, request: AloneRequest): { title: string; details: { summary: string; items: string[] } } | undefined
     journal?: BotJournal
     /** `bots.message`, after the row's transaction committed. */
     emit(event: { botId: string; message: BotChatMessage }): void
-    /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
-    tellAt?(botId: string, tell: 'now' | 'soon' | 'later', at: string, messageId: string): string
     classify?(message: BotChatMessage, input: PostInput): 'now' | 'soon' | 'later' | null
+    /** A bot's schedules, from the shared store (`BotEngine.listSchedules`), for About → Runs. */
     schedules?(botId: string): Array<{ scheduleId: string; label: string; nextAt?: string; jobId?: string; paused?: boolean; name?: string; prompt?: string }>
     /**
      * Where a granted MCP server stands now (`BotMcp.where`), for About → Can use; undefined while the servers were not
@@ -352,7 +353,7 @@ export class BotChatProjection {
       // A row the chat never shows (an event's line, `outOfSightRow`) is kept for the bot's memory and its guards only:
       // it tells nobody and reaches no window.
       const tell = input.quiet || outOfSightRow(input.kind, id) ? null : this.options.classify?.(this.toMessage(this.store.message(id)!), input) ?? null
-      this.store.run('UPDATE bot_messages SET tell = ?, tell_at = ? WHERE id = ?', tell, tell ? this.options.tellAt?.(input.botId, tell, at, id) ?? at : null, id)
+      this.store.run('UPDATE bot_messages SET tell = ?, tell_at = ? WHERE id = ?', tell, tell ? at : null, id)
       return { row: this.store.message(id)!, inserted: true }
     })
     const message = this.toMessage(row)
@@ -729,6 +730,7 @@ export class BotChatProjection {
     return {
       summary: this.summary(definition, now),
       permissions: grant ? [
+        ...(this.options.defaultItems?.(definition.id) ?? []),
         ...(this.options.aloneItems?.(definition.id) ?? []),
         ...this.permissionItems(definition.id, grant.manifest, grant.approvedAt).filter((item) => !this.store.disabledPermissions(definition.id).some((off) => off.id === item.id)).map((item) => ({ ...item, enabled: true })),
         ...this.store.disabledPermissions(definition.id).flatMap((off) => this.permissionItems(definition.id, off.manifest, grant.approvedAt).filter((item) => item.id === off.id).map((item) => ({ ...item, enabled: false, note: `Switched off for this bot. ${item.note}` })))
@@ -741,35 +743,19 @@ export class BotChatProjection {
   }
 
   /**
-   * Each permission of `manifest` beyond the starter grant, as About → Can use lists it. The owner's MCP tools are one
-   * line per server ("Use your GitHub tools"). One that gives nothing now says what is true (gone from Mousse, switched
-   * off, changed since it was allowed, or MCP turned off) and is marked so; Remove is there as an option, not as the fix.
+   * Each permission of `manifest` beyond the starter grant, as About → Can use lists it. The owner's MCP servers are not
+   * among them: every bot has them unless switched off, and their switches are About's own (`defaultItems`), one per
+   * server, whatever an older grant names of them.
    */
   permissionItems(botId: string, manifest: BotManifest, approvedAt: string): BotPermissionItem[] {
-    return grantedPermissions(manifest).map((permission): BotPermissionItem => {
+    return grantedPermissions(manifest).flatMap((permission): BotPermissionItem[] => {
+      if ('mcp' in permission) return []
       const id = permissionId(permission)
       const allowed = this.store.allowedAsk(botId, id)
       const grantedAt = allowed?.answeredAt ?? approvedAt
-      if ('mcp' in permission) {
-        const where = this.options.mcpWhere?.(permission.mcp.serverId)
-        const live = where?.state === 'on' || where?.state === 'changed' ? where.server : undefined
-        const asked = allowed && 'mcp' in allowed.permission ? allowed.permission.mcp.name : undefined
-        const name = live?.name ?? (where?.state === 'off' ? where.name : undefined) ?? asked ?? 'an MCP server'
-        const title = `use your ${name} tools`
-        const tools = mcpAskTools(permission.mcp)
-        if (where?.state === 'gone') return { id, title, note: `${name} isn't set up in Mousse any more, so this gives nothing now. You can remove it.`, grantedAt, gone: true as const, mark: 'Gone from Mousse' }
-        if (where?.state === 'off') return { id, title, note: `${name} is switched off in Settings → Skills & MCP, so this gives nothing while it is. Switch it on there to use it again, or remove it.`, grantedAt, mark: 'Switched off' }
-        if (where?.state === 'mcp_off') return { id, title, note: `MCP is turned off in Settings → Skills & MCP, so this gives nothing while it is. Turn it on there to use it again, or remove it.`, grantedAt, mark: 'MCP is off' }
-        if (where?.state === 'changed') return { id, title, note: `${name} was changed since you allowed it (it runs from another address or command now), so this gives nothing until ${name} is allowed again. The bot asks when it needs it; you can also remove it.`, grantedAt, mark: 'Changed' }
-        if (this.options.asksFirst?.() && manifest.mcp.some(tool => tool.serverId === permission.mcp.serverId && asksFirstFor({ tool: tool.tool, serverName: [name, live?.installationId ?? installationOf(permission.mcp.serverId)], readOnlyHint: live?.tools.find(t => t.tool === tool.tool)?.readOnlyHint, storedLevel: tool.level })))
-          return { id, title, note: 'Asks you first before sending or changing something. What it does through threads, commands or secrets you gave it does not wait for a card.', grantedAt, mark: 'Asks first', asksFirst: true }
-        const shown = tools.slice(0, 6).join(', ')
-        const unusable = live?.unusable.length ? ` (${live.unusable.length} more of its tools can't be used by a bot)` : ''
-        return { id, title, note: `${tools.length} tool${tools.length === 1 ? '' : 's'}: ${shown}${tools.length > 6 ? ', …' : ''}${unusable}`, grantedAt }
-      }
       const text = askText(permission, { budget: starterManifest().budget })
       // About's tooltip says what it gives in full, as the card's does ("use your threads": full access).
-      return { id, title: text.title, note: text.tip ?? text.note, grantedAt, ...('tool' in permission && permission.tool === BOT_THREADS_PERMISSION ? { needsFullAccess: true as const } : {}) }
+      return [{ id, title: text.title, note: text.tip ?? text.note, grantedAt, ...('tool' in permission && permission.tool === BOT_THREADS_PERMISSION ? { needsFullAccess: true as const } : {}) }]
     })
   }
 }
@@ -785,16 +771,16 @@ export function askFingerprintOf(request: BotAskRequest): string {
 }
 
 /**
- * What `manifest` grants beyond the starter grant, one request per permission. A stored `workspace` ("use files on this
- * computer", removed) grants nothing, so it is never listed.
+ * What `manifest` grants beyond the starter grant and what every bot has, one request per permission. A stored
+ * `workspace` ("use files on this computer", removed) grants nothing, so it is never listed; nor are skills and the
+ * automation tools an older grant names, which every bot has unless switched off (About's own switches).
  */
 export function grantedPermissions(manifest: BotManifest): BotPermissionRequest[] {
   const starter = starterManifest()
   const items: BotPermissionRequest[] = []
   for (const tool of manifest.tools) if (!starter.tools.includes(tool)) items.push({ tool })
   // The bot's own tools are never permissions, and a retired one gives nothing: About never lists them.
-  for (const tool of manifest.appTools) if (!starter.appTools.includes(tool) && !isOwnBotAppTool(tool) && !BOT_RETIRED_APP_TOOLS.has(tool)) items.push({ tool })
-  for (const skill of manifest.skills) items.push({ skill })
+  for (const tool of manifest.appTools) if (!starter.appTools.includes(tool) && !isOwnBotAppTool(tool) && !BOT_RETIRED_APP_TOOLS.has(tool) && !BOT_AUTOMATION_APP_TOOLS.includes(tool)) items.push({ tool })
   // The owner's MCP tools: one permission per server, whose tools the grant keeps one by one.
   const servers = new Map<string, string[]>()
   for (const pair of manifest.mcp) servers.set(pair.serverId, [...(servers.get(pair.serverId) ?? []), pair.tool])

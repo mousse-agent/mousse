@@ -148,6 +148,29 @@ describe('Stop while the thread\'s repository is busy', () => {
     if (next) expect(next.presentationMessageStart).toBeGreaterThanOrEqual(action.presentationMessageEnd)
   })
 
+  it('a turn cut off by the service stopping saves where it ended without waiting for the repository or running Git', async () => {
+    const w = world()
+    // Long enough that waiting for the repository would show: a person's Stop waits up to this for it.
+    ;(w.d.orch as unknown as { stoppedTurnCheckpointWaitMs: number }).stoppedTurnCheckpointWaitMs = 20_000
+    const thread = w.thread('Sync')
+    const sent = await w.d.orch.send(SYNC, false, { threadId: thread.id, clientRequestId: 'go', awaitMode: 'ack' })
+    await waitFor(() => w.adapter.turns.length === 1, 'the turn to reach the provider', 30_000)
+    await w.holdRepository()
+
+    const began = Date.now()
+    const stopping = w.d.shutdown()
+    await waitFor(() => w.d.orch.getOrCreateSession(thread.id).activeTurn?.abort.signal.aborted === true, 'the turn to be cut off')
+    // The provider's turn ends, as the service's stop of the harness makes it.
+    await w.adapter.interrupt()
+    await stopping
+    // Before, the service's stop waited here until the 20-second checkpoint wait ran out.
+    expect(Date.now() - began).toBeLessThan(5_000)
+    // Where the turn ended is saved; its snapshot is left for the next turn's recovery.
+    const action = new ThreadActionService(w.d.store.getThreadDir(thread.id)).list().find((item) => item.turnId === sent.runId)!
+    expect(action.state).toBe('running')
+    expect(action.presentationMessageEnd).toBeGreaterThan(action.presentationMessageStart)
+  })
+
   it('lets a Stop end the next turn\'s start in a folder without Git while its snapshot store is busy', async () => {
     const w = world({ git: false })
     const thread = w.thread('No Git')

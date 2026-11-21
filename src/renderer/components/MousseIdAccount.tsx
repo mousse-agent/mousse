@@ -1,8 +1,9 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import type { PlusStatus } from '../../shared/net/local'
-import { formatCountdown, REMOVED_FROM_DEVICES, secondsLeft } from '../lib/plusSignIn'
+import { formatCountdown, LIST_MERGED, REMOVED_FROM_DEVICES, secondsLeft } from '../lib/plusSignIn'
 import { mousseIdName, mousseIdSignedIn, mousseIdPreparation, mousseIdSetupStep, useMousseId, useMousseIdStore, type SignInStart } from '../stores/mousseIdStore'
 import { MousseIdAvatar } from './MousseIdAvatar'
+import { ErrorLine } from './ui/ErrorLine'
 import { SettingsGroup, SettingsRow } from './settings/SettingsRow'
 import { ExternalLink, Logout, X } from '../lib/icons'
 import './account-section.css'
@@ -32,7 +33,7 @@ export function accountState(plus: PlusStatus | undefined, lapsed: boolean): 'co
 
 /**
  * The account row at the top of Settings → Devices: who is signed in to Mousse ID and one plain status
- * (Connected, Reconnecting or not signed in), with Sign in or a quiet Sign out. Shown only when this build has
+ * (Connected, Reconnecting or not signed in), with Sign in or a quiet Sign out; a disconnected account offers both. Shown only when this build has
  * the service. `lapsed` is this computer's expired device pass; `onSetUp` brings the step this device needs into
  * view. `children` (the reconnecting note) sits under the row on the same surface.
  */
@@ -62,11 +63,17 @@ export function MousseIdAccount({ onSetUp, lapsed = false, children }: { onSetUp
     : status === 'connected' ? <>{[who, plus?.plan].filter(Boolean).join(' · ')}{who || plus?.plan ? ' · ' : ''}<span className="settings-status-ok">Connected</span></>
       : status === 'reconnecting' ? <>{who ? `${who} · ` : ''}<span className="settings-status-warn">Reconnecting</span>{lapsed ? ' · waiting for your other computer to reconnect this one' : ''}</>
         : status === 'disconnected' ? `${who ? `${who} · ` : ''}Disconnected · sign in again to reconnect`
-          : SIGNED_OUT_LINE
+          : plus?.reason === 'list_merged' ? LIST_MERGED : SIGNED_OUT_LINE
   const setupStep = !signedIn && !pending && loaded && mousseIdPreparation(net) === 'manual' ? mousseIdSetupStep(net) : ''
   // A step asked for by Sign in goes once this device is ready or signed in.
   const setupNote = (!signedIn && mousseIdPreparation(net) !== 'ready' ? needsSetup : '') || setupStep
   const locked = !!net?.self && net.keystore !== 'unlocked'
+  const signOut = (
+    <button type="button" className="settings-btn" disabled={busy || !net?.enabled} onClick={() => void state.signOut()}>
+      <Logout size={14} />Sign out
+    </button>
+  )
+  const signIn = <button type="button" className="settings-btn devices-dialog-btn primary" disabled={busy} onClick={() => void start()}>Sign in</button>
 
   return (
     <SettingsGroup anchor="account-mousse-id" className="account-group">
@@ -75,13 +82,9 @@ export function MousseIdAccount({ onSetUp, lapsed = false, children }: { onSetUp
         title={title}
         description={description}
         control={
-          signedIn || status === 'reconnecting' ? (
-            <button type="button" className="settings-btn" disabled={busy || !net?.enabled} onClick={() => void state.signOut()}>
-              <Logout size={14} />Sign out
-            </button>
-          ) : !pending && (
-            <button type="button" className="settings-btn devices-dialog-btn primary" disabled={busy} onClick={() => void start()}>Sign in</button>
-          )
+          signedIn || status === 'reconnecting' ? signOut
+            // Disconnected still holds the old account, and signing in to a different one needs it gone first.
+            : !pending && (status === 'disconnected' ? <span className="settings-icon-actions">{signOut}{signIn}</span> : signIn)
         }
       />
       {pending && (
@@ -100,7 +103,7 @@ export function MousseIdAccount({ onSetUp, lapsed = false, children }: { onSetUp
           }
         />
       )}
-      {error && <p role="alert" className="chat-error account-error">{error}</p>}
+      {error && <ErrorLine message={error} className="chat-error account-error" />}
       {setupNote ? (
         <div className="account-note-row">
           <p role="status" className="settings-muted account-note">{setupNote}</p>

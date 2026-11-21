@@ -824,6 +824,32 @@ describe('continue after restart (SPEC §16.4)', () => {
       expect(second.orch.getMessages(thread.id).some((message) => message.id === 'old-echo')).toBe(true)
     })
 
+    it("the start's queue recovery rewrites only a queue it has to: the one holding a dead daemon's claim", async () => {
+      const dir = setupHome()
+      const first = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 1 })
+      // Threads with nothing to reclaim: an empty queue, and one whose message was never claimed (it is drained, not reclaimed).
+      const idle = first.store.createThread('Nothing queued')
+      const held = first.store.createThread('Claimed when the daemon died')
+      first.orch.setThreadModelOverride(held.id, PI)
+      const at = new Date().toISOString()
+      first.store.saveMessageQueue(idle.id, [])
+      first.store.saveMessageQueue(held.id, [
+        { id: 'c1', threadId: held.id, content: 'Build it', enqueuedAt: at, order: 1, intent: 'normal', state: 'claimed', claim: { ownerPid: 2_147_000_090, ownerToken: 'gone', claimedAt: at } }
+      ] as never)
+      await first.crash()
+
+      const pi = piAdapter((input) => `reply to ${input.prompt}`)
+      const second = phase6Daemon(dir, [pi], { pid: 2, orchestratorBoot: true })
+      daemons.push(second)
+      const saves = vi.spyOn(second.store, 'saveMessageQueue')
+      await second.orch.recoverStartupQueues()
+      // Before, every listed thread's queue was written again at each start, whatever it held.
+      expect(new Set(saves.mock.calls.map(([threadId]) => threadId))).toEqual(new Set([held.id]))
+      await waitFor(() => pi.turns.length === 1 && second.engine.getActiveRun(held.id) === null && !second.orch.isActiveTurnRunning(held.id), 'the reclaimed message')
+      expect(pi.turns.map((turn) => turn.prompt)).toEqual(['Build it'])
+      expect(second.store.loadMessageQueue(held.id)).toEqual([])
+    })
+
     it("through the profile's startup recovery, a queue holding only an unread steer runs it once", async () => {
       const dir = setupHome()
       const first = phase6Daemon(dir, [piAdapter(() => 'unused')], { pid: 1 })

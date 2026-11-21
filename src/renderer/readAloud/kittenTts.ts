@@ -2,6 +2,7 @@ import type * as Ort from 'onnxruntime-web'
 import { phonemizeKeepingPunctuation, type PhonemizeText } from './espeakPhonemes'
 import { CLIP_GAP_SECONDS, trimSilence } from './localPlayback'
 import { parseNpz, type NpyArray } from './npz'
+import { endsSentence } from './speechText'
 import { spokenEnglish } from './spokenEnglish'
 
 /**
@@ -63,11 +64,19 @@ function withPunctuation(text: string): string {
  * Splits text into sentences of at most 400 characters, dropping `.`, `!` and `?` and giving each
  * piece a closing comma unless it ends in punctuation (upstream's `chunk_text`). Upstream splits at
  * every `.`, which cuts `4.99` in two; here a mark ends a sentence only before a space or the end
- * of the text.
+ * of the text, and not after an abbreviation such as "Dr." or "e.g." (`endsSentence`).
  */
 export function kittenChunks(text: string): string[] {
+  const parts: string[] = []
+  let start = 0
+  for (const match of text.matchAll(/[.!?]+(?=\s|$)/g)) {
+    if (!endsSentence(text, match.index, match[0])) continue
+    parts.push(text.slice(start, match.index))
+    start = match.index + match[0].length
+  }
+  parts.push(text.slice(start))
   const chunks: string[] = []
-  for (const part of text.split(/[.!?]+(?=\s|$)/)) {
+  for (const part of parts) {
     const sentence = part.trim()
     if (!sentence) continue
     if (sentence.length <= MAX_CHUNK_CHARS) {

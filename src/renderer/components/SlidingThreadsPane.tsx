@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type Ref } from 'react'
 import { scaleMotionMs, useMotionScale } from '../lib/motion'
+import { useAppStore } from '../stores/appStore'
 import '../styles/sliding-threads-pane.css'
 
 const CLOSE_FALLBACK_MS = 250
@@ -24,8 +25,9 @@ export function SlidingThreadsPane({ open, width, children, resizer, paneRef, ov
   openRef.current = open
   const [present, setPresent] = useState(open)
   const [expanded, setExpanded] = useState(open)
-  // Off by the Animation speed setting or the OS reduced-motion setting.
-  const reducedMotion = useMotionScale() === 0
+  const motionScale = useMotionScale()
+  const sidebarAnimations = useAppStore((state) => state.sidebarAnimations)
+  const reducedMotion = !sidebarAnimations || motionScale === 0
 
   useLayoutEffect(() => {
     let frame: number | undefined

@@ -52,6 +52,28 @@ describe('the logo pour after a send', () => {
     expect(copies()).toBe(0)
   })
 
+  it('drops a waiting pour when its document goes away', () => {
+    showLogo(true)
+    setDraft(null, 'hello')
+    setDraft(null, '')
+    showLogo(false)
+
+    vi.stubGlobal('document', undefined)
+    try {
+      vi.advanceTimersByTime(60)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+    expect(copies()).toBe(0)
+
+    showLogo(true)
+    setDraft(null, 'next message')
+    setDraft(null, '')
+    showLogo(false)
+    wait(60)
+    expect(copies()).toBe(1)
+  })
+
   it('shows one logo at a time when the empty view leaves and comes back while the thread starts', () => {
     showLogo(true)
     setDraft(null, 'hello')

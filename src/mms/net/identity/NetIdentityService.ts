@@ -271,6 +271,13 @@ export class NetIdentityService implements IdentityService {
       .map((row) => row.name)
     return live.length ? { keeper, live } : { allowed: 'alone', keeper }
   }
+  /** Whether this computer's own list holds any bots. */
+  listsBots(): boolean {
+    const state = this.load(),
+      user = state.self ? state.users[state.self.user] : undefined
+    if (!user?.current) return false
+    return this.rosterDocument(user.current, user.root).bots.length > 0
+  }
   rosterState(user: UserId): RosterState {
     return this.load().users[user]?.state ?? 'ok'
   }

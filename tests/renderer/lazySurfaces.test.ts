@@ -11,6 +11,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const stub = (testId: string) => () => createElement('div', { 'data-testid': testId })
+// The composer's microphone needs audio APIs jsdom lacks; the warm start's composer is in App's own chunk.
+vi.mock('../../src/renderer/dictation/microphone', () => ({}))
 vi.mock('../../src/renderer/services/navigationGuards', () => ({ confirmNavigation: vi.fn(async () => true) }))
 vi.mock('../../src/renderer/components/downloads/DownloadsIndicator', () => ({ DownloadsIndicator: () => null }))
 vi.mock('../../src/renderer/components/TitleBar', () => ({ TitleBar: () => null }))
