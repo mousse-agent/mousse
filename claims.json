@@ -2,21 +2,6 @@
   "version": 1,
   "claims": [
     {
-      "task": "antigravity-turn-fixes",
-      "session": "Animatrix-0b9a21",
-      "machine": "Animatrix",
-      "branch": "antigravity-turn-fixes",
-      "paths": [
-        "src/mms/run/mcp/attachment.ts",
-        "src/mms/harness/acp/stopReason.ts",
-        "src/shared/pauseDisplay.ts",
-        "src/mms/harness/drivers/acp.ts",
-        "src/mms/harness/acp/presets/antigravity/AntigravityProviderService.ts"
-      ],
-      "claimedAt": "2026-11-20T10:56:43.121Z",
-      "expiresAt": "2026-11-20T13:11:09.414Z"
-    },
-    {
       "task": "continuation-tools-wait-for-run",
       "session": "Animatrix-7c6ffa",
       "machine": "Animatrix",
@@ -56,23 +41,6 @@
       ],
       "claimedAt": "2026-11-21T10:24:52.800Z",
       "expiresAt": "2026-11-21T12:24:52.800Z"
-    },
-    {
-      "task": "download-windows-git",
-      "session": "agibook-b1b05b",
-      "machine": "agibook",
-      "branch": "download-windows-git",
-      "paths": [
-        "src/main/mms/GuiMmsController.ts",
-        "src/main/mms/windowsGit.ts",
-        "src/main/ipc/registerGuiIpc.ts",
-        "src/preload/index.ts",
-        "src/renderer/App.tsx",
-        "src/renderer/components/WorkspaceLoading.tsx",
-        "src/shared/windowsGit.ts"
-      ],
-      "claimedAt": "2026-11-20T11:20:04.637Z",
-      "expiresAt": "2026-11-20T13:20:04.637Z"
     },
     {
       "task": "early-checkout-preparation",
@@ -123,58 +91,6 @@
       "expiresAt": "2026-11-20T22:50:53.551Z"
     },
     {
-      "task": "fix-delete-hang",
-      "session": "Animatrix-2b0044",
-      "machine": "Animatrix",
-      "branch": "fix-delete-hang",
-      "paths": [
-        "src/mms/lifecycle",
-        "src/renderer/lib/archivedThreads.ts",
-        "src/main/ipc/registerGuiIpc.ts"
-      ],
-      "claimedAt": "2026-11-20T11:29:05.831Z",
-      "expiresAt": "2026-11-20T13:29:05.831Z"
-    },
-    {
-      "task": "fix-model-switch-mid-turn",
-      "session": "Animatrix-6036c7",
-      "machine": "Animatrix",
-      "branch": "fix-model-switch-mid-turn",
-      "paths": [
-        "src/mms/orchestrator/OrchestratorService.ts"
-      ],
-      "claimedAt": "2026-11-20T10:45:53.792Z",
-      "expiresAt": "2026-11-20T13:22:43.305Z"
-    },
-    {
-      "task": "fix-new-thread-stuck-starting",
-      "session": "Animatrix-a49ec5",
-      "machine": "Animatrix",
-      "branch": "fix-new-thread-stuck-starting",
-      "paths": [
-        "src/mms/harness/drivers/acp/adapter.ts",
-        "src/mms/harness/drivers/cursor/adapter.ts",
-        "tests/run/nativeAdapters.test.ts"
-      ],
-      "claimedAt": "2026-11-20T11:15:48.246Z",
-      "expiresAt": "2026-11-20T13:15:48.246Z"
-    },
-    {
-      "task": "fix-quit-lingering-service",
-      "session": "Animatrix-70b894",
-      "machine": "Animatrix",
-      "branch": "fix-quit-lingering-service",
-      "paths": [
-        "src/cli/daemonShutdown.ts",
-        "src/cli/commands/service.ts",
-        "src/main/mms/GuiMmsController.ts",
-        "src/mms/orchestrator/OrchestratorService.ts",
-        "src/mms/actions/ThreadActionService.ts"
-      ],
-      "claimedAt": "2026-11-20T11:31:18.871Z",
-      "expiresAt": "2026-11-20T13:31:18.871Z"
-    },
-    {
       "task": "fix-slow-daemon-startup",
       "session": "Animatrix-0ed74a",
       "machine": "Animatrix",
@@ -188,17 +104,6 @@
       ],
       "claimedAt": "2026-11-20T12:26:00.038Z",
       "expiresAt": "2026-11-20T14:26:00.038Z"
-    },
-    {
-      "task": "fix-subagent-optimistic-working",
-      "session": "Animatrix-6036c7",
-      "machine": "Animatrix",
-      "branch": "fix-subagent-optimistic-working",
-      "paths": [
-        "src/mms/orchestrator/OrchestratorService.ts"
-      ],
-      "claimedAt": "2026-11-20T10:40:26.020Z",
-      "expiresAt": "2026-11-20T12:40:26.020Z"
     },
     {
       "task": "git-restart-scaling",
@@ -273,17 +178,6 @@
       ],
       "claimedAt": "2026-11-21T10:20:49.161Z",
       "expiresAt": "2026-11-21T14:08:15.484Z"
-    },
-    {
-      "task": "read-aloud-sentence-splits-and-short-forms",
-      "session": "Animatrix-ae54b8",
-      "machine": "Animatrix",
-      "branch": "read-aloud-sentence-splits-and-short-forms",
-      "paths": [
-        "src/renderer/readAloud"
-      ],
-      "claimedAt": "2026-11-20T10:53:30.178Z",
-      "expiresAt": "2026-11-20T12:53:30.178Z"
     },
     {
       "task": "receipt-release-outside-lease",
@@ -367,19 +261,6 @@
       "expiresAt": "2026-11-21T12:50:38.459Z"
     },
     {
-      "task": "storage-cleanup-keeps-shared-worktrees",
-      "session": "Animatrix-ab3a50",
-      "machine": "Animatrix",
-      "branch": "storage-cleanup-keeps-shared-worktrees",
-      "paths": [
-        "src/mms/lifecycle/StorageCleanupService.ts",
-        "src/mms/MmsProfileServices.ts",
-        "tests/storageCleanupService.test.ts"
-      ],
-      "claimedAt": "2026-11-20T11:47:03.944Z",
-      "expiresAt": "2026-11-20T13:47:03.944Z"
-    },
-    {
       "task": "thread-journal-scaling",
       "session": "Animatrix-8aab10",
       "machine": "Animatrix",
@@ -427,12 +308,12 @@
       "machine": "Animatrix",
       "branch": "worktree-checks-without-git",
       "paths": [
-        "src/mms/lifecycle/ResourceInventory.ts",
-        "src/mms/lifecycle/ResourcePurgeService.ts",
-        "src/mms/lifecycle/worktreeFacts.ts"
+        "src/mms/lifecycle",
+        "tests/resourcePurge.test.ts",
+        "tests/worktreeFacts.test.ts"
       ],
       "claimedAt": "2026-11-21T05:51:04.012Z",
-      "expiresAt": "2026-11-21T13:14:17.295Z"
+      "expiresAt": "2026-11-21T16:09:41.478Z"
     },
     {
       "task": "worktree-turns-skip-start-snapshot",
