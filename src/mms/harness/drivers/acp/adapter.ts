@@ -118,7 +118,7 @@ export class AcpAdapter implements ProviderAdapter {
         // agent does not advertise HTTP) and the session instructions in the session's first prompt.
         mcp: host.bridge?.mcp ?? null,
         orchestrationInstructions: host.bridge?.sessionInstructions || undefined,
-        ...(host.bot ? { bot: true as const } : {}),
+        ...(host.bot ? { bot: true as const, botAuthority: host.bot } : {}),
         ...(host.bridge?.permission ? { prompter: host.bridge.permission } : {}),
         drainSteer: () => ctl.drainSteer(),
         // Per drain, with its token (docs/design/steer-and-interruptions.md §2.6, §2.7): read only once the prompt that

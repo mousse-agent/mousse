@@ -27,6 +27,8 @@ import {
   type PermissionPrompter
 } from './permissions'
 import type { AcpQuirks } from './quirks'
+import { answerBotPermission, checkBotFileRequest } from './botApprovals'
+import type { BotAuthority } from '../../../shared/bots/personal/authority'
 import { acpAgentError, agentCancelledError, promptStopOutcome } from './stopReason'
 import { xaiHandlers, xaiStopFailure } from './xai'
 
@@ -107,6 +109,8 @@ export interface AcpProcess extends AcpConnection {
    * file read or write) is refused, and ends the request.
    */
   refuseTools?: (what: string) => void
+  /** The running turn is a bot's: its authority answers every permission and file request, and nobody is asked. */
+  turnBot?: Pick<BotAuthority, 'check'>
 }
 
 /** Whether a steer goes into `process`'s running prompt as a second prompt, with no cancel (`AcpQuirks.nativeSteerFrom`). */
@@ -265,6 +269,8 @@ export interface AcpChatInput {
    * history in its first prompt, as Codex starts a new thread.
    */
   bot?: true
+  /** The bot's authority (`AdapterHost.bot`): it answers the turn's permission and file requests (`botApprovals.ts`). */
+  botAuthority?: Pick<BotAuthority, 'check'>
   onText: (text: string) => void
   /** The agent's thoughts so far this turn (`agent_thought_chunk`), cumulative like `onText`. */
   onThinking?: (text: string) => void
@@ -389,6 +395,8 @@ export class AcpSessions {
           active.refuseTools(request.toolCall?.title ?? 'a tool')
           return { outcome: { outcome: 'cancelled' } }
         }
+        // A bot's turn: its authority answers, nobody is asked.
+        if (active?.turnBot) return answerBotPermission(active.turnBot, request, classify)
         // While a person is asked, the call is not a foreground tool: a person's steer answers it rather than waiting.
         const callId = request.toolCall?.toolCallId
         const awaiting = callId ? active?.turnToolAwaiting : undefined
@@ -402,10 +410,15 @@ export class AcpSessions {
       ...(quirks.clientFs ? {
         readTextFile: (request) => {
           if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file read')
+          if (active?.turnBot) checkBotFileRequest(active.turnBot, { access: 'read', path: request.path })
           return readWorkspaceFile(scope, request)
         },
         writeTextFile: (request) => {
           if (active?.refuseTools) return refuseFile(active.refuseTools, 'a file write')
+          if (active?.turnBot) {
+            checkBotFileRequest(active.turnBot, { access: 'write', path: request.path })
+            return writeWorkspaceFile(questions, scope, request, label, true)
+          }
           return writeWorkspaceFile(questions, scope, request, label)
         }
       } : {}),
@@ -759,6 +772,7 @@ export class AcpSessions {
       next.turnToolAwaiting = input.onToolAwaiting
       // Read per request, so a change applies from the next turn without restarting the agent.
       next.permissionMode = input.permissionMode ?? 'ask'
+      next.turnBot = input.botAuthority
       this.turning.add(next)
       current = next
     }
@@ -1238,6 +1252,7 @@ export class AcpSessions {
       current.turnPrompter = undefined
       current.turnToolAwaiting = undefined
       current.permissionMode = undefined
+      current.turnBot = undefined
       this.turning.delete(current)
     }
   }

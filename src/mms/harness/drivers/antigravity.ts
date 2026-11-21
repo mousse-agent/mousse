@@ -7,6 +7,7 @@ import { decodeInstanceConfig, type AuthReading, type DriverContext, type Driver
 import { cliNames } from '../env'
 import { LAUNCH_MIRROR_FIELDS } from '../vendorMirror'
 import { compatibilityFields } from '../compatibility'
+import { ACP_NATIVE_TOOLS } from '../acp/botApprovals'
 
 /**
  * The account a recorded sign-in stands for. Mousse never reads the Google account itself, so a
@@ -65,6 +66,12 @@ export function antigravityDriver(options: { builtIn: () => AntigravityProviderS
     ownsSignIn: true,
     // Chat titles, pull request drafts and commit messages: one prompt in a session of its own (`service.oneShot`).
     oneShot: true,
+    // A bot's turn runs in Ask mode, and its authority answers every permission and file request the agent sends
+    // (`acp/botApprovals.ts`). What the agent runs without asking (its own reads and searches, the MCP servers of the
+    // user's own agent setup) is not checked.
+    botAuthority: () => true,
+    botApprovals: () => true,
+    nativeToolNames: (neutral) => ACP_NATIVE_TOOLS[neutral] ?? [],
     decodeConfig: (raw) => decodeInstanceConfig(raw, { privateHome: false }),
     caps: () => ANTIGRAVITY_CAPS,
     updateCommand: () => undefined,
