@@ -2,6 +2,7 @@ import { AppError } from '../../shared/errors'
 import { isDeepStrictEqual } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { readActions, readActionsCopy, writeActions } from './actionsFile'
 import { dirname, join, resolve } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { ThreadJournal } from '../data/ThreadJournal'
@@ -95,29 +96,38 @@ export const UNRECORDED_END_FILE = 'unrecorded-end.json'
 interface UnrecordedEnd { actionId: string; turnId: string }
 
 export class ThreadActionService {
-  private readonly actionsPath: string
   private readonly journal: ThreadJournal
 
   constructor(private readonly threadDirectory: string) {
-    this.actionsPath = join(threadDirectory, 'actions.json')
     this.journal = new ThreadJournal(threadDirectory)
   }
 
+  /** A new list of new objects the caller may change. Parsed from the last read while the file is unchanged (`actionsFile.ts`). */
   list(): ThreadAction[] {
-    if (!existsSync(this.actionsPath)) return []
-    return JSON.parse(readFileSync(this.actionsPath, 'utf8')) as ThreadAction[]
+    return readActionsCopy(this.threadDirectory)
+  }
+
+  /** The actions as last read, shared and frozen: copy one before changing it. */
+  view(): readonly ThreadAction[] {
+    return readActions(this.threadDirectory)
   }
 
   get(actionId: string): ThreadAction | undefined {
-    return this.list().find((action) => action.id === actionId)
+    const action = this.view().find((item) => item.id === actionId)
+    return action && structuredClone(action)
   }
 
   latest(branchId: ConversationBranchId): ThreadAction | undefined {
-    return this.list().filter((action) => action.conversationBranchId === branchId).at(-1)
+    const actions = this.view()
+    let at = actions.length - 1
+    while (at >= 0 && actions[at]!.conversationBranchId !== branchId) at -= 1
+    const action = actions[at]
+    return action && structuredClone(action)
   }
 
-  replace(actions: ThreadAction[]): void {
-    atomicWriteJsonSync(this.actionsPath, actions)
+  /** Writes the list, unless the file already holds exactly it (`writeActions`). */
+  replace(actions: readonly ThreadAction[]): void {
+    writeActions(this.threadDirectory, actions)
   }
 
   currentRevision(): number {
@@ -132,7 +142,7 @@ export class ThreadActionService {
     return current
   }
 
-  private newAction(options: RunThreadActionOptions, startSha: string, actions: ThreadAction[]): ThreadAction {
+  private newAction(options: RunThreadActionOptions, startSha: string, actions: readonly ThreadAction[]): ThreadAction {
     return {
       id: randomUUID(), turnId: options.turnId, conversationBranchId: options.conversationBranchId,
       actor: options.actor ?? { kind: 'main' }, runId: options.runId,
@@ -165,11 +175,11 @@ export class ThreadActionService {
    */
   beginTurn(options: RunThreadActionOptions, startSha: string, checked?: TurnStartCheck): ThreadAction {
     if (options.heldThreadLease) assertHeldThreadLease(this.threadDirectory, options.heldThreadLease)
-    const existing = this.list().find((item) => item.turnId === options.turnId)
+    const existing = this.view().find((item) => item.turnId === options.turnId)
     if (existing) {
       if (existing.startSha !== startSha || existing.conversationBranchId !== options.conversationBranchId) throw new Error('Turn identity was reused for a different workspace boundary.')
       if (existing.state !== 'running') throw new Error('This turn already has a durable result; model execution must not be replayed.')
-      return existing
+      return structuredClone(existing)
     }
     new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
     this.assertExpectedRevision(options.expectedJournalRevision)
@@ -178,10 +188,10 @@ export class ThreadActionService {
     } else {
       inThreadSnapshotScope(this.threadDirectory, options.workspacePath, () => git(options.workspacePath, ['rev-parse', '--verify', `${startSha}^{commit}`]))
     }
-    const actions = this.list()
+    const actions = this.view()
     const action = this.newAction(options, startSha, actions)
     this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'running', expectedPreState: { startSha, actionId: action.id }, details: { action } })
-    actions.push(action); this.replace(actions)
+    this.replace([...actions, action])
     return action
   }
 
@@ -319,36 +329,39 @@ export class ThreadActionService {
    */
   private recordTurnEnd(options: RunThreadActionOptions, state: 'completed' | 'stopped' | 'failed'): void {
     assertHeldThreadLease(this.threadDirectory, options.heldThreadLease!)
-    const actions = this.list()
-    const action = actions.find((item) => item.turnId === options.turnId && item.state === 'running')
-    if (!action) return
+    const actions = this.view()
+    const found = actions.find((item) => item.turnId === options.turnId && item.state === 'running')
+    if (!found) return
+    const action = structuredClone(found)
     action.presentationMessageEnd = options.presentationMessageEnd
     action.nativeContextBoundary = options.nativeContextBoundary
     action.externalEffects = options.externalEffects ?? action.externalEffects
     if (options.startNote) action.startNote = options.startNote
-    this.replace(actions)
+    this.replace(actions.map((item) => item === found ? action : item))
     this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'running', expectedPreState: { startSha: action.startSha, actionId: action.id }, details: { action: structuredClone(action), actionState: state } })
   }
 
   /** `checkpointExistingTurn` for a caller that already holds the mutation locks. */
   private async checkpointTurnHeld(options: RunThreadActionOptions, startSha: string, state: 'completed' | 'stopped' | 'failed'): Promise<ThreadAction> {
-    const actions = this.list()
+    // The list as it is now; the action this turn changes is copied, the others are written back as they are.
+    let actions = this.view()
     const completed = actions.find((item) => item.turnId === options.turnId && item.state !== 'running')
     if (completed) {
       if (completed.startSha !== startSha || completed.conversationBranchId !== options.conversationBranchId || completed.runId !== options.runId ||
           completed.presentationMessageStart !== options.presentationMessageStart || completed.presentationMessageEnd !== options.presentationMessageEnd ||
           !isDeepStrictEqual(completed.nativeContextBoundary, options.nativeContextBoundary) || !isDeepStrictEqual(completed.nativeContextStartBoundary, options.nativeContextStartBoundary) ||
           !isDeepStrictEqual(completed.actor ?? { kind: 'main' }, options.actor ?? { kind: 'main' })) throw new Error('Turn identity was reused for a different workspace boundary or context payload.')
-      if (this.journal.latestByOperation().get(completed.id)?.state !== 'completed') throw new Error('Checkpoint result requires operation recovery.')
-      return completed
+      if (this.journal.latestOf(completed.id)?.state !== 'completed') throw new Error('Checkpoint result requires operation recovery.')
+      return structuredClone(completed)
     }
-    let action = actions.find((item) => item.turnId === options.turnId && item.state === 'running')
-    if (!action) {
+    const running = actions.find((item) => item.turnId === options.turnId && item.state === 'running')
+    let action = running && structuredClone(running)
+    if (action) actions = actions.filter((item) => item !== running)
+    else {
       new ChangeReceiptService(this.threadDirectory).assertNoPendingOperation()
       this.assertExpectedRevision(options.expectedJournalRevision)
       action = this.newAction(options, startSha, actions)
-      actions.push(action)
-      this.replace(actions)
+      this.replace([...actions, action])
       this.journal.append({ operationId: action.id, operationType: 'action-checkpoint', state: 'running', expectedPreState: { startSha, actionId: action.id } })
     }
     action.presentationMessageEnd = options.presentationMessageEnd
@@ -358,8 +371,7 @@ export class ThreadActionService {
     try {
       await this.checkpoint(options.workspacePath, action, state)
       // Admission order differs from completion order when a turn snapshots before child spawn.
-      actions.splice(actions.indexOf(action), 1); actions.push(action)
-      this.replace(actions)
+      this.replace([...actions, action])
       this.appendCheckpointCompleted(action, state)
       return action
     } catch (error) {
@@ -454,12 +466,12 @@ export class ThreadActionService {
   async recoverPending(workspacePath: string, heldThreadLease?: ThreadLeaseHandle, signal?: AbortSignal): Promise<void> {
     const interrupted = (entry: { operationType: string; state: string }) =>['action-checkpoint', 'change-checkpoint'].includes(entry.operationType) && ['running', 'prepared', 'git_applied', 'recovery_required'].includes(entry.state)
     // Nothing to finish takes no lock: a worktree the agent removed or emptied does not stop the next turn here.
-    if (![...this.journal.latestByOperation().values()].some(interrupted)) return
+    if (!this.journal.unsettled().some(interrupted)) return
     return withGitMutationLocks(this.threadDirectory, workspacePath, 'checkpoint-recovery', async () => {
       const receipts = new ChangeReceiptService(this.threadDirectory)
-      for (const entry of [...this.journal.latestByOperation().values()].reverse()) {
+      for (const entry of [...this.journal.unsettled()].reverse()) {
         if (!interrupted(entry)) continue
-        const history = this.journal.list().filter((item) => item.operationId === entry.operationId)
+        const history = this.journal.history(entry.operationId)
         const all = this.list()
         const details = [...history].reverse().map((item) => item.details as { action?: ThreadAction; actionState?: 'completed' | 'stopped' | 'failed' } | undefined)
         let action = details.find((item) => item?.action)?.action ?? all.find((item) => item.id === entry.operationId)

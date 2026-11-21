@@ -26,7 +26,7 @@ import { gitRunError, LISTING_MAX_BUFFER, runGitProcess } from '../git/runGitPro
 import { renameFolderAsync } from './renameFolder'
 import { isIdNamedMousseBranch, isMousseBranchName, isValidBranchName } from '../../shared/mousseBranches'
 import { withOwnedBranches } from '../git/gitPolicy'
-import { BRANCH_RELEASE_OPERATION, BRANCH_RESTORE_OPERATION, threadBranchRecord, type ThreadBranchRecord } from '../workspace/threadBranchRecords'
+import { BRANCH_RECORD_OPERATIONS, BRANCH_RELEASE_OPERATION, BRANCH_RESTORE_OPERATION, threadBranchRecord, type ThreadBranchRecord } from '../workspace/threadBranchRecords'
 import { randomUUID } from 'node:crypto'
 import { adminDigest, adminObjectIds, blobId, HEAD_REFLOG, readAdminFilesAsync, replayedAdminFile, storeAdmin, storeAdminBeforeRemoval, uncontainedTips, type StoredAdmin } from './worktreeAdminData'
 import { keepCopy, keepExistingCommit, keptCopyWindowMs } from '../actions/keptCopies'
@@ -1210,7 +1210,7 @@ export class WorktreeRetirementService {
     try { location = this.store.require(manifest.taskId).location } catch { return basename(manifest.sourcePath) === 'workspace.json' ? { location: '' } : undefined }
     if (basename(manifest.sourcePath) !== 'workspace.json') return undefined
     try {
-      return { location, record: threadBranchRecord(new ThreadJournal(location, { readOnly: true }).list(), { worktreePath: manifest.worktreePath }) }
+      return { location, record: threadBranchRecord(new ThreadJournal(location, { readOnly: true }).ofTypes(...BRANCH_RECORD_OPERATIONS), { worktreePath: manifest.worktreePath }) }
     } catch {
       return { location }
     }

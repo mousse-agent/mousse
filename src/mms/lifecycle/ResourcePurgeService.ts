@@ -23,7 +23,7 @@ import { claimOverlapsPath, getExternalResourceClaims, getExternalResourceClaims
 import { withFileLock } from '../scheduled/fileLock'
 import { isMousseOwnedRef } from '../../shared/mousseBranches'
 import { ThreadJournal } from '../data/ThreadJournal'
-import { threadBranchRecord, type ThreadBranchRecord } from '../workspace/threadBranchRecords'
+import { BRANCH_RECORD_OPERATIONS, threadBranchRecord, type ThreadBranchRecord } from '../workspace/threadBranchRecords'
 import { isKeptFilesItem, keptOnDelete, unverifiedHolds } from '../../shared/resourceLifecycle'
 import { isOwnedSnapshotStore, withOwnedBranches } from '../git/gitPolicy'
 import { threadStoreKeptFilesAsync } from '../actions/SnapshotRefReleaseService'
@@ -729,7 +729,7 @@ export class ResourcePurgeService {
     if (workspace.threadId !== taskId || typeof workspace.worktreePath !== 'string' || `refs/heads/${workspace.branch}` !== ref) return undefined
     const own = { worktreePath: workspace.worktreePath, ...(typeof workspace.retainedRef === 'string' ? { retainedRef: workspace.retainedRef } : {}), ...(typeof workspace.headSha === 'string' ? { headSha: workspace.headSha } : {}) }
     try {
-      return { workspace: own, record: threadBranchRecord(new ThreadJournal(location, { readOnly: true }).list(), { worktreePath: workspace.worktreePath }) }
+      return { workspace: own, record: threadBranchRecord(new ThreadJournal(location, { readOnly: true }).ofTypes(...BRANCH_RECORD_OPERATIONS), { worktreePath: workspace.worktreePath }) }
     } catch {
       return { workspace: own }
     }

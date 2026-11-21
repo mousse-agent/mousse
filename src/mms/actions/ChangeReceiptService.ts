@@ -31,13 +31,12 @@ export class ChangeReceiptService {
     this.journal = new ThreadJournal(threadDirectory, options.readOnly ? { readOnly: true } : {})
   }
 
-  list(): ChangeReceipt[] {
-    const receipts = new Map<string, ChangeReceipt>()
-    for (const entry of this.journal.list()) {
-      const receipt = (entry.details as { receipt?: ChangeReceipt } | undefined)?.receipt
-      if (receipt?.id) receipts.set(receipt.id, receipt)
-    }
-    return [...receipts.values()]
+  /**
+   * Each receipt by id, its latest record winning, in the order ids first appeared. Kept with the journal's index
+   * (`ThreadJournal.receipts`), so a call costs only the records written since the last one. Shared and frozen.
+   */
+  list(): readonly ChangeReceipt[] {
+    return this.journal.receipts()
   }
 
   /** Caller holds task and repository leases. Replay of an operation is idempotent. Git runs without blocking the daemon. */
@@ -113,7 +112,7 @@ export class ChangeReceiptService {
 
   assertNoPendingOperation(): void {
     // A publish waiting to be settled concerns the primary checkout only; it never holds up the thread's own work.
-    const pending = [...this.journal.latestByOperation().values()].find((entry) =>
+    const pending = this.journal.unsettled().find((entry) =>
       ['prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state) && !isPublish(entry.operationType) && !settlesItself(entry.operationType))
     if (pending) throw new Error(`Workspace recovery required for operation ${pending.operationId} (${pending.operationType}).`)
   }

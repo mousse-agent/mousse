@@ -1,6 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import type { ChangeReceipt, ThreadAction } from '../../shared/threadActions'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { DEFAULT_UNDO_RETENTION_POLICY, type UndoRetentionEligibility, type UndoRetentionPolicy } from '../../shared/undoRetention'
@@ -8,6 +6,7 @@ import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { enableVersionedLifecycleWriter } from '../queue/ThreadLifecycleAdmission'
+import { readActions } from './actionsFile'
 
 interface RetentionEvent {
   version: 1
@@ -76,8 +75,9 @@ export class UndoRetentionService {
     this.journal = new ThreadJournal(threadDirectory, { readOnly })
   }
 
+  /** Folded from the journal's retention records alone (`ThreadJournal.ofTypes`): the only ones `stateFromJournal` reads. */
   private state(): State {
-    return stateFromJournal(this.journal.list())
+    return stateFromJournal(this.journal.ofTypes('undo-retention'))
   }
 
   private append(event: Omit<RetentionEvent, 'version'>): void {
@@ -87,15 +87,11 @@ export class UndoRetentionService {
   private validatePolicy(policy: UndoRetentionPolicy): void {
     validateUndoRetentionPolicy(policy)
   }
-  private actions(): ThreadAction[] {
-    const path = join(this.threadDirectory, 'actions.json')
-    return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) as ThreadAction[] : []
+  private actions(): readonly ThreadAction[] {
+    return readActions(this.threadDirectory)
   }
-  private receipts(): ChangeReceipt[] {
-    return this.journal.list().flatMap((entry) => {
-      const receipt = (entry.details as { receipt?: ChangeReceipt })?.receipt
-      return receipt ? [receipt] : []
-    })
+  private receipts(): readonly ChangeReceipt[] {
+    return this.journal.receiptRecords()
   }
   private pending(): boolean { return this.unfinishedOperation() }
 
@@ -105,7 +101,7 @@ export class UndoRetentionService {
    * material (`settlesItself`), so neither counts.
    */
   unfinishedOperation(): boolean {
-    return [...this.journal.latestByOperation().values()].some((entry) => !settlesItself(entry.operationType) && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))
+    return this.journal.unsettled().some((entry) => !settlesItself(entry.operationType) && ['planned', 'running', 'prepared', 'git_applied', 'context_pending', 'recovery_required'].includes(entry.state))
       || this.actions().some((action) => ['planned', 'running', 'checkpointing', 'undoing', 'undo_conflict'].includes(action.state))
   }
 
@@ -266,7 +262,7 @@ export class UndoRetentionService {
     }
     const ids = [this.key(target), this.key(compensation)]
     if (ids.some((id) => state.expired.has(id))) throw new Error('Expired history cannot be resurrected by receipt replay.')
-    if (this.journal.list().some((entry) => entry.operationType === 'undo-retention' && (entry.details as RetentionEvent)?.kind === 'refresh-pair' && (entry.details as RetentionEvent).ids?.[1] === ids[1])) return
+    if (this.journal.ofTypes('undo-retention').some((entry) => (entry.details as RetentionEvent)?.kind === 'refresh-pair' && (entry.details as RetentionEvent).ids?.[1] === ids[1])) return
     const at = Math.max(this.now(), state.highWater)
     this.append({ kind: 'refresh-pair', at, ids, deadline: at + state.policy.windowMs })
   }
