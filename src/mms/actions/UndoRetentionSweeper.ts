@@ -1,6 +1,7 @@
 import type { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
 import { releaseExecutionLeaseHandle, tryAcquireExecutionLease } from '../queue/ThreadExecutionLease'
+import { inBackgroundGitLane } from '../git/gitSpawn'
 import { UndoRetentionService } from './UndoRetentionService'
 import { ReceiptRefReleaseService } from './ReceiptRefReleaseService'
 import { releaseSnapshotRefs } from './SnapshotRefReleaseService'
@@ -11,6 +12,12 @@ import { withGitMutationLocks } from './GitOperationCoordinator'
 import { existsSync } from 'node:fs'
 import { gitCommonDirAsync } from '../lifecycle/canonicalPath'
 import { packMousseRefs, type PackOutcome } from './packMousseRefs'
+import { discoverOwnershipFacts } from '../lifecycle/ownershipDiscovery'
+import type { OwnershipFacts } from '../lifecycle/ResourceInventory'
+import type { TaskLifecycleRecord } from '../../shared/resourceLifecycle'
+
+/** A thread whose expired receipts are released after the batch has swept. */
+interface PendingRelease { task: TaskLifecycleRecord; worktreePath: string; expired: number; preserved: { expired?: number; reason?: string } }
 
 export interface UndoRetentionSweeperOptions {
   intervalMs: number
@@ -38,15 +45,15 @@ export class UndoRetentionSweeper {
   private readonly abort = new AbortController()
   private cursor = 0
   private passes = 0
-  readonly outcomes = new Map<string, { at: string; expired?: number; releasedRefs?: number; expiredPreservedRefs?: number; reason?: string }>()
+  readonly outcomes = new Map<string, { at: string; expired?: number; releasedRefs?: number; expiredPreservedRefs?: number; oldestPendingReleaseAgeMs?: number | null; reason?: string }>()
   /** What the last pass did with each repository's loose `refs/mousse/` refs (`packMousseRefs`), by common directory. */
   readonly packs = new Map<string, { at: string; outcome?: PackOutcome; reason?: string }>()
   constructor(private readonly store: ResourceLifecycleStore, private readonly options: UndoRetentionSweeperOptions = { intervalMs: 60 * 60 * 1000, tasksPerBatch: 20, firstPassAfterMs: 2 * 60 * 1000 }) {}
   start(): void {
     if (this.timer || this.abort.signal.aborted) return
-    this.timer = setInterval(() => { void this.tick() }, this.options.intervalMs)
+    this.timer = setInterval(() => { void inBackgroundGitLane(() => this.tick()) }, this.options.intervalMs)
     this.timer.unref()
-    this.first = setTimeout(() => { void this.tick() }, this.options.firstPassAfterMs ?? 0)
+    this.first = setTimeout(() => { void inBackgroundGitLane(() => this.tick()) }, this.options.firstPassAfterMs ?? 0)
     this.first.unref()
   }
   stop(): Promise<void> {
@@ -73,6 +80,8 @@ export class UndoRetentionSweeper {
     const batch = Math.min(tasks.length, this.options.tasksPerBatch)
     /** A checkout of each repository this pass swept, whose loose Mousse refs are packed after it. */
     const repositories = new Map<string, string>()
+    /** Threads with expired receipts to release once the batch has swept (`releaseReceipts`). */
+    const receipts: PendingRelease[] = []
     for (let i = 0; i < batch && !this.abort.signal.aborted; i++) {
       const task = tasks[this.cursor++ % tasks.length]!
       let lease
@@ -95,20 +104,57 @@ export class UndoRetentionSweeper {
           }
           catch (error) { preserved = { reason: `Kept files: ${error instanceof Error ? error.message : String(error)}` } }
         }
+        // Receipts to release wait until the whole batch has swept: ownership across profiles is then discovered once,
+        // with no thread or repository lease held, and each release uses it (`releaseReceipts`).
+        if (!result.suspended && !workspace.snapshotOnly && new ReceiptRefReleaseService(this.store, task.taskId).hasWork()) {
+          receipts.push({ task, worktreePath: workspace.worktreePath, expired: result.expired.length, preserved })
+          continue
+        }
         // A folder with no worktree keeps its snapshots in a store of Mousse's own, which is also tidied after the release.
-        const released = result.suspended ? undefined : workspace.snapshotOnly
-          ? await releaseSnapshotRefs(task.location, { signal: this.abort.signal, heldThreadLease: lease })
-          : await new ReceiptRefReleaseService(this.store, task.taskId).release(workspace.worktreePath, { signal: this.abort.signal, heldThreadLease: lease })
+        const released = result.suspended || !workspace.snapshotOnly ? undefined : await releaseSnapshotRefs(task.location, { signal: this.abort.signal, heldThreadLease: lease })
         const reasons = result.suspended ? ['Clock review required'] : [...(released?.retained.map((item) => item.reason) ?? []), ...(preserved.reason ? [preserved.reason] : [])]
         this.outcomes.set(task.taskId, { at: new Date().toISOString(), expired: result.expired.length, releasedRefs: released?.releasedRefs.length ?? 0,
+          ...(result.suspended && !workspace.snapshotOnly ? { oldestPendingReleaseAgeMs: new ReceiptRefReleaseService(this.store, task.taskId).oldestPendingReleaseAgeMs() } : {}),
           ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}), ...(reasons.length ? { reason: reasons.join('; ') } : {}) })
       } catch (error) {
         this.outcomes.set(task.taskId, { at: new Date().toISOString(), ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}),
           reason: [error instanceof Error ? error.message : String(error), ...(preserved.reason ? [preserved.reason] : [])].join('; ') })
       } finally { if (lease) releaseExecutionLeaseHandle(lease) }
     }
+    await this.releaseReceipts(receipts)
     await this.sweepKeptCopyOwners(startup)
     await this.packRepositories(repositories)
+  }
+
+  /**
+   * The receipt releases the batch found work for. Who claims what across every profile is discovered once, here, with
+   * no thread or repository lease held; each thread's release then takes its thread's lease and, in short holds, its
+   * repository's (`ReceiptRefReleaseService.release`). A thread that became busy meanwhile is left for a later run.
+   */
+  private async releaseReceipts(pending: PendingRelease[]): Promise<void> {
+    if (!pending.length || this.abort.signal.aborted) return
+    let discovery: OwnershipFacts | undefined
+    try { discovery = await discoverOwnershipFacts(this.store) } catch { discovery = undefined }
+    for (const { task, worktreePath, expired, preserved } of pending) {
+      if (this.abort.signal.aborted) return
+      let lease
+      const service = new ReceiptRefReleaseService(this.store, task.taskId)
+      let oldestPendingReleaseAgeMs: number | null | undefined
+      try {
+        oldestPendingReleaseAgeMs = service.oldestPendingReleaseAgeMs()
+        lease = tryAcquireExecutionLease(task.location, { source: 'undo-retention-sweep' })
+        if (!lease) {
+          this.outcomes.set(task.taskId, { at: new Date().toISOString(), expired, releasedRefs: 0, oldestPendingReleaseAgeMs, ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}), reason: ['Thread is in use; its receipts are released on a later run', ...(preserved.reason ? [preserved.reason] : [])].join('; ') })
+          continue
+        }
+        await waitForFolderAccess([task.location, worktreePath], { whenNotAnswering: 'fail', signal: this.abort.signal })
+        const released = await service.release(worktreePath, { signal: this.abort.signal, heldThreadLease: lease, ...(discovery ? { discovery } : {}) })
+        const reasons = [...released.retained.map((item) => item.reason), ...(preserved.reason ? [preserved.reason] : [])]
+        this.outcomes.set(task.taskId, { at: new Date().toISOString(), expired, releasedRefs: released.releasedRefs.length, oldestPendingReleaseAgeMs: released.oldestPendingReleaseAgeMs, ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}), ...(reasons.length ? { reason: reasons.join('; ') } : {}) })
+      } catch (error) {
+        this.outcomes.set(task.taskId, { at: new Date().toISOString(), ...(oldestPendingReleaseAgeMs !== undefined ? { oldestPendingReleaseAgeMs } : {}), ...(preserved.expired !== undefined ? { expiredPreservedRefs: preserved.expired } : {}), reason: [error instanceof Error ? error.message : String(error), ...(preserved.reason ? [preserved.reason] : [])].join('; ') })
+      } finally { if (lease) releaseExecutionLeaseHandle(lease) }
+    }
   }
 
   /**

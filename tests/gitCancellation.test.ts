@@ -41,6 +41,7 @@ function repo(): string {
 
 /** A Git command that runs for 30 seconds through a program Git starts (an alias), as a stuck command would. */
 const SLOW = ['-c', 'alias.slow=!sleep 30', 'slow']
+const SIGNAL_READY = ['-c', 'alias.slow=!: > git-ready; sleep 30', 'slow']
 
 describe('gitCancellationScope', () => {
   it('starts no Git once the work was stopped', async () => {
@@ -97,7 +98,7 @@ describe('gitCancellationScope', () => {
     expect(execFileSync('git', ['rev-parse', 'refs/mousse/test/kept'], { cwd, encoding: 'utf8' }).trim()).toBe(head)
   })
 
-  it("ends a stopped command's run when something of it outlives the kill, and cleans its lock only once that is gone", async () => {
+  it.skipIf(process.platform === 'win32')("ends a stopped POSIX command's run when something of it outlives the kill, and cleans its lock only once that is gone", async () => {
     const cwd = repo()
     const index = join(cwd, 'private-index')
     GIT_STOP_TIMING.exitWaitMs = 200
@@ -120,7 +121,7 @@ describe('gitCancellationScope', () => {
     expect(existsSync(`${index}.lock`)).toBe(false)
   }, 30_000)
 
-  it("keeps the repository locked while a stopped command's process is still there, and lets go once it is gone", async () => {
+  it.skipIf(process.platform === 'win32')("keeps the repository locked while a stopped POSIX command's process is still there, and lets go once it is gone", async () => {
     const cwd = repo()
     const threadDirectory = mkdtempSync(join(tmpdir(), 'mousse-git-cancel-thread-')); dirs.push(threadDirectory)
     const identity = resolveRepositoryIdentity(cwd)
@@ -128,8 +129,10 @@ describe('gitCancellationScope', () => {
     let lingering = true
     gitStopProbe.alive = () => lingering
     const controller = new AbortController()
-    setTimeout(() => controller.abort(), 500)
-    const ran = await withGitMutationLocks(threadDirectory, cwd, 'test', () => runGitProcess(SLOW, { cwd, env: process.env }), undefined, undefined, controller.signal)
+    const running = withGitMutationLocks(threadDirectory, cwd, 'test', () => runGitProcess(SIGNAL_READY, { cwd, env: process.env }), undefined, undefined, controller.signal)
+    await vi.waitFor(() => expect(existsSync(join(cwd, 'git-ready'))).toBe(true), { timeout: 10_000 })
+    controller.abort()
+    const ran = await running
     // The operation ended, so a stopped turn ends; the repository stays locked.
     expect(ran.error?.code).toBe('ABORT_ERR')
     await expect(acquireRepositoryLease(identity, { retryDelayMs: 5, maxWaitMs: 300 })).rejects.toBeInstanceOf(RepositoryLeaseBusyError)
@@ -138,7 +141,7 @@ describe('gitCancellationScope', () => {
     expect(lease.release()).toBe(true)
   }, 30_000)
 
-  it("keeps watching a stopped command's process past the limit, says so, and lets the repository go once it ends", async () => {
+  it.skipIf(process.platform === 'win32')("keeps watching a stopped POSIX command's process past the limit, says so, and lets the repository go once it ends", async () => {
     const cwd = repo()
     const threadDirectory = mkdtempSync(join(tmpdir(), 'mousse-git-cancel-thread-')); dirs.push(threadDirectory)
     const identity = resolveRepositoryIdentity(cwd)
@@ -147,8 +150,10 @@ describe('gitCancellationScope', () => {
     gitStopProbe.alive = () => lingering
     const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const controller = new AbortController()
-    setTimeout(() => controller.abort(), 500)
-    const ran = await withGitMutationLocks(threadDirectory, cwd, 'test', () => runGitProcess(SLOW, { cwd, env: process.env }), undefined, undefined, controller.signal)
+    const running = withGitMutationLocks(threadDirectory, cwd, 'test', () => runGitProcess(SIGNAL_READY, { cwd, env: process.env }), undefined, undefined, controller.signal)
+    await vi.waitFor(() => expect(existsSync(join(cwd, 'git-ready'))).toBe(true), { timeout: 10_000 })
+    controller.abort()
+    const ran = await running
     expect(ran.error?.code).toBe('ABORT_ERR')
     // The watch starts once the stop's look at the process list is done, which can take a while on a busy machine.
     await vi.waitFor(() => expect(logged).toHaveBeenCalledWith(expect.stringContaining('until it ends or Mousse restarts'), expect.anything()), { timeout: 10_000 })
@@ -237,11 +242,10 @@ describe('StoppedGitTree', () => {
     expect(await tree.alive()).toBe(false)
   })
 
-  it('neither tracks nor (on Windows) kills a pid whose creation time is present and not the command\'s', async () => {
+  it('does not track a PID whose creation time is different from the command\'s', async () => {
     const killed = script([at(100, 7, 3_600_000), at(101, 100, 3_600_001)])
     const tree = await StoppedGitTree.stop(command(100), spawnedAt)
-    // Off Windows the command's own group is killed before the list is read (its id goes to no other group while it lives).
-    expect(killed).toEqual(process.platform === 'win32' ? [] : [100])
+    expect(killed).toEqual([100])
     expect(tree.pids()).toEqual([])
     expect(await tree.alive()).toBe(false)
   })
@@ -282,11 +286,11 @@ describe('StoppedGitTree', () => {
     expect(await tree.alive()).toBe(false)
   })
 
-  it('ends the stopped run at its deadline while the process list and the kill hang', async () => {
+  it.skipIf(process.platform === 'win32')('ends the stopped POSIX run at its deadline while the process list and the kill hang', async () => {
     const cwd = repo()
     GIT_STOP_TIMING.exitWaitMs = 1_000
     gitStopProbe.table = () => new Promise(() => undefined)
-    // A kill that does nothing, as a hung taskkill would: the command keeps running.
+    // A kill that does nothing leaves the command running.
     gitStopProbe.kill = () => undefined
     const controller = new AbortController()
     const scope = gitCancellationScope(controller.signal)

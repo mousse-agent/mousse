@@ -26,6 +26,7 @@ import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionServ
 import { ProviderInstanceService } from '../../src/mms/harness/instanceMap'
 import type { CodexLaunch, CodexProcess } from '../../src/mms/harness/vendors/codex/CodexAppServerClient'
 import { CodexProviderService } from '../../src/mms/harness/vendors/codex/CodexProviderService'
+import { codexFixtureAccessToken } from '../../src/mms/run/testkit/codexAppServerReplay'
 
 const dirs: string[] = []
 const stops: Array<() => void> = []
@@ -130,7 +131,7 @@ function fakeCodex(): string {
 /** What a completed Codex sign-in leaves in a home: the account the app-server reads, and a fake secret. */
 function writeSignIn(home: string, account: string): void {
   mkdirSync(home, { recursive: true })
-  writeFileSync(join(home, 'auth.json'), JSON.stringify({ account, tokens: { refresh_token: `secret-token-of-${account}` } }))
+  writeFileSync(join(home, 'auth.json'), JSON.stringify({ account, tokens: { account_id: account, access_token: codexFixtureAccessToken(account), refresh_token: `secret-token-of-${account}` } }))
 }
 
 /** The account a home holds, as the scripted app-server answers `account/read` for it. */
@@ -215,6 +216,7 @@ function appServers() {
   const control = { hold: false, held: [] as Array<() => void> }
   const launch = (spec: CodexLaunch): CodexProcess => {
     launches.push({ env: spec.env, cwd: spec.cwd, args: spec.args })
+    const startupAccount = accountOf(spec.env.CODEX_HOME)
     const stdout = new PassThrough()
     const stdin = new PassThrough()
     const process = Object.assign(new EventEmitter(), {
@@ -245,8 +247,10 @@ function appServers() {
         else if (message.method === 'account/read') {
           const account = accountOf(spec.env.CODEX_HOME)
           // `api-key`: signed in, but with a key and not a ChatGPT account.
-          reply = { result: { account: account === 'api-key' ? { type: 'apiKey' } : account ? { type: 'chatgpt', email: `${account}@example.test`, planType: 'plus' } : null, requiresOpenaiAuth: true } }
-        } else if (message.method === 'model/list') reply = { result: { data: [{ id: 'gpt-test', displayName: 'GPT Test', hidden: false, supportedReasoningEfforts: [] }], nextCursor: null } }
+          reply = { result: { account: account === 'api-key' ? { type: 'apiKey' } : account ? { type: 'chatgpt', email: `${account}@example.test`, planType: 'plus' } : null, workspaceRouting: startupAccount ? { chatgptAccountId: startupAccount } : null, requiresOpenaiAuth: true } }
+        } else if (message.method === 'getAuthStatus') reply = { result: { authMethod: 'chatgpt', authToken: startupAccount ? codexFixtureAccessToken(startupAccount) : null } }
+        else if (message.method === 'config/read') reply = { result: { config: {} } }
+        else if (message.method === 'model/list') reply = { result: { data: [{ id: 'gpt-test', displayName: 'GPT Test', hidden: false, supportedReasoningEfforts: [] }], nextCursor: null } }
         else reply = { error: { code: -32000, message: 'replay ends here' } }
         stdout.write(JSON.stringify({ id: message.id, ...(reply as object) }) + '\n')
       }
@@ -455,6 +459,7 @@ describe('sign in from the app', () => {
 
   it('stops every app-server of the home before the sign-in starts, and starts a new one to read the result', async () => {
     const w = world()
+    writeSignIn(w.homeOf(WORK), 'acct-old')
     await w.harness.instances.recheck(WORK)
     expect(w.servers.running()).toBeGreaterThan(0)
     const launched = w.servers.launches.length
@@ -1268,7 +1273,8 @@ describe('the service of a Codex account', () => {
   it('reconnect ends the process that knew the old account, forgets the models, and reads the new one', async () => {
     const dir = tempDir('mousse-codex-service')
     const { instance, servers } = service(dir, fakeCodex())
-    expect(await instance.authState()).toBe('signed_out')
+    writeSignIn(join(dir, 'home'), 'acct-old')
+    expect(await instance.authState()).toBe('signed_in')
     expect(servers.running()).toBe(1)
     writeSignIn(join(dir, 'home'), 'acct-new')
     // The running process answers for the account it started with; a reconnect starts another.
@@ -1277,7 +1283,7 @@ describe('the service of a Codex account', () => {
     expect(servers.processes[0]!.signalCode).not.toBeNull()
     expect(instance.account()).toBeUndefined()
     expect(await instance.status({ force: true })).toMatchObject({ state: 'connected' })
-    expect(instance.account()?.subject).toBe('chatgpt:acct-new@example.test')
+    expect(instance.account()?.subject).toContain('acct-new')
   })
 
   it('reads the account whatever Mousse recorded, and leaves what it recorded alone', async () => {

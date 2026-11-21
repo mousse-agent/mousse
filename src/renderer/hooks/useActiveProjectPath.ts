@@ -1,43 +1,129 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { folderRecheckKey, resolveActiveProject, type ActiveProject } from '../lib/activeProject'
 import { isNewEmptyThread, localWorkspaceFor } from '../lib/newThread'
 import { useAppStore } from '../stores/appStore'
+import { isQualifiedId } from '../../shared/threadRef'
 
 interface ResolvedWorkspace {
   path: string | null
+  pending?: boolean
   /** The thread whose ready worktree `path` is, when it is one. */
   workspaceThreadId: string | null
+  /** That worktree's generation. */
+  workspaceGeneration?: number
+  /** Why the thread's own worktree cannot be read now; `path` is then null. */
+  unavailable?: string
 }
 
-async function resolveWorkspaceProjectPath(threadId: string | null): Promise<ResolvedWorkspace> {
-  if (!threadId) return { path: await window.mousse.app.getActiveProjectPath(threadId), workspaceThreadId: null }
-  // The Files panel's folder comes back first if a storage rule retired the thread's worktree, so the Git
-  // panel, the tree, the header and the terminal all start from the same folder. It answers either way.
-  await window.mousse.app.getFilesRoot(threadId).catch(() => undefined)
+/** Said when a storage rule retired the thread's worktree: it comes back when the thread runs or its files are opened. */
+export const WORKTREE_NOT_ON_DISK = 'Worktree not on disk'
+/** Said for a worktree Mousse records as ready that the service did not name a folder for (an older service). */
+const WORKTREE_NOT_READY = 'Worktree not ready'
+
+/** Reads a remote thread's placement and generation from the computer that owns its checkout. */
+async function resolveRoutedWorkspace(threadId: string, fresh: boolean): Promise<ResolvedWorkspace> {
   try {
-    const status = await window.mousse.workspace.getStatus(threadId) as {
-      execution?: { projectPath?: string; lifecycle?: string; placement?: 'project-folder' }
+    const status = await window.mousse.workspace.getStatus(threadId, fresh) as {
+      metadata?: { kind?: string; generation?: number; lifecycle?: string } | null
+      execution?: { projectPath?: string; generation?: number; lifecycle?: string; placement?: 'project-folder' }
+      retiredByCleanup?: unknown
     }
-    // A thread in its project's folder works there as the person does: the project's own Git rules, no Publish.
-    if (status.execution?.projectPath && status.execution.lifecycle === 'ready' && status.execution.placement !== 'project-folder') {
-      return { path: status.execution.projectPath, workspaceThreadId: threadId }
+    const { execution, metadata } = status
+    if (execution?.placement === 'project-folder' || metadata?.kind === 'project-folder') {
+      return { path: execution?.projectPath || await window.mousse.app.getActiveProjectPath(threadId), workspaceThreadId: null }
     }
-  } catch {
-    // Legacy/standalone threads keep the existing project-path behavior.
+    const lifecycle = execution?.lifecycle ?? metadata?.lifecycle
+    if (!metadata || lifecycle === 'unprovisioned' || lifecycle === 'provisioning') {
+      return { path: null, workspaceThreadId: threadId, pending: true }
+    }
+    if (execution?.projectPath && lifecycle === 'ready') {
+      return { path: execution.projectPath, workspaceThreadId: threadId, workspaceGeneration: execution.generation ?? metadata.generation }
+    }
+    return {
+      path: null,
+      workspaceThreadId: threadId,
+      unavailable: status.retiredByCleanup || lifecycle === 'missing' ? WORKTREE_NOT_ON_DISK : WORKTREE_NOT_READY
+    }
+  } catch (error) {
+    return { path: null, workspaceThreadId: threadId, unavailable: failureText(error) }
+  }
+}
+
+const failureText = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
+/**
+ * The folder the thread works in, from Mousse's record and Git's files (`git.heads`): no Git process, and nothing set up
+ * or brought back to answer it. Git waits for a worktree that is still being made.
+ * `attempt` makes a Retry's request its own.
+ */
+async function resolveWorkspaceProjectPath(threadId: string | null, attempt?: number): Promise<ResolvedWorkspace> {
+  if (!threadId) return { path: await window.mousse.app.getActiveProjectPath(threadId), workspaceThreadId: null }
+  if (isQualifiedId(threadId)) return resolveRoutedWorkspace(threadId, attempt !== undefined)
+  let head
+  try {
+    head = (await window.mousse.git.heads({ threadIds: [threadId], ...(attempt ? { attempt } : {}) })).threads[threadId]
+  } catch (error) {
+    return { path: null, workspaceThreadId: null, unavailable: failureText(error) }
+  }
+  if (!head) return { path: null, workspaceThreadId: null, unavailable: 'No answer for this thread' }
+  if ('error' in head) return { path: null, workspaceThreadId: null, unavailable: head.error }
+  if ('own' in head) {
+    const generation = { workspaceGeneration: head.generation }
+    if (head.folder) return { path: head.folder, workspaceThreadId: threadId, ...generation }
+    if (head.unavailable) return { path: null, workspaceThreadId: threadId, ...generation, unavailable: head.unavailable }
+    if (head.missing) return { path: null, workspaceThreadId: threadId, ...generation, unavailable: WORKTREE_NOT_ON_DISK }
+    if (head.lifecycle === 'unprovisioned' || head.lifecycle === 'provisioning') {
+      return { path: null, workspaceThreadId: threadId, ...generation, pending: true }
+    }
+    return { path: null, workspaceThreadId: threadId, ...generation, unavailable: WORKTREE_NOT_READY }
   }
   return { path: await window.mousse.app.getActiveProjectPath(threadId), workspaceThreadId: null }
 }
 
 /** Lookups still running, by profile and thread: the side card, the panels and the toolbar ask at the same moment. */
-const resolving = new Map<string, Promise<ResolvedWorkspace>>()
+const resolving = new Map<string, { lookup: Promise<ResolvedWorkspace>; at: number; fresh: number }>()
+/** A lookup older than this is not joined: one that hung (a drive, a busy service) never holds a later look. */
+const SHARE_MS = 2_000
 
-/** {@link resolveWorkspaceProjectPath}, with every caller that asks while one lookup runs sharing it. */
-function resolveShared(scope: string, threadId: string | null): Promise<ResolvedWorkspace> {
+/**
+ * {@link resolveWorkspaceProjectPath}, with every caller that asks while one recent lookup runs sharing it. A lookup
+ * asked as fresh (`fresh`, a number from {@link nextFresh}: Retry, or Mousse saying the worktree changed) joins only one
+ * started for that number or a later one; callers that ask with the same number share it.
+ */
+function resolveShared(scope: string, threadId: string | null, fresh = 0): Promise<ResolvedWorkspace> {
   const running = resolving.get(scope)
-  if (running) return running
-  const lookup = resolveWorkspaceProjectPath(threadId).finally(() => resolving.delete(scope))
-  resolving.set(scope, lookup)
-  return lookup
+  if (running && running.fresh >= fresh && Date.now() - running.at < SHARE_MS) return running.lookup
+  const entry = { lookup: resolveWorkspaceProjectPath(threadId, fresh || undefined), at: Date.now(), fresh }
+  entry.lookup = entry.lookup.finally(() => { if (resolving.get(scope) === entry) resolving.delete(scope) })
+  resolving.set(scope, entry)
+  return entry.lookup
+}
+
+/** Numbers fresh lookups (Retry, a worktree change), so their request is never answered by one already in flight. */
+let freshLookups = 0
+const nextFresh = (): number => ++freshLookups
+
+/**
+ * The fresh-lookup number of each thread's last worktree change (`git.headsChanged`): every surface showing the thread
+ * looks it up again with the same number, so they share one lookup.
+ */
+const changedAt = new Map<string, number>()
+const changeListeners = new Set<() => void>()
+let stopChanges: (() => void) | undefined
+function subscribeChanges(listener: () => void): () => void {
+  changeListeners.add(listener)
+  stopChanges ??= window.mousse?.git?.onHeadsChanged?.((event) => {
+    for (const threadId of event?.threadIds ?? []) changedAt.set(threadId, nextFresh())
+    for (const notify of changeListeners) notify()
+  })
+  return () => {
+    changeListeners.delete(listener)
+    if (!changeListeners.size) {
+      stopChanges?.()
+      stopChanges = undefined
+    }
+  }
 }
 
 /**
@@ -55,13 +141,22 @@ export function useActiveProjectLocation(): ActiveProject {
     s.threads.find((thread) => thread.id === s.activeThreadId),
     s.messages.length
   ))
-  const draftProjectId = useAppStore((s) => localWorkspaceFor(
-    s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'],
-    s.threads.find((thread) => thread.id === s.activeThreadId),
-    s.projects
-  ).projectId)
+  const { projectId: draftProjectId, worktreeEnabled: draftWorktree } = useAppStore(useShallow((s) => {
+    const { projectId, worktreeEnabled } = localWorkspaceFor(
+      s.composerWorkspaceDrafts[s.activeThreadId ?? '__blank__'],
+      s.threads.find((thread) => thread.id === s.activeThreadId),
+      s.projects
+    )
+    return { projectId, worktreeEnabled }
+  }))
   const scope = `${profileId}:${activeThreadId ?? '__blank__'}`
-  const [resolved, setResolved] = useState<({ scope: string } & ResolvedWorkspace) | null>(null)
+  const [resolved, setResolved] = useState<({ scope: string; changed: number } & ResolvedWorkspace) | null>(null)
+  // Retry (the Git section's), and Mousse saying the thread's worktree changed (made, rebuilt, restored, its branch
+  // renamed), look the folder up again: fresh, never answered by a lookup already running.
+  const changed = useSyncExternalStore(subscribeChanges, () => (activeThreadId ? changedAt.get(activeThreadId) ?? 0 : 0))
+  const [retried, setRetried] = useState<{ scope: string; fresh: number } | null>(null)
+  const fresh = Math.max(changed, retried?.scope === scope ? retried.fresh : 0)
+  const retry = useCallback(() => setRetried({ scope, fresh: nextFresh() }), [scope])
   const turnPhase = useAppStore((s) => (s.activeThreadId ? s.turnStates[s.activeThreadId]?.phase ?? null : null))
   // The warm start's thread is not looked up until the window knows its profile (showWarmView).
   const warmOnly = useAppStore((s) => !s.profileReady && s.warmView !== null)
@@ -69,51 +164,56 @@ export function useActiveProjectLocation(): ActiveProject {
   const recheck = folderRecheckKey({
     threadId: activeThreadId,
     threadProjectId,
-    resolvedWorkspaceThreadId: resolved?.scope === scope ? resolved.workspaceThreadId : null,
+    resolvedWorkspaceThreadId: resolved?.scope === scope && resolved.path ? resolved.workspaceThreadId : null,
     turnPhase
   })
 
   useEffect(() => {
     if (warmOnly) return
     let cancelled = false
-    void resolveShared(scope, activeThreadId).then((workspace) => {
-      if (!cancelled) setResolved({ scope, ...workspace })
-    }).catch(() => { if (!cancelled) setResolved({ scope, path: null, workspaceThreadId: null }) })
+    void resolveShared(scope, activeThreadId, fresh).then((workspace) => {
+      if (!cancelled) setResolved({ scope, changed, ...workspace })
+    }).catch((error: unknown) => { if (!cancelled) setResolved({ scope, changed, path: null, workspaceThreadId: null, unavailable: failureText(error) }) })
     return () => { cancelled = true }
-  }, [activeThreadId, profileId, scope, recheck, warmOnly])
+  }, [activeThreadId, scope, recheck, warmOnly, changed, fresh])
 
-  return resolveActiveProject({
+  const location = resolveActiveProject({
     isNewChat,
     draftProjectId,
+    draftWorktree,
     threadProjectId,
     projects,
-    resolved: resolved?.scope === scope
-      ? { path: resolved.path, loading: false, workspaceThreadId: resolved.workspaceThreadId }
+    resolved: resolved?.scope === scope && resolved.changed === changed
+      ? { path: resolved.path, loading: resolved.pending === true, provisioning: resolved.pending, workspaceThreadId: resolved.workspaceThreadId, workspaceGeneration: resolved.workspaceGeneration, unavailable: resolved.unavailable }
       : { path: null, loading: true, workspaceThreadId: null }
   })
+  return { ...location, retry }
 }
 
 export function useActiveProjectPath(): string | null {
   return useActiveProjectLocation().path
 }
 
-export function useFilesRoot(): { root: string; label: string } {
+export function useFilesRoot(): { root: string; label: string; loading: boolean } {
   const activeThreadId = useAppStore((s) => s.activeThreadId)
   const profileId = useAppStore((s) => s.profileId)
-  const [root, setRoot] = useState('')
-  const [label, setLabel] = useState('~')
+  const scope = `${profileId}:${activeThreadId ?? '__blank__'}`
+  const [resolved, setResolved] = useState<{ scope: string; root: string } | null>(null)
+  // Follow the daemon's Files root when a turn makes the first checkout or a later workspace change replaces it.
+  const changed = useSyncExternalStore(subscribeChanges, () => activeThreadId ? changedAt.get(activeThreadId) ?? 0 : 0)
+  const turnPhase = useAppStore((s) => activeThreadId && s.threads.find((thread) => thread.id === activeThreadId)?.projectId
+    ? s.turnStates[activeThreadId]?.phase ?? null
+    : null)
 
   useEffect(() => {
     let cancelled = false
-    setRoot('')
-    setLabel('~')
-    void window.mousse.app.getFilesRoot(activeThreadId).then((filesRoot) => {
-      if (cancelled) return
-      setRoot(filesRoot)
-      setLabel(filesRoot || '~')
-    }).catch(() => { if (!cancelled) setRoot('') })
+    void window.mousse.app.getFilesRoot(activeThreadId, changed > 0 || turnPhase !== null).then((root) => {
+      if (!cancelled) setResolved({ scope, root })
+    }).catch(() => { if (!cancelled) setResolved({ scope, root: '' }) })
     return () => { cancelled = true }
-  }, [activeThreadId, profileId])
+  }, [activeThreadId, scope, changed, turnPhase])
 
-  return { root, label }
+  const loading = resolved?.scope !== scope
+  const root = loading ? '' : resolved.root
+  return { root, label: root || '~', loading }
 }

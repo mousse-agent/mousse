@@ -14,7 +14,8 @@ import {
   type ClaudeLiveHost,
   type ClaudeSubscriptionChatInput
 } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
-import { BackgroundObligations, LiveSession, UNSURE_MEMORY_MS, type LiveTimings } from '../src/mms/harness/vendors/claude/liveSession'
+import { BackgroundObligations, LIVE_IDLE_CLOSE_MS, LiveSession, UNSURE_MEMORY_MS, type LiveTimings } from '../src/mms/harness/vendors/claude/liveSession'
+import { claudeAccountSubject } from '../src/mms/harness/vendors/claude/accountSubject'
 import { STOP_GRACE_MS } from '../src/mms/harness/stopProcesses'
 import { FakeClaudeCli, lifecycle, messageStart, notification, resultFrame, roster, SESSION, taskStarted, textDelta, toolResult, toolStart } from './run/fakeClaudeCli'
 
@@ -25,6 +26,7 @@ beforeEach(() => {
   const claudeHome = mkdtempSync(join(tmpdir(), 'claude-config-test-'))
   homes.push(claudeHome)
   vi.stubEnv('CLAUDE_CONFIG_DIR', claudeHome)
+  writeFileSync(join(claudeHome, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'test-account' } }))
 })
 afterEach(() => {
   vi.unstubAllEnvs()
@@ -134,6 +136,125 @@ describe('a live Claude query', () => {
     expect(cli.processes).toHaveLength(1)
     expect(process.closed).toBe(false)
     void home
+  })
+
+  it.each(['project', 'local', 'managed drop-in'])('replaces the warm process when %s settings change the API key or add a helper', async (source) => {
+    const managed = source === 'managed drop-in'
+    const managedDir = join(process.env.CLAUDE_CONFIG_DIR!, 'policy')
+    const { cli, turn, service, home } = fixture({}, undefined, undefined, managed ? {
+      accountSubject: (env) => claudeAccountSubject(env, { managedFiles: [join(managedDir, 'managed-settings.json')] })
+    } : {})
+    const folder = managed ? join(managedDir, 'managed-settings.d') : join(home, '.claude')
+    mkdirSync(folder, { recursive: true })
+    const settings = join(folder, managed ? '10-credentials.json' : source === 'local' ? 'settings.local.json' : 'settings.json')
+    const saveKey = (key: string) => writeFileSync(settings, JSON.stringify({ env: { ANTHROPIC_API_KEY: key } }))
+    try {
+      saveKey('first-fixture-key')
+      await turn({ prompt: 'first' })
+      const first = cli.last
+      await turn({ prompt: 'same key' })
+      expect(cli.last).toBe(first)
+
+      saveKey('second-fixture-key')
+      await turn({ prompt: 'new key' })
+      expect(cli.last).not.toBe(first)
+      expect(first.closed).toBe(true)
+      expect(first.inputs).toHaveLength(2)
+
+      writeFileSync(settings, JSON.stringify({ apiKeyHelper: 'fixture-credential-helper' }))
+      const second = cli.last
+      await turn({ prompt: 'helper' })
+      expect(second.closed).toBe(true)
+      const helper = cli.last
+      await turn({ prompt: 'helper again' })
+      expect(cli.last).not.toBe(helper)
+    } finally {
+      await service.stop()
+    }
+  })
+
+  it('sends the prompt on a fresh process when a managed drop-in changes during warm setup', async () => {
+    const managedDir = join(process.env.CLAUDE_CONFIG_DIR!, 'policy')
+    const folder = join(managedDir, 'managed-settings.d')
+    mkdirSync(folder, { recursive: true })
+    const settings = join(folder, '10-credentials.json')
+    const saveKey = (key: string) => writeFileSync(settings, JSON.stringify({ env: { ANTHROPIC_API_KEY: key } }))
+    const { cli, turn, service } = fixture({}, undefined, undefined, {
+      accountSubject: (env) => claudeAccountSubject(env, { managedFiles: [join(managedDir, 'managed-settings.json')] })
+    })
+    let releaseSetup!: () => void
+    const finishSetup = new Promise<void>((done) => { releaseSetup = done })
+    let enterSetup!: () => void
+    const enteredSetup = new Promise<void>((done) => { enterSetup = done })
+    const mcp = { url: 'http://127.0.0.1:9/mcp', token: 'first-token' }
+    try {
+      saveKey('first-fixture-key')
+      await turn({ prompt: 'first', mcp }, 'first transcript')
+      const warm = cli.last
+      warm.mcpHold = () => {
+        enterSetup()
+        return finishSetup
+      }
+
+      const next = turn({ prompt: 'send after rotation', history: 'first transcript', mcp: { ...mcp, token: 'second-token' } }, 'first transcript')
+      void next.catch(() => undefined)
+      await enteredSetup
+      saveKey('second-fixture-key')
+      releaseSetup()
+
+      expect(await next).toBe('reply to 1')
+      expect(warm.inputs).toHaveLength(1)
+      expect(warm.closed).toBe(true)
+      expect(cli.last).not.toBe(warm)
+      expect(cli.last.options.resume).toBeUndefined()
+      expect(JSON.stringify(cli.last.inputs)).toContain('first transcript')
+    } finally {
+      releaseSetup()
+      await service.stop()
+    }
+  })
+
+  it('hands Claude the transcript when a managed drop-in rotates while turn settings are pending', async () => {
+    const managedDir = join(process.env.CLAUDE_CONFIG_DIR!, 'policy')
+    const folder = join(managedDir, 'managed-settings.d')
+    mkdirSync(folder, { recursive: true })
+    const settings = join(folder, '10-credentials.json')
+    const saveKey = (key: string) => writeFileSync(settings, JSON.stringify({ env: { ANTHROPIC_API_KEY: key } }))
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let pending = false
+    const { cli, turn, service } = fixture({}, undefined, undefined, {
+      accountSubject: (env) => claudeAccountSubject(env, { managedFiles: [join(managedDir, 'managed-settings.json')] }),
+      turnSettings: async () => {
+        if (pending) {
+          entered.resolve()
+          await release.promise
+        }
+        return {}
+      }
+    })
+    const history = 'transcript from the original credential'
+    try {
+      saveKey('first-fixture-key')
+      await turn({ prompt: 'first' }, history)
+      const warm = cli.last
+      pending = true
+      const next = turn({ prompt: 'send after rotation' }, history)
+      void next.catch(() => undefined)
+      await entered.promise
+      saveKey('second-fixture-key')
+      release.resolve()
+
+      expect(await next).toBe('reply to 1')
+      expect(warm.inputs).toHaveLength(1)
+      expect(warm.closed).toBe(true)
+      expect(cli.last).not.toBe(warm)
+      expect(cli.last.options.resume).toBeUndefined()
+      expect(JSON.stringify(cli.last.inputs)).toContain(history)
+    } finally {
+      release.resolve()
+      await service.stop()
+    }
   })
 
   it('a turn aborted before Claude started its prompt cancels the queued prompt and keeps the process', async () => {
@@ -1231,7 +1352,57 @@ describe('a model or effort change (issue #359)', () => {
   })
 })
 
+describe('a daemon that stops', () => {
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'EPERM'
+    }
+  }
+
+  it('waits until each open Claude Code process has exited, with the process it started, though it ignores the close', async () => {
+    // A real process standing in for Claude Code: it ignores SIGTERM and runs a helper of its own.
+    const code = [
+      "const { spawn } = require('node:child_process')",
+      "const helper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })",
+      'process.stdout.write(String(helper.pid) + "\\n")',
+      "process.on('SIGTERM', () => {})",
+      'setInterval(() => {}, 1000)'
+    ].join(';')
+    const claude = spawn(process.execPath, ['-e', code], { stdio: ['ignore', 'pipe', 'ignore'] })
+    const helper = await new Promise<number>((resolve) => claude.stdout!.once('data', (chunk: Buffer) => resolve(Number(chunk.toString().trim()))))
+    try {
+      const cli = new FakeClaudeCli()
+      const query = (input: Parameters<FakeClaudeCli['query']>[0]) => Object.assign(cli.query(input), { transport: { process: { pid: claude.pid } } })
+      const f = fixture({}, cli, undefined, { query })
+      await f.turn()
+      expect(alive(claude.pid!)).toBe(true)
+      await f.service.stop()
+      expect(alive(claude.pid!)).toBe(false)
+      await vi.waitFor(() => expect(alive(helper)).toBe(false), { timeout: 1_000, interval: 20 })
+    } finally {
+      claude.kill('SIGKILL')
+      try { process.kill(helper, 'SIGKILL') } catch { /* gone */ }
+    }
+  }, 15_000)
+})
+
 describe('idle release and the cap on live processes', () => {
+  it('a reply ten minutes after the last turn finds the thread\'s process still open; one after the idle window does not', async () => {
+    vi.useFakeTimers()
+    // The default timings: what a thread gets.
+    const f = fixture()
+    await f.turn({ history: 'h' }, 'h')
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    expect(f.cli.last.closed).toBe(false)
+    await f.turn({ history: 'h' }, 'h')
+    expect(f.cli.processes).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(LIVE_IDLE_CLOSE_MS + 1)
+    expect(f.cli.last.closed).toBe(true)
+  })
+
   it('closes an idle thread with no background work after the idle timeout, and the next turn resumes the session', async () => {
     vi.useFakeTimers()
     const f = fixture({ idleCloseMs: 1000 })
@@ -1291,7 +1462,77 @@ describe('idle release and the cap on live processes', () => {
     expect(f.cli.processes).toHaveLength(threads.length)
   })
 
-  it('closes idle processes past the idle count, oldest first, and never a busy one or one holding background work', async () => {
+  it('a process started under another account is never reused, and idle ones started under it close', async () => {
+    const account = (id: string) => writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: id, organizationUuid: 'org' } }))
+    account('first')
+    const f = fixture()
+    await f.turn({ threadId: 'a', history: 'h' }, 'h')
+    await f.turn({ threadId: 'b', history: 'h' }, 'h')
+    await f.turn({ threadId: 'a', history: 'h' }, 'h')
+    expect(f.cli.processes).toHaveLength(2)
+    const [first, other] = f.cli.processes
+
+    account('second')
+    await f.turn({ threadId: 'a', history: 'h' }, 'h')
+    expect(f.cli.processes).toHaveLength(3)
+    expect(first.closed).toBe(true)
+    expect(other.closed).toBe(true)
+    expect(f.service.liveThreadIds()).toEqual(['a'])
+  })
+
+  it('enforces the idle cap when the last background notification is committed', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const f = fixture({ maxIdleSessions: 1 })
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }))
+      process.answer(String(message.uuid), 'started')
+    }
+    await f.turn({ threadId: 'pinned' })
+    const pinned = f.cli.last
+    f.cli.reply = (message, process) => process.answer(String(message.uuid), 'ordinary reply')
+    await f.turn({ threadId: 'idle' })
+    const idle = f.cli.last
+    vi.setSystemTime(Date.now() + 1)
+    pinned.emit(notification('bash-1'), textDelta('background reply'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    const continuation = f.chat({ threadId: 'pinned', continuation: true, prompt: '' })
+    pinned.emit(resultFrame({ text: 'background reply', origin: 'task-notification' }))
+    await expect(continuation).resolves.toBe('background reply')
+    expect([pinned.closed, idle.closed]).toEqual([false, false])
+    f.service.commitConversation('pinned', 'committed background reply')
+    await Promise.resolve()
+    expect([pinned.closed, idle.closed]).toEqual([false, true])
+  })
+
+  it('rechecks identity before taking a background continuation', async () => {
+    const f = fixture()
+    f.cli.reply = (message, process) => {
+      process.emit(roster({ id: 'bash-1' }))
+      process.answer(String(message.uuid), 'started')
+    }
+    await f.turn()
+    const old = f.cli.last
+    old.emit(notification('bash-1'), textDelta('old account background reply'))
+    await vi.waitFor(() => expect(f.host.continuationStarted).toHaveBeenCalledTimes(1))
+    writeFileSync(join(process.env.CLAUDE_CONFIG_DIR!, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'other' } }))
+    const onText = vi.fn()
+    await expect(f.chat({ continuation: true, prompt: '', onText })).rejects.toThrow()
+    expect(onText).not.toHaveBeenCalled()
+    expect(old.closed).toBe(true)
+  })
+
+  it('a status check that finds a terminal sign-out closes idle processes before Send is refused', async () => {
+    let loggedIn = true
+    const f = fixture({}, undefined, undefined, { runAuth: async () => JSON.stringify({ loggedIn, authMethod: 'claude.ai' }) })
+    await f.turn({ threadId: 'a' })
+    await f.turn({ threadId: 'b' })
+    loggedIn = false
+    await expect(f.service.status({ force: true })).resolves.toMatchObject({ state: 'signed_out' })
+    expect(f.cli.processes.map((process) => process.closed)).toEqual([true, true])
+    await expect(f.chat({ threadId: 'a' })).rejects.toThrow()
+  })
+
+  it('keeps no more idle processes than the idle count: the least recently used closes as soon as another goes idle, never a busy one or one holding background work', async () => {
     const f = fixture({ maxIdleSessions: 1 })
     await f.turn({ threadId: 'a' })
     // b holds background work, c has a turn in flight.
@@ -1307,15 +1548,12 @@ describe('idle release and the cap on live processes', () => {
     await vi.waitFor(() => expect(busy.inputs).toHaveLength(1))
 
     f.cli.reply = (message, process) => process.answer(String(message.uuid), 'live')
-    // One idle process (a) is within the count.
+    // Two idle (a, d) once d's turn ends: the oldest closes then, not at the next start.
     expect(await f.turn({ threadId: 'd' })).toBe('live')
-    expect(oldest.closed).toBe(false)
-    // Two idle (a, d): the oldest closes when e starts, then d when f starts.
-    expect(await f.turn({ threadId: 'e' })).toBe('live')
     expect(oldest.closed).toBe(true)
-    expect(f.service.liveThreadIds().sort()).toEqual(['b', 'c', 'd', 'e'])
-    expect(await f.turn({ threadId: 'f' })).toBe('live')
-    expect(f.service.liveThreadIds().sort()).toEqual(['b', 'c', 'e', 'f'])
+    expect(f.service.liveThreadIds().sort()).toEqual(['b', 'c', 'd'])
+    expect(await f.turn({ threadId: 'e' })).toBe('live')
+    expect(f.service.liveThreadIds().sort()).toEqual(['b', 'c', 'e'])
     expect(pinned.closed).toBe(false)
     expect(busy.closed).toBe(false)
     busy.answer(busy.uuid(0), 'busy done')

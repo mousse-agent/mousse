@@ -9,7 +9,7 @@ import type { ChildProcess } from 'node:child_process'
  *
  * A phase runs from one mark to the next (`turnBoundaryMark`, and every `turnTimingMark`), named by the mark that ends
  * it. Each lists its milliseconds and, when it has any, its Git commands: how many were started (`git`), their summed
- * lifetimes (`gitMs`), the time `spawn()` itself held the event loop (`spawnMs`), the commands run synchronously and
+ * lifetimes (`gitMs`), the time the caller spent synchronously starting or dispatching them (`spawnMs`), and the commands run synchronously and
  * the time they held it (`sync`, `syncMs`), and the time spent waiting for a repository's lease (`leaseMs`). A command
  * belongs to the phase it started in. `waitedMs` is the time between the run's request and the start of its setup.
  *
@@ -107,15 +107,18 @@ export function timeGitChild<C extends ChildProcess>(start: () => C): C {
   if (!counts) return start()
   const begun = performance.now()
   const child = start()
-  counts.git = (counts.git ?? 0) + 1
-  counts.spawnMs = (counts.spawnMs ?? 0) + performance.now() - begun
-  // `close` (or `exit` when its pipes are kept open elsewhere): whichever comes first. A process that never started
-  // reports neither and adds no lifetime. No `error` listener: a caller's own unhandled-error behaviour stays as it was.
-  let ended = false
+  const dispatched = performance.now()
+  let started: number | undefined
+  child.once('spawn', () => {
+    started = performance.now()
+    counts.git = (counts.git ?? 0) + 1
+    counts.spawnMs = (counts.spawnMs ?? 0) + dispatched - begun
+  })
+  // Measure between the start and exit notifications. Queue time and pipes kept open after exit are excluded.
   const end = (): void => {
-    if (ended) return
-    ended = true
-    counts.gitMs = (counts.gitMs ?? 0) + performance.now() - begun
+    if (started === undefined) return
+    counts.gitMs = (counts.gitMs ?? 0) + performance.now() - started
+    started = undefined
   }
   child.once('exit', end)
   child.once('close', end)

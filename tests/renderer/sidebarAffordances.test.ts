@@ -9,7 +9,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Project, Thread } from '../../src/shared/types'
+import type { GitHeadsRequest, GitHeadsResult, Project, Thread } from '../../src/shared/types'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -53,7 +53,9 @@ const projectsApi = {
 function preload(): unknown {
   const call = (name: string) => (name.startsWith('on') ? () => () => {} : async () => undefined)
   const group = (known: Record<string, unknown> = {}) => new Proxy(known, { get: (target, key: string) => target[key] ?? call(key) })
-  return new Proxy({ threads: group(threadsApi), projects: group(projectsApi) } as Record<string, unknown>, {
+  return new Proxy({
+    threads: group(threadsApi), projects: group(projectsApi), git: group({ heads: async () => ({ threads: {}, projects: {} }) })
+  } as Record<string, unknown>, {
     get: (target, key: string) => target[key] ?? group()
   })
 }
@@ -369,12 +371,15 @@ describe('the open thread', () => {
 
 describe('row marks', () => {
   it("names every card's branch: its own worktree's, with the branch icon, else its project folder's; none without Git", async () => {
-    const status = vi.fn(async (scope: { projectId: string | null; workspaceThreadId: string | null }) =>
-      scope.workspaceThreadId === 'own' ? { isRepo: true, branch: 'mousse/fix-parser' } : scope.projectId === 'repo' ? { isRepo: true, branch: 'main' } : { isRepo: false, branch: null })
-    const getStatus = vi.fn(async (threadId: string) => threadId === 'own'
-      ? { metadata: { branch: 'mousse/fix-parser' }, execution: { lifecycle: 'ready' } }
-      : { metadata: null })
-    Object.assign((window as unknown as { mousse: Record<string, unknown> }).mousse, { git: { status }, workspace: { getStatus } })
+    const status = vi.fn()
+    const heads = vi.fn(async (_request: GitHeadsRequest): Promise<GitHeadsResult> => ({
+      projects: { repo: { repo: true, branch: 'main' }, plain: { repo: false, branch: null } },
+      threads: {
+        own: { own: true, branch: 'mousse/fix-parser', generation: 0, lifecycle: 'ready' },
+        unmade: { project: true }
+      }
+    }))
+    Object.assign((window as unknown as { mousse: Record<string, unknown> }).mousse, { git: { heads, status } })
     const settle = () => act(async () => { for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve, 0)) })
     const card = (id: string) => host.querySelector(`.threads-sidebar-card[data-thread-id="${id}"] .threads-sidebar-card-sub`)
     show([
@@ -388,8 +393,8 @@ describe('row marks', () => {
     expect(card('folder')?.textContent).toBe('main')
     expect(card('folder')?.querySelector('.threads-sidebar-branch-icon')).toBeNull()
     expect(card('unmade')?.textContent).toBe('main')
-    // The worktree is read only through a scope that names the thread once its workspace is ready.
-    expect(status.mock.calls.map(([scope]) => scope.workspaceThreadId).filter(Boolean)).toEqual(['own'])
+    expect(heads).toHaveBeenCalledWith({ projectIds: ['repo'], threadIds: expect.arrayContaining(['own', 'unmade']) })
+    expect(status).not.toHaveBeenCalled()
 
     show([thread('plain', 'Notes', { projectId: 'plain' })], { view: 'threads', active: 'plain', projects: [project('plain', 'Plain')] })
     await settle()

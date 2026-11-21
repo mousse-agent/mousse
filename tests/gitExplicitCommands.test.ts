@@ -272,6 +272,8 @@ describe('Status reads use plumbing and never write the index', () => {
 })
 
 describe('Every Git run carries safe.bareRepository=explicit', () => {
+  const gitPath = (path: string): string => path.replaceAll('\\', '/')
+
   it('appends after the entries the environment already has, once', () => {
     const env = withGitConfigEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'Someone' })
     expect(env).toMatchObject({ GIT_CONFIG_COUNT: '5', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'Someone', GIT_CONFIG_KEY_1: 'safe.bareRepository', GIT_CONFIG_VALUE_1: 'explicit' })
@@ -318,7 +320,7 @@ describe('Every Git run carries safe.bareRepository=explicit', () => {
     expect(isGitDirectory(bare)).toBe(true)
     expect(isGitDirectory(join(root, 'main'))).toBe(false)
     expect(gitDirectoryEnv(bare)).toEqual({ GIT_DIR: bare })
-    expect((await lifecycleGitAsync(bare, ['worktree', 'list', '--porcelain']))).toContain(`worktree ${join(root, 'main')}`)
+    expect(gitPath(await lifecycleGitAsync(bare, ['worktree', 'list', '--porcelain']))).toContain('worktree ' + gitPath(join(root, 'main')))
     expect((await readOnlyGitAsync(join(root, 'main'), ['rev-parse', '--abbrev-ref', 'HEAD']))).toBe('main')
   })
 
@@ -335,13 +337,13 @@ describe('Every Git run carries safe.bareRepository=explicit', () => {
     // Restore checks and purge read refs in the shared directory.
     expect((await readDirectLifecycleRefAsync(bare, 'refs/mousse/lifecycle/x'))).toBe(head)
     expect((await readDirectLifecycleRefAsync(bare, 'refs/mousse/lifecycle/missing'))).toBeUndefined()
-    expect((await lifecycleReadAsync(bare, ['worktree', 'list', '--porcelain']))).toContain(`worktree ${join(root, 'main')}`)
+    expect(gitPath(await lifecycleReadAsync(bare, ['worktree', 'list', '--porcelain']))).toContain('worktree ' + gitPath(join(root, 'main')))
     expect(actionGit(bare, ['rev-parse', '--verify', 'refs/mousse/lifecycle/x'])).toBe(head)
     expect((await readOnlyGitAsync(bare, ['rev-parse', 'main']))).toBe(head)
     // The same in a repository's own .git folder.
     const dotGit = join(seed, '.git')
     git(seed, 'update-ref', 'refs/mousse/lifecycle/y', head)
     expect((await readDirectLifecycleRefAsync(dotGit, 'refs/mousse/lifecycle/y'))).toBe(head)
-    expect((await lifecycleReadAsync(dotGit, ['worktree', 'list', '--porcelain']))).toContain(`worktree ${seed}`)
+    expect(gitPath(await lifecycleReadAsync(dotGit, ['worktree', 'list', '--porcelain']))).toContain('worktree ' + gitPath(seed))
   })
 })

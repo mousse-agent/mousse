@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usageLimitError } from '../../src/mms/orchestrator/providerErrors'
@@ -24,7 +24,7 @@ import { CODEX_BOT_SETUP_UNREADABLE_TEXT, CODEX_BOT_VERSION_TEXT, codexBotSettin
 import type { NeutralTool } from '../../src/shared/harness/tools'
 import type { AdapterHost, TurnControl, TurnInput, TurnSink } from '../../src/mms/harness/adapter'
 import { mousseOrchestrationInstructions } from '../../src/mms/run/mcp/instructions'
-import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer } from '../../src/mms/run/testkit/codexAppServerReplay'
+import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer, replayCodexEnv } from '../../src/mms/run/testkit/codexAppServerReplay'
 import { parseTranscript, readTranscript, ReplayTransport, type TranscriptFrame } from '../../src/mms/run/testkit/ReplayTransport'
 import { CODEX_CAPS } from '../../src/mms/harness/drivers/codex'
 import { holdControl, type HoldControl } from '../support/steerHoldControl'
@@ -107,11 +107,13 @@ function transport(frames: TranscriptFrame[], onCue?: (frame: unknown) => void |
 
 let home: string
 let work: string
+let env: () => NodeJS.ProcessEnv
 let questions: UserQuestionService
 const services: CodexProviderService[] = []
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'mousse-codex-adapter-'))
+  env = replayCodexEnv(home)
   work = join(home, 'work')
   mkdirSync(work)
   questions = new UserQuestionService()
@@ -130,7 +132,7 @@ function service(replay: ReplayTransport, settings: Record<string, unknown> = {}
   chmodSync(binary, 0o755)
   mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
   writeFileSync(settingsPath(), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }], ...settings }))
-  const created = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { launch: () => ({ binaryPath: binary }) })
+  const created = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { env, launch: () => ({ binaryPath: binary }) })
   services.push(created)
   return created
 }
@@ -360,7 +362,7 @@ describe('CodexAdapter', () => {
     // The turn committed: the Codex thread is saved with the canonical history it now holds.
     const saved = JSON.parse(readFileSync(settingsPath(), 'utf8')) as { threads: Record<string, unknown> }
     // Bound to the instance that started it (the default `codex` instance here).
-    expect(saved.threads['thread-1']).toEqual({ codexThreadId: T, cwd: work, historyKey: sha('history+Hello'), instanceId: 'codex' })
+    expect(saved.threads['thread-1']).toEqual({ account: expect.stringMatching(/^[a-f0-9]{64}$/), codexThreadId: T, cwd: work, historyKey: sha('history+Hello'), instanceId: 'codex' })
   })
 
   it('continues the loaded thread, resumes it from a new process, and starts fresh when resume fails', async () => {
@@ -384,7 +386,7 @@ describe('CodexAdapter', () => {
       ...message('msg-3', ['three'], 'turn-3'),
       completed('completed', 'turn-3')
     ])
-    const reopened = createCodexProviderService(home, questions, { launch: replayCodexAppServer(resumed) }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+    const reopened = createCodexProviderService(home, questions, { launch: replayCodexAppServer(resumed) }, { env, launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(reopened)
     const third = await new CodexAdapter(() => reopened).startTurn(input({ prompt: 'third', nativeHistory: 'history+two' }), recordingSink(), control(), host())
     resumed.assertDone()
@@ -403,7 +405,7 @@ describe('CodexAdapter', () => {
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-4', item: { type: 'agentMessage', id: 'msg-4', text: 'four' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-4', status: 'completed', error: null } })
     ])
-    const recovering = createCodexProviderService(home, questions, { launch: replayCodexAppServer(broken) }, { launch: () => ({ binaryPath: join(home, 'codex') }) })
+    const recovering = createCodexProviderService(home, questions, { launch: replayCodexAppServer(broken) }, { env, launch: () => ({ binaryPath: join(home, 'codex') }) })
     services.push(recovering)
     const fourth = await new CodexAdapter(() => recovering).startTurn(input({ prompt: 'fourth', nativeHistory: 'history+three' }), recordingSink(), control(), host())
     broken.assertDone()
@@ -478,8 +480,8 @@ describe('CodexAdapter', () => {
       out({ id: 6, method: 'thread/fork', params: { threadId: T, excludeTurns: true, ...threadParams({ config: mcpConfig('new'), developerInstructions }) } }),
       inn({ id: 6, result: threadResult('thr-2') }),
       out({ id: 7, method: 'thread/unsubscribe', params: { threadId: T } }),
-      inn({ id: 7, result: { status: 'unsubscribed' } }),
       out({ id: 8, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('again'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+      inn({ id: 7, result: { status: 'unsubscribed' } }),
       inn({ id: 8, result: { turn: { id: 'turn-2', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-2', item: { type: 'agentMessage', id: 'msg-2', text: 'two' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-2', status: 'completed', error: null } }),
@@ -591,8 +593,8 @@ describe('CodexAdapter', () => {
       out({ id: 6, method: 'thread/fork', params: { threadId: T, excludeTurns: true, ...threadParams({ approvalPolicy: 'never', sandbox: 'danger-full-access' }) } }),
       inn({ id: 6, result: threadResult('thr-2') }),
       out({ id: 7, method: 'thread/unsubscribe', params: { threadId: T } }),
-      inn({ id: 7, result: { status: 'unsubscribed' } }),
       out({ id: 8, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('two'), approvalPolicy: 'never', sandboxPolicy: FULL, model: 'gpt-x' } }),
+      inn({ id: 7, result: { status: 'unsubscribed' } }),
       inn({ id: 8, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-2', item: { type: 'agentMessage', id: 'msg-2', text: 'two' } }),
       note('turn/completed', { threadId: 'thr-2', turn: { id: 'turn-2', status: 'completed', error: null } })
@@ -918,16 +920,18 @@ describe('CodexAdapter', () => {
         out({ id: 4, method: 'thread/start', params: threadParams() }),
         cue({ action: 'stop' }),
         inn({ id: 4, result: threadResult() }),
-        // The next turn starts a new thread with the history as a preamble.
-        ...threadStart(5),
-        out({ id: 6, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text(`Previous conversation (context only; do not repeat earlier actions):\n${STOPPED}\n\nCurrent request:\nagain`), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
-        inn({ id: 6, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
+        // The stopped open leaves its load state unknown. A new server gets the history as a preamble.
+        ...handshake(),
+        ...threadStart(4),
+        out({ id: 5, method: 'turn/start', params: { summary: 'auto', threadId: T, input: text(`Previous conversation (context only; do not repeat earlier actions):\n${STOPPED}\n\nCurrent request:\nagain`), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
+        inn({ id: 5, result: { turn: { id: 'turn-2', status: 'inProgress', error: null, items: [] } } }),
         ...message('msg-2', ['two'], 'turn-2'),
         completed('completed', 'turn-2')
       ], () => controller.abort(new Error('stopped while the thread opened')))
       const codex = service(replay)
       const adapter = new CodexAdapter(() => codex)
       await expect(adapter.startTurn(input({ signal: controller.signal }), recordingSink(), control(), stoppedHost())).rejects.toThrow('stopped while the thread opened')
+      await replay.idle()
       expect(savedThreads()?.['thread-1']).toBeUndefined()
       const next = await adapter.startTurn(input({ prompt: 'again', nativeHistory: STOPPED }), recordingSink(), control(), host())
       replay.assertDone()
@@ -1034,7 +1038,7 @@ describe('CodexAdapter', () => {
       mkdirSync(join(home, 'providers', 'codex'), { recursive: true })
       writeFileSync(settingsPath(), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-x', label: 'GPT X' }] }))
       const launch = replayCodexAppServer(replay)
-      const created = createCodexProviderService(home, questions, { launch: (spec) => Object.assign(launch(spec), { pid }), ...dependencies }, { launch: () => ({ binaryPath: binary }) })
+      const created = createCodexProviderService(home, questions, { launch: (spec) => Object.assign(launch(spec), { pid }), ...dependencies }, { env, launch: () => ({ binaryPath: binary }) })
       services.push(created)
       return created
     }
@@ -1142,7 +1146,7 @@ describe('CodexAdapter', () => {
       return { killed: [listed[0]!], survivors: [] }
     })
     // A grace far longer than the test: the kill must not wait for it.
-    const codex = createCodexProviderService(home, questions, { launch: (spec) => Object.assign(launch(spec), { pid: process.pid }), listProcesses, stopCommands, stopGraceMs: 600_000 }, { launch: () => ({ binaryPath: binary }) })
+    const codex = createCodexProviderService(home, questions, { launch: (spec) => Object.assign(launch(spec), { pid: process.pid }), listProcesses, stopCommands, stopGraceMs: 600_000 }, { env, launch: () => ({ binaryPath: binary }) })
     services.push(codex)
     const adapter = new CodexAdapter(() => codex)
     await expect(adapter.startTurn(input({ signal: controller.signal }), recordingSink(), control(), host())).rejects.toThrow('stopped by the user')
@@ -2107,7 +2111,7 @@ describe('a bot turn on Codex', () => {
       check: (call: { kind: string; tool: string; args: Record<string, unknown> }) => {
         calls.push({ tool: call.tool, args: call.args })
         if (call.tool === 'shell') return { ok: false, refused: { text: 'The owner has not allowed this yet.', askId: 'ask-1' } }
-        return String(call.args.path ?? '').startsWith(`${files}/`) ? { ok: true } : { ok: false, wall: { kind: 'escalated', permission: 'change files' } }
+        return String(call.args.path ?? '').startsWith(files + sep) ? { ok: true } : { ok: false, wall: { kind: 'escalated', permission: 'change files' } }
       }
     }
     return { bot, calls }
@@ -2379,10 +2383,10 @@ describe('a bot turn on Codex', () => {
       // The owner allowed the web: the system text changed. The loaded thread, which keeps its old developer instructions,
       // is let go, and a new one starts under the new text, never with the old permissions as its system text.
       ...setup(9),
-      out({ id: 10, method: 'thread/unsubscribe', params: { threadId: T } }),
-      inn({ id: 10, result: { status: 'unsubscribed' } }),
-      out({ id: 11, method: 'thread/start', params: threadParams({ config: { ...NO_COMMANDS, model_provider: 'openai' }, developerInstructions: after }) }),
-      inn({ id: 11, result: threadResult('thr-2') }),
+      out({ id: 10, method: 'thread/start', params: threadParams({ config: { ...NO_COMMANDS, model_provider: 'openai' }, developerInstructions: after }) }),
+      out({ id: 11, method: 'thread/unsubscribe', params: { threadId: T } }),
+      inn({ id: 11, result: { status: 'unsubscribed' } }),
+      inn({ id: 10, result: threadResult('thr-2') }),
       out({ id: 12, method: 'turn/start', params: { summary: 'auto', threadId: 'thr-2', input: text('Previous conversation (context only; do not repeat earlier actions):\nhistory+two\n\nCurrent request:\nthree'), approvalPolicy: 'untrusted', sandboxPolicy: SUPERVISED, model: 'gpt-x' } }),
       inn({ id: 12, result: { turn: { id: 'turn-3', status: 'inProgress', error: null } } }),
       note('item/completed', { threadId: 'thr-2', turnId: 'turn-3', item: { type: 'agentMessage', id: 'msg-3', text: 'three' } }),

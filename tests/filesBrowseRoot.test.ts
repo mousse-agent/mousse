@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MousseMainService } from '../src/mms/MousseMainService'
 import { dispatchMethod } from '../src/mms/protocol/handlers'
 import type { ProtocolClientType } from '../src/mms/protocol/types'
@@ -36,6 +36,7 @@ describe('a folder the Files panel browses outside the thread', () => {
 
   afterEach(async () => {
     folderAccess.reset()
+    vi.restoreAllMocks()
     await mms?.stop()
     delete process.env.MOUSSE_HOME
     rmSync(base, { recursive: true, force: true })
@@ -57,9 +58,14 @@ describe('a folder the Files panel browses outside the thread', () => {
   it('lists, reads, previews and saves there for a window of this computer, with no thread or project', async () => {
     const listed = await call(window(), 'files.list', { root: browsed, path: 'notes' }) as { entries: Array<{ name: string }> }
     expect(listed.entries.map((entry) => entry.name)).toEqual(['todo.md'])
-    expect(await call(window(), 'files.read', { root: browsed, path: 'notes/todo.md' })).toMatchObject({ content: 'buy milk\n' })
+    const path = process.platform === 'win32' ? 'NOTES/TODO.MD' : 'notes/todo.md'
+    expect(await call(window(), 'files.read', { root: browsed, path, includeCanonicalPath: true })).toMatchObject({
+      content: 'buy milk\n', canonicalPath: realpathSync.native(join(browsed, 'notes', 'todo.md'))
+    })
     writeFileSync(join(browsed, 'dot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
-    expect(await call(window(), 'files.readAsset', { root: browsed, path: 'dot.png' })).toMatchObject({ mimeType: 'image/png', size: 4 })
+    expect(await call(window(), 'files.readAsset', { root: browsed, path: 'dot.png', includeCanonicalPath: true })).toMatchObject({
+      mimeType: 'image/png', size: 4, canonicalPath: realpathSync.native(join(browsed, 'dot.png'))
+    })
     await call(window(), 'files.writeDirect', { root: browsed, path: 'notes/todo.md', content: 'buy oat milk\n' })
     expect(readFileSync(join(browsed, 'notes', 'todo.md'), 'utf8')).toBe('buy oat milk\n')
   })
@@ -88,18 +94,25 @@ describe('a folder the Files panel browses outside the thread', () => {
     expect(existsSync(join(browsed, 'notes', 'new.txt'))).toBe(false)
   })
 
-  it('must be a full path of this computer, and a refused one is never touched', async () => {
+  it('must be a full local path, and a refused one is never touched', async () => {
     const probed: string[] = []
     folderAccess.reset({ probe: async (path) => { probed.push(path) }, commonDir: async () => null })
+    // Even if validation regresses, the fake share in this test must never reach the filesystem.
+    const listDir = vi.spyOn(mms.fileService, 'listDir').mockResolvedValue([])
+    const readFile = vi.spyOn(mms.fileService, 'readFileDetails').mockResolvedValue({ content: '' })
     const refused = process.platform === 'win32'
-      ? ['notes', '.\\notes', '\\Users', 'C:Users', '\\\\server\\share', '//server/share', '\\\\?\\C:\\', '\\\\.\\PhysicalDrive0', '\\\\?\\UNC\\server\\share']
+      ? ['notes', '.\\notes', '\\Users', 'C:Users', '\\\\server', '//server/', '\\\\server\\share', '//server/share', '\\\\server\\pipe', '\\\\?\\C:\\', '\\\\.\\PhysicalDrive0', '\\\\?\\UNC\\server\\share']
       : ['notes', './notes', '~/notes']
     for (const root of refused)
       await expect(call(window(), 'files.list', { root, path: '' }), root).rejects.toMatchObject({ code: 'invalid_params' })
+    if (process.platform === 'win32')
+      await expect(call(window(), 'files.read', { root: '\\\\server\\share', path: 'notes.txt' })).rejects.toMatchObject({ code: 'invalid_params' })
     await expect(call(window(), 'files.list', { root: `${browsed}\0x`, path: '' })).rejects.toMatchObject({ code: 'invalid_params' })
     // Nor is a folder another caller names.
     await expect(call(as('cli'), 'files.list', { root: browsed, path: '' })).rejects.toMatchObject({ code: 'forbidden' })
     expect(probed).toEqual([])
+    expect(listDir).not.toHaveBeenCalled()
+    expect(readFile).not.toHaveBeenCalled()
   })
 
   it('never saves into Git’s folder, the Mousse data folder, or through a link that leads there', async () => {
@@ -133,10 +146,15 @@ describe('a folder the Files panel browses outside the thread', () => {
     await expect(call(window(), 'files.writeDirect', { root: browsed, path: 'x.txt', content: 'x' })).rejects.toMatchObject({ code: 'folder_not_answering' })
   })
 
-  it('leaves a save without a browsed folder as it was', async () => {
+  it('accepts scoped relative and absolute saves and refuses an absolute path outside the current folder', async () => {
     const project = mms.projects.openProject(browsed)
     await call(window(), 'files.writeDirect', { projectId: project.id, path: 'notes/plain.txt', content: 'x' })
-    expect(readFileSync(join(browsed, 'notes', 'plain.txt'), 'utf8')).toBe('x')
+    const path = join(browsed, 'notes', 'plain.txt')
+    expect(await call(window(), 'files.read', { projectId: project.id, path })).toMatchObject({ content: 'x' })
+    await call(window(), 'files.writeDirect', { projectId: project.id, path, content: 'edited' })
+    const other = mms.projects.openProject(home)
+    await expect(call(window(), 'files.writeDirect', { projectId: other.id, path, content: 'elsewhere' })).rejects.toThrow(/outside/)
+    expect(readFileSync(path, 'utf8')).toBe('edited')
   })
 
   it('lists this computer’s drives or volumes and its home folder for a window', async () => {
@@ -150,10 +168,10 @@ describe('a folder the Files panel browses outside the thread', () => {
 })
 
 describe('the rules for a browsed folder', () => {
-  it('takes a drive path on Windows and a / path elsewhere, never a share or a device', () => {
+  it('takes a drive path on Windows and a / path elsewhere, never a Windows share or device', () => {
     expect(browsedRootRefusal('C:\\Users\\me', 'win32')).toBeUndefined()
     expect(browsedRootRefusal('d:/notes', 'win32')).toBeUndefined()
-    for (const root of ['\\\\nas\\media', '//nas/media', '\\\\?\\C:\\x', '\\\\.\\pipe\\mousse', '\\Users', 'C:Users', 'notes'])
+    for (const root of ['\\\\nas\\media', '//nas/media/notes', '\\\\nas', '//nas/', '//nas/../x', '//nas/pipe/x', '//nas/mailslot/x', '\\\\?\\C:\\x', '\\\\.\\pipe\\mousse', '\\Users', 'C:Users', 'notes'])
       expect(browsedRootRefusal(root, 'win32'), root).toBeDefined()
     expect(browsedRootRefusal('/home/me', 'linux')).toBeUndefined()
     expect(browsedRootRefusal('//srv/share', 'linux')).toBeUndefined()

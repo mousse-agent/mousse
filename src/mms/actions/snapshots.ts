@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { spawnGitSync, withGitDiskAdmission } from '../git/gitSpawn'
 import { createHash, randomUUID } from 'node:crypto'
 import { lstatSync, rmSync, type Stats } from 'node:fs'
 import { lstat, rm } from 'node:fs/promises'
@@ -275,8 +275,8 @@ function candidateFiles(top: string): Steps<string[]> {
   const args = ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.', ...builtInPathspecs().exclude]
   const options = { maxBuffer: 32 * 1024 * 1024, timeout: 60_000 }
   return step(
-    () => listedCandidates(timeGitSync(() => spawnSync(gitFile(), guarded(top, args), { cwd: top, encoding: 'utf8', env: gitEnvFor(gitEnv(top)), ...options }))),
-    async () => listedCandidates(await runGitProcess(await guardedAsync(top, args), { cwd: top, env: gitEnv(top), ...options }))
+    () => listedCandidates(timeGitSync(() => spawnGitSync(gitFile(), guarded(top, args), { cwd: top, encoding: 'utf8', env: gitEnvFor(gitEnv(top)), ...options }))),
+    () => withGitDiskAdmission(top, async () => listedCandidates(await runGitProcess(await guardedAsync(top, args), { cwd: top, env: gitEnv(top), ...options })))
   )
 }
 

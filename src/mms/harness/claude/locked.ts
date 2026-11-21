@@ -1,4 +1,4 @@
-import { execFile, spawn as nodeSpawn } from 'node:child_process'
+import { spawn as nodeSpawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -16,6 +16,7 @@ import { CLAUDE_MOUSSE_TOOL_PREFIX, CLAUDE_RELAY_TOOL_PREFIX } from '../../run/m
 import type { ToolLedger } from '../../run/mcp/appTools/types'
 import { CLAUDE_LOCKED_TOOLS_ITEMS, hasContainmentEvidence, type ContainmentEvidence } from '../compatibility'
 import { CLAUDE_TURN_EXTRA_ARGS } from '../vendors/claude/turnFrames'
+import { spawnProviderProcess, windowsProviderTree, type WindowsProviderTree } from '../windowsProviderProcess'
 import { trackChildProcess } from '../../diagnostics/liveCounts'
 import { LINUX_RUN_KEPT_OPEN, LINUX_SYSTEM_FOLDERS } from '../linuxFolders'
 
@@ -787,26 +788,21 @@ export interface ClaudeLockedSpawnOptions {
   spawn?: typeof nodeSpawn
   /** Signals the process group `pid` leads (POSIX); throws when it has no member left. */
   signalGroup?: (pid: number, signal: NodeJS.Signals | 0) => void
-  /** Ends the process tree `pid` heads (Windows), without waiting for it. */
-  killTree?: (pid: number) => void
+  onWindowsTree?: (tree: WindowsProviderTree) => void
   graceMs?: number
   /** Where a failed turn's error output goes (default: the log). */
   onStderr?: (tail: string, code: number | null) => void
 }
 
 const defaultSignalGroup = (pid: number, signal: NodeJS.Signals | 0) => process.kill(-pid, signal)
-// `taskkill` runs on its own: the daemon's loop never waits for it.
-const defaultKillTree = (pid: number) => {
-  execFile('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, timeout: 5_000 }, () => undefined)
-}
 
 /**
  * The spawn of a locked turn's Claude Code (`spawnClaudeCodeProcess`): the SDK's command,
  * arguments, folder and environment unchanged, in a process group of its own on POSIX, reported to
  * `onProcess`. The SDK's forwarded abort (after its own close grace) and the CLI's exit end the whole
  * group: SIGTERM, then SIGKILL after a short grace, with plain signals and no process listing on the
- * daemon's loop. On Windows the tree is ended by a `taskkill` that runs on its own, and only while the
- * CLI still runs (a pid may be reused once it is gone). A process whose registration fails is ended
+ * daemon's loop. On Windows the supervisor drains the whole Job Object, including detached
+ * descendants. A process whose registration fails is ended
  * at once and the spawn fails: nothing runs unsupervised. The CLI's error output is kept, and its
  * tail is logged when it fails.
  */
@@ -814,7 +810,6 @@ export function claudeLockedSpawn(options: ClaudeLockedSpawnOptions = {}): (spaw
   const platform = options.platform ?? process.platform
   const spawn = options.spawn ?? nodeSpawn
   const signalGroup = options.signalGroup ?? defaultSignalGroup
-  const killTree = options.killTree ?? defaultKillTree
   const graceMs = options.graceMs ?? CLAUDE_LOCKED_KILL_GRACE_MS
   const onStderr = options.onStderr ?? ((tail: string, code: number | null) => console.warn(`[claude-locked] Claude Code exited with code ${code}: ${tail}`))
   const send = (pid: number, signal: NodeJS.Signals | 0): boolean => {
@@ -826,14 +821,13 @@ export function claudeLockedSpawn(options: ClaudeLockedSpawnOptions = {}): (spaw
     }
   }
   return (spawnOptions) => {
-    const child = spawn(spawnOptions.command, spawnOptions.args, {
-      ...(spawnOptions.cwd ? { cwd: spawnOptions.cwd } : {}),
-      env: spawnOptions.env as NodeJS.ProcessEnv,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      detached: platform !== 'win32',
-      windowsHide: true
-    })
+    const { command, args, cwd, env, signal } = spawnOptions
+    signal.throwIfAborted()
+    const child = platform === 'win32' && !options.spawn
+      ? spawnProviderProcess(command, args, { cwd, env })
+      : spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: platform !== 'win32', windowsHide: true })
     trackChildProcess(child, 'claude')
+    const tree = windowsProviderTree(child)
     const pid = child.pid
     let exited = false
     let ended = false
@@ -847,7 +841,7 @@ export function claudeLockedSpawn(options: ClaudeLockedSpawnOptions = {}): (spaw
       if (ended || pid === undefined) return
       ended = true
       if (platform === 'win32') {
-        if (!exited) killTree(pid)
+        if (!exited) child.kill()
         return
       }
       if (now || !send(pid, 'SIGTERM')) {
@@ -869,15 +863,14 @@ export function claudeLockedSpawn(options: ClaudeLockedSpawnOptions = {}): (spaw
       // On POSIX the group outlives its leader and is ended too.
       end()
     })
-    if (pid !== undefined && options.onProcess) {
-      try {
-        options.onProcess(pid)
-      } catch (error) {
-        end(true)
-        child.stdin?.destroy?.()
-        child.stdout?.destroy?.()
-        throw error
-      }
+    try {
+      if (tree) options.onWindowsTree?.(tree)
+      if (pid !== undefined) options.onProcess?.(pid)
+    } catch (error) {
+      end(true)
+      child.stdin?.destroy?.()
+      child.stdout?.destroy?.()
+      throw error
     }
     return child as unknown as SpawnedProcess
   }

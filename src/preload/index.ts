@@ -32,6 +32,7 @@ import type {
   FileAsset,
   EditorInfo,
   FileEntry,
+  FileText,
   FileGrepResponse,
   FileSearchResponse,
   GitBranchInfo,
@@ -66,6 +67,9 @@ import type {
   GitPushOptions,
   GitScope,
   GitStatusSnapshot,
+  GitHeadsChangedEvent,
+  GitHeadsRequest,
+  GitHeadsResult,
   MainView,
   OrchestratorResponse,
   PermissionMode,
@@ -542,8 +546,10 @@ const api = {
       ipcRenderer.invoke('fs:listDir', dirPath, projectId, threadId, root),
     readFile: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<string> =>
       ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId, root),
-    readAsset: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> =>
-      ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId, root),
+    readFileDetails: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileText> =>
+      ipcRenderer.invoke('fs:readFile', filePath, projectId, threadId, root, true),
+    readAsset: (filePath: string, projectId?: string, threadId?: string | null, root?: string, details?: boolean): Promise<FileAsset> =>
+      ipcRenderer.invoke('fs:readAsset', filePath, projectId, threadId, root, details),
     /** A preview's size and write time (`mtimeMs` absent from an older daemon), without reading it. */
     assetStamp: (filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<{ size: number; mtimeMs?: number }> =>
       ipcRenderer.invoke('fs:assetStamp', filePath, projectId, threadId, root),
@@ -577,6 +583,15 @@ const api = {
     // Reads name their folder by scope, like the mutations: the thread when it is the thread's own worktree, else the project.
     status: (scope: GitScope): Promise<GitStatusSnapshot> =>
       ipcRenderer.invoke('git:status', scope),
+    /** The branches thread cards name, from Git's files: no Git process. */
+    heads: (request: GitHeadsRequest): Promise<GitHeadsResult> =>
+      ipcRenderer.invoke('git:heads', request),
+    /** Mousse changed these threads' branches (made a worktree, renamed its branch). */
+    onHeadsChanged: (cb: (event: GitHeadsChangedEvent) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: GitHeadsChangedEvent): void => cb(payload)
+      ipcRenderer.on('git:headsChanged', handler)
+      return () => ipcRenderer.removeListener('git:headsChanged', handler)
+    },
     log: (limit: number | undefined, scope: GitScope): Promise<GitCommit[]> =>
       ipcRenderer.invoke('git:log', limit, scope),
     branches: (scope: GitScope): Promise<GitBranchInfo> =>
@@ -930,7 +945,7 @@ const api = {
     resetWorktreeFolder: (): Promise<{ status: import('../shared/storage').WorktreeFolderStatus }> => storageInvoke('storage:resetWorktreeFolder')
   },
   workspace: {
-    getStatus: (threadId: string): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId),
+    getStatus: (threadId: string, fresh?: boolean): Promise<unknown> => ipcRenderer.invoke('workspace:getStatus', threadId, fresh),
     restore: (threadId: string, expectedJournalGeneration?: number): Promise<unknown> =>
       ipcRenderer.invoke('workspace:restore', threadId, expectedJournalGeneration),
     /**
@@ -1443,8 +1458,8 @@ const api = {
     },
     getActiveProjectPath: (threadId?: string | null): Promise<string | null> =>
       ipcRenderer.invoke('app:getActiveProjectPath', threadId),
-    getFilesRoot: (threadId?: string | null): Promise<string> =>
-      ipcRenderer.invoke('app:getFilesRoot', threadId),
+    getFilesRoot: (threadId?: string | null, fresh?: boolean): Promise<string> =>
+      ipcRenderer.invoke('app:getFilesRoot', threadId, fresh),
     restart: (): Promise<void> => ipcRenderer.invoke('app:restart'),
     navigateMainView: (view: MainView): Promise<void> =>
       ipcRenderer.invoke('app:navigateMainView', view),
