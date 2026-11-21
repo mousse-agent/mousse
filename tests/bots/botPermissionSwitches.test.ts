@@ -11,6 +11,7 @@ import { BotEngine } from '../../src/mms/bots/activation/BotEngine'
 import { botManifestDigest } from '../../src/mms/bots/grants/compile'
 import { botInstructions } from '../../src/mms/bots/instructions'
 import { BOT_AUTOMATION_APP_TOOLS, BOT_AUTOMATIONS_SWITCH, BOT_SKILLS_SWITCH } from '../../src/shared/bots/personal/manifest'
+import { getDefaultSettings } from '../../src/shared/settings'
 import type { NormalisedCall } from '../../src/shared/bots/personal/authority'
 import { appToolRegistry, appTurn, fakeAppToolHost } from '../run/appToolsFixture'
 import { delegationFixture } from '../run/delegationFixture'
@@ -186,16 +187,32 @@ describe('a bot\'s permission switches', () => {
     try {
       const running = await fx.runningRun('bot-skill')
       const descriptor = { id: 'review', installationId: 'inst-review', name: 'Review changes', description: 'Review', rootPath: '/skills/review', skillPath: '/skills/review/SKILL.md', scope: 'global' as const, source: 'mousse-profile' as const, managed: true }
-      const readSkill = vi.fn(async () => ({ skill: descriptor, content: 'Review instructions' }))
-      const { registry, turns, request } = appToolRegistry(fx.engine, fakeAppToolHost({ skills: () => ({ readSkill }) as never }).host)
+      const result = { skill: descriptor, content: 'Review instructions' }
+      const readSkillForModel = vi.fn(async () => result)
+      const settings = getDefaultSettings().integrations.skills
+      settings.enabledSkills = [descriptor.installationId]
+      const { registry, turns, request } = appToolRegistry(fx.engine, fakeAppToolHost({
+        skills: () => ({ readSkillForModel }) as never,
+        skillSettings: () => settings
+      }).host)
       turns.register(appTurn({ threadId: 'bot-skill', runId: running.runId, bot: work.prepared.authority, enabledSkills: [descriptor] }))
       const call = (name: string, args = {}) => registry.call(name, args, request({ threadId: 'bot-skill', runId: running.runId }))
       expect(f.store.activeGrant(botId)!.manifest.skills).toEqual([])
       expect(await call('load_skill', { skill: 'Review changes' })).toMatchObject({ text: 'Review instructions' })
+      const reading = Promise.withResolvers<void>()
+      const release = Promise.withResolvers<typeof result>()
+      readSkillForModel.mockImplementationOnce(() => {
+        reading.resolve()
+        return release.promise
+      })
+      const inFlight = call('load_skill', { skill: 'Review changes' })
+      await reading.promise
       f.bots.service.setPermission(botId, BOT_SKILLS_SWITCH, false)
+      release.resolve(result)
+      expect(await inFlight).toMatchObject({ isError: true })
       expect(await call('list_skills')).toMatchObject({ text: '[]' })
       expect(await call('load_skill', { skill: 'Review changes' })).toMatchObject({ isError: true })
-      expect(readSkill).toHaveBeenCalledTimes(1)
+      expect(readSkillForModel).toHaveBeenCalledTimes(2)
       expect(f.store.openAsks(botId)).toHaveLength(0)
     } finally { fx.dispose() }
     await finish(f, work.payload, 'completed', { text: 'Skipped the skill.' })

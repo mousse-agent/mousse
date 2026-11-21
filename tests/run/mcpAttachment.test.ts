@@ -9,6 +9,10 @@ import { join } from 'node:path'
 import type { Options, Query } from '@anthropic-ai/claude-agent-sdk'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ClaudeIntegrationResolver } from '../../src/mms/harness/vendors/claude/integrations'
+import { createLegacySingleProfileContext } from '../../src/mms/integrations/profileContext'
+import { SkillsRegistry } from '../../src/mms/integrations/skills/SkillsRegistry'
+import { getDefaultSettings } from '../../src/shared/settings'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { AntigravityProviderService } from '../../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
 import {
@@ -101,6 +105,69 @@ describe('Claude subscription attachment', () => {
     expect(seen[2].integrations).toBeUndefined()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('registry down'))
     warn.mockRestore()
+  })
+
+  it('reaches the provider with its Skills plugin while a real registry refresh is held', async () => {
+    const root = tempHome('mousse-claude-skill-refresh-')
+    const project = join(root, 'project')
+    const skillRoot = join(root, 'integrations', 'skills', 'check')
+    mkdirSync(project)
+    mkdirSync(skillRoot, { recursive: true })
+    const skillPath = join(skillRoot, 'SKILL.md')
+    writeFileSync(skillPath, '---\nname: check\ndescription: Check the change\n---\nReview the diff.\n')
+    const skills = new SkillsRegistry(createLegacySingleProfileContext({ profileRoot: root }))
+    const settings = getDefaultSettings()
+    settings.integrations.skills.enabledSkills = ['mousse-profile:check']
+    const start = Date.now()
+    const now = vi.spyOn(Date, 'now').mockReturnValue(start)
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const reader = skills as unknown as { readSkillDescriptor: (source: unknown, path: string) => Promise<unknown> }
+    const original = reader.readSkillDescriptor.bind(reader)
+    let read: ReturnType<typeof vi.spyOn> | undefined
+    let pending: Promise<unknown> | undefined
+    try {
+      await skills.discover({ projectPath: project })
+      read = vi.spyOn(reader, 'readSkillDescriptor').mockImplementation(async (source, path) => {
+        const result = await original(source, path)
+        if (path === skillPath) {
+          entered.resolve()
+          await release.promise
+        }
+        return result
+      })
+      now.mockReturnValue(start + 31_000)
+      await skills.discover({ projectPath: project, stale: true })
+      await entered.promise
+      const refresh = skills.discover({ projectPath: project })
+      const integrations = new ClaudeIntegrationResolver({
+        skillsRegistry: skills,
+        mcpRegistry: { discover: async () => ({ servers: [], sources: [], diagnostics: [] }) },
+        settings: { get: () => settings },
+        secrets: createLegacySingleProfileContext({ profileRoot: root }).secrets,
+        pluginRoot: join(root, 'plugins')
+      })
+      const provider = Promise.withResolvers<ClaudeSubscriptionChatInput>()
+      const adapter = new ClaudeSubscriptionAdapter(() => ({
+        chat: async (chat) => { provider.resolve(chat); return 'ok' },
+        commitConversation: vi.fn(),
+        standaloneWorkspace: () => root,
+        configured: () => true
+      }), () => integrations)
+      const turn = adapter.startTurn(input({ cwd: project }), sink(), control, host(null))
+      pending = Promise.allSettled([refresh, turn])
+      // The timeout only detects a deadlock while the read is held.
+      const reached = vi.fn()
+      void provider.promise.then(reached)
+      await vi.waitFor(() => expect(reached).toHaveBeenCalled(), { timeout: 2_000 })
+      expect((await provider.promise).integrations?.pluginPath).toBeTruthy()
+      expect((await turn).text).toBe('ok')
+    } finally {
+      release.resolve()
+      await pending
+      read?.mockRestore()
+      now.mockRestore()
+    }
   })
 
   const service = (query: (input: { options: Options; prompt: unknown }) => Query) => {

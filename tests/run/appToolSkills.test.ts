@@ -2,12 +2,15 @@
  * Skills for runtimes with their own loop (PR 2 §2): `list_skills` and `load_skill` over MCP, an
  * explicit `/skill` loaded into the turn preamble, and resumed vendor sessions that keep getting it.
  */
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { SkillsRegistry } from '../../src/mms/integrations/skills/SkillsRegistry'
+import { getManagedSkillStatePath } from '../../src/mms/integrations/nativePaths'
+import { createLegacySingleProfileContext } from '../../src/mms/integrations/profileContext'
+import { SkillLifecycleService } from '../../src/mms/integrations/skills/SkillLifecycleService'
+import { SkillsRegistry } from '../../src/mms/integrations/skills/SkillsRegistry'
 import { UserQuestionService } from '../../src/mms/orchestrator/UserQuestionService'
 import { AntigravityProviderService } from '../../src/mms/harness/acp/presets/antigravity/AntigravityProviderService'
 import { antigravityAdapter } from '../../src/mms/harness/drivers/antigravity'
@@ -19,6 +22,7 @@ import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
 import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer } from '../../src/mms/run/testkit/codexAppServerReplay'
 import { parseTranscript, ReplayTransport, type TranscriptFrame } from '../../src/mms/run/testkit/ReplayTransport'
+import { getDefaultSettings } from '../../src/shared/settings'
 import type { SkillDescriptor } from '../../src/shared/integrations'
 import { appToolRegistry, appTurn, fakeAppToolHost, refusalOf } from './appToolsFixture'
 import { callTool, VendorAdapter, vendorDaemon, type ToolCallResult, type VendorDaemon } from './appToolVendorFixture'
@@ -45,14 +49,16 @@ const BODY: Record<string, string> = { review: '# Review\nRead every changed lin
 /** A skills registry over `skills`, recording the skills read. */
 function fakeSkills(skills: SkillDescriptor[]) {
   const reads: string[] = []
+  const readSkill = vi.fn(async (id: string) => {
+    reads.push(id)
+    const found = skills.find((entry) => entry.id === id || entry.installationId === id || entry.name === id)
+    if (!found) throw new Error(`Skill not found: ${id}`)
+    return { skill: found, content: BODY[found.name] }
+  })
   const registry = {
     discover: vi.fn(async () => ({ skills, sources: [], diagnostics: [] })),
-    readSkill: vi.fn(async (id: string) => {
-      reads.push(id)
-      const found = skills.find((entry) => entry.id === id || entry.installationId === id || entry.name === id)
-      if (!found) throw new Error(`Skill not found: ${id}`)
-      return { skill: found, content: BODY[found.name] }
-    })
+    readSkill,
+    readSkillForModel: (skill: SkillDescriptor) => readSkill(skill.installationId ?? skill.id)
   }
   return { registry: registry as unknown as SkillsRegistry, reads }
 }
@@ -71,7 +77,9 @@ describe('list_skills and load_skill over MCP', () => {
     fx = delegationFixture()
     const run = await fx.runningRun('thread-a')
     const skills = fakeSkills([REVIEW, GATED])
-    const { registry, turns } = appToolRegistry(fx.engine, fakeAppToolHost({ skills: () => skills.registry }).host)
+    const settings = getDefaultSettings().integrations.skills
+    settings.enabledSkills = ['inst-review', 'inst-deploy', 'inst-gone']
+    const { registry, turns } = appToolRegistry(fx.engine, fakeAppToolHost({ skills: () => skills.registry, skillSettings: () => settings }).host)
     turns.register(appTurn({ threadId: 'thread-a', runId: run.runId, projectPath: '/work', enabledSkills: [REVIEW, GATED, GONE] }))
     server = new MousseMcpServer({ credentials: new McpCredentials(fx.store), registry })
     await server.start()
@@ -87,8 +95,6 @@ describe('list_skills and load_skill over MCP', () => {
 
     const loaded = await callTool(mcp, 'load_skill', { skill: 'review' })
     expect(loaded).toMatchObject({ isError: undefined, text: BODY.review })
-    // Read by installation id, in the turn's project.
-    expect(skills.registry.readSkill).toHaveBeenCalledWith('inst-review', { projectPath: '/work' }, expect.anything())
 
     const refused = await callTool(mcp, 'load_skill', { skill: 'deploy' })
     expect(refused.error).toBeUndefined()
@@ -140,6 +146,64 @@ describe('an explicit /skill in a vendor turn', () => {
     // The prompt itself is the user's text; the skill travels in the preamble.
     expect(vendor.inputs[1].prompt).toBe('/review the adapters too')
     expect(JSON.parse(listed!.text!).map((entry: { name: string }) => entry.name)).toEqual(['review', 'deploy'])
+  }, 30_000)
+
+  it('refuses live Settings, installation and frontmatter changes through MCP on the same turn', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'mousse-app-skill-policy-'))
+    const context = createLegacySingleProfileContext({ profileRoot: home })
+    const skills = new SkillsRegistry(context)
+    const lifecycle = new SkillLifecycleService(skills, context)
+    const installed = await lifecycle.create({ name: 'live-review', description: 'Review changes', scope: 'global', instructions: 'Original instructions.', enable: true })
+    const { content: original, skill: { skillPath } } = await skills.readSkill(installed.installationId)
+    const statePath = getManagedSkillStatePath(home)
+    const state = readFileSync(statePath)
+    const refused: Array<{ case: string; result: ToolCallResult }> = []
+    let allowed: ToolCallResult | undefined
+    try {
+      d = await vendorDaemon([new VendorAdapter(async ({ mcp }) => {
+        const load = () => callTool(mcp!, 'load_skill', { skill: 'live-review' })
+        const check = async (label: string) => refused.push({ case: label, result: await load() })
+        allowed = await load()
+
+        d!.settings().integrations.skills.enabledSkills = []
+        await check('removed from Settings')
+        d!.settings().integrations.skills.enabledSkills = [installed.installationId]
+        d!.settings().integrations.skills.enableForMainAgent = false
+        await check('main agent disabled in Settings')
+        d!.settings().integrations.skills.enableForMainAgent = true
+
+        await lifecycle.enable(installed.installationId, false)
+        await check('managed installation disabled')
+        await lifecycle.enable(installed.installationId, true)
+        writeFileSync(statePath, JSON.stringify({ version: 1, installations: {} }))
+        await check('managed installation removed while the file remains')
+        // The same running turn still holds the original descriptor.
+        writeFileSync(statePath, state)
+
+        for (const [label, policy] of [
+          ['explicit user only', 'true'],
+          ['invalid policy type', '"true"'],
+          ['unparseable YAML', '[']
+        ]) {
+          writeFileSync(skillPath, `---\nname: live-review\ndescription: Review changes\ndisable-model-invocation: ${policy}\n---\nDo not return this body.\n`)
+          await check(label)
+        }
+        writeFileSync(skillPath, original)
+        return 'Done.'
+      })])
+      ;(d.orch as any).skillsRegistry = skills
+      d.settings().integrations.skills.enabledSkills = [installed.installationId]
+      await d.send('Review the changes.')
+      expect(allowed?.text).toContain('Original instructions.')
+      expect(refused).toHaveLength(7)
+      for (const { case: label, result } of refused) {
+        expect(refusalOf(result), label).toBeDefined()
+        expect(result.text, label).not.toContain('instructions.')
+        expect(result.text, label).not.toContain('Do not return this body.')
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   }, 30_000)
 
   it("an ordinary thread's turn starts on the last scan of the Skills folders, not after a new one", async () => {

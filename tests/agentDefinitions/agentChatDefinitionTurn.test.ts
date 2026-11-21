@@ -9,6 +9,9 @@ import { ThreadActionService } from '../../src/mms/actions/ThreadActionService'
 import { AgentDefinitionRegistry } from '../../src/mms/agentDefinitions/AgentDefinitionRegistry'
 import { AgentResolver } from '../../src/mms/agentDefinitions/AgentResolver'
 import { StaticAgentIntegrationLookup, StaticAgentModelLookup } from '../../src/mms/agentDefinitions/lookups'
+import { createLegacySingleProfileContext } from '../../src/mms/integrations/profileContext'
+import { SkillsRegistry } from '../../src/mms/integrations/skills/SkillsRegistry'
+import { sha256Hex } from '../../src/shared/agents/hashes'
 import { AgentRegistry } from '../../src/mms/agents/AgentRegistry'
 import { AgentChatService } from '../../src/mms/chats/AgentChatService'
 import { ProjectManager } from '../../src/mms/data/ProjectManager'
@@ -39,7 +42,7 @@ afterEach(async () => {
   vi.restoreAllMocks()
 })
 
-async function fixture(options: { next?: (context: Context, signal: AbortSignal) => Promise<AssistantMessage>; bobProvider?: string } = {}) {
+async function fixture(options: { next?: (context: Context, signal: AbortSignal) => Promise<AssistantMessage>; bobProvider?: string; skills?: Record<string, string>; skillPin?: 'hash' | 'revision' } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'mousse-chat-defturn-')))
   process.env.MOUSSE_HOME = root
   const profileId = randomUUID()
@@ -48,8 +51,17 @@ async function fixture(options: { next?: (context: Context, signal: AbortSignal)
   projects.setThreadStore(threads)
   const defs = await createDefinitionEngine(['alpha', 'beta'])
   const settings = getDefaultSettings()
-  settings.integrations.skills.enabled = false
-  const orch = new OrchestratorService(new AgentRegistry(), new TaskQueue(), new WorktreeManager(root), new PtyManager(), { get: () => settings } as never, defs.providerAuth)
+  settings.integrations.skills.enabled = Boolean(options.skills)
+  const skills = new SkillsRegistry(createLegacySingleProfileContext({ profileId, profileRoot: root }))
+  const skillEntries = Object.entries(options.skills ?? {}).map(([name, body]) => {
+    const rootPath = join(root, 'integrations', 'skills', name)
+    mkdirSync(rootPath, { recursive: true })
+    const content = `---\nname: ${name}\ndescription: ${name} skill\n---\n${body}\n`
+    const path = join(rootPath, 'SKILL.md')
+    writeFileSync(path, content)
+    return { id: `mousse-profile:${name}`, path, available: true, [options.skillPin ?? 'hash']: sha256Hex(content) }
+  })
+  const orch = new OrchestratorService(new AgentRegistry(), new TaskQueue(), new WorktreeManager(root), new PtyManager(), { get: () => settings } as never, defs.providerAuth, undefined, skills)
   orch.setThreadStore(threads)
   const engine = new RunEngine({ store: new RunStore(new ProfileDatabase({ profileHome: root })) })
   orch.setRunEngine(engine)
@@ -58,7 +70,7 @@ async function fixture(options: { next?: (context: Context, signal: AbortSignal)
   const { outputs, captured } = defs
   const runtime = { turns: defs.turns }
   const registry = new AgentDefinitionRegistry({ profileId, profileRoot: root })
-  const lookup = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write'] })
+  const lookup = new StaticAgentIntegrationLookup({ builtinToolIds: ['read', 'write'], skills: skillEntries })
   const entry = (instanceId: string) => ({ ref: { providerId: instanceId.slice(3), modelId: ENGINE_MODEL, instanceId }, available: true, efforts: [], speeds: [], contexts: [], capabilities: ['tools'], unavailableReasons: [] })
   const resolver = new AgentResolver({ registry, integrationLookup: lookup, modelLookup: new StaticAgentModelLookup([entry('pi:alpha'), entry('pi:beta')] as never) })
   const createAgent = (slug: string, instanceId: string) => {
@@ -85,7 +97,7 @@ async function fixture(options: { next?: (context: Context, signal: AbortSignal)
     rmSync(root, { recursive: true, force: true })
     delete process.env.MOUSSE_HOME
   })
-  return { root, orch, engine, runtime, outputs, captured, service, threads, projects, alice, bob }
+  return { root, orch, engine, runtime, outputs, captured, service, threads, projects, alice, bob, skills, skillEntries }
 }
 
 describe('agent chats on definition turns', () => {
@@ -121,6 +133,26 @@ describe('agent chats on definition turns', () => {
     expect(f.captured[1]!.systemPrompt).toContain('You are alice.')
     // One run record per reply, each its own and settled.
     expect(f.engine.listRuns(chat.threadId).map((run) => [run.source, run.status])).toEqual([['definition', 'completed'], ['definition', 'completed']])
+  })
+
+  it.each(['hash', 'revision'] as const)('delivers a surviving skill pinned by %s when another grant is deleted', async (skillPin) => {
+    const f = await fixture({ skillPin, skills: { gone: 'DELETED_GRANT', kept: 'SURVIVING_GRANT' } })
+    const chat = await f.service.create({ kind: 'direct', agentIds: [f.alice] })
+    // Discovery still contains both descriptors when the definition resolves its grants.
+    await f.skills.discover()
+    rmSync(f.skillEntries[0]!.path)
+    f.outputs.push(say('Done.'))
+    f.service.send({ chatId: chat.id, text: 'Use your skills.' })
+    await f.service.waitForIdle()
+    expect(f.captured[0]?.systemPrompt).toContain('SURVIVING_GRANT')
+    expect(f.captured[0]?.systemPrompt).not.toContain('DELETED_GRANT')
+
+    writeFileSync(f.skillEntries[1]!.path, '---\nname: kept\ndescription: kept skill\n---\nCHANGED_GRANT\n')
+    f.outputs.push(say('Done.'))
+    f.service.send({ chatId: chat.id, text: 'Use your skills again.' })
+    await f.service.waitForIdle()
+    expect(f.captured[1]?.systemPrompt).toContain('You are alice.')
+    expect(f.captured[1]?.systemPrompt).not.toContain('CHANGED_GRANT')
   })
 
   it('a composer send to the backing thread during a reply waits for the response, then runs once', async () => {

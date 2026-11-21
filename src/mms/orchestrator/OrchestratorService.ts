@@ -4931,6 +4931,7 @@ export class OrchestratorService extends EventEmitter {
       queueCommand: (threadId, command, options) => this.queueCommandAsAgent(threadId, command, options),
       browserRuntime: () => this.browserRuntime,
       skills: () => this.skillsRegistry,
+      skillSettings: () => this.settingsStore.get().integrations.skills,
       quickActions: new QuickActionTools(questionApproval(this.questions), (action) => this.emit('quick-action-created', action)),
       running: (turn) => this.runningText(turn, 'list'),
       monitors: () => this.monitors ?? undefined,

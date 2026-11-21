@@ -144,7 +144,8 @@ export class ClaudeIntegrationResolver implements ClaudeIntegrationSource {
     }
 
     try {
-      const snapshot = await this.deps.skillsRegistry.discover({ projectPath })
+      // Use the same discovery policy as chat turn preparation, even when Claude's cwd is a separate worktree.
+      const snapshot = await this.deps.skillsRegistry.discover({ projectPath, stale: true })
       const skills = resolveEffectiveSkills({ snapshot, settings: settings.skills, actor }).filter((skill) => !claudeLoadsSkill(skill, this.deps.env?.()))
       if (skills.length > 0) result.pluginPath = await this.buildPlugin(skills, result.warnings)
     } catch (error) {

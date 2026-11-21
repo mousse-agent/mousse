@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { MousseIntegrationsSettings, SkillDescriptor, SkillsRegistrySnapshot } from '../../../../shared/integrations'
 import type { IntegrationActor } from '../../../../shared/integrations/actor'
-import { sha256Hex } from '../../../../shared/agents/hashes'
 import type { EffectiveAgentGrants } from '../../../../shared/agents/types'
 import { getSkillIdFromMode, normalizeChatMode } from '../../../../shared/chatMode'
 import type { ChatMode } from '../../../../shared/types'
@@ -11,7 +10,7 @@ import { withoutWebhookData } from '../../../scheduled/promptPlaceholders'
 import type { SkillsRegistry } from '../../../integrations/skills/SkillsRegistry'
 import type { ModeRegistry } from '../../../modes/ModeRegistry'
 import { mousseOrchestrationInstructions } from '../instructions'
-import { normalizeSkillName } from './skills'
+import { normalizeSkillName, skillGrantMismatch } from './skills'
 import { truncateForModel, type ModeFacts } from './types'
 
 /**
@@ -78,23 +77,23 @@ export async function prepareSkills(input: {
     snapshot = await registry.discover({ projectPath, refresh: true })
     enabledSkills = filterEnabledSkills(snapshot, mode, input.settings(), input.actor)
   }
-  const modeSkills = input.grants ? [] : await loadSkillForMode(registry, mode, projectPath, snapshot)
-  const explicitSkills = await loadExplicitSkills(registry, input.userContent, enabledSkills, projectPath, snapshot)
   const grants = input.grants
-  const grantedSkills = grants
-    ? await Promise.all(enabledSkills.map(async (skill) => {
-        const grant = grants.skills.find((entry) => entry.id === skill.id || entry.id === skill.installationId)!
-        const result = await registry.readSkill(skill.installationId ?? skill.id, { projectPath }, snapshot)
-        if (grant.hash && sha256Hex(result.content) !== grant.hash) {
-          throw new Error(`Granted skill changed after agent resolution: ${grant.id}.`)
-        }
-        if (!grant.hash && grant.revision && result.skill.revision !== grant.revision && result.skill.contentHash !== grant.revision) {
-          throw new Error(`Granted skill revision is unavailable: ${grant.id}@${grant.revision}.`)
-        }
-        return { name: result.skill.name, content: truncateForModel(result.content) }
-      }))
-    : []
-  const loadedSkills = grants ? grantedSkills : [
+  if (grants) {
+    const resolved = await Promise.all(enabledSkills.map(async (skill) => {
+      const grant = grants.skills.find((entry) => entry.id === skill.id || entry.id === skill.installationId)
+      if (!grant) return undefined
+      const result = await readOrSkip(registry, skill.installationId ?? skill.id, projectPath, snapshot)
+      if (!result) return undefined
+      const mismatch = skillGrantMismatch(grant, result.content)
+      if (mismatch) throw new Error(mismatch)
+      return { skill: result.skill, loaded: { name: result.skill.name, content: truncateForModel(result.content) } }
+    }))
+    const available = resolved.filter((entry) => entry !== undefined)
+    return { enabledSkills: available.map((entry) => entry.skill), loadedSkills: available.map((entry) => entry.loaded) }
+  }
+  const modeSkills = await loadSkillForMode(registry, mode, projectPath, snapshot)
+  const explicitSkills = await loadExplicitSkills(registry, input.userContent, enabledSkills, projectPath, snapshot)
+  const loadedSkills = [
     ...modeSkills,
     ...explicitSkills.filter((skill) => !modeSkills.some((loaded) => loaded.name === skill.name))
   ]

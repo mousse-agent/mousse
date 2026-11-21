@@ -1,7 +1,7 @@
 import { join } from 'path'
 import type { IntegrationScope, McpConfigSource, SkillSource } from '../../shared/integrations'
 import type { IntegrationRuntimeContext } from './profileContext'
-import { assertOwnedPath, pathKey } from '../profiles/pathSafety'
+import { assertOwnedPath, pathKey, pathKeyAsync } from '../profiles/pathSafety'
 import { sha256Bytes } from './revision'
 
 export const MOUSSE_PROJECT_DIR = '.mousse'
@@ -67,11 +67,23 @@ export function getProjectMousseMcpConfigPath(projectPath: string): string {
 
 /** Stable identity for a repository. It is deliberately path-derived and contains no profile data. */
 export function getProjectIdentity(projectPath: string): string {
-  return `project-${sha256Bytes(pathKey(projectPath)).slice(0, 24)}`
+  return hashProjectPath(pathKey(projectPath))
+}
+
+export async function getProjectIdentityAsync(projectPath: string): Promise<string> {
+  return hashProjectPath(await pathKeyAsync(projectPath))
+}
+
+function hashProjectPath(path: string): string {
+  return `project-${sha256Bytes(path).slice(0, 24)}`
 }
 
 export function getManagedProjectRoot(profileRoot: string, projectPath: string): string {
-  return join(getManagedIntegrationsRoot(profileRoot), 'projects', sanitizeFsSegment(getProjectIdentity(projectPath)))
+  return managedProjectRoot(profileRoot, getProjectIdentity(projectPath))
+}
+
+function managedProjectRoot(profileRoot: string, projectId: string): string {
+  return join(getManagedIntegrationsRoot(profileRoot), 'projects', sanitizeFsSegment(projectId))
 }
 
 export function getManagedProjectSkillRoot(profileRoot: string, projectPath: string): string {
@@ -105,31 +117,46 @@ export function getNativeSkillRoots(
   context: IntegrationRuntimeContext,
   projectPath?: string
 ): NativeSkillRootDescriptor[] {
-  const roots: NativeSkillRootDescriptor[] = [
+  const project = projectPath ?? context.projectPath
+  return getNativeSkillRootCandidates(context, project, project ? getProjectIdentity(project) : undefined)
+    .map(({ owner, label, ...root }) => ({ ...root, path: assertOwnedPath(owner, root.path, label) }))
+}
+
+export function getNativeSkillRootCandidates(
+  context: IntegrationRuntimeContext,
+  project: string | undefined,
+  projectId: string | undefined
+): Array<NativeSkillRootDescriptor & { owner: string; label: string }> {
+  const roots: Array<NativeSkillRootDescriptor & { owner: string; label: string }> = [
     {
       source: 'mousse-profile',
       scope: 'global',
-      path: assertOwnedPath(context.profileRoot, getManagedSkillRoot(context.profileRoot), 'profile skill root'),
+      path: getManagedSkillRoot(context.profileRoot),
+      owner: context.profileRoot,
+      label: 'profile skill root',
       profileId: context.profileId,
       managed: true
     }
   ]
-  const project = projectPath ?? context.projectPath
-  if (project) {
+  if (project && projectId) {
     roots.push({
       source: 'mousse-project',
       scope: 'project',
-      path: assertOwnedPath(context.profileRoot, getManagedProjectSkillRoot(context.profileRoot, project), 'managed project skill root'),
+      path: join(managedProjectRoot(context.profileRoot, projectId), MOUSSE_PROJECT_SKILLS_DIR),
+      owner: context.profileRoot,
+      label: 'managed project skill root',
       profileId: context.profileId,
-      projectId: getProjectIdentity(project),
+      projectId,
       managed: true
     })
     roots.push({
       source: 'mousse-project',
       scope: 'project',
-      path: assertOwnedPath(project, getProjectMousseSkillRoot(project), 'external project skill root'),
+      path: getProjectMousseSkillRoot(project),
+      owner: project,
+      label: 'external project skill root',
       profileId: context.profileId,
-      projectId: getProjectIdentity(project),
+      projectId,
       managed: false
     })
   }

@@ -117,6 +117,80 @@ describe('Skills discovery cache', () => {
     }
   })
 
+  it('keeps a newer forced shared scan when an older background scan finishes last', async () => {
+    const skills = registry()
+    const [first, second, third] = await Promise.all([project(50), project(51), project(52)])
+    const shared = join(userHome, '.claude', 'skills', 'beta')
+    const betaOf = (snapshot: SkillsRegistrySnapshot) => snapshot.skills.find((skill) => skill.name === 'beta')?.description
+    const start = Date.now()
+    const now = vi.spyOn(Date, 'now').mockReturnValue(start)
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const reader = skills as unknown as { readSkillDescriptor: (source: unknown, path: string) => Promise<unknown> }
+    const original = reader.readSkillDescriptor.bind(reader)
+    const oldSourceDone = Promise.withResolvers<void>()
+    let held = false
+    try {
+      await skills.discover({ projectPath: first })
+      const read = vi.spyOn(reader, 'readSkillDescriptor').mockImplementation(async (source, path) => {
+        const result = await original(source, path)
+        if (path === join(first, '.claude', 'skills', 'local-50', 'SKILL.md')) oldSourceDone.resolve()
+        if (path === join(shared, 'SKILL.md') && !held) {
+          held = true
+          entered.resolve()
+          await release.promise
+        }
+        return result
+      })
+      now.mockReturnValue(start + 31_000)
+      try {
+        await skills.discover({ projectPath: first, stale: true })
+        await entered.promise
+        await writeFile(join(shared, 'SKILL.md'), '---\nname: beta\ndescription: New beta\n---\nChanged.\n')
+        expect(betaOf(await skills.discover({ projectPath: second, refresh: true }))).toBe('New beta')
+        release.resolve()
+        await oldSourceDone.promise
+        expect(betaOf(await skills.discover({ projectPath: third }))).toBe('New beta')
+      } finally {
+        release.resolve()
+        read.mockRestore()
+      }
+    } finally {
+      now.mockRestore()
+      await writeSkill(shared, 'beta')
+    }
+  })
+
+  it('retries a foreground scan invalidated after it reads a skill', async () => {
+    const skills = registry()
+    const path = await project(54)
+    const file = join(path, '.claude', 'skills', 'local-54', 'SKILL.md')
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const reader = skills as unknown as { readSkillDescriptor: (source: unknown, path: string) => Promise<unknown> }
+    const original = reader.readSkillDescriptor.bind(reader)
+    const read = vi.spyOn(reader, 'readSkillDescriptor').mockImplementation(async (source, path) => {
+      const result = await original(source, path)
+      if (path === file) {
+        entered.resolve()
+        await release.promise
+      }
+      return result
+    })
+    const pending = skills.discover({ projectPath: path })
+    try {
+      await entered.promise
+      await rm(file)
+      skills.invalidateDiscoveryCache()
+      release.resolve()
+      expect((await pending).skills.map((skill) => skill.name)).not.toContain('local-54')
+    } finally {
+      release.resolve()
+      await pending
+      read.mockRestore()
+    }
+  })
+
   it('expires a project snapshot with the shared scan it reused', async () => {
     const skills = registry()
     const shared = join(userHome, '.claude', 'skills', 'alpha')
