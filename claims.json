@@ -347,7 +347,7 @@
         "src/renderer/hooks/useActiveProjectPath.ts"
       ],
       "claimedAt": "2026-11-21T04:52:44.669Z",
-      "expiresAt": "2026-11-21T12:25:34.742Z"
+      "expiresAt": "2026-11-21T13:02:40.654Z"
     },
     {
       "task": "starting-thread-is-own-thread",
