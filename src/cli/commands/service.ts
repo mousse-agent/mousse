@@ -33,6 +33,7 @@ import {
   resolveOwnerStatus
 } from '../../mms/ownership/MmsOwnerLease'
 import { installDaemonDiagnostics } from '../daemonDiagnostics'
+import { capDaemonStartupOutput } from '../startupLog'
 import { installElectronDaemonQuit } from '../electronDaemonLifetime'
 import { resolveDaemonHostInvocation } from '../daemonHost'
 import { dropForeignAppImageMounts } from '../appImageMounts'
@@ -326,6 +327,8 @@ export async function runDaemonForeground(opts: DaemonForegroundOptions): Promis
 }
 
 async function runForeground(homeFlag?: string): Promise<void> {
+  // Started by the app, whose startup log takes stdout and stderr for the daemon's whole life: keep it bounded.
+  capDaemonStartupOutput()
   // Before anything starts a program: the app that started the service may quit and take its mount with it.
   dropForeignAppImageMounts()
   // The window client that started this daemon chose its owner token (`DAEMON_OWNER_TOKEN_ENV`).
