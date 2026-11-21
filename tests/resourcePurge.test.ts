@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, renameSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, renameSync, symlinkSync, unlinkSync, cpSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
@@ -16,7 +16,16 @@ import { ProfileManager } from '../src/mms/profiles/ProfileManager'
 import { createInstallationPaths } from '../src/mms/profiles/paths'
 import { unverifiableThread } from './support/unverifiableThread'
 import { canonicalPathAsync } from '../src/mms/lifecycle/canonicalPath'
+import * as gitPrograms from '../src/mms/git/repoPrograms'
 import { OwnershipFacts } from '../src/mms/lifecycle/ResourceInventory'
+
+vi.mock('node:fs', async (importOriginal) => {
+  const fs = await importOriginal<typeof import('node:fs')>()
+  return { ...fs, unlinkSync: vi.fn(fs.unlinkSync) }
+})
+
+const adminOf = (path: string) => readFileSync(join(path, '.git'), 'utf8').trim().slice('gitdir: '.length)
+if (process.platform === 'win32') vi.setConfig({ testTimeout: 120_000 })
 
 const roots: string[] = []
 const owned: Array<() => void> = []
@@ -53,6 +62,176 @@ test('complete purge removes exclusive checkout, refs and task data and retains 
   expect(() => f.store.registerTask({ taskId: 'task', location: f.location, creating: true })).toThrow(/tombstone/)
   expect((await f.coordinator.purge({ taskId: 'task', operationId: 'purge' })).state).toBe('purged')
 })
+test.each(['peer HEAD changed before update-ref', 'peer HEAD changed during target listing', 'unmanaged sibling lock is a directory'] as const)('keeps the ref when Git preparation encounters %s', async (failure) => {
+  const f = fixture({ git: true })
+  const peer = failure.startsWith('peer HEAD changed')
+    ? unverifiableThread(f.store, { id: 'peer', name: 'Peer', repo: f.repo, how: 'intact' })
+    : undefined
+  const sibling = join(f.root, 'unrelated-checkout')
+  git(f.repo, ['worktree', 'add', '-b', 'unrelated', sibling])
+  const retained = 'refs/mousse/threads/task/main'
+  const sha = git(f.repo, ['rev-parse', retained])
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task')
+  const refItem = preview.items.find((item) => item.kind === 'ref' && item.identity === retained)
+  expect(refItem?.commonDir).toBeDefined()
+  const prepare = gitPrograms.withoutRepoProgramsAsync
+  let changed = false
+  let deletingRef = false
+  vi.spyOn(gitPrograms, 'withoutRepoProgramsAsync').mockImplementation(async (cwd, args, options) => {
+    const argv = await prepare(cwd, args, options)
+    const preparesDelete = args[0] === 'update-ref' && options?.stdin?.includes(retained)
+    deletingRef ||= Boolean(preparesDelete)
+    const targetListing = deletingRef && cwd === refItem?.commonDir && args.join(' ') === 'worktree list --porcelain -z'
+    if (!changed && (failure === 'peer HEAD changed during target listing' ? targetListing : preparesDelete)) {
+      changed = true
+      if (peer) writeFileSync(join(adminOf(peer.worktree), 'HEAD'), 'not a HEAD\n')
+      else mkdirSync(join(adminOf(sibling), 'locked'))
+    }
+    return argv
+  })
+  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toThrow()
+  expect(changed).toBe(true)
+  if (peer) {
+    expect(() => git(peer.worktree, ['rev-parse', '--show-toplevel'])).toThrow()
+    expect(git(f.repo, ['worktree', 'list', '--porcelain', '-z'])).toContain('worktree ')
+  } else expect(() => git(f.repo, ['worktree', 'list', '--porcelain', '-z'])).toThrow()
+  expect(git(f.repo, ['rev-parse', retained])).toBe(sha)
+}, 120_000)
+
+test('keeps the branch when an unmanaged sibling checks it out during peer refresh', async () => {
+  const f = fixture({ git: true })
+  const peer = unverifiableThread(f.store, { id: 'peer', name: 'Peer', repo: f.repo, how: 'intact' })
+  const sibling = join(f.root, 'unmanaged')
+  git(f.repo, ['worktree', 'add', '--detach', sibling])
+  const branch = 'mousse/thread/task/main'
+  const ref = 'refs/heads/' + branch
+  const sha = git(f.repo, ['rev-parse', ref])
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task')
+  expect(preview.items).toContainEqual(expect.objectContaining({ identity: ref, status: 'pending' }))
+  const prepare = gitPrograms.withoutRepoProgramsAsync
+  let deletingBranch = false
+  let switched = false
+  vi.spyOn(gitPrograms, 'withoutRepoProgramsAsync').mockImplementation(async (cwd, args, options) => {
+    const argv = await prepare(cwd, args, options)
+    deletingBranch ||= args[0] === 'update-ref' && Boolean(options?.stdin?.includes('delete ' + ref + ' '))
+    if (deletingBranch && !switched && cwd === peer.worktree && args.join(' ') === 'rev-parse --show-toplevel') {
+      git(sibling, ['checkout', branch])
+      switched = true
+    }
+    return argv
+  })
+
+  await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest })).rejects.toThrow(/branch is checked out/)
+  expect(switched).toBe(true)
+  expect(git(sibling, ['symbolic-ref', 'HEAD'])).toBe(ref)
+  expect(git(sibling, ['rev-parse', 'HEAD'])).toBe(sha)
+  expect(git(f.repo, ['rev-parse', ref])).toBe(sha)
+}, 120_000)
+
+test('keeps a relocated checkout when a peer changes during preparation to remove it, and can then resume', async () => {
+  const f = fixture({ git: true })
+  const peer = unverifiableThread(f.store, { id: 'peer', name: 'Peer', repo: f.repo, how: 'intact' })
+  const head = join(adminOf(peer.worktree), 'HEAD')
+  const originalHead = readFileSync(head)
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task')
+  const retirement = new WorktreeRetirementService(f.store)
+  const trash = retirement.trashPathFor({ taskId: 'task', worktreePath: f.worktree })
+  const prepare = gitPrograms.withoutRepoProgramsAsync
+  let changed = false
+  const prepareSpy = vi.spyOn(gitPrograms, 'withoutRepoProgramsAsync').mockImplementation(async (cwd, args, options) => {
+    const argv = await prepare(cwd, args, options)
+    if (args[0] === 'worktree' && args[1] === 'remove' && args[2] === '--force') {
+      changed = true
+      writeFileSync(head, 'not a HEAD\n')
+    }
+    return argv
+  })
+  const request = { taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest }
+  await expect(f.coordinator.purge(request)).rejects.toThrow()
+  expect(changed).toBe(true)
+  expect(() => git(peer.worktree, ['rev-parse', '--show-toplevel'])).toThrow()
+  expect(existsSync(f.worktree)).toBe(false)
+  expect(readFileSync(join(trash, 'a.txt'), 'utf8')).toBe('first\n')
+  expect(git(trash, ['rev-parse', 'HEAD'])).toBe(git(f.repo, ['rev-parse', 'HEAD']))
+
+  prepareSpy.mockRestore()
+  writeFileSync(head, originalHead)
+  expect((await f.coordinator.purge(request)).state).toBe('purged')
+  expect(existsSync(trash)).toBe(false)
+}, 120_000)
+
+test.each(['still absent', 'replaced during removal preparation'] as const)('resumes purge with the trash checkout %s', async (pathState) => {
+  const f = fixture({ git: true })
+  const sha = git(f.worktree, ['rev-parse', 'HEAD'])
+  git(f.worktree, ['config', 'core.excludesFile', join(f.root, 'ignore')])
+  writeFileSync(join(f.root, 'ignore'), 'keep.log\n')
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task')
+  const request = { taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest }
+  const trash = new WorktreeRetirementService(f.store).trashPathFor({ taskId: 'task', worktreePath: f.worktree })
+  const parked = join(f.root, 'original-checkout')
+  const prepare = gitPrograms.withoutRepoProgramsAsync
+  let replaced = false
+  vi.spyOn(gitPrograms, 'withoutRepoProgramsAsync').mockImplementation(async (cwd, args, options) => {
+    const argv = await prepare(cwd, args, options)
+    if (args[0] === 'worktree' && args[1] === 'remove' && args.at(-1) === trash) {
+      if (args[2] === '--force') throw new Error('Stopped after relocation')
+      if (pathState === 'replaced during removal preparation') {
+        cpSync(parked, trash, { recursive: true })
+        writeFileSync(join(trash, 'keep.log'), 'replacement bytes\n')
+        replaced = true
+      }
+    }
+    return argv
+  })
+
+  await expect(f.coordinator.purge(request)).rejects.toThrow()
+  expect(readFileSync(join(trash, 'a.txt'), 'utf8')).toBe('first\n')
+  renameSync(trash, parked)
+
+  const resume = f.coordinator.purge(request)
+  if (pathState === 'still absent') {
+    await expect(resume).resolves.toMatchObject({ state: 'purged' })
+    expect(existsSync(trash)).toBe(false)
+    expect(git(f.repo, ['worktree', 'list', '--porcelain', '-z']).replaceAll('\\', '/')).not.toContain('worktree ' + trash.replaceAll('\\', '/'))
+  } else {
+    await expect(resume).rejects.toThrow()
+    expect(replaced).toBe(true)
+    expect(readFileSync(join(trash, 'keep.log'), 'utf8')).toBe('replacement bytes\n')
+    expect(git(trash, ['rev-parse', 'HEAD'])).toBe(sha)
+    expect(git(trash, ['check-ignore', 'keep.log'])).toBe('keep.log')
+  }
+}, 120_000)
+
+test('keeps the next reviewed file when a peer changes after the first unlink', async () => {
+  const f = fixture({ git: true })
+  const peer = unverifiableThread(f.store, { id: 'peer', name: 'Peer', repo: f.repo, how: 'intact' })
+  const head = join(adminOf(peer.worktree), 'HEAD')
+  const first = join(f.worktree, 'z.txt'), second = join(f.worktree, 'b.txt')
+  writeFileSync(first, 'first removal\n')
+  writeFileSync(second, 'keep these bytes\n')
+  git(f.worktree, ['add', 'b.txt']) // Staged data uses the reviewed file-by-file discard path.
+  await f.coordinator.trash({ taskId: 'task', operationId: 'trash' })
+  const preview = await f.coordinator.cleanup.preview('task')
+  expect(preview.items.find((item) => item.kind === 'worktree')).toMatchObject({ discardState: 'pending' })
+  const realFs = await vi.importActual<typeof import('node:fs')>('node:fs')
+  vi.mocked(unlinkSync).mockImplementation((path) => {
+    realFs.unlinkSync(path)
+    if (path === first) writeFileSync(head, 'not a HEAD\n')
+  })
+  try {
+    await expect(f.coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation, previewDigest: preview.digest, discard: true, human: true })).rejects.toThrow()
+    expect(existsSync(first)).toBe(false)
+    expect(() => git(peer.worktree, ['rev-parse', '--show-toplevel'])).toThrow()
+    expect(readFileSync(second, 'utf8')).toBe('keep these bytes\n')
+  } finally {
+    vi.mocked(unlinkSync).mockImplementation(realFs.unlinkSync)
+  }
+}, 120_000)
+
 /** What a worktree thread's delete must leave: the folder with its files as they are, its branch, and Mousse's refs. */
 function expectWorkKept(f: ReturnType<typeof fixture>) {
   expect(readFileSync(join(f.worktree, 'a.txt'), 'utf8')).toBe('changed, not committed\n')
@@ -472,7 +651,7 @@ test('a broken thread whose repository moved without its worktrees repaired keep
   writeFileSync(join(f.location, 'journal', '0000000000000003.json'), entry(3))
   writeFileSync(join(f.location, 'conversation-branches.json'), JSON.stringify([{ id: 'saved', retainedRef: broken.retainedRef }]))
   renameSync(old, f.repo)
-  expect(readFileSync(join(broken.worktree, '.git'), 'utf8')).toContain(old)
+  expect(relative(old, adminOf(broken.worktree))).toMatch(/^\.git[\\/]worktrees[\\/]/)
   const theirs = () => git(f.repo, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/threads/broken/', 'refs/heads/mousse/thread/broken/', 'refs/mousse/changes/'])
   const ours = () => git(f.repo, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/mousse/threads/task/', 'refs/heads/mousse/thread/task/'])
   const before = theirs(), oursBefore = ours()

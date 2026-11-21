@@ -199,6 +199,8 @@ export interface LifecyclePurgeProgress extends LifecyclePurgePreview {
   completedAt?: string
   error?: string
   discardAuthorized: boolean
+  /** Worktree item IDs with a committed intent to move to their manifest's deterministic trash path. */
+  worktreeMoves?: string[]
   /** The thread's expiry deleted it (`Thread.expiresAt`), not a person: it is never listed in Recently deleted. */
   expired?: true
   /**
