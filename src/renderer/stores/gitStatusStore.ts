@@ -19,6 +19,7 @@ import type {
   GitScope,
   GitStatusSnapshot
 } from '../../shared/types'
+import { WORKSPACE_CHANGED_MESSAGE } from '../../shared/types'
 import type { PullRequestScope } from '../../shared/pullRequests'
 import { errorText } from '../lib/errorText'
 import { anyTurnEnded } from '../lib/turnEnded'
@@ -130,7 +131,9 @@ async function fetchInto(key: string, scope: GitScope, current: () => boolean = 
   try {
     status = await git.status(scope)
   } catch (error) {
-    patch({ loaded: true, error: errorText(error), fetchedAt: Date.now() })
+    const message = errorText(error)
+    if (message.includes(WORKSPACE_CHANGED_MESSAGE)) patch({ ...EMPTY_GIT_ENTRY, error: message })
+    else patch({ loaded: true, error: message, fetchedAt: Date.now() })
     return
   } finally {
     clearTimeout(slow)
@@ -158,8 +161,11 @@ async function fetchInto(key: string, scope: GitScope, current: () => boolean = 
   // Each one as it arrives; a failed read keeps what the folder showed before.
   await Promise.all(details.map(([field, read]) => read.then((value) => {
     const current = useGitStatusStore.getState().entries[key] ?? EMPTY_GIT_ENTRY
-    patch({ [field]: keepIfEqual(current[field], value) } as Partial<GitStatusEntry>)
-  }, () => undefined)))
+    if (!current.error?.includes(WORKSPACE_CHANGED_MESSAGE)) patch({ [field]: keepIfEqual(current[field], value) } as Partial<GitStatusEntry>)
+  }, (error: unknown) => {
+    const message = errorText(error)
+    if (message.includes(WORKSPACE_CHANGED_MESSAGE)) patch({ ...EMPTY_GIT_ENTRY, error: message })
+  })))
 }
 
 /**

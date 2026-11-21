@@ -37,7 +37,7 @@ function fieldsAndPath(record: string, fields: number): [string[], string] {
 }
 
 /** Reads `git status` output for {@link STATUS_ARGS}. A record it does not know throws rather than being dropped. */
-export function parsePorcelainStatus(output: string): PorcelainStatus {
+export function parsePorcelainStatus(output: string, symbolicBranch: string | null): PorcelainStatus {
   const records = output.split('\0')
   const status: PorcelainStatus = { branch: null, born: true, upstream: null, ahead: 0, behind: 0, entries: [] }
   let upstream: string | null = null
@@ -49,7 +49,8 @@ export function parsePorcelainStatus(output: string): PorcelainStatus {
       const [name, ...rest] = record.slice(2).split(' ')
       const value = rest.join(' ')
       if (name === 'branch.oid') status.born = value !== '(initial)'
-      else if (name === 'branch.head') status.branch = value === '(detached)' ? null : value
+      // Porcelain spells a detached HEAD exactly like a branch literally named "(detached)".
+      else if (name === 'branch.head') status.branch = value === '(detached)' && symbolicBranch !== value ? null : value
       else if (name === 'branch.upstream') upstream = value
       else if (name === 'branch.ab') {
         counted = true

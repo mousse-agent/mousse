@@ -1816,6 +1816,7 @@ export async function dispatchMethod(
 }
 
 async function dispatchAdmitted(ctx: HandlerContext, method: string, params: unknown): Promise<unknown> {
+  if (method === 'git.heads') checkGitReadParams(method, params)
   // Deleting an archived thread stops what still runs in it first, once nothing that would refuse the delete is found:
   // the send waiting for its turn is a request the delete's admission would otherwise wait for, and refuse. Another
   // computer's delete is refused anyway. A thread of another computer (a qualified id) is routed to its owner, which
@@ -1831,7 +1832,8 @@ async function dispatchAdmitted(ctx: HandlerContext, method: string, params: unk
     // Read only: a listed thread, or one with a lifecycle record (live, in the trash, a subagent's, a bot's). An id found
     // in neither is counted as the profile's; nothing is scanned, migrated or registered for it before admission. An id
     // no lifecycle record can have (another computer's qualified thread id) is never a thread here.
-    const isThread = (id: string): boolean => isLifecycleIdentity(id) && Boolean(ctx.mms.threads?.peekThread?.(id) || ctx.mms.threads?.lifecycleStore?.get(id))
+    // Git's sidebar batch uses only the memory cache here. Its asynchronous lifecycle lookup has its own deadline.
+    const isThread = (id: string): boolean => isLifecycleIdentity(id) && Boolean(ctx.mms.threads?.peekThread?.(id) || (method !== 'git.heads' && ctx.mms.threads?.lifecycleStore?.get(id)))
     return ctx.mms.runOwnedRequest(method, () => dispatchOwnedMethod(ctx, method, params), requestWorkScope(params, isThread))
   }
   return dispatchOwnedMethod(ctx, method, params)
@@ -1948,7 +1950,7 @@ const FOLDER_METHODS = new Set([
   'pty.create', 'editor.folder', 'github.cloneRepository', 'github.createRepository', 'mcp.getConfigSources',
   'mcp.listServers', 'mcp.writeCursorConfig', 'storage.cleanup.plan', 'storage.cleanup.run'
 ])
-/** Methods under those prefixes that only signal work already in memory. */
+/** Methods that skip the generic folder wait. The sidebar batch sets its own volume deadlines. */
 const FOLDER_FREE_METHODS = new Set(['git.cancelOperation', 'git.heads', 'pullRequests.watchStatus'])
 
 /** Methods that start a turn: like the turn, they wait for a volume that is not answering instead of failing. */
@@ -2021,7 +2023,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
     const routed = await ctx.mms.threadRouter.dispatch(ctx, method, params)
     if (routed) return routed.result
   }
-  checkGitReadParams(method, params)
+  if (method !== 'git.heads') checkGitReadParams(method, params)
   if (isObject(params) && typeof params.threadId === 'string' &&
       !['threads.delete', 'threads.inventory', 'threads.focus',
         // Answers "not found" for a thread being deleted, so a window that shows it knows to leave it.
@@ -4198,12 +4200,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // What the thread waits on, for the banner and the CLI; absent while nothing does. A thread recording into a hidden
       // store (no Git of its own) is read through `loadOrSnapshotAsync`, so it shows the banner too.
       const recovery = await threadRecovery(lookup.threadDirectory, lookup.projectPath, { inFlight })
+      const execution = lookup.projectPath
+        ? await manager.executionContext(lookup.projectPath, metadata)
+        : manager.unboundExecutionContext(lookup.threadId)
       return {
         metadata,
         ...(recovery ? { recovery } : {}),
-        execution: lookup.projectPath
-          ? await manager.executionContext(lookup.projectPath, metadata)
-          : manager.unboundExecutionContext(lookup.threadId),
+        execution: !stored && lookup.projectPath && threadPlacement(lookup.thread) === 'project-folder'
+          ? { ...execution, placement: 'project-folder' }
+          : execution,
         journalGeneration: lookup.currentGeneration,
         ...(marker ? { retiredByCleanup: { at: marker.retiredAt, rule: marker.rule } } : {})
       }

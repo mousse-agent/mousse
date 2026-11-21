@@ -112,6 +112,17 @@ describe('a folder read from Git files', () => {
     expect(await folderBranch(linked, { requireRoot: true })).toEqual({ repo: true, branch: 'main' })
   })
 
+  it('does not read a branch from a .git parent outside its configured checkout', async () => {
+    const main = repository()
+    const checkout = join(root, 'actual-checkout')
+    mkdirSync(checkout)
+    expect(await folderBranch(main)).toEqual({ repo: true, branch: 'main' })
+    git(main, 'config', 'core.worktree', checkout.replaceAll('\\', '/'))
+    expect(git(main, 'rev-parse', '--is-inside-work-tree')).toBe('false')
+    expect(await folderBranch(main)).toEqual({ repo: false, branch: null })
+    expect(await folderBranch(main, { requireRoot: true })).toEqual({ repo: false, branch: null })
+  })
+
   it('reads HEAD again only when it changed', async () => {
     const main = repository()
     await readFolderHead(main)

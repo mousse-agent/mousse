@@ -1,7 +1,7 @@
 import { readFile, stat } from 'node:fs/promises'
-import { join, parse, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import type { GitFolderHead, GitThreadHead } from '../../shared/types'
-import { waitForFolderAccess } from '../files/folderAccess'
+import { volumeKey, waitForFolderAccess } from '../files/folderAccess'
 import { folderBranch } from '../git/gitHead'
 import type { ThreadWorkspaceMetadata } from '../../shared/workspace'
 
@@ -38,23 +38,19 @@ const STALLED_FOR_MS = 10_000
 
 interface Drive { running: number; queue: Array<() => void>; stalledUntil: number }
 const drives = new Map<string, Drive>()
-const driveOf = (path: string): string => {
-  const root = parse(resolve(path)).root
-  return process.platform === 'win32' ? root.toLowerCase() : root
-}
-const notAnswering = (path: string): string => `The drive at ${parse(resolve(path)).root} is not answering.`
+const notAnswering = (volume: string): string => `The drive at ${volume} is not answering.`
 
 /**
  * Runs `work`, which reads files on `path`'s drive, at most {@link PER_DRIVE} at a time per drive, and answers
  * `stalled` when it has not finished within {@link HEAD_ANSWER_MS} or the drive did not answer a moment ago.
  */
 async function onDrive<T>(path: string, work: () => Promise<T>, stalled: (reason: string) => T, deadline = Date.now() + HEAD_ANSWER_MS, fresh = false): Promise<T> {
-  const key = driveOf(path)
+  const key = volumeKey(path)
   let drive = drives.get(key)
   if (!drive) drives.set(key, drive = { running: 0, queue: [], stalledUntil: 0 })
   const d = drive
   // A retry can use a free slot even if another read on this drive stalled.
-  if (Date.now() >= deadline || (!fresh && Date.now() < d.stalledUntil)) return stalled(notAnswering(path))
+  if (Date.now() >= deadline || (!fresh && Date.now() < d.stalledUntil)) return stalled(notAnswering(key))
   const release = () => {
     d.running--
     d.queue.shift()?.()
@@ -75,16 +71,16 @@ async function onDrive<T>(path: string, work: () => Promise<T>, stalled: (reason
   try {
     if (await Promise.race([turn.then(() => 'turn' as const), late]) === 'late') {
       gaveUp = true
-      return stalled(notAnswering(path))
+      return stalled(notAnswering(key))
     }
     if (!fresh && Date.now() < d.stalledUntil) {
       release()
-      return stalled(notAnswering(path))
+      return stalled(notAnswering(key))
     }
     const answer = await Promise.race([work().finally(release), late])
     if (answer !== 'late') return answer
     d.stalledUntil = Date.now() + STALLED_FOR_MS
-    return stalled(notAnswering(path))
+    return stalled(notAnswering(key))
   } finally {
     clearTimeout(timer)
   }

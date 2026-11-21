@@ -11,6 +11,9 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { GitSection } from '../../src/renderer/components/sideCard/GitSection'
+import { ChangesPanel } from '../../src/renderer/components/changes/ChangesPanel'
+import { WORKSPACE_CHANGED_MESSAGE } from '../../src/shared/types'
+import { qualifyId } from '../../src/shared/threadRef'
 import { GIT_LOOKUP_BUDGET_MS } from '../../src/renderer/components/sideCard/useStillPending'
 import { useAppStore } from '../../src/renderer/stores/appStore'
 import { useGitStatusStore } from '../../src/renderer/stores/gitStatusStore'
@@ -30,6 +33,9 @@ let root: Root
 let heads: () => Promise<GitHeadsResult>
 let status: (scope: GitScope) => Promise<GitStatusSnapshot>
 let changed: ((event: GitHeadsChangedEvent) => void) | undefined
+let workspaceStatus: () => Promise<unknown>
+const init = vi.fn(async () => undefined)
+const remoteThread = qualifyId('nod_0123456789abcdefghjkmnpqrs', 't1')
 const calls = { getFilesRoot: 0, getStatus: 0, status: 0 }
 
 const advance = async (ms: number) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms) }) }
@@ -43,18 +49,29 @@ beforeEach(() => {
   calls.status = 0
   heads = async () => ({ projects: {}, threads: { t1: ready } })
   status = async () => repository
+  init.mockClear()
+  workspaceStatus = async () => ({ retiredByCleanup: { at: '2026-11-20T10:00:00.000Z', rule: 'worktree-inactive' } })
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
   ;(window as unknown as { mousse: unknown }).mousse = {
     app: { getFilesRoot: async () => { calls.getFilesRoot++; return WORKTREE }, getActiveProjectPath: async () => PROJECT },
-    workspace: { getStatus: async () => { calls.getStatus++; return { retiredByCleanup: { at: '2026-11-20T10:00:00.000Z', rule: 'worktree-inactive' } } } },
+    workspace: { getStatus: async () => { calls.getStatus++; return workspaceStatus() } },
     git: {
       heads: () => heads(),
+      init,
+      onSelectionChanged: () => () => undefined,
       status: (scope: GitScope) => { calls.status++; return status(scope) },
       onHeadsChanged: (listener: typeof changed) => { changed = listener; return () => { changed = undefined } },
       log: async () => [],
       branches: async () => ({ current: repository.branch, branches: [repository.branch] }),
       diffStats: async () => ({ additions: 0, deletions: 0, filesChanged: 0 })
     },
-    pullRequests: { get: async () => ({ state: 'none' }) }
+    pullRequests: { get: async () => ({ state: 'none' }) },
+    review: {
+      files: async ({ scope }: { scope: unknown }) => ({
+        root: WORKTREE, scope, range: { from: null, to: { kind: 'worktree' } },
+        files: [], truncated: false, mergeCommits: 0
+      })
+    }
   }
   useGitStatusStore.setState({ entries: {} })
   const thread = { id: 't1', name: 'Fix the login', projectId: 'p1', worktreeEnabled: true, startedAt: '2026-11-15T09:00:00.000Z', createdAt: '2026-11-15T09:00:00.000Z', updatedAt: '2026-11-15T09:00:00.000Z' } as unknown as Thread
@@ -69,10 +86,11 @@ afterEach(() => {
   host.remove()
   useAppStore.setState(initialStore, true)
   vi.useRealTimers()
+  vi.unstubAllGlobals()
 })
 
 const open = async () => {
-  act(() => root.render(createElement(GitSection, { threadId: 't1' })))
+  act(() => root.render(createElement(GitSection, { threadId: useAppStore.getState().activeThreadId })))
   await advance(100)
 }
 
@@ -135,4 +153,89 @@ it('shows a checkout that cannot be read as unavailable and offers Retry', async
   expect(host.textContent).toContain('The worktree folder is not a Git checkout.')
   expect(host.textContent).not.toContain('Worktree not on disk')
   expect(retryButton()).not.toBeNull()
+})
+
+function selectRemote() {
+  const thread = useAppStore.getState().threads[0]!
+  useAppStore.setState({ activeThreadId: remoteThread, threads: [{ ...thread, id: remoteThread }] })
+}
+
+const setPhase = (threadId: string, phase: 'queued' | 'thinking' | 'streaming') =>
+  act(() => { useAppStore.setState({ turnStates: { [threadId]: { threadId, turnId: 'first', phase, updatedAt: '' } } }) })
+
+it.each([false, true])('waits for the first worktree before reading Git (remote: %s)', async (remote) => {
+  if (remote) selectRemote()
+  else useAppStore.setState((state) => ({
+    threads: state.threads.map((thread) => ({ ...thread, startedAt: undefined, name: 'New chat' }))
+  }))
+  const threadId = remote ? remoteThread : 't1'
+  const git = window.mousse.git
+  const gitCalls = [vi.spyOn(git, 'status'), vi.spyOn(git, 'log'), vi.spyOn(git, 'branches'), vi.spyOn(git, 'diffStats'), init]
+  status = async (scope) => ({ ...repository, branch: scope.workspaceThreadId ? 'mousse/first-turn' : 'master' })
+  heads = async () => ({ projects: {}, threads: { t1: { own: true, branch: null, generation: 0, lifecycle: 'unprovisioned' } } })
+  workspaceStatus = async () => ({ metadata: null, execution: { projectPath: PROJECT, lifecycle: 'unprovisioned' } })
+  await open()
+  act(() => {
+    useAppStore.setState((state) => ({
+      threads: state.threads.map((thread) => ({ ...thread, startedAt: '2026-11-21T10:00:00.000Z' }))
+    }))
+    setPhase(threadId, 'queued')
+  })
+  await advance(100)
+  heads = async () => ({ projects: {}, threads: { t1: { own: true, branch: null, generation: 0, lifecycle: 'provisioning' } } })
+  workspaceStatus = async () => ({ metadata: { lifecycle: 'provisioning' }, execution: { projectPath: PROJECT, lifecycle: 'provisioning' } })
+  setPhase(threadId, 'thinking')
+  await advance(GIT_LOOKUP_BUDGET_MS)
+  expect(host.textContent).toContain('Checking…')
+  expect(host.textContent).not.toContain('master')
+  for (const call of gitCalls) expect(call).not.toHaveBeenCalled()
+
+  heads = async () => ({ projects: {}, threads: { t1: ready } })
+  workspaceStatus = async () => ({ metadata: { lifecycle: 'ready' }, execution: { projectPath: WORKTREE, generation: 0, lifecycle: 'ready' } })
+  setPhase(threadId, 'streaming')
+  await advance(100)
+  expect(branchButton()?.textContent).toContain('mousse/first-turn')
+  for (const call of gitCalls.slice(0, 4)) {
+    for (const args of call.mock.calls) expect(args).toContainEqual(expect.objectContaining({ workspaceThreadId: threadId }))
+  }
+})
+
+it.each([
+  { surface: 'Git', remote: false },
+  { surface: 'Git', remote: true },
+  { surface: 'Changes', remote: true }
+])('$surface re-resolves a same-path rebuild while an Initialize refresh waits (remote: $remote)', async ({ surface, remote }) => {
+  if (remote) selectRemote()
+  let generation = 2
+  heads = async () => ({ projects: {}, threads: { t1: { ...ready, generation } } })
+  workspaceStatus = async () => ({ metadata: { lifecycle: 'ready' }, execution: { projectPath: WORKTREE, generation, lifecycle: 'ready' } })
+  status = async () => ({ ...repository, isRepo: false, branch: null })
+  if (surface === 'Git') await open()
+  else {
+    act(() => root.render(createElement(ChangesPanel)))
+    await advance(100)
+  }
+
+  let finish: (() => void) | undefined
+  const seen: GitScope[] = []
+  status = async (scope) => {
+    seen.push(scope)
+    if (seen.length === 1) {
+      await new Promise<void>((resolve) => { finish = resolve })
+      if (scope.workspaceGeneration !== undefined && scope.workspaceGeneration !== generation) throw new Error(WORKSPACE_CHANGED_MESSAGE)
+      return { ...repository, branch: 'stale-branch' }
+    }
+    return { ...repository, branch: 'mousse/rebuilt' }
+  }
+  const initialize = [...host.querySelectorAll('button')].find((button) => button.textContent?.startsWith('Initialize'))
+  expect(initialize).toBeDefined()
+  act(() => initialize!.click())
+  await advance(100)
+  expect(finish).toBeDefined()
+  generation++
+  act(() => finish!())
+  await advance(100)
+  expect(seen.map((scope) => scope.workspaceGeneration)).toEqual([2, 3])
+  expect(host.textContent).toContain(surface === 'Git' ? 'mousse/rebuilt' : 'No uncommitted changes')
+  expect(host.textContent).not.toContain('stale-branch')
 })

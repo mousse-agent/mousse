@@ -39,7 +39,7 @@ beforeEach(() => {
       // The worktree is made by the first turn: until then the thread works in no folder of its own.
       heads: async () => {
         lookups++
-        return { projects: {}, threads: { t1: worktreeReady ? { own: true, branch: 'mousse/t1', folder: WORKTREE } : { project: true } } }
+        return { projects: {}, threads: { t1: worktreeReady ? { own: true, branch: 'mousse/t1', folder: WORKTREE } : { own: true, branch: null, generation: 0, lifecycle: 'unprovisioned' } } }
       }
     }
   }
@@ -60,8 +60,7 @@ describe('the folder of a new worktree thread', () => {
   it('becomes the thread worktree once its first turn has made it, without selecting the thread again', async () => {
     act(() => root.render(createElement(Probe)))
     await flush()
-    // Selected before the first turn: no worktree yet, so the project folder (and its branch) shows.
-    expect(seen).toMatchObject({ path: PROJECT, workspaceThreadId: null })
+    expect(seen).toMatchObject({ path: null, workspaceThreadId: 't1', loading: true })
 
     await phase('queued')
     await flush()
@@ -87,16 +86,14 @@ it('uses the owning computer’s workspace lookup for a remote thread', async ()
   const thread = useAppStore.getState().threads[0]!
   useAppStore.setState({ activeThreadId: threadId, threads: [{ ...thread, id: threadId, projectId, node }] })
 
-  const getFilesRoot = vi.fn(async () => WORKTREE)
   const getActiveProjectPath = vi.fn(async () => PROJECT)
-  const getStatus = vi.fn(async () => ({ execution: { projectPath: WORKTREE, lifecycle: 'ready' } }))
+  const getStatus = vi.fn(async () => ({ metadata: { lifecycle: 'ready' }, execution: { projectPath: WORKTREE, lifecycle: 'ready', generation: 4 } }))
   const heads = vi.fn()
-  ;(window as unknown as { mousse: unknown }).mousse = { app: { getFilesRoot, getActiveProjectPath }, workspace: { getStatus }, git: { heads } }
+  ;(window as unknown as { mousse: unknown }).mousse = { app: { getActiveProjectPath }, workspace: { getStatus }, git: { heads } }
   act(() => root.render(createElement(Probe)))
   await flush()
-  expect(getFilesRoot).toHaveBeenCalledWith(threadId, false)
   expect(getStatus).toHaveBeenCalledWith(threadId, false)
-  expect(seen).toMatchObject({ path: WORKTREE, workspaceThreadId: threadId })
+  expect(seen).toMatchObject({ path: WORKTREE, workspaceThreadId: threadId, workspaceGeneration: 4 })
   expect(heads).not.toHaveBeenCalled()
   expect(getActiveProjectPath).not.toHaveBeenCalled()
 })

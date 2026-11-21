@@ -5,6 +5,7 @@ export interface ActiveProjectInput {
   isNewChat: boolean
   /** Project of the composer workspace draft, falling back to the thread's own. */
   draftProjectId: string | undefined
+  draftWorktree?: boolean
   /** Project the selected thread belongs to. */
   threadProjectId: string | null
   projects: ReadonlyArray<{ id: string; path: string }>
@@ -12,6 +13,7 @@ export interface ActiveProjectInput {
   resolved: {
     path: string | null
     loading: boolean
+    provisioning?: boolean
     /** Set when `path` is the thread's own ready worktree rather than the project folder. */
     workspaceThreadId?: string | null
     /** That worktree's generation. */
@@ -29,6 +31,8 @@ export interface ActiveProject {
   key: string | null
   /** The folder is still being looked up, so a null path is not an answer yet. */
   loading: boolean
+  /** The thread is waiting for its checkout to be made. */
+  provisioning?: boolean
   /** The thread whose own worktree `path` is; null when `path` is the project folder. */
   workspaceThreadId: string | null
   /** That worktree's generation: what is cached of it is cached under it (`folderKey`). */
@@ -46,6 +50,7 @@ export interface ActiveProject {
  */
 export function resolveActiveProject(input: ActiveProjectInput): ActiveProject {
   if (input.isNewChat && input.draftProjectId) {
+    if (input.draftWorktree) return { projectId: input.draftProjectId, path: null, key: null, loading: true, provisioning: true, workspaceThreadId: null }
     const path = input.projects.find((project) => project.id === input.draftProjectId)?.path ?? null
     return { projectId: input.draftProjectId, path, key: path ? folderKey({ projectId: input.draftProjectId, workspaceThreadId: null }) : null, loading: false, workspaceThreadId: null }
   }
@@ -58,6 +63,7 @@ export function resolveActiveProject(input: ActiveProjectInput): ActiveProject {
     path: input.resolved.path,
     key: input.resolved.path ? folderKey({ projectId, workspaceThreadId, ...(workspaceGeneration !== undefined ? { workspaceGeneration } : {}) }) : null,
     loading: input.resolved.loading,
+    ...(input.resolved.provisioning ? { provisioning: true } : {}),
     workspaceThreadId,
     ...(workspaceGeneration !== undefined ? { workspaceGeneration } : {}),
     ...(unavailable ? { unavailable } : {})

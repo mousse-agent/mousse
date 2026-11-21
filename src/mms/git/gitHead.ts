@@ -136,21 +136,46 @@ export function clearFolderHeadCache(): void {
   headFileReads = 0
 }
 
+/** Local config that could move the checkout or add configuration needs Git's own interpretation. */
+async function needsGitCheckoutCheck(head: Extract<FolderHead, { repo: true }>): Promise<boolean> {
+  const commonConfig = join(head.commonDir, 'config')
+  const paths = new Set([commonConfig, join(head.gitDir, 'config'), join(head.gitDir, 'config.worktree')])
+  for (const path of paths) {
+    const config = await readFile(path, 'utf8').catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return undefined
+      throw error
+    })
+    if (config === undefined) continue
+    if (path.endsWith('config.worktree') || /\[\s*include(?:if)?\b/i.test(config)) return true
+    // Only the ordinary, explicit non-bare setting is safe to classify without parsing Git config.
+    for (const [, key, value] of config.matchAll(/(?:^|[\r\n\]])[ \t]*(worktree|bare)\b([^\r\n]*)/gi)) {
+      if (key!.toLowerCase() === 'worktree' || !/^\s*=\s*false\s*(?:[;#].*)?$/i.test(value!)) return true
+    }
+  }
+  return false
+}
+
 /**
- * Whether `folder` is in a repository and the branch it is on: from Git's files, or for a layout they cannot tell, from
- * one `git symbolic-ref`. A folder Git says is not in a repository answers `repo: false`; any other failure throws.
+ * Whether the folder is inside a checkout and which branch it is on. Ordinary layouts read Git's files, and Git
+ * checks ambiguous layouts. A folder outside the checkout answers `repo: false`; read failures throw.
  */
 export async function folderBranch(folder: string, options: { requireRoot?: boolean } = {}): Promise<{ repo: boolean; branch: string | null; detachedAt?: string }> {
   const head = await readFolderHead(folder)
-  if (head) {
-    if (!head.repo || (options.requireRoot && relative(head.top, await physicalPath(folder)) !== '')) return { repo: false, branch: null }
+  if (head?.repo === false) return { repo: false, branch: null }
+  if (head && !await needsGitCheckoutCheck(head)) {
+    if (options.requireRoot && relative(head.top, await physicalPath(folder)) !== '') return { repo: false, branch: null }
     return head.commit ? { repo: true, branch: null, detachedAt: head.commit.slice(0, 7) } : { repo: true, branch: head.branch }
   }
-  if (options.requireRoot) {
-    const argv = await withoutRepoProgramsAsync(folder, ['rev-parse', '--show-toplevel'])
-    const top = await runGitProcess(argv, { cwd: folder, env: repoProgramEnv() })
-    if (top.error) throw top.error
-    if (top.status !== 0 || relative(await physicalPath(top.stdout.trim()), await physicalPath(folder)) !== '') return { repo: false, branch: null }
+  const checkoutArgs = ['rev-parse', '--is-inside-work-tree', ...(options.requireRoot ? ['--show-toplevel'] : [])]
+  const checkout = await runGitProcess(await withoutRepoProgramsAsync(folder, checkoutArgs), { cwd: folder, env: repoProgramEnv() })
+  if (checkout.error) throw checkout.error
+  if (checkout.status !== 0) {
+    if (/not a git repository|must be run in a work tree/i.test(checkout.stderr)) return { repo: false, branch: null }
+    throw new Error(checkout.stderr.trim() || `git rev-parse failed with exit code ${checkout.status}`)
+  }
+  const [inside, ...top] = checkout.stdout.replace(/\r?\n$/, '').split(/\r?\n/)
+  if (inside !== 'true' || (options.requireRoot && relative(await physicalPath(top.join('\n')), await physicalPath(folder)) !== '')) {
+    return { repo: false, branch: null }
   }
   const argv = await withoutRepoProgramsAsync(folder, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
   const ran = await runGitProcess(argv, { cwd: folder, env: repoProgramEnv() })

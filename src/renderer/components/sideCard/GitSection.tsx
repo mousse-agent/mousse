@@ -22,7 +22,7 @@ import { useRetiredWorktreeNote } from './useRetiredWorktreeNote'
 import { GIT_LOOKUP_BUDGET_MS, useStillPending } from './useStillPending'
 import { WORKTREE_NOT_ON_DISK } from '../../hooks/useActiveProjectPath'
 import { gitScopeFor } from '../../lib/activeProject'
-import { WORKSPACE_CHANGED_MESSAGE, type GitInProgress, type GitPullRequestLookup, type GitPullStrategy, type GitUpstreamCheck } from '../../../shared/types'
+import type { GitInProgress, GitPullRequestLookup, GitPullStrategy, GitUpstreamCheck } from '../../../shared/types'
 import { useGitActionRunner } from '../git/useGitActionRunner'
 import { BranchPicker } from './BranchPicker'
 import { NextStepButton, type NextStepChoice } from './NextStepButton'
@@ -213,6 +213,7 @@ interface GitSectionViewProps {
   projectId: string | null
   /** The thread whose own worktree `path` is, when it is one; its branch is then fixed. */
   workspaceThreadId?: string | null
+  workspaceGeneration?: number
   /** Key of the folder Git runs in (`folderKey`, not a path on disk); null when there is none. */
   path: string | null
   git: GitStatusView
@@ -247,6 +248,7 @@ export function GitSectionView({
   ownThreadId = null,
   projectId,
   workspaceThreadId = null,
+  workspaceGeneration,
   path,
   git,
   pullRequest = null,
@@ -261,7 +263,7 @@ export function GitSectionView({
   now
 }: GitSectionViewProps) {
   const retired = retiredNote ? <p className="side-card-git-quiet side-card-git-retired">{retiredNote}</p> : null
-  const scope = useMemo(() => gitScopeFor({ projectId, workspaceThreadId }), [projectId, workspaceThreadId])
+  const scope = useMemo(() => gitScopeFor({ projectId, workspaceThreadId, workspaceGeneration }), [projectId, workspaceThreadId, workspaceGeneration])
   const { running, begin, end } = useGitActionRunner()
   const [actionError, setActionError] = useTransientError()
   // Said once and left for long enough to read, unlike an error it is not a failure.
@@ -515,7 +517,7 @@ export function GitSection({ threadId }: SideCardSectionContext) {
   // section says so and offers Retry, and an answer that comes later still shows.
   const [attempt, setAttempt] = useState(0)
   // A first status read the store gave up on (`GIT_STATUS_SLOW_ERROR`) counts as not answering too.
-  const pathSlow = useStillPending(!switching && (loading || (path !== null && !git.loaded)), `${threadId ?? ''}:${attempt}`, GIT_LOOKUP_BUDGET_MS) || git.error === GIT_STATUS_SLOW_ERROR
+  const pathSlow = useStillPending(!switching && ((loading && !location.provisioning) || (path !== null && !git.loaded)), `${threadId ?? ''}:${attempt}`, GIT_LOOKUP_BUDGET_MS) || git.error === GIT_STATUS_SLOW_ERROR
   const collapse = {
     hasProject: projectId !== null,
     pathPending: loading,
@@ -533,20 +535,16 @@ export function GitSection({ threadId }: SideCardSectionContext) {
       void git.retry()
     }
     : undefined
-  // The service refused the read: the thread's worktree was rebuilt since it was looked up. Look it up again (the new
-  // generation is another folder key, so nothing of the old worktree shows for it).
-  const rebuilt = Boolean(git.error?.includes(WORKSPACE_CHANGED_MESSAGE))
-  const lookAgain = location.retry
-  useEffect(() => { if (rebuilt) lookAgain?.() }, [rebuilt, lookAgain])
   // Only for a worktree that is not on disk: the note's read is not on the way to the status.
   const retiredNote = useRetiredWorktreeNote(location.unavailable === WORKTREE_NOT_ON_DISK ? ownThreadId : null, !loading)
-  const upstreamCheck = useUpstreamCheck(path, gitScopeFor({ projectId, workspaceThreadId: location.workspaceThreadId }), git.status?.tracking === 'tracked')
+  const upstreamCheck = useUpstreamCheck(path, gitScopeFor(location), git.status?.tracking === 'tracked')
   return (
     <GitSectionView
       threadId={threadId}
       ownThreadId={ownThreadId}
       projectId={projectId}
       workspaceThreadId={location.workspaceThreadId}
+      workspaceGeneration={location.workspaceGeneration}
       path={path}
       git={git}
       pullRequest={pullRequest}

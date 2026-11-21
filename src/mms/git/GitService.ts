@@ -800,7 +800,7 @@ export class GitService {
       facts.remotes ? false : hasLegacyRemotes(head.commonDir)
     ])
     if (!read.ok) throw failure('git_failed', read)
-    const status = parsePorcelainStatus(read.stdout)
+    const status = parsePorcelainStatus(read.stdout, head.branch)
     // Remotes kept the old way (`remotes/`, `branches/` files) are left to `git remote`.
     const hasRemote = facts.remotes || (legacyRemotes && await this.gitFor(cwd).raw(['remote']).then((value) => Boolean(value.trim())).catch(() => false))
     const inProgress = IN_PROGRESS_ORDER.find((kind) => [...markers].some((marker) => IN_PROGRESS_KIND[marker] === kind)) ?? null

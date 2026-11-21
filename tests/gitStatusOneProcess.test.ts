@@ -61,6 +61,7 @@ const STATES: Array<[string, (cwd: string) => string | undefined | void]> = [
     try { git(cwd, 'merge', 'other') } catch { /* stops on the conflict */ }
   }],
   ['detached', (cwd) => git(cwd, 'checkout', '-q', '--detach')],
+  ['a branch named (detached)', (cwd) => { git(cwd, 'checkout', '-qb', '(detached)') }],
   ['remote in Git’s dotted config syntax', (cwd) => {
     const file = join(cwd, '.git', 'config')
     appendFileSync(file, '\n[remote.origin]\n\turl = ../origin.git\n')

@@ -588,6 +588,6 @@ it('routes a remote workspace and a Git read to the same qualified thread', asyn
   expect(calls).toEqual([
     { method: 'files.root', params: { threadId: REMOTE } },
     { method: 'workspace.getStatus', params: { threadId: REMOTE } },
-    { method: 'git.status', params: { threadId: REMOTE } }
+    { method: 'git.status', params: { threadId: REMOTE, workspaceGeneration: 2, attempt: 5 } }
   ])
 })
