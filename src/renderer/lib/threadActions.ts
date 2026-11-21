@@ -1,15 +1,15 @@
 import type { StartPullRequestThreadInput } from '../../shared/pullRequests'
 import type { NodeId } from '../../shared/net'
 import { expiryPresetMs } from '../../shared/threadExpiry'
-import { composerWorkspaceFor, newThreadWorktree, rememberedChoiceOf, workspaceWithPrivate } from './newThread'
+import { composerWorkspaceFor, newThreadWorktree, rememberedChoiceOf, workspacePendingKey, workspaceWithPrivate } from './newThread'
 import { openSubagentParentRow, visibleThreads } from '../../shared/threadLineage'
 import { findUnstartedThread, isThreadStarted } from '../../shared/threadTitle'
-import type { NewThreadChoice, Project, Thread } from '../../shared/types'
+import { isTurnActivePhase, type NewThreadChoice, type Project, type Thread } from '../../shared/types'
 import { confirmNavigation } from '../services/navigationGuards'
 import { useAppStore } from '../stores/appStore'
 import { useChatsStore } from '../stores/chatsStore'
 import { orderedThreadIds, threadAfterArchive } from './threadOrder'
-import { afterNextPaint, startingThreadIds } from './pendingThreadRows'
+import { afterNextPaint, newChatHeld, startingThreadIds } from './pendingThreadRows'
 import { runWithToast } from './actionToast'
 import { showProjectInSidebar } from './sidebarReveal'
 import { markPendingArchive } from './archiveMotion'
@@ -51,12 +51,17 @@ export async function openAndSelect(threadId: string, options?: { keepWorkspace?
   await selectOrSettle(threadId)
 }
 
+let selectionRequest = 0
+
 /** Asks main to select a thread the store already switched to. A failed select sends no view, so the chat stops waiting for one. */
 export async function selectOrSettle(threadId: string): Promise<void> {
+  const request = ++selectionRequest
+  const { profileId } = useAppStore.getState()
   try {
     await window.mousse.threads.select(threadId)
   } catch (error) {
-    useAppStore.getState().settleTranscript(threadId)
+    const store = useAppStore.getState()
+    if (selectionRequest === request && store.profileId === profileId) store.settleTranscript(threadId)
     throw error
   }
 }
@@ -84,7 +89,7 @@ export async function createAndSelectNoProjectThread(): Promise<void> {
 
 async function openNoProjectThread(): Promise<void> {
   const store = useAppStore.getState()
-  const thread = findUnstartedThread(draftCandidates(store.threads).filter((entry) => !entry.localOnly)) ?? await window.mousse.threads.create()
+  const thread = findUnstartedThread(draftCandidates(store).filter((entry) => !entry.localOnly)) ?? await window.mousse.threads.create()
   store.upsertThread(thread)
   await selectThread(thread.id)
 }
@@ -93,7 +98,7 @@ async function openNoProjectThread(): Promise<void> {
 export async function createAndSelectPrivateThread(): Promise<void> {
   const store = useAppStore.getState()
   const thread =
-    findUnstartedThread(draftCandidates(store.threads).filter((entry) => entry.localOnly && !entry.node)) ??
+    findUnstartedThread(draftCandidates(store).filter((entry) => entry.localOnly && !entry.node)) ??
     await window.mousse.threads.create(undefined, undefined, { localOnly: true })
   store.upsertThread(thread)
   // The command means private, with the private-chat expiry from Settings unless one was picked; a reused draft
@@ -142,10 +147,19 @@ function usableRemembered(remembered: NewThreadChoice | undefined, projectId: st
   return rest
 }
 
-/** The threads New thread may open as an empty draft: not one a send is starting, which is a thread of its own already. */
-function draftCandidates(threads: Thread[]): Thread[] {
-  const starting = startingThreadIds()
-  return visibleThreads(threads).filter((entry) => !starting.has(entry.id))
+/**
+ * The threads New thread may open as an empty draft. Never one a send is starting or has started: a Send holding it
+ * (`holdNewChat`), preparing it (`workspacePending`), listed as its pending row, or with a turn admitted. Each of those
+ * is a thread of its own already, even before the service lists it started.
+ */
+function draftCandidates(store: ReturnType<typeof useAppStore.getState>): Thread[] {
+  const { profileId, threads, workspacePending, turnStates } = store
+  const starting = startingThreadIds(profileId)
+  return visibleThreads(threads).filter((entry) =>
+    !starting.has(entry.id) &&
+    !newChatHeld(profileId, entry.id) &&
+    !workspacePending[workspacePendingKey(profileId, entry.id)] &&
+    !isTurnActivePhase(turnStates[entry.id]?.phase ?? 'idle'))
 }
 
 /**
@@ -162,7 +176,7 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
   if (node) return openRemoteProjectDraft(projectId, node as NodeId)
   // A project just added (Add project) may not be listed in this window yet when the create answers.
   const listedBefore = store.projects.some((project) => project.id === projectId)
-  const empty = findUnstartedThread(draftCandidates(store.threads).filter((entry) => !entry.localOnly), projectId)
+  const empty = findUnstartedThread(draftCandidates(store).filter((entry) => !entry.localOnly), projectId)
   const remembered = usableRemembered(rememberedChoiceOf(store.projects, projectId), projectId)
   if (empty && matchesRememberedChoices(empty, remembered)) {
     await selectThread(empty.id)
@@ -186,7 +200,7 @@ export async function createAndSelectProjectThread(projectId: string): Promise<v
 async function openRemoteProjectDraft(projectId: string, node: NodeId): Promise<void> {
   const store = useAppStore.getState()
   const profileId = store.profileId
-  const thread = findUnstartedThread(draftCandidates(store.threads).filter((entry) => !entry.localOnly && !entry.node)) ?? await window.mousse.threads.create()
+  const thread = findUnstartedThread(draftCandidates(store).filter((entry) => !entry.localOnly && !entry.node)) ?? await window.mousse.threads.create()
   const current = useAppStore.getState()
   if (current.profileId !== profileId) return
   current.upsertThread(thread)

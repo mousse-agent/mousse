@@ -8,6 +8,11 @@
  */
 export type SendOutcome = 'answered' | 'refused' | 'arrived' | 'unknown'
 
+export interface SendRetry<T> {
+  id: string
+  context?: T
+}
+
 /**
  * The request ids of the composer's sends. The id is the service's retry key (`clientRequestId`): a send
  * with an id the service already has is answered with that run and never runs a second time.
@@ -16,8 +21,8 @@ export type SendOutcome = 'answered' | 'refused' | 'arrived' | 'unknown'
  * - The same message sent while the first is still waiting for its reply is a new message, with a new id.
  * - A send that arrived, or that the service refused, gives its id up: the same text sent later is a new message.
  */
-export class SendRetryIds {
-  private readonly retained = new Map<string, string>()
+export class SendRetryIds<T = undefined> {
+  private readonly retained = new Map<string, SendRetry<T>>()
   private readonly waiting = new Set<string>()
 
   constructor(
@@ -25,15 +30,24 @@ export class SendRetryIds {
     private readonly limit = 32
   ) {}
 
-  /** The id for a send of the message with this signature; it waits for its reply until `replied`. */
-  begin(signature: string): string {
+  get hasRetry(): boolean {
+    for (const { id } of this.retained.values()) if (!this.waiting.has(id)) return true
+    return false
+  }
+
+  retry(signature: string): SendRetry<T> | undefined {
     const kept = this.retained.get(signature)
-    const id = kept && !this.waiting.has(kept) ? kept : this.newId()
+    return kept && !this.waiting.has(kept.id) ? kept : undefined
+  }
+
+  /** Keeps a selected retry through async preparation. The ID waits for its reply until `replied`. */
+  begin(signature: string, context?: T, retry = this.retry(signature)): string {
+    const kept = retry ?? { id: this.newId(), context }
     this.retained.delete(signature)
-    this.retained.set(signature, id)
+    this.retained.set(signature, kept)
     if (this.retained.size > this.limit) this.retained.delete(this.retained.keys().next().value!)
-    this.waiting.add(id)
-    return id
+    this.waiting.add(kept.id)
+    return kept.id
   }
 
   /** The send's call returned or failed: the id no longer waits. */
@@ -45,6 +59,6 @@ export class SendRetryIds {
   settle(signature: string, id: string, outcome: SendOutcome): void {
     if (outcome === 'unknown') return
     // A later send of the same message may have taken the signature over; its id stays.
-    if (this.retained.get(signature) === id) this.retained.delete(signature)
+    if (this.retained.get(signature)?.id === id) this.retained.delete(signature)
   }
 }

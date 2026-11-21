@@ -31,6 +31,8 @@ export function skipCompactionLabel(historyTokens?: number): string {
 export const HELD_AFTER_STOP_TITLE = 'Sends after the reply to your next message, or send it now'
 /** A message sent now that no running turn could take yet: it goes in as soon as one can. */
 export const SENDS_NEXT_TITLE = 'Goes in as soon as the turn can take it'
+/** A steer whose turn ended before it could join (`QueuedMessage.steerMissed`): it is an ordinary queued message now. */
+export const STEER_MISSED_TITLE = 'Its turn ended before it could join; it sends as a message of its own'
 /** Why the queue waits while no reply runs (`QueuedMessage.waitsFor`, `waitsForLease`): the row's label and its title. */
 export const QUEUE_WAIT_LABELS = {
   finish: { label: 'Waits for the last turn to finish', title: 'The reply is complete; the turn is still saving its checkpoint' },
@@ -433,7 +435,7 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
         // steer sent into another process's reply is that process's to take.
         const fixed = item.intent === 'steer'
         // Sent now while no running turn could take it: it goes next, into the turn as soon as one can take it.
-        const goesNext = queue.sendingNext.has(item.id)
+        const goesNext = !item.steerMissed && (item.sendsNext || queue.sendingNext.has(item.id))
         const queuedAt = formatMessageTime(item.enqueuedAt)
         const sendLabel = fixed
           ? item.subagentNotice?.length || item.inboxIds?.length ? 'Runs as a turn of its own' : 'Sent into the running reply'
@@ -442,6 +444,8 @@ export function QueuedMessages({ queue }: { queue: ThreadQueue }) {
         // After a Stop nothing drains the queue: the next turn the person starts lifts the hold, and it sends after that.
         const label = goesNext
           ? <span className="queued-message-state" title={SENDS_NEXT_TITLE}>Sends next</span>
+          : item.steerMissed
+          ? <span className="queued-message-state" title={STEER_MISSED_TITLE}>Not steered</span>
           : !last ? null : item.heldAfterStop
           ? <span className="queued-message-state" title={HELD_AFTER_STOP_TITLE}>Held after Stop</span>
           : hold

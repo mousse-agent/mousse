@@ -11,7 +11,7 @@ import type { AgentActor } from './types'
  * (`stopGeneration.ts`): small functions over the run database.
  */
 
-export type QueueOp = 'enqueue' | 'edit' | 'remove' | 'reorder' | 'promote' | 'steer_now'
+export type QueueOp = 'enqueue' | 'edit' | 'remove' | 'reorder' | 'promote' | 'steer_now' | 'enqueue_steer'
 
 export type QueueCommandStatus = 'pending' | 'effects_pending' | 'applied' | 'failed'
 
@@ -30,6 +30,8 @@ export interface QueueIntent {
   itemId: string
   /** enqueue: the item as it is queued. */
   item?: QueuedMessage
+  /** enqueue_steer: a later Stop holds the person's message when it reaches the queue. */
+  admissionStopGeneration?: number
   /** edit: the new text, mode, origin and ceiling. */
   patch?: { content?: string; mode?: QueuedMessage['mode']; origin?: AgentOrigin; permissionMode?: PermissionMode; dropRun?: boolean }
   /** reorder: the new order of the pending items. */

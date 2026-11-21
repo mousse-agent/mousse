@@ -18,6 +18,7 @@ import { HandoffService } from './handoff/HandoffService'
 import { ContextTransfers } from './handoff/Transfers'
 import { Inbox } from './Inbox'
 import { QueueCommands } from './QueueCommands'
+import { enqueueMessage, type EnqueueMessageInput } from '../queue/ThreadMessageQueue'
 import type { Answerer } from './approvalRights'
 import { DEFAULT_HEARTBEAT_MS } from './Reconciler'
 import type { RestartNote } from './restartNote'
@@ -75,6 +76,10 @@ export type RunCommand =
        * repeated `clientRequestId` with other text is refused instead of answered with another message's run.
        */
       prompt?: string
+      /** A Steer target supplied by the caller must match the receipt on retry. */
+      explicitSteerRunId?: string
+      /** Recoverable queue payload of a person's Steer, written with the send's receipt. */
+      steer?: { runId: string; message: Omit<EnqueueMessageInput, 'threadId' | 'runId' | 'clientRequestId' | 'steerOnStart'> }
       /**
        * SPEC §17.3: the send denies the thread's saved approval requests with `feedback` as the
        * reason, inside its own admission, and hands the whole delivery group to the run it creates.
@@ -174,6 +179,8 @@ export type CommandResult =
       runId: string
       sequence: number
       replayed: boolean
+      steerItemId?: string
+      steerDeliveredRunId?: string
       /** A send that ended the thread's pause in its transaction: the paused run, and the resume item it had (SPEC §5). */
       endedPause?: { runId: string; resumeItemId?: string }
       /** A send with `queueBehindPause` that found the thread paused: the paused run, whose pause it left in place. */
@@ -1939,7 +1946,7 @@ export class RunEngine extends EventEmitter {
     const { threadId, clientRequestId } = command
     const receipt = store.getReceipt(clientRequestId)
     if (receipt) {
-      if (receipt.threadId !== threadId || receipt.commandKind !== command.kind || !samePrompt(command, receipt))
+      if (receipt.threadId !== threadId || receipt.commandKind !== command.kind || !matchesSendReceipt(command, receipt))
         return {
           status: 'rejected',
           reason: 'client_request_id_conflict',
@@ -2080,15 +2087,31 @@ export class RunEngine extends EventEmitter {
           runId: run.runId,
           ...(command.prompt !== undefined ? { length: command.prompt.length } : {})
         })
+      const steerItem = command.steer && enqueueMessage([], {
+        ...command.steer.message,
+        threadId: command.threadId,
+        runId: run.runId,
+        clientRequestId: command.clientRequestId,
+        steerOnStart: { runId: command.steer.runId }
+      }).item
+      if (steerItem) {
+        // The database is profile-local, and the queue lock and stable item id protect replay within the thread.
+        new QueueCommands(store.db).insertPending(JSON.stringify(['enqueue_steer', command.threadId, command.clientRequestId]), {
+          op: 'enqueue_steer', threadId: command.threadId, itemId: steerItem.id, item: steerItem,
+          admissionStopGeneration: currentStopGeneration(store, command.threadId),
+          cancelRunIds: [], releaseInboxIds: []
+        })
+      }
       const sequence = store.maxSeq(command.threadId)
       this.putReceipt(command, 'accepted', {
         runId: run.runId,
         sequence,
         ...(endedPause ? { endedPause } : {}),
         ...(heldByPause ? { heldByPause } : {}),
-        ...(command.prompt !== undefined ? { promptDigest: promptDigest(command.prompt) } : {})
+        ...(command.prompt !== undefined ? { promptDigest: promptDigest(command.prompt) } : {}),
+        ...(steerItem ? { steerRunId: command.steer!.runId, steerItemId: steerItem.id } : {})
       })
-      return { status: 'accepted', runId: run.runId, sequence, replayed: false, ...(endedPause ? { endedPause } : {}), ...(heldByPause ? { heldByPause } : {}) }
+      return { status: 'accepted', runId: run.runId, sequence, replayed: false, ...(steerItem ? { steerItemId: steerItem.id } : {}), ...(endedPause ? { endedPause } : {}), ...(heldByPause ? { heldByPause } : {}) }
     })
   }
 
@@ -2341,11 +2364,13 @@ function promptDigest(prompt: string): string {
   return createHash('sha256').update(prompt, 'utf8').digest('hex')
 }
 
-/** A repeated send carries the text it was first sent with. Receipts and sends without a text are not compared. */
-function samePrompt(command: RunCommand, receipt: ReceiptRecord): boolean {
-  if (command.kind !== 'send' || command.prompt === undefined) return true
-  const stored = (receipt.result as { promptDigest?: unknown } | null)?.promptDigest
-  return typeof stored !== 'string' || stored === promptDigest(command.prompt)
+/** A repeated send keeps its text and any explicit Steer target. An omitted target reuses the receipt. */
+function matchesSendReceipt(command: RunCommand, receipt: ReceiptRecord): boolean {
+  if (command.kind !== 'send') return true
+  const stored = receipt.result as { promptDigest?: unknown; steerRunId?: unknown } | null
+  if (command.explicitSteerRunId !== undefined && typeof stored?.steerRunId === 'string' && command.explicitSteerRunId !== stored.steerRunId)
+    return false
+  return command.prompt === undefined || typeof stored?.promptDigest !== 'string' || stored.promptDigest === promptDigest(command.prompt)
 }
 
 function replay(receipt: ReceiptRecord): CommandResult {
@@ -2354,6 +2379,8 @@ function replay(receipt: ReceiptRecord): CommandResult {
     sequence?: number
     reason?: string
     activeRunId?: string | null
+    steerItemId?: string
+    steerDeliveredRunId?: string
     endedPause?: { runId: string; resumeItemId?: string }
     heldByPause?: { runId: string }
   }
@@ -2364,6 +2391,8 @@ function replay(receipt: ReceiptRecord): CommandResult {
       runId: stored.runId ?? '',
       sequence,
       replayed: true,
+      ...(stored.steerItemId ? { steerItemId: stored.steerItemId } : {}),
+      ...(stored.steerDeliveredRunId ? { steerDeliveredRunId: stored.steerDeliveredRunId } : {}),
       ...(stored.endedPause ? { endedPause: stored.endedPause } : {}),
       ...(stored.heldByPause ? { heldByPause: stored.heldByPause } : {})
     }

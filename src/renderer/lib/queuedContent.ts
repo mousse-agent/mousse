@@ -46,8 +46,12 @@ export const isOptimisticQueueItem = (item: QueuedMessage): boolean => item.id.s
  * now. Messages still on their way, being sent, or fixed steer items (a subagent result, another process's steer) are
  * skipped, as their Send now is.
  */
-export function nextSteerableQueueItem(items: readonly QueuedMessage[], busyIds: Readonly<Record<string, boolean>>): QueuedMessage | undefined {
-  return items.find((item) => !isOptimisticQueueItem(item) && item.state === 'pending' && item.intent !== 'steer' && !busyIds[item.id])
+export function nextSteerableQueueItem(
+  items: readonly QueuedMessage[],
+  busyIds: Readonly<Record<string, boolean>>,
+  sendingNext: ReadonlySet<string>
+): QueuedMessage | undefined {
+  return items.find((item) => !isOptimisticQueueItem(item) && item.state === 'pending' && item.intent !== 'steer' && !busyIds[item.id] && !item.sendsNext && (!sendingNext.has(item.id) || item.steerMissed))
 }
 
 /**

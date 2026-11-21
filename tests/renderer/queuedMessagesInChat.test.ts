@@ -716,22 +716,28 @@ function deferred<T>() {
 }
 
 describe('a message shown while its send is on its way', () => {
-  function SendingChat({ optimistic, hidden, onReconciled }: { optimistic: QueuedMessage[]; hidden?: ReadonlySet<string>; onReconciled?: (id: string) => void }) {
-    const thread = useThreadQueue({ threadId: 't1', optimisticItems: optimistic, hiddenRequestIds: hidden, onOptimisticItemReconciled: onReconciled })
+  function SendingChat({ optimistic, hidden, onQueueObserved }: {
+    optimistic: QueuedMessage[]
+    hidden?: ReadonlySet<string>
+    onQueueObserved?: (threadId: string, items: QueuedMessage[]) => void
+  }) {
+    const thread = useThreadQueue({ threadId: 't1', optimisticItems: optimistic, hiddenRequestIds: hidden, onQueueObserved })
     return createElement(QueuedMessages, { queue: thread })
   }
   const ids = () => rows().map((item) => item.dataset.queuedId)
 
   it('shows once when the queue lists it before the send answers', async () => {
-    const reconciled = vi.fn()
+    const observed = vi.fn()
     const copy = queued('optimistic:x', 'two', { clientRequestId: 'req-2' })
-    act(() => root.render(createElement(SendingChat, { optimistic: [copy], onReconciled: reconciled })))
+    act(() => root.render(createElement(SendingChat, { optimistic: [copy], onQueueObserved: observed })))
     await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one')] }) })
     expect(ids()).toEqual(['a', 'optimistic:x'])
     // The daemon lists the item its send queued; the send has not answered yet.
     await act(async () => { push!({ threadId: 't1', items: [queued('a', 'one'), queued('srv-2', 'two', { clientRequestId: 'req-2' })] }) })
     expect(ids()).toEqual(['a', 'srv-2'])
-    expect(reconciled).toHaveBeenCalledWith('optimistic:x')
+    expect(observed).toHaveBeenLastCalledWith('t1', expect.arrayContaining([
+      expect.objectContaining({ id: 'srv-2', clientRequestId: 'req-2' })
+    ]))
   })
 
   it('keeps an identical message sent earlier apart from it', async () => {

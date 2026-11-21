@@ -7,7 +7,7 @@ const item = (id: string, patch: Partial<QueuedMessage> = {}): QueuedMessage =>
 
 describe('the queued message the steer chord sends from an empty composer', () => {
   it('is the first waiting one', () => {
-    expect(nextSteerableQueueItem([item('a'), item('b')], {})?.id).toBe('a')
+    expect(nextSteerableQueueItem([item('a'), item('b')], {}, new Set())?.id).toBe('a')
   })
 
   it('skips one on its way, one being sent, one already steering, and a fixed steer item', () => {
@@ -16,13 +16,14 @@ describe('the queued message the steer chord sends from an empty composer', () =
       item('busy'),
       item('steering', { state: 'steering' }),
       item('notice', { intent: 'steer' }),
+      item('already-sending-next'),
       item('next')
     ]
-    expect(nextSteerableQueueItem(items, { busy: true })?.id).toBe('next')
+    expect(nextSteerableQueueItem(items, { busy: true }, new Set(['already-sending-next']))?.id).toBe('next')
   })
 
   it('is none when nothing can be sent now', () => {
-    expect(nextSteerableQueueItem([], {})).toBeUndefined()
-    expect(nextSteerableQueueItem([item('notice', { intent: 'steer' })], {})).toBeUndefined()
+    expect(nextSteerableQueueItem([], {}, new Set())).toBeUndefined()
+    expect(nextSteerableQueueItem([item('notice', { intent: 'steer' })], {}, new Set())).toBeUndefined()
   })
 })

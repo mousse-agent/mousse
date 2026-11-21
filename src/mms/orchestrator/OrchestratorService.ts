@@ -339,6 +339,7 @@ import {
   holdQueueAfterStop,
   isQueueHeldByStop,
   markWaitingForLease,
+  markSteerOnStart,
   listClaimedQueue,
   listPendingQueue,
   promoteQueuedMessageToSteer,
@@ -647,6 +648,12 @@ export interface OrchestratorSendOptions {
   source?: string
   forceQueue?: boolean
   clientRequestId?: string
+  /**
+   * A person's Steer (`OrchestratorSendRequest.steer`): a message that has to wait for the thread's turn is sent into
+   * it instead, or kept first to join it as it runs when it is still being set up (`promoteQueueItem`).
+   */
+  steer?: boolean
+  steerRunId?: string
   /**
    * `turn` (default) resolves with the turn's result; `ack` resolves once the send is committed
    * and its `turn.start` effect recorded (SPEC §12.7). Only the engine path honours `ack`.
@@ -6597,7 +6604,7 @@ export class OrchestratorService extends EventEmitter {
     }
     // The turn.start effect now carries this admission, whoever reserved it (the send, or a queue drain
     // that held it across the await that made the run): the owner is the run the effect starts.
-    if (session.turnAdmitted && !session.activeTurn) session.admissionRunId = runId
+    if (session.turnAdmitted && !session.activeTurn) this.publishTurnAdmission(session, runId)
     try {
       return this.enqueueTurnStart({ ...payload, runId, admissionHeld: true })
     } catch (error) {
@@ -6850,10 +6857,7 @@ export class OrchestratorService extends EventEmitter {
     if (entry && this.turnResults.get(payload.runId) === entry) this.turnResults.delete(payload.runId)
     const session = this.boundSession.threadId === payload.threadId ? this.boundSession : this.sessions.get(payload.threadId)
     if (session && entry?.payload.admissionHeld && !session.activeTurn) {
-      session.turnAdmitted = false
-      // Messages sent now while this admission was set up stay first in the queue and drain from there.
-      session.steerOnStart = []
-      session.admissionRunId = undefined
+      this.clearTurnAdmission(session, run.runId, session.abortRequested || session.stopping)
       session.abortRequested = false
       if (session.drainAfterSettle) {
         session.drainAfterSettle = false
@@ -10731,13 +10735,22 @@ export class OrchestratorService extends EventEmitter {
 
   /** The listed `items` with why they wait now. */
   private withQueueWait(threadId: string, items: QueuedMessage[]): QueuedMessage[] {
-    const wait = this.queueWaitOf(this.loadedSession(threadId))
+    const session = this.loadedSession(threadId)
+    const wait = this.queueWaitOf(session)
+    // A Steer targeting the turn in setup shows "Sends next" even before the turn lifts the Stop hold.
+    // Once setup ends, a Steer still pending can be sent now again.
+    const settingUp = session?.turnAdmitted && !session.activeTurn && !session.abortRequested && !session.stopping
+    const startingRunId = settingUp ? session.admissionRunId ?? this.turnStates.get(threadId)?.turnId : undefined
     return items.map((item) => {
-      // A steer, or a message a Stop holds, waits for something else.
-      if (wait && item.state === 'pending' && item.intent === 'normal' && !item.heldAfterStop) return item.waitsFor === wait ? item : { ...item, waitsFor: wait }
-      if (!item.waitsFor) return item
-      const { waitsFor: _wait, ...rest } = item
-      return rest
+      const pending = item.state === 'pending'
+      const next = pending && (item.steerOnStart
+        ? item.steerOnStart.runId === startingRunId
+        : settingUp && !item.heldAfterStop && session.steerOnStart.includes(item.id))
+      const sendsNext = next ? true : undefined
+      const steerMissed = pending && !next && item.steerOnStart ? true : undefined
+      const waitsFor = pending && item.intent === 'normal' && !item.heldAfterStop && !next ? wait : undefined
+      if (item.waitsFor === waitsFor && item.sendsNext === sendsNext && item.steerMissed === steerMissed) return item
+      return { ...item, waitsFor, sendsNext, steerMissed }
     })
   }
 
@@ -10811,6 +10824,7 @@ export class OrchestratorService extends EventEmitter {
       afterSave?: (item: QueuedMessage, saved: QueuedMessage[]) => void
       /** Queued because the thread's lease is held (`QueuedMessage.waitsForLease`). */
       waitsForLease?: boolean
+      steerRunId?: string
     }
   ): QueuedMessage {
     if (this.threadStore && !this.threadStore.getThread(threadId)) {
@@ -10860,7 +10874,8 @@ export class OrchestratorService extends EventEmitter {
           id: opts?.id,
           atFront: opts?.atFront,
           continuationOfRunId: opts?.continuationOfRunId,
-          waitsForLease: opts?.waitsForLease
+          waitsForLease: opts?.waitsForLease,
+          ...(opts?.steerRunId ? { steerOnStart: { runId: opts.steerRunId } } : {})
         })
         item = result.item
         return result.items
@@ -10890,7 +10905,8 @@ export class OrchestratorService extends EventEmitter {
       id: opts?.id,
       atFront: opts?.atFront,
       continuationOfRunId: opts?.continuationOfRunId,
-      waitsForLease: opts?.waitsForLease
+      waitsForLease: opts?.waitsForLease,
+      ...(opts?.steerRunId ? { steerOnStart: { runId: opts.steerRunId } } : {})
     })
     session.queue = result.items
     item = result.item
@@ -10978,7 +10994,10 @@ export class OrchestratorService extends EventEmitter {
     if (live && !live.abort.signal.aborted && (live.pendingSteer.some((entry) => entry.itemId === itemId) || session.drainedExternalSteerIds.has(itemId)))
       return { ok: true }
     // Already waiting to join the turn being set up.
-    if (session.steerOnStart.includes(itemId) && session.turnAdmitted) return { ok: true }
+    if (session.turnAdmitted && !session.activeTurn && !session.stopping && !session.abortRequested) {
+      const item = session.queue.find((entry) => entry.id === itemId)
+      if (session.steerOnStart.includes(itemId) || (item?.steerOnStart && item.steerOnStart.runId === this.steerTarget(session))) return { ok: true }
+    }
     // A turn whose provider has finished takes no steer: the message goes first and runs as soon as it has ended.
     const localActive = session.takesSteer()
     const externalActive = this.isThreadLeaseHeldExternally(
@@ -11086,9 +11105,16 @@ export class OrchestratorService extends EventEmitter {
       const pending = listPendingQueue(items).filter((entry) => !entry.internal)
       const item = pending.find((entry) => entry.id === itemId)
       if (!item || item.state !== 'pending') throw new QueueConflictError('queue_item_not_found', 'That message is not in the queue.')
-      const first = [...session.steerOnStart, itemId].filter((id) => pending.some((entry) => entry.id === id))
-      return reorderQueuedMessages(items, [...first, ...pending.map((entry) => entry.id).filter((id) => !first.includes(id))])
+      // A message already targeted at this run keeps its place while it waits for the Stop hold to lift.
+      const first = new Set(pending.filter((entry) => runId
+        ? entry.steerOnStart?.runId === runId
+        : session.steerOnStart.includes(entry.id)).map((entry) => entry.id))
+      if (first.has(itemId)) return items
+      first.add(itemId)
+      // Saved with the item: the run it joins. Another run that meets it never takes it as a steer.
+      return markSteerOnStart(reorderQueuedMessages(items, [...first, ...pending.filter((entry) => !first.has(entry.id)).map((entry) => entry.id)]), itemId, runId)
     }
+    const runId = this.steerTarget(session)
     session.queue = this.threadStore ? mutateDurableQueue(this.threadStore, session.threadId, order) : order(session.queue)
     session.steerOnStart.push(itemId)
     this.emitQueueUpdated(session.threadId, session.queue)
@@ -11174,16 +11200,98 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  private materializeSteerSend(session: ThreadSession, itemId: string): QueuedMessage | undefined {
+    try {
+      session.queue = repairQueueJournal(this.threadStore!, session.threadId)
+    } catch (error) {
+      // Admission already saved the message. A queue I/O failure here must never be a refusal that
+      // prompts the window to send the same message under a new request id.
+      logDebug('OrchestratorService', 'could not apply an admitted Steer to its queue', error, { threadId: session.threadId })
+      this.scheduleQueueRepair(session.threadId, true)
+      return undefined
+    }
+    const item = session.queue.find((entry) => entry.id === itemId)
+    if (item) {
+      if (!this.threadStore?.getThread(session.threadId)?.startedAt) this.touchUserActivityAndNotify(session.threadId)
+      this.emitQueueUpdated(session.threadId, session.queue)
+    }
+    return item
+  }
+
+  private applyQueuedSendSteer(session: ThreadSession, item: QueuedMessage, steerRunId: string | undefined, tryPromote: boolean): { queueItem: QueuedMessage; steerApplied: boolean } {
+    const threadId = session.threadId
+    let [queueItem] = this.withQueueWait(threadId, [item])
+    if (item.intent === 'steer' || (!session.activeTurn && queueItem.sendsNext)) return { queueItem, steerApplied: true }
+    const takesSteer = session.takesSteer() || (!this.runEngine && session.turnAdmitted && !session.activeTurn && !session.stopping && !session.abortRequested)
+    if (tryPromote && item.state === 'pending' && !item.heldAfterStop && takesSteer && (!steerRunId || this.steerTarget(session) === steerRunId)) {
+      try {
+        const { ok } = this.promoteQueueItem(threadId, item.id, { expectedRunId: steerRunId })
+        const saved = session.queue.find((entry) => entry.id === item.id)
+        if (saved) [queueItem] = this.withQueueWait(threadId, [saved])
+        return { queueItem, steerApplied: ok }
+      } catch (error) {
+        logDebug('OrchestratorService', 'a steer sent with its message could not join the turn', error, { threadId })
+      }
+    }
+    return { queueItem, steerApplied: false }
+  }
+
+  private steerSendAlreadySettled(threadId: string, requestId: string, admission: { runId: string; sequence: number; replayed?: boolean }): OrchestratorResponse {
+    const receipt = this.runEngine?.store.getReceipt(requestId)
+    const delivered = receipt?.threadId === threadId
+      ? (receipt.result as { steerDeliveredRunId?: string } | null)?.steerDeliveredRunId
+      : undefined
+    return { message: '', actions: [], ...admission, accepted: true, ...(delivered ? { runId: delivered, steerApplied: true } : {}) }
+  }
+
+  private publishTurnAdmission(session: ThreadSession, runId: string): void {
+    if (session.admissionRunId === runId) return
+    session.admissionRunId = runId
+    this.setTurnPhase(session.threadId, 'queued', { turnId: runId })
+  }
+
+  private clearTurnAdmission(session: ThreadSession, runId: string | undefined, stopped: boolean): void {
+    const legacyIds = session.steerOnStart.splice(0)
+    session.turnAdmitted = false
+    session.admissionRunId = undefined
+    const state = this.turnStates.get(session.threadId)
+    if (runId && state?.phase === 'queued' && state.turnId === runId) this.setTurnPhase(session.threadId, 'idle')
+
+    if (this.threadStore && session.threadId !== '__unbound__' && (runId || legacyIds.length)) {
+      try {
+        session.queue = readDurableQueue(this.threadStore, session.threadId)
+      } catch (error) {
+        logDebug('OrchestratorService', 'could not read Steer messages after setup ended', error, { threadId: session.threadId })
+      }
+    }
+    const missed = session.queue.filter((item) => item.state === 'pending' &&
+      ((item.steerOnStart && item.steerOnStart.runId === runId) || legacyIds.includes(item.id)))
+    if (!missed.length) return
+    this.emitQueueUpdated(session.threadId, session.queue)
+    if (!stopped && missed.some((item) => !item.heldAfterStop)) session.drainAfterSettle = true
+  }
+
   /** The turn now runs: the messages sent now while it was set up join it, in the order they were sent. */
   private deliverSteersOnStart(session: ThreadSession): void {
-    const ids = session.steerOnStart.splice(0)
+    const legacyIds = session.steerOnStart.splice(0)
     // A Stop reached the turn while it was set up: nothing joins it, and nothing runs them after it, as after a Stop of
     // a running turn. They wait first in the queue, in the order they were sent, until the person sends again.
     if (session.activeTurn?.abort.signal.aborted || session.abortRequested || session.stopping) return
-    for (const itemId of ids) {
+    const runId = session.activeTurn?.runId
+    let items: QueuedMessage[]
+    try {
+      items = this.threadStore ? readDurableQueue(this.threadStore, session.threadId) : session.queue
+    } catch (error) {
+      // The queue drains after the original turn, including Steers that could not join it.
+      logDebug('OrchestratorService', 'could not read Steer messages at turn start', error, { threadId: session.threadId })
+      return
+    }
+    const pending = items.filter((item) => item.state === 'pending' && !item.heldAfterStop && (item.steerOnStart
+      ? item.steerOnStart.runId === runId
+      : legacyIds.includes(item.id)))
+    for (const { id: itemId } of pending) {
       try {
-        if (!session.queue.some((entry) => entry.id === itemId && entry.state === 'pending')) continue
-        this.promoteQueueItem(session.threadId, itemId)
+        this.promoteQueueItem(session.threadId, itemId, { expectedRunId: this.runEngine ? runId : undefined })
       } catch (error) {
         // It stays first in the queue and goes as the next turn.
         console.warn('a message sent now could not join the turn that started', { threadId: session.threadId, itemId, error: error instanceof Error ? error.message : String(error) })
@@ -11395,12 +11503,15 @@ export class OrchestratorService extends EventEmitter {
       // Old finished entries go; so do the entries of a thread that no longer exists (nothing is left for them to finish).
       journal.commands.prune()
       for (const threadId of journal.commands.unfinishedThreadIds()) {
-        if (!store.getThread(threadId)) {
+        const thread = store.getThread(threadId)
+        if (!thread) {
           journal.commands.deleteForThread(threadId)
           continue
         }
         try {
-          repairQueueJournal(store, threadId)
+          const items = repairQueueJournal(store, threadId)
+          // A crash can cut off the first send before it made the thread visible for startup draining.
+          if (!thread.startedAt && items.some((item) => item.steerOnStart)) this.touchUserActivityAndNotify(threadId)
         } catch (error) {
           console.warn('a thread\'s unfinished queue commands could not be finished at boot', { threadId, error: error instanceof Error ? error.message : String(error) })
         }
@@ -11413,6 +11524,7 @@ export class OrchestratorService extends EventEmitter {
   private queueEffects(engine: RunEngine): QueueEffects {
     return {
       activeRunId: (threadId) => engine.getActiveRun(threadId)?.runId ?? null,
+      stopGeneration: (threadId) => currentStopGeneration(engine.store, threadId),
       applyEffects: (intent) => {
         // The queued runs the item owned end cancelled (only still-queued ones: a claimed item's run may be starting).
         for (const runId of intent.cancelRunIds) {
@@ -11459,7 +11571,7 @@ export class OrchestratorService extends EventEmitter {
   }
 
   /** An unfinished queue command is tried again in a few seconds, a few times; the next change to the queue and boot try as well. */
-  private scheduleQueueRepair(threadId: string): void {
+  private scheduleQueueRepair(threadId: string, admittedSteer = false): void {
     const attempts = (this.queueRepairAttempts.get(threadId) ?? 0) + 1
     if (this.lifecycle.stopping || attempts > QUEUE_REPAIR_ATTEMPTS) return
     this.queueRepairAttempts.set(threadId, attempts)
@@ -11468,10 +11580,20 @@ export class OrchestratorService extends EventEmitter {
       const store = this.threadStore
       if (this.lifecycle.stopping || !store) return
       try {
-        repairQueueJournal(store, threadId)
+        const items = repairQueueJournal(store, threadId)
         if (!store.getQueueJournal()?.commands.listUnfinished(threadId).length) this.queueRepairAttempts.delete(threadId)
+        if (admittedSteer) {
+          const session = this.getOrCreateSession(threadId)
+          session.queue = items
+          this.emitQueueUpdated(threadId, items)
+          for (const item of items) {
+            if (item.steerOnStart) this.applyQueuedSendSteer(session, item, item.steerOnStart.runId, true)
+          }
+          this.scheduleQueueDrain(session)
+        }
       } catch (error) {
         console.warn('a queue command could not be repaired', { threadId, attempts, error: error instanceof Error ? error.message : String(error) })
+        if (admittedSteer) this.scheduleQueueRepair(threadId, true)
       }
     }, QUEUED_ROW_RELEASE_RETRY_MS)
     timer.unref?.()
@@ -13351,6 +13473,11 @@ export class OrchestratorService extends EventEmitter {
     }
   }
 
+  private steerTarget(session: ThreadSession): string | undefined {
+    if (!this.runEngine || !session.isTurnRunning()) return undefined
+    return session.activeTurn?.runId ?? session.admissionRunId ?? this.turnStates.get(session.threadId)?.turnId ?? undefined
+  }
+
   private async sendOwned(
     input: OrchestratorSendInput,
     reuseLastUser = false,
@@ -13386,6 +13513,8 @@ export class OrchestratorService extends EventEmitter {
     if (session.deleted) {
       throw new Error(`Thread deleted: ${threadId}`)
     }
+    // Capture the intended turn before any await. A later turn can only run the message as a normal follow-up.
+    let steerRunId = opts?.steer ? opts.steerRunId ?? this.steerTarget(session) : undefined
     // A person's message from a window or the CLI brings an archived thread back before it runs. Agents and bots are
     // refused earlier (`thread_archived`) and never unarchive it.
     if ((opts?.source === 'gui' || opts?.source === 'cli') && !opts.agent && !opts.delegation) await this.unarchiveForPerson(threadId)
@@ -13421,6 +13550,13 @@ export class OrchestratorService extends EventEmitter {
             if (full) throw full
           }
           this.assertSendableSelection(session, input, opts?.modelOverride, opts?.origin === 'schedule')
+          if (steerRunId && this.threadStore) {
+            if (expectedBranch || opts?.refuseQueue) throw new DomainRpcError('thread_busy', 'Wait for the current turn to finish.')
+            this.assertQueueOpen(threadId)
+            const request = normalizeSendRequest(input)
+            if (request.images?.length && imageDataChars(repairQueueJournal(this.threadStore, threadId)) + imageDataChars([request]) > QUEUE_IMAGES_MAX_DATA_CHARS)
+              throw knownAppError({ code: 'queue_images_full', message: 'Too many images are waiting in this thread. Send this once they have gone.' }, { category: 'unavailable', retryable: true })
+          }
           opts?.onAdmit?.()
         }
       : undefined
@@ -13434,14 +13570,24 @@ export class OrchestratorService extends EventEmitter {
     // The run is durable before any queue/run decision or provider I/O (SPEC §2.1).
     let run: { runId: string; sequence: number } | undefined
     let heldByPause = false
+    let steerItemId: string | undefined
+    const clientRequestId = opts?.clientRequestId ?? uuidv4()
     if (this.runEngine) {
-      const text = normalizeSendRequest(input).content
+      const { content: text, mode, images, workflowInvocationId } = normalizeSendRequest(input)
+      if (opts?.steer) steerRunId ??= this.steerTarget(session)
       const result = await this.runEngine.dispatch({
         kind: 'send',
         threadId,
-        clientRequestId: opts?.clientRequestId ?? uuidv4(),
+        clientRequestId,
         source: opts?.source ?? 'protocol',
         prompt: text,
+        ...(opts?.steer && opts.steerRunId !== undefined ? { explicitSteerRunId: opts.steerRunId } : {}),
+        ...(steerRunId && this.threadStore ? {
+          steer: {
+            runId: steerRunId,
+            message: { content: text, mode, images, workflowInvocationId, source: opts?.source, permissionMode: opts?.permissionMode, origin: opts?.queueOrigin, sentFrom: opts?.sentFrom }
+          }
+        } : {}),
         ...(opts?.agent ? { actor: opts.agent } : {}),
         ...(opts?.delegation ? { delegation: opts.delegation } : {}),
         ...(opts?.continuationOfRunId ? { continuationOfRunId: opts.continuationOfRunId, acknowledgeUncertain: opts.acknowledgeUncertain === true } : {}),
@@ -13458,11 +13604,29 @@ export class OrchestratorService extends EventEmitter {
       if (result.status !== 'accepted') throw new DomainRpcError(result.reason, `Send refused: ${result.reason}.`)
       if (result.replayed) {
         const replayed = { runId: result.runId, sequence: result.sequence, replayed: true }
+        if (result.steerDeliveredRunId)
+          return { message: '', actions: [], ...replayed, accepted: true, runId: result.steerDeliveredRunId, steerApplied: true }
+        if (result.steerItemId && this.threadStore) {
+          const item = this.materializeSteerSend(session, result.steerItemId)
+          if (!item) return this.steerSendAlreadySettled(threadId, clientRequestId, replayed)
+          const { queueItem, steerApplied } = this.applyQueuedSendSteer(session, item, item.steerOnStart?.runId, Boolean(item.steerOnStart) && !result.heldByPause)
+          if (!session.isTurnRunning() && !item.heldAfterStop) this.scheduleQueueDrain(session)
+          return {
+            message: '', actions: [], queued: true, queueItem, ...replayed,
+            ...(result.heldByPause ? { heldByPause: true } : {}),
+            ...(steerApplied ? { steerApplied: true } : {})
+          }
+        }
         // A replay of a message that waits behind a pause answers as the first send did: queued and held, so the
         // window keeps it out of the transcript and the thread keeps showing as paused.
-        if (result.heldByPause && this.runEngine.getRun(result.runId)?.status === 'queued' && this.threadStore) {
-          const queueItem = readDurableQueue(this.threadStore, threadId).find((item) => item.runId === result.runId)
-          if (queueItem) return { message: '', actions: [], queued: true, queueItem, heldByPause: true, ...replayed }
+        if ((result.heldByPause || opts?.steer) && this.threadStore) {
+          const item = readDurableQueue(this.threadStore, threadId).find((item) =>
+            item.runId === result.runId || (opts?.clientRequestId && item.clientRequestId === opts.clientRequestId)
+          )
+          if (item) {
+            const [queueItem] = this.withQueueWait(threadId, [item])
+            return { message: '', actions: [], queued: true, queueItem, ...(result.heldByPause ? { heldByPause: true } : {}), ...(queueItem.sendsNext || item.intent === 'steer' ? { steerApplied: true } : {}), ...replayed }
+          }
         }
         // A replay of a send whose turn is still live waits for the same result (SPEC §12.7).
         const live = this.turnResults.get(result.runId)
@@ -13487,6 +13651,7 @@ export class OrchestratorService extends EventEmitter {
         return { message: '', actions: [], ...(workflowRun ? { workflowRun } : {}), ...replayed }
       }
       run = { runId: result.runId, sequence: result.sequence }
+      steerItemId = result.steerItemId
       heldByPause = Boolean(result.heldByPause)
       if (opts?.sentFrom) this.recordSentFrom(threadId, run.runId, opts.sentFrom.node)
       // This message ended a usage-limit pause (it is a person's): the continue message that waited for the
@@ -13541,13 +13706,14 @@ export class OrchestratorService extends EventEmitter {
     // A compaction of the thread is running: the message waits in the queue, which is held until the compaction ends.
     const heldByCompaction = !session.isTurnRunning() && this.compactionHoldsQueue(threadId)
 
-    if (session.isTurnRunning() || opts?.forceQueue || externalLease || waitingOnUser || heldByPause || heldByCompaction) {
+    if (session.isTurnRunning() || opts?.forceQueue || externalLease || waitingOnUser || heldByPause || heldByCompaction || steerRunId) {
       if (expectedBranch || opts?.refuseQueue) {
         const busy = new DomainRpcError('thread_busy', 'Wait for the current turn to finish.')
         if (run) this.cancelOrphanedAdmission(run.runId, busy.message)
         throw busy
       }
-      const item = this.enqueueForThread(threadId, input, {
+      if (steerItemId) this.touchUserActivityAndNotify(threadId)
+      const item = steerItemId ? this.materializeSteerSend(session, steerItemId) : this.enqueueForThread(threadId, input, {
         source: opts?.source,
         ...(opts?.clientRequestId ? { clientRequestId: opts.clientRequestId } : {}),
         runId: run?.runId,
@@ -13555,8 +13721,12 @@ export class OrchestratorService extends EventEmitter {
         origin: opts?.queueOrigin ?? (opts?.agent ? agentOriginOf(opts.agent) : undefined),
         // A message from another computer that waits is still that computer's: blocking it removes the item.
         ...(opts?.sentFrom ? { sentFrom: opts.sentFrom } : {}),
-        ...(externalLease ? { waitsForLease: true } : {})
+        ...(externalLease ? { waitsForLease: true } : {}),
+        ...(steerRunId ? { steerRunId } : {})
       })
+      // A queue mutation may have materialized the intent and then consumed it before this reply.
+      if (!item && run) return this.steerSendAlreadySettled(threadId, clientRequestId, run)
+      if (!item) throw new Error('Could not find the admitted queue item')
       // Another process holds the thread: its turn drains the queue when it ends, but other work it holds the lease
       // for does not, so the message also waits here for the lease.
       if (externalLease) this.waitForThreadLease(threadId, item.id)
@@ -13571,7 +13741,7 @@ export class OrchestratorService extends EventEmitter {
       // A person's message sent once their Stop showed the thread stopped, while the stopped turn still ends (its
       // checkpoint): it is what they want next, so it runs as soon as that turn has ended, after what they sent since the
       // Stop and ahead of what they queued before it, which a Stop always kept.
-      if (this.isStopping(threadId) && !opts?.forceQueue && !opts?.agent && !opts?.delegation && !opts?.schedule && !opts?.bindDelivery && !reuseLastUser &&
+      if (this.isStopping(threadId) && !item.heldAfterStop && !opts?.forceQueue && !opts?.agent && !opts?.delegation && !opts?.schedule && !opts?.bindDelivery && !reuseLastUser &&
         opts?.source !== 'wake' && !externalLease && !waitingOnUser && !heldByPause && !heldByCompaction) {
         try {
           this.queueAfterStop(session, item.id)
@@ -13579,11 +13749,18 @@ export class OrchestratorService extends EventEmitter {
           logDebug('OrchestratorService', 'a message sent after a Stop could not go first', error, { threadId })
         }
       }
+      // Steer: the message is for the turn that runs or is being set up, not for after it. It is sent into that turn
+      // here, with its admission, so it does not depend on the window that sent it still showing the thread when the
+      // send answers. A turn being set up keeps it first and takes it as it runs (`steerWhenStarted`).
+      const { queueItem, steerApplied } = this.applyQueuedSendSteer(session, item, steerRunId,
+        Boolean(opts?.steer) && !externalLease && !waitingOnUser && !heldByPause && !heldByCompaction)
+      if (steerRunId && !session.isTurnRunning() && !externalLease && !waitingOnUser && !heldByPause && !heldByCompaction) this.scheduleQueueDrain(session)
       return {
         message: '',
         actions: [],
         queued: true,
-        queueItem: item,
+        queueItem,
+        ...(steerApplied ? { steerApplied: true } : {}),
         ...(heldByPause ? { heldByPause: true } : {}),
         ...run
       }
@@ -13827,6 +14004,7 @@ export class OrchestratorService extends EventEmitter {
       }
       session.turnAdmitted = true
     }
+    if (opts?.runId && !session.activeTurn) this.publishTurnAdmission(session, opts.runId)
     // A new turn is not the stopped one, unless a Stop already reached it while it was admitted.
     if (!session.abortRequested) {
       session.stopping = false
@@ -13863,16 +14041,9 @@ export class OrchestratorService extends EventEmitter {
       if (opts?.schedule && opts.runId && !requeued) this.reportScheduledOccurrence(session, opts.schedule, opts.runId, turnResponse)
       if (opts?.schedule) this.scheduledTurnThreads.delete(session.threadId)
       this.releaseSessionExecutionLease(session)
-      // Sent now while this turn was set up but it never ran: they are first in the queue. They go next when the
-      // turn ended on its own (it failed before it ran); after a Stop they wait for the person, as a stopped turn's do.
-      if (session.steerOnStart.length) {
-        if (!session.abortRequested && !session.stopping) session.drainAfterSettle = true
-        session.steerOnStart = []
-      }
       // Read before the reset below: a Stop that reached this turn drops its hand-off (`settleTurnHandoff`).
       const stoppedAtSettle = session.abortRequested || session.stopping
-      session.turnAdmitted = false
-      session.admissionRunId = undefined
+      this.clearTurnAdmission(session, opts?.runId, stoppedAtSettle)
       session.abortRequested = false
       session.stopping = false
       session.sentAfterStop = []
@@ -14824,7 +14995,7 @@ export class OrchestratorService extends EventEmitter {
     if (!turn.abort.signal.aborted && isFollowUpSource(opts?.source ?? 'gui')) this.releaseHeldNotices(session, request.mode)
     // Authoritative turn lifecycle boundary (includes queue/background turns).
     this.emit('turn-started', { threadId: session.threadId })
-    if (session.steerOnStart.length) this.deliverSteersOnStart(session)
+    if (session.steerOnStart.length || session.queue.some((item) => item.steerOnStart?.runId === turn.runId)) this.deliverSteersOnStart(session)
 
     const stagedApplets: AppletSubmission[] = []
     let assistantText: string
@@ -16254,19 +16425,28 @@ export class OrchestratorService extends EventEmitter {
     return !isStricter(item.permissionMode, binding.policy.permissionMode ?? 'ask')
   }
 
+  private dropAcceptedSteers(items: QueuedMessage[], acceptedIds: ReadonlySet<string>): QueuedMessage[] {
+    if (!acceptedIds.size) return items
+    const store = this.runEngine?.store
+    if (store) {
+      for (const item of items) {
+        if (item.state === 'steering' && acceptedIds.has(item.id) && item.clientRequestId && item.steerRunId)
+          store.recordSteerDelivery(item.threadId, item.clientRequestId, item.id, item.steerRunId)
+      }
+    }
+    return dropSteerItems(items, [...acceptedIds])
+  }
+
   /**
    * Remove steer queue entries only after their content and IDs are durable: the items `ids` names (one accepted
    * drain), or every drained item.
    */
   private acknowledgeDrainedSteers(session: ThreadSession, ids: string[] = [...session.drainedExternalSteerIds]): void {
     if (ids.length === 0) return
-    if (this.threadStore) {
-      session.queue = mutateDurableQueue(this.threadStore, session.threadId, (disk) =>
-        dropSteerItems(disk, ids)
-      )
-    } else {
-      session.queue = dropSteerItems(session.queue, ids)
-    }
+    const acceptedIds = new Set(ids)
+    session.queue = this.threadStore
+      ? mutateDurableQueue(this.threadStore, session.threadId, (disk) => this.dropAcceptedSteers(disk, acceptedIds))
+      : this.dropAcceptedSteers(session.queue, acceptedIds)
     for (const id of ids) session.drainedExternalSteerIds.delete(id)
     this.emitQueueUpdated(session.threadId, session.queue)
     const accepted = new Set(this.nativeContext.acceptedSteerItemIds ?? [])
@@ -16385,7 +16565,7 @@ export class OrchestratorService extends EventEmitter {
             isOwnerLive: (claim) => isProcessAlive(claim.ownerPid),
             isAccepted: (item) => acceptedIds.has(item.id)
           }).items
-          const demoted = demoteSteerItems(dropSteerItems(cleaned, [...acceptedSteerIds]), undefined, { toFront: true })
+          const demoted = demoteSteerItems(this.dropAcceptedSteers(cleaned, acceptedSteerIds), undefined, { toFront: true })
           // The queue is held while the thread is paused (only the continue message of the pause goes), and while a
           // compaction runs. Read here, under the queue lock the hold is saved under.
           const held = this.pausedHoldsQueue(threadId, demoted) || this.compactionHoldsQueue(threadId)
@@ -16804,7 +16984,7 @@ export class OrchestratorService extends EventEmitter {
       const onDisk = items.filter((item) => item.state === 'steering')
       taken = onDisk.filter((item) => accepted.has(item.id)).map((item) => item.id)
       returned = onDisk.filter((item) => !accepted.has(item.id))
-      const kept = taken.length ? dropSteerItems(items, taken) : items
+      const kept = this.dropAcceptedSteers(items, accepted)
       return returned.length ? demoteSteerItems(kept, returned.map((item) => item.id), { toFront: true }) : kept
     }
     if (this.threadStore) {

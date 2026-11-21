@@ -324,6 +324,7 @@ export const PROTOCOL_METHODS = [
   'thread.messageImage',
   'thread.changesSince',
   'orchestrator.send',
+  'orchestrator.sendAccepted',
   'orchestrator.abort',
   'orchestrator.steer',
   'orchestrator.steerNow',

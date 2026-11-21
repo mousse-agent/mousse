@@ -160,6 +160,8 @@ describe('the list the sidebar shows', () => {
     expect(shown.activity.d1).toBe('processing')
     expect(shown.threads.filter((entry) => entry.id === 'd1')).toHaveLength(1)
     expect([...shown.unmade]).toEqual(['d1'])
+    const admitted = withPendingRows([...listed, draft('d1')], [row], { d1: 'processing' }, 'd1')
+    expect(admitted.unmade.has('d1')).toBe(false)
     const started = withPendingRows([...listed, { ...draft('d1'), startedAt: at }], [row], {}, 'd1')
     expect(started.unmade.size).toBe(0)
   })

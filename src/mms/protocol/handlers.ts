@@ -2663,7 +2663,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       const p = isObject(params) ? params : {}
       rejectUnknownKeys(p, [
         'threadId', 'content', 'forceQueue', 'source', 'mode', 'images', 'requestId', 'workflowInvocationId',
-        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused', 'conversationBranchId', 'expect',
+        'clientRequestId', 'await', 'continuationOfRunId', 'acknowledgeUncertain', 'refuseWhilePaused', 'conversationBranchId', 'expect', 'steer', 'steerRunId',
         ROUTED_SEND_WINDOW_KEY
       ])
       const threadId = asString(p.threadId, 'threadId', 256)
@@ -2674,6 +2674,9 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
       // A parent's follow-up to a subagent on this computer: a paused thread refuses it, as for a parent here.
       const refuseWhilePaused = asOptionalBoolean(p.refuseWhilePaused, 'refuseWhilePaused') === true
       const forceQueue = asOptionalBoolean(p.forceQueue, 'forceQueue') === true
+      // A person's Steer (a window here, or the CLI): it joins the busy thread's turn instead of waiting for it.
+      const steer = asOptionalBoolean(p.steer, 'steer') === true && (isPerson(ctx.connection) || ctx.connection?.clientType === 'cli')
+      const steerRunId = steer ? asOptionalString(p.steerRunId, 256) : undefined
       const source = admittedChatSource(ctx, asOptionalString(p.source, 64) ?? 'protocol')
       const mode = asOptionalChatMode(p.mode, 'mode')
       const images = asOptionalChatImages(p.images, 'images')
@@ -2712,9 +2715,15 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         const window = ctx.connection?.clientType === 'gui'
           ? (ctx.connection.capabilities.has(FIRST_SEND_BINDING_CAPABILITY) ? 'binds' : 'older')
           : ctx.connection?.clientType === 'bridge' ? routedWindow : undefined
-        if (window === 'binds')
+        // A Stop before the first prompt leaves binding pending. The engine can still replay an admitted Steer
+        // after checking its prompt and any explicit target against the receipt.
+        const receipt = window && steer && clientRequestId ? ctx.mms.runEngine.store.getReceipt(clientRequestId) : undefined
+        const receiptRunId = receipt?.threadId === threadId && receipt.commandKind === 'send' && receipt.status === 'accepted'
+          ? (receipt.result as { steerRunId?: string } | null)?.steerRunId
+          : undefined
+        if (receiptRunId === undefined && window === 'binds')
           throw new DomainRpcError('first_send_unbound', "This chat's first message has to be sent with the settings it shows. Send it again.", { threadId })
-        if (window === 'older')
+        if (receiptRunId === undefined && window === 'older')
           throw new DomainRpcError('first_send_unbound', 'Update Mousse to send the first message in this chat.', { threadId, update: true })
       }
       const bound = p.expect === undefined ? undefined : boundTurnSettings(ctx, threadId, p.expect, limit)
@@ -2726,6 +2735,7 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         forceQueue,
         clientRequestId,
         awaitMode,
+        ...(steer ? { steer: true, steerRunId } : {}),
         actor: questionAnswerer(ctx),
         // A turn from another computer never runs looser than that computer's limit here, however the thread is set.
         ...(limit ? { permissionMode: limit } : {}),
@@ -2736,6 +2746,14 @@ async function dispatchOwnedMethod(ctx: HandlerContext, method: string, params: 
         ...(refuseWhilePaused ? { refuseWhilePaused } : {}),
         ...(continuationOfRunId ? { continuationOfRunId, acknowledgeUncertain } : {})
       }))
+    }
+    case 'orchestrator.sendAccepted': {
+      const p = isObject(params) ? params : {}
+      rejectUnknownKeys(p, ['threadId', 'clientRequestId'])
+      const threadId = asString(p.threadId, 'threadId', 256)
+      const clientRequestId = asString(p.clientRequestId, 'clientRequestId', 128)
+      const receipt = ctx.mms.runEngine.store.getReceipt(clientRequestId)
+      return { accepted: receipt?.threadId === threadId && receipt.commandKind === 'send' && receipt.status === 'accepted' }
     }
     case 'orchestrator.abort': {
       const p = isObject(params) ? params : {}

@@ -289,7 +289,7 @@ export const PLATFORM_REQUEST_METHODS: ReadonlySet<PlatformRequestMethod> = new 
   'skills.importPackage', 'skills.exportPackage',
   'mcp.create', 'mcp.update', 'mcp.read', 'mcp.enable', 'mcp.delete',
   'mcp.testConnection', 'mcp.beginAuth', 'mcp.cancelAuth', 'mcp.revokeAuth',
-  'runs.resumeNow', 'runs.cancelPause', 'threads.goal', 'threads.setHidden'
+  'orchestrator.sendAccepted', 'runs.resumeNow', 'runs.cancelPause', 'threads.goal', 'threads.setHidden'
 ])
 
 class PlatformRequestError extends AppError {
@@ -422,6 +422,8 @@ function normalizeSendContent(request: OrchestratorSendInput): {
   continuationOfRunId?: string
   acknowledgeUncertain?: boolean
   await?: 'ack'
+  steer?: boolean
+  steerRunId?: string
 } {
   if (typeof request === 'string') return { content: request }
   return {
@@ -433,6 +435,7 @@ function normalizeSendContent(request: OrchestratorSendInput): {
       ? { continuationOfRunId: request.continuationOfRunId, ...(request.acknowledgeUncertain === true ? { acknowledgeUncertain: true } : {}) }
       : {}),
     ...(request.expect && typeof request.expect === 'object' ? { expect: request.expect } : {}),
+    ...(request.steer === true ? { steer: true, ...(typeof request.steerRunId === 'string' ? { steerRunId: request.steerRunId } : {}) } : {}),
     mode: request.mode,
     images: request.images
   }
@@ -1829,6 +1832,8 @@ export function registerGuiIpc(
           ...(body.conversationBranchId ? { conversationBranchId: body.conversationBranchId } : {}),
           ...(body.continuationOfRunId ? { continuationOfRunId: body.continuationOfRunId, ...(body.acknowledgeUncertain ? { acknowledgeUncertain: true } : {}) } : {}),
           ...(body.expect ? { expect: body.expect } : {}),
+          // Steer: only this computer's threads take it; a send to another computer's thread goes without.
+          ...(body.steer && !isQualifiedId(targetThreadId) ? { steer: true, ...(body.steerRunId ? { steerRunId: body.steerRunId } : {}) } : {}),
           // Opt-in: answer once the run is committed, so a caller that watches the turn is not held for all of it.
           ...(body.await === 'ack' ? { await: 'ack' } : {})
         }

@@ -1,4 +1,10 @@
+// @vitest-environment jsdom
+import { act, createElement } from 'react'
+import { createRoot } from 'react-dom/client'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 type Handler = (event: unknown, ...args: unknown[]) => unknown
 const handlers = vi.hoisted(() => new Map<string, (event: unknown, ...args: unknown[]) => unknown>())
@@ -19,10 +25,19 @@ vi.mock('electron', () => ({
   webContents: {}
 }))
 
+// These neighbours make their own daemon requests, separately from the thread rows.
+vi.mock('../src/renderer/components/profiles/ProfileSwitcher', () => ({ ProfileSwitcher: () => null }))
+vi.mock('../src/renderer/components/chats/ChatsSidebar', () => ({ ChatsSidebar: () => null }))
+
 import { registerGuiIpc, type GuiIpcServices } from '../src/main/ipc/registerGuiIpc'
 import { PresentationState } from '../src/main/mms/PresentationState'
 import { MmsProtocolError } from '../src/mms/protocol/client'
 import { isQualifiedId, qualifyId } from '../src/shared/threadRef'
+import type { TurnState } from '../src/shared/types'
+import { useAppStore } from '../src/renderer/stores/appStore'
+import { ThreadsSidebar } from '../src/renderer/components/ThreadsSidebar'
+import { dispatchMethod, type HandlerContext } from '../src/mms/protocol/handlers'
+import { phase6Daemon, piAdapter, PI } from './run/phase6Fixture'
 
 const NODE = 'nod_0123456789abcdefghjkmnpqrs'
 const REMOTE = qualifyId(NODE, 'thread-1')
@@ -551,3 +566,90 @@ describe('a window leaving a deleted thread', () => {
     expect(made).toBe(1)
   })
 })
+
+it('selects a cold admitted thread through sidebar IPC while the transcript and setup are pending', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'mousse-starting-selection-'))
+  vi.stubEnv('MOUSSE_HOME', home)
+  const d = phase6Daemon(home, [piAdapter(() => 'Done')])
+  let finishSetup!: () => void
+  let finishRead!: () => void
+  const setup = new Promise<'stopped'>((resolve) => { finishSetup = () => resolve('stopped') })
+  const reading = new Promise<void>((resolve) => { finishRead = resolve })
+  const previous = useAppStore.getState()
+  const previousBridge = window.mousse
+  const host = document.createElement('div')
+  document.body.append(host)
+  const root = createRoot(host)
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  let selecting: Promise<unknown> | undefined
+  try {
+    const cold = d.store.createThread('Cold', undefined)
+    d.orch.setThreadModelOverride(cold.id, PI)
+    const warm = { ...cold, id: 'warm-thread', startedAt: cold.createdAt }
+    useAppStore.setState({
+      activeThreadId: warm.id, threads: [warm, { ...cold, startedAt: cold.createdAt }], turnStates: {}, messages: [],
+      threadsSidebarView: 'threads', sidebarMode: 'projects'
+    })
+    d.orch.on('turn-state', (state: TurnState) => useAppStore.getState().setTurnState(state))
+    vi.spyOn(d.orch, 'waitForThreadFolders').mockReturnValueOnce(setup)
+    const result = await d.orch.send('First', false, { source: 'gui', threadId: cold.id, clientRequestId: 'first', awaitMode: 'ack' })
+    expect(useAppStore.getState().turnStates[cold.id]).toMatchObject({ phase: 'queued', turnId: result.runId })
+    expect(useAppStore.getState().turnStates[cold.id]?.step).toBeUndefined()
+
+    let entered!: (threadId: string) => void
+    const requested = new Promise<string>((resolve) => { entered = resolve })
+    snapshotThread.mockImplementationOnce(async (threadId) => {
+      entered(threadId)
+      await reading
+      return { messages: [], queue: [], claimed: [], activeTurn: { active: false, running: true }, connectionFailed: false }
+    })
+    Object.defineProperty(window, 'mousse', { configurable: true, writable: true, value: {
+      platform: 'win32',
+      threads: { select: (id: string) => { selecting = invoke('threads:select', id); return selecting } }
+    } })
+    await act(async () => root.render(createElement(ThreadsSidebar)))
+    const coldRow = host.querySelector<HTMLButtonElement>(`button[data-thread-id="${cold.id}"]`)
+    expect(coldRow?.textContent).toContain('Cold')
+    await act(async () => coldRow!.click())
+    expect(await requested).toBe(cold.id)
+    expect(presentation.getActiveThreadId()).toBe(cold.id)
+    expect(useAppStore.getState()).toMatchObject({ activeThreadId: cold.id, openingThreadId: null, transcriptPending: true })
+
+    const sendThroughDaemon = async (method: string, params?: unknown) => {
+      calls.push({ method, params })
+      return dispatchMethod({
+        mms: { orchestrator: d.orch, threads: d.store, runEngine: d.engine },
+        globalSequence: () => 0,
+        connection: { id: 'gui-1', clientType: 'gui', capabilities: new Set() }
+      } as unknown as HandlerContext, method, params)
+    }
+    request.mockImplementationOnce(sendThroughDaemon)
+    const followUp = await invoke('orchestrator:sendToThread', cold.id, {
+      content: 'Follow-up', requestId: 'steer', steer: true, steerRunId: result.runId
+    })
+    expect(sent('orchestrator.send')[0]?.params).toMatchObject({
+      threadId: cold.id, content: 'Follow-up', clientRequestId: 'steer', steer: true, steerRunId: result.runId
+    })
+    expect(followUp).toMatchObject({ queueItem: { content: 'Follow-up', sendsNext: true, steerOnStart: { runId: result.runId } } })
+    for (const [threadId, accepted] of [[cold.id, true], [warm.id, false]] as const) {
+      request.mockImplementationOnce(sendThroughDaemon)
+      await expect(invoke('platform:request', {
+        method: 'orchestrator.sendAccepted', params: { threadId, clientRequestId: 'steer' }
+      })).resolves.toEqual({ ok: true, value: { accepted } })
+    }
+    await act(async () => { await d.orch.stopThread(cold.id, 'user') })
+
+    await act(async () => { finishRead(); await selecting })
+  } finally {
+    finishSetup()
+    finishRead()
+    act(() => root.unmount())
+    host.remove()
+    window.mousse = previousBridge
+    await d.shutdown()
+    useAppStore.setState(previous)
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+}, 30_000)

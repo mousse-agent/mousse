@@ -49,7 +49,9 @@ export function mutateDurableQueue(
 
 /** Finishes the thread's unfinished agent commands now (boot, the retry of a failed effect, a read that wants the settled queue). */
 export function repairQueueJournal(store: ThreadDataStore, threadId: string): QueuedMessage[] {
-  return mutateDurableQueue(store, threadId, (items) => items)
+  return withQueueMutationLock(store.getThreadDir(threadId), () =>
+    recoverQueueJournal(store, threadId, store.loadMessageQueue(threadId))
+  )
 }
 
 /** An agent command on a thread's queue, journaled and replayable by `commandKey` (see `queueJournal.ts`). */
