@@ -20,7 +20,7 @@ import { EffectWorker } from '../../../src/mms/run/EffectWorker'
 import { RunEngine } from '../../../src/mms/run/RunEngine'
 import { RunStore } from '../../../src/mms/run/RunStore'
 import { replayAcpProcess } from '../../../src/mms/run/testkit/acpReplay'
-import { replayCodexAppServer } from '../../../src/mms/run/testkit/codexAppServerReplay'
+import { replayCodexAppServer, replayCodexEnv } from '../../../src/mms/run/testkit/codexAppServerReplay'
 import { createCodexProviderService, type CodexProviderService } from '../../../src/mms/harness/vendors/codex/CodexProviderService'
 import { createHarnessGateway } from '../../../src/mms/harness/gateway'
 import { antigravityDriver } from '../../../src/mms/harness/drivers/antigravity'
@@ -208,7 +208,7 @@ export async function runScenario(name: string, adapterId: string): Promise<Scen
     mkdirSync(providerDir, { recursive: true })
     writeFileSync(join(providerDir, 'settings.json'), JSON.stringify({ binaryPath: binary, models: [{ id: 'gpt-replay-codex', label: 'Replay' }] }))
     // Replace the app-server process only; the client, service and adapter run for real.
-    const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(transport) }, { launch: () => ({ binaryPath: binary }) })
+    const service = createCodexProviderService(home, questions, { launch: replayCodexAppServer(transport) }, { env: replayCodexEnv(home), launch: () => ({ binaryPath: binary }) })
     stops.push(() => service.stop())
     services.codex = service
   }

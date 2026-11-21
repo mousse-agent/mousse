@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import type { WindowsProviderTree } from './windowsProviderProcess'
 import { descendantsOf, killProcessTree, readProcessTable, readStartTime } from './processTree.mjs'
 import { anchoredTree, readProcessEntries, startDisproved, type ProcessEntry } from '../git/stoppedGitTree'
 
@@ -230,6 +231,7 @@ export async function stopCommandProcesses(
  * through that handle.
  */
 export interface SpawnedRoot {
+  windowsTree?: WindowsProviderTree
   spawnedAt?: number
   /** True once the process exited, false while it runs, undefined when the handle cannot tell. */
   exited?: () => boolean | undefined
@@ -271,6 +273,7 @@ export async function reapProcessTree(
   const platform = options.platform ?? process.platform
   const isAlive = options.alive ?? alive
   const root = options.root
+  if (root?.windowsTree) return root.windowsTree.stop().then(() => 'ended', () => 'survived')
   /** Whether the root is gone: by Mousse's handle when it can tell, else by its pid. */
   const rootGone = (): boolean => root?.exited?.() ?? !isAlive(pid)
   if (root) return reapAnchored(pid, root, rootGone, options, platform, isAlive)

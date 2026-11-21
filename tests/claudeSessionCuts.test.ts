@@ -23,6 +23,7 @@ let claudeHome = ''
 beforeEach(() => {
   claudeHome = temp('claude-config-test-')
   vi.stubEnv('CLAUDE_CONFIG_DIR', claudeHome)
+  writeFileSync(join(claudeHome, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'test-account' } }))
 })
 afterEach(() => {
   vi.unstubAllEnvs()
@@ -264,6 +265,7 @@ describe('an undo or an edit on a Claude thread', () => {
 
   it('reads the session files of the home the entry runs with', async () => {
     const own = temp('claude-own-home-')
+    writeFileSync(join(own, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'test-account' } }))
     const f = fixture({ baseEnv: () => ({ ...process.env, CLAUDE_CONFIG_DIR: own }) })
     const turns = await threeTurns(f, own)
     await f.turn('h2', 'after')

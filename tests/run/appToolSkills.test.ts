@@ -20,7 +20,7 @@ import type { AdapterHost, TurnInput, TurnSink } from '../../src/mms/harness/ada
 import { turnPreamble } from '../../src/mms/run/mcp/appTools/assemble'
 import { McpCredentials } from '../../src/mms/run/mcp/McpCredentials'
 import { MousseMcpServer } from '../../src/mms/run/mcp/MousseMcpServer'
-import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer } from '../../src/mms/run/testkit/codexAppServerReplay'
+import { CODEX_APP_SERVER_BOUNDARY, replayCodexAppServer, replayCodexEnv } from '../../src/mms/run/testkit/codexAppServerReplay'
 import { parseTranscript, ReplayTransport, type TranscriptFrame } from '../../src/mms/run/testkit/ReplayTransport'
 import { definitionActor } from '../../src/mms/agentDefinitions/definitionTurnRecord'
 import { getDefaultSettings } from '../../src/shared/settings'
@@ -393,7 +393,7 @@ describe('resumed runtimes keep getting the turn preamble', () => {
       ...codexTurn(8, `${current}/review the last one`, 'turn-4', 'four')
     ])
     const questions = new UserQuestionService()
-    const codex: CodexProviderService = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { launch: () => ({ binaryPath: binary }) })
+    const codex: CodexProviderService = createCodexProviderService(home, questions, { launch: replayCodexAppServer(replay) }, { env: replayCodexEnv(home), launch: () => ({ binaryPath: binary }) })
     services.push(codex, { stop: () => questions.shutdown() })
     const adapter = new CodexAdapter(() => codex)
     const input = (prompt: string, nativeHistory?: string): TurnInput => ({
