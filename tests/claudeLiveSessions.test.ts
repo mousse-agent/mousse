@@ -14,7 +14,7 @@ import {
   type ClaudeLiveHost,
   type ClaudeSubscriptionChatInput
 } from '../src/mms/harness/vendors/claude/ClaudeSubscriptionProviderService'
-import { BackgroundObligations, LiveSession, UNSURE_MEMORY_MS, type LiveTimings } from '../src/mms/harness/vendors/claude/liveSession'
+import { BackgroundObligations, LIVE_IDLE_CLOSE_MS, LiveSession, UNSURE_MEMORY_MS, type LiveTimings } from '../src/mms/harness/vendors/claude/liveSession'
 import { STOP_GRACE_MS } from '../src/mms/harness/stopProcesses'
 import { FakeClaudeCli, lifecycle, messageStart, notification, resultFrame, roster, SESSION, taskStarted, textDelta, toolResult, toolStart } from './run/fakeClaudeCli'
 
@@ -1232,6 +1232,19 @@ describe('a model or effort change (issue #359)', () => {
 })
 
 describe('idle release and the cap on live processes', () => {
+  it('a reply ten minutes after the last turn finds the thread\'s process still open; one after the idle window does not', async () => {
+    vi.useFakeTimers()
+    // The default timings: what a thread gets.
+    const f = fixture()
+    await f.turn({ history: 'h' }, 'h')
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    expect(f.cli.last.closed).toBe(false)
+    await f.turn({ history: 'h' }, 'h')
+    expect(f.cli.processes).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(LIVE_IDLE_CLOSE_MS + 1)
+    expect(f.cli.last.closed).toBe(true)
+  })
+
   it('closes an idle thread with no background work after the idle timeout, and the next turn resumes the session', async () => {
     vi.useFakeTimers()
     const f = fixture({ idleCloseMs: 1000 })

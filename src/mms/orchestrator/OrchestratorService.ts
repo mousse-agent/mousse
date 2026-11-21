@@ -4709,8 +4709,9 @@ export class OrchestratorService extends EventEmitter {
         actor: registered.actor,
         // A definition loads only the skills it was granted.
         ...(input.grants ? { grants: input.grants } : {}),
-        // A bot's turn starts on the last scan of the Skills folders; they are scanned again beside it.
-        ...(registered.bot ? { stale: true } : {})
+        // Every turn starts on the last scan of the Skills folders; they are scanned again beside it, so a Send never
+        // waits for a walk of them. A message naming a skill that scan lacks still waits for a fresh one (`prepareSkills`).
+        stale: true
       })
     } catch (error) {
       // Skills are optional: a broken registry cannot block the turn.

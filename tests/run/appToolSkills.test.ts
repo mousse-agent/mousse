@@ -135,6 +135,29 @@ describe('an explicit /skill in a vendor turn', () => {
     expect(vendor.inputs[1].prompt).toBe('/review the adapters too')
     expect(JSON.parse(listed!.text!).map((entry: { name: string }) => entry.name)).toEqual(['review', 'deploy'])
   }, 30_000)
+
+  it("an ordinary thread's turn starts on the last scan of the Skills folders, not after a new one", async () => {
+    const skills = fakeSkills([REVIEW])
+    // A scan that has not finished: only a caller that takes the last scan is answered.
+    let finishScan = (): void => undefined
+    const scanning = new Promise<void>((resolve) => { finishScan = resolve })
+    const discover = vi.fn(async (options?: { stale?: boolean }) => {
+      if (!options?.stale) await scanning
+      return { skills: [REVIEW], sources: [], diagnostics: [] }
+    })
+    ;(skills.registry as unknown as { discover: typeof discover }).discover = discover
+    const vendor = new VendorAdapter(async () => 'Hello back.')
+    d = await vendorDaemon([vendor])
+    ;(d.orch as any).skillsRegistry = skills.registry
+    d.settings().integrations.skills.enabledSkills = ['inst-review']
+    try {
+      const reply = await Promise.race([d.send('Hello'), new Promise<'waited'>((resolve) => setTimeout(() => resolve('waited'), 15_000))])
+      expect(reply).not.toBe('waited')
+      expect(vendor.inputs).toHaveLength(1)
+    } finally {
+      finishScan()
+    }
+  }, 30_000)
 })
 
 // ----- Codex: a loaded (continued) thread ------------------------------------------------------
