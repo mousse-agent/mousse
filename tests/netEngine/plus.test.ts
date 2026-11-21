@@ -3,9 +3,9 @@
  * `plus.*` and `removal.*` becomes `netEngine.status`, and the window's calls reach the helper through the
  * registered `netEngine.*` handlers. The helper is stubbed at its app channel (`request` and `onEvent`).
  */
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { NetError } from '../../src/shared/net'
-import { EnginePlus, PLUS_FAILED, PLUS_WEB_ORIGINS_VARIABLE, PLUS_WRONG_PAGE } from '../../src/mms/netEngine/plus'
+import { ENGINE_PLUS_VARIABLE, EnginePlus, PLUS_FAILED, PLUS_WEB_ORIGINS_VARIABLE, PLUS_WRONG_PAGE } from '../../src/mms/netEngine/plus'
 import { registerNetEngineMethods } from '../../src/mms/netEngine/registerMethods'
 import type { EngineHelper } from '../../src/mms/netEngine/helper/connections'
 import type { DomainHandlerRegistry } from '../../src/mms/protocol/domainRegistry'
@@ -47,6 +47,31 @@ const LINKED = {
   account: { plan: 'active', period_ends_at: 1_800_000_000 },
   usage: { bulk: { allowance: 100, available: 40 }, interactive: { allowance: 50, available: 50 } }
 }
+
+// The rest of the file runs with Plus over the engine turned on.
+beforeEach(() => {
+  process.env[ENGINE_PLUS_VARIABLE] = '1'
+})
+afterEach(() => {
+  delete process.env[ENGINE_PLUS_VARIABLE]
+})
+
+describe('Mousse Plus over the engine, off by default', () => {
+  it('sends the helper no Plus request, ignores its Plus events and shows no Plus state', async () => {
+    delete process.env[ENGINE_PLUS_VARIABLE]
+    const h = helper({ 'plus.status': LINKED, 'removal.list': {} })
+    const plus = new EnginePlus(() => undefined)
+    plus.attach(h.stub)
+    await settle()
+    h.emit({ ev: 'plus.status', ...LINKED })
+    h.emit({ ev: 'plus.link' })
+    await expect(plus.signIn()).rejects.toThrow("This build isn't set up for Plus.")
+    await expect(plus.refresh()).rejects.toThrow()
+    await settle()
+    expect(h.requests.map(([op]) => op).filter((op) => op.startsWith('plus.'))).toEqual([])
+    expect(plus.view(() => undefined).plus).toBeUndefined()
+  })
+})
 
 describe('EnginePlus', () => {
   it('reads the account and removals when the helper says hello', async () => {
