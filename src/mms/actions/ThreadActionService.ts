@@ -243,7 +243,7 @@ export class ThreadActionService {
       presentationMessageStart: at, presentationMessageEnd: at,
       nativeContextBoundary: options.nativeContextBoundary ?? latest?.nativeContextBoundary ?? { messageIndex: 0, compactionGeneration: 0, fidelity: 'legacy' },
       externalEffects: []
-    }, known, 'completed')
+    }, known, 'completed', snapshot)
     if (unrecorded) {
       // Not only the person's edits: the turn before could not record its end, so its changes are in here too.
       const all = this.list(), recorded = all.find((item) => item.id === action.id)
@@ -342,7 +342,8 @@ export class ThreadActionService {
   }
 
   /** `checkpointExistingTurn` for a caller that already holds the mutation locks. */
-  private async checkpointTurnHeld(options: RunThreadActionOptions, startSha: string, state: 'completed' | 'stopped' | 'failed'): Promise<ThreadAction> {
+  /** `taken`: the end's snapshot, already taken under the same locks with nothing of Mousse's run since (outside changes). */
+  private async checkpointTurnHeld(options: RunThreadActionOptions, startSha: string, state: 'completed' | 'stopped' | 'failed', taken?: Snapshot): Promise<ThreadAction> {
     // The list as it is now; the action this turn changes is copied, the others are written back as they are.
     let actions = this.view()
     const completed = actions.find((item) => item.turnId === options.turnId && item.state !== 'running')
@@ -369,7 +370,7 @@ export class ThreadActionService {
     action.externalEffects = options.externalEffects ?? action.externalEffects
     if (options.startNote) action.startNote = options.startNote
     try {
-      await this.checkpoint(options.workspacePath, action, state)
+      await this.checkpoint(options.workspacePath, action, state, taken)
       // Admission order differs from completion order when a turn snapshots before child spawn.
       this.replace([...actions, action])
       this.appendCheckpointCompleted(action, state)
@@ -513,7 +514,8 @@ export class ThreadActionService {
   private async checkpoint(
     workspacePath: string,
     action: ThreadAction,
-    state: 'completed' | 'stopped' | 'failed'
+    state: 'completed' | 'stopped' | 'failed',
+    taken?: Snapshot
   ): Promise<void> {
     workspacePath = (await repositoryFacts(workspacePath))?.top ?? await gitAsync(workspacePath, ['rev-parse', '--show-toplevel'])
     action.state = 'checkpointing'
@@ -522,7 +524,8 @@ export class ThreadActionService {
     const reason = action.turnId.startsWith(USER_CHANGES_TURN_PREFIX) ? 'outside changes' : `end of turn ${action.turnId}`
     let snapshot: Snapshot
     try {
-      snapshot = await takeSnapshotAsync(workspacePath, { reason, threadId, operationId: action.id })
+      // A snapshot the caller just took under these locks is the end: taking it again would only read the same files.
+      snapshot = taken ?? await takeSnapshotAsync(workspacePath, { reason, threadId, operationId: action.id })
     } catch (error) {
       // A checkpoint that was stopped is not a snapshot that cannot be taken: it fails, and recovery takes it again.
       if (gitWorkCancelled()) throw error

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -98,6 +98,29 @@ describe('a turn that starts in a workspace changed outside Mousse', () => {
     expect(git(repo, 'diff', '--cached', '--name-only')).toBe('staged.txt')
     expect(actions.get(saved!.id)?.state).toBe('completed')
     expect(actions.get(turn.id)?.state).toBe('undone')
+  })
+
+  it('reads the files once: the snapshot the start took is the end of the outside-changes record', async () => {
+    const { repo, thread } = fixture(); const actions = new ThreadActionService(thread)
+    userEdits(repo)
+    // Every Git process writes its own trace file, so the walks of the worktree (`add -A`) are counted by Git itself.
+    const traces = mkdtempSync(join(tmpdir(), 'mousse-dirty-trace-')); roots.push(traces)
+    const previous = process.env.GIT_TRACE2_EVENT
+    process.env.GIT_TRACE2_EVENT = traces
+    let recorded: Awaited<ReturnType<ThreadActionService['recordOutsideChanges']>>
+    try { recorded = await actions.recordOutsideChanges(outside(repo)) } finally {
+      if (previous === undefined) delete process.env.GIT_TRACE2_EVENT
+      else process.env.GIT_TRACE2_EVENT = previous
+    }
+    const walks = readdirSync(traces).filter((file) => readFileSync(join(traces, file), 'utf8').split('\n').some((line) => {
+      if (!line.includes('"event":"start"')) return false
+      const argv = (JSON.parse(line) as { argv: string[] }).argv
+      return argv.includes('add') && argv.includes('-A')
+    }))
+    expect(walks).toHaveLength(1)
+    // The record is complete all the same: it ends on the start's snapshot, with the edits as its changes.
+    expect(recorded.action).toMatchObject({ actor: { kind: 'user' }, state: 'completed', endSha: recorded.startSha })
+    expect(recorded.action!.changedPaths.map((item) => item.path).sort()).toEqual(['notes/screen shot.png', 'staged.txt', 'value.txt'])
   })
 
   it('records nothing when only an ignored file changed', async () => {
