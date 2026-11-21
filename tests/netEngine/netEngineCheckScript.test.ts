@@ -39,6 +39,7 @@ describe('net-engine-check.mjs route cases', () => {
     expect(refused.stderr).toContain('phase1b.link-app takes no --route.')
   })
 
+  // Loading the harness loads the whole daemon: longer than a test's default wait beside other files.
   it('keeps the first reason a run recorded when a later pass records another', async () => {
     const out = mkdtempSync(join(tmpdir(), 'engine-check-out-'))
     const before = process.env.MOUSSE_NET_ENGINE_CHECK_OUT
@@ -58,5 +59,5 @@ describe('net-engine-check.mjs route cases', () => {
       else process.env.MOUSSE_NET_ENGINE_CHECK_OUT = before
       rmSync(out, { recursive: true, force: true })
     }
-  })
+  }, 60_000)
 })
