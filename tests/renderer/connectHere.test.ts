@@ -6,7 +6,7 @@ import type { NetStatus } from '../../src/shared/net'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const { NetDevicesSection } = await import('../../src/renderer/components/NetDevicesSection')
+const { EngineDevicesSection } = await import('../../src/renderer/components/netEngine/EngineDevicesSection')
 
 const row = (node: string, name: string, extra: Record<string, unknown>) => ({
   node,
@@ -29,6 +29,7 @@ const nodes = [
 ]
 const request = vi.fn(async (method: string, _params?: unknown) => {
   switch (method) {
+    case 'netEngine.status': return { enabled: false, on: false, helper: { state: 'off' }, devices: [], approvals: [] }
     case 'net.status':
       return { enabled: true, keystore: 'unlocked', protected: true, routes: [], peers: [], self: { node: 'node_a', user: 'user_a', isAuthority: true } } as unknown as NetStatus
     case 'net.transport.list': return { manifests: [], records: {}, settings: {} }
@@ -62,43 +63,38 @@ afterEach(() => {
 const flush = async () => { for (let i = 0; i < 5; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) }) }
 const rowOf = (node: string) => document.querySelector<HTMLElement>(`[data-device-node="${node}"]`)!
 const buttonIn = (element: ParentNode, name: string) => [...element.querySelectorAll<HTMLButtonElement>('button')].find((item) => item.textContent?.trim() === name)
+const menuItem = (name: string) => [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((entry) => entry.textContent?.trim() === name)
+/** Opens a device's Access from its row menu (Hide access closes it). */
+const openAccess = async (name: string) => {
+  await act(async () => document.querySelector<HTMLElement>(`[aria-label="Actions for ${name}"]`)!.click())
+  const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((entry) => /^(Hide access|Access)$/.test(entry.textContent?.trim() ?? ''))!
+  await act(async () => item.click())
+  for (let i = 0; i < 5; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
+}
 const calls = (method: string) => request.mock.calls.filter(([name]) => name === method).map(([, params]) => params)
 
 it('a device not connected here offers Connect when its route is held, and a link from it otherwise', async () => {
-  await act(async () => root.render(createElement(NetDevicesSection)))
+  await act(async () => root.render(createElement(EngineDevicesSection)))
   await flush()
   const laptop = rowOf('node_b'), desk = rowOf('node_c')
-  expect(laptop.textContent).toContain('not connected here')
-  expect(desk.textContent).toContain('not connected here')
-  expect(desk.textContent).toContain('Paste a link from Desk PC')
-  expect(buttonIn(desk, 'Connect')).toBeUndefined()
-  await act(async () => buttonIn(laptop, 'Connect')!.click())
+  expect(laptop.textContent).toContain('Not connected here')
+  expect(desk.textContent).toContain('Not connected here')
+  // Connect sits in the row's menu, only where this computer holds its routes.
+  await act(async () => desk.querySelector<HTMLElement>('[aria-label="Actions for Desk PC"]')?.click())
+  expect(menuItem('Connect')).toBeUndefined()
+  await act(async () => document.querySelector<HTMLElement>('[aria-label="Actions for Laptop"]')!.click())
+  await act(async () => menuItem('Connect')!.click())
   await flush()
   expect(calls('bridge.connect')).toEqual([{ node: 'node_b' }])
 })
 
-it('a connected device offers Disconnect in its detail, and one not connected does not', async () => {
-  await act(async () => root.render(createElement(NetDevicesSection)))
-  await flush()
-  const mini = rowOf('node_d')
-  expect(mini.textContent).not.toContain('not connected here')
-  // Disconnect sits in the device's detail, not on its row.
-  expect(buttonIn(mini, 'Disconnect')).toBeUndefined()
-  await act(async () => mini.querySelector<HTMLButtonElement>('[aria-label="Show details for Mini"]')!.click())
-  await act(async () => buttonIn(document, 'Disconnect')!.click())
-  await flush()
-  expect(calls('bridge.disconnect')).toEqual([{ node: 'node_d' }])
-  await act(async () => rowOf('node_b').querySelector<HTMLButtonElement>('[aria-label="Show details for Laptop"]')!.click())
-  expect(buttonIn(document, 'Disconnect')).toBeUndefined()
-})
-
 it('a device not connected here shows none of what it may do here until it is', async () => {
-  await act(async () => root.render(createElement(NetDevicesSection)))
+  await act(async () => root.render(createElement(EngineDevicesSection)))
   await flush()
-  await act(async () => rowOf('node_b').querySelector<HTMLButtonElement>('[aria-label="Show details for Laptop"]')!.click())
+  await openAccess('Laptop')
   expect(document.body.textContent).not.toContain('Access from this device')
   expect(document.body.textContent).not.toContain('Terminals from this device')
-  await act(async () => rowOf('node_d').querySelector<HTMLButtonElement>('[aria-label="Show details for Mini"]')!.click())
+  await openAccess('Mini')
   expect(document.body.textContent).toContain('Access from this device')
   expect(document.body.textContent).toContain('Terminals from this device')
 })

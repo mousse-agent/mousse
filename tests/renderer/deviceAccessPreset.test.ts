@@ -12,7 +12,7 @@ import type { BridgeNodePolicy } from '../../src/shared/net/local'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const { NetDevicesSection } = await import('../../src/renderer/components/NetDevicesSection')
+const { EngineDevicesSection } = await import('../../src/renderer/components/netEngine/EngineDevicesSection')
 
 let root: Root
 let host: HTMLElement
@@ -30,6 +30,7 @@ const computer = (node: string, name: string, extra: Record<string, unknown>) =>
   ({ node, name, caps: ['read', 'chat', 'write', 'settings'], keyEpoch: 1, expiresAt: 0, kind: 'computer', self: false, revoked: false, state: 'open', ...extra })
 const request = vi.fn(async (method: string, params?: Record<string, unknown>) => {
   switch (method) {
+    case 'netEngine.status': return { enabled: false, on: false, helper: { state: 'off' }, devices: [], approvals: [] }
     case 'net.status': return { enabled: true, keystore: 'unlocked', protected: true, self: { node: 'nod_self', isAuthority: true }, transports: [], peers: [], routes: [], workOnThreads: true, shareBots: true }
     case 'net.transport.list': return { manifests: [], records: {}, settings: {} }
     case 'net.ssh.list': return { records: [] }
@@ -67,10 +68,17 @@ afterEach(() => {
   host.remove()
 })
 
-/** Opens one device's detail; only one is open at a time. */
-const openDetail = (name: string) => click(document.querySelector(`[aria-label="Show details for ${name}"]`))
+/** Opens a device's Access from its row menu (Hide access closes it). */
+const openAccess = async (name: string) => {
+  await act(async () => document.querySelector<HTMLElement>(`[aria-label="Actions for ${name}"]`)!.click())
+  const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((entry) => /^(Hide access|Access)$/.test(entry.textContent?.trim() ?? ''))!
+  await act(async () => item.click())
+  for (let i = 0; i < 5; i++) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
+}
+/** Opens one device's Access; only one is open at a time. */
+const openDetail = openAccess
 const showDevices = async () => {
-  await act(async () => root.render(createElement(NetDevicesSection)))
+  await act(async () => root.render(createElement(EngineDevicesSection)))
   await flush()
   await openDetail('Mac')
 }

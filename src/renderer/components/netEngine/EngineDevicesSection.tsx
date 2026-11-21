@@ -647,7 +647,6 @@ export function EngineDevicesSection() {
 
       {thisComputer && (
         <SettingsGroup
-          anchor="devices-this-computer"
           title="This computer"
           icon={Monitor}
           className="devices-group"
