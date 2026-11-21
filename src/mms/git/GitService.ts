@@ -702,17 +702,28 @@ export class GitService {
     return run.ok ? run.stdout.trim() : null
   }
 
-  async isRepo(cwd: string): Promise<boolean> {
+  /**
+   * Whether `cwd` is in a Git repository. Git saying it is not answers false; with `strict`, any other failure (Git
+   * could not run, the drive stopped answering) throws instead of reading as "not a repository", and a drive that is
+   * not answering fails the call at once instead of holding it.
+   */
+  async isRepo(cwd: string, options: { strict?: boolean } = {}): Promise<boolean> {
     // The folder answers before anything looks at it.
-    await waitForFolderAccess([resolve(cwd)])
+    await waitForFolderAccess([resolve(cwd)], options.strict ? { whenNotAnswering: 'fail' } : undefined)
     if (!await pathExists(cwd)) return false
     // A repository whose programs Mousse cannot turn off is refused here, with its reason, before the reads below turn failures into defaults.
     await checkRepoPrograms(cwd)
-    return this.gitFor(cwd).checkIsRepo().catch(() => false)
+    // simple-git answers false itself when Git says the folder is not a repository; what it throws is a failure.
+    const check = this.gitFor(cwd).checkIsRepo()
+    return options.strict ? check : check.catch(() => false)
   }
 
+  /**
+   * The folder's branch, changes and upstream. A failed read throws rather than answering "not a repository" or "no
+   * branch", so a window keeps the branch it showed instead of dropping it.
+   */
   async getStatus(cwd: string): Promise<GitStatusSnapshot> {
-    const isRepo = await this.isRepo(cwd)
+    const isRepo = await this.isRepo(cwd, { strict: true })
     if (!isRepo) {
       return { isRepo: false, branch: null, upstream: null, tracking: 'none', ahead: 0, behind: 0, changes: [], ...(await pathExists(cwd) ? {} : { missing: true }) }
     }
@@ -722,7 +733,8 @@ export class GitService {
     // milliseconds to start, and the side card waits for this answer. The count fails, and is not used, without an upstream.
     const [entries, branch, hasHead, foundUpstream, hasRemote, counts, inProgress] = await Promise.all([
       this.statusEntries(cwd),
-      git.raw(['symbolic-ref', '--quiet', '--short', 'HEAD']).then((value) => value.trim() || null).catch(() => null),
+      // A detached HEAD answers nothing (no error); a failure to read HEAD is not a detached HEAD.
+      git.raw(['symbolic-ref', '--quiet', '--short', 'HEAD']).then((value) => value.trim() || null),
       git.raw(['rev-parse', '--verify', 'HEAD']).then(() => true).catch(() => false),
       this.upstream(git),
       git.raw(['remote']).then((value) => Boolean(value.trim())).catch(() => false),
