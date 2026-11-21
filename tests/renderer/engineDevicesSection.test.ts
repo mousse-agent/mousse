@@ -408,6 +408,30 @@ describe('routes (1b §1.3, §1.5)', () => {
     expect(d.called('netEngine.address.use')).toEqual([{ node: 'n1' }])
   })
 
+  it('copies the local tunnel origin before saving a URL and sends a pairing link after setup', async () => {
+    const reach = { lan: false, tailnet: false, public: [], tunnels: [], wsPort: 47101 }
+    const d = daemon({ reach, sendLink: true })
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    try {
+      await mount()
+      const moreWays = [...host.querySelectorAll('summary')].find((item) =>
+        item.textContent?.includes('More ways')
+      )
+      await click(moreWays)
+      await click(button('Copy local origin'))
+      expect(writeText).toHaveBeenCalledWith('http://127.0.0.1:47101')
+      expect(d.called('netEngine.routes.config')).toEqual([])
+      expect(button('Send pairing link')).toBeUndefined()
+
+      await d.change({ reach: { ...reach, tunnels: ['wss://x.example/mousse-net/1'] } })
+      await click(button('Send pairing link'))
+      expect(d.called('netEngine.invite')).toContainEqual({ kind: 'link' })
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard')
+    }
+  })
+
   it('saves Reach through the daemon, tests a route, and says a failed test may be the network', async () => {
     const d = daemon(
       {

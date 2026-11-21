@@ -315,7 +315,7 @@ export interface NetEngineReach {
   tunnels: string[]
   /** The kept TCP port. */
   port?: number
-  /** The loopback port a tunnel client forwards to, while a tunnel is set. */
+  /** The loopback port a tunnel client forwards to, when the helper has opened it. */
   wsPort?: number
   /** Addresses the helper could not bind yet (it retries them). */
   unbound?: string[]
