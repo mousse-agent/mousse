@@ -34,7 +34,8 @@ import { app, BrowserWindow, dialog, ipcMain, nativeTheme, Notification, powerMo
 import { SAVE_TOO_LARGE_MESSAGE, saveExceedsRequest } from '../../shared/fileAssets'
 import { readAssetInPieces, readAssetStamp } from './assetPieces'
 import { browsedRootParams, browseSupport } from './browsedRoot'
-import { daemonGitParams } from './daemonGitParams'
+import { daemonGitParams, daemonGitReadParams } from './daemonGitParams'
+import { headsFromOlderService } from './gitHeadsFallback'
 import { PROJECT_ICON_EXTENSIONS, type ProjectIconChoice, type ProjectIconImage } from '../../shared/projectIcon'
 import { getComputerName } from '../../mms/computerName'
 import { randomUUID } from 'node:crypto'
@@ -139,6 +140,7 @@ import type {
   CreateScheduledJobInput,
   FileAsset,
   FileEntry,
+  FileText,
   FileGrepResponse,
   FileSearchResponse,
   GitBranchInfo,
@@ -151,6 +153,8 @@ import type {
   GitRevertRequest,
   GitDiffStats,
   GitStatusSnapshot,
+  GitHeadsRequest,
+  GitHeadsResult,
   GitContinueResult,
   GitInProgress,
   GitUpstreamCheck,
@@ -2050,8 +2054,8 @@ export function registerGuiIpc(
 
   // ── Projects / threads (protocol) ────────────────────────────────────────
 
-  registerHandler('workspace:getStatus', async (_e, threadId: string) =>
-    guiMms.request('workspace.getStatus', { threadId })
+  registerHandler('workspace:getStatus', async (_e, threadId: string, fresh?: boolean) =>
+    guiMms.request('workspace.getStatus', { threadId }, undefined, { fresh: fresh === true })
   )
   registerHandler('workspace:restore', async (_e, threadId: string, expectedJournalGeneration?: number) =>
     guiMms.request('workspace.restore', { threadId, expectedJournalGeneration })
@@ -3192,9 +3196,9 @@ export function registerGuiIpc(
     ...(typeof threadId === 'string' && threadId ? { threadId } : {})
   })
 
-  registerHandler('app:getFilesRoot', async (_e, threadId?: string | null) => {
+  registerHandler('app:getFilesRoot', async (_e, threadId?: string | null, fresh?: boolean) => {
     const id = threadId ?? currentPresentation().getActiveThreadId()
-    return (await guiMms.request<{ root: string }>('files.root', filesScope(undefined, id))).root
+    return (await guiMms.request<{ root: string }>('files.root', filesScope(undefined, id), undefined, { fresh: fresh === true })).root
   })
 
   // `root` is a folder the Files panel browses instead of the thread's; the daemon accepts it from this computer's
@@ -3209,18 +3213,28 @@ export function registerGuiIpc(
     async (_e, dirPath?: string, projectId?: string, threadId?: string | null, root?: string) =>
       (await guiMms.request<{ entries: FileEntry[] }>('files.list', { ...filesScope(projectId, threadId), ...await browsedRoot(root), path: dirPath ?? '' })).entries
   )
+  const canonicalFileParams = (include: boolean, threadId?: string | null) =>
+    include && !(threadId && isQualifiedId(threadId)) ? { includeCanonicalPath: true } : {}
+
   registerHandler(
     'fs:readFile',
-    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string) =>
-      (await guiMms.request<{ content: string }>('files.read', { ...filesScope(projectId, threadId), ...await browsedRoot(root), path: filePath })).content
+    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string, details = false) => {
+      const reply = await guiMms.request<FileText>('files.read', {
+        ...filesScope(projectId, threadId), ...await browsedRoot(root), ...canonicalFileParams(details, threadId), path: filePath
+      })
+      return details ? reply : reply.content
+    }
   )
   registerHandler(
     'fs:readAsset',
     // The daemon sends a preview in pieces that fit a message; they are joined here.
-    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string): Promise<FileAsset> => {
+    async (_e, filePath: string, projectId?: string, threadId?: string | null, root?: string, details = false): Promise<FileAsset> => {
       const browsed = await browsedRoot(root)
       return readAssetInPieces((offset, length) =>
-        guiMms.request('files.readAsset', { ...filesScope(projectId, threadId), ...browsed, path: filePath, offset, length })
+        guiMms.request('files.readAsset', {
+          ...filesScope(projectId, threadId), ...browsed, ...canonicalFileParams(details && offset === 0, threadId),
+          path: filePath, offset, length
+        })
       )
     }
   )
@@ -3313,17 +3327,33 @@ export function registerGuiIpc(
 
   // Git reads name the folder by scope, like the mutations below: the thread when the folder is its own
   // worktree, the project otherwise. The daemon resolves the folder; a path from the renderer is never used.
+  // A current service (one with `git.heads`) also checks the worktree generation and takes a Retry's number.
+  const gitRead = async <T,>(method: string, scope: GitScope | undefined, args?: Record<string, unknown>) => {
+    const params = daemonGitReadParams(scope, await guiMms.supports('git.heads'), args)
+    return guiMms.request<T>(method, params, undefined, { fresh: typeof scope?.attempt === 'number' })
+  }
   registerHandler('git:status', async (_e, scope?: GitScope) =>
-    (await guiMms.request<{ status: GitStatusSnapshot }>('git.status', daemonGitParams(scope))).status
+    (await gitRead<{ status: GitStatusSnapshot }>('git.status', scope)).status
   )
+  // The branches thread cards name, read from Git's files in the daemon (`git.heads`); from the workspace records and
+  // status reads of an older service that lacks it.
+  registerHandler('git:heads', async (_e, request?: GitHeadsRequest) => {
+    const heads: GitHeadsRequest = {
+      ...(Array.isArray(request?.threadIds) ? { threadIds: request.threadIds } : {}),
+      ...(Array.isArray(request?.projectIds) ? { projectIds: request.projectIds } : {}),
+      ...(Number.isSafeInteger(request?.attempt) ? { attempt: request!.attempt } : {})
+    }
+    if (await guiMms.supports('git.heads')) return guiMms.request<GitHeadsResult>('git.heads', heads)
+    return headsFromOlderService((method, params) => guiMms.request(method, params, undefined, { fresh: heads.attempt !== undefined }), heads)
+  })
   registerHandler('git:log', async (_e, limit: number | undefined, scope?: GitScope) =>
-    (await guiMms.request<{ commits: GitCommit[] }>('git.log', daemonGitParams(scope, { limit }))).commits
+    (await gitRead<{ commits: GitCommit[] }>('git.log', scope, { limit })).commits
   )
   registerHandler('git:branches', async (_e, scope?: GitScope) =>
-    (await guiMms.request<{ branches: GitBranchInfo }>('git.branches', daemonGitParams(scope))).branches
+    (await gitRead<{ branches: GitBranchInfo }>('git.branches', scope)).branches
   )
   registerHandler('git:diffStats', async (_e, scope?: GitScope) =>
-    (await guiMms.request<{ stats: GitDiffStats }>('git.diffStats', daemonGitParams(scope))).stats
+    (await gitRead<{ stats: GitDiffStats }>('git.diffStats', scope)).stats
   )
   // Every Git mutation runs in the daemon, so the thread-worktree rules and the repository lease apply
   // to the GUI like any other client. Storage handlers keep the daemon's error code across IPC.

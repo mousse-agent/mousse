@@ -58,8 +58,8 @@ beforeEach(async () => {
   init = vi.fn(async () => { folder = 'repository'; return { status: repository } })
   ;(window as unknown as { mousse: unknown }).mousse = {
     app: { getFilesRoot: async () => WORKTREE, getActiveProjectPath: async () => PROJECT },
-    workspace: { getStatus: async () => ({ execution: { projectPath: WORKTREE, lifecycle: 'ready' } }) },
     git: {
+      heads: async () => ({ projects: {}, threads: { t1: { own: true, branch: 'mousse/t1', folder: WORKTREE } } }),
       status: vi.fn(async (scope: GitScope) => { statusScopes.push(scope); return statusOf(folder) }),
       log: async () => [],
       branches: async () => ({ current: repository.branch, branches: [repository.branch] }),

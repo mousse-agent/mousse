@@ -1735,6 +1735,28 @@ export class ThreadDataStore extends EventEmitter {
   }
 
   /**
+   * A thread's folder (and its metadata, when the list caches have it) for a read-only lookup: from its lifecycle record,
+   * else worked out from the listed thread. No project is scanned, and nothing is migrated or registered.
+   * Undefined for a thread neither knows, or one in the trash.
+   */
+  async peekThreadLocation(id: string): Promise<{ directory: string; thread?: Thread } | undefined> {
+    const record = await this.lifecycleStore.getAsync(id)
+    const seen = new Set([id])
+    for (let current = record; current;) {
+      if (current.state !== 'active') return undefined
+      const parent = current.parentTaskId
+      if (!parent) break
+      if (seen.has(parent)) throw new Error('Cyclic lifecycle task ownership')
+      seen.add(parent)
+      current = await this.lifecycleStore.getAsync(parent)
+    }
+    const thread = this.listedThread(id)
+    if (record) return { directory: record.location, ...(thread ? { thread } : {}) }
+    if (!thread) return undefined
+    return { directory: thread.projectId ? this.storageLayout.repositoryThreadDir(thread.projectId, id) : this.storageLayout.standaloneThreadDir(id), thread }
+  }
+
+  /**
    * Ids `getThread` looked for on disk and did not find. Kept only while every group is cached and found unchanged on
    * disk (`missingStillHolds`); cleared whenever a cached group changes, so a thread made since is always found.
    */
