@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, normalize } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   assertGitAllowed, assertGitAllowedAsync, clearGitPolicyLog, decideGitCommand, GitPolicyError, gitPolicyLog, gitPolicyMode, isOwnedPath, isOwnedRef,
@@ -90,6 +90,19 @@ describe('Mousse may change what it owns', () => {
     expect(decide({ args, stdin: 'start\ndelete refs/mousse/a 1\ndelete refs/heads/main 2\ncommit\n' })).toMatchObject({ allowed: false })
     expect(decide({ args, stdin: 'update refs/mousse/a\0new\0old\0' })).toMatchObject({ allowed: true })
     expect(decide({ args })).toMatchObject({ allowed: false })
+  })
+
+  it('limits a branch rename transaction to owned HEADs and branch config sections', () => {
+    const args = ['update-ref', '--no-deref', '--stdin']
+    const stdin = 'symref-update HEAD refs/heads/fix/login ref refs/heads/team/temporary\n'
+    const config = ['config', '--local', '--rename-section', 'branch.team/temporary', 'branch.fix/login']
+    withOwnedBranches(['team/temporary', 'fix/login'], () => {
+      expect(decide({ cwd: owned, args, stdin })).toMatchObject({ access: 'owned', allowed: true })
+      expect(decide({ args, stdin })).toMatchObject({ allowed: false })
+      expect(decide({ cwd: owned, args, stdin: stdin.replace('refs/heads/fix/login', 'refs/heads/main') })).toMatchObject({ allowed: false })
+      expect(decide({ args: config })).toMatchObject({ access: 'owned', allowed: true })
+      expect(decide({ args: [...config.slice(0, -1), 'branch.refs/mousse/login'] })).toMatchObject({ allowed: false })
+    })
   })
 
   // What every fetch Mousse runs by itself must say: no tags, no submodules, no FETCH_HEAD, and an empty refmap.
@@ -353,7 +366,7 @@ describe('round 3: private indexes in linked worktrees, update-ref options, simp
 
   it('accepts Mousse\'s private indexes in the Git directory of an owned linked worktree, in both shapes', () => {
     const { worktree, gitDir } = linked()
-    expect(gitDir).toContain(join('.git', 'worktrees'))
+    expect(normalize(gitDir)).toContain(join('.git', 'worktrees'))
     for (const index of [join(gitDir, 'mousse-pending-1.index'), join(gitDir, 'mousse', 'snapshot-index'), join(gitDir, 'mousse', 'restore-a.index'), join(gitDir, 'mousse', 'preserve-b.index')]) {
       expect(decideGitCommand({ cwd: worktree, args: ['add', '-u'], env: { GIT_INDEX_FILE: index } }), index).toMatchObject({ access: 'owned', allowed: true })
       expect(decideGitCommand({ cwd: worktree, args: ['read-tree', 'HEAD'], env: { GIT_INDEX_FILE: index } }), index).toMatchObject({ access: 'owned', allowed: true })

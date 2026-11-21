@@ -899,7 +899,7 @@ export class Harness implements HarnessGateway {
   private liveHost: LiveProcessHost | null = null
   private mcp: McpAttachmentProvider | null = null
   private readonly retired = new Set<InstanceRecord>()
-  private readonly runtimeStops = new Set<Promise<void>>()
+  private readonly runtimeStops = new Map<InstanceRecord, { promise: Promise<void>; failed?: true }>()
   private shutdown?: Promise<void>
   /**
    * The stops of a removal or disable still running, per instance (each settles, never rejects). They
@@ -2506,6 +2506,7 @@ export class Harness implements HarnessGateway {
     let upgraded = false
     const run = async () => {
       await Promise.race([this.shellPath, new Promise((resolve) => setTimeout(resolve, SHELL_PATH_WAIT_MS).unref?.())])
+      if (this.stopped) return
       const record = this.record(instanceId, { allowDisabled: true })
       const override = record.config.binaryPath
       // Signed out in Mousse: reported as such without asking the runtime (no CLI status check).
@@ -4163,6 +4164,8 @@ export class Harness implements HarnessGateway {
   }
 
   private stopRuntime(record: InstanceRecord): Promise<void> | undefined {
+    const existing = this.runtimeStops.get(record)
+    if (existing) return existing.promise
     let stopping: void | Promise<void>
     try {
       stopping = record.runtime.stop()
@@ -4171,10 +4174,12 @@ export class Harness implements HarnessGateway {
     }
     if (!stopping) return undefined
     // Keep failures from earlier runtime retirements available for profile shutdown.
-    this.runtimeStops.add(stopping)
+    const stop: { promise: Promise<void>; failed?: true } = { promise: stopping }
+    this.runtimeStops.set(record, stop)
     void stopping.then(
-      () => this.runtimeStops.delete(stopping),
+      () => this.runtimeStops.delete(record),
       (error: unknown) => {
+        stop.failed = true
         console.warn('[harness] runtime stop failed', { instanceId: record.instanceId, error: errorText(error) })
       }
     )
@@ -4183,6 +4188,7 @@ export class Harness implements HarnessGateway {
 
   stop(): Promise<void> {
     if (this.shutdown) return this.shutdown
+    const retry = this.stopped
     this.stopped = true
     if (this.modelSchedule) {
       clearInterval(this.modelSchedule.interval)
@@ -4192,14 +4198,23 @@ export class Harness implements HarnessGateway {
     }
     for (const operation of this.operations.values()) operation.cancel()
     this.operations.clear()
-    for (const record of new Set([...this.records.values(), ...this.retired])) this.stopRuntime(record)
+    const records = new Set([...this.records.values(), ...this.retired])
+    if (retry) {
+      for (const [record, stop] of this.runtimeStops) {
+        if (!stop.failed) continue
+        this.runtimeStops.delete(record)
+        records.add(record)
+      }
+    }
+    for (const record of records) this.stopRuntime(record)
     this.records.clear()
     this.retired.clear()
     this.listeners.clear()
-    this.shutdown = Promise.allSettled(this.runtimeStops).then((results) => {
+    this.shutdown = Promise.allSettled([...this.runtimeStops.values()].map((stop) => stop.promise)).then((results) => {
       const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
       if (failures.length) throw new AggregateError(failures.map((failure) => failure.reason), 'Provider runtimes could not be stopped')
     })
+    void this.shutdown.catch(() => { this.shutdown = undefined })
     return this.shutdown
   }
 }

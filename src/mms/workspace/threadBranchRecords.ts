@@ -6,11 +6,10 @@ import { isAcceptableThreadBranchName, isMousseBranchName } from '../../shared/m
  * Which branches a thread's journal shows Mousse made for its worktree, under the names they have now.
  *
  * A branch is Mousse's when its journal says so, whatever its name:
- * - `workspace-provision`: the worktree was made with `git worktree add -b <branch>`, which fails when a branch of that
- *   name is already there, so a successful provision proves Mousse made the branch. An older journal's plan
+ * - `workspace-provision`: the worktree was made on a newly created branch. The creation marker proves Mousse made
+ *   the branch when the worktree was provisioned. An older journal's plan
  *   can still identify its worktree for recovery. A plan alone gives no authority to delete the branch.
- * - `workspace-branch-rename`: Mousse renamed a branch it owned (`git branch -m`, which fails when the new name is
- *   taken). Only a completed rename moves ownership to the new name. A rename with no outcome recorded (a stop between
+ * - `workspace-branch-rename`: Mousse renamed a verified branch to a free name. Only a completed rename moves ownership to the new name. A rename with no outcome recorded (a stop between
  *   its steps) is `pending`: until it is settled from the repository (`ThreadWorkspaceManager.settleBranchRename`),
  *   the worktree is still the thread's under either name, but neither branch is deleted or renamed (retirement and
  *   purge keep both). A rename settled without knowing its outcome (`disowned`) leaves Mousse owning neither name for good.
@@ -43,6 +42,8 @@ export interface PendingBranchRename extends BranchRenameIntent {
   operationId: string
   sequence: number
   gitApplied?: true
+  /** The verified destination identity. Older renames moved the original reflog file. */
+  toReflogId?: string
 }
 
 export interface ThreadBranchRecord {
@@ -65,10 +66,10 @@ export interface ThreadBranchRecord {
 
 const fold = (path: string): string => (process.platform === 'win32' || process.platform === 'darwin' ? resolve(path).toLowerCase() : resolve(path))
 
-function provisionIntent(entry: ThreadJournalRecord): { branch: string; worktreePath?: string; requiresCompletion: boolean; reflogId?: string } | undefined {
-  const intent = entry.expectedPreState as { branch?: unknown; worktreePath?: unknown; requiresCompletion?: unknown } | undefined
+function provisionIntent(entry: ThreadJournalRecord): { branch: string; worktreePath?: string; requiresCompletion: boolean; requiresBranchIdentity: boolean; reflogId?: string } | undefined {
+  const intent = entry.expectedPreState as { branch?: unknown; worktreePath?: unknown; requiresCompletion?: unknown; requiresBranchIdentity?: unknown } | undefined
   if (typeof intent?.branch !== 'string') return undefined
-  return { branch: intent.branch, ...(typeof intent.worktreePath === 'string' ? { worktreePath: intent.worktreePath } : {}), requiresCompletion: intent.requiresCompletion === true }
+  return { branch: intent.branch, ...(typeof intent.worktreePath === 'string' ? { worktreePath: intent.worktreePath } : {}), requiresCompletion: intent.requiresCompletion === true, requiresBranchIdentity: intent.requiresBranchIdentity === true }
 }
 
 export function renameIntentOf(entry: ThreadJournalRecord): BranchRenameIntent | undefined {
@@ -119,14 +120,14 @@ export function threadBranchRecord(entries: readonly ThreadJournalRecord[], opti
       } else if (entry.state === 'completed') {
         const provision = provisions.get(entry.operationId)
         if (!provision) continue
-        const { branch, requiresCompletion, reflogId } = provision
+        const { branch, requiresCompletion, requiresBranchIdentity, reflogId } = provision
         const details = entry.details as { branch?: unknown; recovered?: unknown } | undefined
         if (details?.branch !== undefined && details.branch !== branch) continue
         // Historical provision records include the old id-based names, which the title model may no longer pick.
         if (!isAcceptableThreadBranchName(branch) && (requiresCompletion || !isMousseBranchName(branch))) continue
         known.add(branch)
         // Finding an existing checkout during recovery cannot prove that the provision created its ref.
-        if (details?.recovered !== true && !failedProvisions.has(entry.operationId)) {
+        if (details?.recovered !== true && !failedProvisions.has(entry.operationId) && (!requiresBranchIdentity || reflogId)) {
           owned.add(branch)
           reflogIds.delete(branch)
           if (reflogId) reflogIds.set(branch, reflogId)
@@ -146,9 +147,14 @@ export function threadBranchRecord(entries: readonly ThreadJournalRecord[], opti
       } else {
         const rename = renames.get(entry.operationId)
         if (!rename) continue
-        const details = entry.details as { disowned?: unknown; settled?: unknown; reflogId?: unknown } | undefined
+        const details = entry.details as { disowned?: unknown; settled?: unknown; reflogId?: unknown; toReflogId?: unknown } | undefined
         if (entry.state === 'git_applied') {
-          if (rename.fromReflogId && details?.reflogId === rename.fromReflogId) rename.gitApplied = true
+          if (rename.fromReflogId && details?.reflogId === rename.fromReflogId) {
+            if (typeof details.toReflogId === 'string' && /^[0-9a-f]{64}$/.test(details.toReflogId)) {
+              rename.toReflogId = details.toReflogId
+            } else if (details.toReflogId !== undefined) continue
+            rename.gitApplied = true
+          }
           continue
         }
         if (entry.state !== 'completed' && entry.state !== 'failed' && entry.state !== 'cancelled') continue
@@ -159,7 +165,7 @@ export function threadBranchRecord(entries: readonly ThreadJournalRecord[], opti
           const id = reflogIds.get(rename.from)
           reflogIds.delete(rename.from)
           reflogIds.delete(rename.to)
-          if (id && rename.gitApplied && id === rename.fromReflogId) reflogIds.set(rename.to, id)
+          if (id && rename.gitApplied && id === rename.fromReflogId) reflogIds.set(rename.to, rename.toReflogId ?? id)
           owned.delete(rename.from)
           temporary.delete(rename.from)
           owned.add(rename.to)

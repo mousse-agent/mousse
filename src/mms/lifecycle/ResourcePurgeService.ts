@@ -15,7 +15,7 @@ import { projectFolderPurgeRefs, threadKeptFilesRefs } from './projectFolderRefs
 import { measureTree } from './diskMeasure'
 import { assertLifecyclePath, assertLifecyclePathAsync, ResourceLifecycleStore } from './ResourceLifecycleStore'
 import { lockReasonSync, WorktreeRetirementService } from './WorktreeRetirementService'
-import { deleteVerifiedBranchAsync, lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
+import { branchCheckedOutAsync, deleteVerifiedBranchAsync, lifecycleGitAsync, lifecycleReadAsync, readDirectLifecycleRefAsync } from './lifecycleGit'
 import { READ_ONLY_GIT_ENV } from '../git/readOnlyGit'
 import { branchReflogIdentity } from '../git/branchReflogIdentity'
 import { assertFrozenEntryUnchanged, lockedText, proveFrozenContentEntryAsync, walkOwnedContentAsync } from './verifiedDelete'
@@ -973,8 +973,7 @@ export class ResourcePurgeService {
           let reason = 'The branch reflog changed since the purge preview; the branch stays'
           const deleted = await withOwnedBranches([name], () => deleteVerifiedBranchAsync(commonDir, item.identity, current, async () => {
             // Git can switch another worktree onto the branch even while this transaction holds the ref lock.
-            const listing = await lifecycleReadAsync(commonDir, ['worktree', 'list', '--porcelain', '-z'])
-            if (listing.split('\0').includes(`branch ${item.identity}`)) {
+            if (await branchCheckedOutAsync(commonDir, item.identity)) {
               reason = 'This branch is checked out; the branch stays'
               return false
             }
@@ -983,7 +982,9 @@ export class ResourcePurgeService {
             const retained = this.threadBranchRetention(record, name)
             if (retained) { reason = retained; return false }
             const reflog = branchReflogIdentity(commonDir, item.identity)
-            return reflog !== undefined && reflog.id === record?.reflogIds.get(name) && reflog.version === proof.reflogVersion
+            if (!reflog || reflog.id !== record?.reflogIds.get(name) || reflog.version !== proof.reflogVersion) return false
+            reason = 'This branch was in use or its checkouts could not be verified; the branch stays'
+            return true
           }))
           if (!deleted) return reason
           return

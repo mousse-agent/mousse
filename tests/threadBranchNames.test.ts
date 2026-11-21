@@ -7,6 +7,8 @@ import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceMana
 import { WorkspaceResolver } from '../src/mms/workspace/WorkspaceResolver'
 import { isThreadOwnBranch } from '../src/mms/workspace/WorkflowWorkspace'
 import { registerBranchNamer, requestBranchName, type BranchNamer } from '../src/mms/workspace/branchNaming'
+import * as reflog from '../src/mms/git/branchReflogIdentity'
+import * as gitProcess from '../src/mms/git/runGitProcess'
 import { BRANCH_RENAME_OPERATION } from '../src/mms/workspace/threadBranchRecords'
 import type { BranchNamingSettings } from '../src/shared/settings'
 import { gitLeftInPlaceNoticeAsync } from '../src/mms/actions/snapshots'
@@ -237,6 +239,65 @@ describe('what Undo says about Git work after the branch was renamed', () => {
     // Recorded across the rename: the start has the temporary name, the end the new one; that is no switch.
     expect(await gitLeftInPlaceNoticeAsync(made.worktreePath, 'Undo', { commits: [], git: { branchBefore: made.branch, branchAfter: 'fix/login-button', rewroteHistory: false } }, renamedTo)).toBeUndefined()
   })
+})
+
+it('does not claim a branch replaced immediately after provision creates it', async () => {
+  const manager = new ThreadWorkspaceManager(threadDir('creation-race'))
+  const run = gitProcess.runGitProcess
+  let replaced = false
+  vi.spyOn(gitProcess, 'runGitProcess').mockImplementation(async (argv, options) => {
+    const result = await run(argv, options)
+    const creatingWorktree = argv.includes('worktree') && argv.includes('add') && argv.includes('-b')
+    const creatingRef = argv.includes('update-ref') && argv.includes('--create-reflog')
+    if (!replaced && result.status === 0 && (creatingWorktree || creatingRef)) {
+      const ref = creatingWorktree ? `refs/heads/${argv[argv.indexOf('-b') + 1]}` : argv.find((arg) => arg.startsWith('refs/heads/'))!
+      const sha = git(repo, 'rev-parse', ref)
+      git(repo, 'update-ref', '-d', ref, sha)
+      git(repo, 'branch', ref.slice('refs/heads/'.length), sha)
+      replaced = true
+    }
+    return result
+  })
+  const made = await manager.provision('creation-race', 'main', repo)
+  expect(replaced).toBe(true)
+  expect(manager.branchRecord().reflogIds.has(made.branch)).toBe(false)
+  expect(manager.branchRecord().owned.has(made.branch)).toBe(false)
+  expect(git(made.worktreePath, 'rev-parse', 'HEAD')).toBe(made.headSha)
+})
+
+it('keeps a replacement from moving when Git tries to replace the source after the final rename check', async () => {
+  const manager = new ThreadWorkspaceManager(threadDir('rename-race'))
+  const made = await manager.provision('rename-race', 'main', repo)
+  const from = `refs/heads/${made.branch}`
+  const to = 'fix/login-button'
+  git(made.worktreePath, 'commit', '--allow-empty', '-m', 'Keep visible in the reflog')
+  const tip = git(made.worktreePath, 'rev-parse', 'HEAD')
+  git(repo, 'config', `branch.${made.branch}.description`, 'Work already in progress')
+  const read = reflog.branchReflogIdentity
+  let reads = 0
+  let replaced = false
+  vi.spyOn(reflog, 'branchReflogIdentity').mockImplementation((cwd, ref) => {
+    const identity = read(cwd, ref)
+    if (ref === from && ++reads === 2) {
+      try {
+        git(repo, '-c', 'core.filesRefLockTimeout=0', 'update-ref', '-d', from, tip)
+      } catch (error) {
+        expect(String((error as { stderr?: Buffer }).stderr)).toMatch(/cannot lock ref/)
+        return identity
+      }
+      git(repo, 'branch', made.branch, tip)
+      replaced = true
+    }
+    return identity
+  })
+  await manager.renameOwnBranch(made.branch, to)
+  expect(reads).toBeGreaterThanOrEqual(2)
+  expect(replaced).toBe(false)
+  expect(git(made.worktreePath, 'symbolic-ref', 'HEAD')).toBe(`refs/heads/${to}`)
+  expect(git(made.worktreePath, 'rev-parse', 'HEAD')).toBe(tip)
+  expect(branches(repo)).not.toContain(made.branch)
+  expect(git(repo, 'reflog', 'show', '--format=%gs', to)).toContain('commit: Keep visible in the reflog')
+  expect(git(repo, 'config', '--get', `branch.${to}.description`)).toBe('Work already in progress')
 })
 
 it('keeps a user-recreated source branch at the same commit checked out under its original name', async () => {

@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto'
+import { createLoggedBranchAsync, deleteVerifiedBranchAsync, verifiedRefTransactionAsync } from '../lifecycle/lifecycleGit'
 import { ResourceLifecycleStore } from '../lifecycle/ResourceLifecycleStore'
 import { WorktreeRetirementService } from '../lifecycle/WorktreeRetirementService'
 import { findListedWorktreeAsync, WorktreeListPass } from '../lifecycle/worktreeRegistry'
 import { assertFolderUnchanged, folderSignatureAsync, walkOwnedContentAsync } from '../lifecycle/verifiedDelete'
 import { getThreadLifecycleGate } from '../queue/ThreadLifecycleAdmission'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
-import { access, mkdir, readdir, realpath, rename, rm } from 'node:fs/promises'
+import { constants, existsSync, readFileSync, realpathSync } from 'node:fs'
+import { access, copyFile, mkdir, readdir, realpath, rename, rm } from 'node:fs/promises'
 import { nonInteractiveGitEnv } from '../git/gitEnv'
 import { assertGitAllowedAsync, rethrowGitPolicyError, withOwnedBranches, type UserAction } from '../git/gitPolicy'
 import { safeWorktreeGit } from '../worktree/WorktreeManager'
@@ -56,9 +57,9 @@ function gitSync(cwd: string, args: string[]): string {
 }
 
 /** Git for the workspace's own commands, without blocking the daemon: the same check, command and answer as `execFileSync`. */
-async function git(cwd: string, args: string[], userRequested?: UserAction, beforeStart?: () => void): Promise<string> {
+async function git(cwd: string, args: string[], userRequested?: UserAction): Promise<string> {
   const argv = await withoutRepoProgramsAsync(cwd, args, { userRequested })
-  const ran = await runGitProcess(argv, { cwd, env: repoProgramEnv(), beforeStart })
+  const ran = await runGitProcess(argv, { cwd, env: repoProgramEnv() })
   if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
   return ran.stdout.trim()
 }
@@ -179,7 +180,7 @@ async function pinUntrustedWorktree(primaryCheckoutPath: string, worktreePath: s
  * stays pinned. `enableWorktreeConfig` (see `provision`) turns the setting on once the safety checks have passed;
  * `userRequested` is the user's Start thread from pull request, which that change to the repository's config needs.
  */
-async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string, plan: WorktreeCheckoutPlan, enableWorktreeConfig?: () => void, userRequested?: UserAction, onAdded?: () => void): Promise<void> {
+async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: string[], worktreePath: string, plan: WorktreeCheckoutPlan, enableWorktreeConfig?: () => void, userRequested?: UserAction, beforeAdd?: () => Promise<void>): Promise<void> {
   // A repository whose filters cannot be switched off is refused here, before its configuration is changed.
   const safety = await untrustedSafety(primaryCheckoutPath)
   if (enableWorktreeConfig && await enablePerWorktreeConfig(primaryCheckoutPath, userRequested)) enableWorktreeConfig()
@@ -191,11 +192,10 @@ async function addUntrustedWorktree(primaryCheckoutPath: string, addArguments: s
     const ran = await runGitProcess(argv, { cwd, env: repoProgramEnv({ ...process.env, ...nonInteractiveGitEnv(), GIT_LFS_SKIP_SMUDGE: '1' }), ...(input === undefined ? {} : { input }) })
     if (ran.error || ran.status !== 0) throw gitRunError(argv, ran)
   }
+  await beforeAdd?.()
   // In a sparse checkout the safety is pinned before any file is written.
-  await addWorktree({ cwd: primaryCheckoutPath, worktreePath, add: addArguments, plan, prefix: [...safety, ...LONG_PATHS], run, afterAdd: () => {
-    onAdded?.()
-    return pinUntrustedWorktree(primaryCheckoutPath, worktreePath, safety)
-  } })
+  await addWorktree({ cwd: primaryCheckoutPath, worktreePath, add: addArguments, plan, prefix: [...safety, ...LONG_PATHS], run,
+    afterAdd: () => pinUntrustedWorktree(primaryCheckoutPath, worktreePath, safety) })
 }
 
 /** Only for {@link ThreadWorkspaceManager.resolveRepository}. */
@@ -459,7 +459,7 @@ export class ThreadWorkspaceManager {
         operationId,
         operationType: 'workspace-provision',
         state: 'planned',
-        expectedPreState: { head, branch, retainedRef, worktreePath, requiresCompletion: true }
+        expectedPreState: { head, branch, retainedRef, worktreePath, requiresCompletion: true, requiresBranchIdentity: true }
       })
       atomicWriteJsonSync(this.workspacePath, {
         schemaVersion: 1,
@@ -480,14 +480,19 @@ export class ThreadWorkspaceManager {
         lastVerifiedAt: new Date().toISOString(),
         ...(options.untrusted ? { untrusted: true as const } : {})
       } satisfies ThreadWorkspaceMetadata)
-      // Record the branch made by Git before checkout setup can hand control to the caller.
-      const recordBranchCreation = (): void => {
-        const reflogId = branchReflogIdentity(repository.gitCommonDirectory, `refs/heads/${branch}`)?.id
+      const createBranch = async (): Promise<void> => {
+        const ref = `refs/heads/${branch}`
+        const message = `mousse: provision ${operationId}`
+        await createLoggedBranchAsync(repository.primaryCheckoutPath, ref, head, message)
+        const reflogId = branchReflogIdentity(repository.gitCommonDirectory, ref, { message, creation: true })?.id
         if (reflogId) this.journal.append({ operationId: randomUUID(), operationType: BRANCH_CREATE_OPERATION, state: 'completed', details: { provisionId: operationId, reflogId } })
       }
-      const add = ['-b', branch, worktreePath, head]
-      if (options.untrusted) await withOwnedBranches([branch], () => addUntrustedWorktree(repository.primaryCheckoutPath, add, worktreePath, checkoutPlan, options.enableWorktreeConfig, options.userRequested, recordBranchCreation))
-      else await withOwnedBranches([branch], () => addWorktree({ cwd: repository.primaryCheckoutPath, worktreePath, add, plan: checkoutPlan, prefix: LONG_PATHS, afterAdd: recordBranchCreation }))
+      const add = [worktreePath, branch]
+      if (options.untrusted) await withOwnedBranches([branch], () => addUntrustedWorktree(repository.primaryCheckoutPath, add, worktreePath, checkoutPlan, options.enableWorktreeConfig, options.userRequested, createBranch))
+      else await withOwnedBranches([branch], async () => {
+        await createBranch()
+        await addWorktree({ cwd: repository.primaryCheckoutPath, worktreePath, add, plan: checkoutPlan, prefix: LONG_PATHS })
+      })
       if (options.snapshot) {
         // A fresh checkout holds Git's form of every file, so nothing is kept here unless something wrote into it meanwhile.
         const moved = await moveFilesToSnapshotAsync(worktreePath, await git(worktreePath, ['rev-parse', 'HEAD^{tree}']), options.snapshot, { owner: this.threadDirectory, action: 'Starting the worktree' })
@@ -681,14 +686,11 @@ export class ThreadWorkspaceManager {
   }
 
   /**
-   * Renames the thread's worktree branch from `from` to `to` with `git branch -m`, which fails when `to` is taken and
-   * renames the branch the worktree has checked out; the worktree's folder keeps its name. Only a branch Mousse's records
-   * show it made (`branchRecord`), only while the workspace is ready on it, and under the repository's lease (waited for
-   * at most 30 seconds). Returns 'renamed', or why the branch keeps its name.
+   * Renames the verified branch under its Git ref lock. Git cannot delete a branch through the same transaction that
+   * changes its worktree's symbolic HEAD. Keep the original branch locked while Git creates the destination and changes
+   * HEAD together, then delete the original. If interrupted in between, both tips remain reachable.
    *
-   * Each step leaves a state a stop can be settled from: the journal's planned record first (Mousse still owns only
-   * `from`), then Git's rename, its verification, workspace.json and the completed record that moves ownership to `to`.
-   * A stop in between is settled with the verification and the repository (`settleBranchRename`).
+   * The journal moves ownership only after Git's result is verified. See `settleBranchRename` for interrupted renames.
    */
   async renameOwnBranch(from: string, to: string, signal?: AbortSignal): Promise<string> {
     if (!isAcceptableThreadBranchName(to) || to === from) return 'the name is not usable'
@@ -714,7 +716,8 @@ export class ThreadWorkspaceManager {
       if (!await pathExists(current.worktreePath)) return 'the worktree is not there'
       const fromRef = `refs/heads/${from}`
       if ((await tryGit(current.worktreePath, ['symbolic-ref', '-q', 'HEAD'])).stdout !== fromRef) return 'the worktree is on another branch'
-      if (!(await this.headRefs(primary)).has(fromRef)) return 'the branch is gone'
+      const tip = (await this.headRefs(primary)).get(fromRef)
+      if (!tip) return 'the branch is gone'
       // Pushed already (an upstream is set): the remote branch keeps the old name, and pushing or opening a pull request
       // from the renamed one would fail, so it keeps its name.
       if ((await tryGit(primary, ['config', '--get', `branch.${from}.remote`])).stdout) return 'the branch has an upstream'
@@ -727,21 +730,58 @@ export class ThreadWorkspaceManager {
       const plan = { from, to, worktreePath: current.worktreePath, fromReflogId: original.id }
       const intent = this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'planned', expectedPreState: plan })
       const pending = { ...plan, operationId, sequence: intent.sequence }
+      const toRef = `refs/heads/${to}`
+      const message = `mousse: rename ${operationId}`
+      const sourceConfig = `branch.${from}`
+      const destinationConfig = `branch.${to}`
+      let toReflogId: string | undefined
+      let reason = 'the branch or its worktree changed'
       try {
-        await withOwnedBranches([from, to], () => git(primary, ['branch', '-m', '--', from, to], undefined, () => {
+        await withOwnedBranches([from, to], () => deleteVerifiedBranchAsync(primary, fromRef, tip, async () => {
           signal?.throwIfAborted()
-          if (branchReflogIdentity(commonDir, fromRef)?.version !== original.version) throw new Error('The original branch changed')
+          if (branchReflogIdentity(commonDir, fromRef)?.version !== original.version) return false
+          const listing = await git(primary, ['worktree', 'list', '--porcelain', '-z'])
+          if (listing.split('\0').filter((field) => field === `branch ${fromRef}`).length !== 1) return false
+          const keys = (await git(primary, ['config', '--local', '--list', '--name-only'])).split(/\r?\n/)
+          const sections = new Set(keys.map((key) => key.slice(0, key.lastIndexOf('.'))))
+          if (sections.has(destinationConfig)) {
+            reason = 'the destination has branch configuration'
+            return false
+          }
+          if (keys.includes(`${sourceConfig}.remote`)) {
+            reason = 'the branch has an upstream'
+            return false
+          }
+          const moved = await verifiedRefTransactionAsync(current.worktreePath,
+            `create ${toRef} ${tip}\nsymref-update HEAD ${toRef} ref ${fromRef}\n`, async () => {
+              signal?.throwIfAborted()
+              if (branchReflogIdentity(commonDir, fromRef)?.version !== original.version) return false
+              // Git's create/delete transaction does not transfer a reflog. Keep its history while both refs are locked.
+              const toLog = join(commonDir, 'logs', toRef)
+              await mkdir(dirname(toLog), { recursive: true })
+              await copyFile(join(commonDir, 'logs', fromRef), toLog, constants.COPYFILE_EXCL)
+              return true
+            }, message)
+          if (!moved) return false
+          toReflogId = branchReflogIdentity(commonDir, toRef, { message })?.id
+          if (!toReflogId) return false
+          if (sections.has(sourceConfig)) {
+            return verifiedRefTransactionAsync(primary, `verify ${toRef} ${tip}\n`, async () => {
+              if (branchReflogIdentity(commonDir, toRef)?.id !== toReflogId) return false
+              await git(primary, ['config', '--local', '--rename-section', sourceConfig, destinationConfig])
+              return true
+            })
+          }
+          return true
         }))
       } catch (error) {
-        await this.settlePendingRename(primary, commonDir, pending)
-        return `Git did not rename it: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`
+        reason = error instanceof Error ? error.message.split('\n')[0] : String(error)
       }
-      // The successful command must have moved the original reflog. A same-name replacement has a different file.
-      if (branchReflogIdentity(commonDir, `refs/heads/${to}`)?.id !== original.id) {
+      if (!toReflogId) {
         await this.settlePendingRename(primary, commonDir, pending)
-        return 'Git did not move the original branch'
+        return `Git did not rename it: ${reason}`
       }
-      this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'git_applied', details: { reflogId: original.id } })
+      this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'git_applied', details: { reflogId: original.id, toReflogId } })
       this.recordBranchName(from, to)
       this.journal.append({ operationId, operationType: BRANCH_RENAME_OPERATION, state: 'completed', details: { intentSequence: intent.sequence, from, to } })
       return 'renamed'
@@ -751,8 +791,8 @@ export class ThreadWorkspaceManager {
   }
 
   /**
-   * Settles a rename a stop left without an outcome. The destination must still have the original branch's reflog
-   * and the journal must show that this operation verified Git moved it. When the outcome is uncertain, both names
+   * Settles a rename a stop left without an outcome. The destination must match the reflog identity the rename
+   * verified and recorded. When the outcome is uncertain, both names
    * are given up. Takes the repository's lease unless the caller holds it.
    */
   async settleBranchRename(options: { holdingRepositoryLease?: boolean; signal?: AbortSignal } = {}): Promise<void> {
@@ -774,7 +814,7 @@ export class ThreadWorkspaceManager {
   }
 
   private async settlePendingRename(primary: string, commonDir: string, pending: PendingBranchRename): Promise<void> {
-    const { from, to, worktreePath, operationId, fromReflogId, gitApplied } = pending
+    const { from, to, worktreePath, operationId, fromReflogId, gitApplied, toReflogId } = pending
     // Exact-case ref lookup so a case-only sibling on Windows/macOS is never mistaken for `to` or `from`.
     const refs = await this.headRefs(primary)
     const fromRef = `refs/heads/${from}`
@@ -783,14 +823,19 @@ export class ThreadWorkspaceManager {
     const toTip = refs.get(toRef)
     const recordedId = this.branchRecord().reflogIds.get(from)
     const proven = recordedId !== undefined && recordedId === fromReflogId
-    const renamed = proven && gitApplied && !fromTip && toTip && branchReflogIdentity(commonDir, toRef)?.id === recordedId
+    const renamed = proven && gitApplied && (toReflogId || !fromTip) && toTip &&
+      branchReflogIdentity(commonDir, toRef)?.id === (toReflogId ?? recordedId)
     const unchanged = proven && !gitApplied && fromTip && !toTip && branchReflogIdentity(commonDir, fromRef)?.id === recordedId
     const outcome = renamed ? 'renamed' : unchanged ? 'not-renamed' : 'unknown'
     const head = outcome === 'renamed' && await pathExists(worktreePath)
       ? (await tryGit(worktreePath, ['symbolic-ref', '-q', 'HEAD'])).stdout : ''
-    if (outcome === 'renamed' && head === fromRef) {
+    if (outcome === 'renamed' && toTip && !fromTip && head === fromRef) {
       try {
-        await withOwnedBranches([to], () => git(worktreePath, ['symbolic-ref', 'HEAD', toRef]))
+        // Legacy renames could record success before fixing a stale HEAD. Compare its target before replacing it.
+        const repaired = await withOwnedBranches([from, to], () => verifiedRefTransactionAsync(worktreePath,
+          `verify ${toRef} ${toTip}\nsymref-update HEAD ${toRef} ref ${fromRef}\n`,
+          () => branchReflogIdentity(commonDir, toRef)?.id === (toReflogId ?? recordedId)))
+        if (!repaired) return
       } catch (error) {
         rethrowGitPolicyError(error)
         // HEAD could not be moved: nothing is recorded, and the next turn settles it again.

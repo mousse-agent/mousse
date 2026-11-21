@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
+import * as gitProcess from '../src/mms/git/runGitProcess'
 import * as lifecycleGit from '../src/mms/lifecycle/lifecycleGit'
 import { ResourceLifecycleStore } from '../src/mms/lifecycle/ResourceLifecycleStore'
 import { ResourceLifecycleCoordinator } from '../src/mms/lifecycle/ResourceLifecycleCoordinator'
@@ -74,6 +75,39 @@ it('permanent purge keeps a user-recreated branch at the same commit before prev
     expect(existsSync(made.worktreePath)).toBe(false)
     expect(git(f.repo, 'rev-parse', ref)).toBe(made.headSha)
   } finally { f.dispose() }
+}, 120_000)
+
+it('permanent purge repairs a checkout that switches after the locked worktree scan', async () => {
+  const { f, made, coordinator } = await branchPurgeFixture()
+  const ref = 'refs/heads/' + made.branch
+  const other = f.child('other')
+  const run = gitProcess.runGitProcess
+  let switched = false
+  const scan = vi.spyOn(gitProcess, 'runGitProcess').mockImplementation(async (argv, options) => {
+    const result = await run(argv, options)
+    if (!switched && result.status === 0 && argv.includes('worktree') && argv.includes('list') &&
+      existsSync(join(f.repo, '.git', ref + '.lock'))) {
+      expect(result.stdout.split('\0')).not.toContain(`branch ${ref}`)
+      git(other, 'switch', made.branch)
+      switched = true
+    }
+    return result
+  })
+  try {
+    await coordinator.trash({ taskId: 'task', operationId: 'branch-trash' })
+    const preview = await coordinator.cleanup.preview('task')
+    expect(preview.items).toContainEqual(expect.objectContaining({ kind: 'ref', identity: ref }))
+    const result = await coordinator.purge({ taskId: 'task', operationId: 'branch-purge', expectedGeneration: preview.generation, previewDigest: preview.digest })
+    expect(result.state).toBe('purged')
+    expect(existsSync(made.worktreePath)).toBe(false)
+    expect(switched).toBe(true)
+    expect(git(f.repo, 'rev-parse', '--verify', ref)).toBe(made.headSha)
+    expect(git(other, 'symbolic-ref', 'HEAD')).toBe(ref)
+    expect(git(other, 'rev-parse', '--verify', 'HEAD')).toBe(made.headSha)
+  } finally {
+    scan.mockRestore()
+    f.dispose()
+  }
 }, 120_000)
 
 it('permanent purge keeps a branch checked out elsewhere after Git locks the ref for deletion', async () => {
