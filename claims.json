@@ -2,19 +2,6 @@
   "version": 1,
   "claims": [
     {
-      "task": "acp-process-tree-stop",
-      "session": "Animatrix-e4839e",
-      "machine": "Animatrix",
-      "branch": "acp-process-tree-stop",
-      "paths": [
-        "src/mms/harness/acp/connection.ts",
-        "src/mms/harness/acp/presets/antigravity.ts",
-        "src/mms/harness/drivers/acp.ts"
-      ],
-      "claimedAt": "2026-11-20T06:56:37.148Z",
-      "expiresAt": "2026-11-20T08:56:37.148Z"
-    },
-    {
       "task": "antigravity-turn-fixes",
       "session": "Animatrix-0b9a21",
       "machine": "Animatrix",
@@ -73,6 +60,23 @@
       ],
       "claimedAt": "2026-11-20T11:20:04.637Z",
       "expiresAt": "2026-11-20T13:20:04.637Z"
+    },
+    {
+      "task": "early-checkout-preparation",
+      "session": "Animatrix-09e512",
+      "machine": "Animatrix",
+      "branch": "early-checkout-preparation",
+      "paths": [
+        "src/mms/workspace",
+        "src/mms/worktree/worktreeCheckout.ts",
+        "src/mms/orchestrator/OrchestratorService.ts",
+        "src/mms/protocol/handlers.ts",
+        "src/renderer/components/OrchestratorChat.tsx",
+        "src/renderer/lib/createComposerThread.ts",
+        "src/shared/workspace.ts"
+      ],
+      "claimedAt": "2026-11-21T10:14:56.694Z",
+      "expiresAt": "2026-11-21T12:14:56.694Z"
     },
     {
       "task": "faster-thread-titles",
@@ -209,21 +213,6 @@
       ],
       "claimedAt": "2026-11-21T05:08:34.813Z",
       "expiresAt": "2026-11-21T07:08:34.813Z"
-    },
-    {
-      "task": "mousse-id-one-devices-list",
-      "session": "agibook-4b4072",
-      "machine": "agibook",
-      "branch": "mousse-id-one-devices-list",
-      "paths": [
-        "src/mms/net/plus",
-        "src/mms/net/NetService.ts",
-        "src/shared/net/local.ts",
-        "src/renderer/stores/mousseIdStore.ts",
-        "src/renderer/lib/plusSignIn.ts"
-      ],
-      "claimedAt": "2026-11-20T06:08:57.987Z",
-      "expiresAt": "2026-11-20T08:08:57.987Z"
     },
     {
       "task": "net-lists-stream-compaction",
