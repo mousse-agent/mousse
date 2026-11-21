@@ -4,6 +4,7 @@ import { access, lstat, readdir, readFile, realpath, rm, writeFile } from 'node:
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
 import { withGitMutationLocks } from '../actions/GitOperationCoordinator'
+import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { gitsFormsAsync } from '../actions/heldBytes'
 import { keepCopy, keepExistingCommit, keptCopyWindowMs, KEEP_COPY_LIMITS, KeepCopyRefusedError, KeepCopyTooLargeError, type KeptCopy } from '../actions/keptCopies'
 import { threadPreservedIndex } from '../actions/preservedFiles'
@@ -228,6 +229,8 @@ export interface CleanupInput {
    * what the driver writes, and may be asked for. A dispatch's checkout ran none, and none runs for its cleanup.
    */
   filters: boolean
+  /** The caller already holds the owner thread while cleaning up its unclaimed draft. */
+  heldThreadLease?: ThreadLeaseHandle
   /** Test seam: runs right before each entry is removed. */
   beforeRemove?: (path: string) => void
 }
@@ -366,8 +369,8 @@ async function captureFilesAsync(input: CleanupInput, kept: (code: Kept['code'],
 }
 
 /** The locks of the owner of the copies and of the repository, for what runs Git. */
-function lockedFor(record: Pick<CleanupRecord, 'owner' | 'repositoryRoot'>): <T>(work: () => Promise<T>) => Promise<T> {
-  return (work) => withGitMutationLocks(record.owner, record.repositoryRoot, 'worktree-cleanup', work)
+function lockedFor(record: Pick<CleanupRecord, 'owner' | 'repositoryRoot'>, heldThreadLease?: ThreadLeaseHandle): <T>(work: () => Promise<T>) => Promise<T> {
+  return (work) => withGitMutationLocks(record.owner, record.repositoryRoot, 'worktree-cleanup', work, undefined, heldThreadLease)
 }
 
 /** A path whose last part may be gone, with the folders above it spelled as the volume spells them. */
@@ -381,7 +384,7 @@ async function canonical(path: string): Promise<string> {
  */
 export async function verifiedCleanupAsync(input: CleanupInput): Promise<Removed | { kept: Kept }> {
   return withGitAccess('worktree.cleanup', 'owned', () => withDrivers(input.filters, input.worktreePath, async () => {
-    const locked = lockedFor({ owner: input.keep.owner, repositoryRoot: input.repositoryRoot })
+    const locked = lockedFor({ owner: input.keep.owner, repositoryRoot: input.repositoryRoot }, input.heldThreadLease)
     // The files are read before the locks are taken: reading needs none, and other Git work in the repository goes on.
     const ignoredFiles = input.keep.deleteIgnored ? 0 : input.ignored.length
     const holds = ignoredFiles ? `Kept, ${plural(ignoredFiles, 'ignored file')}` : 'Kept'
@@ -394,7 +397,7 @@ export async function verifiedCleanupAsync(input: CleanupInput): Promise<Removed
     const started = await locked(() => captureAndRenameAsync(input, kept, objectFormat, first))
     if ('kept' in started) return started
     try {
-      const finished = await finishCleanupAsync(input.home, started.record, input.beforeRemove, false)
+      const finished = await finishCleanupAsync(input.home, started.record, input.beforeRemove, false, input.heldThreadLease)
       if (finished !== 'restart') return finished
       await rm(recordPathOf(input.home, started.record.id), { force: true })
       return { kept: { ignoredFiles: started.record.ignoredFiles, code: 'cleanup_stopped', reason: `Kept: it went back to ${input.worktreePath} while cleanup was deleting it.` } }
@@ -466,7 +469,7 @@ async function captureAndRenameAsync(input: CleanupInput, kept: (code: Kept['cod
  * `restart` means the folder never moved: the record goes, and the caller cleans the worktree up afresh. `owner`, when
  * the caller has one, must be the record's.
  */
-export async function resumeCleanupAsync(input: { home: string; id: string; owner?: string; beforeRemove?: (path: string) => void }): Promise<Removed | { kept: Kept } | 'restart' | 'gone'> {
+export async function resumeCleanupAsync(input: { home: string; id: string; owner?: string; heldThreadLease?: ThreadLeaseHandle; beforeRemove?: (path: string) => void }): Promise<Removed | { kept: Kept } | 'restart' | 'gone'> {
   const release = tryLockCleanup(input.home, input.id)
   if (!release) return { kept: { ignoredFiles: 0, code: 'cleanup_running', reason: 'Kept: another cleanup is finishing it now.' } }
   try {
@@ -475,7 +478,7 @@ export async function resumeCleanupAsync(input: { home: string; id: string; owne
     if (input.owner !== undefined && !samePath(input.owner, record.owner)) return { kept: { ignoredFiles: record.ignoredFiles, code: 'cleanup_stopped', reason: `Kept: its cleanup was recorded for another owner of its copies; nothing in ${record.deletingPath} was touched.`, path: record.deletingPath } }
     // Recovery runs Git as the first pass did: for a dispatch's checkout, with every filter driver off.
     const at = (await lstat(join(record.deletingPath, '.git')).catch(() => undefined))?.isFile() && await sameFolderAsync(record) ? record.deletingPath : record.repositoryRoot
-    const finished = await withGitAccess('worktree.cleanup', 'owned', () => withDrivers(record.filters, at, () => finishCleanupAsync(input.home, record, input.beforeRemove, true)))
+    const finished = await withGitAccess('worktree.cleanup', 'owned', () => withDrivers(record.filters, at, () => finishCleanupAsync(input.home, record, input.beforeRemove, true, input.heldThreadLease)))
     if (finished === 'restart') await rm(recordPathOf(input.home, record.id), { force: true })
     return finished
   } finally { release() }
@@ -595,9 +598,9 @@ async function stoppedText(record: CleanupRecord, why: string): Promise<string> 
   return `${why}${/[.!]$/.test(why) ? '' : '.'} ${only.length ? `${plural(only.length, 'file')} written into it ${only.length === 1 ? 'is' : 'are'} only in ${record.deletingPath} (${named(only)}). ` : `What is left of it is at ${record.deletingPath}. `}${kept}`
 }
 
-async function finishCleanupAsync(home: string, record: CleanupRecord, beforeRemove: ((path: string) => void) | undefined, resuming: boolean): Promise<Removed | { kept: Kept } | 'restart'> {
+async function finishCleanupAsync(home: string, record: CleanupRecord, beforeRemove: ((path: string) => void) | undefined, resuming: boolean, heldThreadLease?: ThreadLeaseHandle): Promise<Removed | { kept: Kept } | 'restart'> {
   const save = (): void => atomicWriteJsonSync(recordPathOf(home, record.id), record)
-  const locked = lockedFor(record)
+  const locked = lockedFor(record, heldThreadLease)
   const holds = record.ignoredFiles ? `Kept, ${plural(record.ignoredFiles, 'ignored file')}` : 'Kept'
   const stop = async (why: string, untouched = false): Promise<{ kept: Kept }> => {
     // What is left stays a working worktree.

@@ -509,7 +509,7 @@ async function keepThenDelete(input: {
  * overrides that switch off hooks, the file system monitor and every configured clean, smudge and process
  * filter; a thread worktree that holds a pull request's commits keeps the same values in its own configuration.
  */
-export async function safeWorktreeGit(repositoryRoot: string): Promise<{ git: RepositoryGit; safety: string[] }> {
+export async function safeWorktreeGit(repositoryRoot: string, options: { allowPinnedFilters?: boolean } = {}): Promise<{ git: RepositoryGit; safety: string[] }> {
   const git = guardedGit(repositoryRoot, { isolatedCheckout: true })
   const safety = ['-c', `core.hooksPath=${GIT_NULL_DEVICE}`, '-c', 'core.fsmonitor=false', ...HOOK_EVENTS.flatMap((event) => ['-c', `hook.${event}.enabled=false`])]
   // Git LFS and other inherited drivers must never execute on dispatched content,
@@ -521,7 +521,8 @@ export async function safeWorktreeGit(repositoryRoot: string): Promise<{ git: Re
   for (let index = 0; index < entries.length - 1; index += 2) {
     const scope = entries[index]
     const match = /^filter\.(.+)\.(smudge|process|clean|required)\n/i.exec(entries[index + 1])
-    if (match && ['local', 'worktree'].includes(scope) && match[2].toLowerCase() !== 'required') {
+    const pinned = options.allowPinnedFilters && scope === 'worktree' && match?.[0] === entries[index + 1]
+    if (match && !pinned && ['local', 'worktree'].includes(scope) && match[2].toLowerCase() !== 'required') {
       throw new Error('Safe checkout refuses configured external clean, smudge or process filters.')
     }
     if (match) drivers.add(match[1])

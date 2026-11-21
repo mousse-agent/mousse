@@ -1,11 +1,13 @@
 import { execFileSync } from 'node:child_process'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { git as actionGit } from '../src/mms/actions/git'
+import { closeSharedThreadDbClient } from '../src/mms/data/threadDb/threadDbClient'
 import { MousseMainService } from '../src/mms/MousseMainService'
+import * as gitProcess from '../src/mms/git/runGitProcess'
 import { execRunner, type ExecutableRunner } from '../src/mms/git/ghRunner'
 import { GitHubCodeHost, parsePullRequestDetail } from '../src/mms/git/GitHubCodeHost'
 import { PullRequestThreadService } from '../src/mms/git/PullRequestThreadService'
@@ -13,11 +15,36 @@ import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceMana
 import type { PullRequestDetail } from '../src/shared/pullRequests'
 import { git, gitFoundationFixture } from './fixtures/gitFoundation'
 import { clearGitPolicyLog, gitPolicyLog, userAction } from '../src/mms/git/gitPolicy'
-import { installGitRemoveGuard } from './fixtures/gitRemoveGuard'
+import { installGitRemoveGuard as installShellGitRemoveGuard, type GitRemoveGuard, type WorktreeRemoveCall } from './fixtures/gitRemoveGuard'
 import { threadPreservedIndex } from '../src/mms/actions/preservedFiles'
 import { listCleanupRecords } from '../src/mms/worktree/verifiedCleanup'
 import { projectKeptFilesOwner } from '../src/mms/actions/keptCopies'
 import { randomUUID } from 'node:crypto'
+
+/** On Windows Node spawns Git executables directly. Observe the same remove boundary before real Git runs. */
+function installGitRemoveGuard(): Pick<GitRemoveGuard, 'removes' | 'assertNoRemoveOfExisting' | 'restore'> {
+  if (process.platform !== 'win32') return installShellGitRemoveGuard()
+  const calls: WorktreeRemoveCall[] = []
+  const run = gitProcess.runGitProcess
+  const error = (path: string) => new Error(`git worktree remove ran on a folder that still existed: ${path}`)
+  const guard = vi.spyOn(gitProcess, 'runGitProcess').mockImplementation(async (args, options) => {
+    if (args.some((arg, i) => arg === 'worktree' && args[i + 1] === 'remove')) {
+      const path = args.at(-1)!
+      const existed = lstatSync(path, { throwIfNoEntry: false }) !== undefined
+      calls.push({ path, existed, args })
+      if (existed) throw error(path)
+    }
+    return run(args, options)
+  })
+  return {
+    removes: () => calls,
+    assertNoRemoveOfExisting() {
+      const existing = calls.find((call) => call.existed)
+      if (existing) throw error(existing.path)
+    },
+    restore: () => { guard.mockRestore() }
+  }
+}
 
 /** A config value, or '' when it is not set. */
 const configOf = (cwd: string, key: string): string => { try { return git(cwd, 'config', '--get', key) } catch { return '' } }
@@ -152,6 +179,8 @@ describe('a pull request that tries to run code', () => {
   afterEach(async () => {
     vi.restoreAllMocks()
     await mms?.stop()
+    await mms?.threads.flushSearchIndex()
+    await closeSharedThreadDbClient()
     server?.closeAllConnections()
     await new Promise<void>((resolve) => server?.close(() => resolve()))
     if (previousGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL
@@ -256,12 +285,24 @@ describe('a pull request that tries to run code', () => {
     expect(requests).toEqual([])
   }, 60_000)
 
-  it('keeps the safety when storage cleanup retires the worktree and it is rebuilt from its manifest', async () => {
-    // Storage cleanup keeps a checkout that uses external filters, so the pull request drops them in a later commit (the hooks remain).
-    authorGit('rm', '-q', '.gitattributes')
-    authorGit('commit', '-qm', 'drop the attributes')
-    authorGit('push', '-q', '--force', 'origin', 'HEAD:refs/pull/7/head')
-    prSha = authorGit('rev-parse', 'HEAD')
+  it.each(['no filter attributes', 'filter introduced at checkout'] as const)('keeps the safety when rebuilding a retired PR worktree (%s)', async (scenario) => {
+    const lateFilter = scenario === 'filter introduced at checkout'
+    const attributes = join(f.repo, '.git', 'info', 'attributes')
+    const mask = '*.dat !filter\n*.bin !filter\n*.prc !filter\n'
+    if (lateFilter) {
+      // Retirement requires effective filter attributes to be unset. Keep the PR's committed
+      // attributes and mask them until the rebuild begins writing files.
+      writeFileSync(attributes, mask)
+      const patterns = join(f.root, 'sparse-patterns')
+      writeFileSync(patterns, '/*\n!/excluded/\n')
+      git(f.repo, 'config', 'extensions.worktreeConfig', 'true')
+      git(f.repo, 'config', 'mousse.sparseCheckout', patterns)
+    } else {
+      authorGit('rm', '-q', '.gitattributes')
+      authorGit('commit', '-qm', 'drop the attributes')
+      authorGit('push', '-q', '--force', 'origin', 'HEAD:refs/pull/7/head')
+      prSha = authorGit('rev-parse', 'HEAD')
+    }
     const { thread } = await service.startThread({ projectId, reference: '7', allowWorktreeConfig: true }, START)
     const workspace = workspaceOf(thread.id)
     // An inactive-worktree rule 40 days on retires it; only manual runs may act, as a scheduled one could retire it again.
@@ -292,10 +333,32 @@ describe('a pull request that tries to run code', () => {
 
     // Turned on again, the same restore rebuilds the whole worktree with its safety.
     git(f.repo, 'config', '--local', 'extensions.worktreeConfig', 'true')
+    if (lateFilter) {
+      const run = gitProcess.runGitProcess
+      const marker = join(markers, 'late').replaceAll('\\', '/')
+      const command = 'echo ran > "' + marker + '"; cat'
+      const gitconfig = process.env.GIT_CONFIG_GLOBAL!
+      const original = readFileSync(gitconfig, 'utf8')
+      vi.spyOn(gitProcess, 'runGitProcess').mockImplementation(async (args, options) => {
+        if (options.cwd !== workspace.worktreePath || !(args.includes('sparse-checkout') && args.includes('set') || args.at(-2) === 'checkout' && args.at(-1) === 'HEAD')) return run(args, options)
+        // A new checkout driver can appear after the fingerprint and safety checks.
+        writeFileSync(gitconfig, original + '\n[filter "late"]\n\tsmudge = ' + JSON.stringify(command) + '\n')
+        writeFileSync(attributes, 'zdata.dat filter=late\n*.bin !filter\n*.prc !filter\n')
+        try { return await run(args, options) } finally {
+          writeFileSync(gitconfig, original)
+          writeFileSync(attributes, mask)
+        }
+      })
+    }
     const restored = await manager.restore(f.repo)
     expect(restored.lifecycle).toBe('ready')
     expect(git(restored.worktreePath, 'status', '--porcelain')).toBe('')
     expect(f.read(restored.worktreePath, 'value.txt')).toBe('pull request value\n')
+    if (lateFilter) {
+      expect(f.read(restored.worktreePath, '.gitattributes')).toContain('*.dat filter=evil')
+      expect(f.read(restored.worktreePath, 'zdata.dat')).toBe('dat content\n')
+      expect(git(restored.worktreePath, 'sparse-checkout', 'list')).toBe('/*\n!/excluded/')
+    }
     expect(git(restored.worktreePath, 'config', '--show-scope', '--get', 'core.hooksPath')).toMatch(/^worktree\s+\/dev\/null$/)
     expect(git(restored.worktreePath, 'config', '--worktree', '--get', 'filter.evil.smudge')).toBe('')
     git(restored.worktreePath, 'commit', '-q', '--no-verify', '--allow-empty', '-m', 'x')

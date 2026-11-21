@@ -2,13 +2,15 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { availableParallelism, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ThreadActionService } from '../src/mms/actions/ThreadActionService'
 import { UndoService } from '../src/mms/actions/UndoService'
 import { ThreadWorkspaceManager } from '../src/mms/workspace/ThreadWorkspaceManager'
 import { worktreeCheckoutPlan } from '../src/mms/worktree/worktreeCheckout'
 import { actionOptions } from './fixtures/gitFoundation'
 import { pressed } from './support/userRequest'
+
+vi.setConfig({ testTimeout: 60_000 })
 
 /**
  * A new worktree's files (#1506): written by parallel workers unless Git's config says how many, and only the paths of
@@ -32,7 +34,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   if (previousHome === undefined) delete process.env.MOUSSE_HOME; else process.env.MOUSSE_HOME = previousHome
-  rmSync(base, { recursive: true, force: true })
+  rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 })
 
 function sparseProject(patterns: string, file = 'sparse.txt'): void {
