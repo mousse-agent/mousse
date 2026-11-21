@@ -7,7 +7,7 @@
  * `git worktree list --porcelain -z`, not Mousse's own registration reader.
  */
 import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -19,6 +19,11 @@ import { standardLinkedWorktreeAsync, trustedCheckoutsAsync, verifyPinsAsync } f
 import type { WorktreeReconstructionManifest } from '../src/mms/lifecycle/WorktreeRetirementService'
 import { unverifiableThread } from './support/unverifiableThread'
 import * as gitPrograms from '../src/mms/git/repoPrograms'
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const childProcess = await importOriginal<typeof import('node:child_process')>()
+  return { ...childProcess, spawn: vi.fn(childProcess.spawn) }
+})
 
 // Each case runs Git dozens of times to build its layouts; starting a process on Windows is slow.
 vi.setConfig({ testTimeout: 180_000 })
@@ -205,7 +210,9 @@ it.skipIf(process.platform !== 'win32')('defers trust on a Windows UNC path to G
   const path = join(root, 'linked')
   git(repo.main, 'worktree', 'add', '-q', '-b', 'linked', path)
   const unc = '\\\\localhost\\' + path.replace(':', '$')
+  vi.mocked(spawn).mockClear()
   expect(await trustedCheckoutsAsync([{ path: unc, gitDir: gitDirOf(path) }])).toEqual(new Set())
+  expect(spawn).not.toHaveBeenCalled()
 })
 
 it.skipIf(process.platform === 'win32')('uses the effective owner of a real linked worktree', async () => {

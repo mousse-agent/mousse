@@ -528,14 +528,24 @@ export class WorktreeRetirementService {
     /**
      * The caller can gather fresh evidence, then return a synchronous admission check to run just before a move or delete.
      */
-    beforeMove?: () => void | Promise<() => void>
+    beforeMove?: (path: string) => void | Promise<() => void>
+    purgeRelocation?: { started: boolean; record: () => void }
   } = {}): Promise<WorktreeReconstructionManifest> {
     const manifest = this.load(manifestPath)
+    if (options.purgeRelocation?.started) manifest.trashPath ??= this.trashPathFor(manifest)
     // On a drive that is not connected nothing moves and nothing is taken for gone; it waits for the drive.
     await assertWorktreeFolderConnected(manifest.worktreePath, manifest.trashPath, manifest.deleting?.path)
     await this.checkOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId)
     await this.verifyPins(manifest)
     const save = (): void => { if (!options.purging) atomicWriteJsonSync(manifestPath, manifest) }
+    const admitRemoval = (path: string) => async (): Promise<() => void> => {
+      const lease = await this.readRepositoryLease()
+      const admit = await options.beforeMove?.(path)
+      return () => {
+        this.store.withGate(manifest.taskId, () => this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId, lease))
+        admit?.()
+      }
+    }
     await this.settleTrashRegistration(manifest)
     if (!await exists(manifest.worktreePath)) {
       if (await this.registered(manifest)) throw new Error('Missing worktree remains registered; recovery is required')
@@ -543,17 +553,11 @@ export class WorktreeRetirementService {
       // Permanent deletion: what waits in the trash goes too, and what is left of a delete the trash expiry started.
       // Ownership is checked again right before each removal starts.
       if (options.purging && manifest.trashPath) {
-        const lease = await this.readRepositoryLease()
-        const owned = async (): Promise<() => void> => {
-          const admit = await options.beforeMove?.()
-          return () => {
-            this.store.withGate(manifest.taskId, () => this.assertOwnership(manifest.taskId, manifest.commonDir, manifest.repositoryId, lease))
-            admit?.()
-          }
-        }
-        if (manifest.deleting && await exists(manifest.deleting.path)) await this.removeConfirmed(manifest.deleting.path, owned)
-        if (await exists(manifest.trashPath)) await this.removeTrashed(manifest, owned)
-        else if (await worktreeRegisteredAsync(manifest.commonDir, manifest.trashPath)) await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', manifest.trashPath], undefined, undefined, undefined, owned)
+        if (manifest.deleting && await exists(manifest.deleting.path))
+          await this.removeConfirmed(manifest.deleting.path, admitRemoval(manifest.deleting.path))
+        if (await exists(manifest.trashPath)) await this.removeTrashed(manifest, admitRemoval(manifest.trashPath))
+        else if (await worktreeRegisteredAsync(manifest.commonDir, manifest.trashPath))
+          await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', manifest.trashPath], undefined, undefined, undefined, admitRemoval(manifest.trashPath))
         delete manifest.deleting
       }
       manifest.state = manifest.trashPath && await exists(manifest.trashPath) ? 'trashed' : 'retired'; save(); return manifest
@@ -593,7 +597,7 @@ export class WorktreeRetirementService {
     // last the caller's own checks run. A claim on a checkout not read here fails closed.
     const lease = await this.readRepositoryLease()
     const facts = new OwnershipFacts(true)
-    const prepare = options.beforeMove?.()
+    const prepare = options.beforeMove?.(manifest.worktreePath)
     const admit = prepare ? await prepare : undefined
     await getExternalResourceClaims(this.store, excludedNow(), facts)
     this.store.withGate(manifest.taskId, () => {
@@ -605,12 +609,14 @@ export class WorktreeRetirementService {
     })
     admit?.()
     // The destination is fixed by the manifest, so a crash after the move finds the folder there.
-    manifest.trashPath = trashPath; save()
+    manifest.trashPath = trashPath
+    if (options.purging) options.purgeRelocation?.record()
+    else save()
     try { await renameFolderAsync(manifest.worktreePath, trashPath) }
     catch (error) { throw new Error(`The worktree could not be moved to the trash; files in it may be in use (${(error as Error).message.split(/\r?\n/)[0]})`) }
     await this.settleTrashRegistration(manifest)
     if (await this.registered(manifest)) throw new Error('Git still registers the worktree at its old path')
-    if (options.purging) { await this.removeTrashed(manifest); manifest.state = 'retired'; return manifest }
+    if (options.purging) { await this.removeTrashed(manifest, admitRemoval(trashPath)); manifest.state = 'retired'; return manifest }
     manifest.state = 'trashed'; manifest.trashedAt = new Date().toISOString(); save()
     await this.releaseBranches(manifest); save()
     return manifest
@@ -1118,7 +1124,15 @@ export class WorktreeRetirementService {
     let cleared = false
     try { await lifecycleGitAsync(manifest.commonDir, ['worktree', 'remove', '--force', trashPath], undefined, undefined, undefined, async () => {
       const check = await beforeStart?.()
-      return () => { check?.(); cleared = true }
+      return () => {
+        check?.()
+        const root = lstatSync(trashPath)
+        const original = manifest.rootIdentity
+        if (!root.isDirectory() || root.dev !== original.dev || root.ino !== original.ino || root.birthtimeMs !== original.birthtimeMs) {
+          throw new Error('The worktree in the trash was replaced; its files are kept')
+        }
+        cleared = true
+      }
     }) }
     catch (error) {
       if (!cleared) throw error
@@ -1133,7 +1147,7 @@ export class WorktreeRetirementService {
    * never followed, a worktree's `.git` file last. Every entry and every folder from the trash down is identified when
    * the folder is walked; right before each removal, each folder down to it must be the very one walked, and no link, and
    * the entry the very one walked, or nothing more is removed (as in `deleteRenamed`, a deliberate swap between that check
-   * and the system call remains possible in principle). `beforeStart` runs right before the first removal. A file in use
+   * and the system call remains possible in principle). `beforeStart` refreshes admission before each removal. A file in use
    * stops it; the next pass of the permanent deletion carries on.
    */
   private async removeConfirmed(root: string, beforeStart?: () => void | Promise<() => void>): Promise<void> {
@@ -1159,9 +1173,9 @@ export class WorktreeRetirementService {
       paths.push({ path: dotGit, folder: false, identity: identityOf(gitStat) })
     }
     paths.push({ path: root, folder: true, identity: folders.get(resolve(root))! })
-    const admission = beforeStart?.()
-    if (admission) (await admission)()
     for (const entry of paths) {
+      const admission = beforeStart?.()
+      if (admission) (await admission)()
       try {
         assertFoldersUnchanged(trash, dirname(entry.path), folders)
         const stat = lstatSync(entry.path)

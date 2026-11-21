@@ -706,10 +706,10 @@ export class ResourcePurgeService {
   }
 
   /** What an unverified thread's scope is matched against for `item` (`unverifiedOwnerOver`). */
-  private async claimTarget(item: LifecyclePurgeItem): Promise<ClaimTarget> {
+  private async claimTarget(item: LifecyclePurgeItem, path = item.identity): Promise<ClaimTarget> {
     const repository = await repositoryTargetAsync(item.kind === 'ref' || item.kind === 'worktree' ? item.commonDir : undefined)
     if (item.kind === 'ref') return { ...repository, ref: item.identity }
-    return { ...repository, ...(isAbsolute(item.identity) ? { path: await canonicalPathAsync(item.identity) } : {}) }
+    return { ...repository, ...(isAbsolute(path) ? { path: await canonicalPathAsync(path) } : {}) }
   }
   /**
    * When `ref` is the branch the owner thread's workspace.json names for its worktree: that record and the thread's
@@ -840,7 +840,17 @@ export class ResourcePurgeService {
         if (peers.some((peer) => peer.identity === item.identity || target.path !== undefined && claimOverlapsPath(peer, target.path))) throw new Error(`New shared owner retains ${item.identity}`)
         const unverified = unverifiedOwnerOver(peers, target)
         if (unverified) throw new Error(`${unverified.reason} ${item.identity} is kept.`)
-        await this.remove(item, new Set(record.purge!.ownedTaskIds), () => this.store.update(input.taskId, (current) => { current.purge!.items.find((entry) => entry.id === item.id)!.discardState = 'cleared' }), () => this.assertReservation(input.taskId, reservation, record.generation), { taskId: input.taskId, token: reservation, generation: record.generation })
+        const progress = {
+          onDiscardCleared: () => this.store.update(input.taskId, (current) => { current.purge!.items.find((entry) => entry.id === item.id)!.discardState = 'cleared' }),
+          relocation: {
+            started: record.purge!.worktreeMoves?.includes(item.id) === true,
+            record: () => this.store.update(input.taskId, (current) => {
+              const moves = current.purge!.worktreeMoves ??= []
+              if (!moves.includes(item.id)) moves.push(item.id)
+            })
+          }
+        }
+        await this.remove(item, new Set(record.purge!.ownedTaskIds), progress, () => this.assertReservation(input.taskId, reservation, record.generation), { taskId: input.taskId, token: reservation, generation: record.generation })
         record = this.store.update(input.taskId, (current) => { const progress = current.purge!.items.find((entry) => entry.id === item.id)!; progress.status = 'removed'; delete current.purge!.error; delete current.blockedReason })
         await this.hooks.onBoundary?.(record)
       }
@@ -866,7 +876,7 @@ export class ResourcePurgeService {
       throw descriptor
     } finally { active.delete(key) }
   }
-  private async remove(item: LifecyclePurgeItem, ownedIds: Set<string>, onDiscardCleared: () => unknown, assertReservation: () => void, reservation: { taskId: string; token: string; generation: number }): Promise<void> {
+  private async remove(item: LifecyclePurgeItem, ownedIds: Set<string>, progress: { onDiscardCleared: () => unknown; relocation: { started: boolean; record: () => void } }, assertReservation: () => void, reservation: { taskId: string; token: string; generation: number }): Promise<void> {
     assertReservation()
     if (item.kind === 'scheduled-row') {
       const path = item.sourcePath!
@@ -884,13 +894,18 @@ export class ResourcePurgeService {
       })
       return
     }
-    const readUnclaimed = async (): Promise<() => void> => {
-      const target = await this.claimTarget(item)
+    const readUnclaimed = async (path = item.identity): Promise<() => void> => {
+      const target = await this.claimTarget(item, path)
       const claims = await this.peersCheck(ownedIds)
+      if (item.kind === 'ref') {
+        // A repository can contain worktrees that no Mousse task names. Git must still be able to list them.
+        const listing = await lifecycleReadAsync(item.commonDir!, ['worktree', 'list', '--porcelain', '-z'])
+        if (listing.split('\0').includes(`branch ${item.identity}`)) throw new Error('The branch is checked out and is kept')
+      }
       return () => {
         assertReservation()
         const current = claims()
-        if (current.some((peer) => peer.identity === item.identity || target.path !== undefined && claimOverlapsPath(peer, target.path))) throw new Error(item.kind === 'path' ? `New shared owner retains ${item.identity}` : 'A new source claim retains the resource')
+        if (current.some((peer) => peer.identity === path || target.path !== undefined && claimOverlapsPath(peer, target.path))) throw new Error(item.kind === 'path' ? `New shared owner retains ${item.identity}` : 'A new source claim retains the resource')
         const unverified = unverifiedOwnerOver(current, target)
         if (unverified) throw new Error(`${unverified.reason} ${item.identity} is kept.`)
       }
@@ -914,12 +929,12 @@ export class ResourcePurgeService {
       assertReservation()
       if (item.kind === 'worktree') {
         if (item.content && item.discardState) {
-          await this.removeDiscarded(item, commonDir, readUnclaimed, onDiscardCleared)
+          await this.removeDiscarded(item, commonDir, readUnclaimed, progress.onDiscardCleared)
           return
         }
         // Purge reuses the verifier; its source is fenced by the external irreversible owner.
         // Checked again right before the checkout moves (or Git deletes it from the trash), with nothing awaited in between.
-        await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: reservation.taskId, cleanupToken: reservation.token, cleanupGeneration: reservation.generation }).retire(item.manifestPath!, { purging: true, beforeMove: readUnclaimed })
+        await new WorktreeRetirementService(this.store, { repositoryLease: lease, cleanupTaskId: reservation.taskId, cleanupToken: reservation.token, cleanupGeneration: reservation.generation }).retire(item.manifestPath!, { purging: true, beforeMove: readUnclaimed, purgeRelocation: progress.relocation })
       } else {
         const current = await readDirectLifecycleRefAsync(commonDir, item.identity)
         if (!current) return
@@ -1111,13 +1126,12 @@ export class ResourcePurgeService {
       const files = differ.filter((entry) => entry.kind !== 'directory')
       throw changed((files.length ? files : differ).map((entry) => entry.path))
     }
-    let beforeEach: (() => void) | undefined
     for (const entry of [...current].reverse()) {
       if (skipRootGit && !entry.path) continue
       const path = join(root, entry.path)
       await assertLifecyclePathAsync(owner, dirname(path))
       const proof = await proveFrozenContentEntryAsync(root, entry)
-      if (prepareRemoval && !beforeEach) beforeEach = await prepareRemoval()
+      const beforeEach = prepareRemoval && await prepareRemoval()
       // From here to the removal nothing is awaited.
       beforeEach?.()
       assertLifecyclePath(owner, dirname(path))
