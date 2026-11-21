@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { ChangeReceipt } from '../../shared/threadActions'
 import { ThreadJournal } from '../data/ThreadJournal'
+import { FolderNotAnsweringError, waitForFolderAccess } from '../files/folderAccess'
 import { resolveRepositoryIdentityAsync, type RepositoryIdentity } from '../git/RepositoryIdentity'
 import { acquireRepositoryLease, RepositoryLeaseBusyError } from '../git/RepositoryLease'
 import { buildResourceInventoryFromFacts, rereadRepositoryFacts, type OwnershipFacts } from '../lifecycle/ResourceInventory'
@@ -17,6 +18,7 @@ import { withGitMutationLocks } from './GitOperationCoordinator'
 import { UndoRetentionService } from './UndoRetentionService'
 import { repoProgramEnv, withoutRepoProgramsAsync } from '../git/repoPrograms'
 import { untilAborted } from '../git/gitPolicy'
+import { withScopedGitConfig } from '../git/gitEnv'
 import { gitRunError, runGitProcess } from '../git/runGitProcess'
 import { settlesItself } from '../../shared/resourceLifecycle'
 import { cancelUndoRefRelease, finishUndoRefRelease, pendingUndoRefRelease, prepareUndoRefRelease } from './undoRefClaims'
@@ -32,6 +34,12 @@ export const RELEASE_BATCH_SIZE = 10
 const RELEASE_LEASE_WAIT_MS = 5_000
 const RELEASE_HOLD_MS = 15_000
 const RELEASE_RETRY_DELAY_MS = 10 * 60_000
+// Git must unwind its own locks. A busy ref fails immediately instead of spending the lease waiting.
+const NO_REF_LOCK_RETRY = [
+  ['core.filesRefLockTimeout', '0'],
+  ['core.packedRefsTimeout', '0'],
+  ['reftable.lockTimeout', '0']
+] as const
 /** How many times a release discovers ownership again after a record changed while it waited for the lease. */
 export const RELEASE_EVIDENCE_RETRIES = 3
 
@@ -40,34 +48,50 @@ type Candidate = { receipt: ChangeReceipt | undefined; operationId: string; inte
 type HoldEnd = 'finished' | 'yield' | { changed: string }
 type ReleaseHooks = { afterPrepared?: () => void; afterGit?: () => void; afterCheck?: () => void }
 
-/**
- * Release recovery needs the task's prepared journal. Before purge removes it, clear reservations it owns under
- * the same repository lease used by release and copy. Any refs left by a stopped transaction stay as they are.
- */
-export async function cancelPreparedReceiptRefReleases(location: string): Promise<void> {
+async function preparedReceiptRefReleaseCleanup(location: string) {
   assertLifecyclePath(location, join(location, 'journal'))
   const journal = new ThreadJournal(location, { readOnly: true })
-  const pending = [...journal.latestByOperation().values()]
-    .filter((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'prepared')
+  const pending = journal.unsettled().filter((entry) => entry.operationType === 'undo-ref-release' && entry.state === 'prepared')
   if (!pending.length) return
   for (const name of ['workspace.json', 'project-folder.json']) assertLifecyclePath(location, join(location, name))
   const workspace = readThreadWorkspaceRecord(location)
   const paths = new Set([workspace?.integrationTarget?.checkoutPath, workspace?.worktreePath])
   for (const path of paths) {
     if (!path) continue
+    try { await waitForFolderAccess([path], { whenNotAnswering: 'fail' }) }
+    catch (error) {
+      if (error instanceof FolderNotAnsweringError) continue
+      throw error
+    }
     const repository = await resolveRepositoryIdentityAsync(path)
     if (!repository.capability.allowed || repository.key !== workspace?.repositoryId) continue
-    const lease = await acquireRepositoryLease(repository, { maxWaitMs: RELEASE_LEASE_WAIT_MS })
-    try {
-      for (const entry of pending) {
-        const intent = entry.details as ReleaseIntent
-        if (intent?.version !== 1 || intent.repositoryId !== repository.key) throw new Error('Cannot verify a pending Undo release repository for purge.')
-        cancelUndoRefRelease(repository, intent.receiptId, entry.operationId)
-      }
-      return
-    } finally { lease.release() }
+    const releases = pending.map((entry) => {
+      const intent = entry.details as ReleaseIntent
+      if (intent?.version !== 1 || intent.repositoryId !== repository.key) throw new Error('Cannot verify a pending Undo release repository for purge.')
+      return { receiptId: intent.receiptId, operationId: entry.operationId }
+    })
+    return { repository, releases }
   }
-  throw new Error('Cannot verify the repository of the pending Undo releases for purge.')
+  throw new Error('Reconnect the repository to settle the pending Undo releases before deleting this thread.')
+}
+
+/** A preview checks that prepared reservations can be reached without changing them. */
+export async function checkPreparedReceiptRefReleases(location: string): Promise<void> {
+  await preparedReceiptRefReleaseCleanup(location)
+}
+
+/**
+ * Release recovery needs the task's prepared journal. Before purge becomes irreversible, clear reservations it owns
+ * under the same repository lease used by release and copy. The refs stay as they are.
+ */
+export async function cancelPreparedReceiptRefReleases(location: string): Promise<void> {
+  const cleanup = await preparedReceiptRefReleaseCleanup(location)
+  if (!cleanup) return
+  const { repository, releases } = cleanup
+  const lease = await acquireRepositoryLease(repository, { maxWaitMs: RELEASE_LEASE_WAIT_MS })
+  try {
+    for (const { receiptId, operationId } of releases) cancelUndoRefRelease(repository, receiptId, operationId)
+  } finally { lease.release() }
 }
 
 /** Phase 3b: only expired, exclusive immutable receipt refs. Never runs Git GC or deletes user refs. */
@@ -120,8 +144,9 @@ export class ReceiptRefReleaseService {
    * listing, and then, with nothing awaited until the Git transaction starts, ownership is checked from the records
    * themselves, the intents are recorded, and one transaction deletes every eligible ref by its expected commit. The
    * refs are checked individually for absence before the intents complete. Each lease hold runs one transaction of
-   * at most `RELEASE_BATCH_SIZE` receipts and a wall-clock deadline. A failed transaction is retried one receipt per hold, so a busy ref
-   * cannot hold up other receipts. A record that changed while the release waited lets go, discovers again and
+   * at most `RELEASE_BATCH_SIZE` receipts, with a deadline for starting Git. A running writer finishes so Git can
+   * clear its locks. A failed transaction is retried one receipt per hold so a busy ref cannot hold up other receipts.
+   * A record that changed while the release waited lets go, discovers again and
    * retries, at most `RELEASE_EVIDENCE_RETRIES` times; the rest waits for the next run.
    */
   async release(workspacePath: string, options: ReleaseHooks & { limit?: number; signal?: AbortSignal; heldThreadLease?: ThreadLeaseHandle; discovery?: OwnershipFacts } = {}): Promise<ReceiptRefReleaseResult> {
@@ -306,7 +331,8 @@ export class ReceiptRefReleaseService {
       options.afterPrepared?.()
       check()
       if (argv && approved.some(({ present }) => present.length)) {
-        const ran = await runGitProcess(argv, { cwd: workspacePath, env: repoProgramEnv(), input: transaction(approved), cancelRefWriter: true })
+        const ran = await withScopedGitConfig(NO_REF_LOCK_RETRY, () =>
+          runGitProcess(argv, { cwd: workspacePath, env: repoProgramEnv(), input: transaction(approved) }))
         check()
         if (ran.error || ran.status !== 0) {
           if (approved.length > 1) for (const { intent } of approved) isolate.add(intent.receiptId)

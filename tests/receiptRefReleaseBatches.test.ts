@@ -36,6 +36,7 @@ import { createInstallationPaths } from '../src/mms/profiles/paths'
 import { seedLegacyNamedEpisode } from './fixtures/legacy-named-agent'
 import * as inventory from '../src/mms/lifecycle/ResourceInventory'
 import * as reservations from '../src/mms/actions/undoRefClaims'
+import * as folderMoves from '../src/mms/lifecycle/renameFolder'
 import { registerThreadLifecycleGate } from '../src/mms/queue/ThreadLifecycleAdmission'
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -313,7 +314,7 @@ it('keeps the refs when a previously verified peer now points at this repository
   expect(receipts[0]!.retainedRefs.every(refExists)).toBe(true)
 })
 
-it.each(['unavailable repository', 'missing ref'] as const)('returns the thread to trash after restore finds a %s', async (failure) => {
+it.each(['unavailable repository', 'missing ref', 'missing ref after rename'] as const)('returns the thread to trash after restore finds a %s', async (failure) => {
   const { store, workspace, receipts } = await fixture()
   const location = join(f.home, 'thread-data', 'standalone', 'restored')
   const staged = join(f.root, 'staged-restore')
@@ -338,12 +339,26 @@ it.each(['unavailable repository', 'missing ref'] as const)('returns the thread 
     drain: async () => undefined, settleMutationOwnership: async () => undefined, projectIndex: () => undefined
   })
   const trashed = await coordinator.trash({ taskId: 'restored', operationId: 'trash', keepWork: true })
+  const restore = () => coordinator.restore({ taskId: 'restored', operationId: 'restore' })
+  if (failure === 'missing ref after rename') {
+    const move = folderMoves.renameFolder
+    const interrupted = vi.spyOn(folderMoves, 'renameFolder').mockImplementationOnce((from, to) => {
+      move(from, to)
+      throw new Error('Interrupted after rename')
+    })
+    await expect(restore()).rejects.toThrow('Interrupted after rename')
+    interrupted.mockRestore()
+    expect(store.require('restored')).toMatchObject({ location: trashed.location, state: 'restore-moving', generation: trashed.generation })
+    expect(existsSync(trashed.location)).toBe(false)
+    expect(existsSync(location)).toBe(true)
+  }
   const missingRef = receipt.retainedRefs[0]!
   if (failure === 'unavailable repository') saveWorkspace(trashed.location, false)
   else git(f.repo, 'update-ref', '-d', missingRef)
   const error = failure === 'unavailable repository' ? /repository of the restored Undo history/ : /unavailable Undo reference/
-  await expect(coordinator.restore({ taskId: 'restored', operationId: 'restore' })).rejects.toThrow(error)
+  await expect(failure === 'missing ref after rename' ? coordinator.recover('restored') : restore()).rejects.toThrow(error)
   expect(store.require('restored')).toMatchObject({ location: trashed.location, state: 'trashed', generation: trashed.generation })
+  expect(readFileSync(join(trashed.location, 'meta.json'), 'utf8')).toBe('{"id":"restored"}')
   expect(existsSync(location)).toBe(false)
 
   if (failure === 'unavailable repository') saveWorkspace(trashed.location, true)
@@ -352,17 +367,37 @@ it.each(['unavailable repository', 'missing ref'] as const)('returns the thread 
   expect(receipt.retainedRefs.every(refExists)).toBe(true)
 })
 
-it('cancels a prepared release before keep-work purge removes its journal, so a later copy succeeds', async () => {
+it.each(['online', 'offline'] as const)('settles a prepared release before keep-work purge when the repository is %s', async (availability) => {
   const { store, workspace, receipts, release } = await fixture()
   const receipt = receipts[0]!
   const repository = resolveRepositoryIdentity(f.repo)
   await release.release(workspace.worktreePath, { afterPrepared: () => { throw new Error('Stop before update-ref') } })
   expect(() => reservations.assertUndoRefMayBeClaimed(repository, receipt.id)).toThrow(/pending release/)
+  registerThreadLifecycleGate(f.home, store)
 
   const coordinator = new ResourceLifecycleCoordinator(store, {
-    drain: async () => undefined, settleMutationOwnership: async () => undefined, projectIndex: () => undefined
+    drain: async () => undefined, settleMutationOwnership: async () => undefined, projectIndex: () => undefined,
+    onPhase: (_record, phase) => {
+      if (phase === 'purge-started') expect(reservations.pendingUndoRefRelease(repository, receipt.id)).toBeUndefined()
+    }
   })
-  const trashed = await coordinator.trash({ taskId: 'task', operationId: 'trash', keepWork: true })
+  let trashed = await coordinator.trash({ taskId: 'task', operationId: 'trash', keepWork: true })
+  if (availability === 'offline') {
+    const onlinePreview = await coordinator.cleanup.preview('task', { keepWork: true })
+    expect(onlinePreview.blockers).toEqual([])
+    const parked = join(f.root, 'offline-repository')
+    renameSync(f.repo, parked)
+    try {
+      const blocked = await coordinator.cleanup.preview('task', { keepWork: true })
+      await expect(coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: onlinePreview.generation,
+        previewDigest: onlinePreview.digest, keepWork: true })).rejects.toThrow()
+      expect(store.require('task')).toMatchObject({ state: 'trashed', generation: trashed.generation })
+      expect(existsSync(trashed.location)).toBe(true)
+      expect(blocked.blockers).toEqual(expect.arrayContaining([expect.stringMatching(/pending Undo releases/)]))
+      expect((await coordinator.restore({ taskId: 'task', operationId: 'restore' })).state).toBe('active')
+    } finally { renameSync(parked, f.repo) }
+    trashed = await coordinator.trash({ taskId: 'task', operationId: 'trash-again', keepWork: true })
+  }
   const preview = await coordinator.cleanup.preview('task', { keepWork: true })
   const purged = await coordinator.purge({ taskId: 'task', operationId: 'purge', expectedGeneration: preview.generation,
     previewDigest: preview.digest, keepWork: true })
@@ -468,14 +503,14 @@ it('releases the repository lease at its hold deadline even when ownership refre
   expect(receipts[0]!.retainedRefs.every(refExists)).toBe(true)
 })
 
-it('stops a ref writer at the hold deadline and admits a new lease only after it exits', async () => {
+it('lets Git unwind the first lock when the second ref is busy, then releases both refs on retry', async () => {
   const { store, workspace, receipts, advance } = await fixture()
   const receipt = receipts[0]!
   const repository = resolveRepositoryIdentity(f.repo)
   const discovery = await discoverOwnershipFacts(store)
   git(f.repo, 'config', 'core.filesRefLockTimeout', '60000')
-  const lock = join(repository.commonDir, ...receipt.retainedRefs[0]!.split('/')) + '.lock'
-  writeFileSync(lock, '')
+  const [firstLock, secondLock] = receipt.retainedRefs.map((ref) => join(repository.commonDir, `${ref}.lock`))
+  writeFileSync(secondLock!, '')
   vi.mocked(spawn).mockClear()
   try {
     let preparedAt = 0
@@ -487,13 +522,19 @@ it('stops a ref writer at the hold deadline and admits a new lease only after it
     expect(writers).toHaveLength(1)
     expect(preparedAt).toBeGreaterThan(0)
     expect(performance.now() - preparedAt).toBeLessThan(27_000)
-    expect(result.retained[0]?.reason).toMatch(/lease deadline/)
     expect(result.releasedRefs).toEqual([])
     const next = await acquireRepositoryLease(repository, { maxWaitMs: 10_000 })
     try { expect(writers[0]!.exitCode !== null || writers[0]!.signalCode !== null).toBe(true) }
     finally { next.release() }
     expect(receipt.retainedRefs.every(refExists)).toBe(true)
-  } finally { unlinkSync(lock) }
+  } finally { unlinkSync(secondLock!) }
+
+  const retryAfter = reservations.pendingUndoRefRelease(repository, receipt.id)?.retryAfter
+  if (retryAfter !== undefined) advance(retryAfter - advance(0) + 1)
+  const retry = await new ReceiptRefReleaseService(store, 'task', () => advance(0)).release(workspace.worktreePath, { discovery })
+  expect(retry.releasedRefs).toEqual(receipt.retainedRefs)
+  expect(receipt.retainedRefs.some(refExists)).toBe(false)
+  expect(existsSync(firstLock!)).toBe(false)
 })
 
 it('reports the existing release backlog while the retention clock is suspended', async () => {

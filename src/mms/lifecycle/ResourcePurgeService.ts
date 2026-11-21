@@ -27,7 +27,7 @@ import { BRANCH_RECORD_OPERATIONS, threadBranchRecord, type ThreadBranchRecord }
 import { isKeptFilesItem, keptOnDelete, unverifiedHolds } from '../../shared/resourceLifecycle'
 import { isOwnedSnapshotStore, withOwnedBranches } from '../git/gitPolicy'
 import { threadStoreKeptFilesAsync } from '../actions/SnapshotRefReleaseService'
-import { cancelPreparedReceiptRefReleases } from '../actions/ReceiptRefReleaseService'
+import { cancelPreparedReceiptRefReleases, checkPreparedReceiptRefReleases } from '../actions/ReceiptRefReleaseService'
 import { threadRecordName } from '../data/threadRecords'
 
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -444,8 +444,8 @@ export class ResourcePurgeService {
   }
   /**
    * `keepWork`: the preview of a delete that leaves the thread's worktrees (with their branches and uncommitted files)
-   * and its Git refs where they are. They are not read, pinned or listed, so nothing about them can block the delete;
-   * only the thread's own data, scratch folders and scheduled rows are items.
+   * and its Git refs where they are. Only the thread's own data, scratch folders and scheduled rows are items.
+   * A prepared Undo release still needs its repository to clear the reservation before the journal can be removed.
    */
   async preview(taskId: string, options: { keepWork?: boolean } = {}): Promise<LifecyclePurgePreview> {
     return this.withOwnership(taskId, () => this.previewOwned(taskId, false, options.keepWork === true))
@@ -488,6 +488,10 @@ export class ResourcePurgeService {
     const tasks = this.owned(taskId), ownedIds = new Set(tasks.map((task) => task.taskId))
     // The mode is signed with the rest: a preview that keeps the work authorizes only a purge that keeps it.
     const preview: LifecyclePurgePreview = { schemaVersion: 1, taskId, generation: record.generation, digest: '', items: [], ownedTaskIds: [...ownedIds].sort(), blockers: [], retained: [], exclusiveBytes: 0, ...(keepWork ? { keepWork: true as const } : {}) }
+    for (const task of tasks) {
+      try { await checkPreparedReceiptRefReleases(task.location) }
+      catch (error) { preview.blockers.push((error as Error).message) }
+    }
     let peers: Awaited<ReturnType<ResourcePurgeService['peers']>>
     try { peers = await this.peers(ownedIds) } catch (error) { preview.blockers.push((error as Error).message); return this.sign(preview) }
     // Worktrees a delete keeps are not verified, so one that can't be checked blocks nothing; what is removed still is.
@@ -818,11 +822,13 @@ export class ResourcePurgeService {
         const items = expiry
           ? preview.items.map((item) => (item.kind === 'ref' && item.identity.startsWith('refs/heads/') ? { ...item, status: 'retained' as const } : item))
           : preview.items
+        // The journals still exist and Restore is still available if a repository cannot settle its reservation.
+        for (const id of preview.ownedTaskIds) await cancelPreparedReceiptRefReleases(this.store.require(id).location)
         this.store.enableCleanupWriter()
         record = this.store.update(input.taskId, (current) => {
           if (current.state !== 'trashed' || current.generation !== preview.generation) throw new Error('Task changed before purge boundary')
           current.state = 'purge-started'; current.generation++
-          current.purge = { ...preview, items, operationId: input.operationId, startedAt: new Date().toISOString(), discardAuthorized, ...(expiry ? { expired: true } : {}), ...(keepWork ? { keptWork: true } : {}) }
+          current.purge = { ...preview, items, operationId: input.operationId, startedAt: new Date().toISOString(), discardAuthorized, receiptReleasesSettled: true, ...(expiry ? { expired: true } : {}), ...(keepWork ? { keptWork: true } : {}) }
         })
         await this.hooks.onBoundary?.(record)
       } else if (input.keepWork === true && record.purge && !record.purge.expired && !record.purge.keptWork) {
@@ -831,6 +837,7 @@ export class ResourcePurgeService {
         record = this.store.update(input.taskId, (current) => { keepPendingWork(current) })
       }
       if (!record.purge) throw new Error('Purge recovery ledger is absent')
+      // Older, interrupted purges may still have prepared reservations to settle.
       if (!record.purge.receiptReleasesSettled) {
         for (const id of record.purge.ownedTaskIds) await cancelPreparedReceiptRefReleases(this.store.require(id).location)
         record = this.store.update(input.taskId, (current) => { current.purge!.receiptReleasesSettled = true })
