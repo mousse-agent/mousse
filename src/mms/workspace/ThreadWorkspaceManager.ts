@@ -18,6 +18,7 @@ import { gitRunError, runGitProcess } from '../git/runGitProcess'
 import { addWorktree, worktreeCheckoutPlan, type WorktreeCheckoutPlan, type WorktreeGit } from '../worktree/worktreeCheckout'
 import { loadSnapshotWorkspaceMetadataAsync } from './SnapshotWorkspace'
 import { atomicWriteJsonSync } from '../data/AtomicFs'
+import { recordCheckoutIdentity } from './checkoutIdentity'
 import { ThreadJournal, type ThreadJournalRecord } from '../data/ThreadJournal'
 import { getMousseHomeDir } from '../data/paths'
 import { assertWorktreeFolderConnected, chosenFolderHolding, chosenWorktreeFolder, defaultWorktreeBase, notConnectedPlacementNote, placeThreadWorktree, worktreeRegistrationOf, worktreeRegistrationOfSync } from '../worktree/worktreeLayout'
@@ -511,6 +512,8 @@ export class ThreadWorkspaceManager {
         ...(options.untrusted ? { untrusted: true as const } : {})
       }
       atomicWriteJsonSync(this.workspacePath, metadata)
+      // The checkout just made is the one its first turn starts from (`checkoutIdentity.ts`).
+      await recordCheckoutIdentity(this.threadDirectory, worktreePath)
       this.journal.append({
         operationId,
         operationType: 'workspace-provision',
@@ -865,6 +868,7 @@ export class ThreadWorkspaceManager {
       }
       const restored = await this.verify(metadata)
       atomicWriteJsonSync(this.workspacePath, restored)
+      if (restored.lifecycle === 'ready') await recordCheckoutIdentity(this.threadDirectory, restored.worktreePath)
       this.finishProvisionRecovery(restored)
       return restored
     } finally {

@@ -473,7 +473,7 @@ export class ThreadActionService {
         if (!interrupted(entry)) continue
         const history = this.journal.history(entry.operationId)
         const all = this.list()
-        const details = [...history].reverse().map((item) => item.details as { action?: ThreadAction; actionState?: 'completed' | 'stopped' | 'failed' } | undefined)
+        const details = [...history].reverse().map((item) => item.details as { action?: ThreadAction; actionState?: 'completed' | 'stopped' | 'failed'; captured?: Snapshot } | undefined)
         let action = details.find((item) => item?.action)?.action ?? all.find((item) => item.id === entry.operationId)
         if (!action) throw new Error('Interrupted checkpoint has no durable action boundary.')
         action = structuredClone(action)
@@ -488,10 +488,13 @@ export class ThreadActionService {
           if (receipt.git) action.git = receipt.git
           action.state = state; action.completedAt = receipt.createdAt
         } else {
-          // Nothing landed that a retake would not capture, whatever stopped the first attempt (this includes
-          // threads that an earlier version locked when the agent had switched branches or rewritten history).
+          // A completed capture belongs to this operation, even if the person saved other files before recovery.
+          const captured = details.find((item) => item?.captured)?.captured
           try {
-            await this.checkpoint(workspacePath, action, state)
+            if (captured && !(await tryGitAsync(workspacePath, ['cat-file', '-e', `${captured.sha}^{commit}`])).ok) {
+              throw new Error('The interrupted checkpoint snapshot is missing.')
+            }
+            await this.checkpoint(workspacePath, action, state, captured)
           } catch (error) {
             // The retake failed as well: the operation stays waiting, with what stopped it this time.
             this.journal.append({ operationId: entry.operationId, operationType: entry.operationType, state: 'recovery_required', details: { actionId: action.id, actionState: state, startSha: action.startSha, error: String(error) } })
@@ -513,7 +516,9 @@ export class ThreadActionService {
   private async checkpoint(
     workspacePath: string,
     action: ThreadAction,
-    state: 'completed' | 'stopped' | 'failed'
+    state: 'completed' | 'stopped' | 'failed',
+    /** The end snapshot an interrupted checkpoint of this action already took (`recoverPending`). */
+    taken?: Snapshot
   ): Promise<void> {
     workspacePath = (await repositoryFacts(workspacePath))?.top ?? await gitAsync(workspacePath, ['rev-parse', '--show-toplevel'])
     action.state = 'checkpointing'
@@ -521,8 +526,10 @@ export class ThreadActionService {
     const threadId = (await new ThreadWorkspaceManager(this.threadDirectory).loadOrSnapshotAsync())?.threadId
     const reason = action.turnId.startsWith(USER_CHANGES_TURN_PREFIX) ? 'outside changes' : `end of turn ${action.turnId}`
     let snapshot: Snapshot
+    let captured = false
     try {
-      snapshot = await takeSnapshotAsync(workspacePath, { reason, threadId, operationId: action.id })
+      snapshot = taken ?? await takeSnapshotAsync(workspacePath, { reason, threadId, operationId: action.id })
+      captured = !taken
     } catch (error) {
       // A checkpoint that was stopped is not a snapshot that cannot be taken: it fails, and recovery takes it again.
       if (gitWorkCancelled()) throw error
@@ -540,6 +547,11 @@ export class ThreadActionService {
       // A folder past what its hidden store keeps: Undo says why until a turn finds it back within bounds.
       if (error instanceof SnapshotRefusedError) setSnapshotsOff(this.threadDirectory, error.message)
     }
+    // Recovery can reuse the capture before any receipt or workspace metadata is written.
+    if (captured) this.journal.append({
+      operationId: action.id, operationType: 'action-checkpoint', state: 'git_applied',
+      expectedPreState: { startSha: action.startSha }, details: { action, actionState: state, captured: snapshot }
+    })
     // The turn's start could not be captured: the placeholder start is not used. The turn is recorded from its end, so no
     // file is attributed to it and code Undo restores nothing (the conversation still rewinds), and the gap says why.
     const uncaptured = this.uncapturedStart()
