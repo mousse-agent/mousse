@@ -19,6 +19,7 @@ import type {
   GitScope,
   GitStatusSnapshot
 } from '../../shared/types'
+import { WORKSPACE_CHANGED_MESSAGE } from '../../shared/types'
 import type { PullRequestScope } from '../../shared/pullRequests'
 import { errorText } from '../lib/errorText'
 import { anyTurnEnded } from '../lib/turnEnded'
@@ -40,7 +41,7 @@ export const GIT_LOG_LIMIT = 40
 /** A fetch younger than this satisfies an ordinary (not forced) request. */
 export const GIT_STATUS_MAX_AGE_MS = 1500
 /** A folder's first status read that has not answered by then shows {@link GIT_STATUS_SLOW_ERROR} instead of "Checking…". */
-export const GIT_STATUS_SLOW_MS = 15_000
+export const GIT_STATUS_SLOW_MS = 2_500
 export const GIT_STATUS_SLOW_ERROR = 'Git has not answered yet'
 
 export interface GitStatusEntry {
@@ -80,14 +81,22 @@ export interface GitRefreshOptions {
   quiet?: boolean
   /** Which folder the daemon reads: the thread's own worktree, else the project's folder. */
   scope: GitScope
+  /** Retry: never joins a read in flight, here or in the service, whose request carries its own number (`GitScope.attempt`). */
+  fresh?: boolean
 }
+
+/** Numbers each Retry's reads. */
+let retries = 0
 
 interface Flight {
   promise: Promise<void>
   rerun: boolean
+  startedAt: number
 }
 
 const flights = new Map<string, Flight>()
+/** A read running longer than this is not waited for by a forced read (Retry): a new one starts, and the old one's late answer is dropped. */
+export const GIT_STALE_FLIGHT_MS = 2_000
 
 function patchEntry(key: string, patch: Partial<GitStatusEntry>) {
   useGitStatusStore.setState((state) => ({
@@ -104,38 +113,35 @@ export function keepIfEqual<T>(previous: T, next: T): T {
 type GitDetail = 'commits' | 'branches' | 'diffStats'
 
 /**
- * Reads the folder's status, commits, branches and diff counts together, and shows each as it arrives: the status
- * (branch, changed files, ahead and behind) first, so the section never waits for the slower reads to show it. The
- * other three land once the status says the folder is a repository; until then the previous fetch's values stay.
+ * Reads the folder's status, then its commits, branches and diff counts, and shows each as it arrives. The status
+ * (branch, changed files, ahead and behind) is read first and alone, so the section never waits behind the slower
+ * reads' Git processes to show it. The other three are read once the status says the folder is a repository; until
+ * they answer the previous fetch's values stay.
  */
-async function fetchInto(key: string, scope: GitScope): Promise<void> {
+async function fetchInto(key: string, scope: GitScope, current: () => boolean = () => true): Promise<void> {
   const git = window.mousse.git
-  const details: Array<[GitDetail, Promise<GitStatusEntry[GitDetail]>]> = [
-    ['commits', git.log(GIT_LOG_LIMIT, scope)],
-    ['branches', git.branches(scope)],
-    ['diffStats', git.diffStats(scope)]
-  ]
-  // The status decides what becomes of the others; their failures are only theirs.
-  for (const [, read] of details) read.catch(() => undefined)
-
+  // A read a newer one replaced (Retry past a read that hung) changes nothing shown.
+  const patch = (value: Partial<GitStatusEntry>) => { if (current()) patchEntry(key, value) }
   let status: GitStatusSnapshot
   // A first read still unanswered after a while ends "Checking…" with an error; its answer still lands when it comes.
   const slow = setTimeout(() => {
     if (useGitStatusStore.getState().entries[key]?.loaded) return
-    patchEntry(key, { loaded: true, loading: false, error: GIT_STATUS_SLOW_ERROR })
+    patch({ loaded: true, loading: false, error: GIT_STATUS_SLOW_ERROR })
   }, GIT_STATUS_SLOW_MS)
   try {
     status = await git.status(scope)
   } catch (error) {
-    patchEntry(key, { loaded: true, error: errorText(error), fetchedAt: Date.now() })
-    await Promise.allSettled(details.map(([, read]) => read))
+    const message = errorText(error)
+    if (message.includes(WORKSPACE_CHANGED_MESSAGE)) patch({ ...EMPTY_GIT_ENTRY, error: message })
+    else patch({ loaded: true, error: message, fetchedAt: Date.now() })
     return
   } finally {
     clearTimeout(slow)
   }
+  if (!current()) return
   const previous = useGitStatusStore.getState().entries[key] ?? EMPTY_GIT_ENTRY
   if (!status.isRepo) {
-    patchEntry(key, {
+    patch({
       status: keepIfEqual(previous.status, status),
       commits: previous.commits.length ? [] : previous.commits,
       branches: null,
@@ -144,15 +150,22 @@ async function fetchInto(key: string, scope: GitScope): Promise<void> {
       error: null,
       fetchedAt: Date.now()
     })
-    await Promise.allSettled(details.map(([, read]) => read))
     return
   }
-  patchEntry(key, { status: keepIfEqual(previous.status, status), loading: false, loaded: true, error: null, fetchedAt: Date.now() })
+  patch({ status: keepIfEqual(previous.status, status), loading: false, loaded: true, error: null, fetchedAt: Date.now() })
+  const details: Array<[GitDetail, Promise<GitStatusEntry[GitDetail]>]> = [
+    ['commits', git.log(GIT_LOG_LIMIT, scope)],
+    ['branches', git.branches(scope)],
+    ['diffStats', git.diffStats(scope)]
+  ]
   // Each one as it arrives; a failed read keeps what the folder showed before.
   await Promise.all(details.map(([field, read]) => read.then((value) => {
     const current = useGitStatusStore.getState().entries[key] ?? EMPTY_GIT_ENTRY
-    patchEntry(key, { [field]: keepIfEqual(current[field], value) } as Partial<GitStatusEntry>)
-  }, () => undefined)))
+    if (!current.error?.includes(WORKSPACE_CHANGED_MESSAGE)) patch({ [field]: keepIfEqual(current[field], value) } as Partial<GitStatusEntry>)
+  }, (error: unknown) => {
+    const message = errorText(error)
+    if (message.includes(WORKSPACE_CHANGED_MESSAGE)) patch({ ...EMPTY_GIT_ENTRY, error: message })
+  })))
 }
 
 /**
@@ -162,17 +175,18 @@ async function fetchInto(key: string, scope: GitScope): Promise<void> {
  */
 export function refreshGitStatus(key: string, options: GitRefreshOptions): Promise<void> {
   const flight = flights.get(key)
-  if (flight) {
+  // Retry, and a forced read past a read that hung, do not wait for it.
+  if (flight && !options.fresh && !(options.force && Date.now() - flight.startedAt >= GIT_STALE_FLIGHT_MS)) {
     if (options.force) flight.rerun = true
     return flight.promise
   }
 
   const entry = useGitStatusStore.getState().entries[key]
-  if (!options.force && entry?.loaded && Date.now() - entry.fetchedAt < GIT_STATUS_MAX_AGE_MS) {
+  if (!options.force && !options.fresh && entry?.loaded && Date.now() - entry.fetchedAt < GIT_STATUS_MAX_AGE_MS) {
     return Promise.resolve()
   }
 
-  const next: Flight = { promise: Promise.resolve(), rerun: false }
+  const next: Flight = { promise: Promise.resolve(), rerun: false, startedAt: Date.now() }
   flights.set(key, next)
   // Only a folder with nothing loaded yet shows a spinner; a refresh keeps the cached data on screen.
   patchEntry(key, { loading: !entry?.loaded })
@@ -180,11 +194,13 @@ export function refreshGitStatus(key: string, options: GitRefreshOptions): Promi
     try {
       do {
         next.rerun = false
-        await fetchInto(key, options.scope)
-      } while (next.rerun)
+        await fetchInto(key, options.fresh ? { ...options.scope, attempt: ++retries } : options.scope, () => flights.get(key) === next)
+      } while (next.rerun && flights.get(key) === next)
     } finally {
-      flights.delete(key)
-      patchEntry(key, { loading: false })
+      if (flights.get(key) === next) {
+        flights.delete(key)
+        patchEntry(key, { loading: false })
+      }
     }
   })()
   return next.promise
@@ -519,14 +535,20 @@ export function retainGitPath(key: string, scope: GitScope): () => void {
 export interface GitStatusView extends Omit<GitStatusEntry, 'fetchedAt'> {
   /** Force a fresh fetch and wait for it. */
   refresh: () => Promise<void>
+  /** Retry: read again for real, never answered by a read already in flight (`GitRefreshOptions.fresh`). */
+  retry: () => Promise<void>
 }
 
 /** Shared Git state for a folder; a null key means there is nothing to read. */
 export function useGitStatus(key: string | null, scope: GitScope): GitStatusView {
   const entry = useGitStatusStore((state) => (key ? state.entries[key] : undefined)) ?? EMPTY_GIT_ENTRY
   // The ids, not the object: a caller that builds its scope on every render must not refetch on every render.
-  const { projectId, workspaceThreadId } = scope
-  const readScope = useMemo<GitScope>(() => ({ projectId, workspaceThreadId }), [projectId, workspaceThreadId])
+  // The worktree's generation goes with each read: the service refuses one whose worktree was rebuilt since.
+  const { projectId, workspaceThreadId, workspaceGeneration } = scope
+  const readScope = useMemo<GitScope>(
+    () => ({ projectId, workspaceThreadId, ...(workspaceGeneration !== undefined ? { workspaceGeneration } : {}) }),
+    [projectId, workspaceThreadId, workspaceGeneration]
+  )
 
   useEffect(() => {
     if (!key) return
@@ -539,6 +561,10 @@ export function useGitStatus(key: string | null, scope: GitScope): GitStatusView
     () => (key ? refreshGitStatus(key, { force: true, scope: readScope }) : Promise.resolve()),
     [key, readScope]
   )
+  const retry = useCallback(
+    () => (key ? refreshGitStatus(key, { force: true, fresh: true, scope: readScope }) : Promise.resolve()),
+    [key, readScope]
+  )
 
   return {
     status: entry.status,
@@ -548,6 +574,7 @@ export function useGitStatus(key: string | null, scope: GitScope): GitStatusView
     loading: key ? !entry.loaded || entry.loading : false,
     loaded: entry.loaded,
     error: entry.error,
-    refresh
+    refresh,
+    retry
   }
 }

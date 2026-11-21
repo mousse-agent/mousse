@@ -1,6 +1,7 @@
 import type { AssistantMessage, Message } from '../../shared/transcript'
 import type { ProviderDriverKind } from '../../shared/providerInstances'
 import type { PermissionMode } from '../../shared/permissionMode'
+import type { SkillsRegistrySnapshot } from '../../shared/integrations'
 import type { ChatImageAttachment, ChatMode } from '../../shared/types'
 import type { ToolCall } from '../../shared/transcript'
 import type { AgentToolAccess } from '../agents/WorkspaceAccessPolicy'
@@ -432,6 +433,8 @@ export interface TurnBridge {
   sessionInstructions: string
   /** Prefixed to every prompt: loaded skills, the mode's instructions, the applet catalogue, usable tools. */
   turnPreamble: string
+  /** Discovery already prepared for the turn's project. The native runtime still applies live Settings. */
+  skillsSnapshot?: SkillsRegistrySnapshot
   /** The binding's tool allow/deny list (`RunPolicy.tools`), when it has one. */
   toolPolicy?: { allow: string[]; deny?: string[] }
   /** The user's own MCP servers: attached by the runtime (`native`) or proxied by Mousse (`proxy`). */

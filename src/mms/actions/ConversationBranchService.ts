@@ -11,6 +11,7 @@ import { UndoRetentionService } from './UndoRetentionService'
 import { withGitMutationLocks } from './GitOperationCoordinator'
 import type { ThreadLeaseHandle } from '../queue/ThreadExecutionLease'
 import { ThreadWorkspaceManager } from '../workspace/ThreadWorkspaceManager'
+import { noteThreadBranchChanged } from '../workspace/threadHeads'
 import { ChangeReceiptService } from './ChangeReceiptService'
 import { gitAsync, LISTING, mergeTreesAsync, refuseUnsafeChangesAsync, treeOfAsync, tryGitAsync } from './git'
 import { restoreCommandsText, restoreKindOf } from './restoreCommands'
@@ -307,6 +308,7 @@ export class ConversationBranchService {
     atomicWriteJsonSync(manager.workspacePath, {
       ...metadata, conversationBranchId: selected.id, ...(files ? { retainedRef: selected.retainedRef } : {}), generation: (metadata.generation ?? 0) + 1
     })
+    noteThreadBranchChanged(metadata.threadId)
   }
 
   /** Restores the selected branch's conversation and records the switch as done. */
@@ -425,7 +427,10 @@ export class ConversationBranchService {
     atomicWriteJsonSync(this.path, branches)
     const manager = new ThreadWorkspaceManager(this.threadDirectory)
     const metadata = manager.load()
-    if (metadata) atomicWriteJsonSync(manager.workspacePath, { ...metadata, conversationBranchId: selected.id, retainedRef: selected.retainedRef, snapshotSha: snapshot.sha, headSha: snapshot.head ?? metadata.headSha, switchedIn, generation: (metadata.generation ?? 0) + 1 })
+    if (metadata) {
+      atomicWriteJsonSync(manager.workspacePath, { ...metadata, conversationBranchId: selected.id, retainedRef: selected.retainedRef, snapshotSha: snapshot.sha, headSha: snapshot.head ?? metadata.headSha, switchedIn, generation: (metadata.generation ?? 0) + 1 })
+      noteThreadBranchChanged(metadata.threadId)
+    }
   }
 
   /**

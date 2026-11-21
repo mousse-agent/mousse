@@ -186,6 +186,7 @@ export const METHOD_ACCESS: Readonly<Record<string, AccessClass>> = Object.freez
     'review.files': 'work',
     'review.file': 'work',
     'git.status': 'work',
+    'git.heads': 'work',
     'git.checkUpstream': 'work',
     'git.changes': 'work',
     'git.revertedList': 'work',

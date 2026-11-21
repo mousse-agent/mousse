@@ -117,7 +117,7 @@ type BotSender = { botId: string; name: string; activationId: string; limit?: Pe
 import { createHash, randomUUID } from 'node:crypto'
 import { QueueCommands, type QueueIntent } from '../run/QueueCommands'
 import type { PlannedQueueCommand, QueueEffects } from '../queue/queueJournal'
-import { modeFactsFor, PLAN_TURN_NOTE, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble } from '../run/mcp/appTools/assemble'
+import { modeFactsFor, PLAN_TURN_NOTE, prepareSkills, sessionInstructions, settingsToolEnabled, turnPreamble, type SkillsContext } from '../run/mcp/appTools/assemble'
 import type { AutomationToolHost } from '../run/mcp/appTools/automations'
 import type { AppearanceToolHost } from '../run/mcp/appTools/appearance'
 import { AUTOMATION_MANAGER_INSTRUCTIONS } from '../automations/automationManager'
@@ -4702,7 +4702,7 @@ export class OrchestratorService extends EventEmitter {
     const relayRead = this.mcpManager ? this.relayForTurn(registered) : Promise.resolve(undefined)
     // What already runs for the turn's folder, read now: the agent reuses a running server instead of starting another.
     const runningRead = this.runningNoteFor(registered).finally(() => turnTimingMark(registered.threadId, 'running'))
-    let skills: Pick<AppToolTurn, 'enabledSkills' | 'loadedSkills'> = { enabledSkills: [], loadedSkills: [] }
+    let skills: SkillsContext = { enabledSkills: [], loadedSkills: [] }
     try {
       skills = await prepareSkills({
         registry: this.skillsRegistry,
@@ -4713,13 +4713,15 @@ export class OrchestratorService extends EventEmitter {
         actor: registered.actor,
         // A definition loads only the skills it was granted.
         ...(input.grants ? { grants: input.grants } : {}),
-        // A bot's turn starts on the last scan of the Skills folders; they are scanned again beside it.
-        ...(registered.bot ? { stale: true } : {})
+        // Every turn starts on the last scan of the Skills folders; they are scanned again beside it, so a Send never
+        // waits for a walk of them. A message naming a skill that scan lacks still waits for a fresh one (`prepareSkills`).
+        stale: true
       })
     } catch (error) {
       // Skills are optional: a broken registry cannot block the turn.
       console.warn('skills unavailable for the turn', { threadId: registered.threadId, error: error instanceof Error ? error.message : String(error) })
     }
+    const { snapshot: skillsSnapshot, ...turnSkills } = skills
     turnTimingMark(registered.threadId, 'skills')
     // The runtime runs the selected model natively: its vision decides whether a browser screenshot
     // can reach the model.
@@ -4733,7 +4735,7 @@ export class OrchestratorService extends EventEmitter {
       ...(input.approvals === 'never' ? { approvals: 'never' as const } : {}),
       // A bot lists and loads every skill unless its owner switched skills off (then none), else only those it was granted;
       // an MCP result's images reach it only on a model that sees them.
-      ...(registered.bot ? { ...(registered.bot.allSkills ? skills : grantedSkills(skills, registered.bot.skills)), toolImages: this.harness.catalog.toolImages(input.instanceId, input.model) } : skills)
+      ...(registered.bot ? { ...(registered.bot.allSkills ? turnSkills : grantedSkills(turnSkills, registered.bot.skills)), toolImages: this.harness.catalog.toolImages(input.instanceId, input.model) } : turnSkills)
     }) ?? registered
     const descriptor = typeof turn.mode === 'string' ? this.modeRegistry.getModeSync(turn.mode, { projectPath: turn.projectPath }) : undefined
     // Agent and Plan run natively in the runtime; another mode's own instructions go into the preamble. A person's
@@ -4756,6 +4758,7 @@ export class OrchestratorService extends EventEmitter {
       ...(turn.accessLevel ? { accessLevel: turn.accessLevel } : {}),
       ...(capabilityRevision ? { capabilityRevision } : {}),
       mcpEligible: Boolean(this.runEngine),
+      ...(skillsSnapshot ? { skillsSnapshot } : {}),
       ...(turn.definition ? { definition: turn.definition } : {}),
       ...(turn.bot ? { bot: turn.bot } : {}),
       ...(relay ? { relay } : {}),
@@ -4934,6 +4937,7 @@ export class OrchestratorService extends EventEmitter {
       queueCommand: (threadId, command, options) => this.queueCommandAsAgent(threadId, command, options),
       browserRuntime: () => this.browserRuntime,
       skills: () => this.skillsRegistry,
+      skillSettings: () => this.settingsStore.get().integrations.skills,
       quickActions: new QuickActionTools(questionApproval(this.questions), (action) => this.emit('quick-action-created', action)),
       running: (turn) => this.runningText(turn, 'list'),
       monitors: () => this.monitors ?? undefined,
