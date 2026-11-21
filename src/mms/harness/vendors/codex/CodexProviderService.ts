@@ -449,6 +449,8 @@ interface CodexApp {
   /** The account this process last reported (`accountSubject`): its loaded threads were opened under it. */
   subject?: string
   threadOwner?: string
+  accountRevision: number
+  verifiedAccountRevision?: number
   terminal?: TerminalAuth
   /** A thread opened without reusable configuration, possibly without an id. */
   recycleRequired: boolean
@@ -1520,45 +1522,57 @@ export class CodexProviderService {
     const generation = this.authGeneration
     const app = this.app
     const terminal = app?.conn === conn ? app?.terminal : undefined
-    let result: AccountProbe
-    let nativeSubject: string | undefined
-    try {
-      result = this.options.account
-        ? await this.options.account.read(signal)
-        : classifyAccount(await conn!.request('account/read', { refreshToken: false }, { timeoutMs: 15_000, signal }), this.options.ownSignIn)
-      if (terminal && result.kind === 'signed_in') {
-        const fileStore = await (signal ? abortable(terminal.fileStore, signal) : terminal.fileStore)
-        const fileAccount = terminal.atLaunch.account
-        if (fileStore && fileAccount && !terminal.coldOnly) {
-          // config/read reloads disk policy. The app-server may have opened another store at startup.
-          const token = await this.chatGptToken(conn!, signal).catch(() => undefined)
-          signal?.throwIfAborted()
-          const workspace = token && createHash('sha256').update(token).digest('hex') === fileAccount.tokenHash
-            ? chatGptTokenWorkspace(token) : undefined
-          if (!terminal.coldOnly && workspace === fileAccount.workspace)
-            nativeSubject = JSON.stringify(['chatgpt:terminal-workspace:' + workspace, result.email?.trim().toLowerCase() ?? null])
+    for (;;) {
+      const revision = app?.accountRevision
+      let result: AccountProbe
+      let nativeSubject: string | undefined
+      try {
+        if (this.options.account) {
+          result = await this.options.account.read(signal)
+          if (result.kind === 'signed_in') nativeSubject = result.subject
+        } else {
+          const response = await conn!.request('account/read', { refreshToken: false }, { timeoutMs: 15_000, signal })
+          result = classifyAccount(response, this.options.ownSignIn)
+          if (terminal && result.kind === 'signed_in') {
+            const fileStore = await (signal ? abortable(terminal.fileStore, signal) : terminal.fileStore)
+            const fileAccount = terminal.atLaunch.account
+            const selectedWorkspace = response.workspaceRouting?.chatgptAccountId
+            if (fileStore && fileAccount && !terminal.coldOnly) {
+              // The server can select another workspace even when it holds the bearer from this file.
+              const token = await this.chatGptToken(conn!, signal).catch(() => undefined)
+              signal?.throwIfAborted()
+              if (!terminal.coldOnly && token && selectedWorkspace === fileAccount.workspace &&
+                  chatGptTokenWorkspace(token) === selectedWorkspace &&
+                  createHash('sha256').update(token).digest('hex') === fileAccount.tokenHash) {
+                nativeSubject = JSON.stringify(['chatgpt:terminal-workspace:' + selectedWorkspace, result.email?.trim().toLowerCase() ?? null])
+                result = { ...result, subject: nativeSubject }
+              }
+            }
+          }
         }
-        if (!nativeSubject) terminal.coldOnly = true
-        if (nativeSubject) result = { ...result, subject: nativeSubject }
-      } else if (result.kind === 'signed_in') nativeSubject = result.subject
-    } catch (error) {
+      } catch (error) {
+        signal?.throwIfAborted()
+        result = this.accountReadError(error)
+      }
       signal?.throwIfAborted()
-      result = this.accountReadError(error)
+      if (generation !== this.authGeneration || this.stopped || (conn && this.app?.conn !== conn))
+        throw new Error('The Codex sign-in changed during its check. Try again.')
+      if (conn) this.assertTerminalCredentials(conn)
+      // Initialization can publish workspace routing while the first check is already in flight.
+      if (revision !== app?.accountRevision) continue
+      if (terminal && result.kind === 'signed_in' && !nativeSubject) terminal.coldOnly = true
+      const subject = result.kind === 'signed_in' ? accountSubject(result) : undefined
+      if (result.kind === 'signed_in' && !subject)
+        result = { kind: 'error', message: 'Codex did not identify its ChatGPT account. Recheck the sign-in and try again.' }
+      if (app && (!subject || (app.subject && app.subject !== subject))) this.retireAccount(app.conn)
+      else if (app && app.conn === conn) {
+        app.subject = subject
+        app.threadOwner = codexAccountOwner(nativeSubject)
+        app.verifiedAccountRevision = revision
+      }
+      this.probeResult = { at: Date.now(), result }
+      return result
     }
-    signal?.throwIfAborted()
-    if (generation !== this.authGeneration || this.stopped || (conn && this.app?.conn !== conn))
-      throw new Error('The Codex sign-in changed during its check. Try again.')
-    if (conn) this.assertTerminalCredentials(conn)
-    const subject = result.kind === 'signed_in' ? accountSubject(result) : undefined
-    if (result.kind === 'signed_in' && !subject)
-      result = { kind: 'error', message: 'Codex did not identify its ChatGPT account. Recheck the sign-in and try again.' }
-    if (app && (!subject || (app.subject && app.subject !== subject))) this.retireAccount(app.conn)
-    else if (app && app.conn === conn) {
-      app.subject = subject
-      app.threadOwner = codexAccountOwner(nativeSubject)
-    }
-    this.probeResult = { at: Date.now(), result }
-    return result
   }
 
   /** Closing synchronously rejects in-flight RPCs and fences every new write to the old process. */
@@ -1584,7 +1598,7 @@ export class CodexProviderService {
   private assertAccount(conn: CodexConnection): string {
     conn.signal.throwIfAborted()
     const app = this.app
-    if (app?.conn !== conn || !app.subject)
+    if (app?.conn !== conn || !app.subject || app.verifiedAccountRevision !== app.accountRevision)
       throw new Error('The Codex sign-in changed before the request could be sent. Try again.')
     this.assertTerminalCredentials(conn)
     return app.subject
@@ -2458,7 +2472,12 @@ export class CodexProviderService {
     }, { once: true })
     const statuses = new ThreadStatuses()
     conn.onNotification((notification) => this.route(conn, notification, statuses))
-    conn.setServerRequestHandler((request) => this.serve(request))
+    conn.setServerRequestHandler(async (request) => {
+      this.assertAccount(conn)
+      const result = await this.serve(request)
+      this.assertAccount(conn)
+      return result
+    })
     conn.signal.addEventListener('abort', () => this.lost(conn, conn.signal.reason), { once: true })
     const clientInfo = this.options.clientInfo ?? { name: 'mousse', title: 'Mousse' }
     const ready = Promise.resolve().then(() => conn.request('initialize', {
@@ -2481,7 +2500,7 @@ export class CodexProviderService {
           (config.cli_auth_credentials_store == null || config.cli_auth_credentials_store === 'file')))
         .catch(() => false)
     }
-    this.app = { conn, ready, generation: this.launchGeneration, statuses, terminal, recycleRequired: false, threadUsers: new Set(), opening: new Set(), unloading: new Map(), capacityWaiters: new Set() }
+    this.app = { conn, ready, generation: this.launchGeneration, statuses, terminal, accountRevision: 0, recycleRequired: false, threadUsers: new Set(), opening: new Set(), unloading: new Map(), capacityWaiters: new Set() }
     return ready
   }
 
@@ -2578,7 +2597,15 @@ export class CodexProviderService {
     const app = this.app
     if (app?.conn !== conn || conn.signal.aborted) return
     if (notification.method === 'account/updated') {
-      this.retireAccount(conn)
+      const updated = notificationParams(notification, 'account/updated')
+      if (!app.terminal || (app.subject && (!app.threadOwner || updated?.authMode !== 'chatgpt'))) this.retireAccount(conn)
+      else {
+        app.accountRevision += 1
+        this.probeResult = undefined
+        // Before the first reading, admission already owns the check. Later updates fence writes
+        // until a fresh reading confirms the same account and workspace.
+        if (app.subject) void this.status()
+      }
       return
     }
     const closed = notificationParams(notification, 'thread/closed')

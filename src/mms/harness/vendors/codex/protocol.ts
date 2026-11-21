@@ -44,6 +44,7 @@ export interface AccountReadParams {
 export interface AccountReadResponse {
   account: CodexAccount | null
   requiresOpenaiAuth: boolean
+  workspaceRouting?: { chatgptAccountId: string } | null
 }
 /** `getAuthStatus`: how Codex is signed in, with its current access token when `includeToken` is set. */
 export interface GetAuthStatusParams {

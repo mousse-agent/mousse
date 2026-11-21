@@ -91,7 +91,7 @@ function sharedServer() {
             reply({ config: {} })
             break
           case 'account/read':
-            reply({ account: { type: 'chatgpt', email: 'person@example.invalid', planType: 'plus' }, requiresOpenaiAuth: true })
+            reply({ account: { type: 'chatgpt', email: 'person@example.invalid', planType: 'plus' }, workspaceRouting: { chatgptAccountId: 'shared-workspace' }, requiresOpenaiAuth: true })
             break
           case 'getAuthStatus':
             reply({ authMethod: 'chatgpt', authToken: token })

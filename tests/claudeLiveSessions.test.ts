@@ -214,6 +214,49 @@ describe('a live Claude query', () => {
     }
   })
 
+  it('hands Claude the transcript when a managed drop-in rotates while turn settings are pending', async () => {
+    const managedDir = join(process.env.CLAUDE_CONFIG_DIR!, 'policy')
+    const folder = join(managedDir, 'managed-settings.d')
+    mkdirSync(folder, { recursive: true })
+    const settings = join(folder, '10-credentials.json')
+    const saveKey = (key: string) => writeFileSync(settings, JSON.stringify({ env: { ANTHROPIC_API_KEY: key } }))
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let pending = false
+    const { cli, turn, service } = fixture({}, undefined, undefined, {
+      accountSubject: (env) => claudeAccountSubject(env, { managedFiles: [join(managedDir, 'managed-settings.json')] }),
+      turnSettings: async () => {
+        if (pending) {
+          entered.resolve()
+          await release.promise
+        }
+        return {}
+      }
+    })
+    const history = 'transcript from the original credential'
+    try {
+      saveKey('first-fixture-key')
+      await turn({ prompt: 'first' }, history)
+      const warm = cli.last
+      pending = true
+      const next = turn({ prompt: 'send after rotation' }, history)
+      void next.catch(() => undefined)
+      await entered.promise
+      saveKey('second-fixture-key')
+      release.resolve()
+
+      expect(await next).toBe('reply to 1')
+      expect(warm.inputs).toHaveLength(1)
+      expect(warm.closed).toBe(true)
+      expect(cli.last).not.toBe(warm)
+      expect(cli.last.options.resume).toBeUndefined()
+      expect(JSON.stringify(cli.last.inputs)).toContain(history)
+    } finally {
+      release.resolve()
+      await service.stop()
+    }
+  })
+
   it('a turn aborted before Claude started its prompt cancels the queued prompt and keeps the process', async () => {
     const { cli, chat } = fixture()
     silent(cli)

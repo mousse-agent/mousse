@@ -123,8 +123,15 @@ class ReplayCodexProcess extends EventEmitter implements CodexProcess {
             const id = this.requestIds.get(control.id)
             if (id !== undefined) {
               this.requestIds.delete(control.id)
-              if (control.id === this.accountRequest) this.accountResult = control.result
-              response = { ...control, id }
+              let result = control.result
+              if (control.id === this.accountRequest) {
+                const reading = result as { account?: { type?: string } | null; workspaceRouting?: unknown } | undefined
+                // Older recordings predate workspace routing. The replay's file and bearer use this workspace.
+                if (reading?.account?.type === 'chatgpt' && reading.workspaceRouting === undefined)
+                  result = { ...reading, workspaceRouting: { chatgptAccountId: REPLAY_WORKSPACE } }
+                this.accountResult = result
+              }
+              response = { ...control, id, ...(result === undefined ? {} : { result }) }
             }
           }
           this.stdout.write((control.kind === 'stdout' ? String(control.line) : JSON.stringify(response)) + '\n')

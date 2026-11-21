@@ -247,7 +247,7 @@ function appServers() {
         else if (message.method === 'account/read') {
           const account = accountOf(spec.env.CODEX_HOME)
           // `api-key`: signed in, but with a key and not a ChatGPT account.
-          reply = { result: { account: account === 'api-key' ? { type: 'apiKey' } : account ? { type: 'chatgpt', email: `${account}@example.test`, planType: 'plus' } : null, requiresOpenaiAuth: true } }
+          reply = { result: { account: account === 'api-key' ? { type: 'apiKey' } : account ? { type: 'chatgpt', email: `${account}@example.test`, planType: 'plus' } : null, workspaceRouting: startupAccount ? { chatgptAccountId: startupAccount } : null, requiresOpenaiAuth: true } }
         } else if (message.method === 'getAuthStatus') reply = { result: { authMethod: 'chatgpt', authToken: startupAccount ? codexFixtureAccessToken(startupAccount) : null } }
         else if (message.method === 'config/read') reply = { result: { config: {} } }
         else if (message.method === 'model/list') reply = { result: { data: [{ id: 'gpt-test', displayName: 'GPT Test', hidden: false, supportedReasoningEfforts: [] }], nextCursor: null } }

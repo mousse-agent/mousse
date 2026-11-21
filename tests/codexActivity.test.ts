@@ -444,7 +444,7 @@ describe('Codex activity against a scripted app-server', () => {
           }
           const result =
             message.method === 'initialize' ? { userAgent: 'test', codexHome: '/h/.codex', platformFamily: 'unix', platformOs: 'macos' }
-            : message.method === 'account/read' ? { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, requiresOpenaiAuth: true }
+            : message.method === 'account/read' ? { account: { type: 'chatgpt', email: 'me@example.com', planType: 'plus' }, workspaceRouting: { chatgptAccountId: 'fixture-workspace' }, requiresOpenaiAuth: true }
             : message.method === 'getAuthStatus' ? { authMethod: 'chatgpt', authToken: token }
             : message.method === 'config/read' ? { config: {} }
             : message.method === 'thread/list' ? { data: [], nextCursor: null }

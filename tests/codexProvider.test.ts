@@ -40,10 +40,10 @@ function scriptedServer(answer: (message: Message, launchIndex: number) => Reply
   const launch = (spec: CodexLaunch): CodexProcess => {
     const launchIndex = launches.push(spec) - 1
     const authHome = spec.env.CODEX_HOME ?? join(home, '.codex')
-    let startupToken: string | undefined
+    let startupAuth: { access_token?: string; account_id?: string } | undefined
     if (authHome.startsWith(home)) {
       try {
-        startupToken = JSON.parse(readFileSync(join(authHome, 'auth.json'), 'utf8')).tokens?.access_token
+        startupAuth = JSON.parse(readFileSync(join(authHome, 'auth.json'), 'utf8')).tokens
       } catch {
         // No file-backed credentials for this process.
       }
@@ -76,9 +76,13 @@ function scriptedServer(answer: (message: Message, launchIndex: number) => Reply
         // The fixture defaults to Codex's file store unless the test supplies a config or an error.
         if (message.method === 'config/read' && !reply?.error &&
             !(reply?.result && typeof reply.result === 'object' && 'config' in reply.result)) reply = { result: { config: {} } }
+        if (message.method === 'account/read' && reply?.result && typeof reply.result === 'object' &&
+            'account' in reply.result && (reply.result.account as { type?: string } | null)?.type === 'chatgpt' &&
+            !('workspaceRouting' in reply.result) && startupAuth?.account_id)
+          reply = { result: { ...reply.result, workspaceRouting: { chatgptAccountId: startupAuth.account_id } } }
         if (message.method === 'getAuthStatus' && !reply?.error &&
             !(reply?.result && typeof reply.result === 'object' && 'authMethod' in reply.result))
-          reply = { result: { authMethod: 'chatgpt', authToken: startupToken ?? null } }
+          reply = { result: { authMethod: 'chatgpt', authToken: startupAuth?.access_token ?? null } }
         if (reply) stdout.write(JSON.stringify({ id: message.id, ...reply }) + '\n')
       }
     })
@@ -349,6 +353,17 @@ describe('CodexProviderService', () => {
     expect(service.configured()).toBe(false)
   })
 
+  it('re-verifies a late startup notification on the same terminal server', async () => {
+    const server = scriptedServer(() => chatgpt)
+    const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X' }] })
+    expect(await service.status({ force: true })).toMatchObject({ state: 'connected' })
+    const owner = service.account()?.subject
+    server.processes[0].stdout.write(JSON.stringify({ method: 'account/updated', params: { authMode: 'chatgpt' } }) + '\n')
+    expect(await service.status({ force: true })).toMatchObject({ state: 'connected' })
+    expect(service.account()?.subject).toBe(owner)
+    expect(server.launches).toHaveLength(1)
+  })
+
   it('refuses an API-key sign-in so turns never bill an API key', async () => {
     const server = scriptedServer(() => ({ result: { account: { type: 'apiKey' }, requiresOpenaiAuth: true } }))
     const service = create(server)
@@ -583,6 +598,26 @@ describe('CodexProviderService options (managed Codex)', () => {
     expect(server.requests('thread/resume')).toHaveLength(0)
     expect(server.requests('thread/start')).toHaveLength(2)
     expect(JSON.stringify(server.requests('turn/start').at(-1))).toContain('first workspace transcript')
+  })
+
+  it('hands over history when the selected workspace differs despite a matching file bearer', async () => {
+    const server = turnServer({
+      account: (launch) => ({
+        result: { ...chatgpt.result, workspaceRouting: { chatgptAccountId: launch === 0 ? 'workspace-one' : 'workspace-two' } }
+      })
+    })
+    const service = create(server, { models: [{ id: 'gpt-x', label: 'GPT X' }] })
+    const first = await chat(service)
+    const history = 'workspace one transcript'
+    service.commitConversation('t', history)
+    await service.stopAll('switch selected workspace')
+
+    const second = await chat(service, { history })
+    expect(second.codexThreadId).not.toBe(first.codexThreadId)
+    expect(server.requests('thread/resume')).toHaveLength(0)
+    expect(JSON.stringify(server.requests('turn/start').at(-1))).toContain(history)
+    expect(await service.status({ force: true })).toMatchObject({ state: 'connected' })
+    expect(service.account()?.subject).toBe('chatgpt:me@example.com')
   })
 
   it('rebuilds history when Codex only identifies the account by its email', async () => {

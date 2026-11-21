@@ -189,6 +189,8 @@ type SavedSession = {
   usageBaseline?: ClaudeUsageBaseline
   /** Provider instance that owns the session; absent on sessions saved before instances existed. */
   instanceId?: string
+  /** Hash of the account and turn credential settings. Absent on older sessions, null for opaque settings. */
+  credentialIdentity?: string | null
   /**
    * The session's turns, oldest first (issue #360): an undo or an edit that returns the history to
    * what one of them left resumes the session cut after it. Absent on sessions saved before.
@@ -1199,7 +1201,7 @@ export class ClaudeSubscriptionProviderService {
       const sessionId = randomUUID()
       this.settings.sessions = {
         ...this.settings.sessions,
-        [threadId]: { sessionId, cwd: saved.cwd, ...(saved.model ? { model: saved.model } : {}), instanceId, turns: turns.slice(0, index + 1), fork: { from: saved.sessionId, at } }
+        [threadId]: { sessionId, cwd: saved.cwd, ...(saved.model ? { model: saved.model } : {}), instanceId, credentialIdentity: saved.credentialIdentity, turns: turns.slice(0, index + 1), fork: { from: saved.sessionId, at } }
       }
       this.save()
       return sessionId
@@ -3174,25 +3176,13 @@ export class ClaudeSubscriptionProviderService {
       this.forgetConversation(input.threadId)
       stored = undefined
     }
-    const saved = stored && sessionBoundTo(stored, instanceId) ? stored : undefined
+    const candidate = stored && sessionBoundTo(stored, instanceId) ? stored : undefined
     const historyNow = historyKey(input.history ?? '')
-    // A model change resumes the session too (issue #359): Claude Code takes a session made on another model, as its
-    // own model switch does, so the conversation keeps its thinking, images and tool calls.
-    const sameSetup = saved?.cwd === resolve(input.cwd)
-    const resume = !fresh && !saved?.fork && sameSetup && saved?.historyKey === historyNow ? saved.sessionId : undefined
-    /**
-     * Issue #360: the session resumed cut, into a new session (`id`) so the one it came from stays
-     * whole. A fork's first turn makes its branch (whatever the thread's history holds: every turn
-     * since the branch was made ran here and did not finish); an undo or an edit cuts the session
-     * after the turn whose history this one carries.
-     */
+    let saved: SavedSession | undefined
+    let resume: string | undefined
     let branch: { from: string; at: string; id: string; turns: SessionTurn[]; fork: boolean } | undefined
-    if (saved?.fork && branching) branch = { ...saved.fork, id: saved.sessionId, turns: saved.turns ?? [], fork: true }
-    else if (saved && !saved.fork && !resume && sameSetup && branching && !input.continuation && !locked) {
-      const cut = cutForHistory(saved, historyNow, claudeHomeOf(env))
-      if (cut) branch = { from: saved.sessionId, at: cut.at, id: randomUUID(), turns: cut.turns, fork: false }
-    }
-    const metrics = new ClaudeMetricsCollector(resume ?? branch?.from, saved?.usageBaseline)
+    let credentialIdentity: SavedSession['credentialIdentity']
+    const metrics = new ClaudeMetricsCollector()
     const editCounter = new ClaudeNativeEditCounter(input.cwd, input.onLineEdits)
     const savedHistoryKey = stored?.historyKey
     if (stored) {
@@ -3431,6 +3421,21 @@ export class ClaudeSubscriptionProviderService {
           throw new Error('The Claude Code sign-in changed before the turn could be sent. Try again.')
       }
       assertSignIn()
+      // Settings and sign-in can change during setup, even if the adapter admitted the turn on the
+      // previous account. Compare with the credential that actually opened the saved session.
+      credentialIdentity = credentialKey ? historyKey(JSON.stringify([signIn.identity, probedSubject, credentialKey])) : null
+      if (candidate && (candidate.credentialIdentity === undefined ||
+          (credentialIdentity !== null && candidate.credentialIdentity === credentialIdentity))) saved = candidate
+      const sameSetup = saved?.cwd === resolve(input.cwd)
+      // A model change can still continue the same session (issue #359).
+      if (!fresh && saved && !saved.fork && sameSetup && savedHistoryKey === historyNow) resume = saved.sessionId
+      // Issue #360: fork from a saved boundary or cut back to an earlier turn on undo or edit.
+      if (saved?.fork && branching) branch = { ...saved.fork, id: saved.sessionId, turns: saved.turns ?? [], fork: true }
+      else if (saved && !saved.fork && !resume && sameSetup && branching && !input.continuation && !locked) {
+        const cut = cutForHistory(saved, historyNow, claudeHomeOf(env))
+        if (cut) branch = { from: saved.sessionId, at: cut.at, id: randomUUID(), turns: cut.turns, fork: false }
+      }
+      metrics.beginQuery(resume ?? branch?.from, saved?.usageBaseline)
       if (locked) turnTimingMark(input.threadId, 'signIn')
       controller.signal.throwIfAborted()
       input.signal?.throwIfAborted()
@@ -3650,6 +3655,7 @@ export class ClaudeSubscriptionProviderService {
             if (previous) this.closeLiveSession(input.threadId, previous)
           }
           live = fresh || (locked && !botWarm) || !signIn.identity || !credentialKey ? undefined : await this.acquireLive(input.threadId, key, resume, (created) => {
+            assertSignIn('live')
             created.current = turn
             if (!botWarm) return buildOptions(created.lifetime, () => created.current ?? turn, true)
             const folder = mkdtempSync(join(tmpdir(), 'mousse-claude-settings-'))
@@ -3778,7 +3784,7 @@ export class ClaudeSubscriptionProviderService {
         // The same for a bot's one-shot query: no wait while the last reading said signed in (`signInFresh`).
         const threadId = input.threadId
         let nextPrompt: AsyncIterable<SDKUserMessage> = (async function* (): AsyncGenerator<SDKUserMessage> {
-          assertSignIn(fresh ? 'fresh' : undefined)
+          assertSignIn('fresh')
           turnTimingMark(threadId, 'prompt')
           yield* messages()
         })()
@@ -3814,6 +3820,7 @@ export class ClaudeSubscriptionProviderService {
           const turnTextLength = frames.text.length
           // Checked right before the start: a steer a Stop came before is handed back, and no process ever gets it.
           controller.signal.throwIfAborted()
+          assertSignIn('fresh')
           // Each process the turn starts (a steer restarts it) gets the turn's MCP servers before its prompt (#358).
           query = (await this.launch(nextPrompt, options, turnServers(), {
             threadId: input.threadId,
@@ -3920,7 +3927,7 @@ export class ClaudeSubscriptionProviderService {
       if (!success || !sessionId) throw new Error('Claude Code ended before completing the turn')
       this.settings.sessions = {
         ...this.settings.sessions,
-        [input.threadId]: { sessionId, cwd: resolve(input.cwd), model: selected.baseId, usageBaseline: metrics.snapshot(), instanceId, turns: withTurn(sessionId), ...ranEntrypoint() }
+        [input.threadId]: { sessionId, cwd: resolve(input.cwd), model: selected.baseId, usageBaseline: metrics.snapshot(), instanceId, credentialIdentity, turns: withTurn(sessionId), ...ranEntrypoint() }
       }
       this.save()
       this.readyToCommit.add(input.threadId)
@@ -4010,6 +4017,7 @@ export class ClaudeSubscriptionProviderService {
               model: parseThinkingSuffixFromModelId(claudeSpeedOf(input.model).model).baseId,
               ...(baseline ? { usageBaseline: baseline } : {}),
               instanceId,
+              ...(credentialIdentity !== undefined ? { credentialIdentity } : {}),
               ...ranEntrypoint(_ranWith)
             }
           }
