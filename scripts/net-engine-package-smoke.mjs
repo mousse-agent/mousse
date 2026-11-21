@@ -21,7 +21,8 @@
 //
 // Waits: MOUSSE_CHECK_PACKAGE_START_MS (180000) for the packaged app to be ready.
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { CheckFailed } from './check-packaged-net-helper.mjs'
@@ -90,12 +91,33 @@ function step(command, args, reason) {
   if (result.status !== 0) throw new CheckFailed(reason, `${command} ${args.join(' ')} exited ${result.status ?? result.error?.message}`)
 }
 
+/** Longest Unix socket path the OS takes (`sun_path`, with its terminating NUL): 104 bytes on macOS, 108 on Linux. */
+const SOCKET_PATH_MAX = { darwin: 103, linux: 107 }
+
+/**
+ * A new, short MOUSSE_HOME for the packaged app: its daemon listens on `<home>/mms.sock`, which a home under a deep
+ * run folder would put past the Unix socket path limit (`listen EINVAL`). Under the OS temporary folder, or `/tmp`
+ * when that is itself too deep: the folder to make it in.
+ */
+export function homeParent(platform = process.platform, base = tmpdir()) {
+  const limit = SOCKET_PATH_MAX[platform]
+  let real = base
+  try {
+    real = realpathSync(base)
+  } catch {
+    // A folder that cannot be resolved is taken as given.
+  }
+  if (!limit) return real
+  // The name mkdtemp makes is the prefix and six characters.
+  return Buffer.byteLength(join(real, 'mousse-smoke-XXXXXX', 'mms.sock')) <= limit ? real : '/tmp'
+}
+
 /** Starts the packaged app headless in a new MOUSSE_HOME, reads `net-engine status` from it, and stops it. */
-async function startAndAsk(app, home, waitMs) {
+async function startAndAsk(app, waitMs) {
   const { executable } = packagedLayout(app)
   if (!existsSync(executable)) throw new CheckFailed('app_not_started', `${app} has no ${executable}`)
-  rmSync(home, { recursive: true, force: true })
-  mkdirSync(home, { recursive: true })
+  const home = mkdtempSync(join(homeParent(), 'mousse-smoke-'))
+  console.log(`app_home=${home}`)
   const env = { ...process.env, MOUSSE_HOME: home, MOUSSE_CLI: '1' }
   // The packaged app finds its own helper; a helper named for the dev app would hide a missing one.
   delete env.MOUSSE_NET_HELPER
@@ -146,12 +168,13 @@ async function startAndAsk(app, home, waitMs) {
 }
 
 async function main(argv) {
+  // First, before any check can fail: every outcome names the app build.
+  console.log(`app_build=${appBuild()}`)
   try {
     const flags = parse(argv)
     const out = resolve(flags.out)
     const helper = resolve(flags.helper)
     const triple = HELPER_TARGETS[flags.target]
-    console.log(`app_build=${appBuild()}`)
     if (!runsHere(flags.target))
       throw new CheckFailed('wrong_host', `${flags.target} is not packaged and run on ${process.platform} ${process.arch}`)
 
@@ -197,7 +220,7 @@ async function main(argv) {
     const insideSaid = parseHelperVersion(inside.stdout)
     if (insideSaid?.build !== said.build || insideSaid.control !== 'none')
       throw new CheckFailed('stale_helper', `the packaged helper says "${(inside.stdout ?? '').trim()}", not build ${said.build}`)
-    await startAndAsk(app, join(out, 'home'), Number(process.env.MOUSSE_CHECK_PACKAGE_START_MS ?? 180_000))
+    await startAndAsk(app, Number(process.env.MOUSSE_CHECK_PACKAGE_START_MS ?? 180_000))
     console.log('PASS package-smoke')
   } catch (error) {
     console.log(`note: ${error.message}`)
