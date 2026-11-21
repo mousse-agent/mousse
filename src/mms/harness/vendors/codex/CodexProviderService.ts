@@ -2003,7 +2003,7 @@ export class CodexProviderService {
       if (conn && codexThreadId && !conn.signal.aborted) {
         // A stopped request ends its turn on Codex's side too; then the thread is let go.
         if (!ended && turnId) await conn.request('turn/interrupt', { threadId: codexThreadId, turnId }, { timeoutMs: 5_000 }).catch(() => undefined)
-        this.unloadThread(conn, codexThreadId)
+        void this.unloadThread(conn, codexThreadId)
       }
       this.activeThreads.delete(key)
       await releaseThreads?.()
@@ -3231,7 +3231,7 @@ export class CodexProviderService {
       // new Codex thread under the new text, with the history given in its prompt.
       const opened = loaded?.instructionsHash ?? saved.instructionsHash
       if (input.bot && instructionsHash !== undefined && opened !== undefined && opened !== instructionsHash) {
-        if (loaded) this.unloadThread(conn, saved.codexThreadId)
+        if (loaded) void this.unloadThread(conn, saved.codexThreadId)
         const fresh = await this.requestThread(conn, 'thread/start', params, signal, reserved)
         this.loaded.set(fresh.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
         return { codexThreadId: fresh.thread.id, model: fresh.model, continued: false, botSandbox }
@@ -3251,7 +3251,7 @@ export class CodexProviderService {
         // config, and the old thread is released.
         const forked = await this.requestThread(conn, 'thread/fork', { threadId: saved.codexThreadId, excludeTurns: true, ...params }, signal, reserved)
         this.loaded.set(forked.thread.id, { mcpToken, relayKey, cwd, childKey, instructionsHash })
-        this.unloadThread(conn, saved.codexThreadId)
+        void this.unloadThread(conn, saved.codexThreadId)
         return { codexThreadId: forked.thread.id, model: forked.model, continued: true, botSandbox }
       }
       try {
@@ -3646,7 +3646,7 @@ export class CodexProviderService {
       input.signal?.removeEventListener('abort', forward)
       this.controllers.delete(controller)
       this.activeThreads.delete(input.threadId)
-      if (unopened) this.unloadThread(unopened.conn, unopened.id)
+      if (unopened) void this.unloadThread(unopened.conn, unopened.id)
       await releaseThreads?.()
       this.closeWhenIdle(CODEX_IDLE_CLOSE_MS)
       // A stopped turn stays registered (for routing) until its sweep ends or the process dies.

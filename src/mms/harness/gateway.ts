@@ -2935,7 +2935,7 @@ export class Harness implements HarnessGateway {
     } catch (error) {
       if (record) {
         this.records.delete(instanceId)
-        this.stopRuntime(record)
+        void this.stopRuntime(record)
       }
       throw error
     }
@@ -4189,7 +4189,7 @@ export class Harness implements HarnessGateway {
     }
     for (const operation of this.operations.values()) operation.cancel()
     this.operations.clear()
-    for (const record of new Set([...this.records.values(), ...this.retired])) this.stopRuntime(record)
+    for (const record of new Set([...this.records.values(), ...this.retired])) void this.stopRuntime(record)
     this.records.clear()
     this.retired.clear()
     this.listeners.clear()
