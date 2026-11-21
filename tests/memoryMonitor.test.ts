@@ -123,7 +123,7 @@ describe('memory monitor', () => {
     const samples = samplesOf(lines)
     expect(samples).toHaveLength(6)
     expect(samples[0]).toMatchObject({ t: T0, service: { private: 150, rss: 190 }, counts: { loadedThreads: 1, providerProcesses: 1 }, workers: [4], replayMb: 2, children: [{ kind: 'claude', mb: 210 }] })
-    // Children with every sample, as they count in the app's total; the replay size every fifth sample only.
+    // Child rows stay in every sample; their memory and replay size refresh every fifth sample.
     expect(samples[1].children).toEqual([{ kind: 'claude', mb: 210 }])
     expect(samples[1].replayMb).toBeUndefined()
     expect(samples[5].replayMb).toBe(2)

@@ -40,7 +40,7 @@ import { MemoryLog } from './memoryLog'
 import { readChildMemory, readHeapDetail, sampleOwnProcess } from './processMemory'
 import { liveChildProcesses } from './liveCounts'
 
-/** The replay buffer's bytes are read on every Nth sample. */
+/** Child memory and the replay buffer's bytes are read on every Nth periodic sample. */
 const DETAIL_EVERY = 5
 /** History kept in memory for the trend and the growth check. */
 const HISTORY_MS = 6 * 3_600_000
@@ -112,6 +112,7 @@ export class MemoryMonitor {
   private ticks = 0
   private running: Promise<void> | null = null
   private lastReplayMb: number | undefined
+  private childReading: { key: string; at: number; children: ChildMemory[] } | null = null
   private started = false
   /** Set by `stop()`: a sample that was reading then writes nothing and raises no notice. */
   private stopped = false
@@ -174,13 +175,13 @@ export class MemoryMonitor {
   }
 
   /** One sample, the limit check and what a breach needs. Never runs twice at once. */
-  tick(): Promise<void> {
-    if (this.running) return this.running
-    this.running = this.runTick().finally(() => { this.running = null })
+  tick(options: { children?: boolean } = {}): Promise<void> {
+    if (this.running) return options.children ? this.running.then(() => this.tick(options)) : this.running
+    this.running = this.runTick(options.children === true).finally(() => { this.running = null })
     return this.running
   }
 
-  private async runTick(): Promise<void> {
+  private async runTick(forceChildren: boolean): Promise<void> {
     try {
       if (this.stopped) return
       this.ticks += 1
@@ -188,7 +189,7 @@ export class MemoryMonitor {
         this.started = true
         this.log.append({ type: 'start', t: this.now(), version: this.options.version, pid: process.pid })
       }
-      const sample = await this.takeSample((this.ticks - 1) % DETAIL_EVERY === 0)
+      const sample = await this.takeSample(forceChildren || (this.ticks - 1) % DETAIL_EVERY === 0)
       if (this.stopped) return
       this.history.push(sample)
       const cutoff = sample.t - HISTORY_MS
@@ -214,7 +215,7 @@ export class MemoryMonitor {
 
   /**
    * A sample now, for a profiler tool: not kept in the history or written to the log. With `children`, the replay
-   * buffer's size is read again too (the child processes are read with every sample).
+   * buffer's size and child memory are refreshed; otherwise the last child reading may be reused.
    */
   async measure(options: { children?: boolean } = {}): Promise<MemorySample> {
     return this.takeSample(options.children === true)
@@ -256,8 +257,7 @@ export class MemoryMonitor {
       this.options.readCounts()
     ])
     this.detail = (this.options.readDetail ?? readHeapDetail)()
-    // Every sample: the agent CLIs and tools count in the app's total, which would jump if they were read less often.
-    const children = await this.readChildrenNow()
+    const { children, at: childrenAt } = await this.sampleChildren(t, withDetail)
     if (withDetail && this.options.readReplayBytes) this.lastReplayMb = toMb(this.options.readReplayBytes())
     const { processes: app, hints } = this.freshAppReport(t)
     return {
@@ -268,9 +268,34 @@ export class MemoryMonitor {
       counts: { ...reading.counts, providerProcesses: (this.options.childCount ?? (() => liveChildProcesses().length))() },
       ...(reading.workerHeaps.length ? { workers: reading.workerHeaps.map(toMb) } : {}),
       ...(children.length ? { children } : {}),
+      ...(childrenAt !== undefined ? { childrenAt } : {}),
       ...(app.length ? { app } : {}),
       ...(hints ? { hints } : {}),
       ...(withDetail && this.lastReplayMb !== undefined ? { replayMb: this.lastReplayMb } : {})
+    }
+  }
+
+  /** Keep rows between detailed readings without doing an OS memory listing on every tick. */
+  private async sampleChildren(t: number, force: boolean): Promise<{ children: ChildMemory[]; at?: number }> {
+    const tracked = liveChildProcesses()
+    const keyOf = (list: typeof tracked) => JSON.stringify(list)
+    const key = keyOf(tracked)
+    const cached = this.childReading
+    const maxAge = DETAIL_EVERY * this.thresholds.sampleIntervalMs
+    if (!force && cached?.key === key && t >= cached.at && t - cached.at < maxAge) {
+      return { children: cached.children, at: cached.at }
+    }
+    // Invalidate before awaiting: failed reads must never keep old providers or measurements alive.
+    this.childReading = null
+    try {
+      const children = await this.readChildrenNow()
+      const current = liveChildProcesses()
+      if (keyOf(current) !== key) return { children: current.map(({ kind }) => ({ kind, mb: null })) }
+      this.childReading = { key, at: t, children }
+      return { children, at: t }
+    } catch (error) {
+      logWarn('memory', 'child memory read failed', error)
+      return { children: liveChildProcesses().map(({ kind }) => ({ kind, mb: null })) }
     }
   }
 

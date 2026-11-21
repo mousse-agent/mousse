@@ -57,6 +57,7 @@ export function overviewReport(status: MemoryStatus, thresholds: MemoryThreshold
     serviceUptimeMinutes: Math.round(sample.up / 60),
     activeTurns: sample.counts.activeTurns,
     processes: processRows(sample),
+    childrenSampledSecondsAgo: sample.childrenAt === undefined ? null : Math.max(0, Math.round((now - sample.childrenAt) / 1000)),
     service: {
       mb: service,
       baselineMb: status.baselineMb,
@@ -254,6 +255,7 @@ export function sampleNowReport(sample: MemorySample, previous: MemorySample | n
   return {
     now: point,
     processes: processRows(sample),
+    childrenSampledSecondsAgo: sample.childrenAt === undefined ? null : Math.max(0, Math.round((sample.t - sample.childrenAt) / 1000)),
     ...(previous ? { sincePreviousSample: { seconds: Math.round((sample.t - previous.t) / 1000), change: pointChange(samplePoint(previous), point) } } : {}),
     units: UNITS
   }
